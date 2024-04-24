@@ -8,7 +8,7 @@ on:
 
 jobs:
   cpp-ubuntu:
-    name: "${{ matrix.os }} :: C++"
+    name: "C++ (${{ matrix.os }}, ${{ matrix.compiler.cpp }})"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -70,7 +70,7 @@ jobs:
       continue-on-error: true
     - name: Check types with mypy
       run: |
-        mypy --strict src/python
+        mypy --strict src/dmt
       continue-on-error: true
     - name: Test with pytest and Generate coverage report
       run: |

@@ -150,7 +150,7 @@ void FDMT::execute_iter(const float* state_in, float* state_out,
                 const float* head
                     = &state_in[(2 * i_sub + 1) * ndt_prev * nsamps_prev
                                 + i_dt_head * nsamps_prev];
-                fdmt::add_offset_kernel(tail, nsamps_prev, head, out,
+                fdmt::add_offset_kernel(tail, nsamps_prev, head, nsamps_prev, out,
                                         nsamps_cur, offset);
             }
         }

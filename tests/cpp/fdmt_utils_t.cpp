@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
 #include <dmt/fdmt_utils.hpp>
 
 TEST_CASE("cff", "[fdmt_utils]") {
@@ -40,23 +41,24 @@ TEST_CASE("calculate_dt_grid_sub", "[fdmt_utils]") {
 TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
     SECTION("Test case 1: Valid input and output vectors") {
         std::vector<float> arr1 = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
-        std::vector<float> arr2 = {6.0f, 7.0f, 8.0f};
+        std::vector<float> arr2 = {6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
         std::vector<float> arr_out(8, 0.0f);
         size_t offset = 2;
-        REQUIRE_NOTHROW(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                arr2.data(), arr_out.data(),
-                                                arr_out.size(), offset));
+        REQUIRE_NOTHROW(fdmt::add_offset_kernel(
+            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
+            arr_out.size(), offset));
         std::vector<float> expected_output
-            = {1.0f, 2.0f, 9.0f, 11.0f, 13.0f, 0.0f, 0.0f, 0.0f};
+            = {1.0f, 2.0f, 9.0f, 11.0f, 13.0f, 9.0f, 10.0f, 0.0f};
         REQUIRE(arr_out == expected_output);
     }
     SECTION("Test case 2: Output size less than input size") {
         std::vector<float> arr1 = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
-        std::vector<float> arr2 = {6.0f, 7.0f, 8.0f};
+        std::vector<float> arr2 = {6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
         std::vector<float> arr_out(4, 0.0f);
         size_t offset = 2;
         REQUIRE_THROWS_AS(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                  arr2.data(), arr_out.data(),
+                                                  arr2.data(), arr2.size(),
+                                                  arr_out.data(),
                                                   arr_out.size(), offset),
                           std::runtime_error);
     }
@@ -67,7 +69,8 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr_out(5, 0.0f);
         size_t offset = 4;
         REQUIRE_THROWS_AS(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                  arr2.data(), arr_out.data(),
+                                                  arr2.data(), arr2.size(),
+                                                  arr_out.data(),
                                                   arr_out.size(), offset),
                           std::runtime_error);
     }
@@ -77,9 +80,40 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr_out(3, 0.0f);
         size_t offset = 0;
         REQUIRE_THROWS_AS(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                  arr2.data(), arr_out.data(),
+                                                  arr2.data(), arr2.size(),
+                                                  arr_out.data(),
                                                   arr_out.size(), offset),
                           std::runtime_error);
+    }
+    SECTION("Test case 5: Varying offsets") {
+        std::vector<float> arr1 = {0.0f, 1.0f, 2.0f, 3.0f};
+        std::vector<float> arr2 = {1.0f, 2.0f, 3.0f, 4.0f};
+        std::vector<float> arr_out(6, 0.0f);
+        size_t offset1 = 0;
+        REQUIRE_NOTHROW(fdmt::add_offset_kernel(
+            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
+            arr_out.size(), offset1));
+        std::vector<float> expected_output
+            = {1.0f, 3.0f, 5.0f, 7.0f, 0.0f, 0.0f};
+        REQUIRE(arr_out == expected_output);
+        size_t offset2 = 1;
+        REQUIRE_NOTHROW(fdmt::add_offset_kernel(
+            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
+            arr_out.size(), offset2));
+        expected_output = {0.0f, 2.0f, 4.0f, 6.0f, 4.0f, 0.0f};
+        REQUIRE(arr_out == expected_output);
+        size_t offset3 = 2;
+        REQUIRE_NOTHROW(fdmt::add_offset_kernel(
+            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
+            arr_out.size(), offset3));
+        expected_output = {0.0f, 1.0f, 3.0f, 5.0f, 3.0f, 4.0f};
+        REQUIRE(arr_out == expected_output);
+        size_t offset4 = 3;
+        REQUIRE_NOTHROW(fdmt::add_offset_kernel(
+            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
+            arr_out.size(), offset4));
+        expected_output = {0.0f, 1.0f, 2.0f, 4.0f, 2.0f, 3.0f};
+        REQUIRE(arr_out == expected_output);
     }
 }
 

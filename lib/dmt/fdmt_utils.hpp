@@ -25,8 +25,9 @@ std::vector<size_t> calculate_dt_grid_sub(float f_start, float f_end,
                                           size_t dt_max, size_t dt_step,
                                           size_t dt_min);
 
-void add_offset_kernel(const float* arr1, size_t size_in, const float* arr2,
-                       float* arr_out, size_t size_out, size_t offset);
+void add_offset_kernel(const float* arr1, size_t size_in1, const float* arr2,
+                       size_t size_in2, float* arr_out, size_t size_out,
+                       size_t offset);
 
 void copy_kernel(const float* arr1, size_t size_in, float* arr_out,
                  size_t size_out);

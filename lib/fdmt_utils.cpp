@@ -59,16 +59,19 @@ std::vector<size_t> fdmt::calculate_dt_grid_sub(float f_start, float f_end,
     return dt_grid;
 }
 
-void fdmt::add_offset_kernel(const float* arr1, size_t size_in,
-                             const float* arr2, float* arr_out, size_t size_out,
-                             size_t offset) {
-    if (size_out < size_in) {
+void fdmt::add_offset_kernel(const float* arr1, size_t size_in1,
+                             const float* arr2, size_t size_in2, float* arr_out,
+                             size_t size_out, size_t offset) {
+    if (size_in1 != size_in2) {
+        throw std::runtime_error("Input sizes are not equal");
+    }
+    if (size_out < size_in1) {
         throw std::runtime_error("Output size is less than input size");
     }
-    if (offset >= size_in) {
+    if (offset >= size_in1) {
         throw std::runtime_error("Offset is greater than input size");
     }
-    size_t nsum  = size_in - offset;
+    size_t nsum  = size_in1 - offset;
     size_t t_ind = 0;
 
     std::copy_n(arr1, offset, arr_out);
@@ -79,7 +82,7 @@ void fdmt::add_offset_kernel(const float* arr1, size_t size_in,
     }
     t_ind += nsum;
 
-    size_t nrest = std::min(offset, size_out - size_in);
+    size_t nrest = std::min(offset, size_out - t_ind);
     if (nrest > 0) {
         std::copy_n(arr2 + nsum, nrest, arr_out + t_ind);
         t_ind += nrest;
