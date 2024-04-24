@@ -91,7 +91,7 @@ omit = ["tests/*", "*__init__.py", "docs/*"]
 show_missing = true
 ignore_errors = true
 #fail_under = 85
-exclude_also = ["*__init__.py", "docs/*", "raise NotImplementedError", "@jit"]
+exclude_lines = ['raise AssertionError', 'raise NotImplementedError']
 
 [tool.coverage.path]
 source = "src/dmt"
