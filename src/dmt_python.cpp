@@ -68,6 +68,7 @@ PYBIND11_MODULE(libdmt, mod) {
     clsFDMT.def_property_readonly("niters", &FDMT::get_niters);
     clsFDMT.def_property_readonly(
         "dm_arr", [](FDMT& fdmt) { return as_pyarray(fdmt.get_dm_arr()); });
+    clsFDMT.def("set_log_level", &FDMT::set_log_level);
     // execute take 2d array as input, and return 2d array as output
     clsFDMT.def("execute",
                 [](FDMT& fdmt,

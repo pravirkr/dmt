@@ -1,8 +1,8 @@
 CPMFindPackage(
-    NAME Catch2
-    VERSION 3.5.0
-    GITHUB_REPOSITORY catchorg/Catch2 
-  )
+  NAME Catch2
+  VERSION 3.5.0
+  GITHUB_REPOSITORY catchorg/Catch2
+)
 list(APPEND CMAKE_MODULE_PATH ${Catch2_DIR})
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 

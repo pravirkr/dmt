@@ -27,4 +27,11 @@ thefdmt = FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max, dt_min=0, dt_
 dmt_transform = thefdmt.execute(frb.astype(np.float32))
 ```
 
+## Benchmarks
+
+```python
+f_min = 704.0, f_max = 1216.0, nchans = 4096, tsamp = 0.00008192, dt_max = 2048, nsamps = n;
+```
+![](bench/results/bench.png)
+
 

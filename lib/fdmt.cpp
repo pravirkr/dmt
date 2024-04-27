@@ -19,8 +19,8 @@ FDMT::FDMT(float f_min, float f_max, size_t nchans, size_t nsamps, float tsamp,
       correction(df / 2),
       niters(calculate_niters(nchans)) {
     configure_fdmt_plan();
-    spdlog::info("FDMT: df={}, dt_max={}, ndt_init={}, niters={}", df, dt_max,
-                 get_dt_grid_init().size(), niters);
+    spdlog::debug("FDMT: df={}, dt_max={}, ndt_init={}, niters={}", df, dt_max,
+                  get_dt_grid_init().size(), niters);
     dm_arr
         = fdmt::calculate_dm_arr(f_min, f_max, tsamp, dt_max, dt_step, dt_min);
     // Allocate memory for the state buffers
@@ -40,6 +40,14 @@ DtGrid FDMT::get_dt_grid_final() const {
 size_t FDMT::get_niters() const { return niters; }
 FDMTPlan FDMT::get_plan() const { return fdmt_plan; }
 std::vector<float> FDMT::get_dm_arr() const { return dm_arr; }
+
+void FDMT::set_log_level(int level) {
+    if (level < static_cast<int>(spdlog::level::trace)
+        || level > static_cast<int>(spdlog::level::off)) {
+        spdlog::set_level(spdlog::level::info);
+    }
+    spdlog::set_level(static_cast<spdlog::level::level_enum>(level));
+}
 
 size_t FDMT::calculate_niters(size_t nchans) {
     return static_cast<size_t>(std::ceil(std::log2(nchans)));
@@ -111,7 +119,8 @@ void FDMT::initialise(const float* waterfall, float* state) {
         }
     }
 
-    spdlog::info("FDMT: initialised dimensions: {}x{}x{}", nchans, ndt, nsamps);
+    spdlog::debug("FDMT: initialised dimensions: {}x{}x{}", nchans, ndt,
+                  nsamps);
 }
 
 // Private methods
@@ -124,7 +133,7 @@ void FDMT::check_inputs(size_t waterfall_size, size_t dmt_size) const {
     if (dmt_size != nchans_final * dt_final * nsamps_final) {
         throw std::invalid_argument("Invalid size of dmt");
     }
-    spdlog::info("FDMT: Input dimensions: {}x{}", nchans, nsamps);
+    spdlog::debug("FDMT: Input dimensions: {}x{}", nchans, nsamps);
 }
 
 void FDMT::execute_iter(const float* state_in, float* state_out,
@@ -133,8 +142,8 @@ void FDMT::execute_iter(const float* state_in, float* state_out,
         = fdmt_plan.state_shape[i_iter];
     const auto& [nchans_prev, ndt_prev, nsamps_prev]
         = fdmt_plan.state_shape[i_iter - 1];
-    spdlog::info("FDMT: Iteration {}, dimensions: {}x{}x{}", i_iter, nchans_cur,
-                 ndt_cur, nsamps_cur);
+    spdlog::debug("FDMT: Iteration {}, dimensions: {}x{}x{}", i_iter,
+                  nchans_cur, ndt_cur, nsamps_cur);
     for (size_t i_sub = 0; i_sub < nchans_cur; ++i_sub) {
         const auto& dt_grid_sub = fdmt_plan.sub_plan[i_iter][i_sub].dt_grid;
         for (size_t i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
@@ -150,8 +159,8 @@ void FDMT::execute_iter(const float* state_in, float* state_out,
                 const float* head
                     = &state_in[(2 * i_sub + 1) * ndt_prev * nsamps_prev
                                 + i_dt_head * nsamps_prev];
-                fdmt::add_offset_kernel(tail, nsamps_prev, head, nsamps_prev, out,
-                                        nsamps_cur, offset);
+                fdmt::add_offset_kernel(tail, nsamps_prev, head, nsamps_prev,
+                                        out, nsamps_cur, offset);
             }
         }
     }
@@ -170,7 +179,7 @@ void FDMT::configure_fdmt_plan() {
     for (size_t i_iter = 1; i_iter < niters + 1; ++i_iter) {
         make_fdmt_plan(i_iter);
     }
-    spdlog::info("FDMT: configured fdmt plan");
+    spdlog::debug("FDMT: configured fdmt plan");
 }
 
 void FDMT::make_fdmt_plan_iter0() {

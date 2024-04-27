@@ -1,12 +1,18 @@
 cmake_minimum_required(VERSION 3.15)
 cmake_policy(SET CMP0148 OLD)
 
-project(dmt VERSION 0.1.0 LANGUAGES CXX)
+project(
+  dmt
+  VERSION 0.1.0
+  LANGUAGES CXX
+)
 
 # Configuration options
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTING "Build tests" OFF)
+option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
+option(BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(ENABLE_FAST_MATH "Enable fast math flags" ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -30,7 +36,6 @@ endif()
 include(GNUInstallDirs)
 include(cmake/CPM.cmake)
 
-
 # Build the C++ library
 set(LIBRARY_NAME dmt)
 add_subdirectory(lib)
@@ -42,6 +47,10 @@ endif()
 if(BUILD_TESTING)
   add_subdirectory(tests/cpp)
 endif()
+# Build benchmarks
+if(BUILD_BENCHMARKS)
+  add_subdirectory(bench)
+endif()
 
 # Install targets and configuration
 install(
@@ -52,7 +61,11 @@ install(
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(EXPORT dmt_config NAMESPACE dmt:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dmt)
+install(
+  EXPORT dmt_config
+  NAMESPACE dmt::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dmt
+)
 install(DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # This prints a summary of found dependencies

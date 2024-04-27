@@ -38,6 +38,7 @@ public:
     size_t get_niters() const;
     FDMTPlan get_plan() const;
     std::vector<float> get_dm_arr() const;
+    void set_log_level(int level);
     void execute(const float* waterfall, size_t waterfall_size, float* dmt,
                  size_t dmt_size);
     void initialise(const float* waterfall, float* state);
