@@ -5,10 +5,7 @@ CPMFindPackage(
   GITHUB_REPOSITORY gabime/spdlog
   OPTIONS "SPDLOG_INSTALL ON"
 )
-# find_package(OpenMP)
-# Check if OpenMP was found if(OpenMP_CXX_FOUND) target_link_libraries(dmt
-# PRIVATE OpenMP::OpenMP_CXX) target_compile_definitions(dmt PRIVATE USE_OPENMP)
-# endif()
+find_package(OpenMP)
 
 file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
@@ -18,4 +15,13 @@ target_include_directories(
                          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${LIBRARY_NAME} PUBLIC spdlog::spdlog_header_only)
+target_link_libraries(
+  ${LIBRARY_NAME} PUBLIC $<BUILD_INTERFACE:coverage_config>
+                         $<BUILD_INTERFACE:spdlog::spdlog_header_only>
+)
+
+# Check if OpenMP was found
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_OPENMP)
+endif()

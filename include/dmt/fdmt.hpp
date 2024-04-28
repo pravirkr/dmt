@@ -33,12 +33,13 @@ public:
          size_t dt_max, size_t dt_step = 1, size_t dt_min = 0);
     float get_df() const;
     float get_correction() const;
-    DtGrid get_dt_grid_init() const;
-    DtGrid get_dt_grid_final() const;
     size_t get_niters() const;
-    FDMTPlan get_plan() const;
+    const DtGrid& get_dt_grid_init() const;
+    const DtGrid& get_dt_grid_final() const;
+    const FDMTPlan& get_plan() const;
     std::vector<float> get_dm_arr() const;
-    void set_log_level(int level);
+    static void set_log_level(int level);
+    static void set_num_threads(int nthreads);
     void execute(const float* waterfall, size_t waterfall_size, float* dmt,
                  size_t dmt_size);
     void initialise(const float* waterfall, float* state);
@@ -55,10 +56,8 @@ private:
     float df;
     float correction;
     size_t niters;
-    DtGrid dt_grid_final;
 
     FDMTPlan fdmt_plan;
-    std::vector<float> dm_arr;
     // Buffers
     std::vector<float> state_in;
     std::vector<float> state_out;

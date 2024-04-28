@@ -1,6 +1,7 @@
 # dmt
 
 [![GitHub CI](https://github.com/pravirkr/dmt/actions/workflows/ci.yml/badge.svg)](https://github.com/pravirkr/dmt/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/pravirkr/dmt/graph/badge.svg?token=17BGN5IIM9)](https://codecov.io/gh/pravirkr/dmt)
 [![License](https://img.shields.io/github/license/pravirkr/dmt)](https://github.com/pravirkr/dmt/blob/main/LICENSE)
 
 ## Dispersion Measure Transforms
@@ -31,6 +32,7 @@ dmt_transform = thefdmt.execute(frb.astype(np.float32))
 
 ```python
 f_min = 704.0, f_max = 1216.0, nchans = 4096, tsamp = 0.00008192, dt_max = 2048, nsamps = n;
+nthreads = 1, 8;
 ```
 ![](bench/results/bench.png)
 

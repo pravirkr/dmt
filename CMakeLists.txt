@@ -11,8 +11,8 @@ project(
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTING "Build tests" OFF)
-option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(CODE_COVERAGE "Enable coverage reporting" OFF)
 option(ENABLE_FAST_MATH "Enable fast math flags" ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -35,6 +35,13 @@ endif()
 # Initialize some default paths
 include(GNUInstallDirs)
 include(cmake/CPM.cmake)
+
+# Code Coverage Configuration
+add_library(coverage_config INTERFACE)
+if(CODE_COVERAGE)
+  target_compile_options(coverage_config INTERFACE -O0 -g --coverage)
+  target_link_options(coverage_config INTERFACE --coverage)
+endif()
 
 # Build the C++ library
 set(LIBRARY_NAME dmt)

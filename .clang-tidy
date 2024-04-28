@@ -20,6 +20,5 @@ Checks: "
 "
 WarningsAsErrors: ''
 HeaderFilterRegex: ".*"
-AnalyzeTemporaryDtors: false
 FormatStyle:     none
 ...

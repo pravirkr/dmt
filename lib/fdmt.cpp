@@ -1,9 +1,12 @@
 #include <cmath>
 #include <cstdint>
 #include <spdlog/spdlog.h>
+#ifdef USE_OPENMP
+#include <omp.h>
+#endif
 
-#include <dmt/fdmt.hpp>
 #include "dmt/fdmt_utils.hpp"
+#include <dmt/fdmt.hpp>
 
 FDMT::FDMT(float f_min, float f_max, size_t nchans, size_t nsamps, float tsamp,
            size_t dt_max, size_t dt_step, size_t dt_min)
@@ -21,8 +24,6 @@ FDMT::FDMT(float f_min, float f_max, size_t nchans, size_t nsamps, float tsamp,
     configure_fdmt_plan();
     spdlog::debug("FDMT: df={}, dt_max={}, ndt_init={}, niters={}", df, dt_max,
                   get_dt_grid_init().size(), niters);
-    dm_arr
-        = fdmt::calculate_dm_arr(f_min, f_max, tsamp, dt_max, dt_step, dt_min);
     // Allocate memory for the state buffers
     state_in.resize(nchans * get_dt_grid_init().size() * nsamps, 0.0F);
     state_out.resize(nchans * get_dt_grid_init().size() * nsamps, 0.0F);
@@ -31,15 +32,17 @@ FDMT::FDMT(float f_min, float f_max, size_t nchans, size_t nsamps, float tsamp,
 // Getters
 float FDMT::get_df() const { return df; }
 float FDMT::get_correction() const { return correction; }
-DtGrid FDMT::get_dt_grid_init() const {
+size_t FDMT::get_niters() const { return niters; }
+const DtGrid& FDMT::get_dt_grid_init() const {
     return fdmt_plan.sub_plan[0][0].dt_grid;
 }
-DtGrid FDMT::get_dt_grid_final() const {
-    return calculate_dt_grid_sub(f_min, f_max);
+const DtGrid& FDMT::get_dt_grid_final() const {
+    return fdmt_plan.sub_plan[niters][0].dt_grid;
 }
-size_t FDMT::get_niters() const { return niters; }
-FDMTPlan FDMT::get_plan() const { return fdmt_plan; }
-std::vector<float> FDMT::get_dm_arr() const { return dm_arr; }
+const FDMTPlan& FDMT::get_plan() const { return fdmt_plan; }
+std::vector<float> FDMT::get_dm_arr() const {
+    return fdmt::calculate_dm_arr(f_min, f_max, tsamp, dt_max, dt_step, dt_min);
+}
 
 void FDMT::set_log_level(int level) {
     if (level < static_cast<int>(spdlog::level::trace)
@@ -47,6 +50,12 @@ void FDMT::set_log_level(int level) {
         spdlog::set_level(spdlog::level::info);
     }
     spdlog::set_level(static_cast<spdlog::level::level_enum>(level));
+}
+
+void FDMT::set_num_threads(int nthreads) {
+#ifdef USE_OPENMP
+    omp_set_num_threads(nthreads);
+#endif
 }
 
 size_t FDMT::calculate_niters(size_t nchans) {
@@ -86,7 +95,9 @@ void FDMT::initialise(const float* waterfall, float* state) {
     const size_t ndt         = dt_grid_init.size();
     const auto dt_init_min   = dt_grid_init[0];
     // Initialise state for [:, dt_init_min, dt_init_min:]
+#ifdef USE_OPENMP
 #pragma omp parallel for
+#endif
     for (size_t ichan = 0; ichan < nchans; ++ichan) {
         for (size_t isamp = dt_init_min; isamp < nsamps; ++isamp) {
             float sum = 0.0F;
@@ -102,7 +113,9 @@ void FDMT::initialise(const float* waterfall, float* state) {
     for (size_t i_dt = 1; i_dt < ndt; ++i_dt) {
         const auto dt_init_cur  = dt_grid_init[i_dt];
         const auto dt_init_prev = dt_grid_init[i_dt - 1];
+#ifdef USE_OPENMP
 #pragma omp parallel for
+#endif
         for (size_t ichan = 0; ichan < nchans; ++ichan) {
             for (size_t isamp = dt_init_cur; isamp < nsamps; ++isamp) {
                 float sum = 0.0F;
@@ -138,17 +151,26 @@ void FDMT::check_inputs(size_t waterfall_size, size_t dmt_size) const {
 
 void FDMT::execute_iter(const float* state_in, float* state_out,
                         size_t i_iter) {
-    const auto& [nchans_cur, ndt_cur, nsamps_cur]
-        = fdmt_plan.state_shape[i_iter];
-    const auto& [nchans_prev, ndt_prev, nsamps_prev]
-        = fdmt_plan.state_shape[i_iter - 1];
+    // clang bug: structured binding does not work with openmp
+    const size_t nchans_cur  = std::get<0>(fdmt_plan.state_shape[i_iter]);
+    const size_t ndt_cur     = std::get<1>(fdmt_plan.state_shape[i_iter]);
+    const size_t nsamps_cur  = std::get<2>(fdmt_plan.state_shape[i_iter]);
+    const size_t ndt_prev    = std::get<1>(fdmt_plan.state_shape[i_iter - 1]);
+    const size_t nsamps_prev = std::get<2>(fdmt_plan.state_shape[i_iter - 1]);
     spdlog::debug("FDMT: Iteration {}, dimensions: {}x{}x{}", i_iter,
                   nchans_cur, ndt_cur, nsamps_cur);
     for (size_t i_sub = 0; i_sub < nchans_cur; ++i_sub) {
-        const auto& dt_grid_sub = fdmt_plan.sub_plan[i_iter][i_sub].dt_grid;
-        for (size_t i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
-            const auto& [i_dt_out, offset, i_dt_tail, i_dt_head]
-                = fdmt_plan.sub_plan[i_iter][i_sub].dt_plan[i_dt];
+        const size_t dt_grid_sub_size
+            = fdmt_plan.sub_plan[i_iter][i_sub].dt_grid.size();
+        const auto& dt_plan_sub = fdmt_plan.sub_plan[i_iter][i_sub].dt_plan;
+#ifdef USE_OPENMP
+#pragma omp parallel for
+#endif
+        for (size_t i_dt = 0; i_dt < dt_grid_sub_size; ++i_dt) {
+            const size_t i_dt_out  = std::get<0>(dt_plan_sub[i_dt]);
+            const size_t offset    = std::get<1>(dt_plan_sub[i_dt]);
+            const size_t i_dt_tail = std::get<2>(dt_plan_sub[i_dt]);
+            const size_t i_dt_head = std::get<3>(dt_plan_sub[i_dt]);
             const float* tail = &state_in[(2 * i_sub) * ndt_prev * nsamps_prev
                                           + i_dt_tail * nsamps_prev];
             float* out        = &state_out[i_sub * ndt_cur * nsamps_cur

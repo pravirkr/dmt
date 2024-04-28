@@ -43,7 +43,7 @@ parse:
         nargs: '*'
         flags: []
       spelling: CPMFindPackage
-      kwargs: &cpmaddpackagekwargs
+      kwargs: &cpmfindpackagekwargs
         NAME: 1
         FORCE: 1
         VERSION: 1

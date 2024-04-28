@@ -21,6 +21,14 @@ inline py::array_t<typename Sequence::value_type> as_pyarray(Sequence&& seq) {
     return py::array(size, data, capsule);
 }
 
+template <typename Sequence>
+inline py::array_t<typename Sequence::value_type>
+as_pyarray_ref(const Sequence& seq) {
+    auto size        = seq.size();
+    const auto* data = seq.data();
+    return py::array_t<typename Sequence::value_type>(size, data);
+}
+
 PYBIND11_MODULE(libdmt, mod) {
     mod.doc() = "Python Bindings for dmt";
     py::class_<SubbandPlan>(mod, "SubbandPlan")
@@ -60,15 +68,17 @@ PYBIND11_MODULE(libdmt, mod) {
     clsFDMT.def_property_readonly("df", &FDMT::get_df);
     clsFDMT.def_property_readonly("correction", &FDMT::get_correction);
     clsFDMT.def_property_readonly("dt_grid_init", [](FDMT& fdmt) {
-        return as_pyarray(fdmt.get_dt_grid_init());
+        return as_pyarray_ref(fdmt.get_dt_grid_init());
     });
     clsFDMT.def_property_readonly("dt_grid_final", [](FDMT& fdmt) {
-        return as_pyarray(fdmt.get_dt_grid_final());
+        return as_pyarray_ref(fdmt.get_dt_grid_final());
     });
     clsFDMT.def_property_readonly("niters", &FDMT::get_niters);
     clsFDMT.def_property_readonly(
         "dm_arr", [](FDMT& fdmt) { return as_pyarray(fdmt.get_dm_arr()); });
-    clsFDMT.def("set_log_level", &FDMT::set_log_level);
+    clsFDMT.def_static("set_log_level", &FDMT::set_log_level, py::arg("level"));
+    clsFDMT.def_static("set_num_threads", &FDMT::set_num_threads,
+                       py::arg("nthreads"));
     // execute take 2d array as input, and return 2d array as output
     clsFDMT.def("execute",
                 [](FDMT& fdmt,
