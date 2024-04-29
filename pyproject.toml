@@ -96,6 +96,9 @@ exclude_lines = ['raise AssertionError', 'raise NotImplementedError']
 [tool.coverage.path]
 source = "src/dmt"
 
+[tool.gcovr]
+filter = ["lib/*"]
+
 [tool.mypy]
 ignore_missing_imports = true
 plugins = ["numpy.typing.mypy_plugin"]

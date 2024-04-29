@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         build_type: [Debug]
-        compiler: [{cpp: g++-13, code-cov: true}, {cpp: clang++-15}]
+        compiler: [{cpp: g++-13, code-cov: true, gcov: gcov-13}, {cpp: clang++-15}]
     steps:
     - uses: actions/checkout@v4
     - name: Set reusable strings
@@ -31,7 +31,6 @@ jobs:
         -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cpp }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DBUILD_DOCS=OFF -DBUILD_PYTHON=OFF -DBUILD_TESTING=ON
-        -DUSE_CLANG_TIDY=ON 
         -DCODE_COVERAGE=${{ matrix.compiler.code-cov }}
 
     - name: Build
@@ -40,23 +39,21 @@ jobs:
         --config ${{ matrix.build_type }} -j 4
 
     - name: Run unit tests
-      working-directory: ${{ steps.strings.outputs.build-output-dir }}
       run: >
         ctest --build-config ${{ matrix.build_type }} --output-on-failure
         --test-dir ${{ steps.strings.outputs.build-output-dir }}/tests/cpp
     
     - name: Prepare coverage report
       if: ${{ matrix.build_type == 'Debug' && matrix.compiler.code-cov }}
-      working-directory: ${{ steps.strings.outputs.build-output-dir }}
       run: |
-        pip install gcovr
-        gcovr -r .. --cobertura -o coverage.xml
+        pip install gcovr>=7.1
+        gcovr -r . --cobertura -o coverage.xml --gcov-executable=${{ matrix.compiler.gcov }}
     
     - name: Upload coverage reports to Codecov
       if: ${{ matrix.build_type == 'Debug' && matrix.compiler.code-cov }}
       uses: codecov/codecov-action@v4
       with:
-        file: ${{ steps.strings.outputs.build-output-dir }}/coverage.xml
+        file: coverage.xml
         name: codecov-umbrella
         fail_ci_if_error: true
       env:
