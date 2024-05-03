@@ -4,7 +4,7 @@
 #include <vector>
 
 constexpr float disp_coeff = -2.0;
-constexpr float disp_const = 4.148808e3;
+constexpr float disp_const = 1/2.41e-4;
 
 namespace fdmt {
 
