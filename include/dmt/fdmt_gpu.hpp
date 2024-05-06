@@ -4,21 +4,11 @@
 
 #include <dmt/fdmt_base.hpp>
 
-using DtGridTypeD  = thrust::device_vector<SizeType>;
-using DtPlanTypeD  = thrust::tuple<SizeType, SizeType, SizeType, SizeType>;
-using StShapeTypeD = thrust::tuple<SizeType, SizeType, SizeType>;
-
-struct SubbandPlanD {
-    DtGridTypeD dt_grid_d;
-    thrust::device_vector<DtPlanTypeD> dt_plan_d;
-};
-
 struct FDMTPlanD {
-    thrust::device_vector<float> df_top_d;
-    thrust::device_vector<float> df_bot_d;
-    thrust::device_vector<DtGridTypeD> dt_grid_sub_top_d;
-    thrust::device_vector<StShapeTypeD> state_shape_d;
-    thrust::device_vector<thrust::device_vector<SubbandPlanD>> sub_plan_d;
+    thrust::device_vector<SizeType> state_shape_d;
+    thrust::device_vector<SizeType> state_idx_d;
+    thrust::device_vector<SizeType> dt_grid_d;
+    thrust::device_vector<SizeType> dt_plan_d;
 };
 
 class FDMTGPU : public FDMT {
@@ -33,35 +23,30 @@ private:
     thrust::device_vector<float> m_state_in_d;
     thrust::device_vector<float> m_state_out_d;
 
-    FDMTPlanD fdmt_plan_d_;
+    FDMTPlanD m_fdmt_plan_d;
 
-    FDMTPlan_d transferPlanToDevice(const FDMTPlan& plan) {
-        FDMTPlan_d plan_d;
-
-        plan_d.df_top          = plan.df_top;
-        plan_d.df_bot          = plan.df_bot;
-        plan_d.dt_grid_sub_top = plan.dt_grid_sub_top;
-        plan_d.state_shape     = plan.state_shape;
-
-        for (const auto& subPlanVector : plan.sub_plan) {
-            thrust::device_vector<SubbandPlanD> subPlanVector_d;
-
-            for (const auto& subPlan : subPlanVector) {
-                SubbandPlanD subPlan_d;
-
-                subPlan_d.f_start = subPlan.f_start;
-                subPlan_d.f_end   = subPlan.f_end;
-                subPlan_d.f_mid1  = subPlan.f_mid1;
-                subPlan_d.f_mid2  = subPlan.f_mid2;
-                subPlan_d.dt_grid = subPlan.dt_grid;
-                subPlan_d.dt_plan = subPlan.dt_plan;
-
-                subPlanVector_d.push_back(subPlan_d);
+    FDMTPlanD transfer_plan_to_device() {
+        const auto& plan = get_plan();
+        FDMTPlanD plan_d;
+        for (const auto& state_shape_iter : plan.state_shape) {
+            for (const auto& shape : state_shape_iter) {
+                plan_d.state_shape_d.push_back(shape);
             }
-
-            plan_d.sub_plan.push_back(subPlanVector_d);
         }
-
+        // flatten sub_plan and transfer to device
+        for (const auto& sub_plan_iter : plan.sub_plan) {
+            for (const auto& sub_plan : sub_plan_iter) {
+                plan_d.state_idx_d.push_back(sub_plan.state_idx);
+                for (const auto& dt : sub_plan.dt_grid) {
+                    plan_d.dt_grid_d.push_back(dt);
+                }
+                for (const auto& dt_tuple : sub_plan.dt_plan) {
+                    for (const auto& idt : dt_tuple) {
+                        plan_d.dt_plan_d.push_back(idt);
+                    }
+                }
+            }
+        }
         return plan_d;
-    }
+    };
 };

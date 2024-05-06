@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <dmt/fdmt_utils.hpp>
+#include <span>
 
 TEST_CASE("cff", "[fdmt_utils]") {
     REQUIRE(fdmt::cff(1000.0F, 1500.0F, 1000.0F, 1500.0F) == 1.0F);
@@ -10,8 +11,8 @@ TEST_CASE("cff", "[fdmt_utils]") {
 }
 
 TEST_CASE("calculate_dt_sub", "[fdmt_utils]") {
-    REQUIRE(fdmt::calculate_dt_sub(1000.0F, 1500.0F, 1000.0F, 1500.0F, 100)
-            == 100);
+    REQUIRE(fdmt::calculate_dt_sub(1000.0F, 1500.0F, 1000.0F, 1500.0F, 100) ==
+            100);
     REQUIRE(fdmt::calculate_dt_sub(1000.0F, 1500.0F, 1000.0F, 1500.0F, 0) == 0);
 }
 
@@ -22,10 +23,9 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr_out(8, 0.0F);
         size_t offset = 2;
         REQUIRE_NOTHROW(fdmt::add_offset_kernel(
-            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
-            arr_out.size(), offset));
-        std::vector<float> expected_output
-            = {1.0F, 2.0F, 9.0F, 11.0F, 13.0F, 9.0F, 10.0F, 0.0F};
+            std::span(arr1), std::span(arr2), std::span(arr_out), offset));
+        std::vector<float> expected_output = {1.0F,  2.0F, 9.0F,  11.0F,
+                                              13.0F, 9.0F, 10.0F, 0.0F};
         REQUIRE(arr_out == expected_output);
     }
     SECTION("Test case 2: Output size less than input size") {
@@ -33,10 +33,9 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr2 = {6.0F, 7.0F, 8.0F, 9.0F, 10.0F};
         std::vector<float> arr_out(4, 0.0F);
         size_t offset = 2;
-        REQUIRE_THROWS_AS(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                  arr2.data(), arr2.size(),
-                                                  arr_out.data(),
-                                                  arr_out.size(), offset),
+        REQUIRE_THROWS_AS(fdmt::add_offset_kernel(std::span(arr1),
+                                                  std::span(arr2),
+                                                  std::span(arr_out), offset),
                           std::runtime_error);
     }
 
@@ -45,10 +44,9 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr2 = {4.0F, 5.0F};
         std::vector<float> arr_out(5, 0.0F);
         size_t offset = 4;
-        REQUIRE_THROWS_AS(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                  arr2.data(), arr2.size(),
-                                                  arr_out.data(),
-                                                  arr_out.size(), offset),
+        REQUIRE_THROWS_AS(fdmt::add_offset_kernel(std::span(arr1),
+                                                  std::span(arr2),
+                                                  std::span(arr_out), offset),
                           std::runtime_error);
     }
     SECTION("Test case 4: Empty input vectors") {
@@ -56,10 +54,9 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr2;
         std::vector<float> arr_out(3, 0.0F);
         size_t offset = 0;
-        REQUIRE_THROWS_AS(fdmt::add_offset_kernel(arr1.data(), arr1.size(),
-                                                  arr2.data(), arr2.size(),
-                                                  arr_out.data(),
-                                                  arr_out.size(), offset),
+        REQUIRE_THROWS_AS(fdmt::add_offset_kernel(std::span(arr1),
+                                                  std::span(arr2),
+                                                  std::span(arr_out), offset),
                           std::runtime_error);
     }
     SECTION("Test case 5: Varying offsets") {
@@ -68,27 +65,23 @@ TEST_CASE("add_offset_kernel", "[fdmt_utils]") {
         std::vector<float> arr_out(6, 0.0F);
         size_t offset1 = 0;
         REQUIRE_NOTHROW(fdmt::add_offset_kernel(
-            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
-            arr_out.size(), offset1));
-        std::vector<float> expected_output
-            = {1.0F, 3.0F, 5.0F, 7.0F, 0.0F, 0.0F};
+            std::span(arr1), std::span(arr2), std::span(arr_out), offset1));
+        std::vector<float> expected_output = {1.0F, 3.0F, 5.0F,
+                                              7.0F, 0.0F, 0.0F};
         REQUIRE(arr_out == expected_output);
         size_t offset2 = 1;
         REQUIRE_NOTHROW(fdmt::add_offset_kernel(
-            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
-            arr_out.size(), offset2));
+            std::span(arr1), std::span(arr2), std::span(arr_out), offset2));
         expected_output = {0.0F, 2.0F, 4.0F, 6.0F, 4.0F, 0.0F};
         REQUIRE(arr_out == expected_output);
         size_t offset3 = 2;
         REQUIRE_NOTHROW(fdmt::add_offset_kernel(
-            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
-            arr_out.size(), offset3));
+            std::span(arr1), std::span(arr2), std::span(arr_out), offset3));
         expected_output = {0.0F, 1.0F, 3.0F, 5.0F, 3.0F, 4.0F};
         REQUIRE(arr_out == expected_output);
         size_t offset4 = 3;
         REQUIRE_NOTHROW(fdmt::add_offset_kernel(
-            arr1.data(), arr1.size(), arr2.data(), arr2.size(), arr_out.data(),
-            arr_out.size(), offset4));
+            std::span(arr1), std::span(arr2), std::span(arr_out), offset4));
         expected_output = {0.0F, 1.0F, 2.0F, 4.0F, 2.0F, 3.0F};
         REQUIRE(arr_out == expected_output);
     }
@@ -99,8 +92,7 @@ TEST_CASE("copy_kernel", "[fdmt_utils]") {
         std::vector<float> arr1 = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F};
         std::vector<float> arr_out(10, 0.0F);
         ;
-        REQUIRE_NOTHROW(fdmt::copy_kernel(arr1.data(), arr1.size(),
-                                          arr_out.data(), arr_out.size()));
+        REQUIRE_NOTHROW(fdmt::copy_kernel(std::span(arr1), std::span(arr_out)));
         for (size_t i = 0; i < arr1.size(); ++i) {
             REQUIRE(arr_out[i] == arr1[i]);
         }
@@ -111,17 +103,16 @@ TEST_CASE("copy_kernel", "[fdmt_utils]") {
     SECTION("Test case 2: Output size less than input size") {
         std::vector<float> arr1 = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F};
         std::vector<float> arr_out(3, 0.0F);
-        REQUIRE_THROWS_AS(fdmt::copy_kernel(arr1.data(), arr1.size(),
-                                            arr_out.data(), arr_out.size()),
-                          std::runtime_error);
+        REQUIRE_THROWS_AS(
+            fdmt::copy_kernel(std::span(arr1), std::span(arr_out)),
+            std::runtime_error);
     }
     SECTION("Test case 4: Empty input vector") {
         std::vector<float> arr1;
         std::vector<float> arr_out(5, 0.0F);
-        REQUIRE_NOTHROW(fdmt::copy_kernel(arr1.data(), arr1.size(),
-                                          arr_out.data(), arr_out.size()));
-        for (size_t i = 0; i < arr_out.size(); ++i) {
-            REQUIRE(arr_out[i] == 0.0F);
+        REQUIRE_NOTHROW(fdmt::copy_kernel(std::span(arr1), std::span(arr_out)));
+        for (float i : arr_out) {
+            REQUIRE(i == 0.0F);
         }
     }
 }

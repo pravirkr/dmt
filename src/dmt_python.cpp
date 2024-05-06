@@ -1,6 +1,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <span>
 
 #include <dmt/fdmt_cpu.hpp>
 
@@ -12,10 +13,10 @@ template <typename Sequence>
 inline py::array_t<typename Sequence::value_type> as_pyarray(Sequence&& seq) {
     auto size = seq.size();
     auto data = seq.data();
-    std::unique_ptr<Sequence> seq_ptr
-        = std::make_unique<Sequence>(std::forward<Sequence>(seq));
+    std::unique_ptr<Sequence> seq_ptr =
+        std::make_unique<Sequence>(std::forward<Sequence>(seq));
     auto capsule = py::capsule(seq_ptr.get(), [](void* p) {
-        std::unique_ptr<Sequence>(reinterpret_cast<Sequence*>(p));  // NOLINT
+        std::unique_ptr<Sequence>(reinterpret_cast<Sequence*>(p)); // NOLINT
     });
     seq_ptr.release();
     return py::array(size, data, capsule);
@@ -86,26 +87,30 @@ PYBIND11_MODULE(libdmt, mod) {
         "execute", [](FDMTCPU& fdmt,
                       const py::array_t<float, py::array::c_style>& waterfall) {
             const auto* shape = waterfall.shape();
-            const auto dt_final_size
-                = static_cast<ssize_t>(fdmt.get_dt_grid_final().size());
+            const auto dt_final_size =
+                static_cast<ssize_t>(fdmt.get_dt_grid_final().size());
             py::array_t<float, py::array::c_style> dmt(
                 {dt_final_size, shape[1]});
-            fdmt.execute(waterfall.data(), waterfall.size(), dmt.mutable_data(),
-                         dmt.size());
+            fdmt.execute(
+                std::span<const float>(waterfall.data(), waterfall.size()),
+                std::span<float>(dmt.mutable_data(), dmt.size()));
             return dmt;
         });
-    cls_fdmt.def("initialise",
-                 [](FDMTCPU& fdmt,
-                    const py::array_t<float, py::array::c_style>& waterfall) {
-                     const auto* shape = waterfall.shape();
-                     const auto& plan  = fdmt.get_plan();
-                     const auto nchans_ndt
-                         = static_cast<ssize_t>(plan.state_shape[0][3]);
-                     py::array_t<float, py::array::c_style> state(
-                         {nchans_ndt, shape[1]});
-                     std::fill(state.mutable_data(),
-                               state.mutable_data() + state.size(), 0.0F);
-                     fdmt.initialise(waterfall.data(), state.mutable_data());
-                     return state;
-                 });
+    cls_fdmt.def(
+        "initialise",
+        [](FDMTCPU& fdmt,
+           const py::array_t<float, py::array::c_style>& waterfall) {
+            const auto* shape = waterfall.shape();
+            const auto& plan  = fdmt.get_plan();
+            const auto nchans_ndt =
+                static_cast<ssize_t>(plan.state_shape[0][3]);
+            py::array_t<float, py::array::c_style> state(
+                {nchans_ndt, shape[1]});
+            std::fill(state.mutable_data(), state.mutable_data() + state.size(),
+                      0.0F);
+            fdmt.initialise(
+                std::span<const float>(waterfall.data(), waterfall.size()),
+                std::span<float>(state.mutable_data(), state.size()));
+            return state;
+        });
 }
