@@ -2,7 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <dmt/fdmt.hpp>
+#include <dmt/fdmt_cpu.hpp>
 
 namespace py = pybind11;
 
@@ -13,7 +13,7 @@ inline py::array_t<typename Sequence::value_type> as_pyarray(Sequence&& seq) {
     auto size = seq.size();
     auto data = seq.data();
     std::unique_ptr<Sequence> seq_ptr
-        = std::make_unique<Sequence>(std::move(seq));
+        = std::make_unique<Sequence>(std::forward<Sequence>(seq));
     auto capsule = py::capsule(seq_ptr.get(), [](void* p) {
         std::unique_ptr<Sequence>(reinterpret_cast<Sequence*>(p));  // NOLINT
     });
@@ -36,10 +36,11 @@ PYBIND11_MODULE(libdmt, mod) {
         .def_readonly("f_end", &SubbandPlan::f_end)
         .def_readonly("f_mid1", &SubbandPlan::f_mid1)
         .def_readonly("f_mid2", &SubbandPlan::f_mid2)
+        .def_readonly("state_idx", &SubbandPlan::state_idx)
         .def_property_readonly("dt_grid",
                                [](const SubbandPlan& plan) {
                                    return as_pyarray(
-                                       static_cast<DtGrid>(plan.dt_grid));
+                                       static_cast<DtGridType>(plan.dt_grid));
                                })
         .def_readonly("dt_plan", &SubbandPlan::dt_plan);
 
@@ -51,59 +52,60 @@ PYBIND11_MODULE(libdmt, mod) {
             [](const FDMTPlan& plan) {
                 py::list res_list;
                 for (const auto& inner_vec : plan.dt_grid_sub_top) {
-                    res_list.append(as_pyarray(static_cast<DtGrid>(inner_vec)));
+                    res_list.append(
+                        as_pyarray(static_cast<DtGridType>(inner_vec)));
                 }
                 return res_list;
             })
         .def_readonly("state_shape", &FDMTPlan::state_shape)
-        .def_readonly("sub_plan", &FDMTPlan::sub_plan);
+        .def_readonly("sub_plan", &FDMTPlan::sub_plan)
+        .def("calculate_memory_usage", &FDMTPlan::calculate_memory_usage);
 
-    py::class_<FDMT> clsFDMT(mod, "FDMT");
-    clsFDMT.def(
+    py::class_<FDMTCPU> cls_fdmt(mod, "FDMT");
+    cls_fdmt.def(
         py::init<float, float, size_t, size_t, float, size_t, size_t, size_t>(),
         py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
         py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
         py::arg("dt_step") = 1, py::arg("dt_min") = 0);
-    clsFDMT.def_property_readonly("fdmt_plan", &FDMT::get_plan);
-    clsFDMT.def_property_readonly("df", &FDMT::get_df);
-    clsFDMT.def_property_readonly("correction", &FDMT::get_correction);
-    clsFDMT.def_property_readonly("dt_grid_init", [](FDMT& fdmt) {
-        return as_pyarray_ref(fdmt.get_dt_grid_init());
-    });
-    clsFDMT.def_property_readonly("dt_grid_final", [](FDMT& fdmt) {
+    cls_fdmt.def_property_readonly("df", &FDMTCPU::get_df);
+    cls_fdmt.def_property_readonly("correction", &FDMTCPU::get_correction);
+    cls_fdmt.def_property_readonly("niters", &FDMTCPU::get_niters);
+    cls_fdmt.def_property_readonly("fdmt_plan", &FDMTCPU::get_plan);
+    cls_fdmt.def_property_readonly("dt_grid_final", [](FDMTCPU& fdmt) {
         return as_pyarray_ref(fdmt.get_dt_grid_final());
     });
-    clsFDMT.def_property_readonly("niters", &FDMT::get_niters);
-    clsFDMT.def_property_readonly(
-        "dm_arr", [](FDMT& fdmt) { return as_pyarray(fdmt.get_dm_arr()); });
-    clsFDMT.def_static("set_log_level", &FDMT::set_log_level, py::arg("level"));
-    clsFDMT.def_static("set_num_threads", &FDMT::set_num_threads,
-                       py::arg("nthreads"));
+    cls_fdmt.def_property_readonly("dm_grid_final", [](FDMTCPU& fdmt) {
+        return as_pyarray(fdmt.get_dm_grid_final());
+    });
+    cls_fdmt.def_static("set_log_level", &FDMTCPU::set_log_level,
+                        py::arg("level"));
+    cls_fdmt.def_static("set_num_threads", &FDMTCPU::set_num_threads,
+                        py::arg("nthreads"));
     // execute take 2d array as input, and return 2d array as output
-    clsFDMT.def("execute",
-                [](FDMT& fdmt,
-                   const py::array_t<float, py::array::c_style>& waterfall) {
-                    const auto* shape = waterfall.shape();
-                    const auto dt_final_size
-                        = static_cast<ssize_t>(fdmt.get_dt_grid_final().size());
-                    py::array_t<float, py::array::c_style> dmt(
-                        {dt_final_size, shape[1]});
-                    fdmt.execute(waterfall.data(), waterfall.size(),
-                                 dmt.mutable_data(), dmt.size());
-                    return dmt;
-                });
-    // initialise take 2d array as input, and return 3d array as output
-    clsFDMT.def("initialise",
-                [](FDMT& fdmt,
-                   const py::array_t<float, py::array::c_style>& waterfall) {
-                    const auto* shape = waterfall.shape();
-                    const auto dt_init_size
-                        = static_cast<ssize_t>(fdmt.get_dt_grid_init().size());
-                    py::array_t<float, py::array::c_style> state(
-                        {shape[0], dt_init_size, shape[1]});
-                    std::fill(state.mutable_data(),
-                              state.mutable_data() + state.size(), 0.0F);
-                    fdmt.initialise(waterfall.data(), state.mutable_data());
-                    return state;
-                });
+    cls_fdmt.def(
+        "execute", [](FDMTCPU& fdmt,
+                      const py::array_t<float, py::array::c_style>& waterfall) {
+            const auto* shape = waterfall.shape();
+            const auto dt_final_size
+                = static_cast<ssize_t>(fdmt.get_dt_grid_final().size());
+            py::array_t<float, py::array::c_style> dmt(
+                {dt_final_size, shape[1]});
+            fdmt.execute(waterfall.data(), waterfall.size(), dmt.mutable_data(),
+                         dmt.size());
+            return dmt;
+        });
+    cls_fdmt.def("initialise",
+                 [](FDMTCPU& fdmt,
+                    const py::array_t<float, py::array::c_style>& waterfall) {
+                     const auto* shape = waterfall.shape();
+                     const auto& plan  = fdmt.get_plan();
+                     const auto nchans_ndt
+                         = static_cast<ssize_t>(plan.state_shape[0][3]);
+                     py::array_t<float, py::array::c_style> state(
+                         {nchans_ndt, shape[1]});
+                     std::fill(state.mutable_data(),
+                               state.mutable_data() + state.size(), 0.0F);
+                     fdmt.initialise(waterfall.data(), state.mutable_data());
+                     return state;
+                 });
 }

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <random>
 #include <vector>
-#include <dmt/fdmt.hpp>
+#include <dmt/fdmt_cpu.hpp>
 
 class FDMTFixture : public benchmark::Fixture {
 public:
@@ -36,40 +36,42 @@ public:
 
 BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_plan_seq_cpu)(benchmark::State& state) {
     for (auto _ : state) {
-        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_seq_cpu)(benchmark::State& state) {
-    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     fdmt.set_num_threads(1);
 
     std::random_device rd;
     std::mt19937 gen(rd());
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
-    std::vector<float> state_init(
-        nchans * fdmt.get_dt_grid_init().size() * nsamps, 0.0F);
+    const auto& plan = fdmt.get_plan();
+    const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
+    std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
         fdmt.initialise(waterfall.data(), state_init.data());
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_par_cpu)(benchmark::State& state) {
-    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     fdmt.set_num_threads(8);
 
     std::random_device rd;
     std::mt19937 gen(rd());
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
-    std::vector<float> state_init(
-        nchans * fdmt.get_dt_grid_init().size() * nsamps, 0.0F);
+    const auto& plan = fdmt.get_plan();
+    const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
+    std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
         fdmt.initialise(waterfall.data(), state_init.data());
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_seq_cpu)(benchmark::State& state) {
-    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     fdmt.set_num_threads(1);
 
     std::random_device rd;
@@ -83,7 +85,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_seq_cpu)(benchmark::State& state
 }
 
 BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_par_cpu)(benchmark::State& state) {
-    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     fdmt.set_num_threads(8);
 
     std::random_device rd;
@@ -102,7 +104,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_seq_cpu)(benchmark::State& state
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
     
     for (auto _ : state) {
-        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
         state.PauseTiming();
         fdmt.set_num_threads(1);
         std::vector<float> dmt(fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
@@ -119,7 +121,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_par_cpu)(benchmark::State& state
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
     
     for (auto _ : state) {
-        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
         state.PauseTiming();
         fdmt.set_num_threads(8);
         std::vector<float> dmt(fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
