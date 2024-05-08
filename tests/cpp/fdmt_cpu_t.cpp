@@ -14,7 +14,6 @@ TEST_CASE("FDMT class tests", "[fdmt]") {
         REQUIRE(fdmt.get_plan().df_bot.size() == 10);
         REQUIRE(fdmt.get_plan().dt_grid_sub_top.size() == 10);
         REQUIRE(fdmt.get_plan().state_shape.size() == 10);
-        REQUIRE(fdmt.get_plan().sub_plan.size() == 10);
         REQUIRE(fdmt.get_dt_grid_final().size() == 513);
         REQUIRE(fdmt.get_dm_grid_final().size() == 513);
     }

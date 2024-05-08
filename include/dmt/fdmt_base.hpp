@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <span>
+#include <utility>
 #include <vector>
 
 using SizeType    = size_t;
@@ -10,27 +11,26 @@ using DtGridType  = std::vector<SizeType>;
 using DtPlanType  = std::vector<std::array<SizeType, 4>>;
 using StShapeType = std::array<SizeType, 5>;
 
-struct SubbandPlan {
-    float f_start;
-    float f_end;
-    float f_mid1;
-    float f_mid2;
-    // index in the state buffer
-    SizeType state_idx;
-    // dt grid
-    DtGridType dt_grid;
-    // index plan mapping current dt grid to the previous dt grid
-    // i_dt_out, offset, i_dt_tail, i_dt_head
-    DtPlanType dt_plan;
+using FDMTCoordType = std::pair<SizeType, SizeType>; // isub, i_dt
+
+struct FDMTCoordMapping {
+    FDMTCoordType head;
+    FDMTCoordType tail;
+    SizeType offset;
 };
+
 struct FDMTPlan {
     std::vector<float> df_top;
     std::vector<float> df_bot;
-    // Temp array to remember the top subband dt grid
-    std::vector<DtGridType> dt_grid_sub_top;
     // state shape: nchans, ndt_min, ndt_max, nchansxndt, nsamps
     std::vector<StShapeType> state_shape;
-    std::vector<std::vector<SubbandPlan>> sub_plan;
+
+    std::vector<std::vector<FDMTCoordType>> coordinates;
+    std::vector<std::vector<FDMTCoordMapping>> mappings;
+    std::vector<std::vector<SizeType>> state_sub_idx;
+    std::vector<std::vector<DtGridType>> dt_grid;
+    // Temp array to remember the top subband dt grid
+    std::vector<DtGridType> dt_grid_sub_top;
 
     size_t calculate_memory_usage() const;
 };

@@ -32,22 +32,19 @@ as_pyarray_ref(const Sequence& seq) {
 
 PYBIND11_MODULE(libdmt, mod) {
     mod.doc() = "Python Bindings for dmt";
-    py::class_<SubbandPlan>(mod, "SubbandPlan")
-        .def_readonly("f_start", &SubbandPlan::f_start)
-        .def_readonly("f_end", &SubbandPlan::f_end)
-        .def_readonly("f_mid1", &SubbandPlan::f_mid1)
-        .def_readonly("f_mid2", &SubbandPlan::f_mid2)
-        .def_readonly("state_idx", &SubbandPlan::state_idx)
-        .def_property_readonly("dt_grid",
-                               [](const SubbandPlan& plan) {
-                                   return as_pyarray(
-                                       static_cast<DtGridType>(plan.dt_grid));
-                               })
-        .def_readonly("dt_plan", &SubbandPlan::dt_plan);
+    py::class_<FDMTCoordMapping>(mod, "FDMTCoordMapping")
+        .def_readonly("head", &FDMTCoordMapping::head)
+        .def_readonly("tail", &FDMTCoordMapping::tail)
+        .def_readonly("offset", &FDMTCoordMapping::offset);
 
     py::class_<FDMTPlan>(mod, "FDMTPlan")
         .def_readonly("df_top", &FDMTPlan::df_top)
         .def_readonly("df_bot", &FDMTPlan::df_bot)
+        .def_readonly("state_shape", &FDMTPlan::state_shape)
+        .def_readonly("coordinates", &FDMTPlan::coordinates)
+        .def_readonly("mappings", &FDMTPlan::mappings)
+        .def_readonly("state_sub_idx", &FDMTPlan::state_sub_idx)
+        .def_readonly("dt_grid", &FDMTPlan::dt_grid)
         .def_property_readonly(
             "dt_grid_sub_top",
             [](const FDMTPlan& plan) {
@@ -58,8 +55,6 @@ PYBIND11_MODULE(libdmt, mod) {
                 }
                 return res_list;
             })
-        .def_readonly("state_shape", &FDMTPlan::state_shape)
-        .def_readonly("sub_plan", &FDMTPlan::sub_plan)
         .def("calculate_memory_usage", &FDMTPlan::calculate_memory_usage);
 
     py::class_<FDMTCPU> cls_fdmt(mod, "FDMT");

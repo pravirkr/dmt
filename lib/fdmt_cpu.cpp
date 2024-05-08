@@ -43,16 +43,17 @@ void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
 
 void FDMTCPU::initialise(std::span<const float> waterfall,
                          std::span<float> state) {
-    const auto& plan          = get_plan();
-    const auto& sub_plan_init = plan.sub_plan[0];
-    const auto& nsamps        = plan.state_shape[0][4];
+    const auto& plan               = get_plan();
+    const auto& dt_grid_init       = plan.dt_grid[0];
+    const auto& state_sub_idx_init = plan.state_sub_idx[0];
+    const auto& nsamps             = plan.state_shape[0][4];
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
-    shared(sub_plan_init, state, waterfall, nsamps)
+    shared(waterfall, state, dt_grid_init, state_sub_idx_init, nsamps)
 #endif
-    for (size_t i_sub = 0; i_sub < sub_plan_init.size(); ++i_sub) {
-        const auto& dt_grid_sub   = sub_plan_init[i_sub].dt_grid;
-        const auto& state_sub_idx = sub_plan_init[i_sub].state_idx;
+    for (size_t i_sub = 0; i_sub < dt_grid_init.size(); ++i_sub) {
+        const auto& dt_grid_sub   = dt_grid_init[i_sub];
+        const auto& state_sub_idx = state_sub_idx_init[i_sub];
         // Initialise state for [:, dt_init_min, dt_init_min:]
         const auto& dt_grid_sub_min = dt_grid_sub[0];
         for (size_t isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
@@ -89,38 +90,40 @@ void FDMTCPU::initialise(std::span<const float> waterfall,
 
 void FDMTCPU::execute_iter(std::span<const float> state_in,
                            std::span<float> state_out, size_t i_iter) {
-    const auto& plan          = get_plan();
-    const auto& sub_plan_cur  = plan.sub_plan[i_iter];
-    const auto& sub_plan_prev = plan.sub_plan[i_iter - 1];
-    const auto& nsamps        = plan.state_shape[i_iter][4];
-    for (size_t i_sub = 0; i_sub < sub_plan_cur.size(); ++i_sub) {
-        const auto& dt_plan_sub        = sub_plan_cur[i_sub].dt_plan;
-        const auto& state_sub_idx      = sub_plan_cur[i_sub].state_idx;
-        const auto& state_sub_idx_tail = sub_plan_prev[2 * i_sub].state_idx;
-        const auto& state_sub_idx_head = sub_plan_prev[2 * i_sub + 1].state_idx;
+    const auto& plan               = get_plan();
+    const auto& nsamps             = plan.state_shape[i_iter][4];
+    const auto& coords_cur         = plan.coordinates[i_iter];
+    const auto& mappings_cur       = plan.mappings[i_iter];
+    const auto& state_sub_idx_cur  = plan.state_sub_idx[i_iter];
+    const auto& state_sub_idx_prev = plan.state_sub_idx[i_iter - 1];
 
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
-    shared(dt_plan_sub, state_in, state_out, nsamps, state_sub_idx,            \
-               state_sub_idx_tail, state_sub_idx_head)
+    shared(state_in, state_out, coords_cur, mappings_cur, state_sub_idx_cur,   \
+               state_sub_idx_prev, nsamps)
 #endif
-        for (const auto& dt_plan : dt_plan_sub) {
-            const auto& i_dt_out  = dt_plan[0];
-            const auto& offset    = dt_plan[1];
-            const auto& i_dt_tail = dt_plan[2];
-            const auto& i_dt_head = dt_plan[3];
+    for (size_t i_coord = 0; i_coord < coords_cur.size(); ++i_coord) {
+        const auto& i_sub              = coords_cur[i_coord].first;
+        const auto& i_dt               = coords_cur[i_coord].second;
+        const auto& i_sub_tail         = mappings_cur[i_coord].tail.first;
+        const auto& i_dt_tail          = mappings_cur[i_coord].tail.second;
+        const auto& i_sub_head         = mappings_cur[i_coord].head.first;
+        const auto& i_dt_head          = mappings_cur[i_coord].head.second;
+        const auto& offset             = mappings_cur[i_coord].offset;
+        const auto& state_sub_idx      = state_sub_idx_cur[i_sub];
+        const auto& state_sub_idx_tail = state_sub_idx_prev[i_sub_tail];
+        const auto& state_sub_idx_head = state_sub_idx_prev[i_sub_head];
 
-            std::span<const float> tail = state_in.subspan(
-                state_sub_idx_tail + i_dt_tail * nsamps, nsamps);
-            std::span<float> out =
-                state_out.subspan(state_sub_idx + i_dt_out * nsamps, nsamps);
-            if (i_dt_head == SIZE_MAX) {
-                fdmt::copy_kernel(tail, out);
-            } else {
-                std::span<const float> head = state_in.subspan(
-                    state_sub_idx_head + i_dt_head * nsamps, nsamps);
-                fdmt::add_offset_kernel(tail, head, out, offset);
-            }
+        std::span<const float> tail =
+            state_in.subspan(state_sub_idx_tail + i_dt_tail * nsamps, nsamps);
+        std::span<float> out =
+            state_out.subspan(state_sub_idx + i_dt * nsamps, nsamps);
+        if (i_dt_head == SIZE_MAX) {
+            fdmt::copy_kernel(tail, out);
+        } else {
+            std::span<const float> head = state_in.subspan(
+                state_sub_idx_head + i_dt_head * nsamps, nsamps);
+            fdmt::add_offset_kernel(tail, head, out, offset);
         }
     }
     const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
