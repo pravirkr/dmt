@@ -1,5 +1,4 @@
 #include <cmath>
-#include <cstdint>
 #include <span>
 #include <spdlog/spdlog.h>
 #ifdef USE_OPENMP
@@ -94,6 +93,8 @@ void FDMTCPU::execute_iter(std::span<const float> state_in,
     const auto& nsamps             = plan.state_shape[i_iter][4];
     const auto& coords_cur         = plan.coordinates[i_iter];
     const auto& mappings_cur       = plan.mappings[i_iter];
+    const auto& coords_copy_cur    = plan.coordinates_to_copy[i_iter];
+    const auto& mappings_copy_cur  = plan.mappings_to_copy[i_iter];
     const auto& state_sub_idx_cur  = plan.state_sub_idx[i_iter];
     const auto& state_sub_idx_prev = plan.state_sub_idx[i_iter - 1];
 
@@ -118,14 +119,30 @@ void FDMTCPU::execute_iter(std::span<const float> state_in,
             state_in.subspan(state_sub_idx_tail + i_dt_tail * nsamps, nsamps);
         std::span<float> out =
             state_out.subspan(state_sub_idx + i_dt * nsamps, nsamps);
-        if (i_dt_head == SIZE_MAX) {
-            fdmt::copy_kernel(tail, out);
-        } else {
-            std::span<const float> head = state_in.subspan(
-                state_sub_idx_head + i_dt_head * nsamps, nsamps);
-            fdmt::add_offset_kernel(tail, head, out, offset);
-        }
+        std::span<const float> head =
+            state_in.subspan(state_sub_idx_head + i_dt_head * nsamps, nsamps);
+        fdmt::add_offset_kernel(tail, head, out, offset);
     }
+#ifdef USE_OPENMP
+#pragma omp parallel for default(none)                                         \
+    shared(state_in, state_out, coords_copy_cur, mappings_copy_cur,            \
+               state_sub_idx_cur, state_sub_idx_prev, nsamps)
+#endif
+    for (size_t i_coord = 0; i_coord < coords_copy_cur.size(); ++i_coord) {
+        const auto& i_sub              = coords_copy_cur[i_coord].first;
+        const auto& i_dt               = coords_copy_cur[i_coord].second;
+        const auto& i_sub_tail         = mappings_copy_cur[i_coord].tail.first;
+        const auto& i_dt_tail          = mappings_copy_cur[i_coord].tail.second;
+        const auto& state_sub_idx      = state_sub_idx_cur[i_sub];
+        const auto& state_sub_idx_tail = state_sub_idx_prev[i_sub_tail];
+
+        std::span<const float> tail =
+            state_in.subspan(state_sub_idx_tail + i_dt_tail * nsamps, nsamps);
+        std::span<float> out =
+            state_out.subspan(state_sub_idx + i_dt * nsamps, nsamps);
+        fdmt::copy_kernel(tail, out);
+    }
+
     const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
         plan.state_shape[i_iter];
     spdlog::debug("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}",

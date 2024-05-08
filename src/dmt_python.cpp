@@ -42,7 +42,9 @@ PYBIND11_MODULE(libdmt, mod) {
         .def_readonly("df_bot", &FDMTPlan::df_bot)
         .def_readonly("state_shape", &FDMTPlan::state_shape)
         .def_readonly("coordinates", &FDMTPlan::coordinates)
+        .def_readonly("coordinates_copy", &FDMTPlan::coordinates_to_copy)
         .def_readonly("mappings", &FDMTPlan::mappings)
+        .def_readonly("mappings_copy", &FDMTPlan::mappings_to_copy)
         .def_readonly("state_sub_idx", &FDMTPlan::state_sub_idx)
         .def_readonly("dt_grid", &FDMTPlan::dt_grid)
         .def_property_readonly(

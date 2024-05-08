@@ -120,7 +120,9 @@ void FDMT::configure_fdmt_plan() {
     m_fdmt_plan.df_bot.resize(m_niters + 1);
     m_fdmt_plan.state_shape.resize(m_niters + 1);
     m_fdmt_plan.coordinates.resize(m_niters + 1);
+    m_fdmt_plan.coordinates_to_copy.resize(m_niters + 1);
     m_fdmt_plan.mappings.resize(m_niters + 1);
+    m_fdmt_plan.mappings_to_copy.resize(m_niters + 1);
     m_fdmt_plan.state_sub_idx.resize(m_niters + 1);
     m_fdmt_plan.dt_grid.resize(m_niters + 1);
     m_fdmt_plan.dt_grid_sub_top.resize(m_niters + 1);
@@ -165,7 +167,6 @@ void FDMT::make_fdmt_plan_iter0() {
                         static_cast<size_t>(0)),
         m_nsamps};
     // 0th iteration has no mappings
-    m_fdmt_plan.mappings.emplace_back();
     m_fdmt_plan.dt_grid_sub_top[0] = m_fdmt_plan.dt_grid[0][m_nchans - 1];
 }
 
@@ -234,21 +235,29 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
             }
             dt_head = dt - dt_mid2;
             if (i_sub == nchans_cur - 1 && do_copy) {
-                i_dt_head = SIZE_MAX;
                 i_dt_tail =
                     fdmt::find_closest_index(dt_grid_prev[i_sub_tail], dt);
-                offset = 0;
+                m_fdmt_plan.coordinates_to_copy[i_iter].emplace_back(i_sub,
+                                                                     i_dt);
+                coord_mapping = {FDMTCoordType{SIZE_MAX, SIZE_MAX},
+                                 FDMTCoordType{i_sub_tail, i_dt_tail}, 0};
+                m_fdmt_plan.mappings_to_copy[i_iter].emplace_back(
+                    coord_mapping);
             } else {
                 i_dt_head =
                     fdmt::find_closest_index(dt_grid_prev[i_sub_head], dt_head);
                 i_dt_tail =
                     fdmt::find_closest_index(dt_grid_prev[i_sub_tail], dt_mid1);
                 offset = dt_mid2;
+                if (offset >= m_nsamps) {
+                    throw std::runtime_error(
+                        "Offset is greater than input size");
+                }
+                m_fdmt_plan.coordinates[i_iter].emplace_back(i_sub, i_dt);
+                coord_mapping = {FDMTCoordType{i_sub_head, i_dt_head},
+                                 FDMTCoordType{i_sub_tail, i_dt_tail}, offset};
+                m_fdmt_plan.mappings[i_iter].emplace_back(coord_mapping);
             }
-            m_fdmt_plan.coordinates[i_iter].emplace_back(i_sub, i_dt);
-            coord_mapping = {FDMTCoordType{i_sub_head, i_dt_head},
-                             FDMTCoordType{i_sub_tail, i_dt_tail}, offset};
-            m_fdmt_plan.mappings[i_iter].emplace_back(coord_mapping);
         }
         m_fdmt_plan.state_sub_idx[i_iter][i_sub] = state_idx;
         m_fdmt_plan.dt_grid[i_iter][i_sub]       = dt_grid_sub;

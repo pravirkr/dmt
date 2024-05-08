@@ -6,11 +6,9 @@
 #include <utility>
 #include <vector>
 
-using SizeType    = size_t;
-using DtGridType  = std::vector<SizeType>;
-using DtPlanType  = std::vector<std::array<SizeType, 4>>;
-using StShapeType = std::array<SizeType, 5>;
-
+using SizeType      = size_t;
+using DtGridType    = std::vector<SizeType>;
+using StShapeType   = std::array<SizeType, 5>;
 using FDMTCoordType = std::pair<SizeType, SizeType>; // isub, i_dt
 
 struct FDMTCoordMapping {
@@ -26,7 +24,9 @@ struct FDMTPlan {
     std::vector<StShapeType> state_shape;
 
     std::vector<std::vector<FDMTCoordType>> coordinates;
+    std::vector<std::vector<FDMTCoordType>> coordinates_to_copy;
     std::vector<std::vector<FDMTCoordMapping>> mappings;
+    std::vector<std::vector<FDMTCoordMapping>> mappings_to_copy;
     std::vector<std::vector<SizeType>> state_sub_idx;
     std::vector<std::vector<DtGridType>> dt_grid;
     // Temp array to remember the top subband dt grid
