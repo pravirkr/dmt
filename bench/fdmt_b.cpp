@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <dmt/fdmt_cpu.hpp>
 #include <random>
-#include <span>
 #include <vector>
 
 class FDMTFixture : public benchmark::Fixture {
@@ -53,7 +52,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_seq_cpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
-        fdmt.initialise(std::span(waterfall), std::span(state_init));
+        fdmt.initialise(waterfall.data(), state_init.data());
     }
 }
 
@@ -69,7 +68,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_par_cpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
-        fdmt.initialise(std::span(waterfall), std::span(state_init));
+        fdmt.initialise(waterfall.data(), state_init.data());
     }
 }
 
@@ -83,7 +82,8 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_seq_cpu)
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
     std::vector<float> dmt(fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
     for (auto _ : state) {
-        fdmt.execute(std::span(waterfall), std::span(dmt));
+        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
+                     dmt.size());
     }
 }
 
@@ -97,7 +97,8 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_par_cpu)
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
     std::vector<float> dmt(fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
     for (auto _ : state) {
-        fdmt.execute(std::span(waterfall), std::span(dmt));
+        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
+                     dmt.size());
     }
 }
 
@@ -113,7 +114,8 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_seq_cpu)
         state.PauseTiming();
         std::vector<float> dmt(fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
         state.ResumeTiming();
-        fdmt.execute(std::span(waterfall), std::span(dmt));
+        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
+                     dmt.size());
     }
 }
 
@@ -129,7 +131,8 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_par_cpu)
         state.PauseTiming();
         std::vector<float> dmt(fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
         state.ResumeTiming();
-        fdmt.execute(std::span(waterfall), std::span(dmt));
+        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
+                     dmt.size());
     }
 }
 

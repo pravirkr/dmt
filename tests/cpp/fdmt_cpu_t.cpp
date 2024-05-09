@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <dmt/fdmt_cpu.hpp>
-#include <span>
 
 TEST_CASE("FDMT class tests", "[fdmt]") {
     SECTION("Test case 1: Constructor and getter methods") {
@@ -23,8 +22,7 @@ TEST_CASE("FDMT class tests", "[fdmt]") {
         const auto& plan      = fdmt.get_plan();
         const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
         std::vector<float> state(state_size, 0.0F);
-        REQUIRE_NOTHROW(
-            fdmt.initialise(std::span(waterfall), std::span(state)));
+        REQUIRE_NOTHROW(fdmt.initialise(waterfall.data(), state.data()));
     }
 
     SECTION("Test case 3: execute method") {
@@ -32,6 +30,7 @@ TEST_CASE("FDMT class tests", "[fdmt]") {
         std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
         const size_t dt_final_size = fdmt.get_dt_grid_final().size();
         std::vector<float> dmt(dt_final_size * 1024, 0.0F);
-        REQUIRE_NOTHROW(fdmt.execute(std::span(waterfall), std::span(dmt)));
+        REQUIRE_NOTHROW(fdmt.execute(waterfall.data(), waterfall.size(),
+                                     dmt.data(), dmt.size()));
     }
 }

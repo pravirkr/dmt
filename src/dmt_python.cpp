@@ -1,7 +1,6 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <span>
 
 #include <dmt/fdmt_cpu.hpp>
 
@@ -88,9 +87,8 @@ PYBIND11_MODULE(libdmt, mod) {
                 static_cast<ssize_t>(fdmt.get_dt_grid_final().size());
             py::array_t<float, py::array::c_style> dmt(
                 {dt_final_size, shape[1]});
-            fdmt.execute(
-                std::span<const float>(waterfall.data(), waterfall.size()),
-                std::span<float>(dmt.mutable_data(), dmt.size()));
+            fdmt.execute(waterfall.data(), waterfall.size(), dmt.mutable_data(),
+                         dmt.size());
             return dmt;
         });
     cls_fdmt.def(
@@ -105,9 +103,7 @@ PYBIND11_MODULE(libdmt, mod) {
                 {nchans_ndt, shape[1]});
             std::fill(state.mutable_data(), state.mutable_data() + state.size(),
                       0.0F);
-            fdmt.initialise(
-                std::span<const float>(waterfall.data(), waterfall.size()),
-                std::span<float>(state.mutable_data(), state.size()));
+            fdmt.initialise(waterfall.data(), state.mutable_data());
             return state;
         });
 }

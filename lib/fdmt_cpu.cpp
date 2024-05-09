@@ -1,5 +1,3 @@
-#include <cmath>
-#include <span>
 #include <spdlog/spdlog.h>
 #ifdef USE_OPENMP
 #include <omp.h>
@@ -24,24 +22,24 @@ void FDMTCPU::set_num_threads(int nthreads) {
 #endif
 }
 
-void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
-    check_inputs(waterfall.size(), dmt.size());
-    std::span<float> state_in_span(m_state_in);
-    std::span<float> state_out_span(m_state_out);
+void FDMTCPU::execute(const float* waterfall, size_t waterfall_size, float* dmt,
+                      size_t dmt_size) {
+    check_inputs(waterfall_size, dmt_size);
+    float* state_in_ptr  = m_state_in.data();
+    float* state_out_ptr = m_state_out.data();
 
-    initialise(waterfall, state_in_span);
+    initialise(waterfall, state_in_ptr);
     const auto niters = get_niters();
     for (size_t i_iter = 1; i_iter < niters + 1; ++i_iter) {
-        execute_iter(state_in_span, state_out_span, i_iter);
+        execute_iter(state_in_ptr, state_out_ptr, i_iter);
         if (i_iter < niters) {
-            std::swap(state_in_span, state_out_span);
+            std::swap(state_in_ptr, state_out_ptr);
         }
     }
-    std::copy_n(state_out_span.data(), dmt.size(), dmt.data());
+    std::copy_n(state_out_ptr, dmt_size, dmt);
 }
 
-void FDMTCPU::initialise(std::span<const float> waterfall,
-                         std::span<float> state) {
+void FDMTCPU::initialise(const float* waterfall, float* state) {
     const auto& plan               = get_plan();
     const auto& dt_grid_init       = plan.dt_grid[0];
     const auto& state_sub_idx_init = plan.state_sub_idx[0];
@@ -87,8 +85,8 @@ void FDMTCPU::initialise(std::span<const float> waterfall,
                   nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
 }
 
-void FDMTCPU::execute_iter(std::span<const float> state_in,
-                           std::span<float> state_out, size_t i_iter) {
+void FDMTCPU::execute_iter(const float* state_in, float* state_out,
+                           size_t i_iter) {
     const auto& plan               = get_plan();
     const auto& nsamps             = plan.state_shape[i_iter][4];
     const auto& coords_cur         = plan.coordinates[i_iter];
@@ -115,13 +113,11 @@ void FDMTCPU::execute_iter(std::span<const float> state_in,
         const auto& state_sub_idx_tail = state_sub_idx_prev[i_sub_tail];
         const auto& state_sub_idx_head = state_sub_idx_prev[i_sub_head];
 
-        std::span<const float> tail =
-            state_in.subspan(state_sub_idx_tail + i_dt_tail * nsamps, nsamps);
-        std::span<float> out =
-            state_out.subspan(state_sub_idx + i_dt * nsamps, nsamps);
-        std::span<const float> head =
-            state_in.subspan(state_sub_idx_head + i_dt_head * nsamps, nsamps);
-        fdmt::add_offset_kernel(tail, head, out, offset);
+        const float* tail = &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
+        const float* head = &state_in[state_sub_idx_head + i_dt_head * nsamps];
+        float* out        = &state_out[state_sub_idx + i_dt * nsamps];
+        fdmt::add_offset_kernel(tail, nsamps, head, nsamps, out, nsamps,
+                                offset);
     }
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
@@ -136,11 +132,9 @@ void FDMTCPU::execute_iter(std::span<const float> state_in,
         const auto& state_sub_idx      = state_sub_idx_cur[i_sub];
         const auto& state_sub_idx_tail = state_sub_idx_prev[i_sub_tail];
 
-        std::span<const float> tail =
-            state_in.subspan(state_sub_idx_tail + i_dt_tail * nsamps, nsamps);
-        std::span<float> out =
-            state_out.subspan(state_sub_idx + i_dt * nsamps, nsamps);
-        fdmt::copy_kernel(tail, out);
+        const float* tail = &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
+        float* out        = &state_out[state_sub_idx + i_dt * nsamps];
+        fdmt::copy_kernel(tail, nsamps, out, nsamps);
     }
 
     const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =

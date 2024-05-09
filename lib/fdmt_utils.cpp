@@ -15,22 +15,22 @@ size_t fdmt::calculate_dt_sub(float f_start, float f_end, float f_min,
     return static_cast<size_t>(std::round(static_cast<float>(dt) * ratio));
 }
 
-void fdmt::add_offset_kernel(std::span<const float> arr1,
-                             std::span<const float> arr2,
-                             std::span<float> arr_out, size_t offset) {
-    if (arr1.size() != arr2.size()) {
+void fdmt::add_offset_kernel(const float* arr1, size_t size_in1,
+                             const float* arr2, size_t size_in2, float* arr_out,
+                             size_t size_out, size_t offset) {
+    if (size_in1 != size_in2) {
         throw std::runtime_error("Input sizes are not equal");
     }
-    if (arr_out.size() < arr1.size()) {
+    if (size_out < size_in1) {
         throw std::runtime_error("Output size is less than input size");
     }
-    if (offset >= arr1.size()) {
+    if (offset >= size_in1) {
         throw std::runtime_error("Offset is greater than input size");
     }
-    size_t nsum  = arr1.size() - offset;
+    size_t nsum  = size_in1 - offset;
     size_t t_ind = 0;
 
-    std::copy_n(arr1.data(), offset, arr_out.data());
+    std::copy_n(arr1, offset, arr_out);
     t_ind += offset;
 
     for (size_t i = 0; i < nsum; ++i) {
@@ -38,18 +38,19 @@ void fdmt::add_offset_kernel(std::span<const float> arr1,
     }
     t_ind += nsum;
 
-    size_t nrest = std::min(offset, arr_out.size() - t_ind);
+    size_t nrest = std::min(offset, size_out - t_ind);
     if (nrest > 0) {
-        std::copy_n(arr2.data() + nsum, nrest, arr_out.data() + t_ind);
+        std::copy_n(arr2 + nsum, nrest, arr_out + t_ind);
         t_ind += nrest;
     }
 }
 
-void fdmt::copy_kernel(std::span<const float> arr1, std::span<float> arr_out) {
-    if (arr_out.size() < arr1.size()) {
+void fdmt::copy_kernel(const float* arr1, size_t size_in, float* arr_out,
+                       size_t size_out) {
+    if (size_out < size_in) {
         throw std::runtime_error("Output size is less than input size");
     }
-    std::copy_n(arr1.data(), arr1.size(), arr_out.data());
+    std::copy_n(arr1, size_in, arr_out);
 }
 
 size_t fdmt::find_closest_index(const std::vector<size_t>& arr_sorted,

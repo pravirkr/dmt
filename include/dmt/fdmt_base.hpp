@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstddef>
-#include <span>
 #include <utility>
 #include <vector>
 
@@ -52,10 +51,9 @@ public:
     const DtGridType& get_dt_grid_final() const;
     std::vector<float> get_dm_grid_final() const;
     static void set_log_level(int level);
-    virtual void execute(std::span<const float> waterfall,
-                         std::span<float> dmt)      = 0;
-    virtual void initialise(std::span<const float> waterfall,
-                            std::span<float> state) = 0;
+    virtual void execute(const float* waterfall, size_t waterfall_size,
+                         float* dmt, size_t dmt_size)             = 0;
+    virtual void initialise(const float* waterfall, float* state) = 0;
 
 protected:
     void check_inputs(size_t waterfall_size, size_t dmt_size) const;
