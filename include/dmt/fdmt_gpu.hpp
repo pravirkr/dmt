@@ -4,11 +4,32 @@
 
 #include <dmt/fdmt_base.hpp>
 
+using StShapeTypeD   = int4;
+using FDMTCoordTypeD = int2;
+
+struct FDMTCoordMappingD {
+    FDMTCoordTypeD head;
+    FDMTCoordTypeD tail;
+    SizeType offset;
+};
+
 struct FDMTPlanD {
-    thrust::device_vector<SizeType> state_shape_d;
-    thrust::device_vector<SizeType> state_idx_d;
-    thrust::device_vector<SizeType> dt_grid_d;
-    thrust::device_vector<SizeType> dt_plan_d;
+    thrust::device_vector<SizeType> nsubs_d;
+    thrust::device_vector<SizeType> ncoords_d;
+    thrust::device_vector<SizeType> ncoords_to_copy_d;
+    thrust::device_vector<SizeType> nsubs_cumul_d;
+    thrust::device_vector<SizeType> ncoords_cumul_d;
+    thrust::device_vector<SizeType> ncoords_to_copy_cumul_d;
+    // i = i_iter
+    thrust::device_vector<StShapeTypeD> state_shape_d;
+    // i = i_iter * ncoords_cumul_iter + i_coord
+    thrust::device_vector<FDMTCoordTypeD> coordinates_d;
+    thrust::device_vector<FDMTCoordMappingD> mappings_d;
+    // i = i_iter * ncoords_to_copy_cumul_iter + i_coord_to_copy
+    thrust::device_vector<FDMTCoordTypeD> coordinates_to_copy_d;
+    thrust::device_vector<FDMTCoordMappingD> mappings_to_copy_d;
+    // i = i_iter * nsubs_cumul_iter + isub
+    thrust::device_vector<SizeType> state_sub_idx_d;
 };
 
 class FDMTGPU : public FDMT {
@@ -25,28 +46,6 @@ private:
 
     FDMTPlanD m_fdmt_plan_d;
 
-    FDMTPlanD transfer_plan_to_device() {
-        const auto& plan = get_plan();
-        FDMTPlanD plan_d;
-        for (const auto& state_shape_iter : plan.state_shape) {
-            for (const auto& shape : state_shape_iter) {
-                plan_d.state_shape_d.push_back(shape);
-            }
-        }
-        // flatten sub_plan and transfer to device
-        for (const auto& sub_plan_iter : plan.sub_plan) {
-            for (const auto& sub_plan : sub_plan_iter) {
-                plan_d.state_idx_d.push_back(sub_plan.state_idx);
-                for (const auto& dt : sub_plan.dt_grid) {
-                    plan_d.dt_grid_d.push_back(dt);
-                }
-                for (const auto& dt_tuple : sub_plan.dt_plan) {
-                    for (const auto& idt : dt_tuple) {
-                        plan_d.dt_plan_d.push_back(idt);
-                    }
-                }
-            }
-        }
-        return plan_d;
-    };
+    static void transfer_plan_to_device(const FDMTPlan& plan,
+                                        FDMTPlanD& plan_d);
 };

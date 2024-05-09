@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "dmt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dispersion Measure Transforms"
 readme = "README.md"
 license = { text = "MIT" }

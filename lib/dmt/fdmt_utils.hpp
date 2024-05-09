@@ -5,8 +5,8 @@
 
 constexpr float kDispCoeff   = -2.0;
 constexpr float kDispConstLK = 4.1488080e3; // L&K Handbook of Pulsar Astronomy
-constexpr float kDispConstMT = 4.1493774e3; // TEMPO2, Manchester&Taylor (1972)
-constexpr float kDispConstSI = 4.1488066e3; // SI value, Kulkarni (2020)
+constexpr float kDispConstMT = 1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
+constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 constexpr float kDispConst   = kDispConstMT;
 
 namespace fdmt {

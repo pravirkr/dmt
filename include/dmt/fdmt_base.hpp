@@ -5,10 +5,11 @@
 #include <utility>
 #include <vector>
 
-using SizeType      = size_t;
-using DtGridType    = std::vector<SizeType>;
+using SizeType   = size_t;
+using DtGridType = std::vector<SizeType>;
+// state shape: nchans, ndt_min, ndt_max, ncoords, nsamps
 using StShapeType   = std::array<SizeType, 5>;
-using FDMTCoordType = std::pair<SizeType, SizeType>; // isub, i_dt
+using FDMTCoordType = std::pair<SizeType, SizeType>; // i_sub, i_dt
 
 struct FDMTCoordMapping {
     FDMTCoordType head;
@@ -19,7 +20,6 @@ struct FDMTCoordMapping {
 struct FDMTPlan {
     std::vector<float> df_top;
     std::vector<float> df_bot;
-    // state shape: nchans, ndt_min, ndt_max, nchansxndt, nsamps
     std::vector<StShapeType> state_shape;
 
     std::vector<std::vector<FDMTCoordType>> coordinates;

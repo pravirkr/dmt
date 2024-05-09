@@ -3,7 +3,7 @@ cmake_policy(SET CMP0148 OLD)
 
 project(
   dmt
-  VERSION 0.1.0
+  VERSION 0.2.0
   LANGUAGES CXX
 )
 
