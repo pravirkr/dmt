@@ -9,10 +9,10 @@ class TestFDMT:
         dt_max = 512
         thefdmt = libdmt.FDMT(1000, 1500, nchans, nsamples, 0.001, dt_max)
         waterfall = np.ones((nchans, nsamples), dtype=np.float32)
-        thefdmt_init = thefdmt.initialise(waterfall)
+        dmt_output = thefdmt.execute(waterfall)
         np.testing.assert_equal(
-            thefdmt_init.shape,
-            (nchans, thefdmt.dt_grid_init.size, nsamples),
+            dmt_output.shape,
+            (thefdmt.dt_grid_final.size, nsamples),
         )
         """
         np.testing.assert_equal(
