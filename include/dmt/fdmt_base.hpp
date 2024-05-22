@@ -51,7 +51,7 @@ public:
     const FDMTPlan& get_plan() const;
     const DtGridType& get_dt_grid_final() const;
     std::vector<float> get_dm_grid_final() const;
-    //static void set_log_level(int level);
+    static void set_log_level(int level);
     virtual void execute(const float* __restrict waterfall, size_t waterfall_size,
                          float* __restrict dmt, size_t dmt_size)             = 0;
     virtual void initialise(const float* __restrict waterfall, float* __restrict state) = 0;

@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
-//#include <spdlog/spdlog.h>
+#include <spdlog/spdlog.h>
 #include <stdexcept>  // For std::invalid_argument
 #include "fdmt_utils.hpp"
 #include <fdmt_base.hpp>
@@ -75,13 +75,13 @@ std::vector<float> FDMT::get_dm_grid_final() const {
 }
 
 // Setters
-//void FDMT::set_log_level(int level) {
-//    if (level < static_cast<int>(spdlog::level::trace) ||
-//        level > static_cast<int>(spdlog::level::off)) {
-//        spdlog::set_level(spdlog::level::info);
-//    }
-//    spdlog::set_level(static_cast<spdlog::level::level_enum>(level));
-//}
+void FDMT::set_log_level(int level) {
+    if (level < static_cast<int>(spdlog::level::trace) ||
+        level > static_cast<int>(spdlog::level::off)) {
+        spdlog::set_level(spdlog::level::info);
+    }
+    spdlog::set_level(static_cast<spdlog::level::level_enum>(level));
+}
 
 // Private methods
 SizeType FDMT::calculate_niters(SizeType nchans) {
@@ -113,7 +113,7 @@ void FDMT::check_inputs(size_t waterfall_size, size_t dmt_size) const {
         plan.state_shape[m_niters][3] * plan.state_shape[m_niters][4]) {
         throw std::invalid_argument("Invalid size of dmt");
     }
-   // spdlog::debug("FDMT: Input dimensions: {}x{}", m_nchans, m_nsamps);
+    spdlog::debug("FDMT: Input dimensions: {}x{}", m_nchans, m_nsamps);
 }
 
 void FDMT::configure_fdmt_plan() {
@@ -134,7 +134,7 @@ void FDMT::configure_fdmt_plan() {
     for (SizeType i_iter = 1; i_iter < m_niters + 1; ++i_iter) {
         make_fdmt_plan(i_iter);
     }
-   // spdlog::debug("FDMT: configured fdmt plan");
+    spdlog::debug("FDMT: configured fdmt plan");
 }
 
 void FDMT::make_fdmt_plan_iter0() {
