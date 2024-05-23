@@ -3,7 +3,7 @@
 #include <thrust/copy.h>
 #include <fdmt_v1_gpu.cuh>
 
-//#include "npy.hpp" //! delete_
+#include "npy.hpp" //! delete_
 
 extern cudaError_t cudaStatus0 ;
 
@@ -269,7 +269,7 @@ void  FDMT_v1_GPU::execute(const float* waterfall, size_t waterfall_size, float*
    
         kernel_init_fdmt_v1_ << < gridSize, blockSize >> > (waterfall, pstate_sub_idx, pdt_grid
             , ppos_gridInnerVects_cur, state_in_ptr, pnsamp);
-        cudaDeviceSynchronize();
+       // cudaDeviceSynchronize();
     
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -342,7 +342,7 @@ void  FDMT_v1_GPU::execute(const float* waterfall, size_t waterfall_size, float*
             , pstate_sub_idx_cumsum          
             , pnsamp            
           );
-        cudaDeviceSynchronize();
+      //  cudaDeviceSynchronize();
         cudaStatus0 = cudaGetLastError();
         if (cudaStatus0 != cudaSuccess)
         {

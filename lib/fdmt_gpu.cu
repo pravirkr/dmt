@@ -3,7 +3,7 @@
 #include <thrust/copy.h>
 #include <fdmt_gpu.cuh>
 
-//#include "npy.hpp" //! delete_
+#include "npy.hpp" //! delete_
 
 
 extern cudaError_t cudaStatus0 = cudaSuccess;
@@ -245,20 +245,20 @@ void  FDMTGPU::execute(const float* waterfall, size_t waterfall_size, float* dmt
     int* pstate_sub_idx = thrust::raw_pointer_cast(m_fdmt_plan_d.state_sub_idx_d.data()); //+
    
     int* pdt_grid = thrust::raw_pointer_cast(m_fdmt_plan_d.dt_grid_d.data()); //+
-   // int* ppos_gridSubVects = thrust::raw_pointer_cast(m_fdmt_plan_d.pos_gridSubVects.data());
+   
     int* ppos_gridInnerVects = thrust::raw_pointer_cast(m_fdmt_plan_d.pos_gridInnerVects_d.data());  //+ 
     
     int* pstate_sub_idx_cur = &pstate_sub_idx[m_fdmt_plan_d.len_state_sub_idx_cumsum_h[0]]; //+
 
     int* ppos_gridInnerVects_cur = &ppos_gridInnerVects[m_fdmt_plan_d.pos_gridSubVects_h[0]]; //+
-    const dim3 blockSize = dim3(256, 1);
+    const dim3 blockSize = dim3(64, 1);
     const dim3 gridSize = dim3((nsamps + blockSize.x - 1) / blockSize.x,nchan);
 
     auto start = std::chrono::high_resolution_clock::now();    
     
-        kernel_init_fdmt_v1 << < gridSize, blockSize >> > (waterfall, pstate_sub_idx_cur, pdt_grid
+        kernel_init_fdmt_v1 << < gridSize, blockSize, (10 + blockSize.x) * sizeof(float) >> > (waterfall, pstate_sub_idx_cur, pdt_grid
             , ppos_gridInnerVects_cur, state_in_ptr, nsamps);
-        cudaDeviceSynchronize(); 
+       // cudaDeviceSynchronize(); 
    
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -328,7 +328,7 @@ void  FDMTGPU::execute(const float* waterfall, size_t waterfall_size, float* dmt
           , coords_cur_size
           , coords_copy_cur_size
           );
-        cudaDeviceSynchronize();
+        //cudaDeviceSynchronize();
         cudaStatus0 = cudaGetLastError();
         if (cudaStatus0 != cudaSuccess)
         {
@@ -402,7 +402,7 @@ void  kernel_init_fdmt(const float* __restrict waterfall, int* __restrict pstate
 
 
 
-//--------------------------------------------------------------
+////--------------------------------------------------------------
 __global__
 void  kernel_init_fdmt_v1(const float* __restrict waterfall, int* __restrict pstate_sub_idx_cur
     , int* __restrict p_dt_grid, int* __restrict ppos_gridInnerVects_cur, float* __restrict state, const int nsamps)
@@ -455,6 +455,78 @@ void  kernel_init_fdmt_v1(const float* __restrict waterfall, int* __restrict pst
 
 
 }
+//--------------------------------------------------------------
+//__global__
+//void  kernel_init_fdmt_v1(const float* __restrict waterfall, int* __restrict pstate_sub_idx_cur
+//    , int* __restrict p_dt_grid, int* __restrict ppos_gridInnerVects_cur, float* __restrict state, const int nsamps)
+//{
+//    __shared__ int iarr_sh[4];
+//    extern __shared__ float arr_in[];
+//    int isamp = blockIdx.x * blockDim.x + threadIdx.x;
+//    if (isamp >= nsamps)
+//    {
+//        return;
+//    }
+//    int i_sub = blockIdx.y;
+//    //// Initialise state for [:, dt_init_min, dt_init_min:]
+//
+//    iarr_sh[0] = p_dt_grid[ppos_gridInnerVects_cur[i_sub]]; // =dt_grid_sub_min    
+//
+//    iarr_sh[1] = pstate_sub_idx_cur[i_sub]; // = state_sub_idx
+//
+//    iarr_sh[2] = ppos_gridInnerVects_cur[i_sub + 1] - ppos_gridInnerVects_cur[i_sub]; //= dt_grid_sub_size
+//
+//    iarr_sh[3] = ppos_gridInnerVects_cur[i_sub];
+//
+//
+//    int ibegin = blockIdx.x * blockDim.x;
+//    int irow_inp_begin = i_sub * nsamps;
+//    if ( 0 == blockIdx.x)
+//    {
+//        for (int i = iarr_sh[0]; i < blockDim.x + iarr_sh[0]; ++i)
+//        {
+//            arr_in[i ] = waterfall[irow_inp_begin - iarr_sh[0] + i];
+//        }
+//    }
+//    else
+//    {
+//        for (int i = 0; i < blockDim.x + iarr_sh[0]; ++i)
+//        {
+//            arr_in[i] = waterfall[irow_inp_begin + ibegin  + i - iarr_sh[0]];
+//        }
+//    }
+//   
+//
+//    if (isamp >= iarr_sh[0])
+//    {
+//        float sum = 0.0F;
+//        for (int i = 0; i < iarr_sh[0] + 1; ++i)
+//        {
+//            sum += arr_in[threadIdx.x + i];
+//        }
+//        //for (int i = isamp - iarr_sh[0]; i <= isamp; ++i)
+//        //{
+//        //    sum += arr_in[i];// waterfall[i_sub * nsamps + i];
+//        //}
+//        state[iarr_sh[1] + isamp] = fdividef(sum, static_cast<float>(iarr_sh[0] + 1));
+//    }
+//    //---  
+//    for (int i_dt = 1; i_dt < iarr_sh[2]; ++i_dt)
+//    {
+//        int dt_cur = p_dt_grid[iarr_sh[3] + i_dt];// dt_grid_sub[i_dt];
+//        int dt_prev = p_dt_grid[iarr_sh[3] + i_dt - 1];
+//        float sum = 0.0F;
+//        if (isamp >= dt_cur)
+//        {
+//            for (int i = isamp - dt_cur; i < isamp - dt_prev; ++i)
+//            {
+//                sum += waterfall[i_sub * nsamps + i];
+//            }
+//            state[iarr_sh[1] + i_dt * nsamps + isamp] = state[iarr_sh[1] + (i_dt - 1) * nsamps + isamp] *
+//                fdividef(static_cast<float>(dt_prev) + 1.0F + sum, static_cast<float>(dt_cur) + 1.0F);
+//        }
+//    }
+//}
 //--------------------------------------------------------------------------------------
 __global__
 void kernel_execute_iter(const float* __restrict state_in, float* __restrict state_out
