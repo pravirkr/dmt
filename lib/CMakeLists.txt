@@ -9,6 +9,12 @@ find_package(OpenMP)
 
 file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
+# Check if CUDA was found
+if(CMAKE_CUDA_COMPILER)
+  file(GLOB LIBRARY_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  list(APPEND LIBRARY_SOURCES ${LIBRARY_SOURCES_CUDA})
+endif()
+
 add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
 target_include_directories(
   ${LIBRARY_NAME} PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include/>

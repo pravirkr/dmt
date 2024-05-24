@@ -6,8 +6,14 @@ CPMAddPackage(
 )
 
 set(TARGET_BENCHMARKS ${PROJECT_NAME}_bench)
-file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+file(GLOB BENCH_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
-add_executable(${TARGET_BENCHMARKS} ${TEST_SOURCES})
+# Check if CUDA was found
+if(CMAKE_CUDA_COMPILER)
+  file(GLOB BENCH_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  list(APPEND BENCH_SOURCES ${BENCH_SOURCES_CUDA})
+endif()
+
+add_executable(${TARGET_BENCHMARKS} ${BENCH_SOURCES})
 target_include_directories(${TARGET_BENCHMARKS} PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${LIBRARY_NAME} benchmark::benchmark)
+target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${LIBRARY_NAME} benchmark::benchmark_main)

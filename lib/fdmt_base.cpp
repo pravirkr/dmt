@@ -3,10 +3,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
+#include <stdexcept>
+
 #include <spdlog/spdlog.h>
-#include <stdexcept>  // For std::invalid_argument
-#include "fdmt_utils.hpp"
-#include <fdmt_base.hpp>
+
+#include "dmt/fdmt_utils.hpp"
+#include <dmt/fdmt_base.hpp>
 
 size_t FDMTPlan::calculate_memory_usage() const {
     size_t mem_use = 0;
@@ -34,8 +36,14 @@ size_t FDMTPlan::calculate_memory_usage() const {
     return mem_use;
 }
 
-FDMT::FDMT(float f_min, float f_max, SizeType nchans, SizeType nsamps,
-           float tsamp, SizeType dt_max, SizeType dt_step, SizeType dt_min)
+FDMT::FDMT(float f_min,
+           float f_max,
+           SizeType nchans,
+           SizeType nsamps,
+           float tsamp,
+           SizeType dt_max,
+           SizeType dt_step,
+           SizeType dt_min)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -48,15 +56,13 @@ FDMT::FDMT(float f_min, float f_max, SizeType nchans, SizeType nsamps,
       m_correction(m_df / 2),
       m_niters(calculate_niters(m_nchans)) {
     configure_fdmt_plan();
-   /* spdlog::debug("FDMT: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}",
-                  m_df, m_dt_max, m_dt_min, m_dt_step, m_niters);*/
+    spdlog::debug("FDMT: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}",
+                  m_df, m_dt_max, m_dt_min, m_dt_step, m_niters);
 }
 
 // Getters
 float FDMT::get_df() const { return m_df; }
 float FDMT::get_correction() const { return m_correction; }
-int FDMT::get_m_nsamps() const { return static_cast<int>(m_nsamps); };
-
 SizeType FDMT::get_niters() const { return m_niters; }
 const FDMTPlan& FDMT::get_plan() const { return m_fdmt_plan; }
 const DtGridType& FDMT::get_dt_grid_final() const {

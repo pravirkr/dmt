@@ -161,4 +161,4 @@ BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_overall_par_cpu)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
 
-BENCHMARK_MAIN();
+//BENCHMARK_MAIN();

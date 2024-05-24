@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <dmt/fdmt_cpu.hpp>
 
-TEST_CASE("FDMT class tests", "[fdmt]") {
+TEST_CASE("FDMT class tests [CPU]", "[fdmt_cpu]") {
     SECTION("Test case 1: Constructor and getter methods") {
         FDMTCPU fdmt(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         REQUIRE(fdmt.get_df() == 1.0F);
