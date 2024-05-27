@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <spdlog/spdlog.h>
 #ifdef USE_OPENMP
 #include <omp.h>
@@ -36,7 +37,7 @@ void FDMTCPU::execute(const float* __restrict waterfall,
     float* state_in_ptr  = m_state_in.data();
     float* state_out_ptr = m_state_out.data();
 
-    initialise(waterfall, state_in_ptr);
+    initialise(waterfall, waterfall_size, state_in_ptr, m_state_in.size());
     const auto niters = get_niters();
     for (size_t i_iter = 1; i_iter < niters + 1; ++i_iter) {
         execute_iter(state_in_ptr, state_out_ptr, i_iter);
@@ -48,7 +49,9 @@ void FDMTCPU::execute(const float* __restrict waterfall,
 }
 
 void FDMTCPU::initialise(const float* __restrict waterfall,
-                         float* __restrict state) {
+                         size_t waterfall_size,
+                         float* __restrict state,
+                         size_t state_size) {
     const auto& plan               = get_plan();
     const auto& dt_grid_init       = plan.dt_grid[0];
     const auto& state_sub_idx_init = plan.state_sub_idx[0];
@@ -89,6 +92,8 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
     }
     const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
         plan.state_shape[0];
+    spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
+                  state_size);
     spdlog::debug("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}", 0,
                   nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
 }

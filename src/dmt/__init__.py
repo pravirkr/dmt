@@ -1,7 +1,11 @@
+import contextlib
 from importlib import metadata
 
 __version__ = metadata.version(__name__)
 
-from .libdmt import FDMT
+from .libdmt import FDMTCPU
 
-__all__ = ["FDMT"]
+with contextlib.suppress(Exception):
+    from .libcudmt import FDMTGPU
+
+__all__ = ["FDMTCPU", "FDMTGPU"]

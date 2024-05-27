@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <dmt/fdmt_base.hpp>
 
 class FDMTCPU : public FDMT {
@@ -18,7 +19,9 @@ public:
                  float* __restrict dmt,
                  size_t dmt_size) override;
     void initialise(const float* __restrict waterfall,
-                    float* __restrict state) override;
+                    size_t waterfall_size,
+                    float* __restrict state,
+                    size_t state_size) override;
 
 private:
     // Buffers

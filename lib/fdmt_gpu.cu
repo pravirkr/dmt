@@ -57,316 +57,231 @@ FDMTGPU::FDMTGPU(float f_min,
     transfer_plan_to_device(plan, m_fdmt_plan_d);
 }
 
-void FDMTGPU::transfer_plan_to_device(const FDMTPlan& plan, FDMTPlanD& plan_d) {
-    // Transfer the plan to the device
-    const int niter = plan.state_shape.size();
-
-    // 1. "coordinates_d" allocation on GPU
-    // 1.1 "lenof_innerVects_coords_cumsum" creation and  allocation on GPU
-    std::vector<SizeType> h_lenof_innerVects_coords_cumsum_s(niter + 1);
-    h_lenof_innerVects_coords_cumsum_s[0] = 0;
-    for (int i = 1; i < niter + 1; ++i) {
-        h_lenof_innerVects_coords_cumsum_s[i] =
-            h_lenof_innerVects_coords_cumsum_s[i - 1] +
-            plan.coordinates[i - 1].size() * 2;
-    }
-    plan_d.lenof_innerVects_coords_cumsum_h.resize(
-        h_lenof_innerVects_coords_cumsum_s.size());
-    std::copy(h_lenof_innerVects_coords_cumsum_s.begin(),
-              h_lenof_innerVects_coords_cumsum_s.end(),
-              plan_d.lenof_innerVects_coords_cumsum_h.begin());
-    // !1.1
-
-    // 1.2
-    std::vector<SizeType> h_coordinates_flattened_s;
-    for (const auto& innerVec : plan.coordinates) {
-        for (const auto& pair : innerVec) {
-            h_coordinates_flattened_s.push_back(pair.first);
-            h_coordinates_flattened_s.push_back(pair.second);
-        }
-    }
-    std::vector<int> h_coordinates_flattened(h_coordinates_flattened_s.size());
-    std::copy(h_coordinates_flattened_s.begin(),
-              h_coordinates_flattened_s.end(), h_coordinates_flattened.begin());
-    plan_d.coordinates_d.resize(h_coordinates_flattened.size());
-    thrust::copy(h_coordinates_flattened.begin(), h_coordinates_flattened.end(),
-                 plan_d.coordinates_d.begin());
-
-    // !1.2
-    //! 1
-
-    // 2. "coordinates_to_copy" allocation on GPU
-    // 2.1 "lenof_innerVects_coords_to_copy_cumsum" creation and allocation on
-    // GPU
-    std::vector<SizeType> h_lenof_innerVects_coords_to_copy_cumsum_s(niter + 1);
-    h_lenof_innerVects_coords_to_copy_cumsum_s[0] = 0;
-    for (int i = 1; i < niter + 1; ++i) {
-        h_lenof_innerVects_coords_to_copy_cumsum_s[i] =
-            h_lenof_innerVects_coords_to_copy_cumsum_s[i - 1] +
-            plan.coordinates_to_copy[i - 1].size() * 2;
-    }
-
-    plan_d.lenof_innerVects_coords_to_copy_cumsum_h.resize(
-        h_lenof_innerVects_coords_to_copy_cumsum_s.size());
-    std::copy(h_lenof_innerVects_coords_to_copy_cumsum_s.begin(),
-              h_lenof_innerVects_coords_to_copy_cumsum_s.end(),
-              plan_d.lenof_innerVects_coords_to_copy_cumsum_h.begin());
-
-    // !2.1
-
-    // 2.2
-    std::vector<SizeType> h_coordinates_to_copy_flattened_s;
-
-    for (const auto& innerVec : plan.coordinates_to_copy) {
-        for (const auto& pair : innerVec) {
-            h_coordinates_to_copy_flattened_s.push_back(pair.first);
-            h_coordinates_to_copy_flattened_s.push_back(pair.second);
-        }
-    }
-    plan_d.coordinates_to_copy_d.resize(
-        h_coordinates_to_copy_flattened_s.size());
-
-    std::vector<int> h_coordinates_to_copy_flattened(
-        h_coordinates_to_copy_flattened_s.size());
-
-    std::copy(h_coordinates_to_copy_flattened_s.begin(),
-              h_coordinates_to_copy_flattened_s.end(),
-              h_coordinates_to_copy_flattened.begin());
-
-    thrust::copy(h_coordinates_to_copy_flattened.begin(),
-                 h_coordinates_to_copy_flattened.end(),
-                 plan_d.coordinates_to_copy_d.begin());
-    //! 2
-
-    // 3. "mappings" allocation on GPU
-    // 3.1 "len_mappings_cumsum" creation and allocation on GPU
-    std::vector<SizeType> h_len_mappings_cumsum_s(niter + 1);
-    h_len_mappings_cumsum_s[0] = 0;
-    for (int i = 1; i < niter + 1; ++i) {
-        h_len_mappings_cumsum_s[i] =
-            h_len_mappings_cumsum_s[i - 1] + plan.mappings[i - 1].size() * 5;
-    }
-    plan_d.len_mappings_cumsum_h.resize(h_len_mappings_cumsum_s.size());
-
-    std::copy(h_len_mappings_cumsum_s.begin(), h_len_mappings_cumsum_s.end(),
-              plan_d.len_mappings_cumsum_h.begin());
-    // !3.1
-
-    // 3.2
-    std::vector<SizeType> mappings_flattened_s =
-        flatten_mappings(plan.mappings);
-    plan_d.mappings_d.resize(mappings_flattened_s.size());
-    std::vector<int> mappings_flattened(mappings_flattened_s.size());
-    std::copy(mappings_flattened_s.begin(), mappings_flattened_s.end(),
-              mappings_flattened.begin());
-    thrust::copy(mappings_flattened.begin(), mappings_flattened.end(),
-                 plan_d.mappings_d.begin());
-    //! 3.2, !3
-
-    // 4. "mappings_to_copy" allocation on GPU
-    // 4.1 "len_mappings_to_copy_cumsum" creation and allocation on GPU
-    std::vector<SizeType> h_len_mappings_to_copy_cumsum_s(niter + 1);
-    h_len_mappings_to_copy_cumsum_s[0] = 0;
-    for (int i = 1; i < niter + 1; ++i) {
-        h_len_mappings_to_copy_cumsum_s[i] =
-            h_len_mappings_to_copy_cumsum_s[i - 1] +
-            plan.mappings_to_copy[i - 1].size() * 5;
-    }
-    plan_d.len_mappings_to_copy_cumsum_h.resize(
-        h_len_mappings_to_copy_cumsum_s.size());
-
-    std::copy(h_len_mappings_to_copy_cumsum_s.begin(),
-              h_len_mappings_to_copy_cumsum_s.end(),
-              plan_d.len_mappings_to_copy_cumsum_h.begin());
-    // !4.1
-
-    // 4.2
-    std::vector<SizeType> mappings_to_copy_flattened_s =
-        flatten_mappings(plan.mappings_to_copy);
-    std::vector<int> mappings_to_copy_flattened(
-        mappings_to_copy_flattened_s.size());
-    std::copy(mappings_to_copy_flattened_s.begin(),
-              mappings_to_copy_flattened_s.end(),
-              mappings_to_copy_flattened.begin());
-
-    plan_d.mappings_to_copy_d.resize(mappings_to_copy_flattened_s.size());
-    thrust::copy(mappings_to_copy_flattened.begin(),
-                 mappings_to_copy_flattened.end(),
-                 plan_d.mappings_to_copy_d.begin());
-    //! 4.2, !4
-
-    // 5."state_sub_idx_d" allocation on GPU
-    // 5.1 "len_state_sub_idx_cumsum" creation and allocation on GPU
-    std::vector<SizeType> h_len_state_sub_idx_cumsum_s(niter + 1);
-    h_len_state_sub_idx_cumsum_s[0] = 0;
-    for (int i = 1; i < niter + 1; ++i) {
-        h_len_state_sub_idx_cumsum_s[i] = h_len_state_sub_idx_cumsum_s[i - 1] +
-                                          plan.state_sub_idx[i - 1].size();
-    }
-    plan_d.len_state_sub_idx_cumsum_h.resize(
-        h_len_state_sub_idx_cumsum_s.size());
-    std::copy(h_len_state_sub_idx_cumsum_s.begin(),
-              h_len_state_sub_idx_cumsum_s.end(),
-              plan_d.len_state_sub_idx_cumsum_h.begin());
-    // !5.1
-
-    // 5.2
-    std::vector<SizeType> flattened_s;
-    for (const auto& innerVec : plan.state_sub_idx) {
-        flattened_s.insert(flattened_s.end(), innerVec.begin(), innerVec.end());
-    }
-    std::vector<int> flattened(flattened_s.size());
-    plan_d.state_sub_idx_d.resize(flattened_s.size());
-    std::copy(flattened_s.begin(), flattened_s.end(), flattened.begin());
-    thrust::copy(flattened.begin(), flattened.end(),
-                 plan_d.state_sub_idx_d.begin());
-
-    // !5.2, !5
-
-    // 6. "dt_grid_d" allocation on GPU
-    // 6.1 CPU preparations
-    std::vector<SizeType> dt_grid_flattened_s;
-    std::vector<SizeType> pos_gridInnerVects_h_s;
-    std::vector<SizeType> pos_gridSubVects_h_s;
-
-    SizeType currentIndex_1star = 0;
-    SizeType currentIndex_2star = 0;
-
-    for (const auto& subVect : plan.dt_grid) {
-        // Save the starting point of each subvector in dt_grid
-        pos_gridSubVects_h_s.push_back(currentIndex_2star);
-
-        for (const auto& dtGrid : subVect) {
-            // Save the starting point of each DtGridType
-            pos_gridInnerVects_h_s.push_back(currentIndex_1star);
-
-            // Append elements of dtGrid to the flattened vector
-            dt_grid_flattened_s.insert(dt_grid_flattened_s.end(),
-                                       dtGrid.begin(), dtGrid.end());
-            currentIndex_1star += dtGrid.size();
-            currentIndex_2star++;
-        }
-    }
-    pos_gridSubVects_h_s.push_back(currentIndex_2star);
-    pos_gridInnerVects_h_s.push_back(currentIndex_1star);
-
-    //
-    std::vector<int> dt_grid_flattened(dt_grid_flattened_s.size());
-    std::vector<int> pos_gridInnerVects_h(pos_gridInnerVects_h_s.size());
-    std::vector<int> pos_gridSubVects_h(pos_gridSubVects_h_s.size());
-
-    std::copy(dt_grid_flattened_s.begin(), dt_grid_flattened_s.end(),
-              dt_grid_flattened.begin());
-    std::copy(pos_gridInnerVects_h_s.begin(), pos_gridInnerVects_h_s.end(),
-              pos_gridInnerVects_h.begin());
-
-    plan_d.pos_gridSubVects_h.resize(pos_gridSubVects_h_s.size());
-    std::copy(pos_gridSubVects_h_s.begin(), pos_gridSubVects_h_s.end(),
-              plan_d.pos_gridSubVects_h.begin());
-
-    // 6.2 GPU allocation
-    plan_d.dt_grid_d.resize(dt_grid_flattened.size());
-
-    plan_d.pos_gridInnerVects_d.resize(pos_gridInnerVects_h_s.size());
-
-    thrust::copy(dt_grid_flattened.begin(), dt_grid_flattened.end(),
-                 plan_d.dt_grid_d.begin());
-    thrust::copy(pos_gridInnerVects_h.begin(), pos_gridInnerVects_h.end(),
-                 plan_d.pos_gridInnerVects_d.begin());
-    std::copy(pos_gridSubVects_h_s.begin(), pos_gridSubVects_h_s.end(),
-              plan_d.pos_gridSubVects_h.begin());
-    // !7
-}
-//------------------------------------------------------------
-//  Function to flatten the vector of vectors of FDMTCoordMapping
-std::vector<SizeType>
-flatten_mappings(const std::vector<std::vector<FDMTCoordMapping>>& mappings) {
-    std::vector<SizeType> flattened;
-
-    size_t totalSize = 0;
-    for (const auto& vec : mappings) {
-        totalSize +=
-            vec.size() * 5; // Each FDMTCoordMapping has 5 SizeType elements
-    }
-    flattened.reserve(totalSize);
-
-    for (const auto& innerVec : mappings) {
-        for (const auto& mapping : innerVec) {
-            flattened.push_back(mapping.tail.first);
-            flattened.push_back(mapping.tail.second);
-            flattened.push_back(mapping.head.first);
-            flattened.push_back(mapping.head.second);
-            flattened.push_back(mapping.offset);
-        }
-    }
-
-    return flattened;
+void FDMTGPU::execute(const float* __restrict waterfall,
+                      size_t waterfall_size,
+                      float* __restrict dmt,
+                      size_t dmt_size) {
+    execute(waterfall, waterfall_size, dmt, dmt_size, false);
 }
 
 void FDMTGPU::execute(const float* __restrict waterfall,
                       size_t waterfall_size,
                       float* __restrict dmt,
-                      size_t dmt_size) {
+                      size_t dmt_size,
+                      bool device_flags) {
+    if (device_flags) {
+        execute_device(waterfall, waterfall_size, dmt, dmt_size);
+    } else {
+        thrust::device_vector<float> waterfall_d(waterfall,
+                                                 waterfall + waterfall_size);
+        thrust::device_vector<float> dmt_d(dmt, dmt + dmt_size);
+        execute_device(thrust::raw_pointer_cast(waterfall_d.data()),
+                       waterfall_size, thrust::raw_pointer_cast(dmt_d.data()),
+                       dmt_size);
+        thrust::copy(dmt_d.begin(), dmt_d.end(), dmt);
+        ErrorChecker::check_cuda("thrust::copy failed");
+    }
+}
+
+void FDMTGPU::initialise(const float* __restrict waterfall,
+                         size_t waterfall_size,
+                         float* __restrict state,
+                         size_t state_size) {
+    initialise(waterfall, waterfall_size, state, state_size, false);
+}
+
+void FDMTGPU::initialise(const float* __restrict waterfall,
+                         size_t waterfall_size,
+                         float* __restrict state,
+                         size_t state_size,
+                         bool device_flags) {
+    if (device_flags) {
+        initialise_device(waterfall, state);
+    } else {
+        thrust::device_vector<float> waterfall_d(waterfall,
+                                                 waterfall + waterfall_size);
+        thrust::device_vector<float> state_d(state, state + state_size);
+        initialise_device(thrust::raw_pointer_cast(waterfall_d.data()),
+                          thrust::raw_pointer_cast(state_d.data()));
+        thrust::copy(state_d.begin(), state_d.end(), state);
+        ErrorChecker::check_cuda("thrust::copy failed");
+    }
+}
+
+void FDMTGPU::transfer_plan_to_device(const FDMTPlan& plan, FDMTPlanD& plan_d) {
+    // Transfer the plan to the device
+    const int niter_size = plan.state_shape.size();
+
+    // Temp vectors to store the flattened plan on the host
+    std::vector<int> nsubs_h, ncoords_h, nsamps_h, ncoords_to_copy_h;
+    std::vector<int> subs_iter_idx_h, coords_iter_idx_h,
+        coords_to_copy_iter_idx_h, mappings_iter_idx_h,
+        mappings_to_copy_iter_idx_h;
+    std::vector<int> coordinates_h, coordinates_to_copy_h, mappings_h,
+        mappings_to_copy_h, state_sub_idx_h;
+    nsubs_h.reserve(niter_size);
+    ncoords_h.reserve(niter_size);
+    nsamps_h.reserve(niter_size);
+    ncoords_to_copy_h.reserve(niter_size);
+    subs_iter_idx_h.reserve(niter_size);
+    coords_iter_idx_h.reserve(niter_size);
+    coords_to_copy_iter_idx_h.reserve(niter_size);
+    mappings_iter_idx_h.reserve(niter_size);
+    mappings_to_copy_iter_idx_h.reserve(niter_size);
+    for (int i = 0; i < niter_size; ++i) {
+        nsubs_h.emplace_back(plan.state_shape[i][0]);
+        nsamps_h.emplace_back(plan.state_shape[i][4]);
+        ncoords_h.emplace_back(plan.coordinates[i].size());
+        ncoords_to_copy_h.emplace_back(plan.coordinates_to_copy[i].size());
+    }
+
+    // Cumulative sum
+    subs_iter_idx_h.emplace_back(0);
+    coords_iter_idx_h.emplace_back(0);
+    coords_to_copy_iter_idx_h.emplace_back(0);
+    mappings_iter_idx_h.emplace_back(0);
+    mappings_to_copy_iter_idx_h.emplace_back(0);
+    for (int i = 1; i < niter_size; ++i) {
+        subs_iter_idx_h.emplace_back(subs_iter_idx_h[i - 1] + nsubs_h[i - 1]);
+        coords_iter_idx_h.emplace_back(coords_iter_idx_h[i - 1] +
+                                       ncoords_h[i - 1] * 2);
+        coords_to_copy_iter_idx_h.emplace_back(
+            coords_to_copy_iter_idx_h[i - 1] + ncoords_to_copy_h[i - 1] * 2);
+        mappings_iter_idx_h.emplace_back(mappings_iter_idx_h[i - 1] +
+                                         ncoords_h[i - 1] * 5);
+        mappings_to_copy_iter_idx_h.emplace_back(
+            mappings_to_copy_iter_idx_h[i - 1] + ncoords_to_copy_h[i - 1] * 5);
+    }
+
+    // Resize the vectors
+    coordinates_h.reserve(coords_iter_idx_h.back() + ncoords_h.back() * 2);
+    coordinates_to_copy_h.reserve(coords_to_copy_iter_idx_h.back() +
+                                  ncoords_to_copy_h.back() * 2);
+    mappings_h.reserve(mappings_iter_idx_h.back() + ncoords_h.back() * 5);
+    mappings_to_copy_h.reserve(mappings_to_copy_iter_idx_h.back() +
+                               ncoords_to_copy_h.back() * 5);
+    state_sub_idx_h.reserve(subs_iter_idx_h.back() + nsubs_h.back());
+    // Flatten the coordinates and mappings
+    for (int i = 0; i < niter_size; ++i) {
+        for (int j = 0; j < ncoords_h[i]; ++j) {
+            const auto& coord   = plan.coordinates[i][j];
+            const auto& mapping = plan.mappings[i][j];
+            coordinates_h.emplace_back(coord.first);
+            coordinates_h.emplace_back(coord.second);
+            mappings_h.emplace_back(mapping.tail.first);
+            mappings_h.emplace_back(mapping.tail.second);
+            mappings_h.emplace_back(mapping.head.first);
+            mappings_h.emplace_back(mapping.head.second);
+            mappings_h.emplace_back(mapping.offset);
+        }
+        for (int j = 0; j < ncoords_to_copy_h[i]; ++j) {
+            const auto& coord   = plan.coordinates_to_copy[i][j];
+            const auto& mapping = plan.mappings_to_copy[i][j];
+            coordinates_to_copy_h.emplace_back(coord.first);
+            coordinates_to_copy_h.emplace_back(coord.second);
+            mappings_to_copy_h.emplace_back(mapping.tail.first);
+            mappings_to_copy_h.emplace_back(mapping.tail.second);
+            mappings_to_copy_h.emplace_back(mapping.head.first);
+            mappings_to_copy_h.emplace_back(mapping.head.second);
+            mappings_to_copy_h.emplace_back(mapping.offset);
+        }
+        for (int j = 0; j < nsubs_h[i]; ++j) {
+            state_sub_idx_h.emplace_back(plan.state_sub_idx[i][j]);
+        }
+    }
+
+    // Copy to device
+    plan_d.nsubs_d                     = nsubs_h;
+    plan_d.nsamps_d                    = nsamps_h;
+    plan_d.ncoords_d                   = ncoords_h;
+    plan_d.ncoords_to_copy_d           = ncoords_to_copy_h;
+    plan_d.subs_iter_idx_d             = subs_iter_idx_h;
+    plan_d.coords_iter_idx_d           = coords_iter_idx_h;
+    plan_d.coords_to_copy_iter_idx_d   = coords_to_copy_iter_idx_h;
+    plan_d.mappings_iter_idx_d         = mappings_iter_idx_h;
+    plan_d.mappings_to_copy_iter_idx_d = mappings_to_copy_iter_idx_h;
+    plan_d.coordinates_d               = coordinates_h;
+    plan_d.coordinates_to_copy_d       = coordinates_to_copy_h;
+    plan_d.mappings_d                  = mappings_h;
+    plan_d.mappings_to_copy_d          = mappings_to_copy_h;
+    plan_d.state_sub_idx_d             = state_sub_idx_h;
+
+    // dt_grid allocation for initialisation
+    const auto& dt_grid_init = plan.dt_grid[0];
+
+    std::vector<int> ndt_grid_init_h, dt_grid_init_sub_idx_h, dt_grid_init_h;
+    ndt_grid_init_h.reserve(dt_grid_init.size());
+    for (const auto& dtGrid : dt_grid_init) {
+        ndt_grid_init_h.emplace_back(dtGrid.size());
+    }
+    dt_grid_init_sub_idx_h.emplace_back(0);
+    for (int i = 1; i < ndt_grid_init_h.size(); ++i) {
+        dt_grid_init_sub_idx_h.emplace_back(dt_grid_init_sub_idx_h[i - 1] +
+                                            ndt_grid_init_h[i - 1]);
+    }
+    dt_grid_init_h.reserve(dt_grid_init_sub_idx_h.back() +
+                           ndt_grid_init_h.back());
+    for (const auto& dtGrid : dt_grid_init) {
+        for (const auto& dt : dtGrid) {
+            dt_grid_init_h.emplace_back(dt);
+        }
+    }
+    plan_d.ndt_grid_init_d        = ndt_grid_init_h;
+    plan_d.dt_grid_init_sub_idx_d = dt_grid_init_sub_idx_h;
+    plan_d.dt_grid_init_d         = dt_grid_init_h;
+}
+
+void FDMTGPU::execute_device(const float* __restrict waterfall,
+                             size_t waterfall_size,
+                             float* __restrict dmt,
+                             size_t dmt_size) {
     check_inputs(waterfall_size, dmt_size);
     float* state_in_ptr  = thrust::raw_pointer_cast(m_state_in_d.data());
     float* state_out_ptr = thrust::raw_pointer_cast(m_state_out_d.data());
 
-    const auto& plan         = get_plan();
-    int* pstate_sub_idx =
+    initialise_device(waterfall, state_in_ptr);
+
+    const auto* state_sub_idx_d_ptr =
         thrust::raw_pointer_cast(m_fdmt_plan_d.state_sub_idx_d.data());
-    initialise(waterfall, state_in_ptr);
-
-    int* pcoords = thrust::raw_pointer_cast(m_fdmt_plan_d.coordinates_d.data());
-
-    int* pcoords_to_copy =
+    const auto* coords_d_ptr =
+        thrust::raw_pointer_cast(m_fdmt_plan_d.coordinates_d.data());
+    const auto* coords_copy_d_ptr =
         thrust::raw_pointer_cast(m_fdmt_plan_d.coordinates_to_copy_d.data());
-
-    int* pmappings = thrust::raw_pointer_cast(m_fdmt_plan_d.mappings_d.data());
-
-    int* pmappings_to_copy =
+    const auto* mappings_d_ptr =
+        thrust::raw_pointer_cast(m_fdmt_plan_d.mappings_d.data());
+    const auto* mappings_copy_d_ptr =
         thrust::raw_pointer_cast(m_fdmt_plan_d.mappings_to_copy_d.data());
     ErrorChecker::check_cuda("thrust::raw_pointer_cast failed");
 
-    int niters = static_cast<int>(get_niters());
+    const auto niters = static_cast<int>(get_niters());
     for (int i_iter = 1; i_iter < niters + 1; ++i_iter) {
-        int nsamps             = static_cast<int>(plan.state_shape[i_iter][4]);
-        const auto& coords_cur = plan.coordinates[i_iter];
-        const auto& coords_copy_cur = plan.coordinates_to_copy[i_iter];
+        const auto& nsamps          = m_fdmt_plan_d.nsamps_d[i_iter];
+        const auto& ncoords         = m_fdmt_plan_d.ncoords_d[i_iter];
+        const auto& ncoords_to_copy = m_fdmt_plan_d.ncoords_to_copy_d[i_iter];
 
-        int coords_cur_size      = static_cast<int>(coords_cur.size());
-        int coords_copy_cur_size = coords_copy_cur.size();
+        const auto* coords_d_cur =
+            &coords_d_ptr[m_fdmt_plan_d.coords_iter_idx_d[i_iter]];
+        const auto* mappings_d_cur =
+            &mappings_d_ptr[m_fdmt_plan_d.mappings_iter_idx_d[i_iter]];
+        const auto* coords_copy_d_cur =
+            &coords_copy_d_ptr[m_fdmt_plan_d.coords_to_copy_iter_idx_d[i_iter]];
+        const auto* mappings_copy_d_cur =
+            &mappings_copy_d_ptr[m_fdmt_plan_d
+                                     .mappings_to_copy_iter_idx_d[i_iter]];
+        const auto* state_sub_idx_d_cur =
+            &state_sub_idx_d_ptr[m_fdmt_plan_d.subs_iter_idx_d[i_iter]];
+        const auto* state_sub_idx_d_prev =
+            &state_sub_idx_d_ptr[m_fdmt_plan_d.subs_iter_idx_d[i_iter - 1]];
 
-        int* pcoords_cur =
-            &pcoords[m_fdmt_plan_d.lenof_innerVects_coords_cumsum_h[i_iter]];
-
-        int* pmappings_cur =
-            &pmappings[m_fdmt_plan_d.len_mappings_cumsum_h[i_iter]];
-
-        int* pcoords_copy_cur =
-            &pcoords_to_copy
-                [m_fdmt_plan_d
-                     .lenof_innerVects_coords_to_copy_cumsum_h[i_iter]];
-
-        int* pmappings_copy_cur =
-            &pmappings_to_copy[m_fdmt_plan_d
-                                   .len_mappings_to_copy_cumsum_h[i_iter]];
-
-        int* pstate_sub_idx_cur =
-            &pstate_sub_idx[m_fdmt_plan_d.len_state_sub_idx_cumsum_h[i_iter]];
-        int* pstate_sub_idx_prev =
-            &pstate_sub_idx[m_fdmt_plan_d
-                                .len_state_sub_idx_cumsum_h[i_iter - 1]];
-
-        int coords_max = std::max(coords_cur_size, coords_copy_cur_size);
-
-        const dim3 blockSize = dim3(1024, 1);
+        const auto coords_max = std::max(ncoords, ncoords_to_copy);
+        const dim3 blockSize  = dim3(1024, 1);
         const dim3 gridSize =
             dim3((nsamps + blockSize.x - 1) / blockSize.x, coords_max);
-        kernel_execute_iter_v1<<<gridSize, blockSize>>>(
-            state_in_ptr, state_out_ptr, pcoords_cur, pmappings_cur,
-            pcoords_copy_cur, pmappings_copy_cur, pstate_sub_idx_cur,
-            pstate_sub_idx_prev, nsamps, coords_cur_size, coords_copy_cur_size);
-        ErrorChecker::check_cuda("kernel_execute_iter_v1 failed");
+        kernel_execute_iter<<<gridSize, blockSize>>>(
+            state_in_ptr, state_out_ptr, coords_d_cur, mappings_d_cur,
+            coords_copy_d_cur, mappings_copy_d_cur, state_sub_idx_d_cur,
+            state_sub_idx_d_prev, nsamps, ncoords, ncoords_to_copy);
+        ErrorChecker::check_cuda("kernel_execute_iter failed");
 
         std::swap(state_in_ptr, state_out_ptr);
         if (i_iter == (niters - 1)) {
@@ -375,46 +290,48 @@ void FDMTGPU::execute(const float* __restrict waterfall,
     }
 }
 
-void FDMTGPU::initialise(const float* __restrict waterfall,
-                         float* __restrict state) {
-    const auto& plan         = get_plan();
-    const auto& dt_grid_init = plan.dt_grid[0];
-    const int nchan          = dt_grid_init.size();
-    const int nsamps         = plan.state_shape[0][4];
-    int* pstate_sub_idx =
+void FDMTGPU::initialise_device(const float* __restrict waterfall,
+                                float* __restrict state) {
+    const int nsubs  = m_fdmt_plan_d.nsubs_d[0];
+    const int nsamps = m_fdmt_plan_d.nsamps_d[0];
+    const int* state_sub_idx_d_ptr =
         thrust::raw_pointer_cast(m_fdmt_plan_d.state_sub_idx_d.data());
-    int* pdt_grid = thrust::raw_pointer_cast(m_fdmt_plan_d.dt_grid_d.data());
-    int* ppos_gridInnerVects =
-        thrust::raw_pointer_cast(m_fdmt_plan_d.pos_gridInnerVects_d.data());
-    int* pstate_sub_idx_cur =
-        &pstate_sub_idx[m_fdmt_plan_d.len_state_sub_idx_cumsum_h[0]];
-    int* ppos_gridInnerVects_cur =
-        &ppos_gridInnerVects[m_fdmt_plan_d.pos_gridSubVects_h[0]];
-    const dim3 blockSize = dim3(64, 1);
-    const dim3 gridSize = dim3((nsamps + blockSize.x - 1) / blockSize.x, nchan);
- 
-    kernel_init_fdmt_v1<<<gridSize, blockSize>>>(
-        waterfall, state, pstate_sub_idx_cur, pdt_grid,
-        ppos_gridInnerVects_cur, nchan, nsamps);
-    ErrorChecker::check_cuda("kernel_init_fdmt_v1 failed");
+    const int* dt_grid_init_d_ptr =
+        thrust::raw_pointer_cast(m_fdmt_plan_d.dt_grid_init_d.data());
+    const int* ndt_grid_init_d_ptr =
+        thrust::raw_pointer_cast(m_fdmt_plan_d.ndt_grid_init_d.data());
+    const int* dt_grid_init_sub_idx_d_ptr =
+        thrust::raw_pointer_cast(m_fdmt_plan_d.dt_grid_init_sub_idx_d.data());
+
+    const dim3 blockSize = dim3(256, 1);
+    const dim3 gridSize = dim3((nsamps + blockSize.x - 1) / blockSize.x, nsubs);
+    kernel_init_fdmt<<<gridSize, blockSize>>>(
+        waterfall, state, state_sub_idx_d_ptr, dt_grid_init_d_ptr,
+        ndt_grid_init_d_ptr, dt_grid_init_sub_idx_d_ptr, nsubs, nsamps);
+    ErrorChecker::check_cuda("kernel_init_fdmt failed");
 }
 
 __global__ void
 kernel_init_fdmt(const float* __restrict__ waterfall,
                  float* __restrict__ state,
-                 const int* __restrict__ pstate_sub_idx_cur,
-                 const int* __restrict__ p_dt_grid,
-                 const int* __restrict__ ppos_gridInnerVects_cur,
-                 int num_sub,
+                 const int* __restrict__ state_sub_idx_d_ptr,
+                 const int* __restrict__ dt_grid_init_d_ptr,
+                 const int* __restrict__ ndt_grid_init_d_ptr,
+                 const int* __restrict__ dt_grid_init_sub_idx_d_ptr,
+                 int nsubs,
                  int nsamps) {
     int isamp = blockIdx.x * blockDim.x + threadIdx.x;
     int i_sub = blockIdx.y;
-    if (i_sub >= num_sub || isamp >= nsamps) {
+    if (i_sub >= nsubs || isamp >= nsamps) {
         return;
     }
+    const int* dt_grid_sub =
+        &dt_grid_init_d_ptr[dt_grid_init_sub_idx_d_ptr[i_sub]];
+    const auto& state_sub_idx    = state_sub_idx_d_ptr[i_sub];
+    const auto& dt_grid_sub_size = ndt_grid_init_d_ptr[i_sub];
+    const auto& dt_grid_sub_min  = dt_grid_sub[0];
+
     // Initialise state for [:, dt_init_min, dt_init_min:]
-    int dt_grid_sub_min = p_dt_grid[ppos_gridInnerVects_cur[i_sub]];
-    int state_sub_idx   = pstate_sub_idx_cur[i_sub];
     if (isamp >= dt_grid_sub_min) {
         float sum = 0.0F;
         for (int i = isamp - dt_grid_sub_min; i <= isamp; ++i) {
@@ -423,16 +340,12 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
         state[state_sub_idx + isamp] =
             sum / static_cast<float>(dt_grid_sub_min + 1);
     }
-    int dt_grid_sub_size =
-        ppos_gridInnerVects_cur[i_sub + 1] - ppos_gridInnerVects_cur[i_sub];
-
     // Initialise state for [:, dt_grid_init[i_dt], dt_grid_init[i_dt]:]
     for (int i_dt = 1; i_dt < dt_grid_sub_size; ++i_dt) {
-        const int dt_cur = p_dt_grid[ppos_gridInnerVects_cur[i_sub] + i_dt];
-        const int dt_prev =
-            p_dt_grid[ppos_gridInnerVects_cur[i_sub] + i_dt - 1];
-        float sum = 0.0F;
+        const auto dt_cur  = dt_grid_sub[i_dt];
+        const auto dt_prev = dt_grid_sub[i_dt - 1];
         if (isamp >= dt_cur) {
+            float sum = 0.0F;
             for (int i = isamp - dt_cur; i < isamp - dt_prev; ++i) {
                 sum += waterfall[i_sub * nsamps + i];
             }
@@ -446,64 +359,17 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
 }
 
 __global__ void
-kernel_init_fdmt_v1(const float* __restrict__ waterfall,
-                    float* __restrict__ state,
-                    const int* __restrict__ pstate_sub_idx_cur,
-                    const int* __restrict__ p_dt_grid,
-                    const int* __restrict__ ppos_gridInnerVects_cur,
-                    int num_sub,
-                    int nsamps) {
-    __shared__ int iarr_sh[4];
-    // int iarr_sh[4];
-    int isamp = blockIdx.x * blockDim.x + threadIdx.x;
-    int i_sub = blockIdx.y;
-    if (i_sub >= num_sub || isamp >= nsamps) {
-        return;
-    }
-    // Initialise state for [:, dt_init_min, dt_init_min:]
-    iarr_sh[0] = p_dt_grid[ppos_gridInnerVects_cur[i_sub]];
-    iarr_sh[1] = pstate_sub_idx_cur[i_sub];
-    iarr_sh[2] =
-        ppos_gridInnerVects_cur[i_sub + 1] - ppos_gridInnerVects_cur[i_sub];
-    iarr_sh[3] = ppos_gridInnerVects_cur[i_sub];
-
-    if (isamp >= iarr_sh[0]) {
-        float sum = 0.0F;
-        for (int i = isamp - iarr_sh[0]; i <= isamp; ++i) {
-            sum += waterfall[i_sub * nsamps + i];
-        }
-        state[iarr_sh[1] + isamp] =
-            fdividef(sum, static_cast<float>(iarr_sh[0] + 1));
-    }
-    // Initialise state for [:, dt_grid_init[i_dt], dt_grid_init[i_dt]:]
-    for (int i_dt = 1; i_dt < iarr_sh[2]; ++i_dt) {
-        const int dt_cur  = p_dt_grid[iarr_sh[3] + i_dt];
-        const int dt_prev = p_dt_grid[iarr_sh[3] + i_dt - 1];
-        float sum         = 0.0F;
-        if (isamp >= dt_cur) {
-            for (int i = isamp - dt_cur; i < isamp - dt_prev; ++i) {
-                sum += waterfall[i_sub * nsamps + i];
-            }
-            state[iarr_sh[1] + i_dt * nsamps + isamp] =
-                fdividef((state[iarr_sh[1] + (i_dt - 1) * nsamps + isamp] *
-                              (static_cast<float>(dt_prev) + 1.0F) +
-                          sum),
-                         (static_cast<float>(dt_cur) + 1.0F));
-        }
-    }
-}
-
-__global__ void kernel_execute_iter(const float* __restrict__ state_in,
-                                    float* __restrict__ state_out,
-                                    const int* __restrict__ pcoords_cur,
-                                    const int* __restrict__ pmappings_cur,
-                                    const int* __restrict__ pcoords_copy_cur,
-                                    const int* __restrict__ pmappings_copy_cur,
-                                    const int* __restrict__ pstate_sub_idx_cur,
-                                    const int* __restrict__ pstate_sub_idx_prev,
-                                    int nsamps,
-                                    int coords_cur_size,
-                                    int coords_copy_cur_size) {
+kernel_execute_iter(const float* __restrict__ state_in,
+                    float* __restrict__ state_out,
+                    const int* __restrict__ coords_d_cur,
+                    const int* __restrict__ mappings_d_cur,
+                    const int* __restrict__ coords_copy_d_cur,
+                    const int* __restrict__ mappings_copy_d_cur,
+                    const int* __restrict__ state_sub_idx_d_cur,
+                    const int* __restrict__ state_sub_idx_d_prev,
+                    int nsamps,
+                    int coords_cur_size,
+                    int coords_copy_cur_size) {
     int isamp   = blockIdx.x * blockDim.x + threadIdx.x;
     int i_coord = blockIdx.y;
     if (isamp >= nsamps) {
@@ -511,16 +377,16 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     }
 
     if (i_coord < coords_cur_size) {
-        int i_sub              = pcoords_cur[i_coord * 2];
-        int i_dt               = pcoords_cur[i_coord * 2 + 1];
-        int i_sub_tail         = pmappings_cur[i_coord * 5];
-        int i_dt_tail          = pmappings_cur[i_coord * 5 + 1];
-        int i_sub_head         = pmappings_cur[i_coord * 5 + 2];
-        int i_dt_head          = pmappings_cur[i_coord * 5 + 3];
-        int offset             = pmappings_cur[i_coord * 5 + 4];
-        int state_sub_idx      = pstate_sub_idx_cur[i_sub];
-        int state_sub_idx_tail = pstate_sub_idx_prev[i_sub_tail];
-        int state_sub_idx_head = pstate_sub_idx_prev[i_sub_head];
+        const auto& i_sub              = coords_d_cur[i_coord * 2];
+        const auto& i_dt               = coords_d_cur[i_coord * 2 + 1];
+        const auto& i_sub_tail         = mappings_d_cur[i_coord * 5];
+        const auto& i_dt_tail          = mappings_d_cur[i_coord * 5 + 1];
+        const auto& i_sub_head         = mappings_d_cur[i_coord * 5 + 2];
+        const auto& i_dt_head          = mappings_d_cur[i_coord * 5 + 3];
+        const auto& offset             = mappings_d_cur[i_coord * 5 + 4];
+        const auto& state_sub_idx      = state_sub_idx_d_cur[i_sub];
+        const auto& state_sub_idx_tail = state_sub_idx_d_prev[i_sub_tail];
+        const auto& state_sub_idx_head = state_sub_idx_d_prev[i_sub_head];
 
         const float* __restrict tail =
             &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
@@ -536,65 +402,16 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     __syncthreads();
 
     if (i_coord < coords_copy_cur_size) {
-        int i_sub              = pcoords_copy_cur[i_coord * 2];
-        int i_dt               = pcoords_copy_cur[i_coord * 2 + 1];
-        int i_sub_tail         = pmappings_copy_cur[i_coord * 5];
-        int i_dt_tail          = pmappings_copy_cur[i_coord * 5 + 1];
-        int state_sub_idx      = pstate_sub_idx_cur[i_sub];
-        int state_sub_idx_tail = pstate_sub_idx_prev[i_sub_tail];
+        const auto& i_sub              = coords_copy_d_cur[i_coord * 2];
+        const auto& i_dt               = coords_copy_d_cur[i_coord * 2 + 1];
+        const auto& i_sub_tail         = mappings_copy_d_cur[i_coord * 5];
+        const auto& i_dt_tail          = mappings_copy_d_cur[i_coord * 5 + 1];
+        const auto& state_sub_idx      = state_sub_idx_d_cur[i_sub];
+        const auto& state_sub_idx_tail = state_sub_idx_d_prev[i_sub_tail];
 
         const float* __restrict tail =
             &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
         float* __restrict out = &state_out[state_sub_idx + i_dt * nsamps];
         out[isamp]            = tail[isamp];
-    }
-}
-
-__global__ void
-kernel_execute_iter_v1(const float* __restrict__ state_in,
-                       float* __restrict__ state_out,
-                       const int* __restrict__ pcoords_cur,
-                       const int* __restrict__ pmappings_cur,
-                       const int* __restrict__ pcoords_copy_cur,
-                       const int* __restrict__ pmappings_copy_cur,
-                       const int* __restrict__ pstate_sub_idx_cur,
-                       const int* __restrict__ pstate_sub_idx_prev,
-                       int nsamps,
-                       int coords_cur_size,
-                       int coords_copy_cur_size) {
-    __shared__ int iarr_sh[6];
-    int isamp   = blockIdx.x * blockDim.x + threadIdx.x;
-    int i_coord = blockIdx.y;
-    if (isamp >= nsamps) {
-        return;
-    }
-
-    if (i_coord < coords_cur_size) {
-        int i_sub  = pcoords_cur[i_coord * 2];
-        iarr_sh[0] = pstate_sub_idx_prev[pmappings_cur[i_coord * 5]] +
-                     pmappings_cur[i_coord * 5 + 1] * nsamps;
-        iarr_sh[1] = pstate_sub_idx_prev[pmappings_cur[i_coord * 5 + 2]] +
-                     pmappings_cur[i_coord * 5 + 3] * nsamps;
-        iarr_sh[2] =
-            pstate_sub_idx_cur[i_sub] + pcoords_cur[i_coord * 2 + 1] * nsamps;
-        iarr_sh[3] = pmappings_cur[i_coord * 5 + 4]; // offset
-        //---
-        if (isamp < iarr_sh[3]) {
-            state_out[iarr_sh[2] + isamp] = state_in[iarr_sh[0] + isamp];
-
-        } else {
-            state_out[iarr_sh[2] + isamp] =
-                state_in[iarr_sh[0] + isamp] +
-                state_in[iarr_sh[1] + isamp - iarr_sh[3]];
-        }
-    }
-    __syncthreads();
-
-    if (i_coord < coords_copy_cur_size) {
-        iarr_sh[4] = pstate_sub_idx_prev[pmappings_copy_cur[i_coord * 5]] +
-                     pmappings_copy_cur[i_coord * 5 + 1] * nsamps;
-        iarr_sh[5] = pstate_sub_idx_cur[pcoords_copy_cur[i_coord * 2]] +
-                     pcoords_copy_cur[i_coord * 2 + 1] * nsamps;
-        state_out[iarr_sh[5] + isamp] = state_in[iarr_sh[4] + isamp];
     }
 }

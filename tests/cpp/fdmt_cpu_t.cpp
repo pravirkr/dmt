@@ -22,7 +22,8 @@ TEST_CASE("FDMT class tests [CPU]", "[fdmt_cpu]") {
         const auto& plan      = fdmt.get_plan();
         const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
         std::vector<float> state(state_size, 0.0F);
-        REQUIRE_NOTHROW(fdmt.initialise(waterfall.data(), state.data()));
+        REQUIRE_NOTHROW(fdmt.initialise(waterfall.data(), waterfall.size(),
+                                        state.data(), state.size()));
     }
 
     SECTION("Test case 3: execute method") {

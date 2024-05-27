@@ -1,7 +1,7 @@
 # Find dependencies
 CPMFindPackage(
   NAME spdlog
-  VERSION 1.10.0
+  VERSION 1.13.0
   GITHUB_REPOSITORY gabime/spdlog
   OPTIONS "SPDLOG_INSTALL ON"
 )

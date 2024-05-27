@@ -156,8 +156,12 @@ void FDMT::make_fdmt_plan_iter0() {
         f_end       = f_start + m_df;
         dt_grid_sub = calculate_dt_grid_sub(f_start, f_end);
 
+        FDMTCoordMapping coord_mapping;
         for (SizeType i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
             m_fdmt_plan.coordinates[0].emplace_back(i_sub, i_dt);
+            coord_mapping = {FDMTCoordType{SIZE_MAX, SIZE_MAX},
+                             FDMTCoordType{SIZE_MAX, SIZE_MAX}, SIZE_MAX};
+            m_fdmt_plan.mappings[0].emplace_back(coord_mapping);
         }
 
         m_fdmt_plan.state_sub_idx[0][i_sub] = state_idx;

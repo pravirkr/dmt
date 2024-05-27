@@ -52,7 +52,8 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_seq_cpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
-        fdmt.initialise(waterfall.data(), state_init.data());
+        fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
+                        state_init.size());
     }
 }
 
@@ -68,7 +69,8 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_par_cpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
-        fdmt.initialise(waterfall.data(), state_init.data());
+        fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
+                        state_init.size());
     }
 }
 
@@ -161,4 +163,4 @@ BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_overall_par_cpu)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
 
-//BENCHMARK_MAIN();
+// BENCHMARK_MAIN();

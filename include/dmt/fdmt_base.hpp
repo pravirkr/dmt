@@ -36,9 +36,14 @@ struct FDMTPlan {
 
 class FDMT {
 public:
-    FDMT(float f_min, float f_max, SizeType nchans, SizeType nsamps,
-         float tsamp, SizeType dt_max, SizeType dt_step = 1,
-         SizeType dt_min = 0);
+    FDMT(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         SizeType dt_max,
+         SizeType dt_step = 1,
+         SizeType dt_min  = 0);
     FDMT(const FDMT&)            = delete;
     FDMT& operator=(const FDMT&) = delete;
     FDMT(FDMT&&)                 = delete;
@@ -52,10 +57,13 @@ public:
     std::vector<float> get_dm_grid_final() const;
     static void set_log_level(int level);
     virtual void execute(const float* __restrict waterfall,
-                         size_t waterfall_size, float* __restrict dmt,
-                         size_t dmt_size)            = 0;
+                         size_t waterfall_size,
+                         float* __restrict dmt,
+                         size_t dmt_size)      = 0;
     virtual void initialise(const float* __restrict waterfall,
-                            float* __restrict state) = 0;
+                            size_t waterfall_size,
+                            float* __restrict state,
+                            size_t state_size) = 0;
 
 protected:
     void check_inputs(size_t waterfall_size, size_t dmt_size) const;
