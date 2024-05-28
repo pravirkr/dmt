@@ -1,20 +1,22 @@
-#include <cstddef>
+#include <utility>
+
 #include <spdlog/spdlog.h>
 #ifdef USE_OPENMP
 #include <omp.h>
 #endif
 
+#include <dmt/fdmt_base.hpp>
 #include <dmt/fdmt_cpu.hpp>
 #include <dmt/fdmt_utils.hpp>
 
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
-                 size_t nchans,
-                 size_t nsamps,
+                 SizeType nchans,
+                 SizeType nsamps,
                  float tsamp,
-                 size_t dt_max,
-                 size_t dt_step,
-                 size_t dt_min)
+                 SizeType dt_max,
+                 SizeType dt_step,
+                 SizeType dt_min)
     : FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
     // Allocate memory for the state buffers
     const auto& plan      = get_plan();
@@ -30,16 +32,16 @@ void FDMTCPU::set_num_threads(int nthreads) {
 }
 
 void FDMTCPU::execute(const float* __restrict waterfall,
-                      size_t waterfall_size,
+                      SizeType waterfall_size,
                       float* __restrict dmt,
-                      size_t dmt_size) {
+                      SizeType dmt_size) {
     check_inputs(waterfall_size, dmt_size);
     float* state_in_ptr  = m_state_in.data();
     float* state_out_ptr = m_state_out.data();
 
     initialise(waterfall, waterfall_size, state_in_ptr, m_state_in.size());
     const auto niters = get_niters();
-    for (size_t i_iter = 1; i_iter < niters + 1; ++i_iter) {
+    for (SizeType i_iter = 1; i_iter < niters + 1; ++i_iter) {
         execute_iter(state_in_ptr, state_out_ptr, i_iter);
         std::swap(state_in_ptr, state_out_ptr);
         if (i_iter == (niters - 1)) {
@@ -49,9 +51,9 @@ void FDMTCPU::execute(const float* __restrict waterfall,
 }
 
 void FDMTCPU::initialise(const float* __restrict waterfall,
-                         size_t waterfall_size,
+                         SizeType waterfall_size,
                          float* __restrict state,
-                         size_t state_size) {
+                         SizeType state_size) {
     const auto& plan               = get_plan();
     const auto& dt_grid_init       = plan.dt_grid[0];
     const auto& state_sub_idx_init = plan.state_sub_idx[0];
@@ -60,26 +62,26 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
 #pragma omp parallel for default(none)                                         \
     shared(waterfall, state, dt_grid_init, state_sub_idx_init, nsamps)
 #endif
-    for (size_t i_sub = 0; i_sub < dt_grid_init.size(); ++i_sub) {
+    for (SizeType i_sub = 0; i_sub < dt_grid_init.size(); ++i_sub) {
         const auto& dt_grid_sub   = dt_grid_init[i_sub];
         const auto& state_sub_idx = state_sub_idx_init[i_sub];
         // Initialise state for [:, dt_init_min, dt_init_min:]
         const auto& dt_grid_sub_min = dt_grid_sub[0];
-        for (size_t isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
+        for (SizeType isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
             float sum = 0.0F;
-            for (size_t i = isamp - dt_grid_sub_min; i <= isamp; ++i) {
+            for (SizeType i = isamp - dt_grid_sub_min; i <= isamp; ++i) {
                 sum += waterfall[i_sub * nsamps + i];
             }
             state[state_sub_idx + isamp] =
                 sum / static_cast<float>(dt_grid_sub_min + 1);
         }
         // Initialise state for [:, dt_grid_init[i_dt], dt_grid_init[i_dt]:]
-        for (size_t i_dt = 1; i_dt < dt_grid_sub.size(); ++i_dt) {
+        for (SizeType i_dt = 1; i_dt < dt_grid_sub.size(); ++i_dt) {
             const auto dt_cur  = dt_grid_sub[i_dt];
             const auto dt_prev = dt_grid_sub[i_dt - 1];
-            for (size_t isamp = dt_cur; isamp < nsamps; ++isamp) {
+            for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
                 float sum = 0.0F;
-                for (size_t i = isamp - dt_cur; i < isamp - dt_prev; ++i) {
+                for (SizeType i = isamp - dt_cur; i < isamp - dt_prev; ++i) {
                     sum += waterfall[i_sub * nsamps + i];
                 }
                 state[state_sub_idx + i_dt * nsamps + isamp] =
@@ -100,7 +102,7 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
 
 void FDMTCPU::execute_iter(const float* __restrict state_in,
                            float* __restrict state_out,
-                           size_t i_iter) {
+                           SizeType i_iter) {
     const auto& plan               = get_plan();
     const auto& nsamps             = plan.state_shape[i_iter][4];
     const auto& coords_cur         = plan.coordinates[i_iter];
@@ -115,7 +117,7 @@ void FDMTCPU::execute_iter(const float* __restrict state_in,
     shared(state_in, state_out, coords_cur, mappings_cur, state_sub_idx_cur,   \
                state_sub_idx_prev, nsamps)
 #endif
-    for (size_t i_coord = 0; i_coord < coords_cur.size(); ++i_coord) {
+    for (SizeType i_coord = 0; i_coord < coords_cur.size(); ++i_coord) {
         const auto& i_sub              = coords_cur[i_coord].first;
         const auto& i_dt               = coords_cur[i_coord].second;
         const auto& i_sub_tail         = mappings_cur[i_coord].tail.first;
@@ -138,7 +140,7 @@ void FDMTCPU::execute_iter(const float* __restrict state_in,
     shared(state_in, state_out, coords_copy_cur, mappings_copy_cur,            \
                state_sub_idx_cur, state_sub_idx_prev, nsamps)
 #endif
-    for (size_t i_coord = 0; i_coord < coords_copy_cur.size(); ++i_coord) {
+    for (SizeType i_coord = 0; i_coord < coords_copy_cur.size(); ++i_coord) {
         const auto& i_sub              = coords_copy_cur[i_coord].first;
         const auto& i_dt               = coords_copy_cur[i_coord].second;
         const auto& i_sub_tail         = mappings_copy_cur[i_coord].tail.first;

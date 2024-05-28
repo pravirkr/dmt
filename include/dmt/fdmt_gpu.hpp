@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <thrust/device_vector.h>
 
 #include <dmt/fdmt_base.hpp>
@@ -36,32 +35,32 @@ class FDMTGPU : public FDMT {
 public:
     FDMTGPU(float f_min,
             float f_max,
-            size_t nchans,
-            size_t nsamps,
+            SizeType nchans,
+            SizeType nsamps,
             float tsamp,
-            size_t dt_max,
-            size_t dt_step = 1,
-            size_t dt_min  = 0);
+            SizeType dt_max,
+            SizeType dt_step = 1,
+            SizeType dt_min  = 0);
     void execute(const float* __restrict waterfall,
-                 size_t waterfall_size,
+                 SizeType waterfall_size,
                  float* __restrict dmt,
-                 size_t dmt_size) override;
+                 SizeType dmt_size) override;
 
     void initialise(const float* __restrict waterfall,
-                    size_t waterfall_size,
+                    SizeType waterfall_size,
                     float* __restrict state,
-                    size_t state_size) override;
+                    SizeType state_size) override;
 
     void execute(const float* __restrict waterfall,
-                 size_t waterfall_size,
+                 SizeType waterfall_size,
                  float* __restrict dmt,
-                 size_t dmt_size,
+                 SizeType dmt_size,
                  bool device_flags);
 
     void initialise(const float* __restrict waterfall,
-                    size_t waterfall_size,
+                    SizeType waterfall_size,
                     float* __restrict state,
-                    size_t state_size,
+                    SizeType state_size,
                     bool device_flags);
 
 private:
@@ -76,30 +75,7 @@ private:
                            float* __restrict state);
 
     void execute_device(const float* __restrict waterfall,
-                        size_t waterfall_size,
+                        SizeType waterfall_size,
                         float* __restrict dmt,
-                        size_t dmt_size);
+                        SizeType dmt_size);
 };
-
-__global__ void
-kernel_init_fdmt(const float* __restrict__ waterfall,
-                 float* __restrict__ state,
-                 const int* __restrict__ state_sub_idx_d_ptr,
-                 const int* __restrict__ dt_grid_init_d_ptr,
-                 const int* __restrict__ ndt_grid_init_d_ptr,
-                 const int* __restrict__ dt_grid_init_sub_idx_d_ptr,
-                 int nsubs,
-                 int nsamps);
-
-__global__ void
-kernel_execute_iter(const float* __restrict__ state_in,
-                    float* __restrict__ state_out,
-                    const int* __restrict__ coords_d_cur,
-                    const int* __restrict__ mappings_d_cur,
-                    const int* __restrict__ coords_copy_d_cur,
-                    const int* __restrict__ mappings_copy_d_cur,
-                    const int* __restrict__ state_sub_idx_d_cur,
-                    const int* __restrict__ state_sub_idx_d_prev,
-                    int nsamps,
-                    int coords_cur_size,
-                    int coords_copy_cur_size);

@@ -15,7 +15,7 @@
         }                                                                      \
     } while (0);
 
-class cuda_event_timer {
+class CudaEventTimer {
 public:
     /**
      * @brief Constructs a `cuda_event_timer` beginning a manual timing range.
@@ -26,13 +26,13 @@ public:
      * going to update.
      * @param[in] flush_l2_cache_ whether or not to flush the L2 cache before
      *                            every iteration.
-     * @param[in] stream_ The CUDA stream we are measuring time on.
+     * @param[in] m_stream The CUDA stream we are measuring time on.
      */
-    cuda_event_timer(benchmark::State& state,
-                     bool flush_l2_cache = false,
-                     cudaStream_t stream = 0)
-        : p_state(&state),
-          stream_(stream) {
+    explicit CudaEventTimer(benchmark::State& state,
+                            bool flush_l2_cache = false,
+                            cudaStream_t stream = 0)
+        : m_state(&state),
+          m_stream(stream) {
         // flush all of L2$
         if (flush_l2_cache) {
             int current_device = 0;
@@ -47,37 +47,37 @@ public:
                 int* l2_cache_buffer   = nullptr;
                 BENCH_CUDA_TRY(cudaMalloc(&l2_cache_buffer, l2_cache_bytes));
                 BENCH_CUDA_TRY(cudaMemsetAsync(l2_cache_buffer, memset_value,
-                                               l2_cache_bytes, stream_));
+                                               l2_cache_bytes, m_stream));
                 BENCH_CUDA_TRY(cudaFree(l2_cache_buffer));
             }
         }
 
-        BENCH_CUDA_TRY(cudaEventCreate(&start_));
-        BENCH_CUDA_TRY(cudaEventCreate(&stop_));
-        BENCH_CUDA_TRY(cudaEventRecord(start_, stream_));
+        BENCH_CUDA_TRY(cudaEventCreate(&m_start));
+        BENCH_CUDA_TRY(cudaEventCreate(&m_stop));
+        BENCH_CUDA_TRY(cudaEventRecord(m_start, m_stream));
     }
 
-    cuda_event_timer() = delete;
+    CudaEventTimer() = delete;
 
     /**
      * @brief Destroy the `cuda_event_timer` and ending the manual time range.
      *
      */
-    ~cuda_event_timer() {
-        BENCH_CUDA_TRY(cudaEventRecord(stop_, stream_));
-        BENCH_CUDA_TRY(cudaEventSynchronize(stop_));
-        float milliseconds = 0.0f;
-        BENCH_CUDA_TRY(cudaEventElapsedTime(&milliseconds, start_, stop_));
-        p_state->SetIterationTime(milliseconds / (1000.0f));
-        BENCH_CUDA_TRY(cudaEventDestroy(start_));
-        BENCH_CUDA_TRY(cudaEventDestroy(stop_));
+    ~CudaEventTimer() {
+        BENCH_CUDA_TRY(cudaEventRecord(m_stop, m_stream));
+        BENCH_CUDA_TRY(cudaEventSynchronize(m_stop));
+        float milliseconds = 0.0F;
+        BENCH_CUDA_TRY(cudaEventElapsedTime(&milliseconds, m_start, m_stop));
+        m_state->SetIterationTime(milliseconds / (1000.0F));
+        BENCH_CUDA_TRY(cudaEventDestroy(m_start));
+        BENCH_CUDA_TRY(cudaEventDestroy(m_stop));
     }
 
 private:
-    cudaEvent_t start_;
-    cudaEvent_t stop_;
-    cudaStream_t stream_;
-    benchmark::State* p_state;
+    cudaEvent_t m_start{};
+    cudaEvent_t m_stop{};
+    cudaStream_t m_stream;
+    benchmark::State* m_state;
 };
 
 class FDMTGPUFixture : public benchmark::Fixture {
@@ -102,7 +102,7 @@ public:
         thrust::transform(
             thrust::counting_iterator<size_t>(0),
             thrust::counting_iterator<size_t>(size), vec.begin(),
-            [=] __device__(size_t idx) mutable { return dist(rng); });
+            [=] __device__(size_t /*idx*/) mutable { return dist(rng); });
 
         return vec;
     }
@@ -115,9 +115,9 @@ public:
     size_t nsamps{};
 };
 
-BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_plan_gpu)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu)(benchmark::State& state) {
     for (auto _ : state) {
-        cuda_event_timer raii{state};
+        CudaEventTimer raii{state};
         FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     }
 }
@@ -130,7 +130,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_initialise_gpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     thrust::device_vector<float> state_init_d(state_size, 0.0F);
     for (auto _ : state) {
-        cuda_event_timer raii{state};
+        CudaEventTimer raii{state};
         fdmt.initialise(thrust::raw_pointer_cast(waterfall_d.data()),
                         waterfall_d.size(),
                         thrust::raw_pointer_cast(state_init_d.data()),
@@ -145,7 +145,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_execute_gpu)
     thrust::device_vector<float> dmt_d(fdmt.get_dt_grid_final().size() * nsamps,
                                        0.0F);
     for (auto _ : state) {
-        cuda_event_timer raii{state};
+        CudaEventTimer raii{state};
         fdmt.execute(thrust::raw_pointer_cast(waterfall_d.data()),
                      waterfall_d.size(), thrust::raw_pointer_cast(dmt_d.data()),
                      dmt_d.size(), true);
@@ -157,7 +157,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_overall_gpu)
     auto waterfall_d = generate_vector_gpu<float>(nchans * nsamps);
 
     for (auto _ : state) {
-        cuda_event_timer raii{state};
+        CudaEventTimer raii{state};
         FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
         state.PauseTiming();
         thrust::device_vector<float> dmt_d(
@@ -172,7 +172,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_overall_gpu)
 constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 15;
 
-BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_plan_gpu)
+BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps)
     ->UseManualTime();
@@ -184,10 +184,9 @@ BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_execute_gpu)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps)
     ->UseManualTime();
-/*
 BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_overall_gpu)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps)
     ->UseManualTime();
-*/
+
 // BENCHMARK_MAIN();

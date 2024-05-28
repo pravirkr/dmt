@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-using SizeType   = size_t;
+using SizeType   = std::size_t;
 using DtGridType = std::vector<SizeType>;
 // state shape: nchans, ndt_min, ndt_max, ncoords, nsamps
 using StShapeType   = std::array<SizeType, 5>;
@@ -14,7 +14,7 @@ using FDMTCoordType = std::pair<SizeType, SizeType>; // i_sub, i_dt
 struct FDMTCoordMapping {
     FDMTCoordType head;
     FDMTCoordType tail;
-    SizeType offset;
+    SizeType offset = 0;
 };
 
 struct FDMTPlan {
@@ -31,7 +31,7 @@ struct FDMTPlan {
     // Temp array to remember the top subband dt grid
     std::vector<DtGridType> dt_grid_sub_top;
 
-    size_t calculate_memory_usage() const;
+    SizeType calculate_memory_usage() const;
 };
 
 class FDMT {
@@ -57,16 +57,16 @@ public:
     std::vector<float> get_dm_grid_final() const;
     static void set_log_level(int level);
     virtual void execute(const float* __restrict waterfall,
-                         size_t waterfall_size,
+                         SizeType waterfall_size,
                          float* __restrict dmt,
-                         size_t dmt_size)      = 0;
+                         SizeType dmt_size)      = 0;
     virtual void initialise(const float* __restrict waterfall,
-                            size_t waterfall_size,
+                            SizeType waterfall_size,
                             float* __restrict state,
-                            size_t state_size) = 0;
+                            SizeType state_size) = 0;
 
 protected:
-    void check_inputs(size_t waterfall_size, size_t dmt_size) const;
+    void check_inputs(SizeType waterfall_size, SizeType dmt_size) const;
 
 private:
     float m_f_min;

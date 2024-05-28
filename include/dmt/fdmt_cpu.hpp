@@ -1,27 +1,28 @@
 #pragma once
 
-#include <cstddef>
+#include <vector>
+
 #include <dmt/fdmt_base.hpp>
 
 class FDMTCPU : public FDMT {
 public:
     FDMTCPU(float f_min,
             float f_max,
-            size_t nchans,
-            size_t nsamps,
+            SizeType nchans,
+            SizeType nsamps,
             float tsamp,
-            size_t dt_max,
-            size_t dt_step = 1,
-            size_t dt_min  = 0);
+            SizeType dt_max,
+            SizeType dt_step = 1,
+            SizeType dt_min  = 0);
     static void set_num_threads(int nthreads);
     void execute(const float* __restrict waterfall,
-                 size_t waterfall_size,
+                 SizeType waterfall_size,
                  float* __restrict dmt,
-                 size_t dmt_size) override;
+                 SizeType dmt_size) override;
     void initialise(const float* __restrict waterfall,
-                    size_t waterfall_size,
+                    SizeType waterfall_size,
                     float* __restrict state,
-                    size_t state_size) override;
+                    SizeType state_size) override;
 
 private:
     // Buffers

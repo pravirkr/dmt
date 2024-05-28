@@ -1,17 +1,18 @@
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
+#include <vector>
 
+#include <spdlog/common.h>
 #include <spdlog/spdlog.h>
 
 #include "dmt/fdmt_utils.hpp"
 #include <dmt/fdmt_base.hpp>
 
-size_t FDMTPlan::calculate_memory_usage() const {
-    size_t mem_use = 0;
+SizeType FDMTPlan::calculate_memory_usage() const {
+    SizeType mem_use = 0;
     mem_use += df_top.size() * sizeof(float);
     mem_use += df_bot.size() * sizeof(float);
     mem_use += state_shape.size() * sizeof(StShapeType);
@@ -110,7 +111,7 @@ DtGridType FDMT::calculate_dt_grid_sub(float f_start, float f_end) const {
     return dt_grid;
 }
 
-void FDMT::check_inputs(size_t waterfall_size, size_t dmt_size) const {
+void FDMT::check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
     if (waterfall_size != m_nchans * m_nsamps) {
         throw std::invalid_argument("Invalid size of waterfall");
     }
@@ -176,7 +177,7 @@ void FDMT::make_fdmt_plan_iter0() {
         *std::min_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
         *std::max_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
         std::accumulate(nchans_ndt_size.begin(), nchans_ndt_size.end(),
-                        static_cast<size_t>(0)),
+                        static_cast<SizeType>(0)),
         m_nsamps};
     // 0th iteration has no mappings
     m_fdmt_plan.dt_grid_sub_top[0] = m_fdmt_plan.dt_grid[0][m_nchans - 1];
@@ -204,7 +205,7 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
 
     m_fdmt_plan.state_sub_idx[i_iter].resize(nchans_cur);
     m_fdmt_plan.dt_grid[i_iter].resize(nchans_cur);
-    for (size_t i_sub = 0; i_sub < nchans_cur; ++i_sub) {
+    for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
         i_sub_tail = 2 * i_sub;
         i_sub_head = 2 * i_sub + 1;
         f_start    = df_bot * static_cast<float>(i_sub) + m_f_min;
@@ -230,15 +231,15 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
         f_mid2 = f_mid + m_correction;
 
         // Populate the dt_plan mapping current dt grid to the previous dt grid
-        size_t dt, dt_mid1, dt_mid2, dt_head, i_dt_head, i_dt_tail, offset;
+        SizeType dt, dt_mid1, dt_mid2, dt_head, i_dt_head, i_dt_tail, offset;
         FDMTCoordMapping coord_mapping;
-        for (size_t i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
+        for (SizeType i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
             // dt ~= dt_tail (dt_mid) + dt_head
             dt      = dt_grid_sub[i_dt];
-            dt_mid1 = static_cast<size_t>(
+            dt_mid1 = static_cast<SizeType>(
                 std::round(static_cast<float>(dt) *
                            fdmt::cff(f_start, f_mid1, f_start, f_end)));
-            dt_mid2 = static_cast<size_t>(
+            dt_mid2 = static_cast<SizeType>(
                 std::round(static_cast<float>(dt) *
                            fdmt::cff(f_start, f_mid2, f_start, f_end)));
             // check dt_head is always >= 0, otherwise throw error
@@ -283,7 +284,7 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
         *std::min_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
         *std::max_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
         std::accumulate(nchans_ndt_size.begin(), nchans_ndt_size.end(),
-                        static_cast<size_t>(0)),
+                        static_cast<SizeType>(0)),
         m_nsamps};
     m_fdmt_plan.dt_grid_sub_top[i_iter] = dt_grid_sub_top;
 }
