@@ -13,9 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-22.04]
         build_type: [Debug]
-        compiler: [{cpp: g++-13, code-cov: true, gcov: gcov-13}, {cpp: clang++-15}]
+        compiler: [{cpp: g++-12, code-cov: true, gcov: gcov-12}, {cpp: clang++-15}]
     steps:
     - uses: actions/checkout@v4
     - name: Set reusable strings
@@ -23,10 +23,6 @@ jobs:
       shell: bash
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-    - name: Install dependencies
-      shell: bash
-      run: |
-        sudo apt install -y cmake ${{ matrix.compiler.cpp }} lcov
     - name: Configure CMake
       shell: bash
       id: configure
