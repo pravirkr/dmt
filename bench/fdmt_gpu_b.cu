@@ -115,7 +115,8 @@ public:
     size_t nsamps{};
 };
 
-BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu)
+(benchmark::State& state) {
     for (auto _ : state) {
         CudaEventTimer raii{state};
         FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);

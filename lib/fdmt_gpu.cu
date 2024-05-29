@@ -215,7 +215,7 @@ void FDMTGPU::initialise(const float* __restrict waterfall,
 
 void FDMTGPU::transfer_plan_to_device(const FDMTPlan& plan, FDMTPlanD& plan_d) {
     // Transfer the plan to the device
-    const auto niter_size = plan.state_shape.size();
+    const auto niter_size = static_cast<int>(plan.state_shape.size());
 
     // Temp vectors to store the flattened plan on the host
     std::vector<int> nsubs_h, ncoords_h, nsamps_h, ncoords_to_copy_h;

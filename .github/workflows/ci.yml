@@ -23,6 +23,10 @@ jobs:
       shell: bash
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+    - name: Install dependencies
+      run: >
+        sudo apt update
+        sudo apt install -y cmake g++-13 clang-15 lcov
     - name: Configure CMake
       shell: bash
       id: configure

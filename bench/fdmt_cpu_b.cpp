@@ -41,6 +41,14 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer_seq)
     }
 }
 
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer_par)
+(benchmark::State& state) {
+    FDMTCPU::set_num_threads(8);
+    for (auto _ : state) {
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    }
+}
+
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
 (benchmark::State& state) {
     FDMTCPU::set_num_threads(1);
@@ -143,6 +151,9 @@ constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 16;
 
 BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer_seq)
+    ->RangeMultiplier(2)
+    ->Range(kMinNsamps, kMaxNsamps);
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer_par)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
 BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise_seq)

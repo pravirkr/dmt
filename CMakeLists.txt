@@ -63,6 +63,7 @@ endif()
 
 # Build the C++ library
 set(LIBRARY_NAME dmt)
+set(PYLIBRARY_NAME dmtlib)
 add_subdirectory(lib)
 # Build the Python bindings
 if(BUILD_PYTHON)
