@@ -5,7 +5,7 @@
 #include <random>
 #include <vector>
 
-class FDMTFixture : public benchmark::Fixture {
+class FDMTCPUFixture : public benchmark::Fixture {
 public:
     void SetUp(const ::benchmark::State& state) override {
         f_min  = 704.0F;
@@ -34,13 +34,22 @@ public:
     size_t nsamps{};
 };
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_plan_seq_cpu)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer_seq)
+(benchmark::State& state) {
     for (auto _ : state) {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_seq_cpu)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer_par)
+(benchmark::State& state) {
+    FDMTCPU::set_num_threads(8);
+    for (auto _ : state) {
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    }
+}
+
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
 (benchmark::State& state) {
     FDMTCPU::set_num_threads(1);
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
@@ -52,11 +61,12 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_seq_cpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
-        fdmt.initialise(waterfall.data(), state_init.data());
+        fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
+                        state_init.size());
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_par_cpu)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_par)
 (benchmark::State& state) {
     FDMTCPU::set_num_threads(8);
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
@@ -68,11 +78,12 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_initialise_par_cpu)
     const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
     std::vector<float> state_init(state_size, 0.0F);
     for (auto _ : state) {
-        fdmt.initialise(waterfall.data(), state_init.data());
+        fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
+                        state_init.size());
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_seq_cpu)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_seq)
 (benchmark::State& state) {
     FDMTCPU::set_num_threads(1);
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
@@ -87,7 +98,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_seq_cpu)
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_par_cpu)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_par)
 (benchmark::State& state) {
     FDMTCPU::set_num_threads(8);
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
@@ -102,7 +113,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_execute_par_cpu)
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_seq_cpu)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_seq)
 (benchmark::State& state) {
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -119,7 +130,7 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_seq_cpu)
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_par_cpu)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_par)
 (benchmark::State& state) {
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -139,26 +150,29 @@ BENCHMARK_DEFINE_F(FDMTFixture, BM_fdmt_overall_par_cpu)
 constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 16;
 
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_plan_seq_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer_seq)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_initialise_seq_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer_par)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_initialise_par_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_execute_seq_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise_par)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_execute_par_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute_seq)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_overall_seq_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute_par)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTFixture, BM_fdmt_overall_par_cpu)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall_seq)
+    ->RangeMultiplier(2)
+    ->Range(kMinNsamps, kMaxNsamps);
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall_par)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
 
-BENCHMARK_MAIN();
+// BENCHMARK_MAIN();

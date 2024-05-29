@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 cmake_policy(SET CMP0148 OLD)
 
 project(
@@ -13,24 +13,42 @@ option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTING "Build tests" OFF)
 option(BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(CODE_COVERAGE "Enable coverage reporting" OFF)
-option(ENABLE_FAST_MATH "Enable fast math flags" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/cmake)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native")
-
-if(ENABLE_FAST_MATH)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
-endif()
+set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+set(CMAKE_CXX_FLAGS_DEBUG "-g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -ffast-math")
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
+
+# Find CUDA and set up the project
+include(CheckLanguage)
+check_language(CUDA)
+
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS_EQUAL 10.0.0)
+    message(FATAL_ERROR "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}. Need CUDA 10+")
+  else()
+    message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
+  endif()
+
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  set(CMAKE_CUDA_FLAGS "-c -Xcompiler=-Wall,-Wextra --expt-extended-lambda")
+  set(CMAKE_CUDA_FLAGS_DEBUG "-g")
+  set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG -use_fast_math -Xcompiler=-march=native")
+  set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES 0)
+elseif(NOT CMAKE_CUDA_COMPILER)
+  message(STATUS "Not building gpu code. No CUDA compiler found...")
+endif(CMAKE_CUDA_COMPILER)
 
 # Initialize some default paths
 include(GNUInstallDirs)
@@ -45,6 +63,7 @@ endif()
 
 # Build the C++ library
 set(LIBRARY_NAME dmt)
+set(PYLIBRARY_NAME dmtlib)
 add_subdirectory(lib)
 # Build the Python bindings
 if(BUILD_PYTHON)

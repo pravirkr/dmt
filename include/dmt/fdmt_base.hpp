@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-using SizeType   = size_t;
+using SizeType   = std::size_t;
 using DtGridType = std::vector<SizeType>;
 // state shape: nchans, ndt_min, ndt_max, ncoords, nsamps
 using StShapeType   = std::array<SizeType, 5>;
@@ -14,7 +14,7 @@ using FDMTCoordType = std::pair<SizeType, SizeType>; // i_sub, i_dt
 struct FDMTCoordMapping {
     FDMTCoordType head;
     FDMTCoordType tail;
-    SizeType offset;
+    SizeType offset = 0;
 };
 
 struct FDMTPlan {
@@ -31,14 +31,19 @@ struct FDMTPlan {
     // Temp array to remember the top subband dt grid
     std::vector<DtGridType> dt_grid_sub_top;
 
-    size_t calculate_memory_usage() const;
+    SizeType calculate_memory_usage() const;
 };
 
 class FDMT {
 public:
-    FDMT(float f_min, float f_max, SizeType nchans, SizeType nsamps,
-         float tsamp, SizeType dt_max, SizeType dt_step = 1,
-         SizeType dt_min = 0);
+    FDMT(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         SizeType dt_max,
+         SizeType dt_step = 1,
+         SizeType dt_min  = 0);
     FDMT(const FDMT&)            = delete;
     FDMT& operator=(const FDMT&) = delete;
     FDMT(FDMT&&)                 = delete;
@@ -51,12 +56,17 @@ public:
     const DtGridType& get_dt_grid_final() const;
     std::vector<float> get_dm_grid_final() const;
     static void set_log_level(int level);
-    virtual void execute(const float* waterfall, size_t waterfall_size,
-                         float* dmt, size_t dmt_size)             = 0;
-    virtual void initialise(const float* waterfall, float* state) = 0;
+    virtual void execute(const float* __restrict waterfall,
+                         SizeType waterfall_size,
+                         float* __restrict dmt,
+                         SizeType dmt_size)      = 0;
+    virtual void initialise(const float* __restrict waterfall,
+                            SizeType waterfall_size,
+                            float* __restrict state,
+                            SizeType state_size) = 0;
 
 protected:
-    void check_inputs(size_t waterfall_size, size_t dmt_size) const;
+    void check_inputs(SizeType waterfall_size, SizeType dmt_size) const;
 
 private:
     float m_f_min;

@@ -13,9 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-22.04]
         build_type: [Debug]
-        compiler: [{cpp: g++-13, code-cov: true, gcov: gcov-13}, {cpp: clang++-15}]
+        compiler: [{cpp: g++-12, code-cov: true, gcov: gcov-12}, {cpp: clang++-15}]
     steps:
     - uses: actions/checkout@v4
     - name: Set reusable strings

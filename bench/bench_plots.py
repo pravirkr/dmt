@@ -22,7 +22,7 @@ bench_df[["benchmark_name", "benchmark_type", "n"]] = bench_df.name.str.split(
     "/BM_|_|/",
     expand=True,
 ).apply(
-    lambda x: ["_".join([x[1], x[2]]), "_".join([x[3], x[4]]), x[5]],
+    lambda x: ["_".join([x[1], x[2]]), x[3], x[4]],
     axis=1,
     result_type="expand",
 )
@@ -48,8 +48,8 @@ for i, benchmark in enumerate(benchmarks):
     ax.set_title(benchmark)
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("n")
-    ax.set_ylabel("Time (s)")
+    ax.set_xlabel("nsamples")
+    ax.set_ylabel("Time (ms)")
     ax.legend()
 
 fig.tight_layout()

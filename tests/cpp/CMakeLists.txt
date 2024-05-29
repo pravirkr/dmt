@@ -9,6 +9,12 @@ list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 set(TARGET_TESTS tests)
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
+# Check if CUDA was found
+if(CMAKE_CUDA_COMPILER)
+  file(GLOB TEST_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  list(APPEND TEST_SOURCES ${TEST_SOURCES_CUDA})
+endif()
+
 add_executable(${TARGET_TESTS} ${TEST_SOURCES})
 target_include_directories(${TARGET_TESTS} PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(${TARGET_TESTS} PRIVATE ${CMAKE_SOURCE_DIR}/lib)

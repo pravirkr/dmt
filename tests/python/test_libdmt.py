@@ -1,5 +1,5 @@
 import numpy as np
-from dmt import libdmt
+from dmtlib import libdmt
 
 
 class TestFDMT:
@@ -7,7 +7,7 @@ class TestFDMT:
         nchans = 500
         nsamples = 1024
         dt_max = 512
-        thefdmt = libdmt.FDMT(1000, 1500, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMTCPU(1000, 1500, nchans, nsamples, 0.001, dt_max)
         waterfall = np.ones((nchans, nsamples), dtype=np.float32)
         dmt_output = thefdmt.execute(waterfall)
         np.testing.assert_equal(

@@ -9,20 +9,29 @@ constexpr float kDispConstMT = 1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
 constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 constexpr float kDispConst   = kDispConstMT;
 
+using SizeType = std::size_t;
+
 namespace fdmt {
 
 float cff(float f1_start, float f1_end, float f2_start, float f2_end);
 
-size_t calculate_dt_sub(float f_start, float f_end, float f_min, float f_max,
-                        size_t dt);
+SizeType calculate_dt_sub(
+    float f_start, float f_end, float f_min, float f_max, SizeType dt);
 
-void add_offset_kernel(const float* arr1, size_t size_in1, const float* arr2,
-                       size_t size_in2, float* arr_out, size_t size_out,
-                       size_t offset);
+void add_offset_kernel(const float* arr1,
+                       SizeType size_in1,
+                       const float* arr2,
+                       SizeType size_in2,
+                       float* arr_out,
+                       SizeType size_out,
+                       SizeType offset);
 
-void copy_kernel(const float* arr1, size_t size_in, float* arr_out,
-                 size_t size_out);
+void copy_kernel(const float* arr1,
+                 SizeType size_in,
+                 float* arr_out,
+                 SizeType size_out);
 
-size_t find_closest_index(const std::vector<size_t>& arr_sorted, size_t val);
+SizeType find_closest_index(const std::vector<SizeType>& arr_sorted,
+                            SizeType val);
 
 } // namespace fdmt

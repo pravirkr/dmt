@@ -4,41 +4,64 @@
 
 #include <dmt/fdmt_base.hpp>
 
-using StShapeTypeD   = int4;
-using FDMTCoordTypeD = int2;
-
-struct FDMTCoordMappingD {
-    FDMTCoordTypeD head;
-    FDMTCoordTypeD tail;
-    SizeType offset;
-};
-
 struct FDMTPlanD {
-    thrust::device_vector<SizeType> nsubs_d;
-    thrust::device_vector<SizeType> ncoords_d;
-    thrust::device_vector<SizeType> ncoords_to_copy_d;
-    thrust::device_vector<SizeType> nsubs_cumul_d;
-    thrust::device_vector<SizeType> ncoords_cumul_d;
-    thrust::device_vector<SizeType> ncoords_to_copy_cumul_d;
     // i = i_iter
-    thrust::device_vector<StShapeTypeD> state_shape_d;
-    // i = i_iter * ncoords_cumul_iter + i_coord
-    thrust::device_vector<FDMTCoordTypeD> coordinates_d;
-    thrust::device_vector<FDMTCoordMappingD> mappings_d;
-    // i = i_iter * ncoords_to_copy_cumul_iter + i_coord_to_copy
-    thrust::device_vector<FDMTCoordTypeD> coordinates_to_copy_d;
-    thrust::device_vector<FDMTCoordMappingD> mappings_to_copy_d;
-    // i = i_iter * nsubs_cumul_iter + isub
-    thrust::device_vector<SizeType> state_sub_idx_d;
+    thrust::device_vector<int> nsubs_d;
+    thrust::device_vector<int> nsamps_d;
+    thrust::device_vector<int> ncoords_d;
+    thrust::device_vector<int> ncoords_to_copy_d;
+    thrust::device_vector<int> subs_iter_idx_d;
+    thrust::device_vector<int> coords_iter_idx_d;
+    thrust::device_vector<int> coords_to_copy_iter_idx_d;
+    thrust::device_vector<int> mappings_iter_idx_d;
+    thrust::device_vector<int> mappings_to_copy_iter_idx_d;
+    // i, i+1 = coords_iter_idx_d[i_iter] + i_coord
+    thrust::device_vector<int> coordinates_d;
+    thrust::device_vector<int> coordinates_to_copy_d;
+    // i, i+1, ... i+4 = mappings_iter_idx_d[i_iter] + i_coord
+    thrust::device_vector<int> mappings_d;
+    thrust::device_vector<int> mappings_to_copy_d;
+    // i = subs_iter_idx_d[i_iter] + isub
+    thrust::device_vector<int> state_sub_idx_d;
+
+    // i = i_sub (only for i_iter = 0)
+    thrust::device_vector<int> ndt_grid_init_d;
+    thrust::device_vector<int> dt_grid_init_sub_idx_d;
+    // i = dt_grid_init_sub_idx_d[i_sub] + i_dt
+    thrust::device_vector<int> dt_grid_init_d;
 };
 
 class FDMTGPU : public FDMT {
 public:
-    FDMTGPU(float f_min, float f_max, size_t nchans, size_t nsamps, float tsamp,
-            size_t dt_max, size_t dt_step = 1, size_t dt_min = 0);
-    void execute(const float* waterfall, size_t waterfall_size, float* dmt,
-                 size_t dmt_size) override;
-    void initialise(const float* waterfall, float* state) override;
+    FDMTGPU(float f_min,
+            float f_max,
+            SizeType nchans,
+            SizeType nsamps,
+            float tsamp,
+            SizeType dt_max,
+            SizeType dt_step = 1,
+            SizeType dt_min  = 0);
+    void execute(const float* __restrict waterfall,
+                 SizeType waterfall_size,
+                 float* __restrict dmt,
+                 SizeType dmt_size) override;
+
+    void initialise(const float* __restrict waterfall,
+                    SizeType waterfall_size,
+                    float* __restrict state,
+                    SizeType state_size) override;
+
+    void execute(const float* __restrict waterfall,
+                 SizeType waterfall_size,
+                 float* __restrict dmt,
+                 SizeType dmt_size,
+                 bool device_flags);
+
+    void initialise(const float* __restrict waterfall,
+                    SizeType waterfall_size,
+                    float* __restrict state,
+                    SizeType state_size,
+                    bool device_flags);
 
 private:
     thrust::device_vector<float> m_state_in_d;
@@ -48,4 +71,11 @@ private:
 
     static void transfer_plan_to_device(const FDMTPlan& plan,
                                         FDMTPlanD& plan_d);
+    void initialise_device(const float* __restrict waterfall,
+                           float* __restrict state);
+
+    void execute_device(const float* __restrict waterfall,
+                        SizeType waterfall_size,
+                        float* __restrict dmt,
+                        SizeType dmt_size);
 };
