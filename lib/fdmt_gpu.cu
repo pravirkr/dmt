@@ -1,44 +1,10 @@
-#include <sstream>
-#include <stdexcept>
-#include <string>
-
 #include <cuda_runtime.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
+#include <dmt/cuda_utils.cuh>
 #include <dmt/fdmt_gpu.hpp>
 
-namespace error_checker {
-
-inline void
-check_cuda_error(const char* file, int line, const std::string& msg = "") {
-    cudaError_t error = cudaGetLastError();
-    if (error != cudaSuccess) {
-        std::stringstream error_msg;
-        error_msg << "CUDA failed with error: " << cudaGetErrorString(error)
-                  << " (" << file << ":" << line << ")";
-        if (!msg.empty()) {
-            error_msg << " - " << msg;
-        }
-        throw std::runtime_error(error_msg.str());
-    }
-}
-
-inline void
-check_cuda_error_sync(const char* file, int line, const std::string& msg = "") {
-    cudaDeviceSynchronize();
-    check_cuda_error(file, line, msg);
-}
-
-void check_cuda(const std::string& msg = "") {
-    check_cuda_error(__FILE__, __LINE__, msg);
-}
-
-void check_cuda_sync(const std::string& msg = "") {
-    check_cuda_error_sync(__FILE__, __LINE__, msg);
-}
-
-} // namespace error_checker
 
 __global__ void
 kernel_init_fdmt(const float* __restrict__ waterfall,
@@ -320,7 +286,7 @@ void FDMTGPU::transfer_plan_to_device(const FDMTPlan& plan, FDMTPlanD& plan_d) {
         ndt_grid_init_h.emplace_back(dt_grid.size());
     }
     dt_grid_init_sub_idx_h.emplace_back(0);
-    for (int i = 1; i < ndt_grid_init_h.size(); ++i) {
+    for (size_t i = 1; i < ndt_grid_init_h.size(); ++i) {
         dt_grid_init_sub_idx_h.emplace_back(dt_grid_init_sub_idx_h[i - 1] +
                                             ndt_grid_init_h[i - 1]);
     }

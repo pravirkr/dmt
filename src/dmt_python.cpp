@@ -3,6 +3,7 @@
 #include <pybind11/stl.h>
 
 #include "pybind_utils.hpp"
+#include <dmt/ddmt_cpu.hpp>
 #include <dmt/fdmt_cpu.hpp>
 
 namespace py = pybind11;
@@ -84,5 +85,31 @@ PYBIND11_MODULE(libdmt, mod) {
                  fdmt.initialise(waterfall.data(), waterfall.size(),
                                  state.mutable_data(), state.size());
                  return state;
+             });
+    py::class_<DDMTCPU>(mod, "DDMTCPU")
+        .def(py::init<float, float, size_t, float, float, float, float>(),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("tsamp"), py::arg("dm_max"), py::arg("dm_step"),
+             py::arg("dm_min") = 0)
+        .def(py::init([](float f_min, float f_max, size_t nchans, float tsamp,
+                         py::array_t<float> dm_arr) {
+            return new DDMTCPU(f_min, f_max, nchans, tsamp, dm_arr.data(),
+                               dm_arr.size());
+        }))
+        .def_static("set_num_threads", &DDMTCPU::set_num_threads,
+                    py::arg("nthreads"))
+        .def("execute",
+             [](DDMTCPU& ddmt,
+                const py::array_t<float, py::array::c_style>& waterfall) {
+                 const auto* shape         = waterfall.shape();
+                 const auto nsamps         = static_cast<size_t>(shape[1]);
+                 const auto max_delay      = ddmt.get_plan().delay_table.back();
+                 const auto nsamps_reduced = nsamps - max_delay;
+                 const auto dm_count       = ddmt.get_plan().dm_arr.size();
+                 py::array_t<float, py::array::c_style> dmt(
+                     {dm_count, nsamps_reduced});
+                 ddmt.execute(waterfall.data(), waterfall.size(),
+                              dmt.mutable_data(), dmt.size());
+                 return dmt;
              });
 }
