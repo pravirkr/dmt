@@ -1,55 +1,60 @@
 #pragma once
 
-#include <cstdint>
 #include <vector>
 
-using DDMTSize  = uint64_t;
-using DDMTFloat = float;
-using DDMTWord  = uint32_t;
+using SizeType = std::size_t;
 
 struct DDMTPlan {
     std::vector<float> dm_arr;
-    std::vector<int> delay_arr;
-    std::vector<int> kill_mask;
+    // ndm x nchan
+    std::vector<size_t> delay_table;
+    size_t nchans;
 };
 
 class DDMT {
 public:
     DDMT(float f_min,
          float f_max,
-         DDMTSize nchans,
-         DDMTSize nsamps,
+         SizeType nchans,
          float tsamp,
          float dm_max,
          float dm_step,
          float dm_min = 0.0F);
+
+    DDMT(float f_min,
+         float f_max,
+         SizeType nchans,
+         float tsamp,
+         const float* dm_arr,
+         SizeType dm_count);
+
     DDMT(const DDMT&)            = delete;
     DDMT& operator=(const DDMT&) = delete;
     DDMT(DDMT&&)                 = delete;
     DDMT& operator=(DDMT&&)      = delete;
     virtual ~DDMT()              = default;
 
-    std::vector<DDMTSize> get_dt_grid() const;
+    const DDMTPlan& get_plan() const;
     std::vector<float> get_dm_grid() const;
     static void set_log_level(int level);
-    void set_dm_arr(const std::vector<float>& dm_arr);
-    void set_kill_mask(const std::vector<int>& kill_mask);
     virtual void execute(const float* __restrict waterfall,
-                         DDMTSize waterfall_size,
+                         SizeType waterfall_size,
                          float* __restrict dmt,
-                         DDMTSize dmt_size) = 0;
+                         SizeType dmt_size) = 0;
 
 private:
     float m_f_min;
     float m_f_max;
-    DDMTSize m_nchans;
-    DDMTSize m_nsamps;
+    SizeType m_nchans;
     float m_tsamp;
-    float m_dm_max;
-    float m_dm_step;
-    float m_dm_min;
+    std::vector<float> m_dm_arr;
 
     DDMTPlan m_ddmt_plan;
 
+    void validate_inputs() const;
     void configure_ddmt_plan();
+    static std::vector<float>
+    generate_dm_arr(float dm_max, float dm_step, float dm_min);
+    static std::vector<float> generate_dm_arr(const float* dm_arr,
+                                              SizeType dm_count);
 };

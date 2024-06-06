@@ -286,7 +286,7 @@ void FDMTGPU::transfer_plan_to_device(const FDMTPlan& plan, FDMTPlanD& plan_d) {
         ndt_grid_init_h.emplace_back(dt_grid.size());
     }
     dt_grid_init_sub_idx_h.emplace_back(0);
-    for (int i = 1; i < ndt_grid_init_h.size(); ++i) {
+    for (size_t i = 1; i < ndt_grid_init_h.size(); ++i) {
         dt_grid_init_sub_idx_h.emplace_back(dt_grid_init_sub_idx_h[i - 1] +
                                             ndt_grid_init_h[i - 1]);
     }

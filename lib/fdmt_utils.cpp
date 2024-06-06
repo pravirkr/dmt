@@ -6,6 +6,26 @@
 
 #include "dmt/fdmt_utils.hpp"
 
+std::vector<SizeType> ddmt::generate_delay_table(const float* dm_arr,
+                                                 SizeType dm_count,
+                                                 float f0,
+                                                 float df,
+                                                 SizeType nchans,
+                                                 float tsamp) {
+    std::vector<SizeType> delay_table(nchans * dm_count);
+    for (SizeType idm = 0; idm < dm_count; ++idm) {
+        for (SizeType ichan = 0; ichan < nchans; ++ichan) {
+            const auto a = 1.F / (f0 + static_cast<float>(ichan) * df);
+            const auto b = 1.F / f0;
+            const auto delay =
+                kDispConst / tsamp * (a * a - b * b) * dm_arr[idm];
+            delay_table[idm * nchans + ichan] =
+                static_cast<SizeType>(std::round(delay));
+        }
+    }
+    return delay_table;
+}
+
 float fdmt::cff(float f1_start, float f1_end, float f2_start, float f2_end) {
     return (std::pow(f1_start, kDispCoeff) - std::pow(f1_end, kDispCoeff)) /
            (std::pow(f2_start, kDispCoeff) - std::pow(f2_end, kDispCoeff));
@@ -33,8 +53,8 @@ void fdmt::add_offset_kernel(const float* arr1,
     if (offset >= size_in1) {
         throw std::runtime_error("Offset is greater than input size");
     }
-    const SizeType nsum  = size_in1 - offset;
-    SizeType t_ind = 0;
+    const SizeType nsum = size_in1 - offset;
+    SizeType t_ind      = 0;
 
     std::copy_n(arr1, offset, arr_out);
     t_ind += offset;

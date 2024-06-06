@@ -11,6 +11,15 @@ constexpr float kDispConst   = kDispConstMT;
 
 using SizeType = std::size_t;
 
+namespace ddmt {
+std::vector<SizeType> generate_delay_table(const float* dm_arr,
+                                           SizeType dm_count,
+                                           float f0,
+                                           float df,
+                                           SizeType nchans,
+                                           float tsamp);
+}
+
 namespace fdmt {
 
 float cff(float f1_start, float f1_end, float f2_start, float f2_end);
