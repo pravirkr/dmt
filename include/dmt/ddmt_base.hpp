@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 using SizeType = std::size_t;
@@ -7,7 +8,7 @@ using SizeType = std::size_t;
 struct DDMTPlan {
     std::vector<float> dm_arr;
     // ndm x nchan
-    std::vector<size_t> delay_table;
+    std::vector<SizeType> delay_table;
     size_t nchans;
 };
 
