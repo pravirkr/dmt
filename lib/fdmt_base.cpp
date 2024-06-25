@@ -37,6 +37,24 @@ SizeType FDMTPlan::calculate_memory_usage() const {
     return mem_use;
 }
 
+void FDMTPlan::print_summary() const {
+    spdlog::info("FDMT: Plan memory usage: {} bytes", calculate_memory_usage());
+    spdlog::info("FDMT: Plan details:");
+    const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
+        state_shape[0];
+    spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
+                  state_size);
+    spdlog::debug("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}", 0,
+                  nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
+
+    for (SizeType i_iter = 0; i_iter < state_shape.size(); ++i_iter) {
+        const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
+            state_shape[i_iter];
+        spdlog::info("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}",
+                     i_iter, nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
+    }
+}
+
 FDMT::FDMT(float f_min,
            float f_max,
            SizeType nchans,

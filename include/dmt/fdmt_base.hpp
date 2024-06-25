@@ -32,6 +32,7 @@ struct FDMTPlan {
     std::vector<DtGridType> dt_grid_sub_top;
 
     SizeType calculate_memory_usage() const;
+    void print_summary() const;
 };
 
 class FDMT {

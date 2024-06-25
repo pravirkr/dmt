@@ -23,10 +23,6 @@ public:
                     SizeType waterfall_size,
                     float* __restrict state,
                     SizeType state_size) override;
-    void initialise2(const float* __restrict waterfall,
-                     SizeType waterfall_size,
-                     float* __restrict state,
-                     SizeType state_size);
 
 private:
     // Buffers
