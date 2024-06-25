@@ -2,34 +2,30 @@
 
 #include <vector>
 
-#include <dmt/fdmt_base.hpp>
+#include <dmt/cfdmt_base.hpp>
 
-class FDMTCPU : public FDMT {
+class CohFDMTCPU : public CohFDMT {
 public:
-    FDMTCPU(float f_min,
-            float f_max,
-            SizeType nchans,
-            SizeType nsamps,
-            float tsamp,
-            SizeType dt_max,
-            SizeType dt_step = 1,
-            SizeType dt_min  = 0);
+    CohFDMTCPU(float f_center,
+               float sub_bw,
+               SizeType nsub,
+               float tbin,
+               SizeType nbin,
+               SizeType nfft,
+               SizeType nchan,
+               float dm_max,
+               float dm_step,
+               float dm_min = 0.0F);
     static void set_num_threads(int nthreads);
-    void execute(const float* __restrict waterfall,
-                 SizeType waterfall_size,
-                 float* __restrict dmt,
-                 SizeType dmt_size) override;
-    void initialise(const float* __restrict waterfall,
-                    SizeType waterfall_size,
-                    float* __restrict state,
-                    SizeType state_size) override;
+    void execute(const uint8_t* __restrict data_in,
+                 SizeType in_size,
+                 std::string in_order) override;
 
 private:
-    // Buffers
-    std::vector<float> m_state_in;
-    std::vector<float> m_state_out;
-
-    void execute_iter(const float* __restrict state_in,
-                      float* __restrict state_out,
-                      SizeType i_iter);
+    void execute_ftp(const uint8_t* __restrict data_in,
+                     SizeType in_size) override;
+    void execute_ptf(const uint8_t* __restrict data_in,
+                     SizeType in_size) override;
+    void execute_tfp(const uint8_t* __restrict data_in,
+                     SizeType in_size) override;
 };
