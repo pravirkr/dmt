@@ -42,8 +42,8 @@ void FDMTPlan::print_summary() const {
     spdlog::info("FDMT: Plan details:");
     const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
         state_shape[0];
-    spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
-                  state_size);
+    //spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
+    //              state_size);
     spdlog::debug("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}", 0,
                   nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
 

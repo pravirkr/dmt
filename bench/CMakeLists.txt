@@ -1,7 +1,6 @@
-CPMAddPackage(
-  NAME benchmark
-  VERSION 1.8.4
-  GITHUB_REPOSITORY google/benchmark
+CPMFindPackage(
+  NAME benchmark #VERSION 1.8
+  URL https://github.com/google/benchmark/archive/refs/tags/v1.8.4.zip
   OPTIONS "BENCHMARK_ENABLE_WERROR OFF" "BENCHMARK_FORCE_WERROR OFF" "BENCHMARK_ENABLE_TESTING OFF"
 )
 
@@ -15,5 +14,9 @@ if(CMAKE_CUDA_COMPILER)
 endif()
 
 add_executable(${TARGET_BENCHMARKS} ${BENCH_SOURCES})
-target_include_directories(${TARGET_BENCHMARKS} PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${LIBRARY_NAME} benchmark::benchmark_main)
+target_include_directories(
+  ${TARGET_BENCHMARKS} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/lib
+)
+target_link_libraries(
+  ${TARGET_BENCHMARKS} PRIVATE ${PROJECT_NAME}::${LIBRARY_NAME} benchmark::benchmark_main
+)

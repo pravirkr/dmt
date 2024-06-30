@@ -94,6 +94,6 @@ void CohFDMTCPU::execute(const uint8_t* __restrict data_in,
 
 void CohFDMTCPU::execute_ptf(const uint8_t* __restrict data_in,
                              SizeType in_size) {
-    unpack_and_padd_ptf(data_in, in_size, m_data, m_data.size(), m_nsamp,
-                        m_nsub, m_nbin, m_noverlap, m_nfft);
+    //unpack_and_padd_ptf(data_in, in_size, m_data, m_data.size(), m_nsamp,
+    //                    m_nsub, m_nbin, m_noverlap, m_nfft);
 }
