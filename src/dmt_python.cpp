@@ -3,6 +3,7 @@
 #include <pybind11/stl.h>
 
 #include "pybind_utils.hpp"
+#include <dmt/cfdmt_cpu.hpp>
 #include <dmt/ddmt_cpu.hpp>
 #include <dmt/fdmt_cpu.hpp>
 
@@ -110,6 +111,29 @@ PYBIND11_MODULE(libdmt, mod) {
                      {dm_count, nsamps_reduced});
                  ddmt.execute(waterfall.data(), waterfall.size(),
                               dmt.mutable_data(), dmt.size());
+                 return dmt;
+             });
+    py::class_<FDMTCPU>(mod, "CohFDMTCPU")
+        .def(py::init<float, float, size_t, float, size_t, size_t, float, float,
+                      float, size_t>(),
+             py::arg("f_center"), py::arg("sub_bw"), py::arg("nsub"),
+             py::arg("tbin"), py::arg("nbin"), py::arg("nfft"), py::arg("tp"),
+             py::arg("dm_max"), py::arg("dm_min") = 0.0F,
+             py::arg("noverlap") = 8192)
+        .def_static("set_num_threads", &CohFDMTCPU::set_num_threads,
+                    py::arg("nthreads"))
+        .def_property_readonly("plan", &CohFDMTCPU::get_plan)
+        .def_property_readonly("dmt_size", &CohFDMTCPU::get_dmt_size)
+        .def("execute",
+             [](CohFDMTCPU& coh_fdmt,
+                const py::array_t<uint8_t, py::array::c_style>& data_in,
+                std::string in_order = "FTPRI") {
+                 const auto* shape = data_in.shape();
+                 py::array_t<float, py::array::c_style> dmt(
+                     {static_cast<ssize_t>(coh_fdmt.get_dmt_size()), shape[1]});
+                 coh_fdmt.execute(data_in.data(), data_in.size(),
+                                  std::move(in_order), dmt.mutable_data(),
+                                  dmt.size());
                  return dmt;
              });
 }

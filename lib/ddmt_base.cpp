@@ -2,8 +2,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "dmt/dm_utils.hpp"
 #include <dmt/ddmt_base.hpp>
-#include <dmt/fdmt_utils.hpp>
 
 DDMT::DDMT(float f_min,
            float f_max,
@@ -55,7 +55,7 @@ void DDMT::configure_ddmt_plan() {
     m_ddmt_plan.nchans = m_nchans;
     m_ddmt_plan.dm_arr = m_dm_arr;
     const auto df      = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
-    m_ddmt_plan.delay_table = ddmt::generate_delay_table(
+    m_ddmt_plan.delay_table = dm_utils::generate_delay_table(
         m_dm_arr.data(), m_dm_arr.size(), m_f_min, df, m_nchans, m_tsamp);
 }
 

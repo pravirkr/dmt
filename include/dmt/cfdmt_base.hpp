@@ -1,52 +1,46 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
-#include <cstdint>
-#include <string>
-#include <utility>
 #include <vector>
 
-using SizeType = std::size_t;
+#include <dmt/dmt_types.hpp>
 
-class CohFDMT {
-public:
-    CohFDMT(float f_center,
-            float sub_bw,
-            SizeType nsub,
-            float tbin,
-            SizeType nbin,
-            SizeType nfft,
-            SizeType nchan,
-            float dm_max,
-            float dm_step,
-            float dm_min = 0.0F);
-    CohFDMT(const CohFDMT&)            = delete;
-    CohFDMT& operator=(const CohFDMT&) = delete;
-    CohFDMT(CohFDMT&&)                 = delete;
-    CohFDMT& operator=(CohFDMT&&)      = delete;
-    virtual ~CohFDMT()                 = default;
+struct CohFDMTPlan {
+    // Input parameters
+    float fcenter;
+    float bwsub;
+    SizeType nsub;
+    float tbin;
+    SizeType nbin;
+    SizeType nfft;
+    float t_p;
+    float dm_max;
+    float dm_min;
+    SizeType noverlap_inp;
 
-    virtual void execute(const uint8_t* __restrict data_in,
-                         SizeType in_size,
-                         std::string in_order) = 0;
+    // Derived parameters
+    float bw;
+    float f_min;
+    float f_max;
+    SizeType n_p;
+    SizeType nchan;
+    std::vector<float> dm_grid;
+    SizeType noverlap;
+    SizeType nsamp;
+    SizeType mbin;
+    SizeType mchan;
+    SizeType msamp;
+    float tsamp;
+    SizeType dt_max;
 
-protected:
-    float m_fcenter;
-    float m_sub_bw;
-    SizeType m_nsub;
-    float m_tbin;
-    SizeType m_nbin;
-    SizeType m_nfft;
-    SizeType m_nchan;
-
-private:
-    std::vector<float> m_dm_grid;
-
-    virtual void execute_ftp(const uint8_t* __restrict data_in,
-                             SizeType in_size) = 0;
-    virtual void execute_ptf(const uint8_t* __restrict data_in,
-                             SizeType in_size) = 0;
-    virtual void execute_tfp(const uint8_t* __restrict data_in,
-                             SizeType in_size) = 0;
+    CohFDMTPlan(float fcenter,
+                float bwsub,
+                SizeType nsub,
+                float tbin,
+                SizeType nbin,
+                SizeType nfft,
+                float t_p,
+                float dm_max,
+                float dm_min,
+                SizeType noverlap_inp);
 };

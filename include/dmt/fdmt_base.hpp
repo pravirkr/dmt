@@ -5,7 +5,8 @@
 #include <utility>
 #include <vector>
 
-using SizeType   = std::size_t;
+#include <dmt/dmt_types.hpp>
+
 using DtGridType = std::vector<SizeType>;
 // state shape: nchans, ndt_min, ndt_max, ncoords, nsamps
 using StShapeType   = std::array<SizeType, 5>;

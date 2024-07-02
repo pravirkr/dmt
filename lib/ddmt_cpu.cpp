@@ -1,5 +1,4 @@
 #include "dmt/ddmt_base.hpp"
-#include <cmath>
 #include <cstddef>
 #include <spdlog/spdlog.h>
 #ifdef USE_OPENMP

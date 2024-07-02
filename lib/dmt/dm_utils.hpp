@@ -1,30 +1,20 @@
 #pragma once
 
 #include <algorithm>
-#include <cmath>
+#include <complex>
 #include <cstddef>
 #include <stdexcept>
 #include <vector>
 
-constexpr float kDispCoeff   = -2.0;
+#include <dmt/dmt_types.hpp>
+
+constexpr float kDispCoeff   = -2.0F;
 constexpr float kDispConstLK = 4.1488080e3; // L&K Handbook of Pulsar Astronomy
 constexpr float kDispConstMT = 1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
 constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 constexpr float kDispConst   = kDispConstMT;
 
-using SizeType = std::size_t;
-
-namespace ddmt {
-std::vector<SizeType> generate_delay_table(const float* dm_arr,
-                                           SizeType dm_count,
-                                           float f0,
-                                           float df,
-                                           SizeType nchans,
-                                           float tsamp);
-}
-
-namespace fdmt {
-
+namespace dm_utils {
 float cff(float f1_start, float f1_end, float f2_start, float f2_end);
 
 SizeType calculate_dt_sub(
@@ -78,4 +68,34 @@ inline void copy_kernel(const float* __restrict arr1,
 SizeType find_closest_index(const std::vector<SizeType>& arr_sorted,
                             SizeType val);
 
-} // namespace fdmt
+std::vector<SizeType> generate_delay_table(const float* dm_arr,
+                                           SizeType dm_count,
+                                           float f0,
+                                           float df,
+                                           SizeType nchans,
+                                           float tsamp);
+
+// Compute the optimal minimum overlap based on the dispersion delay
+// and the number of channels.
+SizeType minimum_overlap(float dm_max,
+                         float fcenter,
+                         float bw,
+                         float tbin,
+                         SizeType nsub,
+                         SizeType nchan);
+
+// Generate a vector of coherent DMs.
+std::vector<float> generate_coherent_dms(
+    float dm_min, float dm_max, float fcenter, float bw, float tbin, float tp);
+
+void compute_chirp(std::complex<float>* chirp_table,
+                   SizeType chirp_table_size,
+                   const float* dm_grid,
+                   SizeType ndm,
+                   float fcenter,
+                   float bw,
+                   SizeType nbin,
+                   SizeType nsub,
+                   SizeType nchan);
+
+} // namespace dm_utils

@@ -4,9 +4,9 @@
 #include <omp.h>
 #endif
 
+#include "dmt/dm_utils.hpp"
 #include <dmt/fdmt_base.hpp>
 #include <dmt/fdmt_cpu.hpp>
-#include <dmt/fdmt_utils.hpp>
 
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
@@ -165,7 +165,7 @@ void FDMTCPU::execute_iter(const float* __restrict state_in,
         const float* tail = &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
         const float* head = &state_in[state_sub_idx_head + i_dt_head * nsamps];
         float* out        = &state_out[state_sub_idx + i_dt * nsamps];
-        fdmt::add_offset_kernel(tail, nsamps, head, nsamps, out, nsamps,
+        dm_utils::add_offset_kernel(tail, nsamps, head, nsamps, out, nsamps,
                                 offset);
     }
 #ifdef USE_OPENMP
@@ -183,6 +183,6 @@ void FDMTCPU::execute_iter(const float* __restrict state_in,
 
         const float* tail = &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
         float* out        = &state_out[state_sub_idx + i_dt * nsamps];
-        fdmt::copy_kernel(tail, nsamps, out, nsamps);
+        dm_utils::copy_kernel(tail, nsamps, out, nsamps);
     }
 }

@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-using SizeType = std::size_t;
+#include <dmt/dmt_types.hpp>
 
 struct DDMTPlan {
     std::vector<float> dm_arr;

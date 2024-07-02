@@ -8,7 +8,7 @@
 #include <spdlog/common.h>
 #include <spdlog/spdlog.h>
 
-#include "dmt/fdmt_utils.hpp"
+#include "dmt/dm_utils.hpp"
 #include <dmt/fdmt_base.hpp>
 
 SizeType FDMTPlan::calculate_memory_usage() const {
@@ -42,8 +42,8 @@ void FDMTPlan::print_summary() const {
     spdlog::info("FDMT: Plan details:");
     const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
         state_shape[0];
-    //spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
-    //              state_size);
+    // spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
+    //               state_size);
     spdlog::debug("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}", 0,
                   nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
 
@@ -119,9 +119,9 @@ float FDMT::calculate_df(float f_min, float f_max, SizeType nchans) {
 
 DtGridType FDMT::calculate_dt_grid_sub(float f_start, float f_end) const {
     const auto dt_max_sub = static_cast<SizeType>(
-        fdmt::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max));
+        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max));
     const auto dt_min_sub = static_cast<SizeType>(
-        fdmt::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min));
+        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min));
     DtGridType dt_grid;
     for (SizeType dt = dt_min_sub; dt <= dt_max_sub; dt += m_dt_step) {
         dt_grid.push_back(dt);
@@ -256,10 +256,10 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
             dt      = dt_grid_sub[i_dt];
             dt_mid1 = static_cast<SizeType>(
                 std::round(static_cast<float>(dt) *
-                           fdmt::cff(f_start, f_mid1, f_start, f_end)));
+                           dm_utils::cff(f_start, f_mid1, f_start, f_end)));
             dt_mid2 = static_cast<SizeType>(
                 std::round(static_cast<float>(dt) *
-                           fdmt::cff(f_start, f_mid2, f_start, f_end)));
+                           dm_utils::cff(f_start, f_mid2, f_start, f_end)));
             // check dt_head is always >= 0, otherwise throw error
             if (dt_mid1 > dt || dt_mid2 > dt) {
                 throw std::runtime_error("Invalid dt_mid values");
@@ -267,7 +267,7 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
             dt_head = dt - dt_mid2;
             if (i_sub == nchans_cur - 1 && do_copy) {
                 i_dt_tail =
-                    fdmt::find_closest_index(dt_grid_prev[i_sub_tail], dt);
+                    dm_utils::find_closest_index(dt_grid_prev[i_sub_tail], dt);
                 m_fdmt_plan.coordinates_to_copy[i_iter].emplace_back(i_sub,
                                                                      i_dt);
                 coord_mapping = {FDMTCoordType{SIZE_MAX, SIZE_MAX},
@@ -275,10 +275,10 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
                 m_fdmt_plan.mappings_to_copy[i_iter].emplace_back(
                     coord_mapping);
             } else {
-                i_dt_head =
-                    fdmt::find_closest_index(dt_grid_prev[i_sub_head], dt_head);
-                i_dt_tail =
-                    fdmt::find_closest_index(dt_grid_prev[i_sub_tail], dt_mid1);
+                i_dt_head = dm_utils::find_closest_index(
+                    dt_grid_prev[i_sub_head], dt_head);
+                i_dt_tail = dm_utils::find_closest_index(
+                    dt_grid_prev[i_sub_tail], dt_mid1);
                 offset = dt_mid2;
                 if (offset >= m_nsamps) {
                     throw std::runtime_error(
