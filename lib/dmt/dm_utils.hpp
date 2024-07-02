@@ -20,6 +20,8 @@ float cff(float f1_start, float f1_end, float f2_start, float f2_end);
 SizeType calculate_dt_sub(
     float f_start, float f_end, float f_min, float f_max, SizeType dt);
 
+float get_dmconv(float f_min, float f_max, float tsamp);
+
 inline void add_offset_kernel(const float* __restrict arr1,
                               SizeType size_in1,
                               const float* __restrict arr2,
@@ -87,6 +89,15 @@ SizeType minimum_overlap(float dm_max,
 // Generate a vector of coherent DMs.
 std::vector<float> generate_coherent_dms(
     float dm_min, float dm_max, float fcenter, float bw, float tbin, float tp);
+
+void dedisperse(float* __restrict waterfall,
+                SizeType waterfall_size,
+                float dm,
+                float f_min,
+                float f_max,
+                SizeType nchans,
+                SizeType nsamps,
+                float tsamp);
 
 void compute_chirp(std::complex<float>* chirp_table,
                    SizeType chirp_table_size,

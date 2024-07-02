@@ -30,7 +30,6 @@ public:
 
     CohFDMTPlan get_plan() const;
     SizeType get_dmt_size() const;
-
     static void set_num_threads(int nthreads);
     void execute(const uint8_t* __restrict data_in,
                  SizeType in_size,
@@ -75,5 +74,6 @@ private:
                                            ComplexType* __restrict c,
                                            size_t nx,
                                            size_t ny,
-                                           size_t idm);
+                                           size_t idm,
+                                           float scale);
 };

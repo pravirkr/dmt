@@ -24,7 +24,8 @@ struct CohFDMTPlan {
     float f_max;
     SizeType n_p;
     SizeType nchan;
-    std::vector<float> dm_grid;
+    std::vector<float> dm_grid_coh;
+    std::vector<float> dm_grid_final;
     SizeType noverlap;
     SizeType nsamp;
     SizeType mbin;

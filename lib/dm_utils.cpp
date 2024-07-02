@@ -21,6 +21,12 @@ SizeType dm_utils::calculate_dt_sub(
     return static_cast<SizeType>(std::round(static_cast<float>(dt) * ratio));
 }
 
+float dm_utils::get_dmconv(float f_min, float f_max, float tsamp) {
+    const float dm_conv = kDispConst * (std::pow(f_min, kDispCoeff) -
+                                        std::pow(f_max, kDispCoeff));
+    return tsamp / dm_conv;
+}
+
 SizeType dm_utils::find_closest_index(const std::vector<SizeType>& arr_sorted,
                                       SizeType val) {
     if (arr_sorted.empty()) {
@@ -91,6 +97,43 @@ std::vector<float> dm_utils::generate_coherent_dms(
         dm_grid.push_back(dm_min + static_cast<float>(i) * coh_dm_step);
     }
     return dm_grid;
+}
+
+void dm_utils::dedisperse(float* __restrict waterfall,
+                          SizeType waterfall_size,
+                          float dm,
+                          float f_min,
+                          float f_max,
+                          SizeType nchans,
+                          SizeType nsamps,
+                          float tsamp) {
+    if (waterfall_size != nchans * nsamps) {
+        throw std::runtime_error("Waterfall size mismatch");
+    }
+    const float foff = (f_max - f_min) / static_cast<float>(nchans);
+    std::vector<int> shifts(nchans);
+    for (SizeType ichan = 0; ichan < nchans; ++ichan) {
+        const float fchan = f_min + foff * static_cast<float>(ichan);
+        const float delay =
+            kDispConst * dm *
+            (std::pow(f_min, kDispCoeff) - std::pow(fchan, kDispCoeff));
+        shifts[ichan] = static_cast<int>(std::round(delay / tsamp));
+    }
+    for (SizeType ichan = 0; ichan < nchans; ++ichan) {
+        const SizeType start = ichan * nsamps;
+        const SizeType end   = start + nsamps;
+        const int shift      = shifts[ichan];
+        if (shift == 0) {
+            continue;
+        }
+        if (shift > 0) {
+            std::rotate(waterfall + start, waterfall + end - shift,
+                        waterfall + end);
+        } else {
+            std::rotate(waterfall + start, waterfall + start - shift,
+                        waterfall + end);
+        }
+    }
 }
 
 void dm_utils::compute_chirp(std::complex<float>* chirp_table,

@@ -113,7 +113,14 @@ PYBIND11_MODULE(libdmt, mod) {
                               dmt.mutable_data(), dmt.size());
                  return dmt;
              });
-    py::class_<FDMTCPU>(mod, "CohFDMTCPU")
+    py::class_<CohFDMTPlan>(mod, "CohFDMTPlan")
+        .def(py::init<float, float, size_t, float, size_t, size_t, float, float,
+                      float, size_t>(),
+             py::arg("f_center"), py::arg("sub_bw"), py::arg("nsub"),
+             py::arg("tbin"), py::arg("nbin"), py::arg("nfft"), py::arg("tp"),
+             py::arg("dm_max"), py::arg("dm_min") = 0.0F,
+             py::arg("noverlap") = 8192);
+    py::class_<CohFDMTCPU>(mod, "CohFDMTCPU")
         .def(py::init<float, float, size_t, float, size_t, size_t, float, float,
                       float, size_t>(),
              py::arg("f_center"), py::arg("sub_bw"), py::arg("nsub"),
@@ -127,7 +134,7 @@ PYBIND11_MODULE(libdmt, mod) {
         .def("execute",
              [](CohFDMTCPU& coh_fdmt,
                 const py::array_t<uint8_t, py::array::c_style>& data_in,
-                std::string in_order = "FTPRI") {
+                std::string in_order = "PRITF") {
                  const auto* shape = data_in.shape();
                  py::array_t<float, py::array::c_style> dmt(
                      {static_cast<ssize_t>(coh_fdmt.get_dmt_size()), shape[1]});

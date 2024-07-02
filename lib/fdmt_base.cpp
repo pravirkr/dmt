@@ -88,14 +88,12 @@ const DtGridType& FDMT::get_dt_grid_final() const {
     return m_fdmt_plan.dt_grid[m_niters][0];
 }
 std::vector<float> FDMT::get_dm_grid_final() const {
-    const float dm_conv       = kDispConst * (std::pow(m_f_min, kDispCoeff) -
-                                        std::pow(m_f_max, kDispCoeff));
-    const float dm_step       = m_tsamp / dm_conv;
+    const float dm_conv       = dm_utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
     const auto& dt_grid_final = get_dt_grid_final();
     std::vector<float> dm_grid_final(dt_grid_final.size());
     std::transform(
         dt_grid_final.begin(), dt_grid_final.end(), dm_grid_final.begin(),
-        [dm_step](auto& dt) { return static_cast<float>(dt) * dm_step; });
+        [dm_conv](auto& dt) { return static_cast<float>(dt) * dm_conv; });
     return dm_grid_final;
 }
 

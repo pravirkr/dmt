@@ -12,6 +12,8 @@ if(ENABLE_CODE_COVERAGE)
   target_link_options(coverage_config INTERFACE --coverage)
 endif()
 
+find_package(FFTW REQUIRED)
+
 file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
 # Check if CUDA was found
@@ -26,13 +28,14 @@ add_library(${PROJECT_NAME}::${LIBRARY_NAME} ALIAS ${LIBRARY_NAME})
 target_include_directories(
   ${LIBRARY_NAME}
   PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include/>
+         $<BUILD_INTERFACE:${FFTW_INCLUDE_DIRS}>
          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(
   ${LIBRARY_NAME}
-  PUBLIC spdlog::spdlog_header_only
+  PUBLIC spdlog::spdlog_header_only ${FFTW_FLOAT_LIB}
   PRIVATE coverage_config
 )
 

@@ -34,25 +34,35 @@ CohFDMTPlan::CohFDMTPlan(float fcenter,
     n_p   = static_cast<SizeType>(std::ceil(t_p / tbin));
     nchan = n_p;
 
-    dm_grid =
+    dm_grid_coh =
         dm_utils::generate_coherent_dms(dm_min, dm_max, fcenter, bw, tbin, t_p);
-    if (dm_grid.empty()) {
+    if (dm_grid_coh.empty()) {
         throw std::runtime_error("Empty DM grid");
     }
 
     auto noverlap_optimal = dm_utils::minimum_overlap(
-        *std::max_element(dm_grid.begin(), dm_grid.end()), fcenter, bw, tbin,
-        nsub, nchan);
+        *std::max_element(dm_grid_coh.begin(), dm_grid_coh.end()), fcenter, bw,
+        tbin, nsub, nchan);
     auto noverlap_optimal_pow2 = static_cast<SizeType>(
         std::pow(2, std::round(std::log2(noverlap_optimal))));
     noverlap = std::max(noverlap_inp, noverlap_optimal_pow2);
     if (nbin < 2 * noverlap) {
         throw std::invalid_argument("nbin must be greater than 2 * noverlap");
     }
-    nsamp = nfft * (nbin - 2 * noverlap);
-    mbin  = nbin / nchan;
-    mchan = nsub * nchan;
-    msamp = nsamp / nchan;
-    tsamp = tbin * static_cast<float>(nchan);
+    nsamp  = nfft * (nbin - 2 * noverlap);
+    mbin   = nbin / nchan;
+    mchan  = nsub * nchan;
+    msamp  = nsamp / nchan;
+    tsamp  = tbin * static_cast<float>(nchan);
     dt_max = n_p;
+
+    // Generate final DM grid
+    dm_grid_final.resize(dm_grid_coh.size() * dt_max);
+    const float dm_conv = dm_utils::get_dmconv(f_min, f_max, tsamp);
+    for (SizeType i = 0; i < dm_grid_coh.size(); ++i) {
+        for (SizeType j = 0; j < dt_max; ++j) {
+            dm_grid_final[i * dt_max + j] =
+                dm_grid_coh[i] + static_cast<float>(j) * dm_conv;
+        }
+    }
 }

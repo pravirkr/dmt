@@ -45,7 +45,7 @@ CohFDMTCPU::~CohFDMTCPU() {
 CohFDMTPlan CohFDMTCPU::get_plan() const { return m_plan; }
 
 SizeType CohFDMTCPU::get_dmt_size() const {
-    return m_plan.dm_grid.size() * m_plan.dt_max * m_plan.msamp;
+    return m_plan.dm_grid_coh.size() * m_plan.dt_max * m_plan.msamp;
 }
 
 void CohFDMTCPU::set_num_threads(int nthreads) {
@@ -78,16 +78,17 @@ void CohFDMTCPU::execute(const uint8_t* __restrict data_in,
                          m_plan.nbin);
     swap_spectrum_halves(m_unpacked_buffer_p2.data(), m_plan.nfft, m_plan.nsub,
                          m_plan.nbin);
-    for (SizeType idm = 0; idm < m_plan.dm_grid.size(); ++idm) {
+    const auto scale = 1.0F / static_cast<float>(m_plan.nbin);
+    for (SizeType idm = 0; idm < m_plan.dm_grid_coh.size(); ++idm) {
         // Apply the chirp to the data
-        pointwise_complex_multiply(m_unpacked_buffer_p1.data(),
-                                   m_chirp_table.data(),
-                                   m_fftdelay_buffer_p1.data(),
-                                   m_plan.nsub * m_plan.nbin, m_plan.nfft, idm);
-        pointwise_complex_multiply(m_unpacked_buffer_p2.data(),
-                                   m_chirp_table.data(),
-                                   m_fftdelay_buffer_p2.data(),
-                                   m_plan.nsub * m_plan.nbin, m_plan.nfft, idm);
+        pointwise_complex_multiply(
+            m_unpacked_buffer_p1.data(), m_chirp_table.data(),
+            m_fftdelay_buffer_p1.data(), m_plan.nsub * m_plan.nbin, m_plan.nfft,
+            idm, scale);
+        pointwise_complex_multiply(
+            m_unpacked_buffer_p2.data(), m_chirp_table.data(),
+            m_fftdelay_buffer_p2.data(), m_plan.nsub * m_plan.nbin, m_plan.nfft,
+            idm, scale);
         // Swap the halves of the spectrum back
         swap_spectrum_halves(m_fftdelay_buffer_p1.data(), m_plan.nfft,
                              m_plan.nsub * m_plan.nchan, m_plan.mbin);
@@ -106,6 +107,13 @@ void CohFDMTCPU::execute(const uint8_t* __restrict data_in,
         unpad_detect(m_fftdelay_buffer_p1.data(), m_fftdelay_buffer_p2.data(),
                      m_fftdelay_buffer_p1.size(), m_intensity_buffer.data(),
                      m_intensity_buffer.size());
+
+        // Perform inter-channel dedispersion at the current coherent DM
+        dm_utils::dedisperse(m_intensity_buffer.data(),
+                             m_intensity_buffer.size(), m_plan.dm_grid_coh[idm],
+                             m_plan.f_min, m_plan.f_max, m_plan.nchan,
+                             m_plan.msamp, m_plan.tsamp);
+
         // Perform the FDMT
         float* dmt_cur        = &dmt[idm * m_plan.dt_max * m_plan.msamp];
         SizeType dmt_cur_size = m_plan.dt_max * m_plan.msamp;
@@ -120,12 +128,11 @@ void CohFDMTCPU::initialise() {
     m_fftdelay_buffer_p1.resize(m_plan.nfft * m_plan.nsub * m_plan.nbin);
     m_fftdelay_buffer_p2.resize(m_plan.nfft * m_plan.nsub * m_plan.nbin);
     // Compute the chirp table
-    m_chirp_table.resize(m_plan.dm_grid.size() * m_plan.nsub * m_plan.nbin);
+    m_chirp_table.resize(m_plan.dm_grid_coh.size() * m_plan.nsub * m_plan.nbin);
     dm_utils::compute_chirp(m_chirp_table.data(), m_chirp_table.size(),
-                            m_plan.dm_grid.data(), m_plan.dm_grid.size(),
-                            m_plan.fcenter,
-                            m_plan.bwsub * static_cast<float>(m_plan.nsub),
-                            m_plan.nbin, m_plan.nsub, m_plan.nchan);
+                            m_plan.dm_grid_coh.data(),
+                            m_plan.dm_grid_coh.size(), m_plan.fcenter,
+                            m_plan.bw, m_plan.nbin, m_plan.nsub, m_plan.nchan);
     // Generate FFT plan (batch in-place forward FFT)
     const std::array<int, 1> fft_size_fw = {static_cast<int>(m_plan.nbin)};
     m_fft_plan_fw                        = fftwf_plan_many_dft(
@@ -235,10 +242,11 @@ void CohFDMTCPU::pointwise_complex_multiply(const ComplexType* __restrict a,
                                             ComplexType* __restrict c,
                                             SizeType nx,
                                             SizeType ny,
-                                            SizeType idm) {
+                                            SizeType idm,
+                                            float scale) {
     for (SizeType i = 0; i < nx; ++i) {
         for (SizeType j = 0; j < ny; ++j) {
-            c[i + nx * j] = a[i + nx * j] * b[i + nx * idm];
+            c[i + nx * j] = a[i + nx * j] * b[i + nx * idm] * scale;
         }
     }
 }
