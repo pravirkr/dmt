@@ -1,3 +1,4 @@
+#include "dmt/dmt_types.hpp"
 #include <utility>
 
 #ifdef USE_OPENMP
@@ -19,7 +20,7 @@ FDMTCPU::FDMTCPU(float f_min,
     : FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
     // Allocate memory for the state buffers
     const auto& plan      = get_plan();
-    const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
+    const auto state_size = plan.get_buffer_size();
     m_state_in.resize(state_size, 0.0F);
     m_state_out.resize(state_size, 0.0F);
 }
@@ -40,30 +41,28 @@ void FDMTCPU::execute(const float* __restrict waterfall,
 
     initialise(waterfall, waterfall_size, state_in_ptr, m_state_in.size());
     const auto niters = get_niters();
-    for (SizeType i_iter = 1; i_iter < niters + 1; ++i_iter) {
+    for (SizeType i_iter = 1; i_iter < niters; ++i_iter) {
         execute_iter(state_in_ptr, state_out_ptr, i_iter);
         std::swap(state_in_ptr, state_out_ptr);
-        if (i_iter == (niters - 1)) {
-            state_out_ptr = dmt;
-        }
     }
+    // Last iteration directly writes to the output buffer
+    execute_iter(state_in_ptr, dmt, niters);
 }
 
 void FDMTCPU::initialise(const float* __restrict waterfall,
                          SizeType /*waterfall_size*/,
                          float* __restrict state,
                          SizeType /*state_size*/) {
-    const auto& plan               = get_plan();
-    const auto& dt_grid_init       = plan.dt_grid[0];
-    const auto& state_sub_idx_init = plan.state_sub_idx[0];
-    const auto& nsamps             = plan.state_shape[0][4];
+    const auto& plan          = get_plan();
+    const auto& dt_grids_init = plan.dt_grids[0];
+    const auto& nsamps        = plan.state_shape[0][4];
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
-    shared(waterfall, state, dt_grid_init, state_sub_idx_init, nsamps)
+    shared(waterfall, state, dt_grids_init, nsamps)
 #endif
-    for (SizeType i_sub = 0; i_sub < dt_grid_init.size(); ++i_sub) {
-        const auto& dt_grid_sub   = dt_grid_init[i_sub];
-        const auto& state_sub_idx = state_sub_idx_init[i_sub];
+    for (SizeType i_sub = 0; i_sub < dt_grids_init.size(); ++i_sub) {
+        const auto& dt_grid_sub  = dt_grids_init[i_sub].dt_grid;
+        const auto buffer_offset = dt_grids_init[i_sub].sub_offset * nsamps;
         // Initialise state for [:, dt_init_min, dt_init_min:]
         const auto& dt_grid_sub_min = dt_grid_sub[0];
         for (SizeType isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
@@ -71,7 +70,7 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
             for (SizeType i = isamp - dt_grid_sub_min; i <= isamp; ++i) {
                 sum += waterfall[i_sub * nsamps + i];
             }
-            state[state_sub_idx + isamp] =
+            state[buffer_offset + isamp] =
                 sum / static_cast<float>(dt_grid_sub_min + 1);
         }
         // Initialise state for [:, dt_grid_init[i_dt], dt_grid_init[i_dt]:]
@@ -83,8 +82,8 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
                 for (SizeType i = isamp - dt_cur; i < isamp - dt_prev; ++i) {
                     sum += waterfall[i_sub * nsamps + i];
                 }
-                state[state_sub_idx + i_dt * nsamps + isamp] =
-                    (state[state_sub_idx + (i_dt - 1) * nsamps + isamp] *
+                state[buffer_offset + i_dt * nsamps + isamp] =
+                    (state[buffer_offset + (i_dt - 1) * nsamps + isamp] *
                          (static_cast<float>(dt_prev) + 1.0F) +
                      sum) /
                     (static_cast<float>(dt_cur) + 1.0F);
@@ -97,17 +96,16 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
                           SizeType /*waterfall_size*/,
                           float* __restrict state,
                           SizeType /*state_size*/) {
-    const auto& plan               = get_plan();
-    const auto& dt_grid_init       = plan.dt_grid[0];
-    const auto& state_sub_idx_init = plan.state_sub_idx[0];
-    const auto& nsamps             = plan.state_shape[0][4];
+    const auto& plan          = get_plan();
+    const auto& dt_grids_init = plan.dt_grids[0];
+    const auto& nsamps        = plan.state_shape[0][4];
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
-    shared(waterfall, state, dt_grid_init, state_sub_idx_init, nsamps)
+    shared(waterfall, state, dt_grids_init, nsamps)
 #endif
-    for (SizeType i_sub = 0; i_sub < dt_grid_init.size(); ++i_sub) {
-        const auto& dt_grid_sub   = dt_grid_init[i_sub];
-        const auto& state_sub_idx = state_sub_idx_init[i_sub];
+    for (SizeType i_sub = 0; i_sub < dt_grids_init.size(); ++i_sub) {
+        const auto& dt_grid_sub  = dt_grids_init[i_sub].dt_grid;
+        const auto buffer_offset = dt_grids_init[i_sub].sub_offset * nsamps;
         // Initialise state for [:, dt_init_min, dt_init_min:]
         const auto& dt_grid_sub_min = dt_grid_sub[0];
         for (SizeType isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
@@ -115,7 +113,7 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
             for (SizeType i = isamp - dt_grid_sub_min; i <= isamp; ++i) {
                 sum += waterfall[i_sub * nsamps + i];
             }
-            state[state_sub_idx + isamp] = sum;
+            state[buffer_offset + isamp] = sum;
         }
         // Initialise state for [:, dt_grid_init[i_dt], dt_grid_init[i_dt]:]
         for (SizeType i_dt = 1; i_dt < dt_grid_sub.size(); ++i_dt) {
@@ -126,8 +124,8 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
                 for (SizeType i = isamp - dt_cur; i < isamp - dt_prev; ++i) {
                     sum += waterfall[i_sub * nsamps + i];
                 }
-                state[state_sub_idx + i_dt * nsamps + isamp] =
-                    state[state_sub_idx + (i_dt - 1) * nsamps + isamp] + sum;
+                state[buffer_offset + i_dt * nsamps + isamp] =
+                    state[buffer_offset + (i_dt - 1) * nsamps + isamp] + sum;
             }
         }
     }
@@ -136,53 +134,34 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
 void FDMTCPU::execute_iter(const float* __restrict state_in,
                            float* __restrict state_out,
                            SizeType i_iter) {
-    const auto& plan               = get_plan();
-    const auto& nsamps             = plan.state_shape[i_iter][4];
-    const auto& coords_cur         = plan.coordinates[i_iter];
-    const auto& mappings_cur       = plan.mappings[i_iter];
-    const auto& coords_copy_cur    = plan.coordinates_to_copy[i_iter];
-    const auto& mappings_copy_cur  = plan.mappings_to_copy[i_iter];
-    const auto& state_sub_idx_cur  = plan.state_sub_idx[i_iter];
-    const auto& state_sub_idx_prev = plan.state_sub_idx[i_iter - 1];
+    const auto& plan            = get_plan();
+    const auto& coords_prev     = plan.coordinates[i_iter - 1];
+    const auto& coords_sum_cur  = plan.coordinates_to_sum[i_iter];
+    const auto& coords_copy_cur = plan.coordinates_to_copy[i_iter];
 
-#ifdef USE_OPENMP
-#pragma omp parallel for default(none)                                         \
-    shared(state_in, state_out, coords_cur, mappings_cur, state_sub_idx_cur,   \
-               state_sub_idx_prev, nsamps)
-#endif
-    for (SizeType i_coord = 0; i_coord < coords_cur.size(); ++i_coord) {
-        const auto& i_sub              = coords_cur[i_coord].first;
-        const auto& i_dt               = coords_cur[i_coord].second;
-        const auto& i_sub_tail         = mappings_cur[i_coord].tail.first;
-        const auto& i_dt_tail          = mappings_cur[i_coord].tail.second;
-        const auto& i_sub_head         = mappings_cur[i_coord].head.first;
-        const auto& i_dt_head          = mappings_cur[i_coord].head.second;
-        const auto& offset             = mappings_cur[i_coord].offset;
-        const auto& state_sub_idx      = state_sub_idx_cur[i_sub];
-        const auto& state_sub_idx_tail = state_sub_idx_prev[i_sub_tail];
-        const auto& state_sub_idx_head = state_sub_idx_prev[i_sub_head];
-
-        const float* tail = &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
-        const float* head = &state_in[state_sub_idx_head + i_dt_head * nsamps];
-        float* out        = &state_out[state_sub_idx + i_dt * nsamps];
-        dm_utils::add_offset_kernel(tail, nsamps, head, nsamps, out, nsamps,
-                                offset);
-    }
-#ifdef USE_OPENMP
-#pragma omp parallel for default(none)                                         \
-    shared(state_in, state_out, coords_copy_cur, mappings_copy_cur,            \
-               state_sub_idx_cur, state_sub_idx_prev, nsamps)
-#endif
-    for (SizeType i_coord = 0; i_coord < coords_copy_cur.size(); ++i_coord) {
-        const auto& i_sub              = coords_copy_cur[i_coord].first;
-        const auto& i_dt               = coords_copy_cur[i_coord].second;
-        const auto& i_sub_tail         = mappings_copy_cur[i_coord].tail.first;
-        const auto& i_dt_tail          = mappings_copy_cur[i_coord].tail.second;
-        const auto& state_sub_idx      = state_sub_idx_cur[i_sub];
-        const auto& state_sub_idx_tail = state_sub_idx_prev[i_sub_tail];
-
-        const float* tail = &state_in[state_sub_idx_tail + i_dt_tail * nsamps];
-        float* out        = &state_out[state_sub_idx + i_dt * nsamps];
-        dm_utils::copy_kernel(tail, nsamps, out, nsamps);
+#pragma omp parallel default(none)                                             \
+    shared(state_in, state_out, coords_prev, coords_sum_cur, coords_copy_cur)
+    {
+#pragma omp for nowait
+        for (SizeType i_coord = 0; i_coord < coords_sum_cur.size(); ++i_coord) {
+            const auto& coord      = coords_sum_cur[i_coord];
+            const auto& coord_tail = coords_prev[coord.i_coord_tail];
+            const auto& coord_head = coords_prev[coord.i_coord_head];
+            const float* tail      = &state_in[coord_tail.buffer_offset];
+            const float* head      = &state_in[coord_head.buffer_offset];
+            float* out             = &state_out[coord.buffer_offset];
+            dm_utils::add_offset_kernel(tail, coord_tail.nsamps, head,
+                                        coord_head.nsamps, out, coord.nsamps,
+                                        coord.offset);
+        }
+#pragma omp for
+        for (SizeType i_coord = 0; i_coord < coords_copy_cur.size();
+             ++i_coord) {
+            const auto& coord      = coords_copy_cur[i_coord];
+            const auto& coord_tail = coords_prev[coord.i_coord_tail];
+            const float* tail      = &state_in[coord_tail.buffer_offset];
+            float* out             = &state_out[coord.buffer_offset];
+            std::copy_n(tail, coord_tail.nsamps, out);
+        }
     }
 }

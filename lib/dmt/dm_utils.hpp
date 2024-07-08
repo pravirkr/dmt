@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <complex>
 #include <cstddef>
-#include <stdexcept>
 #include <vector>
 
 #include <dmt/dmt_types.hpp>
@@ -22,6 +21,7 @@ SizeType calculate_dt_sub(
 
 float get_dmconv(float f_min, float f_max, float tsamp);
 
+template <bool Debug = false>
 inline void add_offset_kernel(const float* __restrict arr1,
                               SizeType size_in1,
                               const float* __restrict arr2,
@@ -29,42 +29,27 @@ inline void add_offset_kernel(const float* __restrict arr1,
                               float* __restrict arr_out,
                               SizeType size_out,
                               SizeType offset) {
-    if (size_in1 != size_in2) {
-        throw std::runtime_error("Input sizes are not equal");
-    }
-    if (size_out < size_in1) {
-        throw std::runtime_error("Output size is less than input size");
-    }
-    if (offset >= size_in1) {
-        throw std::runtime_error("Offset is greater than input size");
+    if constexpr (Debug) {
+        if (size_in1 != size_in2) {
+            throw std::runtime_error("Input sizes are not equal");
+        }
+        if (size_out < size_in1) {
+            throw std::runtime_error("Output size is less than input size");
+        }
+        if (offset >= size_in1) {
+            throw std::runtime_error("Offset is greater than input size");
+        }
     }
     const SizeType nsum = size_in1 - offset;
-    // SizeType t_ind      = 0;
-
     std::copy_n(arr1, offset, arr_out);
-    // t_ind += offset;
-
 #pragma omp simd
     for (SizeType i = 0; i < nsum; ++i) {
         arr_out[offset + i] = arr1[offset + i] + arr2[i];
     }
-    // t_ind += nsum;
-
     const SizeType nrest = std::min(offset, size_out - size_in1);
     if (nrest > 0) {
         std::copy_n(arr2 + nsum, nrest, arr_out + size_in1);
-        // t_ind += nrest;
     }
-}
-
-inline void copy_kernel(const float* __restrict arr1,
-                        SizeType size_in,
-                        float* __restrict arr_out,
-                        SizeType size_out) {
-    if (size_out < size_in) {
-        throw std::runtime_error("Output size is less than input size");
-    }
-    std::copy_n(arr1, size_in, arr_out);
 }
 
 SizeType find_closest_index(const std::vector<SizeType>& arr_sorted,

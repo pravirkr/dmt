@@ -1,34 +1,27 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <numeric>
 #include <stdexcept>
+#include <sys/stat.h>
 #include <vector>
 
 #include <spdlog/common.h>
 #include <spdlog/spdlog.h>
 
 #include "dmt/dm_utils.hpp"
+#include "dmt/dmt_types.hpp"
 #include <dmt/fdmt_base.hpp>
 
-SizeType FDMTPlan::calculate_memory_usage() const {
+SizeType FDMTPlan::get_memory_usage() const {
     SizeType mem_use = 0;
     mem_use += df_top.size() * sizeof(float);
     mem_use += df_bot.size() * sizeof(float);
     mem_use += state_shape.size() * sizeof(StShapeType);
     for (const auto& coord : coordinates) {
-        mem_use += coord.size() * sizeof(FDMTCoordType);
+        mem_use += 2 * coord.size() * sizeof(FDMTCoord);
     }
-    for (const auto& mapping : mappings) {
-        mem_use += mapping.size() * sizeof(FDMTCoordMapping);
-    }
-    for (const auto& state_sub_idx : state_sub_idx) {
-        mem_use += state_sub_idx.size() * sizeof(SizeType);
-    }
-    for (const auto& dt_grid_iter : dt_grid) {
-        for (const auto& dt_grid : dt_grid_iter) {
-            mem_use += dt_grid.size() * sizeof(SizeType);
-        }
+    for (const auto& dt_grid_iter : dt_grids) {
+        mem_use += dt_grid_iter.size() * sizeof(FDMTSubDTGrid);
     }
     for (const auto& dt_grid : dt_grid_sub_top) {
         mem_use += dt_grid.size() * sizeof(SizeType);
@@ -37,21 +30,34 @@ SizeType FDMTPlan::calculate_memory_usage() const {
     return mem_use;
 }
 
-void FDMTPlan::print_summary() const {
-    spdlog::info("FDMT: Plan memory usage: {} bytes", calculate_memory_usage());
-    spdlog::info("FDMT: Plan details:");
-    const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
-        state_shape[0];
-    // spdlog::debug("FDMT: waterfall_size: {}, state_size: {}", waterfall_size,
-    //               state_size);
-    spdlog::debug("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}", 0,
-                  nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
+SizeType FDMTPlan::get_buffer_size() const {
+    auto max_elements = std::max_element(
+        state_shape.begin(), state_shape.end(),
+        [](const auto& a, const auto& b) { return a[5] < b[5]; });
+    return (*max_elements)[5];
+}
 
-    for (SizeType i_iter = 0; i_iter < state_shape.size(); ++i_iter) {
-        const auto& [nchans_l, ndt_min, ndt_max, nchans_ndt, nsamps_l] =
+void FDMTPlan::print_summary() const {
+    const auto mem_use_mb =
+        static_cast<float>(get_memory_usage()) / 1024.0F / 1024.0F;
+    const auto buffer_size = 2 * get_buffer_size();
+    const auto buffer_size_mb =
+        static_cast<float>(buffer_size) * sizeof(float) / 1024.0F / 1024.0F;
+    const auto niters = state_shape.size() - 1;
+    spdlog::info("FDMT: Plan memory usage: {:.3F} MB", mem_use_mb);
+    spdlog::info("FDMT: Plan buffer size: {} elements, {:.3F} MB", buffer_size,
+                 buffer_size_mb);
+    spdlog::info("FDMT: waterfall_size: ({}x{}), dmt_size: ({}x{})",
+                 state_shape[0][0], state_shape[0][4], state_shape[niters][3],
+                 state_shape[niters][4]);
+    spdlog::info("FDMT: Plan details: {ncoords} ({nchans}x"
+                 "[{ndt_min}..{ndt_max}]) x {nsamps}, nelements: {nelements}");
+    for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
+        const auto& [nchans, ndt_min, ndt_max, ncoords, nsamps, nelements] =
             state_shape[i_iter];
-        spdlog::info("FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}",
-                     i_iter, nchans_ndt, nchans_l, ndt_min, ndt_max, nsamps_l);
+        spdlog::info(
+            "FDMT: Iteration {}, dimensions: {} ({}x[{}..{}]) x {}, {}", i_iter,
+            ncoords, nchans, ndt_min, ndt_max, nsamps, nelements);
     }
 }
 
@@ -85,7 +91,7 @@ float FDMT::get_correction() const { return m_correction; }
 SizeType FDMT::get_niters() const { return m_niters; }
 const FDMTPlan& FDMT::get_plan() const { return m_fdmt_plan; }
 const DtGridType& FDMT::get_dt_grid_final() const {
-    return m_fdmt_plan.dt_grid[m_niters][0];
+    return m_fdmt_plan.dt_grids[m_niters][0].dt_grid;
 }
 std::vector<float> FDMT::get_dm_grid_final() const {
     const float dm_conv       = dm_utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
@@ -95,6 +101,10 @@ std::vector<float> FDMT::get_dm_grid_final() const {
         dt_grid_final.begin(), dt_grid_final.end(), dm_grid_final.begin(),
         [dm_conv](auto& dt) { return static_cast<float>(dt) * dm_conv; });
     return dm_grid_final;
+}
+SizeType FDMT::get_dmt_size() const {
+    const auto& plan = get_plan();
+    return plan.state_shape[m_niters][5];
 }
 
 // Setters
@@ -145,11 +155,9 @@ void FDMT::configure_fdmt_plan() {
     m_fdmt_plan.df_bot.resize(m_niters + 1);
     m_fdmt_plan.state_shape.resize(m_niters + 1);
     m_fdmt_plan.coordinates.resize(m_niters + 1);
+    m_fdmt_plan.coordinates_to_sum.resize(m_niters + 1);
     m_fdmt_plan.coordinates_to_copy.resize(m_niters + 1);
-    m_fdmt_plan.mappings.resize(m_niters + 1);
-    m_fdmt_plan.mappings_to_copy.resize(m_niters + 1);
-    m_fdmt_plan.state_sub_idx.resize(m_niters + 1);
-    m_fdmt_plan.dt_grid.resize(m_niters + 1);
+    m_fdmt_plan.dt_grids.resize(m_niters + 1);
     m_fdmt_plan.dt_grid_sub_top.resize(m_niters + 1);
     // For iteration 0
     make_fdmt_plan_iter0();
@@ -162,41 +170,42 @@ void FDMT::configure_fdmt_plan() {
 
 void FDMT::make_fdmt_plan_iter0() {
     // For iteration 0
-    float f_start, f_end;
-    DtGridType dt_grid_sub, nchans_ndt_size(m_nchans);
-    SizeType state_idx = 0;
-
-    m_fdmt_plan.state_sub_idx[0].resize(m_nchans);
-    m_fdmt_plan.dt_grid[0].resize(m_nchans);
+    const SizeType i_iter  = 0;
+    SizeType buffer_offset = 0;
+    SizeType sub_offset    = 0;
+    m_fdmt_plan.dt_grids[i_iter].resize(m_nchans);
     for (SizeType i_sub = 0; i_sub < m_nchans; ++i_sub) {
-        f_start     = m_df * static_cast<float>(i_sub) + m_f_min;
-        f_end       = f_start + m_df;
-        dt_grid_sub = calculate_dt_grid_sub(f_start, f_end);
+        const auto f_start = m_df * static_cast<float>(i_sub) + m_f_min;
+        const auto f_end   = f_start + m_df;
+        const auto dt_sub  = calculate_dt_grid_sub(f_start, f_end);
+        const auto ndt_sub = dt_sub.size();
 
-        FDMTCoordMapping coord_mapping;
-        for (SizeType i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
-            m_fdmt_plan.coordinates[0].emplace_back(i_sub, i_dt);
-            coord_mapping = {FDMTCoordType{SIZE_MAX, SIZE_MAX},
-                             FDMTCoordType{SIZE_MAX, SIZE_MAX}, SIZE_MAX};
-            m_fdmt_plan.mappings[0].emplace_back(coord_mapping);
+        for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
+            const auto coord_cur =
+                FDMTCoord{i_sub,    i_dt,     m_nsamps, buffer_offset,
+                          SIZE_MAX, SIZE_MAX, SIZE_MAX};
+            m_fdmt_plan.coordinates[i_iter].emplace_back(coord_cur);
+            buffer_offset += m_nsamps;
         }
-
-        m_fdmt_plan.state_sub_idx[0][i_sub] = state_idx;
-        m_fdmt_plan.dt_grid[0][i_sub]       = dt_grid_sub;
-        nchans_ndt_size[i_sub]              = dt_grid_sub.size();
-        state_idx += dt_grid_sub.size() * m_nsamps;
+        m_fdmt_plan.dt_grids[i_iter][i_sub] =
+            FDMTSubDTGrid{dt_sub, ndt_sub, sub_offset};
+        sub_offset += ndt_sub;
     }
-    m_fdmt_plan.df_top[0]      = m_df;
-    m_fdmt_plan.df_bot[0]      = m_df;
-    m_fdmt_plan.state_shape[0] = {
-        m_nchans,
-        *std::min_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
-        *std::max_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
-        std::accumulate(nchans_ndt_size.begin(), nchans_ndt_size.end(),
-                        static_cast<SizeType>(0)),
-        m_nsamps};
+    m_fdmt_plan.df_top[i_iter] = m_df;
+    m_fdmt_plan.df_bot[i_iter] = m_df;
+
+    const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
+        m_fdmt_plan.dt_grids[i_iter].begin(),
+        m_fdmt_plan.dt_grids[i_iter].end(),
+        [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
+    const auto ncoords = m_fdmt_plan.dt_grids[i_iter][m_nchans - 1].sub_offset +
+                         m_fdmt_plan.dt_grids[i_iter][m_nchans - 1].ndt;
+    m_fdmt_plan.state_shape[i_iter] = {m_nchans,        ndt_min_it->ndt,
+                                       ndt_max_it->ndt, ncoords,
+                                       m_nsamps,        ncoords * m_nsamps};
     // 0th iteration has no mappings
-    m_fdmt_plan.dt_grid_sub_top[0] = m_fdmt_plan.dt_grid[0][m_nchans - 1];
+    m_fdmt_plan.dt_grid_sub_top[i_iter] =
+        m_fdmt_plan.dt_grids[i_iter][m_nchans - 1].dt_grid;
 }
 
 void FDMT::make_fdmt_plan(SizeType i_iter) {
@@ -206,101 +215,122 @@ void FDMT::make_fdmt_plan(SizeType i_iter) {
     const auto& df_bot_prev          = m_fdmt_plan.df_bot[i_iter - 1];
     const auto& df_top_prev          = m_fdmt_plan.df_top[i_iter - 1];
     const auto& nchans_prev          = m_fdmt_plan.state_shape[i_iter - 1][0];
+    const auto& nsamps_prev          = m_fdmt_plan.state_shape[i_iter - 1][4];
     const auto& dt_grid_sub_top_prev = m_fdmt_plan.dt_grid_sub_top[i_iter - 1];
-    const auto& dt_grid_prev         = m_fdmt_plan.dt_grid[i_iter - 1];
+    const auto& dt_grids_prev        = m_fdmt_plan.dt_grids[i_iter - 1];
 
     const SizeType nchans_cur = nchans_prev / 2 + nchans_prev % 2;
     const bool do_copy = nchans_prev % 2 == 1; // true if nchans_prev is odd
     const float df_top = (do_copy) ? df_top_prev : df_top_prev + df_bot_prev;
     const float df_bot = df_bot_prev * 2;
+
+    // Calculate nsamps for the current iteration
+    const auto df_tmp = (nchans_cur == 1) ? df_top : df_bot;
+    const auto dt_max_iter =
+        calculate_dt_grid_sub(m_f_min, m_f_min + df_tmp).back();
+    if (dt_max_iter > m_dt_max) {
+        throw std::runtime_error("dt_max_iter is greater than dt_max");
+    }
+    const auto nsamps_iter = m_nsamps + dt_max_iter;
+
     DtGridType dt_grid_sub_top = dt_grid_sub_top_prev;
-
-    float f_start, f_end, f_mid, f_mid1, f_mid2;
-    DtGridType dt_grid_sub, nchans_ndt_size(nchans_cur);
-    SizeType i_sub_head, i_sub_tail, state_idx{0};
-
-    m_fdmt_plan.state_sub_idx[i_iter].resize(nchans_cur);
-    m_fdmt_plan.dt_grid[i_iter].resize(nchans_cur);
+    float f_end, f_mid;
+    DtGridType dt_sub;
+    SizeType buffer_offset = 0;
+    SizeType sub_offset    = 0;
+    m_fdmt_plan.dt_grids[i_iter].resize(nchans_cur);
     for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
-        i_sub_tail = 2 * i_sub;
-        i_sub_head = 2 * i_sub + 1;
-        f_start    = df_bot * static_cast<float>(i_sub) + m_f_min;
+        const auto& dt_grids_tail = dt_grids_prev[2 * i_sub];
+        const auto& dt_grids_head = dt_grids_prev[2 * i_sub + 1];
+        const auto f_start = df_bot * static_cast<float>(i_sub) + m_f_min;
         if (i_sub == nchans_cur - 1) {
             // For the top sub-band
             if (do_copy) {
-                f_end       = f_start + df_top * 2;
-                f_mid       = f_start + df_top;
-                dt_grid_sub = dt_grid_sub_top;
+                f_end  = f_start + df_top * 2;
+                f_mid  = f_start + df_top;
+                dt_sub = dt_grid_sub_top;
             } else {
                 f_end           = f_start + df_top;
                 f_mid           = f_start + df_bot / 2;
-                dt_grid_sub     = calculate_dt_grid_sub(f_start, f_end);
-                dt_grid_sub_top = dt_grid_sub;
+                dt_sub          = calculate_dt_grid_sub(f_start, f_end);
+                dt_grid_sub_top = dt_sub;
             }
         } else {
             // For the bottom sub-bands
-            f_end       = f_start + df_bot;
-            f_mid       = f_start + df_bot / 2;
-            dt_grid_sub = calculate_dt_grid_sub(f_start, f_end);
+            f_end  = f_start + df_bot;
+            f_mid  = f_start + df_bot / 2;
+            dt_sub = calculate_dt_grid_sub(f_start, f_end);
         }
-        f_mid1 = f_mid - m_correction;
-        f_mid2 = f_mid + m_correction;
+        const auto f_mid1  = f_mid - m_correction;
+        const auto f_mid2  = f_mid + m_correction;
+        const auto ndt_sub = dt_sub.size();
 
         // Populate the dt_plan mapping current dt grid to the previous dt grid
-        SizeType dt, dt_mid1, dt_mid2, dt_head, i_dt_head, i_dt_tail, offset;
-        FDMTCoordMapping coord_mapping;
-        for (SizeType i_dt = 0; i_dt < dt_grid_sub.size(); ++i_dt) {
+        for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             // dt ~= dt_tail (dt_mid) + dt_head
-            dt      = dt_grid_sub[i_dt];
-            dt_mid1 = static_cast<SizeType>(
+            const auto dt      = dt_sub[i_dt];
+            const auto dt_mid1 = static_cast<SizeType>(
                 std::round(static_cast<float>(dt) *
                            dm_utils::cff(f_start, f_mid1, f_start, f_end)));
-            dt_mid2 = static_cast<SizeType>(
+            const auto dt_mid2 = static_cast<SizeType>(
                 std::round(static_cast<float>(dt) *
                            dm_utils::cff(f_start, f_mid2, f_start, f_end)));
             // check dt_head is always >= 0, otherwise throw error
             if (dt_mid1 > dt || dt_mid2 > dt) {
                 throw std::runtime_error("Invalid dt_mid values");
             }
-            dt_head = dt - dt_mid2;
-            if (i_sub == nchans_cur - 1 && do_copy) {
-                i_dt_tail =
-                    dm_utils::find_closest_index(dt_grid_prev[i_sub_tail], dt);
-                m_fdmt_plan.coordinates_to_copy[i_iter].emplace_back(i_sub,
-                                                                     i_dt);
-                coord_mapping = {FDMTCoordType{SIZE_MAX, SIZE_MAX},
-                                 FDMTCoordType{i_sub_tail, i_dt_tail}, 0};
-                m_fdmt_plan.mappings_to_copy[i_iter].emplace_back(
-                    coord_mapping);
-            } else {
-                i_dt_head = dm_utils::find_closest_index(
-                    dt_grid_prev[i_sub_head], dt_head);
-                i_dt_tail = dm_utils::find_closest_index(
-                    dt_grid_prev[i_sub_tail], dt_mid1);
-                offset = dt_mid2;
-                if (offset >= m_nsamps) {
-                    throw std::runtime_error(
-                        "Offset is greater than input size");
-                }
-                m_fdmt_plan.coordinates[i_iter].emplace_back(i_sub, i_dt);
-                coord_mapping = {FDMTCoordType{i_sub_head, i_dt_head},
-                                 FDMTCoordType{i_sub_tail, i_dt_tail}, offset};
-                m_fdmt_plan.mappings[i_iter].emplace_back(coord_mapping);
+            if (dt_mid2 >= nsamps_prev) {
+                throw std::runtime_error("Offset is greater than input size");
             }
+            if (i_sub == nchans_cur - 1 && do_copy) {
+                const auto i_dt_tail =
+                    dm_utils::find_closest_index(dt_grids_tail.dt_grid, dt);
+                const auto coord_cur =
+                    FDMTCoord{i_sub,
+                              i_dt,
+                              nsamps_iter,
+                              buffer_offset,
+                              dt_grids_tail.sub_offset + i_dt_tail,
+                              SIZE_MAX,
+                              0};
+                m_fdmt_plan.coordinates[i_iter].emplace_back(coord_cur);
+                m_fdmt_plan.coordinates_to_copy[i_iter].emplace_back(coord_cur);
+            } else {
+                const auto dt_head   = dt - dt_mid2;
+                const auto i_dt_tail = dm_utils::find_closest_index(
+                    dt_grids_tail.dt_grid, dt_mid1);
+                const auto i_dt_head = dm_utils::find_closest_index(
+                    dt_grids_head.dt_grid, dt_head);
+                const auto coord_cur =
+                    FDMTCoord{i_sub,
+                              i_dt,
+                              nsamps_iter,
+                              buffer_offset,
+                              dt_grids_tail.sub_offset + i_dt_tail,
+                              dt_grids_head.sub_offset + i_dt_head,
+                              dt_mid2};
+                m_fdmt_plan.coordinates[i_iter].emplace_back(coord_cur);
+                m_fdmt_plan.coordinates_to_sum[i_iter].emplace_back(coord_cur);
+            }
+            buffer_offset += nsamps_iter;
         }
-        m_fdmt_plan.state_sub_idx[i_iter][i_sub] = state_idx;
-        m_fdmt_plan.dt_grid[i_iter][i_sub]       = dt_grid_sub;
-        nchans_ndt_size[i_sub]                   = dt_grid_sub.size();
-        state_idx += dt_grid_sub.size() * m_nsamps;
+        m_fdmt_plan.dt_grids[i_iter][i_sub] =
+            FDMTSubDTGrid{dt_sub, ndt_sub, sub_offset};
+        sub_offset += ndt_sub;
     }
-    m_fdmt_plan.df_top[i_iter]      = df_top;
-    m_fdmt_plan.df_bot[i_iter]      = df_bot;
-    m_fdmt_plan.state_shape[i_iter] = {
-        nchans_cur,
-        *std::min_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
-        *std::max_element(nchans_ndt_size.begin(), nchans_ndt_size.end()),
-        std::accumulate(nchans_ndt_size.begin(), nchans_ndt_size.end(),
-                        static_cast<SizeType>(0)),
-        m_nsamps};
+    m_fdmt_plan.df_top[i_iter] = df_top;
+    m_fdmt_plan.df_bot[i_iter] = df_bot;
+
+    // state shape summary
+    const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
+        m_fdmt_plan.dt_grids[i_iter].begin(),
+        m_fdmt_plan.dt_grids[i_iter].end(),
+        [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
+    const auto ncoords =
+        m_fdmt_plan.dt_grids[i_iter][nchans_cur - 1].sub_offset +
+        m_fdmt_plan.dt_grids[i_iter][nchans_cur - 1].ndt;
+    m_fdmt_plan.state_shape[i_iter]     = {nchans_cur,      ndt_min_it->ndt,
+                                           ndt_max_it->ndt, ncoords,
+                                           nsamps_iter,     ncoords * nsamps_iter};
     m_fdmt_plan.dt_grid_sub_top[i_iter] = dt_grid_sub_top;
 }

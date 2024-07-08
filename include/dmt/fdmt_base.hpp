@@ -2,20 +2,28 @@
 
 #include <array>
 #include <cstddef>
-#include <utility>
 #include <vector>
 
 #include <dmt/dmt_types.hpp>
 
 using DtGridType = std::vector<SizeType>;
-// state shape: nchans, ndt_min, ndt_max, ncoords, nsamps
-using StShapeType   = std::array<SizeType, 5>;
-using FDMTCoordType = std::pair<SizeType, SizeType>; // i_sub, i_dt
+// state shape: nchans, ndt_min, ndt_max, ncoords, nsamps, nelements
+using StShapeType = std::array<SizeType, 6>;
 
-struct FDMTCoordMapping {
-    FDMTCoordType head;
-    FDMTCoordType tail;
-    SizeType offset = 0;
+struct FDMTCoord {
+    SizeType i_sub;
+    SizeType i_dt;
+    SizeType nsamps;
+    SizeType buffer_offset;
+    SizeType i_coord_tail;
+    SizeType i_coord_head;
+    SizeType offset;
+};
+
+struct FDMTSubDTGrid {
+    DtGridType dt_grid;
+    SizeType ndt;
+    SizeType sub_offset;
 };
 
 struct FDMTPlan {
@@ -23,16 +31,15 @@ struct FDMTPlan {
     std::vector<float> df_bot;
     std::vector<StShapeType> state_shape;
 
-    std::vector<std::vector<FDMTCoordType>> coordinates;
-    std::vector<std::vector<FDMTCoordType>> coordinates_to_copy;
-    std::vector<std::vector<FDMTCoordMapping>> mappings;
-    std::vector<std::vector<FDMTCoordMapping>> mappings_to_copy;
-    std::vector<std::vector<SizeType>> state_sub_idx;
-    std::vector<std::vector<DtGridType>> dt_grid;
+    std::vector<std::vector<FDMTCoord>> coordinates;
+    std::vector<std::vector<FDMTCoord>> coordinates_to_sum;
+    std::vector<std::vector<FDMTCoord>> coordinates_to_copy;
+    std::vector<std::vector<FDMTSubDTGrid>> dt_grids;
     // Temp array to remember the top subband dt grid
     std::vector<DtGridType> dt_grid_sub_top;
 
-    SizeType calculate_memory_usage() const;
+    SizeType get_memory_usage() const;
+    SizeType get_buffer_size() const;
     void print_summary() const;
 };
 
@@ -57,6 +64,7 @@ public:
     const FDMTPlan& get_plan() const;
     const DtGridType& get_dt_grid_final() const;
     std::vector<float> get_dm_grid_final() const;
+    SizeType get_dmt_size() const;
     static void set_log_level(int level);
     virtual void execute(const float* __restrict waterfall,
                          SizeType waterfall_size,
