@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <fftw3.h>
 
-#include <dmt/cfdmt_base.hpp>
+#include <dmt/dmt_plans.hpp>
 #include <dmt/dmt_types.hpp>
 #include <dmt/fdmt_cpu.hpp>
 

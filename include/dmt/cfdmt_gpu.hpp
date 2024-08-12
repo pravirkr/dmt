@@ -1,9 +1,10 @@
 #pragma once
 
 #include <string>
+#include <thrust/complex.h>
 #include <thrust/device_vector.h>
 
-#include <dmt/cfdmt_base.hpp>
+#include <dmt/dmt_plans.hpp>
 #include <dmt/dmt_types.hpp>
 #include <dmt/fdmt_gpu.hpp>
 

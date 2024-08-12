@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <complex>
-#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 
@@ -10,8 +9,6 @@
 #include <fftw3.h>
 
 #include "dmt/baseband_utils.hpp"
-#include "dmt/dm_utils.hpp"
-#include <dmt/cfdmt_base.hpp>
 #include <dmt/cfdmt_cpu.hpp>
 
 CohFDMTCPU::CohFDMTCPU(float f_center,

@@ -1,12 +1,13 @@
-#include "dmt/dmt_types.hpp"
 #include <utility>
 
 #ifdef USE_OPENMP
 #include <omp.h>
 #endif
 
+#include <spdlog/spdlog.h>
+
 #include "dmt/dm_utils.hpp"
-#include <dmt/fdmt_base.hpp>
+#include "dmt/dmt_types.hpp"
 #include <dmt/fdmt_cpu.hpp>
 
 FDMTCPU::FDMTCPU(float f_min,
@@ -17,10 +18,9 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_max,
                  SizeType dt_step,
                  SizeType dt_min)
-    : FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
+    : m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
     // Allocate memory for the state buffers
-    const auto& plan      = get_plan();
-    const auto state_size = plan.get_buffer_size();
+    const auto state_size = m_plan.get_buffer_size();
     m_state_in.resize(state_size, 0.0F);
     m_state_out.resize(state_size, 0.0F);
 }
@@ -31,6 +31,8 @@ void FDMTCPU::set_num_threads(int nthreads) {
 #endif
 }
 
+void FDMTCPU::set_log_level(int level) { FDMTPlan::set_log_level(level); }
+
 void FDMTCPU::execute(const float* __restrict waterfall,
                       SizeType waterfall_size,
                       float* __restrict dmt,
@@ -40,7 +42,7 @@ void FDMTCPU::execute(const float* __restrict waterfall,
     float* state_out_ptr = m_state_out.data();
 
     initialise(waterfall, waterfall_size, state_in_ptr, m_state_in.size());
-    const auto niters = get_niters();
+    const auto niters = m_plan.get_niters();
     for (SizeType i_iter = 1; i_iter < niters; ++i_iter) {
         execute_iter(state_in_ptr, state_out_ptr, i_iter);
         std::swap(state_in_ptr, state_out_ptr);
@@ -53,9 +55,9 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
                          SizeType /*waterfall_size*/,
                          float* __restrict state,
                          SizeType /*state_size*/) {
-    const auto& plan          = get_plan();
-    const auto& dt_grids_init = plan.dt_grids[0];
-    const auto& nsamps        = plan.state_shape[0][4];
+    const auto& plan_c        = m_plan.get_container();
+    const auto& dt_grids_init = plan_c.dt_grids[0];
+    const auto& nsamps        = plan_c.state_shape[0][4];
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
     shared(waterfall, state, dt_grids_init, nsamps)
@@ -96,9 +98,9 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
                           SizeType /*waterfall_size*/,
                           float* __restrict state,
                           SizeType /*state_size*/) {
-    const auto& plan          = get_plan();
-    const auto& dt_grids_init = plan.dt_grids[0];
-    const auto& nsamps        = plan.state_shape[0][4];
+    const auto& plan_c        = m_plan.get_container();
+    const auto& dt_grids_init = plan_c.dt_grids[0];
+    const auto& nsamps        = plan_c.state_shape[0][4];
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
     shared(waterfall, state, dt_grids_init, nsamps)
@@ -134,10 +136,10 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
 void FDMTCPU::execute_iter(const float* __restrict state_in,
                            float* __restrict state_out,
                            SizeType i_iter) {
-    const auto& plan            = get_plan();
-    const auto& coords_prev     = plan.coordinates[i_iter - 1];
-    const auto& coords_sum_cur  = plan.coordinates_to_sum[i_iter];
-    const auto& coords_copy_cur = plan.coordinates_to_copy[i_iter];
+    const auto& plan_c          = m_plan.get_container();
+    const auto& coords_prev     = plan_c.coordinates[i_iter - 1];
+    const auto& coords_sum_cur  = plan_c.coordinates_to_sum[i_iter];
+    const auto& coords_copy_cur = plan_c.coordinates_to_copy[i_iter];
 
 #pragma omp parallel default(none)                                             \
     shared(state_in, state_out, coords_prev, coords_sum_cur, coords_copy_cur)
@@ -164,4 +166,19 @@ void FDMTCPU::execute_iter(const float* __restrict state_in,
             std::copy_n(tail, coord_tail.nsamps, out);
         }
     }
+}
+
+void FDMTCPU::check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
+    const auto nchans = m_plan.get_nchans();
+    const auto nsamps = m_plan.get_nsamps();
+    if (waterfall_size != nchans * nsamps) {
+        throw std::invalid_argument("Invalid size of waterfall");
+    }
+    const auto& plan_c = m_plan.get_container();
+    const auto niters  = m_plan.get_niters();
+    if (dmt_size !=
+        plan_c.state_shape[niters][3] * plan_c.state_shape[niters][4]) {
+        throw std::invalid_argument("Invalid size of dmt");
+    }
+    spdlog::debug("FDMT: Input dimensions: {}x{}", nchans, nsamps);
 }

@@ -2,36 +2,10 @@
 
 #include <thrust/device_vector.h>
 
-#include <dmt/fdmt_base.hpp>
+#include <dmt/dmt_plans.hpp>
+#include <dmt/dmt_plans_gpu.hpp>
 
-struct FDMTPlanD {
-    // i = i_iter
-    thrust::device_vector<int> nsubs_d;
-    thrust::device_vector<int> nsamps_d;
-    thrust::device_vector<int> ncoords_d;
-    thrust::device_vector<int> ncoords_to_copy_d;
-    thrust::device_vector<int> subs_iter_idx_d;
-    thrust::device_vector<int> coords_iter_idx_d;
-    thrust::device_vector<int> coords_to_copy_iter_idx_d;
-    thrust::device_vector<int> mappings_iter_idx_d;
-    thrust::device_vector<int> mappings_to_copy_iter_idx_d;
-    // i, i+1 = coords_iter_idx_d[i_iter] + i_coord
-    thrust::device_vector<int> coordinates_d;
-    thrust::device_vector<int> coordinates_to_copy_d;
-    // i, i+1, ... i+4 = mappings_iter_idx_d[i_iter] + i_coord
-    thrust::device_vector<int> mappings_d;
-    thrust::device_vector<int> mappings_to_copy_d;
-    // i = subs_iter_idx_d[i_iter] + isub
-    thrust::device_vector<int> state_sub_idx_d;
-
-    // i = i_sub (only for i_iter = 0)
-    thrust::device_vector<int> ndt_grid_init_d;
-    thrust::device_vector<int> dt_grid_init_sub_idx_d;
-    // i = dt_grid_init_sub_idx_d[i_sub] + i_dt
-    thrust::device_vector<int> dt_grid_init_d;
-};
-
-class FDMTGPU : public FDMT {
+class FDMTGPU {
 public:
     FDMTGPU(float f_min,
             float f_max,
@@ -41,15 +15,24 @@ public:
             SizeType dt_max,
             SizeType dt_step = 1,
             SizeType dt_min  = 0);
+
+    FDMTGPU(const FDMTGPU&)            = delete;
+    FDMTGPU& operator=(const FDMTGPU&) = delete;
+    FDMTGPU(FDMTGPU&&)                 = delete;
+    FDMTGPU& operator=(FDMTGPU&&)      = delete;
+    ~FDMTGPU()                         = default;
+
+    static void set_log_level(int level);
+
     void execute(const float* __restrict waterfall,
                  SizeType waterfall_size,
                  float* __restrict dmt,
-                 SizeType dmt_size) override;
+                 SizeType dmt_size);
 
     void initialise(const float* __restrict waterfall,
                     SizeType waterfall_size,
                     float* __restrict state,
-                    SizeType state_size) override;
+                    SizeType state_size);
 
     void execute(const float* __restrict waterfall,
                  SizeType waterfall_size,
@@ -64,13 +47,13 @@ public:
                     bool device_flags);
 
 private:
+    FDMTPlan m_plan;
+    FDMTPlanD m_plan_d;
+    // State buffers
     thrust::device_vector<float> m_state_in_d;
     thrust::device_vector<float> m_state_out_d;
 
-    FDMTPlanD m_fdmt_plan_d;
-
-    static void transfer_plan_to_device(const FDMTPlan& plan,
-                                        FDMTPlanD& plan_d);
+    void transfer_plan_to_device();
     void initialise_device(const float* __restrict waterfall,
                            float* __restrict state);
 

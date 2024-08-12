@@ -1,8 +1,8 @@
 #pragma once
 
-#include <dmt/ddmt_base.hpp>
+#include <dmt/dmt_plans.hpp>
 
-class DDMTCPU : public DDMT {
+class DDMTCPU {
 public:
     DDMTCPU(float f_min,
             float f_max,
@@ -16,16 +16,18 @@ public:
             float f_max,
             SizeType nchans,
             float tsamp,
-            const float* dm_arr,
-            SizeType dm_count);
+            const std::vector<float>& dm_arr);
+
+    const DDMTPlan& get_plan() const;
 
     static void set_num_threads(int nthreads);
     void execute(const float* __restrict waterfall,
                  SizeType waterfall_size,
                  float* __restrict dmt,
-                 SizeType dmt_size) override;
+                 SizeType dmt_size);
 
 private:
+    DDMTPlan m_plan;
     static void execute_dedisp(const float* __restrict__ d_in,
                                size_t in_chan_stride,
                                size_t in_samp_stride,

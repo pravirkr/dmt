@@ -1,4 +1,3 @@
-#include "dmt/ddmt_base.hpp"
 #include <cstddef>
 #include <spdlog/spdlog.h>
 #ifdef USE_OPENMP
@@ -14,16 +13,16 @@ DDMTCPU::DDMTCPU(float f_min,
                  float dm_max,
                  float dm_step,
                  float dm_min)
-    : DDMT(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min) {}
+    : m_plan(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min) {}
 
 DDMTCPU::DDMTCPU(float f_min,
                  float f_max,
                  SizeType nchans,
                  float tsamp,
-                 const float* dm_arr,
-                 SizeType dm_count)
-    : DDMT(f_min, f_max, nchans, tsamp, dm_arr, dm_count) {}
+                 const std::vector<float>& dm_arr)
+    : m_plan(f_min, f_max, nchans, tsamp, dm_arr) {}
 
+const DDMTPlan& DDMTCPU::get_plan() const { return m_plan; }
 void DDMTCPU::set_num_threads(int nthreads) {
 #ifdef USE_OPENMP
     omp_set_num_threads(nthreads);
@@ -34,17 +33,17 @@ void DDMTCPU::execute(const float* __restrict waterfall,
                       SizeType waterfall_size,
                       float* __restrict dmt,
                       SizeType dmt_size) {
-    const auto& plan           = get_plan();
-    const auto nchans          = plan.nchans;
+    const auto& plan_c         = m_plan.get_container();
+    const auto nchans          = plan_c.nchans;
     const auto nsamps          = waterfall_size / nchans;
-    const auto max_delay       = plan.delay_table.back();
+    const auto max_delay       = plan_c.delay_table.back();
     const auto nsamps_reduced  = nsamps - max_delay;
     const auto out_dm_stride   = nsamps_reduced;
     const auto out_samp_stride = 1;
     const auto in_chan_stride  = nsamps;
     const auto in_samp_stride  = 1;
-    const auto* delay_table    = plan.delay_table.data();
-    const auto dm_count        = plan.dm_arr.size();
+    const auto* delay_table    = plan_c.delay_table.data();
+    const auto dm_count        = plan_c.dm_arr.size();
 
     if (dmt_size != dm_count * nsamps_reduced) {
         spdlog::error("Output buffer size mismatch: expected {}, got {}",
