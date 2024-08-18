@@ -30,7 +30,7 @@ public:
     CohFDMTCPU& operator=(CohFDMTCPU&&)      = delete;
     ~CohFDMTCPU();
 
-    CohFDMTPlan get_plan() const;
+    const CohFDMTPlan& get_plan() const;
     SizeType get_dmt_size() const;
     static void set_num_threads(int nthreads);
     void execute(const uint8_t* __restrict data_in,
@@ -60,12 +60,12 @@ private:
                      std::string& in_order,
                      ComplexType* __restrict data_p1,
                      ComplexType* __restrict data_p2,
-                     SizeType out_size);
+                     SizeType out_size) const;
     void unpad_detect(const ComplexType* __restrict fft_p1,
                       const ComplexType* __restrict fft_p2,
                       SizeType in_size,
                       float* __restrict intensity,
-                      SizeType out_size);
+                      SizeType out_size) const;
 
     static void swap_spectrum_halves(ComplexType* __restrict data_in,
                                      SizeType nz,

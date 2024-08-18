@@ -33,6 +33,8 @@ void FDMTCPU::set_num_threads(int nthreads) {
 
 void FDMTCPU::set_log_level(int level) { FDMTPlan::set_log_level(level); }
 
+const FDMTPlan& FDMTCPU::get_plan() const { return m_plan; }
+
 void FDMTCPU::execute(const float* __restrict waterfall,
                       SizeType waterfall_size,
                       float* __restrict dmt,
@@ -57,16 +59,16 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
                          SizeType /*state_size*/) {
     const auto& plan_c        = m_plan.get_container();
     const auto& dt_grids_init = plan_c.dt_grids[0];
-    const auto& nsamps        = plan_c.state_shape[0][4];
+    const auto nsamps         = plan_c.state_shape[0].nsamps;
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
     shared(waterfall, state, dt_grids_init, nsamps)
 #endif
     for (SizeType i_sub = 0; i_sub < dt_grids_init.size(); ++i_sub) {
         const auto& dt_grid_sub  = dt_grids_init[i_sub].dt_grid;
-        const auto buffer_offset = dt_grids_init[i_sub].sub_offset * nsamps;
+        const auto buffer_offset = dt_grids_init[i_sub].grid_offset * nsamps;
         // Initialise state for [:, dt_init_min, dt_init_min:]
-        const auto& dt_grid_sub_min = dt_grid_sub[0];
+        const auto dt_grid_sub_min = dt_grid_sub[0];
         for (SizeType isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
             float sum = 0.0F;
             for (SizeType i = isamp - dt_grid_sub_min; i <= isamp; ++i) {
@@ -100,14 +102,14 @@ void FDMTCPU::initialise2(const float* __restrict waterfall,
                           SizeType /*state_size*/) {
     const auto& plan_c        = m_plan.get_container();
     const auto& dt_grids_init = plan_c.dt_grids[0];
-    const auto& nsamps        = plan_c.state_shape[0][4];
+    const auto nsamps         = plan_c.state_shape[0].nsamps;
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
     shared(waterfall, state, dt_grids_init, nsamps)
 #endif
     for (SizeType i_sub = 0; i_sub < dt_grids_init.size(); ++i_sub) {
         const auto& dt_grid_sub  = dt_grids_init[i_sub].dt_grid;
-        const auto buffer_offset = dt_grids_init[i_sub].sub_offset * nsamps;
+        const auto buffer_offset = dt_grids_init[i_sub].grid_offset * nsamps;
         // Initialise state for [:, dt_init_min, dt_init_min:]
         const auto& dt_grid_sub_min = dt_grid_sub[0];
         for (SizeType isamp = dt_grid_sub_min; isamp < nsamps; ++isamp) {
@@ -174,10 +176,7 @@ void FDMTCPU::check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
     if (waterfall_size != nchans * nsamps) {
         throw std::invalid_argument("Invalid size of waterfall");
     }
-    const auto& plan_c = m_plan.get_container();
-    const auto niters  = m_plan.get_niters();
-    if (dmt_size !=
-        plan_c.state_shape[niters][3] * plan_c.state_shape[niters][4]) {
+    if (dmt_size != m_plan.get_dmt_size()) {
         throw std::invalid_argument("Invalid size of dmt");
     }
     spdlog::debug("FDMT: Input dimensions: {}x{}", nchans, nsamps);

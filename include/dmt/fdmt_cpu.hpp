@@ -24,7 +24,7 @@ public:
     static void set_num_threads(int nthreads);
     static void set_log_level(int level);
 
-    FDMTPlan& get_plan() const;
+    const FDMTPlan& get_plan() const;
 
     void execute(const float* __restrict waterfall,
                  SizeType waterfall_size,

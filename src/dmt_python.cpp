@@ -20,13 +20,14 @@ PYBIND11_MODULE(libdmt, mod) {
                     nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude);
                 return std::make_tuple(as_pyarray_ref(arr), nsamps_dispersed);
             });
+    PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords, nsamps,
+                         nelements);
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buffer_offset,
                          i_coord_tail, i_coord_head, offset);
-
     py::class_<FDMTSubDTGrid>(mod, "FDMTSubDTGrid")
-        .def_readonly("dt_grid", &FDMTSubDTGrid::dt_grid)
-        .def_readonly("ndt", &FDMTSubDTGrid::ndt)
-        .def_readonly("sub_offset", &FDMTSubDTGrid::sub_offset);
+        .def_property_readonly("dt_grid", &FDMTSubDTGrid::dt_grid)
+        .def_property_readonly("ndt", &FDMTSubDTGrid::ndt)
+        .def_property_readonly("grid_offset", &FDMTSubDTGrid::grid_offset);
     py::class_<FDMTPlanContainer>(mod, "FDMTPlanContainer")
         .def_property_readonly("df_top", &FDMTPlanContainer::df_top)
         .def_property_readonly("df_bot", &FDMTPlanContainer::df_bot)
@@ -111,31 +112,7 @@ PYBIND11_MODULE(libdmt, mod) {
              py::arg("fcenter"), py::arg("bwsub"), py::arg("nsub"),
              py::arg("tbin"), py::arg("nbin"), py::arg("nfft"), py::arg("t_p"),
              py::arg("dm_max"), py::arg("dm_min") = 0.0F,
-             py::arg("noverlap_inp") = 8192)
-        .def_property_readonly("fcenter", &CohFDMTPlan::get_fcenter)
-        .def_property_readonly("bwsub", &CohFDMTPlan::get_bwsub)
-        .def_property_readonly("nsub", &CohFDMTPlan::get_nsub)
-        .def_property_readonly("tbin", &CohFDMTPlan::get_tbin)
-        .def_property_readonly("nbin", &CohFDMTPlan::get_nbin)
-        .def_property_readonly("nfft", &CohFDMTPlan::get_nfft)
-        .def_property_readonly("t_p", &CohFDMTPlan::get_t_p)
-        .def_property_readonly("dm_max", &CohFDMTPlan::get_dm_max)
-        .def_property_readonly("dm_min", &CohFDMTPlan::get_dm_min)
-        .def_property_readonly("noverlap_inp", &CohFDMTPlan::get_noverlap_inp)
-        .def_property_readonly("bw", &CohFDMTPlan::get_bw)
-        .def_property_readonly("f_min", &CohFDMTPlan::get_f_min)
-        .def_property_readonly("f_max", &CohFDMTPlan::get_f_max)
-        .def_property_readonly("n_p", &CohFDMTPlan::get_n_p)
-        .def_property_readonly("nchan", &CohFDMTPlan::get_nchan)
-        .def_property_readonly("dm_grid_coh", &CohFDMTPlan::get_dm_grid_coh)
-        .def_property_readonly("dm_grid_final", &CohFDMTPlan::get_dm_grid_final)
-        .def_property_readonly("noverlap", &CohFDMTPlan::get_noverlap)
-        .def_property_readonly("nsamps", &CohFDMTPlan::get_nsamp)
-        .def_property_readonly("mbin", &CohFDMTPlan::get_mbin)
-        .def_property_readonly("mchan", &CohFDMTPlan::get_mchan)
-        .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
-        .def_property_readonly("tsamp", &CohFDMTPlan::get_tsamp)
-        .def_property_readonly("dt_max", &CohFDMTPlan::get_dt_max);
+             py::arg("noverlap_inp") = 8192);
 
     py::class_<DDMTPlan>(mod, "DDMTPlan")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
@@ -144,11 +121,13 @@ PYBIND11_MODULE(libdmt, mod) {
              py::arg("dm_min") = 0)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr) {
-            return new DDMTPlan(
-                f_min, f_max, nchans, tsamp,
-                std::vector<float>(dm_arr.data(),
-                                   dm_arr.data() + dm_arr.size()));
-        }))
+                 return DDMTPlan(
+                     f_min, f_max, nchans, tsamp,
+                     std::vector<float>(dm_arr.data(),
+                                        dm_arr.data() + dm_arr.size()));
+             }),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("tsamp"), py::arg("dm_arr"))
         .def_property_readonly("f_min", &DDMTPlan::get_f_min)
         .def_property_readonly("f_max", &DDMTPlan::get_f_max)
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
@@ -172,8 +151,8 @@ PYBIND11_MODULE(libdmt, mod) {
                  const auto& plan_c = plan.get_container();
                  const auto niters  = plan.get_niters();
                  py::array_t<float, py::array::c_style> dmt(
-                     {plan_c.state_shape[niters][3],
-                      plan_c.state_shape[niters][4]});
+                     {plan_c.state_shape[niters].ncoords,
+                      plan_c.state_shape[niters].nsamps});
                  fdmt.execute(waterfall.data(), waterfall.size(),
                               dmt.mutable_data(), dmt.size());
                  return dmt;
@@ -184,7 +163,8 @@ PYBIND11_MODULE(libdmt, mod) {
                  const auto& plan   = fdmt.get_plan();
                  const auto& plan_c = plan.get_container();
                  py::array_t<float, py::array::c_style> state(
-                     {plan_c.state_shape[0][3], plan_c.state_shape[0][4]});
+                     {plan_c.state_shape[0].ncoords,
+                      plan_c.state_shape[0].nsamps});
                  std::fill(state.mutable_data(),
                            state.mutable_data() + state.size(), 0.0F);
                  fdmt.initialise(waterfall.data(), waterfall.size(),
@@ -198,11 +178,13 @@ PYBIND11_MODULE(libdmt, mod) {
              py::arg("dm_min") = 0)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr) {
-            return new DDMTCPU(
-                f_min, f_max, nchans, tsamp,
-                std::vector<float>(dm_arr.data(),
-                                   dm_arr.data() + dm_arr.size()));
-        }))
+                 return DDMTCPU(
+                     f_min, f_max, nchans, tsamp,
+                     std::vector<float>(dm_arr.data(),
+                                        dm_arr.data() + dm_arr.size()));
+             }),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("tsamp"), py::arg("dm_arr"))
         .def_static("set_num_threads", &DDMTCPU::set_num_threads,
                     py::arg("nthreads"))
         .def("execute",

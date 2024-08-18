@@ -9,6 +9,7 @@
 #include <fftw3.h>
 
 #include "dmt/baseband_utils.hpp"
+#include "dmt/dm_utils.hpp"
 #include <dmt/cfdmt_cpu.hpp>
 
 CohFDMTCPU::CohFDMTCPU(float f_center,
@@ -39,10 +40,11 @@ CohFDMTCPU::~CohFDMTCPU() {
     fftwf_destroy_plan(m_fft_plan_bw);
 }
 
-CohFDMTPlan CohFDMTCPU::get_plan() const { return m_plan; }
+const CohFDMTPlan& CohFDMTCPU::get_plan() const { return m_plan; }
 
 SizeType CohFDMTCPU::get_dmt_size() const {
-    return m_plan.dm_grid_coh.size() * m_plan.dt_max * m_plan.msamp;
+    const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
+    return dm_grid_coh.size() * m_plan.dt_max * m_plan.msamp;
 }
 
 void CohFDMTCPU::set_num_threads(int nthreads) {
@@ -124,23 +126,25 @@ void CohFDMTCPU::initialise() {
     m_unpacked_buffer_p2.resize(m_plan.nfft * m_plan.nsub * m_plan.nbin);
     m_fftdelay_buffer_p1.resize(m_plan.nfft * m_plan.nsub * m_plan.nbin);
     m_fftdelay_buffer_p2.resize(m_plan.nfft * m_plan.nsub * m_plan.nbin);
-    // Compute the chirp table
+    m_intensity_buffer.resize(m_plan.nsub * m_plan.nchan * m_plan.msamp);
     m_chirp_table.resize(m_plan.dm_grid_coh.size() * m_plan.nsub * m_plan.nbin);
+    // Compute the chirp table
     dm_utils::compute_chirp(m_chirp_table.data(), m_chirp_table.size(),
                             m_plan.dm_grid_coh.data(),
                             m_plan.dm_grid_coh.size(), m_plan.fcenter,
                             m_plan.bw, m_plan.nbin, m_plan.nsub, m_plan.nchan);
-    // Generate FFT plan (batch in-place forward FFT)
+
+    // Generate FFT plan (batch in-place forward and backward FFT)
     const std::array<int, 1> fft_size_fw = {static_cast<int>(m_plan.nbin)};
-    m_fft_plan_fw                        = fftwf_plan_many_dft(
+    const std::array<int, 1> fft_size_bw = {static_cast<int>(m_plan.mbin)};
+
+    m_fft_plan_fw = fftwf_plan_many_dft(
         1, fft_size_fw.data(), static_cast<int>(m_plan.nfft * m_plan.nsub),
         reinterpret_cast<fftwf_complex*>(m_unpacked_buffer_p1.data()), nullptr,
         1, static_cast<int>(m_plan.nbin),
         reinterpret_cast<fftwf_complex*>(m_unpacked_buffer_p1.data()), nullptr,
         1, static_cast<int>(m_plan.nbin), FFTW_FORWARD, FFTW_ESTIMATE);
-    // Generate FFT plan (batch in-place backward FFT)
-    const std::array<int, 1> fft_size_bw = {static_cast<int>(m_plan.mbin)};
-    m_fft_plan_bw                        = fftwf_plan_many_dft(
+    m_fft_plan_bw = fftwf_plan_many_dft(
         1, fft_size_bw.data(),
         static_cast<int>(m_plan.nfft * m_plan.nsub * m_plan.nchan),
         reinterpret_cast<fftwf_complex*>(m_fftdelay_buffer_p1.data()), nullptr,
@@ -160,7 +164,7 @@ void CohFDMTCPU::unpack_init(const uint8_t* __restrict data_in,
                              std::string& in_order,
                              ComplexType* __restrict data_p1,
                              ComplexType* __restrict data_p2,
-                             SizeType out_size) {
+                             SizeType out_size) const {
     DataOrder order = string_to_data_order(in_order);
     if (order == DataOrder::kFTPRI) {
         DataUnpacker<DataOrder::kFTPRI> unpacker(m_plan.nsub, m_plan.nbin,
@@ -183,7 +187,7 @@ void CohFDMTCPU::unpad_detect(const ComplexType* __restrict fft_p1,
                               const ComplexType* __restrict fft_p2,
                               SizeType in_size,
                               float* __restrict intensity,
-                              SizeType out_size) {
+                              SizeType out_size) const {
     if (in_size != m_plan.nfft * m_plan.nsub * m_plan.nbin) {
         throw std::runtime_error("Invalid input size");
     }
