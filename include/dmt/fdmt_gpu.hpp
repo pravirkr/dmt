@@ -23,6 +23,7 @@ public:
     ~FDMTGPU()                         = default;
 
     static void set_log_level(int level);
+    const FDMTPlan& get_plan() const;
 
     void execute(const float* __restrict waterfall,
                  SizeType waterfall_size,

@@ -40,15 +40,22 @@ inline void add_offset_kernel(const float* __restrict arr1,
             throw std::runtime_error("Offset is greater than input size");
         }
     }
+    SizeType t          = 0;
     const SizeType nsum = size_in1 - offset;
     std::copy_n(arr1, offset, arr_out);
+    t += offset;
 #pragma omp simd
     for (SizeType i = 0; i < nsum; ++i) {
         arr_out[offset + i] = arr1[offset + i] + arr2[i];
     }
+    t += nsum;
     const SizeType nrest = std::min(offset, size_out - size_in1);
     if (nrest > 0) {
         std::copy_n(arr2 + nsum, nrest, arr_out + size_in1);
+        t += nrest;
+    }
+    if (t < size_out) {
+        std::fill(arr_out + t, arr_out + size_out, 0.0F);
     }
 }
 

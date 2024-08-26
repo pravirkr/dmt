@@ -13,7 +13,8 @@ public:
             float tsamp,
             SizeType dt_max,
             SizeType dt_step = 1,
-            SizeType dt_min  = 0);
+            SizeType dt_min  = 0,
+            bool stream_mode = false);
 
     FDMTCPU(const FDMTCPU&)            = delete;
     FDMTCPU& operator=(const FDMTCPU&) = delete;
@@ -23,27 +24,26 @@ public:
 
     static void set_num_threads(int nthreads);
     static void set_log_level(int level);
-
     const FDMTPlan& get_plan() const;
 
     void execute(const float* __restrict waterfall,
                  SizeType waterfall_size,
                  float* __restrict dmt,
-                 SizeType dmt_size);
+                 SizeType dmt_size,
+                 bool normalize = true);
     void initialise(const float* __restrict waterfall,
                     SizeType waterfall_size,
                     float* __restrict state,
-                    SizeType state_size);
-    void initialise2(const float* __restrict waterfall,
-                     SizeType waterfall_size,
-                     float* __restrict state,
-                     SizeType state_size);
+                    SizeType state_size,
+                    bool normalize = true);
 
 private:
+    bool m_stream_mode;
     FDMTPlan m_plan;
     // State buffers
     std::vector<float> m_state_in;
     std::vector<float> m_state_out;
+    std::vector<float> m_history;
 
     void execute_iter(const float* __restrict state_in,
                       float* __restrict state_out,

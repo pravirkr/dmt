@@ -11,68 +11,56 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(libdmt, mod) {
+PYBIND11_MODULE(libdmt, mod) { // NOLINT
     mod.doc() = "Python Bindings for dmt";
-    mod.def("generate_pure_frb",
-            [](SizeType nchans, SizeType nsamps, float f_min, float f_max,
-               SizeType dt, float pulse_toa, float amplitude = 1.0F) {
-                auto [arr, nsamps_dispersed] = generate_pure_frb(
-                    nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude);
-                return std::make_tuple(as_pyarray_ref(arr), nsamps_dispersed);
-            });
+    mod.def(
+        "generate_pure_frb",
+        [](SizeType nchans, SizeType nsamps, float f_min, float f_max,
+           SizeType dt, float pulse_toa, float amplitude = 1.0F) {
+            const auto [arr, nsamps_dispersed] = generate_pure_frb(
+                nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude);
+            return std::make_tuple(as_pyarray_ref(arr), nsamps_dispersed);
+        },
+        py::arg("nchans"), py::arg("nsamps"), py::arg("f_min"),
+        py::arg("f_max"), py::arg("dt"), py::arg("pulse_toa"),
+        py::arg("amplitude") = 1.0F);
     PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords, nsamps,
                          nelements);
-    PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buffer_offset,
+    PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
                          i_coord_tail, i_coord_head, offset);
-    py::class_<FDMTSubDTGrid>(mod, "FDMTSubDTGrid")
-        .def_property_readonly("dt_grid", &FDMTSubDTGrid::dt_grid)
-        .def_property_readonly("ndt", &FDMTSubDTGrid::ndt)
-        .def_property_readonly("grid_offset", &FDMTSubDTGrid::grid_offset);
+    py::class_<FDMTCoordGrid>(mod, "FDMTSubDTGrid")
+        .def_readonly("dt_grid", &FDMTCoordGrid::dt_grid)
+        .def_readonly("ndt", &FDMTCoordGrid::ndt)
+        .def_readonly("grid_offset", &FDMTCoordGrid::coord_offset)
+        .def_readonly("f_start", &FDMTCoordGrid::f_start)
+        .def_readonly("f_end", &FDMTCoordGrid::f_end);
     py::class_<FDMTPlanContainer>(mod, "FDMTPlanContainer")
-        .def_property_readonly("df_top", &FDMTPlanContainer::df_top)
-        .def_property_readonly("df_bot", &FDMTPlanContainer::df_bot)
-        .def_property_readonly("state_shape", &FDMTPlanContainer::state_shape)
-        .def_property_readonly(
-            "coordinates",
-            [](const FDMTPlanContainer& plan_c) {
-                py::list res_list;
-                for (const auto& inner : plan_c.coordinates) {
-                    res_list.append(py::array_t<FDMTCoord>(
-                        static_cast<ssize_t>(inner.size()), inner.data()));
-                }
-                return res_list;
-            })
-        .def_property_readonly(
-            "coordinates_sum",
-            [](const FDMTPlanContainer& plan_c) {
-                py::list res_list;
-                for (const auto& inner : plan_c.coordinates_to_sum) {
-                    res_list.append(py::array_t<FDMTCoord>(
-                        static_cast<ssize_t>(inner.size()), inner.data()));
-                }
-                return res_list;
-            })
-        .def_property_readonly(
-            "coordinates_copy",
-            [](const FDMTPlanContainer& plan_c) {
-                py::list res_list;
-                for (const auto& inner : plan_c.coordinates_to_copy) {
-                    res_list.append(py::array_t<FDMTCoord>(
-                        static_cast<ssize_t>(inner.size()), inner.data()));
-                }
-                return res_list;
-            })
-        .def_readonly("dt_grids", &FDMTPlanContainer::dt_grids)
-        .def_property_readonly(
-            "dt_grid_sub_top",
-            [](const FDMTPlanContainer& plan_c) {
-                py::list res_list;
-                for (const auto& inner_vec : plan_c.dt_grid_sub_top) {
-                    res_list.append(
-                        as_pyarray(static_cast<DtGridType>(inner_vec)));
-                }
-                return res_list;
-            })
+        .def_readonly("df_top", &FDMTPlanContainer::df_top)
+        .def_readonly("df_bot", &FDMTPlanContainer::df_bot)
+        .def_property_readonly("state_shape",
+                               [](const FDMTPlanContainer& plan_c) {
+                                   return as_pyarray_ref(plan_c.state_shape);
+                               })
+        .def_property_readonly("coordinates",
+                               [](const FDMTPlanContainer& plan_c) {
+                                   return as_listof_pyarray(plan_c.coordinates);
+                               })
+        .def_property_readonly("coordinates_sum",
+                               [](const FDMTPlanContainer& plan_c) {
+                                   return as_listof_pyarray(
+                                       plan_c.coordinates_to_sum);
+                               })
+        .def_property_readonly("coordinates_copy",
+                               [](const FDMTPlanContainer& plan_c) {
+                                   return as_listof_pyarray(
+                                       plan_c.coordinates_to_copy);
+                               })
+        .def_readonly("dt_grids", &FDMTPlanContainer::grids)
+        .def_property_readonly("dt_grid_sub_top",
+                               [](const FDMTPlanContainer& plan_c) {
+                                   return as_listof_pyarray(
+                                       plan_c.dt_grid_sub_top);
+                               })
         .def_property_readonly("memory_usage",
                                &FDMTPlanContainer::get_memory_usage);
     py::class_<FDMTPlan>(mod, "FDMTPlan")
@@ -135,42 +123,49 @@ PYBIND11_MODULE(libdmt, mod) {
 
     py::class_<FDMTCPU>(mod, "FDMTCPU")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType>(),
+                      SizeType, SizeType, bool>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
-             py::arg("dt_step") = 1, py::arg("dt_min") = 0)
+             py::arg("dt_step") = 1, py::arg("dt_min") = 0,
+             py::arg("stream_mode") = false)
         .def_property_readonly("plan", &FDMTCPU::get_plan)
         .def_static("set_log_level", &FDMTCPU::set_log_level, py::arg("level"))
         .def_static("set_num_threads", &FDMTCPU::set_num_threads,
                     py::arg("nthreads"))
         // execute take 2d array as input, and return 2d array as output
-        .def("execute",
-             [](FDMTCPU& fdmt,
-                const py::array_t<float, py::array::c_style>& waterfall) {
-                 const auto& plan   = fdmt.get_plan();
-                 const auto& plan_c = plan.get_container();
-                 const auto niters  = plan.get_niters();
-                 py::array_t<float, py::array::c_style> dmt(
-                     {plan_c.state_shape[niters].ncoords,
-                      plan_c.state_shape[niters].nsamps});
-                 fdmt.execute(waterfall.data(), waterfall.size(),
-                              dmt.mutable_data(), dmt.size());
-                 return dmt;
-             })
-        .def("initialise",
-             [](FDMTCPU& fdmt,
-                const py::array_t<float, py::array::c_style>& waterfall) {
-                 const auto& plan   = fdmt.get_plan();
-                 const auto& plan_c = plan.get_container();
-                 py::array_t<float, py::array::c_style> state(
-                     {plan_c.state_shape[0].ncoords,
-                      plan_c.state_shape[0].nsamps});
-                 std::fill(state.mutable_data(),
-                           state.mutable_data() + state.size(), 0.0F);
-                 fdmt.initialise(waterfall.data(), waterfall.size(),
-                                 state.mutable_data(), state.size());
-                 return state;
-             });
+        .def(
+            "execute",
+            [](FDMTCPU& fdmt,
+               const py::array_t<float, py::array::c_style>& waterfall,
+               bool normalize) {
+                const auto& plan   = fdmt.get_plan();
+                const auto& plan_c = plan.get_container();
+                const auto niters  = plan.get_niters();
+                py::array_t<float, py::array::c_style> dmt(
+                    {plan_c.state_shape[niters].ncoords,
+                     plan_c.state_shape[niters].nsamps});
+                fdmt.execute(waterfall.data(), waterfall.size(),
+                             dmt.mutable_data(), dmt.size(), normalize);
+                return dmt;
+            },
+            py::arg("waterfall"), py::arg("normalize") = true)
+        .def(
+            "initialise",
+            [](FDMTCPU& fdmt,
+               const py::array_t<float, py::array::c_style>& waterfall,
+               bool normalize) {
+                const auto& plan   = fdmt.get_plan();
+                const auto& plan_c = plan.get_container();
+                py::array_t<float, py::array::c_style> state(
+                    {plan_c.state_shape[0].ncoords,
+                     plan_c.state_shape[0].nsamps});
+                std::fill(state.mutable_data(),
+                          state.mutable_data() + state.size(), 0.0F);
+                fdmt.initialise(waterfall.data(), waterfall.size(),
+                                state.mutable_data(), state.size(), normalize);
+                return state;
+            },
+            py::arg("waterfall"), py::arg("normalize") = true);
     py::class_<DDMTCPU>(mod, "DDMTCPU")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),

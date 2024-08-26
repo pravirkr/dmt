@@ -26,3 +26,13 @@ as_pyarray_ref(const Sequence& seq) {
     const auto* data = seq.data();
     return py::array_t<typename Sequence::value_type>(size, data);
 }
+
+template <typename T>
+py::list as_listof_pyarray(const std::vector<std::vector<T>>& vec_of_vecs) {
+    py::list result;
+    for (const auto& inner : vec_of_vecs) {
+        result.append(
+            py::array_t<T>(static_cast<ssize_t>(inner.size()), inner.data()));
+    }
+    return result;
+}

@@ -13,30 +13,32 @@
 #include <dmt/dmt_plans.hpp>
 
 FDMTPlanContainer::FDMTPlanContainer(SizeType niters) {
-    df_top.resize(niters + 1);
-    df_bot.resize(niters + 1);
     state_shape.resize(niters + 1);
+    grids.resize(niters + 1);
     coordinates.resize(niters + 1);
     coordinates_to_sum.resize(niters + 1);
     coordinates_to_copy.resize(niters + 1);
-    dt_grids.resize(niters + 1);
     dt_grid_sub_top.resize(niters + 1);
+    df_top.resize(niters + 1);
+    df_bot.resize(niters + 1);
+    dt_max.resize(niters + 1);
 }
 
 SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
     SizeType mem_use = 0;
-    mem_use += df_top.size() * sizeof(float);
-    mem_use += df_bot.size() * sizeof(float);
     mem_use += state_shape.size() * sizeof(FDMTShape);
     for (const auto& coord : coordinates) {
         mem_use += 2 * coord.size() * sizeof(FDMTCoord);
     }
-    for (const auto& dt_grid_iter : dt_grids) {
-        mem_use += dt_grid_iter.size() * sizeof(FDMTSubDTGrid);
+    for (const auto& grid_iter : grids) {
+        mem_use += grid_iter.size() * sizeof(FDMTCoordGrid);
     }
     for (const auto& dt_grid : dt_grid_sub_top) {
         mem_use += dt_grid.size() * sizeof(SizeType);
     }
+    mem_use += df_top.size() * sizeof(float);
+    mem_use += df_bot.size() * sizeof(float);
+    mem_use += dt_max.size() * sizeof(SizeType);
 
     return mem_use;
 }
@@ -86,7 +88,7 @@ const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
     return m_container;
 }
 const DtGridType& FDMTPlan::get_dt_grid_final() const noexcept {
-    return m_container.dt_grids[m_niters][0].dt_grid;
+    return m_container.grids[m_niters][0].dt_grid;
 }
 std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
     const float dm_conv       = dm_utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
@@ -156,6 +158,9 @@ void FDMTPlan::validate_inputs() const {
     if (m_dt_min >= m_dt_max) {
         throw std::invalid_argument("dt_min must be less than dt_max");
     }
+    if (m_dt_step == 0) {
+        throw std::invalid_argument("dt_step must be greater than 0");
+    }
 }
 
 DtGridType FDMTPlan::calculate_dt_grid_sub(float f_start, float f_end) const {
@@ -188,43 +193,39 @@ void FDMTPlan::configure_plan() {
 
 void FDMTPlan::make_plan_iter0() {
     // For iteration 0
-    const SizeType i_iter  = 0;
-    SizeType buffer_offset = 0;
-    SizeType grid_offset   = 0;
-    m_container.dt_grids[i_iter].resize(m_nchans);
+    const SizeType i_iter = 0;
+    SizeType buf_offset   = 0;
+    SizeType ncoords      = 0;
+    m_container.grids[i_iter].resize(m_nchans);
     for (SizeType i_sub = 0; i_sub < m_nchans; ++i_sub) {
         const auto f_start = m_df * static_cast<float>(i_sub) + m_f_min;
         const auto f_end   = f_start + m_df;
         const auto dt_sub  = calculate_dt_grid_sub(f_start, f_end);
         const auto ndt_sub = dt_sub.size();
-
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             const auto coord_cur =
-                FDMTCoord{i_sub,    i_dt,     m_nsamps, buffer_offset,
+                FDMTCoord{i_sub,    i_dt,     m_nsamps, buf_offset,
                           SIZE_MAX, SIZE_MAX, SIZE_MAX};
             m_container.coordinates[i_iter].emplace_back(coord_cur);
-            buffer_offset += m_nsamps;
+            buf_offset += m_nsamps;
         }
-        m_container.dt_grids[i_iter][i_sub] =
-            FDMTSubDTGrid{dt_sub, ndt_sub, grid_offset};
-        grid_offset += ndt_sub;
+        m_container.grids[i_iter][i_sub] =
+            FDMTCoordGrid{dt_sub, ndt_sub, ncoords, f_start, f_end};
+        ncoords += ndt_sub;
     }
-    m_container.df_top[i_iter] = m_df;
-    m_container.df_bot[i_iter] = m_df;
 
     const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
-        m_container.dt_grids[i_iter].begin(),
-        m_container.dt_grids[i_iter].end(),
+        m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
         [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
-    const auto ncoords =
-        m_container.dt_grids[i_iter][m_nchans - 1].grid_offset +
-        m_container.dt_grids[i_iter][m_nchans - 1].ndt;
     m_container.state_shape[i_iter] = {m_nchans,        ndt_min_it->ndt,
                                        ndt_max_it->ndt, ncoords,
                                        m_nsamps,        ncoords * m_nsamps};
-    // 0th iteration has no mappings
     m_container.dt_grid_sub_top[i_iter] =
-        m_container.dt_grids[i_iter][m_nchans - 1].dt_grid;
+        m_container.grids[i_iter][m_nchans - 1].dt_grid;
+    m_container.df_top[i_iter] = m_df;
+    m_container.df_bot[i_iter] = m_df;
+    m_container.dt_max[i_iter] =
+        calculate_dt_grid_sub(m_f_min, m_f_min + m_df).back();
 }
 
 void FDMTPlan::make_plan(SizeType i_iter) {
@@ -235,8 +236,8 @@ void FDMTPlan::make_plan(SizeType i_iter) {
     const auto& df_top_prev = m_container.df_top[i_iter - 1];
     const auto& nchans_prev = m_container.state_shape[i_iter - 1].nchans;
     const auto& nsamps_prev = m_container.state_shape[i_iter - 1].nsamps;
+    const auto& grids_prev  = m_container.grids[i_iter - 1];
     const auto& dt_grid_sub_top_prev = m_container.dt_grid_sub_top[i_iter - 1];
-    const auto& dt_grids_prev        = m_container.dt_grids[i_iter - 1];
 
     const SizeType nchans_cur = nchans_prev / 2 + nchans_prev % 2;
     const bool do_copy = nchans_prev % 2 == 1; // true if nchans_prev is odd
@@ -255,13 +256,13 @@ void FDMTPlan::make_plan(SizeType i_iter) {
     DtGridType dt_grid_sub_top = dt_grid_sub_top_prev;
     float f_end, f_mid;
     DtGridType dt_sub;
-    SizeType buffer_offset = 0;
-    SizeType grid_offset   = 0;
-    m_container.dt_grids[i_iter].resize(nchans_cur);
+    SizeType buf_offset = 0;
+    SizeType ncoords    = 0;
+    m_container.grids[i_iter].resize(nchans_cur);
     for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
-        const auto& dt_grids_tail = dt_grids_prev[2 * i_sub];
-        const auto& dt_grids_head = dt_grids_prev[2 * i_sub + 1];
-        const auto f_start = df_bot * static_cast<float>(i_sub) + m_f_min;
+        const auto& grids_tail = grids_prev[2 * i_sub];
+        const auto& grids_head = grids_prev[2 * i_sub + 1];
+        const auto f_start     = df_bot * static_cast<float>(i_sub) + m_f_min;
         if (i_sub == nchans_cur - 1) {
             // For the top sub-band
             if (do_copy) {
@@ -303,55 +304,51 @@ void FDMTPlan::make_plan(SizeType i_iter) {
             }
             if (i_sub == nchans_cur - 1 && do_copy) {
                 const auto i_dt_tail =
-                    dm_utils::find_closest_index(dt_grids_tail.dt_grid, dt);
+                    dm_utils::find_closest_index(grids_tail.dt_grid, dt);
                 const auto coord_cur =
                     FDMTCoord{i_sub,
                               i_dt,
                               nsamps_iter,
-                              buffer_offset,
-                              dt_grids_tail.grid_offset + i_dt_tail,
+                              buf_offset,
+                              grids_tail.coord_offset + i_dt_tail,
                               SIZE_MAX,
                               0};
                 m_container.coordinates[i_iter].emplace_back(coord_cur);
                 m_container.coordinates_to_copy[i_iter].emplace_back(coord_cur);
             } else {
-                const auto dt_head   = dt - dt_mid2;
-                const auto i_dt_tail = dm_utils::find_closest_index(
-                    dt_grids_tail.dt_grid, dt_mid1);
-                const auto i_dt_head = dm_utils::find_closest_index(
-                    dt_grids_head.dt_grid, dt_head);
+                const auto dt_head = dt - dt_mid2;
+                const auto i_dt_tail =
+                    dm_utils::find_closest_index(grids_tail.dt_grid, dt_mid1);
+                const auto i_dt_head =
+                    dm_utils::find_closest_index(grids_head.dt_grid, dt_head);
                 const auto coord_cur =
                     FDMTCoord{i_sub,
                               i_dt,
                               nsamps_iter,
-                              buffer_offset,
-                              dt_grids_tail.grid_offset + i_dt_tail,
-                              dt_grids_head.grid_offset + i_dt_head,
+                              buf_offset,
+                              grids_tail.coord_offset + i_dt_tail,
+                              grids_head.coord_offset + i_dt_head,
                               dt_mid2};
                 m_container.coordinates[i_iter].emplace_back(coord_cur);
                 m_container.coordinates_to_sum[i_iter].emplace_back(coord_cur);
             }
-            buffer_offset += nsamps_iter;
+            buf_offset += nsamps_iter;
         }
-        m_container.dt_grids[i_iter][i_sub] =
-            FDMTSubDTGrid{dt_sub, ndt_sub, grid_offset};
-        grid_offset += ndt_sub;
+        m_container.grids[i_iter][i_sub] =
+            FDMTCoordGrid{dt_sub, ndt_sub, ncoords, f_start, f_end};
+        ncoords += ndt_sub;
     }
-    m_container.df_top[i_iter] = df_top;
-    m_container.df_bot[i_iter] = df_bot;
-
     // state shape summary
     const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
-        m_container.dt_grids[i_iter].begin(),
-        m_container.dt_grids[i_iter].end(),
+        m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
         [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
-    const auto ncoords =
-        m_container.dt_grids[i_iter][nchans_cur - 1].grid_offset +
-        m_container.dt_grids[i_iter][nchans_cur - 1].ndt;
     m_container.state_shape[i_iter]     = {nchans_cur,      ndt_min_it->ndt,
                                            ndt_max_it->ndt, ncoords,
                                            nsamps_iter,     ncoords * nsamps_iter};
     m_container.dt_grid_sub_top[i_iter] = dt_grid_sub_top;
+    m_container.df_top[i_iter]          = df_top;
+    m_container.df_bot[i_iter]          = df_bot;
+    m_container.dt_max[i_iter]          = dt_max_iter;
 }
 
 CohFDMTPlan::CohFDMTPlan(float fcenter,

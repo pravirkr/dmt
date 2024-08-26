@@ -6,7 +6,7 @@
 
 using DtGridType = std::vector<SizeType>;
 
-// Shape of the FDMT state buffer for a single iteration
+// Shape of the FDMT state buffer in a single iteration
 struct FDMTShape {
     SizeType nchans;    // Number of channels
     SizeType ndt_min;   // Minimum number of delays
@@ -16,34 +16,37 @@ struct FDMTShape {
     SizeType nelements; // Number of elements (ncoords * nsamps)
 };
 
-// Coordinate in the FDMT plan for a single iteration
+// Coordinate of the FDMT plan in a single iteration
 struct FDMTCoord {
-    SizeType i_sub;         // Subband index
-    SizeType i_dt;          // Delay index
-    SizeType nsamps;        // Number of samples in the state buffer
-    SizeType buffer_offset; // Offset (starting point) in the state buffer
-    SizeType i_coord_tail;  // Tail coordinate index in the previous iteration
-    SizeType i_coord_head;  // Head coordinate index in the previous iteration
-    SizeType offset;        // Offset between the tail and head coordinates
+    SizeType i_sub;        // Subband index
+    SizeType i_dt;         // Delay index
+    SizeType nsamps;       // Number of samples in the state buffer
+    SizeType buf_offset;   // Offset (starting point) in the state buffer
+    SizeType i_coord_tail; // Tail coordinate index in the previous iteration
+    SizeType i_coord_head; // Head coordinate index in the previous iteration
+    SizeType offset;       // Offset between the tail and head coordinates
 };
 
-// Subband DT grid for a single iteration
-struct FDMTSubDTGrid {
-    DtGridType dt_grid;   // Delay grid
-    SizeType ndt;         // Number of delays
-    SizeType grid_offset; // Offset (starting point) in the iteration grid
+// Coordinates grid for the FDMT plan for each subband in a single iteration
+struct FDMTCoordGrid {
+    DtGridType dt_grid;    // Delay grid for the subband
+    SizeType ndt;          // Number of delays
+    SizeType coord_offset; // Offset (starting point) in the coordinates array
+    float f_start;         // Start frequency of the subband
+    float f_end;           // End frequency of the subband
 };
 
 struct FDMTPlanContainer {
-    std::vector<float> df_top;
-    std::vector<float> df_bot;
     std::vector<FDMTShape> state_shape;
+    std::vector<std::vector<FDMTCoordGrid>> grids;
     std::vector<std::vector<FDMTCoord>> coordinates;
     std::vector<std::vector<FDMTCoord>> coordinates_to_sum;
     std::vector<std::vector<FDMTCoord>> coordinates_to_copy;
-    std::vector<std::vector<FDMTSubDTGrid>> dt_grids;
-    // Temp array to remember the top subband dt grid
+    // Temp arrays to compute the plan
     std::vector<DtGridType> dt_grid_sub_top;
+    std::vector<float> df_top;
+    std::vector<float> df_bot;
+    std::vector<SizeType> dt_max;
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
@@ -184,8 +187,8 @@ public:
 
     DDMTPlan(const DDMTPlan&)            = delete;
     DDMTPlan& operator=(const DDMTPlan&) = delete;
-    DDMTPlan(DDMTPlan&&)                 = delete;
-    DDMTPlan& operator=(DDMTPlan&&)      = delete;
+    DDMTPlan(DDMTPlan&&)                 = default;
+    DDMTPlan& operator=(DDMTPlan&&)      = default;
     ~DDMTPlan()                          = default;
 
     float get_f_min() const noexcept;

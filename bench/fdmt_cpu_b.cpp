@@ -37,12 +37,12 @@ public:
 class FDMTThreadsFixture : public benchmark::Fixture {
 public:
     void SetUp(const ::benchmark::State& state) override {
-        f_min  = 704.0F;
-        f_max  = 1216.0F;
-        nchans = 4096;
-        tsamp  = 0.00008192F;
-        dt_max = 2048;
-        nsamps = 65536;
+        f_min    = 704.0F;
+        f_max    = 1216.0F;
+        nchans   = 4096;
+        tsamp    = 0.00008192F;
+        dt_max   = 2048;
+        nsamps   = 65536;
         nthreads = state.range(0);
     }
 
@@ -87,10 +87,8 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    auto waterfall        = generate_vector<float>(nchans * nsamps, gen);
-    const auto& plan      = fdmt.get_plan();
-    const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
-    std::vector<float> state_init(state_size, 0.0F);
+    auto waterfall = generate_vector<float>(nchans * nsamps, gen);
+    std::vector<float> state_init(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
                         state_init.size());
@@ -104,10 +102,8 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_par)
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    auto waterfall        = generate_vector<float>(nchans * nsamps, gen);
-    const auto& plan      = fdmt.get_plan();
-    const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
-    std::vector<float> state_init(state_size, 0.0F);
+    auto waterfall = generate_vector<float>(nchans * nsamps, gen);
+    std::vector<float> state_init(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
                         state_init.size());
@@ -122,7 +118,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_seq)
     std::random_device rd;
     std::mt19937 gen(rd());
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
-    std::vector<float> dmt(fdmt.get_dmt_size(), 0.0F);
+    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
                      dmt.size());
@@ -137,7 +133,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_par)
     std::random_device rd;
     std::mt19937 gen(rd());
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
-    std::vector<float> dmt(fdmt.get_dmt_size(), 0.0F);
+    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
                      dmt.size());
@@ -154,7 +150,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_seq)
         FDMTCPU::set_num_threads(1);
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
         state.PauseTiming();
-        std::vector<float> dmt(fdmt.get_dmt_size(), 0.0F);
+        std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
         state.ResumeTiming();
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
                      dmt.size());
@@ -171,7 +167,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_par)
         FDMTCPU::set_num_threads(8);
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
         state.PauseTiming();
-        std::vector<float> dmt(fdmt.get_dmt_size(), 0.0F);
+        std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
         state.ResumeTiming();
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
                      dmt.size());
@@ -186,7 +182,7 @@ BENCHMARK_DEFINE_F(FDMTThreadsFixture, BM_fdmt_execute_threads)
     std::random_device rd;
     std::mt19937 gen(rd());
     auto waterfall = generate_vector<float>(nchans * nsamps, gen);
-    std::vector<float> dmt(fdmt.get_dmt_size(), 0.0F);
+    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
                      dmt.size());
@@ -221,6 +217,12 @@ BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall_par)
     ->RangeMultiplier(2)
     ->Range(kMinNsamps, kMaxNsamps);
 BENCHMARK_REGISTER_F(FDMTThreadsFixture, BM_fdmt_execute_threads)
-    ->Arg(1)->Arg(2)->Arg(4)->Arg(8)->Arg(10)->Arg(12)->Arg(16);
+    ->Arg(1)
+    ->Arg(2)
+    ->Arg(4)
+    ->Arg(8)
+    ->Arg(10)
+    ->Arg(12)
+    ->Arg(16);
 
 // BENCHMARK_MAIN();
