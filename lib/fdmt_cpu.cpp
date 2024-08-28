@@ -19,15 +19,15 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_max,
                  SizeType dt_step,
                  SizeType dt_min,
-                 bool stream_mode)
-    : m_stream_mode(stream_mode),
+                 bool use_history)
+    : m_use_history(use_history),
       m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
     // Allocate memory for the state buffers
     const auto state_size = m_plan.get_buffer_size();
+    const auto hist_size  = m_plan.get_history_size();
     m_state_in.resize(state_size, 0.0F);
     m_state_out.resize(state_size, 0.0F);
-    m_history.resize(m_plan.get_nchans() * m_plan.get_container().dt_max[0],
-                     0.0F);
+    m_history.resize(hist_size, 0.0F);
 }
 
 void FDMTCPU::set_num_threads(int nthreads) {
@@ -153,7 +153,7 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
     const auto& plan_c     = m_plan.get_container();
     const auto& grids_init = plan_c.grids[0];
     const auto nsamps      = plan_c.state_shape[0].nsamps;
-    const auto dt_max      = plan_c.dt_max[0];
+    const auto dt_max      = plan_c.state_shape[0].dt_max;
     auto* hist             = m_history.data();
 
     if (normalize) {
@@ -163,7 +163,7 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
         initialize_impl<false>(waterfall, waterfall_size, state, state_size,
                                grids_init, nsamps, dt_max, hist);
     }
-    if (m_stream_mode) {
+    if (m_use_history) {
         // Copy the last nchans x dt_max elements from waterfall to hist
         for (SizeType i_sub = 0; i_sub < grids_init.size(); ++i_sub) {
             std::copy_n(&waterfall[i_sub * nsamps + nsamps - dt_max], dt_max,
@@ -175,34 +175,31 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
 void FDMTCPU::execute_iter(const float* __restrict state_in,
                            float* __restrict state_out,
                            SizeType i_iter) {
-    const auto& plan_c          = m_plan.get_container();
-    const auto& coords_prev     = plan_c.coordinates[i_iter - 1];
-    const auto& coords_sum_cur  = plan_c.coordinates_to_sum[i_iter];
-    const auto& coords_copy_cur = plan_c.coordinates_to_copy[i_iter];
+    const auto& plan_c = m_plan.get_container();
+    // const auto& coords_prev     = plan_c.coordinates[i_iter - 1];
+    const auto& coords_sum_cur  = plan_c.coordinates_sum[i_iter];
+    const auto& coords_copy_cur = plan_c.coordinates_copy[i_iter];
 
 #pragma omp parallel default(none)                                             \
-    shared(state_in, state_out, coords_prev, coords_sum_cur, coords_copy_cur)
+    shared(state_in, state_out, coords_sum_cur, coords_copy_cur)
     {
 #pragma omp for nowait
         for (SizeType i_coord = 0; i_coord < coords_sum_cur.size(); ++i_coord) {
-            const auto& coord      = coords_sum_cur[i_coord];
-            const auto& coord_tail = coords_prev[coord.i_coord_tail];
-            const auto& coord_head = coords_prev[coord.i_coord_head];
-            const float* tail      = &state_in[coord_tail.buf_offset];
-            const float* head      = &state_in[coord_head.buf_offset];
-            float* out             = &state_out[coord.buf_offset];
-            dm_utils::add_offset_kernel(tail, coord_tail.nsamps, head,
-                                        coord_head.nsamps, out, coord.nsamps,
+            const auto& coord = coords_sum_cur[i_coord];
+            const float* tail = &state_in[coord.tail_buf_offset];
+            const float* head = &state_in[coord.head_buf_offset];
+            float* out        = &state_out[coord.buf_offset];
+            dm_utils::add_offset_kernel(tail, coord.tail_nsamps, head,
+                                        coord.head_nsamps, out, coord.nsamps,
                                         coord.offset);
         }
 #pragma omp for
         for (SizeType i_coord = 0; i_coord < coords_copy_cur.size();
              ++i_coord) {
-            const auto& coord      = coords_copy_cur[i_coord];
-            const auto& coord_tail = coords_prev[coord.i_coord_tail];
-            const float* tail      = &state_in[coord_tail.buf_offset];
-            float* out             = &state_out[coord.buf_offset];
-            std::copy_n(tail, coord_tail.nsamps, out);
+            const auto& coord = coords_copy_cur[i_coord];
+            const float* tail = &state_in[coord.tail_buf_offset];
+            float* out        = &state_out[coord.buf_offset];
+            std::copy_n(tail, coord.tail_nsamps, out);
         }
     }
 }

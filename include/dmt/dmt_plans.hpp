@@ -6,14 +6,20 @@
 
 using DtGridType = std::vector<SizeType>;
 
-// Shape of the FDMT state buffer in a single iteration
+// Shape parameters of the FDMT state buffer in a single iteration
 struct FDMTShape {
-    SizeType nchans;    // Number of channels
-    SizeType ndt_min;   // Minimum number of delays
-    SizeType ndt_max;   // Maximum number of delays
-    SizeType ncoords;   // Number of coordinates (nchans * ndt)
-    SizeType nsamps;    // Number of samples
-    SizeType nelements; // Number of elements (ncoords * nsamps)
+    SizeType nchans;       // Number of channels
+    SizeType ndt_min;      // Minimum number of delays
+    SizeType ndt_max;      // Maximum number of delays
+    SizeType ncoords;      // Number of coordinates (nchans * ndt)
+    SizeType ncoords_sum;  // Number of coordinates to sum
+    SizeType ncoords_copy; // Number of coordinates to copy
+    SizeType nsamps;       // Number of samples
+    SizeType nelements;    // Number of elements (ncoords * nsamps)
+    SizeType dt_max;       // Maximum subband delay (dt) value
+
+    static std::string header_fmt();
+    std::string to_string() const;
 };
 
 // Coordinate of the FDMT plan in a single iteration
@@ -25,6 +31,10 @@ struct FDMTCoord {
     SizeType i_coord_tail; // Tail coordinate index in the previous iteration
     SizeType i_coord_head; // Head coordinate index in the previous iteration
     SizeType offset;       // Offset between the tail and head coordinates
+    SizeType tail_buf_offset; // Offset (starting point) in the tail buffer
+    SizeType tail_nsamps;     // Number of samples in the tail buffer
+    SizeType head_buf_offset; // Offset (starting point) in the head buffer
+    SizeType head_nsamps;     // Number of samples in the head buffer
 };
 
 // Coordinates grid for the FDMT plan for each subband in a single iteration
@@ -40,13 +50,12 @@ struct FDMTPlanContainer {
     std::vector<FDMTShape> state_shape;
     std::vector<std::vector<FDMTCoordGrid>> grids;
     std::vector<std::vector<FDMTCoord>> coordinates;
-    std::vector<std::vector<FDMTCoord>> coordinates_to_sum;
-    std::vector<std::vector<FDMTCoord>> coordinates_to_copy;
+    std::vector<std::vector<FDMTCoord>> coordinates_sum;
+    std::vector<std::vector<FDMTCoord>> coordinates_copy;
     // Temp arrays to compute the plan
     std::vector<DtGridType> dt_grid_sub_top;
     std::vector<float> df_top;
     std::vector<float> df_bot;
-    std::vector<SizeType> dt_max;
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
@@ -89,6 +98,7 @@ public:
     std::vector<float> get_dm_grid_final() const noexcept;
     SizeType get_dmt_size() const noexcept;
     SizeType get_buffer_size() const noexcept;
+    SizeType get_history_size() const noexcept;
 
     void print_summary() const;
     static void set_log_level(int level);

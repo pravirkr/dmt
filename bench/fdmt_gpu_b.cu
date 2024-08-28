@@ -127,9 +127,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_initialise_gpu)
 (benchmark::State& state) {
     FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     auto waterfall_d      = generate_vector_gpu<float>(nchans * nsamps);
-    const auto& plan      = fdmt.get_plan();
-    const auto state_size = plan.state_shape[0][3] * plan.state_shape[0][4];
-    thrust::device_vector<float> state_init_d(state_size, 0.0F);
+    thrust::device_vector<float> state_init_d(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
         fdmt.initialise(thrust::raw_pointer_cast(waterfall_d.data()),
@@ -143,7 +141,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_execute_gpu)
 (benchmark::State& state) {
     FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     auto waterfall_d = generate_vector_gpu<float>(nchans * nsamps);
-    thrust::device_vector<float> dmt_d(fdmt.get_dt_grid_final().size() * nsamps,
+    thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(),
                                        0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
@@ -162,7 +160,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_overall_gpu)
         FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
         state.PauseTiming();
         thrust::device_vector<float> dmt_d(
-            fdmt.get_dt_grid_final().size() * nsamps, 0.0F);
+            fdmt.get_plan().get_dmt_size(), 0.0F);
         state.ResumeTiming();
         fdmt.execute(thrust::raw_pointer_cast(waterfall_d.data()),
                      waterfall_d.size(), thrust::raw_pointer_cast(dmt_d.data()),

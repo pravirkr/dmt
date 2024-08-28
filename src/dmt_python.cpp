@@ -24,10 +24,11 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         py::arg("nchans"), py::arg("nsamps"), py::arg("f_min"),
         py::arg("f_max"), py::arg("dt"), py::arg("pulse_toa"),
         py::arg("amplitude") = 1.0F);
-    PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords, nsamps,
-                         nelements);
+    PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords,
+                         ncoords_sum, ncoords_copy, nsamps, nelements, dt_max);
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
-                         i_coord_tail, i_coord_head, offset);
+                         i_coord_tail, i_coord_head, offset, tail_buf_offset,
+                         tail_nsamps, head_buf_offset, head_nsamps);
     py::class_<FDMTCoordGrid>(mod, "FDMTSubDTGrid")
         .def_readonly("dt_grid", &FDMTCoordGrid::dt_grid)
         .def_readonly("ndt", &FDMTCoordGrid::ndt)
@@ -48,12 +49,12 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("coordinates_sum",
                                [](const FDMTPlanContainer& plan_c) {
                                    return as_listof_pyarray(
-                                       plan_c.coordinates_to_sum);
+                                       plan_c.coordinates_sum);
                                })
         .def_property_readonly("coordinates_copy",
                                [](const FDMTPlanContainer& plan_c) {
                                    return as_listof_pyarray(
-                                       plan_c.coordinates_to_copy);
+                                       plan_c.coordinates_copy);
                                })
         .def_readonly("dt_grids", &FDMTPlanContainer::grids)
         .def_property_readonly("dt_grid_sub_top",
@@ -127,7 +128,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
              py::arg("dt_step") = 1, py::arg("dt_min") = 0,
-             py::arg("stream_mode") = false)
+             py::arg("use_history") = false)
         .def_property_readonly("plan", &FDMTCPU::get_plan)
         .def_static("set_log_level", &FDMTCPU::set_log_level, py::arg("level"))
         .def_static("set_num_threads", &FDMTCPU::set_num_threads,

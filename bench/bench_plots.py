@@ -26,6 +26,7 @@ bench_df[["benchmark_name", "benchmark_type", "n"]] = bench_df.name.str.split(
     axis=1,
     result_type="expand",
 )
+bench_df = bench_df.loc[bench_df["benchmark_type"]!="threads"]
 bench_df["n"] = bench_df["n"].astype("uint32")
 bench_df = bench_df[["benchmark_name", "n", "cpu_time", "benchmark_type"]]
 benchmarks = bench_df.benchmark_name.unique()

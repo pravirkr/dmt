@@ -46,7 +46,7 @@ void CohFDMTGPU::execute(const uint8_t* __restrict data_in,
     if (device_flags) {
         execute_device(data_in, in_size, in_order, dmt, dmt_size);
     } else {
-        thrust::device_vector<float> data_in_d(data_in, data_in + in_size);
+        thrust::device_vector<uint8_t> data_in_d(data_in, data_in + in_size);
         thrust::device_vector<float> dmt_d(dmt, dmt + dmt_size);
         execute_device(thrust::raw_pointer_cast(data_in_d.data()), in_size,
                        in_order, thrust::raw_pointer_cast(dmt_d.data()),

@@ -10,45 +10,37 @@ namespace py = pybind11;
 PYBIND11_MODULE(libcudmt, mod) {
     mod.doc() = "Python Bindings for dmt";
     py::class_<FDMTGPU>(mod, "FDMTGPU")
-        .def(py::init<float, float, size_t, size_t, float, size_t, size_t,
-                      size_t>(),
+        .def(py::init<float, float, SizeType, SizeType, float, SizeType,
+                      SizeType, SizeType, bool, int>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
-             py::arg("dt_step") = 1, py::arg("dt_min") = 0)
-        .def_property_readonly("df", &FDMTGPU::get_df)
-        .def_property_readonly("correction", &FDMTGPU::get_correction)
-        .def_property_readonly("niters", &FDMTGPU::get_niters)
-        .def_property_readonly("dt_grid_final",
-                               [](FDMTGPU& fdmt) {
-                                   return as_pyarray_ref(
-                                       fdmt.get_dt_grid_final());
-                               })
-        .def_property_readonly(
-            "dm_grid_final",
-            [](FDMTGPU& fdmt) { return as_pyarray(fdmt.get_dm_grid_final()); })
+             py::arg("dt_step") = 1, py::arg("dt_min") = 0,
+             py::arg("use_history") = false, py::arg("device_id") = 0)
         .def_static("set_log_level", &FDMTGPU::set_log_level, py::arg("level"))
         // execute take 2d array as input, and return 2d array as output
-        .def("execute",
-             [](FDMTGPU& fdmt,
-                const py::array_t<float, py::array::c_style>& waterfall) {
-                 const auto* shape = waterfall.shape();
-                 const auto dt_final_size =
-                     static_cast<ssize_t>(fdmt.get_dt_grid_final().size());
-                 py::array_t<float, py::array::c_style> dmt(
-                     {dt_final_size, shape[1]});
-                 fdmt.execute(waterfall.data(), waterfall.size(),
-                              dmt.mutable_data(), dmt.size());
-                 return dmt;
-             })
+        .def(
+            "execute",
+            [](FDMTGPU& fdmt,
+               const py::array_t<float, py::array::c_style>& waterfall) {
+                const auto& plan   = fdmt.get_plan();
+                const auto& plan_c = plan.get_container();
+                const auto niters  = plan.get_niters();
+                py::array_t<float, py::array::c_style> dmt(
+                    {plan_c.state_shape[niters].ncoords,
+                     plan_c.state_shape[niters].nsamps});
+                fdmt.execute(waterfall.data(), waterfall.size(),
+                             dmt.mutable_data(), dmt.size());
+                return dmt;
+            },
+            py::arg("waterfall"))
         .def("initialise",
              [](FDMTGPU& fdmt,
                 const py::array_t<float, py::array::c_style>& waterfall) {
-                 const auto* shape = waterfall.shape();
-                 const auto& plan  = fdmt.get_plan();
-                 const auto nchans_ndt =
-                     static_cast<ssize_t>(plan.state_shape[0][3]);
+                 const auto& plan   = fdmt.get_plan();
+                 const auto& plan_c = plan.get_container();
                  py::array_t<float, py::array::c_style> state(
-                     {nchans_ndt, shape[1]});
+                     {plan_c.state_shape[0].ncoords,
+                      plan_c.state_shape[0].nsamps});
                  std::fill(state.mutable_data(),
                            state.mutable_data() + state.size(), 0.0F);
                  fdmt.initialise(waterfall.data(), waterfall.size(),

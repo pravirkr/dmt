@@ -25,35 +25,54 @@ template <typename T> std::vector<T> cumulative_sum(const std::vector<T>& vec) {
     return result;
 }
 
-struct FDMTPlanD {
-    // i = i_iter
-    DeviceVector<int> nsubs_d;
-    DeviceVector<int> nsamps_d;
-    DeviceVector<int> ncoords_d;
-    DeviceVector<int> ncoords_to_copy_d;
-    DeviceVector<int> subs_iter_idx_d;
-    DeviceVector<int> coords_iter_idx_d;
-    DeviceVector<int> coords_to_copy_iter_idx_d;
-    DeviceVector<int> mappings_iter_idx_d;
-    DeviceVector<int> mappings_to_copy_iter_idx_d;
-    // i, i+1 = coords_iter_idx_d[i_iter] + i_coord
-    DeviceVector<int> coordinates_d;
-    DeviceVector<int> coordinates_to_copy_d;
-    // i, i+1, ... i+4 = mappings_iter_idx_d[i_iter] + i_coord
-    DeviceVector<int> mappings_d;
-    DeviceVector<int> mappings_to_copy_d;
-    // i = subs_iter_idx_d[i_iter] + isub
-    DeviceVector<int> state_sub_idx_d;
-
-    // i = i_sub (only for i_iter = 0)
-    DeviceVector<int> ndt_grid_init_d;
-    DeviceVector<int> dt_grid_init_sub_idx_d;
-    // i = dt_grid_init_sub_idx_d[i_sub] + i_dt
-    DeviceVector<int> dt_grid_init_d;
-
-    static FDMTPlanD create_from_plan(const FDMTPlan& plan);
-    static FDMTPlanD create_from_plan2(const FDMTPlan& plan);
+struct FDMTShapeD {
+    DeviceVector<int> nchans;
+    DeviceVector<int> ncoords_sum;
+    DeviceVector<int> ncoords_copy;
+    DeviceVector<int> nsamps;
+    DeviceVector<int> dt_max;
 };
+
+struct FDMTCoordDPtrs {
+    const int* nsamps;
+    const int* buf_offset;
+    const int* offset;
+    const int* tail_buf_offset;
+    const int* tail_nsamps;
+    const int* head_buf_offset;
+    const int* head_nsamps;
+
+    __host__ __device__ void update_offsets(int offset_value);
+};
+
+struct FDMTCoordD {
+    DeviceVector<int> nsamps;
+    DeviceVector<int> buf_offset;
+    DeviceVector<int> offset;
+    DeviceVector<int> tail_buf_offset;
+    DeviceVector<int> tail_nsamps;
+    DeviceVector<int> head_buf_offset;
+    DeviceVector<int> head_nsamps;
+
+    FDMTCoordDPtrs get_raw_ptrs() const;
+};
+
+struct FDMTCoordGridD {
+    DeviceVector<int> dt_grid;
+    DeviceVector<int> ndt;
+    DeviceVector<int> coord_offset;
+};
+
+struct FDMTPlanContainerD {
+    FDMTShapeD state_shape;
+    FDMTCoordGridD grids0;
+    FDMTCoordD coordinates;
+    FDMTCoordD coordinates_sum;
+    FDMTCoordD coordinates_copy;
+};
+
+void transfer_fdmt_plan_to_device(const FDMTPlanContainer& plan,
+                                  FDMTPlanContainerD& plan_d);
 
 struct DDMTPlanD {
     DeviceVector<float> dm_arr_d;

@@ -14,7 +14,7 @@ public:
             SizeType dt_max,
             SizeType dt_step = 1,
             SizeType dt_min  = 0,
-            bool stream_mode = false);
+            bool use_history = false);
 
     FDMTCPU(const FDMTCPU&)            = delete;
     FDMTCPU& operator=(const FDMTCPU&) = delete;
@@ -38,7 +38,7 @@ public:
                     bool normalize = true);
 
 private:
-    bool m_stream_mode;
+    bool m_use_history;
     FDMTPlan m_plan;
     // State buffers
     std::vector<float> m_state_in;
