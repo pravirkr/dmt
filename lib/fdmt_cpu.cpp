@@ -175,8 +175,7 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
 void FDMTCPU::execute_iter(const float* __restrict state_in,
                            float* __restrict state_out,
                            SizeType i_iter) {
-    const auto& plan_c = m_plan.get_container();
-    // const auto& coords_prev     = plan_c.coordinates[i_iter - 1];
+    const auto& plan_c          = m_plan.get_container();
     const auto& coords_sum_cur  = plan_c.coordinates_sum[i_iter];
     const auto& coords_copy_cur = plan_c.coordinates_copy[i_iter];
 

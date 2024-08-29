@@ -1,8 +1,6 @@
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <stdexcept>
-#include <sys/stat.h>
 #include <vector>
 
 #include <spdlog/common.h>
@@ -14,12 +12,12 @@
 
 std::string FDMTShape::header_fmt() {
     return "{ncoords} ({nchans}x[{ndt_min}..{ndt_max}]) x "
-           "{nsamps}, nelements: {nelements}";
+           "{nsamps}, {nelements}";
 }
 
 std::string FDMTShape::to_string() const {
-    return fmt::format("dimensions: {} ({}x[{}..{}]) x {}, {}", ncoords, nchans,
-                       ndt_min, ndt_max, nsamps, nelements);
+    return fmt::format("{:5d} ({:5d}x[{:5d}..{:5d}]) x {:6d}, {:10d}", ncoords,
+                       nchans, ndt_min, ndt_max, nsamps, nelements);
 }
 
 FDMTPlanContainer::FDMTPlanContainer(SizeType niters) {
@@ -117,22 +115,33 @@ SizeType FDMTPlan::get_history_size() const noexcept {
 }
 
 void FDMTPlan::print_summary() const {
-    const auto& state_shape = m_container.state_shape;
-    const auto mem_use_mb =
-        static_cast<float>(m_container.get_memory_usage()) / 1024.0F / 1024.0F;
-    const auto buffer_size = 2 * m_buffer_size;
-    const auto buffer_size_mb =
-        static_cast<float>(buffer_size) * sizeof(float) / 1024.0F / 1024.0F;
-    const auto niters = state_shape.size() - 1;
-    spdlog::info("FDMT: Plan memory usage: {:.3F} MB", mem_use_mb);
-    spdlog::info("FDMT: Plan buffer size: {} elements, {:.3F} MB", buffer_size,
-                 buffer_size_mb);
-    spdlog::info("FDMT: waterfall_size: ({}x{}), dmt_size: ({}x{})",
+    auto size_in_mb = [](SizeType count, SizeType size) {
+        return static_cast<float>(count * size) / 1024.0F / 1024.0F;
+    };
+    const auto& state_shape   = m_container.state_shape;
+    const auto waterfall_size = state_shape[0].nchans * state_shape[0].nsamps;
+    const auto dmt_size       = get_dmt_size();
+    const auto history_size   = get_history_size();
+    const auto buffer_size    = 2 * m_buffer_size;
+
+    const auto waterfall_size_mb = size_in_mb(waterfall_size, sizeof(float));
+    const auto dmt_size_mb       = size_in_mb(dmt_size, sizeof(float));
+    const auto history_size_mb   = size_in_mb(history_size, sizeof(float));
+    const auto buffer_size_mb    = size_in_mb(buffer_size, sizeof(float));
+    const auto plan_use_mb = size_in_mb(m_container.get_memory_usage(), 1);
+    const auto niters      = state_shape.size() - 1;
+    spdlog::info("FDMT: Input waterfall_size: ({}x{}; {:.3F} MB), dmt_size: "
+                 "({}x{}; {:.3F} MB)",
                  state_shape[0].nchans, state_shape[0].nsamps,
-                 state_shape[niters].ncoords, state_shape[niters].nsamps);
+                 waterfall_size_mb, state_shape[niters].ncoords,
+                 state_shape[niters].nsamps, dmt_size_mb);
+    spdlog::info("FDMT: Plan memory usage: {:.3F} MB", plan_use_mb);
+    spdlog::info("FDMT: Plan buffer size: ({}; {:.3F} MB), history size: ({}; "
+                 "{:.3F} MB)",
+                 buffer_size, buffer_size_mb, history_size, history_size_mb);
     spdlog::info("FDMT: Plan details: {}", FDMTShape::header_fmt());
     for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
-        spdlog::info("FDMT: Iteration {}, {}", i_iter,
+        spdlog::info("FDMT: Iteration {:2d}: {}", i_iter,
                      state_shape[i_iter].to_string());
     }
 }
@@ -211,8 +220,9 @@ void FDMTPlan::make_plan_iter0() {
         const auto ndt_sub = dt_sub.size();
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             const auto coord_cur = FDMTCoord{
-                i_sub,    i_dt,     m_nsamps, buf_offset, SIZE_MAX, SIZE_MAX,
-                SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,   SIZE_MAX};
+                i_sub,        i_dt,         m_nsamps,     buf_offset,
+                kSizeTypeMax, kSizeTypeMax, kSizeTypeMax, kSizeTypeMax,
+                kSizeTypeMax, kSizeTypeMax, kSizeTypeMax};
             m_container.coordinates[i_iter].emplace_back(coord_cur);
             buf_offset += m_nsamps;
         }
@@ -222,16 +232,14 @@ void FDMTPlan::make_plan_iter0() {
     }
 
     const auto dt_max = calculate_dt_grid_sub(m_f_min, m_f_min + m_df).back();
-    const auto ncoords_sum  = m_container.coordinates_sum[i_iter].size();
-    const auto ncoords_copy = m_container.coordinates_copy[i_iter].size();
     const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
         m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
         [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
     m_container.state_shape[i_iter] = {
-        m_nchans,     ndt_min_it->ndt, ndt_max_it->ndt,    ncoords, ncoords_sum,
-        ncoords_copy, m_nsamps,        ncoords * m_nsamps, dt_max};
+        m_nchans, ndt_min_it->ndt, ndt_max_it->ndt,    ncoords, 0,
+        0,        m_nsamps,        ncoords * m_nsamps, dt_max};
     m_container.dt_grid_sub_top[i_iter] =
-        m_container.grids[i_iter][m_nchans - 1].dt_grid;
+        m_container.grids[i_iter].back().dt_grid;
     m_container.df_top[i_iter] = m_df;
     m_container.df_bot[i_iter] = m_df;
 }
@@ -320,13 +328,13 @@ void FDMTPlan::make_plan(SizeType i_iter) {
                     nsamps_iter,
                     buf_offset,
                     i_coord_tail,
-                    SIZE_MAX,
+                    kSizeTypeMax,
                     0,
                     m_container.coordinates[i_iter - 1][i_coord_tail]
                         .buf_offset,
                     m_container.coordinates[i_iter - 1][i_coord_tail].nsamps,
-                    SIZE_MAX,
-                    SIZE_MAX};
+                    kSizeTypeMax,
+                    kSizeTypeMax};
 
                 m_container.coordinates[i_iter].emplace_back(coord_cur);
                 m_container.coordinates_copy[i_iter].emplace_back(coord_cur);

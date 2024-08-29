@@ -28,7 +28,7 @@ bench_df[["benchmark_name", "benchmark_type", "n"]] = bench_df.name.str.split(
 )
 bench_df = bench_df.loc[bench_df["benchmark_type"]!="threads"]
 bench_df["n"] = bench_df["n"].astype("uint32")
-bench_df = bench_df[["benchmark_name", "n", "cpu_time", "benchmark_type"]]
+bench_df = bench_df[["benchmark_name", "n", "real_time", "benchmark_type"]]
 benchmarks = bench_df.benchmark_name.unique()
 
 palette = sns.color_palette("husl", len(benchmarks))
@@ -38,7 +38,7 @@ for i, benchmark in enumerate(benchmarks):
     data = bench_df[bench_df["benchmark_name"] == benchmark]
     sns.lineplot(
         x="n",
-        y="cpu_time",
+        y="real_time",
         hue="benchmark_type",
         data=data,
         ax=ax,

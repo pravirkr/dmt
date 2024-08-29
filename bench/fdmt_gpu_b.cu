@@ -1,12 +1,14 @@
-#include <benchmark/benchmark.h>
 #include <cuda_runtime_api.h>
-
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 
+#include <benchmark/benchmark.h>
+
+#include <dmt/dmt_plans.hpp>
 #include <dmt/fdmt_gpu.hpp>
 
+// https://github.com/jrhemstad/example_cuda_benchmark
 #define BENCH_CUDA_TRY(call)                                                   \
     do {                                                                       \
         auto const status = (call);                                            \
@@ -80,32 +82,33 @@ private:
     benchmark::State* m_state;
 };
 
+template <typename T>
+thrust::device_vector<T> generate_vector_gpu(size_t size) {
+    thrust::default_random_engine rng;
+    thrust::uniform_real_distribution<T> dist(0.0, 1.0);
+
+    thrust::device_vector<T> vec(size);
+    thrust::transform(
+        thrust::counting_iterator<size_t>(0),
+        thrust::counting_iterator<size_t>(size), vec.begin(),
+        [=] __device__(size_t /*idx*/) mutable { return dist(rng); });
+
+    return vec;
+}
+
 class FDMTGPUFixture : public benchmark::Fixture {
 public:
     void SetUp(const ::benchmark::State& state) override {
-        f_min  = 704.0F;
-        f_max  = 1216.0F;
-        nchans = 4096;
-        tsamp  = 0.00008192F;
-        dt_max = 2048;
-        nsamps = state.range(0);
+        f_min       = 704.0F;
+        f_max       = 1216.0F;
+        nchans      = 4096;
+        tsamp       = 0.00008192F;
+        dt_max      = 2048;
+        nsamps      = state.range(0);
+        waterfall_d = generate_vector_gpu<float>(nchans * nsamps);
     }
 
     void TearDown(const ::benchmark::State& /*unused*/) override {}
-
-    template <typename T>
-    thrust::device_vector<T> generate_vector_gpu(size_t size) {
-        thrust::default_random_engine rng;
-        thrust::uniform_real_distribution<T> dist(0.0, 1.0);
-
-        thrust::device_vector<T> vec(size);
-        thrust::transform(
-            thrust::counting_iterator<size_t>(0),
-            thrust::counting_iterator<size_t>(size), vec.begin(),
-            [=] __device__(size_t /*idx*/) mutable { return dist(rng); });
-
-        return vec;
-    }
 
     float f_min{};
     float f_max{};
@@ -113,6 +116,7 @@ public:
     float tsamp{};
     size_t dt_max{};
     size_t nsamps{};
+    thrust::device_vector<float> waterfall;
 };
 
 BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu)
@@ -126,8 +130,8 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu)
 BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_initialise_gpu)
 (benchmark::State& state) {
     FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    auto waterfall_d      = generate_vector_gpu<float>(nchans * nsamps);
-    thrust::device_vector<float> state_init_d(fdmt.get_plan().get_buffer_size(), 0.0F);
+    thrust::device_vector<float> state_init_d(fdmt.get_plan().get_buffer_size(),
+                                              0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
         fdmt.initialise(thrust::raw_pointer_cast(waterfall_d.data()),
@@ -140,9 +144,7 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_initialise_gpu)
 BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_execute_gpu)
 (benchmark::State& state) {
     FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    auto waterfall_d = generate_vector_gpu<float>(nchans * nsamps);
-    thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(),
-                                       0.0F);
+    thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
         fdmt.execute(thrust::raw_pointer_cast(waterfall_d.data()),
@@ -153,15 +155,11 @@ BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_execute_gpu)
 
 BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_overall_gpu)
 (benchmark::State& state) {
-    auto waterfall_d = generate_vector_gpu<float>(nchans * nsamps);
-
+    FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    thrust::device_vector<float> dmt_d(tmp_plan.get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
         FDMTGPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-        state.PauseTiming();
-        thrust::device_vector<float> dmt_d(
-            fdmt.get_plan().get_dmt_size(), 0.0F);
-        state.ResumeTiming();
         fdmt.execute(thrust::raw_pointer_cast(waterfall_d.data()),
                      waterfall_d.size(), thrust::raw_pointer_cast(dmt_d.data()),
                      dmt_d.size(), true);

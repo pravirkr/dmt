@@ -32,7 +32,8 @@ TEST_CASE("FDMTPlan", "[dmt_plans]") {
 
         REQUIRE(plan.get_dt_grid_final().size() == 513);
         REQUIRE(plan.get_dm_grid_final().size() == 513);
-        REQUIRE(plan.get_dmt_size() == 513 * (1024 + 512));
+        REQUIRE(plan.get_dmt_size() ==
+                static_cast<SizeType>(513 * (1024 + 512)));
     }
     /*
     SECTION("Edge cases and input validation") {
