@@ -3,11 +3,12 @@
 #include <pybind11/stl.h>
 
 #include "pybind_utils.hpp"
-#include <dmt/cfdmt_cpu.hpp>
-#include <dmt/ddmt_cpu.hpp>
-#include <dmt/dmt_plans.hpp>
-#include <dmt/dmt_simulate.hpp>
-#include <dmt/fdmt_cpu.hpp>
+
+#include <dmt/cfdmt/cfdmt_cpu.hpp>
+#include <dmt/common/plans.hpp>
+#include <dmt/ddmt/ddmt_cpu.hpp>
+#include <dmt/fdmt/fdmt_cpu.hpp>
+#include <dmt/utils/simulate.hpp>
 
 namespace py = pybind11;
 

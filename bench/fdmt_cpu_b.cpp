@@ -4,12 +4,12 @@
 
 #include <benchmark/benchmark.h>
 
-#include <dmt/dmt_plans.hpp>
-#include <dmt/fdmt_cpu.hpp>
+#include <dmt/common/plans.hpp>
+#include <dmt/fdmt/fdmt_cpu.hpp>
 
 // Helper function to generate random data
 template <typename T>
-std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
+static std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
     std::vector<T> vec(size);
     std::uniform_real_distribution<T> dis(0.0, 1.0);
     std::generate(vec.begin(), vec.end(), [&]() { return dis(gen); });

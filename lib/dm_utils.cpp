@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iterator>
+#include <numbers>
 #include <stdexcept>
 #include <vector>
 
@@ -32,7 +33,7 @@ SizeType dm_utils::find_closest_index(const std::vector<SizeType>& arr_sorted,
     if (arr_sorted.empty()) {
         throw std::runtime_error("Array is empty");
     }
-    auto it      = std::lower_bound(arr_sorted.begin(), arr_sorted.end(), val);
+    auto it      = std::ranges::lower_bound(arr_sorted, val);
     SizeType idx = std::distance(arr_sorted.begin(), it);
 
     if (it != arr_sorted.end()) {
@@ -168,7 +169,7 @@ void dm_utils::compute_chirp(ComplexType* chirp_table,
     const float taper_const = 1.0F / (0.47F * bw_chan);
     const float taper_exp   = 80.0F;
     const float coeff_const =
-        2.0F * static_cast<float>(M_PI) * kDispConst * 1.0E6F;
+        2.0F * std::numbers::pi_v<float> * kDispConst * 1.0E6F;
 
     for (SizeType idm = 0; idm < ndm; ++idm) {
         const float coeff = coeff_const * dm_grid[idm];

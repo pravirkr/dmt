@@ -5,8 +5,7 @@
 
 #include <benchmark/benchmark.h>
 
-#include <dmt/dmt_plans.hpp>
-#include <dmt/fdmt_gpu.hpp>
+#include <dmt/fdmt/fdmt_cuda.hpp>
 
 // https://github.com/jrhemstad/example_cuda_benchmark
 #define BENCH_CUDA_TRY(call)                                                   \

@@ -3,24 +3,25 @@
 #include <pybind11/stl.h>
 
 #include "pybind_utils.hpp"
-#include <dmt/fdmt_gpu.hpp>
+
+#include <dmt/fdmt/fdmt_cuda.hpp>
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(libcudmt, mod) {
+PYBIND11_MODULE(libcudmt, mod) { // NOLINT
     mod.doc() = "Python Bindings for dmt";
-    py::class_<FDMTGPU>(mod, "FDMTGPU")
+    py::class_<FDMTCUDA>(mod, "FDMTGPU")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
                       SizeType, SizeType, bool, int>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
              py::arg("dt_step") = 1, py::arg("dt_min") = 0,
              py::arg("use_history") = false, py::arg("device_id") = 0)
-        .def_static("set_log_level", &FDMTGPU::set_log_level, py::arg("level"))
+        .def_static("set_log_level", &FDMTCUDA::set_log_level, py::arg("level"))
         // execute take 2d array as input, and return 2d array as output
         .def(
             "execute",
-            [](FDMTGPU& fdmt,
+            [](FDMTCUDA& fdmt,
                const py::array_t<float, py::array::c_style>& waterfall) {
                 const auto& plan   = fdmt.get_plan();
                 const auto& plan_c = plan.get_container();
@@ -34,7 +35,7 @@ PYBIND11_MODULE(libcudmt, mod) {
             },
             py::arg("waterfall"))
         .def("initialise",
-             [](FDMTGPU& fdmt,
+             [](FDMTCUDA& fdmt,
                 const py::array_t<float, py::array::c_style>& waterfall) {
                  const auto& plan   = fdmt.get_plan();
                  const auto& plan_c = plan.get_container();

@@ -4,7 +4,8 @@
 
 #include <benchmark/benchmark.h>
 
-#include <dmt/fdmt_cpu.hpp>
+#include <dmt/common/plans.hpp>
+#include <dmt/fdmt/fdmt_cpu.hpp>
 
 // Custom memory manager to track allocations
 class CustomMemoryManager : public benchmark::MemoryManager {
@@ -41,21 +42,21 @@ private:
 // Global new and delete operators to use our custom memory manager
 CustomMemoryManager custom_mm; // NOLINT
 
-void* operator new(std::size_t size) { // NOLINT
-    auto [ptr, allocated_size] = custom_mm.allocate(size);
+void* operator new(std::size_t sz) { // NOLINT
+    auto [ptr, allocated_size] = custom_mm.allocate(sz);
     if (ptr == nullptr) {
         throw std::bad_alloc();
     }
     return ptr;
 }
 
-void operator delete(void* ptr, std::size_t size) noexcept { // NOLINT
-    custom_mm.deallocate(ptr, size);
+void operator delete(void* ptr, std::size_t sz) noexcept { // NOLINT
+    custom_mm.deallocate(ptr, sz);
 }
 
 // Helper function to generate random data
 template <typename T>
-std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
+static std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
     std::vector<T> vec(size);
     std::uniform_real_distribution<T> dis(0.0, 1.0);
     std::generate(vec.begin(), vec.end(), [&]() { return dis(gen); });
