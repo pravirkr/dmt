@@ -1,12 +1,14 @@
-#include <cuda_runtime.h>
 #include <string>
+
+#include <cuda_runtime.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
-#include <dmt/cfdmt_gpu.hpp>
-#include <dmt/cuda_utils.cuh>
+#include <dmt/cfdmt/cfdmt_cuda.hpp>
 
-CohFDMTGPU::CohFDMTGPU(float f_center,
+#include "dmt/cuda_utils.cuh"
+
+CohFDMTCUDA::CohFDMTCUDA(float f_center,
                        float sub_bw,
                        SizeType nsub,
                        float tbin,
@@ -29,18 +31,18 @@ CohFDMTGPU::CohFDMTGPU(float f_center,
     initialise();
 }
 
-void CohFDMTGPU::execute(const uint8_t* __restrict data_in,
+void CohFDMTCUDA::execute(const uint8_t* __restrict__ data_in,
                          SizeType in_size,
-                         std::string in_order,
-                         float* __restrict dmt,
+                         const std::string& in_order,
+                         float* __restrict__ dmt,
                          SizeType dmt_size) {
     execute(data_in, in_size, in_order, dmt, dmt_size, false);
 }
 
-void CohFDMTGPU::execute(const uint8_t* __restrict data_in,
+void CohFDMTCUDA::execute(const uint8_t* __restrict__ data_in,
                          SizeType in_size,
-                         std::string in_order,
-                         float* __restrict dmt,
+                         const std::string& in_order,
+                         float* __restrict__ dmt,
                          SizeType dmt_size,
                          bool device_flags) {
     if (device_flags) {
@@ -56,10 +58,10 @@ void CohFDMTGPU::execute(const uint8_t* __restrict data_in,
     }
 }
 
-void CohFDMTGPU::initialise() {}
+void CohFDMTCUDA::initialise() {}
 
-void CohFDMTGPU::execute_device(const uint8_t* __restrict data_in,
+void CohFDMTCUDA::execute_device(const uint8_t* __restrict__ data_in,
                                 SizeType in_size,
-                                std::string in_order,
-                                float* __restrict dmt,
+                                const std::string& in_order,
+                                float* __restrict__ dmt,
                                 SizeType dmt_size) {}

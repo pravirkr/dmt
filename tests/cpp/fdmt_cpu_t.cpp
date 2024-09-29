@@ -3,7 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstddef>
-#include <dmt/fdmt_cpu.hpp>
+#include <dmt/fdmt/fdmt_cpu.hpp>
 
 TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
     FDMTCPU::set_log_level(spdlog::level::debug);

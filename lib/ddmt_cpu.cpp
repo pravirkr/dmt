@@ -4,7 +4,7 @@
 #include <omp.h>
 #endif
 
-#include <dmt/ddmt_cpu.hpp>
+#include <dmt/ddmt/ddmt_cpu.hpp>
 
 DDMTCPU::DDMTCPU(float f_min,
                  float f_max,
@@ -77,10 +77,10 @@ void DDMTCPU::execute_dedisp(const float* __restrict__ d_in,
 #pragma omp simd reduction(+ : sum)
             for (size_t i_chan = 0; i_chan < nchans; ++i_chan) {
                 const auto& delay = delays[i_chan];
-                sum += d_in[i_chan * in_chan_stride +
-                            (i_samp + delay) * in_samp_stride];
+                sum += d_in[(i_chan * in_chan_stride) +
+                            ((i_samp + delay) * in_samp_stride)];
             }
-            d_out[out_idx + i_samp * out_samp_stride] = sum;
+            d_out[out_idx + (i_samp * out_samp_stride)] = sum;
         }
     }
 }

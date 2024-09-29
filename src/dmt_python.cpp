@@ -101,7 +101,32 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              py::arg("fcenter"), py::arg("bwsub"), py::arg("nsub"),
              py::arg("tbin"), py::arg("nbin"), py::arg("nfft"), py::arg("t_p"),
              py::arg("dm_max"), py::arg("dm_min") = 0.0F,
-             py::arg("noverlap_inp") = 8192);
+             py::arg("noverlap_inp") = 8192)
+        .def_property_readonly("fcenter", &CohFDMTPlan::get_fcenter)
+        .def_property_readonly("bwsub", &CohFDMTPlan::get_bwsub)
+        .def_property_readonly("nsub", &CohFDMTPlan::get_nsub)
+        .def_property_readonly("tbin", &CohFDMTPlan::get_tbin)
+        .def_property_readonly("nbin", &CohFDMTPlan::get_nbin)
+        .def_property_readonly("nfft", &CohFDMTPlan::get_nfft)
+        .def_property_readonly("t_p", &CohFDMTPlan::get_t_p)
+        .def_property_readonly("dm_max", &CohFDMTPlan::get_dm_max)
+        .def_property_readonly("dm_min", &CohFDMTPlan::get_dm_min)
+        .def_property_readonly("noverlap_inp", &CohFDMTPlan::get_noverlap_inp)
+        .def_property_readonly("bw", &CohFDMTPlan::get_bw)
+        .def_property_readonly("f_min", &CohFDMTPlan::get_f_min)
+        .def_property_readonly("f_max", &CohFDMTPlan::get_f_max)
+        .def_property_readonly("n_p", &CohFDMTPlan::get_n_p)
+        .def_property_readonly("nchan", &CohFDMTPlan::get_nchan)
+        .def_property_readonly("dm_grid_coh", &CohFDMTPlan::get_dm_grid_coh)
+        .def_property_readonly("dm_grid_final", &CohFDMTPlan::get_dm_grid_final)
+        .def_property_readonly("noverlap", &CohFDMTPlan::get_noverlap)
+        .def_property_readonly("nsamp", &CohFDMTPlan::get_nsamp)
+        .def_property_readonly("mbin", &CohFDMTPlan::get_mbin)
+        .def_property_readonly("mchan", &CohFDMTPlan::get_mchan)
+        .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
+        .def_property_readonly("tsamp", &CohFDMTPlan::get_tsamp)
+        .def_property_readonly("dt_max", &CohFDMTPlan::get_dt_max)
+        .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale);
 
     py::class_<DDMTPlan>(mod, "DDMTPlan")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
@@ -206,20 +231,17 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              py::arg("tbin"), py::arg("nbin"), py::arg("nfft"), py::arg("tp"),
              py::arg("dm_max"), py::arg("dm_min") = 0.0F,
              py::arg("noverlap") = 8192)
-        .def_static("set_num_threads", &CohFDMTCPU::set_num_threads,
-                    py::arg("nthreads"))
         .def_property_readonly("plan", &CohFDMTCPU::get_plan)
         .def_property_readonly("dmt_size", &CohFDMTCPU::get_dmt_size)
         .def("execute",
              [](CohFDMTCPU& coh_fdmt,
                 const py::array_t<uint8_t, py::array::c_style>& data_in,
-                std::string in_order = "PRITF") {
+                const std::string& in_order = "PRITF") {
                  const auto* shape = data_in.shape();
                  py::array_t<float, py::array::c_style> dmt(
                      {static_cast<ssize_t>(coh_fdmt.get_dmt_size()), shape[1]});
-                 coh_fdmt.execute(data_in.data(), data_in.size(),
-                                  std::move(in_order), dmt.mutable_data(),
-                                  dmt.size());
+                 coh_fdmt.execute(data_in.data(), data_in.size(), in_order,
+                                  dmt.mutable_data(), dmt.size());
                  return dmt;
              });
 }

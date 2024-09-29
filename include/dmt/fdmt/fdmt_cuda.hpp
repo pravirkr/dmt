@@ -2,27 +2,28 @@
 
 #include <thrust/device_vector.h>
 
-#include <dmt/dmt_plans.hpp>
-#include <dmt/dmt_plans_gpu.hpp>
+#include "dmt/common/plans.hpp"
+#include "dmt/common/plans_cuda.hpp"
+#include "dmt/common/types.hpp"
 
-class FDMTGPU {
+class FDMTCUDA {
 public:
-    FDMTGPU(float f_min,
-            float f_max,
-            SizeType nchans,
-            SizeType nsamps,
-            float tsamp,
-            SizeType dt_max,
-            SizeType dt_step = 1,
-            SizeType dt_min  = 0,
-            bool use_history = false,
-            int device_id    = 0);
+    FDMTCUDA(float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             SizeType dt_max,
+             SizeType dt_step = 1,
+             SizeType dt_min  = 0,
+             bool use_history = false,
+             int device_id    = 0);
 
-    FDMTGPU(const FDMTGPU&)            = delete;
-    FDMTGPU& operator=(const FDMTGPU&) = delete;
-    FDMTGPU(FDMTGPU&&)                 = delete;
-    FDMTGPU& operator=(FDMTGPU&&)      = delete;
-    ~FDMTGPU()                         = default;
+    FDMTCUDA(const FDMTCUDA&)            = delete;
+    FDMTCUDA& operator=(const FDMTCUDA&) = delete;
+    FDMTCUDA(FDMTCUDA&&)                 = delete;
+    FDMTCUDA& operator=(FDMTCUDA&&)      = delete;
+    ~FDMTCUDA()                          = default;
 
     static void set_log_level(int level);
     const FDMTPlan& get_plan() const;

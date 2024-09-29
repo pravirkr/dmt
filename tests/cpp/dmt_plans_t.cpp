@@ -3,7 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstddef>
-#include <dmt/dmt_plans.hpp>
+#include <dmt/common/plans.hpp>
 
 TEST_CASE("FDMTPlan", "[dmt_plans]") {
     FDMTPlan::set_log_level(spdlog::level::debug);

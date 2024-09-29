@@ -2,9 +2,7 @@
 
 #include <vector>
 
-#include <dmt/dmt_types.hpp>
-
-using DtGridType = std::vector<SizeType>;
+#include "types.hpp"
 
 // Shape parameters of the FDMT state buffer in a single iteration
 struct FDMTShape {
@@ -24,13 +22,13 @@ struct FDMTShape {
 
 // Coordinate of the FDMT plan in a single iteration
 struct FDMTCoord {
-    SizeType i_sub;        // Subband index
-    SizeType i_dt;         // Delay index
-    SizeType nsamps;       // Number of samples in the state buffer
-    SizeType buf_offset;   // Offset (starting point) in the state buffer
-    SizeType i_coord_tail; // Tail coordinate index in the previous iteration
-    SizeType i_coord_head; // Head coordinate index in the previous iteration
-    SizeType offset;       // Offset between the tail and head coordinates
+    SizeType i_sub;           // Subband index
+    SizeType i_dt;            // Delay index
+    SizeType nsamps;          // Number of samples in the state buffer
+    SizeType buf_offset;      // Offset (starting point) in the state buffer
+    SizeType i_coord_tail;    // Tail coordinate index in the previous iteration
+    SizeType i_coord_head;    // Head coordinate index in the previous iteration
+    SizeType offset;          // Offset between the tail and head coordinates
     SizeType tail_buf_offset; // Offset (starting point) in the tail buffer
     SizeType tail_nsamps;     // Number of samples in the tail buffer
     SizeType head_buf_offset; // Offset (starting point) in the head buffer
@@ -126,33 +124,8 @@ private:
     void make_plan(SizeType i_iter);
 };
 
-struct CohFDMTPlan {
-    float fcenter;
-    float bwsub;
-    SizeType nsub;
-    float tbin;
-    SizeType nbin;
-    SizeType nfft;
-    float t_p;
-    float dm_max;
-    float dm_min;
-    SizeType noverlap_inp;
-
-    float bw;
-    float f_min;
-    float f_max;
-    SizeType n_p{};
-    SizeType nchan{};
-    std::vector<float> dm_grid_coh;
-    std::vector<float> dm_grid_final;
-    SizeType noverlap{};
-    SizeType nsamp{};
-    SizeType mbin{};
-    SizeType mchan{};
-    SizeType msamp{};
-    float tsamp{};
-    SizeType dt_max{};
-
+class CohFDMTPlan {
+public:
     CohFDMTPlan(float fcenter,
                 float bwsub,
                 SizeType nsub,
@@ -163,11 +136,71 @@ struct CohFDMTPlan {
                 float dm_max,
                 float dm_min          = 0.0F,
                 SizeType noverlap_inp = 8192);
+    CohFDMTPlan(const CohFDMTPlan&)            = delete;
+    CohFDMTPlan& operator=(const CohFDMTPlan&) = delete;
+    CohFDMTPlan(CohFDMTPlan&&)                 = default;
+    CohFDMTPlan& operator=(CohFDMTPlan&&)      = default;
+    ~CohFDMTPlan()                             = default;
 
+    // Getters
+    float get_fcenter() const noexcept;
+    float get_bwsub() const noexcept;
+    SizeType get_nsub() const noexcept;
+    float get_tbin() const noexcept;
+    SizeType get_nbin() const noexcept;
+    SizeType get_nfft() const noexcept;
+    float get_t_p() const noexcept;
+    float get_dm_max() const noexcept;
+    float get_dm_min() const noexcept;
+    SizeType get_noverlap_inp() const noexcept;
+
+    float get_bw() const noexcept;
+    float get_f_min() const noexcept;
+    float get_f_max() const noexcept;
+    SizeType get_n_p() const noexcept;
+    SizeType get_nchan() const noexcept;
     const std::vector<float>& get_dm_grid_coh() const noexcept;
     const std::vector<float>& get_dm_grid_final() const noexcept;
+    SizeType get_noverlap() const noexcept;
+    SizeType get_nsamp() const noexcept;
+    SizeType get_mbin() const noexcept;
+    SizeType get_mchan() const noexcept;
+    SizeType get_msamp() const noexcept;
+    float get_tsamp() const noexcept;
+    SizeType get_dt_max() const noexcept;
+
+    SizeType get_unpack_buf_size() const noexcept;
+    SizeType get_delay_buf_size() const noexcept;
+    SizeType get_intensity_buf_size() const noexcept;
+    float get_chirp_scale() const noexcept;
 
 private:
+    float m_fcenter;
+    float m_bwsub;
+    SizeType m_nsub;
+    float m_tbin;
+    SizeType m_nbin;
+    SizeType m_nfft;
+    float m_t_p;
+    float m_dm_max;
+    float m_dm_min;
+    SizeType m_noverlap_inp;
+
+    float m_bw;
+    float m_f_min;
+    float m_f_max;
+    SizeType m_n_p{};
+    SizeType m_nchan{};
+    std::vector<float> m_dm_grid_coh;
+    std::vector<float> m_dm_grid_final;
+    SizeType m_noverlap{};
+    SizeType m_nsamp{};
+    SizeType m_mbin{};
+    SizeType m_mchan{};
+    SizeType m_msamp{};
+    float m_tsamp{};
+    SizeType m_dt_max{};
+
     void validate_inputs() const;
     void configure_plan();
 };
@@ -176,7 +209,7 @@ struct DDMTPlanContainer {
     std::vector<float> dm_arr;
     // ndm x nchan
     std::vector<SizeType> delay_table;
-    size_t nchans;
+    SizeType nchans;
 };
 
 class DDMTPlan {

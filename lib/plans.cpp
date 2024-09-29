@@ -1,14 +1,16 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
 #include <spdlog/common.h>
 #include <spdlog/spdlog.h>
 
+#include <dmt/common/plans.hpp>
+#include <dmt/common/types.hpp>
+
 #include "dmt/dm_utils.hpp"
-#include "dmt/dmt_types.hpp"
-#include <dmt/dmt_plans.hpp>
 
 std::string FDMTShape::header_fmt() {
     return "{ncoords} ({nchans}x[{ndt_min}..{ndt_max}]) x "
@@ -180,10 +182,10 @@ void FDMTPlan::validate_inputs() const {
 }
 
 DtGridType FDMTPlan::calculate_dt_grid_sub(float f_start, float f_end) const {
-    const auto dt_max_sub = static_cast<SizeType>(
-        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max));
-    const auto dt_min_sub = static_cast<SizeType>(
-        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min));
+    const auto dt_max_sub =
+        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max);
+    const auto dt_min_sub =
+        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min);
     DtGridType dt_grid;
     for (SizeType dt = dt_min_sub; dt <= dt_max_sub; dt += m_dt_step) {
         dt_grid.push_back(dt);
@@ -214,15 +216,14 @@ void FDMTPlan::make_plan_iter0() {
     SizeType ncoords      = 0;
     m_container.grids[i_iter].resize(m_nchans);
     for (SizeType i_sub = 0; i_sub < m_nchans; ++i_sub) {
-        const auto f_start = m_df * static_cast<float>(i_sub) + m_f_min;
+        const auto f_start = (m_df * static_cast<float>(i_sub)) + m_f_min;
         const auto f_end   = f_start + m_df;
         const auto dt_sub  = calculate_dt_grid_sub(f_start, f_end);
         const auto ndt_sub = dt_sub.size();
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             const auto coord_cur = FDMTCoord{
-                i_sub,        i_dt,         m_nsamps,     buf_offset,
-                kSizeTypeMax, kSizeTypeMax, kSizeTypeMax, kSizeTypeMax,
-                kSizeTypeMax, kSizeTypeMax, kSizeTypeMax};
+                i_sub,    i_dt,     m_nsamps, buf_offset, SIZE_MAX, SIZE_MAX,
+                SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,   SIZE_MAX};
             m_container.coordinates[i_iter].emplace_back(coord_cur);
             buf_offset += m_nsamps;
         }
@@ -255,7 +256,7 @@ void FDMTPlan::make_plan(SizeType i_iter) {
     const auto& grids_prev  = m_container.grids[i_iter - 1];
     const auto& dt_grid_sub_top_prev = m_container.dt_grid_sub_top[i_iter - 1];
 
-    const SizeType nchans_cur = nchans_prev / 2 + nchans_prev % 2;
+    const SizeType nchans_cur = (nchans_prev / 2) + (nchans_prev % 2);
     const bool do_copy = nchans_prev % 2 == 1; // true if nchans_prev is odd
     const float df_top = (do_copy) ? df_top_prev : df_top_prev + df_bot_prev;
     const float df_bot = df_bot_prev * 2;
@@ -277,8 +278,8 @@ void FDMTPlan::make_plan(SizeType i_iter) {
     m_container.grids[i_iter].resize(nchans_cur);
     for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
         const auto& grids_tail = grids_prev[2 * i_sub];
-        const auto& grids_head = grids_prev[2 * i_sub + 1];
-        const auto f_start     = df_bot * static_cast<float>(i_sub) + m_f_min;
+        const auto& grids_head = grids_prev[(2 * i_sub) + 1];
+        const auto f_start     = (df_bot * static_cast<float>(i_sub)) + m_f_min;
         if (i_sub == nchans_cur - 1) {
             // For the top sub-band
             if (do_copy) {
@@ -328,13 +329,13 @@ void FDMTPlan::make_plan(SizeType i_iter) {
                     nsamps_iter,
                     buf_offset,
                     i_coord_tail,
-                    kSizeTypeMax,
+                    SIZE_MAX,
                     0,
                     m_container.coordinates[i_iter - 1][i_coord_tail]
                         .buf_offset,
                     m_container.coordinates[i_iter - 1][i_coord_tail].nsamps,
-                    kSizeTypeMax,
-                    kSizeTypeMax};
+                    SIZE_MAX,
+                    SIZE_MAX};
 
                 m_container.coordinates[i_iter].emplace_back(coord_cur);
                 m_container.coordinates_copy[i_iter].emplace_back(coord_cur);
@@ -394,71 +395,142 @@ CohFDMTPlan::CohFDMTPlan(float fcenter,
                          float dm_max,
                          float dm_min,
                          SizeType noverlap_inp)
-    : fcenter(fcenter),
-      bwsub(bwsub),
-      nsub(nsub),
-      tbin(tbin),
-      nbin(nbin),
-      nfft(nfft),
-      t_p(t_p),
-      dm_max(dm_max),
-      dm_min(dm_min),
-      noverlap_inp(noverlap_inp),
-      bw(bwsub * static_cast<float>(nsub)),
-      f_min(fcenter - bw / 2),
-      f_max(fcenter + bw / 2) {
+    : m_fcenter(fcenter),
+      m_bwsub(bwsub),
+      m_nsub(nsub),
+      m_tbin(tbin),
+      m_nbin(nbin),
+      m_nfft(nfft),
+      m_t_p(t_p),
+      m_dm_max(dm_max),
+      m_dm_min(dm_min),
+      m_noverlap_inp(noverlap_inp),
+      m_bw(bwsub * static_cast<float>(nsub)),
+      m_f_min(fcenter - (m_bw / 2)),
+      m_f_max(fcenter + (m_bw / 2)) {
     validate_inputs();
     configure_plan();
 }
 
-const std::vector<float>& CohFDMTPlan::get_dm_grid_coh() const noexcept {
-    return dm_grid_coh;
+// Getters
+float CohFDMTPlan::get_fcenter() const noexcept { return m_fcenter; }
+float CohFDMTPlan::get_bwsub() const noexcept { return m_bwsub; }
+SizeType CohFDMTPlan::get_nsub() const noexcept { return m_nsub; }
+float CohFDMTPlan::get_tbin() const noexcept { return m_tbin; }
+SizeType CohFDMTPlan::get_nbin() const noexcept { return m_nbin; }
+SizeType CohFDMTPlan::get_nfft() const noexcept { return m_nfft; }
+float CohFDMTPlan::get_t_p() const noexcept { return m_t_p; }
+float CohFDMTPlan::get_dm_max() const noexcept { return m_dm_max; }
+float CohFDMTPlan::get_dm_min() const noexcept { return m_dm_min; }
+SizeType CohFDMTPlan::get_noverlap_inp() const noexcept {
+    return m_noverlap_inp;
 }
 
+float CohFDMTPlan::get_bw() const noexcept { return m_bw; }
+float CohFDMTPlan::get_f_min() const noexcept { return m_f_min; }
+float CohFDMTPlan::get_f_max() const noexcept { return m_f_max; }
+SizeType CohFDMTPlan::get_n_p() const noexcept { return m_n_p; }
+SizeType CohFDMTPlan::get_nchan() const noexcept { return m_nchan; }
+const std::vector<float>& CohFDMTPlan::get_dm_grid_coh() const noexcept {
+    return m_dm_grid_coh;
+}
 const std::vector<float>& CohFDMTPlan::get_dm_grid_final() const noexcept {
-    return dm_grid_final;
+    return m_dm_grid_final;
+}
+SizeType CohFDMTPlan::get_noverlap() const noexcept { return m_noverlap; }
+SizeType CohFDMTPlan::get_nsamp() const noexcept { return m_nsamp; }
+SizeType CohFDMTPlan::get_mbin() const noexcept { return m_mbin; }
+SizeType CohFDMTPlan::get_mchan() const noexcept { return m_mchan; }
+SizeType CohFDMTPlan::get_msamp() const noexcept { return m_msamp; }
+float CohFDMTPlan::get_tsamp() const noexcept { return m_tsamp; }
+SizeType CohFDMTPlan::get_dt_max() const noexcept { return m_dt_max; }
+
+SizeType CohFDMTPlan::get_unpack_buf_size() const noexcept {
+    return m_nfft * m_nsub * m_nbin;
+}
+SizeType CohFDMTPlan::get_delay_buf_size() const noexcept {
+    return m_nfft * m_nsub * m_nbin;
+}
+SizeType CohFDMTPlan::get_intensity_buf_size() const noexcept {
+    return m_nsub * m_nchan * m_msamp;
+}
+float CohFDMTPlan::get_chirp_scale() const noexcept {
+    return 1.0F / static_cast<float>(m_nbin);
 }
 
 void CohFDMTPlan::validate_inputs() const {
-    if (nsub < 1) {
+    if (m_nsub < 1) {
         throw std::invalid_argument("nsub must be greater than 0");
+    }
+    if (m_bwsub <= 0.0F) {
+        throw std::invalid_argument("bwsub must be positive");
+    }
+    if (m_tbin <= 0.0F) {
+        throw std::invalid_argument("tbin must be positive");
+    }
+    if (m_nbin == 0) {
+        throw std::invalid_argument("nbin must be greater than 0");
+    }
+    if (m_nfft == 0) {
+        throw std::invalid_argument("nfft must be greater than 0");
+    }
+    if (m_t_p <= 0.0F) {
+        throw std::invalid_argument("t_p must be positive");
+    }
+    if (m_dm_max < m_dm_min) {
+        throw std::invalid_argument(
+            "dm_max must be greater than or equal to dm_min");
     }
 }
 
 void CohFDMTPlan::configure_plan() {
-    n_p   = static_cast<SizeType>(std::ceil(t_p / tbin));
-    nchan = n_p;
+    // Calculate the number of samples corresponding to pulse width
+    m_n_p   = static_cast<SizeType>(std::ceil(m_t_p / m_tbin));
+    m_nchan = m_n_p;
 
-    dm_grid_coh =
-        dm_utils::generate_coherent_dms(dm_min, dm_max, fcenter, bw, tbin, t_p);
-    if (dm_grid_coh.empty()) {
+    // Generate coherent DM grid
+    m_dm_grid_coh = dm_utils::generate_coherent_dms(
+        m_dm_min, m_dm_max, m_fcenter, m_bw, m_tbin, m_t_p);
+    if (m_dm_grid_coh.empty()) {
         throw std::runtime_error("Empty DM grid");
     }
 
-    auto noverlap_optimal = dm_utils::minimum_overlap(
-        *std::max_element(dm_grid_coh.begin(), dm_grid_coh.end()), fcenter, bw,
-        tbin, nsub, nchan);
-    auto noverlap_optimal_pow2 = static_cast<SizeType>(
+    // Compute optimal overlap size and adjust to the nearest power of two
+    const auto max_dm =
+        *std::max_element(m_dm_grid_coh.begin(), m_dm_grid_coh.end());
+    const auto noverlap_optimal = dm_utils::minimum_overlap(
+        max_dm, m_fcenter, m_bw, m_tbin, m_nsub, m_nchan);
+    const auto noverlap_optimal_pow2 = static_cast<SizeType>(
         std::pow(2, std::round(std::log2(noverlap_optimal))));
-    noverlap = std::max(noverlap_inp, noverlap_optimal_pow2);
+    m_noverlap = std::max(m_noverlap_inp, noverlap_optimal_pow2);
 
-    if (nbin < 2 * noverlap) {
+    // Validate nbin and noverlap
+    if (m_nbin < 2 * m_noverlap) {
         throw std::invalid_argument("nbin must be greater than 2 * noverlap");
     }
-    nsamp  = nfft * (nbin - 2 * noverlap);
-    mbin   = nbin / nchan;
-    mchan  = nsub * nchan;
-    msamp  = nsamp / nchan;
-    tsamp  = tbin * static_cast<float>(nchan);
-    dt_max = n_p;
+    m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
+
+    // Calculate bins per channel
+    if (m_nbin % m_nchan != 0) {
+        throw std::runtime_error("nbin must be divisible by nchan");
+    }
+    m_mbin  = m_nbin / m_nchan;
+    m_mchan = m_nsub * m_nchan;
+
+    if (m_nsamp % m_nchan != 0) {
+        throw std::runtime_error("nsamp must be divisible by nchan");
+    }
+    m_msamp  = m_nsamp / m_nchan;
+    m_tsamp  = m_tbin * static_cast<float>(m_nchan);
+    m_dt_max = m_n_p;
 
     // Generate final DM grid
-    dm_grid_final.resize(dm_grid_coh.size() * dt_max);
-    const float dm_conv = dm_utils::get_dmconv(f_min, f_max, tsamp);
-    for (SizeType i = 0; i < dm_grid_coh.size(); ++i) {
-        for (SizeType j = 0; j < dt_max; ++j) {
-            dm_grid_final[i * dt_max + j] =
-                dm_grid_coh[i] + static_cast<float>(j) * dm_conv;
+    m_dm_grid_final.resize(m_dm_grid_coh.size() * m_dt_max);
+    const float dm_conv = dm_utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
+    for (SizeType i = 0; i < m_dm_grid_coh.size(); ++i) {
+        for (SizeType j = 0; j < m_dt_max; ++j) {
+            m_dm_grid_final[(i * m_dt_max) + j] =
+                m_dm_grid_coh[i] + static_cast<float>(j) * dm_conv;
         }
     }
 }

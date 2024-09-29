@@ -5,8 +5,8 @@
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 
-#include <dmt/fdmt_cpu.hpp>
-#include <dmt/fdmt_gpu.hpp>
+#include <dmt/fdmt/fdmt_cpu.hpp>
+#include <dmt/fdmt/fdmt_cuda.hpp>
 
 TEST_CASE("FDMTGPU", "[fdmt_gpu]") {
     FDMTGPU::set_log_level(spdlog::level::debug);

@@ -1,6 +1,8 @@
-#include <dmt/dm_utils.hpp>
-#include <dmt/dmt_simulate.hpp>
-#include <dmt/dmt_types.hpp>
+
+#include <dmt/common/types.hpp>
+#include <dmt/utils/simulate.hpp>
+
+#include "dmt/dm_utils.hpp"
 
 std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            SizeType nsamps,
@@ -15,7 +17,8 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
     SizeType nsamps_dispersed = 0;
 
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-        const auto freq = f_min + static_cast<float>(ichan) * foff + foff_half;
+        const auto freq =
+            f_min + (static_cast<float>(ichan) * foff) + foff_half;
         const auto freq_min = freq - foff_half;
         const auto freq_max = freq + foff_half;
         const auto dt_start = static_cast<float>(dt) *

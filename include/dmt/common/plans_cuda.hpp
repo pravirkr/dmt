@@ -1,13 +1,11 @@
 #pragma once
 
 #include <numeric>
+#include <thrust/device_vector.h>
 #include <vector>
 
-#include <thrust/device_vector.h>
-
-#include <dmt/dmt_plans.hpp>
-
-template <typename T> using DeviceVector = thrust::device_vector<T>;
+#include "plans.hpp"
+#include "types.hpp"
 
 // Static helper functions
 template <typename T>

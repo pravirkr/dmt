@@ -58,7 +58,7 @@ std::vector<SizeType> dm_utils::generate_delay_table(const float* dm_arr,
             const auto b = 1.F / f0;
             const auto delay =
                 kDispConst / tsamp * (a * a - b * b) * dm_arr[idm];
-            delay_table[idm * nchans + ichan] =
+            delay_table[(idm * nchans) + ichan] =
                 static_cast<SizeType>(std::round(delay));
         }
     }
@@ -72,7 +72,7 @@ SizeType dm_utils::minimum_overlap(float dm_max,
                                    SizeType nsub,
                                    SizeType nchan) {
     float bw_chan         = bw / static_cast<float>(nsub * nchan);
-    float fmin_bottom_sub = fcenter - bw / 2;
+    float fmin_bottom_sub = fcenter - (bw / 2);
     float fmax_bottom_sub = fmin_bottom_sub + bw_chan;
     float delay           = kDispConst * dm_max *
                   (std::pow(fmin_bottom_sub, kDispCoeff) -
@@ -86,15 +86,16 @@ SizeType dm_utils::minimum_overlap(float dm_max,
 
 std::vector<float> dm_utils::generate_coherent_dms(
     float dm_min, float dm_max, float fcenter, float bw, float tbin, float tp) {
-    float f_min = fcenter - bw / 2;
-    float f_max = fcenter + bw / 2;
+    float f_min = fcenter - (bw / 2);
+    float f_max = fcenter + (bw / 2);
     float delay = kDispConst * dm_max *
                   (std::pow(f_min, kDispCoeff) - std::pow(f_max, kDispCoeff));
     auto ncoherent = static_cast<size_t>(std::ceil(delay * tbin / (tp * tp)));
     float coh_dm_step = dm_max / static_cast<float>(ncoherent);
     std::vector<float> dm_grid;
+    dm_grid.reserve(ncoherent);
     for (size_t i = 0; i < ncoherent; ++i) {
-        dm_grid.push_back(dm_min + static_cast<float>(i) * coh_dm_step);
+        dm_grid.push_back(dm_min + (static_cast<float>(i) * coh_dm_step));
     }
     return dm_grid;
 }
@@ -113,7 +114,7 @@ void dm_utils::dedisperse(float* __restrict waterfall,
     const float foff = (f_max - f_min) / static_cast<float>(nchans);
     std::vector<int> shifts(nchans);
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-        const float fchan = f_min + foff * static_cast<float>(ichan);
+        const float fchan = f_min + (foff * static_cast<float>(ichan));
         const float delay =
             kDispConst * dm *
             (std::pow(f_min, kDispCoeff) - std::pow(fchan, kDispCoeff));
@@ -136,7 +137,7 @@ void dm_utils::dedisperse(float* __restrict waterfall,
     }
 }
 
-void dm_utils::compute_chirp(std::complex<float>* chirp_table,
+void dm_utils::compute_chirp(ComplexType* chirp_table,
                              SizeType chirp_table_size,
                              const float* dm_grid,
                              SizeType ndm,
@@ -145,7 +146,6 @@ void dm_utils::compute_chirp(std::complex<float>* chirp_table,
                              SizeType nbin,
                              SizeType nsub,
                              SizeType nchan) {
-
     const SizeType mbin = nbin / nchan;
     const float bw_sub  = bw / static_cast<float>(nsub);
     const float bw_chan = bw_sub / static_cast<float>(nchan);
@@ -156,17 +156,15 @@ void dm_utils::compute_chirp(std::complex<float>* chirp_table,
     }
 
     std::vector<float> freqs_sub(nsub);
+    for (SizeType i = 0; i < nsub; ++i) {
+        freqs_sub[i] =
+            fcenter - bw / 2 + (static_cast<float>(i) + 0.5F) * bw_sub;
+    }
     std::vector<float> bin_freqs(mbin);
-    std::transform(freqs_sub.begin(), freqs_sub.end(), freqs_sub.begin(),
-                   [fcenter, bw, bw_sub, i = 0](auto&) mutable {
-                       return fcenter - bw / 2 +
-                              (static_cast<float>(i++) + 0.5F) * bw_sub;
-                   });
-    std::transform(bin_freqs.begin(), bin_freqs.end(), bin_freqs.begin(),
-                   [bw_chan, bw_bin, i = 0](auto&) mutable {
-                       return -bw_chan / 2 +
-                              (static_cast<float>(i++) + 0.5F) * bw_bin;
-                   });
+    for (SizeType i = 0; i < mbin; ++i) {
+        bin_freqs[i] = -bw_chan / 2 + (static_cast<float>(i) + 0.5F) * bw_bin;
+    }
+
     const float taper_const = 1.0F / (0.47F * bw_chan);
     const float taper_exp   = 80.0F;
     const float coeff_const =
@@ -177,9 +175,9 @@ void dm_utils::compute_chirp(std::complex<float>* chirp_table,
         for (SizeType isub = 0; isub < nsub; ++isub) {
             for (SizeType ichan = 0; ichan < nchan; ++ichan) {
                 const float freq_chan =
-                    freqs_sub[isub] + (static_cast<float>(ichan) -
-                                       static_cast<float>(nchan) / 2 + 0.5F) *
-                                          bw_chan;
+                    freqs_sub[isub] + ((static_cast<float>(ichan) -
+                                        static_cast<float>(nchan) / 2 + 0.5F) *
+                                       bw_chan);
                 for (SizeType ibin = 0; ibin < mbin; ++ibin) {
                     const float bin_freq    = bin_freqs[ibin];
                     const float freq_ratio  = bin_freq / freq_chan;
@@ -188,9 +186,9 @@ void dm_utils::compute_chirp(std::complex<float>* chirp_table,
                     const float taper =
                         1.0F / std::sqrt(1.0F + std::pow(bin_freq * taper_const,
                                                          taper_exp));
-                    const SizeType idx = idm * nsub * nchan * mbin +
-                                         isub * nchan * mbin + ichan * mbin +
-                                         ibin;
+                    const SizeType idx = (idm * nsub * nchan * mbin) +
+                                         (isub * nchan * mbin) +
+                                         (ichan * mbin) + ibin;
                     chirp_table[idx] = std::polar(taper, phase_delay);
                 }
             }

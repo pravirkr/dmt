@@ -1,8 +1,31 @@
+#pragma once
 
-#include <dmt/dmt_types.hpp>
+#include <algorithm>
+#include <cstdint>
+#include <omp.h>
+#include <stdexcept>
+#include <string_view>
 
-enum class DataOrder { kPRITF, kFTPRI, kRITFP };
+#include "dmt/common/types.hpp"
 
+/**
+ * @enum DataOrder
+ * @brief Describes the data order for different unpacking methods.
+ *
+ */
+enum class DataOrder : uint8_t {
+    kPRITF, /**< Polarisation-Real/Imag-time-frequency */
+    kFTPRI, /**< Frequency-Time-Polarisation-Real/Imag */
+    kRITFP  /**< Real/Imag-time-frequency-Polarisation */
+};
+
+/**
+ * @brief Convert a string to the corresponding DataOrder enum value.
+ *
+ * @param sv String representing the data order (e.g. "FTPRI").
+ * @return DataOrder The corresponding DataOrder enum value.
+ * @throw std::runtime_error If the input string is invalid.
+ */
 constexpr DataOrder string_to_data_order(std::string_view sv) {
     if (sv == "FTPRI") {
         return DataOrder::kFTPRI;
@@ -16,14 +39,19 @@ constexpr DataOrder string_to_data_order(std::string_view sv) {
     throw std::runtime_error("Invalid data order");
 }
 
-
-// Unpack and pad the input data to generate complex timeseries
 // Input ordered as polarisation-Real/Imag-time-frequency (PTF) - LOFAR
 // data_in shape: (npol=2, R/I=2, nsamp, nsub)
 // noverlap = n_d * n_c // 2
 // nsamp = nfft * (nbin - 2 * noverlap)
 // data_out shape: (2, nfft, nsub, nbin)
-template <DataOrder Order> class DataUnpacker {
+
+/**
+ * @brief Unpacks and pads the input data to generate complex timeseries.
+ *
+ * @tparam Order The data order for unpacking.
+ * @tparam Npol The number of polarisations.
+ */
+template <DataOrder Order, SizeType Npol = 2> class DataUnpacker {
 public:
     DataUnpacker(SizeType nsub, SizeType nbin, SizeType noverlap, SizeType nfft)
         : m_nsub(nsub),
@@ -36,10 +64,10 @@ public:
         m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
     }
 
-    void unpack_and_padd(const uint8_t* __restrict data_in,
+    void unpack_and_padd(const uint8_t* __restrict__ data_in,
                          SizeType in_size,
-                         ComplexType* __restrict data_p1,
-                         ComplexType* __restrict data_p2,
+                         ComplexType* __restrict__ data_p1,
+                         ComplexType* __restrict__ data_p2,
                          SizeType out_size) {
         validate_sizes(in_size, out_size);
 #ifdef USE_OPENMP
@@ -59,10 +87,9 @@ private:
     SizeType m_nfft;
     SizeType m_nsamp;
     static constexpr SizeType kChunkSize = 64;
-    static constexpr SizeType kNpol      = 2;
 
     void validate_sizes(SizeType in_size, SizeType out_size) {
-        if (in_size != 4 * m_nsamp * m_nsub) {
+        if (in_size != 2 * Npol * m_nsamp * m_nsub) {
             throw std::runtime_error("Invalid input size");
         }
         if (out_size != m_nfft * m_nsub * m_nbin) {
@@ -70,14 +97,13 @@ private:
         }
     }
 
-    inline SizeType
-    calculate_indices(SizeType isamp, SizeType ipol, SizeType isub) {
+    SizeType calculate_indices(SizeType isamp, SizeType ipol, SizeType isub) {
         if constexpr (Order == DataOrder::kPRITF) {
-            return ipol * 2 * m_nsamp * m_nsub + isamp * m_nsub + isub;
+            return (ipol * 2 * m_nsamp * m_nsub) + (isamp * m_nsub) + isub;
         } else if constexpr (Order == DataOrder::kFTPRI) {
-            return isub * m_nsamp * kNpol * 2 + isamp * kNpol * 2 + ipol;
+            return (isub * m_nsamp * Npol * 2) + (isamp * Npol * 2) + ipol;
         } else if constexpr (Order == DataOrder::kRITFP) {
-            return isamp * m_nsub * kNpol + isub * kNpol + ipol;
+            return (isamp * m_nsub * Npol) + (isub * Npol) + ipol;
         }
     }
 
@@ -87,19 +113,19 @@ private:
         } else if constexpr (Order == DataOrder::kFTPRI) {
             return 1;
         } else if constexpr (Order == DataOrder::kRITFP) {
-            return m_nsamp * m_nsub * kNpol;
+            return m_nsamp * m_nsub * Npol;
         }
     }
 
-    void process_chunk(const uint8_t* __restrict data_in,
-                       ComplexType* __restrict data_p1,
-                       ComplexType* __restrict data_p2,
+    void process_chunk(const uint8_t* __restrict__ data_in,
+                       ComplexType* __restrict__ data_p1,
+                       ComplexType* __restrict__ data_p2,
                        SizeType ifft,
                        SizeType isub) {
-        const auto out_offset = ifft * m_nsub * m_nbin + isub * m_nbin;
+        const auto out_offset = (ifft * m_nsub * m_nbin) + (isub * m_nbin);
         const auto start_sample =
-            static_cast<ptrdiff_t>((m_nbin - 2 * m_noverlap) * ifft) -
-            static_cast<ptrdiff_t>(m_noverlap);
+            static_cast<IndexType>((m_nbin - 2 * m_noverlap) * ifft) -
+            static_cast<IndexType>(m_noverlap);
         const auto bin_start = start_sample < 0 ? -start_sample : 0;
         const auto bin_end   = std::min(m_nbin, m_nsamp - start_sample);
         const auto ri_stride = calculate_ri_stride();
@@ -120,3 +146,11 @@ private:
         }
     }
 };
+
+void pointwise_complex_multiply(const ComplexType* __restrict__ a,
+                                const ComplexType* __restrict__ b,
+                                ComplexType* __restrict__ c,
+                                SizeType nx,
+                                SizeType ny,
+                                SizeType idm,
+                                float scale);

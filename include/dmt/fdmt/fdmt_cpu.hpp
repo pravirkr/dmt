@@ -2,7 +2,8 @@
 
 #include <vector>
 
-#include <dmt/dmt_plans.hpp>
+#include "dmt/common/plans.hpp"
+#include "dmt/common/types.hpp"
 
 class FDMTCPU {
 public:

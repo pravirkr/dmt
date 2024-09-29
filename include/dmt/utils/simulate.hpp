@@ -3,7 +3,7 @@
 #include <tuple>
 #include <vector>
 
-#include <dmt/dmt_types.hpp>
+#include "dmt/common/types.hpp"
 
 std::tuple<std::vector<float>, SizeType>
 generate_pure_frb(SizeType nchans,

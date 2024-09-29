@@ -4,8 +4,9 @@
 
 #include <spdlog/spdlog.h>
 
-#include <dmt/cuda_utils.cuh>
-#include <dmt/fdmt_gpu.hpp>
+#include <dmt/fdmt/fdmt_cuda.hpp>
+
+#include "dmt/cuda_utils.cuh"
 
 __global__ void
 kernel_init_fdmt(const float* __restrict__ waterfall,

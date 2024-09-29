@@ -7,9 +7,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include <dmt/common/types.hpp>
+#include <dmt/fdmt/fdmt_cpu.hpp>
+
 #include "dmt/dm_utils.hpp"
-#include "dmt/dmt_types.hpp"
-#include <dmt/fdmt_cpu.hpp>
 
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
@@ -21,14 +22,10 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_min,
                  bool use_history)
     : m_use_history(use_history),
-      m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
-    // Allocate memory for the state buffers
-    const auto state_size = m_plan.get_buffer_size();
-    const auto hist_size  = m_plan.get_history_size();
-    m_state_in.resize(state_size, 0.0F);
-    m_state_out.resize(state_size, 0.0F);
-    m_history.resize(hist_size, 0.0F);
-}
+      m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min),
+      m_state_in(m_plan.get_buffer_size(), 0.0F),
+      m_state_out(m_plan.get_buffer_size(), 0.0F),
+      m_history(m_plan.get_history_size(), 0.0F) {}
 
 void FDMTCPU::set_num_threads(int nthreads) {
 #ifdef USE_OPENMP
@@ -40,9 +37,9 @@ void FDMTCPU::set_log_level(int level) { FDMTPlan::set_log_level(level); }
 
 const FDMTPlan& FDMTCPU::get_plan() const { return m_plan; }
 
-void FDMTCPU::execute(const float* __restrict waterfall,
+void FDMTCPU::execute(const float* __restrict__ waterfall,
                       SizeType waterfall_size,
-                      float* __restrict dmt,
+                      float* __restrict__ dmt,
                       SizeType dmt_size,
                       bool normalize) {
     check_inputs(waterfall_size, dmt_size);
@@ -61,14 +58,14 @@ void FDMTCPU::execute(const float* __restrict waterfall,
 }
 
 template <bool Normalize>
-void initialize_impl(const float* __restrict waterfall,
+void initialize_impl(const float* __restrict__ waterfall,
                      SizeType /*waterfall_size*/,
-                     float* __restrict state,
+                     float* __restrict__ state,
                      SizeType /*state_size*/,
                      const std::vector<FDMTCoordGrid>& grids_init,
                      SizeType nsamps,
                      SizeType dt_max,
-                     const float* __restrict hist) {
+                     const float* __restrict__ hist) {
 
 #ifdef USE_OPENMP
 #pragma omp parallel for default(none)                                         \
@@ -97,8 +94,8 @@ void initialize_impl(const float* __restrict waterfall,
         for (SizeType i_dt = 1; i_dt < dt_grid_sub.size(); ++i_dt) {
             const auto dt_cur            = dt_grid_sub[i_dt];
             const auto dt_prev           = dt_grid_sub[i_dt - 1];
-            const auto state_offset_cur  = buffer_offset + i_dt * nsamps;
-            const auto state_offset_prev = buffer_offset + (i_dt - 1) * nsamps;
+            const auto state_offset_cur  = buffer_offset + (i_dt * nsamps);
+            const auto state_offset_prev = buffer_offset + ((i_dt - 1) * nsamps);
 
             // Initialise state for [i_sub, i_dt, dt_cur:]
             for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
@@ -166,7 +163,7 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
     if (m_use_history) {
         // Copy the last nchans x dt_max elements from waterfall to hist
         for (SizeType i_sub = 0; i_sub < grids_init.size(); ++i_sub) {
-            std::copy_n(&waterfall[i_sub * nsamps + nsamps - dt_max], dt_max,
+            std::copy_n(&waterfall[(i_sub * nsamps) + nsamps - dt_max], dt_max,
                         &hist[i_sub * dt_max]);
         }
     }
@@ -182,6 +179,7 @@ void FDMTCPU::execute_iter(const float* __restrict state_in,
 #pragma omp parallel default(none)                                             \
     shared(state_in, state_out, coords_sum_cur, coords_copy_cur)
     {
+
 #pragma omp for nowait
         for (SizeType i_coord = 0; i_coord < coords_sum_cur.size(); ++i_coord) {
             const auto& coord = coords_sum_cur[i_coord];

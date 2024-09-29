@@ -1,4 +1,4 @@
-#include <dmt/dmt_plans_gpu.hpp>
+#include <dmt/common/plans_cuda.hpp>
 
 __host__ __device__ void FDMTCoordDPtrs::update_offsets(int offset_value) {
     nsamps += offset_value;

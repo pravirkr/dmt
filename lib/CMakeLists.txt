@@ -1,9 +1,12 @@
 CPMFindPackage(
   NAME spdlog
-  VERSION 1.13.0
+  VERSION 1.14.1
   GITHUB_REPOSITORY gabime/spdlog
   OPTIONS "SPDLOG_INSTALL ON"
 )
+
+# Find FFTW
+find_package(FFTW REQUIRED)
 
 # Code Coverage Configuration
 add_library(coverage_config INTERFACE)
@@ -12,11 +15,10 @@ if(ENABLE_CODE_COVERAGE)
   target_link_options(coverage_config INTERFACE --coverage)
 endif()
 
-find_package(FFTW REQUIRED)
-
+# Collect source files
 file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
-# Check if CUDA was found
+# Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
   file(GLOB LIBRARY_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
   list(APPEND LIBRARY_SOURCES ${LIBRARY_SOURCES_CUDA})

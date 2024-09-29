@@ -1,6 +1,7 @@
 #pragma once
 
-#include <dmt/dmt_plans.hpp>
+#include "dmt/common/plans.hpp"
+#include "dmt/common/types.hpp"
 
 class DDMTCPU {
 public:

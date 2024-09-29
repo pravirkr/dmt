@@ -1,9 +1,10 @@
 #pragma once
 
-#include <cuda_runtime.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+
+#include <cuda_runtime.h>
 
 namespace error_checker {
 
