@@ -101,7 +101,7 @@ std::vector<float> dm_utils::generate_coherent_dms(
     return dm_grid;
 }
 
-void dm_utils::dedisperse(float* __restrict waterfall,
+void dm_utils::dedisperse(float* __restrict__ waterfall,
                           SizeType waterfall_size,
                           float dm,
                           float f_min,

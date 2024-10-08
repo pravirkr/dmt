@@ -25,72 +25,35 @@ public:
         nchans = 4096;
         tsamp  = 0.00008192F;
         dt_max = 2048;
-        nsamps = state.range(0);
-        std::random_device rd;
-        gen       = std::mt19937(rd());
+        // If range is 0, fix nsamps for thread benchmarks
+        nsamps = (state.range(0) == 0) ? 1 << 16 : state.range(0);
+        // If second range is 0, use first range as nthreads
+        nthreads  = (state.range(1) == 0) ? static_cast<int>(state.range(0))
+                                          : static_cast<int>(state.range(1));
+        gen       = std::mt19937(std::random_device()());
         waterfall = generate_vector<float>(nchans * nsamps, gen);
     }
 
     void TearDown(const ::benchmark::State& /*unused*/) override {}
 
-    float f_min{};
-    float f_max{};
-    size_t nchans{};
-    float tsamp{};
-    size_t dt_max{};
-    size_t nsamps{};
+    float f_min{}, f_max{}, tsamp{};
+    size_t nchans{}, dt_max{}, nsamps{};
+    int nthreads{};
     std::mt19937 gen;
     std::vector<float> waterfall;
 };
 
-class FDMTThreadsFixture : public benchmark::Fixture {
-public:
-    void SetUp(const ::benchmark::State& state) override {
-        f_min    = 704.0F;
-        f_max    = 1216.0F;
-        nchans   = 4096;
-        tsamp    = 0.00008192F;
-        dt_max   = 2048;
-        nsamps   = 65536;
-        nthreads = state.range(0);
-        std::random_device rd;
-        gen       = std::mt19937(rd());
-        waterfall = generate_vector<float>(nchans * nsamps, gen);
-    }
-
-    void TearDown(const ::benchmark::State& /*unused*/) override {}
-
-    float f_min{};
-    float f_max{};
-    size_t nchans{};
-    float tsamp{};
-    size_t dt_max{};
-    size_t nsamps{};
-    size_t nthreads{};
-    std::mt19937 gen;
-    std::vector<float> waterfall;
-};
-
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer_seq)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTCPU::set_num_threads(1);
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0,
+                     nthreads);
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer_par)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise)
 (benchmark::State& state) {
-    for (auto _ : state) {
-        FDMTCPU::set_num_threads(8);
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    }
-}
-
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
-(benchmark::State& state) {
-    FDMTCPU::set_num_threads(1);
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, nthreads);
     std::vector<float> state_init(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
@@ -98,21 +61,9 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise_par)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute)
 (benchmark::State& state) {
-    FDMTCPU::set_num_threads(8);
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    std::vector<float> state_init(fdmt.get_plan().get_buffer_size(), 0.0F);
-    for (auto _ : state) {
-        fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
-                        state_init.size());
-    }
-}
-
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_seq)
-(benchmark::State& state) {
-    FDMTCPU::set_num_threads(1);
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
@@ -120,45 +71,21 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_seq)
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_par)
-(benchmark::State& state) {
-    FDMTCPU::set_num_threads(8);
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
-    for (auto _ : state) {
-        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
-                     dmt.size());
-    }
-}
-
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_seq)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
 (benchmark::State& state) {
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     std::vector<float> dmt(tmp_plan.get_dmt_size(), 0.0F);
     for (auto _ : state) {
-        FDMTCPU::set_num_threads(1);
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0,
+                     nthreads);
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
                      dmt.size());
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_par)
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_threads)
 (benchmark::State& state) {
-    FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    std::vector<float> dmt(tmp_plan.get_dmt_size(), 0.0F);
-    for (auto _ : state) {
-        FDMTCPU::set_num_threads(8);
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
-                     dmt.size());
-    }
-}
-
-BENCHMARK_DEFINE_F(FDMTThreadsFixture, BM_fdmt_execute_threads)
-(benchmark::State& state) {
-    FDMTCPU::set_num_threads(static_cast<int>(nthreads));
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
@@ -169,52 +96,28 @@ BENCHMARK_DEFINE_F(FDMTThreadsFixture, BM_fdmt_execute_threads)
 constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 16;
 
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer_seq)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps);
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer_par)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2), {1, 8}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise_seq)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
+
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2), {1, 8}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise_par)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
+
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2), {1, 8}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute_seq)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
+
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2), {1, 8}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute_par)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
-    ->MeasureProcessCPUTime()
-    ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall_seq)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
-    ->MeasureProcessCPUTime()
-    ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall_par)
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
-    ->MeasureProcessCPUTime()
-    ->UseRealTime();
-BENCHMARK_REGISTER_F(FDMTThreadsFixture, BM_fdmt_execute_threads)
-    ->Arg(1)
-    ->Arg(2)
-    ->Arg(4)
-    ->Arg(8)
-    ->Arg(10)
-    ->Arg(12)
-    ->Arg(16)
+
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute_threads) // NOLINT
+    ->ArgsProduct({{0}, {1, 2, 4, 8, 10, 12, 16}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();
 

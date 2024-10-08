@@ -29,15 +29,14 @@ add_library(${PROJECT_NAME}::${LIBRARY_NAME} ALIAS ${LIBRARY_NAME})
 
 target_include_directories(
   ${LIBRARY_NAME}
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include/>
-         $<BUILD_INTERFACE:${FFTW_INCLUDE_DIRS}>
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include/> $<BUILD_INTERFACE:${FFTW_INCLUDE_DIRS}>
          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(
   ${LIBRARY_NAME}
-  PUBLIC spdlog::spdlog_header_only ${FFTW_FLOAT_LIB}
+  PUBLIC spdlog::spdlog_header_only ${FFTW_FLOAT_OPENMP_LIB}
   PRIVATE coverage_config
 )
 

@@ -25,14 +25,14 @@ public:
              float tsamp,
              const std::vector<float>& dm_arr);
 
-    void execute(const float* __restrict waterfall,
+    void execute(const float* __restrict__ waterfall,
                  SizeType waterfall_size,
-                 float* __restrict dmt,
+                 float* __restrict__ dmt,
                  SizeType dmt_size);
 
-    void execute(const float* __restrict waterfall,
+    void execute(const float* __restrict__ waterfall,
                  SizeType waterfall_size,
-                 float* __restrict dmt,
+                 float* __restrict__ dmt,
                  SizeType dmt_size,
                  bool device_flags);
 
@@ -41,8 +41,8 @@ private:
     DDMTPlan m_plan;
     DDMTPlanD m_plan_d;
 
-    void execute_device(const float* __restrict waterfall,
+    void execute_device(const float* __restrict__ waterfall,
                         SizeType waterfall_size,
-                        float* __restrict dmt,
+                        float* __restrict__ dmt,
                         SizeType dmt_size);
 };

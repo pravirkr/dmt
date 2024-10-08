@@ -100,9 +100,9 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
         const auto coord_tail_buf_offset = coords_sum.tail_buf_offset[i_coord];
         const auto coord_head_buf_offset = coords_sum.head_buf_offset[i_coord];
 
-        const float* __restrict tail = &state_in[coord_tail_buf_offset];
-        const float* __restrict head = &state_in[coord_head_buf_offset];
-        float* __restrict out        = &state_out[coord_buf_offset];
+        const float* __restrict__ tail = &state_in[coord_tail_buf_offset];
+        const float* __restrict__ head = &state_in[coord_head_buf_offset];
+        float* __restrict__ out        = &state_out[coord_buf_offset];
         if (isamp < offset) {
             out[isamp] = tail[isamp];
         } else if (isamp >= offset && isamp < nsamps_tail) {
@@ -128,7 +128,7 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     }
 }
 
-FDMTGPU::FDMTGPU(float f_min,
+FDMTCUDA::FDMTCUDA(float f_min,
                  float f_max,
                  size_t nchans,
                  size_t nsamps,
@@ -136,43 +136,48 @@ FDMTGPU::FDMTGPU(float f_min,
                  size_t dt_max,
                  size_t dt_step,
                  size_t dt_min,
+                 int device_id,
                  bool use_history,
-                 int device_id)
+                 bool verbose)
     : m_use_history(use_history),
       m_device_id(device_id),
-      m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min) {
-    if (m_device_id < 0) {
-        throw std::invalid_argument("Invalid device_id");
-    }
+      m_plan(f_min,
+             f_max,
+             nchans,
+             nsamps,
+             tsamp,
+             dt_max,
+             dt_step,
+             dt_min,
+             verbose) {
     set_device(m_device_id);
     // Allocate memory for the state buffers
-    const auto state_size = m_plan.get_buffer_size();
-    const auto hist_size  = m_plan.get_history_size();
-    m_state_in_d.resize(state_size, 0.0F);
-    m_state_out_d.resize(state_size, 0.0F);
-    m_history_d.resize(hist_size, 0.0F);
+    m_state_in_d.resize(m_plan.get_buffer_size(), 0.0F);
+    m_state_out_d.resize(m_plan.get_buffer_size(), 0.0F);
+    m_history_d.resize(m_plan.get_history_size(), 0.0F);
     transfer_fdmt_plan_to_device(m_plan.get_container(), m_plan_d);
 }
 
-void FDMTGPU::execute(const float* __restrict waterfall,
+void FDMTCUDA::execute(const float* __restrict__ waterfall,
                       size_t waterfall_size,
-                      float* __restrict dmt,
+                      float* __restrict__ dmt,
                       size_t dmt_size) {
     execute(waterfall, waterfall_size, dmt, dmt_size, false);
 }
 
-void FDMTGPU::set_log_level(int level) { FDMTPlan::set_log_level(level); }
+const FDMTPlan& FDMTCUDA::get_plan() const { return m_plan; }
 
-const FDMTPlan& FDMTGPU::get_plan() const { return m_plan; }
-
-void FDMTGPU::set_device(int device_id) {
+void FDMTCUDA::set_device(int device_id) {
+    if (device_id < 0) {
+        throw std::invalid_argument("Invalid device_id");
+    }
     cudaSetDevice(device_id);
     error_checker::check_cuda("cudaSetDevice failed");
 }
 
-void FDMTGPU::execute(const float* __restrict waterfall,
+void FDMTCUDA::execute(const float* __restrict__ waterfall,
                       size_t waterfall_size,
-                      float* __restrict dmt,
+                      float* __restrict__ dmt,
                       size_t dmt_size,
                       bool device_flags) {
     if (device_flags) {
@@ -189,16 +194,16 @@ void FDMTGPU::execute(const float* __restrict waterfall,
     }
 }
 
-void FDMTGPU::initialise(const float* __restrict waterfall,
+void FDMTCUDA::initialise(const float* __restrict__ waterfall,
                          size_t waterfall_size,
-                         float* __restrict state,
+                         float* __restrict__ state,
                          size_t state_size) {
     initialise(waterfall, waterfall_size, state, state_size, false);
 }
 
-void FDMTGPU::initialise(const float* __restrict waterfall,
+void FDMTCUDA::initialise(const float* __restrict__ waterfall,
                          size_t waterfall_size,
-                         float* __restrict state,
+                         float* __restrict__ state,
                          size_t state_size,
                          bool device_flags) {
     if (device_flags) {
@@ -214,9 +219,9 @@ void FDMTGPU::initialise(const float* __restrict waterfall,
     }
 }
 
-void FDMTGPU::execute_device(const float* __restrict waterfall,
+void FDMTCUDA::execute_device(const float* __restrict__ waterfall,
                              size_t waterfall_size,
-                             float* __restrict dmt,
+                             float* __restrict__ dmt,
                              size_t dmt_size) {
     check_inputs(waterfall_size, dmt_size);
     float* state_in_ptr  = thrust::raw_pointer_cast(m_state_in_d.data());
@@ -256,8 +261,8 @@ void FDMTGPU::execute_device(const float* __restrict waterfall,
     }
 }
 
-void FDMTGPU::initialise_device(const float* __restrict waterfall,
-                                float* __restrict state) {
+void FDMTCUDA::initialise_device(const float* __restrict__ waterfall,
+                                float* __restrict__ state) {
     const int nsubs  = m_plan_d.state_shape.nchans[0];
     const int nsamps = m_plan_d.state_shape.nsamps[0];
     const int dt_max = m_plan_d.state_shape.dt_max[0];
@@ -285,7 +290,7 @@ void FDMTGPU::initialise_device(const float* __restrict waterfall,
     }
 }
 
-void FDMTGPU::check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
+void FDMTCUDA::check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
     const auto nchans = m_plan.get_nchans();
     const auto nsamps = m_plan.get_nsamps();
     if (waterfall_size != nchans * nsamps) {

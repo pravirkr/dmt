@@ -29,9 +29,9 @@ void DDMTCPU::set_num_threads(int nthreads) {
 #endif
 }
 
-void DDMTCPU::execute(const float* __restrict waterfall,
+void DDMTCPU::execute(const float* __restrict__ waterfall,
                       SizeType waterfall_size,
-                      float* __restrict dmt,
+                      float* __restrict__ dmt,
                       SizeType dmt_size) {
     const auto& plan_c         = m_plan.get_container();
     const auto nchans          = plan_c.nchans;

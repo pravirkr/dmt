@@ -9,9 +9,8 @@
 #include <dmt/fdmt/fdmt_cuda.hpp>
 
 TEST_CASE("FDMTGPU", "[fdmt_gpu]") {
-    FDMTGPU::set_log_level(spdlog::level::debug);
     SECTION("Constructor and getter methods") {
-        FDMTGPU fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
+        FDMTCUDA fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         REQUIRE(fdmt_gpu.get_plan().get_df() == fdmt_cpu.get_plan().get_df());
         REQUIRE(fdmt_gpu.get_plan().get_niters() ==
@@ -24,7 +23,7 @@ TEST_CASE("FDMTGPU", "[fdmt_gpu]") {
             Catch::Matchers::Equals(fdmt_cpu.get_plan().get_dm_grid_final()));
     }
     SECTION("initialise method (on device)") {
-        FDMTGPU fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
+        FDMTCUDA fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
         thrust::device_vector<float> waterfall_d = waterfall;
@@ -47,7 +46,7 @@ TEST_CASE("FDMTGPU", "[fdmt_gpu]") {
     }
 
     SECTION("initialise method (on host)") {
-        FDMTGPU fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
+        FDMTCUDA fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
         const auto state_size = fdmt_cpu.get_plan().get_buffer_size();
@@ -63,7 +62,7 @@ TEST_CASE("FDMTGPU", "[fdmt_gpu]") {
     SECTION("execute method (on device)") {
         FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         fdmt_cpu.get_plan().print_summary();
-        FDMTGPU fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
+        FDMTCUDA fdmt_gpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0);
         std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
         thrust::device_vector<float> waterfall_d = waterfall;
         const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();

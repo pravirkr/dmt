@@ -40,3 +40,17 @@ template <typename T> struct AlignedAllocator {
 };
 
 template <typename T> using AlignedVector = std::vector<T, AlignedAllocator<T>>;
+
+template <typename T>
+concept IntegralDataType = std::is_integral_v<T>;
+
+/**
+ * @enum BasebandDataOrder
+ * @brief Describes the data order for different unpacking methods.
+ *
+ */
+enum class BasebandDataOrder : uint8_t {
+    kPRITF, /**< Polarisation-Real/Imag-time-frequency */
+    kFTPRI, /**< Frequency-Time-Polarisation-Real/Imag */
+    kRITFP  /**< Real/Imag-time-frequency-Polarisation */
+};

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -9,6 +8,7 @@
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/common/unpacker.hpp"
 #include "dmt/fdmt/fdmt_cpu.hpp"
 
 class FFTManager {
@@ -29,10 +29,8 @@ public:
                           ComplexType* __restrict__ delay_buffer);
     void forward_fft(ComplexType* __restrict__ data) const;
     void backward_fft(ComplexType* __restrict__ data) const;
-    static void swap_spectrum(ComplexType* __restrict__ data,
-                              SizeType nz,
-                              SizeType ny,
-                              SizeType nx);
+    static void
+    swap_spectrum(ComplexType* __restrict__ data, SizeType nx, SizeType ny);
 
 private:
     SizeType m_nfft;
@@ -49,16 +47,18 @@ private:
 class CohFDMTCPU {
 public:
     CohFDMTCPU(float f_center,
-               float sub_bw,
+               float bw_sub,
                SizeType nsub,
                float tbin,
                SizeType nbin,
                SizeType nfft,
-               float tp,
+               float t_p,
                float dm_max,
-               float dm_min      = 0.0F,
-               SizeType noverlap = 8192,
-               SizeType nthreads = 1);
+               float dm_min                  = 0.0F,
+               SizeType noverlap             = 8192,
+               const std::string& data_order = "PRITF",
+               int nthreads                  = 1,
+               bool verbose                  = false);
 
     CohFDMTCPU(const CohFDMTCPU&)            = delete;
     CohFDMTCPU& operator=(const CohFDMTCPU&) = delete;
@@ -67,10 +67,10 @@ public:
     ~CohFDMTCPU()                            = default;
 
     const CohFDMTPlan& get_plan() const;
-    SizeType get_dmt_size() const;
-    void execute(const uint8_t* __restrict__ data_in,
+
+    template <typename DataType>
+    void execute(const DataType* __restrict__ data_in,
                  SizeType in_size,
-                 const std::string& in_order,
                  float* __restrict__ dmt,
                  SizeType dmt_size);
 
@@ -78,6 +78,7 @@ private:
     CohFDMTPlan m_plan;
     std::unique_ptr<FFTManager> m_thefft;
     std::unique_ptr<FDMTCPU> m_thefdmt;
+    std::unique_ptr<DataUnpacker> m_theunpacker;
 
     std::vector<ComplexType> m_unpack_buf_p1;
     std::vector<ComplexType> m_unpack_buf_p2;
@@ -88,12 +89,6 @@ private:
 
     void initialise();
 
-    void unpack_init(const uint8_t* __restrict__ data_in,
-                     SizeType in_size,
-                     const std::string& in_order,
-                     ComplexType* __restrict__ data_p1,
-                     ComplexType* __restrict__ data_p2,
-                     SizeType out_size) const;
     void unpad_detect(const ComplexType* __restrict__ fft_p1,
                       const ComplexType* __restrict__ fft_p2,
                       SizeType in_size,

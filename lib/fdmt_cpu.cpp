@@ -20,20 +20,27 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_max,
                  SizeType dt_step,
                  SizeType dt_min,
-                 bool use_history)
+                 int nthreads,
+                 bool use_history,
+                 bool verbose)
     : m_use_history(use_history),
-      m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min),
+      m_plan(f_min,
+             f_max,
+             nchans,
+             nsamps,
+             tsamp,
+             dt_max,
+             dt_step,
+             dt_min,
+             verbose),
       m_state_in(m_plan.get_buffer_size(), 0.0F),
       m_state_out(m_plan.get_buffer_size(), 0.0F),
-      m_history(m_plan.get_history_size(), 0.0F) {}
+      m_history(m_plan.get_history_size(), 0.0F) {
 
-void FDMTCPU::set_num_threads(int nthreads) {
 #ifdef USE_OPENMP
     omp_set_num_threads(nthreads);
 #endif
 }
-
-void FDMTCPU::set_log_level(int level) { FDMTPlan::set_log_level(level); }
 
 const FDMTPlan& FDMTCPU::get_plan() const { return m_plan; }
 
@@ -92,10 +99,11 @@ void initialize_impl(const float* __restrict__ waterfall,
             }
         }
         for (SizeType i_dt = 1; i_dt < dt_grid_sub.size(); ++i_dt) {
-            const auto dt_cur            = dt_grid_sub[i_dt];
-            const auto dt_prev           = dt_grid_sub[i_dt - 1];
-            const auto state_offset_cur  = buffer_offset + (i_dt * nsamps);
-            const auto state_offset_prev = buffer_offset + ((i_dt - 1) * nsamps);
+            const auto dt_cur           = dt_grid_sub[i_dt];
+            const auto dt_prev          = dt_grid_sub[i_dt - 1];
+            const auto state_offset_cur = buffer_offset + (i_dt * nsamps);
+            const auto state_offset_prev =
+                buffer_offset + ((i_dt - 1) * nsamps);
 
             // Initialise state for [i_sub, i_dt, dt_cur:]
             for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
@@ -142,9 +150,9 @@ void initialize_impl(const float* __restrict__ waterfall,
     }
 }
 
-void FDMTCPU::initialise(const float* __restrict waterfall,
+void FDMTCPU::initialise(const float* __restrict__ waterfall,
                          SizeType waterfall_size,
-                         float* __restrict state,
+                         float* __restrict__ state,
                          SizeType state_size,
                          bool normalize) {
     const auto& plan_c     = m_plan.get_container();
@@ -169,8 +177,8 @@ void FDMTCPU::initialise(const float* __restrict waterfall,
     }
 }
 
-void FDMTCPU::execute_iter(const float* __restrict state_in,
-                           float* __restrict state_out,
+void FDMTCPU::execute_iter(const float* __restrict__ state_in,
+                           float* __restrict__ state_out,
                            SizeType i_iter) {
     const auto& plan_c          = m_plan.get_container();
     const auto& coords_sum_cur  = plan_c.coordinates_sum[i_iter];

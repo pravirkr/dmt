@@ -5,6 +5,11 @@
 
 class DDMTCPU {
 public:
+    DDMTCPU(const DDMTCPU&)            = delete;
+    DDMTCPU(DDMTCPU&&)                 = default;
+    DDMTCPU& operator=(const DDMTCPU&) = delete;
+    DDMTCPU& operator=(DDMTCPU&&)      = default;
+    ~DDMTCPU()                         = default;
     DDMTCPU(float f_min,
             float f_max,
             SizeType nchans,
@@ -22,9 +27,9 @@ public:
     const DDMTPlan& get_plan() const;
 
     static void set_num_threads(int nthreads);
-    void execute(const float* __restrict waterfall,
+    void execute(const float* __restrict__ waterfall,
                  SizeType waterfall_size,
-                 float* __restrict dmt,
+                 float* __restrict__ dmt,
                  SizeType dmt_size);
 
 private:

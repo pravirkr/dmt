@@ -71,7 +71,8 @@ public:
              float tsamp,
              SizeType dt_max,
              SizeType dt_step = 1,
-             SizeType dt_min  = 0);
+             SizeType dt_min  = 0,
+             bool verbose     = false);
 
     FDMTPlan(const FDMTPlan&)            = delete;
     FDMTPlan& operator=(const FDMTPlan&) = delete;
@@ -94,12 +95,13 @@ public:
     const FDMTPlanContainer& get_container() const noexcept;
     const DtGridType& get_dt_grid_final() const noexcept;
     std::vector<float> get_dm_grid_final() const noexcept;
+    SizeType get_dmt_ndms() const noexcept;
+    SizeType get_dmt_nsamps() const noexcept;
     SizeType get_dmt_size() const noexcept;
     SizeType get_buffer_size() const noexcept;
     SizeType get_history_size() const noexcept;
 
     void print_summary() const;
-    static void set_log_level(int level);
 
 private:
     float m_f_min;
@@ -126,16 +128,19 @@ private:
 
 class CohFDMTPlan {
 public:
-    CohFDMTPlan(float fcenter,
-                float bwsub,
+    CohFDMTPlan(float f_center,
+                float bw_sub,
                 SizeType nsub,
                 float tbin,
                 SizeType nbin,
                 SizeType nfft,
                 float t_p,
                 float dm_max,
-                float dm_min          = 0.0F,
-                SizeType noverlap_inp = 8192);
+                float dm_min                  = 0.0F,
+                SizeType noverlap             = 8192,
+                const std::string& data_order = "PRITF",
+                bool verbose                  = false);
+
     CohFDMTPlan(const CohFDMTPlan&)            = delete;
     CohFDMTPlan& operator=(const CohFDMTPlan&) = delete;
     CohFDMTPlan(CohFDMTPlan&&)                 = default;
@@ -143,8 +148,8 @@ public:
     ~CohFDMTPlan()                             = default;
 
     // Getters
-    float get_fcenter() const noexcept;
-    float get_bwsub() const noexcept;
+    float get_f_center() const noexcept;
+    float get_bw_sub() const noexcept;
     SizeType get_nsub() const noexcept;
     float get_tbin() const noexcept;
     SizeType get_nbin() const noexcept;
@@ -152,7 +157,8 @@ public:
     float get_t_p() const noexcept;
     float get_dm_max() const noexcept;
     float get_dm_min() const noexcept;
-    SizeType get_noverlap_inp() const noexcept;
+    SizeType get_noverlap() const noexcept;
+    const std::string& get_data_order() const noexcept;
 
     float get_bw() const noexcept;
     float get_f_min() const noexcept;
@@ -161,7 +167,6 @@ public:
     SizeType get_nchan() const noexcept;
     const std::vector<float>& get_dm_grid_coh() const noexcept;
     const std::vector<float>& get_dm_grid_final() const noexcept;
-    SizeType get_noverlap() const noexcept;
     SizeType get_nsamp() const noexcept;
     SizeType get_mbin() const noexcept;
     SizeType get_mchan() const noexcept;
@@ -169,14 +174,20 @@ public:
     float get_tsamp() const noexcept;
     SizeType get_dt_max() const noexcept;
 
+    SizeType get_chirp_table_size() const noexcept;
     SizeType get_unpack_buf_size() const noexcept;
     SizeType get_delay_buf_size() const noexcept;
     SizeType get_intensity_buf_size() const noexcept;
+    SizeType get_dmt_size() const;
     float get_chirp_scale() const noexcept;
 
+    const FDMTPlan& get_fdmt_plan() const;
+
+    void print_summary() const;
+
 private:
-    float m_fcenter;
-    float m_bwsub;
+    float m_f_center;
+    float m_bw_sub;
     SizeType m_nsub;
     float m_tbin;
     SizeType m_nbin;
@@ -184,7 +195,8 @@ private:
     float m_t_p;
     float m_dm_max;
     float m_dm_min;
-    SizeType m_noverlap_inp;
+    SizeType m_noverlap;
+    std::string m_data_order;
 
     float m_bw;
     float m_f_min;
@@ -193,13 +205,14 @@ private:
     SizeType m_nchan{};
     std::vector<float> m_dm_grid_coh;
     std::vector<float> m_dm_grid_final;
-    SizeType m_noverlap{};
     SizeType m_nsamp{};
     SizeType m_mbin{};
     SizeType m_mchan{};
     SizeType m_msamp{};
     float m_tsamp{};
     SizeType m_dt_max{};
+
+    std::unique_ptr<FDMTPlan> m_fdmt_plan;
 
     void validate_inputs() const;
     void configure_plan();

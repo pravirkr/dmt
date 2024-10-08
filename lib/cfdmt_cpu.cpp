@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <array>
 #include <complex>
-#include <cstdint>
 #include <stdexcept>
 
 #ifdef USE_OPENMP
@@ -72,74 +71,72 @@ void FFTManager::initialize_plans(ComplexType* __restrict__ unpack_buffer,
 void FFTManager::forward_fft(ComplexType* __restrict__ data) const {
     fftwf_execute_dft(m_forward_plan, reinterpret_cast<fftwf_complex*>(data),
                       reinterpret_cast<fftwf_complex*>(data));
-    swap_spectrum(data, m_nfft, m_nsub, m_nbin);
+    swap_spectrum(data, m_nbin, m_nfft * m_nsub);
 }
 
 void FFTManager::backward_fft(ComplexType* __restrict__ data) const {
-    swap_spectrum(data, m_nfft, m_nsub, m_nbin);
+    swap_spectrum(data, m_mbin, m_nfft * m_nsub * m_nchan);
     fftwf_execute_dft(m_backward_plan, reinterpret_cast<fftwf_complex*>(data),
                       reinterpret_cast<fftwf_complex*>(data));
 }
 
 void FFTManager::swap_spectrum(ComplexType* __restrict__ data_in,
-                               SizeType nz,
-                               SizeType ny,
-                               SizeType nx) {
+                               SizeType nx,
+                               SizeType ny) {
     // Swap the halves along the last dimension
     const SizeType mid_bin = nx / 2;
-    for (SizeType iz = 0; iz < nz; ++iz) {
-        for (SizeType iy = 0; iy < ny; ++iy) {
-            const SizeType offset = (iz * ny + iy) * nx;
-            std::rotate(data_in + offset, data_in + offset + mid_bin,
-                        data_in + offset + nx);
-        }
+    // Loop over all rows
+    for (SizeType j = 0; j < ny; ++j) {
+        const SizeType offset = j * nx;
+        std::rotate(data_in + offset, data_in + offset + mid_bin,
+                    data_in + offset + nx);
     }
 }
 
 CohFDMTCPU::CohFDMTCPU(float f_center,
-                       float sub_bw,
+                       float bw_sub,
                        SizeType nsub,
                        float tbin,
                        SizeType nbin,
                        SizeType nfft,
-                       float tp,
+                       float t_p,
                        float dm_max,
                        float dm_min,
                        SizeType noverlap,
-                       SizeType nthreads)
+                       const std::string& data_order,
+                       int nthreads,
+                       bool verbose)
     : m_plan(f_center,
-             sub_bw,
+             bw_sub,
              nsub,
              tbin,
              nbin,
              nfft,
-             tp,
+             t_p,
              dm_max,
              dm_min,
-             noverlap) {
+             noverlap,
+             data_order,
+             verbose) {
 #ifdef USE_OPENMP
-    omp_set_num_threads(static_cast<int>(nthreads));
+    omp_set_num_threads(nthreads);
 #endif
     initialise();
 }
 
 const CohFDMTPlan& CohFDMTCPU::get_plan() const { return m_plan; }
 
-SizeType CohFDMTCPU::get_dmt_size() const {
-    const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
-    return dm_grid_coh.size() * m_thefdmt->get_plan().get_dmt_size();
-}
-
-void CohFDMTCPU::execute(const uint8_t* __restrict__ data_in,
+template <typename DataType>
+void CohFDMTCPU::execute(const DataType* __restrict__ data_in,
                          SizeType in_size,
-                         const std::string& in_order,
                          float* __restrict__ dmt,
                          SizeType dmt_size) {
-    if (dmt_size != get_dmt_size()) {
+    if (dmt_size != m_plan.get_dmt_size()) {
         throw std::runtime_error("Invalid DMT size");
     }
-    unpack_init(data_in, in_size, in_order, m_unpack_buf_p1.data(),
-                m_unpack_buf_p2.data(), m_unpack_buf_p1.size());
+    m_theunpacker->unpack_and_padd<DataType>(
+        data_in, in_size, m_unpack_buf_p1.data(), m_unpack_buf_p2.data(),
+        m_unpack_buf_p1.size());
     // Forward FFT
     m_thefft->forward_fft(m_unpack_buf_p1.data());
     m_thefft->forward_fft(m_unpack_buf_p2.data());
@@ -170,16 +167,28 @@ void CohFDMTCPU::execute(const uint8_t* __restrict__ data_in,
     }
 }
 
+// Explicit instantiation declarations for DataTypes you need to support.
+template void CohFDMTCPU::execute<uint8_t>(const uint8_t* __restrict__,
+                                           SizeType,
+                                           float* __restrict__,
+                                           SizeType);
+template void CohFDMTCPU::execute<int8_t>(const int8_t* __restrict__,
+                                          SizeType,
+                                          float* __restrict__,
+                                          SizeType);
+
 void CohFDMTCPU::initialise() {
-    // Initialise the FFT manager and FDMT
+    // Initialise the FFT manager, FDMT and data unpacker
     m_thefft = std::make_unique<FFTManager>(
         m_plan.get_nfft(), m_plan.get_nsub(), m_plan.get_nbin(),
         m_plan.get_mbin(), m_plan.get_nchan());
-    m_thefft->initialize_plans(m_unpack_buf_p1.data(),
-                                    m_delay_buf_p1.data());
+    m_thefft->initialize_plans(m_unpack_buf_p1.data(), m_delay_buf_p1.data());
     m_thefdmt = std::make_unique<FDMTCPU>(
         m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
         m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max());
+    m_theunpacker = std::make_unique<DataUnpacker>(
+        m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
+        m_plan.get_nfft(), m_plan.get_data_order());
 
     // Allocate buffers
     m_unpack_buf_p1.resize(m_plan.get_unpack_buf_size());
@@ -187,42 +196,14 @@ void CohFDMTCPU::initialise() {
     m_delay_buf_p1.resize(m_plan.get_delay_buf_size());
     m_delay_buf_p2.resize(m_plan.get_delay_buf_size());
     m_intensity_buf.resize(m_plan.get_intensity_buf_size());
+    m_chirp_table.resize(m_plan.get_chirp_table_size());
 
     // Compute the chirp table
     const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
-    m_chirp_table.resize(dm_grid_coh.size() * m_plan.get_nsub() *
-                         m_plan.get_nbin());
     dm_utils::compute_chirp(
         m_chirp_table.data(), m_chirp_table.size(), dm_grid_coh.data(),
-        dm_grid_coh.size(), m_plan.get_fcenter(), m_plan.get_bw(),
+        dm_grid_coh.size(), m_plan.get_f_center(), m_plan.get_bw(),
         m_plan.get_nbin(), m_plan.get_nsub(), m_plan.get_nchan());
-}
-
-void CohFDMTCPU::unpack_init(const uint8_t* __restrict__ data_in,
-                             SizeType in_size,
-                             const std::string& in_order,
-                             ComplexType* __restrict__ data_p1,
-                             ComplexType* __restrict__ data_p2,
-                             SizeType out_size) const {
-    DataOrder order = string_to_data_order(in_order);
-    if (order == DataOrder::kFTPRI) {
-        DataUnpacker<DataOrder::kFTPRI> unpacker(
-            m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
-            m_plan.get_nfft());
-        unpacker.unpack_and_padd(data_in, in_size, data_p1, data_p2, out_size);
-    } else if (order == DataOrder::kPRITF) {
-        DataUnpacker<DataOrder::kPRITF> unpacker(
-            m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
-            m_plan.get_nfft());
-        unpacker.unpack_and_padd(data_in, in_size, data_p1, data_p2, out_size);
-    } else if (order == DataOrder::kRITFP) {
-        DataUnpacker<DataOrder::kRITFP> unpacker(
-            m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
-            m_plan.get_nfft());
-        unpacker.unpack_and_padd(data_in, in_size, data_p1, data_p2, out_size);
-    } else {
-        throw std::runtime_error("Invalid order: " + in_order);
-    }
 }
 
 void CohFDMTCPU::unpad_detect(const ComplexType* __restrict__ fft_p1,

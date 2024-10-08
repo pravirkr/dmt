@@ -16,8 +16,9 @@ public:
              SizeType dt_max,
              SizeType dt_step = 1,
              SizeType dt_min  = 0,
+             int device_id    = 0,
              bool use_history = false,
-             int device_id    = 0);
+             bool verbose     = false);
 
     FDMTCUDA(const FDMTCUDA&)            = delete;
     FDMTCUDA& operator=(const FDMTCUDA&) = delete;
@@ -25,28 +26,27 @@ public:
     FDMTCUDA& operator=(FDMTCUDA&&)      = delete;
     ~FDMTCUDA()                          = default;
 
-    static void set_log_level(int level);
     const FDMTPlan& get_plan() const;
 
-    void execute(const float* __restrict waterfall,
+    void execute(const float* __restrict__ waterfall,
                  SizeType waterfall_size,
-                 float* __restrict dmt,
+                 float* __restrict__ dmt,
                  SizeType dmt_size);
 
-    void initialise(const float* __restrict waterfall,
+    void initialise(const float* __restrict__ waterfall,
                     SizeType waterfall_size,
-                    float* __restrict state,
+                    float* __restrict__ state,
                     SizeType state_size);
 
-    void execute(const float* __restrict waterfall,
+    void execute(const float* __restrict__ waterfall,
                  SizeType waterfall_size,
-                 float* __restrict dmt,
+                 float* __restrict__ dmt,
                  SizeType dmt_size,
                  bool device_flags);
 
-    void initialise(const float* __restrict waterfall,
+    void initialise(const float* __restrict__ waterfall,
                     SizeType waterfall_size,
-                    float* __restrict state,
+                    float* __restrict__ state,
                     SizeType state_size,
                     bool device_flags);
 
@@ -61,12 +61,12 @@ private:
     thrust::device_vector<float> m_history_d;
     static void set_device(int device_id);
 
-    void initialise_device(const float* __restrict waterfall,
-                           float* __restrict state);
+    void initialise_device(const float* __restrict__ waterfall,
+                           float* __restrict__ state);
 
-    void execute_device(const float* __restrict waterfall,
+    void execute_device(const float* __restrict__ waterfall,
                         SizeType waterfall_size,
-                        float* __restrict dmt,
+                        float* __restrict__ dmt,
                         SizeType dmt_size);
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const;
 };

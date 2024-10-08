@@ -13,9 +13,11 @@ public:
             SizeType nsamps,
             float tsamp,
             SizeType dt_max,
-            SizeType dt_step = 1,
-            SizeType dt_min  = 0,
-            bool use_history = false);
+            SizeType dt_step  = 1,
+            SizeType dt_min   = 0,
+            int nthreads = 1,
+            bool use_history  = false,
+            bool verbose      = false);
 
     FDMTCPU(const FDMTCPU&)            = delete;
     FDMTCPU& operator=(const FDMTCPU&) = delete;
@@ -23,18 +25,16 @@ public:
     FDMTCPU& operator=(FDMTCPU&&)      = delete;
     ~FDMTCPU()                         = default;
 
-    static void set_num_threads(int nthreads);
-    static void set_log_level(int level);
     const FDMTPlan& get_plan() const;
 
-    void execute(const float* __restrict waterfall,
+    void execute(const float* __restrict__ waterfall,
                  SizeType waterfall_size,
-                 float* __restrict dmt,
+                 float* __restrict__ dmt,
                  SizeType dmt_size,
                  bool normalize = true);
-    void initialise(const float* __restrict waterfall,
+    void initialise(const float* __restrict__ waterfall,
                     SizeType waterfall_size,
-                    float* __restrict state,
+                    float* __restrict__ state,
                     SizeType state_size,
                     bool normalize = true);
 
@@ -46,8 +46,8 @@ private:
     std::vector<float> m_state_out;
     std::vector<float> m_history;
 
-    void execute_iter(const float* __restrict state_in,
-                      float* __restrict state_out,
+    void execute_iter(const float* __restrict__ state_in,
+                      float* __restrict__ state_out,
                       SizeType i_iter);
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const;
 };

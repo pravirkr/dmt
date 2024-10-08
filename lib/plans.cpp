@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <format>
+#include <iostream>
 #include <stdexcept>
 #include <vector>
 
@@ -10,6 +12,7 @@
 #include <dmt/common/plans.hpp>
 #include <dmt/common/types.hpp>
 
+#include "dmt/bb_utils_cpu.hpp"
 #include "dmt/dm_utils.hpp"
 
 std::string FDMTShape::header_fmt() {
@@ -65,7 +68,8 @@ FDMTPlan::FDMTPlan(float f_min,
                    float tsamp,
                    SizeType dt_max,
                    SizeType dt_step,
-                   SizeType dt_min)
+                   SizeType dt_min,
+                   bool verbose)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -74,6 +78,11 @@ FDMTPlan::FDMTPlan(float f_min,
       m_dt_max(dt_max),
       m_dt_step(dt_step),
       m_dt_min(dt_min) {
+    if (verbose) {
+        spdlog::set_level(spdlog::level::trace);
+    } else {
+        spdlog::set_level(spdlog::level::info);
+    }
     validate_inputs();
     configure_plan();
 }
@@ -105,6 +114,12 @@ std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
         [dm_conv](auto& dt) { return static_cast<float>(dt) * dm_conv; });
     return dm_grid_final;
 }
+SizeType FDMTPlan::get_dmt_ndms() const noexcept {
+    return m_container.state_shape[m_niters].ncoords;
+}
+SizeType FDMTPlan::get_dmt_nsamps() const noexcept {
+    return m_container.state_shape[m_niters].nsamps;
+}
 
 SizeType FDMTPlan::get_dmt_size() const noexcept {
     return m_container.state_shape[m_niters].nelements;
@@ -131,6 +146,26 @@ void FDMTPlan::print_summary() const {
     const auto buffer_size_mb    = size_in_mb(buffer_size, sizeof(float));
     const auto plan_use_mb = size_in_mb(m_container.get_memory_usage(), 1);
     const auto niters      = state_shape.size() - 1;
+
+    std::cout << std::format("\n*** FDMT Plan Summary ***\n");
+    std::cout << std::format("Input Waterfall Size: {} x {} ( {:.3f} MB )\n",
+                             state_shape[0].nchans, state_shape[0].nsamps,
+                             waterfall_size_mb);
+    std::cout << std::format("DMT Size: {} x {} ( {:.3f} MB )\n",
+                             state_shape[niters].ncoords,
+                             state_shape[niters].nsamps, dmt_size_mb);
+    std::cout << std::format("Plan Memory Usage: {:.3f} MB\n", plan_use_mb);
+    std::cout << std::format("Plan Buffer Size: {} ( {:.3f} MB )\n",
+                             buffer_size, buffer_size_mb);
+    std::cout << std::format("History Size: {} ( {:.3f} MB )\n", history_size,
+                             history_size_mb);
+    std::cout << std::format("Plan Details: {}\n", FDMTShape::header_fmt());
+
+    for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
+        std::cout << std::format("Iteration {:2d}: {}\n", i_iter,
+                                 state_shape[i_iter].to_string());
+    }
+    std::cout << std::format("************************\n");
     spdlog::info("FDMT: Input waterfall_size: ({}x{}; {:.3F} MB), dmt_size: "
                  "({}x{}; {:.3F} MB)",
                  state_shape[0].nchans, state_shape[0].nsamps,
@@ -145,14 +180,6 @@ void FDMTPlan::print_summary() const {
         spdlog::info("FDMT: Iteration {:2d}: {}", i_iter,
                      state_shape[i_iter].to_string());
     }
-}
-
-void FDMTPlan::set_log_level(int level) {
-    if (level < static_cast<int>(spdlog::level::trace) ||
-        level > static_cast<int>(spdlog::level::off)) {
-        spdlog::set_level(spdlog::level::info);
-    }
-    spdlog::set_level(static_cast<spdlog::level::level_enum>(level));
 }
 
 // Private methods
@@ -322,13 +349,11 @@ void FDMTPlan::make_plan(SizeType i_iter) {
         // Populate the dt_plan mapping current dt grid to the previous dt grid
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             // dt ~= dt_tail (dt_mid) + dt_head
-            const auto dt      = dt_sub[i_dt];
-            const auto dt_mid1 = static_cast<SizeType>(
-                std::round(static_cast<float>(dt) *
-                           dm_utils::cff(f_start, f_mid1, f_start, f_end)));
-            const auto dt_mid2 = static_cast<SizeType>(
-                std::round(static_cast<float>(dt) *
-                           dm_utils::cff(f_start, f_mid2, f_start, f_end)));
+            const auto dt = dt_sub[i_dt];
+            const auto dt_mid1 =
+                dm_utils::calculate_dt_sub(f_start, f_mid1, f_start, f_end, dt);
+            const auto dt_mid2 =
+                dm_utils::calculate_dt_sub(f_start, f_mid2, f_start, f_end, dt);
             // check dt_head is always >= 0, otherwise throw error
             if (dt_mid1 > dt || dt_mid2 > dt) {
                 throw std::runtime_error("Invalid dt_mid values");
@@ -420,8 +445,8 @@ void FDMTPlan::make_plan(SizeType i_iter) {
     m_container.df_bot[i_iter]          = df_bot;
 }
 
-CohFDMTPlan::CohFDMTPlan(float fcenter,
-                         float bwsub,
+CohFDMTPlan::CohFDMTPlan(float f_center,
+                         float bw_sub,
                          SizeType nsub,
                          float tbin,
                          SizeType nbin,
@@ -429,9 +454,11 @@ CohFDMTPlan::CohFDMTPlan(float fcenter,
                          float t_p,
                          float dm_max,
                          float dm_min,
-                         SizeType noverlap_inp)
-    : m_fcenter(fcenter),
-      m_bwsub(bwsub),
+                         SizeType noverlap,
+                         const std::string& data_order,
+                         bool verbose)
+    : m_f_center(f_center),
+      m_bw_sub(bw_sub),
       m_nsub(nsub),
       m_tbin(tbin),
       m_nbin(nbin),
@@ -439,17 +466,23 @@ CohFDMTPlan::CohFDMTPlan(float fcenter,
       m_t_p(t_p),
       m_dm_max(dm_max),
       m_dm_min(dm_min),
-      m_noverlap_inp(noverlap_inp),
-      m_bw(bwsub * static_cast<float>(nsub)),
-      m_f_min(fcenter - (m_bw / 2)),
-      m_f_max(fcenter + (m_bw / 2)) {
+      m_noverlap(noverlap),
+      m_data_order(data_order),
+      m_bw(m_bw_sub * static_cast<float>(m_nsub)),
+      m_f_min(m_f_center - (m_bw / 2)),
+      m_f_max(m_f_center + (m_bw / 2)) {
+    if (verbose) {
+        spdlog::set_level(spdlog::level::trace);
+    } else {
+        spdlog::set_level(spdlog::level::info);
+    }
     validate_inputs();
     configure_plan();
 }
 
 // Getters
-float CohFDMTPlan::get_fcenter() const noexcept { return m_fcenter; }
-float CohFDMTPlan::get_bwsub() const noexcept { return m_bwsub; }
+float CohFDMTPlan::get_f_center() const noexcept { return m_f_center; }
+float CohFDMTPlan::get_bw_sub() const noexcept { return m_bw_sub; }
 SizeType CohFDMTPlan::get_nsub() const noexcept { return m_nsub; }
 float CohFDMTPlan::get_tbin() const noexcept { return m_tbin; }
 SizeType CohFDMTPlan::get_nbin() const noexcept { return m_nbin; }
@@ -457,8 +490,9 @@ SizeType CohFDMTPlan::get_nfft() const noexcept { return m_nfft; }
 float CohFDMTPlan::get_t_p() const noexcept { return m_t_p; }
 float CohFDMTPlan::get_dm_max() const noexcept { return m_dm_max; }
 float CohFDMTPlan::get_dm_min() const noexcept { return m_dm_min; }
-SizeType CohFDMTPlan::get_noverlap_inp() const noexcept {
-    return m_noverlap_inp;
+SizeType CohFDMTPlan::get_noverlap() const noexcept { return m_noverlap; }
+const std::string& CohFDMTPlan::get_data_order() const noexcept {
+    return m_data_order;
 }
 
 float CohFDMTPlan::get_bw() const noexcept { return m_bw; }
@@ -472,7 +506,6 @@ const std::vector<float>& CohFDMTPlan::get_dm_grid_coh() const noexcept {
 const std::vector<float>& CohFDMTPlan::get_dm_grid_final() const noexcept {
     return m_dm_grid_final;
 }
-SizeType CohFDMTPlan::get_noverlap() const noexcept { return m_noverlap; }
 SizeType CohFDMTPlan::get_nsamp() const noexcept { return m_nsamp; }
 SizeType CohFDMTPlan::get_mbin() const noexcept { return m_mbin; }
 SizeType CohFDMTPlan::get_mchan() const noexcept { return m_mchan; }
@@ -480,6 +513,9 @@ SizeType CohFDMTPlan::get_msamp() const noexcept { return m_msamp; }
 float CohFDMTPlan::get_tsamp() const noexcept { return m_tsamp; }
 SizeType CohFDMTPlan::get_dt_max() const noexcept { return m_dt_max; }
 
+SizeType CohFDMTPlan::get_chirp_table_size() const noexcept {
+    return m_dm_grid_coh.size() * m_nsub * m_nbin;
+}
 SizeType CohFDMTPlan::get_unpack_buf_size() const noexcept {
     return m_nfft * m_nsub * m_nbin;
 }
@@ -489,15 +525,20 @@ SizeType CohFDMTPlan::get_delay_buf_size() const noexcept {
 SizeType CohFDMTPlan::get_intensity_buf_size() const noexcept {
     return m_nsub * m_nchan * m_msamp;
 }
+SizeType CohFDMTPlan::get_dmt_size() const {
+    return m_dm_grid_coh.size() * m_fdmt_plan->get_dmt_size();
+}
 float CohFDMTPlan::get_chirp_scale() const noexcept {
     return 1.0F / static_cast<float>(m_nbin);
 }
+
+const FDMTPlan& CohFDMTPlan::get_fdmt_plan() const { return *m_fdmt_plan; }
 
 void CohFDMTPlan::validate_inputs() const {
     if (m_nsub < 1) {
         throw std::invalid_argument("nsub must be greater than 0");
     }
-    if (m_bwsub <= 0.0F) {
+    if (m_bw_sub <= 0.0F) {
         throw std::invalid_argument("bwsub must be positive");
     }
     if (m_tbin <= 0.0F) {
@@ -516,6 +557,39 @@ void CohFDMTPlan::validate_inputs() const {
         throw std::invalid_argument(
             "dm_max must be greater than or equal to dm_min");
     }
+    const auto data_order = string_to_data_order(m_data_order);
+}
+
+void CohFDMTPlan::print_summary() const {
+    auto size_in_mb = [](SizeType count, SizeType size) {
+        return static_cast<float>(count * size) / 1024.0F / 1024.0F;
+    };
+    const auto baseband_size = m_nsub * m_nsamp;
+    const auto dmt_size      = get_dmt_size();
+    const auto buffer_size = 2 * (get_unpack_buf_size() + get_delay_buf_size());
+    const auto chirp_size  = get_chirp_table_size() + get_intensity_buf_size();
+
+    const auto baseband_size_mb = size_in_mb(baseband_size, sizeof(float));
+    const auto dmt_size_mb      = size_in_mb(dmt_size, sizeof(float));
+    const auto buffer_size_mb   = size_in_mb(buffer_size, sizeof(ComplexType));
+    const auto chirp_size_mb    = size_in_mb(chirp_size, sizeof(float));
+
+    spdlog::info(
+        "CohFDMT: Input baseband_size: ({}x{}x{}x{}; {:.3F} MB), dmt_size: "
+        "({}x{}; {:.3F} MB)",
+        2, 2, m_nsub, m_nsamp, baseband_size_mb, m_dm_grid_final.size(),
+        m_fdmt_plan->get_dmt_nsamps(), dmt_size_mb);
+    spdlog::info(
+        "CohFDMT: Buffer size: ({}; {:.3F} MB), Chirp+waterfall size: ({}; "
+        "{:.3F} MB)",
+        buffer_size, buffer_size_mb, chirp_size, chirp_size_mb);
+    spdlog::info("CohFDMT: FDMT Calls (nCohDMs): {}", m_dm_grid_coh.size());
+    spdlog::info("CohFDMT: Forward FFT-1D calls: {}(n={})", m_nfft * m_nsub,
+                 m_nbin);
+    spdlog::info("CohFDMT: Per call details ...");
+    spdlog::info("\t\tBackward FFT-1D calls: {}(n={})",
+                 m_nfft * m_nsub * m_nchan, m_mbin);
+    m_fdmt_plan->print_summary();
 }
 
 void CohFDMTPlan::configure_plan() {
@@ -525,7 +599,7 @@ void CohFDMTPlan::configure_plan() {
 
     // Generate coherent DM grid
     m_dm_grid_coh = dm_utils::generate_coherent_dms(
-        m_dm_min, m_dm_max, m_fcenter, m_bw, m_tbin, m_t_p);
+        m_dm_min, m_dm_max, m_f_center, m_bw, m_tbin, m_t_p);
     if (m_dm_grid_coh.empty()) {
         throw std::runtime_error("Empty DM grid");
     }
@@ -533,10 +607,10 @@ void CohFDMTPlan::configure_plan() {
     // Compute optimal overlap size and adjust to the nearest power of two
     const auto max_dm           = *std::ranges::max_element(m_dm_grid_coh);
     const auto noverlap_optimal = dm_utils::minimum_overlap(
-        max_dm, m_fcenter, m_bw, m_tbin, m_nsub, m_nchan);
+        max_dm, m_f_center, m_bw, m_tbin, m_nsub, m_nchan);
     const auto noverlap_optimal_pow2 = static_cast<SizeType>(
         std::pow(2, std::round(std::log2(noverlap_optimal))));
-    m_noverlap = std::max(m_noverlap_inp, noverlap_optimal_pow2);
+    m_noverlap = std::max(m_noverlap, noverlap_optimal_pow2);
 
     // Validate nbin and noverlap
     if (m_nbin < 2 * m_noverlap) {
@@ -556,16 +630,19 @@ void CohFDMTPlan::configure_plan() {
     }
     m_msamp  = m_nsamp / m_nchan;
     m_tsamp  = m_tbin * static_cast<float>(m_nchan);
-    m_dt_max = m_n_p;
+    m_dt_max = m_n_p - 1;
+
+    m_fdmt_plan = std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan, m_msamp,
+                                             m_tsamp, m_dt_max, 1, 0, false);
 
     // Generate final DM grid
-    m_dm_grid_final.resize(m_dm_grid_coh.size() * m_dt_max);
-    const float dm_conv = dm_utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
+    const auto& fdmt_dm_grid = m_fdmt_plan->get_dm_grid_final();
+    m_dm_grid_final.resize(m_dm_grid_coh.size() * fdmt_dm_grid.size());
     for (SizeType i = 0; i < m_dm_grid_coh.size(); ++i) {
-        for (SizeType j = 0; j < m_dt_max; ++j) {
-            m_dm_grid_final[(i * m_dt_max) + j] =
-                m_dm_grid_coh[i] + static_cast<float>(j) * dm_conv;
-        }
+        const auto offset = static_cast<IndexType>(i * fdmt_dm_grid.size());
+        std::ranges::transform(
+            fdmt_dm_grid, m_dm_grid_final.begin() + offset,
+            [dm_coh = m_dm_grid_coh[i]](auto& dm) { return dm + dm_coh; });
     }
 }
 
