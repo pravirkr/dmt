@@ -103,7 +103,7 @@ CohFDMTCPU::CohFDMTCPU(float f_center,
                        float dm_max,
                        float dm_min,
                        SizeType noverlap,
-                       const std::string& data_order,
+                       std::string_view data_order,
                        int nthreads,
                        bool verbose)
     : m_plan(f_center,

@@ -1,3 +1,4 @@
+#include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -15,6 +16,7 @@ using namespace pybind11::literals; // NOLINT
 
 PYBIND11_MODULE(libdmt, mod) { // NOLINT
     mod.doc() = "Python Bindings for dmt";
+    py::add_ostream_redirect(mod, "ostream_redirect");
     mod.def(
         "generate_pure_frb",
         [](SizeType nchans, SizeType nsamps, float f_min, float f_max,
@@ -90,12 +92,20 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly(
             "dm_grid_final",
             [](FDMTPlan& plan) { return as_pyarray(plan.get_dm_grid_final()); })
+        .def_property_readonly("dmt_ndms", &FDMTPlan::get_dmt_ndms)
+        .def_property_readonly("dmt_nsamps", &FDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &FDMTPlan::get_dmt_size)
         .def_property_readonly("buffer_size", &FDMTPlan::get_buffer_size)
-        .def("print_summary", &FDMTPlan::print_summary);
+        .def_property_readonly("history_size", &FDMTPlan::get_history_size)
+        .def(
+            "print_summary",
+            [](FDMTPlan& plan, std::string_view prefix) {
+                plan.print_summary(prefix);
+            },
+            "prefix"_a = "");
     py::class_<CohFDMTPlan>(mod, "CohFDMTPlan")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string, bool>(),
+                      float, float, SizeType, std::string_view, bool>(),
              "fcenter"_a, "bwsub"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "t_p"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap_inp"_a = 8192,
              "data_order"_a = "PRITF", "verbose"_a = false)
@@ -122,7 +132,9 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
         .def_property_readonly("tsamp", &CohFDMTPlan::get_tsamp)
         .def_property_readonly("dt_max", &CohFDMTPlan::get_dt_max)
-        .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale);
+        .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale)
+        .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan)
+        .def("print_summary", &CohFDMTPlan::print_summary);
 
     py::class_<DDMTPlan>(mod, "DDMTPlan")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
@@ -213,7 +225,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              });
     py::class_<CohFDMTCPU>(mod, "CohFDMTCPU")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string, int, bool>(),
+                      float, float, SizeType, std::string_view, int, bool>(),
              "f_center"_a, "sub_bw"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "tp"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap"_a = 8192,
              "data_order"_a = "PRITF", "nthreads"_a = 1, "verbose"_a = false)

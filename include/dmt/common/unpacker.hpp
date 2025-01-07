@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include <string>
+#include <string_view>
 
 #include "dmt/common/types.hpp"
 
@@ -32,7 +32,7 @@ public:
                  SizeType nbin,
                  SizeType noverlap,
                  SizeType nfft,
-                 const std::string& in_order);
+                 std::string_view in_order);
 
     DataUnpacker(const DataUnpacker&)            = delete;
     DataUnpacker& operator=(const DataUnpacker&) = delete;

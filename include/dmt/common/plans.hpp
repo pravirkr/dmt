@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "types.hpp"
@@ -16,7 +18,7 @@ struct FDMTShape {
     SizeType nelements;    // Number of elements (ncoords * nsamps)
     SizeType dt_max;       // Maximum subband delay (dt) value
 
-    static std::string header_fmt();
+    static constexpr std::string_view header_fmt();
     std::string to_string() const;
 };
 
@@ -101,7 +103,7 @@ public:
     SizeType get_buffer_size() const noexcept;
     SizeType get_history_size() const noexcept;
 
-    void print_summary() const;
+    void print_summary(std::string_view prefix = "") const;
 
 private:
     float m_f_min;
@@ -136,10 +138,10 @@ public:
                 SizeType nfft,
                 float t_p,
                 float dm_max,
-                float dm_min                  = 0.0F,
-                SizeType noverlap             = 8192,
-                const std::string& data_order = "PRITF",
-                bool verbose                  = false);
+                float dm_min                = 0.0F,
+                SizeType noverlap           = 8192,
+                std::string_view data_order = "PRITF",
+                bool verbose                = false);
 
     CohFDMTPlan(const CohFDMTPlan&)            = delete;
     CohFDMTPlan& operator=(const CohFDMTPlan&) = delete;
@@ -158,7 +160,7 @@ public:
     float get_dm_max() const noexcept;
     float get_dm_min() const noexcept;
     SizeType get_noverlap() const noexcept;
-    const std::string& get_data_order() const noexcept;
+    std::string_view get_data_order() const noexcept;
 
     float get_bw() const noexcept;
     float get_f_min() const noexcept;
@@ -196,7 +198,7 @@ private:
     float m_dm_max;
     float m_dm_min;
     SizeType m_noverlap;
-    std::string m_data_order;
+    std::string_view m_data_order;
 
     float m_bw;
     float m_f_min;

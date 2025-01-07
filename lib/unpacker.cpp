@@ -5,19 +5,6 @@
 #include <dmt/common/types.hpp>
 #include <dmt/common/unpacker.hpp>
 
-constexpr BasebandDataOrder string_to_data_order(std::string_view sv) {
-    if (sv == "FTPRI") {
-        return BasebandDataOrder::kFTPRI;
-    }
-    if (sv == "PRITF") {
-        return BasebandDataOrder::kPRITF;
-    }
-    if (sv == "RITFP") {
-        return BasebandDataOrder::kRITFP;
-    }
-    throw std::runtime_error("Invalid data order");
-}
-
 template <BasebandDataOrder Order> class DataUnpackerImpl {
 public:
     static constexpr SizeType kChunkSize = 64;
@@ -161,8 +148,8 @@ DataUnpacker::DataUnpacker(SizeType nsub,
                            SizeType nbin,
                            SizeType noverlap,
                            SizeType nfft,
-                           const std::string& in_order) {
-    BasebandDataOrder order = string_to_data_order(in_order);
+                           std::string_view in_order) {
+    const auto order = kBasebandDataOrderMap.at(in_order);
     switch (order) {
     case BasebandDataOrder::kPRITF:
         m_pimpl = std::make_unique<

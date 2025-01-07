@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include <string>
+#include <string_view>
 #include <vector>
 
 #include <fftw3.h>
@@ -54,11 +54,11 @@ public:
                SizeType nfft,
                float t_p,
                float dm_max,
-               float dm_min                  = 0.0F,
-               SizeType noverlap             = 8192,
-               const std::string& data_order = "PRITF",
-               int nthreads                  = 1,
-               bool verbose                  = false);
+               float dm_min                = 0.0F,
+               SizeType noverlap           = 8192,
+               std::string_view data_order = "PRITF",
+               int nthreads                = 1,
+               bool verbose                = false);
 
     CohFDMTCPU(const CohFDMTCPU&)            = delete;
     CohFDMTCPU& operator=(const CohFDMTCPU&) = delete;

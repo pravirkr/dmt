@@ -1,27 +1,29 @@
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <iostream>
+#include <ranges>
 #include <stdexcept>
 #include <vector>
 
+#include <fmt/ranges.h>
 #include <spdlog/common.h>
 #include <spdlog/spdlog.h>
 
 #include <dmt/common/plans.hpp>
 #include <dmt/common/types.hpp>
 
-#include "dmt/bb_utils_cpu.hpp"
 #include "dmt/dm_utils.hpp"
 
-std::string FDMTShape::header_fmt() {
+constexpr std::string_view FDMTShape::header_fmt() {
     return "{ncoords} ({nchans}x[{ndt_min}..{ndt_max}]) x "
            "{nsamps}, {nelements}";
 }
 
 std::string FDMTShape::to_string() const {
-    return fmt::format("{:5d} ({:5d}x[{:5d}..{:5d}]) x {:6d}, {:10d}", ncoords,
+    return std::format("{:5d} ({:5d}x[{:5d}..{:5d}]) x {:6d}, {:10d}", ncoords,
                        nchans, ndt_min, ndt_max, nsamps, nelements);
 }
 
@@ -130,7 +132,7 @@ SizeType FDMTPlan::get_history_size() const noexcept {
     return m_nchans * m_container.state_shape[0].dt_max;
 }
 
-void FDMTPlan::print_summary() const {
+void FDMTPlan::print_summary(std::string_view prefix) const {
     auto size_in_mb = [](SizeType count, SizeType size) {
         return static_cast<float>(count * size) / 1024.0F / 1024.0F;
     };
@@ -139,47 +141,36 @@ void FDMTPlan::print_summary() const {
     const auto dmt_size       = get_dmt_size();
     const auto history_size   = get_history_size();
     const auto buffer_size    = 2 * m_buffer_size;
+    const auto niters         = state_shape.size() - 1;
 
     const auto waterfall_size_mb = size_in_mb(waterfall_size, sizeof(float));
     const auto dmt_size_mb       = size_in_mb(dmt_size, sizeof(float));
     const auto history_size_mb   = size_in_mb(history_size, sizeof(float));
     const auto buffer_size_mb    = size_in_mb(buffer_size, sizeof(float));
     const auto plan_use_mb = size_in_mb(m_container.get_memory_usage(), 1);
-    const auto niters      = state_shape.size() - 1;
 
-    std::cout << std::format("\n*** FDMT Plan Summary ***\n");
-    std::cout << std::format("Input Waterfall Size: {} x {} ( {:.3f} MB )\n",
-                             state_shape[0].nchans, state_shape[0].nsamps,
-                             waterfall_size_mb);
-    std::cout << std::format("DMT Size: {} x {} ( {:.3f} MB )\n",
-                             state_shape[niters].ncoords,
-                             state_shape[niters].nsamps, dmt_size_mb);
-    std::cout << std::format("Plan Memory Usage: {:.3f} MB\n", plan_use_mb);
-    std::cout << std::format("Plan Buffer Size: {} ( {:.3f} MB )\n",
-                             buffer_size, buffer_size_mb);
-    std::cout << std::format("History Size: {} ( {:.3f} MB )\n", history_size,
-                             history_size_mb);
-    std::cout << std::format("Plan Details: {}\n", FDMTShape::header_fmt());
-
+    std::array<std::string, 5> lines = {
+        std::format("*** FDMT Plan Summary ***"),
+        std::format("Input: Waterfall Size: ({} x {}; {:.1f} MB ), DMT "
+                    "Size: ({} x {}; {:.1f} MB )",
+                    state_shape[0].nchans, state_shape[0].nsamps,
+                    waterfall_size_mb, state_shape[niters].ncoords,
+                    state_shape[niters].nsamps, dmt_size_mb),
+        std::format("Plan Memory Usage: {:.1f} MB", plan_use_mb),
+        std::format("Plan Buffer Size: ({}; {:.1f} MB ), History Size: "
+                    "({}; {:.1f} MB )",
+                    buffer_size, buffer_size_mb, history_size, history_size_mb),
+        std::format("Plan Details: {}", FDMTShape::header_fmt())};
+    std::cout << '\n';
+    for (const auto& line : lines) {
+        std::cout << prefix << line << '\n';
+    }
     for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
-        std::cout << std::format("Iteration {:2d}: {}\n", i_iter,
+        std::cout << prefix
+                  << std::format("Iteration {:2d}: {}\n", i_iter,
                                  state_shape[i_iter].to_string());
     }
-    std::cout << std::format("************************\n");
-    spdlog::info("FDMT: Input waterfall_size: ({}x{}; {:.3F} MB), dmt_size: "
-                 "({}x{}; {:.3F} MB)",
-                 state_shape[0].nchans, state_shape[0].nsamps,
-                 waterfall_size_mb, state_shape[niters].ncoords,
-                 state_shape[niters].nsamps, dmt_size_mb);
-    spdlog::info("FDMT: Plan memory usage: {:.3F} MB", plan_use_mb);
-    spdlog::info("FDMT: Plan buffer size: ({}; {:.3F} MB), history size: ({}; "
-                 "{:.3F} MB)",
-                 buffer_size, buffer_size_mb, history_size, history_size_mb);
-    spdlog::info("FDMT: Plan details: {}", FDMTShape::header_fmt());
-    for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
-        spdlog::info("FDMT: Iteration {:2d}: {}", i_iter,
-                     state_shape[i_iter].to_string());
-    }
+    std::cout << prefix << std::format("{:*>80}\n", "");
 }
 
 // Private methods
@@ -455,7 +446,7 @@ CohFDMTPlan::CohFDMTPlan(float f_center,
                          float dm_max,
                          float dm_min,
                          SizeType noverlap,
-                         const std::string& data_order,
+                         std::string_view data_order,
                          bool verbose)
     : m_f_center(f_center),
       m_bw_sub(bw_sub),
@@ -491,7 +482,7 @@ float CohFDMTPlan::get_t_p() const noexcept { return m_t_p; }
 float CohFDMTPlan::get_dm_max() const noexcept { return m_dm_max; }
 float CohFDMTPlan::get_dm_min() const noexcept { return m_dm_min; }
 SizeType CohFDMTPlan::get_noverlap() const noexcept { return m_noverlap; }
-const std::string& CohFDMTPlan::get_data_order() const noexcept {
+std::string_view CohFDMTPlan::get_data_order() const noexcept {
     return m_data_order;
 }
 
@@ -557,39 +548,49 @@ void CohFDMTPlan::validate_inputs() const {
         throw std::invalid_argument(
             "dm_max must be greater than or equal to dm_min");
     }
-    const auto data_order = string_to_data_order(m_data_order);
+    if (!kBasebandDataOrderMap.contains(m_data_order)) {
+        auto kv = std::ranges::views::keys(kBasebandDataOrderMap);
+        std::vector<std::string_view> keys(kv.begin(), kv.end());
+        throw std::invalid_argument(
+            fmt::format("Invalid data order: {}. Supported values are: {}",
+                        m_data_order, fmt::join(keys, ", ")));
+    }
 }
 
 void CohFDMTPlan::print_summary() const {
     auto size_in_mb = [](SizeType count, SizeType size) {
         return static_cast<float>(count * size) / 1024.0F / 1024.0F;
     };
-    const auto baseband_size = m_nsub * m_nsamp;
+    const auto baseband_size = static_cast<SizeType>(2 * 2) * m_nsub * m_nsamp;
     const auto dmt_size      = get_dmt_size();
     const auto buffer_size = 2 * (get_unpack_buf_size() + get_delay_buf_size());
-    const auto chirp_size  = get_chirp_table_size() + get_intensity_buf_size();
+    const auto chirp_size  = get_chirp_table_size();
+    const auto waterfall_size = get_intensity_buf_size();
 
-    const auto baseband_size_mb = size_in_mb(baseband_size, sizeof(float));
-    const auto dmt_size_mb      = size_in_mb(dmt_size, sizeof(float));
-    const auto buffer_size_mb   = size_in_mb(buffer_size, sizeof(ComplexType));
-    const auto chirp_size_mb    = size_in_mb(chirp_size, sizeof(float));
+    const auto baseband_size_mb  = size_in_mb(baseband_size, sizeof(uint8_t));
+    const auto dmt_size_mb       = size_in_mb(dmt_size, sizeof(float));
+    const auto buffer_size_mb    = size_in_mb(buffer_size, sizeof(ComplexType));
+    const auto chirp_size_mb     = size_in_mb(chirp_size, sizeof(float));
+    const auto waterfall_size_mb = size_in_mb(waterfall_size, sizeof(float));
 
-    spdlog::info(
-        "CohFDMT: Input baseband_size: ({}x{}x{}x{}; {:.3F} MB), dmt_size: "
-        "({}x{}; {:.3F} MB)",
-        2, 2, m_nsub, m_nsamp, baseband_size_mb, m_dm_grid_final.size(),
+    std::cout << std::format("\n*** CohFDMT Plan Summary ***\n");
+    std::cout << std::format(
+        "Input: Baseband Size: (2 x 2 x {} x {}; {:.1f} MB ), DMT "
+        "Size: ({} x {}; {:.1f} MB )\n",
+        m_nsub, m_nsamp, baseband_size_mb, m_dm_grid_final.size(),
         m_fdmt_plan->get_dmt_nsamps(), dmt_size_mb);
-    spdlog::info(
-        "CohFDMT: Buffer size: ({}; {:.3F} MB), Chirp+waterfall size: ({}; "
-        "{:.3F} MB)",
-        buffer_size, buffer_size_mb, chirp_size, chirp_size_mb);
-    spdlog::info("CohFDMT: FDMT Calls (nCohDMs): {}", m_dm_grid_coh.size());
-    spdlog::info("CohFDMT: Forward FFT-1D calls: {}(n={})", m_nfft * m_nsub,
-                 m_nbin);
-    spdlog::info("CohFDMT: Per call details ...");
-    spdlog::info("\t\tBackward FFT-1D calls: {}(n={})",
-                 m_nfft * m_nsub * m_nchan, m_mbin);
-    m_fdmt_plan->print_summary();
+    std::cout << std::format("Plan Buffer Size: ({}; {:.1f} MB ), Chirp: "
+                             "({}; {:.1f} MB ), Waterfall: ({}; {:.1f} MB )\n",
+                             buffer_size, buffer_size_mb, chirp_size,
+                             chirp_size_mb, waterfall_size, waterfall_size_mb);
+    std::cout << std::format("Forward FFT-1D calls: {}(n={})\n",
+                             m_nfft * m_nsub, m_nbin);
+    std::cout << std::format("Coherent DMs: {}\n", m_dm_grid_coh.size());
+    std::cout << std::format("Per coherent call details ...\n");
+    std::cout << std::format("\tBackward FFT-1D calls: {}(n={})\n",
+                             m_nfft * m_nsub * m_nchan, m_mbin);
+    m_fdmt_plan->print_summary("\t");
+    std::cout << std::format("{:*>80}\n", "");
 }
 
 void CohFDMTPlan::configure_plan() {

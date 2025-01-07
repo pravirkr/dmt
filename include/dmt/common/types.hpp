@@ -2,6 +2,7 @@
 
 #include <complex>
 #include <cstddef>
+#include <unordered_map>
 #include <vector>
 
 #ifdef USE_CUDA
@@ -54,3 +55,8 @@ enum class BasebandDataOrder : uint8_t {
     kFTPRI, /**< Frequency-Time-Polarisation-Real/Imag */
     kRITFP  /**< Real/Imag-time-frequency-Polarisation */
 };
+
+static const std::unordered_map<std::string_view, BasebandDataOrder>
+    kBasebandDataOrderMap = {{"FTPRI", BasebandDataOrder::kFTPRI},
+                             {"PRITF", BasebandDataOrder::kPRITF},
+                             {"RITFP", BasebandDataOrder::kRITFP}};
