@@ -2,7 +2,7 @@ include(CTest)
 
 CPMFindPackage(
   NAME Catch2
-  VERSION 3.7.1
+  VERSION 3.8.0
   GITHUB_REPOSITORY catchorg/Catch2
 )
 list(APPEND CMAKE_MODULE_PATH ${Catch2_DIR})

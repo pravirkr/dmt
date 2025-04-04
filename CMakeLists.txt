@@ -51,8 +51,10 @@ if(CMAKE_CUDA_COMPILER)
   set(CMAKE_CUDA_FLAGS_DEBUG "-g")
   set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG -use_fast_math -Xcompiler=-march=native")
   set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES 0)
+  add_compile_definitions(USE_CUDA)
 else()
   message(STATUS "CUDA compiler not found. GPU code will not be built.")
+  remove_definitions(USE_CUDA)
 endif()
 
 # Initialize necessary CMake modules

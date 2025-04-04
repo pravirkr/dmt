@@ -8,6 +8,7 @@
 
 #include "dmt/cuda_utils.cuh"
 
+namespace {
 __global__ void
 kernel_init_fdmt(const float* __restrict__ waterfall,
                  float* __restrict__ state,
@@ -18,8 +19,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
                  int nsamps,
                  int dt_max,
                  const float* __restrict__ hist) {
-    int isamp = blockIdx.x * blockDim.x + threadIdx.x;
-    int i_sub = blockIdx.y;
+    auto isamp = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    auto i_sub = static_cast<int>(blockIdx.y);
     if (i_sub >= nsubs || isamp >= nsamps) {
         return;
     }
@@ -42,8 +43,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
     for (int i_dt = 1; i_dt < ndt_grid_sub; ++i_dt) {
         const auto dt_cur            = dt_grid_sub[i_dt];
         const auto dt_prev           = dt_grid_sub[i_dt - 1];
-        const auto state_offset_cur  = buffer_offset + i_dt * nsamps;
-        const auto state_offset_prev = buffer_offset + (i_dt - 1) * nsamps;
+        const auto state_offset_cur  = buffer_offset + (i_dt * nsamps);
+        const auto state_offset_prev = buffer_offset + ((i_dt - 1) * nsamps);
 
         // Initialise state for [i_sub, i_dt, dt_cur:]
         if (isamp >= dt_cur) {
@@ -86,8 +87,8 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
                                     int nsamps,
                                     int ncoords_sum_cur,
                                     int ncoords_copy_cur) {
-    int isamp   = blockIdx.x * blockDim.x + threadIdx.x;
-    int i_coord = blockIdx.y;
+    auto isamp   = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    auto i_coord = static_cast<int>(blockIdx.y);
     if (isamp >= nsamps) {
         return;
     }
@@ -127,18 +128,19 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
         }
     }
 }
+} // namespace
 
 FDMTCUDA::FDMTCUDA(float f_min,
-                 float f_max,
-                 size_t nchans,
-                 size_t nsamps,
-                 float tsamp,
-                 size_t dt_max,
-                 size_t dt_step,
-                 size_t dt_min,
-                 int device_id,
-                 bool use_history,
-                 bool verbose)
+                   float f_max,
+                   size_t nchans,
+                   size_t nsamps,
+                   float tsamp,
+                   size_t dt_max,
+                   size_t dt_step,
+                   size_t dt_min,
+                   int device_id,
+                   bool use_history,
+                   bool verbose)
     : m_use_history(use_history),
       m_device_id(device_id),
       m_plan(f_min,
@@ -159,9 +161,9 @@ FDMTCUDA::FDMTCUDA(float f_min,
 }
 
 void FDMTCUDA::execute(const float* __restrict__ waterfall,
-                      size_t waterfall_size,
-                      float* __restrict__ dmt,
-                      size_t dmt_size) {
+                       size_t waterfall_size,
+                       float* __restrict__ dmt,
+                       size_t dmt_size) {
     execute(waterfall, waterfall_size, dmt, dmt_size, false);
 }
 
@@ -176,10 +178,10 @@ void FDMTCUDA::set_device(int device_id) {
 }
 
 void FDMTCUDA::execute(const float* __restrict__ waterfall,
-                      size_t waterfall_size,
-                      float* __restrict__ dmt,
-                      size_t dmt_size,
-                      bool device_flags) {
+                       size_t waterfall_size,
+                       float* __restrict__ dmt,
+                       size_t dmt_size,
+                       bool device_flags) {
     if (device_flags) {
         execute_device(waterfall, waterfall_size, dmt, dmt_size);
     } else {
@@ -195,17 +197,17 @@ void FDMTCUDA::execute(const float* __restrict__ waterfall,
 }
 
 void FDMTCUDA::initialise(const float* __restrict__ waterfall,
-                         size_t waterfall_size,
-                         float* __restrict__ state,
-                         size_t state_size) {
+                          size_t waterfall_size,
+                          float* __restrict__ state,
+                          size_t state_size) {
     initialise(waterfall, waterfall_size, state, state_size, false);
 }
 
 void FDMTCUDA::initialise(const float* __restrict__ waterfall,
-                         size_t waterfall_size,
-                         float* __restrict__ state,
-                         size_t state_size,
-                         bool device_flags) {
+                          size_t waterfall_size,
+                          float* __restrict__ state,
+                          size_t state_size,
+                          bool device_flags) {
     if (device_flags) {
         initialise_device(waterfall, state);
     } else {
@@ -220,9 +222,9 @@ void FDMTCUDA::initialise(const float* __restrict__ waterfall,
 }
 
 void FDMTCUDA::execute_device(const float* __restrict__ waterfall,
-                             size_t waterfall_size,
-                             float* __restrict__ dmt,
-                             size_t dmt_size) {
+                              size_t waterfall_size,
+                              float* __restrict__ dmt,
+                              size_t dmt_size) {
     check_inputs(waterfall_size, dmt_size);
     float* state_in_ptr  = thrust::raw_pointer_cast(m_state_in_d.data());
     float* state_out_ptr = thrust::raw_pointer_cast(m_state_out_d.data());
@@ -262,7 +264,7 @@ void FDMTCUDA::execute_device(const float* __restrict__ waterfall,
 }
 
 void FDMTCUDA::initialise_device(const float* __restrict__ waterfall,
-                                float* __restrict__ state) {
+                                 float* __restrict__ state) {
     const int nsubs  = m_plan_d.state_shape.nchans[0];
     const int nsamps = m_plan_d.state_shape.nsamps[0];
     const int dt_max = m_plan_d.state_shape.dt_max[0];
@@ -284,8 +286,8 @@ void FDMTCUDA::initialise_device(const float* __restrict__ waterfall,
     if (m_use_history) {
         // Copy the last nchans x dt_max elements from waterfall to hist
         for (int i_sub = 0; i_sub < nsubs; ++i_sub) {
-            thrust::copy_n(&waterfall[i_sub * nsamps + nsamps - dt_max], dt_max,
-                           &hist[i_sub * dt_max]);
+            thrust::copy_n(&waterfall[(i_sub * nsamps) + nsamps - dt_max],
+                           dt_max, &hist[i_sub * dt_max]);
         }
     }
 }

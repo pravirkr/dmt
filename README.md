@@ -7,10 +7,10 @@
 [![License](https://img.shields.io/github/license/pravirkr/dmt)](https://github.com/pravirkr/dmt/blob/main/LICENSE)
 
 ## Dispersion Measure Transforms
+
 |           |           |
 | --------- | --------- |
-| ![](docs/waterfall.png) | ![](docs/dmt.png) |
-
+| ![Waterfall image](docs/waterfall.png) | ![DMT transform](docs/dmt.png) |
 
 ## Installation
 
@@ -36,6 +36,5 @@ dmt_transform = thefdmt.execute(frb.astype(np.float32))
 f_min = 704.0, f_max = 1216.0, nchans = 4096, tsamp = 0.00008192, dt_max = 2048, nsamps = n;
 nthreads = 1, 8;
 ```
-![](bench/results/bench.png)
 
-
+![Benchmark results](bench/results/bench.png)

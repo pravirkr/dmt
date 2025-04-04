@@ -1,6 +1,6 @@
 CPMFindPackage(
-  NAME benchmark #VERSION 1.9
-  URL https://github.com/google/benchmark/archive/refs/tags/v1.9.0.zip
+  NAME benchmark #VERSION 1.9.1
+  URL https://github.com/google/benchmark/archive/refs/tags/v1.9.1.zip
   OPTIONS "BENCHMARK_ENABLE_WERROR OFF" "BENCHMARK_FORCE_WERROR OFF" "BENCHMARK_ENABLE_TESTING OFF"
 )
 

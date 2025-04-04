@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <iostream>
@@ -8,8 +7,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include <fmt/ranges.h>
-#include <spdlog/common.h>
+#include <spdlog/fmt/bundled/ranges.h>
 #include <spdlog/spdlog.h>
 
 #include <dmt/common/plans.hpp>

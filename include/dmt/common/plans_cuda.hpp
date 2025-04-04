@@ -1,7 +1,6 @@
 #pragma once
 
 #include <numeric>
-#include <thrust/device_vector.h>
 #include <vector>
 
 #include "plans.hpp"

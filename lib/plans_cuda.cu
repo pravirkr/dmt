@@ -11,13 +11,13 @@ __host__ __device__ void FDMTCoordDPtrs::update_offsets(int offset_value) {
 }
 
 FDMTCoordDPtrs FDMTCoordD::get_raw_ptrs() const {
-    return {thrust::raw_pointer_cast(nsamps.data()),
-            thrust::raw_pointer_cast(buf_offset.data()),
-            thrust::raw_pointer_cast(offset.data()),
-            thrust::raw_pointer_cast(tail_buf_offset.data()),
-            thrust::raw_pointer_cast(tail_nsamps.data()),
-            thrust::raw_pointer_cast(head_buf_offset.data()),
-            thrust::raw_pointer_cast(head_nsamps.data())};
+    return {.nsamps          = thrust::raw_pointer_cast(nsamps.data()),
+            .buf_offset      = thrust::raw_pointer_cast(buf_offset.data()),
+            .offset          = thrust::raw_pointer_cast(offset.data()),
+            .tail_buf_offset = thrust::raw_pointer_cast(tail_buf_offset.data()),
+            .tail_nsamps     = thrust::raw_pointer_cast(tail_nsamps.data()),
+            .head_buf_offset = thrust::raw_pointer_cast(head_buf_offset.data()),
+            .head_nsamps     = thrust::raw_pointer_cast(head_nsamps.data())};
 }
 
 void transfer_fdmt_plan_to_device(const FDMTPlanContainer& plan,

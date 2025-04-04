@@ -1,3 +1,5 @@
+#include <dmt/fdmt/fdmt_cpu.hpp>
+
 #include <cstddef>
 #include <utility>
 
@@ -8,7 +10,6 @@
 #include <spdlog/spdlog.h>
 
 #include <dmt/common/types.hpp>
-#include <dmt/fdmt/fdmt_cpu.hpp>
 
 #include "dmt/dm_utils.hpp"
 
