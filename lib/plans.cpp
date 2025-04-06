@@ -1,3 +1,5 @@
+#include "dmt/common/plans.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -7,12 +9,10 @@
 #include <stdexcept>
 #include <vector>
 
-#include <spdlog/fmt/bundled/ranges.h>
+#include <spdlog/fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
-#include <dmt/common/plans.hpp>
-#include <dmt/common/types.hpp>
-
+#include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 
 constexpr std::string_view FDMTShape::header_fmt() {

@@ -1,12 +1,13 @@
 #pragma once
 
 #include <complex>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
 
-#ifdef USE_CUDA
+#ifdef DMT_ENABLE_CUDA
 #include <thrust/complex.h>
 #include <thrust/device_vector.h>
 #endif
@@ -17,11 +18,11 @@ using IndexType   = std::ptrdiff_t; // Common index type (for signed indexing)
 using ComplexType = std::complex<float>;
 using DtGridType  = std::vector<SizeType>;
 
-#ifdef USE_CUDA
+#ifdef DMT_ENABLE_CUDA
 using ComplexTypeCUDA = thrust::complex<float>;
 #endif
 
-#ifdef USE_CUDA
+#ifdef DMT_ENABLE_CUDA
 template <typename T> using DeviceVector = thrust::device_vector<T>;
 #endif
 
@@ -61,3 +62,23 @@ static const std::unordered_map<std::string_view, BasebandDataOrder>
     kBasebandDataOrderMap = {{"FTPRI", BasebandDataOrder::kFTPRI},
                              {"PRITF", BasebandDataOrder::kPRITF},
                              {"RITFP", BasebandDataOrder::kRITFP}};
+
+namespace dmt::backend {
+
+/**
+ * @brief Tag struct representing the CPU backend.
+ */
+struct CPU {};
+
+/**
+ * @brief Tag struct representing the CUDA backend.
+ */
+struct CUDA {};
+
+/**
+ * @brief Concept to constrain template parameters to valid execution backends.
+ */
+template <typename T>
+concept ExecutionBackend = std::same_as<T, CPU> || std::same_as<T, CUDA>;
+
+} // namespace dmt::backend

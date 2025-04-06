@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cufft.h>
 #include <string>
 #include <thrust/complex.h>
 #include <thrust/device_vector.h>
@@ -37,8 +38,8 @@ private:
     SizeType m_mbin;
     SizeType m_nchan;
 
-    cufftHandle m_forward_plan  = nullptr;
-    cufftHandle m_backward_plan = nullptr;
+    cufftHandle m_forward_plan  = 0;
+    cufftHandle m_backward_plan = 0;
 };
 
 class CohFDMTCUDA {

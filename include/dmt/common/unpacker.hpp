@@ -3,7 +3,7 @@
 #include <memory>
 #include <string_view>
 
-#include "types.hpp"
+#include "dmt/common/types.hpp"
 
 class DataUnpackerImplBase {
 public:

@@ -1,3 +1,5 @@
+#include <span>
+
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -5,17 +7,18 @@
 
 #include "pybind_utils.hpp"
 
-#include <dmt/cfdmt/cfdmt_cpu.hpp>
-#include <dmt/common/plans.hpp>
-#include <dmt/ddmt/ddmt_cpu.hpp>
-#include <dmt/fdmt/fdmt_cpu.hpp>
-#include <dmt/utils/simulate.hpp>
+// #include "dmt/cfdmt/cfdmt_cpu.hpp"
+#include "dmt/common/plans.hpp"
+#include "dmt/ddmt/ddmt_cpu.hpp"
+#include "dmt/fdmt.hpp"
+#include "dmt/utils/simulate.hpp"
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
 PYBIND11_MODULE(libdmt, mod) { // NOLINT
     mod.doc() = "Python Bindings for dmt";
+
     py::add_ostream_redirect(mod, "ostream_redirect");
     mod.def(
         "generate_pure_frb",
@@ -153,47 +156,58 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp);
 
-    py::class_<FDMTCPU>(mod, "FDMTCPU")
+    using dmt::FDMTCPU;
+    py::class_<FDMTCPU>(mod, "FDMTCPU", "FDMT CPU Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType, int, bool, bool>(),
+                      SizeType, SizeType, bool, bool, int>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_step"_a = 1, "dt_min"_a = 0, "nthreads"_a = 1,
-             "use_history"_a = false, "verbose"_a = false)
-        .def_property_readonly("plan", &FDMTCPU::get_plan)
+             "dt_max"_a, "dt_step"_a = 1, "dt_min"_a = 0,
+             "use_history"_a = false, "verbose"_a = false, "nthreads"_a = 1)
+        .def_property_readonly(
+            "plan", &FDMTCPU::get_plan,
+            "Get the FDMTPlan object containing transform details.")
         // execute take 2d array as input, and return 2d array as output
         .def(
             "execute",
             [](FDMTCPU& fdmt,
-               const py::array_t<float, py::array::c_style>& waterfall,
-               bool normalize) {
+               const py::array_t<float, py::array::c_style>& waterfall) {
+                if (waterfall.ndim() != 2) {
+                    throw std::runtime_error("Input waterfall must be a 2D "
+                                             "NumPy array (nchans, nsamps).");
+                }
                 const auto& plan   = fdmt.get_plan();
                 const auto& plan_c = plan.get_container();
                 const auto niters  = plan.get_niters();
                 py::array_t<float, py::array::c_style> dmt(
                     {plan_c.state_shape[niters].ncoords,
                      plan_c.state_shape[niters].nsamps});
-                fdmt.execute(waterfall.data(), waterfall.size(),
-                             dmt.mutable_data(), dmt.size(), normalize);
+                fdmt.execute(
+                    std::span<const float>(waterfall.data(), waterfall.size()),
+                    std::span<float>(dmt.mutable_data(), dmt.size()));
                 return dmt;
             },
-            py::arg("waterfall"), py::arg("normalize") = true)
-        .def(
-            "initialise",
-            [](FDMTCPU& fdmt,
-               const py::array_t<float, py::array::c_style>& waterfall,
-               bool normalize) {
-                const auto& plan   = fdmt.get_plan();
-                const auto& plan_c = plan.get_container();
-                py::array_t<float, py::array::c_style> state(
-                    {plan_c.state_shape[0].ncoords,
-                     plan_c.state_shape[0].nsamps});
-                std::fill(state.mutable_data(),
-                          state.mutable_data() + state.size(), 0.0F);
-                fdmt.initialise(waterfall.data(), waterfall.size(),
-                                state.mutable_data(), state.size(), normalize);
-                return state;
-            },
-            py::arg("waterfall"), py::arg("normalize") = true);
+            py::arg("waterfall"),
+            R"doc(
+            Executes the FDMT transform on the CPU.
+
+            Parameters
+            ----------
+            waterfall : numpy.ndarray
+                A 2D NumPy array of shape (nchans, nsamps) containing the input data.
+                Must be C-contiguous and of type float32.
+
+            Returns
+            -------
+            numpy.ndarray
+                A 2D NumPy array containing the transformed data.
+                Shape is (n_delays, n_times) where n_delays depends on dt_max/dt_step
+                and n_times is reduced from input nsamps based on maximum delay.
+
+            Notes
+            -----
+            The input array must be properly sized according to the FDMT parameters
+            specified during initialization (nchans, nsamps).
+            )doc");
     py::class_<DDMTCPU>(mod, "DDMTCPU")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,

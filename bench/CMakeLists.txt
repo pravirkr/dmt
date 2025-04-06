@@ -21,7 +21,7 @@ target_include_directories(
   ${TARGET_BENCHMARKS} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/lib
 )
 target_link_libraries(
-  ${TARGET_BENCHMARKS} PRIVATE ${PROJECT_NAME}::${LIBRARY_NAME} benchmark::benchmark_main
+  ${TARGET_BENCHMARKS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
 )
 
 # Memory benchmarks
@@ -30,5 +30,5 @@ target_include_directories(
   ${TARGET_BENCHMARKS_MEM} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/lib
 )
 target_link_libraries(
-  ${TARGET_BENCHMARKS_MEM} PRIVATE ${PROJECT_NAME}::${LIBRARY_NAME} benchmark::benchmark_main
+  ${TARGET_BENCHMARKS_MEM} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
 )

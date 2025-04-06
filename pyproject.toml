@@ -9,14 +9,13 @@ description = "Dispersion Measure Transform Library"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -25,9 +24,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = [
-    "numpy",
-]
+dependencies = ["numpy"]
 
 [project.urls]
 Github = "https://github.com/pravirkr/dmt"
@@ -45,7 +42,7 @@ docs = ["sphinx", "sphinx-book-theme", "sphinx-click", "myst-nb", "breathe"]
 develop = ["ruff"]
 
 [tool.scikit-build]
-cmake.version = ">=3.18"
+cmake.version = ">=3.22"
 cmake.build-type = "Release"
 install.strip = false
 
@@ -64,7 +61,7 @@ test-skip = "pp* *-musllinux* *-manylinux_i686"
 include = ["pyproject.toml", "src/**/*.py"]
 line-length = 88
 indent-width = 4
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.format]
 quote-style = "double"

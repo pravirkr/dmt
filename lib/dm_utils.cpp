@@ -1,3 +1,5 @@
+#include "dmt/dm_utils.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -6,30 +8,27 @@
 #include <stdexcept>
 #include <vector>
 
-#include "dmt/dm_utils.hpp"
+namespace dmt::utils {
 
-float dm_utils::cff(float f1_start,
-                    float f1_end,
-                    float f2_start,
-                    float f2_end) {
+float cff(float f1_start, float f1_end, float f2_start, float f2_end) {
     return (std::pow(f1_start, kDispCoeff) - std::pow(f1_end, kDispCoeff)) /
            (std::pow(f2_start, kDispCoeff) - std::pow(f2_end, kDispCoeff));
 }
 
-SizeType dm_utils::calculate_dt_sub(
+SizeType calculate_dt_sub(
     float f_start, float f_end, float f_min, float f_max, SizeType dt) {
     const float ratio = cff(f_start, f_end, f_min, f_max);
     return static_cast<SizeType>(std::round(static_cast<float>(dt) * ratio));
 }
 
-float dm_utils::get_dmconv(float f_min, float f_max, float tsamp) {
+float get_dmconv(float f_min, float f_max, float tsamp) {
     const float dm_conv = kDispConst * (std::pow(f_min, kDispCoeff) -
                                         std::pow(f_max, kDispCoeff));
     return tsamp / dm_conv;
 }
 
-SizeType dm_utils::find_closest_index(const std::vector<SizeType>& arr_sorted,
-                                      SizeType val) {
+SizeType find_closest_index(const std::vector<SizeType>& arr_sorted,
+                            SizeType val) {
     if (arr_sorted.empty()) {
         throw std::runtime_error("Array is empty");
     }
@@ -46,12 +45,12 @@ SizeType dm_utils::find_closest_index(const std::vector<SizeType>& arr_sorted,
     return idx;
 }
 
-std::vector<SizeType> dm_utils::generate_delay_table(const float* dm_arr,
-                                                     SizeType dm_count,
-                                                     float f0,
-                                                     float df,
-                                                     SizeType nchans,
-                                                     float tsamp) {
+std::vector<SizeType> generate_delay_table(const float* dm_arr,
+                                           SizeType dm_count,
+                                           float f0,
+                                           float df,
+                                           SizeType nchans,
+                                           float tsamp) {
     std::vector<SizeType> delay_table(nchans * dm_count);
     for (SizeType idm = 0; idm < dm_count; ++idm) {
         for (SizeType ichan = 0; ichan < nchans; ++ichan) {
@@ -66,12 +65,12 @@ std::vector<SizeType> dm_utils::generate_delay_table(const float* dm_arr,
     return delay_table;
 }
 
-SizeType dm_utils::minimum_overlap(float dm_max,
-                                   float fcenter,
-                                   float bw,
-                                   float tbin,
-                                   SizeType nsub,
-                                   SizeType nchan) {
+SizeType minimum_overlap(float dm_max,
+                         float fcenter,
+                         float bw,
+                         float tbin,
+                         SizeType nsub,
+                         SizeType nchan) {
     float bw_chan         = bw / static_cast<float>(nsub * nchan);
     float fmin_bottom_sub = fcenter - (bw / 2);
     float fmax_bottom_sub = fmin_bottom_sub + bw_chan;
@@ -85,7 +84,7 @@ SizeType dm_utils::minimum_overlap(float dm_max,
     return static_cast<SizeType>(delay_samples);
 }
 
-std::vector<float> dm_utils::generate_coherent_dms(
+std::vector<float> generate_coherent_dms(
     float dm_min, float dm_max, float fcenter, float bw, float tbin, float tp) {
     float f_min = fcenter - (bw / 2);
     float f_max = fcenter + (bw / 2);
@@ -101,14 +100,14 @@ std::vector<float> dm_utils::generate_coherent_dms(
     return dm_grid;
 }
 
-void dm_utils::dedisperse(float* __restrict__ waterfall,
-                          SizeType waterfall_size,
-                          float dm,
-                          float f_min,
-                          float f_max,
-                          SizeType nchans,
-                          SizeType nsamps,
-                          float tsamp) {
+void dedisperse(float* __restrict__ waterfall,
+                SizeType waterfall_size,
+                float dm,
+                float f_min,
+                float f_max,
+                SizeType nchans,
+                SizeType nsamps,
+                float tsamp) {
     if (waterfall_size != nchans * nsamps) {
         throw std::runtime_error("Waterfall size mismatch");
     }
@@ -138,15 +137,15 @@ void dm_utils::dedisperse(float* __restrict__ waterfall,
     }
 }
 
-void dm_utils::compute_chirp(ComplexType* chirp_table,
-                             SizeType chirp_table_size,
-                             const float* dm_grid,
-                             SizeType ndm,
-                             float fcenter,
-                             float bw,
-                             SizeType nbin,
-                             SizeType nsub,
-                             SizeType nchan) {
+void compute_chirp(ComplexType* chirp_table,
+                   SizeType chirp_table_size,
+                   const float* dm_grid,
+                   SizeType ndm,
+                   float fcenter,
+                   float bw,
+                   SizeType nbin,
+                   SizeType nsub,
+                   SizeType nchan) {
     const SizeType mbin = nbin / nchan;
     const float bw_sub  = bw / static_cast<float>(nsub);
     const float bw_chan = bw_sub / static_cast<float>(nchan);
@@ -196,3 +195,36 @@ void dm_utils::compute_chirp(ComplexType* chirp_table,
         }
     }
 }
+
+void add_offset_kernel(const float* __restrict arr1,
+                       SizeType size_in1,
+                       const float* __restrict arr2,
+                       SizeType size_in2,
+                       float* __restrict arr_out,
+                       SizeType size_out,
+                       SizeType offset) {
+    // Debug checks using assert (only active when NDEBUG is not defined)
+    assert(size_in1 == size_in2 && "Input sizes must be equal");
+    assert(size_out >= size_in1 && "Output size must be >= input size");
+    assert(offset < size_in1 && "Offset must be < input size");
+
+    SizeType t          = 0;
+    const SizeType nsum = size_in1 - offset;
+    std::copy_n(arr1, offset, arr_out);
+    t += offset;
+#pragma omp simd
+    for (SizeType i = 0; i < nsum; ++i) {
+        arr_out[offset + i] = arr1[offset + i] + arr2[i];
+    }
+    t += nsum;
+    const SizeType nrest = std::min(offset, size_out - size_in1);
+    if (nrest > 0) {
+        std::copy_n(arr2 + nsum, nrest, arr_out + size_in1);
+        t += nrest;
+    }
+    if (t < size_out) {
+        std::fill(arr_out + t, arr_out + size_out, 0.0F);
+    }
+}
+
+} // namespace dmt::utils

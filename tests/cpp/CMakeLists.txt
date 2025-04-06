@@ -19,10 +19,10 @@ endif()
 
 add_executable(${TARGET_TESTS} ${TEST_SOURCES})
 target_include_directories(
-  ${TARGET_TESTS} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/lib
+  ${TARGET_TESTS} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
 )
 target_link_libraries(
-  ${TARGET_TESTS} PRIVATE ${PROJECT_NAME}::${LIBRARY_NAME} Catch2::Catch2WithMain
+  ${TARGET_TESTS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} Catch2::Catch2WithMain
 )
 
 include(Catch)
