@@ -106,7 +106,7 @@ const DtGridType& FDMTPlan::get_dt_grid_final() const noexcept {
     return m_container.grids[m_niters][0].dt_grid;
 }
 std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
-    const float dm_conv       = dm_utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
+    const float dm_conv = dmt::utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
     const auto& dt_grid_final = get_dt_grid_final();
     std::vector<float> dm_grid_final(dt_grid_final.size());
     std::ranges::transform(
@@ -197,10 +197,10 @@ void FDMTPlan::validate_inputs() const {
 }
 
 DtGridType FDMTPlan::calculate_dt_grid_sub(float f_start, float f_end) const {
-    const auto dt_max_sub =
-        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max);
-    const auto dt_min_sub =
-        dm_utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min);
+    const auto dt_max_sub = dmt::utils::calculate_dt_sub(
+        f_start, f_end, m_f_min, m_f_max, m_dt_max);
+    const auto dt_min_sub = dmt::utils::calculate_dt_sub(
+        f_start, f_end, m_f_min, m_f_max, m_dt_min);
     DtGridType dt_grid;
     for (SizeType dt = dt_min_sub; dt <= dt_max_sub; dt += m_dt_step) {
         dt_grid.push_back(dt);
@@ -338,11 +338,11 @@ void FDMTPlan::make_plan(SizeType i_iter) {
         // Populate the dt_plan mapping current dt grid to the previous dt grid
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             // dt ~= dt_tail (dt_mid) + dt_head
-            const auto dt = dt_sub[i_dt];
-            const auto dt_mid1 =
-                dm_utils::calculate_dt_sub(f_start, f_mid1, f_start, f_end, dt);
-            const auto dt_mid2 =
-                dm_utils::calculate_dt_sub(f_start, f_mid2, f_start, f_end, dt);
+            const auto dt      = dt_sub[i_dt];
+            const auto dt_mid1 = dmt::utils::calculate_dt_sub(
+                f_start, f_mid1, f_start, f_end, dt);
+            const auto dt_mid2 = dmt::utils::calculate_dt_sub(
+                f_start, f_mid2, f_start, f_end, dt);
             // check dt_head is always >= 0, otherwise throw error
             if (dt_mid1 > dt || dt_mid2 > dt) {
                 throw std::runtime_error("Invalid dt_mid values");
@@ -352,7 +352,7 @@ void FDMTPlan::make_plan(SizeType i_iter) {
             }
             if (i_sub == nchans_cur - 1 && do_copy) {
                 const auto i_dt_tail =
-                    dm_utils::find_closest_index(grids_tail.dt_grid, dt);
+                    dmt::utils::find_closest_index(grids_tail.dt_grid, dt);
                 const auto i_coord_tail = grids_tail.coord_offset + i_dt_tail;
                 const auto coord_cur    = FDMTCoord{
                        .i_sub        = i_sub,
@@ -376,9 +376,9 @@ void FDMTPlan::make_plan(SizeType i_iter) {
             } else {
                 const auto dt_head = dt - dt_mid2;
                 const auto i_dt_tail =
-                    dm_utils::find_closest_index(grids_tail.dt_grid, dt_mid1);
+                    dmt::utils::find_closest_index(grids_tail.dt_grid, dt_mid1);
                 const auto i_dt_head =
-                    dm_utils::find_closest_index(grids_head.dt_grid, dt_head);
+                    dmt::utils::find_closest_index(grids_head.dt_grid, dt_head);
                 const auto i_coord_tail = grids_tail.coord_offset + i_dt_tail;
                 const auto i_coord_head = grids_head.coord_offset + i_dt_head;
                 const auto coord_cur    = FDMTCoord{
@@ -597,7 +597,7 @@ void CohFDMTPlan::configure_plan() {
     m_nchan = m_n_p;
 
     // Generate coherent DM grid
-    m_dm_grid_coh = dm_utils::generate_coherent_dms(
+    m_dm_grid_coh = dmt::utils::generate_coherent_dms(
         m_dm_min, m_dm_max, m_f_center, m_bw, m_tbin, m_t_p);
     if (m_dm_grid_coh.empty()) {
         throw std::runtime_error("Empty DM grid");
@@ -605,7 +605,7 @@ void CohFDMTPlan::configure_plan() {
 
     // Compute optimal overlap size and adjust to the nearest power of two
     const auto max_dm           = *std::ranges::max_element(m_dm_grid_coh);
-    const auto noverlap_optimal = dm_utils::minimum_overlap(
+    const auto noverlap_optimal = dmt::utils::minimum_overlap(
         max_dm, m_f_center, m_bw, m_tbin, m_nsub, m_nchan);
     const auto noverlap_optimal_pow2 = static_cast<SizeType>(
         std::pow(2, std::round(std::log2(noverlap_optimal))));
@@ -706,7 +706,7 @@ void DDMTPlan::configure_plan() {
     m_container.nchans = m_nchans;
     m_container.dm_arr = m_dm_arr;
     const auto df      = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
-    m_container.delay_table = dm_utils::generate_delay_table(
+    m_container.delay_table = dmt::utils::generate_delay_table(
         m_dm_arr.data(), m_dm_arr.size(), m_f_min, df, m_nchans, m_tsamp);
 }
 

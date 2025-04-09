@@ -196,11 +196,11 @@ void compute_chirp(ComplexType* chirp_table,
     }
 }
 
-void add_offset_kernel(const float* __restrict arr1,
+void add_offset_kernel(const float* __restrict__ arr1,
                        SizeType size_in1,
-                       const float* __restrict arr2,
+                       const float* __restrict__ arr2,
                        SizeType size_in2,
-                       float* __restrict arr_out,
+                       float* __restrict__ arr_out,
                        SizeType size_out,
                        SizeType offset) {
     // Debug checks using assert (only active when NDEBUG is not defined)

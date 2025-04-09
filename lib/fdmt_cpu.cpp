@@ -72,12 +72,11 @@ public:
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
         check_inputs(waterfall.size(), dmt.size());
+        initialise(waterfall, std::span(m_state_in));
+
         float* state_in_ptr  = m_state_in.data();
         float* state_out_ptr = m_state_out.data();
-
-        initialise(waterfall.data(), waterfall.size(), state_in_ptr,
-                   m_state_in.size());
-        const auto niters = m_plan.get_niters();
+        const auto niters    = m_plan.get_niters();
         for (SizeType i_iter = 1; i_iter < niters; ++i_iter) {
             execute_iter(state_in_ptr, state_out_ptr, i_iter);
             std::swap(state_in_ptr, state_out_ptr);
@@ -96,21 +95,20 @@ private:
     std::vector<float> m_history;
     int m_nthreads;
 
-    void initialise(const float* __restrict__ waterfall,
-                    SizeType waterfall_size,
-                    float* __restrict__ state,
-                    SizeType state_size) {
+    void initialise(std::span<const float> waterfall, std::span<float> state) {
         const auto& plan_c     = m_plan.get_container();
         const auto& grids_init = plan_c.grids[0];
         const auto nsamps      = plan_c.state_shape[0].nsamps;
         const auto dt_max      = plan_c.state_shape[0].dt_max;
         // Use history data only if enabled and buffer is allocated
-        const float* hist =
-            (m_use_history && !m_history.empty()) ? m_history.data() : nullptr;
+        std::span<const float> hist_span =
+            (m_use_history && !m_history.empty())
+                ? std::span<const float>(m_history)
+                : std::span<const float>();
 
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel for default(none)                                         \
-    shared(waterfall, state, grids_init, nsamps, dt_max, hist)
+    shared(waterfall, state, grids_init, nsamps, dt_max, hist_span)
 #endif
         for (SizeType i_sub = 0; i_sub < grids_init.size(); ++i_sub) {
             const auto& dt_grid_sub  = grids_init[i_sub].dt_grid;
@@ -156,16 +154,14 @@ private:
                     auto i_end_rel =
                         static_cast<std::ptrdiff_t>(isamp - dt_prev);
                     // Sum from history buffer if needed and available
-                    if (hist != nullptr) {
+                    if (!hist_span.empty()) {
                         for (std::ptrdiff_t i_rel = i_start_rel;
                              i_rel < 0 && i_rel < i_end_rel; ++i_rel) {
-                            // Access history using relative index (hist
-                            // contains last dt_max samples)
-                            sum += hist[hist_offset + (dt_max + i_rel)];
+                            // hist contains last dt_max samples
+                            sum += hist_span[hist_offset + (dt_max + i_rel)];
                         }
                     }
-                    // Sum from waterfall buffer for the remaining part of the
-                    // window
+                    // Sum from waterfall buffer for the remaining part
                     for (std::ptrdiff_t i_rel = std::max(
                              i_start_rel, static_cast<std::ptrdiff_t>(0));
                          i_rel < i_end_rel; ++i_rel) {
@@ -185,10 +181,10 @@ private:
             float* hist_ptr = m_history.data();
             // Copy the last nchans x dt_max elements from waterfall to hist
             for (SizeType i_sub = 0; i_sub < grids_init.size(); ++i_sub) {
-                const float* wf_last_elements =
-                    &waterfall[(i_sub * nsamps) + nsamps - dt_max];
+                const auto wf_last_elements = waterfall.subspan(
+                    (i_sub * nsamps) + nsamps - dt_max, dt_max);
                 float* hist_sub_buffer = &hist_ptr[i_sub * dt_max];
-                std::copy_n(wf_last_elements, dt_max, hist_sub_buffer);
+                std::copy_n(wf_last_elements.data(), dt_max, hist_sub_buffer);
             }
         }
     }
@@ -211,11 +207,9 @@ private:
             for (SizeType i_coord = 0; i_coord < coords_sum_cur.size();
                  ++i_coord) {
                 const auto& coord = coords_sum_cur[i_coord];
-                const float* __restrict__ tail =
-                    &state_in[coord.tail_buf_offset];
-                const float* __restrict__ head =
-                    &state_in[coord.head_buf_offset];
-                float* __restrict__ out = &state_out[coord.buf_offset];
+                const float* tail = &state_in[coord.tail_buf_offset];
+                const float* head = &state_in[coord.head_buf_offset];
+                float* out        = &state_out[coord.buf_offset];
                 utils::add_offset_kernel(tail, coord.tail_nsamps, head,
                                          coord.head_nsamps, out, coord.nsamps,
                                          coord.offset);
@@ -226,9 +220,8 @@ private:
             for (SizeType i_coord = 0; i_coord < coords_copy_cur.size();
                  ++i_coord) {
                 const auto& coord = coords_copy_cur[i_coord];
-                const float* __restrict__ tail =
-                    &state_in[coord.tail_buf_offset];
-                float* __restrict__ out = &state_out[coord.buf_offset];
+                const float* tail = &state_in[coord.tail_buf_offset];
+                float* out        = &state_out[coord.buf_offset];
                 std::copy_n(tail, coord.tail_nsamps, out);
             }
         }
@@ -279,14 +272,22 @@ FDMT<backend::CPU>::FDMT(float f_min,
                                     nthreads)) {
     spdlog::debug("FDMT<CPU> object created.");
 }
-
 template <>
-FDMT<backend::CPU>::~FDMT() = default;
+FDMT<backend::CPU>::~FDMT() {
+    spdlog::debug("FDMT<CPU> object destroyed.");
+}
 template <>
-FDMT<backend::CPU>::FDMT(FDMT&& other) noexcept = default;
+FDMT<backend::CPU>::FDMT(FDMT&& other) noexcept
+    : m_impl(std::move(other.m_impl)) {
+    spdlog::debug("FDMT<CPU> object moved.");
+}
 template <>
-FDMT<backend::CPU>&
-FDMT<backend::CPU>::operator=(FDMT&& other) noexcept = default;
+FDMT<backend::CPU>& FDMT<backend::CPU>::operator=(FDMT&& other) noexcept {
+    if (this != &other) {
+        m_impl = std::move(other.m_impl);
+    }
+    return *this;
+}
 template <>
 const FDMTPlan& FDMT<backend::CPU>::get_plan() const {
     return m_impl->get_plan();
@@ -296,5 +297,18 @@ void FDMT<backend::CPU>::execute(std::span<const float> waterfall,
                                  std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
+
+// Explicit instantiation (for linking)
+template FDMT<backend::CPU>::FDMT(float,
+                                  float,
+                                  SizeType,
+                                  SizeType,
+                                  float,
+                                  SizeType,
+                                  SizeType,
+                                  SizeType,
+                                  bool,
+                                  bool,
+                                  int);
 
 } // namespace dmt

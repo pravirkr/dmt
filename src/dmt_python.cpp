@@ -7,9 +7,9 @@
 
 #include "pybind_utils.hpp"
 
-// #include "dmt/cfdmt/cfdmt_cpu.hpp"
+#include "dmt/cfdmt/cfdmt_cpu.hpp"
 #include "dmt/common/plans.hpp"
-#include "dmt/ddmt/ddmt_cpu.hpp"
+#include "dmt/ddmt.hpp"
 #include "dmt/fdmt.hpp"
 #include "dmt/utils/simulate.hpp"
 
@@ -156,6 +156,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp);
 
+    using dmt::DDMTCPU;
     using dmt::FDMTCPU;
     py::class_<FDMTCPU>(mod, "FDMTCPU", "FDMT CPU Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
@@ -233,8 +234,9 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                  const auto dm_count       = plan_c.dm_arr.size();
                  py::array_t<float, py::array::c_style> dmt(
                      {dm_count, nsamps_reduced});
-                 ddmt.execute(waterfall.data(), waterfall.size(),
-                              dmt.mutable_data(), dmt.size());
+                 ddmt.execute(
+                     std::span<const float>(waterfall.data(), waterfall.size()),
+                     std::span<float>(dmt.mutable_data(), dmt.size()));
                  return dmt;
              });
     py::class_<CohFDMTCPU>(mod, "CohFDMTCPU")

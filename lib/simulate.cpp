@@ -22,13 +22,13 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
         const auto freq_min = freq - foff_half;
         const auto freq_max = freq + foff_half;
         const auto dt_start = static_cast<float>(dt) *
-                              dm_utils::cff(f_min, freq_min, f_min, f_max);
+                              dmt::utils::cff(f_min, freq_min, f_min, f_max);
         const auto tstart      = pulse_toa - dt_start;
         const auto tstart_int  = static_cast<SizeType>(std::floor(tstart));
         const auto tstart_frac = tstart - static_cast<float>(tstart_int);
 
         const auto dt_sub = static_cast<float>(dt) *
-                            dm_utils::cff(freq_min, freq_max, f_min, f_max);
+                            dmt::utils::cff(freq_min, freq_max, f_min, f_max);
         const auto tend      = tstart - dt_sub;
         const auto tend_int  = static_cast<SizeType>(std::floor(tend));
         const auto tend_frac = tend - static_cast<float>(tend_int);

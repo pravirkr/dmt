@@ -1,21 +1,21 @@
-#include <cstdint>
 #include <random>
+#include <span>
 #include <vector>
 
 #include <benchmark/benchmark.h>
 
-#include <dmt/common/plans.hpp>
-#include <dmt/fdmt/fdmt_cpu.hpp>
+#include "dmt/common/plans.hpp"
+#include "dmt/fdmt.hpp"
 
 // Custom memory manager to track allocations
 class CustomMemoryManager : public benchmark::MemoryManager {
 public:
-    void Start() BENCHMARK_OVERRIDE {
+    void Start() override {
         m_bytes_allocated  = 0;
         m_allocation_count = 0;
     }
 
-    void Stop(Result& result) BENCHMARK_OVERRIDE {
+    void Stop(Result& result) override {
         result.num_allocs     = static_cast<int64_t>(m_allocation_count);
         result.max_bytes_used = static_cast<int64_t>(m_bytes_allocated);
     }
@@ -66,13 +66,13 @@ static std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
 class FDMTCPUFixture : public benchmark::Fixture {
 public:
     void SetUp(const ::benchmark::State& state) override {
-        f_min    = 704.0F;
-        f_max    = 1216.0F;
-        nchans   = 4096;
-        tsamp    = 0.00008192F;
-        dt_max   = 2048;
-        nsamps   = state.range(0);
-        nthreads = static_cast<int>(state.range(1));
+        f_min     = 704.0F;
+        f_max     = 1216.0F;
+        nchans    = 4096;
+        tsamp     = 0.00008192F;
+        dt_max    = 2048;
+        nsamps    = state.range(0);
+        nthreads  = static_cast<int>(state.range(1));
         gen       = std::mt19937(std::random_device()());
         waterfall = generate_vector<float>(nchans * nsamps, gen);
     }
@@ -89,13 +89,12 @@ public:
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_memory_usage)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0,
-                     nthreads);
+        dmt::FDMT<dmt::backend::CPU> fdmt(f_min, f_max, nchans, nsamps, tsamp,
+                                          dt_max, 1, 0, false, false, nthreads);
         state.PauseTiming();
         std::vector<float> dmt(fdmt.get_plan().get_dmt_size());
         state.ResumeTiming();
-        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
-                     dmt.size());
+        fdmt.execute(std::span(waterfall), std::span(dmt));
     }
 }
 

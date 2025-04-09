@@ -1,11 +1,12 @@
 #include <algorithm>
 #include <random>
+#include <span>
 #include <vector>
 
 #include <benchmark/benchmark.h>
 
-#include <dmt/common/plans.hpp>
-#include <dmt/fdmt/fdmt_cpu.hpp>
+#include "dmt/common/plans.hpp"
+#include "dmt/fdmt.hpp"
 
 // Helper function to generate random data
 template <typename T>
@@ -46,28 +47,18 @@ public:
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0,
-                     nthreads);
-    }
-}
-
-BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_initialise)
-(benchmark::State& state) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, nthreads);
-    std::vector<float> state_init(fdmt.get_plan().get_buffer_size(), 0.0F);
-    for (auto _ : state) {
-        fdmt.initialise(waterfall.data(), waterfall.size(), state_init.data(),
-                        state_init.size());
+        dmt::FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0,
+                          false, false, nthreads);
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute)
 (benchmark::State& state) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, nthreads);
+    dmt::FDMT<dmt::backend::CPU> fdmt(f_min, f_max, nchans, nsamps, tsamp,
+                                      dt_max, 1, 0, false, false, nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
-        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
-                     dmt.size());
+        fdmt.execute(std::span(waterfall), std::span(dmt));
     }
 }
 
@@ -76,20 +67,19 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     std::vector<float> dmt(tmp_plan.get_dmt_size(), 0.0F);
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0,
-                     nthreads);
-        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
-                     dmt.size());
+        dmt::FDMT<dmt::backend::CPU> fdmt(f_min, f_max, nchans, nsamps, tsamp,
+                                          dt_max, 1, 0, false, false, nthreads);
+        fdmt.execute(std::span(waterfall), std::span(dmt));
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_threads)
 (benchmark::State& state) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, nthreads);
+    dmt::FDMT<dmt::backend::CPU> fdmt(f_min, f_max, nchans, nsamps, tsamp,
+                                      dt_max, 1, 0, false, false, nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
-        fdmt.execute(waterfall.data(), waterfall.size(), dmt.data(),
-                     dmt.size());
+        fdmt.execute(std::span(waterfall), std::span(dmt));
     }
 }
 
@@ -97,11 +87,6 @@ constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 16;
 
 BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_planBuffer) // NOLINT
-    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2), {1, 8}})
-    ->MeasureProcessCPUTime()
-    ->UseRealTime();
-
-BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_initialise) // NOLINT
     ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2), {1, 8}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();

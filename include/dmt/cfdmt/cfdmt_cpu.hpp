@@ -9,7 +9,7 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/common/unpacker.hpp"
-#include "dmt/fdmt/fdmt_cpu.hpp"
+#include "dmt/fdmt.hpp"
 
 class FFTManager {
 public:
@@ -77,7 +77,7 @@ public:
 private:
     CohFDMTPlan m_plan;
     std::unique_ptr<FFTManager> m_thefft;
-    std::unique_ptr<FDMTCPU> m_thefdmt;
+    std::unique_ptr<dmt::FDMTCPU> m_thefdmt;
     std::unique_ptr<DataUnpacker> m_theunpacker;
 
     std::vector<ComplexType> m_unpack_buf_p1;

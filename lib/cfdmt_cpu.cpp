@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <complex>
+#include <span>
 #include <stdexcept>
 
 #ifdef USE_OPENMP
@@ -154,16 +155,17 @@ void CohFDMTCPU::execute(const DataType* __restrict__ data_in,
                      m_delay_buf_p1.size(), m_intensity_buf.data(),
                      m_intensity_buf.size());
         // Perform inter-channel dedispersion at the current coherent DM
-        dm_utils::dedisperse(m_intensity_buf.data(), m_intensity_buf.size(),
-                             dm_grid_coh[idm], m_plan.get_f_min(),
-                             m_plan.get_f_max(), m_plan.get_mchan(),
-                             m_plan.get_msamp(), m_plan.get_tsamp());
+        dmt::utils::dedisperse(m_intensity_buf.data(), m_intensity_buf.size(),
+                               dm_grid_coh[idm], m_plan.get_f_min(),
+                               m_plan.get_f_max(), m_plan.get_mchan(),
+                               m_plan.get_msamp(), m_plan.get_tsamp());
 
         // Perform the FDMT
         SizeType dmt_cur_size = m_thefdmt->get_plan().get_dmt_size();
         float* dmt_cur        = &dmt[idm * dmt_cur_size];
-        m_thefdmt->execute(m_intensity_buf.data(), m_intensity_buf.size(),
-                           dmt_cur, dmt_cur_size);
+        m_thefdmt->execute(std::span<const float>(m_intensity_buf.data(),
+                                                  m_intensity_buf.size()),
+                           std::span<float>(dmt_cur, dmt_cur_size));
     }
 }
 
@@ -183,7 +185,7 @@ void CohFDMTCPU::initialise() {
         m_plan.get_nfft(), m_plan.get_nsub(), m_plan.get_nbin(),
         m_plan.get_mbin(), m_plan.get_nchan());
     m_thefft->initialize_plans(m_unpack_buf_p1.data(), m_delay_buf_p1.data());
-    m_thefdmt = std::make_unique<FDMTCPU>(
+    m_thefdmt = std::make_unique<dmt::FDMTCPU>(
         m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
         m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max());
     m_theunpacker = std::make_unique<DataUnpacker>(
@@ -200,7 +202,7 @@ void CohFDMTCPU::initialise() {
 
     // Compute the chirp table
     const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
-    dm_utils::compute_chirp(
+    dmt::utils::compute_chirp(
         m_chirp_table.data(), m_chirp_table.size(), dm_grid_coh.data(),
         dm_grid_coh.size(), m_plan.get_f_center(), m_plan.get_bw(),
         m_plan.get_nbin(), m_plan.get_nsub(), m_plan.get_nchan());
