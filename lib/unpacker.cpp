@@ -1,11 +1,13 @@
+#include "dmt/common/unpacker.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 
-#include <dmt/common/types.hpp>
-#include <dmt/common/unpacker.hpp>
+#include "dmt/common/types.hpp"
 
-template <BasebandDataOrder Order> class DataUnpackerImpl {
+template <BasebandDataOrder Order>
+class DataUnpackerImpl {
 public:
     static constexpr SizeType kChunkSize = 64;
     static constexpr SizeType kNpol      = 2;

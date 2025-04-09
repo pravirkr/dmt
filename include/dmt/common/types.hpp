@@ -4,10 +4,13 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
 #ifdef DMT_ENABLE_CUDA
+#include <cuda/std/complex>
+#include <cuda/std/span>
 #include <thrust/complex.h>
 #include <thrust/device_vector.h>
 #endif
@@ -19,16 +22,18 @@ using ComplexType = std::complex<float>;
 using DtGridType  = std::vector<SizeType>;
 
 #ifdef DMT_ENABLE_CUDA
-using ComplexTypeCUDA = thrust::complex<float>;
+using ComplexTypeCUDA = cuda::std::complex<float>;
 #endif
 
 #ifdef DMT_ENABLE_CUDA
-template <typename T> using DeviceVector = thrust::device_vector<T>;
+template <typename T>
+using DeviceVector = thrust::device_vector<T>;
 #endif
 
 // Utilities for aligning or enforcing hardware-specific requirements (e.g.,
 // SIMD alignment)
-template <typename T> struct AlignedAllocator {
+template <typename T>
+struct AlignedAllocator {
     static constexpr std::size_t kAlignment = alignof(std::max_align_t);
 
     T* allocate(std::size_t n) {
@@ -42,7 +47,8 @@ template <typename T> struct AlignedAllocator {
     void deallocate(T* ptr, std::size_t /*unused*/) noexcept { free(ptr); }
 };
 
-template <typename T> using AlignedVector = std::vector<T, AlignedAllocator<T>>;
+template <typename T>
+using AlignedVector = std::vector<T, AlignedAllocator<T>>;
 
 template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
@@ -80,5 +86,29 @@ struct CUDA {};
  */
 template <typename T>
 concept ExecutionBackend = std::same_as<T, CPU> || std::same_as<T, CUDA>;
+
+/**
+ * @brief Helper struct to define backend-specific types.
+ */
+template <ExecutionBackend Backend>
+struct BackendTypes; // Primary template (intentionally undefined)
+
+// Specialization for CPU backend
+template <>
+struct BackendTypes<CPU> {
+    using ComplexType = ComplexType;
+    template <typename T>
+    using SpanType = std::span<T>;
+};
+
+#ifdef DMT_ENABLE_CUDA
+// Specialization for CUDA backend
+template <>
+struct BackendTypes<CUDA> {
+    using ComplexType = ComplexTypeCUDA;
+    template <typename T>
+    using SpanType = cuda::std::span<T>;
+};
+#endif // DMT_ENABLE_CUDA
 
 } // namespace dmt::backend

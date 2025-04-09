@@ -7,7 +7,7 @@
 
 #include "pybind_utils.hpp"
 
-#include "dmt/cfdmt/cfdmt_cpu.hpp"
+#include "dmt/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/ddmt.hpp"
 #include "dmt/fdmt.hpp"
@@ -156,6 +156,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp);
 
+    using dmt::CohFDMTCPU;
     using dmt::DDMTCPU;
     using dmt::FDMTCPU;
     py::class_<FDMTCPU>(mod, "FDMTCPU", "FDMT CPU Implementation Wrapper")
@@ -254,19 +255,9 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                  py::array_t<float, py::array::c_style> dmt(
                      {static_cast<ssize_t>(coh_fdmt.get_plan().get_dmt_size()),
                       shape[1]});
-                 coh_fdmt.execute<uint8_t>(data_in.data(), data_in.size(),
-                                           dmt.mutable_data(), dmt.size());
-                 return dmt;
-             })
-        .def("execute",
-             [](CohFDMTCPU& coh_fdmt,
-                const py::array_t<int8_t, py::array::c_style>& data_in) {
-                 const auto* shape = data_in.shape();
-                 py::array_t<float, py::array::c_style> dmt(
-                     {static_cast<ssize_t>(coh_fdmt.get_plan().get_dmt_size()),
-                      shape[1]});
-                 coh_fdmt.execute<int8_t>(data_in.data(), data_in.size(),
-                                          dmt.mutable_data(), dmt.size());
+                 coh_fdmt.execute(
+                     std::span<const uint8_t>(data_in.data(), data_in.size()),
+                     std::span<float>(dmt.mutable_data(), dmt.size()));
                  return dmt;
              });
 }
