@@ -38,6 +38,9 @@ set(DMT_LIBRARY_ALL_SOURCES ${DMT_LIBRARY_CXX_SOURCES})
 if(CMAKE_CUDA_COMPILER)
   file(GLOB DMT_LIBRARY_CUDA_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
   list(APPEND DMT_LIBRARY_ALL_SOURCES ${DMT_LIBRARY_CUDA_SOURCES})
+
+  # Explicitly set CUDA files to be compiled with CUDA
+  set_source_files_properties(${DMT_LIBRARY_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
 endif()
 
 add_library(${DMT_LIBRARY_NAME} ${DMT_LIBRARY_ALL_SOURCES})
@@ -51,12 +54,28 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# Add CUDA include directories when available
+if(CMAKE_CUDA_COMPILER)
+  target_include_directories(${DMT_LIBRARY_NAME} 
+    PUBLIC ${CUDAToolkit_INCLUDE_DIRS}
+  )
+endif()
+
 # Link libraries
 target_link_libraries(
   ${DMT_LIBRARY_NAME}
   PRIVATE ${DMT_COMPILE_OPTIONS} coverage_config
   PUBLIC spdlog::spdlog_header_only ${FFTW_FLOAT_OPENMP_LIB}
 )
+
+# Add CUDA options and libraries when available
+if(CMAKE_CUDA_COMPILER)
+  target_link_libraries(${DMT_LIBRARY_NAME} 
+    PRIVATE ${DMT_CUDA_OPTIONS}
+    PUBLIC CUDA::cudart
+    PRIVATE CUDA::cuda_driver
+  )
+endif()
 
 # Find and link OpenMP if available
 if(OpenMP_CXX_FOUND)
@@ -75,6 +94,22 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
+# Also install CUDA options if available
+if(CMAKE_CUDA_COMPILER)
+  install(
+    TARGETS ${DMT_CUDA_OPTIONS}
+    EXPORT ${PROJECT_NAME}Targets
+  )
+endif()
+
+# Install coverage config if enabled
+if(ENABLE_COVERAGE)
+  install(
+    TARGETS coverage_config
+    EXPORT ${PROJECT_NAME}Targets
+  )
+endif()
+
 # Install headers
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
@@ -83,5 +118,5 @@ install(
   EXPORT ${PROJECT_NAME}Targets
   FILE ${PROJECT_NAME}Targets.cmake
   NAMESPACE ${PROJECT_NAME}::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${LIBRARY_NAME}
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${DMT_LIBRARY_NAME}
 )

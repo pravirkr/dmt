@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.24)
 
 project(
   dmt
@@ -7,6 +7,7 @@ project(
   DESCRIPTION "Dispersion Measure Transform Library"
 )
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Modern CMake policies
 if(POLICY CMP0146)
   cmake_policy(SET CMP0146 NEW)
@@ -16,6 +17,23 @@ if(POLICY CMP0148)
 endif()
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
+endif()
+
+# Compiler version requirements
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
+    message(
+      FATAL_ERROR
+        "GCC 13.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+    )
+  endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
+    message(
+      FATAL_ERROR
+        "Clang 18.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+    )
+  endif()
 endif()
 
 # Configuration options
@@ -58,6 +76,10 @@ else()
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
+# Project structure and paths
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+include(GNUInstallDirs)
+
 # Compiler flags (Interface target to hold global compile options)
 set(DMT_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
@@ -69,29 +91,42 @@ target_compile_options(
             $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-march=native;-ffast-math>
 )
 
-# Project structure and paths
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-include(GNUInstallDirs)
-
 # Find CUDA and set up the project
 include(CheckLanguage)
 check_language(CUDA)
 
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
-  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 10.0.0)
-    message(FATAL_ERROR "CUDA 10.0 or higher is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
-  else()
-    message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.6.0)
+    message(FATAL_ERROR "CUDA 12.6 or higher is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
   endif()
+  message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
 
-  set(CMAKE_CUDA_STANDARD 20)
+  # Find CUDA Toolkit for proper include dirs and linking
+  find_package(CUDAToolkit REQUIRED)
+
+  set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   set(CMAKE_CUDA_EXTENSIONS OFF)
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -c -Xcompiler=-Wall,-Wextra --expt-extended-lambda")
-  set(CMAKE_CUDA_FLAGS_DEBUG "-g")
-  set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG -use_fast_math -Xcompiler=-march=native")
-  set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES 0)
+
+  # Define a target for CUDA compilation options
+  set(DMT_CUDA_OPTIONS ${PROJECT_NAME}_CUDA_OPTIONS)
+  add_library(${DMT_CUDA_OPTIONS} INTERFACE)
+  target_compile_options(
+    ${DMT_CUDA_OPTIONS}
+    INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:
+              -Wno-pedantic
+              --expt-extended-lambda
+              --expt-relaxed-constexpr
+              -Xcompiler=-Wall,-Wextra
+              $<$<CONFIG:Debug>:-G;-g>
+              $<$<CONFIG:Release>:-O3;-use_fast_math>
+              >
+  )
+  set(CMAKE_CUDA_ARCHITECTURES native)
+  message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  # Disable response files for better IDE integration
+  set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
   add_compile_definitions(DMT_ENABLE_CUDA)
 else()
   message(STATUS "CUDA compiler not found. GPU code will not be built.")

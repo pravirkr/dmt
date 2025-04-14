@@ -42,24 +42,9 @@ public:
           m_state_in(m_plan.get_buffer_size(), 0.0F),
           m_state_out(m_plan.get_buffer_size(), 0.0F),
           m_history(use_history ? m_plan.get_history_size() : 0, 0.0F),
-          m_nthreads(nthreads) {
-
-#ifdef DMT_ENABLE_OPENMP
-        if (m_nthreads <= 0) {
-            m_nthreads = omp_get_max_threads();
-        }
-        omp_set_num_threads(m_nthreads);
-        spdlog::debug("FDMT<CPU>::Impl: Using {} OpenMP threads", m_nthreads);
-#else
-        // Warn if nthreads > 1 but OpenMP is not enabled
-        if (m_nthreads > 1) {
-            spdlog::warn(
-                "FDMT<CPU>::Impl: Warning - nthreads > 1 specified, but OpenMP "
-                "is not enabled (DMT_ENABLE_OPENMP not defined).");
-        }
-        m_nthreads = 1;
-#endif
-        spdlog::debug("FDMT<CPU>::Impl: Plan created, buffers allocated.");
+          m_nthreads(set_dmt_openmp_threads(nthreads)) {
+        spdlog::debug("FDMT<CPU>::Impl: Initialised with {} threads.",
+                      m_nthreads);
     }
 
     ~Impl()                      = default;

@@ -8,6 +8,12 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef DMT_ENABLE_OPENMP
+#include <omp.h>
+#endif
+
+#include <spdlog/spdlog.h>
+
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/complex>
 #include <cuda/std/span>
@@ -68,6 +74,31 @@ static const std::unordered_map<std::string_view, BasebandDataOrder>
     kBasebandDataOrderMap = {{"FTPRI", BasebandDataOrder::kFTPRI},
                              {"PRITF", BasebandDataOrder::kPRITF},
                              {"RITFP", BasebandDataOrder::kRITFP}};
+
+/**
+ * @brief Set the number of OpenMP threads to use.
+ *
+ * @param nthreads The number of threads to use.
+ * @return The number of threads actually used.
+ */
+inline int set_dmt_openmp_threads(int nthreads) {
+#ifdef DMT_ENABLE_OPENMP
+    if (nthreads <= 0) {
+        nthreads = omp_get_max_threads();
+    }
+    omp_set_num_threads(nthreads);
+    spdlog::debug("set_openmp_threads: Using {} OpenMP threads", nthreads);
+#else
+    // Warn if nthreads > 1 but OpenMP is not enabled
+    if (nthreads > 1) {
+        spdlog::warn(
+            "set_openmp_threads: Warning - nthreads > 1 specified, but "
+            "OpenMP is not enabled (DMT_ENABLE_OPENMP not defined).");
+    }
+    nthreads = 1;
+#endif
+    return nthreads;
+}
 
 namespace dmt::backend {
 

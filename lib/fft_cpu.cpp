@@ -1,6 +1,5 @@
 #include "dmt/fft.hpp"
 
-#include <cstddef>
 #include <utility>
 
 #ifdef DMT_ENABLE_OPENMP
@@ -10,17 +9,14 @@
 
 #include <spdlog/spdlog.h>
 
+#include "dmt/bb_utils_cpu.hpp"
+
 namespace dmt {
 
 template <>
 class FFTManager<backend::CPU>::Impl {
 public:
-    Impl(SizeType nfft,
-         SizeType nsub,
-         SizeType nbin,
-         SizeType mbin,
-         SizeType nchan,
-         int nthreads)
+    Impl(int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads)
         : m_nfft(nfft),
           m_nsub(nsub),
           m_nbin(nbin),
@@ -33,7 +29,6 @@ public:
         }
         // Set the number of threads
         if (fftwf_init_threads() == 0) {
-            spdlog::error("FFTW failed to initialize threads support.");
             throw std::runtime_error("Failed to initialise FFTW threads");
         }
         fftwf_plan_with_nthreads(m_nthreads);
@@ -59,11 +54,14 @@ public:
     Impl& operator=(Impl&&)      = delete;
 
     ~Impl() {
+        spdlog::debug("Destroying FFTW plans.");
         if (m_forward_plan != nullptr) {
             fftwf_destroy_plan(m_forward_plan);
+            m_forward_plan = nullptr;
         }
         if (m_backward_plan != nullptr) {
             fftwf_destroy_plan(m_backward_plan);
+            m_backward_plan = nullptr;
         }
 #ifdef DMT_ENABLE_OPENMP
         fftwf_cleanup_threads();
@@ -78,20 +76,22 @@ public:
         auto* delay_buffer_ptr =
             reinterpret_cast<fftwf_complex*>(delay_buffer.data());
 
-        // Check buffer sizes (not needed)
+        unsigned plan_flags = FFTW_MEASURE;
+
         // --- Forward Plan ---
         // 1D FFT of size m_nbin
         // Batch size: m_nfft * m_nsub
         // Input stride = 1, Input distance = m_nbin
         // Output stride = 1, Output distance = m_nbin (in-place)
-        const std::array<int, 1> fft_size_fw = {static_cast<int>(m_nbin)};
-        int howmany_fw      = static_cast<int>(m_nfft * m_nsub);
-        int istride_fw      = 1;
-        int idist_fw        = static_cast<int>(m_nbin);
-        int ostride_fw      = 1;
-        int odist_fw        = static_cast<int>(m_nbin);
-        unsigned plan_flags = FFTW_MEASURE;
-        m_forward_plan      = fftwf_plan_many_dft(
+        const std::array<int, 1> fft_size_fw = {m_nbin};
+
+        int howmany_fw = (m_nfft * m_nsub);
+        int idist_fw   = m_nbin;
+        int odist_fw   = m_nbin;
+        int istride_fw = 1;
+        int ostride_fw = 1;
+
+        m_forward_plan = fftwf_plan_many_dft(
             1,                  // rank
             fft_size_fw.data(), // n
             howmany_fw,         // howmany
@@ -109,19 +109,20 @@ public:
         if (m_forward_plan == nullptr) {
             throw std::runtime_error("Failed to create forward FFTW plan");
         }
-        spdlog::debug("Forward FFTW plan created: {}");
+        spdlog::debug("Forward FFTW plan created");
 
         // --- Backward Plan ---
         // 1D FFT of size m_mbin
         // Batch size: m_nfft * m_nsub * m_nchan
         // Input stride = 1, Input distance = m_mbin
         // Output stride = 1, Output distance = m_mbin (in-place)
-        const std::array<int, 1> fft_size_bw = {static_cast<int>(m_mbin)};
-        int howmany_bw = static_cast<int>(m_nfft * m_nsub * m_nchan);
+        const std::array<int, 1> fft_size_bw = {m_mbin};
+
+        int howmany_bw = (m_nfft * m_nsub * m_nchan);
+        int idist_bw   = m_mbin;
+        int odist_bw   = m_mbin;
         int istride_bw = 1;
-        int idist_bw   = static_cast<int>(m_mbin);
         int ostride_bw = 1;
-        int odist_bw   = static_cast<int>(m_mbin);
 
         m_backward_plan =
             fftwf_plan_many_dft(1,                  // rank
@@ -139,65 +140,48 @@ public:
                                 plan_flags          // flags
             );
         if (m_backward_plan == nullptr) {
+            // Clean up forward plan if backward fails
+            if (m_forward_plan != nullptr) {
+                fftwf_destroy_plan(m_forward_plan);
+                m_forward_plan = nullptr;
+            }
             throw std::runtime_error("Failed to create FFTW plans");
         }
         spdlog::debug("Backward FFTW plan created:");
         spdlog::info("FFTW plans initialized successfully.");
     }
 
-    void forward_fft(std::span<ComplexType> data) const {
+    void forward_fft(std::span<ComplexType> data1,
+                     std::span<ComplexType> data2) const {
         if (m_forward_plan == nullptr) {
             throw std::logic_error("Forward FFT plan not initialized.");
         }
-        auto* data_ptr = reinterpret_cast<fftwf_complex*>(data.data());
-        fftwf_execute_dft(m_forward_plan, data_ptr, data_ptr);
-        swap_spectrum(data, m_nbin, m_nfft * m_nsub);
+        auto* data1_ptr = reinterpret_cast<fftwf_complex*>(data1.data());
+        auto* data2_ptr = reinterpret_cast<fftwf_complex*>(data2.data());
+        fftwf_execute_dft(m_forward_plan, data1_ptr, data1_ptr);
+        fftwf_execute_dft(m_forward_plan, data2_ptr, data2_ptr);
+        bb_utils::swap_spectrum(data1, data2, m_nbin, m_nfft * m_nsub);
     }
 
-    void backward_fft(std::span<ComplexType> data) const {
+    void backward_fft(std::span<ComplexType> data1,
+                      std::span<ComplexType> data2) const {
         if (m_backward_plan == nullptr) {
             throw std::logic_error("Backward FFT plan not initialized.");
         }
-        auto* data_ptr = reinterpret_cast<fftwf_complex*>(data.data());
-        swap_spectrum(data, m_mbin, m_nfft * m_nsub * m_nchan);
-        fftwf_execute_dft(m_backward_plan, data_ptr, data_ptr);
-    }
-
-    static void
-    swap_spectrum(std::span<ComplexType> data, SizeType nx, SizeType ny) {
-        if (nx == 0 || ny == 0) {
-            throw std::invalid_argument("Invalid dimensions in swap_spectrum");
-        }
-        ComplexType* data_ptr = data.data();
-
-        const SizeType total_elements = nx * ny;
-        if (data.size() != total_elements) {
-            throw std::invalid_argument(
-                "Span size does not match dimensions in "
-                "swap_spectrum");
-        }
-        if (nx % 2 != 0) {
-            throw std::invalid_argument("nx must be even in swap_spectrum");
-        }
-        // Swap the halves along the last dimension
-        const SizeType mid_point = nx / 2;
-        if (mid_point == 0 && nx > 0) {
-            return;
-        }
-        for (SizeType j = 0; j < ny; ++j) {
-            const SizeType offset      = j * nx;
-            ComplexType* row_start_ptr = data_ptr + offset;
-            std::rotate(row_start_ptr, row_start_ptr + mid_point,
-                        row_start_ptr + nx);
-        }
+        auto* data1_ptr = reinterpret_cast<fftwf_complex*>(data1.data());
+        auto* data2_ptr = reinterpret_cast<fftwf_complex*>(data2.data());
+        bb_utils::swap_spectrum(data1, data2, m_mbin,
+                                m_nfft * m_nsub * m_nchan);
+        fftwf_execute_dft(m_backward_plan, data1_ptr, data1_ptr);
+        fftwf_execute_dft(m_backward_plan, data2_ptr, data2_ptr);
     }
 
 private:
-    SizeType m_nfft;
-    SizeType m_nsub;
-    SizeType m_nbin;
-    SizeType m_mbin;
-    SizeType m_nchan;
+    int m_nfft;
+    int m_nsub;
+    int m_nbin;
+    int m_mbin;
+    int m_nchan;
     int m_nthreads;
 
     fftwf_plan m_forward_plan  = nullptr;
@@ -208,12 +192,8 @@ private:
 // CPU-specific constructor implementation
 template <>
 template <std::same_as<backend::CPU> P>
-FFTManager<backend::CPU>::FFTManager(SizeType nfft,
-                                     SizeType nsub,
-                                     SizeType nbin,
-                                     SizeType mbin,
-                                     SizeType nchan,
-                                     int nthreads)
+FFTManager<backend::CPU>::FFTManager(
+    int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads)
     : m_impl(std::make_unique<Impl>(nfft, nsub, nbin, mbin, nchan, nthreads)) {
     spdlog::debug("FFTManager<CPU> object created.");
 }
@@ -242,23 +222,17 @@ void FFTManager<backend::CPU>::initialize_plans(
 }
 template <>
 template <std::same_as<backend::CPU> P>
-void FFTManager<backend::CPU>::forward_fft(std::span<ComplexType> data) const {
-    m_impl->forward_fft(data);
+void FFTManager<backend::CPU>::forward_fft(std::span<ComplexType> data1,
+                                           std::span<ComplexType> data2) const {
+    m_impl->forward_fft(data1, data2);
 }
 template <>
 template <std::same_as<backend::CPU> P>
-void FFTManager<backend::CPU>::backward_fft(std::span<ComplexType> data) const {
-    m_impl->backward_fft(data);
-}
-template <>
-template <std::same_as<backend::CPU> P>
-void FFTManager<backend::CPU>::swap_spectrum(std::span<ComplexType> data,
-                                             SizeType nx,
-                                             SizeType ny) {
-    dmt::FFTManager<>::Impl::swap_spectrum(data, nx, ny);
+void FFTManager<backend::CPU>::backward_fft(
+    std::span<ComplexType> data1, std::span<ComplexType> data2) const {
+    m_impl->backward_fft(data1, data2);
 }
 // Explicit instantiation (for linking)
-template FFTManager<backend::CPU>::FFTManager(
-    SizeType, SizeType, SizeType, SizeType, SizeType, int);
+template FFTManager<backend::CPU>::FFTManager(int, int, int, int, int, int);
 
 } // namespace dmt

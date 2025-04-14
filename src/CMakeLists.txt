@@ -5,14 +5,22 @@ find_package(pybind11 CONFIG REQUIRED)
 set(DMT_PYMODULE_NAME lib${DMT_LIBRARY_NAME})
 pybind11_add_module(${DMT_PYMODULE_NAME} dmt_python.cpp)
 target_include_directories(${DMT_PYMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(${DMT_PYMODULE_NAME} PUBLIC ${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS})
+target_link_libraries(
+  ${DMT_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
+)
 install(TARGETS ${DMT_PYMODULE_NAME} DESTINATION ${DMT_LIBRARY_NAME})
 
 # GPU module (if CUDA is available)
 if(CMAKE_CUDA_COMPILER)
   set(DMT_PYGPUMODULE_NAME libcuda${DMT_LIBRARY_NAME})
   pybind11_add_module(${DMT_PYGPUMODULE_NAME} dmt_python_gpu.cpp)
-  target_include_directories(${DMT_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include)
-  target_link_libraries(${DMT_PYGPUMODULE_NAME} PUBLIC ${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS})
-  install(TARGETS ${PYGPUMODULE_NAME} DESTINATION ${PYLIBRARY_NAME})
+  target_include_directories(
+    ${DMT_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(
+    ${DMT_PYGPUMODULE_NAME}
+    PUBLIC ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
+    PRIVATE ${DMT_CUDA_OPTIONS}
+  )
+  install(TARGETS ${DMT_PYGPUMODULE_NAME} DESTINATION ${DMT_LIBRARY_NAME})
 endif()
