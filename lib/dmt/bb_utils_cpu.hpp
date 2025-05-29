@@ -6,6 +6,15 @@
 
 namespace dmt::bb_utils {
 
+// Compute the chirp table for coherent dedispersion.
+void compute_chirp(std::span<const float> dm_grid,
+                   std::span<ComplexType> chirp_table,
+                   float fcenter,
+                   float bw,
+                   SizeType nbin,
+                   SizeType nsub,
+                   SizeType nchan);
+
 void swap_spectrum(std::span<ComplexType> data1,
                    std::span<ComplexType> data2,
                    int n,

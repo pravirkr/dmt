@@ -3,8 +3,13 @@
 #include <spdlog/spdlog.h>
 
 #include <cstddef>
-#include <dmt/fdmt.hpp>
 #include <span>
+
+#include "dmt/algorithms/fdmt.hpp"
+
+namespace dmt {
+
+using algorithms::FDMTCPU;
 
 TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
     const float f_min    = 1000.0F;
@@ -47,3 +52,5 @@ TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
             std::span<float>(dmt.data(), dmt.size())));
     }
 }
+
+} // namespace dmt

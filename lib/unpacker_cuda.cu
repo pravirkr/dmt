@@ -1,4 +1,5 @@
-#include "dmt/unpacker.hpp"
+#include "dmt/common/types.hpp"
+#include "dmt/utils/unpacker.hpp"
 
 #include <memory>
 #include <stdexcept>
@@ -18,8 +19,9 @@
 
 #include "dmt/cuda_utils.cuh"
 
-namespace {
+namespace dmt::utils {
 
+namespace {
 // Templated functor to perform the unpacking logic for a single output element
 template <IntegralDataType InDataType, BasebandDataOrder Order>
 struct UnpackAndPadFunctor {
@@ -81,8 +83,6 @@ struct UnpackAndPadFunctor {
 };
 } // namespace
 
-namespace dmt {
-
 template <>
 class DataUnpacker<backend::CUDA>::Impl {
 public:
@@ -99,8 +99,7 @@ public:
           m_noverlap(noverlap),
           m_nfft(nfft),
           m_device_id(device_id) {
-        // DMT_CHECK_CUDA_CALL(cudaSetDevice(m_device_id),
-        // "DataUnpacker<backend::CUDA>::Impl: cudaSetDevice");
+        cuda_utils::set_device(m_device_id);
         spdlog::debug("DataUnpacker<CUDA>::Impl: Set device to {}.",
                       m_device_id);
         if (m_nbin <= 2 * m_noverlap) {
@@ -116,6 +115,17 @@ public:
             throw std::invalid_argument(
                 std::format("Invalid input order: {}", in_order));
         }
+        // Expected input size: 2 polarizations * Real/Imag * total input
+        // samples * subbands
+        m_expected_in_size = kNpol * 2 * m_nsamp * m_nsub;
+        // Expected output size: FFT blocks * subbands * bins per FFT
+        m_expected_out_size = m_nfft * m_nsub * m_nbin;
+
+        // Make this robust if other DataType sizes are supported later
+        const SizeType sizeof_datatype = 1; // Assuming int8/uint8
+        const auto m_expected_in_bytes = m_expected_in_size * sizeof_datatype;
+        m_d_in_buffer.resize(m_expected_in_bytes);
+
         spdlog::debug("DataUnpacker<CUDA>::Impl: Initialised using device {}.",
                       m_device_id);
     }
@@ -130,19 +140,20 @@ public:
     void execute(std::span<const DataType> data_in,
                  cuda::std::span<ComplexTypeCUDA> data_p1,
                  cuda::std::span<ComplexTypeCUDA> data_p2,
-                 cudaStream_t stream) const {
-        // validate_sizes(data_in.size(), data_p1.size(), data_p2.size());
+                 cudaStream_t stream) {
+        validate_sizes(data_in.size(), data_p1.size(), data_p2.size());
 
         // Copy input data from host to device
-        thrust::device_vector<DataType> data_in_d(data_in.size());
+        // Cast the byte pointer to the specific DataType pointer needed now
+        std::byte* d_in_byte_ptr =
+            thrust::raw_pointer_cast(m_d_in_buffer.data());
+        auto* d_in_ptr = reinterpret_cast<DataType*>(d_in_byte_ptr);
         DMT_CHECK_CUDA_CALL(
-            cudaMemcpyAsync(data_in_d.data().get(), data_in.data(),
-                            data_in.size_bytes(), cudaMemcpyHostToDevice,
-                            stream),
+            cudaMemcpyAsync(d_in_ptr, data_in.data(), data_in.size_bytes(),
+                            cudaMemcpyHostToDevice, stream),
             "DataUnpacker<backend::CUDA>::Impl: cudaMemcpyAsync");
 
-        auto data_in_d_span =
-            cuda::std::span(data_in_d.data().get(), data_in_d.size());
+        auto data_in_d_span = cuda::std::span(d_in_ptr, m_expected_in_size);
 
         switch (m_order) {
         case BasebandDataOrder::kPRITF:
@@ -173,29 +184,27 @@ private:
     SizeType m_nsamp;
     int m_device_id;
     BasebandDataOrder m_order;
+    SizeType m_expected_in_size;
+    SizeType m_expected_out_size;
+    DeviceVector<std::byte> m_d_in_buffer;
 
     void validate_sizes(SizeType in_size,
                         SizeType out1_size,
                         SizeType out2_size) const {
-        // Expected input size: 2 polarizations * Real/Imag * total input
-        // samples * subbands
-        const SizeType expected_in_size = kNpol * 2 * m_nsamp * m_nsub;
-        if (in_size != expected_in_size) {
+        if (in_size != m_expected_in_size) {
             throw std::runtime_error(std::format(
                 "DataUnpacker<CPU>: Invalid input size. Expected {}, got {}.",
-                expected_in_size, in_size));
+                m_expected_in_size, in_size));
         }
-        // Expected output size: FFT blocks * subbands * bins per FFT
-        const SizeType expected_out_size = m_nfft * m_nsub * m_nbin;
-        if (out1_size != expected_out_size) {
+        if (out1_size != m_expected_out_size) {
             throw std::runtime_error(std::format(
                 "DataUnpacker<CPU>: Invalid output size. Expected {}, got {}.",
-                expected_out_size, out1_size));
+                m_expected_out_size, out1_size));
         }
-        if (out2_size != expected_out_size) {
+        if (out2_size != m_expected_out_size) {
             throw std::runtime_error(std::format(
                 "DataUnpacker<CPU>: Invalid output size. Expected {}, got {}.",
-                expected_out_size, out2_size));
+                m_expected_out_size, out2_size));
         }
     }
 
@@ -235,7 +244,8 @@ private:
             .nsamp     = static_cast<int>(m_nsamp),
             .ri_stride = static_cast<int>(ri_stride)};
         thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-        DMT_CHECK_LAST_CUDA_ERROR("thrust::for_each unpack/pad failed");
+        cuda_utils::check_last_cuda_error(
+            "thrust::for_each unpack/pad failed");
     }
 
 }; // End DataUnpacker<backend::CUDA>::Impl definition
@@ -280,20 +290,4 @@ void DataUnpacker<backend::CUDA>::execute(
     m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
 }
 
-// Explicit instantiation (for linking)
-template DataUnpacker<backend::CUDA>::DataUnpacker(
-    SizeType, SizeType, SizeType, SizeType, std::string_view, int);
-
-// Instantiate the public execute method for each supported DataType
-template void DataUnpacker<backend::CUDA>::execute<int8_t>(
-    std::span<const int8_t>,
-    cuda::std::span<ComplexTypeCUDA>,
-    cuda::std::span<ComplexTypeCUDA>,
-    cudaStream_t) const;
-template void DataUnpacker<backend::CUDA>::execute<uint8_t>(
-    std::span<const uint8_t>,
-    cuda::std::span<ComplexTypeCUDA>,
-    cuda::std::span<ComplexTypeCUDA>,
-    cudaStream_t) const;
-
-} // namespace dmt
+} // namespace dmt::utils

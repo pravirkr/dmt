@@ -1,16 +1,9 @@
 #pragma once
 
 #include <cassert>
-#include <complex>
 #include <vector>
 
 #include "dmt/common/types.hpp"
-
-constexpr float kDispCoeff   = -2.0F;
-constexpr float kDispConstLK = 4.1488080e3; // L&K Handbook of Pulsar Astronomy
-constexpr float kDispConstMT = 1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
-constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
-constexpr float kDispConst   = kDispConstMT;
 
 namespace dmt::utils {
 // Compute the frequency-dependent dispersion delay compared to total delay.
@@ -57,17 +50,6 @@ void dedisperse(float* __restrict__ waterfall,
                 SizeType nchans,
                 SizeType nsamps,
                 float tsamp);
-
-// Compute the chirp table for coherent dedispersion.
-void compute_chirp(std::complex<float>* chirp_table,
-                   SizeType chirp_table_size,
-                   const float* dm_grid,
-                   SizeType ndm,
-                   float fcenter,
-                   float bw,
-                   SizeType nbin,
-                   SizeType nsub,
-                   SizeType nchan);
 
 /**
  * @brief Computes out[k] = arr1[k] for k < offset,

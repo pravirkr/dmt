@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -11,7 +12,7 @@
 
 #include "dmt/common/types.hpp"
 
-namespace dmt {
+namespace dmt::utils {
 
 // Input ordered as polarisation-Real/Imag-time-frequency (PTF) - LOFAR
 // data_in shape: (npol=2, R/I=2, nsamp, nsub)
@@ -119,4 +120,4 @@ using DataUnpackerCPU = DataUnpacker<backend::CPU>;
 using DataUnpackerCUDA = DataUnpacker<backend::CUDA>;
 #endif // DMT_ENABLE_CUDA
 
-} // namespace dmt
+} // namespace dmt::utils

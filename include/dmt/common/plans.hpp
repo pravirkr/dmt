@@ -5,7 +5,9 @@
 #include <string_view>
 #include <vector>
 
-#include "types.hpp"
+#include "dmt/common/types.hpp"
+
+namespace dmt::plans {
 
 // Shape parameters of the FDMT state buffer in a single iteration
 struct FDMTShape {
@@ -275,3 +277,5 @@ private:
     static std::vector<float> generate_dm_arr(const float* dm_arr,
                                               SizeType dm_count);
 };
+
+} // namespace dmt::plans

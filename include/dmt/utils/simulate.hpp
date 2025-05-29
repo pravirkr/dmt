@@ -5,6 +5,8 @@
 
 #include "dmt/common/types.hpp"
 
+namespace dmt::utils {
+
 std::tuple<std::vector<float>, SizeType>
 generate_pure_frb(SizeType nchans,
                   SizeType nsamps,
@@ -13,3 +15,5 @@ generate_pure_frb(SizeType nchans,
                   SizeType dt,
                   float pulse_toa,
                   float amplitude = 1.0F);
+
+} // namespace dmt::utils

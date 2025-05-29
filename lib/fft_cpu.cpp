@@ -1,4 +1,4 @@
-#include "dmt/fft.hpp"
+#include "dmt/utils/fft.hpp"
 
 #include <utility>
 
@@ -11,7 +11,7 @@
 
 #include "dmt/bb_utils_cpu.hpp"
 
-namespace dmt {
+namespace dmt::utils {
 
 template <>
 class FFTManager<backend::CPU>::Impl {
@@ -23,53 +23,24 @@ public:
           m_mbin(mbin),
           m_nchan(nchan),
           m_nthreads(nthreads) {
-#ifdef DMT_ENABLE_OPENMP
-        if (m_nthreads <= 0) {
-            m_nthreads = omp_get_max_threads();
-        }
-        // Set the number of threads
-        if (fftwf_init_threads() == 0) {
-            throw std::runtime_error("Failed to initialise FFTW threads");
-        }
-        fftwf_plan_with_nthreads(m_nthreads);
-        spdlog::debug(
-            "FFTManager<CPU>::Impl: FFTW threads initialized with {} threads.",
-            m_nthreads);
-#else
-        // Warn if nthreads > 1 but OpenMP is not enabled
-        if (m_nthreads > 1) {
-            spdlog::warn(
-                "FFTManager<CPU>::Impl: Warning - nthreads > 1 specified, but "
-                "OpenMP is not enabled (DMT_ENABLE_OPENMP undefined). "
-                "Using single thread.");
-        }
-        m_nthreads = 1;
-#endif
-        spdlog::debug("FFTManager<CPU>::Impl created.");
+        configure_threading();
+        spdlog::debug("FFTManager<CPU>::Impl: Initialized with nfft={}, "
+                      "nsub={}, nbin={}, mbin={}, nchan={}, nthreads={}",
+                      nfft, nsub, nbin, mbin, nchan, m_nthreads);
     }
 
+    ~Impl() noexcept {
+        spdlog::debug("FFTManager<CPU>::Impl: Destroying instance");
+        cleanup_resources();
+    }
     Impl(const Impl&)            = delete;
     Impl& operator=(const Impl&) = delete;
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    ~Impl() {
-        spdlog::debug("Destroying FFTW plans.");
-        if (m_forward_plan != nullptr) {
-            fftwf_destroy_plan(m_forward_plan);
-            m_forward_plan = nullptr;
-        }
-        if (m_backward_plan != nullptr) {
-            fftwf_destroy_plan(m_backward_plan);
-            m_backward_plan = nullptr;
-        }
-#ifdef DMT_ENABLE_OPENMP
-        fftwf_cleanup_threads();
-#endif
-    }
     void initialize_plans(std::span<ComplexType> unpack_buffer,
                           std::span<ComplexType> delay_buffer) {
-        spdlog::debug("Initializing FFTW plans...");
+        spdlog::debug("initialize_plans: Creating FFTW plans");
         // Ensure pointers are valid complex types for FFTW
         auto* unpack_buffer_ptr =
             reinterpret_cast<fftwf_complex*>(unpack_buffer.data());
@@ -77,6 +48,7 @@ public:
             reinterpret_cast<fftwf_complex*>(delay_buffer.data());
 
         unsigned plan_flags = FFTW_MEASURE;
+        const int rank      = 1;
 
         // --- Forward Plan ---
         // 1D FFT of size m_nbin
@@ -85,27 +57,27 @@ public:
         // Output stride = 1, Output distance = m_nbin (in-place)
         const std::array<int, 1> fft_size_fw = {m_nbin};
 
-        int howmany_fw = (m_nfft * m_nsub);
-        int idist_fw   = m_nbin;
-        int odist_fw   = m_nbin;
-        int istride_fw = 1;
-        int ostride_fw = 1;
+        const int howmany_fw = (m_nfft * m_nsub);
+        const int idist_fw   = m_nbin;
+        const int odist_fw   = m_nbin;
+        const int istride_fw = 1;
+        const int ostride_fw = 1;
 
-        m_forward_plan = fftwf_plan_many_dft(
-            1,                  // rank
-            fft_size_fw.data(), // n
-            howmany_fw,         // howmany
-            unpack_buffer_ptr,  // in
-            nullptr,            // inembed (null for simple stride/dist)
-            istride_fw,         // istride
-            idist_fw,           // idist
-            unpack_buffer_ptr,  // out (in-place)
-            nullptr,            // onembed (null for simple stride/dist)
-            ostride_fw,         // ostride
-            odist_fw,           // odist
-            FFTW_FORWARD,       // sign
-            plan_flags          // flags
-        );
+        m_forward_plan =
+            fftwf_plan_many_dft(rank,               // rank
+                                fft_size_fw.data(), // n
+                                howmany_fw,         // howmany
+                                unpack_buffer_ptr,  // in
+                                nullptr,            // inembed
+                                istride_fw,         // istride
+                                idist_fw,           // idist
+                                unpack_buffer_ptr,  // out (in-place)
+                                nullptr,            // onembed
+                                ostride_fw,         // ostride
+                                odist_fw,           // odist
+                                FFTW_FORWARD,       // sign
+                                plan_flags          // flags
+            );
         if (m_forward_plan == nullptr) {
             throw std::runtime_error("Failed to create forward FFTW plan");
         }
@@ -118,14 +90,14 @@ public:
         // Output stride = 1, Output distance = m_mbin (in-place)
         const std::array<int, 1> fft_size_bw = {m_mbin};
 
-        int howmany_bw = (m_nfft * m_nsub * m_nchan);
-        int idist_bw   = m_mbin;
-        int odist_bw   = m_mbin;
-        int istride_bw = 1;
-        int ostride_bw = 1;
+        const int howmany_bw = (m_nfft * m_nsub * m_nchan);
+        const int idist_bw   = m_mbin;
+        const int odist_bw   = m_mbin;
+        const int istride_bw = 1;
+        const int ostride_bw = 1;
 
         m_backward_plan =
-            fftwf_plan_many_dft(1,                  // rank
+            fftwf_plan_many_dft(rank,               // rank
                                 fft_size_bw.data(), // n
                                 howmany_bw,         // howmany
                                 delay_buffer_ptr,   // in
@@ -148,7 +120,6 @@ public:
             throw std::runtime_error("Failed to create FFTW plans");
         }
         spdlog::debug("Backward FFTW plan created:");
-        spdlog::info("FFTW plans initialized successfully.");
     }
 
     void forward_fft(std::span<ComplexType> data1,
@@ -161,6 +132,7 @@ public:
         fftwf_execute_dft(m_forward_plan, data1_ptr, data1_ptr);
         fftwf_execute_dft(m_forward_plan, data2_ptr, data2_ptr);
         bb_utils::swap_spectrum(data1, data2, m_nbin, m_nfft * m_nsub);
+        spdlog::debug("forward_fft: Completed FFT and spectrum swap");
     }
 
     void backward_fft(std::span<ComplexType> data1,
@@ -174,18 +146,70 @@ public:
                                 m_nfft * m_nsub * m_nchan);
         fftwf_execute_dft(m_backward_plan, data1_ptr, data1_ptr);
         fftwf_execute_dft(m_backward_plan, data2_ptr, data2_ptr);
+        spdlog::debug("backward_fft: Completed spectrum swap and FFT");
     }
 
 private:
-    int m_nfft;
-    int m_nsub;
-    int m_nbin;
-    int m_mbin;
-    int m_nchan;
+    const int m_nfft;
+    const int m_nsub;
+    const int m_nbin;
+    const int m_mbin;
+    const int m_nchan;
     int m_nthreads;
 
     fftwf_plan m_forward_plan  = nullptr;
     fftwf_plan m_backward_plan = nullptr;
+
+    // Configures threading for FFTW
+    void configure_threading() {
+#ifdef DMT_ENABLE_OPENMP
+        if (m_nthreads <= 0) {
+            m_nthreads = omp_get_max_threads();
+            spdlog::debug("configure_threading: Using max threads: {}",
+                          m_nthreads);
+        }
+        if (fftwf_init_threads() == 0) {
+            spdlog::error(
+                "configure_threading: Failed to initialize FFTW threads");
+            throw std::runtime_error("Failed to initialize FFTW threads");
+        }
+        fftwf_plan_with_nthreads(m_nthreads);
+        spdlog::debug("configure_threading: FFTW initialized with {} threads",
+                      m_nthreads);
+#else
+        if (m_nthreads > 1) {
+            spdlog::warn("configure_threading: nthreads={} requested but "
+                         "OpenMP disabled; using single thread",
+                         m_nthreads);
+            m_nthreads = 1;
+        }
+#endif
+    }
+
+    // Cleans up FFTW resources
+    void cleanup_resources() noexcept {
+        try {
+            if (m_forward_plan != nullptr) {
+                fftwf_destroy_plan(m_forward_plan);
+                m_forward_plan = nullptr;
+                spdlog::debug("cleanup_resources: Forward plan destroyed");
+            }
+            if (m_backward_plan != nullptr) {
+                fftwf_destroy_plan(m_backward_plan);
+                m_backward_plan = nullptr;
+                spdlog::debug("cleanup_resources: Backward plan destroyed");
+            }
+#ifdef DMT_ENABLE_OPENMP
+            fftwf_cleanup_threads();
+            spdlog::debug("cleanup_resources: FFTW threads cleaned up");
+#endif
+            fftwf_cleanup();
+            spdlog::debug("cleanup_resources: FFTW global cleanup completed");
+        } catch (...) {
+            spdlog::error(
+                "cleanup_resources: Unexpected exception during cleanup");
+        }
+    }
 
 }; // End FFTManager<backend::CPU>::Impl definition
 
@@ -235,4 +259,4 @@ void FFTManager<backend::CPU>::backward_fft(
 // Explicit instantiation (for linking)
 template FFTManager<backend::CPU>::FFTManager(int, int, int, int, int, int);
 
-} // namespace dmt
+} // namespace dmt::utils

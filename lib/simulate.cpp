@@ -1,9 +1,9 @@
+#include "dmt/utils/simulate.hpp"
 
-#include <dmt/common/types.hpp>
-#include <dmt/utils/simulate.hpp>
-
+#include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 
+namespace dmt::utils {
 std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            SizeType nsamps,
                                                            float f_min,
@@ -21,21 +21,22 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
             f_min + (static_cast<float>(ichan) * foff) + foff_half;
         const auto freq_min = freq - foff_half;
         const auto freq_max = freq + foff_half;
-        const auto dt_start = static_cast<float>(dt) *
-                              dmt::utils::cff(f_min, freq_min, f_min, f_max);
+        const auto dt_start =
+            static_cast<float>(dt) * utils::cff(f_min, freq_min, f_min, f_max);
         const auto tstart      = pulse_toa - dt_start;
-        const auto tstart_int  = static_cast<SizeType>(std::floor(tstart));
+        const auto tstart_int  = static_cast<IndexType>(std::floor(tstart));
         const auto tstart_frac = tstart - static_cast<float>(tstart_int);
 
         const auto dt_sub = static_cast<float>(dt) *
-                            dmt::utils::cff(freq_min, freq_max, f_min, f_max);
+                            utils::cff(freq_min, freq_max, f_min, f_max);
         const auto tend      = tstart - dt_sub;
-        const auto tend_int  = static_cast<SizeType>(std::floor(tend));
+        const auto tend_int  = static_cast<IndexType>(std::floor(tend));
         const auto tend_frac = tend - static_cast<float>(tend_int);
 
         float* arr_chan_start = &arr[ichan * nsamps];
 
-        if (0 <= tend_int && tend_int <= tstart_int && tstart_int < nsamps) {
+        if (tend_int >= 0 && tend_int <= tstart_int &&
+            tstart_int < static_cast<IndexType>(nsamps)) {
             if (tend_int == tstart_int) {
                 arr_chan_start[tend_int] = amplitude;
                 nsamps_dispersed += 1;
@@ -45,21 +46,25 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                           arr_chan_start + tstart_int + 1, amp_per_sample);
                 arr_chan_start[tend_int] *= tend_frac;
                 arr_chan_start[tstart_int] *= tstart_frac;
-                nsamps_dispersed += tstart_int - tend_int + 1;
+                nsamps_dispersed +=
+                    static_cast<SizeType>(tstart_int - tend_int + 1);
             }
-        } else if (tend_int < 0 && 0 <= tstart_int && tstart_int < nsamps) {
+        } else if (tend_int < 0 && 0 <= tstart_int &&
+                   tstart_int < static_cast<IndexType>(nsamps)) {
             const float amp_per_sample = amplitude / dt_sub;
             std::fill(arr_chan_start, arr_chan_start + tstart_int + 1,
                       amp_per_sample);
             arr_chan_start[tstart_int] *= tstart_frac;
-            nsamps_dispersed += tstart_int + 1;
-        } else if (0 <= tend_int && tend_int < nsamps && nsamps <= tstart_int) {
+            nsamps_dispersed += static_cast<SizeType>(tstart_int + 1);
+        } else if (tend_int >= 0 && tend_int < static_cast<IndexType>(nsamps) &&
+                   static_cast<IndexType>(nsamps) <= tstart_int) {
             const float amp_per_sample = amplitude / dt_sub;
             std::fill(arr_chan_start + tend_int, arr_chan_start + nsamps,
                       amp_per_sample);
             arr_chan_start[tend_int] *= tend_frac;
-            nsamps_dispersed += nsamps - tend_int;
+            nsamps_dispersed += static_cast<SizeType>(nsamps - tend_int);
         }
     }
     return {arr, nsamps_dispersed};
 }
+} // namespace dmt::utils

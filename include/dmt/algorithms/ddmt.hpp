@@ -12,7 +12,7 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
-namespace dmt {
+namespace dmt::algorithms {
 
 template <backend::ExecutionBackend Backend = backend::CPU>
 class DDMT {
@@ -61,7 +61,7 @@ public:
     DDMT(const DDMT&)            = delete;
     DDMT& operator=(const DDMT&) = delete;
 
-    const DDMTPlan& get_plan() const;
+    const plans::DDMTPlan& get_plan() const;
 
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -85,4 +85,4 @@ using DDMTCPU = DDMT<backend::CPU>;
 using DDMTCUDA = DDMT<backend::CUDA>;
 #endif // DMT_ENABLE_CUDA
 
-} // namespace dmt
+} // namespace dmt::algorithms

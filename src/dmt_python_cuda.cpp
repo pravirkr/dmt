@@ -7,15 +7,18 @@
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
 
-#include "dmt/fdmt.hpp"
+#include "dmt/dmt.hpp"
 #include "pybind_utils.hpp"
 
+namespace dmt {
+using algorithms::FDMTCUDA;
+
 namespace py = pybind11;
+using namespace pybind11::literals; // NOLINT
 
 PYBIND11_MODULE(libcudmt, mod) { // NOLINT
     mod.doc() = "Python Bindings for dmt (CUDA Backend)";
 
-    using dmt::FDMTCUDA;
     py::class_<FDMTCUDA>(mod, "FDMTCUDA", "FDMT CUDA Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
                       SizeType, SizeType, bool, bool, int>(),
@@ -55,3 +58,5 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
             executing the transform, and copying the result back to the host.
             )doc");
 }
+
+} // namespace dmt

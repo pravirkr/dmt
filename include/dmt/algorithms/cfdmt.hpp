@@ -1,18 +1,18 @@
 #pragma once
 
+#include <concepts>
 #include <memory>
 #include <span>
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
-#include <type_traits>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
-namespace dmt {
+namespace dmt::algorithms {
 
 /**
  * @brief Computes the Coherent Fast Dispersion Measure Transform (CFDMT).
@@ -67,16 +67,18 @@ public:
     CohFDMT(const CohFDMT&)            = delete;
     CohFDMT& operator=(const CohFDMT&) = delete;
 
-    const CohFDMTPlan& get_plan() const;
+    const plans::CohFDMTPlan& get_plan() const;
     SizeType get_dmt_size() const;
 
-    void execute(std::span<const uint8_t> data_in, std::span<float> dmt);
+    template <IntegralDataType DataType>
+    void execute(std::span<const DataType> data_in, std::span<float> dmt) const;
 
 #ifdef DMT_ENABLE_CUDA
-    void execute(cuda::std::span<const uint8_t> d_data_in,
+    template <IntegralDataType DataType,
+              std::same_as<backend::CUDA> P = Backend>
+    void execute(cuda::std::span<const DataType> d_data_in,
                  cuda::std::span<float> d_dmt,
-                 cudaStream_t stream = nullptr)
-        requires std::is_same_v<Backend, backend::CUDA>;
+                 cudaStream_t stream = nullptr) const;
 #endif // DMT_ENABLE_CUDA
 
 private:
@@ -90,4 +92,4 @@ using CohFDMTCPU = CohFDMT<backend::CPU>;
 using CohFDMTCUDA = CohFDMT<backend::CUDA>;
 #endif // DMT_ENABLE_CUDA
 
-} // namespace dmt
+} // namespace dmt::algorithms

@@ -15,6 +15,8 @@
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 
+namespace dmt::plans {
+
 constexpr std::string_view FDMTShape::header_fmt() {
     return "{ncoords} ({nchans}x[{ndt_min}..{ndt_max}]) x "
            "{nsamps}, {nelements}";
@@ -733,3 +735,5 @@ DDMTPlan::generate_dm_arr(float dm_max, float dm_step, float dm_min) {
     }
     return dm_arr;
 }
+
+} // namespace dmt::plans

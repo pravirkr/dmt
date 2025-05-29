@@ -1,4 +1,4 @@
-#include "dmt/unpacker.hpp"
+#include "dmt/utils/unpacker.hpp"
 
 #include <algorithm>
 #include <format>
@@ -9,7 +9,7 @@
 
 #include "spdlog/spdlog.h"
 
-namespace dmt {
+namespace dmt::utils {
 
 template <>
 class DataUnpacker<backend::CPU>::Impl {
@@ -280,4 +280,4 @@ template void
                                                  std::span<ComplexType>,
                                                  std::span<ComplexType>) const;
 
-} // namespace dmt
+} // namespace dmt::utils

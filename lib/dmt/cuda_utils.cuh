@@ -9,23 +9,35 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 
-// Formatter specialization for cudaError_t
-template <>
-struct std::formatter<cudaError_t> : std::formatter<int> {
-    constexpr auto format(cudaError_t error, format_context& ctx) const {
-        return std::formatter<int>::format(static_cast<int>(error), ctx);
-    }
-};
+namespace dmt::cuda_utils {
 
-// Formatter specialization for cufftResult
-template <>
-struct std::formatter<cufftResult> : std::formatter<int> {
-    constexpr auto format(cufftResult error, format_context& ctx) const {
-        return std::formatter<int>::format(static_cast<int>(error), ctx);
+// Error code to string conversion
+constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
+    switch (error) {
+    case CUFFT_SUCCESS:
+        return "CUFFT_SUCCESS";
+    case CUFFT_INVALID_PLAN:
+        return "CUFFT_INVALID_PLAN";
+    case CUFFT_ALLOC_FAILED:
+        return "CUFFT_ALLOC_FAILED";
+    case CUFFT_INVALID_TYPE:
+        return "CUFFT_INVALID_TYPE";
+    case CUFFT_INVALID_VALUE:
+        return "CUFFT_INVALID_VALUE";
+    case CUFFT_INTERNAL_ERROR:
+        return "CUFFT_INTERNAL_ERROR";
+    case CUFFT_EXEC_FAILED:
+        return "CUFFT_EXEC_FAILED";
+    case CUFFT_SETUP_FAILED:
+        return "CUFFT_SETUP_FAILED";
+    case CUFFT_INVALID_SIZE:
+        return "CUFFT_INVALID_SIZE";
+    case CUFFT_UNALIGNED_DATA:
+        return "CUFFT_UNALIGNED_DATA";
+    default:
+        return "Unknown cuFFT error";
     }
-};
-
-namespace dmt::error {
+}
 
 /**
  * @brief Custom exception class for CUDA errors.
@@ -37,7 +49,7 @@ public:
         cudaError_t code,
         std::string_view user_msg       = "",
         const std::source_location& loc = std::source_location::current())
-        : std::runtime_error(format_what(code, user_msg, loc)),
+        : std::runtime_error(format_cuda_error(code, user_msg, loc)),
           m_code(static_cast<int>(code)),
           m_is_cuda(true),
           m_file(loc.file_name()),
@@ -48,9 +60,9 @@ public:
     // Constructor for cufftResult
     explicit CudaException(
         cufftResult code,
-        std::string_view user_msg = "",
-        std::source_location loc  = std::source_location::current())
-        : std::runtime_error(format_what(code, user_msg, loc)),
+        std::string_view user_msg       = "",
+        const std::source_location& loc = std::source_location::current())
+        : std::runtime_error(format_cufft_error(code, user_msg, loc)),
           m_code(static_cast<int>(code)),
           m_is_cuda(false),
           m_file(loc.file_name()),
@@ -63,9 +75,7 @@ public:
         return m_is_cuda;
     }
     [[nodiscard]] constexpr const char* file() const noexcept { return m_file; }
-    [[nodiscard]] constexpr std::uint32_t line() const noexcept {
-        return m_line;
-    }
+    [[nodiscard]] constexpr uint32_t line() const noexcept { return m_line; }
     [[nodiscard]] constexpr const char* function() const noexcept {
         return m_func;
     }
@@ -73,102 +83,47 @@ public:
         return m_user_msg;
     }
     [[nodiscard]] std::string error_string() const {
-        if (m_is_cuda) {
-            return cudaGetErrorString(static_cast<cudaError_t>(m_code));
-        }
-        // cuFFT doesn't provide a standard string function, so we map manually
-        switch (static_cast<cufftResult>(m_code)) {
-        case CUFFT_SUCCESS:
-            return "CUFFT_SUCCESS";
-        case CUFFT_INVALID_PLAN:
-            return "CUFFT_INVALID_PLAN";
-        case CUFFT_ALLOC_FAILED:
-            return "CUFFT_ALLOC_FAILED";
-        case CUFFT_INVALID_TYPE:
-            return "CUFFT_INVALID_TYPE";
-        case CUFFT_INVALID_VALUE:
-            return "CUFFT_INVALID_VALUE";
-        case CUFFT_INTERNAL_ERROR:
-            return "CUFFT_INTERNAL_ERROR";
-        case CUFFT_EXEC_FAILED:
-            return "CUFFT_EXEC_FAILED";
-        case CUFFT_SETUP_FAILED:
-            return "CUFFT_SETUP_FAILED";
-        case CUFFT_INVALID_SIZE:
-            return "CUFFT_INVALID_SIZE";
-        case CUFFT_UNALIGNED_DATA:
-            return "CUFFT_UNALIGNED_DATA";
-        default:
-            return "Unknown cuFFT error";
-        }
+        return m_is_cuda ? cudaGetErrorString(static_cast<cudaError_t>(m_code))
+                         : std::string(cufft_error_string(
+                               static_cast<cufftResult>(m_code)));
     }
 
 private:
     int m_code;
     bool m_is_cuda;
     const char* m_file;
-    std::uint32_t m_line;
+    uint32_t m_line;
     const char* m_func;
     std::string m_user_msg;
 
-    // Helper to format the what() message for the base class
-    static std::string format_what(cudaError_t code,
-                                   std::string_view user_msg,
-                                   const std::source_location& loc) {
-        auto base_msg = std::format("[{}] {}", code, cudaGetErrorString(code));
+    // Helper to format the what() message for CUDA errors
+    static std::string format_cuda_error(cudaError_t code,
+                                         std::string_view user_msg,
+                                         const std::source_location& loc) {
+        auto base_msg =
+            std::format("CUDA Error [{}]: {}", static_cast<int>(code),
+                        cudaGetErrorString(code));
         return user_msg.empty()
-                   ? std::format("CUDA Error {} in {} ({}:{})", base_msg,
+                   ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line())
-                   : std::format("CUDA Error {} in {} ({}:{}): {}", base_msg,
+                   : std::format("{} in {} ({}:{}): {}", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line(), user_msg);
     }
 
-    static std::string format_what(cufftResult code,
-                                   std::string_view user_msg,
-                                   const std::source_location& loc) {
-        auto base_msg = std::format("[{}] ", code);
-        switch (code) {
-        case CUFFT_SUCCESS:
-            base_msg += "CUFFT_SUCCESS";
-            break;
-        case CUFFT_INVALID_PLAN:
-            base_msg += "CUFFT_INVALID_PLAN";
-            break;
-        case CUFFT_ALLOC_FAILED:
-            base_msg += "CUFFT_ALLOC_FAILED";
-            break;
-        case CUFFT_INVALID_TYPE:
-            base_msg += "CUFFT_INVALID_TYPE";
-            break;
-        case CUFFT_INVALID_VALUE:
-            base_msg += "CUFFT_INVALID_VALUE";
-            break;
-        case CUFFT_INTERNAL_ERROR:
-            base_msg += "CUFFT_INTERNAL_ERROR";
-            break;
-        case CUFFT_EXEC_FAILED:
-            base_msg += "CUFFT_EXEC_FAILED";
-            break;
-        case CUFFT_SETUP_FAILED:
-            base_msg += "CUFFT_SETUP_FAILED";
-            break;
-        case CUFFT_INVALID_SIZE:
-            base_msg += "CUFFT_INVALID_SIZE";
-            break;
-        case CUFFT_UNALIGNED_DATA:
-            base_msg += "CUFFT_UNALIGNED_DATA";
-            break;
-        default:
-            base_msg += "Unknown cuFFT error";
-            break;
-        }
+    // Helper to format the what() message for cuFFT errors
+    static std::string format_cufft_error(cufftResult code,
+                                          std::string_view user_msg,
+                                          const std::source_location& loc) {
+        auto base_msg =
+            std::format("cuFFT Error [{}]: {}", static_cast<int>(code),
+                        cufft_error_string(code));
         return user_msg.empty()
-                   ? std::format("cuFFT Error {} in {} ({}:{})", base_msg,
+                   ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line())
-                   : std::format("cuFFT Error {} in {} ({}:{}): {}", base_msg,
+                   : std::format("{} in {} ({}:{}): {}", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line(), user_msg);
     }
@@ -229,7 +184,7 @@ inline void check_kernel_launch_params(
     check_cuda_call(cudaGetDeviceProperties(&props, device),
                     "Failed to get device properties", loc);
 
-    auto throw_if_exceeds = [&](auto val, auto max, std::string_view dim) {
+    auto check_limit = [&](auto val, auto max, std::string_view dim) {
         if (val > static_cast<unsigned>(max)) {
             throw std::runtime_error(
                 std::format("{} dimension {} exceeds device limit {} at {}:{}",
@@ -237,14 +192,14 @@ inline void check_kernel_launch_params(
         }
     };
 
-    throw_if_exceeds(block.x, props.maxThreadsDim[0], "Block X");
-    throw_if_exceeds(block.y, props.maxThreadsDim[1], "Block Y");
-    throw_if_exceeds(block.z, props.maxThreadsDim[2], "Block Z");
-    throw_if_exceeds(block.x * block.y * block.z, props.maxThreadsPerBlock,
-                     "Total threads");
-    throw_if_exceeds(grid.x, props.maxGridSize[0], "Grid X");
-    throw_if_exceeds(grid.y, props.maxGridSize[1], "Grid Y");
-    throw_if_exceeds(grid.z, props.maxGridSize[2], "Grid Z");
+    check_limit(block.x, props.maxThreadsDim[0], "Block X");
+    check_limit(block.y, props.maxThreadsDim[1], "Block Y");
+    check_limit(block.z, props.maxThreadsDim[2], "Block Z");
+    check_limit(block.x * block.y * block.z, props.maxThreadsPerBlock,
+                "Total threads");
+    check_limit(grid.x, props.maxGridSize[0], "Grid X");
+    check_limit(grid.y, props.maxGridSize[1], "Grid Y");
+    check_limit(grid.z, props.maxGridSize[2], "Grid Z");
 }
 
 [[nodiscard]] inline std::string get_device_info() noexcept {
@@ -264,31 +219,17 @@ inline void check_kernel_launch_params(
                        props.totalGlobalMem >> 20);
 }
 
-} // namespace dmt::error
-
-#define DMT_CHECK_CUDA_CALL(call, ...)                                         \
-    dmt::error::check_cuda_call(call, __VA_ARGS__)
-#define DMT_CHECK_CUFFT_CALL(call, ...)                                        \
-    dmt::error::check_cuda_call(call, __VA_ARGS__)
-
-/**
- * @brief Macro to check the last asynchronous CUDA error (e.g., after kernel
- * launch <<<>>>).
- * @param msg Optional user message string literal.
- */
-#define DMT_CHECK_LAST_CUDA_ERROR(...)                                         \
-    dmt::error::check_last_cuda_error(__VA_ARGS__)
-
-/**
- * @brief Macro to synchronize the device/stream and check for errors.
- * @param msg Optional user message string literal.
- */
-#define DMT_CHECK_CUDA_SYNC(...) dmt::error::check_cuda_sync(__VA_ARGS__)
-
-/**
- * @brief Macro to check kernel launch parameters before launch.
- * @param grid The dim3 grid dimensions.
- * @param block The dim3 block dimensions.
- */
-#define DMT_CHECK_KERNEL_PARAMS(grid, block)                                   \
-    dmt::error::check_kernel_launch_params(grid, block)
+inline void set_device(int device_id) {
+    int device_count;
+    check_cuda_call(cudaGetDeviceCount(&device_count),
+                    "Failed to get device count");
+    if (device_id < 0 || device_id >= device_count) {
+        throw CudaException(
+            cudaErrorInvalidDevice,
+            std::format("Invalid device_id: {}. Must be between 0 and {}",
+                        device_id, device_count - 1));
+    }
+    check_cuda_call(cudaSetDevice(device_id),
+                    std::format("Failed to set device {}", device_id));
+}
+} // namespace dmt::cuda_utils

@@ -1,6 +1,5 @@
-#include "dmt/cfdmt.hpp"
+#include "dmt/algorithms/cfdmt.hpp"
 
-#include <cstdint>
 #include <span>
 #include <stdexcept>
 
@@ -11,14 +10,14 @@
 
 #include <spdlog/spdlog.h>
 
+#include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bb_utils_cpu.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
-#include "dmt/fdmt.hpp"
-#include "dmt/fft.hpp"
-#include "dmt/unpacker.hpp"
+#include "dmt/utils/fft.hpp"
+#include "dmt/utils/unpacker.hpp"
 
-namespace dmt {
+namespace dmt::algorithms {
 
 template <>
 class CohFDMT<backend::CPU>::Impl {
@@ -36,8 +35,7 @@ public:
          std::string_view data_order,
          bool verbose,
          int nthreads)
-        : m_nthreads(nthreads),
-          m_plan(f_center,
+        : m_plan(f_center,
                  bw_sub,
                  nsub,
                  tbin,
@@ -48,21 +46,20 @@ public:
                  dm_min,
                  noverlap,
                  data_order,
-                 verbose) {
-#ifdef DMT_ENABLE_OPENMP
-        omp_set_num_threads(nthreads);
-#endif
+                 verbose),
+          m_nthreads(set_dmt_openmp_threads(nthreads)) {
         initialise();
     }
 
-    const CohFDMTPlan& get_plan() const { return m_plan; }
+    const plans::CohFDMTPlan& get_plan() const { return m_plan; }
 
-    void execute(std::span<const uint8_t> data_in, std::span<float> dmt) {
+    template <IntegralDataType DataType>
+    void execute(std::span<const DataType> data_in, std::span<float> dmt) {
         if (dmt.size() != m_plan.get_dmt_size()) {
             throw std::runtime_error("Invalid DMT size");
         }
-        m_theunpacker->execute<uint8_t>(data_in, m_unpack_buf_p1,
-                                        m_unpack_buf_p2);
+        m_theunpacker->execute<DataType>(data_in, m_unpack_buf_p1,
+                                         m_unpack_buf_p2);
         // Forward FFT
         m_thefft->forward_fft(m_unpack_buf_p1, m_unpack_buf_p2);
         const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
@@ -88,11 +85,11 @@ public:
     }
 
 private:
+    plans::CohFDMTPlan m_plan;
     int m_nthreads;
-    CohFDMTPlan m_plan;
-    std::unique_ptr<FFTManagerCPU> m_thefft;
-    std::unique_ptr<FDMTCPU> m_thefdmt;
-    std::unique_ptr<DataUnpackerCPU> m_theunpacker;
+    std::unique_ptr<utils::FFTManagerCPU> m_thefft;
+    std::unique_ptr<algorithms::FDMT<backend::CPU>> m_thefdmt;
+    std::unique_ptr<utils::DataUnpacker<backend::CPU>> m_theunpacker;
 
     std::vector<ComplexType> m_unpack_buf_p1;
     std::vector<ComplexType> m_unpack_buf_p2;
@@ -103,15 +100,15 @@ private:
 
     void initialise() {
         // Initialise the FFT manager, FDMT and data unpacker
-        m_thefft = std::make_unique<FFTManagerCPU>(
+        m_thefft = std::make_unique<utils::FFTManagerCPU>(
             m_plan.get_nfft(), m_plan.get_nsub(), m_plan.get_nbin(),
             m_plan.get_mbin(), m_plan.get_nchan(), m_nthreads);
         m_thefft->initialize_plans(std::span<ComplexType>(m_unpack_buf_p1),
                                    std::span<ComplexType>(m_delay_buf_p1));
-        m_thefdmt = std::make_unique<dmt::FDMTCPU>(
+        m_thefdmt = std::make_unique<algorithms::FDMT<backend::CPU>>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max());
-        m_theunpacker = std::make_unique<DataUnpackerCPU>(
+        m_theunpacker = std::make_unique<utils::DataUnpacker<backend::CPU>>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_nthreads);
 
@@ -125,9 +122,8 @@ private:
 
         // Compute the chirp table
         const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
-        dmt::utils::compute_chirp(
-            m_chirp_table.data(), m_chirp_table.size(), dm_grid_coh.data(),
-            dm_grid_coh.size(), m_plan.get_f_center(), m_plan.get_bw(),
+        bb_utils::compute_chirp(
+            dm_grid_coh, m_chirp_table, m_plan.get_f_center(), m_plan.get_bw(),
             m_plan.get_nbin(), m_plan.get_nsub(), m_plan.get_nchan());
     }
 
@@ -201,13 +197,14 @@ CohFDMT<backend::CPU>::operator=(CohFDMT&& other) noexcept {
     return *this;
 }
 template <>
-const CohFDMTPlan& CohFDMT<backend::CPU>::get_plan() const {
+const plans::CohFDMTPlan& CohFDMT<backend::CPU>::get_plan() const {
     return m_impl->get_plan();
 }
 template <>
-void CohFDMT<backend::CPU>::execute(std::span<const uint8_t> data_in,
-                                    std::span<float> dmt) {
-    m_impl->execute(data_in, dmt);
+template <IntegralDataType DataType>
+void CohFDMT<backend::CPU>::execute(std::span<const DataType> data_in,
+                                    std::span<float> dmt) const {
+    m_impl->execute<DataType>(data_in, dmt);
 }
 
 // Explicit instantiation (for linking)
@@ -224,4 +221,11 @@ template CohFDMT<backend::CPU>::CohFDMT(float,
                                         std::string_view,
                                         bool,
                                         int);
-} // namespace dmt
+
+// Instantiate the public execute method for each supported DataType
+template void CohFDMT<backend::CPU>::execute<int8_t>(std::span<const int8_t>,
+                                                     std::span<float>) const;
+template void CohFDMT<backend::CPU>::execute<uint8_t>(std::span<const uint8_t>,
+                                                      std::span<float>) const;
+
+} // namespace dmt::algorithms

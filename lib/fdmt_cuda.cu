@@ -1,4 +1,4 @@
-#include "dmt/fdmt.hpp"
+#include "dmt/algorithms/fdmt.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -12,9 +12,11 @@
 
 #include <spdlog/spdlog.h>
 
-#include "dmt/common/plans_cuda.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
+#include "dmt/plans_cuda.cuh"
+
+namespace dmt::algorithms {
 
 namespace {
 __global__ void
@@ -95,8 +97,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
 
 __global__ void kernel_execute_iter(const float* __restrict__ state_in,
                                     float* __restrict__ state_out,
-                                    const FDMTCoordDPtrs coords_sum,
-                                    const FDMTCoordDPtrs coords_copy,
+                                    const plans::FDMTCoordDPtrs coords_sum,
+                                    const plans::FDMTCoordDPtrs coords_copy,
                                     int nsamps,
                                     int ncoords_sum_cur,
                                     int ncoords_copy_cur) {
@@ -144,8 +146,6 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
 }
 } // namespace
 
-namespace dmt {
-
 template <>
 class FDMTCUDA::Impl {
 public:
@@ -171,7 +171,7 @@ public:
                  dt_step,
                  dt_min,
                  verbose) {
-        set_device(m_device_id);
+        cuda_utils::set_device(m_device_id);
         spdlog::debug("FDMTCUDA::Impl: Set device to {}", m_device_id);
         // Allocate memory for the state buffers
         m_state_in_d.resize(m_plan.get_buffer_size(), 0.0F);
@@ -180,8 +180,9 @@ public:
         if (m_use_history) {
             m_history_d.resize(m_plan.get_history_size(), 0.0F);
         }
-        transfer_fdmt_plan_to_device(m_plan.get_container(), m_plan_d);
-        DMT_CHECK_LAST_CUDA_ERROR("FDMT<CUDA>::Impl constructor failed");
+        plans::transfer_fdmt_plan_to_device(m_plan.get_container(), m_plan_d);
+        cuda_utils::check_last_cuda_error(
+            "FDMT<CUDA>::Impl constructor failed");
     }
     ~Impl()                      = default;
     Impl(const Impl&)            = delete;
@@ -189,7 +190,7 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    const FDMTPlan& get_plan() const { return m_plan; }
+    const plans::FDMTPlan& get_plan() const { return m_plan; }
 
     // Host execute: handles HtoD copy, calls device execute, handles DtoH copy
     void execute_h(std::span<const float> waterfall_h, std::span<float> dmt_h) {
@@ -206,7 +207,7 @@ public:
         cudaMemcpyAsync(waterfall_d.data().get(), waterfall_h.data(),
                         waterfall_h.size_bytes(), cudaMemcpyHostToDevice,
                         stream);
-        DMT_CHECK_LAST_CUDA_ERROR(
+        cuda_utils::check_last_cuda_error(
             "execute_h: cudaMemcpyAsync H->D waterfall failed");
 
         // Execute on device
@@ -220,11 +221,13 @@ public:
         // Copy D->H
         cudaMemcpyAsync(dmt_h.data(), dmt_d.data().get(), dmt_h.size_bytes(),
                         cudaMemcpyDeviceToHost, stream);
-        DMT_CHECK_LAST_CUDA_ERROR("execute_h: cudaMemcpyAsync D->H dmt failed");
+        cuda_utils::check_last_cuda_error(
+            "execute_h: cudaMemcpyAsync D->H dmt failed");
 
         // Synchronize stream to ensure copies and kernel are complete
         cudaStreamSynchronize(stream);
-        DMT_CHECK_LAST_CUDA_ERROR("execute_h: cudaStreamSynchronize failed");
+        cuda_utils::check_last_cuda_error(
+            "execute_h: cudaStreamSynchronize failed");
 
         spdlog::debug("FDMT<CUDA>::Impl: Host execution complete.");
     }
@@ -246,23 +249,12 @@ public:
 private:
     int m_device_id;
     bool m_use_history;
-    FDMTPlan m_plan;
-    FDMTPlanContainerD m_plan_d;
+    plans::FDMTPlan m_plan;
+    plans::FDMTPlanContainerD m_plan_d;
     // State buffers
     thrust::device_vector<float> m_state_in_d;
     thrust::device_vector<float> m_state_out_d;
     thrust::device_vector<float> m_history_d;
-
-    static void set_device(int device_id) {
-        if (device_id < 0) {
-            throw std::invalid_argument(std::format(
-                "FDMTCUDA::Impl: Invalid device_id: {}", device_id));
-        }
-        cudaSetDevice(device_id);
-        DMT_CHECK_LAST_CUDA_ERROR(std::format(
-            "FDMTCUDA::Impl: cudaSetDevice failed for device_id: {}",
-            device_id));
-    }
 
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
         const auto nchans = m_plan.get_nchans();
@@ -297,7 +289,7 @@ private:
         // auto coords_prev     = m_plan_d.coordinates.get_raw_ptrs();
         coords_sum_cur.update_offsets(m_plan_d.state_shape.ncoords_sum[0]);
         coords_copy_cur.update_offsets(m_plan_d.state_shape.ncoords_copy[0]);
-        DMT_CHECK_LAST_CUDA_ERROR("thrust::raw_pointer_cast failed");
+        cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
 
         const auto niters = static_cast<int>(m_plan.get_niters());
         for (int i_iter = 1; i_iter < niters + 1; ++i_iter) {
@@ -311,7 +303,7 @@ private:
             const dim3 block_size = dim3(256, 1);
             const dim3 grid_size =
                 dim3((nsamps + block_size.x - 1) / block_size.x, coords_max);
-            DMT_CHECK_KERNEL_PARAMS(grid_size, block_size);
+            cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
             // Determine output buffer: final iteration writes to device_dmt
             float* current_out_ptr = (i_iter == niters) ? dmt_d : state_out_ptr;
@@ -320,7 +312,8 @@ private:
             kernel_execute_iter<<<grid_size, block_size, 0, stream>>>(
                 state_in_ptr, current_out_ptr, coords_sum_cur, coords_copy_cur,
                 nsamps, ncoords_sum_cur, ncoords_copy_cur);
-            DMT_CHECK_LAST_CUDA_ERROR("kernel_execute_iter launch failed");
+            cuda_utils::check_last_cuda_error(
+                "kernel_execute_iter launch failed");
 
             coords_sum_cur.update_offsets(ncoords_sum_cur);
             coords_copy_cur.update_offsets(ncoords_copy_cur);
@@ -353,13 +346,13 @@ private:
         const dim3 block_size = dim3(1024, 1);
         const dim3 grid_size =
             dim3((nsamps + block_size.x - 1) / block_size.x, nsubs);
-        DMT_CHECK_KERNEL_PARAMS(grid_size, block_size);
+        cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
         // Launch kernel for initialisation
         kernel_init_fdmt<<<grid_size, block_size, 0, stream>>>(
             waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
             grids0_coord_offset_ptr, nsubs, nsamps, dt_max, hist_ptr);
-        DMT_CHECK_LAST_CUDA_ERROR("kernel_init_fdmt launch failed");
+        cuda_utils::check_last_cuda_error("kernel_init_fdmt launch failed");
 
         // Update history buffer if enabled
         if (m_use_history) {
@@ -369,7 +362,8 @@ private:
                     &waterfall_d[(i_sub * nsamps) + nsamps - dt_max], dt_max,
                     &hist_ptr[static_cast<ptrdiff_t>(i_sub * dt_max)]);
             }
-            DMT_CHECK_LAST_CUDA_ERROR("History update cudaMemcpyAsync failed");
+            cuda_utils::check_last_cuda_error(
+                "History update cudaMemcpyAsync failed");
         }
         spdlog::debug(
             "FDMT<CUDA>::Impl: Initialise device submitted to stream.");
@@ -405,14 +399,23 @@ FDMT<backend::CUDA>::FDMT(float f_min,
 }
 
 template <>
-FDMT<backend::CUDA>::~FDMT() = default;
+FDMT<backend::CUDA>::~FDMT() {
+    spdlog::debug("FDMT<CUDA> object destroyed.");
+}
 template <>
-FDMT<backend::CUDA>::FDMT(FDMT&& other) noexcept = default;
+FDMT<backend::CUDA>::FDMT(FDMT&& other) noexcept
+    : m_impl(std::move(other.m_impl)) {
+    spdlog::debug("FDMT<CUDA> object moved.");
+}
 template <>
-FDMT<backend::CUDA>&
-FDMT<backend::CUDA>::operator=(FDMT&& other) noexcept = default;
+FDMT<backend::CUDA>& FDMT<backend::CUDA>::operator=(FDMT&& other) noexcept {
+    if (this != &other) {
+        m_impl = std::move(other.m_impl);
+    }
+    return *this;
+}
 template <>
-const FDMTPlan& FDMT<backend::CUDA>::get_plan() const {
+const plans::FDMTPlan& FDMT<backend::CUDA>::get_plan() const {
     return m_impl->get_plan();
 }
 template <>
@@ -422,15 +425,11 @@ void FDMT<backend::CUDA>::execute(std::span<const float> waterfall,
 }
 
 template <>
-template <typename B> // Need template parameter from header declaration
-auto FDMT<backend::CUDA>::execute(cuda::std::span<const float> d_waterfall,
+template <std::same_as<backend::CUDA> P>
+void FDMT<backend::CUDA>::execute(cuda::std::span<const float> d_waterfall,
                                   cuda::std::span<float> d_dmt,
-                                  cudaStream_t stream)
-    requires std::is_same_v<B,
-                            backend::CUDA> // Match requires clause from header
-{
-    // Forward the call to the implementation object's device handler
+                                  cudaStream_t stream) {
     m_impl->execute_d(d_waterfall, d_dmt, stream);
 }
 
-} // namespace dmt
+} // namespace dmt::algorithms

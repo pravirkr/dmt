@@ -6,10 +6,69 @@
 
 #include <algorithm>
 #include <format>
+#include <numbers>
 
 #include "dmt/common/types.hpp"
 
 namespace dmt::bb_utils {
+
+void compute_chirp(std::span<const float> dm_grid,
+                   std::span<ComplexType> chirp_table,
+                   float fcenter,
+                   float bw,
+                   SizeType nbin,
+                   SizeType nsub,
+                   SizeType nchan) {
+    const auto ndm      = dm_grid.size();
+    const SizeType mbin = nbin / nchan;
+    const float bw_sub  = bw / static_cast<float>(nsub);
+    const float bw_chan = bw_sub / static_cast<float>(nchan);
+    const float bw_bin  = bw_chan / static_cast<float>(mbin);
+
+    if (chirp_table.size() != ndm * nsub * nbin) {
+        throw std::runtime_error("Chirp table size mismatch");
+    }
+
+    std::vector<float> freqs_sub(nsub);
+    for (SizeType i = 0; i < nsub; ++i) {
+        freqs_sub[i] =
+            fcenter - bw / 2 + (static_cast<float>(i) + 0.5F) * bw_sub;
+    }
+    std::vector<float> bin_freqs(mbin);
+    for (SizeType i = 0; i < mbin; ++i) {
+        bin_freqs[i] = -bw_chan / 2 + (static_cast<float>(i) + 0.5F) * bw_bin;
+    }
+
+    const float taper_const = 1.0F / (0.47F * bw_chan);
+    const float taper_exp   = 80.0F;
+    const float coeff_const =
+        2.0F * std::numbers::pi_v<float> * kDispConst * 1.0E6F;
+
+    for (SizeType idm = 0; idm < ndm; ++idm) {
+        const float coeff = coeff_const * dm_grid[idm];
+        for (SizeType isub = 0; isub < nsub; ++isub) {
+            for (SizeType ichan = 0; ichan < nchan; ++ichan) {
+                const float freq_chan =
+                    freqs_sub[isub] + ((static_cast<float>(ichan) -
+                                        static_cast<float>(nchan) / 2 + 0.5F) *
+                                       bw_chan);
+                for (SizeType ibin = 0; ibin < mbin; ++ibin) {
+                    const float bin_freq    = bin_freqs[ibin];
+                    const float freq_ratio  = bin_freq / freq_chan;
+                    const float phase_delay = -coeff * freq_ratio * freq_ratio /
+                                              (freq_chan + bin_freq);
+                    const float taper =
+                        1.0F / std::sqrt(1.0F + std::pow(bin_freq * taper_const,
+                                                         taper_exp));
+                    const SizeType idx = (idm * nsub * nchan * mbin) +
+                                         (isub * nchan * mbin) +
+                                         (ichan * mbin) + ibin;
+                    chirp_table[idx] = std::polar(taper, phase_delay);
+                }
+            }
+        }
+    }
+}
 
 void swap_spectrum(std::span<ComplexType> data1,
                    std::span<ComplexType> data2,
@@ -112,8 +171,8 @@ void unpad_detect(std::span<const ComplexType> fft_p1,
 
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel for collapse(4) default(none)                             \
-    shared(intensity, fft_p1, fft_p2, nsub, nchan, msamp, mbin_adjusted,       \
-               noverlap_per_channel)
+    shared(intensity, fft_p1, fft_p2, nsub, nchan, nfft, msamp, mbin,          \
+               mbin_adjusted, noverlap_per_channel)
 #endif
     for (SizeType ibin = 0; ibin < mbin_adjusted; ++ibin) {
         for (SizeType ichan = 0; ichan < nchan; ++ichan) {

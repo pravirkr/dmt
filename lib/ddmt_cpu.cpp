@@ -1,4 +1,4 @@
-#include "dmt/ddmt.hpp"
+#include "dmt/algorithms/ddmt.hpp"
 
 #include <cstddef>
 
@@ -10,7 +10,7 @@
 
 #include "dmt/common/types.hpp"
 
-namespace dmt {
+namespace dmt::algorithms {
 
 template <>
 class DDMT<backend::CPU>::Impl {
@@ -51,7 +51,7 @@ public:
 #endif
     }
 
-    const DDMTPlan& get_plan() const { return m_plan; }
+    const plans::DDMTPlan& get_plan() const { return m_plan; }
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
         const auto& plan_c         = m_plan.get_container();
@@ -107,7 +107,7 @@ public:
     }
 
 private:
-    DDMTPlan m_plan;
+    plans::DDMTPlan m_plan;
     int m_nthreads;
 };
 
@@ -150,7 +150,7 @@ template <>
 DDMT<backend::CPU>&
 DDMT<backend::CPU>::operator=(DDMT&& other) noexcept = default;
 template <>
-const DDMTPlan& DDMT<backend::CPU>::get_plan() const {
+const plans::DDMTPlan& DDMT<backend::CPU>::get_plan() const {
     return m_impl->get_plan();
 }
 template <>
@@ -159,4 +159,4 @@ void DDMT<backend::CPU>::execute(std::span<const float> waterfall,
     m_impl->execute(waterfall, dmt);
 }
 
-} // namespace dmt
+} // namespace dmt::algorithms

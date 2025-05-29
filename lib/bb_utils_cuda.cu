@@ -12,11 +12,13 @@
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
 
+namespace dmt::bb_utils {
+
 namespace {
 
 // Functor for in-place fftshift of two complex buffers
 struct SwapSpectrumDual {
-    cufftComplex *buf1, *buf2;
+    ComplexTypeCUDA *buf1, *buf2;
     int n, batch_size, mid_point;
 
     __device__ void operator()(int idx) const {
@@ -95,13 +97,10 @@ struct TransposeUnpadDetect {
         }
     }
 };
-
 } // namespace
 
-namespace dmt::bb_utils_cu {
-
-void swap_spectrum(cuda::std::span<cufftComplex> data1,
-                   cuda::std::span<cufftComplex> data2,
+void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data1,
+                   cuda::std::span<ComplexTypeCUDA> data2,
                    int n,
                    int batch_size,
                    cudaStream_t stream) {
@@ -121,14 +120,14 @@ void swap_spectrum(cuda::std::span<cufftComplex> data1,
                              .batch_size = batch_size,
                              .mid_point  = mid_point};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    DMT_CHECK_LAST_CUDA_ERROR("thrust::for_each failed");
+    cuda_utils::check_last_cuda_error("thrust::for_each failed");
 }
 
-void apply_chirp(cuda::std::span<const cufftComplex> data1_in,
-                 cuda::std::span<const cufftComplex> data2_in,
-                 cuda::std::span<const cufftComplex> chirp_table,
-                 cuda::std::span<cufftComplex> data1_out,
-                 cuda::std::span<cufftComplex> data2_out,
+void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
+                 cuda::std::span<const ComplexTypeCUDA> data2_in,
+                 cuda::std::span<const ComplexTypeCUDA> chirp_table,
+                 cuda::std::span<ComplexTypeCUDA> data1_out,
+                 cuda::std::span<ComplexTypeCUDA> data2_out,
                  int nsub,
                  int nbin,
                  int nfft,
@@ -144,18 +143,17 @@ void apply_chirp(cuda::std::span<const cufftComplex> data1_in,
 
     auto first = thrust::counting_iterator<int>(0);
     auto last  = thrust::counting_iterator<int>(nsub * nbin * nfft);
-    ComplexMulScaleDual functor{
-        .a     = reinterpret_cast<const ComplexTypeCUDA*>(data1_in.data()),
-        .d     = reinterpret_cast<const ComplexTypeCUDA*>(data2_in.data()),
-        .b     = reinterpret_cast<const ComplexTypeCUDA*>(chirp_table.data()),
-        .c     = reinterpret_cast<ComplexTypeCUDA*>(data1_out.data()),
-        .e     = reinterpret_cast<ComplexTypeCUDA*>(data2_out.data()),
-        .nx    = nsub * nbin,
-        .ny    = nfft,
-        .l     = idm,
-        .scale = scale};
+    ComplexMulScaleDual functor{.a     = data1_in.data(),
+                                .d     = data2_in.data(),
+                                .b     = chirp_table.data(),
+                                .c     = data1_out.data(),
+                                .e     = data2_out.data(),
+                                .nx    = nsub * nbin,
+                                .ny    = nfft,
+                                .l     = idm,
+                                .scale = scale};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    DMT_CHECK_LAST_CUDA_ERROR("thrust::for_each failed");
+    cuda_utils::check_last_cuda_error("thrust::for_each failed");
 }
 
 void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
@@ -190,7 +188,7 @@ void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
                                  .mbin_adjusted        = mbin_adjusted,
                                  .msamp                = msamp};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    DMT_CHECK_LAST_CUDA_ERROR("thrust::for_each failed");
+    cuda_utils::check_last_cuda_error("thrust::for_each failed");
 }
 
-} // namespace dmt::bb_utils_cu
+} // namespace dmt::bb_utils

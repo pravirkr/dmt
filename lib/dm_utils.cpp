@@ -3,9 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <format>
 #include <iterator>
-#include <numbers>
 #include <stdexcept>
 #include <vector>
 
@@ -134,65 +132,6 @@ void dedisperse(float* __restrict__ waterfall,
         } else {
             std::rotate(waterfall + start, waterfall + start - shift,
                         waterfall + end);
-        }
-    }
-}
-
-void compute_chirp(ComplexType* chirp_table,
-                   SizeType chirp_table_size,
-                   const float* dm_grid,
-                   SizeType ndm,
-                   float fcenter,
-                   float bw,
-                   SizeType nbin,
-                   SizeType nsub,
-                   SizeType nchan) {
-    const SizeType mbin = nbin / nchan;
-    const float bw_sub  = bw / static_cast<float>(nsub);
-    const float bw_chan = bw_sub / static_cast<float>(nchan);
-    const float bw_bin  = bw_chan / static_cast<float>(mbin);
-
-    if (chirp_table_size != ndm * nsub * nbin) {
-        throw std::runtime_error("Chirp table size mismatch");
-    }
-
-    std::vector<float> freqs_sub(nsub);
-    for (SizeType i = 0; i < nsub; ++i) {
-        freqs_sub[i] =
-            fcenter - bw / 2 + (static_cast<float>(i) + 0.5F) * bw_sub;
-    }
-    std::vector<float> bin_freqs(mbin);
-    for (SizeType i = 0; i < mbin; ++i) {
-        bin_freqs[i] = -bw_chan / 2 + (static_cast<float>(i) + 0.5F) * bw_bin;
-    }
-
-    const float taper_const = 1.0F / (0.47F * bw_chan);
-    const float taper_exp   = 80.0F;
-    const float coeff_const =
-        2.0F * std::numbers::pi_v<float> * kDispConst * 1.0E6F;
-
-    for (SizeType idm = 0; idm < ndm; ++idm) {
-        const float coeff = coeff_const * dm_grid[idm];
-        for (SizeType isub = 0; isub < nsub; ++isub) {
-            for (SizeType ichan = 0; ichan < nchan; ++ichan) {
-                const float freq_chan =
-                    freqs_sub[isub] + ((static_cast<float>(ichan) -
-                                        static_cast<float>(nchan) / 2 + 0.5F) *
-                                       bw_chan);
-                for (SizeType ibin = 0; ibin < mbin; ++ibin) {
-                    const float bin_freq    = bin_freqs[ibin];
-                    const float freq_ratio  = bin_freq / freq_chan;
-                    const float phase_delay = -coeff * freq_ratio * freq_ratio /
-                                              (freq_chan + bin_freq);
-                    const float taper =
-                        1.0F / std::sqrt(1.0F + std::pow(bin_freq * taper_const,
-                                                         taper_exp));
-                    const SizeType idx = (idm * nsub * nchan * mbin) +
-                                         (isub * nchan * mbin) +
-                                         (ichan * mbin) + ibin;
-                    chirp_table[idx] = std::polar(taper, phase_delay);
-                }
-            }
         }
     }
 }

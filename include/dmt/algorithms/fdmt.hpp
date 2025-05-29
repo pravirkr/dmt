@@ -1,18 +1,18 @@
 #pragma once
 
+#include <concepts>
 #include <memory>
 #include <span>
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
-#include <type_traits>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
-namespace dmt {
+namespace dmt::algorithms {
 
 /**
  * @brief Computes the Fast Dispersion Measure Transform (FDMT).
@@ -91,7 +91,7 @@ public:
      * @brief Gets the FDMT plan details.
      * @return Constant reference to the FDMTPlan object.
      */
-    const FDMTPlan& get_plan() const;
+    const plans::FDMTPlan& get_plan() const;
 
     /**
      * @brief Executes the FDMT transform using host memory.
@@ -115,16 +115,15 @@ public:
      * device. Uses libcudacxx span (`cuda::std::span`) for device memory views.
      * Allows specifying a CUDA stream for asynchronous execution.
      *
-     * @tparam B Dummy template parameter for requires clause.
+     * @tparam P Constraint ensuring this overload is only for the CUDA backend.
      * @param d_waterfall Input waterfall data view (device memory)
      * @param d_dmt Output DM-time array view (device memory)
      * @param stream The CUDA stream to execute the transform on.
      */
-    template <typename B = Backend>
-    auto execute(cuda::std::span<const float> d_waterfall,
+    template <std::same_as<backend::CUDA> P = Backend>
+    void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
-                 cudaStream_t stream = nullptr)
-        requires std::is_same_v<B, backend::CUDA>;
+                 cudaStream_t stream = nullptr);
 
 #endif // DMT_ENABLE_CUDA
 
@@ -139,4 +138,4 @@ using FDMTCPU = FDMT<backend::CPU>;
 using FDMTCUDA = FDMT<backend::CUDA>;
 #endif // DMT_ENABLE_CUDA
 
-} // namespace dmt
+} // namespace dmt::algorithms

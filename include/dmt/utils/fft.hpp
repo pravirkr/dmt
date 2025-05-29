@@ -10,7 +10,7 @@
 
 #include "dmt/common/types.hpp"
 
-namespace dmt {
+namespace dmt::utils {
 
 /**
  * @brief Manages FFT plans and execution for CPU (FFTW) or CUDA (cuFFT).
@@ -94,7 +94,8 @@ public:
      * @param stream CUDA stream for execution.
      */
     template <std::same_as<backend::CUDA> P = Backend>
-    void forward_fft(cuda::std::span<ComplexTypeCUDA> data,
+    void forward_fft(cuda::std::span<ComplexTypeCUDA> data1,
+                     cuda::std::span<ComplexTypeCUDA> data2,
                      cudaStream_t stream = nullptr) const;
 
     /**
@@ -103,7 +104,8 @@ public:
      * @param stream CUDA stream for execution.
      */
     template <std::same_as<backend::CUDA> P = Backend>
-    void backward_fft(cuda::std::span<ComplexTypeCUDA> data,
+    void backward_fft(cuda::std::span<ComplexTypeCUDA> data1,
+                      cuda::std::span<ComplexTypeCUDA> data2,
                       cudaStream_t stream = nullptr) const;
 
     template <std::same_as<backend::CUDA> P = Backend>
@@ -123,4 +125,4 @@ using FFTManagerCPU = FFTManager<backend::CPU>;
 using FFTManagerCUDA = FFTManager<backend::CUDA>;
 #endif // DMT_ENABLE_CUDA
 
-} // namespace dmt
+} // namespace dmt::utils

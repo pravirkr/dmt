@@ -4,7 +4,6 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -21,6 +20,8 @@
 #include <thrust/device_vector.h>
 #endif
 
+namespace dmt {
+
 // Basic Type Definitions
 using SizeType    = std::size_t;    // Common size type
 using IndexType   = std::ptrdiff_t; // Common index type (for signed indexing)
@@ -35,6 +36,15 @@ using ComplexTypeCUDA = cuda::std::complex<float>;
 template <typename T>
 using DeviceVector = thrust::device_vector<T>;
 #endif
+
+// Constants for dispersion calculations
+inline constexpr float kDispCoeff = -2.0F;
+inline constexpr float kDispConstLK =
+    4.1488080e3; // L&K Handbook of Pulsar Astronomy
+inline constexpr float kDispConstMT =
+    1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
+inline constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
+inline constexpr float kDispConst   = kDispConstMT;
 
 // Utilities for aligning or enforcing hardware-specific requirements (e.g.,
 // SIMD alignment)
@@ -100,6 +110,8 @@ inline int set_dmt_openmp_threads(int nthreads) {
     return nthreads;
 }
 
+} // namespace dmt
+
 namespace dmt::backend {
 
 /**
@@ -124,12 +136,11 @@ concept ExecutionBackend = std::same_as<T, CPU> || std::same_as<T, CUDA>;
 template <ExecutionBackend Backend>
 struct BackendTypes; // Primary template (intentionally undefined)
 
+/*
 // Specialization for CPU backend
 template <>
 struct BackendTypes<CPU> {
     using ComplexType = ComplexType;
-    template <typename T>
-    using SpanType = std::span<T>;
 };
 
 #ifdef DMT_ENABLE_CUDA
@@ -137,9 +148,7 @@ struct BackendTypes<CPU> {
 template <>
 struct BackendTypes<CUDA> {
     using ComplexType = ComplexTypeCUDA;
-    template <typename T>
-    using SpanType = cuda::std::span<T>;
 };
 #endif // DMT_ENABLE_CUDA
-
+*/
 } // namespace dmt::backend

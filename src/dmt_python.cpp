@@ -7,11 +7,19 @@
 
 #include "pybind_utils.hpp"
 
-#include "dmt/cfdmt.hpp"
-#include "dmt/common/plans.hpp"
-#include "dmt/ddmt.hpp"
-#include "dmt/fdmt.hpp"
-#include "dmt/utils/simulate.hpp"
+#include "dmt/dmt.hpp"
+
+namespace dmt {
+using algorithms::CohFDMTCPU;
+using algorithms::DDMTCPU;
+using algorithms::FDMTCPU;
+using plans::CohFDMTPlan;
+using plans::DDMTPlan;
+using plans::FDMTCoord;
+using plans::FDMTCoordGrid;
+using plans::FDMTPlan;
+using plans::FDMTPlanContainer;
+using plans::FDMTShape;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
@@ -24,12 +32,13 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         "generate_pure_frb",
         [](SizeType nchans, SizeType nsamps, float f_min, float f_max,
            SizeType dt, float pulse_toa, float amplitude = 1.0F) {
-            const auto [arr, nsamps_dispersed] = generate_pure_frb(
+            const auto [arr, nsamps_dispersed] = utils::generate_pure_frb(
                 nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude);
             return std::make_tuple(as_pyarray_ref(arr), nsamps_dispersed);
         },
         "nchans"_a, "nsamps"_a, "f_min"_a, "f_max"_a, "dt"_a, "pulse_toa"_a,
         "amplitude"_a = 1.0F);
+
     PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords,
                          ncoords_sum, ncoords_copy, nsamps, nelements, dt_max);
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
@@ -156,9 +165,6 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp);
 
-    using dmt::CohFDMTCPU;
-    using dmt::DDMTCPU;
-    using dmt::FDMTCPU;
     py::class_<FDMTCPU>(mod, "FDMTCPU", "FDMT CPU Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
                       SizeType, SizeType, bool, bool, int>(),
@@ -261,3 +267,5 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                  return dmt;
              });
 }
+
+} // namespace dmt

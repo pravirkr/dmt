@@ -6,7 +6,17 @@
 
 #include "dmt/common/types.hpp"
 
-namespace dmt::bb_utils_cu {
+namespace dmt::bb_utils {
+
+// Compute the chirp table for coherent dedispersion.
+void compute_chirp(cuda::std::span<const float> dm_grid,
+                   cuda::std::span<ComplexTypeCUDA> chirp_table,
+                   float fcenter,
+                   float bw,
+                   SizeType nbin,
+                   SizeType nsub,
+                   SizeType nchan,
+                   cudaStream_t stream = nullptr);
 
 /**
  * @brief Swap halves of two spectrums (fftshift) along the last dimension (n).
@@ -26,8 +36,8 @@ namespace dmt::bb_utils_cu {
  * @param batch_size Number of rows.
  * @param stream CUDA stream for asynchronous execution.
  */
-void swap_spectrum(cuda::std::span<cufftComplex> data1,
-                   cuda::std::span<cufftComplex> data2,
+void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data1,
+                   cuda::std::span<ComplexTypeCUDA> data2,
                    int n,
                    int batch_size,
                    cudaStream_t stream);
@@ -52,11 +62,11 @@ void swap_spectrum(cuda::std::span<cufftComplex> data1,
  * @param scale Scaling factor.
  * @param stream CUDA stream for asynchronous execution.
  */
-void apply_chirp(cuda::std::span<const cufftComplex> data1_in,
-                 cuda::std::span<const cufftComplex> data2_in,
-                 cuda::std::span<const cufftComplex> chirp_table,
-                 cuda::std::span<cufftComplex> data1_out,
-                 cuda::std::span<cufftComplex> data2_out,
+void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
+                 cuda::std::span<const ComplexTypeCUDA> data2_in,
+                 cuda::std::span<const ComplexTypeCUDA> chirp_table,
+                 cuda::std::span<ComplexTypeCUDA> data1_out,
+                 cuda::std::span<ComplexTypeCUDA> data2_out,
                  int nsub,
                  int nbin,
                  int nfft,
@@ -87,4 +97,5 @@ void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
                   int mbin,
                   int noverlap,
                   cudaStream_t stream);
-} // namespace dmt::bb_utils_cu
+
+} // namespace dmt::bb_utils

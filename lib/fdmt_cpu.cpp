@@ -1,4 +1,4 @@
-#include "dmt/fdmt.hpp"
+#include "dmt/algorithms/fdmt.hpp"
 
 #include <cstddef>
 #include <format>
@@ -13,7 +13,7 @@
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 
-namespace dmt {
+namespace dmt::algorithms {
 
 template <>
 class FDMT<backend::CPU>::Impl {
@@ -53,7 +53,7 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    const FDMTPlan& get_plan() const { return m_plan; }
+    const plans::FDMTPlan& get_plan() const { return m_plan; }
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
         check_inputs(waterfall.size(), dmt.size());
@@ -73,7 +73,7 @@ public:
 
 private:
     bool m_use_history;
-    FDMTPlan m_plan;
+    plans::FDMTPlan m_plan;
     // State buffers
     std::vector<float> m_state_in;
     std::vector<float> m_state_out;
@@ -274,7 +274,7 @@ FDMT<backend::CPU>& FDMT<backend::CPU>::operator=(FDMT&& other) noexcept {
     return *this;
 }
 template <>
-const FDMTPlan& FDMT<backend::CPU>::get_plan() const {
+const plans::FDMTPlan& FDMT<backend::CPU>::get_plan() const {
     return m_impl->get_plan();
 }
 template <>
@@ -296,4 +296,4 @@ template FDMT<backend::CPU>::FDMT(float,
                                   bool,
                                   int);
 
-} // namespace dmt
+} // namespace dmt::algorithms

@@ -2,8 +2,13 @@
 
 #include <spdlog/spdlog.h>
 
-#include <dmt/common/plans.hpp>
-#include <dmt/common/types.hpp>
+#include "dmt/common/plans.hpp"
+#include "dmt/common/types.hpp"
+
+namespace dmt {
+
+using plans::CohFDMTPlan;
+using plans::FDMTPlan;
 
 TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
     const float f_min      = 1000.0F;
@@ -150,12 +155,14 @@ TEST_CASE("CohFDMTPlan basic", "[dmt_plans]") {
         CHECK(plan.get_f_max() == f_center + (0.5F * nsub * bw_sub));
         CHECK(plan.get_n_p() == chan_per_sub);
         CHECK(plan.get_nchan() == chan_per_sub);
-        CHECK(plan.get_nsamp() == nfft * (nbin - static_cast<SizeType>(2 * 8192)));
+        CHECK(plan.get_nsamp() ==
+              nfft * (nbin - static_cast<SizeType>(2 * 8192)));
         CHECK(plan.get_mbin() == nbin / chan_per_sub);
         CHECK(plan.get_mchan() == nsub * chan_per_sub);
         CHECK(plan.get_msamp() == plan.get_nsamp() / chan_per_sub);
         CHECK(plan.get_tsamp() == tbin * static_cast<float>(chan_per_sub));
         CHECK(plan.get_dt_max() == chan_per_sub - 1);
-
     }
 }
+
+} // namespace dmt
