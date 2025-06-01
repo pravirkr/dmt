@@ -16,8 +16,7 @@
 
 namespace dmt::algorithms {
 
-template <>
-class CohFDMT<backend::CUDA>::Impl {
+class CohFDMTCUDA::Impl {
 public:
     Impl(float f_center,
          float bw_sub,
@@ -108,8 +107,8 @@ private:
     plans::CohFDMTPlan m_plan;
     int m_device_id;
     std::unique_ptr<utils::FFTManagerCUDA> m_thefft;
-    std::unique_ptr<algorithms::FDMT<backend::CUDA>> m_thefdmt;
-    std::unique_ptr<utils::DataUnpacker<backend::CUDA>> m_theunpacker;
+    std::unique_ptr<algorithms::FDMTCUDA> m_thefdmt;
+    std::unique_ptr<utils::DataUnpackerCUDA> m_theunpacker;
 
     thrust::device_vector<ComplexTypeCUDA> m_unpack_buf_p1;
     thrust::device_vector<ComplexTypeCUDA> m_unpack_buf_p2;
@@ -184,24 +183,21 @@ private:
                                static_cast<int>(m_plan.get_mbin()),
                                static_cast<int>(m_plan.get_noverlap()), stream);
     }
-}; // End CohFDMT<backend::CUDA>::Impl definition
+}; // End CohFDMTCUDA::Impl definition
 
-// CUDA-specific constructor implementation
-template <>
-template <std::same_as<backend::CUDA> P>
-CohFDMT<backend::CUDA>::CohFDMT(float f_center,
-                                float bw_sub,
-                                SizeType nsub,
-                                float tbin,
-                                SizeType nbin,
-                                SizeType nfft,
-                                float t_p,
-                                float dm_max,
-                                float dm_min,
-                                SizeType noverlap,
-                                std::string_view data_order,
-                                bool verbose,
-                                int device_id)
+CohFDMTCUDA::CohFDMTCUDA(float f_center,
+                         float bw_sub,
+                         SizeType nsub,
+                         float tbin,
+                         SizeType nbin,
+                         SizeType nfft,
+                         float t_p,
+                         float dm_max,
+                         float dm_min,
+                         SizeType noverlap,
+                         std::string_view data_order,
+                         bool verbose,
+                         int device_id)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,
                                     nsub,
@@ -214,42 +210,21 @@ CohFDMT<backend::CUDA>::CohFDMT(float f_center,
                                     noverlap,
                                     data_order,
                                     verbose,
-                                    device_id)) {
-    spdlog::debug("CohFDMT<CUDA> object created.");
-}
-template <>
-CohFDMT<backend::CUDA>::~CohFDMT() {
-    spdlog::debug("CohFDMT<CUDA> object destroyed.");
-}
-template <>
-CohFDMT<backend::CUDA>::CohFDMT(CohFDMT&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("CohFDMT<CUDA> object moved.");
-}
-template <>
-CohFDMT<backend::CUDA>&
-CohFDMT<backend::CUDA>::operator=(CohFDMT&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-const plans::CohFDMTPlan& CohFDMT<backend::CUDA>::get_plan() const {
+                                    device_id)) {}
+CohFDMTCUDA::~CohFDMTCUDA()                                       = default;
+CohFDMTCUDA::CohFDMTCUDA(CohFDMTCUDA&& other) noexcept            = default;
+CohFDMTCUDA& CohFDMTCUDA::operator=(CohFDMTCUDA&& other) noexcept = default;
+const plans::CohFDMTPlan& CohFDMTCUDA::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-// template <>
-// template <IntegralDataType DataType>
-// void CohFDMT<backend::CUDA>::execute(std::span<const DataType> data_in,
-//                                      std::span<float> dmt) const {
-//     m_impl->execute_h<DataType>(data_in, dmt);
-// }
-template <>
-template <IntegralDataType DataType, std::same_as<backend::CUDA> P>
-void CohFDMT<backend::CUDA>::execute(cuda::std::span<const DataType> d_data_in,
-                                     cuda::std::span<float> d_dmt,
-                                     cudaStream_t stream) const {
-    m_impl->execute_d<DataType>(d_data_in, d_dmt, stream);
+SizeType CohFDMTCUDA::get_dmt_size() const noexcept {
+    return m_impl->get_plan().get_dmt_size();
+}
+template <IntegralDataType DataType>
+void CohFDMTCUDA::execute(cuda::std::span<const DataType> data_in,
+                          cuda::std::span<float> dmt,
+                          cudaStream_t stream) const {
+    m_impl->execute_d<DataType>(data_in, dmt, stream);
 }
 
 } // namespace dmt::algorithms

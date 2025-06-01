@@ -1,3 +1,4 @@
+#include <cuda/std/span>
 #include <cuda_runtime_api.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -5,7 +6,7 @@
 
 #include <benchmark/benchmark.h>
 
-#include <dmt/fdmt/fdmt_cuda.hpp>
+#include "dmt/algorithms/fdmt.hpp"
 
 // https://github.com/jrhemstad/example_cuda_benchmark
 #define BENCH_CUDA_TRY(call)                                                   \
@@ -15,6 +16,15 @@
             throw std::runtime_error("CUDA error detected.");                  \
         }                                                                      \
     } while (0);
+
+#define BENCH_CUDA_CHECK_NOTHROW(call)                                         \
+    do {                                                                       \
+        auto const status = (call);                                            \
+        if (cudaSuccess != status) {                                           \
+            std::fprintf(stderr, "CUDA error in destructor: %s\n",             \
+                         cudaGetErrorString(status));                          \
+        }                                                                      \
+    } while (0)
 
 class CudaEventTimer {
 public:
@@ -32,9 +42,9 @@ public:
     explicit CudaEventTimer(benchmark::State& state,
                             bool flush_l2_cache = false,
                             cudaStream_t stream = 0)
-        : m_state(&state),
-          m_stream(stream) {
-        // flush all of L2$
+        : m_stream(stream),
+          m_state(&state) {
+        // flush all of L2 cache
         if (flush_l2_cache) {
             int current_device = 0;
             BENCH_CUDA_TRY(cudaGetDevice(&current_device));
@@ -65,13 +75,14 @@ public:
      *
      */
     ~CudaEventTimer() {
-        BENCH_CUDA_TRY(cudaEventRecord(m_stop, m_stream));
-        BENCH_CUDA_TRY(cudaEventSynchronize(m_stop));
+        BENCH_CUDA_CHECK_NOTHROW(cudaEventRecord(m_stop, m_stream));
+        BENCH_CUDA_CHECK_NOTHROW(cudaEventSynchronize(m_stop));
         float milliseconds = 0.0F;
-        BENCH_CUDA_TRY(cudaEventElapsedTime(&milliseconds, m_start, m_stop));
+        BENCH_CUDA_CHECK_NOTHROW(
+            cudaEventElapsedTime(&milliseconds, m_start, m_stop));
         m_state->SetIterationTime(milliseconds / (1000.0F));
-        BENCH_CUDA_TRY(cudaEventDestroy(m_start));
-        BENCH_CUDA_TRY(cudaEventDestroy(m_stop));
+        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_start));
+        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_stop));
     }
 
 private:
@@ -81,6 +92,7 @@ private:
     benchmark::State* m_state;
 };
 
+namespace {
 template <typename T>
 thrust::device_vector<T> generate_vector_device(size_t size) {
     thrust::default_random_engine rng;
@@ -94,6 +106,11 @@ thrust::device_vector<T> generate_vector_device(size_t size) {
 
     return vec;
 }
+} // namespace
+
+namespace dmt {
+using algorithms::FDMTCUDA;
+using plans::FDMTPlan;
 
 class FDMTCUDAFixture : public benchmark::Fixture {
 public:
@@ -109,12 +126,18 @@ public:
 
     void TearDown(const ::benchmark::State& /*unused*/) override {}
 
+    void SetUp(benchmark::State& state) override {
+        SetUp(static_cast<const benchmark::State&>(state));
+    }
+
+    void TearDown(benchmark::State& /*unused*/) override {}
+
     float f_min{}, f_max{}, tsamp{};
     size_t nchans{}, dt_max{}, nsamps{};
-    thrust::device_vector<float> waterfall;
+    thrust::device_vector<float> waterfall_d;
 };
 
-BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_planBuffer_gpu)
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_planBuffer_cuda)
 (benchmark::State& state) {
     for (auto _ : state) {
         CudaEventTimer raii{state};
@@ -122,63 +145,52 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_planBuffer_gpu)
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_initialise_gpu)
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda)
 (benchmark::State& state) {
-    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    thrust::device_vector<float> state_init_d(fdmt.get_plan().get_buffer_size(),
-                                              0.0F);
+    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_dmt_size(),
+                                       0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        fdmt.initialise(thrust::raw_pointer_cast(waterfall_d.data()),
-                        waterfall_d.size(),
-                        thrust::raw_pointer_cast(state_init_d.data()),
-                        state_init_d.size(), true);
+        fdmt_cuda.execute(
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(waterfall_d.data()),
+                waterfall_d.size()),
+            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                                   dmt_d.size()));
     }
 }
 
-BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_execute_gpu)
-(benchmark::State& state) {
-    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(), 0.0F);
-    for (auto _ : state) {
-        CudaEventTimer raii{state};
-        fdmt.execute(thrust::raw_pointer_cast(waterfall_d.data()),
-                     waterfall_d.size(), thrust::raw_pointer_cast(dmt_d.data()),
-                     dmt_d.size(), true);
-    }
-}
-
-BENCHMARK_DEFINE_F(FDMTGPUFixture, BM_fdmt_overall_gpu)
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
 (benchmark::State& state) {
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     thrust::device_vector<float> dmt_d(tmp_plan.get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-        fdmt.execute(thrust::raw_pointer_cast(waterfall_d.data()),
-                     waterfall_d.size(), thrust::raw_pointer_cast(dmt_d.data()),
-                     dmt_d.size(), true);
+        FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        fdmt_cuda.execute(
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(waterfall_d.data()),
+                waterfall_d.size()),
+            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                                   dmt_d.size()));
     }
 }
 
 constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 15;
 
-BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_planBuffer_gpu) // NOLINT 
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
-    ->UseManualTime();
-BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_initialise_gpu) // NOLINT
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
-    ->UseManualTime();
-BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_execute_gpu) // NOLINT
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
-    ->UseManualTime();
-BENCHMARK_REGISTER_F(FDMTGPUFixture, BM_fdmt_overall_gpu) // NOLINT
-    ->RangeMultiplier(2)
-    ->Range(kMinNsamps, kMaxNsamps)
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_planBuffer_cuda) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
     ->UseManualTime();
 
-// BENCHMARK_MAIN();
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_cuda) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
+    ->UseManualTime();
+
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_overall_cuda) // NOLINT
+    ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
+    ->UseManualTime();
+
+BENCHMARK_MAIN();
+} // namespace dmt

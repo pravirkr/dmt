@@ -135,36 +135,4 @@ void dedisperse(float* __restrict__ waterfall,
         }
     }
 }
-
-void add_offset_kernel(const float* __restrict__ arr1,
-                       SizeType size_in1,
-                       const float* __restrict__ arr2,
-                       SizeType size_in2,
-                       float* __restrict__ arr_out,
-                       SizeType size_out,
-                       SizeType offset) {
-    // Debug checks using assert (only active when NDEBUG is not defined)
-    assert(size_in1 == size_in2 && "Input sizes must be equal");
-    assert(size_out >= size_in1 && "Output size must be >= input size");
-    assert(offset < size_in1 && "Offset must be < input size");
-
-    SizeType t          = 0;
-    const SizeType nsum = size_in1 - offset;
-    std::copy_n(arr1, offset, arr_out);
-    t += offset;
-#pragma omp simd
-    for (SizeType i = 0; i < nsum; ++i) {
-        arr_out[offset + i] = arr1[offset + i] + arr2[i];
-    }
-    t += nsum;
-    const SizeType nrest = std::min(offset, size_out - size_in1);
-    if (nrest > 0) {
-        std::copy_n(arr2 + nsum, nrest, arr_out + size_in1);
-        t += nrest;
-    }
-    if (t < size_out) {
-        std::fill(arr_out + t, arr_out + size_out, 0.0F);
-    }
-}
-
 } // namespace dmt::utils

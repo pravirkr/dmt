@@ -1,7 +1,6 @@
 #pragma once
 
 #include <complex>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -111,44 +110,3 @@ inline int set_dmt_openmp_threads(int nthreads) {
 }
 
 } // namespace dmt
-
-namespace dmt::backend {
-
-/**
- * @brief Tag struct representing the CPU backend.
- */
-struct CPU {};
-
-/**
- * @brief Tag struct representing the CUDA backend.
- */
-struct CUDA {};
-
-/**
- * @brief Concept to constrain template parameters to valid execution backends.
- */
-template <typename T>
-concept ExecutionBackend = std::same_as<T, CPU> || std::same_as<T, CUDA>;
-
-/**
- * @brief Helper struct to define backend-specific types.
- */
-template <ExecutionBackend Backend>
-struct BackendTypes; // Primary template (intentionally undefined)
-
-/*
-// Specialization for CPU backend
-template <>
-struct BackendTypes<CPU> {
-    using ComplexType = ComplexType;
-};
-
-#ifdef DMT_ENABLE_CUDA
-// Specialization for CUDA backend
-template <>
-struct BackendTypes<CUDA> {
-    using ComplexType = ComplexTypeCUDA;
-};
-#endif // DMT_ENABLE_CUDA
-*/
-} // namespace dmt::backend

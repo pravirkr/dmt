@@ -12,8 +12,7 @@
 
 namespace dmt::algorithms {
 
-template <>
-class DDMT<backend::CPU>::Impl {
+class DDMTCPU::Impl {
 public:
     Impl(float f_min,
          float f_max,
@@ -30,7 +29,7 @@ public:
             m_nthreads = omp_get_max_threads();
         }
         omp_set_num_threads(m_nthreads);
-        spdlog::debug("DDMT<CPU>::Impl: Using {} OpenMP threads", m_nthreads);
+        spdlog::debug("DDMTCPU::Impl: Using {} OpenMP threads", m_nthreads);
 #endif
     }
 
@@ -47,7 +46,7 @@ public:
             m_nthreads = omp_get_max_threads();
         }
         omp_set_num_threads(m_nthreads);
-        spdlog::debug("DDMT<CPU>::Impl: Using {} OpenMP threads", m_nthreads);
+        spdlog::debug("DDMTCPU::Impl: Using {} OpenMP threads", m_nthreads);
 #endif
     }
 
@@ -111,51 +110,32 @@ private:
     int m_nthreads;
 };
 
-// CPU-specific constructor implementation
-template <>
-template <std::same_as<backend::CPU> P>
-DDMT<backend::CPU>::DDMT(float f_min,
-                         float f_max,
-                         SizeType nchans,
-                         float tsamp,
-                         float dm_max,
-                         float dm_step,
-                         float dm_min,
-                         int nthreads)
+DDMTCPU::DDMTCPU(float f_min,
+                 float f_max,
+                 SizeType nchans,
+                 float tsamp,
+                 float dm_max,
+                 float dm_step,
+                 float dm_min,
+                 int nthreads)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min, nthreads)) {
-    spdlog::debug("DDMT<CPU> object created.");
-}
+          f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min, nthreads)) {}
 
-template <>
-template <std::same_as<backend::CPU> P>
-DDMT<backend::CPU>::DDMT(float f_min,
-                         float f_max,
-                         SizeType nchans,
-                         float tsamp,
-                         const std::vector<float>& dm_arr,
-                         int nthreads)
+DDMTCPU::DDMTCPU(float f_min,
+                 float f_max,
+                 SizeType nchans,
+                 float tsamp,
+                 const std::vector<float>& dm_arr,
+                 int nthreads)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, tsamp, dm_arr, nthreads)) {
-    spdlog::debug("DDMT<CPU> object created.");
-}
-
-template <>
-DDMT<backend::CPU>::~DDMT() = default;
-
-template <>
-DDMT<backend::CPU>::DDMT(DDMT&& other) noexcept = default;
-
-template <>
-DDMT<backend::CPU>&
-DDMT<backend::CPU>::operator=(DDMT&& other) noexcept = default;
-template <>
-const plans::DDMTPlan& DDMT<backend::CPU>::get_plan() const {
+          f_min, f_max, nchans, tsamp, dm_arr, nthreads)) {}
+DDMTCPU::~DDMTCPU()                                   = default;
+DDMTCPU::DDMTCPU(DDMTCPU&& other) noexcept            = default;
+DDMTCPU& DDMTCPU::operator=(DDMTCPU&& other) noexcept = default;
+const plans::DDMTPlan& DDMTCPU::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-template <>
-void DDMT<backend::CPU>::execute(std::span<const float> waterfall,
-                                 std::span<float> dmt) {
+void DDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
 

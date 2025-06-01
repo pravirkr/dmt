@@ -146,7 +146,6 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
 }
 } // namespace
 
-template <>
 class FDMTCUDA::Impl {
 public:
     Impl(float f_min,
@@ -181,8 +180,7 @@ public:
             m_history_d.resize(m_plan.get_history_size(), 0.0F);
         }
         plans::transfer_fdmt_plan_to_device(m_plan.get_container(), m_plan_d);
-        cuda_utils::check_last_cuda_error(
-            "FDMT<CUDA>::Impl constructor failed");
+        cuda_utils::check_last_cuda_error("FDMTCUDA::Impl constructor failed");
     }
     ~Impl()                      = default;
     Impl(const Impl&)            = delete;
@@ -229,7 +227,7 @@ public:
         cuda_utils::check_last_cuda_error(
             "execute_h: cudaStreamSynchronize failed");
 
-        spdlog::debug("FDMT<CUDA>::Impl: Host execution complete.");
+        spdlog::debug("FDMTCUDA::Impl: Host execution complete.");
     }
     // Device execute: directly calls internal device logic
     void execute_d(cuda::std::span<const float> waterfall_d,
@@ -243,7 +241,7 @@ public:
 
         check_inputs(wf_size, dmt_size);
         execute_device(wf_ptr, wf_size, dmt_ptr, dmt_size, stream);
-        spdlog::debug("FDMT<CUDA>::Impl: Device execution complete on stream");
+        spdlog::debug("FDMTCUDA::Impl: Device execution complete on stream");
     }
 
 private:
@@ -323,7 +321,7 @@ private:
                 std::swap(state_in_ptr, state_out_ptr);
             }
         }
-        spdlog::debug("FDMT<CUDA>::Impl: Iterations submitted to stream.");
+        spdlog::debug("FDMTCUDA::Impl: Iterations submitted to stream.");
     }
 
     void initialise_device(const float* __restrict__ waterfall_d,
@@ -365,25 +363,21 @@ private:
             cuda_utils::check_last_cuda_error(
                 "History update cudaMemcpyAsync failed");
         }
-        spdlog::debug(
-            "FDMT<CUDA>::Impl: Initialise device submitted to stream.");
+        spdlog::debug("FDMTCUDA::Impl: Initialise device submitted to stream.");
     }
 }; // End FDMTCUDA::Impl definition
 
-// CUDA-specific constructor implementation
-template <>
-template <std::same_as<backend::CUDA> P>
-FDMT<backend::CUDA>::FDMT(float f_min,
-                          float f_max,
-                          SizeType nchans,
-                          SizeType nsamps,
-                          float tsamp,
-                          SizeType dt_max,
-                          SizeType dt_step,
-                          SizeType dt_min,
-                          bool use_history,
-                          bool verbose,
-                          int device_id)
+FDMTCUDA::FDMTCUDA(float f_min,
+                   float f_max,
+                   SizeType nchans,
+                   SizeType nsamps,
+                   float tsamp,
+                   SizeType dt_max,
+                   SizeType dt_step,
+                   SizeType dt_min,
+                   bool use_history,
+                   bool verbose,
+                   int device_id)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -394,42 +388,19 @@ FDMT<backend::CUDA>::FDMT(float f_min,
                                     dt_min,
                                     use_history,
                                     verbose,
-                                    device_id)) {
-    spdlog::debug("FDMT<CUDA> object created for device {}", device_id);
-}
-
-template <>
-FDMT<backend::CUDA>::~FDMT() {
-    spdlog::debug("FDMT<CUDA> object destroyed.");
-}
-template <>
-FDMT<backend::CUDA>::FDMT(FDMT&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("FDMT<CUDA> object moved.");
-}
-template <>
-FDMT<backend::CUDA>& FDMT<backend::CUDA>::operator=(FDMT&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-const plans::FDMTPlan& FDMT<backend::CUDA>::get_plan() const {
+                                    device_id)) {}
+FDMTCUDA::~FDMTCUDA()                                    = default;
+FDMTCUDA::FDMTCUDA(FDMTCUDA&& other) noexcept            = default;
+FDMTCUDA& FDMTCUDA::operator=(FDMTCUDA&& other) noexcept = default;
+const plans::FDMTPlan& FDMTCUDA::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-template <>
-void FDMT<backend::CUDA>::execute(std::span<const float> waterfall,
-                                  std::span<float> dmt) {
+void FDMTCUDA::execute(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->execute_h(waterfall, dmt);
 }
-
-template <>
-template <std::same_as<backend::CUDA> P>
-void FDMT<backend::CUDA>::execute(cuda::std::span<const float> d_waterfall,
-                                  cuda::std::span<float> d_dmt,
-                                  cudaStream_t stream) {
+void FDMTCUDA::execute(cuda::std::span<const float> d_waterfall,
+                       cuda::std::span<float> d_dmt,
+                       cudaStream_t stream) {
     m_impl->execute_d(d_waterfall, d_dmt, stream);
 }
-
 } // namespace dmt::algorithms

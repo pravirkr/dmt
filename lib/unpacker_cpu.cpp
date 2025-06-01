@@ -5,14 +5,12 @@
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
-#include <utility>
 
 #include "spdlog/spdlog.h"
 
 namespace dmt::utils {
 
-template <>
-class DataUnpacker<backend::CPU>::Impl {
+class DataUnpackerCPU::Impl {
 public:
     static constexpr SizeType kChunkSize = 64;
     static constexpr SizeType kNpol      = 2;
@@ -40,7 +38,7 @@ public:
             throw std::invalid_argument(
                 std::format("Invalid input order: {}", in_order));
         }
-        spdlog::debug("DataUnpacker<CPU>::Impl: Initialised with {} threads.",
+        spdlog::debug("DataUnpackerCPU::Impl: Initialised with {} threads.",
                       m_nthreads);
     }
 
@@ -69,10 +67,10 @@ public:
                 data_in, data_p1, data_p2);
             break;
         default:
-            throw std::logic_error("DataUnpacker<CPU>: Unsupported data order "
-                                   "encountered in execute.");
+            throw std::logic_error("DataUnpackerCPU::Impl: Unsupported data "
+                                   "order encountered in execute.");
         }
-        spdlog::debug("DataUnpacker<CPU>::Impl: Execution complete.");
+        spdlog::debug("DataUnpackerCPU::Impl: Execution complete.");
     }
 
 private:
@@ -227,57 +225,32 @@ private:
         }
     }
 
-}; // End DataUnpacker<backend::CPU>::Impl definition
+}; // End DataUnpackerCPU::Impl definition
 
-// CPU-specific constructor implementation
-template <>
-template <std::same_as<backend::CPU> P>
-DataUnpacker<backend::CPU>::DataUnpacker(SizeType nsub,
-                                         SizeType nbin,
-                                         SizeType noverlap,
-                                         SizeType nfft,
-                                         std::string_view in_order,
-                                         int nthreads)
+DataUnpackerCPU::DataUnpackerCPU(SizeType nsub,
+                                 SizeType nbin,
+                                 SizeType noverlap,
+                                 SizeType nfft,
+                                 std::string_view in_order,
+                                 int nthreads)
     : m_impl(std::make_unique<Impl>(
-          nsub, nbin, noverlap, nfft, in_order, nthreads)) {
-    spdlog::debug("DataUnpacker<CPU> object created.");
-}
-template <>
-DataUnpacker<backend::CPU>::~DataUnpacker() {
-    spdlog::debug("DataUnpacker<CPU> object destroyed.");
-}
-template <>
-DataUnpacker<backend::CPU>::DataUnpacker(DataUnpacker&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("DataUnpacker<CPU> object moved.");
-}
-template <>
-DataUnpacker<backend::CPU>&
-DataUnpacker<backend::CPU>::operator=(DataUnpacker&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-template <IntegralDataType DataType, std::same_as<backend::CPU> P>
-void DataUnpacker<backend::CPU>::execute(std::span<const DataType> data_in,
-                                         std::span<ComplexType> data_p1,
-                                         std::span<ComplexType> data_p2) const {
+          nsub, nbin, noverlap, nfft, in_order, nthreads)) {}
+DataUnpackerCPU::~DataUnpackerCPU()                                = default;
+DataUnpackerCPU::DataUnpackerCPU(DataUnpackerCPU&& other) noexcept = default;
+DataUnpackerCPU&
+DataUnpackerCPU::operator=(DataUnpackerCPU&& other) noexcept = default;
+template <IntegralDataType DataType>
+void DataUnpackerCPU::execute(std::span<const DataType> data_in,
+                              std::span<ComplexType> data_p1,
+                              std::span<ComplexType> data_p2) const {
     m_impl->execute<DataType>(data_in, data_p1, data_p2);
 }
-// Explicit instantiation (for linking)
-template DataUnpacker<backend::CPU>::DataUnpacker(
-    SizeType, SizeType, SizeType, SizeType, std::string_view, int);
 
-// Instantiate the public execute method for each supported DataType
-template void
-    DataUnpacker<backend::CPU>::execute<int8_t>(std::span<const int8_t>,
+template void DataUnpackerCPU::execute<int8_t>(std::span<const int8_t>,
+                                               std::span<ComplexType>,
+                                               std::span<ComplexType>) const;
+template void DataUnpackerCPU::execute<uint8_t>(std::span<const uint8_t>,
                                                 std::span<ComplexType>,
                                                 std::span<ComplexType>) const;
-template void
-    DataUnpacker<backend::CPU>::execute<uint8_t>(std::span<const uint8_t>,
-                                                 std::span<ComplexType>,
-                                                 std::span<ComplexType>) const;
 
 } // namespace dmt::utils

@@ -19,8 +19,7 @@
 
 namespace dmt::algorithms {
 
-template <>
-class CohFDMT<backend::CPU>::Impl {
+class CohFDMTCPU::Impl {
 public:
     Impl(float f_center,
          float bw_sub,
@@ -88,8 +87,8 @@ private:
     plans::CohFDMTPlan m_plan;
     int m_nthreads;
     std::unique_ptr<utils::FFTManagerCPU> m_thefft;
-    std::unique_ptr<algorithms::FDMT<backend::CPU>> m_thefdmt;
-    std::unique_ptr<utils::DataUnpacker<backend::CPU>> m_theunpacker;
+    std::unique_ptr<algorithms::FDMTCPU> m_thefdmt;
+    std::unique_ptr<utils::DataUnpackerCPU> m_theunpacker;
 
     std::vector<ComplexType> m_unpack_buf_p1;
     std::vector<ComplexType> m_unpack_buf_p2;
@@ -105,10 +104,10 @@ private:
             m_plan.get_mbin(), m_plan.get_nchan(), m_nthreads);
         m_thefft->initialize_plans(std::span<ComplexType>(m_unpack_buf_p1),
                                    std::span<ComplexType>(m_delay_buf_p1));
-        m_thefdmt = std::make_unique<algorithms::FDMT<backend::CPU>>(
+        m_thefdmt = std::make_unique<algorithms::FDMTCPU>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max());
-        m_theunpacker = std::make_unique<utils::DataUnpacker<backend::CPU>>(
+        m_theunpacker = std::make_unique<utils::DataUnpackerCPU>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_nthreads);
 
@@ -146,24 +145,21 @@ private:
                                m_plan.get_mbin(), m_plan.get_noverlap());
     }
 
-}; // End CohFDMT<backend::CPU>::Impl definition
+}; // End CohFDMTCPU::Impl definition
 
-// CPU-specific constructor implementation
-template <>
-template <std::same_as<backend::CPU> P>
-CohFDMT<backend::CPU>::CohFDMT(float f_center,
-                               float bw_sub,
-                               SizeType nsub,
-                               float tbin,
-                               SizeType nbin,
-                               SizeType nfft,
-                               float t_p,
-                               float dm_max,
-                               float dm_min,
-                               SizeType noverlap,
-                               std::string_view data_order,
-                               bool verbose,
-                               int nthreads)
+CohFDMTCPU::CohFDMTCPU(float f_center,
+                       float bw_sub,
+                       SizeType nsub,
+                       float tbin,
+                       SizeType nbin,
+                       SizeType nfft,
+                       float t_p,
+                       float dm_max,
+                       float dm_min,
+                       SizeType noverlap,
+                       std::string_view data_order,
+                       bool verbose,
+                       int nthreads)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,
                                     nsub,
@@ -176,56 +172,27 @@ CohFDMT<backend::CPU>::CohFDMT(float f_center,
                                     noverlap,
                                     data_order,
                                     verbose,
-                                    nthreads)) {
-    spdlog::debug("CohFDMT<CPU> object created.");
-}
-template <>
-CohFDMT<backend::CPU>::~CohFDMT() {
-    spdlog::debug("CohFDMT<CPU> object destroyed.");
-}
-template <>
-CohFDMT<backend::CPU>::CohFDMT(CohFDMT&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("CohFDMT<CPU> object moved.");
-}
-template <>
-CohFDMT<backend::CPU>&
-CohFDMT<backend::CPU>::operator=(CohFDMT&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-const plans::CohFDMTPlan& CohFDMT<backend::CPU>::get_plan() const {
+                                    nthreads)) {}
+
+CohFDMTCPU::~CohFDMTCPU()                                      = default;
+CohFDMTCPU::CohFDMTCPU(CohFDMTCPU&& other) noexcept            = default;
+CohFDMTCPU& CohFDMTCPU::operator=(CohFDMTCPU&& other) noexcept = default;
+const plans::CohFDMTPlan& CohFDMTCPU::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-template <>
+SizeType CohFDMTCPU::get_dmt_size() const noexcept {
+    return m_impl->get_plan().get_dmt_size();
+}
 template <IntegralDataType DataType>
-void CohFDMT<backend::CPU>::execute(std::span<const DataType> data_in,
-                                    std::span<float> dmt) const {
+void CohFDMTCPU::execute(std::span<const DataType> data_in,
+                         std::span<float> dmt) const {
     m_impl->execute<DataType>(data_in, dmt);
 }
 
-// Explicit instantiation (for linking)
-template CohFDMT<backend::CPU>::CohFDMT(float,
-                                        float,
-                                        SizeType,
-                                        float,
-                                        SizeType,
-                                        SizeType,
-                                        float,
-                                        float,
-                                        float,
-                                        SizeType,
-                                        std::string_view,
-                                        bool,
-                                        int);
-
 // Instantiate the public execute method for each supported DataType
-template void CohFDMT<backend::CPU>::execute<int8_t>(std::span<const int8_t>,
-                                                     std::span<float>) const;
-template void CohFDMT<backend::CPU>::execute<uint8_t>(std::span<const uint8_t>,
-                                                      std::span<float>) const;
+template void CohFDMTCPU::execute<int8_t>(std::span<const int8_t>,
+                                          std::span<float>) const;
+template void CohFDMTCPU::execute<uint8_t>(std::span<const uint8_t>,
+                                           std::span<float>) const;
 
 } // namespace dmt::algorithms

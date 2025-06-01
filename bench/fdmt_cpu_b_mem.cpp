@@ -4,8 +4,7 @@
 
 #include <benchmark/benchmark.h>
 
-#include "dmt/common/plans.hpp"
-#include "dmt/fdmt.hpp"
+#include "dmt/algorithms/fdmt.hpp"
 
 // Custom memory manager to track allocations
 class CustomMemoryManager : public benchmark::MemoryManager {
@@ -50,9 +49,21 @@ void* operator new(std::size_t sz) { // NOLINT
     return ptr;
 }
 
+// Provide both sized and unsized operator delete
+void operator delete(void* ptr) noexcept { // NOLINT
+    // For unsized delete, we can't track the exact size, but we still need to
+    // free
+    if (ptr != nullptr) {
+        std::free(ptr); // NOLINT
+    }
+}
+
 void operator delete(void* ptr, std::size_t size) noexcept { // NOLINT
     custom_mm.deallocate(ptr, size);
 }
+
+namespace dmt {
+using algorithms::FDMTCPU;
 
 // Helper function to generate random data
 template <typename T>
@@ -89,8 +100,8 @@ public:
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_memory_usage)
 (benchmark::State& state) {
     for (auto _ : state) {
-        dmt::FDMT<dmt::backend::CPU> fdmt(f_min, f_max, nchans, nsamps, tsamp,
-                                          dt_max, 1, 0, false, false, nthreads);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, false,
+                     false, nthreads);
         state.PauseTiming();
         std::vector<float> dmt(fdmt.get_plan().get_dmt_size());
         state.ResumeTiming();
@@ -108,9 +119,15 @@ BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall_memory_usage) // NOLINT
 
 // Separate main function for memory benchmarks
 // BENCHMARK_MAIN();
-int main(int argc, char** argv) {
+int main(int argc, char** argv) { // NOLINT
     ::benchmark::RegisterMemoryManager(&custom_mm);
     ::benchmark::Initialize(&argc, argv);
+    if (::benchmark::ReportUnrecognizedArguments(argc, argv)) {
+        return 1;
+    }
     ::benchmark::RunSpecifiedBenchmarks();
     ::benchmark::Shutdown();
+    return 0;
 }
+
+} // namespace dmt

@@ -15,8 +15,7 @@
 
 namespace dmt::algorithms {
 
-template <>
-class FDMT<backend::CPU>::Impl {
+class FDMTCPU::Impl {
 public:
     Impl(float f_min,
          float f_max,
@@ -43,7 +42,7 @@ public:
           m_state_out(m_plan.get_buffer_size(), 0.0F),
           m_history(use_history ? m_plan.get_history_size() : 0, 0.0F),
           m_nthreads(set_dmt_openmp_threads(nthreads)) {
-        spdlog::debug("FDMT<CPU>::Impl: Initialised with {} threads.",
+        spdlog::debug("FDMTCPU::Impl: Initialised with {} threads.",
                       m_nthreads);
     }
 
@@ -68,7 +67,7 @@ public:
         }
         // Last iteration directly writes to the output buffer
         execute_iter(state_in_ptr, dmt.data(), niters);
-        spdlog::debug("FDMT<CPU>::Impl: Execution complete.");
+        spdlog::debug("FDMTCPU::Impl: Execution complete.");
     }
 
 private:
@@ -217,33 +216,30 @@ private:
         const auto nsamps = m_plan.get_nsamps();
         if (waterfall_size != nchans * nsamps) {
             throw std::invalid_argument(std::format(
-                "FDMT<CPU>: Invalid size of waterfall. Expected {}, got {}",
+                "FDMTCPU: Invalid size of waterfall. Expected {}, got {}",
                 nchans * nsamps, waterfall_size));
         }
         if (dmt_size != m_plan.get_dmt_size()) {
-            throw std::invalid_argument(std::format(
-                "FDMT<CPU>: Invalid size of dmt. Expected {}, got {}",
-                m_plan.get_dmt_size(), dmt_size));
+            throw std::invalid_argument(
+                std::format("FDMTCPU: Invalid size of dmt. Expected {}, got {}",
+                            m_plan.get_dmt_size(), dmt_size));
         }
-        spdlog::debug("FDMT<CPU>: Input dimensions check passed: {}x{}", nchans,
+        spdlog::debug("FDMTCPU: Input dimensions check passed: {}x{}", nchans,
                       nsamps);
     }
-}; // End FDMT<backend::CPU>::Impl definition
+}; // End FDMTCPU::Impl definition
 
-// CPU-specific constructor implementation
-template <>
-template <std::same_as<backend::CPU> P>
-FDMT<backend::CPU>::FDMT(float f_min,
-                         float f_max,
-                         SizeType nchans,
-                         SizeType nsamps,
-                         float tsamp,
-                         SizeType dt_max,
-                         SizeType dt_step,
-                         SizeType dt_min,
-                         bool use_history,
-                         bool verbose,
-                         int nthreads)
+FDMTCPU::FDMTCPU(float f_min,
+                 float f_max,
+                 SizeType nchans,
+                 SizeType nsamps,
+                 float tsamp,
+                 SizeType dt_max,
+                 SizeType dt_step,
+                 SizeType dt_min,
+                 bool use_history,
+                 bool verbose,
+                 int nthreads)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -254,46 +250,15 @@ FDMT<backend::CPU>::FDMT(float f_min,
                                     dt_min,
                                     use_history,
                                     verbose,
-                                    nthreads)) {
-    spdlog::debug("FDMT<CPU> object created.");
-}
-template <>
-FDMT<backend::CPU>::~FDMT() {
-    spdlog::debug("FDMT<CPU> object destroyed.");
-}
-template <>
-FDMT<backend::CPU>::FDMT(FDMT&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("FDMT<CPU> object moved.");
-}
-template <>
-FDMT<backend::CPU>& FDMT<backend::CPU>::operator=(FDMT&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-const plans::FDMTPlan& FDMT<backend::CPU>::get_plan() const {
+                                    nthreads)) {}
+FDMTCPU::~FDMTCPU()                                   = default;
+FDMTCPU::FDMTCPU(FDMTCPU&& other) noexcept            = default;
+FDMTCPU& FDMTCPU::operator=(FDMTCPU&& other) noexcept = default;
+const plans::FDMTPlan& FDMTCPU::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-template <>
-void FDMT<backend::CPU>::execute(std::span<const float> waterfall,
-                                 std::span<float> dmt) {
+void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
-
-// Explicit instantiation (for linking)
-template FDMT<backend::CPU>::FDMT(float,
-                                  float,
-                                  SizeType,
-                                  SizeType,
-                                  float,
-                                  SizeType,
-                                  SizeType,
-                                  SizeType,
-                                  bool,
-                                  bool,
-                                  int);
 
 } // namespace dmt::algorithms

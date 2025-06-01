@@ -5,7 +5,6 @@
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
-#include <utility>
 
 #include <cuda/std/complex>
 #include <cuda/std/span>
@@ -83,8 +82,7 @@ struct UnpackAndPadFunctor {
 };
 } // namespace
 
-template <>
-class DataUnpacker<backend::CUDA>::Impl {
+class DataUnpackerCUDA::Impl {
 public:
     static constexpr SizeType kNpol = 2;
 
@@ -100,11 +98,10 @@ public:
           m_nfft(nfft),
           m_device_id(device_id) {
         cuda_utils::set_device(m_device_id);
-        spdlog::debug("DataUnpacker<CUDA>::Impl: Set device to {}.",
-                      m_device_id);
+        spdlog::debug("DataUnpackerCUDA::Impl: Set device to {}.", m_device_id);
         if (m_nbin <= 2 * m_noverlap) {
             throw std::invalid_argument(
-                std::format("DataUnpacker<CUDA>: Invalid nbin and noverlap "
+                std::format("DataUnpackerCUDA::Impl: Invalid nbin and noverlap "
                             "values: {} and {}",
                             m_nbin, m_noverlap));
         }
@@ -126,7 +123,7 @@ public:
         const auto m_expected_in_bytes = m_expected_in_size * sizeof_datatype;
         m_d_in_buffer.resize(m_expected_in_bytes);
 
-        spdlog::debug("DataUnpacker<CUDA>::Impl: Initialised using device {}.",
+        spdlog::debug("DataUnpackerCUDA::Impl: Initialised using device {}.",
                       m_device_id);
     }
 
@@ -148,10 +145,10 @@ public:
         std::byte* d_in_byte_ptr =
             thrust::raw_pointer_cast(m_d_in_buffer.data());
         auto* d_in_ptr = reinterpret_cast<DataType*>(d_in_byte_ptr);
-        DMT_CHECK_CUDA_CALL(
-            cudaMemcpyAsync(d_in_ptr, data_in.data(), data_in.size_bytes(),
-                            cudaMemcpyHostToDevice, stream),
-            "DataUnpacker<backend::CUDA>::Impl: cudaMemcpyAsync");
+        DMT_CHECK_CUDA_CALL(cudaMemcpyAsync(d_in_ptr, data_in.data(),
+                                            data_in.size_bytes(),
+                                            cudaMemcpyHostToDevice, stream),
+                            "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
 
         auto data_in_d_span = cuda::std::span(d_in_ptr, m_expected_in_size);
 
@@ -169,11 +166,11 @@ public:
                 data_in_d_span, data_p1, data_p2, stream);
             break;
         default:
-            throw std::logic_error("DataUnpacker<CUDA>: Unsupported data order "
-                                   "encountered in execute.");
+            throw std::logic_error(
+                "DataUnpackerCUDA::Impl: Unsupported data order "
+                "encountered in execute.");
         }
-        spdlog::debug(
-            "DataUnpacker<CUDA>::Impl: Execution submitted to stream");
+        spdlog::debug("DataUnpackerCUDA::Impl: Execution submitted to stream");
     }
 
 private:
@@ -192,19 +189,22 @@ private:
                         SizeType out1_size,
                         SizeType out2_size) const {
         if (in_size != m_expected_in_size) {
-            throw std::runtime_error(std::format(
-                "DataUnpacker<CPU>: Invalid input size. Expected {}, got {}.",
-                m_expected_in_size, in_size));
+            throw std::runtime_error(
+                std::format("DataUnpackerCUDA::Impl: Invalid input size. "
+                            "Expected {}, got {}.",
+                            m_expected_in_size, in_size));
         }
         if (out1_size != m_expected_out_size) {
-            throw std::runtime_error(std::format(
-                "DataUnpacker<CPU>: Invalid output size. Expected {}, got {}.",
-                m_expected_out_size, out1_size));
+            throw std::runtime_error(
+                std::format("DataUnpackerCUDA::Impl: Invalid output size. "
+                            "Expected {}, got {}.",
+                            m_expected_out_size, out1_size));
         }
         if (out2_size != m_expected_out_size) {
-            throw std::runtime_error(std::format(
-                "DataUnpacker<CPU>: Invalid output size. Expected {}, got {}.",
-                m_expected_out_size, out2_size));
+            throw std::runtime_error(
+                std::format("DataUnpackerCUDA::Impl: Invalid output size. "
+                            "Expected {}, got {}.",
+                            m_expected_out_size, out2_size));
         }
     }
 
@@ -244,49 +244,28 @@ private:
             .nsamp     = static_cast<int>(m_nsamp),
             .ri_stride = static_cast<int>(ri_stride)};
         thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-        cuda_utils::check_last_cuda_error(
-            "thrust::for_each unpack/pad failed");
+        cuda_utils::check_last_cuda_error("thrust::for_each unpack/pad failed");
     }
 
-}; // End DataUnpacker<backend::CUDA>::Impl definition
+}; // End DataUnpackerCUDA::Impl definition
 
-// CUDA-specific constructor implementation
-template <>
-template <std::same_as<backend::CUDA> P>
-DataUnpacker<backend::CUDA>::DataUnpacker(SizeType nsub,
-                                          SizeType nbin,
-                                          SizeType noverlap,
-                                          SizeType nfft,
-                                          std::string_view in_order,
-                                          int device_id)
+DataUnpackerCUDA::DataUnpackerCUDA(SizeType nsub,
+                                   SizeType nbin,
+                                   SizeType noverlap,
+                                   SizeType nfft,
+                                   std::string_view in_order,
+                                   int device_id)
     : m_impl(std::make_unique<Impl>(
-          nsub, nbin, noverlap, nfft, in_order, device_id)) {
-    spdlog::debug("DataUnpacker<CUDA> object created.");
-}
-template <>
-DataUnpacker<backend::CUDA>::~DataUnpacker() {
-    spdlog::debug("DataUnpacker<CUDA> object destroyed.");
-}
-template <>
-DataUnpacker<backend::CUDA>::DataUnpacker(DataUnpacker&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("DataUnpacker<CUDA> object moved.");
-}
-template <>
-DataUnpacker<backend::CUDA>&
-DataUnpacker<backend::CUDA>::operator=(DataUnpacker&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-template <IntegralDataType DataType, std::same_as<backend::CUDA> P>
-void DataUnpacker<backend::CUDA>::execute(
-    std::span<const DataType> data_in,
-    cuda::std::span<ComplexTypeCUDA> data_p1,
-    cuda::std::span<ComplexTypeCUDA> data_p2,
-    cudaStream_t stream) const {
+          nsub, nbin, noverlap, nfft, in_order, device_id)) {}
+DataUnpackerCUDA::~DataUnpackerCUDA()                                 = default;
+DataUnpackerCUDA::DataUnpackerCUDA(DataUnpackerCUDA&& other) noexcept = default;
+DataUnpackerCUDA&
+DataUnpackerCUDA::operator=(DataUnpackerCUDA&& other) noexcept = default;
+template <IntegralDataType DataType>
+void DataUnpackerCUDA::execute(std::span<const DataType> data_in,
+                               cuda::std::span<ComplexTypeCUDA> data_p1,
+                               cuda::std::span<ComplexTypeCUDA> data_p2,
+                               cudaStream_t stream) const {
     m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
 }
 

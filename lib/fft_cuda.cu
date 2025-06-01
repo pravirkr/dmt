@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstddef>
-#include <utility>
 
 #include <cuda/std/complex>
 #include <cuda/std/span>
@@ -17,8 +16,7 @@
 
 namespace dmt::utils {
 
-template <>
-class FFTManager<backend::CUDA>::Impl {
+class FFTManagerCUDA::Impl {
 public:
     Impl(int nfft, int nsub, int nbin, int mbin, int nchan, int device_id)
         : m_nfft(nfft),
@@ -28,25 +26,25 @@ public:
           m_nchan(nchan),
           m_device_id(device_id) {
         cuda_utils::set_device(m_device_id);
-        spdlog::debug("FFTManager<CUDA>::Impl: Initialized CUDA device {}",
+        spdlog::debug("FFTManagerCUDA::Impl: Initialized CUDA device {}",
                       m_device_id);
 
         try {
             create_plans();
             allocate_workspace();
         } catch (const std::exception& e) {
-            spdlog::error("FFTManager<CUDA>::Impl: Initialization failed: {}",
+            spdlog::error("FFTManagerCUDA::Impl: Initialization failed: {}",
                           e.what());
             cleanup_resources();
             throw;
         }
-        spdlog::debug("FFTManager<CUDA>::Impl: Successfully created with "
+        spdlog::debug("FFTManagerCUDA::Impl: Successfully created with "
                       "nfft={}, nsub={}, nbin={}, mbin={}, nchan={}",
                       m_nfft, m_nsub, m_nbin, m_mbin, m_nchan);
     }
 
     ~Impl() {
-        spdlog::debug("FFTManager<CUDA>::Impl: Destroying instance");
+        spdlog::debug("FFTManagerCUDA::Impl: Destroying instance");
         cleanup_resources();
     }
     Impl(const Impl&)            = delete;
@@ -219,47 +217,24 @@ private:
         m_workspace_size = 0;
     }
 
-}; // End FFTManager<backend::CUDA>::Impl definition
+}; // End FFTManagerCUDA::Impl definition
 
-// CUDA-specific constructor implementation
-template <>
-template <std::same_as<backend::CUDA> P>
-FFTManager<backend::CUDA>::FFTManager(
+FFTManagerCUDA::FFTManagerCUDA(
     int nfft, int nsub, int nbin, int mbin, int nchan, int device_id)
     : m_impl(std::make_unique<Impl>(nfft, nsub, nbin, mbin, nchan, device_id)) {
-    spdlog::debug("FFTManager<CUDA> object created for device {}.", device_id);
 }
-template <>
-FFTManager<backend::CUDA>::~FFTManager() {
-    spdlog::debug("FFTManager<CUDA> object destroyed.");
-}
-template <>
-FFTManager<backend::CUDA>::FFTManager(FFTManager&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("FFTManager<CUDA> object moved.");
-}
-template <>
-FFTManager<backend::CUDA>&
-FFTManager<backend::CUDA>::operator=(FFTManager&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-template <std::same_as<backend::CUDA> P>
-void FFTManager<backend::CUDA>::forward_fft(
-    cuda::std::span<ComplexTypeCUDA> data1,
-    cuda::std::span<ComplexTypeCUDA> data2,
-    cudaStream_t stream) const {
+FFTManagerCUDA::~FFTManagerCUDA()                               = default;
+FFTManagerCUDA::FFTManagerCUDA(FFTManagerCUDA&& other) noexcept = default;
+FFTManagerCUDA&
+FFTManagerCUDA::operator=(FFTManagerCUDA&& other) noexcept = default;
+void FFTManagerCUDA::forward_fft(cuda::std::span<ComplexTypeCUDA> data1,
+                                 cuda::std::span<ComplexTypeCUDA> data2,
+                                 cudaStream_t stream) const {
     m_impl->forward_fft(data1, data2, stream);
 }
-template <>
-template <std::same_as<backend::CUDA> P>
-void FFTManager<backend::CUDA>::backward_fft(
-    cuda::std::span<ComplexTypeCUDA> data1,
-    cuda::std::span<ComplexTypeCUDA> data2,
-    cudaStream_t stream) const {
+void FFTManagerCUDA::backward_fft(cuda::std::span<ComplexTypeCUDA> data1,
+                                  cuda::std::span<ComplexTypeCUDA> data2,
+                                  cudaStream_t stream) const {
     m_impl->backward_fft(data1, data2, stream);
 }
 

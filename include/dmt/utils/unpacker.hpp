@@ -1,6 +1,5 @@
 #pragma once
 
-#include <concepts>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -24,12 +23,8 @@ namespace dmt::utils {
  *
  * Handles different input data types (uint8_t, int8_t) and memory layouts
  * (BasebandDataOrder), converting to complex float output suitable for FFT.
- *
- * @tparam Backend The execution backend (dmt::backend::CPU or
- * dmt::backend::CUDA).
  */
-template <backend::ExecutionBackend Backend = backend::CPU>
-class DataUnpacker {
+class DataUnpackerCPU {
 public:
     /**
      * @brief Construct for CPU backend.
@@ -41,39 +36,18 @@ public:
      * "FTPRI").
      * @param nthreads Number of threads for OpenMP execution.
      */
-    template <std::same_as<backend::CPU> P = Backend>
-    DataUnpacker(SizeType nsub,
-                 SizeType nbin,
-                 SizeType noverlap,
-                 SizeType nfft,
-                 std::string_view in_order,
-                 int nthreads = 1);
+    DataUnpackerCPU(SizeType nsub,
+                    SizeType nbin,
+                    SizeType noverlap,
+                    SizeType nfft,
+                    std::string_view in_order,
+                    int nthreads = 1);
 
-#ifdef DMT_ENABLE_CUDA
-    /**
-     * @brief Construct for CUDA backend.
-     * @param nsub Number of subbands.
-     * @param nbin Number of frequency bins per subband in output.
-     * @param noverlap Overlap size for FFT processing.
-     * @param nfft Number of FFTs / time blocks.
-     * @param in_order String identifier for input data order (e.g., "PRITF",
-     * "FTPRI").
-     * @param device_id CUDA device ID.
-     */
-    template <std::same_as<backend::CUDA> P = Backend>
-    DataUnpacker(SizeType nsub,
-                 SizeType nbin,
-                 SizeType noverlap,
-                 SizeType nfft,
-                 std::string_view in_order,
-                 int device_id = 0);
-#endif // DMT_ENABLE_CUDA
-
-    ~DataUnpacker();
-    DataUnpacker(DataUnpacker&&) noexcept;
-    DataUnpacker& operator=(DataUnpacker&&) noexcept;
-    DataUnpacker(const DataUnpacker&)            = delete;
-    DataUnpacker& operator=(const DataUnpacker&) = delete;
+    ~DataUnpackerCPU();
+    DataUnpackerCPU(DataUnpackerCPU&&) noexcept;
+    DataUnpackerCPU& operator=(DataUnpackerCPU&&) noexcept;
+    DataUnpackerCPU(const DataUnpackerCPU&)            = delete;
+    DataUnpackerCPU& operator=(const DataUnpackerCPU&) = delete;
 
     /**
      * @brief Unpacks input data and pads for FFT (CPU version).
@@ -84,12 +58,50 @@ public:
      * @param data_p2 Span viewing the output host buffer for polarization 2
      * (ComplexType).
      */
-    template <IntegralDataType DataType, std::same_as<backend::CPU> P = Backend>
+    template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in,
                  std::span<ComplexType> data_p1,
                  std::span<ComplexType> data_p2) const;
 
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 #ifdef DMT_ENABLE_CUDA
+/**
+ * @brief Unpacks and pads input data based on specified order and type.
+ *
+ * Handles different input data types (uint8_t, int8_t) and memory layouts
+ * (BasebandDataOrder), converting to complex float output suitable for FFT.
+ *
+ * @tparam Backend The execution backend (dmt::backend::CPU or
+ * dmt::backend::CUDA).
+ */
+class DataUnpackerCUDA {
+public:
+    /**
+     * @brief Construct for CUDA backend.
+     * @param nsub Number of subbands.
+     * @param nbin Number of frequency bins per subband in output.
+     * @param noverlap Overlap size for FFT processing.
+     * @param nfft Number of FFTs / time blocks.
+     * @param in_order String identifier for input data order (e.g., "PRITF",
+     * "FTPRI").
+     * @param device_id CUDA device ID.
+     */
+    DataUnpackerCUDA(SizeType nsub,
+                     SizeType nbin,
+                     SizeType noverlap,
+                     SizeType nfft,
+                     std::string_view in_order,
+                     int device_id = 0);
+    ~DataUnpackerCUDA();
+    DataUnpackerCUDA(DataUnpackerCUDA&&) noexcept;
+    DataUnpackerCUDA& operator=(DataUnpackerCUDA&&) noexcept;
+    DataUnpackerCUDA(const DataUnpackerCUDA&)            = delete;
+    DataUnpackerCUDA& operator=(const DataUnpackerCUDA&) = delete;
+
     /**
      * @brief Unpacks input data and pads for FFT (CUDA version).
      * @tparam DataType The integral input data type (e.g., uint8_t, int8_t).
@@ -101,23 +113,16 @@ public:
      * (ComplexTypeCUDA).
      * @param stream CUDA stream for execution.
      */
-    template <IntegralDataType DataType,
-              std::same_as<backend::CUDA> P = Backend>
+    template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in,
                  cuda::std::span<ComplexTypeCUDA> data_p1,
                  cuda::std::span<ComplexTypeCUDA> data_p2,
                  cudaStream_t stream = nullptr) const;
-#endif // DMT_ENABLE_CUDA
 
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
-
-// Type aliases for convenience
-using DataUnpackerCPU = DataUnpacker<backend::CPU>;
-#ifdef DMT_ENABLE_CUDA
-using DataUnpackerCUDA = DataUnpacker<backend::CUDA>;
 #endif // DMT_ENABLE_CUDA
 
 } // namespace dmt::utils

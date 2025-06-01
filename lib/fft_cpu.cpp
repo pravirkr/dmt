@@ -1,7 +1,5 @@
 #include "dmt/utils/fft.hpp"
 
-#include <utility>
-
 #ifdef DMT_ENABLE_OPENMP
 #include <omp.h>
 #endif
@@ -13,8 +11,7 @@
 
 namespace dmt::utils {
 
-template <>
-class FFTManager<backend::CPU>::Impl {
+class FFTManagerCPU::Impl {
 public:
     Impl(int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads)
         : m_nfft(nfft),
@@ -24,13 +21,13 @@ public:
           m_nchan(nchan),
           m_nthreads(nthreads) {
         configure_threading();
-        spdlog::debug("FFTManager<CPU>::Impl: Initialized with nfft={}, "
+        spdlog::debug("FFTManagerCPU::Impl: Initialized with nfft={}, "
                       "nsub={}, nbin={}, mbin={}, nchan={}, nthreads={}",
                       nfft, nsub, nbin, mbin, nchan, m_nthreads);
     }
 
     ~Impl() noexcept {
-        spdlog::debug("FFTManager<CPU>::Impl: Destroying instance");
+        spdlog::debug("FFTManagerCPU::Impl: Destroying instance");
         cleanup_resources();
     }
     Impl(const Impl&)            = delete;
@@ -211,52 +208,26 @@ private:
         }
     }
 
-}; // End FFTManager<backend::CPU>::Impl definition
+}; // End FFTManagerCPU::Impl definition
 
-// CPU-specific constructor implementation
-template <>
-template <std::same_as<backend::CPU> P>
-FFTManager<backend::CPU>::FFTManager(
+FFTManagerCPU::FFTManagerCPU(
     int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads)
-    : m_impl(std::make_unique<Impl>(nfft, nsub, nbin, mbin, nchan, nthreads)) {
-    spdlog::debug("FFTManager<CPU> object created.");
-}
-template <>
-FFTManager<backend::CPU>::~FFTManager() {
-    spdlog::debug("FFTManager<CPU> object destroyed.");
-}
-template <>
-FFTManager<backend::CPU>::FFTManager(FFTManager&& other) noexcept
-    : m_impl(std::move(other.m_impl)) {
-    spdlog::debug("FFTManager<CPU> object moved.");
-}
-template <>
-FFTManager<backend::CPU>&
-FFTManager<backend::CPU>::operator=(FFTManager&& other) noexcept {
-    if (this != &other) {
-        m_impl = std::move(other.m_impl);
-    }
-    return *this;
-}
-template <>
-template <std::same_as<backend::CPU> P>
-void FFTManager<backend::CPU>::initialize_plans(
-    std::span<ComplexType> unpack_buffer, std::span<ComplexType> delay_buffer) {
+    : m_impl(std::make_unique<Impl>(nfft, nsub, nbin, mbin, nchan, nthreads)) {}
+FFTManagerCPU::~FFTManagerCPU()                              = default;
+FFTManagerCPU::FFTManagerCPU(FFTManagerCPU&& other) noexcept = default;
+FFTManagerCPU&
+FFTManagerCPU::operator=(FFTManagerCPU&& other) noexcept = default;
+void FFTManagerCPU::initialize_plans(std::span<ComplexType> unpack_buffer,
+                                     std::span<ComplexType> delay_buffer) {
     m_impl->initialize_plans(unpack_buffer, delay_buffer);
 }
-template <>
-template <std::same_as<backend::CPU> P>
-void FFTManager<backend::CPU>::forward_fft(std::span<ComplexType> data1,
-                                           std::span<ComplexType> data2) const {
+void FFTManagerCPU::forward_fft(std::span<ComplexType> data1,
+                                std::span<ComplexType> data2) const {
     m_impl->forward_fft(data1, data2);
 }
-template <>
-template <std::same_as<backend::CPU> P>
-void FFTManager<backend::CPU>::backward_fft(
-    std::span<ComplexType> data1, std::span<ComplexType> data2) const {
+void FFTManagerCPU::backward_fft(std::span<ComplexType> data1,
+                                 std::span<ComplexType> data2) const {
     m_impl->backward_fft(data1, data2);
 }
-// Explicit instantiation (for linking)
-template FFTManager<backend::CPU>::FFTManager(int, int, int, int, int, int);
 
 } // namespace dmt::utils
