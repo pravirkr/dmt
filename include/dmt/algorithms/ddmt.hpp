@@ -28,7 +28,7 @@ public:
             float f_max,
             SizeType nchans,
             float tsamp,
-            const std::vector<float>& dm_arr,
+            std::span<const float> dm_arr,
             int nthreads = 1);
 
     ~DDMTCPU();

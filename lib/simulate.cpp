@@ -24,16 +24,20 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
         const auto dt_start =
             static_cast<float>(dt) * utils::cff(f_min, freq_min, f_min, f_max);
         const auto tstart      = pulse_toa - dt_start;
-        const auto tstart_int  = static_cast<IndexType>(std::floor(tstart));
+        const auto tstart_int  = static_cast<IndexType>(tstart);
         const auto tstart_frac = tstart - static_cast<float>(tstart_int);
 
         const auto dt_sub = static_cast<float>(dt) *
                             utils::cff(freq_min, freq_max, f_min, f_max);
         const auto tend      = tstart - dt_sub;
-        const auto tend_int  = static_cast<IndexType>(std::floor(tend));
-        const auto tend_frac = tend - static_cast<float>(tend_int);
+        const auto tend_int  = static_cast<IndexType>(tend);
+        const auto tend_frac = 1.0F - (tend - static_cast<float>(tend_int));
 
         float* arr_chan_start = &arr[ichan * nsamps];
+
+        if (tstart_int < 0 || tend_int >= static_cast<IndexType>(nsamps)) {
+            continue;
+        }
 
         if (tend_int >= 0 && tend_int <= tstart_int &&
             tstart_int < static_cast<IndexType>(nsamps)) {

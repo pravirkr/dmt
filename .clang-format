@@ -7,7 +7,12 @@ AccessModifierOffset: -4
 AlignConsecutiveAssignments:
   Enabled: true
 BinPackParameters: false
-BreakTemplateDeclarations: Yes
 DerivePointerAlignment: false
+IncludeCategories:
+  - Regex: '^<.*'              # System and third-party headers
+    Priority: 1
+  - Regex: '^".*"'            # Project headers
+    Priority: 2
 PackConstructorInitializers: CurrentLine
 PointerAlignment: Left
+SortIncludes: CaseSensitive

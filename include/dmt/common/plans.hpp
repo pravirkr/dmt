@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,10 +12,10 @@ namespace dmt::plans {
 
 // Shape parameters of the FDMT state buffer in a single iteration
 struct FDMTShape {
-    SizeType nchans;       // Number of channels
-    SizeType ndt_min;      // Minimum number of delays
-    SizeType ndt_max;      // Maximum number of delays
-    SizeType ncoords;      // Number of coordinates (nchans * ndt)
+    SizeType nchans;       // Number of frequency channels
+    SizeType ndt_min;      // Minimum number of delays (at highest frequency)
+    SizeType ndt_max;      // Maximum number of delays (at lowest frequency)
+    SizeType ncoords;      // Number of coordinates (nchans * \sum ndt)
     SizeType ncoords_sum;  // Number of coordinates to sum
     SizeType ncoords_copy; // Number of coordinates to copy
     SizeType nsamps;       // Number of samples
@@ -27,13 +28,13 @@ struct FDMTShape {
 
 // Coordinate of the FDMT plan in a single iteration
 struct FDMTCoord {
-    SizeType i_sub;           // Subband index
-    SizeType i_dt;            // Delay index
-    SizeType nsamps;          // Number of samples in the state buffer
-    SizeType buf_offset;      // Offset (starting point) in the state buffer
-    SizeType i_coord_tail;    // Tail coordinate index in the previous iteration
-    SizeType i_coord_head;    // Head coordinate index in the previous iteration
-    SizeType offset;          // Offset between the tail and head coordinates
+    SizeType i_sub;        // Frequency subband index
+    SizeType i_dt;         // Delay index
+    SizeType nsamps;       // Number of samples in the state buffer
+    SizeType buf_offset;   // Offset (starting point) in the state buffer
+    SizeType i_coord_tail; // Tail coordinate index in the previous iteration
+    SizeType i_coord_head; // Head coordinate index in the previous iteration
+    SizeType delay;        // Delay offset between the tail and head coordinates
     SizeType tail_buf_offset; // Offset (starting point) in the tail buffer
     SizeType tail_nsamps;     // Number of samples in the tail buffer
     SizeType head_buf_offset; // Offset (starting point) in the head buffer
@@ -67,6 +68,19 @@ struct FDMTPlanContainer {
     SizeType get_buffer_size() const noexcept;
 };
 
+struct DDMTPlanContainer {
+    std::vector<float> dm_arr;
+    // ndm x nchans
+    std::vector<SizeType> delay_table;
+    SizeType nchans;
+};
+
+/**
+ * @brief Fast Dispersion Measure Transform (FDMT) plan class.
+ * @details
+ * This class holds all data and logic for an FDMT plan.
+ * This includes parameter grids, coordinate mappings, and buffer sizes.
+ */
 class FDMTPlan {
 public:
     FDMTPlan(float f_min,
@@ -79,58 +93,67 @@ public:
              SizeType dt_min  = 0,
              bool verbose     = false);
 
-    FDMTPlan(const FDMTPlan&)            = delete;
-    FDMTPlan& operator=(const FDMTPlan&) = delete;
-    FDMTPlan(FDMTPlan&&)                 = delete;
-    FDMTPlan& operator=(FDMTPlan&&)      = delete;
-    ~FDMTPlan()                          = default;
+    // --- Rule of five: PIMPL ---
+    ~FDMTPlan();
+    FDMTPlan(FDMTPlan&&) noexcept;
+    FDMTPlan& operator=(FDMTPlan&&) noexcept;
+    FDMTPlan(const FDMTPlan&);
+    FDMTPlan& operator=(const FDMTPlan&);
 
-    // Getters
+    // --- Getters ---
+    /// @brief Minimum frequency (MHz)
     float get_f_min() const noexcept;
+    /// @brief Maximum frequency (MHz)
     float get_f_max() const noexcept;
+    /// @brief Number of frequency channels
     SizeType get_nchans() const noexcept;
+    /// @brief Number of time samples
     SizeType get_nsamps() const noexcept;
+    /// @brief Time sample interval (seconds)
     float get_tsamp() const noexcept;
+    /// @brief Maximum delay in time bins
     SizeType get_dt_max() const noexcept;
+    /// @brief Step size for the delay in time bins
     SizeType get_dt_step() const noexcept;
+    /// @brief Minimum delay in time bins
     SizeType get_dt_min() const noexcept;
+    /// @brief Frequency resolution (MHz)
     float get_df() const noexcept;
-    float get_correction() const noexcept;
+    /// @brief Number of iterations
     SizeType get_niters() const noexcept;
+    /// @brief Container for the FDMT plan
     const FDMTPlanContainer& get_container() const noexcept;
-    const DtGridType& get_dt_grid_final() const noexcept;
-    std::vector<float> get_dm_grid_final() const noexcept;
+
+    // --- Methods ---
+    /// @brief Final delay grid in time bins
+    [[nodiscard]] DtGridType get_dt_grid_final() const noexcept;
+    /// @brief Final DM grid (pc/cm^3)
+    [[nodiscard]] std::vector<float> get_dm_grid_final() const noexcept;
+    /// @brief Number of DMs in the final DMT transform
     SizeType get_dmt_ndms() const noexcept;
+    /// @brief Number of time samples in the final DMT transform
     SizeType get_dmt_nsamps() const noexcept;
+    /// @brief Number of elements in the final DMT transform
     SizeType get_dmt_size() const noexcept;
+    /// @brief Size of the buffer for the FDMT plan
     SizeType get_buffer_size() const noexcept;
+    /// @brief Size of the history for the FDMT plan
     SizeType get_history_size() const noexcept;
 
+    /// @brief Print a summary of the FDMT plan
     void print_summary(std::string_view prefix = "") const;
 
 private:
-    float m_f_min;
-    float m_f_max;
-    SizeType m_nchans;
-    SizeType m_nsamps;
-    float m_tsamp;
-    SizeType m_dt_max;
-    SizeType m_dt_step;
-    SizeType m_dt_min;
-
-    float m_df{};
-    float m_correction{};
-    SizeType m_niters{};
-    FDMTPlanContainer m_container;
-    SizeType m_buffer_size{};
-
-    void validate_inputs() const;
-    DtGridType calculate_dt_grid_sub(float f_start, float f_end) const;
-    void configure_plan();
-    void make_plan_iter0();
-    void make_plan(SizeType i_iter);
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
+/**
+ * @brief Coherent Fast Dispersion Measure Transform (CohFDMT) plan class.
+ * @details
+ * This class holds all data and logic for a CohFDMT plan.
+ * This includes parameter grids, coordinate mappings, and buffer sizes.
+ */
 class CohFDMTPlan {
 public:
     CohFDMTPlan(float f_center,
@@ -146,90 +169,94 @@ public:
                 std::string_view data_order = "PRITF",
                 bool verbose                = false);
 
-    CohFDMTPlan(const CohFDMTPlan&)            = delete;
-    CohFDMTPlan& operator=(const CohFDMTPlan&) = delete;
-    CohFDMTPlan(CohFDMTPlan&&)                 = default;
-    CohFDMTPlan& operator=(CohFDMTPlan&&)      = default;
-    ~CohFDMTPlan()                             = default;
+    // --- Rule of five: PIMPL ---
+    ~CohFDMTPlan();
+    CohFDMTPlan(CohFDMTPlan&&) noexcept;
+    CohFDMTPlan& operator=(CohFDMTPlan&&) noexcept;
+    CohFDMTPlan(const CohFDMTPlan&);
+    CohFDMTPlan& operator=(const CohFDMTPlan&);
 
-    // Getters
+    // --- Getters ---
+    /// @brief Center frequency (MHz)
     float get_f_center() const noexcept;
+    /// @brief Subband bandwidth (MHz)
     float get_bw_sub() const noexcept;
+    /// @brief Number of subbands
     SizeType get_nsub() const noexcept;
+    /// @brief Time bin size (seconds)
     float get_tbin() const noexcept;
+    /// @brief Number of time bins
     SizeType get_nbin() const noexcept;
+    /// @brief Number of 1D FFT calls
     SizeType get_nfft() const noexcept;
+    /// @brief Pulse width (seconds)
     float get_t_p() const noexcept;
+    /// @brief Maximum DM (pc/cm^3)
     float get_dm_max() const noexcept;
+    /// @brief Minimum DM (pc/cm^3)
     float get_dm_min() const noexcept;
+    /// @brief Number of overlap samples
     SizeType get_noverlap() const noexcept;
+    /// @brief Data order
     std::string_view get_data_order() const noexcept;
 
+    // --- Methods ---
+    /// @brief Subband bandwidth (MHz)
     float get_bw() const noexcept;
+    /// @brief Minimum frequency (MHz)
     float get_f_min() const noexcept;
+    /// @brief Maximum frequency (MHz)
     float get_f_max() const noexcept;
+    /// @brief Pulse width in time bins
     SizeType get_n_p() const noexcept;
+    /// @brief Number of channels
     SizeType get_nchan() const noexcept;
-    const std::vector<float>& get_dm_grid_coh() const noexcept;
-    const std::vector<float>& get_dm_grid_final() const noexcept;
+    /// @brief Coherent DM grid (pc/cm^3)
+    [[nodiscard]] std::vector<float> get_dm_grid_coh() const noexcept;
+    /// @brief Final DM grid (pc/cm^3)
+    [[nodiscard]] std::vector<float> get_dm_grid_final() const noexcept;
+    /// @brief Number of samples
     SizeType get_nsamp() const noexcept;
+    /// @brief Number of bins per channel
     SizeType get_mbin() const noexcept;
+    /// @brief Number of channels per subband
     SizeType get_mchan() const noexcept;
+    /// @brief Number of samples per channel
     SizeType get_msamp() const noexcept;
+    /// @brief Time sample interval (seconds)
     float get_tsamp() const noexcept;
+    /// @brief Maximum delay in time bins
     SizeType get_dt_max() const noexcept;
 
+    /// @brief Size of the chirp table
     SizeType get_chirp_table_size() const noexcept;
+    /// @brief Size of the unpack buffer
     SizeType get_unpack_buf_size() const noexcept;
+    /// @brief Size of the delay buffer
     SizeType get_delay_buf_size() const noexcept;
+    /// @brief Size of the intensity buffer
     SizeType get_intensity_buf_size() const noexcept;
+    /// @brief Number of elements in the final DMT transform
     SizeType get_dmt_size() const;
+    /// @brief Chirp scale
     float get_chirp_scale() const noexcept;
 
+    /// @brief FDMT plan
     const FDMTPlan& get_fdmt_plan() const;
-
+    /// @brief Print a summary of the CohFDMT plan
     void print_summary() const;
 
 private:
-    float m_f_center;
-    float m_bw_sub;
-    SizeType m_nsub;
-    float m_tbin;
-    SizeType m_nbin;
-    SizeType m_nfft;
-    float m_t_p;
-    float m_dm_max;
-    float m_dm_min;
-    SizeType m_noverlap;
-    std::string_view m_data_order;
-
-    float m_bw;
-    float m_f_min;
-    float m_f_max;
-    SizeType m_n_p{};
-    SizeType m_nchan{};
-    std::vector<float> m_dm_grid_coh;
-    std::vector<float> m_dm_grid_final;
-    SizeType m_nsamp{};
-    SizeType m_mbin{};
-    SizeType m_mchan{};
-    SizeType m_msamp{};
-    float m_tsamp{};
-    SizeType m_dt_max{};
-
-    std::unique_ptr<FDMTPlan> m_fdmt_plan;
-
-    void validate_inputs() const;
-    void configure_plan();
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
-struct DDMTPlanContainer {
-    std::vector<float> dm_arr;
-    // ndm x nchan
-    std::vector<SizeType> delay_table;
-    SizeType nchans;
-};
-
+/**
+ * @brief Direct Dispersion Measure Transform (DDMT) plan class.
+ * @details
+ * This class holds all data and logic for a DDMT plan.
+ * This includes parameter grids, coordinate mappings, and buffer sizes.
+ */
 class DDMTPlan {
 public:
     DDMTPlan(float f_min,
@@ -238,44 +265,42 @@ public:
              float tsamp,
              float dm_max,
              float dm_step,
-             float dm_min = 0.0F);
+             float dm_min = 0.0F,
+             bool verbose = false);
 
     DDMTPlan(float f_min,
              float f_max,
              SizeType nchans,
              float tsamp,
-             const std::vector<float>& dm_arr);
+             std::span<const float> dm_arr,
+             bool verbose = false);
 
-    DDMTPlan(const DDMTPlan&)            = delete;
-    DDMTPlan& operator=(const DDMTPlan&) = delete;
-    DDMTPlan(DDMTPlan&&)                 = default;
-    DDMTPlan& operator=(DDMTPlan&&)      = default;
-    ~DDMTPlan()                          = default;
+    // --- Rule of five: PIMPL ---
+    ~DDMTPlan();
+    DDMTPlan(DDMTPlan&&) noexcept;
+    DDMTPlan& operator=(DDMTPlan&&) noexcept;
+    DDMTPlan(const DDMTPlan&);
+    DDMTPlan& operator=(const DDMTPlan&);
 
+    // --- Getters ---
+    /// @brief Minimum frequency (MHz)
     float get_f_min() const noexcept;
+    /// @brief Maximum frequency (MHz)
     float get_f_max() const noexcept;
+    /// @brief Number of frequency channels
     SizeType get_nchans() const noexcept;
+    /// @brief Time sample interval (seconds)
     float get_tsamp() const noexcept;
-    const std::vector<float>& get_dm_arr() const noexcept;
+    /// @brief DM array (pc/cm^3)
+    [[nodiscard]] std::vector<float> get_dm_arr() const noexcept;
+    /// @brief Container for the DDMT plan
     const DDMTPlanContainer& get_container() const noexcept;
-    std::vector<float> get_dm_grid() const noexcept;
-    static void set_log_level(int level);
+    /// @brief DM grid (pc/cm^3)
+    [[nodiscard]] std::vector<float> get_dm_grid() const noexcept;
 
 private:
-    float m_f_min;
-    float m_f_max;
-    SizeType m_nchans;
-    float m_tsamp;
-    std::vector<float> m_dm_arr;
-
-    DDMTPlanContainer m_container;
-
-    void validate_inputs() const;
-    void configure_plan();
-    static std::vector<float>
-    generate_dm_arr(float dm_max, float dm_step, float dm_min);
-    static std::vector<float> generate_dm_arr(const float* dm_arr,
-                                              SizeType dm_count);
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 } // namespace dmt::plans

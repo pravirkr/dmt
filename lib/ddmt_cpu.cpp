@@ -23,32 +23,16 @@ public:
          float dm_min,
          int nthreads)
         : m_plan(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min),
-          m_nthreads(nthreads) {
-#ifdef DMT_ENABLE_OPENMP
-        if (m_nthreads <= 0) {
-            m_nthreads = omp_get_max_threads();
-        }
-        omp_set_num_threads(m_nthreads);
-        spdlog::debug("DDMTCPU::Impl: Using {} OpenMP threads", m_nthreads);
-#endif
-    }
+          m_nthreads(set_dmt_openmp_threads(nthreads)) {}
 
     Impl(float f_min,
          float f_max,
          SizeType nchans,
          float tsamp,
-         const std::vector<float>& dm_arr,
-         int n_threads)
+         std::span<const float> dm_arr,
+         int nthreads)
         : m_plan(f_min, f_max, nchans, tsamp, dm_arr),
-          m_nthreads(n_threads) {
-#ifdef DMT_ENABLE_OPENMP
-        if (m_nthreads <= 0) {
-            m_nthreads = omp_get_max_threads();
-        }
-        omp_set_num_threads(m_nthreads);
-        spdlog::debug("DDMTCPU::Impl: Using {} OpenMP threads", m_nthreads);
-#endif
-    }
+          m_nthreads(set_dmt_openmp_threads(nthreads)) {}
 
     const plans::DDMTPlan& get_plan() const { return m_plan; }
 
@@ -125,7 +109,7 @@ DDMTCPU::DDMTCPU(float f_min,
                  float f_max,
                  SizeType nchans,
                  float tsamp,
-                 const std::vector<float>& dm_arr,
+                 std::span<const float> dm_arr,
                  int nthreads)
     : m_impl(std::make_unique<Impl>(
           f_min, f_max, nchans, tsamp, dm_arr, nthreads)) {}

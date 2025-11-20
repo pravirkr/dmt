@@ -91,7 +91,7 @@ ignore_errors = true
 exclude_lines = ['raise AssertionError', 'raise NotImplementedError']
 
 [tool.coverage.path]
-source = "src/dmt"
+source = "src/dmtlib"
 
 [tool.gcovr]
 filter = ["lib/*"]

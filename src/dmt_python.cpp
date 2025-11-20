@@ -42,7 +42,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords,
                          ncoords_sum, ncoords_copy, nsamps, nelements, dt_max);
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
-                         i_coord_tail, i_coord_head, offset, tail_buf_offset,
+                         i_coord_tail, i_coord_head, delay, tail_buf_offset,
                          tail_nsamps, head_buf_offset, head_nsamps);
     py::class_<FDMTCoordGrid>(mod, "FDMTSubDTGrid")
         .def_readonly("dt_grid", &FDMTCoordGrid::dt_grid)
@@ -93,7 +93,6 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("dt_step", &FDMTPlan::get_dt_step)
         .def_property_readonly("dt_min", &FDMTPlan::get_dt_min)
         .def_property_readonly("df", &FDMTPlan::get_df)
-        .def_property_readonly("correction", &FDMTPlan::get_correction)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
         .def_property_readonly("container", &FDMTPlan::get_container)
         .def_property_readonly("dt_grid_final",

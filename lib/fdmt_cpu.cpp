@@ -11,7 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "dmt/common/types.hpp"
-#include "dmt/dm_utils.hpp"
+#include "dmt/kernels.hpp"
 
 namespace dmt::algorithms {
 
@@ -41,10 +41,7 @@ public:
           m_state_in(m_plan.get_buffer_size(), 0.0F),
           m_state_out(m_plan.get_buffer_size(), 0.0F),
           m_history(use_history ? m_plan.get_history_size() : 0, 0.0F),
-          m_nthreads(set_dmt_openmp_threads(nthreads)) {
-        spdlog::debug("FDMTCPU::Impl: Initialised with {} threads.",
-                      m_nthreads);
-    }
+          m_nthreads(set_dmt_openmp_threads(nthreads)) {}
 
     ~Impl()                      = default;
     Impl(const Impl&)            = delete;
@@ -107,8 +104,7 @@ private:
                 for (SizeType i = isamp - dt_min; i <= isamp; ++i) {
                     sum += waterfall[waterfall_offset + i];
                 }
-                state[buffer_offset + isamp] =
-                    sum / static_cast<float>(dt_min + 1);
+                state[buffer_offset + isamp] = sum;
             }
             for (SizeType i_dt = 1; i_dt < dt_grid_sub.size(); ++i_dt) {
                 const auto dt_cur           = dt_grid_sub[i_dt];
@@ -125,38 +121,32 @@ private:
                         sum += waterfall[waterfall_offset + i];
                     }
                     state[state_offset_cur + isamp] =
-                        (state[state_offset_prev + isamp] *
-                             static_cast<float>(dt_prev + 1) +
-                         sum) /
-                        static_cast<float>(dt_cur + 1);
+                        state[state_offset_prev + isamp] + sum;
                 }
                 // Initialise state for [i_sub, i_dt, 0:dt_cur]
                 for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
                     float sum = 0.0F;
-                    auto i_start_rel =
-                        static_cast<std::ptrdiff_t>(isamp - dt_cur);
-                    auto i_end_rel =
-                        static_cast<std::ptrdiff_t>(isamp - dt_prev);
+                    const auto i_start_rel =
+                        static_cast<IndexType>(isamp - dt_cur);
+                    const auto i_end_rel =
+                        static_cast<IndexType>(isamp - dt_prev);
                     // Sum from history buffer if needed and available
                     if (!hist_span.empty()) {
-                        for (std::ptrdiff_t i_rel = i_start_rel;
+                        for (IndexType i_rel = i_start_rel;
                              i_rel < 0 && i_rel < i_end_rel; ++i_rel) {
                             // hist contains last dt_max samples
                             sum += hist_span[hist_offset + (dt_max + i_rel)];
                         }
                     }
                     // Sum from waterfall buffer for the remaining part
-                    for (std::ptrdiff_t i_rel = std::max(
-                             i_start_rel, static_cast<std::ptrdiff_t>(0));
+                    for (IndexType i_rel =
+                             std::max(i_start_rel, static_cast<IndexType>(0));
                          i_rel < i_end_rel; ++i_rel) {
                         // Access waterfall using absolute index
                         sum += waterfall[waterfall_offset + i_rel];
                     }
                     state[state_offset_cur + isamp] =
-                        (state[state_offset_prev + isamp] *
-                             static_cast<float>(dt_prev + 1) +
-                         sum) /
-                        static_cast<float>(dt_cur + 1);
+                        state[state_offset_prev + isamp] + sum;
                 }
             }
         }
@@ -191,12 +181,14 @@ private:
             for (SizeType i_coord = 0; i_coord < coords_sum_cur.size();
                  ++i_coord) {
                 const auto& coord = coords_sum_cur[i_coord];
-                const float* tail = &state_in[coord.tail_buf_offset];
-                const float* head = &state_in[coord.head_buf_offset];
-                float* out        = &state_out[coord.buf_offset];
-                utils::add_offset_kernel(tail, coord.tail_nsamps, head,
-                                         coord.head_nsamps, out, coord.nsamps,
-                                         coord.offset);
+                const float* __restrict__ tail =
+                    &state_in[coord.tail_buf_offset];
+                const float* __restrict__ head =
+                    &state_in[coord.head_buf_offset];
+                float* __restrict__ out = &state_out[coord.buf_offset];
+                kernels::offset_add(tail, coord.tail_nsamps, head,
+                                    coord.head_nsamps, out, coord.nsamps,
+                                    coord.delay);
             }
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp for
@@ -204,8 +196,9 @@ private:
             for (SizeType i_coord = 0; i_coord < coords_copy_cur.size();
                  ++i_coord) {
                 const auto& coord = coords_copy_cur[i_coord];
-                const float* tail = &state_in[coord.tail_buf_offset];
-                float* out        = &state_out[coord.buf_offset];
+                const float* __restrict__ tail =
+                    &state_in[coord.tail_buf_offset];
+                float* __restrict__ out = &state_out[coord.buf_offset];
                 std::copy_n(tail, coord.tail_nsamps, out);
             }
         }

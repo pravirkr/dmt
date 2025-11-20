@@ -160,6 +160,38 @@ if(BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
 
+# Install targets
+install(
+  TARGETS ${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS} coverage_config
+  EXPORT ${PROJECT_NAME}Targets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  INCLUDES
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Also install CUDA options if available
+if(CMAKE_CUDA_COMPILER)
+  install(TARGETS ${DMT_CUDA_OPTIONS} EXPORT ${PROJECT_NAME}Targets)
+endif()
+
+# Install coverage config if enabled
+if(ENABLE_COVERAGE)
+  install(TARGETS coverage_config EXPORT ${PROJECT_NAME}Targets)
+endif()
+
+# Install headers
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Generate and install export file
+install(
+  EXPORT ${PROJECT_NAME}Targets
+  FILE ${PROJECT_NAME}Targets.cmake
+  NAMESPACE ${PROJECT_NAME}::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${DMT_LIBRARY_NAME}
+)
+
 # Print feature summary
 include(FeatureSummary)
 feature_summary(WHAT ALL)

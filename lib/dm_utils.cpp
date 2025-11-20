@@ -9,15 +9,15 @@
 
 namespace dmt::utils {
 
-float cff(float f1_start, float f1_end, float f2_start, float f2_end) {
-    return (std::pow(f1_start, kDispCoeff) - std::pow(f1_end, kDispCoeff)) /
-           (std::pow(f2_start, kDispCoeff) - std::pow(f2_end, kDispCoeff));
+float cff(float f_start, float f_end, float f_min, float f_max) {
+    return (std::pow(f_start, kDispCoeff) - std::pow(f_end, kDispCoeff)) /
+           (std::pow(f_min, kDispCoeff) - std::pow(f_max, kDispCoeff));
 }
 
 SizeType calculate_dt_sub(
     float f_start, float f_end, float f_min, float f_max, SizeType dt) {
     const float ratio = cff(f_start, f_end, f_min, f_max);
-    return static_cast<SizeType>(std::round(static_cast<float>(dt) * ratio));
+    return static_cast<SizeType>(std::ceil(static_cast<float>(dt) * ratio));
 }
 
 float get_dmconv(float f_min, float f_max, float tsamp) {
@@ -26,39 +26,46 @@ float get_dmconv(float f_min, float f_max, float tsamp) {
     return tsamp / dm_conv;
 }
 
-SizeType find_closest_index(const std::vector<SizeType>& arr_sorted,
-                            SizeType val) {
+SizeType find_nearest_sorted_idx(std::span<const SizeType> arr_sorted,
+                                 SizeType val) {
     if (arr_sorted.empty()) {
-        throw std::runtime_error("Array is empty");
+        throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
-    auto it      = std::ranges::lower_bound(arr_sorted, val);
-    SizeType idx = std::distance(arr_sorted.begin(), it);
+    const auto it = std::ranges::lower_bound(arr_sorted, val);
+    auto idx = static_cast<SizeType>(std::distance(arr_sorted.begin(), it));
 
-    if (it != arr_sorted.end()) {
-        if (it != arr_sorted.begin() && val - *(it - 1) < *it - val) {
-            idx--;
+    // Handle case where val is larger than all elements
+    if (it == arr_sorted.end()) {
+        return arr_sorted.size() - 1;
+    }
+    // Check if previous element is closer
+    if (it != arr_sorted.begin()) {
+        const auto val_prev    = *(it - 1);
+        const auto val_curr    = *it;
+        const bool prev_closer = (val >= val_prev) && (val <= val_curr) &&
+                                 (val - val_prev) <= (val_curr - val);
+        if (prev_closer) {
+            --idx;
         }
-    } else {
-        idx = arr_sorted.size() - 1;
     }
     return idx;
 }
 
-std::vector<SizeType> generate_delay_table(const float* dm_arr,
-                                           SizeType dm_count,
-                                           float f0,
-                                           float df,
+std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
                                            SizeType nchans,
+                                           float fch1,
+                                           float foff,
                                            float tsamp) {
-    std::vector<SizeType> delay_table(nchans * dm_count);
-    for (SizeType idm = 0; idm < dm_count; ++idm) {
+    const auto ndm = dm_arr.size();
+    std::vector<SizeType> delay_table(nchans * ndm);
+    for (SizeType idm = 0; idm < ndm; ++idm) {
         for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-            const auto a = 1.F / (f0 + static_cast<float>(ichan) * df);
-            const auto b = 1.F / f0;
+            const auto a = 1.F / (fch1 + static_cast<float>(ichan) * foff);
+            const auto b = 1.F / fch1;
             const auto delay =
                 kDispConst / tsamp * (a * a - b * b) * dm_arr[idm];
             delay_table[(idm * nchans) + ichan] =
-                static_cast<SizeType>(std::round(delay));
+                static_cast<SizeType>(std::nearbyint(delay));
         }
     }
     return delay_table;
@@ -79,8 +86,8 @@ SizeType minimum_overlap(float dm_max,
     if (delay < 0) {
         throw std::runtime_error("Negative dispersion delay is not allowed");
     }
-    float delay_samples = std::round(delay / tbin);
-    return static_cast<SizeType>(delay_samples);
+    float delay_samples = delay / tbin;
+    return static_cast<SizeType>(std::nearbyint(delay_samples));
 }
 
 std::vector<float> generate_coherent_dms(
@@ -117,7 +124,7 @@ void dedisperse(float* __restrict__ waterfall,
         const float delay =
             kDispConst * dm *
             (std::pow(f_min, kDispCoeff) - std::pow(fchan, kDispCoeff));
-        shifts[ichan] = static_cast<int>(std::round(delay / tsamp));
+        shifts[ichan] = static_cast<int>(std::nearbyint(delay / tsamp));
     }
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
         const SizeType start = ichan * nsamps;
