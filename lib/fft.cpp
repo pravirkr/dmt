@@ -7,7 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "dmt/bb_utils_cpu.hpp"
+#include "dmt/bb_utils.hpp"
 
 namespace dmt::utils {
 

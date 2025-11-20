@@ -11,7 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/bb_utils_cpu.hpp"
+#include "dmt/bb_utils.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/utils/fft.hpp"

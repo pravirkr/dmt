@@ -1,4 +1,4 @@
-#include "dmt/bb_utils_cpu.hpp"
+#include "dmt/bb_utils.hpp"
 
 #ifdef USE_OPENMP
 #include <omp.h>
@@ -32,11 +32,12 @@ void compute_chirp(std::span<const float> dm_grid,
     std::vector<float> freqs_sub(nsub);
     for (SizeType i = 0; i < nsub; ++i) {
         freqs_sub[i] =
-            fcenter - bw / 2 + (static_cast<float>(i) + 0.5F) * bw_sub;
+            fcenter - (bw / 2) + ((static_cast<float>(i) + 0.5F) * bw_sub);
     }
     std::vector<float> bin_freqs(mbin);
     for (SizeType i = 0; i < mbin; ++i) {
-        bin_freqs[i] = -bw_chan / 2 + (static_cast<float>(i) + 0.5F) * bw_bin;
+        bin_freqs[i] =
+            (-bw_chan / 2) + ((static_cast<float>(i) + 0.5F) * bw_bin);
     }
 
     const float taper_const = 1.0F / (0.47F * bw_chan);
