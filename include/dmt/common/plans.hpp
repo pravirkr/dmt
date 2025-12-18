@@ -43,8 +43,8 @@ struct FDMTCoord {
 
 // Coordinates grid for the FDMT plan for each subband in a single iteration
 struct FDMTCoordGrid {
-    DtGridType dt_grid;    // Delay grid for the subband
-    SizeType ndt;          // Number of delays
+    std::vector<SizeType> dt_grid; // Delay grid for the subband
+    SizeType ndt;                  // Number of delays
     SizeType coord_offset; // Offset (starting point) in the coordinates array
     float f_start;         // Start frequency of the subband
     float f_end;           // End frequency of the subband
@@ -57,7 +57,7 @@ struct FDMTPlanContainer {
     std::vector<std::vector<FDMTCoord>> coordinates_sum;
     std::vector<std::vector<FDMTCoord>> coordinates_copy;
     // Temp arrays to compute the plan
-    std::vector<DtGridType> dt_grid_sub_top;
+    std::vector<std::vector<SizeType>> dt_grid_sub_top;
     std::vector<float> df_top;
     std::vector<float> df_bot;
 
@@ -89,9 +89,9 @@ public:
              SizeType nsamps,
              float tsamp,
              SizeType dt_max,
-             SizeType dt_step = 1,
-             SizeType dt_min  = 0,
-             bool verbose     = false);
+             SizeType dt_min       = 0,
+             std::string_view mode = "full",
+             bool verbose          = false);
 
     // --- Rule of five: PIMPL ---
     ~FDMTPlan();
@@ -113,8 +113,6 @@ public:
     float get_tsamp() const noexcept;
     /// @brief Maximum delay in time bins
     SizeType get_dt_max() const noexcept;
-    /// @brief Step size for the delay in time bins
-    SizeType get_dt_step() const noexcept;
     /// @brief Minimum delay in time bins
     SizeType get_dt_min() const noexcept;
     /// @brief Frequency resolution (MHz)
@@ -126,9 +124,11 @@ public:
 
     // --- Methods ---
     /// @brief Final delay grid in time bins
-    [[nodiscard]] DtGridType get_dt_grid_final() const noexcept;
+    [[nodiscard]] std::vector<SizeType> get_dt_grid_final() const noexcept;
     /// @brief Final DM grid (pc/cm^3)
     [[nodiscard]] std::vector<float> get_dm_grid_final() const noexcept;
+    /// @brief Final smearing grid (samples per channel)
+    [[nodiscard]] std::vector<float> get_smearing_grid_final() const noexcept;
     /// @brief Number of DMs in the final DMT transform
     SizeType get_dmt_ndms() const noexcept;
     /// @brief Number of time samples in the final DMT transform
@@ -137,8 +137,10 @@ public:
     SizeType get_dmt_size() const noexcept;
     /// @brief Size of the buffer for the FDMT plan
     SizeType get_buffer_size() const noexcept;
-    /// @brief Size of the history for the FDMT plan
+    /// @brief Size of the Overlap-Save history for the FDMT plan
     SizeType get_history_size() const noexcept;
+    /// @brief Size of the Boxcar smearing history for the FDMT plan
+    SizeType get_history_init_size() const noexcept;
 
     /// @brief Print a summary of the FDMT plan
     void print_summary(std::string_view prefix = "") const;

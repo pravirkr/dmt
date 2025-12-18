@@ -25,7 +25,6 @@ namespace dmt {
 using SizeType    = std::size_t;    // Common size type
 using IndexType   = std::ptrdiff_t; // Common index type (for signed indexing)
 using ComplexType = std::complex<float>;
-using DtGridType  = std::vector<SizeType>;
 
 #ifdef DMT_ENABLE_CUDA
 using ComplexTypeCUDA = cuda::std::complex<float>;

@@ -81,16 +81,15 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                                &FDMTPlanContainer::get_memory_usage);
     py::class_<FDMTPlan>(mod, "FDMTPlan")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType, bool>(),
+                      SizeType, std::string_view, bool>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_step"_a = 1, "dt_min"_a = 0, "verbose"_a = false)
+             "dt_max"_a, "dt_min"_a = 0, "mode"_a = "full", "verbose"_a = false)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly("nchans", &FDMTPlan::get_nchans)
         .def_property_readonly("nsamps", &FDMTPlan::get_nsamps)
         .def_property_readonly("tsamp", &FDMTPlan::get_tsamp)
         .def_property_readonly("dt_max", &FDMTPlan::get_dt_max)
-        .def_property_readonly("dt_step", &FDMTPlan::get_dt_step)
         .def_property_readonly("dt_min", &FDMTPlan::get_dt_min)
         .def_property_readonly("df", &FDMTPlan::get_df)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
@@ -103,11 +102,18 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly(
             "dm_grid_final",
             [](FDMTPlan& plan) { return as_pyarray(plan.get_dm_grid_final()); })
+        .def_property_readonly("smearing_grid_final",
+                               [](FDMTPlan& plan) {
+                                   return as_pyarray(
+                                       plan.get_smearing_grid_final());
+                               })
         .def_property_readonly("dmt_ndms", &FDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &FDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &FDMTPlan::get_dmt_size)
         .def_property_readonly("buffer_size", &FDMTPlan::get_buffer_size)
         .def_property_readonly("history_size", &FDMTPlan::get_history_size)
+        .def_property_readonly("history_init_size",
+                               &FDMTPlan::get_history_init_size)
         .def(
             "print_summary",
             [](FDMTPlan& plan, std::string_view prefix) {
@@ -166,10 +172,10 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
 
     py::class_<FDMTCPU>(mod, "FDMTCPU", "FDMT CPU Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType, bool, bool, int>(),
+                      SizeType, bool, std::string_view, bool, int>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_step"_a = 1, "dt_min"_a = 0,
-             "use_history"_a = false, "verbose"_a = false, "nthreads"_a = 1)
+             "dt_max"_a, "dt_min"_a = 0, "use_box_smearing"_a = true,
+             "mode"_a = "full", "verbose"_a = false, "nthreads"_a = 1)
         .def_property_readonly(
             "plan", &FDMTCPU::get_plan,
             "Get the FDMTPlan object containing transform details.")
@@ -215,6 +221,25 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
             The input array must be properly sized according to the FDMT parameters
             specified during initialization (nchans, nsamps).
             )doc");
+
+    mod.def(
+        "compute_fdmt",
+        [](const py::array_t<float, py::array::c_style>& waterfall, float f_min,
+           float f_max, SizeType nchans, SizeType nsamps, float tsamp,
+           SizeType dt_max, SizeType dt_min, bool use_box_smearing,
+           std::string_view mode, bool verbose, int nthreads) {
+            auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
+                std::span<const float>(waterfall.data(), waterfall.size()),
+                f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                use_box_smearing, mode, verbose, nthreads);
+            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+        },
+        py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
+        py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"),
+        py::arg("dt_max"), py::arg("dt_min") = 0,
+        py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+        py::arg("verbose") = false, py::arg("nthreads") = 1);
+
     py::class_<DDMTCPU>(mod, "DDMTCPU")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,

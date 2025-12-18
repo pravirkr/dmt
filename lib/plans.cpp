@@ -71,8 +71,8 @@ public:
          SizeType nsamps,
          float tsamp,
          SizeType dt_max,
-         SizeType dt_step,
          SizeType dt_min,
+         std::string_view mode,
          bool verbose)
         : m_f_min(f_min),
           m_f_max(f_max),
@@ -80,8 +80,8 @@ public:
           m_nsamps(nsamps),
           m_tsamp(tsamp),
           m_dt_max(dt_max),
-          m_dt_step(dt_step),
-          m_dt_min(dt_min) {
+          m_dt_min(dt_min),
+          m_mode(mode) {
         if (verbose) {
             spdlog::set_level(spdlog::level::trace);
         } else {
@@ -103,17 +103,16 @@ public:
     SizeType get_nsamps() const noexcept { return m_nsamps; }
     float get_tsamp() const noexcept { return m_tsamp; }
     SizeType get_dt_max() const noexcept { return m_dt_max; }
-    SizeType get_dt_step() const noexcept { return m_dt_step; }
     SizeType get_dt_min() const noexcept { return m_dt_min; }
     float get_df() const noexcept { return m_df; }
     SizeType get_niters() const noexcept { return m_niters; }
     const FDMTPlanContainer& get_container() const noexcept {
         return m_container;
     }
-    [[nodiscard]] DtGridType get_dt_grid_final() const noexcept {
+    std::vector<SizeType> get_dt_grid_final() const noexcept {
         return m_container.grids[m_niters][0].dt_grid;
     }
-    [[nodiscard]] std::vector<float> get_dm_grid_final() const noexcept {
+    std::vector<float> get_dm_grid_final() const noexcept {
         const float dm_conv = utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
         const auto& dt_grid_final = get_dt_grid_final();
         std::vector<float> dm_grid_final(dt_grid_final.size());
@@ -121,6 +120,13 @@ public:
             dt_grid_final, dm_grid_final.begin(),
             [dm_conv](auto& dt) { return static_cast<float>(dt) * dm_conv; });
         return dm_grid_final;
+    }
+    std::vector<float> get_smearing_grid_final() const noexcept {
+        // Return the smearing samples per channel for each DM trial.
+        std::vector<float> smearing_grid(get_dmt_ndms() * m_nchans);
+        // Recursively traverse the plan to get the actual smearing
+        // samples used in the FDMT.
+        return smearing_grid;
     }
     SizeType get_dmt_ndms() const noexcept {
         return m_container.state_shape[m_niters].ncoords;
@@ -135,6 +141,9 @@ public:
         return m_container.get_buffer_size();
     }
     SizeType get_history_size() const noexcept {
+        return m_nchans * m_container.state_shape[m_niters].dt_max;
+    }
+    SizeType get_history_init_size() const noexcept {
         return m_nchans * m_container.state_shape[0].dt_max;
     }
 
@@ -189,8 +198,8 @@ private:
     SizeType m_nsamps;
     float m_tsamp;
     SizeType m_dt_max;
-    SizeType m_dt_step;
     SizeType m_dt_min;
+    std::string_view m_mode;
 
     float m_df{};
     SizeType m_niters{};
@@ -223,18 +232,19 @@ private:
                 std::format("FDMT: dt_min={} must be less than dt_max={}",
                             m_dt_min, m_dt_max));
         }
-        if (m_dt_step == 0) {
+        if (m_mode != "full" && m_mode != "valid" && m_mode != "roll") {
             throw std::invalid_argument(std::format(
-                "FDMT: dt_step={} must be greater than 0", m_dt_step));
+                "FDMT: mode={} must be 'full' or 'valid' or 'roll'", m_mode));
         }
     }
-    DtGridType calculate_dt_grid_sub(float f_start, float f_end) const {
+    std::vector<SizeType> calculate_dt_grid_sub(float f_start,
+                                                float f_end) const noexcept {
         const auto dt_max_sub =
             utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max);
         const auto dt_min_sub =
             utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min);
-        DtGridType dt_grid;
-        for (SizeType dt = dt_min_sub; dt <= dt_max_sub; dt += m_dt_step) {
+        std::vector<SizeType> dt_grid;
+        for (SizeType dt = dt_min_sub; dt <= dt_max_sub; dt += 1) {
             dt_grid.push_back(dt);
         }
         return dt_grid;
@@ -250,9 +260,8 @@ private:
         }
         m_buffer_size = m_container.get_buffer_size();
         spdlog::debug("FDMT: configured fdmt plan");
-        spdlog::debug(
-            "FDMT: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}", m_df,
-            m_dt_max, m_dt_min, m_dt_step, m_niters);
+        spdlog::debug("FDMT: df={}, dt_max={}, dt_min={}, niters={}", m_df,
+                      m_dt_max, m_dt_min, m_niters);
     }
     void make_plan_iter0() {
         // For iteration 0
@@ -291,6 +300,7 @@ private:
 
         const auto dt_max =
             calculate_dt_grid_sub(m_f_min, m_f_min + m_df).back();
+        const auto dt_max_int = static_cast<SizeType>(std::ceil(dt_max));
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
             m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
@@ -302,7 +312,7 @@ private:
                                            .ncoords_copy = 0,
                                            .nsamps       = m_nsamps,
                                            .nelements    = ncoords * m_nsamps,
-                                           .dt_max       = dt_max};
+                                           .dt_max       = dt_max_int};
         m_container.dt_grid_sub_top[i_iter] =
             m_container.grids[i_iter].back().dt_grid;
         m_container.df_top[i_iter] = m_df;
@@ -319,6 +329,10 @@ private:
         const auto& grids_prev  = m_container.grids[i_iter - 1];
         const auto& dt_grid_sub_top_prev =
             m_container.dt_grid_sub_top[i_iter - 1];
+        const auto& coords_prev = m_container.coordinates[i_iter - 1];
+        auto& coords_cur        = m_container.coordinates[i_iter];
+        auto& coords_sum_cur    = m_container.coordinates_sum[i_iter];
+        auto& coords_copy_cur   = m_container.coordinates_copy[i_iter];
 
         const SizeType nchans_cur = (nchans_prev / 2) + (nchans_prev % 2);
         const bool do_copy = nchans_prev % 2 == 1; // true if nchans_prev is odd
@@ -326,18 +340,26 @@ private:
             (do_copy) ? df_top_prev : df_top_prev + df_bot_prev;
         const float df_bot = df_bot_prev * 2;
 
-        // Calculate nsamps for the current iteration
+        // Calculate nsamps for the current iteration and mode
         const auto df_tmp = (nchans_cur == 1) ? df_top : df_bot;
         const auto dt_max_iter =
             calculate_dt_grid_sub(m_f_min, m_f_min + df_tmp).back();
         if (dt_max_iter > m_dt_max) {
-            throw std::runtime_error("dt_max_iter is greater than dt_max");
+            throw std::runtime_error(
+                std::format("dt_max_iter={} is greater than dt_max={}",
+                            dt_max_iter, m_dt_max));
         }
-        const auto nsamps_iter = m_nsamps + dt_max_iter;
+        if (m_mode == "valid" && dt_max_iter > m_nsamps) {
+            throw std::runtime_error(std::format(
+                "dt_max_iter={} is greater than nsamps={} for mode='{}'",
+                dt_max_iter, m_nsamps, m_mode));
+        }
+        const auto nsamps_iter =
+            m_nsamps + ((m_mode == "full") ? dt_max_iter : 0);
 
-        DtGridType dt_grid_sub_top = dt_grid_sub_top_prev;
         float f_end, f_mid;
-        DtGridType dt_sub;
+        std::vector<SizeType> dt_grid_sub_top = dt_grid_sub_top_prev;
+        std::vector<SizeType> dt_sub;
         SizeType buf_offset = 0;
         SizeType ncoords    = 0;
         m_container.grids[i_iter].resize(nchans_cur);
@@ -363,13 +385,12 @@ private:
                 dt_sub = calculate_dt_grid_sub(f_start, f_end);
             }
             const auto ndt_sub = dt_sub.size();
-
-            // Fraction to tail child in [0,1]
-            const auto tail_phi = utils::cff(f_start, f_mid, f_start, f_end);
+            // fraction to left child in [0,1]
+            const float tail_phi = utils::cff(f_start, f_mid, f_start, f_end);
 
             // Populate the dt_plan mapping current dt grid to the previous grid
             for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
-                const auto dt = dt_sub[i_dt];
+                const SizeType dt = dt_sub[i_dt];
                 if (i_sub == nchans_cur - 1 && do_copy) {
                     // dt = dt_tail
                     const auto i_dt_tail =
@@ -377,25 +398,20 @@ private:
                     const auto i_coord_tail =
                         grids_tail.coord_offset + i_dt_tail;
                     const auto coord_cur = FDMTCoord{
-                        .i_sub        = i_sub,
-                        .i_dt         = i_dt,
-                        .nsamps       = nsamps_iter,
-                        .buf_offset   = buf_offset,
-                        .i_coord_tail = i_coord_tail,
-                        .i_coord_head = SIZE_MAX,
-                        .delay        = 0,
-                        .tail_buf_offset =
-                            m_container.coordinates[i_iter - 1][i_coord_tail]
-                                .buf_offset,
-                        .tail_nsamps =
-                            m_container.coordinates[i_iter - 1][i_coord_tail]
-                                .nsamps,
+                        .i_sub           = i_sub,
+                        .i_dt            = i_dt,
+                        .nsamps          = nsamps_iter,
+                        .buf_offset      = buf_offset,
+                        .i_coord_tail    = i_coord_tail,
+                        .i_coord_head    = SIZE_MAX,
+                        .delay           = 0,
+                        .tail_buf_offset = coords_prev[i_coord_tail].buf_offset,
+                        .tail_nsamps     = coords_prev[i_coord_tail].nsamps,
                         .head_buf_offset = SIZE_MAX,
                         .head_nsamps     = SIZE_MAX};
 
-                    m_container.coordinates[i_iter].emplace_back(coord_cur);
-                    m_container.coordinates_copy[i_iter].emplace_back(
-                        coord_cur);
+                    coords_cur.emplace_back(coord_cur);
+                    coords_copy_cur.emplace_back(coord_cur);
                 } else {
                     // dt = dt_tail + dt_head
                     const auto& grids_head = grids_prev[(2 * i_sub) + 1];
@@ -408,6 +424,7 @@ private:
                             "Invalid dt_tail (> dt) values: dt_tail={}, dt={}",
                             dt_tail, dt));
                     }
+                    // dt_tail is also the offset delay in bins
                     if (dt_tail >= nsamps_prev) {
                         throw std::runtime_error(std::format(
                             "DM delay is greater than input size (dt_tail "
@@ -424,27 +441,19 @@ private:
                     const auto i_coord_head =
                         grids_head.coord_offset + i_dt_head;
                     const auto coord_cur = FDMTCoord{
-                        .i_sub        = i_sub,
-                        .i_dt         = i_dt,
-                        .nsamps       = nsamps_iter,
-                        .buf_offset   = buf_offset,
-                        .i_coord_tail = i_coord_tail,
-                        .i_coord_head = i_coord_head,
-                        .delay        = dt_tail,
-                        .tail_buf_offset =
-                            m_container.coordinates[i_iter - 1][i_coord_tail]
-                                .buf_offset,
-                        .tail_nsamps =
-                            m_container.coordinates[i_iter - 1][i_coord_tail]
-                                .nsamps,
-                        .head_buf_offset =
-                            m_container.coordinates[i_iter - 1][i_coord_head]
-                                .buf_offset,
-                        .head_nsamps =
-                            m_container.coordinates[i_iter - 1][i_coord_head]
-                                .nsamps};
-                    m_container.coordinates[i_iter].emplace_back(coord_cur);
-                    m_container.coordinates_sum[i_iter].emplace_back(coord_cur);
+                        .i_sub           = i_sub,
+                        .i_dt            = i_dt,
+                        .nsamps          = nsamps_iter,
+                        .buf_offset      = buf_offset,
+                        .i_coord_tail    = i_coord_tail,
+                        .i_coord_head    = i_coord_head,
+                        .delay           = dt_tail,
+                        .tail_buf_offset = coords_prev[i_coord_tail].buf_offset,
+                        .tail_nsamps     = coords_prev[i_coord_tail].nsamps,
+                        .head_buf_offset = coords_prev[i_coord_head].buf_offset,
+                        .head_nsamps     = coords_prev[i_coord_head].nsamps};
+                    coords_cur.emplace_back(coord_cur);
+                    coords_sum_cur.emplace_back(coord_cur);
                 }
                 buf_offset += nsamps_iter;
             }
@@ -457,8 +466,8 @@ private:
             ncoords += ndt_sub;
         }
         // state shape summary
-        const auto ncoords_sum  = m_container.coordinates_sum[i_iter].size();
-        const auto ncoords_copy = m_container.coordinates_copy[i_iter].size();
+        const auto ncoords_sum              = coords_sum_cur.size();
+        const auto ncoords_copy             = coords_copy_cur.size();
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
             m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
@@ -724,8 +733,9 @@ private:
         m_tsamp  = m_tbin * static_cast<float>(m_nchan);
         m_dt_max = m_n_p - 1;
 
-        m_fdmt_plan = std::make_unique<FDMTPlan>(
-            m_f_min, m_f_max, m_mchan, m_msamp, m_tsamp, m_dt_max, 1, 0, false);
+        m_fdmt_plan =
+            std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan, m_msamp,
+                                       m_tsamp, m_dt_max, 0, "full", false);
 
         // Generate final DM grid
         const auto& fdmt_dm_grid = m_fdmt_plan->get_dm_grid_final();
@@ -852,18 +862,12 @@ FDMTPlan::FDMTPlan(float f_min,
                    SizeType nsamps,
                    float tsamp,
                    SizeType dt_max,
-                   SizeType dt_step,
                    SizeType dt_min,
+                   std::string_view mode,
                    bool verbose)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_max,
-                                    dt_step,
-                                    dt_min,
-                                    verbose)) {}
+    : m_impl(std::make_unique<Impl>(
+          f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, mode, verbose)) {
+}
 FDMTPlan::~FDMTPlan()                              = default;
 FDMTPlan::FDMTPlan(FDMTPlan&&) noexcept            = default;
 FDMTPlan& FDMTPlan::operator=(FDMTPlan&&) noexcept = default;
@@ -882,20 +886,20 @@ SizeType FDMTPlan::get_nchans() const noexcept { return m_impl->get_nchans(); }
 SizeType FDMTPlan::get_nsamps() const noexcept { return m_impl->get_nsamps(); }
 float FDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
 SizeType FDMTPlan::get_dt_max() const noexcept { return m_impl->get_dt_max(); }
-SizeType FDMTPlan::get_dt_step() const noexcept {
-    return m_impl->get_dt_step();
-}
 SizeType FDMTPlan::get_dt_min() const noexcept { return m_impl->get_dt_min(); }
 float FDMTPlan::get_df() const noexcept { return m_impl->get_df(); }
 SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
 const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
     return m_impl->get_container();
 }
-DtGridType FDMTPlan::get_dt_grid_final() const noexcept {
+std::vector<SizeType> FDMTPlan::get_dt_grid_final() const noexcept {
     return m_impl->get_dt_grid_final();
 }
 std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
     return m_impl->get_dm_grid_final();
+}
+std::vector<float> FDMTPlan::get_smearing_grid_final() const noexcept {
+    return m_impl->get_smearing_grid_final();
 }
 SizeType FDMTPlan::get_dmt_ndms() const noexcept {
     return m_impl->get_dmt_ndms();
@@ -911,6 +915,9 @@ SizeType FDMTPlan::get_buffer_size() const noexcept {
 }
 SizeType FDMTPlan::get_history_size() const noexcept {
     return m_impl->get_history_size();
+}
+SizeType FDMTPlan::get_history_init_size() const noexcept {
+    return m_impl->get_history_init_size();
 }
 void FDMTPlan::print_summary(std::string_view prefix) const {
     m_impl->print_summary(prefix);
