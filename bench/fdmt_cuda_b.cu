@@ -148,7 +148,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_planBuffer_cuda)
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda)
 (benchmark::State& state) {
     FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_dmt_size(),
+    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
@@ -164,7 +164,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda)
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
 (benchmark::State& state) {
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    thrust::device_vector<float> dmt_d(tmp_plan.get_dmt_size(), 0.0F);
+    thrust::device_vector<float> dmt_d(tmp_plan.get_buffer_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
         FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);

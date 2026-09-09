@@ -125,7 +125,7 @@ private:
         m_thefdmt = std::make_unique<algorithms::FDMTCUDA>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_device_id);
+            0, true, "full", false, m_device_id);
         m_theunpacker = std::make_unique<utils::DataUnpackerCUDA>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_device_id);

@@ -239,9 +239,14 @@ public:
      * @param nsamps Number of time samples per incoming block.
      * @param tsamp Sampling time (s).
      * @param dt_max Maximum delay trial (in samples).
-     * @param dt_step Step size for delay trials (default: 1).
      * @param dt_min Minimum delay trial (in samples, default: 0).
-     * @param use_history Whether to use previous blocks' data to initialise.
+     * @param use_box_smearing Whether to account for intra-channel smearing
+     * using boxcar summation (default: true).
+     * @param mode Mode of the FDMT transform. Available modes are:
+     * - "full": Full FDMT transform of every sample in the input waterfall.
+     * - "valid": Valid FDMT transform for samples upto dt_max.
+     * - "roll": Roll FDMT transform using rotation of the input waterfall.
+     * (default: "full").
      * @param verbose Enable verbose output.
      * @param device_id CUDA device ID to use (default: 0).
      */
@@ -251,11 +256,11 @@ public:
              SizeType nsamps,
              float tsamp,
              SizeType dt_max,
-             SizeType dt_step = 1,
-             SizeType dt_min  = 0,
-             bool use_history = false,
-             bool verbose     = false,
-             int device_id    = 0);
+             SizeType dt_min       = 0,
+             bool use_box_smearing = true,
+             std::string_view mode = "full",
+             bool verbose          = false,
+             int device_id         = 0);
 
     ~FDMTCUDA();
     FDMTCUDA(FDMTCUDA&&) noexcept;
@@ -290,6 +295,10 @@ public:
      * @param d_waterfall Input waterfall data view (device memory)
      * @param d_dmt Output DM-time array view (device memory)
      * @param stream The CUDA stream to execute the transform on.
+     *
+     * @note Work is submitted asynchronously to @p stream. Call
+     *       cudaStreamSynchronize(stream) (or an equivalent ordering guarantee)
+     *       before reading @p d_dmt on the host or reusing the buffers.
      */
     void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
@@ -309,6 +318,10 @@ public:
      * @param stream CUDA stream for asynchronous execution (default: nullptr).
      * @throws std::invalid_argument If the input or output buffers are too
      * small.
+     *
+     * @note Kernels and memory copies are queued on @p stream. Synchronize
+     *       before consuming @p d_dmt or calling reset() again on another
+     *       stream unless ordering is guaranteed externally.
      */
     void reset(cuda::std::span<const float> d_waterfall,
                cuda::std::span<float> d_dmt,
@@ -324,6 +337,9 @@ public:
      * @param stream CUDA stream to use (default: nullptr, uses stream from
      * reset if nullptr).
      * @throws std::logic_error If reset() was not called first.
+     *
+     * @note Asynchronous on the active CUDA stream; synchronize before reading
+     *       results.
      */
     void advance(SizeType levels = 1, cudaStream_t stream = nullptr);
 
@@ -338,6 +354,9 @@ public:
      * @param stream CUDA stream to use (default: nullptr, uses stream from
      * reset if nullptr).
      * @throws std::logic_error If reset() was not called first.
+     *
+     * @note Asynchronous on the active CUDA stream; synchronize before reading
+     *       results.
      */
     void advance_until_remaining(SizeType remaining_levels,
                                  cudaStream_t stream = nullptr);
@@ -409,6 +428,9 @@ public:
      * @param stream CUDA stream to use (default: nullptr, uses stream from
      * reset if nullptr).
      * @throws std::logic_error If reset() was not called first.
+     *
+     * @note Asynchronous on the active CUDA stream; synchronize before reading
+     *       the final transform in @p d_dmt passed to reset().
      */
     void finalize(cudaStream_t stream = nullptr);
 
@@ -425,10 +447,11 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      SizeType nsamps,
                                      float tsamp,
                                      SizeType dt_max,
-                                     SizeType dt_step = 1,
-                                     SizeType dt_min  = 0,
-                                     bool verbose     = false,
-                                     int device_id    = 0);
+                                     SizeType dt_min       = 0,
+                                     bool use_box_smearing = true,
+                                     std::string_view mode = "full",
+                                     bool verbose          = false,
+                                     int device_id         = 0);
 
 #endif // DMT_ENABLE_CUDA
 

@@ -122,10 +122,45 @@ public:
         return dm_grid_final;
     }
     std::vector<float> get_smearing_grid_final() const noexcept {
-        // Return the smearing samples per channel for each DM trial.
-        std::vector<float> smearing_grid(get_dmt_ndms() * m_nchans);
-        // Recursively traverse the plan to get the actual smearing
-        // samples used in the FDMT.
+        const auto ndms = get_dmt_ndms();
+        std::vector<float> smearing_grid(ndms * m_nchans, 0.0F);
+        if (m_niters == 0 || m_nchans == 0) {
+            return smearing_grid;
+        }
+
+        // Helper lambda to recursively trace coordinates down to level 0
+        auto trace_coord = [&](auto& self, SizeType level, SizeType coord_idx,
+                               SizeType dm_idx) -> void {
+            if (level == 0) {
+                if (coord_idx < m_container.coordinates[0].size()) {
+                    const auto& coord0 = m_container.coordinates[0][coord_idx];
+                    const auto chan    = coord0.i_sub;
+                    if (chan < m_nchans &&
+                        coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
+                        const auto dt =
+                            m_container.grids[0][chan].dt_grid[coord0.i_dt];
+                        smearing_grid[(dm_idx * m_nchans) + chan] =
+                            static_cast<float>(dt);
+                    }
+                }
+                return;
+            }
+
+            if (level < m_container.coordinates.size() &&
+                coord_idx < m_container.coordinates[level].size()) {
+                const auto& coord = m_container.coordinates[level][coord_idx];
+                if (coord.i_coord_tail != SIZE_MAX) {
+                    self(self, level - 1, coord.i_coord_tail, dm_idx);
+                }
+                if (coord.i_coord_head != SIZE_MAX) {
+                    self(self, level - 1, coord.i_coord_head, dm_idx);
+                }
+            }
+        };
+
+        for (SizeType i_dm = 0; i_dm < ndms; ++i_dm) {
+            trace_coord(trace_coord, m_niters, i_dm, i_dm);
+        }
         return smearing_grid;
     }
     SizeType get_dmt_ndms() const noexcept {
@@ -211,9 +246,9 @@ private:
             throw std::invalid_argument(std::format(
                 "FDMT: f_min={} must be less than f_max={}", m_f_min, m_f_max));
         }
-        if (m_nchans == 0) {
+        if (m_nchans < 2) {
             throw std::invalid_argument(std::format(
-                "FDMT: nchans={} must be greater than 0", m_nchans));
+                "FDMT: nchans={} must be at least 2", m_nchans));
         }
         if (m_nsamps == 0) {
             throw std::invalid_argument(std::format(

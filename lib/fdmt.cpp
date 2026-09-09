@@ -55,17 +55,18 @@ void offset_add(const float* __restrict__ data_tail,
     assert(size_out >= size_tail && "Output size must be >= Input tail size");
     assert(delay_shift < size_tail && "Offset must be < input tail size");
 
-    const SizeType nsum = size_tail - delay_shift;
-    // Part 1: Overlap region [delay_shift, size_tail)
-#pragma omp simd
-    for (SizeType i = 0; i < nsum; ++i) {
-        out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
-    }
-
     if constexpr (Mode == FDMTMode::kFull) {
         // Full mode: Output can extend beyond input size
-        // Part 2: Copy tail-only region [0, delay_shift)
+        // Part 1: Copy tail-only region [0, delay_shift)
         std::copy_n(data_tail, delay_shift, out);
+
+        // Part 2: Overlap region [delay_shift, size_tail)
+        const SizeType nsum = size_tail - delay_shift;
+#pragma omp simd
+        for (SizeType i = 0; i < nsum; ++i) {
+            out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
+        }
+
         // Part 3: Head-only region [size_tail, size_tail + nrest)
         const SizeType nrest = std::min(delay_shift, size_out - size_tail);
         if (nrest > 0) {
@@ -80,14 +81,28 @@ void offset_add(const float* __restrict__ data_tail,
         // Valid mode: only overlap region
         assert(size_out == size_tail &&
                "All sizes must be equal in valid mode");
-        // Part 2: Copy tail-only region [0, delay_shift)
+        // Part 1: Copy tail-only region [0, delay_shift)
         std::copy_n(data_tail, delay_shift, out);
+
+        // Part 2: Overlap region [delay_shift, size_tail)
+        const SizeType nsum = size_tail - delay_shift;
+#pragma omp simd
+        for (SizeType i = 0; i < nsum; ++i) {
+            out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
+        }
     } else if constexpr (Mode == FDMTMode::kRoll) {
         // Roll mode: cyclic addition
         assert(size_out == size_tail && "All sizes must be equal in roll mode");
-        // Part 2: Wrapped region [0, delay_shift)
+        // Part 1: Wrapped region [0, delay_shift)
         for (SizeType k = 0; k < delay_shift; ++k) {
             out[k] = data_tail[k] + data_head[size_tail - delay_shift + k];
+        }
+
+        // Part 2: Overlap region [delay_shift, size_tail)
+        const SizeType nsum = size_tail - delay_shift;
+#pragma omp simd
+        for (SizeType i = 0; i < nsum; ++i) {
+            out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
         }
     }
 }
@@ -124,19 +139,13 @@ void fdmt_iter(const float* __restrict__ state_in,
             const float* __restrict__ tail = &state_in[coord->tail_buf_offset];
             float* __restrict__ out        = &state_out[coord->buf_offset];
             std::copy_n(tail, coord->tail_nsamps, out);
+            if (coord->nsamps > coord->tail_nsamps) {
+                std::fill(out + coord->tail_nsamps, out + coord->nsamps, 0.0F);
+            }
         }
     }
 }
 
-/*
-// Before calling fdmt_init_impl:
-assert(nsamps > 0);
-for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
-    assert(!grids_init[i_sub].dt_grid.empty());
-    assert(grids_init[i_sub].dt_grid[0] < nsamps);
-    assert(grids_init[i_sub].dt_grid.back() < nsamps);  // if applicable
-}
-*/
 template <bool UseRoll, bool UseBoxSmearing>
 void fdmt_init_impl_row0(const float* __restrict__ wf_sub,
                          float* __restrict__ buf_row0,
@@ -235,9 +244,8 @@ void fdmt_init_impl(const float* __restrict__ waterfall,
                     const plans::FDMTCoordGrid* __restrict__ grids_init,
                     SizeType nsubs,
                     SizeType nsamps) noexcept {
-    // Preconditions (enforced at higher level):
-    // - For all i_sub: grids_init[i_sub].dt_grid[0] < nsamps
-    // - For all i_sub: grids_init[i_sub].dt_grid.size() > 0
+    // Preconditions (enforced by FDMTPlan::validate_inputs and make_plan):
+    // - nsamps > 0, non-empty dt_grid per sub-band, dt_min_sub < nsamps
 
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel for default(none)                                         \
@@ -268,158 +276,82 @@ void fdmt_init_impl(const float* __restrict__ waterfall,
     }
 }
 
-/*
-assert(nsamps > dt_max_final + dt_max_init);  // nsamps >>> these values
-assert(dt_max_init >= 1);
-assert(dt_max_final >= 1);
-for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
-    assert(!grids_init[i_sub].dt_grid.empty());
-    assert(grids_init[i_sub].dt_grid[0] <= dt_max_init);  // dt_min <=
-dt_max_init assert(grids_init[i_sub].dt_grid.back() <= dt_max_init);  // all dt
-values in init stage
-}
-*/
 void fdmt_init_valid_row0_box(const float* __restrict__ wf_sub,
                               const float* __restrict__ hist_sub,
-                              const float* __restrict__ hist_init_sub,
                               float* __restrict__ buf_row0,
                               SizeType dt_min_sub,
-                              SizeType dt_max_init,
                               SizeType dt_max_final,
-                              SizeType nsamps_ext) noexcept {
+                              SizeType nsamps) noexcept {
     // ===== First DT row (dt_min_sub) =====
     // Box sum of (dt_min_sub + 1) samples ending at current position
     float running_sum = 0.0F;
 
     // --- isamp = 0: sum of logical indices [-dt_min_sub, 0] ---
-    // [-dt_min_sub, -1] from hist_init, [0] from hist_buffer
+    // Samples [-dt_min_sub, -1] from hist_sub, [0] from wf_sub
     for (SizeType i = 0; i < dt_min_sub; ++i) {
-        // Logical index: -dt_min_sub + i (ranges from -dt_min_sub to -1)
-        // hist_init index: dt_max_init - dt_min_sub + i
-        running_sum += hist_init_sub[dt_max_init - dt_min_sub + i];
+        running_sum += hist_sub[dt_max_final - dt_min_sub + i];
     }
-    running_sum += hist_sub[0]; // Logical index 0
+    running_sum += wf_sub[0];
     buf_row0[0] = running_sum;
 
-    // --- Zone A: isamp in [1, dt_min_sub] ---
-    // Add from hist_buffer, remove from hist_init
+    // --- isamp in [1, dt_min_sub]: window slides into valid data ---
+    // Add from wf_sub, remove from hist_sub
     for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
-        // Add: logical index isamp -> hist_buffer[isamp]
-        running_sum += hist_sub[isamp];
-        // Remove: logical index (isamp - dt_min_sub - 1) -> hist_init
-        // isamp - dt_min_sub - 1 ranges from -dt_min_sub to -1
-        running_sum -= hist_init_sub[dt_max_init + (isamp - dt_min_sub - 1)];
+        running_sum += wf_sub[isamp];
+        running_sum -= hist_sub[dt_max_final + isamp - dt_min_sub - 1];
         buf_row0[isamp] = running_sum;
     }
 
-    // --- Zone B: isamp in [dt_min_sub + 1, dt_max_final) ---
-    // Add from hist_buffer, remove from hist_buffer
-    for (SizeType isamp = dt_min_sub + 1; isamp < dt_max_final; ++isamp) {
-        running_sum += hist_sub[isamp];
-        running_sum -= hist_sub[isamp - dt_min_sub - 1];
-        buf_row0[isamp] = running_sum;
-    }
-
-    // --- Zone C: isamp in [dt_max_final, dt_max_final + dt_min + 1) ---
-    // Add from waterfall, remove from hist_buffer
-    const SizeType zone_c_end = dt_max_final + dt_min_sub + 1;
-    for (SizeType isamp = dt_max_final; isamp < zone_c_end; ++isamp) {
-        // Add: logical index isamp -> waterfall[isamp - dt_max_final]
-        running_sum += wf_sub[isamp - dt_max_final];
-        // Remove: logical index (isamp - dt_min_sub - 1) -> hist_buffer
-        running_sum -= hist_sub[isamp - dt_min_sub - 1];
-        buf_row0[isamp] = running_sum;
-    }
-
-    // --- Zone D: isamp in [zone_c_end, nsamps_ext) ---
-    // Add from waterfall, remove from waterfall
-    for (SizeType isamp = zone_c_end; isamp < nsamps_ext; ++isamp) {
-        const SizeType wf_idx = isamp - dt_max_final;
-        running_sum += wf_sub[wf_idx];
-        running_sum -= wf_sub[wf_idx - dt_min_sub - 1];
+    // --- isamp in [dt_min_sub + 1, nsamps): fully within waterfall ---
+    // Add from wf_sub, remove from wf_sub
+    for (SizeType isamp = dt_min_sub + 1; isamp < nsamps; ++isamp) {
+        running_sum += wf_sub[isamp];
+        running_sum -= wf_sub[isamp - dt_min_sub - 1];
         buf_row0[isamp] = running_sum;
     }
 }
 
 void fdmt_init_valid_row0_shift(const float* __restrict__ wf_sub,
                                 const float* __restrict__ hist_sub,
-                                const float* __restrict__ hist_init_sub,
                                 float* __restrict__ buf_row0,
                                 SizeType dt_min_sub,
-                                SizeType dt_max_init,
                                 SizeType dt_max_final,
-                                SizeType nsamps_ext) noexcept {
-    // ===== First DT row (dt_min_sub) =====
-    // No smearing: just shift by dt_min_sub
-    // --- Zone A: isamp in [0, dt_min_sub) ---
-    // Source: hist_init (logical index isamp - dt_min_sub is in
-    // [-dt_min_sub, -1])
+                                SizeType nsamps) noexcept {
+    // ===== First DT row (dt_min_sub) without smearing =====
+    // For isamp in [0, dt_min_sub): read from history
     for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
-        // Logical source: isamp - dt_min_sub (negative)
-        buf_row0[isamp] = hist_init_sub[dt_max_init - dt_min_sub + isamp];
+        buf_row0[isamp] = hist_sub[dt_max_final - dt_min_sub + isamp];
     }
-    // --- Zone B: isamp in [dt_min_sub, dt_max_final + dt_min_sub) ---
-    // Source: hist_buffer (logical index isamp - dt_min_sub is in [0,
-    // dt_max_final))
-    for (SizeType isamp = dt_min_sub; isamp < dt_max_final + dt_min_sub;
-         ++isamp) {
-        buf_row0[isamp] = hist_sub[isamp - dt_min_sub];
-    }
-
-    // --- Zone C: isamp in [dt_max_final + dt_min_sub, nsamps_ext) ---
-    // Source: waterfall (logical index isamp - dt_min_sub is in
-    // [dt_max_final, ...))
-    for (SizeType isamp = dt_max_final + dt_min_sub; isamp < nsamps_ext;
-         ++isamp) {
-        buf_row0[isamp] = wf_sub[(isamp - dt_max_final) - dt_min_sub];
+    // For isamp in [dt_min_sub, nsamps): read from waterfall
+    for (SizeType isamp = dt_min_sub; isamp < nsamps; ++isamp) {
+        buf_row0[isamp] = wf_sub[isamp - dt_min_sub];
     }
 }
 
 template <bool UseBoxSmearing>
 void fdmt_init_valid_row(const float* __restrict__ wf_sub,
                          const float* __restrict__ hist_sub,
-                         const float* __restrict__ hist_init_sub,
                          const float* __restrict__ buf_prev,
                          float* __restrict__ buf_cur,
                          SizeType dt_cur,
-                         SizeType dt_max_init,
                          SizeType dt_max_final,
-                         SizeType nsamps_ext) noexcept {
+                         SizeType nsamps) noexcept {
     if constexpr (UseBoxSmearing) {
         // Extend box: new_sum[isamp] = prev_sum[isamp] + input[isamp - dt_cur]
-
-        // --- Zone A: isamp in [0, dt_cur) ---
         for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
             buf_cur[isamp] =
-                buf_prev[isamp] + hist_init_sub[dt_max_init + (isamp - dt_cur)];
+                buf_prev[isamp] + hist_sub[dt_max_final + isamp - dt_cur];
         }
-
-        // --- Zone B: isamp in [dt_cur, dt_max_final + dt_cur) ---
-        const SizeType zone_b_end = dt_max_final + dt_cur;
-        for (SizeType isamp = dt_cur; isamp < zone_b_end; ++isamp) {
-            buf_cur[isamp] = buf_prev[isamp] + hist_sub[isamp - dt_cur];
-        }
-
-        // --- Zone C: isamp in [zone_b_end, nsamps_ext) ---
-        for (SizeType isamp = zone_b_end; isamp < nsamps_ext; ++isamp) {
-            buf_cur[isamp] =
-                buf_prev[isamp] + wf_sub[isamp - dt_cur - dt_max_final];
+        for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
+            buf_cur[isamp] = buf_prev[isamp] + wf_sub[isamp - dt_cur];
         }
     } else {
         // No smearing: just shift by dt_cur
-        // --- Zone A: isamp in [0, dt_cur) ---
         for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-            buf_cur[isamp] = hist_init_sub[dt_max_init - dt_cur + isamp];
+            buf_cur[isamp] = hist_sub[dt_max_final - dt_cur + isamp];
         }
-        // --- Zone B: isamp in [dt_cur, dt_max_final + dt_cur) ---
-        const SizeType zone_b_end = dt_max_final + dt_cur;
-        for (SizeType isamp = dt_cur; isamp < zone_b_end; ++isamp) {
-            buf_cur[isamp] = hist_sub[isamp - dt_cur];
-        }
-
-        // --- Zone C: isamp in [zone_b_end, nsamps_ext) ---
-        for (SizeType isamp = zone_b_end; isamp < nsamps_ext; ++isamp) {
-            buf_cur[isamp] = wf_sub[isamp - dt_cur - dt_max_final];
+        for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
+            buf_cur[isamp] = wf_sub[isamp - dt_cur];
         }
     }
 }
@@ -431,24 +363,21 @@ void fdmt_init_valid_update_history(const float* __restrict__ waterfall,
                                     SizeType nsamps,
                                     SizeType dt_max_init,
                                     SizeType dt_max_final) noexcept {
-    // Update history buffer
     for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
         const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
         float* __restrict__ hist_sub     = hist_buffer + (i_sub * dt_max_final);
-        float* __restrict__ hist_init_sub =
-            hist_init_buffer + (i_sub * dt_max_init);
-
-        // hist_init <- waterfall[nsamps - dt_max_final - dt_max_init : nsamps -
-        // dt_max_final]
-        std::copy_n(wf_sub + nsamps - dt_max_final - dt_max_init, dt_max_init,
-                    hist_init_sub);
-
-        // hist_buffer <- waterfall[nsamps - dt_max_final : nsamps]
         std::copy_n(wf_sub + nsamps - dt_max_final, dt_max_final, hist_sub);
+
+        if (hist_init_buffer != nullptr && dt_max_init > 0) {
+            float* __restrict__ hist_init_sub =
+                hist_init_buffer + (i_sub * dt_max_init);
+            std::copy_n(wf_sub + nsamps - dt_max_init, dt_max_init,
+                        hist_init_sub);
+        }
     }
 }
 
-// Specialized implementation for VALID mode with two history buffers
+// Specialized implementation for VALID mode with history
 template <bool UseBoxSmearing>
 void fdmt_init_valid_impl(const float* __restrict__ waterfall,
                           float* __restrict__ init_buffer,
@@ -459,50 +388,42 @@ void fdmt_init_valid_impl(const float* __restrict__ waterfall,
                           SizeType nsamps,
                           SizeType dt_max_init,
                           SizeType dt_max_final) noexcept {
-    // Preconditions (enforced at higher level):
-    // - dt_min_sub <= dt_max_init for all sub-bands
-    // - nsamps >> dt_max_final + dt_max_init
-    // - dt_max_init >= 1, dt_max_final >= 1
-    const SizeType nsamps_ext = dt_max_final + nsamps;
-
+    // Preconditions (enforced by FDMTPlan::validate_inputs and make_plan):
+    // - nsamps > 0, dt_max_final >= 1, non-empty dt_grid per sub-band
+    // - dt_min_sub <= dt_max_final for all sub-bands
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel for default(none)                                         \
-    shared(waterfall, init_buffer, hist_buffer, hist_init_buffer, grids_init,  \
-               nsubs, nsamps, nsamps_ext, dt_max_init, dt_max_final)
+    shared(waterfall, init_buffer, hist_buffer, grids_init, nsubs, nsamps,     \
+           dt_max_final)
 #endif
     for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
         const auto& dt_grid_sub = grids_init[i_sub].dt_grid;
         const auto dt_min_sub   = dt_grid_sub[0];
         const auto ndt_sub      = dt_grid_sub.size();
 
-        // Hoist pointer arithmetic
         const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
         const float* __restrict__ hist_sub =
             hist_buffer + (i_sub * dt_max_final);
-        const float* __restrict__ hist_init_sub =
-            hist_init_buffer + (i_sub * dt_max_init);
         float* __restrict__ buf_base =
-            init_buffer + (grids_init[i_sub].coord_offset * nsamps_ext);
+            init_buffer + (grids_init[i_sub].coord_offset * nsamps);
 
         if constexpr (UseBoxSmearing) {
-            fdmt_init_valid_row0_box(wf_sub, hist_sub, hist_init_sub, buf_base,
-                                     dt_min_sub, dt_max_init, dt_max_final,
-                                     nsamps_ext);
+            fdmt_init_valid_row0_box(wf_sub, hist_sub, buf_base, dt_min_sub,
+                                     dt_max_final, nsamps);
         } else {
-            fdmt_init_valid_row0_shift(wf_sub, hist_sub, hist_init_sub,
-                                       buf_base, dt_min_sub, dt_max_init,
-                                       dt_max_final, nsamps_ext);
+            fdmt_init_valid_row0_shift(wf_sub, hist_sub, buf_base, dt_min_sub,
+                                       dt_max_final, nsamps);
         }
 
-        // ===== Subsequent DT rows (dt = dt_min_sub + 1, ...) =====
+        // Subsequent DT rows
         for (SizeType i_dt = 1; i_dt < ndt_sub; ++i_dt) {
             const auto dt_cur           = dt_grid_sub[i_dt];
-            float* __restrict__ buf_cur = buf_base + (i_dt * nsamps_ext);
+            float* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
             const float* __restrict__ buf_prev =
-                buf_base + ((i_dt - 1) * nsamps_ext);
-            fdmt_init_valid_row<UseBoxSmearing>(
-                wf_sub, hist_sub, hist_init_sub, buf_prev, buf_cur, dt_cur,
-                dt_max_init, dt_max_final, nsamps_ext);
+                buf_base + ((i_dt - 1) * nsamps);
+            fdmt_init_valid_row<UseBoxSmearing>(wf_sub, hist_sub, buf_prev,
+                                                buf_cur, dt_cur, dt_max_final,
+                                                nsamps);
         }
     }
 
@@ -538,11 +459,12 @@ public:
           m_state_internal(m_plan.get_buffer_size(), 0.0F),
           m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
                     0.0F),
-          m_history_init(m_mode == FDMTMode::kValid && m_use_box_smearing
+          m_history_init(m_mode == FDMTMode::kValid
                              ? m_plan.get_history_init_size()
                              : 0,
-                         0.0F),
-          m_nthreads(set_dmt_openmp_threads(nthreads)) {}
+                         0.0F) {
+        set_dmt_openmp_threads(nthreads);
+    }
 
     ~Impl()                      = default;
     Impl(const Impl&)            = delete;
@@ -572,19 +494,12 @@ public:
                 "FDMTCPU: Invalid size of dmt. Expected at least {}, got {}",
                 m_plan.get_buffer_size(), dmt.size()));
         }
-        const auto levels = m_plan.get_niters() + 1;
-        if (levels < 2) {
-            throw std::invalid_argument(
-                std::format("FDMTCPU: Invalid number of levels. Expected at "
-                            "least 2, got {}",
-                            levels));
-        }
 
         m_dmt_target_ptr = dmt.data();
         m_current_level  = 0;
 
         // Number of internal ping-pong iterations (excluding the final write)
-        const SizeType internal_iters = levels - 2;
+        const SizeType internal_iters = total_levels() - 2;
         const bool odd_swaps          = (internal_iters % 2) == 1;
         if (odd_swaps) {
             m_current_in_ptr  = dmt.data();
@@ -731,10 +646,9 @@ private:
     plans::FDMTPlan m_plan;
     // Internal state buffer (for ping-pong buffering)
     std::vector<float> m_state_internal;
-    // History buffers - only allocated for "valid" mode
+    // History buffers for valid-mode streaming across FDMT blocks
     std::vector<float> m_history;
     std::vector<float> m_history_init; // only when use_box_smearing is true
-    int m_nthreads;
 
     // Stepper state
     float* m_current_in_ptr{nullptr};

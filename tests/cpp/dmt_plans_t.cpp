@@ -47,6 +47,15 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
               static_cast<SizeType>(ndms_expected * (nsamps + dt_max)));
     }
 
+    SECTION("Smearing grid") {
+        const auto smearing_grid = plan.get_smearing_grid_final();
+        const auto ndms          = plan.get_dmt_ndms();
+        CHECK(smearing_grid.size() == ndms * nchans);
+        for (const auto& val : smearing_grid) {
+            CHECK(val >= 0.0F);
+        }
+    }
+
     SECTION("Memory usage and buffer size") {
         CHECK(plan.get_buffer_size() > 0);
         CHECK(plan.get_container().get_memory_usage() > 0);
@@ -58,25 +67,25 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
 
         // Check the values of df_top and df_bot
         for (SizeType i = 0; i < container.df_top.size() - 1; ++i) {
+            CHECK(container.df_top[i] <= container.df_top[i + 1]);
             CHECK(container.df_bot[i] < container.df_bot[i + 1]);
             CHECK(container.df_top[i] <= container.df_bot[i]);
         }
 
         // Check the values of state_shape
         for (SizeType i = 0; i < container.state_shape.size() - 1; ++i) {
-            CHECK(container.state_shape[i].nchans >=
+            CHECK(container.state_shape[i].nchans >
                   container.state_shape[i + 1].nchans);
-            CHECK(container.state_shape[i].ndt_max <=
-                  container.state_shape[i + 1].ndt_max);
-            CHECK(container.state_shape[i].ndt_min <=
-                  container.state_shape[i + 1].ndt_min);
             CHECK(container.state_shape[i].nsamps <=
                   container.state_shape[i + 1].nsamps);
+            CHECK(container.state_shape[i].nelements > 0);
+            CHECK(container.state_shape[i].dt_max <=
+                  container.state_shape[i + 1].dt_max);
         }
 
-        // Check the values of dt_grid_final
+        // Check dt_grid_final
         const auto& dt_grid_final = plan.get_dt_grid_final();
-        CHECK(dt_grid_final.front() == 0);
+        CHECK(dt_grid_final.front() == plan.get_dt_min());
         CHECK(dt_grid_final.back() == plan.get_dt_max());
         for (SizeType i = 0; i < dt_grid_final.size() - 1; ++i) {
             CHECK(dt_grid_final[i] < dt_grid_final[i + 1]);
@@ -95,9 +104,12 @@ TEST_CASE("FDMTPlan edge cases", "[dmt_plans]") {
         CHECK_THROWS_AS(
             FDMTPlan(1500.0F, 1000.0F, 500, 1024, 0.001F, 512, 0, "full"),
             std::invalid_argument);
-        // nchans == 0
+        // nchans < 2
         CHECK_THROWS_AS(
             FDMTPlan(1000.0F, 1500.0F, 0, 1024, 0.001F, 512, 0, "full"),
+            std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 1, 1024, 0.001F, 512, 0, "full"),
             std::invalid_argument);
         // nsamps == 0
         CHECK_THROWS_AS(

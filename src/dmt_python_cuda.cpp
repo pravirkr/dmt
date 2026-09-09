@@ -21,16 +21,16 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
 
     py::class_<FDMTCUDA>(mod, "FDMTCUDA", "FDMT CUDA Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType, bool, bool, int>(),
+                      SizeType, bool, std::string_view, bool, int>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
-             py::arg("dt_step") = 1, py::arg("dt_min") = 0,
-             py::arg("use_history") = false, py::arg("verbose") = false,
+             py::arg("dt_min") = 0, py::arg("use_box_smearing") = true,
+             py::arg("mode") = "full", py::arg("verbose") = false,
              py::arg("device_id") = 0)
         .def_property_readonly(
             "plan", &FDMTCUDA::get_plan,
             "Get the FDMTPlan object containing transform details.")
-        // execute take 2d array as input, and return 2d array as output
+        // execute takes 2d array as input, and returns 2d array as output
         .def(
             "execute",
             [](FDMTCUDA& fdmt,
@@ -42,13 +42,16 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
                 const auto& plan   = fdmt.get_plan();
                 const auto& plan_c = plan.get_container();
                 const auto niters  = plan.get_niters();
-                py::array_t<float, py::array::c_style> dmt(
-                    {plan_c.state_shape[niters].ncoords,
-                     plan_c.state_shape[niters].nsamps});
+                const auto ncoords = plan_c.state_shape[niters].ncoords;
+                const auto nsamps  = plan_c.state_shape[niters].nsamps;
+                py::array_t<float, py::array::c_style> dmt_buf(
+                    plan.get_buffer_size());
                 fdmt.execute(
                     std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(dmt.mutable_data(), dmt.size()));
-                return dmt;
+                    std::span<float>(dmt_buf.mutable_data(), dmt_buf.size()));
+                return py::array_t<float>(
+                    {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
+                    dmt_buf.data(), dmt_buf);
             },
             py::arg("waterfall"),
             R"doc(
@@ -56,7 +59,12 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
 
             This method handles copying data from the host (NumPy array) to the GPU,
             executing the transform, and copying the result back to the host.
-            )doc");
+            )doc")
+        .def_property_readonly("current_level", &FDMTCUDA::current_level)
+        .def_property_readonly("total_levels", &FDMTCUDA::total_levels)
+        .def_property_readonly("remaining_levels", &FDMTCUDA::remaining_levels)
+        .def_property_readonly("num_subbands", &FDMTCUDA::num_subbands)
+        .def_property_readonly("is_finished", &FDMTCUDA::is_finished);
 }
 
 } // namespace dmt

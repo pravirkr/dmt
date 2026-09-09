@@ -157,4 +157,155 @@ TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
     }
 }
 
+TEST_CASE("FDMTCPU modes and smearing matrix", "[fdmt_cpu]") {
+    const float f_min   = 1000.0F;
+    const float f_max   = 1500.0F;
+    const size_t nchans = 64;
+    const size_t nsamps = 256;
+    const float tsamp   = 0.001F;
+    const size_t dt_max = 32;
+    const size_t dt_min = 0;
+
+    const std::vector<std::string> modes = {"full", "roll", "valid"};
+    const std::vector<bool> smearings    = {true, false};
+
+    for (const auto& mode : modes) {
+        for (const auto smearing : smearings) {
+            DYNAMIC_SECTION("Mode: " << mode << ", Smearing: " << smearing) {
+                FDMTCPU fdmt_sync(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                 dt_min, smearing, mode);
+                const auto& plan = fdmt_sync.get_plan();
+
+                if (mode == "full") {
+                    CHECK(plan.get_dmt_nsamps() == nsamps + dt_max);
+                } else {
+                    CHECK(plan.get_dmt_nsamps() == nsamps);
+                }
+
+                std::vector<float> waterfall(nchans * nsamps);
+                for (size_t i = 0; i < waterfall.size(); ++i) {
+                    waterfall[i] = static_cast<float>((i % 13) + 1);
+                }
+
+                // Synchronous execution
+                std::vector<float> dmt_sync(plan.get_buffer_size(), 0.0F);
+                fdmt_sync.execute(waterfall, dmt_sync);
+
+                // Verify output has non-zero values
+                float sum_sync = 0.0F;
+                for (size_t i = 0; i < plan.get_dmt_size(); ++i) {
+                    sum_sync += dmt_sync[i];
+                }
+                CHECK(sum_sync > 0.0F);
+
+                // Stepper execution with fresh instance (matching cold-start state) and dirty buffer reuse
+                FDMTCPU fdmt_stepped(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                    dt_min, smearing, mode);
+                std::vector<float> dmt_stepped(plan.get_buffer_size(), 999.0F);
+                fdmt_stepped.reset(waterfall, dmt_stepped);
+                fdmt_stepped.advance_until_remaining(0);
+                CHECK(fdmt_stepped.is_finished());
+                fdmt_stepped.finalize();
+
+                // Verify exact bit-for-bit equivalence between sync and stepper
+                const auto dmt_size = plan.get_dmt_size();
+                for (size_t i = 0; i < dmt_size; ++i) {
+                    REQUIRE(dmt_stepped[i] == dmt_sync[i]);
+                }
+
+                // Also test second block on both: verify second block is bit-exact
+                std::vector<float> dmt_sync2(plan.get_buffer_size(), 0.0F);
+                fdmt_sync.execute(waterfall, dmt_sync2);
+
+                std::vector<float> dmt_stepped2(plan.get_buffer_size(), -888.0F);
+                fdmt_stepped.reset(waterfall, dmt_stepped2);
+                fdmt_stepped.advance_until_remaining(0);
+                fdmt_stepped.finalize();
+
+                for (size_t i = 0; i < dmt_size; ++i) {
+                    REQUIRE(dmt_stepped2[i] == dmt_sync2[i]);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTCPU odd channels and padding safety", "[fdmt_cpu]") {
+    const float f_min   = 1000.0F;
+    const float f_max   = 1500.0F;
+    const size_t nsamps = 256;
+    const float tsamp   = 0.001F;
+    const size_t dt_max = 32;
+    const size_t dt_min = 0;
+
+    // Test channel counts that produce odd divisions (triggering do_copy)
+    const std::vector<size_t> odd_chans = {13, 63};
+
+    for (const auto nchans : odd_chans) {
+        DYNAMIC_SECTION("nchans = " << nchans) {
+            FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                         true, "full");
+            const auto& plan = fdmt.get_plan();
+
+            std::vector<float> waterfall(nchans * nsamps);
+            for (size_t i = 0; i < waterfall.size(); ++i) {
+                waterfall[i] = static_cast<float>((i % 7) + 1);
+            }
+
+            std::vector<float> dmt_sync(plan.get_buffer_size(), 0.0F);
+            fdmt.execute(waterfall, dmt_sync);
+
+            // Pre-fill stepped buffer with dirty non-zero floats to catch padding leaks
+            std::vector<float> dmt_stepped(plan.get_buffer_size(), -42.0F);
+            fdmt.reset(waterfall, dmt_stepped);
+            while (!fdmt.is_finished()) {
+                fdmt.advance(1);
+            }
+            fdmt.finalize();
+
+            const auto dmt_size = plan.get_dmt_size();
+            for (size_t i = 0; i < dmt_size; ++i) {
+                REQUIRE(dmt_stepped[i] == dmt_sync[i]);
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTCPU valid mode streaming history", "[fdmt_cpu]") {
+    const float f_min   = 1000.0F;
+    const float f_max   = 1500.0F;
+    const size_t nchans = 32;
+    const size_t nsamps = 256;
+    const float tsamp   = 0.001F;
+    const size_t dt_max = 32;
+    const size_t dt_min = 0;
+
+    FDMTCPU fdmt_valid(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                       true, "valid");
+    const auto& plan = fdmt_valid.get_plan();
+
+    std::vector<float> block1(nchans * nsamps, 1.0F);
+    std::vector<float> block2(nchans * nsamps, 2.0F);
+
+    std::vector<float> dmt1(plan.get_buffer_size(), 0.0F);
+    std::vector<float> dmt2(plan.get_buffer_size(), 0.0F);
+
+    // Block 1 (cold start, zero history)
+    REQUIRE_NOTHROW(fdmt_valid.execute(block1, dmt1));
+
+    // Block 2 (should incorporate history from block 1 seamlessly)
+    REQUIRE_NOTHROW(fdmt_valid.execute(block2, dmt2));
+
+    // Values in block 2 should be strictly greater than cold start
+    // because block 1's history contributes to the edge samples
+    float sum1 = 0.0F;
+    float sum2 = 0.0F;
+    for (size_t i = 0; i < plan.get_dmt_size(); ++i) {
+        sum1 += dmt1[i];
+        sum2 += dmt2[i];
+    }
+    CHECK(sum1 > 0.0F);
+    CHECK(sum2 > sum1);
+}
+
 } // namespace dmt

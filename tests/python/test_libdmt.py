@@ -192,3 +192,61 @@ class TestFDMT:
         res = thefdmt.finalize()
         sync = thefdmt.execute(waterfall)
         np.testing.assert_allclose(res, sync, rtol=1e-6, atol=1e-6)
+
+    @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
+    @pytest.mark.parametrize("use_box_smearing", [True, False])
+    def test_modes_and_smearing_matrix(self, mode: str, use_box_smearing: bool) -> None:
+        nchans = 64
+        nsamples = 256
+        dt_max = 32
+        fdmt_sync = libdmt.FDMTCPU(
+            1000.0, 1500.0, nchans, nsamples, 0.001, dt_max,
+            dt_min=0, use_box_smearing=use_box_smearing, mode=mode
+        )
+        if mode == "full":
+            assert fdmt_sync.plan.dmt_nsamps == nsamples + dt_max
+        else:
+            assert fdmt_sync.plan.dmt_nsamps == nsamples
+
+        rng = np.random.default_rng(42)
+        waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
+
+        sync_output = fdmt_sync.execute(waterfall)
+
+        fdmt_step = libdmt.FDMTCPU(
+            1000.0, 1500.0, nchans, nsamples, 0.001, dt_max,
+            dt_min=0, use_box_smearing=use_box_smearing, mode=mode
+        )
+        fdmt_step.reset(waterfall)
+        fdmt_step.advance_until_remaining(0)
+        assert fdmt_step.is_finished
+        step_output = fdmt_step.finalize()
+
+        np.testing.assert_allclose(step_output, sync_output, rtol=1e-5, atol=1e-5)
+
+    def test_valid_mode_streaming_history(self) -> None:
+        nchans = 32
+        nsamples = 256
+        dt_max = 32
+        thefdmt = libdmt.FDMTCPU(
+            1000.0, 1500.0, nchans, nsamples, 0.001, dt_max,
+            mode="valid"
+        )
+        block1 = np.ones((nchans, nsamples), dtype=np.float32)
+        block2 = np.full((nchans, nsamples), 2.0, dtype=np.float32)
+
+        dmt1 = thefdmt.execute(block1)
+        dmt2 = thefdmt.execute(block2)
+
+        assert dmt1.shape == (thefdmt.dt_grid_final.size, nsamples)
+        assert dmt2.shape == (thefdmt.dt_grid_final.size, nsamples)
+        assert np.sum(dmt2) > np.sum(dmt1)
+
+    def test_smearing_grid_final(self) -> None:
+        nchans = 64
+        nsamples = 256
+        dt_max = 32
+        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        smearing_grid = thefdmt.plan.smearing_grid_final
+        assert smearing_grid.size == thefdmt.plan.dmt_ndms * nchans
+        assert np.all(smearing_grid >= 0.0)

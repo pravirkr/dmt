@@ -119,7 +119,7 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
             buf_offset.emplace_back(coord.buf_offset);
             i_coord_tail.emplace_back(coord.i_coord_tail);
             i_coord_head.emplace_back(coord.i_coord_head);
-            offset.emplace_back(coord.offset);
+            offset.emplace_back(coord.delay);
             tail_buf_offset.emplace_back(coord.tail_buf_offset);
             tail_nsamps.emplace_back(coord.tail_nsamps);
             head_buf_offset.emplace_back(coord.head_buf_offset);
