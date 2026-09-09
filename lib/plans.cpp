@@ -471,15 +471,15 @@ private:
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
             m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
-        m_container.state_shape[i_iter]     = {.nchans       = nchans_cur,
-                                               .ndt_min      = ndt_min_it->ndt,
-                                               .ndt_max      = ndt_max_it->ndt,
-                                               .ncoords      = ncoords,
-                                               .ncoords_sum  = ncoords_sum,
-                                               .ncoords_copy = ncoords_copy,
-                                               .nsamps       = nsamps_iter,
-                                               .nelements = ncoords * nsamps_iter,
-                                               .dt_max    = dt_max_iter};
+        m_container.state_shape[i_iter] = {.nchans       = nchans_cur,
+                                           .ndt_min      = ndt_min_it->ndt,
+                                           .ndt_max      = ndt_max_it->ndt,
+                                           .ncoords      = ncoords,
+                                           .ncoords_sum  = ncoords_sum,
+                                           .ncoords_copy = ncoords_copy,
+                                           .nsamps       = nsamps_iter,
+                                           .nelements = ncoords * nsamps_iter,
+                                           .dt_max    = dt_max_iter};
         m_container.dt_grid_sub_top[i_iter] = dt_grid_sub_top;
         m_container.df_top[i_iter]          = df_top;
         m_container.df_bot[i_iter]          = df_bot;
@@ -523,11 +523,69 @@ public:
         configure_plan();
     }
 
-    ~Impl()                      = default;
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
+    ~Impl() = default;
+    Impl(const Impl& other)
+        : m_f_center(other.m_f_center),
+          m_bw_sub(other.m_bw_sub),
+          m_nsub(other.m_nsub),
+          m_tbin(other.m_tbin),
+          m_nbin(other.m_nbin),
+          m_nfft(other.m_nfft),
+          m_t_p(other.m_t_p),
+          m_dm_max(other.m_dm_max),
+          m_dm_min(other.m_dm_min),
+          m_noverlap(other.m_noverlap),
+          m_data_order(other.m_data_order),
+          m_bw(other.m_bw),
+          m_f_min(other.m_f_min),
+          m_f_max(other.m_f_max),
+          m_n_p(other.m_n_p),
+          m_nchan(other.m_nchan),
+          m_dm_grid_coh(other.m_dm_grid_coh),
+          m_dm_grid_final(other.m_dm_grid_final),
+          m_nsamp(other.m_nsamp),
+          m_mbin(other.m_mbin),
+          m_mchan(other.m_mchan),
+          m_msamp(other.m_msamp),
+          m_tsamp(other.m_tsamp),
+          m_dt_max(other.m_dt_max),
+          m_fdmt_plan(other.m_fdmt_plan
+                          ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
+                          : nullptr) {}
+    Impl& operator=(const Impl& other) {
+        if (this != &other) {
+            m_f_center      = other.m_f_center;
+            m_bw_sub        = other.m_bw_sub;
+            m_nsub          = other.m_nsub;
+            m_tbin          = other.m_tbin;
+            m_nbin          = other.m_nbin;
+            m_nfft          = other.m_nfft;
+            m_t_p           = other.m_t_p;
+            m_dm_max        = other.m_dm_max;
+            m_dm_min        = other.m_dm_min;
+            m_noverlap      = other.m_noverlap;
+            m_data_order    = other.m_data_order;
+            m_bw            = other.m_bw;
+            m_f_min         = other.m_f_min;
+            m_f_max         = other.m_f_max;
+            m_n_p           = other.m_n_p;
+            m_nchan         = other.m_nchan;
+            m_dm_grid_coh   = other.m_dm_grid_coh;
+            m_dm_grid_final = other.m_dm_grid_final;
+            m_nsamp         = other.m_nsamp;
+            m_mbin          = other.m_mbin;
+            m_mchan         = other.m_mchan;
+            m_msamp         = other.m_msamp;
+            m_tsamp         = other.m_tsamp;
+            m_dt_max        = other.m_dt_max;
+            m_fdmt_plan = other.m_fdmt_plan
+                              ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
+                              : nullptr;
+        }
+        return *this;
+    }
+    Impl(Impl&&)            = delete;
+    Impl& operator=(Impl&&) = delete;
 
     // Getters
     float get_f_center() const noexcept { return m_f_center; }
@@ -951,6 +1009,14 @@ CohFDMTPlan::CohFDMTPlan(float f_center,
 CohFDMTPlan::~CohFDMTPlan()                                 = default;
 CohFDMTPlan::CohFDMTPlan(CohFDMTPlan&&) noexcept            = default;
 CohFDMTPlan& CohFDMTPlan::operator=(CohFDMTPlan&&) noexcept = default;
+CohFDMTPlan::CohFDMTPlan(const CohFDMTPlan& other)
+    : m_impl(std::make_unique<Impl>(*other.m_impl)) {}
+CohFDMTPlan& CohFDMTPlan::operator=(const CohFDMTPlan& other) {
+    if (this != &other) {
+        m_impl = std::make_unique<Impl>(*other.m_impl);
+    }
+    return *this;
+}
 float CohFDMTPlan::get_f_center() const noexcept {
     return m_impl->get_f_center();
 }
@@ -1020,6 +1086,16 @@ DDMTPlan::DDMTPlan(float f_min,
                    bool verbose)
     : m_impl(std::make_unique<Impl>(
           f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min, verbose)) {}
+
+DDMTPlan::DDMTPlan(float f_min,
+                   float f_max,
+                   SizeType nchans,
+                   float tsamp,
+                   std::span<const float> dm_arr,
+                   bool verbose)
+    : m_impl(std::make_unique<Impl>(
+          f_min, f_max, nchans, tsamp, dm_arr, verbose)) {}
+
 DDMTPlan::~DDMTPlan()                              = default;
 DDMTPlan::DDMTPlan(DDMTPlan&&) noexcept            = default;
 DDMTPlan& DDMTPlan::operator=(DDMTPlan&&) noexcept = default;

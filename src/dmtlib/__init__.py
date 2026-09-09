@@ -1,7 +1,10 @@
 import contextlib
 from importlib import metadata
 
-__version__ = metadata.version(__name__)
+try:
+    __version__ = metadata.version(__name__)
+except metadata.PackageNotFoundError:
+    __version__ = "0.2.0"
 
 from .libdmt import FDMTCPU
 

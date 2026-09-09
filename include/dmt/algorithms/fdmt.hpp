@@ -15,10 +15,25 @@
 namespace dmt::algorithms {
 
 /**
+ * @brief Zero-copy read-only view of a sub-band's intermediate DM-time
+ * transform.
+ */
+struct FDMTSubbandView {
+    std::span<const float> data; ///< Contiguous DM-time data (ndt * nsamps)
+    SizeType subband_idx;        ///< (0 <= subband_idx < num_subbands)
+    SizeType ndt;                ///< Number of DM delay trials
+    SizeType nsamps;             ///< Number of time samples per delay trial
+    float f_start;               ///< Start frequency of this sub-band (MHz)
+    float f_end;                 ///< End frequency of this sub-band (MHz)
+    std::span<const SizeType> dt_grid; ///< Delay trials in samples
+};
+
+/**
  * @brief Fast Dispersion Measure Transform (FDMT) for CPU execution.
  *
  * Performs the FDMT algorithm using CPU cores with optional OpenMP
- * parallelization.
+ * parallelization. Supports both single-shot transformation and stepped
+ * execution for intermediate sub-band inspection.
  */
 class FDMTCPU {
 public:
@@ -67,12 +82,106 @@ public:
     const plans::FDMTPlan& get_plan() const noexcept;
 
     /**
-     * @brief Executes the FDMT transform.
+     * @brief Executes the full FDMT transform in a single shot.
      *
      * @param waterfall Input waterfall data view.
      * @param dmt Output DM-time array view.
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
+
+    // =========================================================================
+    // Stepper / Hierarchical DP Engine API
+    // =========================================================================
+
+    /**
+     * @brief Resets and initializes the stepper with a new waterfall block and
+     * caller-provided dmt buffer for zero-allocation ping-pong storage (Level
+     * 0).
+     *
+     * @param waterfall Input waterfall data view (nchans * nsamps).
+     * @param dmt Output DM-time array view (size >= plan.get_buffer_size()).
+     *            Used as one of the two ping-pong scratch buffers and receives
+     *            the final transform at finalize().
+     */
+    void reset(std::span<const float> waterfall, std::span<float> dmt);
+
+    /**
+     * @brief Steps forward by a given number of levels.
+     * @param levels Number of levels to advance (default: 1).
+     */
+    void advance(SizeType levels = 1);
+
+    /**
+     * @brief Advances execution until N levels remain before the root.
+     *
+     * Examples:
+     * - remaining_levels = 1: Stops 1 level before root (2 children sub-bands
+     * remaining).
+     * - remaining_levels = 2: Stops 2 levels before root (4 children sub-bands
+     * remaining).
+     * - remaining_levels = 0: Advances to completion (root level).
+     *
+     * @param remaining_levels Target number of levels remaining before root.
+     */
+    void advance_until_remaining(SizeType remaining_levels);
+
+    /**
+     * @brief Read-only view of all intermediate data across all sub-bands at
+     * current level.
+     */
+    [[nodiscard]] std::span<const float> view_level_data() const;
+
+    /**
+     * @brief Read-only view of the data slice for a specific sub-band at
+     * current level.
+     * @param subband_idx Index of the sub-band (0 <= subband_idx <
+     * num_subbands()).
+     */
+    [[nodiscard]] std::span<const float>
+    view_subband_data(SizeType subband_idx) const;
+
+    /**
+     * @brief Detailed read-only view and metadata for a specific sub-band at
+     * current level.
+     * @param subband_idx Index of the sub-band (0 <= subband_idx <
+     * num_subbands()).
+     */
+    [[nodiscard]] FDMTSubbandView view_subband(SizeType subband_idx) const;
+
+    /**
+     * @brief Current level index (0 = initialised waterfall, total_levels() - 1
+     * = root).
+     */
+    [[nodiscard]] SizeType current_level() const noexcept;
+
+    /**
+     * @brief Total number of levels (niters + 1).
+     */
+    [[nodiscard]] SizeType total_levels() const noexcept;
+
+    /**
+     * @brief Number of levels remaining before root (total_levels() - 1 -
+     * current_level()).
+     */
+    [[nodiscard]] SizeType remaining_levels() const noexcept;
+
+    /**
+     * @brief Number of active sub-bands at the current level.
+     */
+    [[nodiscard]] SizeType num_subbands() const;
+
+    /**
+     * @brief Check if execution has reached the final root level.
+     */
+    [[nodiscard]] bool is_finished() const noexcept;
+
+    /**
+     * @brief Finalizes execution to root level.
+     *
+     * Advances all remaining levels to the root. The final root transform is
+     * guaranteed to reside in the dmt buffer provided during reset().
+     */
+    void finalize();
 
 private:
     class Impl;
@@ -96,10 +205,28 @@ compute_fdmt(std::span<const float> waterfall,
 
 #ifdef DMT_ENABLE_CUDA
 /**
+ * @brief Zero-copy read-only view of a sub-band's intermediate DM-time
+ * transform residing in CUDA device memory.
+ */
+struct FDMTSubbandViewCUDA {
+    cuda::std::span<const float> data; ///< Contiguous DM-time (ndt * nsamps)
+    SizeType subband_idx;              ///< (0 <= subband_idx < num_subbands)
+    SizeType ndt;                      ///< Number of DM delay trials
+    SizeType nsamps; ///< Number of time samples per delay trial
+    float f_start;   ///< Start frequency of this sub-band (MHz)
+    float f_end;     ///< End frequency of this sub-band (MHz)
+    std::span<const SizeType> dt_grid; ///< Delay trials in samples
+};
+
+using FDMTCUDASubbandView = FDMTSubbandViewCUDA;
+
+/**
  * @brief Fast Dispersion Measure Transform (FDMT) for CUDA execution.
  *
  * Performs the FDMT algorithm using CUDA-enabled GPUs for high-performance
- * processing.
+ * processing. Supports single-shot execution (host/device memory) as well as
+ * interactive hierarchical stepped execution on device memory for intermediate
+ * sub-band matched-filtering pipelines.
  */
 class FDMTCUDA {
 public:
@@ -167,6 +294,123 @@ public:
     void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Resets and initializes the stepped execution state using device
+     * memory.
+     *
+     * Prepares the internal pipeline buffers for hierarchical stepping,
+     * binding the input waterfall and output DM-time buffers directly on the
+     * device.
+     *
+     * @param d_waterfall 2D input array on device (nchans * nsamps).
+     * @param d_dmt 2D output array on device (capacity at least
+     * get_dmt_size()).
+     * @param stream CUDA stream for asynchronous execution (default: nullptr).
+     * @throws std::invalid_argument If the input or output buffers are too
+     * small.
+     */
+    void reset(cuda::std::span<const float> d_waterfall,
+               cuda::std::span<float> d_dmt,
+               cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Advances execution by the specified number of levels on the CUDA
+     * device.
+     *
+     * @param levels Number of hierarchical levels to advance (default: 1).
+     *               If levels exceeds the remaining levels, advances to the
+     * root.
+     * @param stream CUDA stream to use (default: nullptr, uses stream from
+     * reset if nullptr).
+     * @throws std::logic_error If reset() was not called first.
+     */
+    void advance(SizeType levels = 1, cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Advances execution until a given number of levels remain before
+     * the root.
+     *
+     * Commonly used to pause 1 level before root (2 sub-bands) or 2 levels
+     * before root (4 sub-bands) for sub-band search / matched filtering.
+     *
+     * @param remaining_levels Target remaining levels before the root.
+     * @param stream CUDA stream to use (default: nullptr, uses stream from
+     * reset if nullptr).
+     * @throws std::logic_error If reset() was not called first.
+     */
+    void advance_until_remaining(SizeType remaining_levels,
+                                 cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Obtains a read-only device span of the entire buffer at the
+     * current level.
+     *
+     * @return Read-only device view of the active state buffer.
+     * @throws std::logic_error If reset() was not called first.
+     */
+    cuda::std::span<const float> view_level_data() const;
+
+    /**
+     * @brief Obtains a read-only device span of a specific sub-band at the
+     * current level.
+     *
+     * @param subband_idx Sub-band index in [0, num_subbands()).
+     * @return Read-only device view of the sub-band's DM-time array (ndt *
+     * nsamps floats).
+     * @throws std::logic_error If reset() was not called first.
+     * @throws std::out_of_range If subband_idx >= num_subbands().
+     */
+    cuda::std::span<const float> view_subband_data(SizeType subband_idx) const;
+
+    /**
+     * @brief Obtains a rich descriptor view of a specific sub-band on the
+     * device.
+     *
+     * Provides frequency boundaries, DM trial counts, and a device span.
+     *
+     * @param subband_idx Sub-band index in [0, num_subbands()).
+     * @return FDMTSubbandViewCUDA containing sub-band metadata and device span.
+     * @throws std::logic_error If reset() was not called first.
+     * @throws std::out_of_range If subband_idx >= num_subbands().
+     */
+    FDMTSubbandViewCUDA view_subband(SizeType subband_idx) const;
+
+    /**
+     * @brief Current hierarchical level of the transform (0 = initial
+     * waterfall).
+     */
+    SizeType current_level() const noexcept;
+
+    /**
+     * @brief Total number of levels in the hierarchy (niters + 1).
+     */
+    SizeType total_levels() const noexcept;
+
+    /**
+     * @brief Number of levels remaining before reaching the root level.
+     */
+    SizeType remaining_levels() const noexcept;
+
+    /**
+     * @brief Number of sub-bands present at the current level.
+     * @throws std::logic_error If reset() was not called first.
+     */
+    SizeType num_subbands() const;
+
+    /**
+     * @brief Checks if execution has reached the root level.
+     */
+    bool is_finished() const noexcept;
+
+    /**
+     * @brief Advances through any remaining levels to the root level.
+     *
+     * @param stream CUDA stream to use (default: nullptr, uses stream from
+     * reset if nullptr).
+     * @throws std::logic_error If reset() was not called first.
+     */
+    void finalize(cudaStream_t stream = nullptr);
 
 private:
     class Impl;

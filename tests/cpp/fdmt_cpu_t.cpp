@@ -1,6 +1,9 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <span>
+#include <stdexcept>
+#include <vector>
 
 #include "dmt/algorithms/fdmt.hpp"
 
@@ -9,30 +12,148 @@ namespace dmt {
 using algorithms::FDMTCPU;
 
 TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
-    const float f_min    = 1000.0F;
-    const float f_max    = 1500.0F;
-    const size_t nchans  = 500;
-    const size_t nsamps  = 1024;
-    const float tsamp    = 0.001F;
-    const size_t dt_max  = 512;
-    const size_t dt_step = 1;
-    const size_t dt_min  = 0;
+    const float f_min   = 1000.0F;
+    const float f_max   = 1500.0F;
+    const size_t nchans = 500;
+    const size_t nsamps = 1024;
+    const float tsamp   = 0.001F;
+    const size_t dt_max = 512;
+    const size_t dt_min = 0;
 
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min);
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
 
     SECTION("Constructor and getter methods") {
         const auto& plan         = fdmt.get_plan();
-        const auto ndms_expected = static_cast<SizeType>(
-            std::floor((dt_max - dt_min) / static_cast<float>(dt_step)) + 1);
+        const auto ndms_expected = static_cast<SizeType>(dt_max - dt_min + 1);
         CHECK(plan.get_dt_grid_final().size() == ndms_expected);
         CHECK(plan.get_dm_grid_final().size() == ndms_expected);
         CHECK(plan.get_dmt_size() ==
               static_cast<SizeType>(ndms_expected * (nsamps + dt_max)));
     }
+
     SECTION("execute method") {
         std::vector<float> waterfall(nchans * nsamps, 1.0F);
-        std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
+        std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
         REQUIRE_NOTHROW(fdmt.execute(waterfall, dmt));
+    }
+
+    SECTION("stepper execution bit-exact match with execute") {
+        std::vector<float> waterfall(nchans * nsamps);
+        for (size_t i = 0; i < waterfall.size(); ++i) {
+            waterfall[i] = static_cast<float>((i % 17) + 1);
+        }
+        std::vector<float> dmt_oneshot(fdmt.get_plan().get_buffer_size(), 0.0F);
+        fdmt.execute(waterfall, dmt_oneshot);
+
+        std::vector<float> dmt_stepped(fdmt.get_plan().get_buffer_size(), 0.0F);
+        fdmt.reset(waterfall, dmt_stepped);
+        CHECK(fdmt.current_level() == 0);
+        CHECK(fdmt.total_levels() == fdmt.get_plan().get_niters() + 1);
+        CHECK(fdmt.remaining_levels() == fdmt.total_levels() - 1);
+        CHECK_FALSE(fdmt.is_finished());
+
+        // Step by step to root
+        while (!fdmt.is_finished()) {
+            fdmt.advance(1);
+        }
+        CHECK(fdmt.is_finished());
+        CHECK(fdmt.remaining_levels() == 0);
+        fdmt.finalize();
+
+        // Verify exact bit-for-bit equivalence
+        const auto dmt_size = fdmt.get_plan().get_dmt_size();
+        for (size_t i = 0; i < dmt_size; ++i) {
+            REQUIRE(dmt_stepped[i] == dmt_oneshot[i]);
+        }
+    }
+
+    SECTION("subband inspection at remaining_levels = 1 (2 children)") {
+        std::vector<float> waterfall(nchans * nsamps, 1.0F);
+        std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
+        fdmt.reset(waterfall, dmt);
+
+        fdmt.advance_until_remaining(1);
+        CHECK(fdmt.remaining_levels() == 1);
+        CHECK(fdmt.num_subbands() == 2);
+
+        auto sub0 = fdmt.view_subband(0);
+        auto sub1 = fdmt.view_subband(1);
+
+        CHECK(sub0.subband_idx == 0);
+        CHECK(sub1.subband_idx == 1);
+        CHECK(sub0.ndt > 0);
+        CHECK(sub1.ndt > 0);
+        CHECK(sub0.nsamps > 0);
+        CHECK(sub0.f_start == Catch::Approx(f_min));
+        CHECK(sub1.f_end == Catch::Approx(f_max));
+        CHECK(sub0.f_end == Catch::Approx(sub1.f_start));
+        CHECK(sub0.data.size() == sub0.ndt * sub0.nsamps);
+        CHECK(sub1.data.size() == sub1.ndt * sub1.nsamps);
+        CHECK(!sub0.dt_grid.empty());
+        CHECK(!sub1.dt_grid.empty());
+
+        // view_subband_data gives identical slice
+        auto sub0_data = fdmt.view_subband_data(0);
+        CHECK(sub0_data.data() == sub0.data.data());
+        CHECK(sub0_data.size() == sub0.data.size());
+
+        // view_level_data covers all subbands at this level
+        auto level_data = fdmt.view_level_data();
+        CHECK(level_data.size() == sub0.data.size() + sub1.data.size());
+
+        // Finalize to root
+        fdmt.finalize();
+        CHECK_FALSE(fdmt.is_finished()); // reset after finalize
+    }
+
+    SECTION("subband inspection at remaining_levels = 2 (4 children)") {
+        std::vector<float> waterfall(nchans * nsamps, 1.0F);
+        std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
+        fdmt.reset(waterfall, dmt);
+
+        fdmt.advance_until_remaining(2);
+        CHECK(fdmt.remaining_levels() == 2);
+        CHECK(fdmt.num_subbands() == 4);
+
+        for (size_t s = 0; s < 4; ++s) {
+            auto sub = fdmt.view_subband(s);
+            CHECK(sub.subband_idx == s);
+            CHECK(sub.data.size() == sub.ndt * sub.nsamps);
+        }
+
+        // Out of range check
+        CHECK_THROWS_AS(fdmt.view_subband(4), std::out_of_range);
+        CHECK_THROWS_AS(fdmt.view_subband_data(4), std::out_of_range);
+
+        fdmt.finalize();
+    }
+
+    SECTION("stepper lifecycle and error handling") {
+        std::vector<float> waterfall(nchans * nsamps, 1.0F);
+        std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
+
+        // Calling advance or view before reset should throw
+        CHECK_THROWS_AS(fdmt.advance(), std::logic_error);
+        CHECK_THROWS_AS(fdmt.advance_until_remaining(1), std::logic_error);
+        CHECK_THROWS_AS(fdmt.view_level_data(), std::logic_error);
+        CHECK_THROWS_AS(fdmt.view_subband(0), std::logic_error);
+        CHECK_THROWS_AS(fdmt.view_subband_data(0), std::logic_error);
+        CHECK_THROWS_AS(fdmt.num_subbands(), std::logic_error);
+        CHECK_THROWS_AS(fdmt.finalize(), std::logic_error);
+
+        // Invalid buffer sizes should throw invalid_argument
+        std::vector<float> bad_wf(10, 1.0F);
+        std::vector<float> bad_dmt(10, 0.0F);
+        CHECK_THROWS_AS(fdmt.reset(bad_wf, dmt), std::invalid_argument);
+        CHECK_THROWS_AS(fdmt.reset(waterfall, bad_dmt), std::invalid_argument);
+
+        fdmt.reset(waterfall, dmt);
+        // Advancing more than remaining levels stops cleanly at root
+        fdmt.advance(100);
+        CHECK(fdmt.is_finished());
+        CHECK(fdmt.remaining_levels() == 0);
+
+        REQUIRE_NOTHROW(fdmt.finalize());
     }
 }
 

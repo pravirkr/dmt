@@ -13,6 +13,7 @@ namespace dmt {
 using algorithms::CohFDMTCPU;
 using algorithms::DDMTCPU;
 using algorithms::FDMTCPU;
+using algorithms::FDMTSubbandView;
 using plans::CohFDMTPlan;
 using plans::DDMTPlan;
 using plans::FDMTCoord;
@@ -50,6 +51,24 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_readonly("grid_offset", &FDMTCoordGrid::coord_offset)
         .def_readonly("f_start", &FDMTCoordGrid::f_start)
         .def_readonly("f_end", &FDMTCoordGrid::f_end);
+    py::class_<FDMTSubbandView>(mod, "FDMTSubbandView")
+        .def_property_readonly(
+            "data",
+            [](py::object self) {
+                const auto& v = self.cast<const FDMTSubbandView&>();
+                return py::array_t<float>(
+                    {v.ndt, v.nsamps},
+                    {v.nsamps * sizeof(float), sizeof(float)}, v.data.data(),
+                    self);
+            })
+        .def_readonly("subband_idx", &FDMTSubbandView::subband_idx)
+        .def_readonly("ndt", &FDMTSubbandView::ndt)
+        .def_readonly("nsamps", &FDMTSubbandView::nsamps)
+        .def_readonly("f_start", &FDMTSubbandView::f_start)
+        .def_readonly("f_end", &FDMTSubbandView::f_end)
+        .def_property_readonly("dt_grid", [](const FDMTSubbandView& v) {
+            return std::vector<SizeType>(v.dt_grid.begin(), v.dt_grid.end());
+        });
     py::class_<FDMTPlanContainer>(mod, "FDMTPlanContainer")
         .def_readonly("df_top", &FDMTPlanContainer::df_top)
         .def_readonly("df_bot", &FDMTPlanContainer::df_bot)
@@ -170,7 +189,8 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp);
 
-    py::class_<FDMTCPU>(mod, "FDMTCPU", "FDMT CPU Implementation Wrapper")
+    py::class_<FDMTCPU>(mod, "FDMTCPU", py::dynamic_attr(),
+                        "FDMT CPU Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
                       SizeType, bool, std::string_view, bool, int>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
@@ -179,6 +199,11 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly(
             "plan", &FDMTCPU::get_plan,
             "Get the FDMTPlan object containing transform details.")
+        .def_property_readonly("dt_grid_final",
+                               [](FDMTCPU& fdmt) {
+                                   return as_pyarray(
+                                       fdmt.get_plan().get_dt_grid_final());
+                               })
         // execute take 2d array as input, and return 2d array as output
         .def(
             "execute",
@@ -191,13 +216,16 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                 const auto& plan   = fdmt.get_plan();
                 const auto& plan_c = plan.get_container();
                 const auto niters  = plan.get_niters();
-                py::array_t<float, py::array::c_style> dmt(
-                    {plan_c.state_shape[niters].ncoords,
-                     plan_c.state_shape[niters].nsamps});
+                const auto ncoords = plan_c.state_shape[niters].ncoords;
+                const auto nsamps  = plan_c.state_shape[niters].nsamps;
+                py::array_t<float, py::array::c_style> dmt_buf(
+                    plan.get_buffer_size());
                 fdmt.execute(
                     std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(dmt.mutable_data(), dmt.size()));
-                return dmt;
+                    std::span<float>(dmt_buf.mutable_data(), dmt_buf.size()));
+                return py::array_t<float>(
+                    {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
+                    dmt_buf.data(), dmt_buf);
             },
             py::arg("waterfall"),
             R"doc(
@@ -220,7 +248,83 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
             -----
             The input array must be properly sized according to the FDMT parameters
             specified during initialization (nchans, nsamps).
-            )doc");
+            )doc")
+        .def(
+            "reset",
+            [](py::object self,
+               const py::array_t<float, py::array::c_style>& waterfall,
+               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+                auto& fdmt = self.cast<FDMTCPU&>();
+                if (waterfall.ndim() != 2) {
+                    throw std::runtime_error("Input waterfall must be a 2D "
+                                             "NumPy array (nchans, nsamps).");
+                }
+                py::array_t<float, py::array::c_style> dmt;
+                if (dmt_opt.has_value()) {
+                    dmt = *dmt_opt;
+                } else {
+                    dmt = py::array_t<float, py::array::c_style>(
+                        fdmt.get_plan().get_buffer_size());
+                }
+                self.attr("_waterfall_buffer") = waterfall;
+                self.attr("_dmt_buffer")       = dmt;
+                fdmt.reset(
+                    std::span<const float>(waterfall.data(), waterfall.size()),
+                    std::span<float>(dmt.mutable_data(), dmt.size()));
+            },
+            py::arg("waterfall"), py::arg("dmt") = py::none(),
+            "Reset and initialize the stepper with waterfall and optional dmt "
+            "buffer.")
+        .def("advance", &FDMTCPU::advance, py::arg("levels") = 1,
+             "Advance execution by a given number of levels.")
+        .def("advance_until_remaining", &FDMTCPU::advance_until_remaining,
+             py::arg("remaining_levels"),
+             "Advance execution until N levels remain before root.")
+        .def("view_level_data",
+             [](py::object self) {
+                 auto& fdmt = self.cast<FDMTCPU&>();
+                 auto span  = fdmt.view_level_data();
+                 return py::array_t<float>(span.size(), span.data(), self);
+             })
+        .def(
+            "view_subband_data",
+            [](py::object self, SizeType subband_idx) {
+                auto& fdmt    = self.cast<FDMTCPU&>();
+                auto sub_view = fdmt.view_subband(subband_idx);
+                return py::array_t<float>(
+                    {sub_view.ndt, sub_view.nsamps},
+                    {sub_view.nsamps * sizeof(float), sizeof(float)},
+                    sub_view.data.data(), self);
+            },
+            py::arg("subband_idx"))
+        .def(
+            "view_subband",
+            [](py::object self, SizeType subband_idx) {
+                auto& fdmt = self.cast<FDMTCPU&>();
+                return fdmt.view_subband(subband_idx);
+            },
+            py::arg("subband_idx"))
+        .def("finalize",
+             [](py::object self) {
+                 auto& fdmt = self.cast<FDMTCPU&>();
+                 fdmt.finalize();
+                 py::array_t<float, py::array::c_style> dmt =
+                     self.attr("_dmt_buffer")
+                         .cast<py::array_t<float, py::array::c_style>>();
+                 const auto& plan   = fdmt.get_plan();
+                 const auto& plan_c = plan.get_container();
+                 const auto niters  = plan.get_niters();
+                 const auto ncoords = plan_c.state_shape[niters].ncoords;
+                 const auto nsamps  = plan_c.state_shape[niters].nsamps;
+                 return py::array_t<float>(
+                     {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
+                     dmt.data(), self);
+             })
+        .def_property_readonly("current_level", &FDMTCPU::current_level)
+        .def_property_readonly("total_levels", &FDMTCPU::total_levels)
+        .def_property_readonly("remaining_levels", &FDMTCPU::remaining_levels)
+        .def_property_readonly("num_subbands", &FDMTCPU::num_subbands)
+        .def_property_readonly("is_finished", &FDMTCPU::is_finished);
 
     mod.def(
         "compute_fdmt",

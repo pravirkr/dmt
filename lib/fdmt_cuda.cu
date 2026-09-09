@@ -180,6 +180,22 @@ public:
             m_history_d.resize(m_plan.get_history_size(), 0.0F);
         }
         plans::transfer_fdmt_plan_to_device(m_plan.get_container(), m_plan_d);
+
+        // Precompute cumulative coordinate offsets per iteration
+        const auto niters_plus_one = m_plan.get_niters() + 1;
+        m_coords_sum_offsets.resize(niters_plus_one, 0);
+        m_coords_copy_offsets.resize(niters_plus_one, 0);
+        int sum_off  = 0;
+        int copy_off = 0;
+        for (size_t i = 0; i < niters_plus_one; ++i) {
+            m_coords_sum_offsets[i]  = sum_off;
+            m_coords_copy_offsets[i] = copy_off;
+            sum_off += static_cast<int>(
+                m_plan.get_container().state_shape[i].ncoords_sum);
+            copy_off += static_cast<int>(
+                m_plan.get_container().state_shape[i].ncoords_copy);
+        }
+
         cuda_utils::check_last_cuda_error("FDMTCUDA::Impl constructor failed");
     }
     ~Impl()                      = default;
@@ -194,12 +210,10 @@ public:
     void execute_h(std::span<const float> waterfall_h, std::span<float> dmt_h) {
         check_inputs(waterfall_h.size(), dmt_h.size());
 
-        // Allocate temporary device buffers for input/output (consider reusing
-        // or caching)
+        cuda_utils::set_device(m_device_id);
         thrust::device_vector<float> waterfall_d(waterfall_h.size());
         thrust::device_vector<float> dmt_d(dmt_h.size());
 
-        // Use default stream 0 for simplicity here, could use a member stream
         cudaStream_t stream = nullptr;
         // Copy H->D
         cudaMemcpyAsync(waterfall_d.data().get(), waterfall_h.data(),
@@ -229,19 +243,170 @@ public:
 
         spdlog::debug("FDMTCUDA::Impl: Host execution complete.");
     }
-    // Device execute: directly calls internal device logic
+
+    // Device execute: calls reset, advances to completion, finalizes
     void execute_d(cuda::std::span<const float> waterfall_d,
                    cuda::std::span<float> dmt_d,
                    cudaStream_t stream) {
-        // Get raw pointers and sizes from cuda::std::span
-        const float* wf_ptr = waterfall_d.data();
-        SizeType wf_size    = waterfall_d.size();
-        float* dmt_ptr      = dmt_d.data();
-        SizeType dmt_size   = dmt_d.size();
-
-        check_inputs(wf_size, dmt_size);
-        execute_device(wf_ptr, wf_size, dmt_ptr, dmt_size, stream);
+        reset(waterfall_d, dmt_d, stream);
+        advance_until_remaining(0, stream);
+        finalize(stream);
         spdlog::debug("FDMTCUDA::Impl: Device execution complete on stream");
+    }
+
+    // Stepper API implementation
+    void reset(cuda::std::span<const float> d_waterfall,
+               cuda::std::span<float> d_dmt,
+               cudaStream_t stream = nullptr) {
+        check_inputs(d_waterfall.size(), d_dmt.size());
+        cuda_utils::set_device(m_device_id);
+        m_stream        = stream;
+        m_dmt_user_ptr  = d_dmt.data();
+        m_dmt_user_size = d_dmt.size();
+        m_current_level = 0;
+
+        const auto niters = m_plan.get_niters();
+        if (niters == 0) {
+            m_current_in_ptr  = m_dmt_user_ptr;
+            m_current_out_ptr = m_dmt_user_ptr;
+            initialise_device(d_waterfall.data(), m_current_in_ptr, stream);
+        } else {
+            m_current_in_ptr  = m_state_in_d.data().get();
+            m_current_out_ptr = m_state_out_d.data().get();
+            initialise_device(d_waterfall.data(), m_current_in_ptr, stream);
+        }
+
+        m_is_initialized = true;
+        spdlog::debug("FDMTCUDA::Impl: Stepper initialized at level 0.");
+    }
+
+    void advance(SizeType levels = 1, cudaStream_t stream = nullptr) {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        cuda_utils::set_device(m_device_id);
+        cudaStream_t active_stream = stream ? stream : m_stream;
+        const auto total_lvl       = total_levels();
+        while (levels > 0 && m_current_level < total_lvl - 1) {
+            const SizeType next_level = m_current_level + 1;
+            execute_iter_device(next_level, active_stream);
+            --levels;
+        }
+    }
+
+    void advance_until_remaining(SizeType remaining_levels,
+                                 cudaStream_t stream = nullptr) {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        const auto total_lvl = total_levels();
+        if (remaining_levels >= total_lvl) {
+            return;
+        }
+        const SizeType target_level = total_lvl - 1 - remaining_levels;
+        if (target_level > m_current_level) {
+            advance(target_level - m_current_level, stream);
+        }
+    }
+
+    [[nodiscard]] cuda::std::span<const float> view_level_data() const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        const auto& state_shape =
+            m_plan.get_container().state_shape[m_current_level];
+        return cuda::std::span<const float>(m_current_in_ptr,
+                                            state_shape.nelements);
+    }
+
+    [[nodiscard]] cuda::std::span<const float>
+    view_subband_data(SizeType subband_idx) const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        const auto& grids = m_plan.get_container().grids[m_current_level];
+        if (subband_idx >= grids.size()) {
+            throw std::out_of_range(
+                std::format("FDMTCUDA: Subband index {} out of range (current "
+                            "level has {} subbands)",
+                            subband_idx, grids.size()));
+        }
+        const auto& grid = grids[subband_idx];
+        const auto& state_shape =
+            m_plan.get_container().state_shape[m_current_level];
+        const auto offset = grid.coord_offset * state_shape.nsamps;
+        const auto count  = grid.ndt * state_shape.nsamps;
+        return cuda::std::span<const float>(m_current_in_ptr + offset, count);
+    }
+
+    [[nodiscard]] FDMTSubbandViewCUDA view_subband(SizeType subband_idx) const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        const auto& grids = m_plan.get_container().grids[m_current_level];
+        if (subband_idx >= grids.size()) {
+            throw std::out_of_range(
+                std::format("FDMTCUDA: Subband index {} out of range (current "
+                            "level has {} subbands)",
+                            subband_idx, grids.size()));
+        }
+        const auto& grid = grids[subband_idx];
+        const auto& state_shape =
+            m_plan.get_container().state_shape[m_current_level];
+        const auto offset = grid.coord_offset * state_shape.nsamps;
+        const auto count  = grid.ndt * state_shape.nsamps;
+        return FDMTSubbandViewCUDA{
+            .data =
+                cuda::std::span<const float>(m_current_in_ptr + offset, count),
+            .subband_idx = subband_idx,
+            .ndt         = grid.ndt,
+            .nsamps      = state_shape.nsamps,
+            .f_start     = grid.f_start,
+            .f_end       = grid.f_end,
+            .dt_grid     = std::span<const SizeType>(grid.dt_grid.data(),
+                                                     grid.dt_grid.size())};
+    }
+
+    [[nodiscard]] SizeType current_level() const noexcept {
+        return m_current_level;
+    }
+
+    [[nodiscard]] SizeType total_levels() const noexcept {
+        return m_plan.get_niters() + 1;
+    }
+
+    [[nodiscard]] SizeType remaining_levels() const noexcept {
+        const auto total_lvl = total_levels();
+        return (m_current_level >= total_lvl - 1)
+                   ? 0
+                   : (total_lvl - 1 - m_current_level);
+    }
+
+    [[nodiscard]] SizeType num_subbands() const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        return m_plan.get_container().grids[m_current_level].size();
+    }
+
+    [[nodiscard]] bool is_finished() const noexcept {
+        return m_current_level >= total_levels() - 1;
+    }
+
+    void finalize(cudaStream_t stream = nullptr) {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCUDA: Stepper is not initialized. Call reset() first.");
+        }
+        if (!is_finished()) {
+            advance_until_remaining(0, stream);
+        }
     }
 
 private:
@@ -254,6 +419,17 @@ private:
     thrust::device_vector<float> m_state_out_d;
     thrust::device_vector<float> m_history_d;
 
+    // Stepper state
+    bool m_is_initialized{false};
+    SizeType m_current_level{0};
+    float* m_current_in_ptr{nullptr};
+    float* m_current_out_ptr{nullptr};
+    float* m_dmt_user_ptr{nullptr};
+    SizeType m_dmt_user_size{0};
+    cudaStream_t m_stream{nullptr};
+    std::vector<int> m_coords_sum_offsets;
+    std::vector<int> m_coords_copy_offsets;
+
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
         const auto nchans = m_plan.get_nchans();
         const auto nsamps = m_plan.get_nsamps();
@@ -263,65 +439,48 @@ private:
                             "Expected {}, got {}",
                             nchans * nsamps, waterfall_size));
         }
-        if (dmt_size != m_plan.get_dmt_size()) {
-            throw std::invalid_argument(std::format(
-                "FDMTCUDA::Impl: Invalid size of dmt. Expected {}, got {}",
-                m_plan.get_dmt_size(), dmt_size));
+        if (dmt_size < m_plan.get_dmt_size()) {
+            throw std::invalid_argument(
+                std::format("FDMTCUDA::Impl: Invalid size of dmt. Expected at "
+                            "least {}, got {}",
+                            m_plan.get_dmt_size(), dmt_size));
         }
         spdlog::debug("FDMTCUDA::Impl: Input dimensions check passed: {}x{}",
                       nchans, nsamps);
     }
 
-    void execute_device(const float* __restrict__ waterfall_d,
-                        SizeType /*waterfall_size*/,
-                        float* __restrict__ dmt_d,
-                        SizeType /*dmt_size*/,
-                        cudaStream_t stream) {
-        float* state_in_ptr  = m_state_in_d.data().get();
-        float* state_out_ptr = m_state_out_d.data().get();
-
-        initialise_device(waterfall_d, state_in_ptr, stream);
+    void execute_iter_device(SizeType next_level, cudaStream_t stream) {
+        const auto& shape = m_plan.get_container().state_shape[next_level];
+        const int nsamps  = static_cast<int>(shape.nsamps);
+        const int ncoords_sum_cur  = static_cast<int>(shape.ncoords_sum);
+        const int ncoords_copy_cur = static_cast<int>(shape.ncoords_copy);
 
         auto coords_sum_cur  = m_plan_d.coordinates_sum.get_raw_ptrs();
         auto coords_copy_cur = m_plan_d.coordinates_copy.get_raw_ptrs();
-        // auto coords_prev     = m_plan_d.coordinates.get_raw_ptrs();
-        coords_sum_cur.update_offsets(m_plan_d.state_shape.ncoords_sum[0]);
-        coords_copy_cur.update_offsets(m_plan_d.state_shape.ncoords_copy[0]);
-        cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
+        coords_sum_cur.update_offsets(m_coords_sum_offsets[next_level]);
+        coords_copy_cur.update_offsets(m_coords_copy_offsets[next_level]);
 
-        const auto niters = static_cast<int>(m_plan.get_niters());
-        for (int i_iter = 1; i_iter < niters + 1; ++i_iter) {
-            const int nsamps = m_plan_d.state_shape.nsamps[i_iter];
-            const int ncoords_sum_cur =
-                m_plan_d.state_shape.ncoords_sum[i_iter];
-            const int ncoords_copy_cur =
-                m_plan_d.state_shape.ncoords_copy[i_iter];
+        const auto coords_max = std::max(ncoords_sum_cur, ncoords_copy_cur);
+        const dim3 block_size = dim3(256, 1);
+        const dim3 grid_size =
+            dim3((nsamps + block_size.x - 1) / block_size.x, coords_max);
+        cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
-            const auto coords_max = std::max(ncoords_sum_cur, ncoords_copy_cur);
-            const dim3 block_size = dim3(256, 1);
-            const dim3 grid_size =
-                dim3((nsamps + block_size.x - 1) / block_size.x, coords_max);
-            cuda_utils::check_kernel_launch_params(grid_size, block_size);
+        const auto niters = m_plan.get_niters();
+        float* current_out_ptr =
+            (next_level == niters) ? m_dmt_user_ptr : m_current_out_ptr;
 
-            // Determine output buffer: final iteration writes to device_dmt
-            float* current_out_ptr = (i_iter == niters) ? dmt_d : state_out_ptr;
+        kernel_execute_iter<<<grid_size, block_size, 0, stream>>>(
+            m_current_in_ptr, current_out_ptr, coords_sum_cur, coords_copy_cur,
+            nsamps, ncoords_sum_cur, ncoords_copy_cur);
+        cuda_utils::check_last_cuda_error("kernel_execute_iter launch failed");
 
-            // Launch kernel for this iteration
-            kernel_execute_iter<<<grid_size, block_size, 0, stream>>>(
-                state_in_ptr, current_out_ptr, coords_sum_cur, coords_copy_cur,
-                nsamps, ncoords_sum_cur, ncoords_copy_cur);
-            cuda_utils::check_last_cuda_error(
-                "kernel_execute_iter launch failed");
-
-            coords_sum_cur.update_offsets(ncoords_sum_cur);
-            coords_copy_cur.update_offsets(ncoords_copy_cur);
-
-            // Ping-pong buffers (unless it's the final iteration)
-            if (i_iter < niters) {
-                std::swap(state_in_ptr, state_out_ptr);
-            }
+        if (next_level == niters) {
+            m_current_in_ptr = m_dmt_user_ptr;
+        } else {
+            std::swap(m_current_in_ptr, m_current_out_ptr);
         }
-        spdlog::debug("FDMTCUDA::Impl: Iterations submitted to stream.");
+        m_current_level = next_level;
     }
 
     void initialise_device(const float* __restrict__ waterfall_d,
@@ -402,5 +561,57 @@ void FDMTCUDA::execute(cuda::std::span<const float> d_waterfall,
                        cuda::std::span<float> d_dmt,
                        cudaStream_t stream) {
     m_impl->execute_d(d_waterfall, d_dmt, stream);
+}
+void FDMTCUDA::reset(cuda::std::span<const float> d_waterfall,
+                     cuda::std::span<float> d_dmt,
+                     cudaStream_t stream) {
+    m_impl->reset(d_waterfall, d_dmt, stream);
+}
+void FDMTCUDA::advance(SizeType levels, cudaStream_t stream) {
+    m_impl->advance(levels, stream);
+}
+void FDMTCUDA::advance_until_remaining(SizeType remaining_levels,
+                                       cudaStream_t stream) {
+    m_impl->advance_until_remaining(remaining_levels, stream);
+}
+cuda::std::span<const float> FDMTCUDA::view_level_data() const {
+    return m_impl->view_level_data();
+}
+cuda::std::span<const float>
+FDMTCUDA::view_subband_data(SizeType subband_idx) const {
+    return m_impl->view_subband_data(subband_idx);
+}
+FDMTSubbandViewCUDA FDMTCUDA::view_subband(SizeType subband_idx) const {
+    return m_impl->view_subband(subband_idx);
+}
+SizeType FDMTCUDA::current_level() const noexcept {
+    return m_impl->current_level();
+}
+SizeType FDMTCUDA::total_levels() const noexcept {
+    return m_impl->total_levels();
+}
+SizeType FDMTCUDA::remaining_levels() const noexcept {
+    return m_impl->remaining_levels();
+}
+SizeType FDMTCUDA::num_subbands() const { return m_impl->num_subbands(); }
+bool FDMTCUDA::is_finished() const noexcept { return m_impl->is_finished(); }
+void FDMTCUDA::finalize(cudaStream_t stream) { m_impl->finalize(stream); }
+
+std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
+                                     float f_min,
+                                     float f_max,
+                                     SizeType nchans,
+                                     SizeType nsamps,
+                                     float tsamp,
+                                     SizeType dt_max,
+                                     SizeType dt_step,
+                                     SizeType dt_min,
+                                     bool verbose,
+                                     int device_id) {
+    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min,
+                  false, verbose, device_id);
+    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
+    fdmt.execute(waterfall, dmt);
+    return dmt;
 }
 } // namespace dmt::algorithms

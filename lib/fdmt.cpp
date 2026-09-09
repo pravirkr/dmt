@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <format>
+#include <stdexcept>
 #include <utility>
 
 #ifdef DMT_ENABLE_OPENMP
@@ -137,6 +138,98 @@ for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
 }
 */
 template <bool UseRoll, bool UseBoxSmearing>
+void fdmt_init_impl_row0(const float* __restrict__ wf_sub,
+                         float* __restrict__ buf_row0,
+                         SizeType dt_min_sub,
+                         SizeType nsamps) noexcept {
+    // ===== First DT row (dt_min_sub) =====
+    if constexpr (UseBoxSmearing) {
+        float running_sum = 0.0F;
+
+        // Initialize sum for isamp=0
+        if constexpr (UseRoll) {
+            // Sum samples at wrapped indices: [nsamps - dt_min_sub, nsamps)
+            // and [0]
+            for (SizeType i = 0; i < dt_min_sub; ++i) {
+                running_sum += wf_sub[nsamps - dt_min_sub + i];
+            }
+            running_sum += wf_sub[0];
+        } else {
+            running_sum = wf_sub[0];
+        }
+        buf_row0[0] = running_sum;
+
+        // Triangle region [1, dt_min_sub]: window slides into valid data
+        for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
+            running_sum += wf_sub[isamp];
+            if constexpr (UseRoll) {
+                running_sum -= wf_sub[nsamps - dt_min_sub - 1 + isamp];
+            }
+            buf_row0[isamp] = running_sum;
+        }
+
+        // Main region [dt_min_sub + 1, nsamps): fully within bounds
+        for (SizeType isamp = dt_min_sub + 1; isamp < nsamps; ++isamp) {
+            running_sum += wf_sub[isamp];
+            running_sum -= wf_sub[isamp - dt_min_sub - 1];
+            buf_row0[isamp] = running_sum;
+        }
+    } else {
+        // No smearing: just shift by dt_min_sub
+        if constexpr (UseRoll) {
+            // Triangle: wrap indices
+            for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
+                buf_row0[isamp] = wf_sub[nsamps - dt_min_sub + isamp];
+            }
+        } else {
+            // Triangle: partial (no history)
+            std::fill(buf_row0, buf_row0 + dt_min_sub, 0.0F);
+        }
+        // Main region
+        for (SizeType isamp = dt_min_sub; isamp < nsamps; ++isamp) {
+            buf_row0[isamp] = wf_sub[isamp - dt_min_sub];
+        }
+    }
+}
+
+template <bool UseRoll, bool UseBoxSmearing>
+void fdmt_init_impl_row(const float* __restrict__ wf_sub,
+                        const float* __restrict__ buf_prev,
+                        float* __restrict__ buf_cur,
+                        SizeType dt_cur,
+                        SizeType nsamps) noexcept {
+    if constexpr (UseBoxSmearing) {
+        // Extend box sum: new_sum = prev_sum + waterfall[isamp - dt_cur]
+        if constexpr (UseRoll) {
+            for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+                buf_cur[isamp] =
+                    buf_prev[isamp] + wf_sub[nsamps - dt_cur + isamp];
+            }
+        } else {
+            // No new sample available, just copy previous partial sum
+            for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+                buf_cur[isamp] = buf_prev[isamp];
+            }
+        }
+        for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
+            buf_cur[isamp] = buf_prev[isamp] + wf_sub[isamp - dt_cur];
+        }
+    } else {
+        // No smearing: just shift by dt_cur
+        if constexpr (UseRoll) {
+            for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+                buf_cur[isamp] = wf_sub[nsamps - dt_cur + isamp];
+            }
+        } else {
+            std::fill(buf_cur, buf_cur + dt_cur, 0.0F);
+        }
+        for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
+            buf_cur[isamp] = wf_sub[isamp - dt_cur];
+        }
+    }
+}
+
+template <bool UseRoll, bool UseBoxSmearing>
 void fdmt_init_impl(const float* __restrict__ waterfall,
                     float* __restrict__ init_buffer,
                     const plans::FDMTCoordGrid* __restrict__ grids_init,
@@ -160,56 +253,8 @@ void fdmt_init_impl(const float* __restrict__ waterfall,
         float* __restrict__ buf_base =
             init_buffer + (grids_init[i_sub].coord_offset * nsamps);
 
-        // ===== First DT row (dt_min_sub) =====
-        float* __restrict__ buf_row0 = buf_base;
-
-        if constexpr (UseBoxSmearing) {
-            float running_sum = 0.0F;
-
-            // Initialize sum for isamp=0
-            if constexpr (UseRoll) {
-                // Sum samples at wrapped indices: [nsamps - dt_min_sub, nsamps)
-                // and [0]
-                for (SizeType i = 0; i < dt_min_sub; ++i) {
-                    running_sum += wf_sub[nsamps - dt_min_sub + i];
-                }
-                running_sum += wf_sub[0];
-            } else {
-                running_sum = wf_sub[0];
-            }
-            buf_row0[0] = running_sum;
-
-            // Triangle region [1, dt_min_sub]: window slides into valid data
-            for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
-                running_sum += wf_sub[isamp];
-                if constexpr (UseRoll) {
-                    running_sum -= wf_sub[nsamps - dt_min_sub - 1 + isamp];
-                }
-                buf_row0[isamp] = running_sum;
-            }
-
-            // Main region [dt_min_sub + 1, nsamps): fully within bounds
-            for (SizeType isamp = dt_min_sub + 1; isamp < nsamps; ++isamp) {
-                running_sum += wf_sub[isamp];
-                running_sum -= wf_sub[isamp - dt_min_sub - 1];
-                buf_row0[isamp] = running_sum;
-            }
-        } else {
-            // No smearing: just shift by dt_min_sub
-            if constexpr (UseRoll) {
-                // Triangle: wrap indices
-                for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
-                    buf_row0[isamp] = wf_sub[nsamps - dt_min_sub + isamp];
-                }
-            } else {
-                // Triangle: partial (no history)
-                std::fill(buf_row0, buf_row0 + dt_min_sub, 0.0F);
-            }
-            // Main region
-            for (SizeType isamp = dt_min_sub; isamp < nsamps; ++isamp) {
-                buf_row0[isamp] = wf_sub[isamp - dt_min_sub];
-            }
-        }
+        fdmt_init_impl_row0<UseRoll, UseBoxSmearing>(wf_sub, buf_base,
+                                                     dt_min_sub, nsamps);
 
         // ===== Subsequent DT rows (dt = dt_min_sub + 1, ...) =====
         for (SizeType i_dt = 1; i_dt < ndt_sub; ++i_dt) {
@@ -217,37 +262,8 @@ void fdmt_init_impl(const float* __restrict__ waterfall,
             float* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
             const float* __restrict__ buf_prev =
                 buf_base + ((i_dt - 1) * nsamps);
-
-            if constexpr (UseBoxSmearing) {
-                // Extend box sum: new_sum = prev_sum + waterfall[isamp -
-                // dt_cur]
-                if constexpr (UseRoll) {
-                    for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                        buf_cur[isamp] =
-                            buf_prev[isamp] + wf_sub[nsamps - dt_cur + isamp];
-                    }
-                } else {
-                    // No new sample available, just copy previous partial sum
-                    for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                        buf_cur[isamp] = buf_prev[isamp];
-                    }
-                }
-                for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
-                    buf_cur[isamp] = buf_prev[isamp] + wf_sub[isamp - dt_cur];
-                }
-            } else {
-                // No smearing: just shift by dt_cur
-                if constexpr (UseRoll) {
-                    for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                        buf_cur[isamp] = wf_sub[nsamps - dt_cur + isamp];
-                    }
-                } else {
-                    std::fill(buf_cur, buf_cur + dt_cur, 0.0F);
-                }
-                for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
-                    buf_cur[isamp] = wf_sub[isamp - dt_cur];
-                }
-            }
+            fdmt_init_impl_row<UseRoll, UseBoxSmearing>(
+                wf_sub, buf_prev, buf_cur, dt_cur, nsamps);
         }
     }
 }
@@ -263,6 +279,175 @@ dt_max_init assert(grids_init[i_sub].dt_grid.back() <= dt_max_init);  // all dt
 values in init stage
 }
 */
+void fdmt_init_valid_row0_box(const float* __restrict__ wf_sub,
+                              const float* __restrict__ hist_sub,
+                              const float* __restrict__ hist_init_sub,
+                              float* __restrict__ buf_row0,
+                              SizeType dt_min_sub,
+                              SizeType dt_max_init,
+                              SizeType dt_max_final,
+                              SizeType nsamps_ext) noexcept {
+    // ===== First DT row (dt_min_sub) =====
+    // Box sum of (dt_min_sub + 1) samples ending at current position
+    float running_sum = 0.0F;
+
+    // --- isamp = 0: sum of logical indices [-dt_min_sub, 0] ---
+    // [-dt_min_sub, -1] from hist_init, [0] from hist_buffer
+    for (SizeType i = 0; i < dt_min_sub; ++i) {
+        // Logical index: -dt_min_sub + i (ranges from -dt_min_sub to -1)
+        // hist_init index: dt_max_init - dt_min_sub + i
+        running_sum += hist_init_sub[dt_max_init - dt_min_sub + i];
+    }
+    running_sum += hist_sub[0]; // Logical index 0
+    buf_row0[0] = running_sum;
+
+    // --- Zone A: isamp in [1, dt_min_sub] ---
+    // Add from hist_buffer, remove from hist_init
+    for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
+        // Add: logical index isamp -> hist_buffer[isamp]
+        running_sum += hist_sub[isamp];
+        // Remove: logical index (isamp - dt_min_sub - 1) -> hist_init
+        // isamp - dt_min_sub - 1 ranges from -dt_min_sub to -1
+        running_sum -= hist_init_sub[dt_max_init + (isamp - dt_min_sub - 1)];
+        buf_row0[isamp] = running_sum;
+    }
+
+    // --- Zone B: isamp in [dt_min_sub + 1, dt_max_final) ---
+    // Add from hist_buffer, remove from hist_buffer
+    for (SizeType isamp = dt_min_sub + 1; isamp < dt_max_final; ++isamp) {
+        running_sum += hist_sub[isamp];
+        running_sum -= hist_sub[isamp - dt_min_sub - 1];
+        buf_row0[isamp] = running_sum;
+    }
+
+    // --- Zone C: isamp in [dt_max_final, dt_max_final + dt_min + 1) ---
+    // Add from waterfall, remove from hist_buffer
+    const SizeType zone_c_end = dt_max_final + dt_min_sub + 1;
+    for (SizeType isamp = dt_max_final; isamp < zone_c_end; ++isamp) {
+        // Add: logical index isamp -> waterfall[isamp - dt_max_final]
+        running_sum += wf_sub[isamp - dt_max_final];
+        // Remove: logical index (isamp - dt_min_sub - 1) -> hist_buffer
+        running_sum -= hist_sub[isamp - dt_min_sub - 1];
+        buf_row0[isamp] = running_sum;
+    }
+
+    // --- Zone D: isamp in [zone_c_end, nsamps_ext) ---
+    // Add from waterfall, remove from waterfall
+    for (SizeType isamp = zone_c_end; isamp < nsamps_ext; ++isamp) {
+        const SizeType wf_idx = isamp - dt_max_final;
+        running_sum += wf_sub[wf_idx];
+        running_sum -= wf_sub[wf_idx - dt_min_sub - 1];
+        buf_row0[isamp] = running_sum;
+    }
+}
+
+void fdmt_init_valid_row0_shift(const float* __restrict__ wf_sub,
+                                const float* __restrict__ hist_sub,
+                                const float* __restrict__ hist_init_sub,
+                                float* __restrict__ buf_row0,
+                                SizeType dt_min_sub,
+                                SizeType dt_max_init,
+                                SizeType dt_max_final,
+                                SizeType nsamps_ext) noexcept {
+    // ===== First DT row (dt_min_sub) =====
+    // No smearing: just shift by dt_min_sub
+    // --- Zone A: isamp in [0, dt_min_sub) ---
+    // Source: hist_init (logical index isamp - dt_min_sub is in
+    // [-dt_min_sub, -1])
+    for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
+        // Logical source: isamp - dt_min_sub (negative)
+        buf_row0[isamp] = hist_init_sub[dt_max_init - dt_min_sub + isamp];
+    }
+    // --- Zone B: isamp in [dt_min_sub, dt_max_final + dt_min_sub) ---
+    // Source: hist_buffer (logical index isamp - dt_min_sub is in [0,
+    // dt_max_final))
+    for (SizeType isamp = dt_min_sub; isamp < dt_max_final + dt_min_sub;
+         ++isamp) {
+        buf_row0[isamp] = hist_sub[isamp - dt_min_sub];
+    }
+
+    // --- Zone C: isamp in [dt_max_final + dt_min_sub, nsamps_ext) ---
+    // Source: waterfall (logical index isamp - dt_min_sub is in
+    // [dt_max_final, ...))
+    for (SizeType isamp = dt_max_final + dt_min_sub; isamp < nsamps_ext;
+         ++isamp) {
+        buf_row0[isamp] = wf_sub[(isamp - dt_max_final) - dt_min_sub];
+    }
+}
+
+template <bool UseBoxSmearing>
+void fdmt_init_valid_row(const float* __restrict__ wf_sub,
+                         const float* __restrict__ hist_sub,
+                         const float* __restrict__ hist_init_sub,
+                         const float* __restrict__ buf_prev,
+                         float* __restrict__ buf_cur,
+                         SizeType dt_cur,
+                         SizeType dt_max_init,
+                         SizeType dt_max_final,
+                         SizeType nsamps_ext) noexcept {
+    if constexpr (UseBoxSmearing) {
+        // Extend box: new_sum[isamp] = prev_sum[isamp] + input[isamp - dt_cur]
+
+        // --- Zone A: isamp in [0, dt_cur) ---
+        for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+            buf_cur[isamp] =
+                buf_prev[isamp] + hist_init_sub[dt_max_init + (isamp - dt_cur)];
+        }
+
+        // --- Zone B: isamp in [dt_cur, dt_max_final + dt_cur) ---
+        const SizeType zone_b_end = dt_max_final + dt_cur;
+        for (SizeType isamp = dt_cur; isamp < zone_b_end; ++isamp) {
+            buf_cur[isamp] = buf_prev[isamp] + hist_sub[isamp - dt_cur];
+        }
+
+        // --- Zone C: isamp in [zone_b_end, nsamps_ext) ---
+        for (SizeType isamp = zone_b_end; isamp < nsamps_ext; ++isamp) {
+            buf_cur[isamp] =
+                buf_prev[isamp] + wf_sub[isamp - dt_cur - dt_max_final];
+        }
+    } else {
+        // No smearing: just shift by dt_cur
+        // --- Zone A: isamp in [0, dt_cur) ---
+        for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+            buf_cur[isamp] = hist_init_sub[dt_max_init - dt_cur + isamp];
+        }
+        // --- Zone B: isamp in [dt_cur, dt_max_final + dt_cur) ---
+        const SizeType zone_b_end = dt_max_final + dt_cur;
+        for (SizeType isamp = dt_cur; isamp < zone_b_end; ++isamp) {
+            buf_cur[isamp] = hist_sub[isamp - dt_cur];
+        }
+
+        // --- Zone C: isamp in [zone_b_end, nsamps_ext) ---
+        for (SizeType isamp = zone_b_end; isamp < nsamps_ext; ++isamp) {
+            buf_cur[isamp] = wf_sub[isamp - dt_cur - dt_max_final];
+        }
+    }
+}
+
+void fdmt_init_valid_update_history(const float* __restrict__ waterfall,
+                                    float* __restrict__ hist_buffer,
+                                    float* __restrict__ hist_init_buffer,
+                                    SizeType nsubs,
+                                    SizeType nsamps,
+                                    SizeType dt_max_init,
+                                    SizeType dt_max_final) noexcept {
+    // Update history buffer
+    for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
+        const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
+        float* __restrict__ hist_sub     = hist_buffer + (i_sub * dt_max_final);
+        float* __restrict__ hist_init_sub =
+            hist_init_buffer + (i_sub * dt_max_init);
+
+        // hist_init <- waterfall[nsamps - dt_max_final - dt_max_init : nsamps -
+        // dt_max_final]
+        std::copy_n(wf_sub + nsamps - dt_max_final - dt_max_init, dt_max_init,
+                    hist_init_sub);
+
+        // hist_buffer <- waterfall[nsamps - dt_max_final : nsamps]
+        std::copy_n(wf_sub + nsamps - dt_max_final, dt_max_final, hist_sub);
+    }
+}
+
 // Specialized implementation for VALID mode with two history buffers
 template <bool UseBoxSmearing>
 void fdmt_init_valid_impl(const float* __restrict__ waterfall,
@@ -299,88 +484,14 @@ void fdmt_init_valid_impl(const float* __restrict__ waterfall,
         float* __restrict__ buf_base =
             init_buffer + (grids_init[i_sub].coord_offset * nsamps_ext);
 
-        // ===== First DT row (dt_min_sub) =====
-        float* __restrict__ buf_row0 = buf_base;
-
         if constexpr (UseBoxSmearing) {
-            // Box sum of (dt_min_sub + 1) samples ending at current position
-            float running_sum = 0.0F;
-
-            // --- isamp = 0: sum of logical indices [-dt_min_sub, 0] ---
-            // [-dt_min_sub, -1] from hist_init, [0] from hist_buffer
-            for (SizeType i = 0; i < dt_min_sub; ++i) {
-                // Logical index: -dt_min_sub + i (ranges from -dt_min_sub to
-                // -1) hist_init index: dt_max_init - dt_min_sub + i
-                running_sum += hist_init_sub[dt_max_init - dt_min_sub + i];
-            }
-            running_sum += hist_sub[0]; // Logical index 0
-            buf_row0[0] = running_sum;
-
-            // --- Zone A: isamp in [1, dt_min_sub] ---
-            // Add from hist_buffer, remove from hist_init
-            for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
-                // Add: logical index isamp -> hist_buffer[isamp]
-                running_sum += hist_sub[isamp];
-                // Remove: logical index (isamp - dt_min_sub - 1) -> hist_init
-                // isamp - dt_min_sub - 1 ranges from -dt_min_sub to -1
-                running_sum -=
-                    hist_init_sub[dt_max_init + (isamp - dt_min_sub - 1)];
-                buf_row0[isamp] = running_sum;
-            }
-
-            // --- Zone B: isamp in [dt_min_sub + 1, dt_max_final) ---
-            // Add from hist_buffer, remove from hist_buffer
-            for (SizeType isamp = dt_min_sub + 1; isamp < dt_max_final;
-                 ++isamp) {
-                running_sum += hist_sub[isamp];
-                running_sum -= hist_sub[isamp - dt_min_sub - 1];
-                buf_row0[isamp] = running_sum;
-            }
-
-            // --- Zone C: isamp in [dt_max_final, dt_max_final + dt_min + 1)
-            // --- Add from waterfall, remove from hist_buffer
-            const SizeType zone_c_end = dt_max_final + dt_min_sub + 1;
-            for (SizeType isamp = dt_max_final; isamp < zone_c_end; ++isamp) {
-                // Add: logical index isamp -> waterfall[isamp - dt_max_final]
-                running_sum += wf_sub[isamp - dt_max_final];
-                // Remove: logical index (isamp - dt_min_sub - 1) -> hist_buffer
-                running_sum -= hist_sub[isamp - dt_min_sub - 1];
-                buf_row0[isamp] = running_sum;
-            }
-
-            // --- Zone D: isamp in [zone_c_end, nsamps_ext) ---
-            // Add from waterfall, remove from waterfall
-            for (SizeType isamp = zone_c_end; isamp < nsamps_ext; ++isamp) {
-                const SizeType wf_idx = isamp - dt_max_final;
-                running_sum += wf_sub[wf_idx];
-                running_sum -= wf_sub[wf_idx - dt_min_sub - 1];
-                buf_row0[isamp] = running_sum;
-            }
+            fdmt_init_valid_row0_box(wf_sub, hist_sub, hist_init_sub, buf_base,
+                                     dt_min_sub, dt_max_init, dt_max_final,
+                                     nsamps_ext);
         } else {
-            // No smearing: just shift by dt_min_sub
-            // --- Zone A: isamp in [0, dt_min_sub) ---
-            // Source: hist_init (logical index isamp - dt_min_sub is in
-            // [-dt_min_sub, -1])
-            for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
-                // Logical source: isamp - dt_min_sub (negative)
-                buf_row0[isamp] =
-                    hist_init_sub[dt_max_init - dt_min_sub + isamp];
-            }
-            // --- Zone B: isamp in [dt_min_sub, dt_max_final + dt_min_sub) ---
-            // Source: hist_buffer (logical index isamp - dt_min_sub is in [0,
-            // dt_max_final))
-            for (SizeType isamp = dt_min_sub; isamp < dt_max_final + dt_min_sub;
-                 ++isamp) {
-                buf_row0[isamp] = hist_sub[isamp - dt_min_sub];
-            }
-
-            // --- Zone C: isamp in [dt_max_final + dt_min_sub, nsamps_ext) ---
-            // Source: waterfall (logical index isamp - dt_min_sub is in
-            // [dt_max_final, ...))
-            for (SizeType isamp = dt_max_final + dt_min_sub; isamp < nsamps_ext;
-                 ++isamp) {
-                buf_row0[isamp] = wf_sub[(isamp - dt_max_final) - dt_min_sub];
-            }
+            fdmt_init_valid_row0_shift(wf_sub, hist_sub, hist_init_sub,
+                                       buf_base, dt_min_sub, dt_max_init,
+                                       dt_max_final, nsamps_ext);
         }
 
         // ===== Subsequent DT rows (dt = dt_min_sub + 1, ...) =====
@@ -389,65 +500,14 @@ void fdmt_init_valid_impl(const float* __restrict__ waterfall,
             float* __restrict__ buf_cur = buf_base + (i_dt * nsamps_ext);
             const float* __restrict__ buf_prev =
                 buf_base + ((i_dt - 1) * nsamps_ext);
-
-            if constexpr (UseBoxSmearing) {
-                // Extend box: new_sum[isamp] = prev_sum[isamp] + input[isamp -
-                // dt_cur]
-
-                // --- Zone A: isamp in [0, dt_cur) ---
-                for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                    buf_cur[isamp] =
-                        buf_prev[isamp] +
-                        hist_init_sub[dt_max_init + (isamp - dt_cur)];
-                }
-
-                // --- Zone B: isamp in [dt_cur, dt_max_final + dt_cur) ---
-                const SizeType zone_b_end = dt_max_final + dt_cur;
-                for (SizeType isamp = dt_cur; isamp < zone_b_end; ++isamp) {
-                    buf_cur[isamp] = buf_prev[isamp] + hist_sub[isamp - dt_cur];
-                }
-
-                // --- Zone C: isamp in [zone_b_end, nsamps_ext) ---
-                for (SizeType isamp = zone_b_end; isamp < nsamps_ext; ++isamp) {
-                    buf_cur[isamp] =
-                        buf_prev[isamp] + wf_sub[isamp - dt_cur - dt_max_final];
-                }
-            } else {
-                // No smearing: just shift by dt_cur
-                // --- Zone A: isamp in [0, dt_cur) ---
-                for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                    buf_cur[isamp] =
-                        hist_init_sub[dt_max_init - dt_cur + isamp];
-                }
-                // --- Zone B: isamp in [dt_cur, dt_max_final + dt_cur) ---
-                const SizeType zone_b_end = dt_max_final + dt_cur;
-                for (SizeType isamp = dt_cur; isamp < zone_b_end; ++isamp) {
-                    buf_cur[isamp] = hist_sub[isamp - dt_cur];
-                }
-
-                // --- Zone C: isamp in [zone_b_end, nsamps_ext) ---
-                for (SizeType isamp = zone_b_end; isamp < nsamps_ext; ++isamp) {
-                    buf_cur[isamp] = wf_sub[isamp - dt_cur - dt_max_final];
-                }
-            }
+            fdmt_init_valid_row<UseBoxSmearing>(
+                wf_sub, hist_sub, hist_init_sub, buf_prev, buf_cur, dt_cur,
+                dt_max_init, dt_max_final, nsamps_ext);
         }
     }
 
-    // Update history buffer
-    for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
-        const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
-        float* __restrict__ hist_sub     = hist_buffer + (i_sub * dt_max_final);
-        float* __restrict__ hist_init_sub =
-            hist_init_buffer + (i_sub * dt_max_init);
-
-        // hist_init <- waterfall[nsamps - dt_max_final - dt_max_init : nsamps -
-        // dt_max_final]
-        std::copy_n(wf_sub + nsamps - dt_max_final - dt_max_init, dt_max_init,
-                    hist_init_sub);
-
-        // hist_buffer <- waterfall[nsamps - dt_max_final : nsamps]
-        std::copy_n(wf_sub + nsamps - dt_max_final, dt_max_final, hist_sub);
-    }
+    fdmt_init_valid_update_history(waterfall, hist_buffer, hist_init_buffer,
+                                   nsubs, nsamps, dt_max_init, dt_max_final);
 }
 } // namespace
 
@@ -493,6 +553,13 @@ public:
     const plans::FDMTPlan& get_plan() const { return m_plan; }
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
+        reset(waterfall, dmt);
+        advance_until_remaining(0);
+        finalize();
+        spdlog::debug("FDMTCPU::Impl: Execution complete.");
+    }
+
+    void reset(std::span<const float> waterfall, std::span<float> dmt) {
         const auto nchans = m_plan.get_nchans();
         const auto nsamps = m_plan.get_nsamps();
         if (waterfall.size() != nchans * nsamps) {
@@ -505,9 +572,157 @@ public:
                 "FDMTCPU: Invalid size of dmt. Expected at least {}, got {}",
                 m_plan.get_buffer_size(), dmt.size()));
         }
-        spdlog::debug("FDMTCPU: Input dimensions check passed: {}x{}", nchans,
-                      nsamps);
-        execute_unified(waterfall, dmt);
+        const auto levels = m_plan.get_niters() + 1;
+        if (levels < 2) {
+            throw std::invalid_argument(
+                std::format("FDMTCPU: Invalid number of levels. Expected at "
+                            "least 2, got {}",
+                            levels));
+        }
+
+        m_dmt_target_ptr = dmt.data();
+        m_current_level  = 0;
+
+        // Number of internal ping-pong iterations (excluding the final write)
+        const SizeType internal_iters = levels - 2;
+        const bool odd_swaps          = (internal_iters % 2) == 1;
+        if (odd_swaps) {
+            m_current_in_ptr  = dmt.data();
+            m_current_out_ptr = m_state_internal.data();
+        } else {
+            m_current_in_ptr  = m_state_internal.data();
+            m_current_out_ptr = dmt.data();
+        }
+
+        initialise(waterfall, m_current_in_ptr);
+        m_is_initialized = true;
+        spdlog::debug("FDMTCPU: Stepper initialized at level 0.");
+    }
+
+    void advance(SizeType levels = 1) {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        const auto total_lvl = total_levels();
+        while (levels > 0 && m_current_level < total_lvl - 1) {
+            const SizeType next_level = m_current_level + 1;
+            execute_iter(m_current_in_ptr, m_current_out_ptr, next_level);
+            std::swap(m_current_in_ptr, m_current_out_ptr);
+            m_current_level = next_level;
+            --levels;
+        }
+    }
+
+    void advance_until_remaining(SizeType remaining_levels) {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        const auto total_lvl = total_levels();
+        if (remaining_levels >= total_lvl) {
+            return;
+        }
+        const SizeType target_level = total_lvl - 1 - remaining_levels;
+        if (target_level > m_current_level) {
+            advance(target_level - m_current_level);
+        }
+    }
+
+    [[nodiscard]] std::span<const float> view_level_data() const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        const auto& state_shape =
+            m_plan.get_container().state_shape[m_current_level];
+        return {m_current_in_ptr, state_shape.nelements};
+    }
+
+    [[nodiscard]] std::span<const float>
+    view_subband_data(SizeType subband_idx) const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        const auto& plan_c      = m_plan.get_container();
+        const auto& state_shape = plan_c.state_shape[m_current_level];
+        if (subband_idx >= state_shape.nchans) {
+            throw std::out_of_range(std::format(
+                "FDMTCPU: Subband index {} out of range (current level has {} "
+                "subbands)",
+                subband_idx, state_shape.nchans));
+        }
+        const auto& grid  = plan_c.grids[m_current_level][subband_idx];
+        const auto offset = grid.coord_offset * state_shape.nsamps;
+        const auto count  = grid.ndt * state_shape.nsamps;
+        return {m_current_in_ptr + offset, count};
+    }
+
+    [[nodiscard]] FDMTSubbandView view_subband(SizeType subband_idx) const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        const auto& plan_c      = m_plan.get_container();
+        const auto& state_shape = plan_c.state_shape[m_current_level];
+        if (subband_idx >= state_shape.nchans) {
+            throw std::out_of_range(std::format(
+                "FDMTCPU: Subband index {} out of range (current level has {} "
+                "subbands)",
+                subband_idx, state_shape.nchans));
+        }
+        const auto& grid  = plan_c.grids[m_current_level][subband_idx];
+        const auto offset = grid.coord_offset * state_shape.nsamps;
+        const auto count  = grid.ndt * state_shape.nsamps;
+        return FDMTSubbandView{
+            .data = std::span<const float>(m_current_in_ptr + offset, count),
+            .subband_idx = subband_idx,
+            .ndt         = grid.ndt,
+            .nsamps      = state_shape.nsamps,
+            .f_start     = grid.f_start,
+            .f_end       = grid.f_end,
+            .dt_grid     = std::span<const SizeType>(grid.dt_grid.data(),
+                                                     grid.dt_grid.size()),
+        };
+    }
+
+    [[nodiscard]] SizeType current_level() const noexcept {
+        return m_current_level;
+    }
+
+    [[nodiscard]] SizeType total_levels() const noexcept {
+        return m_plan.get_niters() + 1;
+    }
+
+    [[nodiscard]] SizeType remaining_levels() const noexcept {
+        if (total_levels() <= 1 || m_current_level >= total_levels() - 1) {
+            return 0;
+        }
+        return (total_levels() - 1) - m_current_level;
+    }
+
+    [[nodiscard]] SizeType num_subbands() const {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        return m_plan.get_container().state_shape[m_current_level].nchans;
+    }
+
+    [[nodiscard]] bool is_finished() const noexcept {
+        return m_is_initialized && (m_current_level >= total_levels() - 1);
+    }
+
+    void finalize() {
+        if (!m_is_initialized) {
+            throw std::logic_error(
+                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+        }
+        if (!is_finished()) {
+            advance_until_remaining(0);
+        }
+        m_is_initialized = false;
     }
 
 private:
@@ -521,6 +736,13 @@ private:
     std::vector<float> m_history_init; // only when use_box_smearing is true
     int m_nthreads;
 
+    // Stepper state
+    float* m_current_in_ptr{nullptr};
+    float* m_current_out_ptr{nullptr};
+    float* m_dmt_target_ptr{nullptr};
+    SizeType m_current_level{0};
+    bool m_is_initialized{false};
+
     static FDMTMode parse_mode(std::string_view mode) {
         if (mode == "full") {
             return FDMTMode::kFull;
@@ -533,45 +755,6 @@ private:
         }
         throw std::invalid_argument(std::format(
             "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
-    }
-
-    void execute_unified(std::span<const float> waterfall,
-                         std::span<float> dmt) {
-        const auto levels = m_plan.get_niters() + 1;
-        if (levels < 2) {
-            throw std::invalid_argument(
-                std::format("FDMTCPU: Invalid number of levels. Expected at "
-                            "least 2, got {}",
-                            levels));
-        }
-        float* current_in_ptr  = nullptr;
-        float* current_out_ptr = nullptr;
-        // Number of internal ping-pong iterations (excluding the final write)
-        const SizeType internal_iters = levels - 2;
-        // Determine starting configuration to ensure final result lands in the
-        // correct side of the ping-pong table
-        const bool odd_swaps = (internal_iters % 2) == 1;
-        if (odd_swaps) {
-            // init -> result, odd swaps -> dmt ends in result
-            current_in_ptr  = dmt.data();
-            current_out_ptr = m_state_internal.data();
-        } else {
-            // init -> internal, even swaps -> dmt ends in result
-            current_in_ptr  = m_state_internal.data();
-            current_out_ptr = dmt.data();
-        }
-
-        // Initialize in the current buffer
-        initialise(waterfall, current_in_ptr);
-        for (SizeType i_level = 1; i_level < levels; ++i_level) {
-            const bool is_last = i_level == levels - 1;
-            execute_iter(current_in_ptr, current_out_ptr, i_level);
-            // Ping-pong buffers (unless it's the final iteration)
-            if (!is_last) {
-                std::swap(current_in_ptr, current_out_ptr);
-            }
-        }
-        spdlog::debug("FDMTCPU::Impl: Execution complete.");
     }
 
     void initialise(std::span<const float> waterfall,
@@ -671,6 +854,34 @@ const plans::FDMTPlan& FDMTCPU::get_plan() const noexcept {
 void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
+void FDMTCPU::reset(std::span<const float> waterfall, std::span<float> dmt) {
+    m_impl->reset(waterfall, dmt);
+}
+void FDMTCPU::advance(SizeType levels) { m_impl->advance(levels); }
+void FDMTCPU::advance_until_remaining(SizeType remaining_levels) {
+    m_impl->advance_until_remaining(remaining_levels);
+}
+std::span<const float> FDMTCPU::view_level_data() const {
+    return m_impl->view_level_data();
+}
+std::span<const float> FDMTCPU::view_subband_data(SizeType subband_idx) const {
+    return m_impl->view_subband_data(subband_idx);
+}
+FDMTSubbandView FDMTCPU::view_subband(SizeType subband_idx) const {
+    return m_impl->view_subband(subband_idx);
+}
+SizeType FDMTCPU::current_level() const noexcept {
+    return m_impl->current_level();
+}
+SizeType FDMTCPU::total_levels() const noexcept {
+    return m_impl->total_levels();
+}
+SizeType FDMTCPU::remaining_levels() const noexcept {
+    return m_impl->remaining_levels();
+}
+SizeType FDMTCPU::num_subbands() const { return m_impl->num_subbands(); }
+bool FDMTCPU::is_finished() const noexcept { return m_impl->is_finished(); }
+void FDMTCPU::finalize() { m_impl->finalize(); }
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,

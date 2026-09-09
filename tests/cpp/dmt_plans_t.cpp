@@ -18,7 +18,7 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
     const SizeType dt_step = 1;
     const SizeType dt_min  = 0;
 
-    FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_step, dt_min);
+    FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
 
     SECTION("Constructor and getter methods") {
         CHECK(plan.get_f_min() == f_min);
@@ -27,7 +27,6 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
         CHECK(plan.get_nsamps() == nsamps);
         CHECK(plan.get_tsamp() == tsamp);
         CHECK(plan.get_dt_max() == dt_max);
-        CHECK(plan.get_dt_step() == dt_step);
         CHECK(plan.get_dt_min() == dt_min);
     }
 
@@ -39,10 +38,8 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
         CHECK(container.state_shape.size() == 10);
     }
     SECTION("Grid and size calculations") {
-        const auto ndms_expected = static_cast<SizeType>(
-            std::floor((dt_max - dt_min) / static_cast<float>(dt_step)) + 1);
+        const auto ndms_expected = static_cast<SizeType>(dt_max - dt_min + 1);
         CHECK(plan.get_df() == 1.0F);
-        CHECK(plan.get_correction() == 0.5F);
         CHECK(plan.get_niters() == 9);
         CHECK(plan.get_dt_grid_final().size() == ndms_expected);
         CHECK(plan.get_dm_grid_final().size() == ndms_expected);
@@ -89,33 +86,38 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
 
 TEST_CASE("FDMTPlan edge cases", "[dmt_plans]") {
     SECTION("Valid construction") {
-        CHECK_NOTHROW(FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 0));
+        CHECK_NOTHROW(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, "full"));
     }
 
     SECTION("Invalid parameters") {
         // f_min > f_max
         CHECK_THROWS_AS(
-            FDMTPlan(1500.0F, 1000.0F, 500, 1024, 0.001F, 512, 1, 0),
+            FDMTPlan(1500.0F, 1000.0F, 500, 1024, 0.001F, 512, 0, "full"),
             std::invalid_argument);
         // nchans == 0
-        CHECK_THROWS_AS(FDMTPlan(1000.0F, 1500.0F, 0, 1024, 0.001F, 512, 1, 0),
-                        std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 0, 1024, 0.001F, 512, 0, "full"),
+            std::invalid_argument);
         // nsamps == 0
-        CHECK_THROWS_AS(FDMTPlan(1000.0F, 1500.0F, 500, 0, 0.001F, 512, 1, 0),
-                        std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 0, 0.001F, 512, 0, "full"),
+            std::invalid_argument);
         // tsamp <= 0
-        CHECK_THROWS_AS(FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.0F, 512, 1, 0),
-                        std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.0F, 512, 0, "full"),
+            std::invalid_argument);
         // dt_max == 0
-        CHECK_THROWS_AS(FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 0, 1, 0),
-                        std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 0, 0, "full"),
+            std::invalid_argument);
         // dt_min >= dt_max
         CHECK_THROWS_AS(
-            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 1, 512),
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 512, "full"),
             std::invalid_argument);
-        // dt_step == 0
+        // invalid mode
         CHECK_THROWS_AS(
-            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 0),
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, "invalid"),
             std::invalid_argument);
     }
 }
