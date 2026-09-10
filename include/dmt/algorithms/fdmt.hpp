@@ -64,6 +64,29 @@ public:
             float tsamp,
             SizeType dt_max,
             SizeType dt_min       = 0,
+            SizeType dt_step      = 1,
+            bool use_box_smearing = true,
+            std::string_view mode = "full",
+            bool verbose          = false,
+            int nthreads          = 1);
+
+    FDMTCPU(float f_min,
+            float f_max,
+            SizeType nchans,
+            SizeType nsamps,
+            float tsamp,
+            const std::vector<SizeType>& dt_grid,
+            bool use_box_smearing = true,
+            std::string_view mode = "full",
+            bool verbose          = false,
+            int nthreads          = 1);
+
+    FDMTCPU(float f_min,
+            float f_max,
+            SizeType nchans,
+            SizeType nsamps,
+            float tsamp,
+            const std::vector<float>& dm_grid,
             bool use_box_smearing = true,
             std::string_view mode = "full",
             bool verbose          = false,
@@ -198,6 +221,33 @@ compute_fdmt(std::span<const float> waterfall,
              float tsamp,
              SizeType dt_max,
              SizeType dt_min       = 0,
+             SizeType dt_step      = 1,
+             bool use_box_smearing = true,
+             std::string_view mode = "full",
+             bool verbose          = false,
+             int nthreads          = 1);
+
+[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
+compute_fdmt(std::span<const float> waterfall,
+             float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<SizeType>& dt_grid,
+             bool use_box_smearing = true,
+             std::string_view mode = "full",
+             bool verbose          = false,
+             int nthreads          = 1);
+
+[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
+compute_fdmt(std::span<const float> waterfall,
+             float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
@@ -240,6 +290,7 @@ public:
      * @param tsamp Sampling time (s).
      * @param dt_max Maximum delay trial (in samples).
      * @param dt_min Minimum delay trial (in samples, default: 0).
+     * @param dt_step Delay trial step (in samples, default: 1).
      * @param use_box_smearing Whether to account for intra-channel smearing
      * using boxcar summation (default: true).
      * @param mode Mode of the FDMT transform. Available modes are:
@@ -257,6 +308,29 @@ public:
              float tsamp,
              SizeType dt_max,
              SizeType dt_min       = 0,
+             SizeType dt_step      = 1,
+             bool use_box_smearing = true,
+             std::string_view mode = "full",
+             bool verbose          = false,
+             int device_id         = 0);
+
+    FDMTCUDA(float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<SizeType>& dt_grid,
+             bool use_box_smearing = true,
+             std::string_view mode = "full",
+             bool verbose          = false,
+             int device_id         = 0);
+
+    FDMTCUDA(float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
@@ -448,6 +522,31 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      float tsamp,
                                      SizeType dt_max,
                                      SizeType dt_min       = 0,
+                                     SizeType dt_step      = 1,
+                                     bool use_box_smearing = true,
+                                     std::string_view mode = "full",
+                                     bool verbose          = false,
+                                     int device_id         = 0);
+
+std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
+                                     float f_min,
+                                     float f_max,
+                                     SizeType nchans,
+                                     SizeType nsamps,
+                                     float tsamp,
+                                     const std::vector<SizeType>& dt_grid,
+                                     bool use_box_smearing = true,
+                                     std::string_view mode = "full",
+                                     bool verbose          = false,
+                                     int device_id         = 0);
+
+std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
+                                     float f_min,
+                                     float f_max,
+                                     SizeType nchans,
+                                     SizeType nsamps,
+                                     float tsamp,
+                                     const std::vector<float>& dm_grid,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",
                                      bool verbose          = false,

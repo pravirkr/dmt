@@ -21,15 +21,56 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
 
     py::class_<FDMTCUDA>(mod, "FDMTCUDA", "FDMT CUDA Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, bool, std::string_view, bool, int>(),
+                      SizeType, SizeType, bool, std::string_view, bool, int>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
-             py::arg("dt_min") = 0, py::arg("use_box_smearing") = true,
-             py::arg("mode") = "full", py::arg("verbose") = false,
-             py::arg("device_id") = 0)
+             py::arg("dt_min") = 0, py::arg("dt_step") = 1,
+             py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+             py::arg("verbose") = false, py::arg("device_id") = 0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, const py::object& dt_grid,
+                        const py::object& dt_arr, const py::object& dm_grid,
+                        const py::object& dm_arr, bool use_box_smearing,
+                        std::string_view mode, bool verbose, int device_id) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                if (type == CustomGridType::kDt) {
+                    return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                    extract_dt_grid(obj), use_box_smearing,
+                                    mode, verbose, device_id);
+                }
+                return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                extract_dm_grid(obj), use_box_smearing, mode,
+                                verbose, device_id);
+            }),
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+            py::arg("verbose") = false, py::arg("device_id") = 0)
         .def_property_readonly(
             "plan", &FDMTCUDA::get_plan,
             "Get the FDMTPlan object containing transform details.")
+        .def_property_readonly("dt_grid_final",
+                               [](FDMTCUDA& fdmt) {
+                                   return as_pyarray(
+                                       fdmt.get_plan().get_dt_grid_final());
+                               })
+        .def_property_readonly("dm_grid_final",
+                               [](FDMTCUDA& fdmt) {
+                                   return as_pyarray(
+                                       fdmt.get_plan().get_dm_grid_final());
+                               })
+        .def("get_dt_grid_final",
+             [](FDMTCUDA& fdmt) {
+                 return as_pyarray(fdmt.get_plan().get_dt_grid_final());
+             })
+        .def("get_dm_grid_final",
+             [](FDMTCUDA& fdmt) {
+                 return as_pyarray(fdmt.get_plan().get_dm_grid_final());
+             })
         // execute takes 2d array as input, and returns 2d array as output
         .def(
             "execute",

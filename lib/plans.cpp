@@ -27,6 +27,26 @@ std::string FDMTShape::to_string() const {
                        nchans, ndt_min, ndt_max, nsamps, nelements);
 }
 
+std::string FDMTComplexity::to_string() const {
+    std::string result = std::format(
+        "FDMT Complexity:\n"
+        "  Output DM trials (N_dt)      : {}\n"
+        "  Input channels   (N_chans)   : {}\n"
+        "  Brute-force ops / time samp  : {} (N_dt x N_chans)\n"
+        "  FDMT tree nodes  (Levels 1..M): {}\n"
+        "  FDMT additions   (Levels 1..M): {} (offset_add operations)\n"
+        "  FDMT copy nodes  (Levels 1..M): {}\n"
+        "  Theoretical Speedup Factor   : {:.2f}x (brute_force / "
+        "fdmt_additions)",
+        n_dt, n_chans, brute_force_ops, total_tree_nodes, sum_additions,
+        copy_nodes, ops_ratio);
+    if (ops_ratio > 0.0F && ops_ratio < 2.0F) {
+        result += "\n  Note: Speedup factor is < 2.0x (coarse dt spacing "
+                  "approaches brute-force complexity)";
+    }
+    return result;
+}
+
 FDMTPlanContainer::FDMTPlanContainer(SizeType niters) {
     state_shape.resize(niters + 1);
     grids.resize(niters + 1);
@@ -72,6 +92,7 @@ public:
          float tsamp,
          SizeType dt_max,
          SizeType dt_min,
+         SizeType dt_step,
          std::string_view mode,
          bool verbose)
         : m_f_min(f_min),
@@ -81,12 +102,104 @@ public:
           m_tsamp(tsamp),
           m_dt_max(dt_max),
           m_dt_min(dt_min),
-          m_mode(mode) {
+          m_dt_step(dt_step),
+          m_mode(mode),
+          m_is_custom_grid(false) {
         if (verbose) {
             spdlog::set_level(spdlog::level::trace);
         } else {
             spdlog::set_level(spdlog::level::info);
         }
+        validate_inputs();
+        configure_plan();
+    }
+
+    Impl(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         const std::vector<SizeType>& dt_grid,
+         std::string_view mode,
+         bool verbose)
+        : m_f_min(f_min),
+          m_f_max(f_max),
+          m_nchans(nchans),
+          m_nsamps(nsamps),
+          m_tsamp(tsamp),
+          m_dt_max(0),
+          m_dt_min(0),
+          m_dt_step(0),
+          m_mode(mode),
+          m_is_custom_grid(true),
+          m_dt_grid_target(dt_grid) {
+        if (verbose) {
+            spdlog::set_level(spdlog::level::trace);
+        } else {
+            spdlog::set_level(spdlog::level::info);
+        }
+        if (m_dt_grid_target.empty()) {
+            throw std::invalid_argument("FDMT: dt_grid must not be empty");
+        }
+        std::ranges::sort(m_dt_grid_target);
+        const auto [first, last] = std::ranges::unique(m_dt_grid_target);
+        m_dt_grid_target.erase(first, last);
+
+        m_dt_min = m_dt_grid_target.front();
+        m_dt_max = m_dt_grid_target.back();
+        validate_inputs();
+        configure_plan();
+    }
+
+    Impl(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         const std::vector<float>& dm_grid,
+         std::string_view mode,
+         bool verbose)
+        : m_f_min(f_min),
+          m_f_max(f_max),
+          m_nchans(nchans),
+          m_nsamps(nsamps),
+          m_tsamp(tsamp),
+          m_dt_max(0),
+          m_dt_min(0),
+          m_dt_step(0),
+          m_mode(mode),
+          m_is_custom_grid(true) {
+        if (verbose) {
+            spdlog::set_level(spdlog::level::trace);
+        } else {
+            spdlog::set_level(spdlog::level::info);
+        }
+        if (dm_grid.empty()) {
+            throw std::invalid_argument("FDMT: dm_grid must not be empty");
+        }
+        for (const auto dm : dm_grid) {
+            if (dm < 0.0F) {
+                throw std::invalid_argument(
+                    "FDMT: dm_grid values must be non-negative");
+            }
+        }
+        auto dm_sorted = dm_grid;
+        std::ranges::sort(dm_sorted);
+        const auto [dm_first, dm_last] = std::ranges::unique(dm_sorted);
+        dm_sorted.erase(dm_first, dm_last);
+
+        const float dm_conv = utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
+        m_dt_grid_target.reserve(dm_sorted.size());
+        for (const auto dm : dm_sorted) {
+            m_dt_grid_target.push_back(
+                static_cast<SizeType>(std::nearbyint(dm / dm_conv)));
+        }
+        std::ranges::sort(m_dt_grid_target);
+        const auto [first, last] = std::ranges::unique(m_dt_grid_target);
+        m_dt_grid_target.erase(first, last);
+
+        m_dt_min = m_dt_grid_target.front();
+        m_dt_max = m_dt_grid_target.back();
         validate_inputs();
         configure_plan();
     }
@@ -104,10 +217,42 @@ public:
     float get_tsamp() const noexcept { return m_tsamp; }
     SizeType get_dt_max() const noexcept { return m_dt_max; }
     SizeType get_dt_min() const noexcept { return m_dt_min; }
+    SizeType get_dt_step() const noexcept { return m_dt_step; }
+    bool is_custom_grid() const noexcept { return m_is_custom_grid; }
     float get_df() const noexcept { return m_df; }
     SizeType get_niters() const noexcept { return m_niters; }
     const FDMTPlanContainer& get_container() const noexcept {
         return m_container;
+    }
+    FDMTComplexity get_complexity() const noexcept {
+        const auto n_dt            = get_dt_grid_final().size();
+        const auto n_chans         = m_nchans;
+        const auto brute_force_ops = n_dt * n_chans;
+        SizeType total_tree_nodes  = 0;
+        SizeType sum_additions     = 0;
+        SizeType copy_nodes        = 0;
+        for (SizeType l = 1; l <= m_niters; ++l) {
+            total_tree_nodes += m_container.coordinates[l].size();
+            sum_additions += m_container.coordinates_sum[l].size();
+            copy_nodes += m_container.coordinates_copy[l].size();
+        }
+        const float ops_ratio = sum_additions > 0
+                                    ? static_cast<float>(brute_force_ops) /
+                                          static_cast<float>(sum_additions)
+                                    : 0.0F;
+        return FDMTComplexity{
+            .n_dt             = n_dt,
+            .n_chans          = n_chans,
+            .brute_force_ops  = brute_force_ops,
+            .total_tree_nodes = total_tree_nodes,
+            .sum_additions    = sum_additions,
+            .copy_nodes       = copy_nodes,
+            .ops_ratio        = ops_ratio,
+        };
+    }
+    void print_complexity_summary() const {
+        const auto comp = get_complexity();
+        spdlog::info("{}", comp.to_string());
     }
     std::vector<SizeType> get_dt_grid_final() const noexcept {
         return m_container.grids[m_niters][0].dt_grid;
@@ -136,7 +281,8 @@ public:
                     const auto& coord0 = m_container.coordinates[0][coord_idx];
                     const auto chan    = coord0.i_sub;
                     if (chan < m_nchans &&
-                        coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
+                        coord0.i_dt <
+                            m_container.grids[0][chan].dt_grid.size()) {
                         const auto dt =
                             m_container.grids[0][chan].dt_grid[coord0.i_dt];
                         smearing_grid[(dm_idx * m_nchans) + chan] =
@@ -234,6 +380,9 @@ private:
     float m_tsamp;
     SizeType m_dt_max;
     SizeType m_dt_min;
+    SizeType m_dt_step;
+    bool m_is_custom_grid{false};
+    std::vector<SizeType> m_dt_grid_target{};
     std::string_view m_mode;
 
     float m_df{};
@@ -247,8 +396,8 @@ private:
                 "FDMT: f_min={} must be less than f_max={}", m_f_min, m_f_max));
         }
         if (m_nchans < 2) {
-            throw std::invalid_argument(std::format(
-                "FDMT: nchans={} must be at least 2", m_nchans));
+            throw std::invalid_argument(
+                std::format("FDMT: nchans={} must be at least 2", m_nchans));
         }
         if (m_nsamps == 0) {
             throw std::invalid_argument(std::format(
@@ -258,57 +407,183 @@ private:
             throw std::invalid_argument(
                 std::format("FDMT: tsamp={} must be greater than 0", m_tsamp));
         }
-        if (m_dt_max == 0) {
-            throw std::invalid_argument(std::format(
-                "FDMT: dt_max={} must be greater than 0", m_dt_max));
-        }
-        if (m_dt_min >= m_dt_max) {
-            throw std::invalid_argument(
-                std::format("FDMT: dt_min={} must be less than dt_max={}",
-                            m_dt_min, m_dt_max));
+        if (m_is_custom_grid) {
+            if (m_dt_grid_target.empty()) {
+                throw std::invalid_argument("FDMT: dt_grid must not be empty");
+            }
+            if (m_dt_max == 0) {
+                throw std::invalid_argument(
+                    "FDMT: dt_max in dt_grid must be greater than 0");
+            }
+        } else {
+            if (m_dt_max == 0) {
+                throw std::invalid_argument(std::format(
+                    "FDMT: dt_max={} must be greater than 0", m_dt_max));
+            }
+            if (m_dt_min >= m_dt_max) {
+                throw std::invalid_argument(
+                    std::format("FDMT: dt_min={} must be less than dt_max={}",
+                                m_dt_min, m_dt_max));
+            }
+            if (m_dt_step == 0) {
+                throw std::invalid_argument(std::format(
+                    "FDMT: dt_step={} must be greater than 0", m_dt_step));
+            }
+            if (m_dt_step > (m_dt_max - m_dt_min)) {
+                throw std::invalid_argument(
+                    std::format("FDMT: dt_step={} cannot be greater than "
+                                "(dt_max - dt_min)={}",
+                                m_dt_step, m_dt_max - m_dt_min));
+            }
         }
         if (m_mode != "full" && m_mode != "valid" && m_mode != "roll") {
             throw std::invalid_argument(std::format(
                 "FDMT: mode={} must be 'full' or 'valid' or 'roll'", m_mode));
         }
     }
-    std::vector<SizeType> calculate_dt_grid_sub(float f_start,
-                                                float f_end) const noexcept {
-        const auto dt_max_sub =
-            utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_max);
-        const auto dt_min_sub =
-            utils::calculate_dt_sub(f_start, f_end, m_f_min, m_f_max, m_dt_min);
-        std::vector<SizeType> dt_grid;
-        for (SizeType dt = dt_min_sub; dt <= dt_max_sub; dt += 1) {
-            dt_grid.push_back(dt);
+
+    std::vector<std::vector<std::vector<SizeType>>>
+    determine_active_grids(const std::vector<SizeType>& nchans_level) const {
+        std::vector<std::vector<std::vector<SizeType>>> active_dts(m_niters +
+                                                                   1);
+        for (SizeType l = 0; l <= m_niters; ++l) {
+            active_dts[l].resize(nchans_level[l]);
         }
-        return dt_grid;
+
+        // Target sparse grid at root level (m_niters, subband 0)
+        if (m_is_custom_grid) {
+            active_dts[m_niters][0] = m_dt_grid_target;
+        } else {
+            for (SizeType dt = m_dt_min; dt <= m_dt_max; dt += m_dt_step) {
+                active_dts[m_niters][0].push_back(dt);
+            }
+        }
+
+        // Top-down traversal from root to level 1
+        for (SizeType l = m_niters; l >= 1; --l) {
+            const auto nchans_cur  = nchans_level[l];
+            const auto nchans_prev = nchans_level[l - 1];
+            const bool do_copy     = (nchans_prev % 2 == 1);
+            const float df_top     = m_container.df_top[l];
+            const float df_bot     = m_container.df_bot[l];
+
+            for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
+                const auto& cur_dts = active_dts[l][i_sub];
+                if (cur_dts.empty()) {
+                    continue;
+                }
+
+                const auto f_start =
+                    (df_bot * static_cast<float>(i_sub)) + m_f_min;
+                float f_end = 0.0F;
+                float f_mid = 0.0F;
+                if (i_sub == nchans_cur - 1) {
+                    if (do_copy) {
+                        f_end = f_start + (df_top * 2);
+                        f_mid = f_start + df_top;
+                    } else {
+                        f_end = f_start + df_top;
+                        f_mid = f_start + (df_bot / 2);
+                    }
+                } else {
+                    f_end = f_start + df_bot;
+                    f_mid = f_start + (df_bot / 2);
+                }
+                const float tail_phi =
+                    utils::cff(f_start, f_mid, f_start, f_end);
+
+                for (const auto dt : cur_dts) {
+                    if (i_sub == nchans_cur - 1 && do_copy) {
+                        active_dts[l - 1][2 * i_sub].push_back(dt);
+                    } else {
+                        const auto dt_tail = static_cast<SizeType>(
+                            std::nearbyint(static_cast<float>(dt) * tail_phi));
+                        const auto dt_head = dt - dt_tail;
+                        active_dts[l - 1][2 * i_sub].push_back(dt_tail);
+                        active_dts[l - 1][(2 * i_sub) + 1].push_back(dt_head);
+                    }
+                }
+            }
+
+            // Deduplicate and sort active_dts[l - 1]
+            for (SizeType i_sub = 0; i_sub < nchans_prev; ++i_sub) {
+                auto& vec = active_dts[l - 1][i_sub];
+                std::ranges::sort(vec);
+                const auto [first, last] = std::ranges::unique(vec);
+                vec.erase(first, last);
+            }
+        }
+
+        return active_dts;
     }
+
     void configure_plan() {
         m_df        = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
         m_niters    = static_cast<SizeType>(std::ceil(std::log2(m_nchans)));
         m_container = FDMTPlanContainer(m_niters);
-        make_plan_iter0();
-        // For iterations 1 to niters
-        for (SizeType i_iter = 1; i_iter < m_niters + 1; ++i_iter) {
-            make_plan(i_iter);
+
+        // Step 1: Compute hierarchy structure and frequency bandwidths
+        std::vector<SizeType> nchans_level(m_niters + 1);
+        nchans_level[0]       = m_nchans;
+        m_container.df_top[0] = m_df;
+        m_container.df_bot[0] = m_df;
+        for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
+            const auto nchans_prev = nchans_level[i_iter - 1];
+            nchans_level[i_iter]   = (nchans_prev / 2) + (nchans_prev % 2);
+            const bool do_copy     = (nchans_prev % 2 == 1);
+            m_container.df_top[i_iter] =
+                do_copy ? m_container.df_top[i_iter - 1]
+                        : m_container.df_top[i_iter - 1] +
+                              m_container.df_bot[i_iter - 1];
+            m_container.df_bot[i_iter] = m_container.df_bot[i_iter - 1] * 2;
         }
+
+        // Step 2: Top-down reachability traversal to identify active (i_sub,
+        // dt) nodes
+        auto active_dts = determine_active_grids(nchans_level);
+
+        // Step 3: Populate grids and coordinates bottom-up using active sets
+        make_plan_iter0(active_dts[0]);
+        for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
+            make_plan(i_iter, active_dts[i_iter]);
+        }
+
         m_buffer_size = m_container.get_buffer_size();
         spdlog::debug("FDMT: configured fdmt plan");
-        spdlog::debug("FDMT: df={}, dt_max={}, dt_min={}, niters={}", m_df,
-                      m_dt_max, m_dt_min, m_niters);
+        spdlog::debug(
+            "FDMT: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}", m_df,
+            m_dt_max, m_dt_min, m_dt_step, m_niters);
     }
-    void make_plan_iter0() {
-        // For iteration 0
+
+    void
+    make_plan_iter0(const std::vector<std::vector<SizeType>>& active_level0) {
         const SizeType i_iter = 0;
         SizeType buf_offset   = 0;
         SizeType ncoords      = 0;
         m_container.grids[i_iter].resize(m_nchans);
+        SizeType max_dt_overall = 0;
+
         for (SizeType i_sub = 0; i_sub < m_nchans; ++i_sub) {
             const auto f_start = (m_df * static_cast<float>(i_sub)) + m_f_min;
             const auto f_end   = f_start + m_df;
-            const auto dt_sub  = calculate_dt_grid_sub(f_start, f_end);
+
+            // Level 0 grid: dense from min_dt_chan to max_dt_chan required by
+            // top-down pruning
+            SizeType min_dt_chan = 0;
+            SizeType max_dt_chan = 0;
+            if (!active_level0[i_sub].empty()) {
+                min_dt_chan = active_level0[i_sub].front();
+                max_dt_chan = active_level0[i_sub].back(); // already sorted
+            }
+            max_dt_overall = std::max(max_dt_overall, max_dt_chan);
+
+            std::vector<SizeType> dt_sub;
+            dt_sub.reserve(max_dt_chan - min_dt_chan + 1);
+            for (SizeType dt = min_dt_chan; dt <= max_dt_chan; ++dt) {
+                dt_sub.push_back(dt);
+            }
             const auto ndt_sub = dt_sub.size();
+
             for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
                 const auto coord_cur = FDMTCoord{.i_sub           = i_sub,
                                                  .i_dt            = i_dt,
@@ -325,7 +600,7 @@ private:
                 buf_offset += m_nsamps;
             }
             m_container.grids[i_iter][i_sub] =
-                FDMTCoordGrid{.dt_grid      = dt_sub,
+                FDMTCoordGrid{.dt_grid      = std::move(dt_sub),
                               .ndt          = ndt_sub,
                               .coord_offset = ncoords,
                               .f_start      = f_start,
@@ -333,9 +608,6 @@ private:
             ncoords += ndt_sub;
         }
 
-        const auto dt_max =
-            calculate_dt_grid_sub(m_f_min, m_f_min + m_df).back();
-        const auto dt_max_int = static_cast<SizeType>(std::ceil(dt_max));
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
             m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
@@ -347,13 +619,13 @@ private:
                                            .ncoords_copy = 0,
                                            .nsamps       = m_nsamps,
                                            .nelements    = ncoords * m_nsamps,
-                                           .dt_max       = dt_max_int};
+                                           .dt_max       = max_dt_overall};
         m_container.dt_grid_sub_top[i_iter] =
             m_container.grids[i_iter].back().dt_grid;
-        m_container.df_top[i_iter] = m_df;
-        m_container.df_bot[i_iter] = m_df;
     }
-    void make_plan(SizeType i_iter) {
+
+    void make_plan(SizeType i_iter,
+                   const std::vector<std::vector<SizeType>>& active_level) {
         if (i_iter < 1 || i_iter > m_niters) {
             throw std::invalid_argument("Invalid iteration number");
         }
@@ -362,23 +634,24 @@ private:
         const auto& nchans_prev = m_container.state_shape[i_iter - 1].nchans;
         const auto& nsamps_prev = m_container.state_shape[i_iter - 1].nsamps;
         const auto& grids_prev  = m_container.grids[i_iter - 1];
-        const auto& dt_grid_sub_top_prev =
-            m_container.dt_grid_sub_top[i_iter - 1];
         const auto& coords_prev = m_container.coordinates[i_iter - 1];
         auto& coords_cur        = m_container.coordinates[i_iter];
         auto& coords_sum_cur    = m_container.coordinates_sum[i_iter];
         auto& coords_copy_cur   = m_container.coordinates_copy[i_iter];
 
         const SizeType nchans_cur = (nchans_prev / 2) + (nchans_prev % 2);
-        const bool do_copy = nchans_prev % 2 == 1; // true if nchans_prev is odd
-        const float df_top =
-            (do_copy) ? df_top_prev : df_top_prev + df_bot_prev;
-        const float df_bot = df_bot_prev * 2;
+        const bool do_copy        = (nchans_prev % 2 == 1);
+        const float df_top        = m_container.df_top[i_iter];
+        const float df_bot        = m_container.df_bot[i_iter];
 
-        // Calculate nsamps for the current iteration and mode
-        const auto df_tmp = (nchans_cur == 1) ? df_top : df_bot;
-        const auto dt_max_iter =
-            calculate_dt_grid_sub(m_f_min, m_f_min + df_tmp).back();
+        // Determine max dt trial at this iteration
+        SizeType dt_max_iter = 0;
+        for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
+            if (!active_level[i_sub].empty()) {
+                dt_max_iter = std::max(dt_max_iter, active_level[i_sub].back());
+            }
+        }
+
         if (dt_max_iter > m_dt_max) {
             throw std::runtime_error(
                 std::format("dt_max_iter={} is greater than dt_max={}",
@@ -392,42 +665,36 @@ private:
         const auto nsamps_iter =
             m_nsamps + ((m_mode == "full") ? dt_max_iter : 0);
 
-        float f_end, f_mid;
-        std::vector<SizeType> dt_grid_sub_top = dt_grid_sub_top_prev;
-        std::vector<SizeType> dt_sub;
         SizeType buf_offset = 0;
         SizeType ncoords    = 0;
         m_container.grids[i_iter].resize(nchans_cur);
+
         for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
             const auto& grids_tail = grids_prev[2 * i_sub];
             const auto f_start = (df_bot * static_cast<float>(i_sub)) + m_f_min;
+            float f_end        = 0.0F;
+            float f_mid        = 0.0F;
+
             if (i_sub == nchans_cur - 1) {
-                // For the top sub-band
                 if (do_copy) {
-                    f_end  = f_start + (df_top * 2);
-                    f_mid  = f_start + df_top;
-                    dt_sub = dt_grid_sub_top;
+                    f_end = f_start + (df_top * 2);
+                    f_mid = f_start + df_top;
                 } else {
-                    f_end           = f_start + df_top;
-                    f_mid           = f_start + (df_bot / 2);
-                    dt_sub          = calculate_dt_grid_sub(f_start, f_end);
-                    dt_grid_sub_top = dt_sub;
+                    f_end = f_start + df_top;
+                    f_mid = f_start + (df_bot / 2);
                 }
             } else {
-                // For the bottom sub-bands
-                f_end  = f_start + df_bot;
-                f_mid  = f_start + (df_bot / 2);
-                dt_sub = calculate_dt_grid_sub(f_start, f_end);
+                f_end = f_start + df_bot;
+                f_mid = f_start + (df_bot / 2);
             }
-            const auto ndt_sub = dt_sub.size();
-            // fraction to left child in [0,1]
+
+            const auto& dt_sub   = active_level[i_sub];
+            const auto ndt_sub   = dt_sub.size();
             const float tail_phi = utils::cff(f_start, f_mid, f_start, f_end);
 
-            // Populate the dt_plan mapping current dt grid to the previous grid
             for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
                 const SizeType dt = dt_sub[i_dt];
                 if (i_sub == nchans_cur - 1 && do_copy) {
-                    // dt = dt_tail
                     const auto i_dt_tail =
                         utils::find_nearest_sorted_idx(grids_tail.dt_grid, dt);
                     const auto i_coord_tail =
@@ -448,18 +715,14 @@ private:
                     coords_cur.emplace_back(coord_cur);
                     coords_copy_cur.emplace_back(coord_cur);
                 } else {
-                    // dt = dt_tail + dt_head
                     const auto& grids_head = grids_prev[(2 * i_sub) + 1];
-                    // Bankers rounding to ensure dt_tail is an integer
-                    const auto dt_tail = static_cast<SizeType>(
+                    const auto dt_tail     = static_cast<SizeType>(
                         std::nearbyint(static_cast<float>(dt) * tail_phi));
-                    // guarantee dt_head is always >= 0, otherwise throw error
                     if (dt_tail > dt) {
                         throw std::runtime_error(std::format(
                             "Invalid dt_tail (> dt) values: dt_tail={}, dt={}",
                             dt_tail, dt));
                     }
-                    // dt_tail is also the offset delay in bins
                     if (dt_tail >= nsamps_prev) {
                         throw std::runtime_error(std::format(
                             "DM delay is greater than input size (dt_tail "
@@ -500,7 +763,7 @@ private:
                               .f_end        = f_end};
             ncoords += ndt_sub;
         }
-        // state shape summary
+
         const auto ncoords_sum              = coords_sum_cur.size();
         const auto ncoords_copy             = coords_copy_cur.size();
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
@@ -515,9 +778,8 @@ private:
                                            .nsamps       = nsamps_iter,
                                            .nelements = ncoords * nsamps_iter,
                                            .dt_max    = dt_max_iter};
-        m_container.dt_grid_sub_top[i_iter] = dt_grid_sub_top;
-        m_container.df_top[i_iter]          = df_top;
-        m_container.df_bot[i_iter]          = df_bot;
+        m_container.dt_grid_sub_top[i_iter] =
+            m_container.grids[i_iter].back().dt_grid;
     }
 };
 
@@ -828,7 +1090,7 @@ private:
 
         m_fdmt_plan =
             std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan, m_msamp,
-                                       m_tsamp, m_dt_max, 0, "full", false);
+                                       m_tsamp, m_dt_max, 0, 1, "full", false);
 
         // Generate final DM grid
         const auto& fdmt_dm_grid = m_fdmt_plan->get_dm_grid_final();
@@ -956,11 +1218,41 @@ FDMTPlan::FDMTPlan(float f_min,
                    float tsamp,
                    SizeType dt_max,
                    SizeType dt_min,
+                   SizeType dt_step,
+                   std::string_view mode,
+                   bool verbose)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dt_max,
+                                    dt_min,
+                                    dt_step,
+                                    mode,
+                                    verbose)) {}
+FDMTPlan::FDMTPlan(float f_min,
+                   float f_max,
+                   SizeType nchans,
+                   SizeType nsamps,
+                   float tsamp,
+                   const std::vector<SizeType>& dt_grid,
                    std::string_view mode,
                    bool verbose)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, mode, verbose)) {
-}
+          f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {}
+
+FDMTPlan::FDMTPlan(float f_min,
+                   float f_max,
+                   SizeType nchans,
+                   SizeType nsamps,
+                   float tsamp,
+                   const std::vector<float>& dm_grid,
+                   std::string_view mode,
+                   bool verbose)
+    : m_impl(std::make_unique<Impl>(
+          f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {}
+
 FDMTPlan::~FDMTPlan()                              = default;
 FDMTPlan::FDMTPlan(FDMTPlan&&) noexcept            = default;
 FDMTPlan& FDMTPlan::operator=(FDMTPlan&&) noexcept = default;
@@ -980,10 +1272,22 @@ SizeType FDMTPlan::get_nsamps() const noexcept { return m_impl->get_nsamps(); }
 float FDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
 SizeType FDMTPlan::get_dt_max() const noexcept { return m_impl->get_dt_max(); }
 SizeType FDMTPlan::get_dt_min() const noexcept { return m_impl->get_dt_min(); }
+SizeType FDMTPlan::get_dt_step() const noexcept {
+    return m_impl->get_dt_step();
+}
+bool FDMTPlan::is_custom_grid() const noexcept {
+    return m_impl->is_custom_grid();
+}
 float FDMTPlan::get_df() const noexcept { return m_impl->get_df(); }
 SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
 const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
     return m_impl->get_container();
+}
+FDMTComplexity FDMTPlan::get_complexity() const noexcept {
+    return m_impl->get_complexity();
+}
+void FDMTPlan::print_complexity_summary() const {
+    m_impl->print_complexity_summary();
 }
 std::vector<SizeType> FDMTPlan::get_dt_grid_final() const noexcept {
     return m_impl->get_dt_grid_final();

@@ -76,6 +76,25 @@ struct DDMTPlanContainer {
 };
 
 /**
+ * @brief Performance and complexity statistics comparing FDMT to brute-force
+ * dedispersion.
+ */
+struct FDMTComplexity {
+    SizeType n_dt;             ///< Number of DM delay trials
+    SizeType n_chans;          ///< Number of frequency channels
+    SizeType brute_force_ops;  ///< Brute force operations per time sample (n_dt
+                               ///< * n_chans)
+    SizeType total_tree_nodes; ///< Total active coordinates across levels 1..M
+    SizeType sum_additions; ///< Total offset additions per time sample across
+                            ///< levels 1..M
+    SizeType copy_nodes;    ///< Total copy/forwarding nodes across levels 1..M
+    float ops_ratio;        ///< Theoretical speedup factor (brute_force_ops /
+                            ///< sum_additions)
+
+    std::string to_string() const;
+};
+
+/**
  * @brief Fast Dispersion Measure Transform (FDMT) plan class.
  * @details
  * This class holds all data and logic for an FDMT plan.
@@ -90,6 +109,25 @@ public:
              float tsamp,
              SizeType dt_max,
              SizeType dt_min       = 0,
+             SizeType dt_step      = 1,
+             std::string_view mode = "full",
+             bool verbose          = false);
+
+    FDMTPlan(float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<SizeType>& dt_grid,
+             std::string_view mode = "full",
+             bool verbose          = false);
+
+    FDMTPlan(float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<float>& dm_grid,
              std::string_view mode = "full",
              bool verbose          = false);
 
@@ -115,6 +153,10 @@ public:
     SizeType get_dt_max() const noexcept;
     /// @brief Minimum delay in time bins
     SizeType get_dt_min() const noexcept;
+    /// @brief Delay step in time bins
+    SizeType get_dt_step() const noexcept;
+    /// @brief Whether a custom arbitrary delay or DM grid was provided
+    bool is_custom_grid() const noexcept;
     /// @brief Frequency resolution (MHz)
     float get_df() const noexcept;
     /// @brief Number of iterations
@@ -141,6 +183,12 @@ public:
     SizeType get_history_size() const noexcept;
     /// @brief Size of the Boxcar smearing history for the FDMT plan
     SizeType get_history_init_size() const noexcept;
+
+    /// @brief Computes complexity comparison between FDMT and brute-force
+    /// dedispersion
+    [[nodiscard]] FDMTComplexity get_complexity() const noexcept;
+    /// @brief Prints a formatted comparison of FDMT vs brute-force operations
+    void print_complexity_summary() const;
 
     /// @brief Print a summary of the FDMT plan
     void print_summary(std::string_view prefix = "") const;

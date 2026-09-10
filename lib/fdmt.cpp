@@ -394,7 +394,7 @@ void fdmt_init_valid_impl(const float* __restrict__ waterfall,
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel for default(none)                                         \
     shared(waterfall, init_buffer, hist_buffer, grids_init, nsubs, nsamps,     \
-           dt_max_final)
+               dt_max_final)
 #endif
     for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
         const auto& dt_grid_sub = grids_init[i_sub].dt_grid;
@@ -441,6 +441,7 @@ public:
          float tsamp,
          SizeType dt_max,
          SizeType dt_min,
+         SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
@@ -454,15 +455,59 @@ public:
                  tsamp,
                  dt_max,
                  dt_min,
+                 dt_step,
                  mode,
                  verbose),
           m_state_internal(m_plan.get_buffer_size(), 0.0F),
           m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
                     0.0F),
-          m_history_init(m_mode == FDMTMode::kValid
-                             ? m_plan.get_history_init_size()
-                             : 0,
-                         0.0F) {
+          m_history_init(
+              m_mode == FDMTMode::kValid ? m_plan.get_history_init_size() : 0,
+              0.0F) {
+        set_dmt_openmp_threads(nthreads);
+    }
+
+    Impl(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         const std::vector<SizeType>& dt_grid,
+         bool use_box_smearing,
+         std::string_view mode,
+         bool verbose,
+         int nthreads)
+        : m_use_box_smearing(use_box_smearing),
+          m_mode(parse_mode(mode)),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose),
+          m_state_internal(m_plan.get_buffer_size(), 0.0F),
+          m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
+                    0.0F),
+          m_history_init(
+              m_mode == FDMTMode::kValid ? m_plan.get_history_init_size() : 0,
+              0.0F) {
+        set_dmt_openmp_threads(nthreads);
+    }
+
+    Impl(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         const std::vector<float>& dm_grid,
+         bool use_box_smearing,
+         std::string_view mode,
+         bool verbose,
+         int nthreads)
+        : m_use_box_smearing(use_box_smearing),
+          m_mode(parse_mode(mode)),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose),
+          m_state_internal(m_plan.get_buffer_size(), 0.0F),
+          m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
+                    0.0F),
+          m_history_init(
+              m_mode == FDMTMode::kValid ? m_plan.get_history_init_size() : 0,
+              0.0F) {
         set_dmt_openmp_threads(nthreads);
     }
 
@@ -744,6 +789,7 @@ FDMTCPU::FDMTCPU(float f_min,
                  float tsamp,
                  SizeType dt_max,
                  SizeType dt_min,
+                 SizeType dt_step,
                  bool use_box_smearing,
                  std::string_view mode,
                  bool verbose,
@@ -755,10 +801,53 @@ FDMTCPU::FDMTCPU(float f_min,
                                     tsamp,
                                     dt_max,
                                     dt_min,
+                                    dt_step,
                                     use_box_smearing,
                                     mode,
                                     verbose,
                                     nthreads)) {}
+FDMTCPU::FDMTCPU(float f_min,
+                 float f_max,
+                 SizeType nchans,
+                 SizeType nsamps,
+                 float tsamp,
+                 const std::vector<SizeType>& dt_grid,
+                 bool use_box_smearing,
+                 std::string_view mode,
+                 bool verbose,
+                 int nthreads)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dt_grid,
+                                    use_box_smearing,
+                                    mode,
+                                    verbose,
+                                    nthreads)) {}
+
+FDMTCPU::FDMTCPU(float f_min,
+                 float f_max,
+                 SizeType nchans,
+                 SizeType nsamps,
+                 float tsamp,
+                 const std::vector<float>& dm_grid,
+                 bool use_box_smearing,
+                 std::string_view mode,
+                 bool verbose,
+                 int nthreads)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dm_grid,
+                                    use_box_smearing,
+                                    mode,
+                                    verbose,
+                                    nthreads)) {}
+
 FDMTCPU::~FDMTCPU()                                   = default;
 FDMTCPU::FDMTCPU(FDMTCPU&& other) noexcept            = default;
 FDMTCPU& FDMTCPU::operator=(FDMTCPU&& other) noexcept = default;
@@ -806,17 +895,62 @@ compute_fdmt(std::span<const float> waterfall,
              float tsamp,
              SizeType dt_max,
              SizeType dt_min,
+             SizeType dt_step,
              bool use_box_smearing,
              std::string_view mode,
              bool verbose,
              int nthreads) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
                  use_box_smearing, mode, verbose, nthreads);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
     // RESIZE to actual result size
+    dmt.resize(fdmt_plan.get_dmt_size());
+    return std::make_tuple(std::move(dmt), fdmt_plan);
+}
+
+[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
+compute_fdmt(std::span<const float> waterfall,
+             float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<SizeType>& dt_grid,
+             bool use_box_smearing,
+             std::string_view mode,
+             bool verbose,
+             int nthreads) {
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
+                 mode, verbose, nthreads);
+    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
+    const auto buffer_size           = fdmt_plan.get_buffer_size();
+    std::vector<float> dmt(buffer_size, 0.0F);
+    fdmt.execute(waterfall, dmt);
+    dmt.resize(fdmt_plan.get_dmt_size());
+    return std::make_tuple(std::move(dmt), fdmt_plan);
+}
+
+[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
+compute_fdmt(std::span<const float> waterfall,
+             float f_min,
+             float f_max,
+             SizeType nchans,
+             SizeType nsamps,
+             float tsamp,
+             const std::vector<float>& dm_grid,
+             bool use_box_smearing,
+             std::string_view mode,
+             bool verbose,
+             int nthreads) {
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,
+                 mode, verbose, nthreads);
+    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
+    const auto buffer_size           = fdmt_plan.get_buffer_size();
+    std::vector<float> dmt(buffer_size, 0.0F);
+    fdmt.execute(waterfall, dmt);
     dmt.resize(fdmt_plan.get_dmt_size());
     return std::make_tuple(std::move(dmt), fdmt_plan);
 }

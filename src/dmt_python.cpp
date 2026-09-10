@@ -16,6 +16,7 @@ using algorithms::FDMTCPU;
 using algorithms::FDMTSubbandView;
 using plans::CohFDMTPlan;
 using plans::DDMTPlan;
+using plans::FDMTComplexity;
 using plans::FDMTCoord;
 using plans::FDMTCoordGrid;
 using plans::FDMTPlan;
@@ -45,6 +46,16 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
                          i_coord_tail, i_coord_head, delay, tail_buf_offset,
                          tail_nsamps, head_buf_offset, head_nsamps);
+    py::class_<FDMTComplexity>(mod, "FDMTComplexity")
+        .def_readonly("n_dt", &FDMTComplexity::n_dt)
+        .def_readonly("n_chans", &FDMTComplexity::n_chans)
+        .def_readonly("brute_force_ops", &FDMTComplexity::brute_force_ops)
+        .def_readonly("total_tree_nodes", &FDMTComplexity::total_tree_nodes)
+        .def_readonly("sum_additions", &FDMTComplexity::sum_additions)
+        .def_readonly("copy_nodes", &FDMTComplexity::copy_nodes)
+        .def_readonly("ops_ratio", &FDMTComplexity::ops_ratio)
+        .def("to_string", &FDMTComplexity::to_string)
+        .def("__repr__", &FDMTComplexity::to_string);
     py::class_<FDMTCoordGrid>(mod, "FDMTSubDTGrid")
         .def_readonly("dt_grid", &FDMTCoordGrid::dt_grid)
         .def_readonly("ndt", &FDMTCoordGrid::ndt)
@@ -100,9 +111,29 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                                &FDMTPlanContainer::get_memory_usage);
     py::class_<FDMTPlan>(mod, "FDMTPlan")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, std::string_view, bool>(),
+                      SizeType, SizeType, std::string_view, bool>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "mode"_a = "full", "verbose"_a = false)
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "full",
+             "verbose"_a = false)
+        .def(py::init([](float f_min, float f_max, SizeType nchans,
+                         SizeType nsamps, float tsamp,
+                         const py::object& dt_grid, const py::object& dt_arr,
+                         const py::object& dm_grid, const py::object& dm_arr,
+                         std::string_view mode, bool verbose) {
+                 const auto [type, obj] =
+                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                 if (type == CustomGridType::kDt) {
+                     return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                     extract_dt_grid(obj), mode, verbose);
+                 }
+                 return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 extract_dm_grid(obj), mode, verbose);
+             }),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+             py::arg("mode") = "full", py::arg("verbose") = false)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly("nchans", &FDMTPlan::get_nchans)
@@ -110,22 +141,29 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("tsamp", &FDMTPlan::get_tsamp)
         .def_property_readonly("dt_max", &FDMTPlan::get_dt_max)
         .def_property_readonly("dt_min", &FDMTPlan::get_dt_min)
+        .def_property_readonly("dt_step", &FDMTPlan::get_dt_step)
+        .def_property_readonly("is_custom_grid", &FDMTPlan::is_custom_grid)
         .def_property_readonly("df", &FDMTPlan::get_df)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
         .def_property_readonly("container", &FDMTPlan::get_container)
-        .def_property_readonly("dt_grid_final",
-                               [](FDMTPlan& plan) {
-                                   return as_pyarray_ref(
-                                       plan.get_dt_grid_final());
-                               })
+        .def_property_readonly(
+            "dt_grid_final",
+            [](FDMTPlan& plan) { return as_pyarray(plan.get_dt_grid_final()); })
         .def_property_readonly(
             "dm_grid_final",
+            [](FDMTPlan& plan) { return as_pyarray(plan.get_dm_grid_final()); })
+        .def(
+            "get_dt_grid_final",
+            [](FDMTPlan& plan) { return as_pyarray(plan.get_dt_grid_final()); })
+        .def(
+            "get_dm_grid_final",
             [](FDMTPlan& plan) { return as_pyarray(plan.get_dm_grid_final()); })
         .def_property_readonly("smearing_grid_final",
                                [](FDMTPlan& plan) {
                                    return as_pyarray(
                                        plan.get_smearing_grid_final());
                                })
+        .def_property_readonly("complexity", &FDMTPlan::get_complexity)
         .def_property_readonly("dmt_ndms", &FDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &FDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &FDMTPlan::get_dmt_size)
@@ -138,7 +176,8 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
             [](FDMTPlan& plan, std::string_view prefix) {
                 plan.print_summary(prefix);
             },
-            "prefix"_a = "");
+            "prefix"_a = "")
+        .def("print_complexity_summary", &FDMTPlan::print_complexity_summary);
     py::class_<CohFDMTPlan>(mod, "CohFDMTPlan")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
                       float, float, SizeType, std::string_view, bool>(),
@@ -192,10 +231,34 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     py::class_<FDMTCPU>(mod, "FDMTCPU", py::dynamic_attr(),
                         "FDMT CPU Implementation Wrapper")
         .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, bool, std::string_view, bool, int>(),
+                      SizeType, SizeType, bool, std::string_view, bool, int>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "use_box_smearing"_a = true,
-             "mode"_a = "full", "verbose"_a = false, "nthreads"_a = 1)
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
+             "use_box_smearing"_a = true, "mode"_a = "full",
+             "verbose"_a = false, "nthreads"_a = 1)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, const py::object& dt_grid,
+                        const py::object& dt_arr, const py::object& dm_grid,
+                        const py::object& dm_arr, bool use_box_smearing,
+                        std::string_view mode, bool verbose, int nthreads) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                if (type == CustomGridType::kDt) {
+                    return FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
+                                   extract_dt_grid(obj), use_box_smearing, mode,
+                                   verbose, nthreads);
+                }
+                return FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
+                               extract_dm_grid(obj), use_box_smearing, mode,
+                               verbose, nthreads);
+            }),
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+            py::arg("verbose") = false, py::arg("nthreads") = 1)
         .def_property_readonly(
             "plan", &FDMTCPU::get_plan,
             "Get the FDMTPlan object containing transform details.")
@@ -204,6 +267,19 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                                    return as_pyarray(
                                        fdmt.get_plan().get_dt_grid_final());
                                })
+        .def_property_readonly("dm_grid_final",
+                               [](FDMTCPU& fdmt) {
+                                   return as_pyarray(
+                                       fdmt.get_plan().get_dm_grid_final());
+                               })
+        .def("get_dt_grid_final",
+             [](FDMTCPU& fdmt) {
+                 return as_pyarray(fdmt.get_plan().get_dt_grid_final());
+             })
+        .def("get_dm_grid_final",
+             [](FDMTCPU& fdmt) {
+                 return as_pyarray(fdmt.get_plan().get_dm_grid_final());
+             })
         // execute take 2d array as input, and return 2d array as output
         .def(
             "execute",
@@ -330,17 +406,48 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         "compute_fdmt",
         [](const py::array_t<float, py::array::c_style>& waterfall, float f_min,
            float f_max, SizeType nchans, SizeType nsamps, float tsamp,
-           SizeType dt_max, SizeType dt_min, bool use_box_smearing,
-           std::string_view mode, bool verbose, int nthreads) {
+           SizeType dt_max, SizeType dt_min, SizeType dt_step,
+           bool use_box_smearing, std::string_view mode, bool verbose,
+           int nthreads) {
             auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
                 std::span<const float>(waterfall.data(), waterfall.size()),
-                f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
                 use_box_smearing, mode, verbose, nthreads);
             return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
         },
         py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"),
-        py::arg("dt_max"), py::arg("dt_min") = 0,
+        py::arg("dt_max"), py::arg("dt_min") = 0, py::arg("dt_step") = 1,
+        py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+        py::arg("verbose") = false, py::arg("nthreads") = 1);
+
+    mod.def(
+        "compute_fdmt",
+        [](const py::array_t<float, py::array::c_style>& waterfall, float f_min,
+           float f_max, SizeType nchans, SizeType nsamps, float tsamp,
+           const py::object& dt_grid, const py::object& dt_arr,
+           const py::object& dm_grid, const py::object& dm_arr,
+           bool use_box_smearing, std::string_view mode, bool verbose,
+           int nthreads) {
+            const auto [type, obj] =
+                resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+            if (type == CustomGridType::kDt) {
+                auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
+                    std::span<const float>(waterfall.data(), waterfall.size()),
+                    f_min, f_max, nchans, nsamps, tsamp, extract_dt_grid(obj),
+                    use_box_smearing, mode, verbose, nthreads);
+                return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+            }
+            auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
+                std::span<const float>(waterfall.data(), waterfall.size()),
+                f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
+                use_box_smearing, mode, verbose, nthreads);
+            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+        },
+        py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
+        py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+        py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+        py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
         py::arg("use_box_smearing") = true, py::arg("mode") = "full",
         py::arg("verbose") = false, py::arg("nthreads") = 1);
 

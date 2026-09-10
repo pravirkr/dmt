@@ -100,8 +100,8 @@ public:
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall_memory_usage)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 1, 0, false,
-                     false, nthreads);
+        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                     "full", false, nthreads);
         state.PauseTiming();
         std::vector<float> dmt(fdmt.get_plan().get_dmt_size());
         state.ResumeTiming();

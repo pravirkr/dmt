@@ -52,7 +52,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
                  int nsamps,
                  int dt_max_final,
                  const float* __restrict__ hist) {
-    const auto isamp = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto isamp =
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_sub = static_cast<int>(blockIdx.y);
     if (i_sub >= nsubs || isamp >= nsamps) {
         return;
@@ -74,7 +75,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
         if constexpr (Mode == FDMTMode::kRoll) {
             return waterfall[waterfall_offset + (t + nsamps)];
         } else if constexpr (Mode == FDMTMode::kValid) {
-            return (hist != nullptr) ? hist[hist_offset + dt_max_final + t] : 0.0F;
+            return (hist != nullptr) ? hist[hist_offset + dt_max_final + t]
+                                     : 0.0F;
         } else {
             return 0.0F; // kFull: zero-padded before t=0
         }
@@ -83,11 +85,18 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
     // Row 0: dt_min
     float prev_val = 0.0F;
     if constexpr (UseBoxSmearing) {
-        float sum = 0.0F;
-        for (int d = 0; d <= dt_min; ++d) {
-            sum += get_sample(isamp - d);
+        if (dt_min == 0) {
+            // O(1) fast-path: zero delay across leaf channel (most common case)
+            prev_val = get_sample(isamp);
+        } else {
+            // Unrolled coalesced summation loop for dt_min > 0
+            float sum = 0.0F;
+#pragma unroll 4
+            for (int d = 0; d <= dt_min; ++d) {
+                sum += get_sample(isamp - d);
+            }
+            prev_val = sum;
         }
-        prev_val = sum;
     } else {
         prev_val = get_sample(isamp - dt_min);
     }
@@ -104,20 +113,20 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
             cur_val = get_sample(isamp - dt_cur);
         }
         state[state_offset_cur + isamp] = cur_val;
-        prev_val = cur_val;
+        prev_val                        = cur_val;
     }
 }
 
 template <FDMTMode Mode>
-__global__ void
-kernel_execute_iter(const float* __restrict__ state_in,
-                    float* __restrict__ state_out,
-                    const plans::FDMTCoordDPtrs coords_sum,
-                    const plans::FDMTCoordDPtrs coords_copy,
-                    int nsamps,
-                    int ncoords_sum_cur,
-                    int ncoords_copy_cur) {
-    const auto isamp   = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+__global__ void kernel_execute_iter(const float* __restrict__ state_in,
+                                    float* __restrict__ state_out,
+                                    const plans::FDMTCoordDPtrs coords_sum,
+                                    const plans::FDMTCoordDPtrs coords_copy,
+                                    int nsamps,
+                                    int ncoords_sum_cur,
+                                    int ncoords_copy_cur) {
+    const auto isamp =
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_coord = static_cast<int>(blockIdx.y);
     if (isamp >= nsamps) {
         return;
@@ -147,11 +156,11 @@ kernel_execute_iter(const float* __restrict__ state_in,
                     head_val = state_in[head_idx_base + (isamp - offset)];
                 }
             } else if constexpr (Mode == FDMTMode::kRoll) {
-                tail_val = state_in[tail_idx_base + isamp];
+                tail_val            = state_in[tail_idx_base + isamp];
                 const int head_samp = (isamp >= offset)
                                           ? (isamp - offset)
                                           : (nsamps_tail - offset + isamp);
-                head_val = state_in[head_idx_base + head_samp];
+                head_val            = state_in[head_idx_base + head_samp];
             }
             state_out[out_idx_base + isamp] = tail_val + head_val;
         }
@@ -181,6 +190,7 @@ public:
          float tsamp,
          SizeType dt_max,
          SizeType dt_min,
+         SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
@@ -195,8 +205,47 @@ public:
                  tsamp,
                  dt_max,
                  dt_min,
+                 dt_step,
                  mode,
                  verbose) {
+        init_device_structures();
+    }
+
+    Impl(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         const std::vector<SizeType>& dt_grid,
+         bool use_box_smearing,
+         std::string_view mode,
+         bool verbose,
+         int device_id)
+        : m_device_id(device_id),
+          m_use_box_smearing(use_box_smearing),
+          m_mode(parse_mode(mode)),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose) {
+        init_device_structures();
+    }
+
+    Impl(float f_min,
+         float f_max,
+         SizeType nchans,
+         SizeType nsamps,
+         float tsamp,
+         const std::vector<float>& dm_grid,
+         bool use_box_smearing,
+         std::string_view mode,
+         bool verbose,
+         int device_id)
+        : m_device_id(device_id),
+          m_use_box_smearing(use_box_smearing),
+          m_mode(parse_mode(mode)),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose) {
+        init_device_structures();
+    }
+
+    void init_device_structures() {
         cuda_utils::set_device(m_device_id);
         spdlog::debug("FDMTCUDA::Impl: Set device to {}", m_device_id);
         // Allocate single internal state buffer on device for ping-pong
@@ -289,10 +338,12 @@ public:
         const SizeType internal_iters = total_levels() - 2;
         const bool odd_swaps          = (internal_iters % 2) == 1;
         if (odd_swaps) {
-            m_current_in_ptr  = d_dmt.data();
-            m_current_out_ptr = thrust::raw_pointer_cast(m_state_internal_d.data());
+            m_current_in_ptr = d_dmt.data();
+            m_current_out_ptr =
+                thrust::raw_pointer_cast(m_state_internal_d.data());
         } else {
-            m_current_in_ptr  = thrust::raw_pointer_cast(m_state_internal_d.data());
+            m_current_in_ptr =
+                thrust::raw_pointer_cast(m_state_internal_d.data());
             m_current_out_ptr = d_dmt.data();
         }
 
@@ -311,8 +362,8 @@ public:
         const auto total_lvl       = total_levels();
         while (levels > 0 && m_current_level < total_lvl - 1) {
             const SizeType next_level = m_current_level + 1;
-            execute_iter_device(m_current_in_ptr, m_current_out_ptr,
-                                next_level, active_stream);
+            execute_iter_device(m_current_in_ptr, m_current_out_ptr, next_level,
+                                active_stream);
             std::swap(m_current_in_ptr, m_current_out_ptr);
             m_current_level = next_level;
             --levels;
@@ -468,8 +519,8 @@ private:
                             "least {}, got {}",
                             m_plan.get_buffer_size(), dmt_size));
         }
-        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}",
-                      nchans, nsamps);
+        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}", nchans,
+                      nsamps);
     }
 
     void execute_iter_device(const float* __restrict__ in_ptr,
@@ -493,17 +544,20 @@ private:
         cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
         if (m_mode == FDMTMode::kFull) {
-            kernel_execute_iter<FDMTMode::kFull><<<grid_size, block_size, 0, stream>>>(
-                in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                nsamps, ncoords_sum_cur, ncoords_copy_cur);
+            kernel_execute_iter<FDMTMode::kFull>
+                <<<grid_size, block_size, 0, stream>>>(
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, nsamps,
+                    ncoords_sum_cur, ncoords_copy_cur);
         } else if (m_mode == FDMTMode::kRoll) {
-            kernel_execute_iter<FDMTMode::kRoll><<<grid_size, block_size, 0, stream>>>(
-                in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                nsamps, ncoords_sum_cur, ncoords_copy_cur);
+            kernel_execute_iter<FDMTMode::kRoll>
+                <<<grid_size, block_size, 0, stream>>>(
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, nsamps,
+                    ncoords_sum_cur, ncoords_copy_cur);
         } else {
-            kernel_execute_iter<FDMTMode::kValid><<<grid_size, block_size, 0, stream>>>(
-                in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                nsamps, ncoords_sum_cur, ncoords_copy_cur);
+            kernel_execute_iter<FDMTMode::kValid>
+                <<<grid_size, block_size, 0, stream>>>(
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, nsamps,
+                    ncoords_sum_cur, ncoords_copy_cur);
         }
         cuda_utils::check_last_cuda_error("kernel_execute_iter launch failed");
     }
@@ -511,11 +565,11 @@ private:
     void initialise_device(const float* __restrict__ waterfall_d,
                            float* __restrict__ state_d,
                            cudaStream_t stream) {
-        const auto& plan_c     = m_plan.get_container();
-        const int nsubs        = static_cast<int>(plan_c.state_shape[0].nchans);
-        const int nsamps       = static_cast<int>(plan_c.state_shape[0].nsamps);
-        const int dt_max_final = static_cast<int>(
-            plan_c.state_shape[m_plan.get_niters()].dt_max);
+        const auto& plan_c = m_plan.get_container();
+        const int nsubs    = static_cast<int>(plan_c.state_shape[0].nchans);
+        const int nsamps   = static_cast<int>(plan_c.state_shape[0].nsamps);
+        const int dt_max_final =
+            static_cast<int>(plan_c.state_shape[m_plan.get_niters()].dt_max);
 
         const int* grids0_dt_grid_ptr = m_plan_d.grids0.dt_grid.data().get();
         const int* grids0_ndt_ptr     = m_plan_d.grids0.ndt.data().get();
@@ -532,47 +586,56 @@ private:
 
         if (m_mode == FDMTMode::kFull) {
             if (m_use_box_smearing) {
-                kernel_init_fdmt<FDMTMode::kFull, true><<<grid_size, block_size, 0, stream>>>(
-                    waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
-                    grids0_coord_offset_ptr, nsubs, nsamps, dt_max_final, hist_ptr);
+                kernel_init_fdmt<FDMTMode::kFull, true>
+                    <<<grid_size, block_size, 0, stream>>>(
+                        waterfall_d, state_d, grids0_dt_grid_ptr,
+                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
+                        dt_max_final, hist_ptr);
             } else {
-                kernel_init_fdmt<FDMTMode::kFull, false><<<grid_size, block_size, 0, stream>>>(
-                    waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
-                    grids0_coord_offset_ptr, nsubs, nsamps, dt_max_final, hist_ptr);
+                kernel_init_fdmt<FDMTMode::kFull, false>
+                    <<<grid_size, block_size, 0, stream>>>(
+                        waterfall_d, state_d, grids0_dt_grid_ptr,
+                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
+                        dt_max_final, hist_ptr);
             }
         } else if (m_mode == FDMTMode::kRoll) {
             if (m_use_box_smearing) {
-                kernel_init_fdmt<FDMTMode::kRoll, true><<<grid_size, block_size, 0, stream>>>(
-                    waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
-                    grids0_coord_offset_ptr, nsubs, nsamps, dt_max_final, hist_ptr);
+                kernel_init_fdmt<FDMTMode::kRoll, true>
+                    <<<grid_size, block_size, 0, stream>>>(
+                        waterfall_d, state_d, grids0_dt_grid_ptr,
+                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
+                        dt_max_final, hist_ptr);
             } else {
-                kernel_init_fdmt<FDMTMode::kRoll, false><<<grid_size, block_size, 0, stream>>>(
-                    waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
-                    grids0_coord_offset_ptr, nsubs, nsamps, dt_max_final, hist_ptr);
+                kernel_init_fdmt<FDMTMode::kRoll, false>
+                    <<<grid_size, block_size, 0, stream>>>(
+                        waterfall_d, state_d, grids0_dt_grid_ptr,
+                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
+                        dt_max_final, hist_ptr);
             }
         } else {
             if (m_use_box_smearing) {
-                kernel_init_fdmt<FDMTMode::kValid, true><<<grid_size, block_size, 0, stream>>>(
-                    waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
-                    grids0_coord_offset_ptr, nsubs, nsamps, dt_max_final, hist_ptr);
+                kernel_init_fdmt<FDMTMode::kValid, true>
+                    <<<grid_size, block_size, 0, stream>>>(
+                        waterfall_d, state_d, grids0_dt_grid_ptr,
+                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
+                        dt_max_final, hist_ptr);
             } else {
-                kernel_init_fdmt<FDMTMode::kValid, false><<<grid_size, block_size, 0, stream>>>(
-                    waterfall_d, state_d, grids0_dt_grid_ptr, grids0_ndt_ptr,
-                    grids0_coord_offset_ptr, nsubs, nsamps, dt_max_final, hist_ptr);
+                kernel_init_fdmt<FDMTMode::kValid, false>
+                    <<<grid_size, block_size, 0, stream>>>(
+                        waterfall_d, state_d, grids0_dt_grid_ptr,
+                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
+                        dt_max_final, hist_ptr);
             }
         }
         cuda_utils::check_last_cuda_error("kernel_init_fdmt launch failed");
 
-        if (m_mode == FDMTMode::kValid && hist_ptr != nullptr && dt_max_final > 0) {
-            cudaMemcpy2DAsync(
-                hist_ptr,
-                dt_max_final * sizeof(float),
-                waterfall_d + nsamps - dt_max_final,
-                nsamps * sizeof(float),
-                dt_max_final * sizeof(float),
-                nsubs,
-                cudaMemcpyDeviceToDevice,
-                stream);
+        if (m_mode == FDMTMode::kValid && hist_ptr != nullptr &&
+            dt_max_final > 0) {
+            cudaMemcpy2DAsync(hist_ptr, dt_max_final * sizeof(float),
+                              waterfall_d + nsamps - dt_max_final,
+                              nsamps * sizeof(float),
+                              dt_max_final * sizeof(float), nsubs,
+                              cudaMemcpyDeviceToDevice, stream);
             cuda_utils::check_last_cuda_error(
                 "History update cudaMemcpy2DAsync failed");
         }
@@ -587,6 +650,7 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    float tsamp,
                    SizeType dt_max,
                    SizeType dt_min,
+                   SizeType dt_step,
                    bool use_box_smearing,
                    std::string_view mode,
                    bool verbose,
@@ -598,10 +662,53 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     tsamp,
                                     dt_max,
                                     dt_min,
+                                    dt_step,
                                     use_box_smearing,
                                     mode,
                                     verbose,
                                     device_id)) {}
+FDMTCUDA::FDMTCUDA(float f_min,
+                   float f_max,
+                   SizeType nchans,
+                   SizeType nsamps,
+                   float tsamp,
+                   const std::vector<SizeType>& dt_grid,
+                   bool use_box_smearing,
+                   std::string_view mode,
+                   bool verbose,
+                   int device_id)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dt_grid,
+                                    use_box_smearing,
+                                    mode,
+                                    verbose,
+                                    device_id)) {}
+
+FDMTCUDA::FDMTCUDA(float f_min,
+                   float f_max,
+                   SizeType nchans,
+                   SizeType nsamps,
+                   float tsamp,
+                   const std::vector<float>& dm_grid,
+                   bool use_box_smearing,
+                   std::string_view mode,
+                   bool verbose,
+                   int device_id)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dm_grid,
+                                    use_box_smearing,
+                                    mode,
+                                    verbose,
+                                    device_id)) {}
+
 FDMTCUDA::~FDMTCUDA()                                    = default;
 FDMTCUDA::FDMTCUDA(FDMTCUDA&& other) noexcept            = default;
 FDMTCUDA& FDMTCUDA::operator=(FDMTCUDA&& other) noexcept = default;
@@ -651,19 +758,63 @@ SizeType FDMTCUDA::num_subbands() const { return m_impl->num_subbands(); }
 bool FDMTCUDA::is_finished() const noexcept { return m_impl->is_finished(); }
 void FDMTCUDA::finalize(cudaStream_t stream) { m_impl->finalize(stream); }
 
-std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
-                                     float f_min,
-                                     float f_max,
-                                     SizeType nchans,
-                                     SizeType nsamps,
-                                     float tsamp,
-                                     SizeType dt_max,
-                                     SizeType dt_min,
-                                     bool use_box_smearing,
-                                     std::string_view mode,
-                                     bool verbose,
-                                     int device_id) {
-    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+[[nodiscard]] std::vector<float>
+compute_fdmt_cuda(std::span<const float> waterfall,
+                  float f_min,
+                  float f_max,
+                  SizeType nchans,
+                  SizeType nsamps,
+                  float tsamp,
+                  SizeType dt_max,
+                  SizeType dt_min,
+                  SizeType dt_step,
+                  bool use_box_smearing,
+                  std::string_view mode,
+                  bool verbose,
+                  int device_id) {
+    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
+                  use_box_smearing, mode, verbose, device_id);
+    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
+    std::vector<float> dmt(fdmt_plan.get_buffer_size(), 0.0F);
+    fdmt.execute(waterfall, dmt);
+    dmt.resize(fdmt_plan.get_dmt_size());
+    return dmt;
+}
+
+[[nodiscard]] std::vector<float>
+compute_fdmt_cuda(std::span<const float> waterfall,
+                  float f_min,
+                  float f_max,
+                  SizeType nchans,
+                  SizeType nsamps,
+                  float tsamp,
+                  const std::vector<SizeType>& dt_grid,
+                  bool use_box_smearing,
+                  std::string_view mode,
+                  bool verbose,
+                  int device_id) {
+    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
+                  use_box_smearing, mode, verbose, device_id);
+    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
+    std::vector<float> dmt(fdmt_plan.get_buffer_size(), 0.0F);
+    fdmt.execute(waterfall, dmt);
+    dmt.resize(fdmt_plan.get_dmt_size());
+    return dmt;
+}
+
+[[nodiscard]] std::vector<float>
+compute_fdmt_cuda(std::span<const float> waterfall,
+                  float f_min,
+                  float f_max,
+                  SizeType nchans,
+                  SizeType nsamps,
+                  float tsamp,
+                  const std::vector<float>& dm_grid,
+                  bool use_box_smearing,
+                  std::string_view mode,
+                  bool verbose,
+                  int device_id) {
+    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,
                   use_box_smearing, mode, verbose, device_id);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     std::vector<float> dmt(fdmt_plan.get_buffer_size(), 0.0F);
