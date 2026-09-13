@@ -39,12 +39,13 @@ struct FDMTCoord {
     SizeType tail_nsamps;     // Number of samples in the tail buffer
     SizeType head_buf_offset; // Offset (starting point) in the head buffer
     SizeType head_nsamps;     // Number of samples in the head buffer
+    SizeType hist_offset{0};  // Offset in the tree history buffer
 };
 
 // Coordinates grid for the FDMT plan for each subband in a single iteration
 struct FDMTCoordGrid {
-    std::vector<SizeType> dt_grid; // Delay grid for the subband
-    SizeType ndt;                  // Number of delays
+    std::vector<IndexType> dt_grid; // Delay grid for the subband
+    SizeType ndt;                   // Number of delays
     SizeType coord_offset; // Offset (starting point) in the coordinates array
     float f_start;         // Start frequency of the subband
     float f_end;           // End frequency of the subband
@@ -57,15 +58,19 @@ struct FDMTPlanContainer {
     std::vector<std::vector<FDMTCoord>> coordinates_sum;
     std::vector<std::vector<FDMTCoord>> coordinates_copy;
     // Temp arrays to compute the plan
-    std::vector<std::vector<SizeType>> dt_grid_sub_top;
+    std::vector<std::vector<IndexType>> dt_grid_sub_top;
     std::vector<float> df_top;
     std::vector<float> df_bot;
+    SizeType tree_history_size{0};
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
 
     SizeType get_memory_usage() const noexcept;
     SizeType get_buffer_size() const noexcept;
+    [[nodiscard]] SizeType get_tree_history_size() const noexcept {
+        return tree_history_size;
+    }
 };
 
 struct DDMTPlanContainer {
@@ -107,8 +112,8 @@ public:
              SizeType nchans,
              SizeType nsamps,
              float tsamp,
-             SizeType dt_max,
-             SizeType dt_min       = 0,
+             IndexType dt_max,
+             IndexType dt_min      = 0,
              SizeType dt_step      = 1,
              std::string_view mode = "full",
              bool verbose          = false);
@@ -118,7 +123,7 @@ public:
              SizeType nchans,
              SizeType nsamps,
              float tsamp,
-             const std::vector<SizeType>& dt_grid,
+             const std::vector<IndexType>& dt_grid,
              std::string_view mode = "full",
              bool verbose          = false);
 
@@ -150,9 +155,9 @@ public:
     /// @brief Time sample interval (seconds)
     float get_tsamp() const noexcept;
     /// @brief Maximum delay in time bins
-    SizeType get_dt_max() const noexcept;
+    IndexType get_dt_max() const noexcept;
     /// @brief Minimum delay in time bins
-    SizeType get_dt_min() const noexcept;
+    IndexType get_dt_min() const noexcept;
     /// @brief Delay step in time bins
     SizeType get_dt_step() const noexcept;
     /// @brief Whether a custom arbitrary delay or DM grid was provided
@@ -166,11 +171,36 @@ public:
 
     // --- Methods ---
     /// @brief Final delay grid in time bins
-    [[nodiscard]] std::vector<SizeType> get_dt_grid_final() const noexcept;
+    [[nodiscard]] std::vector<IndexType> get_dt_grid_final() const noexcept;
     /// @brief Final DM grid (pc/cm^3)
     [[nodiscard]] std::vector<float> get_dm_grid_final() const noexcept;
     /// @brief Final smearing grid (samples per channel)
     [[nodiscard]] std::vector<float> get_smearing_grid_final() const noexcept;
+    /// @brief Per-channel absolute time shift (samples) for a given DM/dt
+    /// trial's coordinate lineage, relative to the tree's unshifted
+    /// reference channel. See the .cpp doc comment for the exact semantics;
+    /// used by algorithms::add_frb_track() to inject a synthetic pulse that
+    /// lands exactly on trial dm_idx.
+    /// @throws std::out_of_range if dm_idx >= get_dmt_ndms().
+    [[nodiscard]] std::vector<IndexType> trace_dm(SizeType dm_idx) const;
+    /// @brief Theoretical noise variance for a given DM trial and boxcar width
+    [[nodiscard]] float
+    get_effective_variance(SizeType dm_idx,
+                           SizeType boxcar_width,
+                           bool use_box_smearing = true) const;
+    /// @brief Theoretical noise standard deviation for a given DM trial and boxcar width
+    [[nodiscard]] float
+    get_effective_sigma(SizeType dm_idx,
+                        SizeType boxcar_width,
+                        bool use_box_smearing = true) const;
+    /// @brief Theoretical noise variance grid across all DM trials for a boxcar width
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width,
+                                bool use_box_smearing = true) const;
+    /// @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width
+    [[nodiscard]] std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width,
+                             bool use_box_smearing = true) const;
     /// @brief Number of DMs in the final DMT transform
     SizeType get_dmt_ndms() const noexcept;
     /// @brief Number of time samples in the final DMT transform
@@ -183,6 +213,8 @@ public:
     SizeType get_history_size() const noexcept;
     /// @brief Size of the Boxcar smearing history for the FDMT plan
     SizeType get_history_init_size() const noexcept;
+    /// @brief Size of the tree history buffer for valid-mode streaming across FDMT blocks
+    SizeType get_tree_history_size() const noexcept;
 
     /// @brief Computes complexity comparison between FDMT and brute-force
     /// dedispersion

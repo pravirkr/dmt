@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <iterator>
 #include <stdexcept>
 #include <vector>
@@ -26,13 +27,14 @@ float get_dmconv(float f_min, float f_max, float tsamp) {
     return tsamp / dm_conv;
 }
 
-SizeType find_nearest_sorted_idx(std::span<const SizeType> arr_sorted,
-                                 SizeType val) {
+template <typename T>
+static SizeType find_nearest_sorted_idx_impl(std::span<const T> arr_sorted,
+                                             T val) {
     if (arr_sorted.empty()) {
         throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
     const auto it = std::ranges::lower_bound(arr_sorted, val);
-    auto idx = static_cast<SizeType>(std::distance(arr_sorted.begin(), it));
+    auto idx      = static_cast<SizeType>(std::distance(arr_sorted.begin(), it));
 
     // Handle case where val is larger than all elements
     if (it == arr_sorted.end()) {
@@ -43,12 +45,22 @@ SizeType find_nearest_sorted_idx(std::span<const SizeType> arr_sorted,
         const auto val_prev    = *(it - 1);
         const auto val_curr    = *it;
         const bool prev_closer = (val >= val_prev) && (val <= val_curr) &&
-                                 (val - val_prev) <= (val_curr - val);
+                                 ((val - val_prev) <= (val_curr - val));
         if (prev_closer) {
             --idx;
         }
     }
     return idx;
+}
+
+SizeType find_nearest_sorted_idx(std::span<const SizeType> arr_sorted,
+                                 SizeType val) {
+    return find_nearest_sorted_idx_impl(arr_sorted, val);
+}
+
+SizeType find_nearest_sorted_idx(std::span<const IndexType> arr_sorted,
+                                 IndexType val) {
+    return find_nearest_sorted_idx_impl(arr_sorted, val);
 }
 
 std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,

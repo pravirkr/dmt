@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
@@ -323,7 +326,7 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans]") {
     const float tsamp     = 0.001F;
 
     SECTION("Arbitrary sorted dt_grid") {
-        const std::vector<SizeType> custom_dts = {25, 50, 75, 100, 130, 180};
+        const std::vector<IndexType> custom_dts = {25, 50, 75, 100, 130, 180};
         FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, custom_dts);
 
         CHECK(plan.is_custom_grid());
@@ -341,7 +344,7 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans]") {
     SECTION(
         "Level 0 starts from min_dt_chan > 0 when child delays require it") {
         // High delay range where child delays do not include 0
-        const std::vector<SizeType> high_dts = {200, 250, 300};
+        const std::vector<IndexType> high_dts = {200, 250, 300};
         FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, high_dts);
 
         const auto& l0_grids        = plan.get_container().grids[0];
@@ -374,12 +377,12 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans]") {
     SECTION("Validation errors for invalid custom grids") {
         // Empty dt_grid
         CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                 std::vector<SizeType>{}),
+                                 std::vector<IndexType>{}),
                         std::invalid_argument);
 
         // All-zero dt_grid
         CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                 std::vector<SizeType>{0}),
+                                 std::vector<IndexType>{0}),
                         std::invalid_argument);
 
         // Empty dm_grid
@@ -387,16 +390,20 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans]") {
             FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, std::vector<float>{}),
             std::invalid_argument);
 
-        // Negative DM
+        // All-zero dm_grid
         CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                 std::vector<float>{-5.0F, 10.0F}),
+                                 std::vector<float>{0.0F, 0.0F}),
                         std::invalid_argument);
+
+        // Negative DM is valid and constructs successfully
+        CHECK_NOTHROW(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                               std::vector<float>{-5.0F, 10.0F}));
     }
 
     SECTION("Unsorted and duplicate dt_grid is auto-sorted and deduplicated") {
         FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp,
-                      std::vector<SizeType>{50, 20, 100, 20});
-        CHECK(plan.get_dt_grid_final() == std::vector<SizeType>{20, 50, 100});
+                      std::vector<IndexType>{50, 20, 100, 20});
+        CHECK(plan.get_dt_grid_final() == std::vector<IndexType>{20, 50, 100});
         CHECK(plan.get_dt_min() == 20);
         CHECK(plan.get_dt_max() == 100);
     }
@@ -413,7 +420,7 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans]") {
     SECTION("High sparsity target grid note in complexity summary") {
         // Very sparse grid (e.g., 2 delays) where brute-force ops < 2 * FDMT
         // tree ops
-        const std::vector<SizeType> sparse_dts = {50, 100};
+        const std::vector<IndexType> sparse_dts = {50, 100};
         FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, sparse_dts);
         const auto comp = plan.get_complexity();
         if (comp.ops_ratio < 2.0F) {
@@ -421,6 +428,131 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans]") {
             CHECK(summary.find("Note: Speedup factor is < 2.0x") !=
                   std::string::npos);
         }
+    }
+}
+
+TEST_CASE("FDMTPlan negative and symmetric dispersion", "[dmt_plans]") {
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 64;
+    const SizeType nsamps  = 512;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 32;
+    const IndexType dt_min = -32;
+
+    SECTION("Plan construction and grid properties") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        CHECK(plan.get_dt_min() == -32);
+        CHECK(plan.get_dt_max() == 32);
+        const auto& dt_grid = plan.get_dt_grid_final();
+        REQUIRE(dt_grid.size() == 65);
+        CHECK(dt_grid.front() == -32);
+        CHECK(dt_grid.back() == 32);
+
+        // Verify strictly monotonic
+        for (size_t i = 1; i < dt_grid.size(); ++i) {
+            CHECK(dt_grid[i] > dt_grid[i - 1]);
+        }
+    }
+
+    SECTION("Effective variance without smearing") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        // For un-smeared plan (use_box_smearing=false), variance is N_chans * W
+        for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 16) {
+            CHECK(plan.get_effective_variance(dm_idx, 1, false) ==
+                  Catch::Approx(static_cast<float>(nchans * 1)));
+            CHECK(plan.get_effective_variance(dm_idx, 4, false) ==
+                  Catch::Approx(static_cast<float>(nchans * 4)));
+            CHECK(plan.get_effective_sigma(dm_idx, 4, false) ==
+                  Catch::Approx(std::sqrt(static_cast<float>(nchans * 4))));
+        }
+
+        const auto var_grid_1 = plan.get_effective_variance_grid(1, false);
+        REQUIRE(var_grid_1.size() == 65);
+        for (const auto v : var_grid_1) {
+            CHECK(v == Catch::Approx(static_cast<float>(nchans)));
+        }
+
+        const auto sig_grid_4 = plan.get_effective_sigma_grid(4, false);
+        REQUIRE(sig_grid_4.size() == 65);
+        for (const auto s : sig_grid_4) {
+            CHECK(s == Catch::Approx(std::sqrt(static_cast<float>(nchans * 4))));
+        }
+    }
+
+    SECTION("Effective variance with smearing") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+
+        // At dt = 0 (index 32): smearing s_i = 0 for all channels -> variance == nchans
+        CHECK(plan.get_effective_variance(32, 1, true) ==
+              Catch::Approx(static_cast<float>(nchans)));
+
+        // For W = 1 across any DM: each channel has smearing s_i >= 0, so Var >= nchans
+        for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 10) {
+            CHECK(plan.get_effective_variance(dm_idx, 1, true) >=
+                  static_cast<float>(nchans));
+        }
+
+        // For W = 4: Variance should be positive and <= nchans * W^2
+        for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 10) {
+            const float var = plan.get_effective_variance(dm_idx, 4, true);
+            CHECK(var > 0.0F);
+            CHECK(var <= static_cast<float>(nchans * 4 * 4));
+        }
+
+        // Verify symmetry: Var(+dt) == Var(-dt)
+        const auto& dt_grid = plan.get_dt_grid_final();
+        for (size_t i = 0; i < dt_grid.size() / 2; ++i) {
+            const size_t opp_i = dt_grid.size() - 1 - i;
+            CHECK(dt_grid[i] == -dt_grid[opp_i]);
+            CHECK(plan.get_effective_variance(i, 4, true) ==
+                  Catch::Approx(plan.get_effective_variance(opp_i, 4, true)));
+        }
+    }
+
+    SECTION("Invalid argument and bounds checks") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        CHECK_THROWS_AS(plan.get_effective_variance(0, 0), std::invalid_argument);
+        CHECK_THROWS_AS(plan.get_effective_sigma(0, 0), std::invalid_argument);
+        CHECK_THROWS_AS(plan.get_effective_variance(1000, 1), std::out_of_range);
+        CHECK_THROWS_AS(plan.get_effective_sigma(1000, 1), std::out_of_range);
+    }
+
+    SECTION("get_effective_variance_grid matches per-DM get_effective_variance") {
+        // Regression test for the O(ndms^2) -> O(ndms) fix: the grid variant
+        // must still return exactly what calling get_effective_variance()
+        // once per DM index would, for both the smeared and un-smeared paths.
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        for (const bool use_box_smearing : {false, true}) {
+            const auto grid = plan.get_effective_variance_grid(3, use_box_smearing);
+            REQUIRE(grid.size() == plan.get_dmt_ndms());
+            for (size_t dm_idx = 0; dm_idx < grid.size(); dm_idx += 7) {
+                CHECK(grid[dm_idx] ==
+                      Catch::Approx(
+                          plan.get_effective_variance(dm_idx, 3, use_box_smearing)));
+            }
+        }
+    }
+
+    SECTION("trace_dm") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        const auto& dt_grid = plan.get_dt_grid_final();
+
+        // dt=0 requires no relative shift between any pair of channels.
+        const auto it_zero = std::find(dt_grid.begin(), dt_grid.end(), 0);
+        REQUIRE(it_zero != dt_grid.end());
+        const auto idx_zero =
+            static_cast<SizeType>(std::distance(dt_grid.begin(), it_zero));
+        const auto shifts_zero = plan.trace_dm(idx_zero);
+        REQUIRE(shifts_zero.size() == nchans);
+        for (const auto s : shifts_zero) {
+            CHECK(s == shifts_zero.front());
+        }
+
+        // Every returned vector has one entry per channel, for both signs.
+        CHECK(plan.trace_dm(0).size() == nchans);
+        CHECK(plan.trace_dm(dt_grid.size() - 1).size() == nchans);
+        CHECK_THROWS_AS(plan.trace_dm(dt_grid.size()), std::out_of_range);
     }
 }
 

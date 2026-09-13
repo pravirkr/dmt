@@ -41,6 +41,24 @@ FDMTMode parse_mode(std::string_view mode) {
         "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
 }
 
+/**
+ * @brief Level-0 (per-channel) FDMT state initialization kernel.
+ *
+ * `dt_grid_sub` (this sub-band's local dt grid) is dense, contiguous, and
+ * sorted ascending by construction (see `make_plan_iter0` in plans.cpp), but
+ * may start below zero when the plan's overall dt range is negative or
+ * straddles zero. Level 0 has no notion of merge *direction* -- that is
+ * resolved entirely by the sign-aware tail/head reference swap in
+ * `make_plan` (see its doc comment), once per merge, above this level. A
+ * row here only ever represents "this single channel's own delay/smearing
+ * width of |dt| samples": rows +s and -s are always identical, since a
+ * single leaf channel has no other channel to be earlier/later than. This
+ * mirrors the CPU implementation's `fdmt_init_subband` in fdmt.cpp exactly
+ * (see its doc comment for the full rationale) -- every row lookup below is
+ * indexed by magnitude `s`, and `write_matches` fans a computed row out to
+ * whichever of the +s / -s dt indices are actually present in this
+ * sub-band's grid.
+ */
 template <FDMTMode Mode, bool UseBoxSmearing>
 __global__ void
 kernel_init_fdmt(const float* __restrict__ waterfall,
@@ -65,9 +83,10 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
     const auto ndt_grid_sub     = grids0_ndt_ptr[i_sub];
     const auto waterfall_offset = i_sub * nsamps;
     const auto hist_offset      = i_sub * dt_max_final;
-    const auto dt_min           = dt_grid_sub[0];
+    const auto dt_first         = dt_grid_sub[0];
+    const auto dt_last          = dt_grid_sub[ndt_grid_sub - 1];
 
-    // Lambda to fetch sample at relative index (isamp - dt)
+    // Lambda to fetch sample at relative index (isamp - shift), shift >= 0.
     auto get_sample = [&](int t) -> float {
         if (t >= 0) {
             return waterfall[waterfall_offset + t];
@@ -82,46 +101,77 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
         }
     };
 
-    // Row 0: dt_min
-    float prev_val = 0.0F;
+    // Writes `val` into every dt row whose value has magnitude `s` (there
+    // are up to two: +s and -s, whichever are actually present in this
+    // dense sub-band grid).
+    auto write_matches = [&](int s, float val) {
+        if (s >= dt_first && s <= dt_last) {
+            state[buffer_offset + ((s - dt_first) * nsamps) + isamp] = val;
+        }
+        const int neg = -s;
+        if (s != 0 && neg >= dt_first && neg <= dt_last) {
+            state[buffer_offset + ((neg - dt_first) * nsamps) + isamp] = val;
+        }
+    };
+
+    // Smallest and largest |dt| actually present. A dense range either
+    // straddles (or touches) zero -- smallest magnitude 0 -- or is purely
+    // one-signed, in which case the smallest magnitude sits at whichever
+    // end is closest to zero.
+    const int s_lo = (dt_last >= 0) ? 0 : min(abs(dt_first), abs(dt_last));
+    const int s_hi = max(abs(dt_first), abs(dt_last));
+
     if constexpr (UseBoxSmearing) {
-        if (dt_min == 0) {
+        float prev_val;
+        if (s_lo == 0) {
             // O(1) fast-path: zero delay across leaf channel (most common case)
             prev_val = get_sample(isamp);
         } else {
-            // Unrolled coalesced summation loop for dt_min > 0
+            // Unrolled coalesced summation loop seeding the box-sum at the
+            // smallest magnitude present.
             float sum = 0.0F;
 #pragma unroll 4
-            for (int d = 0; d <= dt_min; ++d) {
+            for (int d = 0; d <= s_lo; ++d) {
                 sum += get_sample(isamp - d);
             }
             prev_val = sum;
         }
-    } else {
-        prev_val = get_sample(isamp - dt_min);
-    }
-    state[buffer_offset + isamp] = prev_val;
-
-    // Subsequent DT rows (dt = dt_min + 1, ...)
-    for (int i_dt = 1; i_dt < ndt_grid_sub; ++i_dt) {
-        const auto dt_cur           = dt_grid_sub[i_dt];
-        const auto state_offset_cur = buffer_offset + (i_dt * nsamps);
-        float cur_val;
-        if constexpr (UseBoxSmearing) {
-            cur_val = prev_val + get_sample(isamp - dt_cur);
-        } else {
-            cur_val = get_sample(isamp - dt_cur);
+        write_matches(s_lo, prev_val);
+        for (int s = s_lo + 1; s <= s_hi; ++s) {
+            const float cur_val = prev_val + get_sample(isamp - s);
+            write_matches(s, cur_val);
+            prev_val = cur_val;
         }
-        state[state_offset_cur + isamp] = cur_val;
-        prev_val                        = cur_val;
+    } else {
+        // No smearing: each row is an independent shift by |dt| samples, no
+        // accumulation between rows.
+        for (int s = s_lo; s <= s_hi; ++s) {
+            write_matches(s, get_sample(isamp - s));
+        }
     }
 }
 
+/**
+ * @brief Per-level tree merge kernel. `kValid`'s cross-block history mirrors
+ * `offset_add<kValid>` in fdmt.cpp (see its doc comment) with one CUDA-
+ * specific twist: the CPU version reads its whole boundary region and then
+ * overwrites the history buffer within one sequential per-coordinate thread,
+ * so there's no hazard. Here, `isamp` is itself parallelized *within* one
+ * coordinate, so a thread reading `hist_in[...]` (this coordinate's boundary,
+ * from the previous block) and another thread of the same coordinate writing
+ * `hist_out[...]` (capturing this block's own tail for the next block) would
+ * race if `hist_in`/`hist_out` aliased the same buffer. They never do:
+ * `FDMTCUDA::Impl::reset()` ping-pongs two same-sized device buffers once per
+ * block, so within a single launch `hist_in` and `hist_out` are always
+ * distinct arrays.
+ */
 template <FDMTMode Mode>
 __global__ void kernel_execute_iter(const float* __restrict__ state_in,
                                     float* __restrict__ state_out,
                                     const plans::FDMTCoordDPtrs coords_sum,
                                     const plans::FDMTCoordDPtrs coords_copy,
+                                    const float* __restrict__ hist_in,
+                                    float* __restrict__ hist_out,
                                     int nsamps,
                                     int ncoords_sum_cur,
                                     int ncoords_copy_cur) {
@@ -139,6 +189,7 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
         const auto out_idx_base  = coords_sum.buf_offset[i_coord];
         const auto tail_idx_base = coords_sum.tail_buf_offset[i_coord];
         const auto head_idx_base = coords_sum.head_buf_offset[i_coord];
+        const auto hist_off      = coords_sum.hist_offset[i_coord];
 
         if (isamp < nsamps_out) {
             float tail_val = 0.0F;
@@ -154,6 +205,18 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
                 tail_val = state_in[tail_idx_base + isamp];
                 if (isamp >= offset) {
                     head_val = state_in[head_idx_base + (isamp - offset)];
+                } else if (hist_in != nullptr) {
+                    // Boundary sample: use the previous block's trailing
+                    // head samples, captured below the last time this
+                    // coordinate ran.
+                    head_val = hist_in[hist_off + isamp];
+                }
+                if (hist_out != nullptr && offset > 0 &&
+                    isamp >= nsamps_tail - offset) {
+                    // Capture this block's own trailing `offset` samples of
+                    // head for the next call to this coordinate.
+                    hist_out[hist_off + (isamp - (nsamps_tail - offset))] =
+                        state_in[head_idx_base + isamp];
                 }
             } else if constexpr (Mode == FDMTMode::kRoll) {
                 tail_val            = state_in[tail_idx_base + isamp];
@@ -188,8 +251,8 @@ public:
          SizeType nchans,
          SizeType nsamps,
          float tsamp,
-         SizeType dt_max,
-         SizeType dt_min,
+         IndexType dt_max,
+         IndexType dt_min,
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
@@ -216,7 +279,7 @@ public:
          SizeType nchans,
          SizeType nsamps,
          float tsamp,
-         const std::vector<SizeType>& dt_grid,
+         const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
@@ -252,6 +315,12 @@ public:
         m_state_internal_d.resize(m_plan.get_buffer_size(), 0.0F);
         if (m_mode == FDMTMode::kValid) {
             m_history_d.resize(m_plan.get_history_size(), 0.0F);
+            // Two same-sized tree-history buffers, ping-ponged once per
+            // block in reset() -- see kernel_execute_iter's doc comment for
+            // why one buffer isn't safe here the way it is on the CPU.
+            const auto tree_hist_size = m_plan.get_tree_history_size();
+            m_tree_history_a_d.resize(tree_hist_size, 0.0F);
+            m_tree_history_b_d.resize(tree_hist_size, 0.0F);
         }
         plans::transfer_fdmt_plan_to_device(m_plan.get_container(), m_plan_d);
 
@@ -334,6 +403,25 @@ public:
         m_stream         = stream;
         m_dmt_target_ptr = d_dmt.data();
         m_current_level  = 0;
+
+        if (m_mode == FDMTMode::kValid) {
+            // Ping-pong once per block (not per level): every level's
+            // history lives in the same pair of buffers at disjoint
+            // offsets, and all levels of one block must agree on which
+            // buffer is "previous block" vs "this block".
+            if (m_tree_history_parity) {
+                m_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_b_d.data());
+                m_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_a_d.data());
+            } else {
+                m_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_a_d.data());
+                m_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_b_d.data());
+            }
+            m_tree_history_parity = !m_tree_history_parity;
+        }
 
         const SizeType internal_iters = total_levels() - 2;
         const bool odd_swaps          = (internal_iters % 2) == 1;
@@ -441,8 +529,8 @@ public:
             .nsamps      = state_shape.nsamps,
             .f_start     = grid.f_start,
             .f_end       = grid.f_end,
-            .dt_grid     = std::span<const SizeType>(grid.dt_grid.data(),
-                                                     grid.dt_grid.size())};
+            .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
+                                                      grid.dt_grid.size())};
     }
 
     [[nodiscard]] SizeType current_level() const noexcept {
@@ -483,6 +571,45 @@ public:
         m_is_initialized = false;
     }
 
+    // Analytical variance/sigma: pure plan-side math (see
+    // plans::FDMTPlan::get_effective_variance), identical on CPU and CUDA --
+    // provided here for API parity with FDMTCPU.
+    [[nodiscard]] float
+    get_effective_variance(SizeType dm_idx, SizeType boxcar_width) const {
+        return m_plan.get_effective_variance(dm_idx, boxcar_width,
+                                             m_use_box_smearing);
+    }
+    [[nodiscard]] float
+    get_effective_sigma(SizeType dm_idx, SizeType boxcar_width) const {
+        return m_plan.get_effective_sigma(dm_idx, boxcar_width,
+                                          m_use_box_smearing);
+    }
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width) const {
+        return m_plan.get_effective_variance_grid(boxcar_width, m_use_box_smearing);
+    }
+    [[nodiscard]] std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width) const {
+        return m_plan.get_effective_sigma_grid(boxcar_width, m_use_box_smearing);
+    }
+
+    /// Zeroes all cross-block history (level-0 and tree-level) so the next
+    /// execute()/reset() call starts as if this were a brand-new instance.
+    /// Mirrors FDMTCPU::reset_history().
+    void reset_history() noexcept {
+        cuda_utils::set_device(m_device_id);
+        if (!m_history_d.empty()) {
+            m_history_d.assign(m_history_d.size(), 0.0F);
+        }
+        if (!m_tree_history_a_d.empty()) {
+            m_tree_history_a_d.assign(m_tree_history_a_d.size(), 0.0F);
+        }
+        if (!m_tree_history_b_d.empty()) {
+            m_tree_history_b_d.assign(m_tree_history_b_d.size(), 0.0F);
+        }
+        m_tree_history_parity = false;
+    }
+
 private:
     int m_device_id;
     bool m_use_box_smearing;
@@ -491,8 +618,16 @@ private:
     plans::FDMTPlanContainerD m_plan_d;
     // Internal state buffer on device (for ping-pong buffering)
     thrust::device_vector<float> m_state_internal_d;
-    // History buffer for valid-mode streaming across FDMT blocks
+    // Level-0 history buffer for valid-mode streaming across FDMT blocks
     thrust::device_vector<float> m_history_d;
+    // Tree-level (level >= 1) cross-block history: two same-sized buffers
+    // ping-ponged once per block by reset(); see kernel_execute_iter's doc
+    // comment for why a single buffer (as used on the CPU) isn't safe here.
+    thrust::device_vector<float> m_tree_history_a_d;
+    thrust::device_vector<float> m_tree_history_b_d;
+    bool m_tree_history_parity{false};
+    float* m_hist_in_ptr{nullptr};
+    float* m_hist_out_ptr{nullptr};
 
     // Stepper state
     bool m_is_initialized{false};
@@ -546,18 +681,21 @@ private:
         if (m_mode == FDMTMode::kFull) {
             kernel_execute_iter<FDMTMode::kFull>
                 <<<grid_size, block_size, 0, stream>>>(
-                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, nsamps,
-                    ncoords_sum_cur, ncoords_copy_cur);
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
+                    m_hist_in_ptr, m_hist_out_ptr, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur);
         } else if (m_mode == FDMTMode::kRoll) {
             kernel_execute_iter<FDMTMode::kRoll>
                 <<<grid_size, block_size, 0, stream>>>(
-                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, nsamps,
-                    ncoords_sum_cur, ncoords_copy_cur);
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
+                    m_hist_in_ptr, m_hist_out_ptr, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur);
         } else {
             kernel_execute_iter<FDMTMode::kValid>
                 <<<grid_size, block_size, 0, stream>>>(
-                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, nsamps,
-                    ncoords_sum_cur, ncoords_copy_cur);
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
+                    m_hist_in_ptr, m_hist_out_ptr, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur);
         }
         cuda_utils::check_last_cuda_error("kernel_execute_iter launch failed");
     }
@@ -648,8 +786,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    SizeType nchans,
                    SizeType nsamps,
                    float tsamp,
-                   SizeType dt_max,
-                   SizeType dt_min,
+                   IndexType dt_max,
+                   IndexType dt_min,
                    SizeType dt_step,
                    bool use_box_smearing,
                    std::string_view mode,
@@ -672,7 +810,7 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    SizeType nchans,
                    SizeType nsamps,
                    float tsamp,
-                   const std::vector<SizeType>& dt_grid,
+                   const std::vector<IndexType>& dt_grid,
                    bool use_box_smearing,
                    std::string_view mode,
                    bool verbose,
@@ -757,6 +895,23 @@ SizeType FDMTCUDA::remaining_levels() const noexcept {
 SizeType FDMTCUDA::num_subbands() const { return m_impl->num_subbands(); }
 bool FDMTCUDA::is_finished() const noexcept { return m_impl->is_finished(); }
 void FDMTCUDA::finalize(cudaStream_t stream) { m_impl->finalize(stream); }
+float FDMTCUDA::get_effective_variance(SizeType dm_idx,
+                                       SizeType boxcar_width) const {
+    return m_impl->get_effective_variance(dm_idx, boxcar_width);
+}
+float FDMTCUDA::get_effective_sigma(SizeType dm_idx,
+                                    SizeType boxcar_width) const {
+    return m_impl->get_effective_sigma(dm_idx, boxcar_width);
+}
+std::vector<float>
+FDMTCUDA::get_effective_variance_grid(SizeType boxcar_width) const {
+    return m_impl->get_effective_variance_grid(boxcar_width);
+}
+std::vector<float>
+FDMTCUDA::get_effective_sigma_grid(SizeType boxcar_width) const {
+    return m_impl->get_effective_sigma_grid(boxcar_width);
+}
+void FDMTCUDA::reset_history() noexcept { m_impl->reset_history(); }
 
 [[nodiscard]] std::vector<float>
 compute_fdmt_cuda(std::span<const float> waterfall,
@@ -765,8 +920,8 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   SizeType nchans,
                   SizeType nsamps,
                   float tsamp,
-                  SizeType dt_max,
-                  SizeType dt_min,
+                  IndexType dt_max,
+                  IndexType dt_min,
                   SizeType dt_step,
                   bool use_box_smearing,
                   std::string_view mode,
@@ -788,7 +943,7 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   SizeType nchans,
                   SizeType nsamps,
                   float tsamp,
-                  const std::vector<SizeType>& dt_grid,
+                  const std::vector<IndexType>& dt_grid,
                   bool use_box_smearing,
                   std::string_view mode,
                   bool verbose,

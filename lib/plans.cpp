@@ -90,8 +90,8 @@ public:
          SizeType nchans,
          SizeType nsamps,
          float tsamp,
-         SizeType dt_max,
-         SizeType dt_min,
+         IndexType dt_max,
+         IndexType dt_min,
          SizeType dt_step,
          std::string_view mode,
          bool verbose)
@@ -119,7 +119,7 @@ public:
          SizeType nchans,
          SizeType nsamps,
          float tsamp,
-         const std::vector<SizeType>& dt_grid,
+         const std::vector<IndexType>& dt_grid,
          std::string_view mode,
          bool verbose)
         : m_f_min(f_min),
@@ -177,12 +177,6 @@ public:
         if (dm_grid.empty()) {
             throw std::invalid_argument("FDMT: dm_grid must not be empty");
         }
-        for (const auto dm : dm_grid) {
-            if (dm < 0.0F) {
-                throw std::invalid_argument(
-                    "FDMT: dm_grid values must be non-negative");
-            }
-        }
         auto dm_sorted = dm_grid;
         std::ranges::sort(dm_sorted);
         const auto [dm_first, dm_last] = std::ranges::unique(dm_sorted);
@@ -192,7 +186,7 @@ public:
         m_dt_grid_target.reserve(dm_sorted.size());
         for (const auto dm : dm_sorted) {
             m_dt_grid_target.push_back(
-                static_cast<SizeType>(std::nearbyint(dm / dm_conv)));
+                static_cast<IndexType>(std::nearbyint(dm / dm_conv)));
         }
         std::ranges::sort(m_dt_grid_target);
         const auto [first, last] = std::ranges::unique(m_dt_grid_target);
@@ -215,8 +209,8 @@ public:
     SizeType get_nchans() const noexcept { return m_nchans; }
     SizeType get_nsamps() const noexcept { return m_nsamps; }
     float get_tsamp() const noexcept { return m_tsamp; }
-    SizeType get_dt_max() const noexcept { return m_dt_max; }
-    SizeType get_dt_min() const noexcept { return m_dt_min; }
+    IndexType get_dt_max() const noexcept { return m_dt_max; }
+    IndexType get_dt_min() const noexcept { return m_dt_min; }
     SizeType get_dt_step() const noexcept { return m_dt_step; }
     bool is_custom_grid() const noexcept { return m_is_custom_grid; }
     float get_df() const noexcept { return m_df; }
@@ -254,7 +248,7 @@ public:
         const auto comp = get_complexity();
         spdlog::info("{}", comp.to_string());
     }
-    std::vector<SizeType> get_dt_grid_final() const noexcept {
+    std::vector<IndexType> get_dt_grid_final() const noexcept {
         return m_container.grids[m_niters][0].dt_grid;
     }
     std::vector<float> get_dm_grid_final() const noexcept {
@@ -286,7 +280,7 @@ public:
                         const auto dt =
                             m_container.grids[0][chan].dt_grid[coord0.i_dt];
                         smearing_grid[(dm_idx * m_nchans) + chan] =
-                            static_cast<float>(dt);
+                            std::abs(static_cast<float>(dt));
                     }
                 }
                 return;
@@ -309,6 +303,165 @@ public:
         }
         return smearing_grid;
     }
+    /**
+     * @brief Per-channel input-sample shift needed to *place* a synthetic
+     * pulse so it reconstructs at a given DM/dt trial, i.e. the inverse of
+     * "where does this channel's data end up" — see `algorithms::
+     * add_frb_track`, which injects a unit impulse into channel c at
+     * `toffset + trace_dm(dm_idx)[c]` for every channel to make the FDMT
+     * transform peak at exactly `(dm_idx, toffset)`.
+     *
+     * Derivation: `offset_add`'s hot loop computes
+     * `out[k] = tail[k] + head[k - delay_shift]`, i.e. an impulse sitting at
+     * position p in the HEAD child's own buffer surfaces in the parent's
+     * output at position `p + delay_shift`. Turned around: for the parent's
+     * output to peak at a chosen target position T, the HEAD child's own
+     * data must be placed at `T - delay_shift`, while the TAIL child's data
+     * stays at `T` unchanged. Walking this rule recursively from the root
+     * (target = toffset) down to level 0 gives every leaf channel's
+     * required placement: descending into a tail subtree leaves the running
+     * target unchanged, descending into a head subtree subtracts that
+     * merge's `coord.delay`. Which child is "tail" vs "head" in this sense
+     * (not which is numerically lower/higher frequency) flips with the sign
+     * of that merge's own dt, exactly mirroring `make_plan`'s tail/head
+     * reference swap for negative dt. A copy/passthrough coordinate
+     * (unpaired odd sub-band, `i_coord_head == SIZE_MAX`) forwards its
+     * target unchanged. Level 0 applies one more magnitude-only shift of
+     * `|dt|` in the same "look backward" direction as a head shift (see
+     * `fdmt_init_subband`'s doc comment in fdmt.cpp), so the running target
+     * is reduced by `|dt|` once more at the leaf itself.
+     */
+    std::vector<IndexType> trace_dm(SizeType dm_idx) const {
+        std::vector<IndexType> shifts(m_nchans, 0);
+        if (m_niters == 0 || m_nchans == 0) {
+            return shifts;
+        }
+        const auto ndms = get_dmt_ndms();
+        if (dm_idx >= ndms) {
+            throw std::out_of_range("dm_idx " + std::to_string(dm_idx) +
+                                    " out of range [0, " + std::to_string(ndms) + ")");
+        }
+
+        auto trace = [&](auto& self, SizeType level, SizeType coord_idx,
+                         IndexType target) -> void {
+            if (level == 0) {
+                if (coord_idx < m_container.coordinates[0].size()) {
+                    const auto& coord0 = m_container.coordinates[0][coord_idx];
+                    const auto chan    = coord0.i_sub;
+                    if (chan < m_nchans &&
+                        coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
+                        const auto dt0 =
+                            m_container.grids[0][chan].dt_grid[coord0.i_dt];
+                        shifts[chan] =
+                            target - std::abs(static_cast<IndexType>(dt0));
+                    }
+                }
+                return;
+            }
+            if (level >= m_container.coordinates.size() ||
+                coord_idx >= m_container.coordinates[level].size()) {
+                return;
+            }
+            const auto& coord = m_container.coordinates[level][coord_idx];
+            if (coord.i_coord_head == SIZE_MAX) {
+                // Pure copy/passthrough of an unpaired odd sub-band: target
+                // is forwarded unchanged.
+                if (coord.i_coord_tail != SIZE_MAX) {
+                    self(self, level - 1, coord.i_coord_tail, target);
+                }
+                return;
+            }
+            const auto dt_val =
+                m_container.grids[level][coord.i_sub].dt_grid[coord.i_dt];
+            const auto delay = static_cast<IndexType>(coord.delay);
+            if (coord.i_coord_tail != SIZE_MAX) {
+                self(self, level - 1, coord.i_coord_tail,
+                    target - ((dt_val >= 0) ? IndexType{0} : delay));
+            }
+            self(self, level - 1, coord.i_coord_head,
+                target - ((dt_val >= 0) ? delay : IndexType{0}));
+        };
+        trace(trace, m_niters, dm_idx, IndexType{0});
+        return shifts;
+    }
+    /**
+     * @brief variance of a boxcar matched filter of
+     * width @p w convolved with one channel's own intra-channel smearing
+     * kernel of width `smearing_row[c] + 1` samples, summed over channels.
+     *
+     * When there is no smearing at all (every `smearing_row[c] == 0`), each
+     * term collapses to `w` exactly, so this is a strict superset of the
+     * `use_box_smearing = false` fast path (`nchans * w`) rather than a
+     * separate special case of it.
+     */
+    float variance_from_smearing_row(const float* smearing_row, float w) const noexcept {
+        float total_var = 0.0F;
+        for (SizeType c = 0; c < m_nchans; ++c) {
+            const float smearing_len = smearing_row[c] + 1.0F;
+            const float H            = std::max(smearing_len, w);
+            const float L            = std::min(smearing_len, w);
+            total_var += (H - L + 1.0F) * (L * L) +
+                        ((2.0F * L - 1.0F) * L * (L - 1.0F)) / 3.0F;
+        }
+        return total_var;
+    }
+    float get_effective_variance(SizeType dm_idx,
+                                 SizeType boxcar_width,
+                                 bool use_box_smearing) const {
+        if (boxcar_width == 0) {
+            throw std::invalid_argument("boxcar_width must be greater than 0");
+        }
+        const auto ndms = get_dmt_ndms();
+        if (dm_idx >= ndms) {
+            throw std::out_of_range("dm_idx " + std::to_string(dm_idx) +
+                                    " out of range [0, " + std::to_string(ndms) + ")");
+        }
+        const float w = static_cast<float>(boxcar_width);
+        if (!use_box_smearing) {
+            return static_cast<float>(m_nchans) * w;
+        }
+        const auto smearing_grid = get_smearing_grid_final();
+        return variance_from_smearing_row(&smearing_grid[dm_idx * m_nchans], w);
+    }
+    float get_effective_sigma(SizeType dm_idx,
+                              SizeType boxcar_width,
+                              bool use_box_smearing) const {
+        return std::sqrt(
+            get_effective_variance(dm_idx, boxcar_width, use_box_smearing));
+    }
+    std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width,
+                                bool use_box_smearing) const {
+        if (boxcar_width == 0) {
+            throw std::invalid_argument("boxcar_width must be greater than 0");
+        }
+        const auto ndms = get_dmt_ndms();
+        std::vector<float> grid(ndms, 0.0F);
+        const float w = static_cast<float>(boxcar_width);
+        if (!use_box_smearing) {
+            std::fill(grid.begin(), grid.end(), static_cast<float>(m_nchans) * w);
+            return grid;
+        }
+        // Compute the O(ndms * nchans) smearing-grid tree trace exactly
+        // once and reuse it for every DM index below. Calling
+        // get_effective_variance() in this loop instead would recompute
+        // get_smearing_grid_final() from scratch on every iteration, making
+        // this O(ndms^2 * nchans) for no reason.
+        const auto smearing_grid = get_smearing_grid_final();
+        for (SizeType i = 0; i < ndms; ++i) {
+            grid[i] = variance_from_smearing_row(&smearing_grid[i * m_nchans], w);
+        }
+        return grid;
+    }
+    std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width,
+                             bool use_box_smearing) const {
+        auto grid = get_effective_variance_grid(boxcar_width, use_box_smearing);
+        for (auto& v : grid) {
+            v = std::sqrt(v);
+        }
+        return grid;
+    }
     SizeType get_dmt_ndms() const noexcept {
         return m_container.state_shape[m_niters].ncoords;
     }
@@ -322,10 +475,15 @@ public:
         return m_container.get_buffer_size();
     }
     SizeType get_history_size() const noexcept {
-        return m_nchans * m_container.state_shape[m_niters].dt_max;
+        const auto abs_dt_max = static_cast<SizeType>(
+            std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
+        return m_nchans * abs_dt_max;
     }
     SizeType get_history_init_size() const noexcept {
         return m_nchans * m_container.state_shape[0].dt_max;
+    }
+    SizeType get_tree_history_size() const noexcept {
+        return m_container.get_tree_history_size();
     }
 
     void print_summary(std::string_view prefix) const {
@@ -378,11 +536,11 @@ private:
     SizeType m_nchans;
     SizeType m_nsamps;
     float m_tsamp;
-    SizeType m_dt_max;
-    SizeType m_dt_min;
+    IndexType m_dt_max;
+    IndexType m_dt_min;
     SizeType m_dt_step;
     bool m_is_custom_grid{false};
-    std::vector<SizeType> m_dt_grid_target{};
+    std::vector<IndexType> m_dt_grid_target{};
     std::string_view m_mode;
 
     float m_df{};
@@ -411,14 +569,21 @@ private:
             if (m_dt_grid_target.empty()) {
                 throw std::invalid_argument("FDMT: dt_grid must not be empty");
             }
-            if (m_dt_max == 0) {
+            bool all_zero = true;
+            for (const auto dt : m_dt_grid_target) {
+                if (dt != 0) {
+                    all_zero = false;
+                    break;
+                }
+            }
+            if (all_zero) {
                 throw std::invalid_argument(
-                    "FDMT: dt_max in dt_grid must be greater than 0");
+                    "FDMT: dt_grid must contain at least one non-zero delay trial");
             }
         } else {
-            if (m_dt_max == 0) {
-                throw std::invalid_argument(std::format(
-                    "FDMT: dt_max={} must be greater than 0", m_dt_max));
+            if (m_dt_min == 0 && m_dt_max == 0) {
+                throw std::invalid_argument(
+                    "FDMT: dt_max and dt_min cannot both be 0");
             }
             if (m_dt_min >= m_dt_max) {
                 throw std::invalid_argument(
@@ -429,7 +594,7 @@ private:
                 throw std::invalid_argument(std::format(
                     "FDMT: dt_step={} must be greater than 0", m_dt_step));
             }
-            if (m_dt_step > (m_dt_max - m_dt_min)) {
+            if (m_dt_step > static_cast<SizeType>(m_dt_max - m_dt_min)) {
                 throw std::invalid_argument(
                     std::format("FDMT: dt_step={} cannot be greater than "
                                 "(dt_max - dt_min)={}",
@@ -442,9 +607,9 @@ private:
         }
     }
 
-    std::vector<std::vector<std::vector<SizeType>>>
+    std::vector<std::vector<std::vector<IndexType>>>
     determine_active_grids(const std::vector<SizeType>& nchans_level) const {
-        std::vector<std::vector<std::vector<SizeType>>> active_dts(m_niters +
+        std::vector<std::vector<std::vector<IndexType>>> active_dts(m_niters +
                                                                    1);
         for (SizeType l = 0; l <= m_niters; ++l) {
             active_dts[l].resize(nchans_level[l]);
@@ -454,7 +619,8 @@ private:
         if (m_is_custom_grid) {
             active_dts[m_niters][0] = m_dt_grid_target;
         } else {
-            for (SizeType dt = m_dt_min; dt <= m_dt_max; dt += m_dt_step) {
+            for (IndexType dt = m_dt_min; dt <= m_dt_max;
+                 dt += static_cast<IndexType>(m_dt_step)) {
                 active_dts[m_niters][0].push_back(dt);
             }
         }
@@ -496,7 +662,7 @@ private:
                     if (i_sub == nchans_cur - 1 && do_copy) {
                         active_dts[l - 1][2 * i_sub].push_back(dt);
                     } else {
-                        const auto dt_tail = static_cast<SizeType>(
+                        const auto dt_tail = static_cast<IndexType>(
                             std::nearbyint(static_cast<float>(dt) * tail_phi));
                         const auto dt_head = dt - dt_tail;
                         active_dts[l - 1][2 * i_sub].push_back(dt_tail);
@@ -548,6 +714,20 @@ private:
             make_plan(i_iter, active_dts[i_iter]);
         }
 
+        // Step 4: Assign tree history offsets for valid-mode cross-block streaming
+        SizeType total_tree_hist = 0;
+        for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
+            for (auto& coord : m_container.coordinates_sum[i_iter]) {
+                if (coord.delay > 0) {
+                    coord.hist_offset = total_tree_hist;
+                    total_tree_hist += coord.delay;
+                } else {
+                    coord.hist_offset = 0;
+                }
+            }
+        }
+        m_container.tree_history_size = total_tree_hist;
+
         m_buffer_size = m_container.get_buffer_size();
         spdlog::debug("FDMT: configured fdmt plan");
         spdlog::debug(
@@ -556,7 +736,7 @@ private:
     }
 
     void
-    make_plan_iter0(const std::vector<std::vector<SizeType>>& active_level0) {
+    make_plan_iter0(const std::vector<std::vector<IndexType>>& active_level0) {
         const SizeType i_iter = 0;
         SizeType buf_offset   = 0;
         SizeType ncoords      = 0;
@@ -569,17 +749,19 @@ private:
 
             // Level 0 grid: dense from min_dt_chan to max_dt_chan required by
             // top-down pruning
-            SizeType min_dt_chan = 0;
-            SizeType max_dt_chan = 0;
+            IndexType min_dt_chan = 0;
+            IndexType max_dt_chan = 0;
             if (!active_level0[i_sub].empty()) {
                 min_dt_chan = active_level0[i_sub].front();
                 max_dt_chan = active_level0[i_sub].back(); // already sorted
             }
-            max_dt_overall = std::max(max_dt_overall, max_dt_chan);
+            max_dt_overall = std::max(
+                {max_dt_overall, static_cast<SizeType>(std::abs(min_dt_chan)),
+                 static_cast<SizeType>(std::abs(max_dt_chan))});
 
-            std::vector<SizeType> dt_sub;
+            std::vector<IndexType> dt_sub;
             dt_sub.reserve(max_dt_chan - min_dt_chan + 1);
-            for (SizeType dt = min_dt_chan; dt <= max_dt_chan; ++dt) {
+            for (IndexType dt = min_dt_chan; dt <= max_dt_chan; ++dt) {
                 dt_sub.push_back(dt);
             }
             const auto ndt_sub = dt_sub.size();
@@ -625,7 +807,7 @@ private:
     }
 
     void make_plan(SizeType i_iter,
-                   const std::vector<std::vector<SizeType>>& active_level) {
+                   const std::vector<std::vector<IndexType>>& active_level) {
         if (i_iter < 1 || i_iter > m_niters) {
             throw std::invalid_argument("Invalid iteration number");
         }
@@ -644,18 +826,24 @@ private:
         const float df_top        = m_container.df_top[i_iter];
         const float df_bot        = m_container.df_bot[i_iter];
 
-        // Determine max dt trial at this iteration
+        // Determine max absolute dt trial at this iteration
         SizeType dt_max_iter = 0;
         for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
             if (!active_level[i_sub].empty()) {
-                dt_max_iter = std::max(dt_max_iter, active_level[i_sub].back());
+                const auto abs_front = static_cast<SizeType>(
+                    std::abs(active_level[i_sub].front()));
+                const auto abs_back = static_cast<SizeType>(
+                    std::abs(active_level[i_sub].back()));
+                dt_max_iter = std::max({dt_max_iter, abs_front, abs_back});
             }
         }
 
-        if (dt_max_iter > m_dt_max) {
+        const auto abs_dt_max = static_cast<SizeType>(
+            std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
+        if (dt_max_iter > abs_dt_max) {
             throw std::runtime_error(
-                std::format("dt_max_iter={} is greater than dt_max={}",
-                            dt_max_iter, m_dt_max));
+                std::format("dt_max_iter={} is greater than abs_dt_max={}",
+                            dt_max_iter, abs_dt_max));
         }
         if (m_mode == "valid" && dt_max_iter > m_nsamps) {
             throw std::runtime_error(std::format(
@@ -693,7 +881,7 @@ private:
             const float tail_phi = utils::cff(f_start, f_mid, f_start, f_end);
 
             for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
-                const SizeType dt = dt_sub[i_dt];
+                const IndexType dt = dt_sub[i_dt];
                 if (i_sub == nchans_cur - 1 && do_copy) {
                     const auto i_dt_tail =
                         utils::find_nearest_sorted_idx(grids_tail.dt_grid, dt);
@@ -716,20 +904,27 @@ private:
                     coords_copy_cur.emplace_back(coord_cur);
                 } else {
                     const auto& grids_head = grids_prev[(2 * i_sub) + 1];
-                    const auto dt_tail     = static_cast<SizeType>(
+                    const auto dt_tail     = static_cast<IndexType>(
                         std::nearbyint(static_cast<float>(dt) * tail_phi));
-                    if (dt_tail > dt) {
+                    const auto dt_head = dt - dt_tail;
+
+                    // Sanity check on the fractional-delay split itself,
+                    // independent of sign handling below: dt_tail must never
+                    // overshoot dt in magnitude or point the opposite way
+                    // (tail_phi is a ratio in [0, 1], so dt_tail should lie
+                    // between 0 and dt, inclusive, on the same side of zero
+                    // as dt). This is the signed generalization of the
+                    // dt_tail > dt guard that existed before negative-DM
+                    // support; it only runs at plan-build time, never in the
+                    // per-sample hot path.
+                    if ((dt >= 0 && (dt_tail < 0 || dt_tail > dt)) ||
+                        (dt < 0 && (dt_tail > 0 || dt_tail < dt))) {
                         throw std::runtime_error(std::format(
-                            "Invalid dt_tail (> dt) values: dt_tail={}, dt={}",
+                            "Invalid dt_tail (sign/magnitude mismatch with "
+                            "dt): dt_tail={}, dt={}",
                             dt_tail, dt));
                     }
-                    if (dt_tail >= nsamps_prev) {
-                        throw std::runtime_error(std::format(
-                            "DM delay is greater than input size (dt_tail "
-                            ">= nsamps_prev): dt_tail={}, nsamps_prev={}",
-                            dt_tail, nsamps_prev));
-                    }
-                    const auto dt_head   = dt - dt_tail;
+
                     const auto i_dt_tail = utils::find_nearest_sorted_idx(
                         grids_tail.dt_grid, dt_tail);
                     const auto i_dt_head = utils::find_nearest_sorted_idx(
@@ -738,6 +933,70 @@ private:
                         grids_tail.coord_offset + i_dt_tail;
                     const auto i_coord_head =
                         grids_head.coord_offset + i_dt_head;
+
+                    // Sign-aware reference/shift assignment. `offset_add`
+                    // (the hot loop) only ever computes
+                    // out[k] = tail[k] + head[k - delay_shift] with an
+                    // unsigned delay_shift; it has no notion of DM sign at
+                    // all. Both branches below feed it exactly that shape —
+                    // the sign of dt only changes *which* child subband
+                    // plays the unshifted "tail" (reference) role in that
+                    // formula, decided once here at plan-build time, not
+                    // per sample:
+                    //
+                    //  - dt >= 0 (standard): the low-frequency child is the
+                    //    reference (delay_shift = 0 relative to it); the
+                    //    high-frequency child is shifted forward in time by
+                    //    dt_tail samples, since a positive DM means the
+                    //    high-frequency signal arrives *after* the low
+                    //    frequency signal by that amount.
+                    //  - dt < 0: the roles swap. The high-frequency child
+                    //    becomes the reference, and the low-frequency child
+                    //    (which now arrives *earlier*) is instead shifted
+                    //    forward by |dt_head| samples so that it lines up
+                    //    causally with the high-frequency reference.
+                    //
+                    // This is deliberately different from — but equivalent
+                    // in intent to — the shift_input/shift_output axis-offset
+                    // sketched (never implemented) in Zackay & Ofek's
+                    // reference code: instead of reindexing the whole dt-axis
+                    // by a fixed +delta_t offset so every trial has a
+                    // non-negative array index, we pick whichever child is
+                    // already causally "later" to be the shifted operand, so
+                    // delay_shift here is always >= 0 without needing any
+                    // axis reindexing or extra buffer space.
+                    SizeType delay_shift = 0;
+                    SizeType tail_offset = 0;
+                    SizeType tail_n      = 0;
+                    SizeType head_offset = 0;
+                    SizeType head_n      = 0;
+
+                    if (dt >= 0) {
+                        delay_shift = static_cast<SizeType>(dt_tail);
+                        tail_offset = coords_prev[i_coord_tail].buf_offset;
+                        tail_n      = coords_prev[i_coord_tail].nsamps;
+                        head_offset = coords_prev[i_coord_head].buf_offset;
+                        head_n      = coords_prev[i_coord_head].nsamps;
+                    } else {
+                        // Negative DM: lower freq (tail) arrived earlier than
+                        // higher freq (head). Reference is head (top edge), so
+                        // tail is shifted by |dt_head| relative to head!
+                        delay_shift = static_cast<SizeType>(std::abs(dt_head));
+                        tail_offset = coords_prev[i_coord_head]
+                                          .buf_offset; // reference (head, unshifted)
+                        tail_n      = coords_prev[i_coord_head].nsamps;
+                        head_offset = coords_prev[i_coord_tail]
+                                          .buf_offset; // shifted by |dt_head|
+                        head_n      = coords_prev[i_coord_tail].nsamps;
+                    }
+
+                    if (delay_shift >= nsamps_prev) {
+                        throw std::runtime_error(std::format(
+                            "DM delay is greater than input size: "
+                            "delay_shift={}, nsamps_prev={}",
+                            delay_shift, nsamps_prev));
+                    }
+
                     const auto coord_cur = FDMTCoord{
                         .i_sub           = i_sub,
                         .i_dt            = i_dt,
@@ -745,11 +1004,11 @@ private:
                         .buf_offset      = buf_offset,
                         .i_coord_tail    = i_coord_tail,
                         .i_coord_head    = i_coord_head,
-                        .delay           = dt_tail,
-                        .tail_buf_offset = coords_prev[i_coord_tail].buf_offset,
-                        .tail_nsamps     = coords_prev[i_coord_tail].nsamps,
-                        .head_buf_offset = coords_prev[i_coord_head].buf_offset,
-                        .head_nsamps     = coords_prev[i_coord_head].nsamps};
+                        .delay           = delay_shift,
+                        .tail_buf_offset = tail_offset,
+                        .tail_nsamps     = tail_n,
+                        .head_buf_offset = head_offset,
+                        .head_nsamps     = head_n};
                     coords_cur.emplace_back(coord_cur);
                     coords_sum_cur.emplace_back(coord_cur);
                 }
@@ -1216,8 +1475,8 @@ FDMTPlan::FDMTPlan(float f_min,
                    SizeType nchans,
                    SizeType nsamps,
                    float tsamp,
-                   SizeType dt_max,
-                   SizeType dt_min,
+                   IndexType dt_max,
+                   IndexType dt_min,
                    SizeType dt_step,
                    std::string_view mode,
                    bool verbose)
@@ -1236,7 +1495,7 @@ FDMTPlan::FDMTPlan(float f_min,
                    SizeType nchans,
                    SizeType nsamps,
                    float tsamp,
-                   const std::vector<SizeType>& dt_grid,
+                   const std::vector<IndexType>& dt_grid,
                    std::string_view mode,
                    bool verbose)
     : m_impl(std::make_unique<Impl>(
@@ -1270,8 +1529,8 @@ float FDMTPlan::get_f_max() const noexcept { return m_impl->get_f_max(); }
 SizeType FDMTPlan::get_nchans() const noexcept { return m_impl->get_nchans(); }
 SizeType FDMTPlan::get_nsamps() const noexcept { return m_impl->get_nsamps(); }
 float FDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
-SizeType FDMTPlan::get_dt_max() const noexcept { return m_impl->get_dt_max(); }
-SizeType FDMTPlan::get_dt_min() const noexcept { return m_impl->get_dt_min(); }
+IndexType FDMTPlan::get_dt_max() const noexcept { return m_impl->get_dt_max(); }
+IndexType FDMTPlan::get_dt_min() const noexcept { return m_impl->get_dt_min(); }
 SizeType FDMTPlan::get_dt_step() const noexcept {
     return m_impl->get_dt_step();
 }
@@ -1289,7 +1548,7 @@ FDMTComplexity FDMTPlan::get_complexity() const noexcept {
 void FDMTPlan::print_complexity_summary() const {
     m_impl->print_complexity_summary();
 }
-std::vector<SizeType> FDMTPlan::get_dt_grid_final() const noexcept {
+std::vector<IndexType> FDMTPlan::get_dt_grid_final() const noexcept {
     return m_impl->get_dt_grid_final();
 }
 std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
@@ -1297,6 +1556,29 @@ std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
 }
 std::vector<float> FDMTPlan::get_smearing_grid_final() const noexcept {
     return m_impl->get_smearing_grid_final();
+}
+std::vector<IndexType> FDMTPlan::trace_dm(SizeType dm_idx) const {
+    return m_impl->trace_dm(dm_idx);
+}
+float FDMTPlan::get_effective_variance(SizeType dm_idx,
+                                       SizeType boxcar_width,
+                                       bool use_box_smearing) const {
+    return m_impl->get_effective_variance(dm_idx, boxcar_width, use_box_smearing);
+}
+float FDMTPlan::get_effective_sigma(SizeType dm_idx,
+                                    SizeType boxcar_width,
+                                    bool use_box_smearing) const {
+    return m_impl->get_effective_sigma(dm_idx, boxcar_width, use_box_smearing);
+}
+std::vector<float>
+FDMTPlan::get_effective_variance_grid(SizeType boxcar_width,
+                                      bool use_box_smearing) const {
+    return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing);
+}
+std::vector<float>
+FDMTPlan::get_effective_sigma_grid(SizeType boxcar_width,
+                                   bool use_box_smearing) const {
+    return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing);
 }
 SizeType FDMTPlan::get_dmt_ndms() const noexcept {
     return m_impl->get_dmt_ndms();
@@ -1315,6 +1597,9 @@ SizeType FDMTPlan::get_history_size() const noexcept {
 }
 SizeType FDMTPlan::get_history_init_size() const noexcept {
     return m_impl->get_history_init_size();
+}
+SizeType FDMTPlan::get_tree_history_size() const noexcept {
+    return m_impl->get_tree_history_size();
 }
 void FDMTPlan::print_summary(std::string_view prefix) const {
     m_impl->print_summary(prefix);

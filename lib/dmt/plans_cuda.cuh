@@ -41,6 +41,7 @@ struct FDMTCoordDPtrs {
     const int* tail_nsamps;
     const int* head_buf_offset;
     const int* head_nsamps;
+    const int* hist_offset; // valid-mode cross-block tree history slot (coordinates_sum only)
 
     __host__ __device__ void update_offsets(int offset_value) {
         nsamps += offset_value;
@@ -50,6 +51,7 @@ struct FDMTCoordDPtrs {
         tail_nsamps += offset_value;
         head_buf_offset += offset_value;
         head_nsamps += offset_value;
+        hist_offset += offset_value;
     }
 };
 
@@ -61,6 +63,7 @@ struct FDMTCoordD {
     DeviceVector<int> tail_nsamps;
     DeviceVector<int> head_buf_offset;
     DeviceVector<int> head_nsamps;
+    DeviceVector<int> hist_offset;
 
     __host__ FDMTCoordDPtrs get_raw_ptrs() const {
         return {
@@ -70,7 +73,8 @@ struct FDMTCoordD {
             .tail_buf_offset = thrust::raw_pointer_cast(tail_buf_offset.data()),
             .tail_nsamps     = thrust::raw_pointer_cast(tail_nsamps.data()),
             .head_buf_offset = thrust::raw_pointer_cast(head_buf_offset.data()),
-            .head_nsamps     = thrust::raw_pointer_cast(head_nsamps.data())};
+            .head_nsamps     = thrust::raw_pointer_cast(head_nsamps.data()),
+            .hist_offset     = thrust::raw_pointer_cast(hist_offset.data())};
     }
 };
 
@@ -93,7 +97,7 @@ __host__ inline void
 transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
                      FDMTCoordD& device_coords) {
     std::vector<int> nsamps, buf_offset, i_coord_tail, i_coord_head, offset,
-        tail_buf_offset, tail_nsamps, head_buf_offset, head_nsamps;
+        tail_buf_offset, tail_nsamps, head_buf_offset, head_nsamps, hist_offset;
 
     // Calculate total size for efficient allocation
     size_t total_size = 0;
@@ -111,6 +115,7 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
     tail_nsamps.reserve(total_size);
     head_buf_offset.reserve(total_size);
     head_nsamps.reserve(total_size);
+    hist_offset.reserve(total_size);
 
     // Fill vectors
     for (const auto& host_coords_iter : host_coords) {
@@ -124,6 +129,7 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
             tail_nsamps.emplace_back(coord.tail_nsamps);
             head_buf_offset.emplace_back(coord.head_buf_offset);
             head_nsamps.emplace_back(coord.head_nsamps);
+            hist_offset.emplace_back(static_cast<int>(coord.hist_offset));
         }
     }
 
@@ -135,6 +141,7 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
     device_coords.tail_nsamps     = tail_nsamps;
     device_coords.head_buf_offset = head_buf_offset;
     device_coords.head_nsamps     = head_nsamps;
+    device_coords.hist_offset     = hist_offset;
 }
 } // namespace detail
 

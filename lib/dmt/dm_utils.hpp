@@ -64,6 +64,8 @@ float get_dmconv(float f_min, float f_max, float tsamp);
  */
 SizeType find_nearest_sorted_idx(std::span<const SizeType> arr_sorted,
                                  SizeType val);
+SizeType find_nearest_sorted_idx(std::span<const IndexType> arr_sorted,
+                                 IndexType val);
 
 /**
  * @brief Generate a delay table for brute-force dedispersion.

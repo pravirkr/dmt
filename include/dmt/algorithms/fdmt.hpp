@@ -25,7 +25,7 @@ struct FDMTSubbandView {
     SizeType nsamps;             ///< Number of time samples per delay trial
     float f_start;               ///< Start frequency of this sub-band (MHz)
     float f_end;                 ///< End frequency of this sub-band (MHz)
-    std::span<const SizeType> dt_grid; ///< Delay trials in samples
+    std::span<const IndexType> dt_grid; ///< Delay trials in samples
 };
 
 /**
@@ -51,7 +51,14 @@ public:
      * using boxcar summation (default: true).
      * @param mode Mode of the FDMT transform. Available modes are:
      * - "full": Full FDMT transform of every sample in the input waterfall.
-     * - "valid": Valid FDMT transform for samples upto dt_max.
+     * - "valid": Valid FDMT transform for samples upto dt_max. Every merge
+     *   node that needs one keeps a small cross-block history slot (see
+     *   FDMTCoord::hist_offset), so repeated calls to execute() (or the
+     *   reset()/advance()/finalize() stepper) on consecutive, non-overlapping
+     *   blocks reproduce monolithic full-mode execution bit-exactly for
+     *   every trial, not just dt=0 -- an overlap-save scheme applied inside
+     *   the tree rather than to the raw input. Call reset_history() to
+     *   restart streaming from a cold state (e.g. for a new observation).
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "full").
      * @param verbose Enable verbose output.
@@ -62,8 +69,8 @@ public:
             SizeType nchans,
             SizeType nsamps,
             float tsamp,
-            SizeType dt_max,
-            SizeType dt_min       = 0,
+            IndexType dt_max,
+            IndexType dt_min      = 0,
             SizeType dt_step      = 1,
             bool use_box_smearing = true,
             std::string_view mode = "full",
@@ -75,7 +82,7 @@ public:
             SizeType nchans,
             SizeType nsamps,
             float tsamp,
-            const std::vector<SizeType>& dt_grid,
+            const std::vector<IndexType>& dt_grid,
             bool use_box_smearing = true,
             std::string_view mode = "full",
             bool verbose          = false,
@@ -206,6 +213,37 @@ public:
      */
     void finalize();
 
+    /**
+     * @brief Theoretical noise variance for a given DM trial and boxcar width.
+     */
+    [[nodiscard]] float
+    get_effective_variance(SizeType dm_idx,
+                           SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Theoretical noise standard deviation for a given DM trial and boxcar width.
+     */
+    [[nodiscard]] float
+    get_effective_sigma(SizeType dm_idx,
+                        SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Theoretical noise variance grid across all DM trials for a boxcar width.
+     */
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width.
+     */
+    [[nodiscard]] std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Resets the internal history buffer for valid-mode streaming across FDMT blocks.
+     */
+    void reset_history() noexcept;
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -219,8 +257,8 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType nchans,
              SizeType nsamps,
              float tsamp,
-             SizeType dt_max,
-             SizeType dt_min       = 0,
+             IndexType dt_max,
+             IndexType dt_min      = 0,
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
              std::string_view mode = "full",
@@ -234,7 +272,7 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType nchans,
              SizeType nsamps,
              float tsamp,
-             const std::vector<SizeType>& dt_grid,
+             const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
@@ -253,6 +291,39 @@ compute_fdmt(std::span<const float> waterfall,
              bool verbose          = false,
              int nthreads          = 1);
 
+/**
+ * @brief Injects a synthetic dispersed pulse ("FRB track") into a waterfall
+ * buffer so that it lands, after running the FDMT transform, exactly on a
+ * given final DM/dt trial at a chosen time sample.
+ *
+ * Built on plans::FDMTPlan::trace_dm(), which decompiles trial @p dm_idx's
+ * coordinate lineage into a per-channel sample shift. Adds @p amplitude
+ * (does not overwrite) to @p width consecutive samples per channel, so this
+ * can be used to inject a test pulse into real or simulated noise.
+ *
+ * @param waterfall Waterfall buffer to inject into, shape (nchans, nsamps)
+ *                  matching plan.get_nchans()/get_nsamps(); modified in
+ *                  place.
+ * @param plan The FDMT plan whose trial grid and channel layout to target.
+ * @param dm_idx Index into the plan's final DM/dt trial grid.
+ * @param amplitude Amplitude added per channel, per injected sample.
+ * @param toffset Reference-channel time sample at which the pulse should
+ *                peak after running FDMT (default: 0).
+ * @param width Number of consecutive samples per channel to inject, for a
+ *              simple top-hat pulse shape instead of a single impulse
+ *              (default: 1).
+ * @throws std::invalid_argument if width == 0 or waterfall has the wrong
+ *         size.
+ * @throws std::out_of_range if dm_idx is out of range, or if the injected
+ *         samples would fall outside [0, nsamps) for any channel.
+ */
+void add_frb_track(std::span<float> waterfall,
+                   const plans::FDMTPlan& plan,
+                   SizeType dm_idx,
+                   float amplitude = 1.0F,
+                   IndexType toffset = 0,
+                   SizeType width = 1);
+
 #ifdef DMT_ENABLE_CUDA
 /**
  * @brief Zero-copy read-only view of a sub-band's intermediate DM-time
@@ -265,7 +336,7 @@ struct FDMTSubbandViewCUDA {
     SizeType nsamps; ///< Number of time samples per delay trial
     float f_start;   ///< Start frequency of this sub-band (MHz)
     float f_end;     ///< End frequency of this sub-band (MHz)
-    std::span<const SizeType> dt_grid; ///< Delay trials in samples
+    std::span<const IndexType> dt_grid; ///< Delay trials in samples
 };
 
 using FDMTCUDASubbandView = FDMTSubbandViewCUDA;
@@ -295,7 +366,18 @@ public:
      * using boxcar summation (default: true).
      * @param mode Mode of the FDMT transform. Available modes are:
      * - "full": Full FDMT transform of every sample in the input waterfall.
-     * - "valid": Valid FDMT transform for samples upto dt_max.
+     * - "valid": Valid FDMT transform for samples upto dt_max. Every merge
+     *   node that needs one keeps a small cross-block history slot (see
+     *   FDMTCoord::hist_offset), so repeated calls to execute() (or the
+     *   reset()/advance()/finalize() stepper) on consecutive, non-overlapping
+     *   blocks reproduce monolithic full-mode execution bit-exactly for
+     *   every trial, not just dt=0 -- an overlap-save scheme applied inside
+     *   the tree rather than to the raw input. Mirrors FDMTCPU's mechanism;
+     *   see kernel_execute_iter's doc comment in fdmt_cuda.cu for the one
+     *   CUDA-specific difference (a ping-ponged pair of history buffers,
+     *   needed because samples within a coordinate are processed in
+     *   parallel here, unlike the CPU's one-thread-per-coordinate loop).
+     *   Call reset_history() to restart streaming from a cold state.
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "full").
      * @param verbose Enable verbose output.
@@ -306,8 +388,8 @@ public:
              SizeType nchans,
              SizeType nsamps,
              float tsamp,
-             SizeType dt_max,
-             SizeType dt_min       = 0,
+             IndexType dt_max,
+             IndexType dt_min      = 0,
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
              std::string_view mode = "full",
@@ -319,7 +401,7 @@ public:
              SizeType nchans,
              SizeType nsamps,
              float tsamp,
-             const std::vector<SizeType>& dt_grid,
+             const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
@@ -508,6 +590,40 @@ public:
      */
     void finalize(cudaStream_t stream = nullptr);
 
+    /**
+     * @brief Theoretical noise variance for a given DM trial and boxcar
+     * width. Identical formula to FDMTCPU::get_effective_variance (pure
+     * plan-side math, independent of which backend executed the transform).
+     */
+    [[nodiscard]] float
+    get_effective_variance(SizeType dm_idx,
+                           SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Theoretical noise standard deviation for a given DM trial and boxcar width.
+     */
+    [[nodiscard]] float
+    get_effective_sigma(SizeType dm_idx,
+                        SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Theoretical noise variance grid across all DM trials for a boxcar width.
+     */
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width.
+     */
+    [[nodiscard]] std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width = 1) const;
+
+    /**
+     * @brief Resets the internal history buffers for valid-mode streaming
+     * across FDMT blocks. Mirrors FDMTCPU::reset_history().
+     */
+    void reset_history() noexcept;
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -520,8 +636,8 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      SizeType nchans,
                                      SizeType nsamps,
                                      float tsamp,
-                                     SizeType dt_max,
-                                     SizeType dt_min       = 0,
+                                     IndexType dt_max,
+                                     IndexType dt_min       = 0,
                                      SizeType dt_step      = 1,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",
@@ -534,7 +650,7 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      SizeType nchans,
                                      SizeType nsamps,
                                      float tsamp,
-                                     const std::vector<SizeType>& dt_grid,
+                                     const std::vector<IndexType>& dt_grid,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",
                                      bool verbose          = false,

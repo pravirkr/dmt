@@ -45,7 +45,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                          ncoords_sum, ncoords_copy, nsamps, nelements, dt_max);
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
                          i_coord_tail, i_coord_head, delay, tail_buf_offset,
-                         tail_nsamps, head_buf_offset, head_nsamps);
+                         tail_nsamps, head_buf_offset, head_nsamps, hist_offset);
     py::class_<FDMTComplexity>(mod, "FDMTComplexity")
         .def_readonly("n_dt", &FDMTComplexity::n_dt)
         .def_readonly("n_chans", &FDMTComplexity::n_chans)
@@ -78,7 +78,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_readonly("f_start", &FDMTSubbandView::f_start)
         .def_readonly("f_end", &FDMTSubbandView::f_end)
         .def_property_readonly("dt_grid", [](const FDMTSubbandView& v) {
-            return std::vector<SizeType>(v.dt_grid.begin(), v.dt_grid.end());
+            return std::vector<IndexType>(v.dt_grid.begin(), v.dt_grid.end());
         });
     py::class_<FDMTPlanContainer>(mod, "FDMTPlanContainer")
         .def_readonly("df_top", &FDMTPlanContainer::df_top)
@@ -110,8 +110,8 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("memory_usage",
                                &FDMTPlanContainer::get_memory_usage);
     py::class_<FDMTPlan>(mod, "FDMTPlan")
-        .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType, std::string_view, bool>(),
+        .def(py::init<float, float, SizeType, SizeType, float, IndexType,
+                      IndexType, SizeType, std::string_view, bool>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "full",
              "verbose"_a = false)
@@ -163,6 +163,34 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                                    return as_pyarray(
                                        plan.get_smearing_grid_final());
                                })
+        .def(
+            "trace_dm",
+            [](const FDMTPlan& plan, SizeType dm_idx) {
+                return as_pyarray(plan.trace_dm(dm_idx));
+            },
+            py::arg("dm_idx"),
+            R"doc(
+            Per-channel absolute time shift (in samples) for a given DM/dt
+            trial's coordinate lineage, relative to the tree's unshifted
+            reference channel. Used by add_frb_track() to inject a synthetic
+            pulse that lands exactly on trial dm_idx.
+            )doc")
+        .def("get_effective_variance", &FDMTPlan::get_effective_variance,
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1,
+             py::arg("use_box_smearing") = true)
+        .def("get_effective_sigma", &FDMTPlan::get_effective_sigma,
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1,
+             py::arg("use_box_smearing") = true)
+        .def("get_effective_variance_grid",
+             [](const FDMTPlan& plan, SizeType boxcar_width, bool use_box_smearing) {
+                 return as_pyarray(plan.get_effective_variance_grid(boxcar_width, use_box_smearing));
+             },
+             py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+        .def("get_effective_sigma_grid",
+             [](const FDMTPlan& plan, SizeType boxcar_width, bool use_box_smearing) {
+                 return as_pyarray(plan.get_effective_sigma_grid(boxcar_width, use_box_smearing));
+             },
+             py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
         .def_property_readonly("complexity", &FDMTPlan::get_complexity)
         .def_property_readonly("dmt_ndms", &FDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &FDMTPlan::get_dmt_nsamps)
@@ -171,6 +199,8 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("history_size", &FDMTPlan::get_history_size)
         .def_property_readonly("history_init_size",
                                &FDMTPlan::get_history_init_size)
+        .def_property_readonly("tree_history_size",
+                               &FDMTPlan::get_tree_history_size)
         .def(
             "print_summary",
             [](FDMTPlan& plan, std::string_view prefix) {
@@ -230,8 +260,8 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
 
     py::class_<FDMTCPU>(mod, "FDMTCPU", py::dynamic_attr(),
                         "FDMT CPU Implementation Wrapper")
-        .def(py::init<float, float, SizeType, SizeType, float, SizeType,
-                      SizeType, SizeType, bool, std::string_view, bool, int>(),
+        .def(py::init<float, float, SizeType, SizeType, float, IndexType,
+                      IndexType, SizeType, bool, std::string_view, bool, int>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
              "use_box_smearing"_a = true, "mode"_a = "full",
@@ -280,6 +310,20 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              [](FDMTCPU& fdmt) {
                  return as_pyarray(fdmt.get_plan().get_dm_grid_final());
              })
+        .def("get_effective_variance", &FDMTCPU::get_effective_variance,
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1)
+        .def("get_effective_sigma", &FDMTCPU::get_effective_sigma,
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1)
+        .def("get_effective_variance_grid",
+             [](const FDMTCPU& fdmt, SizeType boxcar_width) {
+                 return as_pyarray(fdmt.get_effective_variance_grid(boxcar_width));
+             },
+             py::arg("boxcar_width") = 1)
+        .def("get_effective_sigma_grid",
+             [](const FDMTCPU& fdmt, SizeType boxcar_width) {
+                 return as_pyarray(fdmt.get_effective_sigma_grid(boxcar_width));
+             },
+             py::arg("boxcar_width") = 1)
         // execute take 2d array as input, and return 2d array as output
         .def(
             "execute",
@@ -400,13 +444,15 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("total_levels", &FDMTCPU::total_levels)
         .def_property_readonly("remaining_levels", &FDMTCPU::remaining_levels)
         .def_property_readonly("num_subbands", &FDMTCPU::num_subbands)
-        .def_property_readonly("is_finished", &FDMTCPU::is_finished);
+        .def_property_readonly("is_finished", &FDMTCPU::is_finished)
+        .def("reset_history", &FDMTCPU::reset_history,
+             "Reset the internal history buffers for valid-mode streaming.");
 
     mod.def(
         "compute_fdmt",
         [](const py::array_t<float, py::array::c_style>& waterfall, float f_min,
            float f_max, SizeType nchans, SizeType nsamps, float tsamp,
-           SizeType dt_max, SizeType dt_min, SizeType dt_step,
+           IndexType dt_max, IndexType dt_min, SizeType dt_step,
            bool use_box_smearing, std::string_view mode, bool verbose,
            int nthreads) {
             auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
@@ -450,6 +496,39 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
         py::arg("use_box_smearing") = true, py::arg("mode") = "full",
         py::arg("verbose") = false, py::arg("nthreads") = 1);
+
+    mod.def(
+        "add_frb_track",
+        [](py::array_t<float, py::array::c_style>& waterfall,
+           const FDMTPlan& plan, SizeType dm_idx, float amplitude,
+           IndexType toffset, SizeType width) {
+            algorithms::add_frb_track(
+                std::span<float>(waterfall.mutable_data(), waterfall.size()),
+                plan, dm_idx, amplitude, toffset, width);
+        },
+        py::arg("waterfall"), py::arg("plan"), py::arg("dm_idx"),
+        py::arg("amplitude") = 1.0F, py::arg("toffset") = 0,
+        py::arg("width") = 1,
+        R"doc(
+        Injects a synthetic dispersed pulse ("FRB track") into a waterfall
+        array in place, so that it lands exactly on a given final DM/dt
+        trial at a chosen time sample after running the FDMT transform.
+
+        Parameters
+        ----------
+        waterfall : np.ndarray, shape (nchans, nsamps)
+            Modified in place (amplitude is added, not overwritten).
+        plan : FDMTPlan
+            The plan whose trial grid and channel layout to target.
+        dm_idx : int
+            Index into the plan's final DM/dt trial grid.
+        amplitude : float
+            Amplitude added per channel, per injected sample.
+        toffset : int
+            Reference-channel time sample at which the pulse should peak.
+        width : int
+            Number of consecutive samples per channel to inject (>=1).
+        )doc");
 
     py::class_<DDMTCPU>(mod, "DDMTCPU")
         .def(py::init<float, float, SizeType, float, float, float, float>(),
