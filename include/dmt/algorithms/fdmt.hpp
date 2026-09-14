@@ -216,31 +216,33 @@ public:
     /**
      * @brief Theoretical noise variance for a given DM trial and boxcar width.
      */
-    [[nodiscard]] float
-    get_effective_variance(SizeType dm_idx,
-                           SizeType boxcar_width = 1) const;
+    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
+                                               SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Theoretical noise standard deviation for a given DM trial and boxcar width.
+     * @brief Theoretical noise standard deviation for a given DM trial and
+     * boxcar width.
      */
-    [[nodiscard]] float
-    get_effective_sigma(SizeType dm_idx,
-                        SizeType boxcar_width = 1) const;
+    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
+                                            SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Theoretical noise variance grid across all DM trials for a boxcar width.
+     * @brief Theoretical noise variance grid across all DM trials for a boxcar
+     * width.
      */
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width.
+     * @brief Theoretical noise standard deviation grid across all DM trials for
+     * a boxcar width.
      */
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Resets the internal history buffer for valid-mode streaming across FDMT blocks.
+     * @brief Resets the internal history buffer for valid-mode streaming across
+     * FDMT blocks.
      */
     void reset_history() noexcept;
 
@@ -320,9 +322,9 @@ compute_fdmt(std::span<const float> waterfall,
 void add_frb_track(std::span<float> waterfall,
                    const plans::FDMTPlan& plan,
                    SizeType dm_idx,
-                   float amplitude = 1.0F,
+                   float amplitude   = 1.0F,
                    IndexType toffset = 0,
-                   SizeType width = 1);
+                   SizeType width    = 1);
 
 #ifdef DMT_ENABLE_CUDA
 /**
@@ -595,25 +597,26 @@ public:
      * width. Identical formula to FDMTCPU::get_effective_variance (pure
      * plan-side math, independent of which backend executed the transform).
      */
-    [[nodiscard]] float
-    get_effective_variance(SizeType dm_idx,
-                           SizeType boxcar_width = 1) const;
+    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
+                                               SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Theoretical noise standard deviation for a given DM trial and boxcar width.
+     * @brief Theoretical noise standard deviation for a given DM trial and
+     * boxcar width.
      */
-    [[nodiscard]] float
-    get_effective_sigma(SizeType dm_idx,
-                        SizeType boxcar_width = 1) const;
+    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
+                                            SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Theoretical noise variance grid across all DM trials for a boxcar width.
+     * @brief Theoretical noise variance grid across all DM trials for a boxcar
+     * width.
      */
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width = 1) const;
 
     /**
-     * @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width.
+     * @brief Theoretical noise standard deviation grid across all DM trials for
+     * a boxcar width.
      */
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1) const;
@@ -637,7 +640,7 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      SizeType nsamps,
                                      float tsamp,
                                      IndexType dt_max,
-                                     IndexType dt_min       = 0,
+                                     IndexType dt_min      = 0,
                                      SizeType dt_step      = 1,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",

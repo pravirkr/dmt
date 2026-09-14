@@ -1,0 +1,21 @@
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+# Hard system dependencies required by every dmt build.
+find_dependency(OpenMP)
+
+# Static dmt archives reference FFTW symbols; shared builds bundle FFTW privately.
+if(NOT @DMT_BUILT_AS_SHARED@)
+  find_dependency(FFTW COMPONENTS ${FFTW_FLOAT_OPENMP_LIB})
+endif()
+
+# CUDA is only required when this dmt build was configured with CUDA support.
+include("${CMAKE_CURRENT_LIST_DIR}/dmtCUDAConfig.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/dmtTargets.cmake")
+
+check_required_components(dmt)

@@ -2,20 +2,28 @@
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
+  -bugprone-incorrect-roundings,
   clang-analyzer-*,
   clang-diagnostic-*,
   concurrency-*,
   cppcoreguidelines*,
   -cppcoreguidelines-avoid-magic-numbers,
-  -cppcoreguidelines-avoid-do-while,
   -cppcoreguidelines-init-variables,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-prefer-member-initializer,
   -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
   -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-slicing,
   google-*,
-  llvm-include-order,
+  hicpp-*,
+  llvm-*,
+  -llvm-prefer-static-over-anonymous-namespace,
+  -llvm-use-ranges,
   misc-*,
   -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
   -misc-use-anonymous-namespace,
   modernize-*,
   -modernize-loop-convert,
@@ -31,11 +39,7 @@ Checks: >
   -readability-suspicious-call-argument,
 
 WarningsAsErrors: ""
-HeaderFileExtensions:
-  - h
-  - hh
-  - hpp
-  - cuh
+HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
 HeaderFilterRegex: ".*"
 FormatStyle: "file"
 CheckOptions:
@@ -66,4 +70,4 @@ CheckOptions:
   readability-identifier-naming.StructCase: "CamelCase"
   readability-identifier-naming.TemplateParameterCase: "CamelCase"
   readability-function-cognitive-complexity.IgnoreMacros: "true"
-  readability-function-cognitive-complexity.Threshold: "40"
+  readability-function-cognitive-complexity.Threshold: "50"

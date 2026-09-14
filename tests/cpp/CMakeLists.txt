@@ -1,13 +1,20 @@
-include(CTest)
-
+# Catch2 test framework (CPM).
 CPMFindPackage(
   NAME Catch2
-  VERSION 3.8.0
+  VERSION 3.16.0
   GITHUB_REPOSITORY catchorg/Catch2
+  OPTIONS "CATCH_INSTALL_DOCS OFF" "CATCH_INSTALL_EXTRAS OFF"
 )
+if(NOT Catch2_FOUND AND NOT TARGET Catch2::Catch2WithMain)
+  message(
+    FATAL_ERROR "Catch2 is required for DMT_BUILD_TESTING=ON but was not found or downloaded."
+  )
+endif()
+
 list(APPEND CMAKE_MODULE_PATH ${Catch2_DIR})
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 
+include(CTest)
 # Test executable
 set(TARGET_TESTS ${PROJECT_NAME}_tests)
 

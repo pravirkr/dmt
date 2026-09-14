@@ -1,4 +1,9 @@
 set(PYBIND11_FINDPYTHON ON)
+find_package(
+  Python
+  COMPONENTS Interpreter Development
+  REQUIRED
+)
 find_package(pybind11 CONFIG REQUIRED)
 
 # CPU module

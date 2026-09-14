@@ -31,8 +31,7 @@ using ComplexTypeCUDA = cuda::std::complex<float>;
 #endif
 
 #ifdef DMT_ENABLE_CUDA
-template <typename T>
-using DeviceVector = thrust::device_vector<T>;
+template <typename T> using DeviceVector = thrust::device_vector<T>;
 #endif
 
 // Constants for dispersion calculations
@@ -46,8 +45,7 @@ inline constexpr float kDispConst   = kDispConstMT;
 
 // Utilities for aligning or enforcing hardware-specific requirements (e.g.,
 // SIMD alignment)
-template <typename T>
-struct AlignedAllocator {
+template <typename T> struct AlignedAllocator {
     static constexpr std::size_t kAlignment = alignof(std::max_align_t);
 
     T* allocate(std::size_t n) {
@@ -61,8 +59,7 @@ struct AlignedAllocator {
     void deallocate(T* ptr, std::size_t /*unused*/) noexcept { free(ptr); }
 };
 
-template <typename T>
-using AlignedVector = std::vector<T, AlignedAllocator<T>>;
+template <typename T> using AlignedVector = std::vector<T, AlignedAllocator<T>>;
 
 template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
@@ -75,13 +72,15 @@ concept IntegralDataType = std::is_integral_v<T>;
 enum class BasebandDataOrder : uint8_t {
     kPRITF, /**< Polarisation-Real/Imag-time-frequency */
     kFTPRI, /**< Frequency-Time-Polarisation-Real/Imag */
-    kRITFP  /**< Real/Imag-time-frequency-Polarisation */
+    kRITFP, /**< Real/Imag-time-frequency-Polarisation */
 };
 
 static const std::unordered_map<std::string_view, BasebandDataOrder>
-    kBasebandDataOrderMap = {{"FTPRI", BasebandDataOrder::kFTPRI},
-                             {"PRITF", BasebandDataOrder::kPRITF},
-                             {"RITFP", BasebandDataOrder::kRITFP}};
+    kBasebandDataOrderMap = {
+        {"FTPRI", BasebandDataOrder::kFTPRI},
+        {"PRITF", BasebandDataOrder::kPRITF},
+        {"RITFP", BasebandDataOrder::kRITFP},
+};
 
 /**
  * @brief Set the number of OpenMP threads to use.

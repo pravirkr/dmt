@@ -149,9 +149,9 @@ void fdmt_iter(const float* __restrict__ state_in,
             const float* __restrict__ tail = &state_in[coord->tail_buf_offset];
             const float* __restrict__ head = &state_in[coord->head_buf_offset];
             float* __restrict__ out        = &state_out[coord->buf_offset];
-            float* __restrict__ hist       = (hist_ptr != nullptr && coord->delay > 0)
-                                                 ? &hist_ptr[coord->hist_offset]
-                                                 : nullptr;
+            float* __restrict__ hist = (hist_ptr != nullptr && coord->delay > 0)
+                                           ? &hist_ptr[coord->hist_offset]
+                                           : nullptr;
             offset_add<Mode>(tail, coord->tail_nsamps, head, coord->head_nsamps,
                              out, coord->nsamps, coord->delay, hist);
         }
@@ -306,12 +306,15 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
         // All-non-negative sub-band grid: original incremental algorithm,
         // unchanged (numerically identical to the pre-negative-DM code path).
         const auto dt_min_sub = static_cast<SizeType>(dt_first);
-        fdmt_init_impl_row0<UseRoll, true>(wf_sub, buf_base, dt_min_sub, nsamps);
+        fdmt_init_impl_row0<UseRoll, true>(wf_sub, buf_base, dt_min_sub,
+                                           nsamps);
         for (SizeType i_dt = 1; i_dt < ndt_sub; ++i_dt) {
             const auto dt_cur = static_cast<SizeType>(dt_grid_sub[i_dt]);
             float* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
-            const float* __restrict__ buf_prev = buf_base + ((i_dt - 1) * nsamps);
-            fdmt_init_impl_row<UseRoll, true>(wf_sub, buf_prev, buf_cur, dt_cur, nsamps);
+            const float* __restrict__ buf_prev =
+                buf_base + ((i_dt - 1) * nsamps);
+            fdmt_init_impl_row<UseRoll, true>(wf_sub, buf_prev, buf_cur, dt_cur,
+                                              nsamps);
         }
         return;
     }
@@ -335,23 +338,27 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
         const auto s_signed = static_cast<IndexType>(s);
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                       buf_base + static_cast<SizeType>(s_signed - dt_first) * nsamps);
+                        buf_base + static_cast<SizeType>(s_signed - dt_first) *
+                                       nsamps);
         }
         if (s_signed != 0 && -s_signed >= dt_first && -s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                       buf_base + static_cast<SizeType>(-s_signed - dt_first) * nsamps);
+                        buf_base + static_cast<SizeType>(-s_signed - dt_first) *
+                                       nsamps);
         }
     };
 
     if (s_lo == 0) {
         std::copy_n(wf_sub, nsamps, row_prev.data());
     } else {
-        fdmt_init_impl_row0<UseRoll, true>(wf_sub, row_prev.data(), s_lo, nsamps);
+        fdmt_init_impl_row0<UseRoll, true>(wf_sub, row_prev.data(), s_lo,
+                                           nsamps);
     }
     write_matches(s_lo, row_prev.data());
 
     for (SizeType s = s_lo + 1; s <= s_hi; ++s) {
-        fdmt_init_impl_row<UseRoll, true>(wf_sub, row_prev.data(), row_curr.data(), s, nsamps);
+        fdmt_init_impl_row<UseRoll, true>(wf_sub, row_prev.data(),
+                                          row_curr.data(), s, nsamps);
         write_matches(s, row_curr.data());
         row_prev.swap(row_curr);
     }
@@ -497,8 +504,9 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
     if constexpr (!UseBoxSmearing) {
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             const auto s = static_cast<SizeType>(std::abs(dt_grid_sub[i_dt]));
-            fdmt_init_valid_row0_shift(wf_sub, hist_sub, buf_base + (i_dt * nsamps),
-                                       s, dt_max_final, nsamps);
+            fdmt_init_valid_row0_shift(wf_sub, hist_sub,
+                                       buf_base + (i_dt * nsamps), s,
+                                       dt_max_final, nsamps);
         }
         return;
     }
@@ -510,7 +518,8 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
         for (SizeType i_dt = 1; i_dt < ndt_sub; ++i_dt) {
             const auto dt_cur = static_cast<SizeType>(dt_grid_sub[i_dt]);
             float* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
-            const float* __restrict__ buf_prev = buf_base + ((i_dt - 1) * nsamps);
+            const float* __restrict__ buf_prev =
+                buf_base + ((i_dt - 1) * nsamps);
             fdmt_init_valid_row<true>(wf_sub, hist_sub, buf_prev, buf_cur,
                                       dt_cur, dt_max_final, nsamps);
         }
@@ -529,11 +538,13 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
         const auto s_signed = static_cast<IndexType>(s);
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                       buf_base + static_cast<SizeType>(s_signed - dt_first) * nsamps);
+                        buf_base + static_cast<SizeType>(s_signed - dt_first) *
+                                       nsamps);
         }
         if (s_signed != 0 && -s_signed >= dt_first && -s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                       buf_base + static_cast<SizeType>(-s_signed - dt_first) * nsamps);
+                        buf_base + static_cast<SizeType>(-s_signed - dt_first) *
+                                       nsamps);
         }
     };
 
@@ -541,13 +552,13 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
         std::copy_n(wf_sub, nsamps, row_prev.data());
     } else {
         fdmt_init_valid_row0_box(wf_sub, hist_sub, row_prev.data(), s_lo,
-                                dt_max_final, nsamps);
+                                 dt_max_final, nsamps);
     }
     write_matches(s_lo, row_prev.data());
 
     for (SizeType s = s_lo + 1; s <= s_hi; ++s) {
-        fdmt_init_valid_row<true>(wf_sub, hist_sub, row_prev.data(), row_curr.data(),
-                                  s, dt_max_final, nsamps);
+        fdmt_init_valid_row<true>(wf_sub, hist_sub, row_prev.data(),
+                                  row_curr.data(), s, dt_max_final, nsamps);
         write_matches(s, row_curr.data());
         row_prev.swap(row_curr);
     }
@@ -576,9 +587,9 @@ void fdmt_init_valid_impl(const float* __restrict__ waterfall,
         float* __restrict__ buf_base =
             init_buffer + (grids_init[i_sub].coord_offset * nsamps);
 
-        fdmt_init_valid_subband<UseBoxSmearing>(
-            wf_sub, hist_sub, buf_base, grids_init[i_sub].dt_grid, dt_max_final,
-            nsamps);
+        fdmt_init_valid_subband<UseBoxSmearing>(wf_sub, hist_sub, buf_base,
+                                                grids_init[i_sub].dt_grid,
+                                                dt_max_final, nsamps);
     }
 
     fdmt_init_valid_update_history(waterfall, hist_buffer, hist_init_buffer,
@@ -806,7 +817,7 @@ public:
             .f_start     = grid.f_start,
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
-                                                     grid.dt_grid.size()),
+                                                      grid.dt_grid.size()),
         };
     }
 
@@ -848,16 +859,14 @@ public:
         m_is_initialized = false;
     }
 
-    [[nodiscard]] float
-    get_effective_variance(SizeType dm_idx,
-                           SizeType boxcar_width) const {
+    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
+                                               SizeType boxcar_width) const {
         return m_plan.get_effective_variance(dm_idx, boxcar_width,
                                              m_use_box_smearing);
     }
 
-    [[nodiscard]] float
-    get_effective_sigma(SizeType dm_idx,
-                        SizeType boxcar_width) const {
+    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
+                                            SizeType boxcar_width) const {
         return m_plan.get_effective_sigma(dm_idx, boxcar_width,
                                           m_use_box_smearing);
     }
@@ -972,8 +981,9 @@ private:
                 coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
         } else {
             fdmt_iter<FDMTMode::kValid>(
-                state_in, state_out, m_tree_history.data(), coords_sum_cur.data(),
-                coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
+                state_in, state_out, m_tree_history.data(),
+                coords_sum_cur.data(), coords_copy_cur.data(), ncoords_sum_cur,
+                ncoords_copy_cur);
         }
     }
 }; // End FDMTCPU::Impl definition
@@ -1102,9 +1112,7 @@ FDMTCPU::get_effective_sigma_grid(SizeType boxcar_width) const {
     return m_impl->get_effective_sigma_grid(boxcar_width);
 }
 
-void FDMTCPU::reset_history() noexcept {
-    m_impl->reset_history();
-}
+void FDMTCPU::reset_history() noexcept { m_impl->reset_history(); }
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,
@@ -1182,7 +1190,8 @@ void add_frb_track(std::span<float> waterfall,
                    IndexType toffset,
                    SizeType width) {
     if (width == 0) {
-        throw std::invalid_argument("add_frb_track: width must be greater than 0");
+        throw std::invalid_argument(
+            "add_frb_track: width must be greater than 0");
     }
     const auto nchans = plan.get_nchans();
     const auto nsamps = plan.get_nsamps();

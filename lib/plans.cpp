@@ -7,6 +7,7 @@
 #include <iostream>
 #include <ranges>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <spdlog/fmt/ranges.h>
@@ -103,8 +104,7 @@ public:
           m_dt_max(dt_max),
           m_dt_min(dt_min),
           m_dt_step(dt_step),
-          m_mode(mode),
-          m_is_custom_grid(false) {
+          m_mode(mode) {
         if (verbose) {
             spdlog::set_level(spdlog::level::trace);
         } else {
@@ -339,7 +339,8 @@ public:
         const auto ndms = get_dmt_ndms();
         if (dm_idx >= ndms) {
             throw std::out_of_range("dm_idx " + std::to_string(dm_idx) +
-                                    " out of range [0, " + std::to_string(ndms) + ")");
+                                    " out of range [0, " +
+                                    std::to_string(ndms) + ")");
         }
 
         auto trace = [&](auto& self, SizeType level, SizeType coord_idx,
@@ -349,7 +350,8 @@ public:
                     const auto& coord0 = m_container.coordinates[0][coord_idx];
                     const auto chan    = coord0.i_sub;
                     if (chan < m_nchans &&
-                        coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
+                        coord0.i_dt <
+                            m_container.grids[0][chan].dt_grid.size()) {
                         const auto dt0 =
                             m_container.grids[0][chan].dt_grid[coord0.i_dt];
                         shifts[chan] =
@@ -376,10 +378,10 @@ public:
             const auto delay = static_cast<IndexType>(coord.delay);
             if (coord.i_coord_tail != SIZE_MAX) {
                 self(self, level - 1, coord.i_coord_tail,
-                    target - ((dt_val >= 0) ? IndexType{0} : delay));
+                     target - ((dt_val >= 0) ? IndexType{0} : delay));
             }
             self(self, level - 1, coord.i_coord_head,
-                target - ((dt_val >= 0) ? delay : IndexType{0}));
+                 target - ((dt_val >= 0) ? delay : IndexType{0}));
         };
         trace(trace, m_niters, dm_idx, IndexType{0});
         return shifts;
@@ -394,14 +396,15 @@ public:
      * `use_box_smearing = false` fast path (`nchans * w`) rather than a
      * separate special case of it.
      */
-    float variance_from_smearing_row(const float* smearing_row, float w) const noexcept {
+    float variance_from_smearing_row(const float* smearing_row,
+                                     float w) const noexcept {
         float total_var = 0.0F;
         for (SizeType c = 0; c < m_nchans; ++c) {
             const float smearing_len = smearing_row[c] + 1.0F;
-            const float H            = std::max(smearing_len, w);
-            const float L            = std::min(smearing_len, w);
-            total_var += (H - L + 1.0F) * (L * L) +
-                        ((2.0F * L - 1.0F) * L * (L - 1.0F)) / 3.0F;
+            const float h            = std::max(smearing_len, w);
+            const float l            = std::min(smearing_len, w);
+            total_var += ((h - l + 1.0F) * (l * l)) +
+                         ((((2.0F * l) - 1.0F) * l * (l - 1.0F)) / 3.0F);
         }
         return total_var;
     }
@@ -414,7 +417,8 @@ public:
         const auto ndms = get_dmt_ndms();
         if (dm_idx >= ndms) {
             throw std::out_of_range("dm_idx " + std::to_string(dm_idx) +
-                                    " out of range [0, " + std::to_string(ndms) + ")");
+                                    " out of range [0, " +
+                                    std::to_string(ndms) + ")");
         }
         const float w = static_cast<float>(boxcar_width);
         if (!use_box_smearing) {
@@ -437,9 +441,9 @@ public:
         }
         const auto ndms = get_dmt_ndms();
         std::vector<float> grid(ndms, 0.0F);
-        const float w = static_cast<float>(boxcar_width);
+        const auto w = static_cast<float>(boxcar_width);
         if (!use_box_smearing) {
-            std::fill(grid.begin(), grid.end(), static_cast<float>(m_nchans) * w);
+            std::ranges::fill(grid, static_cast<float>(m_nchans) * w);
             return grid;
         }
         // Compute the O(ndms * nchans) smearing-grid tree trace exactly
@@ -449,13 +453,13 @@ public:
         // this O(ndms^2 * nchans) for no reason.
         const auto smearing_grid = get_smearing_grid_final();
         for (SizeType i = 0; i < ndms; ++i) {
-            grid[i] = variance_from_smearing_row(&smearing_grid[i * m_nchans], w);
+            grid[i] =
+                variance_from_smearing_row(&smearing_grid[i * m_nchans], w);
         }
         return grid;
     }
-    std::vector<float>
-    get_effective_sigma_grid(SizeType boxcar_width,
-                             bool use_box_smearing) const {
+    std::vector<float> get_effective_sigma_grid(SizeType boxcar_width,
+                                                bool use_box_smearing) const {
         auto grid = get_effective_variance_grid(boxcar_width, use_box_smearing);
         for (auto& v : grid) {
             v = std::sqrt(v);
@@ -517,7 +521,8 @@ public:
                         "({}; {:.1f} MB )",
                         buffer_size, buffer_size_mb, history_size,
                         history_size_mb),
-            std::format("Plan Details: {}", FDMTShape::header_fmt())};
+            std::format("Plan Details: {}", FDMTShape::header_fmt()),
+        };
         std::cout << '\n';
         for (const auto& line : lines) {
             std::cout << prefix << line << '\n';
@@ -539,9 +544,9 @@ private:
     IndexType m_dt_max;
     IndexType m_dt_min;
     SizeType m_dt_step;
-    bool m_is_custom_grid{false};
-    std::vector<IndexType> m_dt_grid_target{};
     std::string_view m_mode;
+    bool m_is_custom_grid{false};
+    std::vector<IndexType> m_dt_grid_target;
 
     float m_df{};
     SizeType m_niters{};
@@ -577,8 +582,8 @@ private:
                 }
             }
             if (all_zero) {
-                throw std::invalid_argument(
-                    "FDMT: dt_grid must contain at least one non-zero delay trial");
+                throw std::invalid_argument("FDMT: dt_grid must contain at "
+                                            "least one non-zero delay trial");
             }
         } else {
             if (m_dt_min == 0 && m_dt_max == 0) {
@@ -594,7 +599,7 @@ private:
                 throw std::invalid_argument(std::format(
                     "FDMT: dt_step={} must be greater than 0", m_dt_step));
             }
-            if (m_dt_step > static_cast<SizeType>(m_dt_max - m_dt_min)) {
+            if (std::cmp_greater(m_dt_step, m_dt_max - m_dt_min)) {
                 throw std::invalid_argument(
                     std::format("FDMT: dt_step={} cannot be greater than "
                                 "(dt_max - dt_min)={}",
@@ -610,7 +615,7 @@ private:
     std::vector<std::vector<std::vector<IndexType>>>
     determine_active_grids(const std::vector<SizeType>& nchans_level) const {
         std::vector<std::vector<std::vector<IndexType>>> active_dts(m_niters +
-                                                                   1);
+                                                                    1);
         for (SizeType l = 0; l <= m_niters; ++l) {
             active_dts[l].resize(nchans_level[l]);
         }
@@ -714,7 +719,8 @@ private:
             make_plan(i_iter, active_dts[i_iter]);
         }
 
-        // Step 4: Assign tree history offsets for valid-mode cross-block streaming
+        // Step 4: Assign tree history offsets for valid-mode cross-block
+        // streaming
         SizeType total_tree_hist = 0;
         for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
             for (auto& coord : m_container.coordinates_sum[i_iter]) {
@@ -755,9 +761,11 @@ private:
                 min_dt_chan = active_level0[i_sub].front();
                 max_dt_chan = active_level0[i_sub].back(); // already sorted
             }
-            max_dt_overall = std::max(
-                {max_dt_overall, static_cast<SizeType>(std::abs(min_dt_chan)),
-                 static_cast<SizeType>(std::abs(max_dt_chan))});
+            max_dt_overall = std::max({
+                max_dt_overall,
+                static_cast<SizeType>(std::abs(min_dt_chan)),
+                static_cast<SizeType>(std::abs(max_dt_chan)),
+            });
 
             std::vector<IndexType> dt_sub;
             dt_sub.reserve(max_dt_chan - min_dt_chan + 1);
@@ -767,41 +775,46 @@ private:
             const auto ndt_sub = dt_sub.size();
 
             for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
-                const auto coord_cur = FDMTCoord{.i_sub           = i_sub,
-                                                 .i_dt            = i_dt,
-                                                 .nsamps          = m_nsamps,
-                                                 .buf_offset      = buf_offset,
-                                                 .i_coord_tail    = SIZE_MAX,
-                                                 .i_coord_head    = SIZE_MAX,
-                                                 .delay           = SIZE_MAX,
-                                                 .tail_buf_offset = SIZE_MAX,
-                                                 .tail_nsamps     = SIZE_MAX,
-                                                 .head_buf_offset = SIZE_MAX,
-                                                 .head_nsamps     = SIZE_MAX};
+                const auto coord_cur = FDMTCoord{
+                    .i_sub           = i_sub,
+                    .i_dt            = i_dt,
+                    .nsamps          = m_nsamps,
+                    .buf_offset      = buf_offset,
+                    .i_coord_tail    = SIZE_MAX,
+                    .i_coord_head    = SIZE_MAX,
+                    .delay           = SIZE_MAX,
+                    .tail_buf_offset = SIZE_MAX,
+                    .tail_nsamps     = SIZE_MAX,
+                    .head_buf_offset = SIZE_MAX,
+                    .head_nsamps     = SIZE_MAX,
+                };
                 m_container.coordinates[i_iter].emplace_back(coord_cur);
                 buf_offset += m_nsamps;
             }
-            m_container.grids[i_iter][i_sub] =
-                FDMTCoordGrid{.dt_grid      = std::move(dt_sub),
-                              .ndt          = ndt_sub,
-                              .coord_offset = ncoords,
-                              .f_start      = f_start,
-                              .f_end        = f_end};
+            m_container.grids[i_iter][i_sub] = FDMTCoordGrid{
+                .dt_grid      = std::move(dt_sub),
+                .ndt          = ndt_sub,
+                .coord_offset = ncoords,
+                .f_start      = f_start,
+                .f_end        = f_end,
+            };
             ncoords += ndt_sub;
         }
 
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
             m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
-        m_container.state_shape[i_iter] = {.nchans       = m_nchans,
-                                           .ndt_min      = ndt_min_it->ndt,
-                                           .ndt_max      = ndt_max_it->ndt,
-                                           .ncoords      = ncoords,
-                                           .ncoords_sum  = 0,
-                                           .ncoords_copy = 0,
-                                           .nsamps       = m_nsamps,
-                                           .nelements    = ncoords * m_nsamps,
-                                           .dt_max       = max_dt_overall};
+        m_container.state_shape[i_iter] = {
+            .nchans       = m_nchans,
+            .ndt_min      = ndt_min_it->ndt,
+            .ndt_max      = ndt_max_it->ndt,
+            .ncoords      = ncoords,
+            .ncoords_sum  = 0,
+            .ncoords_copy = 0,
+            .nsamps       = m_nsamps,
+            .nelements    = ncoords * m_nsamps,
+            .dt_max       = max_dt_overall,
+        };
         m_container.dt_grid_sub_top[i_iter] =
             m_container.grids[i_iter].back().dt_grid;
     }
@@ -811,8 +824,8 @@ private:
         if (i_iter < 1 || i_iter > m_niters) {
             throw std::invalid_argument("Invalid iteration number");
         }
-        const auto& df_bot_prev = m_container.df_bot[i_iter - 1];
-        const auto& df_top_prev = m_container.df_top[i_iter - 1];
+        // const auto& df_bot_prev = m_container.df_bot[i_iter - 1];
+        // const auto& df_top_prev = m_container.df_top[i_iter - 1];
         const auto& nchans_prev = m_container.state_shape[i_iter - 1].nchans;
         const auto& nsamps_prev = m_container.state_shape[i_iter - 1].nsamps;
         const auto& grids_prev  = m_container.grids[i_iter - 1];
@@ -832,8 +845,8 @@ private:
             if (!active_level[i_sub].empty()) {
                 const auto abs_front = static_cast<SizeType>(
                     std::abs(active_level[i_sub].front()));
-                const auto abs_back = static_cast<SizeType>(
-                    std::abs(active_level[i_sub].back()));
+                const auto abs_back =
+                    static_cast<SizeType>(std::abs(active_level[i_sub].back()));
                 dt_max_iter = std::max({dt_max_iter, abs_front, abs_back});
             }
         }
@@ -898,7 +911,8 @@ private:
                         .tail_buf_offset = coords_prev[i_coord_tail].buf_offset,
                         .tail_nsamps     = coords_prev[i_coord_tail].nsamps,
                         .head_buf_offset = SIZE_MAX,
-                        .head_nsamps     = SIZE_MAX};
+                        .head_nsamps     = SIZE_MAX,
+                    };
 
                     coords_cur.emplace_back(coord_cur);
                     coords_copy_cur.emplace_back(coord_cur);
@@ -982,8 +996,9 @@ private:
                         // higher freq (head). Reference is head (top edge), so
                         // tail is shifted by |dt_head| relative to head!
                         delay_shift = static_cast<SizeType>(std::abs(dt_head));
-                        tail_offset = coords_prev[i_coord_head]
-                                          .buf_offset; // reference (head, unshifted)
+                        tail_offset =
+                            coords_prev[i_coord_head]
+                                .buf_offset; // reference (head, unshifted)
                         tail_n      = coords_prev[i_coord_head].nsamps;
                         head_offset = coords_prev[i_coord_tail]
                                           .buf_offset; // shifted by |dt_head|
@@ -991,10 +1006,10 @@ private:
                     }
 
                     if (delay_shift >= nsamps_prev) {
-                        throw std::runtime_error(std::format(
-                            "DM delay is greater than input size: "
-                            "delay_shift={}, nsamps_prev={}",
-                            delay_shift, nsamps_prev));
+                        throw std::runtime_error(
+                            std::format("DM delay is greater than input size: "
+                                        "delay_shift={}, nsamps_prev={}",
+                                        delay_shift, nsamps_prev));
                     }
 
                     const auto coord_cur = FDMTCoord{
@@ -1008,18 +1023,20 @@ private:
                         .tail_buf_offset = tail_offset,
                         .tail_nsamps     = tail_n,
                         .head_buf_offset = head_offset,
-                        .head_nsamps     = head_n};
+                        .head_nsamps     = head_n,
+                    };
                     coords_cur.emplace_back(coord_cur);
                     coords_sum_cur.emplace_back(coord_cur);
                 }
                 buf_offset += nsamps_iter;
             }
-            m_container.grids[i_iter][i_sub] =
-                FDMTCoordGrid{.dt_grid      = dt_sub,
-                              .ndt          = ndt_sub,
-                              .coord_offset = ncoords,
-                              .f_start      = f_start,
-                              .f_end        = f_end};
+            m_container.grids[i_iter][i_sub] = FDMTCoordGrid{
+                .dt_grid      = dt_sub,
+                .ndt          = ndt_sub,
+                .coord_offset = ncoords,
+                .f_start      = f_start,
+                .f_end        = f_end,
+            };
             ncoords += ndt_sub;
         }
 
@@ -1028,15 +1045,17 @@ private:
         const auto [ndt_min_it, ndt_max_it] = std::minmax_element(
             m_container.grids[i_iter].begin(), m_container.grids[i_iter].end(),
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
-        m_container.state_shape[i_iter] = {.nchans       = nchans_cur,
-                                           .ndt_min      = ndt_min_it->ndt,
-                                           .ndt_max      = ndt_max_it->ndt,
-                                           .ncoords      = ncoords,
-                                           .ncoords_sum  = ncoords_sum,
-                                           .ncoords_copy = ncoords_copy,
-                                           .nsamps       = nsamps_iter,
-                                           .nelements = ncoords * nsamps_iter,
-                                           .dt_max    = dt_max_iter};
+        m_container.state_shape[i_iter] = {
+            .nchans       = nchans_cur,
+            .ndt_min      = ndt_min_it->ndt,
+            .ndt_max      = ndt_max_it->ndt,
+            .ncoords      = ncoords,
+            .ncoords_sum  = ncoords_sum,
+            .ncoords_copy = ncoords_copy,
+            .nsamps       = nsamps_iter,
+            .nelements    = ncoords * nsamps_iter,
+            .dt_max       = dt_max_iter,
+        };
         m_container.dt_grid_sub_top[i_iter] =
             m_container.grids[i_iter].back().dt_grid;
     }
@@ -1325,7 +1344,7 @@ private:
                             "nbin={}, noverlap={}",
                             m_nbin, m_noverlap));
         }
-        m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
+        m_nsamp = m_nfft * (m_nbin - (2 * m_noverlap));
 
         // Calculate bins per channel
         if (m_nbin % m_nchan != 0) {
@@ -1461,10 +1480,21 @@ private:
 
     static std::vector<float>
     generate_dm_arr(float dm_max, float dm_step, float dm_min) {
-        std::vector<float> dm_arr;
-        for (float dm = dm_min; dm <= dm_max; dm += dm_step) {
-            dm_arr.push_back(dm);
+        if (dm_step <= 0.0F || dm_min > dm_max) {
+            return {};
         }
+
+        // Number of steps: floor((max - min) / step) + 1
+        const auto count =
+            static_cast<SizeType>(std::floor((dm_max - dm_min) / dm_step)) + 1;
+
+        std::vector<float> dm_arr;
+        dm_arr.reserve(count);
+
+        for (SizeType i = 0; i < count; ++i) {
+            dm_arr.push_back(dm_min + (static_cast<float>(i) * dm_step));
+        }
+
         return dm_arr;
     }
 };
@@ -1563,7 +1593,8 @@ std::vector<IndexType> FDMTPlan::trace_dm(SizeType dm_idx) const {
 float FDMTPlan::get_effective_variance(SizeType dm_idx,
                                        SizeType boxcar_width,
                                        bool use_box_smearing) const {
-    return m_impl->get_effective_variance(dm_idx, boxcar_width, use_box_smearing);
+    return m_impl->get_effective_variance(dm_idx, boxcar_width,
+                                          use_box_smearing);
 }
 float FDMTPlan::get_effective_sigma(SizeType dm_idx,
                                     SizeType boxcar_width,
