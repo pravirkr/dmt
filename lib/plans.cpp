@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <format>
 #include <iostream>
+#include <numbers>
 #include <ranges>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -212,6 +214,7 @@ public:
     IndexType get_dt_max() const noexcept { return m_dt_max; }
     IndexType get_dt_min() const noexcept { return m_dt_min; }
     SizeType get_dt_step() const noexcept { return m_dt_step; }
+    std::string_view get_mode() const noexcept { return m_mode; }
     bool is_custom_grid() const noexcept { return m_is_custom_grid; }
     float get_df() const noexcept { return m_df; }
     SizeType get_niters() const noexcept { return m_niters; }
@@ -489,6 +492,56 @@ public:
     SizeType get_tree_history_size() const noexcept {
         return m_container.get_tree_history_size();
     }
+    SizeType get_fft_overlap() const noexcept {
+        return static_cast<SizeType>(
+            std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
+    }
+    SizeType get_fft_size() const noexcept {
+        if (m_mode == "roll") {
+            return m_nsamps;
+        }
+        // Pad by the trial delay plus the largest tree/level-0 shift so
+        // circular convolution does not wrap into the linear region.
+        return m_nsamps + get_fft_overlap() + get_max_shift();
+    }
+    SizeType get_fft_n_bins() const noexcept {
+        return (get_fft_size() / 2) + 1;
+    }
+    SizeType get_fft_buffer_size() const noexcept {
+        SizeType max_coords = 0;
+        for (const auto& shape : m_container.state_shape) {
+            max_coords = std::max(max_coords, shape.ncoords);
+        }
+        return max_coords * get_fft_n_bins();
+    }
+    SizeType get_max_shift() const noexcept {
+        SizeType max_s = m_container.state_shape[0].dt_max;
+        for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
+            for (const auto& coord : m_container.coordinates_sum[i_iter]) {
+                max_s = std::max(max_s, coord.delay);
+            }
+        }
+        return max_s;
+    }
+    std::vector<ComplexType> get_fft_phasor_table() const {
+        const auto n_bins = get_fft_n_bins();
+        const auto n_fft  = get_fft_size();
+        const auto max_s  = get_max_shift();
+        std::vector<ComplexType> phasors((max_s + 1) * n_bins);
+        const float two_pi_over_N =
+            static_cast<float>(2.0 * std::numbers::pi) /
+            static_cast<float>(n_fft);
+        for (SizeType s = 0; s <= max_s; ++s) {
+            const float s_float = static_cast<float>(s);
+            for (SizeType k = 0; k < n_bins; ++k) {
+                const float angle =
+                    -two_pi_over_N * s_float * static_cast<float>(k);
+                phasors[(s * n_bins) + k] =
+                    ComplexType(std::cos(angle), std::sin(angle));
+            }
+        }
+        return phasors;
+    }
 
     void print_summary(std::string_view prefix) const {
         auto size_in_mb = [](SizeType count, SizeType size) {
@@ -544,7 +597,7 @@ private:
     IndexType m_dt_max;
     IndexType m_dt_min;
     SizeType m_dt_step;
-    std::string_view m_mode;
+    std::string m_mode;
     bool m_is_custom_grid{false};
     std::vector<IndexType> m_dt_grid_target;
 
@@ -1573,6 +1626,9 @@ IndexType FDMTPlan::get_dt_min() const noexcept { return m_impl->get_dt_min(); }
 SizeType FDMTPlan::get_dt_step() const noexcept {
     return m_impl->get_dt_step();
 }
+std::string_view FDMTPlan::get_mode() const noexcept {
+    return m_impl->get_mode();
+}
 bool FDMTPlan::is_custom_grid() const noexcept {
     return m_impl->is_custom_grid();
 }
@@ -1640,6 +1696,24 @@ SizeType FDMTPlan::get_history_init_size() const noexcept {
 }
 SizeType FDMTPlan::get_tree_history_size() const noexcept {
     return m_impl->get_tree_history_size();
+}
+SizeType FDMTPlan::get_fft_overlap() const noexcept {
+    return m_impl->get_fft_overlap();
+}
+SizeType FDMTPlan::get_fft_size() const noexcept {
+    return m_impl->get_fft_size();
+}
+SizeType FDMTPlan::get_fft_n_bins() const noexcept {
+    return m_impl->get_fft_n_bins();
+}
+SizeType FDMTPlan::get_fft_buffer_size() const noexcept {
+    return m_impl->get_fft_buffer_size();
+}
+SizeType FDMTPlan::get_max_shift() const noexcept {
+    return m_impl->get_max_shift();
+}
+std::vector<ComplexType> FDMTPlan::get_fft_phasor_table() const {
+    return m_impl->get_fft_phasor_table();
 }
 void FDMTPlan::print_summary(std::string_view prefix) const {
     m_impl->print_summary(prefix);

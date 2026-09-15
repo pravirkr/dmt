@@ -30,7 +30,7 @@ TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
         CHECK(plan.get_dt_grid_final().size() == ndms_expected);
         CHECK(plan.get_dm_grid_final().size() == ndms_expected);
         CHECK(plan.get_dmt_size() ==
-              static_cast<SizeType>(ndms_expected * (nsamps + dt_max)));
+              static_cast<SizeType>(ndms_expected * nsamps));
     }
 
     SECTION("execute method") {
@@ -47,6 +47,9 @@ TEST_CASE("FDMTCPU", "[fdmt_cpu]") {
         std::vector<float> dmt_oneshot(fdmt.get_plan().get_buffer_size(), 0.0F);
         fdmt.execute(waterfall, dmt_oneshot);
 
+        // execute() updates valid-mode history; start the stepper from a
+        // cold state so it matches a one-shot of the same isolated block.
+        fdmt.reset_history();
         std::vector<float> dmt_stepped(fdmt.get_plan().get_buffer_size(), 0.0F);
         fdmt.reset(waterfall, dmt_stepped);
         CHECK(fdmt.current_level() == 0);

@@ -1,3 +1,4 @@
+#include <optional>
 #include <span>
 
 #include <pybind11/iostream.h>
@@ -13,6 +14,7 @@ namespace dmt {
 using algorithms::CohFDMTCPU;
 using algorithms::DDMTCPU;
 using algorithms::FDMTCPU;
+using algorithms::FDMTFFTCPU;
 using algorithms::FDMTSubbandView;
 using plans::CohFDMTPlan;
 
@@ -115,7 +117,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def(py::init<float, float, SizeType, SizeType, float, IndexType,
                       IndexType, SizeType, std::string_view, bool>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "full",
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
              "verbose"_a = false)
         .def(py::init([](float f_min, float f_max, SizeType nchans,
                          SizeType nsamps, float tsamp,
@@ -135,7 +137,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
              py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
              py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("mode") = "full", py::arg("verbose") = false)
+             py::arg("mode") = "valid", py::arg("verbose") = false)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly("nchans", &FDMTPlan::get_nchans)
@@ -144,6 +146,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("dt_max", &FDMTPlan::get_dt_max)
         .def_property_readonly("dt_min", &FDMTPlan::get_dt_min)
         .def_property_readonly("dt_step", &FDMTPlan::get_dt_step)
+        .def_property_readonly("mode", &FDMTPlan::get_mode)
         .def_property_readonly("is_custom_grid", &FDMTPlan::is_custom_grid)
         .def_property_readonly("df", &FDMTPlan::get_df)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
@@ -273,7 +276,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
                       SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
-             "use_box_smearing"_a = true, "mode"_a = "full",
+             "use_box_smearing"_a = true, "mode"_a = "valid",
              "verbose"_a = false, "nthreads"_a = 1, "nbeams"_a = 1)
         .def(py::init([](float f_min, float f_max, SizeType nchans,
                          SizeType nsamps, float tsamp,
@@ -296,7 +299,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
              py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
              py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
              py::arg("verbose") = false, py::arg("nthreads") = 1,
              py::arg("nbeams") = 1)
         .def_property_readonly(
@@ -505,6 +508,245 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def("reset_history", &FDMTCPU::reset_history,
              "Reset the internal history buffers for valid-mode streaming.");
 
+    py::class_<FDMTFFTCPU>(mod, "FDMTFFTCPU", py::dynamic_attr())
+        .def(py::init<float, float, SizeType, SizeType, float, IndexType,
+                      IndexType, SizeType, bool, std::string_view, bool, int,
+                      SizeType>(),
+             "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
+             "use_box_smearing"_a = true, "mode"_a = "valid",
+             "verbose"_a = false, "nthreads"_a = 1, "nbeams"_a = 1)
+        .def(py::init([](float f_min, float f_max, SizeType nchans,
+                         SizeType nsamps, float tsamp,
+                         const py::object& dt_grid, const py::object& dt_arr,
+                         const py::object& dm_grid, const py::object& dm_arr,
+                         bool use_box_smearing, std::string_view mode,
+                         bool verbose, int nthreads, SizeType nbeams) {
+                 const auto [type, obj] =
+                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                 if (type == CustomGridType::kDt) {
+                     return std::make_unique<FDMTFFTCPU>(
+                         f_min, f_max, nchans, nsamps, tsamp,
+                         extract_dt_grid(obj), use_box_smearing, mode, verbose,
+                         nthreads, nbeams);
+                 }
+                 return std::make_unique<FDMTFFTCPU>(
+                     f_min, f_max, nchans, nsamps, tsamp,
+                     extract_dm_grid(obj), use_box_smearing, mode, verbose,
+                     nthreads, nbeams);
+             }),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+             py::arg("verbose") = false, py::arg("nthreads") = 1,
+             py::arg("nbeams") = 1)
+        .def_property_readonly("plan", &FDMTFFTCPU::get_plan)
+        .def_property_readonly("nbeams", &FDMTFFTCPU::get_nbeams)
+        .def_property_readonly("dt_grid_final",
+                               [](FDMTFFTCPU& fdmt) {
+                                   return as_pyarray(
+                                       fdmt.get_plan().get_dt_grid_final());
+                               })
+        .def_property_readonly("dm_grid_final",
+                               [](FDMTFFTCPU& fdmt) {
+                                   return as_pyarray(
+                                       fdmt.get_plan().get_dm_grid_final());
+                               })
+        .def("get_dt_grid_final",
+             [](FDMTFFTCPU& fdmt) {
+                 return as_pyarray(fdmt.get_plan().get_dt_grid_final());
+             })
+        .def("get_dm_grid_final",
+             [](FDMTFFTCPU& fdmt) {
+                 return as_pyarray(fdmt.get_plan().get_dm_grid_final());
+             })
+        .def("get_effective_variance", &FDMTFFTCPU::get_effective_variance,
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1)
+        .def("get_effective_sigma", &FDMTFFTCPU::get_effective_sigma,
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1)
+        .def(
+            "get_effective_variance_grid",
+            [](const FDMTFFTCPU& fdmt, SizeType boxcar_width) {
+                return as_pyarray(
+                    fdmt.get_effective_variance_grid(boxcar_width));
+            },
+            py::arg("boxcar_width") = 1)
+        .def(
+            "get_effective_sigma_grid",
+            [](const FDMTFFTCPU& fdmt, SizeType boxcar_width) {
+                return as_pyarray(fdmt.get_effective_sigma_grid(boxcar_width));
+            },
+            py::arg("boxcar_width") = 1)
+        .def(
+            "execute",
+            [](FDMTFFTCPU& fdmt,
+               const py::array_t<float, py::array::c_style>& waterfall)
+                -> py::object {
+                const auto nbeams     = fdmt.get_nbeams();
+                const auto& plan      = fdmt.get_plan();
+                const auto ndms       = plan.get_dmt_ndms();
+                const auto nsamps_out = plan.get_dmt_nsamps();
+
+                if (waterfall.ndim() == 2) {
+                    if (nbeams != 1) {
+                        throw std::invalid_argument(std::format(
+                            "FDMTFFTCPU: Invalid size of waterfall. Expected {}, "
+                            "got {}",
+                            nbeams * plan.get_nchans() * plan.get_nsamps(),
+                            waterfall.size()));
+                    }
+                    py::array_t<float, py::array::c_style> result(
+                        {ndms, nsamps_out});
+                    fdmt.execute(std::span<const float>(waterfall.data(),
+                                                        waterfall.size()),
+                                 std::span<float>(result.mutable_data(),
+                                                  result.size()));
+                    return result;
+                }
+                if (waterfall.ndim() == 3) {
+                    if (static_cast<SizeType>(waterfall.shape(0)) != nbeams) {
+                        throw std::invalid_argument(std::format(
+                            "FDMTFFTCPU: Invalid size of waterfall. Expected {}, "
+                            "got {}",
+                            nbeams * plan.get_nchans() * plan.get_nsamps(),
+                            waterfall.size()));
+                    }
+                    py::array_t<float, py::array::c_style> result(
+                        {nbeams, ndms, nsamps_out});
+                    fdmt.execute(
+                        std::span<const float>(waterfall.data(),
+                                               waterfall.size()),
+                        std::span<float>(result.mutable_data(), result.size()));
+                    return result;
+                }
+                throw std::runtime_error("Input waterfall must be a 2D "
+                                         "(nchans, nsamps) or 3D (nbeams, "
+                                         "nchans, nsamps) NumPy array.");
+            },
+            py::arg("waterfall"))
+        .def(
+            "reset",
+            [](py::object self,
+               const py::array_t<float, py::array::c_style>& waterfall,
+               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+                auto& fdmt = self.cast<FDMTFFTCPU&>();
+                py::array_t<float, py::array::c_style> dmt;
+                if (dmt_opt.has_value()) {
+                    dmt = *dmt_opt;
+                } else {
+                    const auto nbeams = fdmt.get_nbeams();
+                    dmt = py::array_t<float, py::array::c_style>(
+                        nbeams * fdmt.get_plan().get_dmt_size());
+                }
+                self.attr("_waterfall_buffer") = waterfall;
+                self.attr("_dmt_buffer")       = dmt;
+                fdmt.reset(
+                    std::span<const float>(waterfall.data(), waterfall.size()),
+                    std::span<float>(dmt.mutable_data(), dmt.size()));
+            },
+            py::arg("waterfall"), py::arg("dmt") = py::none())
+        .def("advance", &FDMTFFTCPU::advance, py::arg("levels") = 1)
+        .def("advance_until_remaining", &FDMTFFTCPU::advance_until_remaining,
+             py::arg("remaining_levels"))
+        .def("view_level_data",
+             [](py::object self) {
+                 auto& fdmt = self.cast<FDMTFFTCPU&>();
+                 auto span  = fdmt.view_level_data();
+                 return py::array_t<float>(span.size(), span.data(), self);
+             })
+        .def(
+            "view_subband_data",
+            [](py::object self, SizeType subband_idx) {
+                auto& fdmt    = self.cast<FDMTFFTCPU&>();
+                auto sub_view = fdmt.view_subband(subband_idx);
+                return py::array_t<float>(
+                    {sub_view.ndt, sub_view.nsamps},
+                    {sub_view.nsamps * sizeof(float), sizeof(float)},
+                    sub_view.data.data(), self);
+            },
+            py::arg("subband_idx"))
+        .def(
+            "view_subband",
+            [](py::object self, SizeType subband_idx) {
+                auto& fdmt = self.cast<FDMTFFTCPU&>();
+                return fdmt.view_subband(subband_idx);
+            },
+            py::arg("subband_idx"))
+        .def("finalize",
+             [](py::object self) {
+                 auto& fdmt = self.cast<FDMTFFTCPU&>();
+                 fdmt.finalize();
+                 py::array_t<float, py::array::c_style> dmt =
+                     self.attr("_dmt_buffer")
+                         .cast<py::array_t<float, py::array::c_style>>();
+                 const auto& plan   = fdmt.get_plan();
+                 const auto ncoords = plan.get_dmt_ndms();
+                 const auto nsamps  = plan.get_dmt_nsamps();
+                 return py::array_t<float>(
+                     {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
+                     dmt.data(), self);
+             })
+        .def_property_readonly("current_level", &FDMTFFTCPU::current_level)
+        .def_property_readonly("total_levels", &FDMTFFTCPU::total_levels)
+        .def_property_readonly("remaining_levels",
+                               &FDMTFFTCPU::remaining_levels)
+        .def_property_readonly("num_subbands", &FDMTFFTCPU::num_subbands)
+        .def_property_readonly("is_finished", &FDMTFFTCPU::is_finished)
+        .def("reset_history", &FDMTFFTCPU::reset_history);
+
+    mod.def(
+        "compute_fdmt_fft",
+        [](const py::array_t<float, py::array::c_style>& waterfall, float f_min,
+           float f_max, SizeType nchans, SizeType nsamps, float tsamp,
+           IndexType dt_max, IndexType dt_min, SizeType dt_step,
+           bool use_box_smearing, std::string_view mode, bool verbose,
+           int nthreads, SizeType nbeams) {
+            auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
+                std::span<const float>(waterfall.data(), waterfall.size()),
+                f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
+                use_box_smearing, mode, verbose, nthreads, nbeams);
+            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+        },
+        py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
+        py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"),
+        py::arg("dt_max"), py::arg("dt_min") = 0, py::arg("dt_step") = 1,
+        py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+        py::arg("verbose") = false, py::arg("nthreads") = 1,
+        py::arg("nbeams") = 1);
+
+    mod.def(
+        "compute_fdmt_fft",
+        [](const py::array_t<float, py::array::c_style>& waterfall, float f_min,
+           float f_max, SizeType nchans, SizeType nsamps, float tsamp,
+           const py::object& dt_grid, const py::object& dt_arr,
+           const py::object& dm_grid, const py::object& dm_arr,
+           bool use_box_smearing, std::string_view mode, bool verbose,
+           int nthreads, SizeType nbeams) {
+            const auto [type, obj] =
+                resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+            if (type == CustomGridType::kDt) {
+                auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
+                    std::span<const float>(waterfall.data(), waterfall.size()),
+                    f_min, f_max, nchans, nsamps, tsamp, extract_dt_grid(obj),
+                    use_box_smearing, mode, verbose, nthreads, nbeams);
+                return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+            }
+            auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
+                std::span<const float>(waterfall.data(), waterfall.size()),
+                f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
+                use_box_smearing, mode, verbose, nthreads, nbeams);
+            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+        },
+        py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
+        py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+        py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+        py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+        py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+        py::arg("verbose") = false, py::arg("nthreads") = 1,
+        py::arg("nbeams") = 1);
+
     mod.def(
 
         "compute_fdmt",
@@ -522,7 +764,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"),
         py::arg("dt_max"), py::arg("dt_min") = 0, py::arg("dt_step") = 1,
-        py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+        py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
         py::arg("verbose") = false, py::arg("nthreads") = 1,
         py::arg("nbeams") = 1);
 
@@ -553,7 +795,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
         py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
         py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-        py::arg("use_box_smearing") = true, py::arg("mode") = "full",
+        py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
         py::arg("verbose") = false, py::arg("nthreads") = 1,
         py::arg("nbeams") = 1);
 

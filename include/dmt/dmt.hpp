@@ -6,6 +6,7 @@
 #include "utils/simulate.hpp" // IWYU pragma: export
 
 // Include headers for each algorithm
-#include "algorithms/cfdmt.hpp" // IWYU pragma: export
-#include "algorithms/ddmt.hpp"  // IWYU pragma: export
-#include "algorithms/fdmt.hpp"  // IWYU pragma: export
+#include "algorithms/cfdmt.hpp"    // IWYU pragma: export
+#include "algorithms/ddmt.hpp"     // IWYU pragma: export
+#include "algorithms/fdmt.hpp"     // IWYU pragma: export
+#include "algorithms/fdmt_fft.hpp" // IWYU pragma: export

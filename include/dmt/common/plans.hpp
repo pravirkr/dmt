@@ -115,7 +115,7 @@ public:
              IndexType dt_max,
              IndexType dt_min      = 0,
              SizeType dt_step      = 1,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false);
 
     FDMTPlan(float f_min,
@@ -124,7 +124,7 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<IndexType>& dt_grid,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false);
 
     FDMTPlan(float f_min,
@@ -133,7 +133,7 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<float>& dm_grid,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false);
 
     // --- Rule of five: PIMPL ---
@@ -160,6 +160,8 @@ public:
     IndexType get_dt_min() const noexcept;
     /// @brief Delay step in time bins
     SizeType get_dt_step() const noexcept;
+    /// @brief Transform mode: "full", "valid", or "roll"
+    std::string_view get_mode() const noexcept;
     /// @brief Whether a custom arbitrary delay or DM grid was provided
     bool is_custom_grid() const noexcept;
     /// @brief Frequency resolution (MHz)
@@ -215,6 +217,20 @@ public:
     SizeType get_history_init_size() const noexcept;
     /// @brief Size of the tree history buffer for valid-mode streaming across FDMT blocks
     SizeType get_tree_history_size() const noexcept;
+    /// @brief Overlap/pad length L = max(|dt_min|, |dt_max|) for FFT full/valid
+    [[nodiscard]] SizeType get_fft_overlap() const noexcept;
+    /// @brief FFT length: nsamps for roll; nsamps + overlap + max_shift
+    /// for full/valid (extra zeros after the block so circular convolution
+    /// does not wrap into the linear region).
+    [[nodiscard]] SizeType get_fft_size() const noexcept;
+    /// @brief Number of complex bins in R2C Fourier domain (fft_size / 2 + 1)
+    [[nodiscard]] SizeType get_fft_n_bins() const noexcept;
+    /// @brief Buffer size in complex elements for FDMT-FFT state ping-pong buffers
+    [[nodiscard]] SizeType get_fft_buffer_size() const noexcept;
+    /// @brief Maximum shift in samples across all tree coordinates and level 0
+    [[nodiscard]] SizeType get_max_shift() const noexcept;
+    /// @brief Precomputed phasor table of shape (max_shift + 1, n_bins)
+    [[nodiscard]] std::vector<ComplexType> get_fft_phasor_table() const;
 
     /// @brief Computes complexity comparison between FDMT and brute-force
     /// dedispersion

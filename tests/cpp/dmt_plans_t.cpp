@@ -47,7 +47,7 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans]") {
         CHECK(plan.get_dt_grid_final().size() == ndms_expected);
         CHECK(plan.get_dm_grid_final().size() == ndms_expected);
         CHECK(plan.get_dmt_size() ==
-              static_cast<SizeType>(ndms_expected * (nsamps + dt_max)));
+              static_cast<SizeType>(ndms_expected * nsamps));
     }
 
     SECTION("Smearing grid") {

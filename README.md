@@ -26,7 +26,7 @@ pip install -U git+https://github.com/pravirkr/dmt
 from dmtlib import FDMTCPU
 
 frb = np.ones((nchans, nsamps), dtype=np.float32)
-thefdmt = FDMTCPU(f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max, dt_min=0, dt_step=1)
+thefdmt = FDMTCPU(f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max, dt_min=0, dt_step=1)  # mode="valid" by default
 dmt_transform = thefdmt.execute(frb.astype(np.float32))
 ```
 

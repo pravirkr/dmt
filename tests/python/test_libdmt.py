@@ -28,7 +28,8 @@ class TestFDMT:
         # Synchronous execution
         sync_output = thefdmt.execute(waterfall)
 
-        # Stepper execution
+        # Stepper execution (cold history so valid-mode matches one-shot)
+        thefdmt.reset_history()
         thefdmt.reset(waterfall)
         thefdmt.advance_until_remaining(0)
         assert thefdmt.is_finished
@@ -79,6 +80,7 @@ class TestFDMT:
 
         # Resume and finalize
         res = thefdmt.finalize()
+        thefdmt.reset_history()
         sync = thefdmt.execute(waterfall)
         np.testing.assert_allclose(res, sync, rtol=1e-6, atol=1e-6)
 
@@ -110,6 +112,7 @@ class TestFDMT:
 
         # Finalize and verify exact match
         res = thefdmt.finalize()
+        thefdmt.reset_history()
         sync = thefdmt.execute(waterfall)
         np.testing.assert_allclose(res, sync, rtol=1e-6, atol=1e-6)
 
@@ -133,6 +136,7 @@ class TestFDMT:
         assert thefdmt.is_finished
 
         res = thefdmt.finalize()
+        thefdmt.reset_history()
         sync = thefdmt.execute(waterfall)
         np.testing.assert_allclose(res, sync, rtol=1e-6, atol=1e-6)
 
@@ -151,6 +155,7 @@ class TestFDMT:
         thefdmt.advance_until_remaining(1)
         res = thefdmt.finalize()
 
+        thefdmt.reset_history()
         sync = thefdmt.execute(waterfall)
         np.testing.assert_allclose(res, sync, rtol=1e-6, atol=1e-6)
         # Verify that the final result is in custom_buf directly
@@ -190,6 +195,7 @@ class TestFDMT:
         assert thefdmt.is_finished
         assert thefdmt.remaining_levels == 0
         res = thefdmt.finalize()
+        thefdmt.reset_history()
         sync = thefdmt.execute(waterfall)
         np.testing.assert_allclose(res, sync, rtol=1e-6, atol=1e-6)
 

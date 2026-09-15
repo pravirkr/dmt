@@ -60,7 +60,7 @@ public:
      *   the tree rather than to the raw input. Call reset_history() to
      *   restart streaming from a cold state (e.g. for a new observation).
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
-     * (default: "full").
+     * (default: "valid").
      * @param verbose Enable verbose output.
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together
@@ -81,7 +81,7 @@ public:
             IndexType dt_min      = 0,
             SizeType dt_step      = 1,
             bool use_box_smearing = true,
-            std::string_view mode = "full",
+            std::string_view mode = "valid",
             bool verbose          = false,
             int nthreads          = 1,
             SizeType nbeams       = 1);
@@ -93,7 +93,7 @@ public:
             float tsamp,
             const std::vector<IndexType>& dt_grid,
             bool use_box_smearing = true,
-            std::string_view mode = "full",
+            std::string_view mode = "valid",
             bool verbose          = false,
             int nthreads          = 1,
             SizeType nbeams       = 1);
@@ -105,7 +105,7 @@ public:
             float tsamp,
             const std::vector<float>& dm_grid,
             bool use_box_smearing = true,
-            std::string_view mode = "full",
+            std::string_view mode = "valid",
             bool verbose          = false,
             int nthreads          = 1,
             SizeType nbeams       = 1);
@@ -290,7 +290,7 @@ compute_fdmt(std::span<const float> waterfall,
              IndexType dt_min      = 0,
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false,
              int nthreads          = 1,
              SizeType nbeams       = 1);
@@ -304,7 +304,7 @@ compute_fdmt(std::span<const float> waterfall,
              float tsamp,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false,
              int nthreads          = 1,
              SizeType nbeams       = 1);
@@ -318,7 +318,7 @@ compute_fdmt(std::span<const float> waterfall,
              float tsamp,
              const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false,
              int nthreads          = 1,
              SizeType nbeams       = 1);
@@ -411,7 +411,7 @@ public:
      *   parallel here, unlike the CPU's one-thread-per-coordinate loop).
      *   Call reset_history() to restart streaming from a cold state.
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
-     * (default: "full").
+     * (default: "valid").
      * @param verbose Enable verbose output.
      * @param device_id CUDA device ID to use (default: 0).
      */
@@ -424,7 +424,7 @@ public:
              IndexType dt_min      = 0,
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false,
              int device_id         = 0,
              SizeType nbeams       = 1);
@@ -436,7 +436,7 @@ public:
              float tsamp,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false,
              int device_id         = 0,
              SizeType nbeams       = 1);
@@ -448,7 +448,7 @@ public:
              float tsamp,
              const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
-             std::string_view mode = "full",
+             std::string_view mode = "valid",
              bool verbose          = false,
              int device_id         = 0,
              SizeType nbeams       = 1);
@@ -681,7 +681,7 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      IndexType dt_min      = 0,
                                      SizeType dt_step      = 1,
                                      bool use_box_smearing = true,
-                                     std::string_view mode = "full",
+                                     std::string_view mode = "valid",
                                      bool verbose          = false,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
@@ -694,7 +694,7 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      float tsamp,
                                      const std::vector<IndexType>& dt_grid,
                                      bool use_box_smearing = true,
-                                     std::string_view mode = "full",
+                                     std::string_view mode = "valid",
                                      bool verbose          = false,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
@@ -707,7 +707,7 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      float tsamp,
                                      const std::vector<float>& dm_grid,
                                      bool use_box_smearing = true,
-                                     std::string_view mode = "full",
+                                     std::string_view mode = "valid",
                                      bool verbose          = false,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
