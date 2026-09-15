@@ -63,6 +63,14 @@ public:
      * (default: "full").
      * @param verbose Enable verbose output.
      * @param nthreads Number of OpenMP threads to use (default: 1).
+     * @param nbeams Number of independent beams to process together
+     * (default: 1). The plan/coordinate DAG is shared across all beams
+     * (dedispersion delays don't depend on beam), so this only scales the
+     * state/history buffers and adds an outer beam loop around the existing
+     * per-coordinate execution -- at nbeams=1 this is the same code path and
+     * layout as before this parameter existed. `waterfall`/`dmt` become
+     * beam-major: shape (nbeams, nchans, nsamps) / (nbeams, ndms, nsamps)
+     * flattened, beam b at offset b*nchans*nsamps / b*get_buffer_size().
      */
     FDMTCPU(float f_min,
             float f_max,
@@ -75,7 +83,8 @@ public:
             bool use_box_smearing = true,
             std::string_view mode = "full",
             bool verbose          = false,
-            int nthreads          = 1);
+            int nthreads          = 1,
+            SizeType nbeams       = 1);
 
     FDMTCPU(float f_min,
             float f_max,
@@ -86,7 +95,8 @@ public:
             bool use_box_smearing = true,
             std::string_view mode = "full",
             bool verbose          = false,
-            int nthreads          = 1);
+            int nthreads          = 1,
+            SizeType nbeams       = 1);
 
     FDMTCPU(float f_min,
             float f_max,
@@ -97,7 +107,8 @@ public:
             bool use_box_smearing = true,
             std::string_view mode = "full",
             bool verbose          = false,
-            int nthreads          = 1);
+            int nthreads          = 1,
+            SizeType nbeams       = 1);
 
     ~FDMTCPU();
     FDMTCPU(FDMTCPU&&) noexcept;
@@ -112,10 +123,19 @@ public:
     const plans::FDMTPlan& get_plan() const noexcept;
 
     /**
+     * @brief Number of beams processed together (see the `nbeams`
+     * constructor parameter). 1 unless constructed otherwise.
+     */
+    [[nodiscard]] SizeType get_nbeams() const noexcept;
+
+    /**
      * @brief Executes the full FDMT transform in a single shot.
      *
-     * @param waterfall Input waterfall data view.
-     * @param dmt Output DM-time array view.
+     * @param waterfall Input waterfall data, beam-major flat
+     * (nbeams*nchans*nsamps); nbeams=1 (the default) is just (nchans,
+     * nsamps).
+     * @param dmt Output DM-time array, beam-major flat
+     * (nbeams*get_buffer_size()).
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -128,10 +148,17 @@ public:
      * caller-provided dmt buffer for zero-allocation ping-pong storage (Level
      * 0).
      *
-     * @param waterfall Input waterfall data view (nchans * nsamps).
-     * @param dmt Output DM-time array view (size >= plan.get_buffer_size()).
+     * @param waterfall Input waterfall data, beam-major flat
+     * (nbeams*nchans*nsamps).
+     * @param dmt Output DM-time array (size >= nbeams*plan.get_buffer_size()).
      *            Used as one of the two ping-pong scratch buffers and receives
      *            the final transform at finalize().
+     *
+     * @note When nbeams() > 1, the stepper inspection methods
+     * (view_level_data/view_subband_data/view_subband) only expose beam 0's
+     * slice -- advance()/advance_until_remaining()/finalize() still process
+     * every beam correctly, but per-beam intermediate-level inspection isn't
+     * exposed by this API yet.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -265,7 +292,8 @@ compute_fdmt(std::span<const float> waterfall,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
-             int nthreads          = 1);
+             int nthreads          = 1,
+             SizeType nbeams       = 1);
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,
@@ -278,7 +306,8 @@ compute_fdmt(std::span<const float> waterfall,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
-             int nthreads          = 1);
+             int nthreads          = 1,
+             SizeType nbeams       = 1);
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,
@@ -291,7 +320,8 @@ compute_fdmt(std::span<const float> waterfall,
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
-             int nthreads          = 1);
+             int nthreads          = 1,
+             SizeType nbeams       = 1);
 
 /**
  * @brief Injects a synthetic dispersed pulse ("FRB track") into a waterfall
@@ -396,7 +426,8 @@ public:
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
-             int device_id         = 0);
+             int device_id         = 0,
+             SizeType nbeams       = 1);
 
     FDMTCUDA(float f_min,
              float f_max,
@@ -407,7 +438,8 @@ public:
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
-             int device_id         = 0);
+             int device_id         = 0,
+             SizeType nbeams       = 1);
 
     FDMTCUDA(float f_min,
              float f_max,
@@ -418,7 +450,8 @@ public:
              bool use_box_smearing = true,
              std::string_view mode = "full",
              bool verbose          = false,
-             int device_id         = 0);
+             int device_id         = 0,
+             SizeType nbeams       = 1);
 
     ~FDMTCUDA();
     FDMTCUDA(FDMTCUDA&&) noexcept;
@@ -622,6 +655,11 @@ public:
     get_effective_sigma_grid(SizeType boxcar_width = 1) const;
 
     /**
+     * @brief Number of beams processed concurrently by this instance.
+     */
+    [[nodiscard]] SizeType get_nbeams() const noexcept;
+
+    /**
      * @brief Resets the internal history buffers for valid-mode streaming
      * across FDMT blocks. Mirrors FDMTCPU::reset_history().
      */
@@ -645,7 +683,8 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",
                                      bool verbose          = false,
-                                     int device_id         = 0);
+                                     int device_id         = 0,
+                                     SizeType nbeams       = 1);
 
 std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      float f_min,
@@ -657,7 +696,8 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",
                                      bool verbose          = false,
-                                     int device_id         = 0);
+                                     int device_id         = 0,
+                                     SizeType nbeams       = 1);
 
 std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      float f_min,
@@ -669,7 +709,8 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "full",
                                      bool verbose          = false,
-                                     int device_id         = 0);
+                                     int device_id         = 0,
+                                     SizeType nbeams       = 1);
 
 #endif // DMT_ENABLE_CUDA
 

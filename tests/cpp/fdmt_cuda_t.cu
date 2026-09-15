@@ -522,7 +522,95 @@ TEST_CASE("FDMTGPU", "[fdmt_gpu]") {
         }
 
         CHECK(streamed[(dm_idx * total) + toffset] ==
-             Catch::Approx(static_cast<float>(nchans)));
+              Catch::Approx(static_cast<float>(nchans)));
+    }
+
+    SECTION("valid-mode tree-history streaming parity with CPU in small-block regime (nsamps < dt_max)") {
+        const float f_min         = 1000.0F;
+        const float f_max         = 1500.0F;
+        const SizeType nchans     = 24;
+        const float tsamp         = 0.001F;
+        const IndexType dt_max    = 40;
+        const IndexType dt_min    = 0;
+        const SizeType block_size = 8; // block_size (8) < dt_max (40)
+        const SizeType n_blocks   = 16;
+        const auto total_nsamp    = block_size * n_blocks;
+
+        std::vector<float> waterfall(nchans * total_nsamp);
+        for (size_t i = 0; i < waterfall.size(); ++i) {
+            waterfall[i] = static_cast<float>((i % 29) + 1);
+        }
+
+        FDMTCPU fdmt_cpu(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
+                         1, true, "valid");
+        FDMTCUDA fdmt_cuda(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
+                           1, true, "valid");
+
+        const auto& plan = fdmt_cpu.get_plan();
+        const auto ndms = plan.get_dmt_ndms();
+        std::vector<float> block(nchans * block_size);
+        std::vector<float> dmt_cpu_block(plan.get_buffer_size(), 0.0F);
+        std::vector<float> dmt_cuda_block(plan.get_buffer_size(), 0.0F);
+
+        for (SizeType b = 0; b < n_blocks; ++b) {
+            for (SizeType c = 0; c < nchans; ++c) {
+                std::copy_n(waterfall.data() + (c * total_nsamp) + (b * block_size),
+                            block_size, block.data() + (c * block_size));
+            }
+            fdmt_cpu.execute(block, dmt_cpu_block);
+            fdmt_cuda.execute(block, dmt_cuda_block);
+            for (SizeType d = 0; d < ndms; ++d) {
+                for (SizeType t = 0; t < block_size; ++t) {
+                    CHECK(dmt_cuda_block[(d * block_size) + t] ==
+                          Catch::Approx(dmt_cpu_block[(d * block_size) + t]).margin(1e-3));
+                }
+            }
+        }
+    }
+
+    SECTION("FDMTCUDA nbeams>1 multi-beam execution parity with single-beam") {
+        const float f_min         = 1000.0F;
+        const float f_max         = 1500.0F;
+        const SizeType nchans     = 32;
+        const SizeType nsamps     = 64;
+        const float tsamp         = 0.001F;
+        const IndexType dt_max    = 16;
+        const IndexType dt_min    = 0;
+        const SizeType nbeams     = 3;
+
+        std::vector<float> multi_wf(nbeams * nchans * nsamps);
+        for (size_t b = 0; b < nbeams; ++b) {
+            for (size_t i = 0; i < nchans * nsamps; ++i) {
+                multi_wf[(b * nchans * nsamps) + i] =
+                    static_cast<float>((i % 17) + (b + 1) * 3);
+            }
+        }
+
+        FDMTCUDA fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                            1, true, "full", false, 0, nbeams);
+        CHECK(fdmt_multi.get_nbeams() == nbeams);
+
+        const auto buf_size = fdmt_multi.get_plan().get_buffer_size();
+        std::vector<float> multi_dmt(nbeams * buf_size, 0.0F);
+        fdmt_multi.execute(multi_wf, multi_dmt);
+
+        FDMTCUDA fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                             1, true, "full", false, 0, 1);
+        std::vector<float> single_wf(nchans * nsamps);
+        std::vector<float> single_dmt(buf_size, 0.0F);
+
+        const auto dmt_size = fdmt_multi.get_plan().get_dmt_size();
+        for (size_t b = 0; b < nbeams; ++b) {
+            std::copy_n(multi_wf.data() + (b * nchans * nsamps),
+                        nchans * nsamps, single_wf.data());
+            std::fill(single_dmt.begin(), single_dmt.end(), 0.0F);
+            fdmt_single.execute(single_wf, single_dmt);
+
+            for (size_t i = 0; i < dmt_size; ++i) {
+                CHECK(multi_dmt[(b * buf_size) + i] ==
+                      Catch::Approx(single_dmt[i]).margin(1e-3));
+            }
+        }
     }
 }
 

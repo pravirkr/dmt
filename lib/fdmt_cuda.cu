@@ -69,22 +69,26 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
                  int nsubs,
                  int nsamps,
                  int dt_max_final,
+                 int state0_nelements,
                  const float* __restrict__ hist) {
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_sub = static_cast<int>(blockIdx.y);
+    const auto i_sub  = static_cast<int>(blockIdx.y);
+    const auto i_beam = static_cast<int>(blockIdx.z);
     if (i_sub >= nsubs || isamp >= nsamps) {
         return;
     }
 
     const auto* dt_grid_sub =
         &grids0_dt_grid_ptr[grids0_coord_offset_ptr[i_sub]];
-    const auto buffer_offset    = grids0_coord_offset_ptr[i_sub] * nsamps;
+    const auto buffer_offset =
+        (i_beam * state0_nelements) + (grids0_coord_offset_ptr[i_sub] * nsamps);
     const auto ndt_grid_sub     = grids0_ndt_ptr[i_sub];
-    const auto waterfall_offset = i_sub * nsamps;
-    const auto hist_offset      = i_sub * dt_max_final;
-    const auto dt_first         = dt_grid_sub[0];
-    const auto dt_last          = dt_grid_sub[ndt_grid_sub - 1];
+    const auto waterfall_offset = (i_beam * nsubs * nsamps) + (i_sub * nsamps);
+    const auto hist_offset =
+        (i_beam * nsubs * dt_max_final) + (i_sub * dt_max_final);
+    const auto dt_first = dt_grid_sub[0];
+    const auto dt_last  = dt_grid_sub[ndt_grid_sub - 1];
 
     // Lambda to fetch sample at relative index (isamp - shift), shift >= 0.
     auto get_sample = [&](int t) -> float {
@@ -152,18 +156,42 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
 }
 
 /**
- * @brief Per-level tree merge kernel. `kValid`'s cross-block history mirrors
- * `offset_add<kValid>` in fdmt.cpp (see its doc comment) with one CUDA-
- * specific twist: the CPU version reads its whole boundary region and then
- * overwrites the history buffer within one sequential per-coordinate thread,
- * so there's no hazard. Here, `isamp` is itself parallelized *within* one
- * coordinate, so a thread reading `hist_in[...]` (this coordinate's boundary,
- * from the previous block) and another thread of the same coordinate writing
- * `hist_out[...]` (capturing this block's own tail for the next block) would
- * race if `hist_in`/`hist_out` aliased the same buffer. They never do:
- * `FDMTCUDA::Impl::reset()` ping-pongs two same-sized device buffers once per
- * block, so within a single launch `hist_in` and `hist_out` are always
- * distinct arrays.
+ * @brief Advances the level-0 FIFO history window on the GPU.
+ * Supports arbitrary block sizes (nsamps < dt_max_final and nsamps >= dt_max_final).
+ */
+__global__ void
+kernel_advance_history_window(float* __restrict__ hist_out,
+                              const float* __restrict__ hist_in,
+                              const float* __restrict__ waterfall,
+                              int nsubs,
+                              int nsamps,
+                              int dt_max_final) {
+    const auto t      = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto i_sub  = static_cast<int>(blockIdx.y);
+    const auto i_beam = static_cast<int>(blockIdx.z);
+    if (t >= dt_max_final || i_sub >= nsubs) {
+        return;
+    }
+    const auto hist_offset =
+        (i_beam * nsubs * dt_max_final) + (i_sub * dt_max_final);
+    const auto wf_offset = (i_beam * nsubs * nsamps) + (i_sub * nsamps);
+
+    if (nsamps >= dt_max_final) {
+        hist_out[hist_offset + t] =
+            waterfall[wf_offset + (nsamps - dt_max_final + t)];
+    } else {
+        if (t < dt_max_final - nsamps) {
+            hist_out[hist_offset + t] =
+                (hist_in != nullptr) ? hist_in[hist_offset + t + nsamps] : 0.0F;
+        } else {
+            hist_out[hist_offset + t] =
+                waterfall[wf_offset + (t - (dt_max_final - nsamps))];
+        }
+    }
+}
+
+/**
+ * @brief Per-level tree merge kernel with multi-beam support.
  */
 template <FDMTMode Mode>
 __global__ void kernel_execute_iter(const float* __restrict__ state_in,
@@ -171,13 +199,16 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
                                     const plans::FDMTCoordDPtrs coords_sum,
                                     const plans::FDMTCoordDPtrs coords_copy,
                                     const float* __restrict__ hist_in,
-                                    float* __restrict__ hist_out,
                                     int nsamps,
                                     int ncoords_sum_cur,
-                                    int ncoords_copy_cur) {
+                                    int ncoords_copy_cur,
+                                    int in_state_nelements,
+                                    int out_state_nelements,
+                                    int tree_hist_size) {
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_coord = static_cast<int>(blockIdx.y);
+    const auto i_beam  = static_cast<int>(blockIdx.z);
     if (isamp >= nsamps) {
         return;
     }
@@ -186,10 +217,10 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
         const auto nsamps_out    = coords_sum.nsamps[i_coord];
         const auto offset        = coords_sum.offset[i_coord];
         const auto nsamps_tail   = coords_sum.tail_nsamps[i_coord];
-        const auto out_idx_base  = coords_sum.buf_offset[i_coord];
-        const auto tail_idx_base = coords_sum.tail_buf_offset[i_coord];
-        const auto head_idx_base = coords_sum.head_buf_offset[i_coord];
-        const auto hist_off      = coords_sum.hist_offset[i_coord];
+        const auto out_idx_base  = (i_beam * out_state_nelements) + coords_sum.buf_offset[i_coord];
+        const auto tail_idx_base = (i_beam * in_state_nelements) + coords_sum.tail_buf_offset[i_coord];
+        const auto head_idx_base = (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
+        const auto hist_off      = (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
 
         if (isamp < nsamps_out) {
             float tail_val = 0.0F;
@@ -206,17 +237,7 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
                 if (isamp >= offset) {
                     head_val = state_in[head_idx_base + (isamp - offset)];
                 } else if (hist_in != nullptr) {
-                    // Boundary sample: use the previous block's trailing
-                    // head samples, captured below the last time this
-                    // coordinate ran.
                     head_val = hist_in[hist_off + isamp];
-                }
-                if (hist_out != nullptr && offset > 0 &&
-                    isamp >= nsamps_tail - offset) {
-                    // Capture this block's own trailing `offset` samples of
-                    // head for the next call to this coordinate.
-                    hist_out[hist_off + (isamp - (nsamps_tail - offset))] =
-                        state_in[head_idx_base + isamp];
                 }
             } else if constexpr (Mode == FDMTMode::kRoll) {
                 tail_val            = state_in[tail_idx_base + isamp];
@@ -232,15 +253,57 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     if (i_coord < ncoords_copy_cur) {
         const auto nsamps_out  = coords_copy.nsamps[i_coord];
         const auto nsamps_tail = coords_copy.tail_nsamps[i_coord];
-        const int out_idx_base = coords_copy.buf_offset[i_coord];
+        const int out_idx_base = (i_beam * out_state_nelements) + coords_copy.buf_offset[i_coord];
         if (isamp < nsamps_tail) {
-            const int tail_idx_base = coords_copy.tail_buf_offset[i_coord];
+            const int tail_idx_base = (i_beam * in_state_nelements) + coords_copy.tail_buf_offset[i_coord];
             state_out[out_idx_base + isamp] = state_in[tail_idx_base + isamp];
         } else if (isamp < nsamps_out) {
             state_out[out_idx_base + isamp] = 0.0F;
         }
     }
 }
+
+/**
+ * @brief Advances tree-level cross-block FIFO history on GPU.
+ * Supports arbitrary block sizes and offsets.
+ */
+__global__ void
+kernel_advance_tree_history(const float* __restrict__ state_in,
+                            const plans::FDMTCoordDPtrs coords_sum,
+                            const float* __restrict__ hist_in,
+                            float* __restrict__ hist_out,
+                            int ncoords_sum_cur,
+                            int in_state_nelements,
+                            int tree_hist_size) {
+    const auto k       = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto i_coord = static_cast<int>(blockIdx.y);
+    const auto i_beam  = static_cast<int>(blockIdx.z);
+    if (i_coord >= ncoords_sum_cur) {
+        return;
+    }
+    const auto offset = coords_sum.offset[i_coord];
+    if (offset <= 0 || k >= offset) {
+        return;
+    }
+
+    const auto nsamps_head   = coords_sum.head_nsamps[i_coord];
+    const auto hist_off      = (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
+    const auto head_idx_base = (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
+
+    if (nsamps_head >= offset) {
+        hist_out[hist_off + k] =
+            state_in[head_idx_base + (nsamps_head - offset + k)];
+    } else {
+        if (k < offset - nsamps_head) {
+            hist_out[hist_off + k] =
+                (hist_in != nullptr) ? hist_in[hist_off + k + nsamps_head] : 0.0F;
+        } else {
+            hist_out[hist_off + k] =
+                state_in[head_idx_base + (k - (offset - nsamps_head))];
+        }
+    }
+}
+
 
 } // namespace
 
@@ -257,10 +320,12 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
-         int device_id)
+         int device_id,
+         SizeType nbeams = 1)
         : m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
+          m_nbeams(nbeams),
           m_plan(f_min,
                  f_max,
                  nchans,
@@ -283,10 +348,12 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
-         int device_id)
+         int device_id,
+         SizeType nbeams = 1)
         : m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
+          m_nbeams(nbeams),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose) {
         init_device_structures();
     }
@@ -300,10 +367,12 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
-         int device_id)
+         int device_id,
+         SizeType nbeams = 1)
         : m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
+          m_nbeams(nbeams),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose) {
         init_device_structures();
     }
@@ -311,14 +380,16 @@ public:
     void init_device_structures() {
         cuda_utils::set_device(m_device_id);
         spdlog::debug("FDMTCUDA::Impl: Set device to {}", m_device_id);
-        // Allocate single internal state buffer on device for ping-pong
-        m_state_internal_d.resize(m_plan.get_buffer_size(), 0.0F);
+        // Allocate internal state buffer on device for ping-pong
+        m_state_internal_d.resize(m_nbeams * m_plan.get_buffer_size(), 0.0F);
         if (m_mode == FDMTMode::kValid) {
-            m_history_d.resize(m_plan.get_history_size(), 0.0F);
+            const auto hist_size = m_nbeams * m_plan.get_history_size();
+            m_history_a_d.resize(hist_size, 0.0F);
+            m_history_b_d.resize(hist_size, 0.0F);
             // Two same-sized tree-history buffers, ping-ponged once per
             // block in reset() -- see kernel_execute_iter's doc comment for
             // why one buffer isn't safe here the way it is on the CPU.
-            const auto tree_hist_size = m_plan.get_tree_history_size();
+            const auto tree_hist_size = m_nbeams * m_plan.get_tree_history_size();
             m_tree_history_a_d.resize(tree_hist_size, 0.0F);
             m_tree_history_b_d.resize(tree_hist_size, 0.0F);
         }
@@ -341,6 +412,7 @@ public:
 
         cuda_utils::check_last_cuda_error("FDMTCUDA::Impl constructor failed");
     }
+
 
     ~Impl()                      = default;
     Impl(const Impl&)            = delete;
@@ -414,17 +486,26 @@ public:
                     thrust::raw_pointer_cast(m_tree_history_b_d.data());
                 m_hist_out_ptr =
                     thrust::raw_pointer_cast(m_tree_history_a_d.data());
+                m_level0_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_history_b_d.data());
+                m_level0_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_history_a_d.data());
             } else {
                 m_hist_in_ptr =
                     thrust::raw_pointer_cast(m_tree_history_a_d.data());
                 m_hist_out_ptr =
                     thrust::raw_pointer_cast(m_tree_history_b_d.data());
+                m_level0_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_history_a_d.data());
+                m_level0_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_history_b_d.data());
             }
             m_tree_history_parity = !m_tree_history_parity;
         }
 
-        const SizeType internal_iters = total_levels() - 2;
-        const bool odd_swaps          = (internal_iters % 2) == 1;
+        const SizeType internal_iters =
+            total_levels() >= 2 ? total_levels() - 2 : 0;
+        const bool odd_swaps = (internal_iters % 2) == 1;
         if (odd_swaps) {
             m_current_in_ptr = d_dmt.data();
             m_current_out_ptr =
@@ -448,14 +529,15 @@ public:
         cuda_utils::set_device(m_device_id);
         cudaStream_t active_stream = stream ? stream : m_stream;
         const auto total_lvl       = total_levels();
-        while (levels > 0 && m_current_level < total_lvl - 1) {
-            const SizeType next_level = m_current_level + 1;
-            execute_iter_device(m_current_in_ptr, m_current_out_ptr, next_level,
-                                active_stream);
+        const auto target_level    = std::min(m_current_level + levels, total_lvl - 1);
+
+        while (m_current_level < target_level) {
+            execute_iter_device(m_current_in_ptr, m_current_out_ptr,
+                                m_current_level + 1, active_stream);
             std::swap(m_current_in_ptr, m_current_out_ptr);
-            m_current_level = next_level;
-            --levels;
+            m_current_level++;
         }
+        spdlog::debug("FDMTCUDA: Stepper advanced to level {}.", m_current_level);
     }
 
     void advance_until_remaining(SizeType remaining_levels,
@@ -468,95 +550,71 @@ public:
         if (remaining_levels >= total_lvl) {
             return;
         }
-        const SizeType target_level = total_lvl - 1 - remaining_levels;
+        const auto target_level = total_lvl - 1 - remaining_levels;
         if (target_level > m_current_level) {
             advance(target_level - m_current_level, stream);
         }
     }
 
-    [[nodiscard]] cuda::std::span<const float> view_level_data() const {
+    cuda::std::span<const float> view_level_data() const {
         if (!m_is_initialized) {
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
-        const auto& state_shape =
+        const auto& shape =
             m_plan.get_container().state_shape[m_current_level];
         return cuda::std::span<const float>(m_current_in_ptr,
-                                            state_shape.nelements);
+                                            m_nbeams * shape.nelements);
     }
 
-    [[nodiscard]] cuda::std::span<const float>
-    view_subband_data(SizeType subband_idx) const {
+    cuda::std::span<const float> view_subband_data(SizeType subband_idx) const {
         if (!m_is_initialized) {
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
-        const auto& plan_c      = m_plan.get_container();
-        const auto& state_shape = plan_c.state_shape[m_current_level];
-        if (subband_idx >= state_shape.nchans) {
-            throw std::out_of_range(
-                std::format("FDMTCUDA: Subband index {} out of range (current "
-                            "level has {} subbands)",
-                            subband_idx, state_shape.nchans));
-        }
-        const auto& grid  = plan_c.grids[m_current_level][subband_idx];
-        const auto offset = grid.coord_offset * state_shape.nsamps;
-        const auto count  = grid.ndt * state_shape.nsamps;
+        const auto& grid =
+            m_plan.get_container().grids[m_current_level][subband_idx];
+        const auto nsamps =
+            m_plan.get_container().state_shape[m_current_level].nsamps;
+        const auto offset = grid.coord_offset * nsamps;
+        const auto count  = grid.ndt * nsamps;
         return cuda::std::span<const float>(m_current_in_ptr + offset, count);
     }
 
-    [[nodiscard]] FDMTSubbandViewCUDA view_subband(SizeType subband_idx) const {
+    FDMTSubbandViewCUDA view_subband(SizeType subband_idx) const {
         if (!m_is_initialized) {
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
-        const auto& plan_c      = m_plan.get_container();
-        const auto& state_shape = plan_c.state_shape[m_current_level];
-        if (subband_idx >= state_shape.nchans) {
-            throw std::out_of_range(
-                std::format("FDMTCUDA: Subband index {} out of range (current "
-                            "level has {} subbands)",
-                            subband_idx, state_shape.nchans));
-        }
-        const auto& grid  = plan_c.grids[m_current_level][subband_idx];
-        const auto offset = grid.coord_offset * state_shape.nsamps;
-        const auto count  = grid.ndt * state_shape.nsamps;
+        const auto& grid =
+            m_plan.get_container().grids[m_current_level][subband_idx];
+        const auto nsamps =
+            m_plan.get_container().state_shape[m_current_level].nsamps;
         return FDMTSubbandViewCUDA{
-            .data =
-                cuda::std::span<const float>(m_current_in_ptr + offset, count),
+            .data        = view_subband_data(subband_idx),
             .subband_idx = subband_idx,
             .ndt         = grid.ndt,
-            .nsamps      = state_shape.nsamps,
+            .nsamps      = nsamps,
             .f_start     = grid.f_start,
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
-                                                      grid.dt_grid.size())};
+                                                     grid.dt_grid.size()),
+        };
     }
 
-    [[nodiscard]] SizeType current_level() const noexcept {
-        return m_current_level;
+    SizeType current_level() const noexcept { return m_current_level; }
+    SizeType total_levels() const noexcept { return m_plan.get_niters() + 1; }
+    SizeType remaining_levels() const noexcept {
+        return total_levels() - 1 - m_current_level;
     }
-
-    [[nodiscard]] SizeType total_levels() const noexcept {
-        return m_plan.get_niters() + 1;
-    }
-
-    [[nodiscard]] SizeType remaining_levels() const noexcept {
-        if (total_levels() <= 1 || m_current_level >= total_levels() - 1) {
-            return 0;
-        }
-        return (total_levels() - 1) - m_current_level;
-    }
-
-    [[nodiscard]] SizeType num_subbands() const {
+    SizeType num_subbands() const {
         if (!m_is_initialized) {
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
-        return m_plan.get_container().state_shape[m_current_level].nchans;
+        return m_plan.get_container().grids[m_current_level].size();
     }
-
-    [[nodiscard]] bool is_finished() const noexcept {
+    bool is_finished() const noexcept {
         return m_is_initialized && (m_current_level >= total_levels() - 1);
     }
 
@@ -565,8 +623,20 @@ public:
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
-        if (!is_finished()) {
-            advance_until_remaining(0, stream);
+        cuda_utils::set_device(m_device_id);
+        cudaStream_t active_stream = stream ? stream : m_stream;
+        advance_until_remaining(0, active_stream);
+
+        if (m_current_in_ptr != m_dmt_target_ptr) {
+            spdlog::debug("FDMTCUDA::finalize: Copying final state from internal "
+                          "scratch to dmt_target_ptr");
+            const auto final_size =
+                m_nbeams * m_plan.get_container().state_shape.back().nelements;
+            cudaMemcpyAsync(m_dmt_target_ptr, m_current_in_ptr,
+                            final_size * sizeof(float),
+                            cudaMemcpyDeviceToDevice, active_stream);
+            cuda_utils::check_last_cuda_error(
+                "finalize: cudaMemcpyAsync final state to dmt failed");
         }
         m_is_initialized = false;
     }
@@ -593,13 +663,18 @@ public:
         return m_plan.get_effective_sigma_grid(boxcar_width, m_use_box_smearing);
     }
 
+    [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
+
     /// Zeroes all cross-block history (level-0 and tree-level) so the next
     /// execute()/reset() call starts as if this were a brand-new instance.
     /// Mirrors FDMTCPU::reset_history().
     void reset_history() noexcept {
         cuda_utils::set_device(m_device_id);
-        if (!m_history_d.empty()) {
-            m_history_d.assign(m_history_d.size(), 0.0F);
+        if (!m_history_a_d.empty()) {
+            m_history_a_d.assign(m_history_a_d.size(), 0.0F);
+        }
+        if (!m_history_b_d.empty()) {
+            m_history_b_d.assign(m_history_b_d.size(), 0.0F);
         }
         if (!m_tree_history_a_d.empty()) {
             m_tree_history_a_d.assign(m_tree_history_a_d.size(), 0.0F);
@@ -614,15 +689,17 @@ private:
     int m_device_id;
     bool m_use_box_smearing;
     FDMTMode m_mode;
+    SizeType m_nbeams{1};
     plans::FDMTPlan m_plan;
     plans::FDMTPlanContainerD m_plan_d;
     // Internal state buffer on device (for ping-pong buffering)
     thrust::device_vector<float> m_state_internal_d;
-    // Level-0 history buffer for valid-mode streaming across FDMT blocks
-    thrust::device_vector<float> m_history_d;
+    // Level-0 history buffer for valid-mode streaming across FDMT blocks (ping-pong pair)
+    thrust::device_vector<float> m_history_a_d;
+    thrust::device_vector<float> m_history_b_d;
+    float* m_level0_hist_in_ptr{nullptr};
+    float* m_level0_hist_out_ptr{nullptr};
     // Tree-level (level >= 1) cross-block history: two same-sized buffers
-    // ping-ponged once per block by reset(); see kernel_execute_iter's doc
-    // comment for why a single buffer (as used on the CPU) isn't safe here.
     thrust::device_vector<float> m_tree_history_a_d;
     thrust::device_vector<float> m_tree_history_b_d;
     bool m_tree_history_parity{false};
@@ -642,19 +719,19 @@ private:
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
         const auto nchans = m_plan.get_nchans();
         const auto nsamps = m_plan.get_nsamps();
-        if (waterfall_size != nchans * nsamps) {
+        if (waterfall_size != m_nbeams * nchans * nsamps) {
             throw std::invalid_argument(
                 std::format("FDMTCUDA: Invalid size of waterfall. "
                             "Expected {}, got {}",
-                            nchans * nsamps, waterfall_size));
+                            m_nbeams * nchans * nsamps, waterfall_size));
         }
-        if (dmt_size < m_plan.get_buffer_size()) {
+        if (dmt_size < m_nbeams * m_plan.get_buffer_size()) {
             throw std::invalid_argument(
                 std::format("FDMTCUDA: Invalid size of dmt. Expected at "
                             "least {}, got {}",
-                            m_plan.get_buffer_size(), dmt_size));
+                            m_nbeams * m_plan.get_buffer_size(), dmt_size));
         }
-        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}", nchans,
+        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}x{}", m_nbeams, nchans,
                       nsamps);
     }
 
@@ -675,27 +752,45 @@ private:
         const auto coords_max = std::max(ncoords_sum_cur, ncoords_copy_cur);
         const dim3 block_size = dim3(256, 1);
         const dim3 grid_size =
-            dim3((nsamps + block_size.x - 1) / block_size.x, coords_max);
+            dim3((nsamps + block_size.x - 1) / block_size.x, coords_max, m_nbeams);
         cuda_utils::check_kernel_launch_params(grid_size, block_size);
+
+        const auto in_state_nelements = static_cast<int>(m_plan.get_container().state_shape[m_current_level].nelements);
+        const auto out_state_nelements = static_cast<int>(shape.nelements);
+        const auto tree_hist_size = static_cast<int>(m_plan.get_tree_history_size());
 
         if (m_mode == FDMTMode::kFull) {
             kernel_execute_iter<FDMTMode::kFull>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                    m_hist_in_ptr, m_hist_out_ptr, nsamps, ncoords_sum_cur,
-                    ncoords_copy_cur);
+                    m_hist_in_ptr, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur, in_state_nelements, out_state_nelements, tree_hist_size);
         } else if (m_mode == FDMTMode::kRoll) {
             kernel_execute_iter<FDMTMode::kRoll>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                    m_hist_in_ptr, m_hist_out_ptr, nsamps, ncoords_sum_cur,
-                    ncoords_copy_cur);
+                    m_hist_in_ptr, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur, in_state_nelements, out_state_nelements, tree_hist_size);
         } else {
             kernel_execute_iter<FDMTMode::kValid>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                    m_hist_in_ptr, m_hist_out_ptr, nsamps, ncoords_sum_cur,
-                    ncoords_copy_cur);
+                    m_hist_in_ptr, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur, in_state_nelements, out_state_nelements, tree_hist_size);
+
+            if (m_hist_out_ptr != nullptr && ncoords_sum_cur > 0) {
+                const auto max_offset = static_cast<int>(shape.dt_max);
+                if (max_offset > 0) {
+                    const dim3 block_thist = dim3(256, 1);
+                    const dim3 grid_thist =
+                        dim3((max_offset + block_thist.x - 1) / block_thist.x, ncoords_sum_cur, m_nbeams);
+                    kernel_advance_tree_history<<<grid_thist, block_thist, 0, stream>>>(
+                        in_ptr, coords_sum_cur, m_hist_in_ptr, m_hist_out_ptr,
+                        ncoords_sum_cur, in_state_nelements, tree_hist_size);
+                    cuda_utils::check_last_cuda_error(
+                        "kernel_advance_tree_history launch failed");
+                }
+            }
         }
         cuda_utils::check_last_cuda_error("kernel_execute_iter launch failed");
     }
@@ -708,18 +803,17 @@ private:
         const int nsamps   = static_cast<int>(plan_c.state_shape[0].nsamps);
         const int dt_max_final =
             static_cast<int>(plan_c.state_shape[m_plan.get_niters()].dt_max);
+        const int state0_nelements =
+            static_cast<int>(plan_c.state_shape[0].nelements);
 
         const int* grids0_dt_grid_ptr = m_plan_d.grids0.dt_grid.data().get();
         const int* grids0_ndt_ptr     = m_plan_d.grids0.ndt.data().get();
         const int* grids0_coord_offset_ptr =
             m_plan_d.grids0.coord_offset.data().get();
-        float* hist_ptr = (m_mode == FDMTMode::kValid && !m_history_d.empty())
-                              ? thrust::raw_pointer_cast(m_history_d.data())
-                              : nullptr;
 
         const dim3 block_size = dim3(1024, 1);
         const dim3 grid_size =
-            dim3((nsamps + block_size.x - 1) / block_size.x, nsubs);
+            dim3((nsamps + block_size.x - 1) / block_size.x, nsubs, m_nbeams);
         cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
         if (m_mode == FDMTMode::kFull) {
@@ -728,13 +822,13 @@ private:
                     <<<grid_size, block_size, 0, stream>>>(
                         waterfall_d, state_d, grids0_dt_grid_ptr,
                         grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, hist_ptr);
+                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
             } else {
                 kernel_init_fdmt<FDMTMode::kFull, false>
                     <<<grid_size, block_size, 0, stream>>>(
                         waterfall_d, state_d, grids0_dt_grid_ptr,
                         grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, hist_ptr);
+                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
             }
         } else if (m_mode == FDMTMode::kRoll) {
             if (m_use_box_smearing) {
@@ -742,13 +836,13 @@ private:
                     <<<grid_size, block_size, 0, stream>>>(
                         waterfall_d, state_d, grids0_dt_grid_ptr,
                         grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, hist_ptr);
+                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
             } else {
                 kernel_init_fdmt<FDMTMode::kRoll, false>
                     <<<grid_size, block_size, 0, stream>>>(
                         waterfall_d, state_d, grids0_dt_grid_ptr,
                         grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, hist_ptr);
+                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
             }
         } else {
             if (m_use_box_smearing) {
@@ -756,26 +850,26 @@ private:
                     <<<grid_size, block_size, 0, stream>>>(
                         waterfall_d, state_d, grids0_dt_grid_ptr,
                         grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, hist_ptr);
+                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
             } else {
                 kernel_init_fdmt<FDMTMode::kValid, false>
                     <<<grid_size, block_size, 0, stream>>>(
                         waterfall_d, state_d, grids0_dt_grid_ptr,
                         grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, hist_ptr);
+                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
             }
         }
         cuda_utils::check_last_cuda_error("kernel_init_fdmt launch failed");
 
-        if (m_mode == FDMTMode::kValid && hist_ptr != nullptr &&
+        if (m_mode == FDMTMode::kValid && m_level0_hist_out_ptr != nullptr &&
             dt_max_final > 0) {
-            cudaMemcpy2DAsync(hist_ptr, dt_max_final * sizeof(float),
-                              waterfall_d + nsamps - dt_max_final,
-                              nsamps * sizeof(float),
-                              dt_max_final * sizeof(float), nsubs,
-                              cudaMemcpyDeviceToDevice, stream);
+            const dim3 block_hist = dim3(256, 1);
+            const dim3 grid_hist =
+                dim3((dt_max_final + block_hist.x - 1) / block_hist.x, nsubs, m_nbeams);
+            kernel_advance_history_window<<<grid_hist, block_hist, 0, stream>>>(
+                m_level0_hist_out_ptr, m_level0_hist_in_ptr, waterfall_d, nsubs, nsamps, dt_max_final);
             cuda_utils::check_last_cuda_error(
-                "History update cudaMemcpy2DAsync failed");
+                "kernel_advance_history_window launch failed");
         }
         spdlog::debug("FDMTCUDA::Impl: Initialise device submitted to stream.");
     }
@@ -792,7 +886,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    bool use_box_smearing,
                    std::string_view mode,
                    bool verbose,
-                   int device_id)
+                   int device_id,
+                   SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -804,7 +899,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     use_box_smearing,
                                     mode,
                                     verbose,
-                                    device_id)) {}
+                                    device_id,
+                                    nbeams)) {}
 FDMTCUDA::FDMTCUDA(float f_min,
                    float f_max,
                    SizeType nchans,
@@ -814,7 +910,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    bool use_box_smearing,
                    std::string_view mode,
                    bool verbose,
-                   int device_id)
+                   int device_id,
+                   SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -824,7 +921,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     use_box_smearing,
                                     mode,
                                     verbose,
-                                    device_id)) {}
+                                    device_id,
+                                    nbeams)) {}
 
 FDMTCUDA::FDMTCUDA(float f_min,
                    float f_max,
@@ -835,7 +933,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    bool use_box_smearing,
                    std::string_view mode,
                    bool verbose,
-                   int device_id)
+                   int device_id,
+                   SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -845,7 +944,8 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     use_box_smearing,
                                     mode,
                                     verbose,
-                                    device_id)) {}
+                                    device_id,
+                                    nbeams)) {}
 
 FDMTCUDA::~FDMTCUDA()                                    = default;
 FDMTCUDA::FDMTCUDA(FDMTCUDA&& other) noexcept            = default;
@@ -912,6 +1012,7 @@ FDMTCUDA::get_effective_sigma_grid(SizeType boxcar_width) const {
     return m_impl->get_effective_sigma_grid(boxcar_width);
 }
 void FDMTCUDA::reset_history() noexcept { m_impl->reset_history(); }
+SizeType FDMTCUDA::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
 
 [[nodiscard]] std::vector<float>
 compute_fdmt_cuda(std::span<const float> waterfall,
@@ -926,14 +1027,21 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   bool use_box_smearing,
                   std::string_view mode,
                   bool verbose,
-                  int device_id) {
+                  int device_id,
+                  SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                  use_box_smearing, mode, verbose, device_id);
+                  use_box_smearing, mode, verbose, device_id, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    std::vector<float> dmt(fdmt_plan.get_buffer_size(), 0.0F);
+    const auto buffer_size           = fdmt_plan.get_buffer_size();
+    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
-    dmt.resize(fdmt_plan.get_dmt_size());
-    return dmt;
+    const auto dmt_size = fdmt_plan.get_dmt_size();
+    std::vector<float> dmt_out(nbeams * dmt_size);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
+                    dmt_out.data() + (b * dmt_size));
+    }
+    return dmt_out;
 }
 
 [[nodiscard]] std::vector<float>
@@ -947,14 +1055,21 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   bool use_box_smearing,
                   std::string_view mode,
                   bool verbose,
-                  int device_id) {
+                  int device_id,
+                  SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
-                  use_box_smearing, mode, verbose, device_id);
+                  use_box_smearing, mode, verbose, device_id, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    std::vector<float> dmt(fdmt_plan.get_buffer_size(), 0.0F);
+    const auto buffer_size           = fdmt_plan.get_buffer_size();
+    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
-    dmt.resize(fdmt_plan.get_dmt_size());
-    return dmt;
+    const auto dmt_size = fdmt_plan.get_dmt_size();
+    std::vector<float> dmt_out(nbeams * dmt_size);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
+                    dmt_out.data() + (b * dmt_size));
+    }
+    return dmt_out;
 }
 
 [[nodiscard]] std::vector<float>
@@ -968,14 +1083,21 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   bool use_box_smearing,
                   std::string_view mode,
                   bool verbose,
-                  int device_id) {
+                  int device_id,
+                  SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,
-                  use_box_smearing, mode, verbose, device_id);
+                  use_box_smearing, mode, verbose, device_id, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    std::vector<float> dmt(fdmt_plan.get_buffer_size(), 0.0F);
+    const auto buffer_size           = fdmt_plan.get_buffer_size();
+    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
-    dmt.resize(fdmt_plan.get_dmt_size());
-    return dmt;
+    const auto dmt_size = fdmt_plan.get_dmt_size();
+    std::vector<float> dmt_out(nbeams * dmt_size);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
+                    dmt_out.data() + (b * dmt_size));
+    }
+    return dmt_out;
 }
 
 } // namespace dmt::algorithms

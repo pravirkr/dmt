@@ -20,6 +20,36 @@ namespace {
 enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
 
 /**
+ * @brief Advances a size-`capacity` FIFO history window (holding the most
+ * recent `capacity` samples of some stream) by `nsamps` new samples from
+ * `new_data`, in place.
+ *
+ * When `nsamps >= capacity`, one block fully covers the window, so it's
+ * simply replaced outright with the trailing `capacity` samples of
+ * `new_data` (this is the only case supported before this generalization,
+ * and this branch reproduces that exact formula bit-for-bit). When `nsamps <
+ * capacity` (block smaller than the window), the oldest `nsamps` retained
+ * samples are shifted out and this whole block is appended. Shared by both
+ * the tree-level history in `offset_add<kValid>` and the level-0 per-channel
+ * history in `fdmt_init_valid_update_history`, so the two mechanisms can't
+ * drift apart.
+ */
+void fdmt_advance_history_window(const float* __restrict__ new_data,
+                                 float* __restrict__ hist,
+                                 SizeType nsamps,
+                                 SizeType capacity) noexcept {
+    if (capacity == 0) {
+        return;
+    }
+    if (nsamps >= capacity) {
+        std::copy_n(new_data + nsamps - capacity, capacity, hist);
+    } else {
+        std::copy(hist + nsamps, hist + capacity, hist);
+        std::copy_n(new_data, nsamps, hist + capacity - nsamps);
+    }
+}
+
+/**
  * @brief Performs offset addition of two input arrays with mode-specific
  * boundary handling. This is the innermost hot loop of the FDMT algorithm.
  *
@@ -65,7 +95,12 @@ void offset_add(const float* __restrict__ data_tail,
                 float* __restrict__ hist = nullptr) noexcept {
     assert(size_tail == size_head && "Input tail and head sizes must be equal");
     assert(size_out >= size_tail && "Output size must be >= Input tail size");
-    assert(delay_shift < size_tail && "Offset must be < input tail size");
+    // kValid supports delay_shift >= size_tail (block size smaller than this
+    // coordinate's dispersion delay) via the cross-block history FIFO in
+    // `hist`; kFull/kRoll have no history mechanism and always require the
+    // delay to fit within one block.
+    assert((Mode == FDMTMode::kValid || delay_shift < size_tail) &&
+           "Offset must be < input tail size");
 
     if constexpr (Mode == FDMTMode::kFull) {
         // Full mode: Output can extend beyond input size
@@ -93,19 +128,28 @@ void offset_add(const float* __restrict__ data_tail,
         // Valid mode: only overlap region
         assert(size_out == size_tail &&
                "All sizes must be equal in valid mode");
-        // Part 1: Boundary region [0, delay_shift)
+        // Part 1: Boundary region [0, min(delay_shift, size_tail)). When
+        // delay_shift >= size_tail (this coordinate's delay spans more than
+        // one block), the whole output block comes from history + tail, and
+        // Part 2 below contributes nothing this call.
         if (hist != nullptr && delay_shift > 0) {
-            for (SizeType i = 0; i < delay_shift; ++i) {
+            const SizeType boundary_len = std::min(delay_shift, size_tail);
+            for (SizeType i = 0; i < boundary_len; ++i) {
                 out[i] = data_tail[i] + hist[i];
             }
-            // Save trailing delay_shift samples of head for the next block
-            std::copy_n(data_head + size_head - delay_shift, delay_shift, hist);
+            // Update the size-delay_shift history FIFO with this block's own
+            // head samples, so the next call sees a correctly-advanced
+            // window regardless of how block size compares to delay_shift.
+            fdmt_advance_history_window(data_head, hist, size_head,
+                                        delay_shift);
         } else {
             std::copy_n(data_tail, delay_shift, out);
         }
 
-        // Part 2: Overlap region [delay_shift, size_tail)
-        const SizeType nsum = size_tail - delay_shift;
+        // Part 2: Overlap region [delay_shift, size_tail), empty once
+        // delay_shift >= size_tail.
+        const SizeType nsum =
+            (delay_shift < size_tail) ? (size_tail - delay_shift) : 0;
 #pragma omp simd
         for (SizeType i = 0; i < nsum; ++i) {
             out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
@@ -338,13 +382,13 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
         const auto s_signed = static_cast<IndexType>(s);
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                        buf_base + static_cast<SizeType>(s_signed - dt_first) *
-                                       nsamps);
+                        buf_base + (static_cast<SizeType>(s_signed - dt_first) *
+                                       nsamps));
         }
         if (s_signed != 0 && -s_signed >= dt_first && -s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                        buf_base + static_cast<SizeType>(-s_signed - dt_first) *
-                                       nsamps);
+                        buf_base + (static_cast<SizeType>(-s_signed - dt_first) *
+                                       nsamps));
         }
     };
 
@@ -401,9 +445,12 @@ void fdmt_init_valid_row0_box(const float* __restrict__ wf_sub,
     running_sum += wf_sub[0];
     buf_row0[0] = running_sum;
 
-    // --- isamp in [1, dt_min_sub]: window slides into valid data ---
-    // Add from wf_sub, remove from hist_sub
-    for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
+    // --- isamp in [1, min(dt_min_sub, nsamps-1)]: window slides into valid
+    // data. Clamped to nsamps-1 so a per-channel delay exceeding the block
+    // size (dt_min_sub >= nsamps) can't write past the end of buf_row0; the
+    // main region loop below is then naturally empty in that case.
+    const SizeType boundary_end = std::min(dt_min_sub + 1, nsamps);
+    for (SizeType isamp = 1; isamp < boundary_end; ++isamp) {
         running_sum += wf_sub[isamp];
         running_sum -= hist_sub[dt_max_final + isamp - dt_min_sub - 1];
         buf_row0[isamp] = running_sum;
@@ -425,8 +472,10 @@ void fdmt_init_valid_row0_shift(const float* __restrict__ wf_sub,
                                 SizeType dt_max_final,
                                 SizeType nsamps) noexcept {
     // ===== First DT row (dt_min_sub) without smearing =====
-    // For isamp in [0, dt_min_sub): read from history
-    for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
+    // For isamp in [0, min(dt_min_sub, nsamps)): read from history. Clamped
+    // so dt_min_sub >= nsamps can't write past the end of buf_row0.
+    const SizeType boundary_len = std::min(dt_min_sub, nsamps);
+    for (SizeType isamp = 0; isamp < boundary_len; ++isamp) {
         buf_row0[isamp] = hist_sub[dt_max_final - dt_min_sub + isamp];
     }
     // For isamp in [dt_min_sub, nsamps): read from waterfall
@@ -443,9 +492,12 @@ void fdmt_init_valid_row(const float* __restrict__ wf_sub,
                          SizeType dt_cur,
                          SizeType dt_max_final,
                          SizeType nsamps) noexcept {
+    // Clamped so dt_cur >= nsamps can't write past the end of buf_cur (or
+    // read past the end of buf_prev, which is the same size).
+    const SizeType boundary_len = std::min(dt_cur, nsamps);
     if constexpr (UseBoxSmearing) {
         // Extend box: new_sum[isamp] = prev_sum[isamp] + input[isamp - dt_cur]
-        for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+        for (SizeType isamp = 0; isamp < boundary_len; ++isamp) {
             buf_cur[isamp] =
                 buf_prev[isamp] + hist_sub[dt_max_final + isamp - dt_cur];
         }
@@ -454,7 +506,7 @@ void fdmt_init_valid_row(const float* __restrict__ wf_sub,
         }
     } else {
         // No smearing: just shift by dt_cur
-        for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
+        for (SizeType isamp = 0; isamp < boundary_len; ++isamp) {
             buf_cur[isamp] = hist_sub[dt_max_final - dt_cur + isamp];
         }
         for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
@@ -473,13 +525,13 @@ void fdmt_init_valid_update_history(const float* __restrict__ waterfall,
     for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
         const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
         float* __restrict__ hist_sub     = hist_buffer + (i_sub * dt_max_final);
-        std::copy_n(wf_sub + nsamps - dt_max_final, dt_max_final, hist_sub);
+        fdmt_advance_history_window(wf_sub, hist_sub, nsamps, dt_max_final);
 
         if (hist_init_buffer != nullptr && dt_max_init > 0) {
             float* __restrict__ hist_init_sub =
                 hist_init_buffer + (i_sub * dt_max_init);
-            std::copy_n(wf_sub + nsamps - dt_max_init, dt_max_init,
-                        hist_init_sub);
+            fdmt_advance_history_window(wf_sub, hist_init_sub, nsamps,
+                                        dt_max_init);
         }
     }
 }
@@ -538,13 +590,13 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
         const auto s_signed = static_cast<IndexType>(s);
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                        buf_base + static_cast<SizeType>(s_signed - dt_first) *
-                                       nsamps);
+                        buf_base + (static_cast<SizeType>(s_signed - dt_first) *
+                                       nsamps));
         }
         if (s_signed != 0 && -s_signed >= dt_first && -s_signed <= dt_last) {
             std::copy_n(row, nsamps,
-                        buf_base + static_cast<SizeType>(-s_signed - dt_first) *
-                                       nsamps);
+                        buf_base + (static_cast<SizeType>(-s_signed - dt_first) *
+                                       nsamps));
         }
     };
 
@@ -610,9 +662,11 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
-         int nthreads)
+         int nthreads,
+         SizeType nbeams)
         : m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
+          m_nbeams(nbeams),
           m_plan(f_min,
                  f_max,
                  nchans,
@@ -623,15 +677,19 @@ public:
                  dt_step,
                  mode,
                  verbose),
-          m_state_internal(m_plan.get_buffer_size(), 0.0F),
-          m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
+          m_state_internal(m_nbeams * m_plan.get_buffer_size(), 0.0F),
+          m_history(m_mode == FDMTMode::kValid
+                        ? m_nbeams * m_plan.get_history_size()
+                        : 0,
                     0.0F),
-          m_history_init(
-              m_mode == FDMTMode::kValid ? m_plan.get_history_init_size() : 0,
-              0.0F),
-          m_tree_history(
-              m_mode == FDMTMode::kValid ? m_plan.get_tree_history_size() : 0,
-              0.0F) {
+          m_history_init(m_mode == FDMTMode::kValid
+                             ? m_nbeams * m_plan.get_history_init_size()
+                             : 0,
+                         0.0F),
+          m_tree_history(m_mode == FDMTMode::kValid
+                             ? m_nbeams * m_plan.get_tree_history_size()
+                             : 0,
+                         0.0F) {
         set_dmt_openmp_threads(nthreads);
     }
 
@@ -644,19 +702,25 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
-         int nthreads)
+         int nthreads,
+         SizeType nbeams)
         : m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
+          m_nbeams(nbeams),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose),
-          m_state_internal(m_plan.get_buffer_size(), 0.0F),
-          m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
+          m_state_internal(m_nbeams * m_plan.get_buffer_size(), 0.0F),
+          m_history(m_mode == FDMTMode::kValid
+                        ? m_nbeams * m_plan.get_history_size()
+                        : 0,
                     0.0F),
-          m_history_init(
-              m_mode == FDMTMode::kValid ? m_plan.get_history_init_size() : 0,
-              0.0F),
-          m_tree_history(
-              m_mode == FDMTMode::kValid ? m_plan.get_tree_history_size() : 0,
-              0.0F) {
+          m_history_init(m_mode == FDMTMode::kValid
+                             ? m_nbeams * m_plan.get_history_init_size()
+                             : 0,
+                         0.0F),
+          m_tree_history(m_mode == FDMTMode::kValid
+                             ? m_nbeams * m_plan.get_tree_history_size()
+                             : 0,
+                         0.0F) {
         set_dmt_openmp_threads(nthreads);
     }
 
@@ -669,19 +733,25 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          bool verbose,
-         int nthreads)
+         int nthreads,
+         SizeType nbeams)
         : m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
+          m_nbeams(nbeams),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose),
-          m_state_internal(m_plan.get_buffer_size(), 0.0F),
-          m_history(m_mode == FDMTMode::kValid ? m_plan.get_history_size() : 0,
+          m_state_internal(m_nbeams * m_plan.get_buffer_size(), 0.0F),
+          m_history(m_mode == FDMTMode::kValid
+                        ? m_nbeams * m_plan.get_history_size()
+                        : 0,
                     0.0F),
-          m_history_init(
-              m_mode == FDMTMode::kValid ? m_plan.get_history_init_size() : 0,
-              0.0F),
-          m_tree_history(
-              m_mode == FDMTMode::kValid ? m_plan.get_tree_history_size() : 0,
-              0.0F) {
+          m_history_init(m_mode == FDMTMode::kValid
+                             ? m_nbeams * m_plan.get_history_init_size()
+                             : 0,
+                         0.0F),
+          m_tree_history(m_mode == FDMTMode::kValid
+                             ? m_nbeams * m_plan.get_tree_history_size()
+                             : 0,
+                         0.0F) {
         set_dmt_openmp_threads(nthreads);
     }
 
@@ -693,6 +763,8 @@ public:
 
     const plans::FDMTPlan& get_plan() const { return m_plan; }
 
+    [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
+
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
         reset(waterfall, dmt);
         advance_until_remaining(0);
@@ -703,23 +775,24 @@ public:
     void reset(std::span<const float> waterfall, std::span<float> dmt) {
         const auto nchans = m_plan.get_nchans();
         const auto nsamps = m_plan.get_nsamps();
-        if (waterfall.size() != nchans * nsamps) {
+        if (waterfall.size() != m_nbeams * nchans * nsamps) {
             throw std::invalid_argument(std::format(
                 "FDMTCPU: Invalid size of waterfall. Expected {}, got {}",
-                nchans * nsamps, waterfall.size()));
+                m_nbeams * nchans * nsamps, waterfall.size()));
         }
-        if (dmt.size() < m_plan.get_buffer_size()) {
+        if (dmt.size() < m_nbeams * m_plan.get_buffer_size()) {
             throw std::invalid_argument(std::format(
                 "FDMTCPU: Invalid size of dmt. Expected at least {}, got {}",
-                m_plan.get_buffer_size(), dmt.size()));
+                m_nbeams * m_plan.get_buffer_size(), dmt.size()));
         }
 
         m_dmt_target_ptr = dmt.data();
         m_current_level  = 0;
 
         // Number of internal ping-pong iterations (excluding the final write)
-        const SizeType internal_iters = total_levels() - 2;
-        const bool odd_swaps          = (internal_iters % 2) == 1;
+        const SizeType internal_iters =
+            total_levels() >= 2 ? total_levels() - 2 : 0;
+        const bool odd_swaps = (internal_iters % 2) == 1;
         if (odd_swaps) {
             m_current_in_ptr  = dmt.data();
             m_current_out_ptr = m_state_internal.data();
@@ -892,6 +965,7 @@ public:
 private:
     bool m_use_box_smearing;
     FDMTMode m_mode;
+    SizeType m_nbeams;
     plans::FDMTPlan m_plan;
     // Internal state buffer (for ping-pong buffering)
     std::vector<float> m_state_internal;
@@ -921,6 +995,17 @@ private:
             "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
     }
 
+    // Beam-major layout: beam b's waterfall/state/history all live in
+    // disjoint, per-beam-sized slices of the same flat buffers (the plan's
+    // coordinate offsets are beam-agnostic and apply identically within each
+    // slice). Looping over beams here -- rather than folding beam into the
+    // OpenMP parallel-for inside fdmt_init_impl/fdmt_init_valid_impl/
+    // fdmt_iter -- means those functions, and the nbeams=1 hot path, are
+    // completely untouched by this generalization: at nbeams=1 the loop body
+    // runs exactly once with a zero offset, reproducing today's single-beam
+    // call byte-for-byte. (Folding beam into the parallel region for better
+    // multi-beam throughput is a follow-up optimization once this is
+    // benchmarked, not part of this change.)
     void initialise(std::span<const float> waterfall,
                     float* __restrict__ init_buffer) {
         const auto& plan_c     = m_plan.get_container();
@@ -931,33 +1016,49 @@ private:
             plan_c.state_shape[m_plan.get_niters()].dt_max;
         const auto nsubs = plan_c.state_shape[0].nchans;
 
-        if (m_mode == FDMTMode::kFull) {
-            if (m_use_box_smearing) {
-                fdmt_init_impl<false, true>(waterfall.data(), init_buffer,
-                                            grids_init.data(), nsubs, nsamps);
+        const auto wf_beam_stride   = nsubs * nsamps;
+        const auto buf_beam_stride  = m_plan.get_buffer_size();
+        const auto hist_beam_stride = m_plan.get_history_size();
+        const auto hist_init_stride = m_plan.get_history_init_size();
+
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            const float* __restrict__ wf_b =
+                waterfall.data() + (b * wf_beam_stride);
+            float* __restrict__ init_buffer_b =
+                init_buffer + (b * buf_beam_stride);
+
+            if (m_mode == FDMTMode::kFull) {
+                if (m_use_box_smearing) {
+                    fdmt_init_impl<false, true>(
+                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                } else {
+                    fdmt_init_impl<false, false>(
+                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                }
+            } else if (m_mode == FDMTMode::kRoll) {
+                if (m_use_box_smearing) {
+                    fdmt_init_impl<true, true>(
+                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                } else {
+                    fdmt_init_impl<true, false>(
+                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                }
             } else {
-                fdmt_init_impl<false, false>(waterfall.data(), init_buffer,
-                                             grids_init.data(), nsubs, nsamps);
-            }
-        } else if (m_mode == FDMTMode::kRoll) {
-            if (m_use_box_smearing) {
-                fdmt_init_impl<true, true>(waterfall.data(), init_buffer,
-                                           grids_init.data(), nsubs, nsamps);
-            } else {
-                fdmt_init_impl<true, false>(waterfall.data(), init_buffer,
-                                            grids_init.data(), nsubs, nsamps);
-            }
-        } else {
-            if (m_use_box_smearing) {
-                fdmt_init_valid_impl<true>(
-                    waterfall.data(), init_buffer, m_history.data(),
-                    m_history_init.data(), grids_init.data(), nsubs, nsamps,
-                    dt_max_init, dt_max_final);
-            } else {
-                fdmt_init_valid_impl<false>(
-                    waterfall.data(), init_buffer, m_history.data(),
-                    m_history_init.data(), grids_init.data(), nsubs, nsamps,
-                    dt_max_init, dt_max_final);
+                float* __restrict__ hist_b =
+                    m_history.data() + (b * hist_beam_stride);
+                float* __restrict__ hist_init_b =
+                    m_history_init.data() + (b * hist_init_stride);
+                if (m_use_box_smearing) {
+                    fdmt_init_valid_impl<true>(wf_b, init_buffer_b, hist_b,
+                                               hist_init_b, grids_init.data(),
+                                               nsubs, nsamps, dt_max_init,
+                                               dt_max_final);
+                } else {
+                    fdmt_init_valid_impl<false>(wf_b, init_buffer_b, hist_b,
+                                                hist_init_b, grids_init.data(),
+                                                nsubs, nsamps, dt_max_init,
+                                                dt_max_final);
+                }
             }
         }
     }
@@ -971,21 +1072,32 @@ private:
         const auto ncoords_sum_cur  = coords_sum_cur.size();
         const auto ncoords_copy_cur = coords_copy_cur.size();
 
-        if (m_mode == FDMTMode::kFull) {
-            fdmt_iter<FDMTMode::kFull>(
-                state_in, state_out, nullptr, coords_sum_cur.data(),
-                coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
-        } else if (m_mode == FDMTMode::kRoll) {
-            fdmt_iter<FDMTMode::kRoll>(
-                state_in, state_out, nullptr, coords_sum_cur.data(),
-                coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
-        } else {
-            fdmt_iter<FDMTMode::kValid>(
-                state_in, state_out, m_tree_history.data(),
-                coords_sum_cur.data(), coords_copy_cur.data(), ncoords_sum_cur,
-                ncoords_copy_cur);
+        const auto buf_beam_stride  = m_plan.get_buffer_size();
+        const auto hist_beam_stride = m_plan.get_tree_history_size();
+
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            const float* __restrict__ state_in_b =
+                state_in + (b * buf_beam_stride);
+            float* __restrict__ state_out_b = state_out + (b * buf_beam_stride);
+
+            if (m_mode == FDMTMode::kFull) {
+                fdmt_iter<FDMTMode::kFull>(
+                    state_in_b, state_out_b, nullptr, coords_sum_cur.data(),
+                    coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
+            } else if (m_mode == FDMTMode::kRoll) {
+                fdmt_iter<FDMTMode::kRoll>(
+                    state_in_b, state_out_b, nullptr, coords_sum_cur.data(),
+                    coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
+            } else {
+                float* __restrict__ hist_b =
+                    m_tree_history.data() + (b * hist_beam_stride);
+                fdmt_iter<FDMTMode::kValid>(
+                    state_in_b, state_out_b, hist_b, coords_sum_cur.data(),
+                    coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
+            }
         }
     }
+
 }; // End FDMTCPU::Impl definition
 
 FDMTCPU::FDMTCPU(float f_min,
@@ -999,7 +1111,8 @@ FDMTCPU::FDMTCPU(float f_min,
                  bool use_box_smearing,
                  std::string_view mode,
                  bool verbose,
-                 int nthreads)
+                 int nthreads,
+                 SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1011,7 +1124,8 @@ FDMTCPU::FDMTCPU(float f_min,
                                     use_box_smearing,
                                     mode,
                                     verbose,
-                                    nthreads)) {}
+                                    nthreads,
+                                    nbeams)) {}
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
                  SizeType nchans,
@@ -1021,7 +1135,8 @@ FDMTCPU::FDMTCPU(float f_min,
                  bool use_box_smearing,
                  std::string_view mode,
                  bool verbose,
-                 int nthreads)
+                 int nthreads,
+                 SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1031,7 +1146,8 @@ FDMTCPU::FDMTCPU(float f_min,
                                     use_box_smearing,
                                     mode,
                                     verbose,
-                                    nthreads)) {}
+                                    nthreads,
+                                    nbeams)) {}
 
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
@@ -1042,7 +1158,8 @@ FDMTCPU::FDMTCPU(float f_min,
                  bool use_box_smearing,
                  std::string_view mode,
                  bool verbose,
-                 int nthreads)
+                 int nthreads,
+                 SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1052,7 +1169,8 @@ FDMTCPU::FDMTCPU(float f_min,
                                     use_box_smearing,
                                     mode,
                                     verbose,
-                                    nthreads)) {}
+                                    nthreads,
+                                    nbeams)) {}
 
 FDMTCPU::~FDMTCPU()                                   = default;
 FDMTCPU::FDMTCPU(FDMTCPU&& other) noexcept            = default;
@@ -1060,6 +1178,7 @@ FDMTCPU& FDMTCPU::operator=(FDMTCPU&& other) noexcept = default;
 const plans::FDMTPlan& FDMTCPU::get_plan() const noexcept {
     return m_impl->get_plan();
 }
+SizeType FDMTCPU::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
 void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
@@ -1127,16 +1246,24 @@ compute_fdmt(std::span<const float> waterfall,
              bool use_box_smearing,
              std::string_view mode,
              bool verbose,
-             int nthreads) {
+             int nthreads,
+             SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                 use_box_smearing, mode, verbose, nthreads);
+                 use_box_smearing, mode, verbose, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(buffer_size, 0.0F);
+    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
-    // RESIZE to actual result size
-    dmt.resize(fdmt_plan.get_dmt_size());
-    return std::make_tuple(std::move(dmt), fdmt_plan);
+    // Compact each beam's leading get_dmt_size() samples (discarding the
+    // buffer_size-sized scratch tail) into a contiguous (nbeams, dmt_size)
+    // result.
+    const auto dmt_size = fdmt_plan.get_dmt_size();
+    std::vector<float> dmt_out(nbeams * dmt_size);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
+                    dmt_out.data() + (b * dmt_size));
+    }
+    return std::make_tuple(std::move(dmt_out), fdmt_plan);
 }
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
@@ -1150,15 +1277,21 @@ compute_fdmt(std::span<const float> waterfall,
              bool use_box_smearing,
              std::string_view mode,
              bool verbose,
-             int nthreads) {
+             int nthreads,
+             SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
-                 mode, verbose, nthreads);
+                 mode, verbose, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(buffer_size, 0.0F);
+    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
-    dmt.resize(fdmt_plan.get_dmt_size());
-    return std::make_tuple(std::move(dmt), fdmt_plan);
+    const auto dmt_size = fdmt_plan.get_dmt_size();
+    std::vector<float> dmt_out(nbeams * dmt_size);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
+                    dmt_out.data() + (b * dmt_size));
+    }
+    return std::make_tuple(std::move(dmt_out), fdmt_plan);
 }
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
@@ -1172,15 +1305,21 @@ compute_fdmt(std::span<const float> waterfall,
              bool use_box_smearing,
              std::string_view mode,
              bool verbose,
-             int nthreads) {
+             int nthreads,
+             SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,
-                 mode, verbose, nthreads);
+                 mode, verbose, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(buffer_size, 0.0F);
+    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
     fdmt.execute(waterfall, dmt);
-    dmt.resize(fdmt_plan.get_dmt_size());
-    return std::make_tuple(std::move(dmt), fdmt_plan);
+    const auto dmt_size = fdmt_plan.get_dmt_size();
+    std::vector<float> dmt_out(nbeams * dmt_size);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
+                    dmt_out.data() + (b * dmt_size));
+    }
+    return std::make_tuple(std::move(dmt_out), fdmt_plan);
 }
 
 void add_frb_track(std::span<float> waterfall,

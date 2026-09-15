@@ -814,6 +814,10 @@ class TestFDMT:
             (63, 100, 10),  # odd nchans, non-round block size
             (32, 128, 20),  # long chain
             (32, 40, 15),   # many small blocks
+            # block_size < dt_max=32: exercises the ring-buffer FIFO history
+            (32, 8, 30),    # block_size << dt_max
+            (32, 4, 40),    # block_size << dt_max, many blocks
+            (13, 3, 25),    # odd nchans with block_size << dt_max
         ],
     )
     def test_valid_mode_streaming_stress(
@@ -844,7 +848,68 @@ class TestFDMT:
             rtol=1e-5, atol=1e-3,
         )
 
+    def test_valid_mode_streaming_small_block_regime(self) -> None:
+        # Exact target regime where block_size < dt_max
+        nchans = 32
+        dt_max = 32
+        block_size = 8
+        n_blocks = 10
+        total = block_size * n_blocks
+
+        rng = np.random.default_rng(42)
+        wf = rng.standard_normal((nchans, total)).astype(np.float32)
+
+        full_engine = libdmt.FDMTCPU(
+            1200.0, 1600.0, nchans, total, 1e-3, dt_max, 0, mode="full"
+        )
+        res_mono = full_engine.execute(wf)
+
+        valid_engine = libdmt.FDMTCPU(
+            1200.0, 1600.0, nchans, block_size, 1e-3, dt_max, 0, mode="valid"
+        )
+        res_valid = np.zeros_like(res_mono)
+        for b in range(n_blocks):
+            block = wf[:, b * block_size : (b + 1) * block_size]
+            res_valid[:, b * block_size : (b + 1) * block_size] = valid_engine.execute(block)
+
+        # After warm-up of dt_max samples, streaming valid mode must match monolithic full
+        valid_slice = slice(dt_max, (n_blocks - 1) * block_size)
+        diff = np.abs(res_mono[:, valid_slice] - res_valid[:, valid_slice])
+        assert np.max(diff) < 1e-4
+        assert np.sum(diff > 1e-4) == 0
+
+    def test_valid_mode_streaming_multi_beam_small_block(self) -> None:
+        # Multi-beam 3D streaming in small block regime (block_size < dt_max)
+        nbeams = 4
+        nchans = 32
+        dt_max = 32
+        block_size = 8
+        n_blocks = 10
+        total = block_size * n_blocks
+
+        rng = np.random.default_rng(123)
+        wf = rng.standard_normal((nbeams, nchans, total)).astype(np.float32)
+
+        full_engine = libdmt.FDMTCPU(
+            1200.0, 1600.0, nchans, total, 1e-3, dt_max, 0, mode="full", nbeams=nbeams
+        )
+        res_mono = full_engine.execute(wf)
+
+        valid_engine = libdmt.FDMTCPU(
+            1200.0, 1600.0, nchans, block_size, 1e-3, dt_max, 0, mode="valid", nbeams=nbeams
+        )
+        res_valid = np.zeros_like(res_mono)
+        for b in range(n_blocks):
+            block = wf[:, :, b * block_size : (b + 1) * block_size]
+            res_valid[:, :, b * block_size : (b + 1) * block_size] = valid_engine.execute(block)
+
+        valid_slice = slice(dt_max, (n_blocks - 1) * block_size)
+        diff = np.abs(res_mono[:, :, valid_slice] - res_valid[:, :, valid_slice])
+        assert np.max(diff) < 1e-4
+        assert np.sum(diff > 1e-4) == 0
+
     def test_reset_history_matches_fresh_instance(self) -> None:
+
         f_min, f_max = 1000.0, 1500.0
         nchans, nsamps, tsamp = 32, 128, 0.001
         dt_max, dt_min = 32, -32
@@ -943,5 +1008,47 @@ class TestFDMT:
             streamed[:, abs_dt_max:], dmt_full[:, abs_dt_max:total],
             rtol=1e-5, atol=1e-3,
         )
+
+    def test_nbeams_kwarg_defaults_to_one(self) -> None:
+        # nbeams is a new trailing keyword argument; default construction
+        # (and explicit nbeams=1) must both report nbeams=1 and produce
+        # identical output.
+        f_min, f_max = 1000.0, 1500.0
+        nchans, nsamps, tsamp = 32, 128, 0.001
+        dt_max, dt_min = 32, 0
+
+        fdmt_default = libdmt.FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
+                                      dt_max, dt_min)
+        fdmt_explicit = libdmt.FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
+                                       dt_max, dt_min, nbeams=1)
+        assert fdmt_default.nbeams == 1
+        assert fdmt_explicit.nbeams == 1
+
+        waterfall = np.ones((nchans, nsamps), dtype=np.float32)
+        np.testing.assert_array_equal(
+            fdmt_default.execute(waterfall), fdmt_explicit.execute(waterfall)
+        )
+
+    def test_nbeams_greater_than_one_reports_correctly(self) -> None:
+        # nbeams>1 is fully supported at the C++/span level (see the C++
+        # multi-beam test suite), but the convenience execute() wrapper in
+        # this Python binding still allocates a single-beam-sized output
+        # buffer and doesn't reshape a beam-major input -- so it must fail
+        # loudly (via the underlying C++ size check) on a single-beam-sized
+        # array rather than silently misinterpret it, until the binding is
+        # extended for beam-major numpy shapes.
+        f_min, f_max = 1000.0, 1500.0
+        nchans, nsamps, tsamp = 16, 64, 0.001
+        dt_max, dt_min = 16, 0
+        nbeams = 3
+
+        fdmt_multi = libdmt.FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
+                                    dt_max, dt_min, nbeams=nbeams)
+        assert fdmt_multi.nbeams == nbeams
+
+        waterfall_single_beam_sized = np.ones((nchans, nsamps),
+                                              dtype=np.float32)
+        with pytest.raises(ValueError, match="Invalid size of waterfall"):
+            fdmt_multi.execute(waterfall_single_beam_sized)
 
 

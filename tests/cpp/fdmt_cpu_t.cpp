@@ -725,13 +725,28 @@ TEST_CASE("FDMTCPU valid-mode cross-block streaming",
     struct Config {
         IndexType dt_max;
         IndexType dt_min;
+        SizeType block_size = 128;
+        SizeType n_blocks   = 5;
     };
-    const std::vector<Config> configs = {{32, 0}, {32, -32}, {16, -32}};
+    const std::vector<Config> configs = {
+        {32, 0},
+        {32, -32},
+        {16, -32},
+        // block_size < dt_max: exercises the cross-block history FIFO
+        // generalization (Phase 1), not just the original block_size >
+        // dt_max regime covered by the three configs above. n_blocks is
+        // bumped up so total_nsamp comfortably exceeds abs_dt_max, leaving
+        // samples beyond the warm-up region to actually check.
+        {32, 0, 4, 40},
+        {32, -32, 4, 40},
+        {32, -32, 17, 10},
+    };
 
     for (const auto& cfg : configs) {
-        DYNAMIC_SECTION("dt_max=" << cfg.dt_max << " dt_min=" << cfg.dt_min) {
-            const SizeType block_size  = 128;
-            const SizeType n_blocks    = 5;
+        DYNAMIC_SECTION("dt_max=" << cfg.dt_max << " dt_min=" << cfg.dt_min
+                                  << " block_size=" << cfg.block_size) {
+            const SizeType block_size  = cfg.block_size;
+            const SizeType n_blocks    = cfg.n_blocks;
             const SizeType total_nsamp = block_size * n_blocks;
 
             std::vector<float> waterfall(nchans * total_nsamp);
@@ -840,6 +855,15 @@ TEST_CASE("FDMTCPU valid-mode streaming stress: smearing, odd channels, "
         {63, 100, 10, true},  // odd nchans, non-round block size
         {32, 128, 20, true},  // long chain
         {32, 40, 15, true},   // many small blocks
+        // block_size < dt_max=32: exercises the cross-block FIFO
+        // generalization (ring-buffer history), not just the original
+        // single-slot regime.
+        {32, 4, 40, true},    // block_size << dt_max, many blocks to fill
+        {32, 8, 30, true},    // block_size << dt_max
+        {32, 17, 20, true},   // block_size just below dt_max
+        {32, 31, 20, true},   // block_size == dt_max - 1
+        {32, 33, 20, true},   // block_size == dt_max + 1 (boundary sanity)
+        {13, 3, 25, true},    // odd nchans combined with block_size << dt_max
     };
 
     for (const auto& cfg : configs) {
@@ -875,6 +899,55 @@ TEST_CASE("FDMTCPU valid-mode streaming stress: smearing, odd channels, "
                              .margin(1e-3));
                 }
             }
+        }
+    }
+}
+
+TEST_CASE(
+    "FDMTCPU valid-mode ring-buffer warm-up transient across many small "
+    "blocks",
+    "[fdmt_cpu]") {
+    // Dedicated stress case for the cross-block history FIFO generalization:
+    // dt_max is large relative to block_size, so it takes several blocks
+    // (ceil(dt_max/block_size)) before every coordinate's history window is
+    // fully populated with real (non-bootstrap) samples. This must still
+    // reproduce monolithic mode="full" bit-exactly for t >= abs_dt_max, and
+    // must not crash/corrupt state during the multi-block fill-up period.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 24;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 100;
+    const IndexType dt_min = -100;
+
+    const SizeType block_size  = 8; // dt_max spans 13 blocks (ceil(100/8))
+    const SizeType n_blocks    = 40;
+    const auto total_nsamp     = block_size * n_blocks;
+
+    std::vector<float> waterfall(nchans * total_nsamp);
+    for (size_t i = 0; i < waterfall.size(); ++i) {
+        waterfall[i] = static_cast<float>((i % 29) + 1);
+    }
+
+    FDMTCPU fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp, dt_max, dt_min,
+                      1, true, "full");
+    std::vector<float> dmt_full(fdmt_full.get_plan().get_buffer_size(), 0.0F);
+    fdmt_full.execute(waterfall, dmt_full);
+    const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
+
+    FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
+                       1, true, "valid");
+    std::vector<float> streamed;
+    stream_blocks(fdmt_valid, waterfall, nchans, block_size, n_blocks,
+                 streamed);
+
+    const auto ndms = fdmt_valid.get_plan().get_dmt_ndms();
+    const auto abs_dt_max =
+        static_cast<SizeType>(std::max(std::abs(dt_min), std::abs(dt_max)));
+    for (SizeType d = 0; d < ndms; ++d) {
+        for (SizeType t = abs_dt_max; t < total_nsamp; ++t) {
+            CHECK(streamed[(d * total_nsamp) + t] ==
+                 Catch::Approx(dmt_full[(d * full_nsamps) + t]).margin(1e-3));
         }
     }
 }
@@ -930,6 +1003,57 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state",
     CHECK(differs_before_reset);
 }
 
+TEST_CASE("FDMTCPU reset_history() actually resets streaming state "
+         "(block_size < dt_max)",
+         "[fdmt_cpu]") {
+    // Same as the test above, but with block_size < dt_max so the history
+    // FIFO is still mid-fill-up when reset_history() is called, exercising
+    // the multi-block ring-buffer generalization's reset path.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 32;
+    const SizeType nsamps  = 8;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 32;
+    const IndexType dt_min = -32;
+
+    std::vector<float> block1(nchans * nsamps);
+    std::vector<float> block2(nchans * nsamps);
+    for (size_t i = 0; i < block1.size(); ++i) {
+        block1[i] = static_cast<float>((i % 17) + 1);
+        block2[i] = static_cast<float>((i % 13) + 1);
+    }
+
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
+                "valid");
+    std::vector<float> dmt1(fdmt.get_plan().get_buffer_size(), 0.0F);
+    std::vector<float> dmt2_with_history(fdmt.get_plan().get_buffer_size(),
+                                         0.0F);
+    fdmt.execute(block1, dmt1);
+    fdmt.execute(block2, dmt2_with_history);
+
+    fdmt.reset_history();
+    std::vector<float> dmt2_after_reset(fdmt.get_plan().get_buffer_size(),
+                                        0.0F);
+    fdmt.execute(block2, dmt2_after_reset);
+
+    FDMTCPU fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                       true, "valid");
+    std::vector<float> dmt2_fresh(fdmt_fresh.get_plan().get_buffer_size(),
+                                  0.0F);
+    fdmt_fresh.execute(block2, dmt2_fresh);
+
+    const auto dmt_size = fdmt.get_plan().get_dmt_size();
+    bool differs_before_reset = false;
+    for (size_t i = 0; i < dmt_size; ++i) {
+        CHECK(dmt2_after_reset[i] == Catch::Approx(dmt2_fresh[i]));
+        if (dmt2_with_history[i] != dmt2_after_reset[i]) {
+            differs_before_reset = true;
+        }
+    }
+    CHECK(differs_before_reset);
+}
+
 TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary",
          "[fdmt_cpu]") {
     // The end-to-end scenario the streaming fix exists for: a real dispersed
@@ -952,6 +1076,60 @@ TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary",
     const std::vector<IndexType> target_dts = {16, -16, 0, 32, -32};
     const std::vector<SizeType> toffsets    = {
         block_size - 5, block_size, block_size + 5, (2 * block_size) - 3};
+
+    for (const auto target_dt : target_dts) {
+        for (const auto toffset : toffsets) {
+            DYNAMIC_SECTION("dt=" << target_dt << " toffset=" << toffset) {
+                const auto it =
+                    std::find(dt_grid.begin(), dt_grid.end(), target_dt);
+                REQUIRE(it != dt_grid.end());
+                const auto dm_idx = static_cast<SizeType>(
+                    std::distance(dt_grid.begin(), it));
+
+                std::vector<float> waterfall(nchans * total_nsamp, 0.0F);
+                algorithms::add_frb_track(waterfall, plan, dm_idx, 1.0F,
+                                          static_cast<IndexType>(toffset), 1);
+
+                FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp,
+                                  dt_max, dt_min, 1, false, "valid");
+                std::vector<float> streamed;
+                stream_blocks(fdmt_valid, waterfall, nchans, block_size,
+                             n_blocks, streamed);
+
+                const auto value = streamed[(dm_idx * total_nsamp) + toffset];
+                CHECK(value == Catch::Approx(static_cast<float>(nchans)));
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary "
+         "with block_size < dt_max",
+         "[fdmt_cpu]") {
+    // Same scenario as the block_size > dt_max test above, but with a block
+    // size small enough that the pulse's dispersive sweep spans several
+    // blocks (dt_max=32, block_size=8 => up to 4 blocks), directly
+    // exercising the cross-block history FIFO's multi-block fill-up path
+    // with a real injected signal rather than synthetic noise.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 64;
+    const SizeType block_size = 8;
+    const SizeType n_blocks   = 20;
+    const auto total_nsamp    = block_size * n_blocks;
+    const float tsamp       = 0.001F;
+    const IndexType dt_max  = 32;
+    const IndexType dt_min  = -32;
+
+    plans::FDMTPlan plan(f_min, f_max, nchans, total_nsamp, tsamp, dt_max,
+                        dt_min);
+    const auto& dt_grid = plan.get_dt_grid_final();
+
+    const std::vector<IndexType> target_dts = {16, -16, 0, 32, -32};
+    // Kept within [dt_max, total_nsamp - 1 - dt_max] so the injected pulse's
+    // per-channel shift (up to +-dt_max) never falls outside the waterfall,
+    // while still spanning several block_size=8 boundaries.
+    const std::vector<SizeType> toffsets = {40, 45, 80, 120};
 
     for (const auto target_dt : target_dts) {
         for (const auto toffset : toffsets) {
@@ -1042,6 +1220,171 @@ TEST_CASE("FDMTCPU stepper partial-advance across streamed blocks",
         for (SizeType t = abs_dt_max; t < total_nsamp; ++t) {
             CHECK(streamed[(d * total_nsamp) + t] ==
                  Catch::Approx(dmt_full[(d * full_nsamps) + t]).margin(1e-3));
+        }
+    }
+}
+
+TEST_CASE("FDMTCPU nbeams=1 is byte-identical to unbeamed execution",
+         "[fdmt_cpu]") {
+    // The zero-regression contract: explicitly passing nbeams=1 (the
+    // trailing default) must produce exactly the same output as never
+    // passing it at all -- not merely "close", since nothing about the
+    // single-beam hot path is supposed to change.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 48;
+    const SizeType nsamps  = 256;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 48;
+    const IndexType dt_min = -16;
+
+    std::vector<float> waterfall(nchans * nsamps);
+    for (size_t i = 0; i < waterfall.size(); ++i) {
+        waterfall[i] = static_cast<float>((i % 19) + 1);
+    }
+
+    for (const std::string_view mode : {"full", "valid", "roll"}) {
+        DYNAMIC_SECTION("mode=" << mode) {
+            FDMTCPU fdmt_default(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                 dt_min, 1, true, mode);
+            FDMTCPU fdmt_explicit_nbeams1(f_min, f_max, nchans, nsamps, tsamp,
+                                          dt_max, dt_min, 1, true, mode, false,
+                                          1, /*nbeams=*/1);
+            CHECK(fdmt_default.get_nbeams() == 1);
+            CHECK(fdmt_explicit_nbeams1.get_nbeams() == 1);
+
+            std::vector<float> dmt_default(
+                fdmt_default.get_plan().get_buffer_size(), 0.0F);
+            std::vector<float> dmt_explicit(
+                fdmt_explicit_nbeams1.get_plan().get_buffer_size(), 0.0F);
+            fdmt_default.execute(waterfall, dmt_default);
+            fdmt_explicit_nbeams1.execute(waterfall, dmt_explicit);
+
+            REQUIRE(dmt_default.size() == dmt_explicit.size());
+            for (size_t i = 0; i < dmt_default.size(); ++i) {
+                CHECK(dmt_default[i] == dmt_explicit[i]);
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTCPU nbeams>1 produces independent per-beam results",
+         "[fdmt_cpu]") {
+    // Packing nbeams independent, differently-seeded waterfalls into one
+    // beam-major multi-beam call must reproduce exactly what nbeams
+    // separate single-beam calls would each produce -- proving beams don't
+    // leak into each other's state/history buffers.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 32;
+    const SizeType nsamps  = 200;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 32;
+    const IndexType dt_min = -32;
+    const SizeType nbeams  = 4;
+
+    for (const std::string_view mode : {"full", "valid"}) {
+        DYNAMIC_SECTION("mode=" << mode) {
+            std::vector<float> waterfall_multi(nbeams * nchans * nsamps);
+            for (SizeType b = 0; b < nbeams; ++b) {
+                for (size_t i = 0; i < nchans * nsamps; ++i) {
+                    waterfall_multi[(b * nchans * nsamps) + i] =
+                        static_cast<float>(((i + (b * 7)) % 29) + 1);
+                }
+            }
+
+            FDMTCPU fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                              dt_min, 1, true, mode, false, 1, nbeams);
+            CHECK(fdmt_multi.get_nbeams() == nbeams);
+            const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
+            std::vector<float> dmt_multi(nbeams * buffer_size, 0.0F);
+            fdmt_multi.execute(waterfall_multi, dmt_multi);
+
+            for (SizeType b = 0; b < nbeams; ++b) {
+                FDMTCPU fdmt_single(f_min, f_max, nchans, nsamps, tsamp,
+                                   dt_max, dt_min, 1, true, mode);
+                std::vector<float> waterfall_single(
+                    waterfall_multi.data() + (b * nchans * nsamps),
+                    waterfall_multi.data() + ((b + 1) * nchans * nsamps));
+                std::vector<float> dmt_single(buffer_size, 0.0F);
+                fdmt_single.execute(waterfall_single, dmt_single);
+
+                for (size_t i = 0; i < buffer_size; ++i) {
+                    CHECK(dmt_multi[(b * buffer_size) + i] == dmt_single[i]);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTCPU nbeams>1 valid-mode streaming keeps per-beam history "
+         "isolated across blocks",
+         "[fdmt_cpu]") {
+    // Combines Phase 1 (cross-block history FIFO, including block_size <
+    // dt_max) with Phase 3 (nbeams): each beam's history must evolve
+    // completely independently across streamed blocks, matching nbeams
+    // separate single-beam streaming runs exactly.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 16;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 40;
+    const IndexType dt_min = -40;
+    const SizeType nbeams  = 3;
+
+    const SizeType block_size = 8; // < dt_max: exercises Phase 1 + Phase 3
+                                   // together
+    const SizeType n_blocks   = 15;
+    const auto total_nsamp    = block_size * n_blocks;
+
+    std::vector<float> waterfall_multi(nbeams * nchans * total_nsamp);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        for (size_t i = 0; i < nchans * total_nsamp; ++i) {
+            waterfall_multi[(b * nchans * total_nsamp) + i] =
+                static_cast<float>(((i + (b * 11)) % 23) + 1);
+        }
+    }
+
+    FDMTCPU fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
+                       1, true, "valid", false, 1, nbeams);
+    const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
+
+    std::vector<FDMTCPU> fdmt_singles;
+    for (SizeType b = 0; b < nbeams; ++b) {
+        fdmt_singles.emplace_back(f_min, f_max, nchans, block_size, tsamp,
+                                  dt_max, dt_min, 1, true, "valid");
+    }
+
+    for (SizeType blk = 0; blk < n_blocks; ++blk) {
+        std::vector<float> block_multi(nbeams * nchans * block_size);
+        for (SizeType b = 0; b < nbeams; ++b) {
+            for (SizeType c = 0; c < nchans; ++c) {
+                std::copy_n(
+                    waterfall_multi.data() + (b * nchans * total_nsamp) +
+                        (c * total_nsamp) + (blk * block_size),
+                    block_size,
+                    block_multi.data() + (b * nchans * block_size) +
+                        (c * block_size));
+            }
+        }
+        std::vector<float> dmt_multi(nbeams * buffer_size, 0.0F);
+        fdmt_multi.execute(block_multi, dmt_multi);
+
+        for (SizeType b = 0; b < nbeams; ++b) {
+            std::vector<float> block_single(nchans * block_size);
+            for (SizeType c = 0; c < nchans; ++c) {
+                std::copy_n(waterfall_multi.data() +
+                                (b * nchans * total_nsamp) +
+                                (c * total_nsamp) + (blk * block_size),
+                            block_size,
+                            block_single.data() + (c * block_size));
+            }
+            std::vector<float> dmt_single(buffer_size, 0.0F);
+            fdmt_singles[b].execute(block_single, dmt_single);
+
+            for (size_t i = 0; i < buffer_size; ++i) {
+                CHECK(dmt_multi[(b * buffer_size) + i] == dmt_single[i]);
+            }
         }
     }
 }

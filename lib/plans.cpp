@@ -858,11 +858,12 @@ private:
                 std::format("dt_max_iter={} is greater than abs_dt_max={}",
                             dt_max_iter, abs_dt_max));
         }
-        if (m_mode == "valid" && dt_max_iter > m_nsamps) {
-            throw std::runtime_error(std::format(
-                "dt_max_iter={} is greater than nsamps={} for mode='{}'",
-                dt_max_iter, m_nsamps, m_mode));
-        }
+        // Note: mode="valid" intentionally allows dt_max_iter > m_nsamps
+        // (block size smaller than this level's max delay) -- the
+        // cross-block history FIFO in offset_add<kValid> (see
+        // FDMTCoord::hist_offset) accumulates real history across multiple
+        // blocks in that case rather than requiring one block to cover the
+        // whole delay.
         const auto nsamps_iter =
             m_nsamps + ((m_mode == "full") ? dt_max_iter : 0);
 
@@ -1005,7 +1006,15 @@ private:
                         head_n      = coords_prev[i_coord_tail].nsamps;
                     }
 
-                    if (delay_shift >= nsamps_prev) {
+                    // "full"/"roll" have no cross-block history mechanism,
+                    // so a delay that doesn't fit within one block can never
+                    // be satisfied and must fail fast at plan-build time.
+                    // "valid" mode's cross-block history FIFO (see
+                    // FDMTCoord::hist_offset, offset_add<kValid> in
+                    // fdmt.cpp) is explicitly designed to support
+                    // delay_shift >= nsamps_prev by accumulating real
+                    // history across multiple blocks.
+                    if (m_mode != "valid" && delay_shift >= nsamps_prev) {
                         throw std::runtime_error(
                             std::format("DM delay is greater than input size: "
                                         "delay_shift={}, nsamps_prev={}",
