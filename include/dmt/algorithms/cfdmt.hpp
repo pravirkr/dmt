@@ -46,6 +46,12 @@ public:
     template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in, std::span<float> dmt) const;
 
+    /**
+     * @brief Resets every coarse-DM trial's fine-search streaming history to
+     * a cold state (e.g. for a new observation / non-contiguous data).
+     */
+    void reset_history() noexcept;
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -88,6 +94,12 @@ public:
     void execute(cuda::std::span<const DataType> d_data_in,
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream = nullptr) const;
+
+    /**
+     * @brief Resets every coarse-DM trial's fine-search streaming history to
+     * a cold state (e.g. for a new observation / non-contiguous data).
+     */
+    void reset_history() noexcept;
 
 private:
     class Impl;

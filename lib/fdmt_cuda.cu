@@ -685,6 +685,82 @@ public:
         m_tree_history_parity = false;
     }
 
+    /// Total device-buffer size (floats) of this instance's "valid"-mode
+    /// streaming history, as saved/restored by save_history()/load_history()
+    /// -- the two level-0 buffers, the two tree-level buffers, and one extra
+    /// float encoding m_tree_history_parity. Zero (well, the trailing flag
+    /// aside) for "full"/"roll" mode instances.
+    [[nodiscard]] SizeType history_state_size() const noexcept {
+        return m_history_a_d.size() + m_history_b_d.size() +
+               m_tree_history_a_d.size() + m_tree_history_b_d.size() + 1;
+    }
+
+    /// Copies this instance's current streaming history (both ping-pong
+    /// buffer pairs plus the parity flag) out to a caller-owned device
+    /// buffer, so one shared FDMTCUDA instance can multiplex several
+    /// independent streams (each with its own history) instead of requiring
+    /// one instance per stream. Enqueued on `stream`; synchronize before
+    /// reading `out` elsewhere.
+    void save_history(cuda::std::span<float> out, cudaStream_t stream) const {
+        if (out.size() != history_state_size()) {
+            throw std::invalid_argument(std::format(
+                "FDMTCUDA::save_history: Invalid output size. Expected {}, "
+                "got {}",
+                history_state_size(), out.size()));
+        }
+        cuda_utils::set_device(m_device_id);
+        float* dst = out.data();
+        auto copy_out = [&](const thrust::device_vector<float>& src) {
+            if (!src.empty()) {
+                cudaMemcpyAsync(dst, thrust::raw_pointer_cast(src.data()),
+                                src.size() * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream);
+            }
+            dst += src.size();
+        };
+        copy_out(m_history_a_d);
+        copy_out(m_history_b_d);
+        copy_out(m_tree_history_a_d);
+        copy_out(m_tree_history_b_d);
+        const float parity = m_tree_history_parity ? 1.0F : 0.0F;
+        cudaMemcpyAsync(dst, &parity, sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        cuda_utils::check_last_cuda_error("FDMTCUDA::save_history failed");
+    }
+
+    /// Replaces this instance's current streaming history with a buffer
+    /// previously produced by save_history() (from an instance built with
+    /// the same plan geometry), resuming that stream. Blocks briefly to read
+    /// back the parity flag onto the host -- use reset_history() instead to
+    /// start a stream cold.
+    void load_history(cuda::std::span<const float> in, cudaStream_t stream) {
+        if (in.size() != history_state_size()) {
+            throw std::invalid_argument(std::format(
+                "FDMTCUDA::load_history: Invalid input size. Expected {}, "
+                "got {}",
+                history_state_size(), in.size()));
+        }
+        cuda_utils::set_device(m_device_id);
+        const float* src = in.data();
+        auto copy_in = [&](thrust::device_vector<float>& dst_vec) {
+            if (!dst_vec.empty()) {
+                cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
+                                dst_vec.size() * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream);
+            }
+            src += dst_vec.size();
+        };
+        copy_in(m_history_a_d);
+        copy_in(m_history_b_d);
+        copy_in(m_tree_history_a_d);
+        copy_in(m_tree_history_b_d);
+        cudaStreamSynchronize(stream);
+        float parity = 0.0F;
+        cudaMemcpy(&parity, src, sizeof(float), cudaMemcpyDeviceToHost);
+        m_tree_history_parity = parity != 0.0F;
+        cuda_utils::check_last_cuda_error("FDMTCUDA::load_history failed");
+    }
+
 private:
     int m_device_id;
     bool m_use_box_smearing;
@@ -1013,6 +1089,17 @@ FDMTCUDA::get_effective_sigma_grid(SizeType boxcar_width) const {
 }
 void FDMTCUDA::reset_history() noexcept { m_impl->reset_history(); }
 SizeType FDMTCUDA::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
+SizeType FDMTCUDA::history_state_size() const noexcept {
+    return m_impl->history_state_size();
+}
+void FDMTCUDA::save_history(cuda::std::span<float> out,
+                            cudaStream_t stream) const {
+    m_impl->save_history(out, stream);
+}
+void FDMTCUDA::load_history(cuda::std::span<const float> in,
+                            cudaStream_t stream) {
+    m_impl->load_history(in, stream);
+}
 
 [[nodiscard]] std::vector<float>
 compute_fdmt_cuda(std::span<const float> waterfall,

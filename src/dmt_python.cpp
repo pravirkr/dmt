@@ -248,8 +248,30 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
         .def_property_readonly("tsamp", &CohFDMTPlan::get_tsamp)
         .def_property_readonly("dt_max", &CohFDMTPlan::get_dt_max)
+        .def_property_readonly("ndm", &CohFDMTPlan::get_ndm)
+        .def_property_readonly("dmt_ndms", &CohFDMTPlan::get_dmt_ndms)
+        .def_property_readonly("dmt_nsamps", &CohFDMTPlan::get_dmt_nsamps)
+        .def_property_readonly("dmt_size", &CohFDMTPlan::get_dmt_size)
         .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale)
         .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan)
+        .def("get_effective_variance_grid",
+             [](const CohFDMTPlan& plan, SizeType boxcar_width,
+                bool use_box_smearing) {
+                 return as_pyarray(plan.get_effective_variance_grid(
+                     boxcar_width, use_box_smearing));
+             },
+             py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+        .def("get_effective_sigma_grid",
+             [](const CohFDMTPlan& plan, SizeType boxcar_width,
+                bool use_box_smearing) {
+                 return as_pyarray(plan.get_effective_sigma_grid(
+                     boxcar_width, use_box_smearing));
+             },
+             py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+        .def("get_cumulative_count_grid",
+             [](const CohFDMTPlan& plan) {
+                 return as_pyarray(plan.get_cumulative_count_grid());
+             })
         .def("print_summary", &CohFDMTPlan::print_summary);
 
     py::class_<DDMTPlan>(mod, "DDMTPlan")
@@ -864,24 +886,41 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
              });
     py::class_<CohFDMTCPU>(mod, "CohFDMTCPU")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string_view, int, bool>(),
+                      float, float, SizeType, std::string_view, bool, int>(),
              "f_center"_a, "sub_bw"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "tp"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap"_a = 8192,
-             "data_order"_a = "PRITF", "nthreads"_a = 1, "verbose"_a = false)
+             "data_order"_a = "PRITF", "verbose"_a = false, "nthreads"_a = 1)
         .def_property_readonly("plan", &CohFDMTCPU::get_plan)
         // Bind each data type to execute method
         .def("execute",
              [](CohFDMTCPU& coh_fdmt,
                 const py::array_t<uint8_t, py::array::c_style>& data_in) {
-                 const auto* shape = data_in.shape();
+                 const auto& plan      = coh_fdmt.get_plan();
+                 const auto ndm_total  = plan.get_ndm();
+                 const auto nsamps_out = plan.get_dmt_nsamps();
                  py::array_t<float, py::array::c_style> dmt(
-                     {static_cast<ssize_t>(coh_fdmt.get_plan().get_dmt_size()),
-                      shape[1]});
+                     {static_cast<ssize_t>(ndm_total),
+                      static_cast<ssize_t>(nsamps_out)});
                  coh_fdmt.execute(
                      std::span<const uint8_t>(data_in.data(), data_in.size()),
                      std::span<float>(dmt.mutable_data(), dmt.size()));
                  return dmt;
-             });
+             })
+        .def("execute",
+             [](CohFDMTCPU& coh_fdmt,
+                const py::array_t<int8_t, py::array::c_style>& data_in) {
+                 const auto& plan      = coh_fdmt.get_plan();
+                 const auto ndm_total  = plan.get_ndm();
+                 const auto nsamps_out = plan.get_dmt_nsamps();
+                 py::array_t<float, py::array::c_style> dmt(
+                     {static_cast<ssize_t>(ndm_total),
+                      static_cast<ssize_t>(nsamps_out)});
+                 coh_fdmt.execute(
+                     std::span<const int8_t>(data_in.data(), data_in.size()),
+                     std::span<float>(dmt.mutable_data(), dmt.size()));
+                 return dmt;
+             })
+        .def("reset_history", &CohFDMTCPU::reset_history);
 }
 
 } // namespace dmt

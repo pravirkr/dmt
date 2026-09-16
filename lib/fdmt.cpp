@@ -962,6 +962,41 @@ public:
         std::fill(m_tree_history.begin(), m_tree_history.end(), 0.0F);
     }
 
+    [[nodiscard]] SizeType history_state_size() const noexcept {
+        return m_history.size() + m_history_init.size() + m_tree_history.size();
+    }
+
+    void save_history(std::span<float> out) const {
+        if (out.size() != history_state_size()) {
+            throw std::invalid_argument(
+                std::format("FDMTCPU::save_history: Invalid output size. "
+                           "Expected {}, got {}",
+                           history_state_size(), out.size()));
+        }
+        auto it = out.begin();
+        it      = std::copy(m_history.begin(), m_history.end(), it);
+        it      = std::copy(m_history_init.begin(), m_history_init.end(), it);
+        std::copy(m_tree_history.begin(), m_tree_history.end(), it);
+    }
+
+    void load_history(std::span<const float> in) {
+        if (in.size() != history_state_size()) {
+            throw std::invalid_argument(
+                std::format("FDMTCPU::load_history: Invalid input size. "
+                           "Expected {}, got {}",
+                           history_state_size(), in.size()));
+        }
+        auto it = in.begin();
+        std::copy(it, it + static_cast<IndexType>(m_history.size()),
+                  m_history.begin());
+        it += static_cast<IndexType>(m_history.size());
+        std::copy(it, it + static_cast<IndexType>(m_history_init.size()),
+                  m_history_init.begin());
+        it += static_cast<IndexType>(m_history_init.size());
+        std::copy(it, it + static_cast<IndexType>(m_tree_history.size()),
+                  m_tree_history.begin());
+    }
+
 private:
     bool m_use_box_smearing;
     FDMTMode m_mode;
@@ -1232,6 +1267,15 @@ FDMTCPU::get_effective_sigma_grid(SizeType boxcar_width) const {
 }
 
 void FDMTCPU::reset_history() noexcept { m_impl->reset_history(); }
+SizeType FDMTCPU::history_state_size() const noexcept {
+    return m_impl->history_state_size();
+}
+void FDMTCPU::save_history(std::span<float> out) const {
+    m_impl->save_history(out);
+}
+void FDMTCPU::load_history(std::span<const float> in) {
+    m_impl->load_history(in);
+}
 
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,

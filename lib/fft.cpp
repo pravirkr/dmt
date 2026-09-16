@@ -165,14 +165,16 @@ private:
             spdlog::debug("configure_threading: Using max threads: {}",
                           m_nthreads);
         }
-        if (fftwf_init_threads() == 0) {
-            spdlog::error(
-                "configure_threading: Failed to initialize FFTW threads");
-            throw std::runtime_error("Failed to initialize FFTW threads");
+        if (m_nthreads > 1) {
+            if (fftwf_init_threads() == 0) {
+                spdlog::error(
+                    "configure_threading: Failed to initialize FFTW threads");
+                throw std::runtime_error("Failed to initialize FFTW threads");
+            }
+            fftwf_plan_with_nthreads(m_nthreads);
+            spdlog::debug("configure_threading: FFTW initialized with {} threads",
+                          m_nthreads);
         }
-        fftwf_plan_with_nthreads(m_nthreads);
-        spdlog::debug("configure_threading: FFTW initialized with {} threads",
-                      m_nthreads);
 #else
         if (m_nthreads > 1) {
             spdlog::warn("configure_threading: nthreads={} requested but "
@@ -197,8 +199,10 @@ private:
                 spdlog::debug("cleanup_resources: Backward plan destroyed");
             }
 #ifdef DMT_ENABLE_OPENMP
-            fftwf_cleanup_threads();
-            spdlog::debug("cleanup_resources: FFTW threads cleaned up");
+            if (m_nthreads > 1) {
+                fftwf_cleanup_threads();
+                spdlog::debug("cleanup_resources: FFTW threads cleaned up");
+            }
 #endif
             fftwf_cleanup();
             spdlog::debug("cleanup_resources: FFTW global cleanup completed");

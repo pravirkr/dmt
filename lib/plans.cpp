@@ -1186,6 +1186,7 @@ public:
           m_msamp(other.m_msamp),
           m_tsamp(other.m_tsamp),
           m_dt_max(other.m_dt_max),
+          m_dt_min(other.m_dt_min),
           m_fdmt_plan(other.m_fdmt_plan
                           ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
                           : nullptr) {}
@@ -1215,6 +1216,7 @@ public:
             m_msamp         = other.m_msamp;
             m_tsamp         = other.m_tsamp;
             m_dt_max        = other.m_dt_max;
+            m_dt_min        = other.m_dt_min;
             m_fdmt_plan = other.m_fdmt_plan
                               ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
                               : nullptr;
@@ -1254,6 +1256,7 @@ public:
     SizeType get_msamp() const noexcept { return m_msamp; }
     float get_tsamp() const noexcept { return m_tsamp; }
     SizeType get_dt_max() const noexcept { return m_dt_max; }
+    IndexType get_dt_min() const noexcept { return m_dt_min; }
 
     SizeType get_chirp_table_size() const noexcept {
         return m_dm_grid_coh.size() * m_nsub * m_nbin;
@@ -1267,11 +1270,50 @@ public:
     SizeType get_intensity_buf_size() const noexcept {
         return m_nsub * m_nchan * m_msamp;
     }
+    SizeType get_ndm() const noexcept { return m_dm_grid_final.size(); }
+    SizeType get_dmt_ndms() const noexcept { return m_dm_grid_final.size(); }
+    SizeType get_dmt_nsamps() const noexcept {
+        return m_fdmt_plan ? m_fdmt_plan->get_dmt_nsamps() : 0;
+    }
     SizeType get_dmt_size() const {
         return m_dm_grid_coh.size() * m_fdmt_plan->get_dmt_size();
     }
     float get_chirp_scale() const noexcept {
         return 1.0F / static_cast<float>(m_nbin);
+    }
+
+    std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width,
+                                bool use_box_smearing) const {
+        if (!m_fdmt_plan) {
+            return {};
+        }
+        const auto fdmt_var =
+            m_fdmt_plan->get_effective_variance_grid(boxcar_width,
+                                                     use_box_smearing);
+        const auto ndm_coh = m_dm_grid_coh.size();
+        const auto n_fine  = fdmt_var.size();
+        std::vector<float> grid(ndm_coh * n_fine);
+        for (SizeType i = 0; i < ndm_coh; ++i) {
+            std::ranges::copy(
+                fdmt_var, grid.begin() + static_cast<IndexType>(i * n_fine));
+        }
+        return grid;
+    }
+
+    std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width,
+                             bool use_box_smearing) const {
+        auto var_grid =
+            get_effective_variance_grid(boxcar_width, use_box_smearing);
+        for (auto& v : var_grid) {
+            v = std::sqrt(v);
+        }
+        return var_grid;
+    }
+
+    std::vector<float> get_cumulative_count_grid() const {
+        return get_effective_variance_grid(1, false);
     }
 
     const FDMTPlan& get_fdmt_plan() const { return *m_fdmt_plan; }
@@ -1344,6 +1386,7 @@ private:
     SizeType m_msamp{};
     float m_tsamp{};
     SizeType m_dt_max{};
+    IndexType m_dt_min{};
 
     std::unique_ptr<FDMTPlan> m_fdmt_plan;
 
@@ -1424,13 +1467,24 @@ private:
                             "nsamp={}, nchan={}",
                             m_nsamp, m_nchan));
         }
-        m_msamp  = m_nsamp / m_nchan;
-        m_tsamp  = m_tbin * static_cast<float>(m_nchan);
+        m_msamp = m_nsamp / m_nchan;
+        m_tsamp = m_tbin * static_cast<float>(m_nchan);
+        // The fine FDMT stage searches its residual symmetrically around
+        // each coherent DM trial (treated as the reference/"zero" point),
+        // exploiting FDMT's negative-dt support: dt in [-n_p, n_p) doubles
+        // the DM width covered per coherent trial relative to a one-sided
+        // [0, n_p) search, which is what lets generate_coherent_dms() halve
+        // the number of coherent trials needed (see its doc comment).
         m_dt_max = m_n_p - 1;
+        m_dt_min = -static_cast<IndexType>(m_n_p);
 
-        m_fdmt_plan =
-            std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan, m_msamp,
-                                       m_tsamp, m_dt_max, 0, 1, "full", false);
+        // mode="valid": each coherent DM trial's fine-search FDMT instance
+        // streams its own cross-block history (see CohFDMTCPU/CohFDMTCUDA),
+        // so contiguous baseband blocks produce contiguous fine-DMT output
+        // per coherent trial. Must match the runtime FDMTCPU/FDMTCUDA mode.
+        m_fdmt_plan = std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan,
+                                                 m_msamp, m_tsamp, m_dt_max,
+                                                 m_dt_min, 1, "valid", false);
 
         // Generate final DM grid
         const auto& fdmt_dm_grid = m_fdmt_plan->get_dm_grid_final();
@@ -1792,6 +1846,9 @@ float CohFDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
 SizeType CohFDMTPlan::get_dt_max() const noexcept {
     return m_impl->get_dt_max();
 }
+IndexType CohFDMTPlan::get_dt_min() const noexcept {
+    return m_impl->get_dt_min();
+}
 SizeType CohFDMTPlan::get_chirp_table_size() const noexcept {
     return m_impl->get_chirp_table_size();
 }
@@ -1804,9 +1861,27 @@ SizeType CohFDMTPlan::get_delay_buf_size() const noexcept {
 SizeType CohFDMTPlan::get_intensity_buf_size() const noexcept {
     return m_impl->get_intensity_buf_size();
 }
+SizeType CohFDMTPlan::get_ndm() const noexcept { return m_impl->get_ndm(); }
+SizeType CohFDMTPlan::get_dmt_ndms() const noexcept { return m_impl->get_dmt_ndms(); }
+SizeType CohFDMTPlan::get_dmt_nsamps() const noexcept {
+    return m_impl->get_dmt_nsamps();
+}
 SizeType CohFDMTPlan::get_dmt_size() const { return m_impl->get_dmt_size(); }
 float CohFDMTPlan::get_chirp_scale() const noexcept {
     return m_impl->get_chirp_scale();
+}
+std::vector<float>
+CohFDMTPlan::get_effective_variance_grid(SizeType boxcar_width,
+                                        bool use_box_smearing) const {
+    return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing);
+}
+std::vector<float>
+CohFDMTPlan::get_effective_sigma_grid(SizeType boxcar_width,
+                                     bool use_box_smearing) const {
+    return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing);
+}
+std::vector<float> CohFDMTPlan::get_cumulative_count_grid() const {
+    return m_impl->get_cumulative_count_grid();
 }
 const FDMTPlan& CohFDMTPlan::get_fdmt_plan() const {
     return m_impl->get_fdmt_plan();

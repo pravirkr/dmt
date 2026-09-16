@@ -806,6 +806,83 @@ TEST_CASE("FDMTCPU valid-mode cross-block streaming",
     }
 }
 
+TEST_CASE("FDMTCPU save_history/load_history multiplexes independent streams",
+         "[fdmt_cpu]") {
+    // This is the exact pattern CohFDMTCPU relies on: one shared FDMTCPU
+    // instance processes several *independent* streams (cfdmt's coarse-DM
+    // trials) by swapping each stream's small history in/out around its
+    // own block, rather than needing one instance per stream. Verify this
+    // reproduces the same per-stream result as running each stream through
+    // its own dedicated instance.
+    const float f_min        = 1000.0F;
+    const float f_max        = 1500.0F;
+    const SizeType nchans    = 32;
+    const float tsamp        = 0.001F;
+    const IndexType dt_max   = 16;
+    const IndexType dt_min   = -16;
+    const SizeType block_size = 64;
+    const SizeType n_blocks   = 4;
+    const SizeType n_streams  = 3;
+
+    // Independent per-stream ground truth: one dedicated instance each.
+    std::vector<std::vector<float>> stream_data(n_streams);
+    std::vector<std::vector<float>> expected(n_streams);
+    for (SizeType s = 0; s < n_streams; ++s) {
+        stream_data[s].resize(nchans * block_size * n_blocks);
+        for (size_t i = 0; i < stream_data[s].size(); ++i) {
+            stream_data[s][i] =
+                static_cast<float>(((i + (s * 7)) % 23) + 1);
+        }
+        FDMTCPU fdmt_dedicated(f_min, f_max, nchans, block_size, tsamp,
+                              dt_max, dt_min, 1, false, "valid");
+        expected[s].resize(fdmt_dedicated.get_plan().get_buffer_size() *
+                           n_blocks);
+        const auto buf_size = fdmt_dedicated.get_plan().get_buffer_size();
+        for (SizeType b = 0; b < n_blocks; ++b) {
+            std::span<const float> block(
+                stream_data[s].data() + (b * nchans * block_size),
+                nchans * block_size);
+            std::span<float> out(expected[s].data() + (b * buf_size),
+                                 buf_size);
+            fdmt_dedicated.execute(block, out);
+        }
+    }
+
+    // One shared instance, round-robin across streams via save/load_history.
+    FDMTCPU fdmt_shared(f_min, f_max, nchans, block_size, tsamp, dt_max,
+                        dt_min, 1, false, "valid");
+    const auto hist_size = fdmt_shared.history_state_size();
+    REQUIRE(hist_size > 0);
+    std::vector<std::vector<float>> histories(
+        n_streams, std::vector<float>(hist_size, 0.0F));
+    const auto buf_size = fdmt_shared.get_plan().get_buffer_size();
+    std::vector<std::vector<float>> actual(
+        n_streams, std::vector<float>(buf_size * n_blocks));
+
+    for (SizeType b = 0; b < n_blocks; ++b) {
+        for (SizeType s = 0; s < n_streams; ++s) {
+            fdmt_shared.load_history(histories[s]);
+            std::span<const float> block(
+                stream_data[s].data() + (b * nchans * block_size),
+                nchans * block_size);
+            std::span<float> out(actual[s].data() + (b * buf_size), buf_size);
+            fdmt_shared.execute(block, out);
+            fdmt_shared.save_history(histories[s]);
+        }
+    }
+
+    for (SizeType s = 0; s < n_streams; ++s) {
+        REQUIRE(actual[s].size() == expected[s].size());
+        for (size_t i = 0; i < actual[s].size(); ++i) {
+            CHECK(actual[s][i] == expected[s][i]);
+        }
+    }
+
+    // reset_history() cold-starts the shared instance for a given slot.
+    fdmt_shared.reset_history();
+    REQUIRE_NOTHROW(fdmt_shared.load_history(histories[0]));
+}
+
 namespace {
 // Streams `waterfall` (nchans x block_size*n_blocks) through `fdmt` in
 // consecutive non-overlapping blocks, writing results into `streamed`

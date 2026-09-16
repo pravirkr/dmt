@@ -273,6 +273,38 @@ public:
      */
     void reset_history() noexcept;
 
+    /**
+     * @brief Size (in floats) of this instance's "valid"-mode streaming
+     * history state, as used by save_history()/load_history(). Zero for
+     * "full"/"roll" mode instances.
+     */
+    [[nodiscard]] SizeType history_state_size() const noexcept;
+
+    /**
+     * @brief Copies this instance's current "valid"-mode streaming history
+     * out to caller-owned storage, so it can be swapped out and later
+     * restored with load_history() -- e.g. to let one shared FDMTCPU
+     * instance multiplex several independent streams (each with its own
+     * history) rather than requiring one instance per stream.
+     *
+     * @param out Destination span, size must equal history_state_size().
+     * A "full"/"roll" mode instance has history_state_size() == 0, so this
+     * is a no-op for those.
+     * @throws std::invalid_argument if out.size() != history_state_size().
+     */
+    void save_history(std::span<float> out) const;
+
+    /**
+     * @brief Replaces this instance's current "valid"-mode streaming history
+     * with a buffer previously produced by save_history() (from an instance
+     * built with the same plan geometry), resuming that stream. Use
+     * reset_history() instead to start a stream cold.
+     *
+     * @param in Source span, size must equal history_state_size().
+     * @throws std::invalid_argument if in.size() != history_state_size().
+     */
+    void load_history(std::span<const float> in);
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -664,6 +696,44 @@ public:
      * across FDMT blocks. Mirrors FDMTCPU::reset_history().
      */
     void reset_history() noexcept;
+
+    /**
+     * @brief Size (in floats) of this instance's "valid"-mode streaming
+     * history state (device-resident), as used by
+     * save_history()/load_history(). Mirrors FDMTCPU::history_state_size().
+     */
+    [[nodiscard]] SizeType history_state_size() const noexcept;
+
+    /**
+     * @brief Copies this instance's current streaming history out to a
+     * caller-owned device buffer, so one shared FDMTCUDA instance can
+     * multiplex several independent streams (each with its own history)
+     * rather than requiring one instance per stream. Mirrors
+     * FDMTCPU::save_history().
+     *
+     * @param out Destination device span, size must equal
+     * history_state_size().
+     * @param stream CUDA stream to enqueue the copy on; synchronize before
+     * reading @p out elsewhere.
+     * @throws std::invalid_argument if out.size() != history_state_size().
+     */
+    void save_history(cuda::std::span<float> out,
+                      cudaStream_t stream = nullptr) const;
+
+    /**
+     * @brief Replaces this instance's current streaming history with a
+     * device buffer previously produced by save_history() (from an instance
+     * built with the same plan geometry), resuming that stream. Mirrors
+     * FDMTCPU::load_history(). Use reset_history() instead to start a stream
+     * cold.
+     *
+     * @param in Source device span, size must equal history_state_size().
+     * @param stream CUDA stream to enqueue the copy on. Briefly synchronizes
+     * internally to read back a small parity flag onto the host.
+     * @throws std::invalid_argument if in.size() != history_state_size().
+     */
+    void load_history(cuda::std::span<const float> in,
+                      cudaStream_t stream = nullptr);
 
 private:
     class Impl;

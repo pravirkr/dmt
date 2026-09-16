@@ -173,6 +173,33 @@ public:
         spdlog::debug("DataUnpackerCUDA::Impl: Execution submitted to stream");
     }
 
+    template <IntegralDataType DataType>
+    void execute(cuda::std::span<const DataType> data_in_d,
+                 cuda::std::span<ComplexTypeCUDA> data_p1,
+                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cudaStream_t stream) {
+        validate_sizes(data_in_d.size(), data_p1.size(), data_p2.size());
+        switch (m_order) {
+        case BasebandDataOrder::kPRITF:
+            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kPRITF>(
+                data_in_d, data_p1, data_p2, stream);
+            break;
+        case BasebandDataOrder::kFTPRI:
+            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kFTPRI>(
+                data_in_d, data_p1, data_p2, stream);
+            break;
+        case BasebandDataOrder::kRITFP:
+            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kRITFP>(
+                data_in_d, data_p1, data_p2, stream);
+            break;
+        default:
+            throw std::logic_error(
+                "DataUnpackerCUDA::Impl: Unsupported data order "
+                "encountered in execute.");
+        }
+        spdlog::debug("DataUnpackerCUDA::Impl: Device execution submitted to stream");
+    }
+
 private:
     SizeType m_nsub;
     SizeType m_nbin;
@@ -268,5 +295,34 @@ void DataUnpackerCUDA::execute(std::span<const DataType> data_in,
                                cudaStream_t stream) const {
     m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
 }
+
+template <IntegralDataType DataType>
+void DataUnpackerCUDA::execute(cuda::std::span<const DataType> data_in,
+                               cuda::std::span<ComplexTypeCUDA> data_p1,
+                               cuda::std::span<ComplexTypeCUDA> data_p2,
+                               cudaStream_t stream) const {
+    m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
+}
+
+template void DataUnpackerCUDA::execute<int8_t>(
+    std::span<const int8_t>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cudaStream_t) const;
+template void DataUnpackerCUDA::execute<uint8_t>(
+    std::span<const uint8_t>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cudaStream_t) const;
+template void DataUnpackerCUDA::execute<int8_t>(
+    cuda::std::span<const int8_t>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cudaStream_t) const;
+template void DataUnpackerCUDA::execute<uint8_t>(
+    cuda::std::span<const uint8_t>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cuda::std::span<ComplexTypeCUDA>,
+    cudaStream_t) const;
 
 } // namespace dmt::utils

@@ -323,8 +323,14 @@ public:
     SizeType get_msamp() const noexcept;
     /// @brief Time sample interval (seconds)
     float get_tsamp() const noexcept;
-    /// @brief Maximum delay in time bins
+    /// @brief Maximum delay in time bins (fine-search residual, symmetric
+    /// around each coherent DM trial)
     SizeType get_dt_max() const noexcept;
+    /// @brief Minimum (negative) delay in time bins -- the fine FDMT search
+    /// is symmetric around each coherent DM trial (dt in [get_dt_min(),
+    /// get_dt_max()]), exploiting FDMT's negative-dt support to halve the
+    /// number of coherent trials needed relative to a one-sided search.
+    IndexType get_dt_min() const noexcept;
 
     /// @brief Size of the chirp table
     SizeType get_chirp_table_size() const noexcept;
@@ -334,6 +340,22 @@ public:
     SizeType get_delay_buf_size() const noexcept;
     /// @brief Size of the intensity buffer
     SizeType get_intensity_buf_size() const noexcept;
+    /// @brief Total number of final DM trials across all coherent trials
+    SizeType get_ndm() const noexcept;
+    /// @brief Total number of final DM trials across all coherent trials
+    SizeType get_dmt_ndms() const noexcept;
+    /// @brief Number of time samples in each DM trial
+    SizeType get_dmt_nsamps() const noexcept;
+    /// @brief Theoretical noise variance grid across all DM trials for a boxcar width
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width = 1,
+                                bool use_box_smearing = true) const;
+    /// @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width
+    [[nodiscard]] std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width = 1,
+                             bool use_box_smearing = true) const;
+    /// @brief Cumulative sample accumulation count per channel-integrated DM trial
+    [[nodiscard]] std::vector<float> get_cumulative_count_grid() const;
     /// @brief Number of elements in the final DMT transform
     SizeType get_dmt_size() const;
     /// @brief Chirp scale

@@ -111,6 +111,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build2/
 develop-eggs/
 dist/
 downloads/
@@ -318,5 +319,10 @@ $RECYCLE.BIN/
 
 # AI/Agent
 .cursor
+
+# CPM
+.cpm_cache/
+
+tmp_files/
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,linux,windows,c++,python,cmake,visualstudiocode

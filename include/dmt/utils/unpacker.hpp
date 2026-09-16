@@ -119,6 +119,22 @@ public:
                  cuda::std::span<ComplexTypeCUDA> data_p2,
                  cudaStream_t stream = nullptr) const;
 
+    /**
+     * @brief Unpacks input device data and pads for FFT (device-resident version).
+     * @tparam DataType The integral input data type (e.g., uint8_t, int8_t).
+     * @param data_in Span viewing the input device data.
+     * @param data_p1 Span viewing the output device buffer for polarization 1
+     * (ComplexTypeCUDA).
+     * @param data_p2 Span viewing the output device buffer for polarization 2
+     * (ComplexTypeCUDA).
+     * @param stream CUDA stream for execution.
+     */
+    template <IntegralDataType DataType>
+    void execute(cuda::std::span<const DataType> data_in,
+                 cuda::std::span<ComplexTypeCUDA> data_p1,
+                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cudaStream_t stream = nullptr) const;
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
