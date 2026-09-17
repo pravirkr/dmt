@@ -34,21 +34,48 @@ add_executable(${TARGET_TESTS} ${TEST_SOURCES})
 
 target_include_directories(
   ${TARGET_TESTS} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
+                          ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 if(CMAKE_CUDA_COMPILER)
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
+    target_include_directories(${TARGET_TESTS} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+  endif()
   target_include_directories(${TARGET_TESTS} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
 target_link_libraries(
   ${TARGET_TESTS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} Catch2::Catch2WithMain
-                          ${DMT_COMPILE_OPTIONS}
+                          ${DMT_COMPILE_OPTIONS} spdlog::spdlog_header_only
 )
+dmt_enable_coverage(${TARGET_TESTS})
 
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(${TARGET_TESTS} PRIVATE ${DMT_CUDA_OPTIONS})
 endif()
 
-# Discover tests
 include(Catch)
-catch_discover_tests(${TARGET_TESTS})
+if(CMAKE_CUDA_COMPILER)
+  catch_discover_tests(
+    ${TARGET_TESTS}
+    TEST_SPEC
+    "~[gpu]~[parity]"
+    TEST_PREFIX
+    "cpu:"
+    PROPERTIES
+    LABELS
+    "cpu"
+  )
+  catch_discover_tests(
+    ${TARGET_TESTS}
+    TEST_SPEC
+    "[gpu],[parity]"
+    TEST_PREFIX
+    "gpu:"
+    PROPERTIES
+    LABELS
+    "gpu"
+  )
+else()
+  catch_discover_tests(${TARGET_TESTS} PROPERTIES LABELS "cpu")
+endif()

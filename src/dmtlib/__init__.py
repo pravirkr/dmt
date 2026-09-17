@@ -30,4 +30,3 @@ __all__ = [
     "compute_fdmt",
     "compute_fdmt_fft",
 ]
-

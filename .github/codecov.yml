@@ -1,4 +1,7 @@
-comment: false
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+
 coverage:
   status:
     project:
@@ -6,3 +9,33 @@ coverage:
         target: 50%
         threshold: 5%
         if_ci_failed: error
+      cpp:
+        flags:
+          - cpp
+        target: 50%
+        threshold: 5%
+      python:
+        flags:
+          - python
+        target: auto
+        threshold: 5%
+    patch:
+      default:
+        target: auto
+
+ignore:
+  - "tests/**"
+  - "bench/**"
+  - "build/**"
+
+flags:
+  cpp:
+    paths:
+      - lib
+      - include
+      - src
+    carryforward: true
+  python:
+    paths:
+      - src/dmtlib
+    carryforward: true

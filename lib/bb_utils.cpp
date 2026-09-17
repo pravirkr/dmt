@@ -31,9 +31,9 @@ void compute_chirp(std::span<const float> dm_grid,
 
     std::vector<double> freqs_sub(nsub);
     for (SizeType i = 0; i < nsub; ++i) {
-        freqs_sub[i] =
-            static_cast<double>(fcenter) - (static_cast<double>(bw) / 2.0) +
-            ((static_cast<double>(i) + 0.5) * bw_sub);
+        freqs_sub[i] = static_cast<double>(fcenter) -
+                       (static_cast<double>(bw) / 2.0) +
+                       ((static_cast<double>(i) + 0.5) * bw_sub);
     }
     std::vector<double> bin_freqs(mbin);
     for (SizeType i = 0; i < mbin; ++i) {
@@ -43,30 +43,33 @@ void compute_chirp(std::span<const float> dm_grid,
 
     const double taper_const = 1.0 / (0.47 * bw_chan);
     const double taper_exp   = 80.0;
-    const double coeff_const =
-        2.0 * std::numbers::pi_v<double> * static_cast<double>(kDispConst) * 1.0E6;
+    const double coeff_const = 2.0 * std::numbers::pi_v<double> *
+                               static_cast<double>(kDispConst) * 1.0E6;
 
     for (SizeType idm = 0; idm < ndm; ++idm) {
         const double coeff = coeff_const * static_cast<double>(dm_grid[idm]);
         for (SizeType isub = 0; isub < nsub; ++isub) {
             for (SizeType ichan = 0; ichan < nchan; ++ichan) {
                 const double freq_chan =
-                    freqs_sub[isub] + ((static_cast<double>(ichan) -
-                                        static_cast<double>(nchan) / 2.0 + 0.5) *
-                                       bw_chan);
+                    freqs_sub[isub] +
+                    ((static_cast<double>(ichan) -
+                      static_cast<double>(nchan) / 2.0 + 0.5) *
+                     bw_chan);
                 for (SizeType ibin = 0; ibin < mbin; ++ibin) {
                     const double bin_freq    = bin_freqs[ibin];
                     const double freq_ratio  = bin_freq / freq_chan;
-                    const double phase_delay = -coeff * freq_ratio * freq_ratio /
-                                              (freq_chan + bin_freq);
+                    const double phase_delay = -coeff * freq_ratio *
+                                               freq_ratio /
+                                               (freq_chan + bin_freq);
                     const double taper =
                         1.0 / std::sqrt(1.0 + std::pow(bin_freq * taper_const,
                                                        taper_exp));
                     const SizeType idx = (idm * nsub * nchan * mbin) +
                                          (isub * nchan * mbin) +
                                          (ichan * mbin) + ibin;
-                    chirp_table[idx] = std::polar(static_cast<float>(taper),
-                                                  static_cast<float>(phase_delay));
+                    chirp_table[idx] =
+                        std::polar(static_cast<float>(taper),
+                                   static_cast<float>(phase_delay));
                 }
             }
         }
@@ -186,10 +189,9 @@ void unpad_detect(std::span<const ComplexType> fft_p1,
                 for (SizeType isub = 0; isub < nsub; ++isub) {
                     const SizeType isamp = ibin + (mbin_adjusted * ifft);
                     const SizeType ibin_adjusted = ibin + noverlap_per_channel;
-                    const SizeType src_idx =
-                        (ifft * nsub * nchan * mbin) +
-                        (isub * nchan * mbin) + (ichan * mbin) +
-                        ibin_adjusted;
+                    const SizeType src_idx = (ifft * nsub * nchan * mbin) +
+                                             (isub * nchan * mbin) +
+                                             (ichan * mbin) + ibin_adjusted;
                     const SizeType dst_idx =
                         (isub * nchan * msamp) + (ichan * msamp) + isamp;
                     intensity[dst_idx] =

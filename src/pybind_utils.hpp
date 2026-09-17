@@ -51,8 +51,9 @@ as_listof_pyarray(const std::vector<std::vector<T>>& vec_of_vecs) {
 inline std::vector<IndexType> extract_dt_grid(const py::object& obj) {
     std::vector<IndexType> result;
     if (py::isinstance<py::array>(obj)) {
-        auto arr = py::array_t<IndexType, py::array::c_style |
-                                              py::array::forcecast>::ensure(obj);
+        auto arr =
+            py::array_t<IndexType,
+                        py::array::c_style | py::array::forcecast>::ensure(obj);
         if (!arr) {
             throw py::value_error(
                 "dt_grid could not be converted to 1D integer array");

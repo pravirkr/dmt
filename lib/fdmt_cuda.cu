@@ -157,7 +157,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
 
 /**
  * @brief Advances the level-0 FIFO history window on the GPU.
- * Supports arbitrary block sizes (nsamps < dt_max_final and nsamps >= dt_max_final).
+ * Supports arbitrary block sizes (nsamps < dt_max_final and nsamps >=
+ * dt_max_final).
  */
 __global__ void
 kernel_advance_history_window(float* __restrict__ hist_out,
@@ -166,7 +167,7 @@ kernel_advance_history_window(float* __restrict__ hist_out,
                               int nsubs,
                               int nsamps,
                               int dt_max_final) {
-    const auto t      = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto t = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_sub  = static_cast<int>(blockIdx.y);
     const auto i_beam = static_cast<int>(blockIdx.z);
     if (t >= dt_max_final || i_sub >= nsubs) {
@@ -214,13 +215,17 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     }
 
     if (i_coord < ncoords_sum_cur) {
-        const auto nsamps_out    = coords_sum.nsamps[i_coord];
-        const auto offset        = coords_sum.offset[i_coord];
-        const auto nsamps_tail   = coords_sum.tail_nsamps[i_coord];
-        const auto out_idx_base  = (i_beam * out_state_nelements) + coords_sum.buf_offset[i_coord];
-        const auto tail_idx_base = (i_beam * in_state_nelements) + coords_sum.tail_buf_offset[i_coord];
-        const auto head_idx_base = (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
-        const auto hist_off      = (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
+        const auto nsamps_out  = coords_sum.nsamps[i_coord];
+        const auto offset      = coords_sum.offset[i_coord];
+        const auto nsamps_tail = coords_sum.tail_nsamps[i_coord];
+        const auto out_idx_base =
+            (i_beam * out_state_nelements) + coords_sum.buf_offset[i_coord];
+        const auto tail_idx_base =
+            (i_beam * in_state_nelements) + coords_sum.tail_buf_offset[i_coord];
+        const auto head_idx_base =
+            (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
+        const auto hist_off =
+            (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
 
         if (isamp < nsamps_out) {
             float tail_val = 0.0F;
@@ -253,9 +258,11 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     if (i_coord < ncoords_copy_cur) {
         const auto nsamps_out  = coords_copy.nsamps[i_coord];
         const auto nsamps_tail = coords_copy.tail_nsamps[i_coord];
-        const int out_idx_base = (i_beam * out_state_nelements) + coords_copy.buf_offset[i_coord];
+        const int out_idx_base =
+            (i_beam * out_state_nelements) + coords_copy.buf_offset[i_coord];
         if (isamp < nsamps_tail) {
-            const int tail_idx_base = (i_beam * in_state_nelements) + coords_copy.tail_buf_offset[i_coord];
+            const int tail_idx_base = (i_beam * in_state_nelements) +
+                                      coords_copy.tail_buf_offset[i_coord];
             state_out[out_idx_base + isamp] = state_in[tail_idx_base + isamp];
         } else if (isamp < nsamps_out) {
             state_out[out_idx_base + isamp] = 0.0F;
@@ -275,7 +282,7 @@ kernel_advance_tree_history(const float* __restrict__ state_in,
                             int ncoords_sum_cur,
                             int in_state_nelements,
                             int tree_hist_size) {
-    const auto k       = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_coord = static_cast<int>(blockIdx.y);
     const auto i_beam  = static_cast<int>(blockIdx.z);
     if (i_coord >= ncoords_sum_cur) {
@@ -286,24 +293,26 @@ kernel_advance_tree_history(const float* __restrict__ state_in,
         return;
     }
 
-    const auto nsamps_head   = coords_sum.head_nsamps[i_coord];
-    const auto hist_off      = (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
-    const auto head_idx_base = (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
+    const auto nsamps_head = coords_sum.head_nsamps[i_coord];
+    const auto hist_off =
+        (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
+    const auto head_idx_base =
+        (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
 
     if (nsamps_head >= offset) {
         hist_out[hist_off + k] =
             state_in[head_idx_base + (nsamps_head - offset + k)];
     } else {
         if (k < offset - nsamps_head) {
-            hist_out[hist_off + k] =
-                (hist_in != nullptr) ? hist_in[hist_off + k + nsamps_head] : 0.0F;
+            hist_out[hist_off + k] = (hist_in != nullptr)
+                                         ? hist_in[hist_off + k + nsamps_head]
+                                         : 0.0F;
         } else {
             hist_out[hist_off + k] =
                 state_in[head_idx_base + (k - (offset - nsamps_head))];
         }
     }
 }
-
 
 } // namespace
 
@@ -389,7 +398,8 @@ public:
             // Two same-sized tree-history buffers, ping-ponged once per
             // block in reset() -- see kernel_execute_iter's doc comment for
             // why one buffer isn't safe here the way it is on the CPU.
-            const auto tree_hist_size = m_nbeams * m_plan.get_tree_history_size();
+            const auto tree_hist_size =
+                m_nbeams * m_plan.get_tree_history_size();
             m_tree_history_a_d.resize(tree_hist_size, 0.0F);
             m_tree_history_b_d.resize(tree_hist_size, 0.0F);
         }
@@ -412,7 +422,6 @@ public:
 
         cuda_utils::check_last_cuda_error("FDMTCUDA::Impl constructor failed");
     }
-
 
     ~Impl()                      = default;
     Impl(const Impl&)            = delete;
@@ -529,7 +538,8 @@ public:
         cuda_utils::set_device(m_device_id);
         cudaStream_t active_stream = stream ? stream : m_stream;
         const auto total_lvl       = total_levels();
-        const auto target_level    = std::min(m_current_level + levels, total_lvl - 1);
+        const auto target_level =
+            std::min(m_current_level + levels, total_lvl - 1);
 
         while (m_current_level < target_level) {
             execute_iter_device(m_current_in_ptr, m_current_out_ptr,
@@ -537,7 +547,8 @@ public:
             std::swap(m_current_in_ptr, m_current_out_ptr);
             m_current_level++;
         }
-        spdlog::debug("FDMTCUDA: Stepper advanced to level {}.", m_current_level);
+        spdlog::debug("FDMTCUDA: Stepper advanced to level {}.",
+                      m_current_level);
     }
 
     void advance_until_remaining(SizeType remaining_levels,
@@ -561,8 +572,7 @@ public:
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
-        const auto& shape =
-            m_plan.get_container().state_shape[m_current_level];
+        const auto& shape = m_plan.get_container().state_shape[m_current_level];
         return cuda::std::span<const float>(m_current_in_ptr,
                                             m_nbeams * shape.nelements);
     }
@@ -598,7 +608,7 @@ public:
             .f_start     = grid.f_start,
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
-                                                     grid.dt_grid.size()),
+                                                      grid.dt_grid.size()),
         };
     }
 
@@ -628,8 +638,9 @@ public:
         advance_until_remaining(0, active_stream);
 
         if (m_current_in_ptr != m_dmt_target_ptr) {
-            spdlog::debug("FDMTCUDA::finalize: Copying final state from internal "
-                          "scratch to dmt_target_ptr");
+            spdlog::debug(
+                "FDMTCUDA::finalize: Copying final state from internal "
+                "scratch to dmt_target_ptr");
             const auto final_size =
                 m_nbeams * m_plan.get_container().state_shape.back().nelements;
             cudaMemcpyAsync(m_dmt_target_ptr, m_current_in_ptr,
@@ -644,23 +655,25 @@ public:
     // Analytical variance/sigma: pure plan-side math (see
     // plans::FDMTPlan::get_effective_variance), identical on CPU and CUDA --
     // provided here for API parity with FDMTCPU.
-    [[nodiscard]] float
-    get_effective_variance(SizeType dm_idx, SizeType boxcar_width) const {
+    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
+                                               SizeType boxcar_width) const {
         return m_plan.get_effective_variance(dm_idx, boxcar_width,
                                              m_use_box_smearing);
     }
-    [[nodiscard]] float
-    get_effective_sigma(SizeType dm_idx, SizeType boxcar_width) const {
+    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
+                                            SizeType boxcar_width) const {
         return m_plan.get_effective_sigma(dm_idx, boxcar_width,
                                           m_use_box_smearing);
     }
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width) const {
-        return m_plan.get_effective_variance_grid(boxcar_width, m_use_box_smearing);
+        return m_plan.get_effective_variance_grid(boxcar_width,
+                                                  m_use_box_smearing);
     }
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width) const {
-        return m_plan.get_effective_sigma_grid(boxcar_width, m_use_box_smearing);
+        return m_plan.get_effective_sigma_grid(boxcar_width,
+                                               m_use_box_smearing);
     }
 
     [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
@@ -709,7 +722,7 @@ public:
                 history_state_size(), out.size()));
         }
         cuda_utils::set_device(m_device_id);
-        float* dst = out.data();
+        float* dst    = out.data();
         auto copy_out = [&](const thrust::device_vector<float>& src) {
             if (!src.empty()) {
                 cudaMemcpyAsync(dst, thrust::raw_pointer_cast(src.data()),
@@ -742,11 +755,11 @@ public:
         }
         cuda_utils::set_device(m_device_id);
         const float* src = in.data();
-        auto copy_in = [&](thrust::device_vector<float>& dst_vec) {
+        auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
                 cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
-                                dst_vec.size() * sizeof(float),
-                                cudaMemcpyDeviceToDevice, stream);
+                                    dst_vec.size() * sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream);
             }
             src += dst_vec.size();
         };
@@ -770,7 +783,8 @@ private:
     plans::FDMTPlanContainerD m_plan_d;
     // Internal state buffer on device (for ping-pong buffering)
     thrust::device_vector<float> m_state_internal_d;
-    // Level-0 history buffer for valid-mode streaming across FDMT blocks (ping-pong pair)
+    // Level-0 history buffer for valid-mode streaming across FDMT blocks
+    // (ping-pong pair)
     thrust::device_vector<float> m_history_a_d;
     thrust::device_vector<float> m_history_b_d;
     float* m_level0_hist_in_ptr{nullptr};
@@ -807,8 +821,8 @@ private:
                             "least {}, got {}",
                             m_nbeams * m_plan.get_buffer_size(), dmt_size));
         }
-        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}x{}", m_nbeams, nchans,
-                      nsamps);
+        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}x{}",
+                      m_nbeams, nchans, nsamps);
     }
 
     void execute_iter_device(const float* __restrict__ in_ptr,
@@ -827,40 +841,44 @@ private:
 
         const auto coords_max = std::max(ncoords_sum_cur, ncoords_copy_cur);
         const dim3 block_size = dim3(256, 1);
-        const dim3 grid_size =
-            dim3((nsamps + block_size.x - 1) / block_size.x, coords_max, m_nbeams);
+        const dim3 grid_size  = dim3((nsamps + block_size.x - 1) / block_size.x,
+                                     coords_max, m_nbeams);
         cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
-        const auto in_state_nelements = static_cast<int>(m_plan.get_container().state_shape[m_current_level].nelements);
+        const auto in_state_nelements = static_cast<int>(
+            m_plan.get_container().state_shape[m_current_level].nelements);
         const auto out_state_nelements = static_cast<int>(shape.nelements);
-        const auto tree_hist_size = static_cast<int>(m_plan.get_tree_history_size());
+        const auto tree_hist_size =
+            static_cast<int>(m_plan.get_tree_history_size());
 
         if (m_mode == FDMTMode::kFull) {
             kernel_execute_iter<FDMTMode::kFull>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                    m_hist_in_ptr, nsamps, ncoords_sum_cur,
-                    ncoords_copy_cur, in_state_nelements, out_state_nelements, tree_hist_size);
+                    m_hist_in_ptr, nsamps, ncoords_sum_cur, ncoords_copy_cur,
+                    in_state_nelements, out_state_nelements, tree_hist_size);
         } else if (m_mode == FDMTMode::kRoll) {
             kernel_execute_iter<FDMTMode::kRoll>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                    m_hist_in_ptr, nsamps, ncoords_sum_cur,
-                    ncoords_copy_cur, in_state_nelements, out_state_nelements, tree_hist_size);
+                    m_hist_in_ptr, nsamps, ncoords_sum_cur, ncoords_copy_cur,
+                    in_state_nelements, out_state_nelements, tree_hist_size);
         } else {
             kernel_execute_iter<FDMTMode::kValid>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                    m_hist_in_ptr, nsamps, ncoords_sum_cur,
-                    ncoords_copy_cur, in_state_nelements, out_state_nelements, tree_hist_size);
+                    m_hist_in_ptr, nsamps, ncoords_sum_cur, ncoords_copy_cur,
+                    in_state_nelements, out_state_nelements, tree_hist_size);
 
             if (m_hist_out_ptr != nullptr && ncoords_sum_cur > 0) {
                 const auto max_offset = static_cast<int>(shape.dt_max);
                 if (max_offset > 0) {
                     const dim3 block_thist = dim3(256, 1);
                     const dim3 grid_thist =
-                        dim3((max_offset + block_thist.x - 1) / block_thist.x, ncoords_sum_cur, m_nbeams);
-                    kernel_advance_tree_history<<<grid_thist, block_thist, 0, stream>>>(
+                        dim3((max_offset + block_thist.x - 1) / block_thist.x,
+                             ncoords_sum_cur, m_nbeams);
+                    kernel_advance_tree_history<<<grid_thist, block_thist, 0,
+                                                  stream>>>(
                         in_ptr, coords_sum_cur, m_hist_in_ptr, m_hist_out_ptr,
                         ncoords_sum_cur, in_state_nelements, tree_hist_size);
                     cuda_utils::check_last_cuda_error(
@@ -941,9 +959,11 @@ private:
             dt_max_final > 0) {
             const dim3 block_hist = dim3(256, 1);
             const dim3 grid_hist =
-                dim3((dt_max_final + block_hist.x - 1) / block_hist.x, nsubs, m_nbeams);
+                dim3((dt_max_final + block_hist.x - 1) / block_hist.x, nsubs,
+                     m_nbeams);
             kernel_advance_history_window<<<grid_hist, block_hist, 0, stream>>>(
-                m_level0_hist_out_ptr, m_level0_hist_in_ptr, waterfall_d, nsubs, nsamps, dt_max_final);
+                m_level0_hist_out_ptr, m_level0_hist_in_ptr, waterfall_d, nsubs,
+                nsamps, dt_max_final);
             cuda_utils::check_last_cuda_error(
                 "kernel_advance_history_window launch failed");
         }

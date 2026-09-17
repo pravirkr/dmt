@@ -70,7 +70,8 @@ public:
             m_thefft->backward_fft(m_delay_buf_p1, m_delay_buf_p2);
             // Detect and unpad
             unpad_detect(m_delay_buf_p1, m_delay_buf_p2, m_intensity_buf);
-            // Apply causal streaming inter-channel delay line for this coarse trial
+            // Apply causal streaming inter-channel delay line for this coarse
+            // trial
             m_delay_line.process(m_intensity_buf, m_aligned_buf, idm,
                                  m_plan.get_mchan(), m_plan.get_msamp());
 
@@ -85,7 +86,7 @@ public:
             const auto dmt_cur_size = m_thefdmt->get_plan().get_dmt_size();
             auto dmt_cur_span = dmt.subspan(idm * dmt_cur_size, dmt_cur_size);
             std::copy_n(m_fdmt_scratch.begin(), dmt_cur_size,
-                       dmt_cur_span.begin());
+                        dmt_cur_span.begin());
         }
     }
 
@@ -155,8 +156,9 @@ private:
             std::vector<float>(m_thefdmt->history_state_size(), 0.0F));
 
         // Initialise the causal inter-channel streaming delay line
-        m_delay_line.initialise(dm_grid_coh, m_plan.get_f_min(), m_plan.get_f_max(),
-                                m_plan.get_mchan(), m_plan.get_tsamp());
+        m_delay_line.initialise(dm_grid_coh, m_plan.get_f_min(),
+                                m_plan.get_f_max(), m_plan.get_mchan(),
+                                m_plan.get_tsamp());
 
         // Compute the chirp table
         bb_utils::compute_chirp(

@@ -10,9 +10,9 @@ set(TARGET_BENCHMARKS ${PROJECT_NAME}_bench)
 set(TARGET_BENCHMARKS_MEM ${PROJECT_NAME}_bench_mem)
 
 # Collect CPU benchmark sources
-set(BENCH_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cpu_b.cpp)
+set(BENCH_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp
+                  ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cpu_b.cpp
+)
 file(GLOB BENCH_SOURCES_MEM ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b_mem.cpp)
 
 # Add CUDA benchmark sources if available

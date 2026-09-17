@@ -97,7 +97,7 @@ struct ChannelDelayLineFunctor {
             out[idx] = in[(ichan * nsamps) + (t - shift)];
         } else {
             SizeType offset = offsets[(idm * nchans) + ichan];
-            out[idx] = history[offset + t];
+            out[idx]        = history[offset + t];
         }
     }
 };
@@ -148,11 +148,9 @@ struct TransposeUnpadDetect {
         for (int isub = 0; isub < nsub; ++isub) {
             int isamp         = ibin + (mbin_adjusted * ifft);
             int ibin_adjusted = ibin + noverlap_per_channel;
-            int src_idx       = (ifft * nsub * nchan * mbin) +
-                          (isub * nchan * mbin) + (ichan * mbin) +
-                          ibin_adjusted;
-            int dst_idx =
-                (isub * nchan * msamp) + (ichan * msamp) + isamp;
+            int src_idx = (ifft * nsub * nchan * mbin) + (isub * nchan * mbin) +
+                          (ichan * mbin) + ibin_adjusted;
+            int dst_idx = (isub * nchan * msamp) + (ichan * msamp) + isamp;
             intensity[dst_idx] = norm(fft_p1[src_idx]) + norm(fft_p2[src_idx]);
         }
     }
@@ -263,29 +261,30 @@ void channel_delay_line(cuda::std::span<const float> in,
                         int nchans,
                         int nsamps,
                         cudaStream_t stream) {
-    assert(in.size() == static_cast<SizeType>(nchans) *
-                             static_cast<SizeType>(nsamps));
+    assert(in.size() ==
+           static_cast<SizeType>(nchans) * static_cast<SizeType>(nsamps));
     assert(out.size() == in.size());
 
     auto first = thrust::counting_iterator<int>(0);
     auto last  = thrust::counting_iterator<int>(nchans * nsamps);
     ChannelDelayLineFunctor functor{.in          = in.data(),
-                                   .out         = out.data(),
-                                   .history     = history.data(),
-                                   .shift_table = shift_table.data(),
-                                   .offsets     = offsets.data(),
-                                   .idm         = idm,
-                                   .nchans      = nchans,
-                                   .nsamps      = nsamps};
+                                    .out         = out.data(),
+                                    .history     = history.data(),
+                                    .shift_table = shift_table.data(),
+                                    .offsets     = offsets.data(),
+                                    .idm         = idm,
+                                    .nchans      = nchans,
+                                    .nsamps      = nsamps};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    cuda_utils::check_last_cuda_error("channel_delay_line: thrust::for_each failed");
+    cuda_utils::check_last_cuda_error(
+        "channel_delay_line: thrust::for_each failed");
 
     if (!history.empty()) {
         int threads_per_block = 256;
         int blocks            = nchans;
         update_delay_history_kernel<<<blocks, threads_per_block, 0, stream>>>(
-            in.data(), history.data(), shift_table.data(), offsets.data(),
-            idm, nchans, nsamps);
+            in.data(), history.data(), shift_table.data(), offsets.data(), idm,
+            nchans, nsamps);
         cuda_utils::check_last_cuda_error(
             "channel_delay_line: update_delay_history_kernel failed");
     }
@@ -327,7 +326,7 @@ __global__ void compute_chirp_kernel(const float* dm_grid,
         freq_sub +
         ((static_cast<double>(ichan) - static_cast<double>(nchan) / 2.0 + 0.5) *
          bw_chan);
-    double coeff = coeff_const * static_cast<double>(dm_grid[idm]);
+    double coeff      = coeff_const * static_cast<double>(dm_grid[idm]);
     double freq_ratio = bin_freq / freq_chan;
     double phase_delay =
         -coeff * freq_ratio * freq_ratio / (freq_chan + bin_freq);
@@ -353,25 +352,23 @@ void compute_chirp(cuda::std::span<const float> dm_grid,
     const SizeType total = ndm * nsub * nchan * mbin;
     assert(chirp_table.size() == total);
 
-    const double bw_sub      = static_cast<double>(bw) / static_cast<double>(nsub);
-    const double bw_chan     = bw_sub / static_cast<double>(nchan);
-    const double bw_bin      = bw_chan / static_cast<double>(mbin);
+    const double bw_sub  = static_cast<double>(bw) / static_cast<double>(nsub);
+    const double bw_chan = bw_sub / static_cast<double>(nchan);
+    const double bw_bin  = bw_chan / static_cast<double>(mbin);
     const double taper_const = 1.0 / (0.47 * bw_chan);
     const double taper_exp   = 80.0;
-    const double coeff_const =
-        2.0 * std::numbers::pi_v<double> * static_cast<double>(kDispConst) * 1.0E6;
+    const double coeff_const = 2.0 * std::numbers::pi_v<double> *
+                               static_cast<double>(kDispConst) * 1.0E6;
 
     const int threads_per_block = 256;
-    const int blocks = static_cast<int>(
+    const int blocks            = static_cast<int>(
         (total + static_cast<SizeType>(threads_per_block) - 1) /
         static_cast<SizeType>(threads_per_block));
 
     compute_chirp_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        dm_grid.data(), chirp_table.data(),
-        static_cast<double>(fcenter), static_cast<double>(bw),
-        bw_sub, bw_chan, bw_bin,
-        taper_const, taper_exp, coeff_const,
-        ndm, nsub, nchan, mbin, total);
+        dm_grid.data(), chirp_table.data(), static_cast<double>(fcenter),
+        static_cast<double>(bw), bw_sub, bw_chan, bw_bin, taper_const,
+        taper_exp, coeff_const, ndm, nsub, nchan, mbin, total);
     cuda_utils::check_last_cuda_error("compute_chirp_kernel failed");
 }
 

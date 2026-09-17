@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
@@ -10,6 +9,9 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
+#include "test_helpers.hpp"
+
+#include <catch2/matchers/catch_matchers_all.hpp>
 
 namespace dmt {
 
@@ -19,8 +21,8 @@ using Catch::Approx;
 
 namespace {
 
-std::vector<float> random_waterfall(SizeType nchans, SizeType nsamps,
-                                    unsigned seed = 42) {
+std::vector<float>
+random_waterfall(SizeType nchans, SizeType nsamps, unsigned seed = 42) {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> dist(1.0F, 10.0F);
     std::vector<float> waterfall(nchans * nsamps);
@@ -30,18 +32,10 @@ std::vector<float> random_waterfall(SizeType nchans, SizeType nsamps,
     return waterfall;
 }
 
-void require_close(const std::vector<float>& a, const std::vector<float>& b,
-                   SizeType n, float margin) {
-    REQUIRE(a.size() >= n);
-    REQUIRE(b.size() >= n);
-    for (SizeType i = 0; i < n; ++i) {
-        REQUIRE(a[i] == Approx(b[i]).margin(margin));
-    }
-}
-
 } // namespace
 
-TEST_CASE("FDMTFFTCPU basic constructor and properties", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU basic constructor and properties",
+          "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -53,9 +47,8 @@ TEST_CASE("FDMTFFTCPU basic constructor and properties", "[fdmt_fft_cpu]") {
     FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
 
     SECTION("Plan getters") {
-        const auto& plan           = fdmt_fft.get_plan();
-        const auto ndms_expected =
-            static_cast<SizeType>(dt_max - dt_min + 1);
+        const auto& plan         = fdmt_fft.get_plan();
+        const auto ndms_expected = static_cast<SizeType>(dt_max - dt_min + 1);
         CHECK(plan.get_dt_grid_final().size() == ndms_expected);
         CHECK(plan.get_dm_grid_final().size() == ndms_expected);
         CHECK(fdmt_fft.get_nbeams() == 1);
@@ -79,7 +72,7 @@ TEST_CASE("FDMTFFTCPU basic constructor and properties", "[fdmt_fft_cpu]") {
 }
 
 TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
-          "[fdmt_fft_cpu]") {
+          "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -99,7 +92,7 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
         std::vector<float> dmt_fft(ndms * nsamps, 0.0F);
         fdmt_cpu.execute(waterfall, dmt_cpu);
         fdmt_fft.execute(waterfall, dmt_fft);
-        require_close(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
+        test::require_approx(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
     }
 
     SECTION("Without box smearing") {
@@ -112,11 +105,11 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
         std::vector<float> dmt_fft(ndms * nsamps, 0.0F);
         fdmt_cpu.execute(waterfall, dmt_cpu);
         fdmt_fft.execute(waterfall, dmt_fft);
-        require_close(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
+        test::require_approx(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
     }
 }
 
-TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -146,7 +139,7 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu]") {
     }
 }
 
-TEST_CASE("FDMTFFTCPU vs FDMTCPU valid first block", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU vs FDMTCPU valid first block", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -164,16 +157,17 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU valid first block", "[fdmt_fft_cpu]") {
     std::vector<float> dmt_fft(n, 0.0F);
     fdmt_cpu.execute(waterfall, dmt_cpu);
     fdmt_fft.execute(waterfall, dmt_fft);
-    require_close(dmt_fft, dmt_cpu, n, 0.08F);
+    test::require_approx(dmt_fft, dmt_cpu, n, 0.08F);
 }
 
-TEST_CASE("FDMTFFTCPU valid streaming vs FDMTCPU valid", "[fdmt_fft_cpu]") {
-    const float f_min   = 1200.0F;
-    const float f_max   = 1600.0F;
-    const size_t nchans = 16;
-    const size_t nsamps = 128;
-    const float tsamp   = 0.001F;
-    const size_t dt_max = 24;
+TEST_CASE("FDMTFFTCPU valid streaming vs FDMTCPU valid",
+          "[fdmt_fft_cpu][cpu]") {
+    const float f_min    = 1200.0F;
+    const float f_max    = 1600.0F;
+    const size_t nchans  = 16;
+    const size_t nsamps  = 128;
+    const float tsamp    = 0.001F;
+    const size_t dt_max  = 24;
     const size_t nblocks = 3;
 
     FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
@@ -185,16 +179,17 @@ TEST_CASE("FDMTFFTCPU valid streaming vs FDMTCPU valid", "[fdmt_fft_cpu]") {
     fdmt_fft.reset_history();
 
     for (size_t b = 0; b < nblocks; ++b) {
-        auto wf = random_waterfall(nchans, nsamps, 100 + static_cast<unsigned>(b));
+        auto wf =
+            random_waterfall(nchans, nsamps, 100 + static_cast<unsigned>(b));
         std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
         std::vector<float> dmt_fft(nout, 0.0F);
         fdmt_cpu.execute(wf, dmt_cpu);
         fdmt_fft.execute(wf, dmt_fft);
-        require_close(dmt_fft, dmt_cpu, nout, 0.1F);
+        test::require_approx(dmt_fft, dmt_cpu, nout, 0.1F);
     }
 }
 
-TEST_CASE("FDMTFFTCPU odd channel counts", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU odd channel counts", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1200.0F;
     const float f_max   = 1600.0F;
     const size_t nchans = 13;
@@ -212,10 +207,10 @@ TEST_CASE("FDMTFFTCPU odd channel counts", "[fdmt_fft_cpu]") {
     std::vector<float> dmt_fft(ndms * nsamps, 0.0F);
     fdmt_cpu.execute(waterfall, dmt_cpu);
     fdmt_fft.execute(waterfall, dmt_fft);
-    require_close(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
+    test::require_approx(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
 }
 
-TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 16;
@@ -241,14 +236,17 @@ TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu]") {
                 static_cast<std::ptrdiff_t>((b + 1) * nchans * nsamps));
         std::vector<float> single_dmt(ndms * nsamps, 0.0F);
         fdmt_single.execute(single_wf, single_dmt);
-        for (size_t i = 0; i < single_dmt.size(); ++i) {
-            REQUIRE(dmt_multi[(b * ndms * nsamps) + i] ==
-                    Approx(single_dmt[i]).margin(1e-4F));
-        }
+        test::require_approx(
+            std::vector<float>(
+                dmt_multi.begin() +
+                    static_cast<std::ptrdiff_t>(b * ndms * nsamps),
+                dmt_multi.begin() +
+                    static_cast<std::ptrdiff_t>((b + 1) * ndms * nsamps)),
+            single_dmt, 1e-4);
     }
 }
 
-TEST_CASE("FDMTFFTCPU stepper matches execute", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU stepper matches execute", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 16;
@@ -272,19 +270,21 @@ TEST_CASE("FDMTFFTCPU stepper matches execute", "[fdmt_fft_cpu]") {
     auto sub0 = fdmt.view_subband(0);
     CHECK(sub0.ndt > 0);
     fdmt.finalize();
-    require_close(dmt_step, dmt_one, n, 1e-4F);
+    test::require_approx(dmt_step, dmt_one, n, 1e-4F);
 }
 
-TEST_CASE("FDMTFFTCPU variance matches plan", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU variance matches plan", "[fdmt_fft_cpu][cpu]") {
     FDMTFFTCPU fdmt(1000.0F, 1500.0F, 16, 128, 0.001F, 16);
     const auto& plan = fdmt.get_plan();
     CHECK(fdmt.get_effective_variance(0, 1) ==
           Approx(plan.get_effective_variance(0, 1, true)));
     auto grid = fdmt.get_effective_sigma_grid(2);
-    CHECK(grid.size() == plan.get_dmt_ndms());
+    REQUIRE_THAT(
+        grid, Catch::Matchers::Approx(plan.get_effective_sigma_grid(2, true)));
 }
 
-TEST_CASE("FDMTFFTCPU convenience function compute_fdmt_fft", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU convenience function compute_fdmt_fft",
+          "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 16;
@@ -293,19 +293,25 @@ TEST_CASE("FDMTFFTCPU convenience function compute_fdmt_fft", "[fdmt_fft_cpu]") 
     const size_t dt_max = 16;
     std::vector<float> waterfall(nchans * nsamps, 2.0F);
 
-    auto [dmt, plan] = algorithms::compute_fdmt_fft(
-        waterfall, f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-        "valid");
+    auto [dmt, plan] =
+        algorithms::compute_fdmt_fft(waterfall, f_min, f_max, nchans, nsamps,
+                                     tsamp, dt_max, 0, 1, true, "valid");
+    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                    "valid");
+    std::vector<float> dmt_class(plan.get_dmt_size(), 0.0F);
+    fdmt.execute(waterfall, dmt_class);
     CHECK(dmt.size() == plan.get_dmt_ndms() * plan.get_dmt_nsamps());
+    test::require_approx(dmt, dmt_class, plan.get_dmt_size(), 1e-4F);
 }
 
-TEST_CASE("FDMTFFTCPU valid streaming with nsamps < dt_max", "[fdmt_fft_cpu]") {
-    const float f_min   = 1000.0F;
-    const float f_max   = 1500.0F;
-    const size_t nchans = 16;
-    const size_t nsamps = 8;
-    const float tsamp   = 0.001F;
-    const size_t dt_max = 24;
+TEST_CASE("FDMTFFTCPU valid streaming with nsamps < dt_max",
+          "[fdmt_fft_cpu][cpu]") {
+    const float f_min    = 1000.0F;
+    const float f_max    = 1500.0F;
+    const size_t nchans  = 16;
+    const size_t nsamps  = 8;
+    const float tsamp    = 0.001F;
+    const size_t dt_max  = 24;
     const size_t nblocks = 5;
 
     FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
@@ -316,17 +322,18 @@ TEST_CASE("FDMTFFTCPU valid streaming with nsamps < dt_max", "[fdmt_fft_cpu]") {
     fdmt_cpu.reset_history();
     fdmt_fft.reset_history();
     for (size_t b = 0; b < nblocks; ++b) {
-        auto wf = random_waterfall(nchans, nsamps,
-                                   200 + static_cast<unsigned>(b));
+        auto wf =
+            random_waterfall(nchans, nsamps, 200 + static_cast<unsigned>(b));
         std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
         std::vector<float> dmt_fft(nout, 0.0F);
         fdmt_cpu.execute(wf, dmt_cpu);
         fdmt_fft.execute(wf, dmt_fft);
-        require_close(dmt_fft, dmt_cpu, nout, 0.15F);
+        test::require_approx(dmt_fft, dmt_cpu, nout, 0.15F);
     }
 }
 
-TEST_CASE("FDMTFFTCPU multi-beam stepper matches execute", "[fdmt_fft_cpu]") {
+TEST_CASE("FDMTFFTCPU multi-beam stepper matches execute",
+          "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 8;
@@ -345,7 +352,7 @@ TEST_CASE("FDMTFFTCPU multi-beam stepper matches execute", "[fdmt_fft_cpu]") {
     std::vector<float> dmt_step(n, 0.0F);
     fdmt.reset(waterfall, dmt_step);
     fdmt.finalize();
-    require_close(dmt_step, dmt_one, n, 1e-4F);
+    test::require_approx(dmt_step, dmt_one, n, 1e-4F);
 }
 
 } // namespace dmt

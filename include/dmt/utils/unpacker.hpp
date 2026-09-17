@@ -120,7 +120,8 @@ public:
                  cudaStream_t stream = nullptr) const;
 
     /**
-     * @brief Unpacks input device data and pads for FFT (device-resident version).
+     * @brief Unpacks input device data and pads for FFT (device-resident
+     * version).
      * @tparam DataType The integral input data type (e.g., uint8_t, int8_t).
      * @param data_in Span viewing the input device data.
      * @param data_p1 Span viewing the output device buffer for polarization 1

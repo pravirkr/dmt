@@ -39,19 +39,15 @@ option(DMT_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(DMT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(DMT_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(DMT_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
-option(DMT_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundled dependencies"
-       OFF
-)
+option(DMT_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundled dependencies" OFF)
 # BUILD_SHARED_LIBS is a standard CMake option (ON = shared dmt, OFF = static dmt).
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 # Python extensions are installed as a single module file; embed dmt statically
 # instead of shipping a separate libdmt.so plus loader search-path tweaks.
 if(DMT_BUILD_PYTHON AND BUILD_SHARED_LIBS)
-  message(
-    FATAL_ERROR
-      "DMT_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
-      "Python wheels should statically link dmt into libdmt.cpython-*.so."
+  message(FATAL_ERROR "DMT_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
+                      "Python wheels should statically link dmt into libdmt.cpython-*.so."
   )
 endif()
 
@@ -71,7 +67,6 @@ set(DMT_CUDA_ARCHITECTURES
     "native"
     CACHE STRING "CUDA architectures passed to CMAKE_CUDA_ARCHITECTURES (e.g. native, 80, 86;90)"
 )
-
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -145,9 +140,8 @@ if(DMT_CUDA STREQUAL "ON" OR DMT_CUDA STREQUAL "AUTO")
   if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
   elseif(DMT_CUDA STREQUAL "ON")
-    message(
-      FATAL_ERROR
-        "DMT_CUDA=ON but no CUDA compiler (nvcc) was found. Install CUDA >= 12.6 or use DMT_CUDA=AUTO/OFF."
+    message(FATAL_ERROR "DMT_CUDA=ON but no CUDA compiler (nvcc) was found. "
+                        "Install CUDA >= 12.6 or use DMT_CUDA=AUTO/OFF."
     )
   else()
     message(STATUS "CUDA compiler not found. Building CPU-only (DMT_CUDA=AUTO).")
@@ -161,8 +155,7 @@ if(CMAKE_CUDA_COMPILER AND DMT_CUDA STREQUAL "ON")
   find_program(DMT_NVIDIA_SMI nvidia-smi)
   if(NOT DMT_NVIDIA_SMI)
     message(
-      FATAL_ERROR
-        "DMT_CUDA=ON but nvidia-smi was not found. An NVIDIA driver and GPU are required."
+      FATAL_ERROR "DMT_CUDA=ON but nvidia-smi was not found. An NVIDIA driver and GPU are required."
     )
   endif()
   execute_process(
@@ -232,6 +225,27 @@ set(DMT_LIBRARY_NAME ${PROJECT_NAME})
 set(DMT_PYTHON_LIBRARY_NAME ${PROJECT_NAME}lib)
 set(DMT_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
 
+# BUILD_INTERFACE keeps flags off the installed export set. PUBLIC so in-tree
+# consumers (tests, pybind modules) inherit compile and -lgcov link flags.
+function(dmt_enable_coverage target)
+  if(NOT DMT_ENABLE_COVERAGE)
+    return()
+  endif()
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(
+      FATAL_ERROR
+        "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
+    )
+  endif()
+  target_compile_options(
+    ${target}
+    PUBLIC $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-O0>>
+           $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-g>>
+           $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:--coverage>>
+  )
+  target_link_options(${target} PUBLIC $<BUILD_INTERFACE:--coverage>)
+endfunction()
+
 add_subdirectory(lib)
 if(DMT_BUILD_PYTHON)
   add_subdirectory(src)
@@ -299,10 +313,9 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 
-install(
-  FILES ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/dmtConfigVersion.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/dmtCUDAConfig.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/dmtConfigVersion.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/dmtCUDAConfig.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
 )
 
 # Print feature summary
@@ -310,9 +323,7 @@ include(FeatureSummary)
 feature_summary(WHAT ALL)
 
 if(CMAKE_CUDA_COMPILER)
-  message(
-    STATUS "dmt build mode: CPU + CUDA (DMT_CUDA=${DMT_CUDA}, DMT_ENABLE_CUDA macro defined)"
-  )
+  message(STATUS "dmt build mode: CPU + CUDA (DMT_CUDA=${DMT_CUDA}, DMT_ENABLE_CUDA macro defined)")
 else()
   message(STATUS "dmt build mode: CPU-only (DMT_CUDA=${DMT_CUDA})")
 endif()

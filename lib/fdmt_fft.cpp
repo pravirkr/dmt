@@ -117,14 +117,8 @@ public:
           m_nthreads(nthreads),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(f_min,
-                                                   f_max,
-                                                   nchans,
-                                                   nsamps,
-                                                   tsamp,
-                                                   dt_grid,
-                                                   mode,
-                                                   verbose)) {
+          m_plan(std::make_unique<plans::FDMTPlan>(
+              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {
         initialize();
     }
 
@@ -145,14 +139,8 @@ public:
           m_nthreads(nthreads),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(f_min,
-                                                   f_max,
-                                                   nchans,
-                                                   nsamps,
-                                                   tsamp,
-                                                   dm_grid,
-                                                   mode,
-                                                   verbose)) {
+          m_plan(std::make_unique<plans::FDMTPlan>(
+              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {
         initialize();
     }
 
@@ -278,13 +266,12 @@ public:
                 "FDMTFFTCPU: Subband index {} out of range ({} subbands)",
                 subband_idx, shape.nchans));
         }
-        const auto& grid      = plan_c.grids[m_current_level][subband_idx];
-        const auto nsamps_v   = view_nsamps();
-        const auto offset     = grid.coord_offset * nsamps_v;
-        const auto count      = grid.ndt * nsamps_v;
+        const auto& grid    = plan_c.grids[m_current_level][subband_idx];
+        const auto nsamps_v = view_nsamps();
+        const auto offset   = grid.coord_offset * nsamps_v;
+        const auto count    = grid.ndt * nsamps_v;
         return FDMTSubbandView{
-            .data        = std::span<const float>(m_view_time.data() + offset,
-                                                  count),
+            .data = std::span<const float>(m_view_time.data() + offset, count),
             .subband_idx = subband_idx,
             .ndt         = grid.ndt,
             .nsamps      = nsamps_v,
@@ -324,8 +311,7 @@ public:
             inverse_and_store(m_state_in + (b * m_fft_buf_size),
                               m_dmt_target_ptr + (b * m_ndms * m_nsamps_out));
             if (m_mode == FDMTMode::kValid && m_waterfall_ptr != nullptr) {
-                update_overlap(
-                    m_waterfall_ptr + (b * m_nchans * m_nsamps), b);
+                update_overlap(m_waterfall_ptr + (b * m_nchans * m_nsamps), b);
             }
         }
         m_is_initialized = false;
@@ -437,7 +423,7 @@ private:
             m_overlap.assign(m_nbeams * m_nchans * m_overlap_len, 0.0F);
         }
 
-        int n_time = static_cast<int>(m_n_fft);
+        int n_time     = static_cast<int>(m_n_fft);
         m_plan_forward = fftwf_plan_many_dft_r2c(
             1, &n_time, static_cast<int>(m_nchans), m_time_window.data(),
             nullptr, 1, static_cast<int>(m_n_fft),
@@ -494,8 +480,7 @@ private:
         for (SizeType c = 0; c < m_nchans; ++c) {
             float* dst = m_time_window.data() + (c * m_n_fft);
             const float* ov =
-                m_overlap.data() +
-                (((beam * m_nchans) + c) * m_overlap_len);
+                m_overlap.data() + (((beam * m_nchans) + c) * m_overlap_len);
             if (m_overlap_len > 0) {
                 std::copy_n(ov, m_overlap_len, dst);
             }
@@ -508,8 +493,8 @@ private:
             return;
         }
         for (SizeType c = 0; c < m_nchans; ++c) {
-            float* ov = m_overlap.data() +
-                        (((beam * m_nchans) + c) * m_overlap_len);
+            float* ov =
+                m_overlap.data() + (((beam * m_nchans) + c) * m_overlap_len);
             advance_overlap_window(wf + (c * m_nsamps), ov, m_nsamps,
                                    m_overlap_len);
         }
@@ -526,13 +511,13 @@ private:
             const auto ndt          = g.ndt;
             const ComplexType* spec = &m_spectra[i_sub * m_n_bins];
             for (SizeType i_dt = 0; i_dt < ndt; ++i_dt) {
-                const auto coord_idx = coord_base + i_dt;
-                const auto dt        = g.dt_grid[i_dt];
-                const auto s = static_cast<SizeType>(std::abs(dt));
+                const auto coord_idx   = coord_base + i_dt;
+                const auto dt          = g.dt_grid[i_dt];
+                const auto s           = static_cast<SizeType>(std::abs(dt));
                 const ComplexType* win = m_use_box_smearing
                                              ? &m_boxcar_window[s * m_n_bins]
                                              : &m_phasors[s * m_n_bins];
-                ComplexType* out = &state_0[coord_idx * m_n_bins];
+                ComplexType* out       = &state_0[coord_idx * m_n_bins];
 #pragma omp simd
                 for (SizeType k = 0; k < m_n_bins; ++k) {
                     out[k] = spec[k] * win[k];
@@ -552,8 +537,8 @@ private:
         const auto n_copy       = coords_copy.size();
 
         for (SizeType b = 0; b < nbeams; ++b) {
-            const ComplexType* in_b  = state_in + (b * m_fft_buf_size);
-            ComplexType* out_b       = state_out + (b * m_fft_buf_size);
+            const ComplexType* in_b = state_in + (b * m_fft_buf_size);
+            ComplexType* out_b      = state_out + (b * m_fft_buf_size);
 #ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel default(none)                                             \
     shared(in_b, out_b, coords_sum, coords_copy, n_sum, n_copy)
@@ -610,8 +595,7 @@ private:
     void inverse_and_store(const ComplexType* state_root, float* dmt_ptr) {
         std::copy_n(state_root, m_fft_buf_size, m_ifft_in.data());
         fftwf_execute_dft_c2r(
-            m_plan_backward,
-            reinterpret_cast<fftwf_complex*>(m_ifft_in.data()),
+            m_plan_backward, reinterpret_cast<fftwf_complex*>(m_ifft_in.data()),
             m_time_out.data());
 
         const float norm = 1.0F / static_cast<float>(m_n_fft);
@@ -644,11 +628,11 @@ private:
         }
         std::copy_n(m_state_in, m_fft_buf_size, m_ifft_in.data());
         fftwf_execute_dft_c2r(
-            m_plan_backward,
-            reinterpret_cast<fftwf_complex*>(m_ifft_in.data()),
+            m_plan_backward, reinterpret_cast<fftwf_complex*>(m_ifft_in.data()),
             m_time_out.data());
 
-        const auto& shape   = m_plan->get_container().state_shape[m_current_level];
+        const auto& shape =
+            m_plan->get_container().state_shape[m_current_level];
         const auto nsamps_v = view_nsamps();
         const auto skip     = view_skip();
         const float norm    = 1.0F / static_cast<float>(m_n_fft);
@@ -746,15 +730,18 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                                     nthreads,
                                     nbeams)) {}
 
-FDMTFFTCPU::~FDMTFFTCPU()                         = default;
-FDMTFFTCPU::FDMTFFTCPU(FDMTFFTCPU&&) noexcept     = default;
+FDMTFFTCPU::~FDMTFFTCPU()                                = default;
+FDMTFFTCPU::FDMTFFTCPU(FDMTFFTCPU&&) noexcept            = default;
 FDMTFFTCPU& FDMTFFTCPU::operator=(FDMTFFTCPU&&) noexcept = default;
 
 const plans::FDMTPlan& FDMTFFTCPU::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-SizeType FDMTFFTCPU::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
-void FDMTFFTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
+SizeType FDMTFFTCPU::get_nbeams() const noexcept {
+    return m_impl->get_nbeams();
+}
+void FDMTFFTCPU::execute(std::span<const float> waterfall,
+                         std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
 void FDMTFFTCPU::reset(std::span<const float> waterfall, std::span<float> dmt) {

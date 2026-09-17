@@ -3,11 +3,15 @@
 #include <random>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
+#include "test_helpers.hpp"
+
+#include <algorithm>
+#include <catch2/matchers/catch_matchers_all.hpp>
 
 namespace dmt {
 
@@ -28,16 +32,15 @@ CohFDMTPlan make_test_plan() {
     const float tbin            = 1.0E-6F;
     const SizeType nbin         = 1 << 10;
     const SizeType nfft         = 2;
-    const float t_p              = tbin * static_cast<float>(chan_per_sub);
-    const float dm_max           = 5.0F;
-    const float dm_min           = 0.0F;
-    return {f_center, bw_sub, nsub,   tbin,      nbin,
-           nfft,      t_p,    dm_max, dm_min,    32,
-           "PRITF",   false};
+    const float t_p             = tbin * static_cast<float>(chan_per_sub);
+    const float dm_max          = 5.0F;
+    const float dm_min          = 0.0F;
+    return {f_center, bw_sub, nsub,   tbin, nbin,    nfft,
+            t_p,      dm_max, dm_min, 32,   "PRITF", false};
 }
 } // namespace
 
-TEST_CASE("CohFDMTPlan symmetric dt range", "[cfdmt]") {
+TEST_CASE("CohFDMTPlan symmetric dt range", "[cfdmt][cpu]") {
     const auto plan = make_test_plan();
     // Symmetric fine-DM search: dt_min is negative, |dt_min| + dt_max + 1
     // spans twice the one-sided n_p width used before the 2x optimization.
@@ -59,7 +62,7 @@ TEST_CASE("CohFDMTPlan symmetric dt range", "[cfdmt]") {
 }
 
 TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
-         "[cfdmt]") {
+          "[cfdmt][cpu]") {
     // Regression test for the apply_chirp() size-invariant bug: this used to
     // throw unconditionally whenever dm_grid_coh.size() > 1, which is the
     // normal case.
@@ -67,13 +70,13 @@ TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
     REQUIRE(plan.get_dm_grid_coh().size() > 1);
 
     CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                       plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                       plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                       plan.get_noverlap());
+                        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                        plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                        plan.get_noverlap());
 
     const SizeType in_size = SizeType{2} * SizeType{2} *
-                            coh_fdmt.get_plan().get_nsamp() *
-                            coh_fdmt.get_plan().get_nsub();
+                             coh_fdmt.get_plan().get_nsamp() *
+                             coh_fdmt.get_plan().get_nsub();
     std::vector<uint8_t> data_in(in_size);
     std::mt19937 rng(42);
     std::uniform_int_distribution<int> dist(0, 255);
@@ -84,15 +87,9 @@ TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
     std::vector<float> dmt(coh_fdmt.get_dmt_size(), 0.0F);
     REQUIRE_NOTHROW(coh_fdmt.execute<uint8_t>(data_in, dmt));
 
-    // Every element must be finite and non-negative (it's a sum of squared
-    // magnitudes propagated through FDMT, which only adds/copies).
-    bool any_nonzero = false;
-    for (const auto val : dmt) {
-        CHECK(std::isfinite(val));
-        CHECK(val >= 0.0F);
-        any_nonzero = any_nonzero || (val != 0.0F);
-    }
-    CHECK(any_nonzero);
+    CHECK(std::ranges::all_of(
+        dmt, [](float val) { return std::isfinite(val) && val >= 0.0F; }));
+    CHECK(std::ranges::any_of(dmt, [](float val) { return val != 0.0F; }));
 
     // A second call on independent data must also succeed and keep
     // streaming (rather than crash) via the per-coarse-DM history swap.
@@ -105,7 +102,7 @@ TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
     REQUIRE_NOTHROW(coh_fdmt.execute<uint8_t>(data_in, dmt));
 }
 
-TEST_CASE("CohFDMTPlan dimension and buffer invariants", "[cfdmt]") {
+TEST_CASE("CohFDMTPlan dimension and buffer invariants", "[cfdmt][cpu]") {
     const auto plan = make_test_plan();
 
     CHECK(plan.get_ndm() == plan.get_dmt_ndms());
@@ -127,23 +124,24 @@ TEST_CASE("CohFDMTPlan dimension and buffer invariants", "[cfdmt]") {
     REQUIRE(var_grid.size() == plan.get_ndm());
     REQUIRE(sig_grid.size() == plan.get_ndm());
     REQUIRE(count_grid.size() == plan.get_ndm());
-
-    for (size_t i = 0; i < plan.get_ndm(); ++i) {
-        CHECK(var_grid[i] > 0.0F);
-        CHECK(sig_grid[i] == Catch::Approx(std::sqrt(var_grid[i])));
-        CHECK(count_grid[i] > 0.0F);
-    }
+    CHECK(std::ranges::all_of(var_grid, [](float v) { return v > 0.0F; }));
+    CHECK(std::ranges::all_of(count_grid, [](float v) { return v > 0.0F; }));
+    std::vector<float> expected_sigma(var_grid.size());
+    std::ranges::transform(var_grid, expected_sigma.begin(),
+                           [](float v) { return std::sqrt(v); });
+    REQUIRE_THAT(sig_grid, Catch::Matchers::Approx(expected_sigma));
 }
 
-TEST_CASE("CohFDMTCPU multi-block streaming state and history reset", "[cfdmt]") {
+TEST_CASE("CohFDMTCPU multi-block streaming state and history reset",
+          "[cfdmt][cpu]") {
     const auto plan = make_test_plan();
     CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                         plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                         plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
                         plan.get_noverlap());
 
-    const SizeType in_size = SizeType{2} * SizeType{2} *
-                             plan.get_nsamp() * plan.get_nsub();
+    const SizeType in_size =
+        SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
     std::vector<uint8_t> block1(in_size);
     std::vector<uint8_t> block2(in_size);
 
@@ -171,26 +169,19 @@ TEST_CASE("CohFDMTCPU multi-block streaming state and history reset", "[cfdmt]")
     coh_fdmt.reset_history();
     coh_fdmt.execute<uint8_t>(block2, dmt_b2_cold);
 
-    // Streaming history from block 1 must carry over into block 2
-    // so dmt_b2_streamed and dmt_b2_cold must differ
-    bool any_difference = false;
-    for (size_t i = 0; i < dmt_b2_streamed.size(); ++i) {
-        if (std::abs(dmt_b2_streamed[i] - dmt_b2_cold[i]) > 1e-4F) {
-            any_difference = true;
-            break;
-        }
-    }
-    CHECK(any_difference);
+    CHECK_FALSE(std::equal(
+        dmt_b2_streamed.begin(), dmt_b2_streamed.end(), dmt_b2_cold.begin(),
+        [](float a, float b) { return std::abs(a - b) <= 1e-4F; }));
 
-    // 4. Reset history and re-process block 1: must be bit-exact to dmt_b1_initial
+    // 4. Reset history and re-process block 1: must be bit-exact to
+    // dmt_b1_initial
     coh_fdmt.reset_history();
     coh_fdmt.execute<uint8_t>(block1, dmt_b1_repeated);
-    for (size_t i = 0; i < dmt_b1_initial.size(); ++i) {
-        REQUIRE(dmt_b1_initial[i] == dmt_b1_repeated[i]);
-    }
+    test::require_exact(dmt_b1_initial, dmt_b1_repeated);
 }
 
-TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment", "[cfdmt]") {
+TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment",
+          "[cfdmt][cpu]") {
     const SizeType chan_per_sub = 4;
     const float f_center        = 1250.0F;
     const float bw_sub          = 25.0F;
@@ -216,8 +207,9 @@ TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment", "[cfdmt]") {
     const SizeType pulse_t = nsamp / 2;
     for (SizeType ipol = 0; ipol < 2; ++ipol) {
         for (SizeType isub = 0; isub < nsub; ++isub) {
-            const SizeType idx_re = ipol * 2 * nsub * nsamp +
-                                    0 * nsub * nsamp + isub * nsamp + pulse_t;
+            const SizeType idx_re = (ipol * 2 * nsub * nsamp) +
+                                    (0 * nsub * nsamp) + (isub * nsamp) +
+                                    pulse_t;
             data_in[idx_re] = 127;
         }
     }
@@ -234,7 +226,7 @@ TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment", "[cfdmt]") {
 
     for (size_t idm = 0; idm < ndm_total; ++idm) {
         for (size_t it = 0; it < nsamps_out; ++it) {
-            const float val = dmt[idm * nsamps_out + it];
+            const float val = dmt[(idm * nsamps_out) + it];
             if (val > global_max) {
                 global_max  = val;
                 peak_dm_idx = idm;

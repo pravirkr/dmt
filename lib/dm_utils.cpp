@@ -34,7 +34,7 @@ static SizeType find_nearest_sorted_idx_impl(std::span<const T> arr_sorted,
         throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
     const auto it = std::ranges::lower_bound(arr_sorted, val);
-    auto idx      = static_cast<SizeType>(std::distance(arr_sorted.begin(), it));
+    auto idx = static_cast<SizeType>(std::distance(arr_sorted.begin(), it));
 
     // Handle case where val is larger than all elements
     if (it == arr_sorted.end()) {
@@ -135,7 +135,7 @@ namespace {
 // inter-channel bulk shift applied after coherent per-channel dechirping.
 std::vector<int> compute_dedisperse_shifts(
     float dm, float f_min, float f_max, SizeType nchans, float tsamp) {
-    const float foff = (f_max - f_min) / static_cast<float>(nchans);
+    const float foff  = (f_max - f_min) / static_cast<float>(nchans);
     const float f_ref = f_min + (foff * 0.5F);
     std::vector<int> shifts(nchans);
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
@@ -143,7 +143,8 @@ std::vector<int> compute_dedisperse_shifts(
         const float delay =
             kDispConst * dm *
             (std::pow(f_ref, kDispCoeff) - std::pow(fchan, kDispCoeff));
-        shifts[ichan] = std::max(0, static_cast<int>(std::nearbyint(delay / tsamp)));
+        shifts[ichan] =
+            std::max(0, static_cast<int>(std::nearbyint(delay / tsamp)));
     }
     return shifts;
 }
@@ -156,25 +157,25 @@ std::vector<int> generate_dedisperse_shift_table(std::span<const float> dm_grid,
                                                  float tsamp) {
     std::vector<int> table(dm_grid.size() * nchans);
     for (SizeType idm = 0; idm < dm_grid.size(); ++idm) {
-        const auto shifts =
-            compute_dedisperse_shifts(dm_grid[idm], f_min, f_max, nchans, tsamp);
-        std::ranges::copy(shifts, table.begin() +
-                                       static_cast<IndexType>(idm * nchans));
+        const auto shifts = compute_dedisperse_shifts(dm_grid[idm], f_min,
+                                                      f_max, nchans, tsamp);
+        std::ranges::copy(shifts,
+                          table.begin() + static_cast<IndexType>(idm * nchans));
     }
     return table;
 }
 
-std::vector<SizeType> generate_dedisperse_offset_table(
-    std::span<const float> dm_grid,
-    float f_min,
-    float f_max,
-    SizeType nchans,
-    float tsamp) {
+std::vector<SizeType>
+generate_dedisperse_offset_table(std::span<const float> dm_grid,
+                                 float f_min,
+                                 float f_max,
+                                 SizeType nchans,
+                                 float tsamp) {
     std::vector<SizeType> offsets(dm_grid.size() * nchans);
     for (SizeType idm = 0; idm < dm_grid.size(); ++idm) {
-        const auto shifts =
-            compute_dedisperse_shifts(dm_grid[idm], f_min, f_max, nchans, tsamp);
-        SizeType total = 0;
+        const auto shifts = compute_dedisperse_shifts(dm_grid[idm], f_min,
+                                                      f_max, nchans, tsamp);
+        SizeType total    = 0;
         for (SizeType c = 0; c < nchans; ++c) {
             offsets[(idm * nchans) + c] = total;
             if (shifts[c] > 0) {
@@ -196,8 +197,8 @@ void ChannelDelayLineCPU::initialise(std::span<const float> dm_grid_coh,
     m_histories.resize(ndm);
 
     for (SizeType idm = 0; idm < ndm; ++idm) {
-        m_shifts[idm] = compute_dedisperse_shifts(
-            dm_grid_coh[idm], f_min, f_max, nchans, tsamp);
+        m_shifts[idm] = compute_dedisperse_shifts(dm_grid_coh[idm], f_min,
+                                                  f_max, nchans, tsamp);
         m_offsets[idm].resize(nchans);
         SizeType total = 0;
         for (SizeType c = 0; c < nchans; ++c) {
@@ -261,7 +262,8 @@ const std::vector<int>& ChannelDelayLineCPU::get_shifts(SizeType idm) const {
     return m_shifts.at(idm);
 }
 
-const std::vector<SizeType>& ChannelDelayLineCPU::get_offsets(SizeType idm) const {
+const std::vector<SizeType>&
+ChannelDelayLineCPU::get_offsets(SizeType idm) const {
     return m_offsets.at(idm);
 }
 
@@ -276,11 +278,12 @@ void dedisperse(float* __restrict__ waterfall,
     if (waterfall_size != nchans * nsamps) {
         throw std::runtime_error("Waterfall size mismatch");
     }
-    const auto shifts = compute_dedisperse_shifts(dm, f_min, f_max, nchans, tsamp);
+    const auto shifts =
+        compute_dedisperse_shifts(dm, f_min, f_max, nchans, tsamp);
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
         const SizeType start = ichan * nsamps;
         const SizeType end   = start + nsamps;
-        int shift = shifts[ichan] % static_cast<int>(nsamps);
+        int shift            = shifts[ichan] % static_cast<int>(nsamps);
         if (shift < 0) {
             shift += static_cast<int>(nsamps);
         }

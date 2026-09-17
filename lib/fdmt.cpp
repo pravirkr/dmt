@@ -383,12 +383,13 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
                         buf_base + (static_cast<SizeType>(s_signed - dt_first) *
-                                       nsamps));
+                                    nsamps));
         }
         if (s_signed != 0 && -s_signed >= dt_first && -s_signed <= dt_last) {
-            std::copy_n(row, nsamps,
-                        buf_base + (static_cast<SizeType>(-s_signed - dt_first) *
-                                       nsamps));
+            std::copy_n(
+                row, nsamps,
+                buf_base +
+                    (static_cast<SizeType>(-s_signed - dt_first) * nsamps));
         }
     };
 
@@ -591,12 +592,13 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
                         buf_base + (static_cast<SizeType>(s_signed - dt_first) *
-                                       nsamps));
+                                    nsamps));
         }
         if (s_signed != 0 && -s_signed >= dt_first && -s_signed <= dt_last) {
-            std::copy_n(row, nsamps,
-                        buf_base + (static_cast<SizeType>(-s_signed - dt_first) *
-                                       nsamps));
+            std::copy_n(
+                row, nsamps,
+                buf_base +
+                    (static_cast<SizeType>(-s_signed - dt_first) * nsamps));
         }
     };
 
@@ -970,8 +972,8 @@ public:
         if (out.size() != history_state_size()) {
             throw std::invalid_argument(
                 std::format("FDMTCPU::save_history: Invalid output size. "
-                           "Expected {}, got {}",
-                           history_state_size(), out.size()));
+                            "Expected {}, got {}",
+                            history_state_size(), out.size()));
         }
         auto it = out.begin();
         it      = std::copy(m_history.begin(), m_history.end(), it);
@@ -983,8 +985,8 @@ public:
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(
                 std::format("FDMTCPU::load_history: Invalid input size. "
-                           "Expected {}, got {}",
-                           history_state_size(), in.size()));
+                            "Expected {}, got {}",
+                            history_state_size(), in.size()));
         }
         auto it = in.begin();
         std::copy(it, it + static_cast<IndexType>(m_history.size()),

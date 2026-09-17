@@ -56,15 +56,14 @@ __global__ void kernel_fill_window(const float* __restrict__ wf,
                                    int overlap_len,
                                    int mode,
                                    int nbeams) {
-    const auto t      = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto t = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_chan = static_cast<int>(blockIdx.y);
     const auto i_beam = static_cast<int>(blockIdx.z);
     if (t >= n_fft || i_chan >= nchans || i_beam >= nbeams) {
         return;
     }
-    const auto out_idx =
-        (((i_beam * nchans) + i_chan) * n_fft) + t;
-    float val = 0.0F;
+    const auto out_idx = (((i_beam * nchans) + i_chan) * n_fft) + t;
+    float val          = 0.0F;
     if (mode == 2) { // roll
         if (t < nsamps) {
             val = wf[(((i_beam * nchans) + i_chan) * nsamps) + t];
@@ -79,7 +78,8 @@ __global__ void kernel_fill_window(const float* __restrict__ wf,
                 val = overlap[(((i_beam * nchans) + i_chan) * overlap_len) + t];
             }
         } else if (t < overlap_len + nsamps) {
-            val = wf[(((i_beam * nchans) + i_chan) * nsamps) + (t - overlap_len)];
+            val =
+                wf[(((i_beam * nchans) + i_chan) * nsamps) + (t - overlap_len)];
         }
     }
     window[out_idx] = val;
@@ -98,9 +98,9 @@ __global__ void kernel_update_overlap(const float* __restrict__ wf,
     if (i >= overlap_len || i_chan >= nchans || i_beam >= nbeams) {
         return;
     }
-    const auto base = ((i_beam * nchans) + i_chan) * overlap_len;
+    const auto base  = ((i_beam * nchans) + i_chan) * overlap_len;
     const float* src = wf + ((((i_beam * nchans) + i_chan) * nsamps));
-    float val = 0.0F;
+    float val        = 0.0F;
     if (nsamps >= overlap_len) {
         val = src[nsamps - overlap_len + i];
     } else if (i < overlap_len - nsamps) {
@@ -111,31 +111,31 @@ __global__ void kernel_update_overlap(const float* __restrict__ wf,
     overlap_out[base + i] = val;
 }
 
-__global__ void kernel_init_fdmt_fft(const Cplx* __restrict__ spectra,
-                                     const Cplx* __restrict__ win_table,
-                                     Cplx* __restrict__ state,
-                                     const int* __restrict__ grids0_coord_offset_ptr,
-                                     const int* __restrict__ grids0_ndt_ptr,
-                                     const int* __restrict__ grids0_dt_grid_ptr,
-                                     int nsubs,
-                                     int n_bins,
-                                     int max_coords) {
-    const auto k      = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+__global__ void
+kernel_init_fdmt_fft(const Cplx* __restrict__ spectra,
+                     const Cplx* __restrict__ win_table,
+                     Cplx* __restrict__ state,
+                     const int* __restrict__ grids0_coord_offset_ptr,
+                     const int* __restrict__ grids0_ndt_ptr,
+                     const int* __restrict__ grids0_dt_grid_ptr,
+                     int nsubs,
+                     int n_bins,
+                     int max_coords) {
+    const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_sub  = static_cast<int>(blockIdx.y);
     const auto i_beam = static_cast<int>(blockIdx.z);
     if (k >= n_bins || i_sub >= nsubs) {
         return;
     }
-    const auto coord_base = grids0_coord_offset_ptr[i_sub];
-    const auto ndt        = grids0_ndt_ptr[i_sub];
-    const auto* dt_grid   = &grids0_dt_grid_ptr[coord_base];
-    const auto spec_offset =
-        (i_beam * nsubs * n_bins) + (i_sub * n_bins) + k;
-    const Cplx sample          = spectra[spec_offset];
+    const auto coord_base  = grids0_coord_offset_ptr[i_sub];
+    const auto ndt         = grids0_ndt_ptr[i_sub];
+    const auto* dt_grid    = &grids0_dt_grid_ptr[coord_base];
+    const auto spec_offset = (i_beam * nsubs * n_bins) + (i_sub * n_bins) + k;
+    const Cplx sample      = spectra[spec_offset];
     const auto beam_state_base = i_beam * max_coords * n_bins;
     for (int i_dt = 0; i_dt < ndt; ++i_dt) {
-        const int s        = abs(dt_grid[i_dt]);
-        const Cplx win     = win_table[(s * n_bins) + k];
+        const int s          = abs(dt_grid[i_dt]);
+        const Cplx win       = win_table[(s * n_bins) + k];
         const auto coord_idx = coord_base + i_dt;
         state[beam_state_base + (coord_idx * n_bins) + k] = sample * win;
     }
@@ -150,12 +150,13 @@ __global__ void kernel_execute_iter_fft(const Cplx* __restrict__ state_in,
                                         int ncoords_sum_cur,
                                         int ncoords_copy_cur,
                                         int max_coords) {
-    const auto linear = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_beam = static_cast<int>(blockIdx.y);
-    const int max_iter_coords =
-        (ncoords_sum_cur > ncoords_copy_cur) ? ncoords_sum_cur
-                                             : ncoords_copy_cur;
-    const int total = max_iter_coords * n_bins;
+    const auto linear =
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto i_beam         = static_cast<int>(blockIdx.y);
+    const int max_iter_coords = (ncoords_sum_cur > ncoords_copy_cur)
+                                    ? ncoords_sum_cur
+                                    : ncoords_copy_cur;
+    const int total           = max_iter_coords * n_bins;
     if (linear >= total) {
         return;
     }
@@ -176,9 +177,9 @@ __global__ void kernel_execute_iter_fft(const Cplx* __restrict__ state_in,
             (i_beam * max_coords * n_bins) + (head_idx * n_bins);
         const auto out_base =
             (i_beam * max_coords * n_bins) + (out_idx * n_bins);
-        const Cplx tail = state_in[tail_base + k];
-        const Cplx head = state_in[head_base + k];
-        const Cplx p    = phasors[(s * n_bins) + k];
+        const Cplx tail         = state_in[tail_base + k];
+        const Cplx head         = state_in[head_base + k];
+        const Cplx p            = phasors[(s * n_bins) + k];
         state_out[out_base + k] = tail + (head * p);
     }
     if (i_coord < ncoords_copy_cur) {
@@ -203,8 +204,8 @@ __global__ void kernel_trim_scale(const float* __restrict__ time_out,
                                   int max_coords,
                                   int nbeams,
                                   float norm) {
-    const auto t      = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_dm   = static_cast<int>(blockIdx.y);
+    const auto t    = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto i_dm = static_cast<int>(blockIdx.y);
     const auto i_beam = static_cast<int>(blockIdx.z);
     if (t >= nsamps_out || i_dm >= ndms || i_beam >= nbeams) {
         return;
@@ -222,12 +223,12 @@ __global__ void kernel_materialize_view(const float* __restrict__ time_out,
                                         int skip,
                                         int max_coords,
                                         float norm) {
-    const auto t    = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_c  = static_cast<int>(blockIdx.y);
+    const auto t   = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto i_c = static_cast<int>(blockIdx.y);
     if (t >= nsamps_view || i_c >= ncoords) {
         return;
     }
-    const auto src = time_out[(i_c * n_fft) + skip + t];
+    const auto src                = time_out[(i_c * n_fft) + skip + t];
     view[(i_c * nsamps_view) + t] = src * norm;
 }
 
@@ -284,14 +285,8 @@ public:
           m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(f_min,
-                                                   f_max,
-                                                   nchans,
-                                                   nsamps,
-                                                   tsamp,
-                                                   dt_grid,
-                                                   mode,
-                                                   verbose)) {
+          m_plan(std::make_unique<plans::FDMTPlan>(
+              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {
         initialize();
     }
 
@@ -312,14 +307,8 @@ public:
           m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(f_min,
-                                                   f_max,
-                                                   nchans,
-                                                   nsamps,
-                                                   tsamp,
-                                                   dm_grid,
-                                                   mode,
-                                                   verbose)) {
+          m_plan(std::make_unique<plans::FDMTPlan>(
+              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {
         initialize();
     }
 
@@ -692,24 +681,24 @@ private:
             m_overlap_scratch_d.resize(ov_n, 0.0F);
         }
 
-        int n_time        = static_cast<int>(m_n_fft);
-        int howmany_fwd   = static_cast<int>(m_nbeams * m_nchans);
-        int inembed_fwd   = n_time;
-        int onembed_fwd   = static_cast<int>(m_n_bins);
-        cuda_utils::check_cuda_call(
-            cufftPlanMany(&m_plan_forward, 1, &n_time, &inembed_fwd, 1,
-                          inembed_fwd, &onembed_fwd, 1, onembed_fwd, CUFFT_R2C,
-                          howmany_fwd),
-            "FDMTFFTCUDA: cufftPlanMany forward");
+        int n_time      = static_cast<int>(m_n_fft);
+        int howmany_fwd = static_cast<int>(m_nbeams * m_nchans);
+        int inembed_fwd = n_time;
+        int onembed_fwd = static_cast<int>(m_n_bins);
+        cuda_utils::check_cuda_call(cufftPlanMany(&m_plan_forward, 1, &n_time,
+                                                  &inembed_fwd, 1, inembed_fwd,
+                                                  &onembed_fwd, 1, onembed_fwd,
+                                                  CUFFT_R2C, howmany_fwd),
+                                    "FDMTFFTCUDA: cufftPlanMany forward");
 
         int howmany_bwd = static_cast<int>(m_nbeams * m_max_coords);
         int inembed_bwd = static_cast<int>(m_n_bins);
         int onembed_bwd = n_time;
-        cuda_utils::check_cuda_call(
-            cufftPlanMany(&m_plan_backward, 1, &n_time, &inembed_bwd, 1,
-                          inembed_bwd, &onembed_bwd, 1, onembed_bwd, CUFFT_C2R,
-                          howmany_bwd),
-            "FDMTFFTCUDA: cufftPlanMany backward");
+        cuda_utils::check_cuda_call(cufftPlanMany(&m_plan_backward, 1, &n_time,
+                                                  &inembed_bwd, 1, inembed_bwd,
+                                                  &onembed_bwd, 1, onembed_bwd,
+                                                  CUFFT_C2R, howmany_bwd),
+                                    "FDMTFFTCUDA: cufftPlanMany backward");
     }
 
     void run_transform(cuda::std::span<const float> d_waterfall,
@@ -756,9 +745,8 @@ private:
         cuda_utils::check_kernel_launch_params(grid_fill, block);
         const int mode_i = static_cast<int>(m_mode);
         const float* ov_ptr =
-            m_overlap_d.empty()
-                ? nullptr
-                : thrust::raw_pointer_cast(m_overlap_d.data());
+            m_overlap_d.empty() ? nullptr
+                                : thrust::raw_pointer_cast(m_overlap_d.data());
         kernel_fill_window<<<grid_fill, block, 0, stream>>>(
             d_wf, ov_ptr, thrust::raw_pointer_cast(m_window_d.data()),
             static_cast<int>(m_nchans), static_cast<int>(m_nsamps),
@@ -776,11 +764,12 @@ private:
                              static_cast<unsigned>(m_nchans),
                              static_cast<unsigned>(m_nbeams));
         cuda_utils::check_kernel_launch_params(init_grid, dim3(block_x));
-        const auto* win_ptr = m_use_box_smearing
-            ? reinterpret_cast<const Cplx*>(
-                  thrust::raw_pointer_cast(m_boxcar_window_d.data()))
-            : reinterpret_cast<const Cplx*>(
-                  thrust::raw_pointer_cast(m_phasors_d.data()));
+        const auto* win_ptr =
+            m_use_box_smearing
+                ? reinterpret_cast<const Cplx*>(
+                      thrust::raw_pointer_cast(m_boxcar_window_d.data()))
+                : reinterpret_cast<const Cplx*>(
+                      thrust::raw_pointer_cast(m_phasors_d.data()));
         kernel_init_fdmt_fft<<<init_grid, block_x, 0, stream>>>(
             reinterpret_cast<const Cplx*>(
                 thrust::raw_pointer_cast(m_spectra_d.data())),
@@ -873,9 +862,7 @@ private:
 
     [[nodiscard]] SizeType view_nsamps() const {
         if (m_mode == FDMTMode::kFull) {
-            return m_plan->get_container()
-                .state_shape[m_current_level]
-                .nsamps;
+            return m_plan->get_container().state_shape[m_current_level].nsamps;
         }
         return m_nsamps;
     }
@@ -898,7 +885,8 @@ private:
                              thrust::raw_pointer_cast(m_ifft_d.data())),
                          thrust::raw_pointer_cast(m_time_out_d.data())),
             "FDMTFFTCUDA: view C2R");
-        const auto& shape   = m_plan->get_container().state_shape[m_current_level];
+        const auto& shape =
+            m_plan->get_container().state_shape[m_current_level];
         const auto nsamps_v = view_nsamps();
         const auto skip     = view_skip();
         const float norm    = 1.0F / static_cast<float>(m_n_fft);
@@ -997,8 +985,8 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                                     device_id,
                                     nbeams)) {}
 
-FDMTFFTCUDA::~FDMTFFTCUDA()                               = default;
-FDMTFFTCUDA::FDMTFFTCUDA(FDMTFFTCUDA&&) noexcept           = default;
+FDMTFFTCUDA::~FDMTFFTCUDA()                                 = default;
+FDMTFFTCUDA::FDMTFFTCUDA(FDMTFFTCUDA&&) noexcept            = default;
 FDMTFFTCUDA& FDMTFFTCUDA::operator=(FDMTFFTCUDA&&) noexcept = default;
 
 const plans::FDMTPlan& FDMTFFTCUDA::get_plan() const noexcept {
@@ -1007,27 +995,29 @@ const plans::FDMTPlan& FDMTFFTCUDA::get_plan() const noexcept {
 SizeType FDMTFFTCUDA::get_nbeams() const noexcept {
     return m_impl->get_nbeams();
 }
-void FDMTFFTCUDA::execute(std::span<const float> waterfall, std::span<float> dmt) {
+void FDMTFFTCUDA::execute(std::span<const float> waterfall,
+                          std::span<float> dmt) {
     m_impl->execute(waterfall, dmt);
 }
 void FDMTFFTCUDA::execute(cuda::std::span<const float> d_waterfall,
-                         cuda::std::span<float> d_dmt,
-                         cudaStream_t stream) {
+                          cuda::std::span<float> d_dmt,
+                          cudaStream_t stream) {
     m_impl->execute(d_waterfall, d_dmt, stream);
 }
-void FDMTFFTCUDA::reset(std::span<const float> waterfall, std::span<float> dmt) {
+void FDMTFFTCUDA::reset(std::span<const float> waterfall,
+                        std::span<float> dmt) {
     m_impl->reset(waterfall, dmt);
 }
 void FDMTFFTCUDA::reset(cuda::std::span<const float> d_waterfall,
-                       cuda::std::span<float> d_dmt,
-                       cudaStream_t stream) {
+                        cuda::std::span<float> d_dmt,
+                        cudaStream_t stream) {
     m_impl->reset(d_waterfall, d_dmt, stream);
 }
 void FDMTFFTCUDA::advance(SizeType levels, cudaStream_t stream) {
     m_impl->advance(levels, stream);
 }
 void FDMTFFTCUDA::advance_until_remaining(SizeType remaining_levels,
-                                         cudaStream_t stream) {
+                                          cudaStream_t stream) {
     m_impl->advance_until_remaining(remaining_levels, stream);
 }
 cuda::std::span<const float> FDMTFFTCUDA::view_level_data() const {

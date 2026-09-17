@@ -41,23 +41,14 @@ add_library(${PROJECT_NAME}::${DMT_LIBRARY_NAME} ALIAS ${DMT_LIBRARY_NAME})
 
 target_compile_features(${DMT_LIBRARY_NAME} PUBLIC cxx_std_20)
 
-# C++ code uses #ifdef DMT_ENABLE_CUDA for optional GPU API (preprocessor macro, not a CMake option).
+# Optional GPU API in C++ via DMT_ENABLE_CUDA (preprocessor macro, not a CMake option).
 if(CMAKE_CUDA_COMPILER)
   target_compile_definitions(${DMT_LIBRARY_NAME} PUBLIC DMT_ENABLE_CUDA)
 endif()
 
-# Code coverage setup
+dmt_enable_coverage(${DMT_LIBRARY_NAME})
 if(DMT_ENABLE_COVERAGE)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(${DMT_LIBRARY_NAME} PRIVATE -O0 -g --coverage)
-    target_link_options(${DMT_LIBRARY_NAME} PRIVATE --coverage)
-    message(STATUS "Code coverage enabled.")
-  else()
-    message(
-      FATAL_ERROR
-        "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
-    )
-  endif()
+  message(STATUS "Code coverage enabled.")
 endif()
 
 # Set include directories
@@ -78,8 +69,7 @@ endif()
 
 # Header-only internal deps (not part of the installed export set).
 target_link_libraries(
-  ${DMT_LIBRARY_NAME}
-  PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}> spdlog::spdlog_header_only
+  ${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}> spdlog::spdlog_header_only
 )
 
 # FFTW: shared dmt links privately; static dmt exposes FFTW to downstream linkers.

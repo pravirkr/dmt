@@ -528,9 +528,8 @@ public:
         const auto n_fft  = get_fft_size();
         const auto max_s  = get_max_shift();
         std::vector<ComplexType> phasors((max_s + 1) * n_bins);
-        const float two_pi_over_N =
-            static_cast<float>(2.0 * std::numbers::pi) /
-            static_cast<float>(n_fft);
+        const float two_pi_over_N = static_cast<float>(2.0 * std::numbers::pi) /
+                                    static_cast<float>(n_fft);
         for (SizeType s = 0; s <= max_s; ++s) {
             const float s_float = static_cast<float>(s);
             for (SizeType k = 0; k < n_bins; ++k) {
@@ -1056,7 +1055,7 @@ private:
                         tail_n      = coords_prev[i_coord_head].nsamps;
                         head_offset = coords_prev[i_coord_tail]
                                           .buf_offset; // shifted by |dt_head|
-                        head_n      = coords_prev[i_coord_tail].nsamps;
+                        head_n = coords_prev[i_coord_tail].nsamps;
                     }
 
                     // "full"/"roll" have no cross-block history mechanism,
@@ -1217,9 +1216,9 @@ public:
             m_tsamp         = other.m_tsamp;
             m_dt_max        = other.m_dt_max;
             m_dt_min        = other.m_dt_min;
-            m_fdmt_plan = other.m_fdmt_plan
-                              ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
-                              : nullptr;
+            m_fdmt_plan     = other.m_fdmt_plan
+                                  ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
+                                  : nullptr;
         }
         return *this;
     }
@@ -1288,22 +1287,20 @@ public:
         if (!m_fdmt_plan) {
             return {};
         }
-        const auto fdmt_var =
-            m_fdmt_plan->get_effective_variance_grid(boxcar_width,
-                                                     use_box_smearing);
+        const auto fdmt_var = m_fdmt_plan->get_effective_variance_grid(
+            boxcar_width, use_box_smearing);
         const auto ndm_coh = m_dm_grid_coh.size();
         const auto n_fine  = fdmt_var.size();
         std::vector<float> grid(ndm_coh * n_fine);
         for (SizeType i = 0; i < ndm_coh; ++i) {
-            std::ranges::copy(
-                fdmt_var, grid.begin() + static_cast<IndexType>(i * n_fine));
+            std::ranges::copy(fdmt_var, grid.begin() +
+                                            static_cast<IndexType>(i * n_fine));
         }
         return grid;
     }
 
-    std::vector<float>
-    get_effective_sigma_grid(SizeType boxcar_width,
-                             bool use_box_smearing) const {
+    std::vector<float> get_effective_sigma_grid(SizeType boxcar_width,
+                                                bool use_box_smearing) const {
         auto var_grid =
             get_effective_variance_grid(boxcar_width, use_box_smearing);
         for (auto& v : var_grid) {
@@ -1862,7 +1859,9 @@ SizeType CohFDMTPlan::get_intensity_buf_size() const noexcept {
     return m_impl->get_intensity_buf_size();
 }
 SizeType CohFDMTPlan::get_ndm() const noexcept { return m_impl->get_ndm(); }
-SizeType CohFDMTPlan::get_dmt_ndms() const noexcept { return m_impl->get_dmt_ndms(); }
+SizeType CohFDMTPlan::get_dmt_ndms() const noexcept {
+    return m_impl->get_dmt_ndms();
+}
 SizeType CohFDMTPlan::get_dmt_nsamps() const noexcept {
     return m_impl->get_dmt_nsamps();
 }
@@ -1872,12 +1871,12 @@ float CohFDMTPlan::get_chirp_scale() const noexcept {
 }
 std::vector<float>
 CohFDMTPlan::get_effective_variance_grid(SizeType boxcar_width,
-                                        bool use_box_smearing) const {
+                                         bool use_box_smearing) const {
     return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing);
 }
 std::vector<float>
 CohFDMTPlan::get_effective_sigma_grid(SizeType boxcar_width,
-                                     bool use_box_smearing) const {
+                                      bool use_box_smearing) const {
     return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing);
 }
 std::vector<float> CohFDMTPlan::get_cumulative_count_grid() const {

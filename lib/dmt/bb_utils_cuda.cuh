@@ -99,14 +99,17 @@ void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
                   cudaStream_t stream);
 
 /**
- * @brief Applies causal multi-block streaming delay line for one coarse-DM trial.
- * Each channel c is delayed by shift_table[idm * nchans + c] samples relative to f_min.
- * Boundary samples are streamed causally via the history buffer.
+ * @brief Applies causal multi-block streaming delay line for one coarse-DM
+ * trial. Each channel c is delayed by shift_table[idm * nchans + c] samples
+ * relative to f_min. Boundary samples are streamed causally via the history
+ * buffer.
  *
  * @param in Input waterfall (nchans rows, nsamps columns).
  * @param out Output waterfall, same shape as `in`.
- * @param history Device buffer containing per-channel history state for this coarse-DM trial.
- * @param shift_table Precomputed per-channel integer sample shifts for every coarse-DM trial.
+ * @param history Device buffer containing per-channel history state for this
+ * coarse-DM trial.
+ * @param shift_table Precomputed per-channel integer sample shifts for every
+ * coarse-DM trial.
  * @param offsets Precomputed per-channel offsets into history buffer.
  * @param idm Coarse-DM trial index.
  * @param nchans Number of channels.

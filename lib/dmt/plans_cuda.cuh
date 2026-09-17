@@ -18,8 +18,7 @@ std::vector<T> flatten(const std::vector<std::vector<T>>& vec_2d) {
     return flattened;
 }
 
-template <typename T>
-std::vector<T> cumulative_sum(const std::vector<T>& vec) {
+template <typename T> std::vector<T> cumulative_sum(const std::vector<T>& vec) {
     std::vector<T> result(vec.size() + 1, 0);
     std::partial_sum(vec.begin(), vec.end(), result.begin() + 1);
     return result;
@@ -41,7 +40,8 @@ struct FDMTCoordDPtrs {
     const int* tail_nsamps;
     const int* head_buf_offset;
     const int* head_nsamps;
-    const int* hist_offset; // valid-mode cross-block tree history slot (coordinates_sum only)
+    const int* hist_offset; // valid-mode cross-block tree history slot
+                            // (coordinates_sum only)
 
     __host__ __device__ void update_offsets(int offset_value) {
         nsamps += offset_value;

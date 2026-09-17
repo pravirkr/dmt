@@ -57,7 +57,7 @@ public:
         if (dmt_d.size() != m_plan.get_dmt_size()) {
             throw std::runtime_error("Invalid DMT size");
         }
-        const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
+        const auto& dm_grid_coh   = m_plan.get_dm_grid_coh();
         auto m_unpack_buf_p1_span = cuda::std::span<ComplexTypeCUDA>(
             thrust::raw_pointer_cast(m_unpack_buf_p1.data()),
             m_unpack_buf_p1.size());
@@ -97,15 +97,14 @@ public:
             unpad_detect(m_delay_buf_p1_span, m_delay_buf_p2_span,
                          m_intensity_buf_span, stream);
 
-            // Apply causal streaming inter-channel delay line for this coarse trial
+            // Apply causal streaming inter-channel delay line for this coarse
+            // trial
             auto delay_hist_span = cuda::std::span<float>(
                 thrust::raw_pointer_cast(m_channel_delay_histories[idm].data()),
                 m_channel_delay_histories[idm].size());
             bb_utils::channel_delay_line(
-                m_intensity_buf_span, m_aligned_buf_span,
-                delay_hist_span,
-                shift_table_span, offset_table_span,
-                static_cast<int>(idm),
+                m_intensity_buf_span, m_aligned_buf_span, delay_hist_span,
+                shift_table_span, offset_table_span, static_cast<int>(idm),
                 static_cast<int>(m_plan.get_mchan()),
                 static_cast<int>(m_plan.get_msamp()), stream);
 
@@ -158,7 +157,8 @@ public:
             "CohFDMTCUDA::execute (host): D2H copy failed");
     }
 
-    // Device entry point: input is already device-resident, unpacks directly on GPU
+    // Device entry point: input is already device-resident, unpacks directly on
+    // GPU
     template <IntegralDataType DataType>
     void execute_d(cuda::std::span<const DataType> data_in_d,
                    cuda::std::span<float> dmt_d,
@@ -246,9 +246,10 @@ private:
         thrust::copy(shift_table_h.begin(), shift_table_h.end(),
                      m_dedisperse_shift_table_d.begin());
 
-        const auto offset_table_h = dmt::utils::generate_dedisperse_offset_table(
-            dm_grid_coh_h, m_plan.get_f_min(), m_plan.get_f_max(),
-            m_plan.get_mchan(), m_plan.get_tsamp());
+        const auto offset_table_h =
+            dmt::utils::generate_dedisperse_offset_table(
+                dm_grid_coh_h, m_plan.get_f_min(), m_plan.get_f_max(),
+                m_plan.get_mchan(), m_plan.get_tsamp());
         m_dedisperse_offset_table_d.resize(offset_table_h.size());
         thrust::copy(offset_table_h.begin(), offset_table_h.end(),
                      m_dedisperse_offset_table_d.begin());
@@ -267,10 +268,9 @@ private:
         }
 
         // One small streaming-history slot per coarse-DM trial for FDMT
-        m_dm_histories.assign(
-            dm_grid_coh_h.size(),
-            thrust::device_vector<float>(m_thefdmt->history_state_size(),
-                                         0.0F));
+        m_dm_histories.assign(dm_grid_coh_h.size(),
+                              thrust::device_vector<float>(
+                                  m_thefdmt->history_state_size(), 0.0F));
 
         // Compute the chirp table
         thrust::device_vector<float> dm_grid_coh_d(dm_grid_coh_h.size());

@@ -262,8 +262,8 @@ class TestFDMTFFT:
                 atol=5e-3,
             )
 
+    @pytest.mark.cuda
     def test_fdmt_fft_gpu_optional(self) -> None:
-        pytest.importorskip("dmtlib.libcudmt")
         from dmtlib import FDMTFFTGPU
 
         f_min = 1000.0

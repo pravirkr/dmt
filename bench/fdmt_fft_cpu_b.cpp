@@ -25,12 +25,12 @@ static std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
 class FDMTFFTCPUFixture : public benchmark::Fixture {
 public:
     void SetUp(const ::benchmark::State& state) override {
-        f_min  = 704.0F;
-        f_max  = 1216.0F;
-        nchans = 256;
-        tsamp  = 0.00008192F;
-        dt_max = 256;
-        nsamps = (state.range(0) == 0) ? 1 << 12 : state.range(0);
+        f_min     = 704.0F;
+        f_max     = 1216.0F;
+        nchans    = 256;
+        tsamp     = 0.00008192F;
+        dt_max    = 256;
+        nsamps    = (state.range(0) == 0) ? 1 << 12 : state.range(0);
         nthreads  = (state.range(1) == 0) ? static_cast<int>(state.range(0))
                                           : static_cast<int>(state.range(1));
         gen       = std::mt19937(std::random_device()());

@@ -172,8 +172,9 @@ private:
                 throw std::runtime_error("Failed to initialize FFTW threads");
             }
             fftwf_plan_with_nthreads(m_nthreads);
-            spdlog::debug("configure_threading: FFTW initialized with {} threads",
-                          m_nthreads);
+            spdlog::debug(
+                "configure_threading: FFTW initialized with {} threads",
+                m_nthreads);
         }
 #else
         if (m_nthreads > 1) {

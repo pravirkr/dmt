@@ -106,21 +106,22 @@ std::vector<int> generate_dedisperse_shift_table(std::span<const float> dm_grid,
 
 // Precompute the flat (ndm * nchans) per-channel history offsets for the
 // streaming delay line.
-std::vector<SizeType> generate_dedisperse_offset_table(
-    std::span<const float> dm_grid,
-    float f_min,
-    float f_max,
-    SizeType nchans,
-    float tsamp);
+std::vector<SizeType>
+generate_dedisperse_offset_table(std::span<const float> dm_grid,
+                                 float f_min,
+                                 float f_max,
+                                 SizeType nchans,
+                                 float tsamp);
 
 /**
  * @brief Causal multi-block streaming delay line for inter-channel alignment
  * across coarse-DM trials.
  *
  * For each coarse-DM trial and each channel c, delays incoming samples by
- * S_c = round(kDispConst * dm * (f_min^-2 - f_c^-2) / tsamp) samples relative to f_min.
- * Maintains an isolated FIFO history per trial so consecutive streamed blocks
- * produce continuous output without circular wrapping or buffer overrun.
+ * S_c = round(kDispConst * dm * (f_min^-2 - f_c^-2) / tsamp) samples relative
+ * to f_min. Maintains an isolated FIFO history per trial so consecutive
+ * streamed blocks produce continuous output without circular wrapping or buffer
+ * overrun.
  */
 class ChannelDelayLineCPU {
 public:
@@ -145,9 +146,9 @@ public:
     [[nodiscard]] const std::vector<SizeType>& get_offsets(SizeType idm) const;
 
 private:
-    std::vector<std::vector<int>> m_shifts;          // [idm][ichan]
-    std::vector<std::vector<SizeType>> m_offsets;     // [idm][ichan]
-    std::vector<std::vector<float>> m_histories;     // [idm][total_hist_size]
+    std::vector<std::vector<int>> m_shifts;       // [idm][ichan]
+    std::vector<std::vector<SizeType>> m_offsets; // [idm][ichan]
+    std::vector<std::vector<float>> m_histories;  // [idm][total_hist_size]
 };
 
 // Legacy single-block dedisperse function (kept for backward compatibility).

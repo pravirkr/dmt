@@ -190,16 +190,18 @@ public:
     get_effective_variance(SizeType dm_idx,
                            SizeType boxcar_width,
                            bool use_box_smearing = true) const;
-    /// @brief Theoretical noise standard deviation for a given DM trial and boxcar width
-    [[nodiscard]] float
-    get_effective_sigma(SizeType dm_idx,
-                        SizeType boxcar_width,
-                        bool use_box_smearing = true) const;
-    /// @brief Theoretical noise variance grid across all DM trials for a boxcar width
+    /// @brief Theoretical noise standard deviation for a given DM trial and
+    /// boxcar width
+    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
+                                            SizeType boxcar_width,
+                                            bool use_box_smearing = true) const;
+    /// @brief Theoretical noise variance grid across all DM trials for a boxcar
+    /// width
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width,
                                 bool use_box_smearing = true) const;
-    /// @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width
+    /// @brief Theoretical noise standard deviation grid across all DM trials
+    /// for a boxcar width
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width,
                              bool use_box_smearing = true) const;
@@ -215,7 +217,8 @@ public:
     SizeType get_history_size() const noexcept;
     /// @brief Size of the Boxcar smearing history for the FDMT plan
     SizeType get_history_init_size() const noexcept;
-    /// @brief Size of the tree history buffer for valid-mode streaming across FDMT blocks
+    /// @brief Size of the tree history buffer for valid-mode streaming across
+    /// FDMT blocks
     SizeType get_tree_history_size() const noexcept;
     /// @brief Overlap/pad length L = max(|dt_min|, |dt_max|) for FFT full/valid
     [[nodiscard]] SizeType get_fft_overlap() const noexcept;
@@ -225,7 +228,8 @@ public:
     [[nodiscard]] SizeType get_fft_size() const noexcept;
     /// @brief Number of complex bins in R2C Fourier domain (fft_size / 2 + 1)
     [[nodiscard]] SizeType get_fft_n_bins() const noexcept;
-    /// @brief Buffer size in complex elements for FDMT-FFT state ping-pong buffers
+    /// @brief Buffer size in complex elements for FDMT-FFT state ping-pong
+    /// buffers
     [[nodiscard]] SizeType get_fft_buffer_size() const noexcept;
     /// @brief Maximum shift in samples across all tree coordinates and level 0
     [[nodiscard]] SizeType get_max_shift() const noexcept;
@@ -346,15 +350,18 @@ public:
     SizeType get_dmt_ndms() const noexcept;
     /// @brief Number of time samples in each DM trial
     SizeType get_dmt_nsamps() const noexcept;
-    /// @brief Theoretical noise variance grid across all DM trials for a boxcar width
+    /// @brief Theoretical noise variance grid across all DM trials for a boxcar
+    /// width
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width = 1,
                                 bool use_box_smearing = true) const;
-    /// @brief Theoretical noise standard deviation grid across all DM trials for a boxcar width
+    /// @brief Theoretical noise standard deviation grid across all DM trials
+    /// for a boxcar width
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1,
                              bool use_box_smearing = true) const;
-    /// @brief Cumulative sample accumulation count per channel-integrated DM trial
+    /// @brief Cumulative sample accumulation count per channel-integrated DM
+    /// trial
     [[nodiscard]] std::vector<float> get_cumulative_count_grid() const;
     /// @brief Number of elements in the final DMT transform
     SizeType get_dmt_size() const;
