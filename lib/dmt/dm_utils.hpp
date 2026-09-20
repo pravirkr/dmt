@@ -83,6 +83,49 @@ std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
                                            float foff,
                                            float tsamp);
 
+/**
+ * @brief Generate a fractional delay table (one float per channel) in bins/(pc cm^-3).
+ *
+ * For channel ichan, delay = std::nearbyint(dm * fractional_delay_table[ichan]).
+ *
+ * @param nchans Number of channels.
+ * @param fch1 First channel frequency (MHz).
+ * @param foff Channel frequency offset (MHz).
+ * @param tsamp Sampling time (s).
+ * @return Per-channel fractional delay array (size == nchans).
+ */
+std::vector<float> generate_fractional_delay_table(SizeType nchans,
+                                                  float fch1,
+                                                  float foff,
+                                                  float tsamp);
+
+/**
+ * @brief Generate an optimal DM trial grid using Lina Levin's pulse-broadening tolerance rule.
+ *
+ * @param dm_start Starting DM (pc cm^-3).
+ * @param dm_end Ending DM (pc cm^-3).
+ * @param tsamp Sampling interval (s).
+ * @param pulse_width Intrinsic pulse width (s).
+ * @param f_min Lowest frequency (MHz).
+ * @param f_max Highest frequency (MHz).
+ * @param nchans Number of frequency channels.
+ * @param tol Smearing tolerance factor (must be > 1.0, typically 1.15 to 1.25).
+ * @return Monotonically increasing vector of DM trials starting at dm_start.
+ * Normally ends at a value >= dm_end; if the step size collapses to zero
+ * before reaching dm_end (an extreme tolerance/pulse_width/tsamp
+ * combination with no valid further step), the grid stops short and a
+ * warning is logged -- callers that need a hard guarantee should check
+ * `grid.back() >= dm_end` themselves.
+ */
+std::vector<float> generate_levin_dm_grid(float dm_start,
+                                          float dm_end,
+                                          float tsamp,
+                                          float pulse_width,
+                                          float f_min,
+                                          float f_max,
+                                          SizeType nchans,
+                                          float tol);
+
 // Compute the optimal minimum overlap based on the dispersion delay
 // and the number of channels.
 SizeType minimum_overlap(float dm_max,

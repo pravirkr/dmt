@@ -60,7 +60,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute)
 (benchmark::State& state) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
                  "full", false, nthreads);
-    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
+    std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
     }
@@ -69,7 +69,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute)
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
 (benchmark::State& state) {
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    std::vector<float> dmt(tmp_plan.get_dmt_size(), 0.0F);
+    std::vector<float> dmt(tmp_plan.get_buffer_size(), 0.0F);
     for (auto _ : state) {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
                      "full", false, nthreads);
@@ -81,7 +81,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_threads)
 (benchmark::State& state) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
                  "full", false, nthreads);
-    std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
+    std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
     }

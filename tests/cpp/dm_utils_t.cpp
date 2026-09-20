@@ -271,7 +271,11 @@ TEST_CASE("get_dmconv delay tables and legacy dedisperse",
                          table.begin(),
                          table.begin() + static_cast<std::ptrdiff_t>(nchans)),
                      Catch::Matchers::Equals(std::vector<SizeType>(nchans, 0)));
+        // fch1 = f_max here (descending freq), so it is already the
+        // highest-frequency (reference, zero-delay) channel; delay grows
+        // toward the last (lowest-frequency) channel of the DM=10 row.
         CHECK(table.back() > 0);
+        CHECK(table[nchans] == 0);
     }
 
     SECTION("minimum_overlap is non-zero for a real DM and rejects negatives") {

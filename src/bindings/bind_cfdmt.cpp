@@ -1,5 +1,6 @@
 #include "bindings/bind.hpp"
 
+#include <algorithm>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -14,7 +15,6 @@
 
 namespace dmt {
 using algorithms::CohFDMTCPU;
-using algorithms::DDMTCPU;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
@@ -55,74 +55,8 @@ void bind_cfdmt(py::module_& mod) {
             Number of samples that received energy.
         )doc");
 
-    py::class_<DDMTCPU>(mod, "DDMTCPU",
-                        R"doc(
-        Brute-force incoherent dedispersion on the CPU.
-
-        Parameters
-        ----------
-        f_min, f_max : float
-            Band edges in MHz.
-        nchans : int
-            Number of frequency channels.
-        tsamp : float
-            Sampling interval in seconds.
-        dm_max, dm_step : float
-            Regular DM grid in pc cm^-3.
-        dm_min : float, optional
-            Lowest DM trial (default 0).
-        dm_arr : numpy.ndarray, optional
-            Explicit DM list (second constructor).
-
-        See also
-        --------
-        DDMTPlan, FDMTCPU
-        )doc")
-        .def(py::init<float, float, SizeType, float, float, float, float>(),
-             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F)
-        .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr) {
-                 return DDMTCPU(
-                     f_min, f_max, nchans, tsamp,
-                     std::vector<float>(dm_arr.data(),
-                                        dm_arr.data() + dm_arr.size()));
-             }),
-             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-             py::arg("tsamp"), py::arg("dm_arr"))
-        .def(
-            "execute",
-            [](DDMTCPU& ddmt,
-               const py::array_t<float, py::array::c_style>& waterfall) {
-                const auto& plan          = ddmt.get_plan();
-                const auto& plan_c        = plan.get_container();
-                const auto* shape         = waterfall.shape();
-                const auto nsamps         = static_cast<SizeType>(shape[1]);
-                const auto max_delay      = plan_c.delay_table.back();
-                const auto nsamps_reduced = nsamps - max_delay;
-                const auto dm_count       = plan_c.dm_arr.size();
-                py::array_t<float, py::array::c_style> dmt(
-                    {dm_count, nsamps_reduced});
-                ddmt.execute(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(dmt.mutable_data(), dmt.size()));
-                return dmt;
-            },
-            py::arg("waterfall"),
-            R"doc(
-             Dedisperse a waterfall onto the planned DM grid.
-
-             Parameters
-             ----------
-             waterfall : numpy.ndarray, dtype float32
-                 C-contiguous array of shape ``(nchans, nsamps)``.
-
-             Returns
-             -------
-             numpy.ndarray
-                 ``(n_dm, nsamps - max_delay)`` float32 array.
-             )doc");
     py::class_<CohFDMTCPU>(mod, "CohFDMTCPU",
+
                            R"doc(
         Hybrid coherent FDMT on the CPU.
 

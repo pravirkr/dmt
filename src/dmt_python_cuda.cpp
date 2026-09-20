@@ -18,4 +18,6 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
 
     dmt::bind_fdmt_cuda(mod);
     dmt::bind_cfdmt_cuda(mod);
+    dmt::bind_ddmt_cuda(mod);
 }
+

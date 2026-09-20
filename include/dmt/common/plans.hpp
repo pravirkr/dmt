@@ -77,7 +77,12 @@ struct DDMTPlanContainer {
     std::vector<float> dm_arr;
     // ndm x nchans
     std::vector<SizeType> delay_table;
+    // nchans; fractional delay per channel in bins / (pc cm^-3)
+    std::vector<float> fractional_delay_table;
+    // nchans; 1 = channel contributes to the sum, 0 = masked out (e.g. RFI)
+    std::vector<uint8_t> kill_mask;
     SizeType nchans;
+    SizeType nbits = 32;
 };
 
 /**
@@ -379,6 +384,16 @@ private:
 };
 
 /**
+ * @brief Parameters for generating an optimal DM trial grid using Lina Levin's algorithm.
+ */
+struct LevinConfig {
+    float dm_start;
+    float dm_end;
+    float pulse_width;
+    float tol;
+};
+
+/**
  * @brief Direct Dispersion Measure Transform (DDMT) plan class.
  * @details
  * This class holds all data and logic for a DDMT plan.
@@ -393,14 +408,28 @@ public:
              float dm_max,
              float dm_step,
              float dm_min = 0.0F,
-             bool verbose = false);
+             bool verbose = false,
+             SizeType nbits = 32,
+             std::span<const uint8_t> kill_mask = {});
 
     DDMTPlan(float f_min,
              float f_max,
              SizeType nchans,
              float tsamp,
              std::span<const float> dm_arr,
-             bool verbose = false);
+             bool verbose = false,
+             SizeType nbits = 32,
+             std::span<const uint8_t> kill_mask = {});
+
+    /// @brief Construct a DDMTPlan with an optimal Lina Levin DM grid.
+    DDMTPlan(float f_min,
+             float f_max,
+             SizeType nchans,
+             float tsamp,
+             const LevinConfig& levin,
+             bool verbose = false,
+             SizeType nbits = 32,
+             std::span<const uint8_t> kill_mask = {});
 
     // --- Rule of five: PIMPL ---
     ~DDMTPlan();
@@ -424,6 +453,46 @@ public:
     const DDMTPlanContainer& get_container() const noexcept;
     /// @brief DM grid (pc/cm^3)
     [[nodiscard]] std::vector<float> get_dm_grid() const noexcept;
+    /// @brief Per-channel fractional delay array (size == nchans) in bins / (pc cm^-3)
+    [[nodiscard]] std::vector<float> get_fractional_delay_table() const noexcept;
+    /// @brief Input bits per sample (32 => float; 1/2/4/8/16 => packed integer)
+    SizeType get_nbits() const noexcept;
+    /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans
+    [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept;
+    /// @brief Replace the channel kill mask. Does not affect the delay
+    /// table, so this does not require recomputing it.
+    /// @throws std::invalid_argument if kill_mask.size() != nchans
+    void set_kill_mask(std::span<const uint8_t> kill_mask);
+    /// @brief Theoretical noise variance for a DM trial. Every DM trial
+    /// sums exactly the same number of active (unmasked) channels, so this
+    /// is a single value shared by every trial (unlike FDMT, whose variance
+    /// depends on boxcar width and tree level); it is still exposed as a
+    /// getter for API-shape consistency with FDMTPlan.
+    [[nodiscard]] float get_effective_variance() const noexcept;
+    /// @brief Theoretical noise standard deviation for a DM trial.
+    [[nodiscard]] float get_effective_sigma() const noexcept;
+    /// @brief Theoretical noise variance grid, one value per DM trial (all
+    /// equal; see get_effective_variance()).
+    [[nodiscard]] std::vector<float> get_effective_variance_grid() const noexcept;
+    /// @brief Theoretical noise standard deviation grid, one value per DM
+    /// trial (all equal; see get_effective_variance()).
+    [[nodiscard]] std::vector<float> get_effective_sigma_grid() const noexcept;
+
+    /// @brief Generate an optimal DM trial grid using Lina Levin's
+    /// pulse-broadening tolerance rule. The grid normally ends at a value
+    /// >= dm_end; if the step size collapses before reaching it (an
+    /// extreme tolerance/pulse_width/tsamp combination), it stops short
+    /// and logs a warning -- see utils::generate_levin_dm_grid's doc
+    /// comment for details.
+    [[nodiscard]] static std::vector<float>
+    generate_levin_dm_grid(float dm_start,
+                           float dm_end,
+                           float tsamp,
+                           float pulse_width,
+                           float f_min,
+                           float f_max,
+                           SizeType nchans,
+                           float tol);
 
 private:
     class Impl;

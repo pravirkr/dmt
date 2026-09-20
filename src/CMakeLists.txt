@@ -10,7 +10,7 @@ find_package(pybind11 CONFIG REQUIRED)
 set(DMT_PYMODULE_NAME lib${DMT_LIBRARY_NAME})
 pybind11_add_module(
   ${DMT_PYMODULE_NAME} dmt_python.cpp bindings/bind_plans.cpp bindings/bind_fdmt.cpp
-  bindings/bind_cfdmt.cpp
+  bindings/bind_cfdmt.cpp bindings/bind_ddmt.cpp
 )
 target_compile_features(${DMT_PYMODULE_NAME} PRIVATE cxx_std_20)
 target_include_directories(
@@ -27,7 +27,7 @@ if(CMAKE_CUDA_COMPILER)
   set(DMT_PYGPUMODULE_NAME libcuda${DMT_LIBRARY_NAME})
   pybind11_add_module(
     ${DMT_PYGPUMODULE_NAME} dmt_python_cuda.cpp bindings/bind_fdmt_cuda.cpp
-    bindings/bind_cfdmt_cuda.cpp
+    bindings/bind_cfdmt_cuda.cpp bindings/bind_ddmt_cuda.cpp
   )
   target_compile_features(${DMT_PYGPUMODULE_NAME} PRIVATE cxx_std_20)
   target_include_directories(

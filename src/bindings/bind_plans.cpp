@@ -21,6 +21,7 @@ using plans::FDMTCoordGrid;
 using plans::FDMTPlan;
 using plans::FDMTPlanContainer;
 using plans::FDMTShape;
+using plans::LevinConfig;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
@@ -343,12 +344,34 @@ void bind_plans(py::module_& mod) {
              })
         .def("print_summary", &CohFDMTPlan::print_summary);
 
+    py::class_<LevinConfig>(mod, "LevinConfig",
+                            R"doc(
+        Configuration parameters for generating an optimal Lina Levin DM trial grid.
+
+        Parameters
+        ----------
+        dm_start : float
+            Minimum DM trial (pc cm^-3).
+        dm_end : float
+            Maximum DM trial (pc cm^-3).
+        pulse_width : float
+            Intrinsic pulse width in seconds.
+        tol : float
+            Pulse-broadening tolerance factor (> 1.0, typically 1.10 - 1.25).
+        )doc")
+        .def(py::init<float, float, float, float>(),
+             "dm_start"_a, "dm_end"_a, "pulse_width"_a, "tol"_a = 1.25F)
+        .def_readwrite("dm_start", &LevinConfig::dm_start)
+        .def_readwrite("dm_end", &LevinConfig::dm_end)
+        .def_readwrite("pulse_width", &LevinConfig::pulse_width)
+        .def_readwrite("tol", &LevinConfig::tol);
+
     py::class_<DDMTPlan>(mod, "DDMTPlan",
                          R"doc(
         Plan for brute-force incoherent dedispersion (DDMT).
 
         Stores the DM trial list and the per-channel delay table used by
-        :class:`DDMTCPU`.
+        :class:`DDMTCPU` and :class:`DDMTCUDA`.
 
         Parameters
         ----------
@@ -359,27 +382,70 @@ void bind_plans(py::module_& mod) {
         tsamp : float
             Sampling interval in seconds.
         dm_max, dm_step : float
-            Regular DM grid (pc cm^-3). Ignored when ``dm_arr`` is given.
+            Regular DM grid (pc cm^-3). Ignored when ``dm_arr`` or ``levin`` is given.
         dm_min : float, optional
             Lowest DM trial (default 0).
         dm_arr : numpy.ndarray, optional
-            Explicit DM trial list. Uses the second constructor.
+            Explicit DM trial list.
+        levin : LevinConfig, optional
+            Lina Levin optimal grid configuration.
         )doc")
-        .def(py::init<float, float, SizeType, float, float, float, float>(),
+        .def(py::init<float, float, SizeType, float, float, float, float, bool, SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F)
+             "dm_step"_a, "dm_min"_a = 0.0F, "verbose"_a = false, "nbits"_a = 32)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr) {
+                         const py::array_t<float>& dm_arr, bool verbose, SizeType nbits) {
                  return DDMTPlan(
                      f_min, f_max, nchans, tsamp,
                      std::vector<float>(dm_arr.data(),
-                                        dm_arr.data() + dm_arr.size()));
+                                        dm_arr.data() + dm_arr.size()),
+                     verbose, nbits);
              }),
-             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a)
+             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
+             "verbose"_a = false, "nbits"_a = 32)
+        .def(py::init<float, float, SizeType, float, const LevinConfig&, bool, SizeType>(),
+             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
+             "verbose"_a = false, "nbits"_a = 32)
+        .def_static("generate_levin_dm_grid",
+                    [](float dm_start, float dm_end, float tsamp, float pulse_width,
+                       float f_min, float f_max, SizeType nchans, float tol) {
+                        return as_pyarray(DDMTPlan::generate_levin_dm_grid(
+                            dm_start, dm_end, tsamp, pulse_width, f_min, f_max, nchans, tol));
+                    },
+                    "dm_start"_a, "dm_end"_a, "tsamp"_a, "pulse_width"_a,
+                    "f_min"_a, "f_max"_a, "nchans"_a, "tol"_a = 1.25F)
         .def_property_readonly("f_min", &DDMTPlan::get_f_min)
         .def_property_readonly("f_max", &DDMTPlan::get_f_max)
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
-        .def_property_readonly("tsamp", &DDMTPlan::get_tsamp);
+        .def_property_readonly("tsamp", &DDMTPlan::get_tsamp)
+        .def_property_readonly("nbits", &DDMTPlan::get_nbits)
+        .def_property_readonly("dm_arr", [](const DDMTPlan& plan) {
+            return as_pyarray(plan.get_dm_arr());
+        })
+        .def_property_readonly("dm_grid", [](const DDMTPlan& plan) {
+            return as_pyarray(plan.get_dm_grid());
+        })
+        .def_property_readonly("fractional_delay_table", [](const DDMTPlan& plan) {
+            return as_pyarray(plan.get_fractional_delay_table());
+        })
+        .def_property("kill_mask",
+                      [](const DDMTPlan& plan) { return as_pyarray(plan.get_kill_mask()); },
+                      [](DDMTPlan& plan, const py::array_t<uint8_t>& mask) {
+                          plan.set_kill_mask(std::span<const uint8_t>(mask.data(), mask.size()));
+                      })
+        .def_property_readonly("effective_variance", &DDMTPlan::get_effective_variance)
+        .def_property_readonly("effective_sigma", &DDMTPlan::get_effective_sigma)
+        .def_property_readonly("effective_variance_grid",
+                               [](const DDMTPlan& plan) {
+                                   return as_pyarray(
+                                       plan.get_effective_variance_grid());
+                               })
+        .def_property_readonly("effective_sigma_grid",
+                               [](const DDMTPlan& plan) {
+                                   return as_pyarray(
+                                       plan.get_effective_sigma_grid());
+                               });
 }
+
 
 } // namespace dmt
