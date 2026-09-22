@@ -84,9 +84,11 @@ std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
                                            float tsamp);
 
 /**
- * @brief Generate a fractional delay table (one float per channel) in bins/(pc cm^-3).
+ * @brief Generate a fractional delay table (one float per channel) in bins/(pc
+ * cm^-3).
  *
- * For channel ichan, delay = std::nearbyint(dm * fractional_delay_table[ichan]).
+ * For channel ichan, delay = std::nearbyint(dm *
+ * fractional_delay_table[ichan]).
  *
  * @param nchans Number of channels.
  * @param fch1 First channel frequency (MHz).
@@ -95,12 +97,19 @@ std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
  * @return Per-channel fractional delay array (size == nchans).
  */
 std::vector<float> generate_fractional_delay_table(SizeType nchans,
-                                                  float fch1,
-                                                  float foff,
-                                                  float tsamp);
+                                                   float fch1,
+                                                   float foff,
+                                                   float tsamp);
 
 /**
- * @brief Generate an optimal DM trial grid using Lina Levin's pulse-broadening tolerance rule.
+ * @brief Generate an optimal DM trial grid using Lina Levin's pulse-broadening
+ * tolerance rule (Levin 2012).
+ *
+ * Note: This function generates continuous physical DM trials (pc cm^-3)
+ * parameterised by pulse-broadening tolerance (tol > 1.0) and evaluated at band
+ * center. For FDMT discrete integer delay trials (dt_arr) bounded by fractional
+ * S/N loss (max_snr_loss < 1.0) evaluated at band edge f_min, see the Python
+ * module `dmtlib.grid` (`generate_optimal_dt_grid`).
  *
  * @param dm_start Starting DM (pc cm^-3).
  * @param dm_end Ending DM (pc cm^-3).

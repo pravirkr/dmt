@@ -44,6 +44,16 @@ std::string FDMTComplexity::to_string() const {
         "fdmt_additions)",
         n_dt, n_chans, brute_force_ops, total_tree_nodes, sum_additions,
         copy_nodes, ops_ratio);
+    if (!ops_by_iter.empty()) {
+        result += "\n  Operations by iteration (0..M): [";
+        for (size_t i = 0; i < ops_by_iter.size(); ++i) {
+            result += std::to_string(ops_by_iter[i]);
+            if (i + 1 < ops_by_iter.size()) {
+                result += ", ";
+            }
+        }
+        result += ']';
+    }
     if (ops_ratio > 0.0F && ops_ratio < 2.0F) {
         result += "\n  Note: Speedup factor is < 2.0x (coarse dt spacing "
                   "approaches brute-force complexity)";
@@ -222,35 +232,90 @@ public:
     const FDMTPlanContainer& get_container() const noexcept {
         return m_container;
     }
-    FDMTComplexity get_complexity() const noexcept {
+    FDMTComplexity get_complexity(bool use_box_smearing = true) const noexcept {
         const auto n_dt            = get_dt_grid_final().size();
         const auto n_chans         = m_nchans;
         const auto brute_force_ops = n_dt * n_chans;
         SizeType total_tree_nodes  = 0;
         SizeType sum_additions     = 0;
         SizeType copy_nodes        = 0;
-        for (SizeType l = 1; l <= m_niters; ++l) {
-            total_tree_nodes += m_container.coordinates[l].size();
-            sum_additions += m_container.coordinates_sum[l].size();
-            copy_nodes += m_container.coordinates_copy[l].size();
+
+        std::vector<SizeType> ops_by_iter(m_niters + 1, 0);
+        std::vector<SizeType> nodes_by_iter(m_niters + 1, 0);
+
+        // Level 0: Active coordinates and boxcar additions.
+        nodes_by_iter[0] = m_container.coordinates[0].size();
+        if (use_box_smearing) {
+            SizeType lvl0_ops = 0;
+            for (SizeType c = 0; c < m_nchans; ++c) {
+                const auto& dt_grid = m_container.grids[0][c].dt_grid;
+                if (!dt_grid.empty()) {
+                    lvl0_ops += (dt_grid.size() - 1) +
+                                ((dt_grid.front() != 0) ? SizeType{2} : SizeType{0});
+                }
+            }
+            ops_by_iter[0] = lvl0_ops;
         }
+
+        for (SizeType l = 1; l <= m_niters; ++l) {
+            const auto n_coords = m_container.coordinates[l].size();
+            const auto n_sum    = m_container.coordinates_sum[l].size();
+            const auto n_copy   = m_container.coordinates_copy[l].size();
+            total_tree_nodes   += n_coords;
+            sum_additions      += n_sum;
+            copy_nodes         += n_copy;
+            nodes_by_iter[l]    = n_coords;
+            ops_by_iter[l]      = n_sum;
+        }
+
         const float ops_ratio = sum_additions > 0
                                     ? static_cast<float>(brute_force_ops) /
                                           static_cast<float>(sum_additions)
                                     : 0.0F;
+
         return FDMTComplexity{
-            .n_dt             = n_dt,
-            .n_chans          = n_chans,
-            .brute_force_ops  = brute_force_ops,
-            .total_tree_nodes = total_tree_nodes,
-            .sum_additions    = sum_additions,
-            .copy_nodes       = copy_nodes,
-            .ops_ratio        = ops_ratio,
+            .n_dt                    = n_dt,
+            .n_chans                 = n_chans,
+            .brute_force_ops         = brute_force_ops,
+            .total_tree_nodes        = total_tree_nodes,
+            .sum_additions           = sum_additions,
+            .copy_nodes              = copy_nodes,
+            .ops_ratio               = ops_ratio,
+            .ops_by_iter             = std::move(ops_by_iter),
+            .nodes_by_iter           = std::move(nodes_by_iter),
         };
     }
     void print_complexity_summary() const {
         const auto comp = get_complexity();
         spdlog::info("{}", comp.to_string());
+    }
+    std::vector<SizeType>
+    get_operations_by_iteration(bool use_box_smearing = true) const {
+        return get_complexity(use_box_smearing).ops_by_iter;
+    }
+    std::vector<SizeType> get_nodes_by_iteration() const {
+        return get_complexity().nodes_by_iter;
+    }
+    const std::vector<FDMTShape>& get_state_shapes() const noexcept {
+        return m_container.state_shape;
+    }
+    SizeType get_total_operations(bool use_box_smearing = true) const noexcept {
+        const auto ops = get_operations_by_iteration(use_box_smearing);
+        SizeType total = 0;
+        for (auto v : ops) {
+            total += v;
+        }
+        return total;
+    }
+    SizeType get_total_flops(bool use_box_smearing = true) const noexcept {
+        return get_total_operations(use_box_smearing) * m_nsamps;
+    }
+    float get_theoretical_gflops(bool use_box_smearing = true) const noexcept {
+        if (m_tsamp <= 0.0F) {
+            return 0.0F;
+        }
+        return static_cast<float>(get_total_operations(use_box_smearing)) /
+               (m_tsamp * 1e9F);
     }
     std::vector<IndexType> get_dt_grid_final() const noexcept {
         return m_container.grids[m_niters][0].dt_grid;
@@ -1790,11 +1855,31 @@ SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
 const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
     return m_impl->get_container();
 }
-FDMTComplexity FDMTPlan::get_complexity() const noexcept {
-    return m_impl->get_complexity();
+FDMTComplexity
+FDMTPlan::get_complexity(bool use_box_smearing) const noexcept {
+    return m_impl->get_complexity(use_box_smearing);
 }
 void FDMTPlan::print_complexity_summary() const {
     m_impl->print_complexity_summary();
+}
+std::vector<SizeType>
+FDMTPlan::get_operations_by_iteration(bool use_box_smearing) const {
+    return m_impl->get_operations_by_iteration(use_box_smearing);
+}
+std::vector<SizeType> FDMTPlan::get_nodes_by_iteration() const {
+    return m_impl->get_nodes_by_iteration();
+}
+const std::vector<FDMTShape>& FDMTPlan::get_state_shapes() const noexcept {
+    return m_impl->get_state_shapes();
+}
+SizeType FDMTPlan::get_total_operations(bool use_box_smearing) const noexcept {
+    return m_impl->get_total_operations(use_box_smearing);
+}
+SizeType FDMTPlan::get_total_flops(bool use_box_smearing) const noexcept {
+    return m_impl->get_total_flops(use_box_smearing);
+}
+float FDMTPlan::get_theoretical_gflops(bool use_box_smearing) const noexcept {
+    return m_impl->get_theoretical_gflops(use_box_smearing);
 }
 std::vector<IndexType> FDMTPlan::get_dt_grid_final() const noexcept {
     return m_impl->get_dt_grid_final();

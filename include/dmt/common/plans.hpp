@@ -92,14 +92,13 @@ struct DDMTPlanContainer {
 struct FDMTComplexity {
     SizeType n_dt;             ///< Number of DM delay trials
     SizeType n_chans;          ///< Number of frequency channels
-    SizeType brute_force_ops;  ///< Brute force operations per time sample (n_dt
-                               ///< * n_chans)
+    SizeType brute_force_ops;  ///< Ops per time sample (n_dt * n_chans)
     SizeType total_tree_nodes; ///< Total active coordinates across levels 1..M
-    SizeType sum_additions; ///< Total offset additions per time sample across
-                            ///< levels 1..M
+    SizeType sum_additions; ///< Total additions per sample across levels 1..M
     SizeType copy_nodes;    ///< Total copy/forwarding nodes across levels 1..M
-    float ops_ratio;        ///< Theoretical speedup factor (brute_force_ops /
-                            ///< sum_additions)
+    float ops_ratio;        ///< Theoretical speedup (excludes level-0)
+    std::vector<SizeType> ops_by_iter; ///< Additions per sample per level 0..M
+    std::vector<SizeType> nodes_by_iter; ///< Active coordinates per level 0..M
 
     std::string to_string() const;
 };
@@ -242,10 +241,38 @@ public:
     [[nodiscard]] std::vector<ComplexType> get_fft_phasor_table() const;
 
     /// @brief Computes complexity comparison between FDMT and brute-force
-    /// dedispersion
-    [[nodiscard]] FDMTComplexity get_complexity() const noexcept;
+    /// dedispersion. Note: FDMTComplexity::sum_additions/ops_ratio are a
+    /// legacy metric covering levels 1..M only; use get_total_operations()
+    /// for the fuller levels-0..M picture (see FDMTComplexity's doc comment).
+    [[nodiscard]] FDMTComplexity
+    get_complexity(bool use_box_smearing = true) const noexcept;
     /// @brief Prints a formatted comparison of FDMT vs brute-force operations
     void print_complexity_summary() const;
+
+    /// @brief Number of additions per time sample for each tree level (0..M)
+    [[nodiscard]] std::vector<SizeType>
+    get_operations_by_iteration(bool use_box_smearing = true) const;
+
+    /// @brief Number of active tree coordinates for each tree level (0..M)
+    [[nodiscard]] std::vector<SizeType> get_nodes_by_iteration() const;
+
+    /// @brief State shape for each tree level (0..M)
+    [[nodiscard]] const std::vector<FDMTShape>&
+    get_state_shapes() const noexcept;
+
+    /// @brief Total operations (additions) per time sample across all levels
+    /// (0..M)
+    [[nodiscard]] SizeType
+    get_total_operations(bool use_box_smearing = true) const noexcept;
+
+    /// @brief Total operations (additions) per block across all levels (0..M)
+    [[nodiscard]] SizeType
+    get_total_flops(bool use_box_smearing = true) const noexcept;
+
+    /// @brief Theoretical compute throughput (GFLOPs/sec) required for
+    /// real-time processing
+    [[nodiscard]] float
+    get_theoretical_gflops(bool use_box_smearing = true) const noexcept;
 
     /// @brief Print a summary of the FDMT plan
     void print_summary(std::string_view prefix = "") const;
@@ -384,7 +411,8 @@ private:
 };
 
 /**
- * @brief Parameters for generating an optimal DM trial grid using Lina Levin's algorithm.
+ * @brief Parameters for generating an optimal DM trial grid using Lina Levin's
+ * algorithm.
  */
 struct LevinConfig {
     float dm_start;
@@ -407,9 +435,9 @@ public:
              float tsamp,
              float dm_max,
              float dm_step,
-             float dm_min = 0.0F,
-             bool verbose = false,
-             SizeType nbits = 32,
+             float dm_min                       = 0.0F,
+             bool verbose                       = false,
+             SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
     DDMTPlan(float f_min,
@@ -417,8 +445,8 @@ public:
              SizeType nchans,
              float tsamp,
              std::span<const float> dm_arr,
-             bool verbose = false,
-             SizeType nbits = 32,
+             bool verbose                       = false,
+             SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
     /// @brief Construct a DDMTPlan with an optimal Lina Levin DM grid.
@@ -427,8 +455,8 @@ public:
              SizeType nchans,
              float tsamp,
              const LevinConfig& levin,
-             bool verbose = false,
-             SizeType nbits = 32,
+             bool verbose                       = false,
+             SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
     // --- Rule of five: PIMPL ---
@@ -453,8 +481,10 @@ public:
     const DDMTPlanContainer& get_container() const noexcept;
     /// @brief DM grid (pc/cm^3)
     [[nodiscard]] std::vector<float> get_dm_grid() const noexcept;
-    /// @brief Per-channel fractional delay array (size == nchans) in bins / (pc cm^-3)
-    [[nodiscard]] std::vector<float> get_fractional_delay_table() const noexcept;
+    /// @brief Per-channel fractional delay array (size == nchans) in bins / (pc
+    /// cm^-3)
+    [[nodiscard]] std::vector<float>
+    get_fractional_delay_table() const noexcept;
     /// @brief Input bits per sample (32 => float; 1/2/4/8/16 => packed integer)
     SizeType get_nbits() const noexcept;
     /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans
@@ -473,7 +503,8 @@ public:
     [[nodiscard]] float get_effective_sigma() const noexcept;
     /// @brief Theoretical noise variance grid, one value per DM trial (all
     /// equal; see get_effective_variance()).
-    [[nodiscard]] std::vector<float> get_effective_variance_grid() const noexcept;
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid() const noexcept;
     /// @brief Theoretical noise standard deviation grid, one value per DM
     /// trial (all equal; see get_effective_variance()).
     [[nodiscard]] std::vector<float> get_effective_sigma_grid() const noexcept;

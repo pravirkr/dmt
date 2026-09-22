@@ -6,6 +6,11 @@ try:
 except metadata.PackageNotFoundError:
     __version__ = "0.2.0"
 
+from .grid import (
+    calculate_snr_loss,
+    generate_optimal_dm_grid,
+    generate_optimal_dt_grid,
+)
 from .libdmt import (
     DDMTCPU,
     FDMTCPU,
@@ -13,6 +18,8 @@ from .libdmt import (
     CohFDMTCPU,
     CohFDMTPlan,
     DDMTPlan,
+    FDMTComplexity,
+    FDMTPlan,
     LevinConfig,
     compute_fdmt,
     compute_fdmt_fft,
@@ -35,8 +42,13 @@ __all__ = [
     "CohFDMTGPU",
     "CohFDMTPlan",
     "DDMTPlan",
+    "FDMTComplexity",
+    "FDMTPlan",
     "LevinConfig",
+    "calculate_snr_loss",
     "compute_fdmt",
     "compute_fdmt_fft",
+    "generate_optimal_dm_grid",
+    "generate_optimal_dt_grid",
 ]
 

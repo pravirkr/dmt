@@ -41,6 +41,8 @@ void bind_plans(py::module_& mod) {
         .def_readonly("sum_additions", &FDMTComplexity::sum_additions)
         .def_readonly("copy_nodes", &FDMTComplexity::copy_nodes)
         .def_readonly("ops_ratio", &FDMTComplexity::ops_ratio)
+        .def_readonly("operations_by_iteration", &FDMTComplexity::ops_by_iter)
+        .def_readonly("nodes_by_iteration", &FDMTComplexity::nodes_by_iter)
         .def("to_string", &FDMTComplexity::to_string)
         .def("__repr__", &FDMTComplexity::to_string);
     py::class_<FDMTCoordGrid>(mod, "FDMTSubDTGrid")
@@ -241,7 +243,43 @@ void bind_plans(py::module_& mod) {
                     boxcar_width, use_box_smearing));
             },
             py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
-        .def_property_readonly("complexity", &FDMTPlan::get_complexity)
+        .def("get_complexity", &FDMTPlan::get_complexity,
+             py::arg("use_box_smearing") = true)
+        .def_property_readonly(
+            "complexity",
+            [](const FDMTPlan& plan) { return plan.get_complexity(true); })
+        .def("get_operations_by_iteration",
+             &FDMTPlan::get_operations_by_iteration,
+             py::arg("use_box_smearing") = true)
+        .def_property_readonly("operations_by_iteration",
+                               [](const FDMTPlan& plan) {
+                                   return plan.get_operations_by_iteration(
+                                       true);
+                               })
+        .def_property_readonly("nodes_by_iteration",
+                               &FDMTPlan::get_nodes_by_iteration)
+        .def_property_readonly("state_shapes",
+                               [](const FDMTPlan& plan) {
+                                   return as_pyarray_ref(
+                                       plan.get_state_shapes());
+                               })
+        .def("get_total_operations", &FDMTPlan::get_total_operations,
+             py::arg("use_box_smearing") = true)
+        .def_property_readonly("total_operations",
+                               [](const FDMTPlan& plan) {
+                                   return plan.get_total_operations(true);
+                               })
+        .def("get_total_flops", &FDMTPlan::get_total_flops,
+             py::arg("use_box_smearing") = true)
+        .def_property_readonly(
+            "total_flops",
+            [](const FDMTPlan& plan) { return plan.get_total_flops(true); })
+        .def("get_theoretical_gflops", &FDMTPlan::get_theoretical_gflops,
+             py::arg("use_box_smearing") = true)
+        .def_property_readonly("theoretical_gflops",
+                               [](const FDMTPlan& plan) {
+                                   return plan.get_theoretical_gflops(true);
+                               })
         .def_property_readonly("dmt_ndms", &FDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &FDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &FDMTPlan::get_dmt_size)
@@ -359,8 +397,8 @@ void bind_plans(py::module_& mod) {
         tol : float
             Pulse-broadening tolerance factor (> 1.0, typically 1.10 - 1.25).
         )doc")
-        .def(py::init<float, float, float, float>(),
-             "dm_start"_a, "dm_end"_a, "pulse_width"_a, "tol"_a = 1.25F)
+        .def(py::init<float, float, float, float>(), "dm_start"_a, "dm_end"_a,
+             "pulse_width"_a, "tol"_a = 1.25F)
         .def_readwrite("dm_start", &LevinConfig::dm_start)
         .def_readwrite("dm_end", &LevinConfig::dm_end)
         .def_readwrite("pulse_width", &LevinConfig::pulse_width)
@@ -390,11 +428,14 @@ void bind_plans(py::module_& mod) {
         levin : LevinConfig, optional
             Lina Levin optimal grid configuration.
         )doc")
-        .def(py::init<float, float, SizeType, float, float, float, float, bool, SizeType>(),
+        .def(py::init<float, float, SizeType, float, float, float, float, bool,
+                      SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F, "verbose"_a = false, "nbits"_a = 32)
+             "dm_step"_a, "dm_min"_a = 0.0F, "verbose"_a = false,
+             "nbits"_a = 32)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr, bool verbose, SizeType nbits) {
+                         const py::array_t<float>& dm_arr, bool verbose,
+                         SizeType nbits) {
                  return DDMTPlan(
                      f_min, f_max, nchans, tsamp,
                      std::vector<float>(dm_arr.data(),
@@ -403,49 +444,58 @@ void bind_plans(py::module_& mod) {
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
              "verbose"_a = false, "nbits"_a = 32)
-        .def(py::init<float, float, SizeType, float, const LevinConfig&, bool, SizeType>(),
+        .def(py::init<float, float, SizeType, float, const LevinConfig&, bool,
+                      SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
              "verbose"_a = false, "nbits"_a = 32)
-        .def_static("generate_levin_dm_grid",
-                    [](float dm_start, float dm_end, float tsamp, float pulse_width,
-                       float f_min, float f_max, SizeType nchans, float tol) {
-                        return as_pyarray(DDMTPlan::generate_levin_dm_grid(
-                            dm_start, dm_end, tsamp, pulse_width, f_min, f_max, nchans, tol));
-                    },
-                    "dm_start"_a, "dm_end"_a, "tsamp"_a, "pulse_width"_a,
-                    "f_min"_a, "f_max"_a, "nchans"_a, "tol"_a = 1.25F)
+        .def_static(
+            "generate_levin_dm_grid",
+            [](float dm_start, float dm_end, float tsamp, float pulse_width,
+               float f_min, float f_max, SizeType nchans, float tol) {
+                return as_pyarray(DDMTPlan::generate_levin_dm_grid(
+                    dm_start, dm_end, tsamp, pulse_width, f_min, f_max, nchans,
+                    tol));
+            },
+            "dm_start"_a, "dm_end"_a, "tsamp"_a, "pulse_width"_a, "f_min"_a,
+            "f_max"_a, "nchans"_a, "tol"_a = 1.25F)
         .def_property_readonly("f_min", &DDMTPlan::get_f_min)
         .def_property_readonly("f_max", &DDMTPlan::get_f_max)
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp)
         .def_property_readonly("nbits", &DDMTPlan::get_nbits)
-        .def_property_readonly("dm_arr", [](const DDMTPlan& plan) {
-            return as_pyarray(plan.get_dm_arr());
-        })
-        .def_property_readonly("dm_grid", [](const DDMTPlan& plan) {
-            return as_pyarray(plan.get_dm_grid());
-        })
-        .def_property_readonly("fractional_delay_table", [](const DDMTPlan& plan) {
-            return as_pyarray(plan.get_fractional_delay_table());
-        })
-        .def_property("kill_mask",
-                      [](const DDMTPlan& plan) { return as_pyarray(plan.get_kill_mask()); },
-                      [](DDMTPlan& plan, const py::array_t<uint8_t>& mask) {
-                          plan.set_kill_mask(std::span<const uint8_t>(mask.data(), mask.size()));
-                      })
-        .def_property_readonly("effective_variance", &DDMTPlan::get_effective_variance)
-        .def_property_readonly("effective_sigma", &DDMTPlan::get_effective_sigma)
+        .def_property_readonly(
+            "dm_arr",
+            [](const DDMTPlan& plan) { return as_pyarray(plan.get_dm_arr()); })
+        .def_property_readonly(
+            "dm_grid",
+            [](const DDMTPlan& plan) { return as_pyarray(plan.get_dm_grid()); })
+        .def_property_readonly("fractional_delay_table",
+                               [](const DDMTPlan& plan) {
+                                   return as_pyarray(
+                                       plan.get_fractional_delay_table());
+                               })
+        .def_property(
+            "kill_mask",
+            [](const DDMTPlan& plan) {
+                return as_pyarray(plan.get_kill_mask());
+            },
+            [](DDMTPlan& plan, const py::array_t<uint8_t>& mask) {
+                plan.set_kill_mask(
+                    std::span<const uint8_t>(mask.data(), mask.size()));
+            })
+        .def_property_readonly("effective_variance",
+                               &DDMTPlan::get_effective_variance)
+        .def_property_readonly("effective_sigma",
+                               &DDMTPlan::get_effective_sigma)
         .def_property_readonly("effective_variance_grid",
                                [](const DDMTPlan& plan) {
                                    return as_pyarray(
                                        plan.get_effective_variance_grid());
                                })
-        .def_property_readonly("effective_sigma_grid",
-                               [](const DDMTPlan& plan) {
-                                   return as_pyarray(
-                                       plan.get_effective_sigma_grid());
-                               });
+        .def_property_readonly(
+            "effective_sigma_grid", [](const DDMTPlan& plan) {
+                return as_pyarray(plan.get_effective_sigma_grid());
+            });
 }
-
 
 } // namespace dmt
