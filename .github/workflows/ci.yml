@@ -1,92 +1,384 @@
 name: GitHub CI
 
+# Two tiers:
+#   • PR (every commit): correctness gates — must pass before merge.
+#   • main push (after merge): coverage + clang-tidy — reporting & static analysis.
+#   • workflow_dispatch: full suite (both tiers).
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Portable CI builds; cache CPM downloads across jobs.
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
 
 jobs:
-  cpp-ubuntu:
-    name: "C++ (${{ matrix.os }}, ${{ matrix.compiler.cpp }})"
-    runs-on: ${{ matrix.os }}
+  # =============================================================================
+  # Tier 1 — run on every pull_request commit (and workflow_dispatch)
+  # =============================================================================
+
+  # C++ correctness (Release). CMake builds library + bindings; ctest only.
+  cpp-tests:
+    name: "C++ tests (${{ matrix.compiler.cc }})"
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04]
-        build_type: [Debug]
-        compiler: [{cpp: g++-12, code-cov: true, gcov: gcov-12}, {cpp: clang++-15}]
+        compiler:
+          - { cc: gcc-13, cpp: g++-13 }
+          - { cc: clang-18, cpp: clang++-18 }
     steps:
-    - uses: actions/checkout@v4
-    - name: Set reusable strings
-      id: strings
-      shell: bash
-      run: |
-        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-    - name: Configure CMake
-      shell: bash
-      id: configure
-      run: >
-        cmake -B ${{ steps.strings.outputs.build-output-dir }}
-        -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cpp }}
-        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-        -DBUILD_DOCS=OFF -DBUILD_PYTHON=OFF -DBUILD_TESTING=ON
-        -DCODE_COVERAGE=${{ matrix.compiler.code-cov }}
+      - uses: actions/checkout@v7
 
-    - name: Build
-      run: >
-        cmake --build ${{ steps.strings.outputs.build-output-dir }} 
-        --config ${{ matrix.build_type }} -j 4
+      - name: Install system packages
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache \
+            gcc-13 g++-13 clang-18 \
+            python3-dev libfftw3-dev libomp-dev catch2 git
 
-    - name: Run unit tests
-      run: >
-        ctest --build-config ${{ matrix.build_type }} --output-on-failure
-        --test-dir ${{ steps.strings.outputs.build-output-dir }}/tests/cpp
-    
-    - name: Prepare coverage report
-      if: ${{ matrix.build_type == 'Debug' && matrix.compiler.code-cov }}
-      run: |
-        pip install gcovr>=7.1
-        gcovr -r . --cobertura -o coverage.xml --gcov-executable=${{ matrix.compiler.gcov }}
-    
-    - name: Upload coverage reports to Codecov
-      if: ${{ matrix.build_type == 'Debug' && matrix.compiler.code-cov }}
-      uses: codecov/codecov-action@v4
-      with:
-        file: coverage.xml
-        name: codecov-umbrella
-        fail_ci_if_error: true
-      env:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -U pip "pybind11>=3.0"
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cpp-tests-${{ matrix.compiler.cc }}
+          max-size: 500M
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ matrix.compiler.cc }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-${{ matrix.compiler.cc }}-
+
+      - name: Configure CMake
+        env:
+          CC: ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cpp }}
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_BUILD_TYPE=Release
+          -DDMT_BUILD_DOCS=OFF
+          -DDMT_BUILD_PYTHON=ON
+          -DDMT_BUILD_TESTING=ON
+          -DDMT_ENABLE_COVERAGE=OFF
+          -DDMT_CUDA=OFF
+          -DDMT_ENABLE_NATIVE_ARCH=OFF
+          -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Run C++ unit tests
+        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+
+  # Python: uv install + pytest (supported user path).
+  python-tests:
+    name: "Python (${{ matrix.os }})"
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ubuntu packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache \
+            libfftw3-dev libomp-dev git
+
+      - name: Install macOS packages
+        if: runner.os == 'macOS'
+        run: |
+          brew install fftw libomp ccache cmake ninja
+          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix fftw);$(brew --prefix libomp)" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: python-${{ matrix.os }}
+          max-size: 500M
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Install package and test dependencies
+        run: uv sync --extra tests --reinstall-package dmtlib
+        env:
+          CMAKE_ARGS: >-
+            -DDMT_CUDA=OFF
+            -DDMT_BUILD_TESTING=OFF
+            -DDMT_ENABLE_NATIVE_ARCH=OFF
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Test with pytest
+        run: uv run pytest tests/python
+
+  # ASan + UBSan (C++ tests only; no Python bindings).
+  sanitizers:
+    name: Sanitizers (ASan+UBSan, gcc-13, Debug)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            gcc-13 g++-13 \
+            libfftw3-dev libomp-dev catch2 git
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-sanitizers-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-sanitizers-
+
+      - name: Configure CMake
+        env:
+          CC: gcc-13
+          CXX: g++-13
+          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DDMT_BUILD_DOCS=OFF
+          -DDMT_BUILD_PYTHON=OFF
+          -DDMT_BUILD_TESTING=ON
+          -DDMT_CUDA=OFF
+          -DDMT_ENABLE_NATIVE_ARCH=OFF
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Run tests under ASan/UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+
+  # =============================================================================
+  # Tier 2 — run on push to main (post-merge) and workflow_dispatch
+  # =============================================================================
+
+  # clang-tidy: compile_commands.json (DMT_CUDA=OFF) defines the TU set.
+  clang-tidy:
+    name: clang-tidy
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            cmake ninja-build clang-tidy-18 clang-tools-18 gcc-13 g++-13 \
+            python3-dev libfftw3-dev libomp-dev catch2 git
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -U pip "pybind11>=3.0"
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-clang-tidy-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-clang-tidy-
+
+      - name: Configure (compile_commands.json)
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DDMT_BUILD_DOCS=OFF
+          -DDMT_BUILD_PYTHON=ON
+          -DDMT_BUILD_TESTING=ON
+          -DDMT_CUDA=OFF
+          -DDMT_ENABLE_NATIVE_ARCH=OFF
+          -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
+
+      - name: Run clang-tidy
+        run: run-clang-tidy-18 -p build
+
+  # C++ coverage (gcc-13, Debug). gcov upload to Codecov on main only.
+  cpp-coverage:
+    name: C++ coverage (gcc-13, Debug)
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache \
+            gcc-13 g++-13 gcovr \
+            libfftw3-dev libomp-dev catch2 git
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cpp-coverage-gcc-13
+          max-size: 500M
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-gcc-13-debug-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-gcc-13-debug-
+
+      - name: Configure CMake
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_BUILD_TYPE=Debug
+          -DDMT_BUILD_DOCS=OFF
+          -DDMT_BUILD_PYTHON=OFF
+          -DDMT_BUILD_TESTING=ON
+          -DDMT_ENABLE_COVERAGE=ON
+          -DDMT_CUDA=OFF
+          -DDMT_ENABLE_NATIVE_ARCH=OFF
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Run C++ unit tests (instrumented)
+        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+
+      - name: Generate coverage report
+        run: |
+          gcovr -r . --filter 'lib/.*' --filter 'include/.*' --filter 'src/.*' \
+            --exclude 'tests/.*' --exclude 'build/_deps/.*' --exclude 'bench/.*' \
+            --gcov-executable gcov-13 \
+            --cobertura coverage.xml
+
+      - name: Upload C++ coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: cpp
+          name: cpp-gcov
+          fail_ci_if_error: true
+        env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  python:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.9', '3.10']
-
+  python-coverage:
+    name: Python coverage (ubuntu-24.04)
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install it
-      run: |
-        python -m pip install -U pip setuptools wheel
-        python -m pip install .[tests] -v
-    - name: Lint with Ruff
-      uses: chartboost/ruff-action@v1
-      with:
-        args: "check"
-      continue-on-error: true
-    - name: Check types with mypy
-      run: |
-        mypy --strict src/dmt
-      continue-on-error: true
-    - name: Test with pytest and Generate coverage report
-      run: |
-        pytest --cov=./ --cov-report=xml tests/python
-      continue-on-error: false
+      - uses: actions/checkout@v7
+
+      - name: Install Ubuntu packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache \
+            libfftw3-dev libomp-dev git
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: python-coverage-ubuntu
+          max-size: 500M
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-Linux-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-Linux-
+
+      - name: Install package and test dependencies
+        run: uv sync --extra tests --reinstall-package dmtlib
+        env:
+          CMAKE_ARGS: >-
+            -DDMT_CUDA=OFF
+            -DDMT_BUILD_TESTING=OFF
+            -DDMT_ENABLE_NATIVE_ARCH=OFF
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Test with pytest (coverage)
+        run: uv run pytest --cov=dmtlib --cov-report=xml tests/python
+
+      - name: Upload Python coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: python
+          name: python-coverage
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

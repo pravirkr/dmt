@@ -1,0 +1,44 @@
+# Doxyfile.in configured by CMake for dmt
+# Absolute paths so the generated file does not depend on the working directory.
+
+PROJECT_NAME           = "@PROJECT_NAME@"
+PROJECT_NUMBER         = "@PROJECT_VERSION@"
+PROJECT_BRIEF          = "@PROJECT_DESCRIPTION@"
+OUTPUT_DIRECTORY       = "@CMAKE_CURRENT_BINARY_DIR@/doxygen"
+CREATE_SUBDIRS         = NO
+OUTPUT_LANGUAGE        = English
+
+INPUT                  = "@PROJECT_SOURCE_DIR@/include/dmt"
+FILE_PATTERNS          = *.hpp *.h *.cuh
+EXTENSION_MAPPING      = h=C++ hpp=C++ cuh=C++
+RECURSIVE              = YES
+EXCLUDE_PATTERNS       = */detail/* */tests/* */bench/*
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+HIDE_UNDOC_MEMBERS     = NO
+BRIEF_MEMBER_DESC      = YES
+REPEAT_BRIEF           = YES
+STRIP_FROM_PATH        = "@PROJECT_SOURCE_DIR@/include"
+FULL_PATH_NAMES        = YES
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_AS_ERROR          = NO
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+XML_OUTPUT             = xml
+XML_PROGRAMLISTING     = YES
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = NO
+SEARCH_INCLUDES        = YES
+INCLUDE_PATH           = "@PROJECT_SOURCE_DIR@/include"
+SKIP_FUNCTION_MACROS   = YES
+PREDEFINED             = DMT_ENABLE_CUDA=1

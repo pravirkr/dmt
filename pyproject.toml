@@ -1,70 +1,91 @@
+# https://learn.scientific-python.org/development/guides/packaging-compiled/
 [build-system]
-requires = ["scikit-build-core", "pybind11"]
+requires = ["scikit-build-core", "pybind11>=3.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "dmtlib"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Dispersion Measure Transform Library"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: MacOS :: MacOS X",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
-    "License :: OSI Approved :: MIT License",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = [
-    "numpy",
-]
+dependencies = ["numpy"]
 
 [project.urls]
-Github = "https://github.com/pravirkr/dmt"
+Homepage = "https://github.com/pravirkr/dmt"
+Documentation = "https://dmt.readthedocs.io"
+Repository = "https://github.com/pravirkr/dmt"
 
 [project.optional-dependencies]
-tests = [
-    "pytest",
-    "pytest-cov",
-    "pytest-randomly",
-    "pytest-sugar",
-    "pytest-benchmark",
-    "mypy",
+tests = ["pytest", "pytest-cov", "pytest-randomly", "pytest-sugar"]
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-copybutton",
+    "numpydoc",
+    "myst-nb",
+    "breathe",
+    "sphinx-design",
+    "matplotlib",
 ]
-docs = ["sphinx", "sphinx-book-theme", "sphinx-click", "myst-nb", "breathe"]
-develop = ["ruff"]
+develop = ["ruff", "ty"]
 
 [tool.scikit-build]
 cmake.version = ">=3.18"
 cmake.build-type = "Release"
-install.strip = false
+install.strip = true            # Strip debug symbols
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/dmtlib"]
 
 [tool.scikit-build.cmake.define]
-BUILD_PYTHON = "ON"
-BUILD_TESTING = "OFF"
-BUILD_DOCS = "OFF"
+DMT_BUILD_PYTHON = "ON"
+DMT_BUILD_TESTING = "OFF"
+DMT_BUILD_DOCS = "OFF"
+DMT_BUILD_BENCHMARKS = "OFF"
+DMT_CUDA = "AUTO"
+DMT_USE_SYSTEM_DEPS = "OFF"
+DMT_ENABLE_NATIVE_ARCH = "ON"
+DMT_ENABLE_COVERAGE = "OFF"
+DMT_ENABLE_IPO = "OFF"
+BUILD_SHARED_LIBS = "OFF"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\([^)]*VERSION\s+(?P<value>[0-9][^\s)]+)'
 
 [tool.cibuildwheel]
-test-extras = "test"
+test-extras = "tests"
 test-command = "python -m pytest {project}/tests/python -v"
 test-skip = "pp* *-musllinux* *-manylinux_i686"
 
+[tool.cibuildwheel.linux]
+# Wheels must run on machines other than the builder — no -march=native, pinned CPM deps.
+environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_CUDA = "AUTO" }
+
+[tool.cibuildwheel.macos]
+environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_CUDA = "OFF" }
 
 [tool.ruff]
 include = ["pyproject.toml", "src/**/*.py"]
 line-length = 88
 indent-width = 4
-target-version = "py39"
+target-version = "py312"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -72,19 +93,38 @@ indent-style = "space"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D1", "ANN1", "PLR2004"]
+ignore = ["COM812", "D1", "D301", "PLR2004", "G004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "FBT", "PLR2004", "PT011", "SLF001"]
+"docs/**" = ["INP001", "ARG001", "ANN401", "CPY001", "T201", "S607"]
 
 [tool.ruff.lint.pylint]
-max-args = 10
+max-args = 15
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src"]
+exclude = ["tests/**"]
+
+[tool.ty.rules]
+index-out-of-bounds = "ignore"
+unresolved-import = "ignore"
+not-iterable = "ignore"        # For Numba prange
+
 [tool.pytest.ini_options]
-minversion = "8.0"
-testpaths = "tests/python"
+minversion = "9.0"
+addopts = ["-ra", "-q"]
+testpaths = ["tests/python"]
+markers = ["cuda: tests that require the CUDA Python extension and a GPU"]
 
 [tool.coverage.run]
+source = ["dmtlib"]
 omit = ["tests/*", "*__init__.py", "docs/*"]
 
 [tool.coverage.report]
@@ -93,12 +133,13 @@ ignore_errors = true
 #fail_under = 85
 exclude_lines = ['raise AssertionError', 'raise NotImplementedError']
 
-[tool.coverage.path]
-source = "src/dmt"
+[tool.coverage.paths]
+source = ["src/dmtlib", "*/site-packages/dmtlib", "*/dmtlib"]
 
 [tool.gcovr]
-filter = ["lib/*"]
+filter = ["lib/.*", "include/.*", "src/.*"]
+exclude = ["tests/.*", "build/_deps/.*", "bench/.*"]
 
-[tool.mypy]
-ignore_missing_imports = true
-plugins = ["numpy.typing.mypy_plugin"]
+[tool.numpydoc_validation]
+checks = ["all", "GL01", "GL08", "EX01", "SA01", "ES01", "SS02", "SA04"]
+exclude = ['\.undocumented_method$', '\.__repr__$']

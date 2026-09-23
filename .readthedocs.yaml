@@ -1,0 +1,31 @@
+# Read the Docs configuration file
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
+
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.12"
+  apt_packages:
+    - doxygen
+    - graphviz
+    - libfftw3-dev
+    - cmake
+    - ninja-build
+  jobs:
+    pre_build:
+      # Doxygen warnings (missing CUDA/spdlog headers) must not abort the
+      # Sphinx build. conf.py also runs Doxygen when this step is skipped.
+      - cd docs && doxygen Doxyfile || echo "doxygen failed; continuing without C++ XML"
+
+sphinx:
+  configuration: docs/conf.py
+  fail_on_warning: false
+
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs

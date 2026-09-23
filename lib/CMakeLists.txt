@@ -1,33 +1,95 @@
-# Find dependencies
-CPMFindPackage(
-  NAME spdlog
-  VERSION 1.13.0
-  GITHUB_REPOSITORY gabime/spdlog
-  OPTIONS "SPDLOG_INSTALL ON"
+# System dependencies
+message(STATUS "Searching for required system dependencies...")
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
+
+# fmt — keep version in sync with spdlog's expected fmt release.
+CPMAddPackage(
+  NAME fmt
+  VERSION 12.1.0
+  URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
+  OPTIONS "FMT_INSTALL ON" "FMT_HEADER_ONLY ON"
+  EXCLUDE_FROM_ALL YES
+  SYSTEM YES
 )
-find_package(OpenMP)
 
-file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+# spdlog — use the fmt package above (header-only external fmt).
+CPMAddPackage(
+  NAME spdlog
+  VERSION 1.17.0
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
+  OPTIONS "SPDLOG_INSTALL ON" "SPDLOG_FMT_EXTERNAL_HO ON" "SPDLOG_BUILD_SHARED OFF"
+  EXCLUDE_FROM_ALL YES
+  SYSTEM YES
+)
 
-# Check if CUDA was found
+# Collect source files
+file(GLOB DMT_LIBRARY_CXX_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+set(DMT_LIBRARY_ALL_SOURCES ${DMT_LIBRARY_CXX_SOURCES})
+
+# Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
-  file(GLOB LIBRARY_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
-  list(APPEND LIBRARY_SOURCES ${LIBRARY_SOURCES_CUDA})
+  file(GLOB DMT_LIBRARY_CUDA_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  list(APPEND DMT_LIBRARY_ALL_SOURCES ${DMT_LIBRARY_CUDA_SOURCES})
+
+  # Explicitly set CUDA files to be compiled with CUDA
+  set_source_files_properties(${DMT_LIBRARY_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
 endif()
 
-add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
+add_library(${DMT_LIBRARY_NAME} ${DMT_LIBRARY_ALL_SOURCES})
+add_library(${PROJECT_NAME}::${DMT_LIBRARY_NAME} ALIAS ${DMT_LIBRARY_NAME})
+
+target_compile_features(${DMT_LIBRARY_NAME} PUBLIC cxx_std_20)
+
+# Optional GPU API in C++ via DMT_ENABLE_CUDA (preprocessor macro, not a CMake option).
+if(CMAKE_CUDA_COMPILER)
+  target_compile_definitions(${DMT_LIBRARY_NAME} PUBLIC DMT_ENABLE_CUDA)
+endif()
+
+dmt_enable_coverage(${DMT_LIBRARY_NAME})
+if(DMT_ENABLE_COVERAGE)
+  message(STATUS "Code coverage enabled.")
+endif()
+
+# Set include directories
 target_include_directories(
-  ${LIBRARY_NAME} PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include/>
-                         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-)
-target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(
-  ${LIBRARY_NAME} PUBLIC $<BUILD_INTERFACE:coverage_config>
-                         $<BUILD_INTERFACE:spdlog::spdlog_header_only>
+  ${DMT_LIBRARY_NAME}
+  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/>
+         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Check if OpenMP was found
+# Add CUDA include directories when available
+if(CMAKE_CUDA_COMPILER)
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
+    target_include_directories(${DMT_LIBRARY_NAME} PUBLIC "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+  endif()
+  target_include_directories(${DMT_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+endif()
+
+# Header-only internal deps (not part of the installed export set).
+target_link_libraries(
+  ${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}> spdlog::spdlog_header_only
+)
+
+# FFTW: shared dmt links privately; static dmt exposes FFTW to downstream linkers.
+if(BUILD_SHARED_LIBS)
+  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE FFTW::Float FFTW::FloatOpenMP)
+else()
+  target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
+endif()
+
+# OpenMP is internal to libdmt
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(${LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_OPENMP)
+  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
+  target_compile_definitions(${DMT_LIBRARY_NAME} PRIVATE DMT_ENABLE_OPENMP)
+endif()
+
+# Add CUDA options and libraries when available
+if(CMAKE_CUDA_COMPILER)
+  target_link_libraries(
+    ${DMT_LIBRARY_NAME}
+    PRIVATE ${DMT_CUDA_OPTIONS} CUDA::cuda_driver
+    PUBLIC CUDA::cudart CUDA::cufft
+  )
 endif()

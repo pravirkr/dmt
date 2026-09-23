@@ -1,0 +1,4 @@
+# Substituted at configure time: ON when dmt was built with CUDA, otherwise OFF.
+if(@DMT_BUILT_WITH_CUDA@)
+  find_dependency(CUDAToolkit)
+endif()

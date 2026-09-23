@@ -1,0 +1,554 @@
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
+#include "dmt/common/plans.hpp"
+#include "dmt/common/types.hpp"
+
+namespace dmt {
+
+using plans::CohFDMTPlan;
+using plans::FDMTPlan;
+
+TEST_CASE("FDMTPlan basic", "[dmt_plans][cpu]") {
+    const float f_min     = 1000.0F;
+    const float f_max     = 1500.0F;
+    const SizeType nchans = 500;
+    const SizeType nsamps = 1024;
+    const float tsamp     = 0.001F;
+    const SizeType dt_max = 512;
+    const SizeType dt_min = 0;
+
+    FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+
+    SECTION("Constructor and getter methods") {
+        CHECK(plan.get_f_min() == f_min);
+        CHECK(plan.get_f_max() == f_max);
+        CHECK(plan.get_nchans() == nchans);
+        CHECK(plan.get_nsamps() == nsamps);
+        CHECK(plan.get_tsamp() == tsamp);
+        CHECK(plan.get_dt_max() == dt_max);
+        CHECK(plan.get_dt_min() == dt_min);
+    }
+
+    SECTION("Container properties") {
+        const auto& container = plan.get_container();
+        CHECK(container.df_top.size() == 10);
+        CHECK(container.df_bot.size() == 10);
+        CHECK(container.dt_grid_sub_top.size() == 10);
+        CHECK(container.state_shape.size() == 10);
+    }
+    SECTION("Grid and size calculations") {
+        const auto ndms_expected = (dt_max - dt_min + 1);
+        CHECK(plan.get_df() == 1.0F);
+        CHECK(plan.get_niters() == 9);
+        CHECK(plan.get_dt_grid_final().size() == ndms_expected);
+        CHECK(plan.get_dm_grid_final().size() == ndms_expected);
+        CHECK(plan.get_dmt_size() ==
+              static_cast<SizeType>(ndms_expected * nsamps));
+    }
+
+    SECTION("Smearing grid") {
+        const auto smearing_grid = plan.get_smearing_grid_final();
+        const auto ndms          = plan.get_dmt_ndms();
+        CHECK(smearing_grid.size() == ndms * nchans);
+        CHECK(std::ranges::all_of(smearing_grid,
+                                  [](float val) { return val >= 0.0F; }));
+    }
+
+    SECTION("Memory usage and buffer size") {
+        CHECK(plan.get_buffer_size() > 0);
+        CHECK(plan.get_container().get_memory_usage() > 0);
+        CHECK(plan.get_container().get_buffer_size() == plan.get_buffer_size());
+    }
+
+    SECTION("Internal calculations") {
+        const auto& container = plan.get_container();
+
+        CHECK(std::ranges::is_sorted(container.df_top));
+        CHECK(std::ranges::is_sorted(container.df_bot));
+        for (SizeType i = 0; i < container.df_top.size(); ++i) {
+            CHECK(container.df_top[i] <= container.df_bot[i]);
+        }
+
+        // Check the values of state_shape
+        for (SizeType i = 0; i < container.state_shape.size() - 1; ++i) {
+            CHECK(container.state_shape[i].nchans >
+                  container.state_shape[i + 1].nchans);
+            CHECK(container.state_shape[i].nsamps <=
+                  container.state_shape[i + 1].nsamps);
+            CHECK(container.state_shape[i].nelements > 0);
+            CHECK(container.state_shape[i].dt_max <=
+                  container.state_shape[i + 1].dt_max);
+        }
+
+        // Check dt_grid_final
+        const auto& dt_grid_final = plan.get_dt_grid_final();
+        CHECK(dt_grid_final.front() == plan.get_dt_min());
+        CHECK(dt_grid_final.back() == plan.get_dt_max());
+        CHECK(std::ranges::is_sorted(dt_grid_final));
+    }
+}
+
+TEST_CASE("FDMTPlan edge cases", "[dmt_plans][cpu]") {
+    SECTION("Valid construction") {
+        CHECK_NOTHROW(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, "full"));
+    }
+
+    SECTION("Invalid parameters") {
+        // f_min > f_max
+        CHECK_THROWS_AS(
+            FDMTPlan(1500.0F, 1000.0F, 500, 1024, 0.001F, 512, 0, 1, "full"),
+            std::invalid_argument);
+        // nchans < 2
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 0, 1024, 0.001F, 512, 0, 1, "full"),
+            std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 1, 1024, 0.001F, 512, 0, 1, "full"),
+            std::invalid_argument);
+        // nsamps == 0
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 0, 0.001F, 512, 0, 1, "full"),
+            std::invalid_argument);
+        // tsamp <= 0
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.0F, 512, 0, 1, "full"),
+            std::invalid_argument);
+        // dt_max == 0
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 0, 0, 1, "full"),
+            std::invalid_argument);
+        // dt_min >= dt_max
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 512, 1, "full"),
+            std::invalid_argument);
+        // dt_step == 0
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 0, "full"),
+            std::invalid_argument);
+        // dt_step > dt_max - dt_min
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 600, "full"),
+            std::invalid_argument);
+        // invalid mode
+        CHECK_THROWS_AS(
+            FDMTPlan(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, "invalid"),
+            std::invalid_argument);
+    }
+}
+
+TEST_CASE("CohFDMTPlan basic", "[dmt_plans][cpu]") {
+    const SizeType chan_per_sub = 16;
+
+    const float f_center = 895.21484375F;
+    const float bw_sub   = 2.9296875F;
+    const SizeType nsub  = 64;
+    const float tbin     = 3.41333333333333E-07;
+    const SizeType nbin  = 1 << 16;
+    const SizeType nfft  = 3;
+    const float t_p      = tbin * chan_per_sub;
+    const float dm_max   = 30.0F;
+    const float dm_min   = 0.0F;
+
+    CohFDMTPlan plan(f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max,
+                     dm_min);
+    SECTION("Constructor and getter methods") {
+        CHECK(plan.get_f_center() == f_center);
+        CHECK(plan.get_bw_sub() == bw_sub);
+        CHECK(plan.get_nsub() == nsub);
+        CHECK(plan.get_tbin() == tbin);
+        CHECK(plan.get_nbin() == nbin);
+        CHECK(plan.get_nfft() == nfft);
+        CHECK(plan.get_t_p() == t_p);
+        CHECK(plan.get_dm_max() == dm_max);
+        CHECK(plan.get_dm_min() == dm_min);
+        CHECK(plan.get_noverlap() == 8192);
+        CHECK(plan.get_data_order() == "PRITF");
+
+        CHECK(plan.get_bw() == nsub * bw_sub);
+        CHECK(plan.get_f_min() == f_center - (0.5F * nsub * bw_sub));
+        CHECK(plan.get_f_max() == f_center + (0.5F * nsub * bw_sub));
+        CHECK(plan.get_n_p() == chan_per_sub);
+        CHECK(plan.get_nchan() == chan_per_sub);
+        CHECK(plan.get_nsamp() ==
+              nfft * (nbin - static_cast<SizeType>(2 * 8192)));
+        CHECK(plan.get_mbin() == nbin / chan_per_sub);
+        CHECK(plan.get_mchan() == nsub * chan_per_sub);
+        CHECK(plan.get_msamp() == plan.get_nsamp() / chan_per_sub);
+        CHECK(plan.get_tsamp() == tbin * static_cast<float>(chan_per_sub));
+        CHECK(plan.get_dt_max() == chan_per_sub - 1);
+    }
+}
+
+TEST_CASE("FDMTPlan dt_min and dt_step top-down pruning", "[dmt_plans][cpu]") {
+    const float f_min     = 1000.0F;
+    const float f_max     = 1500.0F;
+    const SizeType nchans = 64;
+    const SizeType nsamps = 1024;
+    const float tsamp     = 0.001F;
+
+    SECTION("Sparse final grid with dt_min and dt_step") {
+        const SizeType dt_min  = 20;
+        const SizeType dt_max  = 100;
+        const SizeType dt_step = 5;
+
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                      dt_step);
+        CHECK(plan.get_dt_min() == dt_min);
+        CHECK(plan.get_dt_max() == dt_max);
+        CHECK(plan.get_dt_step() == dt_step);
+
+        const auto& dt_grid          = plan.get_dt_grid_final();
+        const SizeType expected_ndms = ((dt_max - dt_min) / dt_step) + 1;
+        CHECK(dt_grid.size() == expected_ndms);
+        CHECK(std::cmp_equal(dt_grid.front(), dt_min));
+        for (SizeType i = 0; i < dt_grid.size(); ++i) {
+            CHECK(std::cmp_equal(dt_grid[i], dt_min + (i * dt_step)));
+        }
+    }
+
+    SECTION("Equivalence of pruned tree coordinates with dense tree") {
+        const SizeType dt_max  = 100;
+        const SizeType dt_min  = 20;
+        const SizeType dt_step = 4;
+
+        FDMTPlan dense_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1);
+        FDMTPlan sparse_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                             dt_min, dt_step);
+
+        const auto niters = dense_plan.get_niters();
+        REQUIRE(sparse_plan.get_niters() == niters);
+
+        const auto& dense_coords =
+            dense_plan.get_container().coordinates_sum[niters];
+        const auto& sparse_coords =
+            sparse_plan.get_container().coordinates_sum[niters];
+
+        const auto& dense_final_grid  = dense_plan.get_dt_grid_final();
+        const auto& sparse_final_grid = sparse_plan.get_dt_grid_final();
+
+        CHECK(sparse_coords.size() == sparse_final_grid.size());
+
+        // For each dt in the sparse plan root level, find the corresponding
+        // coord in dense plan
+        for (SizeType s_idx = 0; s_idx < sparse_final_grid.size(); ++s_idx) {
+            const auto target_dt = sparse_final_grid[s_idx];
+            const auto& s_coord  = sparse_coords[s_idx];
+
+            // Find in dense grid
+            auto it = std::ranges::find(dense_final_grid, target_dt);
+            REQUIRE(it != dense_final_grid.end());
+            const auto d_idx    = std::distance(dense_final_grid.begin(), it);
+            const auto& d_coord = dense_coords[d_idx];
+
+            // Verify the delay shift matches exactly
+            CHECK(s_coord.delay == d_coord.delay);
+
+            // Verify child coordinate indices map to the exact same delay
+            // values in level niters - 1
+            const auto& dense_coords_prev =
+                dense_plan.get_container().coordinates[niters - 1];
+            const auto& sparse_coords_prev =
+                sparse_plan.get_container().coordinates[niters - 1];
+
+            const auto& dense_prev_grid_tail =
+                dense_plan.get_container().grids[niters - 1][0].dt_grid;
+            const auto& dense_prev_grid_head =
+                dense_plan.get_container().grids[niters - 1][1].dt_grid;
+
+            const auto& sparse_prev_grid_tail =
+                sparse_plan.get_container().grids[niters - 1][0].dt_grid;
+            const auto& sparse_prev_grid_head =
+                sparse_plan.get_container().grids[niters - 1][1].dt_grid;
+
+            const auto s_dt_tail =
+                sparse_prev_grid_tail[sparse_coords_prev[s_coord.i_coord_tail]
+                                          .i_dt];
+            const auto d_dt_tail =
+                dense_prev_grid_tail[dense_coords_prev[d_coord.i_coord_tail]
+                                         .i_dt];
+            CHECK(s_dt_tail == d_dt_tail);
+
+            const auto s_dt_head =
+                sparse_prev_grid_head[sparse_coords_prev[s_coord.i_coord_head]
+                                          .i_dt];
+            const auto d_dt_head =
+                dense_prev_grid_head[dense_coords_prev[d_coord.i_coord_head]
+                                         .i_dt];
+            CHECK(s_dt_head == d_dt_head);
+        }
+    }
+}
+
+TEST_CASE("FDMTPlan complexity calculations", "[dmt_plans][cpu]") {
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 128;
+    const SizeType nsamps  = 1024;
+    const float tsamp      = 0.001F;
+    const SizeType dt_max  = 256;
+    const SizeType dt_min  = 64;
+    const SizeType dt_step = 2;
+
+    FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step);
+    const auto comp = plan.get_complexity();
+
+    const SizeType expected_ndt = ((dt_max - dt_min) / dt_step) + 1;
+    CHECK(comp.n_dt == expected_ndt);
+    CHECK(comp.n_chans == nchans);
+    CHECK(comp.brute_force_ops == expected_ndt * nchans);
+    CHECK(comp.total_tree_nodes > 0);
+    CHECK(comp.sum_additions > 0);
+    CHECK(comp.total_tree_nodes >= comp.sum_additions);
+    CHECK(comp.ops_ratio >
+          1.0); // Speedup: FDMT requires fewer additions than brute-force
+
+    const auto summary = comp.to_string();
+    CHECK(summary.find("FDMT Complexity:") != std::string::npos);
+    CHECK(summary.find("Brute-force ops") != std::string::npos);
+    CHECK(summary.find("Theoretical Speedup Factor") != std::string::npos);
+}
+
+TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans][cpu]") {
+    const float f_min     = 1000.0F;
+    const float f_max     = 1500.0F;
+    const SizeType nchans = 64;
+    const SizeType nsamps = 1024;
+    const float tsamp     = 0.001F;
+
+    SECTION("Arbitrary sorted dt_grid") {
+        const std::vector<IndexType> custom_dts = {25, 50, 75, 100, 130, 180};
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, custom_dts);
+
+        CHECK(plan.is_custom_grid());
+        CHECK(plan.get_dt_min() == 25);
+        CHECK(plan.get_dt_max() == 180);
+        CHECK(plan.get_dt_grid_final() == custom_dts);
+        CHECK(plan.get_dmt_ndms() == custom_dts.size());
+
+        // Target grid at root iteration
+        const auto niters     = plan.get_niters();
+        const auto& root_grid = plan.get_container().grids[niters][0].dt_grid;
+        CHECK(root_grid == custom_dts);
+    }
+
+    SECTION(
+        "Level 0 starts from min_dt_chan > 0 when child delays require it") {
+        // High delay range where child delays do not include 0
+        const std::vector<IndexType> high_dts = {200, 250, 300};
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, high_dts);
+
+        const auto& l0_grids        = plan.get_container().grids[0];
+        bool found_nonzero_l0_start = false;
+        for (SizeType i = 0; i < nchans; ++i) {
+            if (!l0_grids[i].dt_grid.empty() &&
+                l0_grids[i].dt_grid.front() > 0) {
+                found_nonzero_l0_start = true;
+                break;
+            }
+        }
+        CHECK(found_nonzero_l0_start);
+    }
+
+    SECTION("Arbitrary dm_grid conversion and deduplication") {
+        const std::vector<float> dms = {10.0F, 25.5F, 50.0F};
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dms);
+
+        CHECK(plan.is_custom_grid());
+        CHECK(!plan.get_dt_grid_final().empty());
+        CHECK(!plan.get_dm_grid_final().empty());
+
+        const auto dt_final = plan.get_dt_grid_final();
+        CHECK(std::ranges::is_sorted(dt_final));
+    }
+
+    SECTION("Validation errors for invalid custom grids") {
+        // Empty dt_grid
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<IndexType>{}),
+                        std::invalid_argument);
+
+        // All-zero dt_grid
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<IndexType>{0}),
+                        std::invalid_argument);
+
+        // Empty dm_grid
+        CHECK_THROWS_AS(
+            FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, std::vector<float>{}),
+            std::invalid_argument);
+
+        // All-zero dm_grid
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{0.0F, 0.0F}),
+                        std::invalid_argument);
+
+        // Negative DM is valid and constructs successfully
+        CHECK_NOTHROW(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                               std::vector<float>{-5.0F, 10.0F}));
+    }
+
+    SECTION("Unsorted and duplicate dt_grid is auto-sorted and deduplicated") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp,
+                      std::vector<IndexType>{50, 20, 100, 20});
+        CHECK(plan.get_dt_grid_final() == std::vector<IndexType>{20, 50, 100});
+        CHECK(plan.get_dt_min() == 20);
+        CHECK(plan.get_dt_max() == 100);
+    }
+
+    SECTION("Unsorted and duplicate dm_grid is auto-sorted and deduplicated") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp,
+                      std::vector<float>{50.0F, 20.0F, 100.0F, 20.0F});
+        const auto dt_final = plan.get_dt_grid_final();
+        CHECK(std::ranges::is_sorted(dt_final));
+    }
+
+    SECTION("High sparsity target grid note in complexity summary") {
+        // Very sparse grid (e.g., 2 delays) where brute-force ops < 2 * FDMT
+        // tree ops
+        const std::vector<IndexType> sparse_dts = {50, 100};
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, sparse_dts);
+        const auto comp = plan.get_complexity();
+        if (comp.ops_ratio < 2.0F) {
+            const auto summary = comp.to_string();
+            CHECK(summary.find("Note: Speedup factor is < 2.0x") !=
+                  std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("FDMTPlan negative and symmetric dispersion", "[dmt_plans][cpu]") {
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 64;
+    const SizeType nsamps  = 512;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 32;
+    const IndexType dt_min = -32;
+
+    SECTION("Plan construction and grid properties") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        CHECK(plan.get_dt_min() == -32);
+        CHECK(plan.get_dt_max() == 32);
+        const auto& dt_grid = plan.get_dt_grid_final();
+        REQUIRE(dt_grid.size() == 65);
+        CHECK(dt_grid.front() == -32);
+        CHECK(dt_grid.back() == 32);
+
+        CHECK(std::ranges::is_sorted(dt_grid));
+    }
+
+    SECTION("Effective variance without smearing") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        // For un-smeared plan (use_box_smearing=false), variance is N_chans * W
+        for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 16) {
+            CHECK(plan.get_effective_variance(dm_idx, 1, false) ==
+                  Catch::Approx(static_cast<float>(nchans * 1)));
+            CHECK(plan.get_effective_variance(dm_idx, 4, false) ==
+                  Catch::Approx(static_cast<float>(nchans * 4)));
+            CHECK(plan.get_effective_sigma(dm_idx, 4, false) ==
+                  Catch::Approx(std::sqrt(static_cast<float>(nchans * 4))));
+        }
+
+        const auto var_grid_1 = plan.get_effective_variance_grid(1, false);
+        REQUIRE(var_grid_1.size() == 65);
+        for (const auto v : var_grid_1) {
+            CHECK(v == Catch::Approx(static_cast<float>(nchans)));
+        }
+
+        const auto sig_grid_4 = plan.get_effective_sigma_grid(4, false);
+        REQUIRE(sig_grid_4.size() == 65);
+        for (const auto s : sig_grid_4) {
+            CHECK(s ==
+                  Catch::Approx(std::sqrt(static_cast<float>(nchans * 4))));
+        }
+    }
+
+    SECTION("Effective variance with smearing") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+
+        // At dt = 0 (index 32): smearing s_i = 0 for all channels -> variance
+        // == nchans
+        CHECK(plan.get_effective_variance(32, 1, true) ==
+              Catch::Approx(static_cast<float>(nchans)));
+
+        // For W = 1 across any DM: each channel has smearing s_i >= 0, so Var
+        // >= nchans
+        for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 10) {
+            CHECK(plan.get_effective_variance(dm_idx, 1, true) >=
+                  static_cast<float>(nchans));
+        }
+
+        // For W = 4: Variance should be positive and <= nchans * W^2
+        for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 10) {
+            const float var = plan.get_effective_variance(dm_idx, 4, true);
+            CHECK(var > 0.0F);
+            CHECK(var <= static_cast<float>(nchans * 4 * 4));
+        }
+
+        // Verify symmetry: Var(+dt) == Var(-dt)
+        const auto& dt_grid = plan.get_dt_grid_final();
+        for (size_t i = 0; i < dt_grid.size() / 2; ++i) {
+            const size_t opp_i = dt_grid.size() - 1 - i;
+            CHECK(dt_grid[i] == -dt_grid[opp_i]);
+            CHECK(plan.get_effective_variance(i, 4, true) ==
+                  Catch::Approx(plan.get_effective_variance(opp_i, 4, true)));
+        }
+    }
+
+    SECTION("Invalid argument and bounds checks") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        CHECK_THROWS_AS(plan.get_effective_variance(0, 0),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(plan.get_effective_sigma(0, 0), std::invalid_argument);
+        CHECK_THROWS_AS(plan.get_effective_variance(1000, 1),
+                        std::out_of_range);
+        CHECK_THROWS_AS(plan.get_effective_sigma(1000, 1), std::out_of_range);
+    }
+
+    SECTION(
+        "get_effective_variance_grid matches per-DM get_effective_variance") {
+        // Regression test for the O(ndms^2) -> O(ndms) fix: the grid variant
+        // must still return exactly what calling get_effective_variance()
+        // once per DM index would, for both the smeared and un-smeared paths.
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        for (const bool use_box_smearing : {false, true}) {
+            const auto grid =
+                plan.get_effective_variance_grid(3, use_box_smearing);
+            REQUIRE(grid.size() == plan.get_dmt_ndms());
+            for (size_t dm_idx = 0; dm_idx < grid.size(); dm_idx += 7) {
+                CHECK(grid[dm_idx] == Catch::Approx(plan.get_effective_variance(
+                                          dm_idx, 3, use_box_smearing)));
+            }
+        }
+    }
+
+    SECTION("trace_dm") {
+        FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+        const auto& dt_grid = plan.get_dt_grid_final();
+
+        // dt=0 requires no relative shift between any pair of channels.
+        const auto it_zero = std::find(dt_grid.begin(), dt_grid.end(), 0);
+        REQUIRE(it_zero != dt_grid.end());
+        const auto idx_zero =
+            static_cast<SizeType>(std::distance(dt_grid.begin(), it_zero));
+        const auto shifts_zero = plan.trace_dm(idx_zero);
+        REQUIRE(shifts_zero.size() == nchans);
+        for (const auto s : shifts_zero) {
+            CHECK(s == shifts_zero.front());
+        }
+
+        // Every returned vector has one entry per channel, for both signs.
+        CHECK(plan.trace_dm(0).size() == nchans);
+        CHECK(plan.trace_dm(dt_grid.size() - 1).size() == nchans);
+        CHECK_THROWS_AS(plan.trace_dm(dt_grid.size()), std::out_of_range);
+    }
+}
+
+} // namespace dmt
