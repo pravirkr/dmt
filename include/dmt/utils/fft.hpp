@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file fft.hpp
+ * @brief FFT execution managers for CPU (FFTW) and CUDA GPU (cuFFT) transforms.
+ */
+
 #include <memory>
 #include <span>
 
@@ -99,7 +104,8 @@ public:
 
     /**
      * @brief Performs an in-place forward FFT on GPU data.
-     * @param data Device data buffer (must match planned dimensions/size).
+     * @param data1 First device buffer (must match planned dimensions/size).
+     * @param data2 Second device buffer (must match planned dimensions/size).
      * @param stream CUDA stream for execution.
      */
     void forward_fft(cuda::std::span<ComplexTypeCUDA> data1,
@@ -108,7 +114,8 @@ public:
 
     /**
      * @brief Performs an in-place backward FFT on GPU data.
-     * @param data Device data buffer (must match planned dimensions/size).
+     * @param data1 First device buffer (must match planned dimensions/size).
+     * @param data2 Second device buffer (must match planned dimensions/size).
      * @param stream CUDA stream for execution.
      */
     void backward_fft(cuda::std::span<ComplexTypeCUDA> data1,

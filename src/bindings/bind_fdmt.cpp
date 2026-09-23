@@ -122,22 +122,78 @@ void bind_fdmt(py::module_& mod) {
                  return as_pyarray(fdmt.get_plan().get_dm_grid_final());
              })
         .def("get_effective_variance", &FDMTCPU::get_effective_variance,
-             py::arg("dm_idx"), py::arg("boxcar_width") = 1)
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1,
+             R"doc(
+             Compute theoretical noise variance for a DM trial and boxcar width.
+
+             Parameters
+             ----------
+             dm_idx : int
+                 Index into the final DM/dt trial grid.
+             boxcar_width : int, optional
+                 Width of subsequent boxcar filter in samples (default 1).
+
+             Returns
+             -------
+             float
+                 Predicted noise variance scaled from input noise.
+             )doc")
         .def("get_effective_sigma", &FDMTCPU::get_effective_sigma,
-             py::arg("dm_idx"), py::arg("boxcar_width") = 1)
+             py::arg("dm_idx"), py::arg("boxcar_width") = 1,
+             R"doc(
+             Compute theoretical noise standard deviation (sigma) for a DM trial and boxcar width.
+
+             Parameters
+             ----------
+             dm_idx : int
+                 Index into the final DM/dt trial grid.
+             boxcar_width : int, optional
+                 Width of subsequent boxcar filter in samples (default 1).
+
+             Returns
+             -------
+             float
+                 Predicted noise standard deviation (sqrt(variance)).
+             )doc")
         .def(
             "get_effective_variance_grid",
             [](const FDMTCPU& fdmt, SizeType boxcar_width) {
                 return as_pyarray(
                     fdmt.get_effective_variance_grid(boxcar_width));
             },
-            py::arg("boxcar_width") = 1)
+            py::arg("boxcar_width") = 1,
+            R"doc(
+            Compute theoretical noise variance for all DM trials across the grid.
+
+            Parameters
+            ----------
+            boxcar_width : int, optional
+                Width of subsequent boxcar filter in samples (default 1).
+
+            Returns
+            -------
+            numpy.ndarray
+                1D float32 array of shape ``(n_dm,)`` of theoretical variances.
+            )doc")
         .def(
             "get_effective_sigma_grid",
             [](const FDMTCPU& fdmt, SizeType boxcar_width) {
                 return as_pyarray(fdmt.get_effective_sigma_grid(boxcar_width));
             },
-            py::arg("boxcar_width") = 1)
+            py::arg("boxcar_width") = 1,
+            R"doc(
+            Compute theoretical noise standard deviation (sigma) for all DM trials.
+
+            Parameters
+            ----------
+            boxcar_width : int, optional
+                Width of subsequent boxcar filter in samples (default 1).
+
+            Returns
+            -------
+            numpy.ndarray
+                1D float32 array of shape ``(n_dm,)`` of theoretical standard deviations.
+            )doc")
         // execute takes 2d or 3d array as input, and returns 2d or 3d array as
         // output
         .def(
@@ -297,7 +353,39 @@ void bind_fdmt(py::module_& mod) {
         .def_property_readonly("num_subbands", &FDMTCPU::num_subbands)
         .def_property_readonly("is_finished", &FDMTCPU::is_finished)
         .def("reset_history", &FDMTCPU::reset_history,
-             "Reset the internal history buffers for valid-mode streaming.");
+             "Reset the internal history buffers for valid-mode streaming.")
+        .def("history_state_size", &FDMTCPU::history_state_size,
+             R"doc(
+             Size (in float32 elements) of this instance's streaming history state.
+             Zero for "full" or "roll" modes.
+             )doc")
+        .def("save_history", [](const FDMTCPU& fdmt) -> py::object {
+            const auto sz = fdmt.history_state_size();
+            py::array_t<float, py::array::c_style> hist(sz);
+            fdmt.save_history(std::span<float>(hist.mutable_data(), hist.size()));
+            return hist;
+        },
+        R"doc(
+        Save the internal streaming history state into a 1D float32 NumPy array.
+        Enables time-multiplexing multiple beams or sub-streams on a single FDMTCPU instance.
+        )doc")
+        .def("load_history", [](FDMTCPU& fdmt, const py::array& hist_obj) {
+            if (hist_obj.dtype().kind() != 'f' || hist_obj.itemsize() != 4) {
+                throw std::invalid_argument(
+                    "FDMTCPU.load_history: expected a float32 array");
+            }
+            auto hist = hist_obj.cast<py::array_t<float, py::array::c_style>>();
+            if (static_cast<SizeType>(hist.size()) != fdmt.history_state_size()) {
+                throw std::invalid_argument(std::format(
+                    "FDMTCPU.load_history: expected buffer of size {}, got {}",
+                    fdmt.history_state_size(), hist.size()));
+            }
+            fdmt.load_history(std::span<const float>(hist.data(), hist.size()));
+        },
+        py::arg("history"),
+        R"doc(
+        Restore previously saved streaming history state from a 1D float32 NumPy array.
+        )doc");
 
     py::class_<FDMTFFTCPU>(mod, "FDMTFFTCPU", py::dynamic_attr(),
                            R"doc(
@@ -559,36 +647,8 @@ void bind_fdmt(py::module_& mod) {
         R"doc(
         One-shot FFT-domain FDMT.
 
-        Parameters
-        ----------
-        waterfall : numpy.ndarray, dtype float32
-            Input waterfall of shape ``(nchans, nsamps)``.
-        f_min, f_max : float
-            Band edges in MHz.
-        nchans, nsamps : int
-            Waterfall dimensions.
-        tsamp : float
-            Sampling interval in seconds.
-        dt_max : int
-            Maximum delay trial in samples.
-        dt_min, dt_step : int, optional
-            Delay-grid range and stride.
-        use_box_smearing : bool, optional
-            Account for intra-channel smearing.
-        mode : str, optional
-            Output time alignment.
-        verbose : bool, optional
-            Print the plan summary.
-        nthreads, nbeams : int, optional
-            Thread count and packed beams.
-
-        Returns
-        -------
-        dmt : numpy.ndarray
-            Flattened transform of length ``plan.dmt_size`` (reshape using
-            ``plan.dmt_ndms`` and ``plan.dmt_nsamps``).
-        plan : FDMTPlan
-            Plan used for the transform.
+        Runs the FFT-domain FDMT on an input waterfall array of shape (nchans, nsamps),
+        returning a tuple (dmt_matrix, plan).
         )doc");
 
     mod.def(
@@ -645,8 +705,8 @@ void bind_fdmt(py::module_& mod) {
         R"doc(
         One-shot incoherent FDMT.
 
-        Same arguments and return value as :func:`compute_fdmt_fft`, using
-        the time-domain :class:`FDMTCPU` engine.
+        Runs the time-domain FDMT on an input waterfall array of shape (nchans, nsamps),
+        returning a tuple (dmt_matrix, plan).
         )doc");
 
     mod.def(

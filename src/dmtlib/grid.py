@@ -5,14 +5,21 @@ fractional sensitivity loss (e.g. <= 5%) across the entire DM search range
 while minimizing redundant trials.
 
 Algorithms supported:
+
 1. ``method="snr_loss"`` (Default, recommended for FDMT):
    Evaluates intra-channel dispersion smearing at the band edge (f_min, the
-   worst-case channel):
+   worst-case channel)::
+
        t_chan(DM) = 2 * K_DM * DM * df / f_min^3
-   The effective pulse width including smearing and sampling interval is:
+
+   The effective pulse width including smearing and sampling interval is::
+
        W_eff(DM) = sqrt(W_pulse^2 + t_samp^2 + t_chan(DM)^2)
-   The allowed delay mismatch for a maximum fractional S/N loss eta is:
+
+   The allowed delay mismatch for a maximum fractional S/N loss eta is::
+
        dt_step(DM) <= max(1.0, 2 * eta * W_eff(DM))
+
    where eta = sqrt(1 / (1 - max_snr_loss)^2 - 1).
    This method is strictly monotonic, never collapses at high DM, and
    supports negative and symmetric DM ranges.

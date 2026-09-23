@@ -27,16 +27,22 @@ classifiers = [
 dependencies = ["numpy"]
 
 [project.urls]
-Github = "https://github.com/pravirkr/dmt"
+Homepage = "https://github.com/pravirkr/dmt"
+Documentation = "https://dmt.readthedocs.io"
+Repository = "https://github.com/pravirkr/dmt"
 
 [project.optional-dependencies]
-tests = [
-    "pytest",
-    "pytest-cov",
-    "pytest-randomly",
-    "pytest-sugar",
+tests = ["pytest", "pytest-cov", "pytest-randomly", "pytest-sugar"]
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-copybutton",
+    "numpydoc",
+    "myst-nb",
+    "breathe",
+    "sphinx-design",
+    "matplotlib",
 ]
-docs = ["sphinx", "sphinx-book-theme", "sphinx-click", "myst-nb", "breathe"]
 develop = ["ruff", "ty"]
 
 [tool.scikit-build]
@@ -86,10 +92,14 @@ indent-style = "space"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D1", "PLR2004"]
+ignore = ["COM812", "D1", "D301", "PLR2004", "G004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "FBT", "PLR2004", "PT011", "SLF001"]
+"docs/**" = ["INP001", "ARG001", "ANN401", "CPY001", "T201", "S607"]
 
 [tool.ruff.lint.pylint]
-max-args = 10
+max-args = 15
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
@@ -128,3 +138,7 @@ source = ["src/dmtlib", "*/site-packages/dmtlib", "*/dmtlib"]
 [tool.gcovr]
 filter = ["lib/.*", "include/.*", "src/.*"]
 exclude = ["tests/.*", "build/_deps/.*", "bench/.*"]
+
+[tool.numpydoc_validation]
+checks = ["all", "GL01", "GL08", "EX01", "SA01", "ES01", "SS02", "SA04"]
+exclude = ['\.undocumented_method$', '\.__repr__$']

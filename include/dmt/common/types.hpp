@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file types.hpp
+ * @brief Common type definitions, astrophysical dispersion constants, and memory utilities.
+ */
+
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -43,11 +48,19 @@ inline constexpr float kDispConstMT =
 inline constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 inline constexpr float kDispConst   = kDispConstMT;
 
-// Utilities for aligning or enforcing hardware-specific requirements (e.g.,
-// SIMD alignment)
+/**
+ * @brief POSIX aligned memory allocator for SIMD vectorization and cache alignment.
+ * @tparam T Value type to allocate.
+ */
 template <typename T> struct AlignedAllocator {
     static constexpr std::size_t kAlignment = alignof(std::max_align_t);
 
+    /**
+     * @brief Allocates aligned memory.
+     * @param n Number of elements to allocate.
+     * @return Pointer to aligned memory buffer.
+     * @throws std::bad_alloc if allocation fails.
+     */
     T* allocate(std::size_t n) {
         void* ptr = nullptr;
         if (posix_memalign(&ptr, kAlignment, n * sizeof(T)) != 0) {
@@ -56,6 +69,10 @@ template <typename T> struct AlignedAllocator {
         return reinterpret_cast<T*>(ptr);
     }
 
+    /**
+     * @brief Deallocates aligned memory.
+     * @param ptr Pointer previously allocated with allocate().
+     */
     void deallocate(T* ptr, std::size_t /*unused*/) noexcept { free(ptr); }
 };
 
@@ -66,15 +83,17 @@ concept IntegralDataType = std::is_integral_v<T>;
 
 /**
  * @enum BasebandDataOrder
- * @brief Describes the data order for different unpacking methods.
- *
+ * @brief Memory layouts for raw telescope complex baseband voltage streams.
  */
 enum class BasebandDataOrder : uint8_t {
-    kPRITF, /**< Polarisation-Real/Imag-time-frequency */
-    kFTPRI, /**< Frequency-Time-Polarisation-Real/Imag */
-    kRITFP, /**< Real/Imag-time-frequency-Polarisation */
+    kPRITF, /**< Polarization -> Real/Imag -> Time -> Frequency (LOFAR default) */
+    kFTPRI, /**< Frequency -> Time -> Polarization -> Real/Imag */
+    kRITFP, /**< Real/Imag -> Time -> Frequency -> Polarization */
 };
 
+/**
+ * @brief String-to-enum mapping for baseband data ordering.
+ */
 static const std::unordered_map<std::string_view, BasebandDataOrder>
     kBasebandDataOrderMap = {
         {"FTPRI", BasebandDataOrder::kFTPRI},
@@ -83,10 +102,13 @@ static const std::unordered_map<std::string_view, BasebandDataOrder>
 };
 
 /**
- * @brief Set the number of OpenMP threads to use.
+ * @brief Configures the number of OpenMP worker threads for CPU parallel execution.
  *
- * @param nthreads The number of threads to use.
- * @return The number of threads actually used.
+ * If DMT was compiled without OpenMP support (`DMT_ENABLE_OPENMP` undefined),
+ * this logs a warning if `nthreads > 1` and defaults to 1 thread.
+ *
+ * @param nthreads Target number of OpenMP threads (<= 0 sets to omp_get_max_threads()).
+ * @return Actual number of threads configured.
  */
 inline int set_dmt_openmp_threads(int nthreads) {
 #ifdef DMT_ENABLE_OPENMP
@@ -108,3 +130,4 @@ inline int set_dmt_openmp_threads(int nthreads) {
 }
 
 } // namespace dmt
+

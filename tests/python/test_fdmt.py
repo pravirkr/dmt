@@ -1037,3 +1037,43 @@ class TestFDMT:
         waterfall_single_beam_sized = np.ones((nchans, nsamps), dtype=np.float32)
         with pytest.raises(ValueError, match="Invalid size of waterfall"):
             fdmt_multi.execute(waterfall_single_beam_sized)
+
+    def test_save_and_load_history(self) -> None:
+        f_min, f_max = 1000.0, 1500.0
+        nchans, nsamps, tsamp = 16, 64, 0.001
+        dt_max = 16
+
+        engine = libdmt.FDMTCPU(
+            f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max, mode="valid"
+        )
+        assert engine.history_state_size() > 0
+
+        rng = np.random.default_rng(42)
+        wf_a1 = rng.standard_normal((nchans, nsamps)).astype(np.float32)
+        wf_a2 = rng.standard_normal((nchans, nsamps)).astype(np.float32)
+
+        # Stream A block 1
+        engine.reset_history()
+        engine.execute(wf_a1)
+
+        # Save state of stream A
+        hist_a = engine.save_history()
+        assert isinstance(hist_a, np.ndarray)
+        assert hist_a.dtype == np.float32
+        assert hist_a.size == engine.history_state_size()
+
+        # Reset engine and run dummy stream B
+        engine.reset_history()
+        wf_b = rng.standard_normal((nchans, nsamps)).astype(np.float32)
+        engine.execute(wf_b)
+
+        # Restore state of stream A and execute block 2
+        engine.load_history(hist_a)
+        res_interrupted = engine.execute(wf_a2)
+
+        # Compare with unbroken stream A execution
+        engine.reset_history()
+        engine.execute(wf_a1)
+        res_continuous = engine.execute(wf_a2)
+
+        np.testing.assert_allclose(res_interrupted, res_continuous, rtol=1e-5, atol=1e-5)

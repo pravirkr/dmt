@@ -257,6 +257,9 @@ endif()
 if(DMT_BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
+if(DMT_BUILD_DOCS)
+  add_subdirectory(docs)
+endif()
 
 # Install / export: find_package(dmt) + target dmt::dmt
 include(CMakePackageConfigHelpers)

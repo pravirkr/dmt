@@ -47,6 +47,7 @@ public:
      * @param tsamp Sampling time (s).
      * @param dt_max Maximum delay trial (in samples).
      * @param dt_min Minimum delay trial (in samples, default: 0).
+     * @param dt_step Stride between delay trials (default: 1).
      * @param use_box_smearing Whether to account for intra-channel smearing
      * using boxcar summation (default: true).
      * @param mode Mode of the FDMT transform. Available modes are:
@@ -86,6 +87,21 @@ public:
             int nthreads          = 1,
             SizeType nbeams       = 1);
 
+    /**
+     * @brief Constructs an FDMTCPU instance with a custom delay trial grid.
+     *
+     * @param f_min Frequency of the lowest channel (MHz).
+     * @param f_max Frequency of the highest channel (MHz).
+     * @param nchans Number of frequency channels (power of 2).
+     * @param nsamps Number of time samples per incoming block.
+     * @param tsamp Sampling time (s).
+     * @param dt_grid Explicit list of delay trials in samples (e.g. from generate_optimal_dt_grid).
+     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param mode Mode: "valid", "full", or "roll" (default: "valid").
+     * @param verbose Enable verbose plan output.
+     * @param nthreads Number of OpenMP threads to use (default: 1).
+     * @param nbeams Number of independent beams to process together (default: 1).
+     */
     FDMTCPU(float f_min,
             float f_max,
             SizeType nchans,
@@ -98,6 +114,21 @@ public:
             int nthreads          = 1,
             SizeType nbeams       = 1);
 
+    /**
+     * @brief Constructs an FDMTCPU instance with a custom physical DM trial grid.
+     *
+     * @param f_min Frequency of the lowest channel (MHz).
+     * @param f_max Frequency of the highest channel (MHz).
+     * @param nchans Number of frequency channels (power of 2).
+     * @param nsamps Number of time samples per incoming block.
+     * @param tsamp Sampling time (s).
+     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports non-uniform spacing and negative DMs).
+     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param mode Mode: "valid", "full", or "roll" (default: "valid").
+     * @param verbose Enable verbose plan output.
+     * @param nthreads Number of OpenMP threads to use (default: 1).
+     * @param nbeams Number of independent beams to process together (default: 1).
+     */
     FDMTCPU(float f_min,
             float f_max,
             SizeType nchans,
@@ -310,7 +341,25 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-// Convenience function FDMT a block of data
+/**
+ * @brief High-level convenience function to execute FDMT on a waterfall block with a linear delay grid.
+ *
+ * @param waterfall Input waterfall data, beam-major flat (nbeams*nchans*nsamps).
+ * @param f_min Bottom edge frequency in MHz.
+ * @param f_max Top edge frequency in MHz.
+ * @param nchans Number of frequency channels (power of 2).
+ * @param nsamps Number of time samples per block.
+ * @param tsamp Sampling interval in seconds.
+ * @param dt_max Maximum delay trial in samples.
+ * @param dt_min Minimum delay trial in samples (default: 0).
+ * @param dt_step Stride between delay trials (default: 1).
+ * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+ * @param mode Mode: "valid", "full", or "roll" (default: "valid").
+ * @param verbose Enable verbose output (default: false).
+ * @param nthreads Number of OpenMP threads (default: 1).
+ * @param nbeams Number of batched beams (default: 1).
+ * @return Tuple of (transformed DMT buffer as std::vector<float>, FDMTPlan object).
+ */
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,
              float f_min,
@@ -446,6 +495,8 @@ public:
      * (default: "valid").
      * @param verbose Enable verbose output.
      * @param device_id CUDA device ID to use (default: 0).
+     * @param nbeams Number of independent beams to process together
+     * (default: 1).
      */
     FDMTCUDA(float f_min,
              float f_max,
@@ -461,6 +512,21 @@ public:
              int device_id         = 0,
              SizeType nbeams       = 1);
 
+    /**
+     * @brief Constructs an FDMTCUDA object with a custom delay trial grid.
+     *
+     * @param f_min Frequency of the lowest channel (MHz).
+     * @param f_max Frequency of the highest channel (MHz).
+     * @param nchans Number of frequency channels (power of 2).
+     * @param nsamps Number of time samples per incoming block.
+     * @param tsamp Sampling time (s).
+     * @param dt_grid Explicit list of delay trials in samples.
+     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param mode Mode: "valid", "full", or "roll" (default: "valid").
+     * @param verbose Enable verbose output.
+     * @param device_id CUDA device ID to use (default: 0).
+     * @param nbeams Number of independent beams to process together (default: 1).
+     */
     FDMTCUDA(float f_min,
              float f_max,
              SizeType nchans,
@@ -473,6 +539,21 @@ public:
              int device_id         = 0,
              SizeType nbeams       = 1);
 
+    /**
+     * @brief Constructs an FDMTCUDA object with a custom DM trial grid.
+     *
+     * @param f_min Frequency of the lowest channel (MHz).
+     * @param f_max Frequency of the highest channel (MHz).
+     * @param nchans Number of frequency channels (power of 2).
+     * @param nsamps Number of time samples per incoming block.
+     * @param tsamp Sampling time (s).
+     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports non-uniform and negative DMs).
+     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param mode Mode: "valid", "full", or "roll" (default: "valid").
+     * @param verbose Enable verbose output.
+     * @param device_id CUDA device ID to use (default: 0).
+     * @param nbeams Number of independent beams to process together (default: 1).
+     */
     FDMTCUDA(float f_min,
              float f_max,
              SizeType nchans,
@@ -740,7 +821,25 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-// Convenience function FDMT a block of data
+/**
+ * @brief Convenience function to run FDMT on GPU device using host memory views.
+ *
+ * @param waterfall Input waterfall data on host.
+ * @param f_min Bottom edge frequency in MHz.
+ * @param f_max Top edge frequency in MHz.
+ * @param nchans Number of frequency channels.
+ * @param nsamps Number of time samples per block.
+ * @param tsamp Sampling interval in seconds.
+ * @param dt_max Maximum delay trial in samples.
+ * @param dt_min Minimum delay trial in samples (default: 0).
+ * @param dt_step Stride between delay trials (default: 1).
+ * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+ * @param mode Mode: "valid", "full", or "roll" (default: "valid").
+ * @param verbose Enable verbose output.
+ * @param device_id CUDA device ID.
+ * @param nbeams Number of batched beams.
+ * @return Transformed DMT buffer on host.
+ */
 std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      float f_min,
                                      float f_max,

@@ -21,6 +21,7 @@ from .libdmt import (
     FDMTComplexity,
     FDMTPlan,
     LevinConfig,
+    add_frb_track,
     compute_fdmt,
     compute_fdmt_fft,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "FDMTComplexity",
     "FDMTPlan",
     "LevinConfig",
+    "add_frb_track",
     "calculate_snr_loss",
     "compute_fdmt",
     "compute_fdmt_fft",

@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file unpacker.hpp
+ * @brief Baseband voltage stream unpackers and format converters for LOFAR/telescope DAQ layouts.
+ */
+
 #include <memory>
 #include <span>
 #include <string_view>
