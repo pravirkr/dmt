@@ -35,7 +35,8 @@ class TestCohFDMT:
         assert len(sig_grid) == plan.ndm
         assert len(cnt_grid) == plan.ndm
         assert np.all(var_grid > 0.0)
-        np.testing.assert_allclose(sig_grid, np.sqrt(var_grid))
+        # sigma may be computed in C++ float32; sqrt(var) in float64 — allow ~1 ulp.
+        np.testing.assert_allclose(sig_grid, np.sqrt(var_grid), rtol=1e-6, atol=1e-6)
         assert np.all(cnt_grid > 0.0)
 
     def test_execute_output_shape_2d(self) -> None:

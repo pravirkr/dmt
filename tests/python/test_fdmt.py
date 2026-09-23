@@ -298,7 +298,10 @@ class TestFDMT:
         for s_idx, dt in enumerate(fdmt_sparse.dt_grid_final):
             d_idx = np.where(fdmt_dense.dt_grid_final == dt)[0][0]
             np.testing.assert_allclose(
-                sync_sparse[s_idx], sync_dense[d_idx], rtol=1e-5, atol=1e-5
+                sync_sparse[s_idx],
+                sync_dense[d_idx],
+                rtol=1e-5,
+                atol=2e-5,  # Release -ffast-math on Linux can differ slightly at trail samples
             )
 
     def test_compute_fdmt_function(self) -> None:
