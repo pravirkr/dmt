@@ -1,5 +1,9 @@
 name: GitHub CI
 
+# Two tiers:
+#   • PR (every commit): correctness gates — must pass before merge.
+#   • main push (after merge): coverage + clang-tidy — reporting & static analysis.
+#   • workflow_dispatch: full suite (both tiers).
 on:
   push:
     branches: [main]
@@ -19,59 +23,14 @@ env:
   CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
 
 jobs:
-  # ---------------------------------------------------------------------
-  # clang-tidy: compile_commands.json (DMT_CUDA=OFF) defines the TU set.
-  # ---------------------------------------------------------------------
-  clang-tidy:
-    name: clang-tidy
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
+  # =============================================================================
+  # Tier 1 — run on every pull_request commit (and workflow_dispatch)
+  # =============================================================================
 
-      - name: Install system packages
-        run: |
-          sudo apt update
-          sudo apt install -y --no-install-recommends \
-            cmake ninja-build clang-tidy-18 clang-tools-18 gcc-13 g++-13 \
-            python3-dev libfftw3-dev libomp-dev catch2 git
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - run: python -m pip install -U pip "pybind11>=3.0"
-
-      - name: Cache CPM sources
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.CPM_SOURCE_CACHE }}
-          key: cpm-clang-tidy-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
-          restore-keys: |
-            cpm-clang-tidy-
-
-      - name: Configure (compile_commands.json only, no build)
-        env:
-          CC: gcc-13
-          CXX: g++-13
-        run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DDMT_BUILD_DOCS=OFF
-          -DDMT_BUILD_PYTHON=ON
-          -DDMT_BUILD_TESTING=ON
-          -DDMT_CUDA=OFF
-          -DDMT_ENABLE_NATIVE_ARCH=OFF
-          -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
-
-      - name: Run clang-tidy
-        run: run-clang-tidy-18 -p build
-
-  # ---------------------------------------------------------------------
   # C++ correctness (Release). CMake builds library + bindings; ctest only.
-  # ---------------------------------------------------------------------
   cpp-tests:
     name: "C++ tests (${{ matrix.compiler.cc }})"
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -82,12 +41,6 @@ jobs:
           - { cc: clang-18, cpp: clang++-18 }
     steps:
       - uses: actions/checkout@v7
-
-      - name: Check CPU info (Linux)
-        run: |
-          lscpu
-          grep flags /proc/cpuinfo | head -n 1
-          grep "cpu MHz" /proc/cpuinfo | head -n 1
 
       - name: Install system packages
         run: |
@@ -140,11 +93,172 @@ jobs:
       - name: Run C++ unit tests
         run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
 
-  # ---------------------------------------------------------------------
+  # Python: uv install + pytest (supported user path).
+  python-tests:
+    name: "Python (${{ matrix.os }})"
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ubuntu packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache \
+            libfftw3-dev libomp-dev git
+
+      - name: Install macOS packages
+        if: runner.os == 'macOS'
+        run: |
+          brew install fftw libomp ccache cmake ninja
+          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix fftw);$(brew --prefix libomp)" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: python-${{ matrix.os }}
+          max-size: 500M
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Install package and test dependencies
+        run: uv sync --extra tests --reinstall-package dmtlib
+        env:
+          CMAKE_ARGS: >-
+            -DDMT_CUDA=OFF
+            -DDMT_BUILD_TESTING=OFF
+            -DDMT_ENABLE_NATIVE_ARCH=OFF
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Test with pytest
+        run: uv run pytest tests/python
+
+  # ASan + UBSan (C++ tests only; no Python bindings).
+  sanitizers:
+    name: Sanitizers (ASan+UBSan, gcc-13, Debug)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            gcc-13 g++-13 \
+            libfftw3-dev libomp-dev catch2 git
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-sanitizers-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-sanitizers-
+
+      - name: Configure CMake
+        env:
+          CC: gcc-13
+          CXX: g++-13
+          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DDMT_BUILD_DOCS=OFF
+          -DDMT_BUILD_PYTHON=OFF
+          -DDMT_BUILD_TESTING=ON
+          -DDMT_CUDA=OFF
+          -DDMT_ENABLE_NATIVE_ARCH=OFF
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Run tests under ASan/UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+
+  # =============================================================================
+  # Tier 2 — run on push to main (post-merge) and workflow_dispatch
+  # =============================================================================
+
+  # clang-tidy: compile_commands.json (DMT_CUDA=OFF) defines the TU set.
+  clang-tidy:
+    name: clang-tidy
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            cmake ninja-build clang-tidy-18 clang-tools-18 gcc-13 g++-13 \
+            python3-dev libfftw3-dev libomp-dev catch2 git
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -U pip "pybind11>=3.0"
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-clang-tidy-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-clang-tidy-
+
+      - name: Configure (compile_commands.json)
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DDMT_BUILD_DOCS=OFF
+          -DDMT_BUILD_PYTHON=ON
+          -DDMT_BUILD_TESTING=ON
+          -DDMT_CUDA=OFF
+          -DDMT_ENABLE_NATIVE_ARCH=OFF
+          -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
+
+      - name: Run clang-tidy
+        run: run-clang-tidy-18 -p build
+
   # C++ coverage (gcc-13, Debug). gcov upload to Codecov on main only.
-  # ---------------------------------------------------------------------
   cpp-coverage:
     name: C++ coverage (gcc-13, Debug)
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -211,35 +325,20 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # ---------------------------------------------------------------------
-  # Python: uv install + pytest (supported user path).
-  # ---------------------------------------------------------------------
-  python-tests:
-    name: "Python (${{ matrix.os }})"
-    runs-on: ${{ matrix.os }}
+  python-coverage:
+    name: Python coverage (ubuntu-24.04)
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Ubuntu packages
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache \
             libfftw3-dev libomp-dev git
-
-      - name: Install macOS packages
-        if: runner.os == 'macOS'
-        run: |
-          brew install fftw libomp ccache cmake ninja
-          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix fftw);$(brew --prefix libomp)" >> "$GITHUB_ENV"
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -250,19 +349,19 @@ jobs:
       - name: Cache ccache object store
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: python-${{ matrix.os }}
+          key: python-coverage-ubuntu
           max-size: 500M
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6
         with:
           path: ${{ env.CPM_SOURCE_CACHE }}
-          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          key: cpm-Linux-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
           restore-keys: |
-            cpm-${{ runner.os }}-
+            cpm-Linux-
 
       - name: Install package and test dependencies
-        run: uv sync --extra tests
+        run: uv sync --extra tests --reinstall-package dmtlib
         env:
           CMAKE_ARGS: >-
             -DDMT_CUDA=OFF
@@ -271,7 +370,7 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-      - name: Test with pytest
+      - name: Test with pytest (coverage)
         run: uv run pytest --cov=dmtlib --cov-report=xml tests/python
 
       - name: Upload Python coverage to Codecov
@@ -283,53 +382,3 @@ jobs:
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  # ---------------------------------------------------------------------
-  # ASan + UBSan (C++ tests only; no Python bindings).
-  # ---------------------------------------------------------------------
-  sanitizers:
-    name: Sanitizers (ASan+UBSan, gcc-13, Debug)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build \
-            gcc-13 g++-13 \
-            libfftw3-dev libomp-dev catch2 git
-
-      - name: Cache CPM sources
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.CPM_SOURCE_CACHE }}
-          key: cpm-sanitizers-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
-          restore-keys: |
-            cpm-sanitizers-
-
-      - name: Configure CMake
-        env:
-          CC: gcc-13
-          CXX: g++-13
-          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
-          LDFLAGS: -fsanitize=address,undefined
-        run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DDMT_BUILD_DOCS=OFF
-          -DDMT_BUILD_PYTHON=OFF
-          -DDMT_BUILD_TESTING=ON
-          -DDMT_CUDA=OFF
-          -DDMT_ENABLE_NATIVE_ARCH=OFF
-
-      - name: Build
-        run: cmake --build build -j "$(nproc)"
-
-      - name: Run tests under ASan/UBSan
-        env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu

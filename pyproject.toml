@@ -50,6 +50,7 @@ cmake.version = ">=3.18"
 cmake.build-type = "Release"
 install.strip = true            # Strip debug symbols
 build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/dmtlib"]
 
 [tool.scikit-build.cmake.define]
 DMT_BUILD_PYTHON = "ON"
