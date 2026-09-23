@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include "dmt/cuda_utils.cuh"
+#include "dmt/bb_utils.hpp"
 
 namespace dmt::utils {
 
@@ -106,8 +107,8 @@ public:
                             m_nbin, m_noverlap));
         }
         m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
-        if (kBasebandDataOrderMap.contains(in_order)) {
-            m_order = kBasebandDataOrderMap.at(in_order);
+        if (const auto order = bb_utils::find_baseband_data_order(in_order)) {
+            m_order = *order;
         } else {
             throw std::invalid_argument(
                 std::format("Invalid input order: {}", in_order));

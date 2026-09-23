@@ -4,9 +4,11 @@
 #include <format>
 #include <stdexcept>
 #include <string_view>
-#include <unordered_map>
 
 #include "spdlog/spdlog.h"
+
+#include "dmt/bb_utils.hpp"
+#include "dmt/omp_helper.hpp"
 
 namespace dmt::utils {
 
@@ -31,9 +33,9 @@ public:
                 std::format("Invalid nbin and noverlap values: {} and {}",
                             m_nbin, m_noverlap));
         }
-        m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
-        if (kBasebandDataOrderMap.contains(in_order)) {
-            m_order = kBasebandDataOrderMap.at(in_order);
+        m_nsamp = m_nfft * (m_nbin - (2 * m_noverlap));
+        if (const auto order = bb_utils::find_baseband_data_order(in_order)) {
+            m_order = *order;
         } else {
             throw std::invalid_argument(
                 std::format("Invalid input order: {}", in_order));
@@ -183,9 +185,9 @@ private:
                        ComplexType* __restrict__ data_p2,
                        SizeType ifft,
                        SizeType isub) const {
-        const auto out_offset = (ifft * m_nsub + isub) * m_nbin;
+        const auto out_offset = ((ifft * m_nsub) + isub) * m_nbin;
         const auto start_sample =
-            static_cast<IndexType>((m_nbin - 2 * m_noverlap) * ifft) -
+            static_cast<IndexType>((m_nbin - (2 * m_noverlap)) * ifft) -
             static_cast<IndexType>(m_noverlap);
         const auto bin_start =
             static_cast<SizeType>(start_sample < 0 ? -start_sample : 0);

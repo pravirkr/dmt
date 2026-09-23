@@ -12,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "dmt/common/types.hpp"
+#include "dmt/omp_helper.hpp"
 
 namespace dmt::algorithms {
 

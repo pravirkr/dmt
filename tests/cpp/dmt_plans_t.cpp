@@ -209,7 +209,7 @@ TEST_CASE("FDMTPlan dt_min and dt_step top-down pruning", "[dmt_plans][cpu]") {
         CHECK(dt_grid.size() == expected_ndms);
         CHECK(std::cmp_equal(dt_grid.front(), dt_min));
         for (SizeType i = 0; i < dt_grid.size(); ++i) {
-            CHECK(dt_grid[i] == (dt_min + (i * dt_step)));
+            CHECK(std::cmp_equal(dt_grid[i], dt_min + (i * dt_step)));
         }
     }
 

@@ -21,6 +21,7 @@
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/omp_helper.hpp"
 
 namespace dmt::algorithms {
 

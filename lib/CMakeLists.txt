@@ -79,13 +79,9 @@ else()
   target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
 endif()
 
-# Find and link OpenMP if available
+# OpenMP is internal to libdmt
 if(OpenMP_CXX_FOUND)
-  if(BUILD_SHARED_LIBS)
-    target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
-  else()
-    target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX)
-  endif()
+  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
   target_compile_definitions(${DMT_LIBRARY_NAME} PRIVATE DMT_ENABLE_OPENMP)
 endif()
 

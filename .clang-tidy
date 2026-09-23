@@ -40,7 +40,10 @@ Checks: >
 
 WarningsAsErrors: ""
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
-HeaderFilterRegex: ".*"
+# run-clang-tidy uses HeaderFilterRegex as the default -header-filter.
+HeaderFilterRegex: ".*/(include|lib|src|tests)/.*"
+# Suppress diagnostics from vendored headers (Catch2, CPM trees, build dir).
+ExcludeHeaderFilterRegex: ".*/(\\.cache|/_deps/|/build/|catch2/).*"
 FormatStyle: "file"
 CheckOptions:
   readability-identifier-naming.ClassCase: "CamelCase"

@@ -42,6 +42,9 @@ target_link_libraries(
   ${TARGET_BENCHMARKS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
                                ${DMT_COMPILE_OPTIONS}
 )
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${TARGET_BENCHMARKS} PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${DMT_CUDA_OPTIONS})
@@ -72,3 +75,6 @@ target_link_libraries(
   ${TARGET_BENCHMARKS_MEM} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark
                                    ${DMT_COMPILE_OPTIONS}
 )
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${TARGET_BENCHMARKS_MEM} PRIVATE OpenMP::OpenMP_CXX)
+endif()

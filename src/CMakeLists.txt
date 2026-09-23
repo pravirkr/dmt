@@ -19,6 +19,9 @@ target_include_directories(
 target_link_libraries(
   ${DMT_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
 )
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${DMT_PYMODULE_NAME} PRIVATE OpenMP::OpenMP_CXX)
+endif()
 dmt_enable_coverage(${DMT_PYMODULE_NAME})
 install(TARGETS ${DMT_PYMODULE_NAME} DESTINATION ${DMT_PYTHON_LIBRARY_NAME})
 
@@ -39,6 +42,9 @@ if(CMAKE_CUDA_COMPILER)
     PUBLIC ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
     PRIVATE ${DMT_CUDA_OPTIONS}
   )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(${DMT_PYGPUMODULE_NAME} PRIVATE OpenMP::OpenMP_CXX)
+  endif()
   dmt_enable_coverage(${DMT_PYGPUMODULE_NAME})
   install(TARGETS ${DMT_PYGPUMODULE_NAME} DESTINATION ${DMT_PYTHON_LIBRARY_NAME})
 endif()

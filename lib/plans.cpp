@@ -16,6 +16,7 @@
 #include <spdlog/fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
+#include "dmt/bb_utils.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 
@@ -250,8 +251,9 @@ public:
             for (SizeType c = 0; c < m_nchans; ++c) {
                 const auto& dt_grid = m_container.grids[0][c].dt_grid;
                 if (!dt_grid.empty()) {
-                    lvl0_ops += (dt_grid.size() - 1) +
-                                ((dt_grid.front() != 0) ? SizeType{2} : SizeType{0});
+                    lvl0_ops +=
+                        (dt_grid.size() - 1) +
+                        ((dt_grid.front() != 0) ? SizeType{2} : SizeType{0});
                 }
             }
             ops_by_iter[0] = lvl0_ops;
@@ -261,11 +263,11 @@ public:
             const auto n_coords = m_container.coordinates[l].size();
             const auto n_sum    = m_container.coordinates_sum[l].size();
             const auto n_copy   = m_container.coordinates_copy[l].size();
-            total_tree_nodes   += n_coords;
-            sum_additions      += n_sum;
-            copy_nodes         += n_copy;
-            nodes_by_iter[l]    = n_coords;
-            ops_by_iter[l]      = n_sum;
+            total_tree_nodes += n_coords;
+            sum_additions += n_sum;
+            copy_nodes += n_copy;
+            nodes_by_iter[l] = n_coords;
+            ops_by_iter[l]   = n_sum;
         }
 
         const float ops_ratio = sum_additions > 0
@@ -274,15 +276,15 @@ public:
                                     : 0.0F;
 
         return FDMTComplexity{
-            .n_dt                    = n_dt,
-            .n_chans                 = n_chans,
-            .brute_force_ops         = brute_force_ops,
-            .total_tree_nodes        = total_tree_nodes,
-            .sum_additions           = sum_additions,
-            .copy_nodes              = copy_nodes,
-            .ops_ratio               = ops_ratio,
-            .ops_by_iter             = std::move(ops_by_iter),
-            .nodes_by_iter           = std::move(nodes_by_iter),
+            .n_dt             = n_dt,
+            .n_chans          = n_chans,
+            .brute_force_ops  = brute_force_ops,
+            .total_tree_nodes = total_tree_nodes,
+            .sum_additions    = sum_additions,
+            .copy_nodes       = copy_nodes,
+            .ops_ratio        = ops_ratio,
+            .ops_by_iter      = std::move(ops_by_iter),
+            .nodes_by_iter    = std::move(nodes_by_iter),
         };
     }
     void print_complexity_summary() const {
@@ -594,13 +596,13 @@ public:
         const auto n_fft  = get_fft_size();
         const auto max_s  = get_max_shift();
         std::vector<ComplexType> phasors((max_s + 1) * n_bins);
-        const float two_pi_over_N = static_cast<float>(2.0 * std::numbers::pi) /
+        const float two_pi_over_n = static_cast<float>(2.0 * std::numbers::pi) /
                                     static_cast<float>(n_fft);
         for (SizeType s = 0; s <= max_s; ++s) {
-            const float s_float = static_cast<float>(s);
+            const auto s_float = static_cast<float>(s);
             for (SizeType k = 0; k < n_bins; ++k) {
                 const float angle =
-                    -two_pi_over_N * s_float * static_cast<float>(k);
+                    -two_pi_over_n * s_float * static_cast<float>(k);
                 phasors[(s * n_bins) + k] =
                     ComplexType(std::cos(angle), std::sin(angle));
             }
@@ -1121,7 +1123,7 @@ private:
                         tail_n      = coords_prev[i_coord_head].nsamps;
                         head_offset = coords_prev[i_coord_tail]
                                           .buf_offset; // shifted by |dt_head|
-                        head_n = coords_prev[i_coord_tail].nsamps;
+                        head_n      = coords_prev[i_coord_tail].nsamps;
                     }
 
                     // "full"/"roll" have no cross-block history mechanism,
@@ -1282,9 +1284,9 @@ public:
             m_tsamp         = other.m_tsamp;
             m_dt_max        = other.m_dt_max;
             m_dt_min        = other.m_dt_min;
-            m_fdmt_plan     = other.m_fdmt_plan
-                                  ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
-                                  : nullptr;
+            m_fdmt_plan = other.m_fdmt_plan
+                              ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
+                              : nullptr;
         }
         return *this;
     }
@@ -1476,12 +1478,10 @@ private:
             throw std::invalid_argument(
                 "dm_max must be greater than or equal to dm_min");
         }
-        if (!kBasebandDataOrderMap.contains(m_data_order)) {
-            auto kv = std::ranges::views::keys(kBasebandDataOrderMap);
-            std::vector<std::string_view> keys(kv.begin(), kv.end());
-            throw std::invalid_argument(
-                fmt::format("Invalid data order: {}. Supported values are: {}",
-                            m_data_order, fmt::join(keys, ", ")));
+        if (!bb_utils::find_baseband_data_order(m_data_order)) {
+            throw std::invalid_argument(std::format(
+                "Invalid data order: {}. Supported values are: {}",
+                m_data_order, bb_utils::supported_baseband_data_orders()));
         }
     }
 
@@ -1569,10 +1569,10 @@ public:
          float tsamp,
          float dm_max,
          float dm_step,
-         float dm_min                        = 0.0F,
-         bool verbose                        = false,
-         SizeType nbits                      = 32,
-         std::span<const uint8_t> kill_mask  = {})
+         float dm_min                       = 0.0F,
+         bool verbose                       = false,
+         SizeType nbits                     = 32,
+         std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -1596,9 +1596,9 @@ public:
          SizeType nchans,
          float tsamp,
          std::span<const float> dm_arr,
-         bool verbose                        = false,
-         SizeType nbits                      = 32,
-         std::span<const uint8_t> kill_mask  = {})
+         bool verbose                       = false,
+         SizeType nbits                     = 32,
+         std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -1621,16 +1621,21 @@ public:
          SizeType nchans,
          float tsamp,
          const LevinConfig& levin,
-         bool verbose                        = false,
-         SizeType nbits                      = 32,
-         std::span<const uint8_t> kill_mask  = {})
+         bool verbose                       = false,
+         SizeType nbits                     = 32,
+         std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
           m_tsamp(tsamp),
-          m_dm_arr(utils::generate_levin_dm_grid(levin.dm_start, levin.dm_end, tsamp,
-                                                 levin.pulse_width, f_min, f_max,
-                                                 nchans, levin.tol)),
+          m_dm_arr(utils::generate_levin_dm_grid(levin.dm_start,
+                                                 levin.dm_end,
+                                                 tsamp,
+                                                 levin.pulse_width,
+                                                 f_min,
+                                                 f_max,
+                                                 nchans,
+                                                 levin.tol)),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
         if (verbose) {
@@ -1661,7 +1666,8 @@ public:
     [[nodiscard]] std::vector<float> get_dm_grid() const noexcept {
         return m_container.dm_arr;
     }
-    [[nodiscard]] std::vector<float> get_fractional_delay_table() const noexcept {
+    [[nodiscard]] std::vector<float>
+    get_fractional_delay_table() const noexcept {
         return m_container.fractional_delay_table;
     }
     SizeType get_nbits() const noexcept { return m_nbits; }
@@ -1670,9 +1676,9 @@ public:
     }
     void set_kill_mask(std::span<const uint8_t> kill_mask) {
         if (kill_mask.size() != m_nchans) {
-            throw std::invalid_argument(std::format(
-                "DDMT: kill_mask size={} must equal nchans={}",
-                kill_mask.size(), m_nchans));
+            throw std::invalid_argument(
+                std::format("DDMT: kill_mask size={} must equal nchans={}",
+                            kill_mask.size(), m_nchans));
         }
         m_container.kill_mask.assign(kill_mask.begin(), kill_mask.end());
     }
@@ -1682,7 +1688,8 @@ public:
     [[nodiscard]] float get_effective_sigma() const noexcept {
         return std::sqrt(get_effective_variance());
     }
-    [[nodiscard]] std::vector<float> get_effective_variance_grid() const noexcept {
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid() const noexcept {
         return std::vector<float>(m_dm_arr.size(), get_effective_variance());
     }
     [[nodiscard]] std::vector<float> get_effective_sigma_grid() const noexcept {
@@ -1701,8 +1708,8 @@ private:
     DDMTPlanContainer m_container;
 
     [[nodiscard]] SizeType count_active_chans() const noexcept {
-        return static_cast<SizeType>(std::ranges::count(
-            m_container.kill_mask, static_cast<uint8_t>(1)));
+        return static_cast<SizeType>(
+            std::ranges::count(m_container.kill_mask, static_cast<uint8_t>(1)));
     }
 
     void validate_inputs() const {
@@ -1724,9 +1731,9 @@ private:
                 "DDMT: nbits={} must be one of 1, 2, 4, 8, 16, 32", m_nbits));
         }
         if (!m_kill_mask.empty() && m_kill_mask.size() != m_nchans) {
-            throw std::invalid_argument(std::format(
-                "DDMT: kill_mask size={} must equal nchans={}",
-                m_kill_mask.size(), m_nchans));
+            throw std::invalid_argument(
+                std::format("DDMT: kill_mask size={} must equal nchans={}",
+                            m_kill_mask.size(), m_nchans));
         }
         if (m_nbits < 32) {
             // Worst case (no kill_mask applied yet): every channel at the
@@ -1735,8 +1742,8 @@ private:
             // overflow.
             const auto max_val = static_cast<double>((1U << m_nbits) - 1U);
             const auto max_sum = max_val * static_cast<double>(m_nchans);
-            if (max_sum > static_cast<double>(
-                              std::numeric_limits<int32_t>::max())) {
+            if (max_sum >
+                static_cast<double>(std::numeric_limits<int32_t>::max())) {
                 throw std::invalid_argument(std::format(
                     "DDMT: nbits={} with nchans={} can overflow the "
                     "int32_t accumulator (worst-case sum {})",
@@ -1745,17 +1752,18 @@ private:
         }
     }
     void configure_plan() {
-        m_container.nchans = m_nchans;
-        m_container.dm_arr = m_dm_arr;
-        m_container.nbits  = m_nbits;
-        m_container.kill_mask =
-            m_kill_mask.empty() ? std::vector<uint8_t>(m_nchans, 1)
-                                : m_kill_mask;
-        const auto df      = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
+        m_container.nchans    = m_nchans;
+        m_container.dm_arr    = m_dm_arr;
+        m_container.nbits     = m_nbits;
+        m_container.kill_mask = m_kill_mask.empty()
+                                    ? std::vector<uint8_t>(m_nchans, 1)
+                                    : m_kill_mask;
+        const auto df = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
         m_container.delay_table = utils::generate_delay_table(
             m_dm_arr, m_nchans, m_f_min, df, m_tsamp);
-        m_container.fractional_delay_table = utils::generate_fractional_delay_table(
-            m_nchans, m_f_min, df, m_tsamp);
+        m_container.fractional_delay_table =
+            utils::generate_fractional_delay_table(m_nchans, m_f_min, df,
+                                                   m_tsamp);
     }
 
     static std::vector<float>
@@ -1855,8 +1863,7 @@ SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
 const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
     return m_impl->get_container();
 }
-FDMTComplexity
-FDMTPlan::get_complexity(bool use_box_smearing) const noexcept {
+FDMTComplexity FDMTPlan::get_complexity(bool use_box_smearing) const noexcept {
     return m_impl->get_complexity(use_box_smearing);
 }
 void FDMTPlan::print_complexity_summary() const {
@@ -2085,8 +2092,15 @@ DDMTPlan::DDMTPlan(float f_min,
                    bool verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
-    : m_impl(std::make_unique<Impl>(f_min, f_max, nchans, tsamp, dm_max,
-                                    dm_step, dm_min, verbose, nbits,
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    tsamp,
+                                    dm_max,
+                                    dm_step,
+                                    dm_min,
+                                    verbose,
+                                    nbits,
                                     kill_mask)) {}
 
 DDMTPlan::DDMTPlan(float f_min,
@@ -2097,8 +2111,8 @@ DDMTPlan::DDMTPlan(float f_min,
                    bool verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
-    : m_impl(std::make_unique<Impl>(f_min, f_max, nchans, tsamp, dm_arr,
-                                    verbose, nbits, kill_mask)) {}
+    : m_impl(std::make_unique<Impl>(
+          f_min, f_max, nchans, tsamp, dm_arr, verbose, nbits, kill_mask)) {}
 
 DDMTPlan::DDMTPlan(float f_min,
                    float f_max,
@@ -2108,8 +2122,8 @@ DDMTPlan::DDMTPlan(float f_min,
                    bool verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
-    : m_impl(std::make_unique<Impl>(f_min, f_max, nchans, tsamp, levin,
-                                    verbose, nbits, kill_mask)) {}
+    : m_impl(std::make_unique<Impl>(
+          f_min, f_max, nchans, tsamp, levin, verbose, nbits, kill_mask)) {}
 
 DDMTPlan::~DDMTPlan()                              = default;
 DDMTPlan::DDMTPlan(DDMTPlan&&) noexcept            = default;
@@ -2158,16 +2172,15 @@ std::vector<float> DDMTPlan::get_effective_variance_grid() const noexcept {
 std::vector<float> DDMTPlan::get_effective_sigma_grid() const noexcept {
     return m_impl->get_effective_sigma_grid();
 }
-std::vector<float>
-DDMTPlan::generate_levin_dm_grid(float dm_start,
-                                 float dm_end,
-                                 float tsamp,
-                                 float pulse_width,
-                                 float f_min,
-                                 float f_max,
-                                 SizeType nchans,
-                                 float tol) {
+std::vector<float> DDMTPlan::generate_levin_dm_grid(float dm_start,
+                                                    float dm_end,
+                                                    float tsamp,
+                                                    float pulse_width,
+                                                    float f_min,
+                                                    float f_max,
+                                                    SizeType nchans,
+                                                    float tol) {
     return utils::generate_levin_dm_grid(dm_start, dm_end, tsamp, pulse_width,
-                                        f_min, f_max, nchans, tol);
+                                         f_min, f_max, nchans, tol);
 }
 } // namespace dmt::plans

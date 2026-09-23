@@ -13,7 +13,6 @@ namespace dmt {
 
 TEST_CASE("umbrella header dmt/dmt.hpp is self-contained", "[umbrella][cpu]") {
     CHECK(kDispConst > 0.0F);
-    CHECK(set_dmt_openmp_threads(1) == 1);
 }
 
 TEST_CASE("generate_pure_frb injects energy on the dispersed track",
@@ -42,11 +41,10 @@ TEST_CASE("generate_pure_frb injects energy on the dispersed track",
 
 TEST_CASE("generate_pure_frb with positive dt smears across channels",
           "[simulate][cpu]") {
-    const SizeType nchans = 8;
-    const SizeType nsamps = 64;
-    const auto [waterfall, n_disp] =
-        utils::generate_pure_frb(nchans, nsamps, 1000.0F, 1500.0F, 12, 40.0F,
-                                 1.0F);
+    const SizeType nchans          = 8;
+    const SizeType nsamps          = 64;
+    const auto [waterfall, n_disp] = utils::generate_pure_frb(
+        nchans, nsamps, 1000.0F, 1500.0F, 12, 40.0F, 1.0F);
     CHECK(n_disp > nchans);
     CHECK(std::ranges::any_of(waterfall, [](float v) { return v > 0.0F; }));
 }

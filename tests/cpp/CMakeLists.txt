@@ -48,6 +48,9 @@ target_link_libraries(
   ${TARGET_TESTS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} Catch2::Catch2WithMain
                           ${DMT_COMPILE_OPTIONS} spdlog::spdlog_header_only
 )
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${TARGET_TESTS} PRIVATE OpenMP::OpenMP_CXX)
+endif()
 dmt_enable_coverage(${TARGET_TESTS})
 
 if(CMAKE_CUDA_COMPILER)

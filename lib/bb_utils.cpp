@@ -12,6 +12,36 @@
 
 namespace dmt::bb_utils {
 
+std::optional<BasebandDataOrder>
+find_baseband_data_order(std::string_view name) noexcept {
+    for (const auto& [key, order] : kBasebandDataOrders) {
+        if (key == name) {
+            return order;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string supported_baseband_data_orders() noexcept {
+    std::string supported_orders;
+    for (const auto& [key, _] : kBasebandDataOrders) {
+        if (!supported_orders.empty()) {
+            supported_orders += ", ";
+        }
+        supported_orders += key;
+    }
+    return supported_orders;
+}
+
+BasebandDataOrder parse_baseband_data_order(std::string_view name) {
+    if (const auto order = find_baseband_data_order(name)) {
+        return *order;
+    }
+    throw std::invalid_argument(
+        std::format("Invalid data order: {}. Supported values are: {}", name,
+                    supported_baseband_data_orders()));
+}
+
 void compute_chirp(std::span<const float> dm_grid,
                    std::span<ComplexType> chirp_table,
                    float fcenter,
@@ -53,7 +83,7 @@ void compute_chirp(std::span<const float> dm_grid,
                 const double freq_chan =
                     freqs_sub[isub] +
                     ((static_cast<double>(ichan) -
-                      static_cast<double>(nchan) / 2.0 + 0.5) *
+                      (static_cast<double>(nchan) / 2.0) + 0.5) *
                      bw_chan);
                 for (SizeType ibin = 0; ibin < mbin; ++ibin) {
                     const double bin_freq    = bin_freqs[ibin];
