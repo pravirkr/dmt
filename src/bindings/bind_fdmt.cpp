@@ -1,16 +1,19 @@
 #include "bindings/bind.hpp"
 
 #include <algorithm>
+#include <array>
 #include <format>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include <pybind11/numpy.h>
+#include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -19,13 +22,149 @@
 
 namespace dmt {
 using algorithms::FDMTCPU;
+using algorithms::FDMTExecConfig;
 using algorithms::FDMTFFTCPU;
+using algorithms::FDMTSchedule;
+using algorithms::FDMTStreamingStores;
 using plans::FDMTPlan;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
+namespace {
+
+// Runs `run(dmt_span)` into a fresh buffer and returns the transform as
+// (ndms, nsamps) when `batched` is false (nbeams must be 1), else
+// (nbeams, ndms, nsamps). `expected_size` is the full beam-major input size,
+// used only for the error message.
+template <typename Run>
+py::object fdmt_execute_to_array(const FDMTCPU& fdmt,
+                                 bool batched,
+                                 SizeType input_size,
+                                 SizeType expected_size,
+                                 Run&& run) {
+    const auto nbeams   = fdmt.get_nbeams();
+    const auto& plan    = fdmt.get_plan();
+    const auto& plan_c  = plan.get_container();
+    const auto niters   = plan.get_niters();
+    const auto ncoords  = plan_c.state_shape[niters].ncoords;
+    const auto nsamps   = plan_c.state_shape[niters].nsamps;
+    const auto dmt_size = plan.get_dmt_size();
+    const auto buf_size = plan.get_buffer_size();
+    if (!batched) {
+        if (nbeams != 1) {
+            throw std::invalid_argument(std::format(
+                "FDMTCPU: Invalid size of waterfall. Expected {}, got {}",
+                expected_size, input_size));
+        }
+        py::array_t<float, py::array::c_style> dmt_buf(buf_size);
+        run(std::span<float>(dmt_buf.mutable_data(), dmt_buf.size()));
+        return py::array_t<float>({ncoords, nsamps},
+                                  {nsamps * sizeof(float), sizeof(float)},
+                                  dmt_buf.data(), dmt_buf);
+    }
+    std::vector<float> dmt_buf(nbeams * buf_size, 0.0F);
+    run(std::span<float>(dmt_buf.data(), dmt_buf.size()));
+    py::array_t<float, py::array::c_style> result({nbeams, ncoords, nsamps});
+    auto* res_ptr = result.mutable_data();
+    for (SizeType b = 0; b < nbeams; ++b) {
+        std::copy_n(dmt_buf.data() + (b * buf_size), dmt_size,
+                    res_ptr + (b * dmt_size));
+    }
+    return result;
+}
+
+} // namespace
+
 void bind_fdmt(py::module_& mod) {
+    py::enum_<FDMTSchedule>(mod, "FDMTSchedule", R"doc(
+        Tree-merge execution order for :class:`FDMTCPU` (see
+        :class:`FDMTExecConfig`). Both produce bit-identical output.
+
+        COORD
+            One full-row merge per output coordinate (original schedule).
+        TILED
+            Cache-blocked: (coordinate chunk, time tile) work items so shared
+            input tiles are reused from cache.
+        )doc")
+        .value("COORD", FDMTSchedule::kCoord)
+        .value("TILED", FDMTSchedule::kTiled);
+
+    py::enum_<FDMTStreamingStores>(mod, "FDMTStreamingStores", R"doc(
+        Non-temporal store policy for float tree merges (x86 AVX2/AVX-512
+        builds only; a no-op elsewhere). Output is unchanged.
+
+        OFF
+            Ordinary cached stores (default).
+        AUTO
+            Stream only levels whose output exceeds the last-level cache.
+        ALWAYS
+            Stream every float level (benchmarking / testing).
+        )doc")
+        .value("OFF", FDMTStreamingStores::kOff)
+        .value("AUTO", FDMTStreamingStores::kAuto)
+        .value("ALWAYS", FDMTStreamingStores::kAlways);
+
+    py::class_<FDMTExecConfig>(mod, "FDMTExecConfig", R"doc(
+        Runtime execution switches for :class:`FDMTCPU`. None of them change
+        the numerical result.
+
+        Parameters
+        ----------
+        schedule : FDMTSchedule, optional
+            Tree-merge schedule (default ``FDMTSchedule.COORD``).
+        tile_nsamps : int, optional
+            ``TILED`` only: samples per time tile; 0 = auto from L2 size.
+        tile_ndt : int, optional
+            ``TILED`` only: coordinates per chunk; 0 = auto (4).
+        int_tree : bool, optional
+            Packed input only: store tree levels as uint8/uint16 where the
+            exact value bound allows (default False).
+        streaming_stores : FDMTStreamingStores, optional
+            Non-temporal store policy for float merges (default OFF).
+        fuse_levels : int, optional
+            :meth:`FDMTCPU.execute` only: fuse level-0 initialisation with
+            the first ``fuse_levels`` tree merges in cache-resident channel
+            groups (0 = original path, default; ``FDMTExecConfig.AUTO_FUSE``
+            picks the depth from the cache size). Bit-identical output.
+        )doc")
+        .def(py::init([](FDMTSchedule schedule, SizeType tile_nsamps,
+                         SizeType tile_ndt, bool int_tree,
+                         FDMTStreamingStores streaming_stores,
+                         SizeType fuse_levels) {
+                 return FDMTExecConfig{.schedule         = schedule,
+                                       .tile_nsamps      = tile_nsamps,
+                                       .tile_ndt         = tile_ndt,
+                                       .int_tree         = int_tree,
+                                       .streaming_stores = streaming_stores,
+                                       .fuse_levels      = fuse_levels};
+             }),
+             "schedule"_a = FDMTSchedule::kCoord, "tile_nsamps"_a = 0,
+             "tile_ndt"_a = 0, "int_tree"_a = false,
+             "streaming_stores"_a = FDMTStreamingStores::kOff,
+             "fuse_levels"_a      = 0)
+        .def_readwrite("schedule", &FDMTExecConfig::schedule)
+        .def_readwrite("tile_nsamps", &FDMTExecConfig::tile_nsamps)
+        .def_readwrite("tile_ndt", &FDMTExecConfig::tile_ndt)
+        .def_readwrite("int_tree", &FDMTExecConfig::int_tree)
+        .def_readwrite("streaming_stores", &FDMTExecConfig::streaming_stores)
+        .def_readwrite("fuse_levels", &FDMTExecConfig::fuse_levels)
+        .def_readonly_static("AUTO_FUSE", &FDMTExecConfig::kAutoFuse)
+        .def(py::self == py::self) // NOLINT
+        .def("__repr__", [](const FDMTExecConfig& c) {
+            constexpr std::array<const char*, 3> kStreaming = {"OFF", "AUTO",
+                                                               "ALWAYS"};
+            return std::format(
+                "FDMTExecConfig(schedule={}, tile_nsamps={}, tile_ndt={}, "
+                "int_tree={}, streaming_stores={}, fuse_levels={})",
+                c.schedule == FDMTSchedule::kTiled ? "TILED" : "COORD",
+                c.tile_nsamps, c.tile_ndt, c.int_tree ? "True" : "False",
+                kStreaming.at(static_cast<std::size_t>(c.streaming_stores)),
+                c.fuse_levels == FDMTExecConfig::kAutoFuse
+                    ? std::string("AUTO_FUSE")
+                    : std::to_string(c.fuse_levels));
+        });
+
     py::class_<FDMTCPU>(mod, "FDMTCPU", py::dynamic_attr(),
                         R"doc(
         Incoherent Fast Dispersion Measure Transform on the CPU.
@@ -97,6 +236,18 @@ void bind_fdmt(py::module_& mod) {
         .def_property_readonly(
             "plan", &FDMTCPU::get_plan,
             "Get the FDMTPlan object containing transform details.")
+        .def_property(
+            "exec_config",
+            [](const FDMTCPU& fdmt) { return fdmt.get_exec_config(); },
+            &FDMTCPU::set_exec_config,
+            "Runtime execution switches (FDMTExecConfig). Assign a new "
+            "config to change them; mutating the returned copy has no effect.")
+        .def_property_readonly(
+            "effective_tile_nsamps", &FDMTCPU::get_effective_tile_nsamps,
+            "Tile size (samples) actually used by FDMTSchedule.TILED.")
+        .def_property_readonly(
+            "effective_fuse_levels", &FDMTCPU::get_effective_fuse_levels,
+            "Fusion depth execute() actually uses (0 = unfused).")
         .def_property_readonly(
             "nbeams", &FDMTCPU::get_nbeams,
             "Number of beams this instance processes together (see the "
@@ -198,62 +349,81 @@ void bind_fdmt(py::module_& mod) {
         // output
         .def(
             "execute",
-            [](FDMTCPU& fdmt,
-               const py::array_t<float, py::array::c_style>& waterfall)
-                -> py::object {
-                const auto nbeams   = fdmt.get_nbeams();
-                const auto& plan    = fdmt.get_plan();
-                const auto& plan_c  = plan.get_container();
-                const auto niters   = plan.get_niters();
-                const auto ncoords  = plan_c.state_shape[niters].ncoords;
-                const auto nsamps   = plan_c.state_shape[niters].nsamps;
-                const auto dmt_size = plan.get_dmt_size();
-                const auto buf_size = plan.get_buffer_size();
-
-                if (waterfall.ndim() == 2) {
-                    if (nbeams != 1) {
-                        throw std::invalid_argument(std::format(
-                            "FDMTCPU: Invalid size of waterfall. Expected {}, "
-                            "got {}",
-                            nbeams * plan.get_nchans() * plan.get_nsamps(),
-                            waterfall.size()));
-                    }
-                    py::array_t<float, py::array::c_style> dmt_buf(buf_size);
-                    fdmt.execute(std::span<const float>(waterfall.data(),
-                                                        waterfall.size()),
-                                 std::span<float>(dmt_buf.mutable_data(),
-                                                  dmt_buf.size()));
-                    return py::array_t<float>(
-                        {ncoords, nsamps},
-                        {nsamps * sizeof(float), sizeof(float)}, dmt_buf.data(),
-                        dmt_buf);
+            [](FDMTCPU& fdmt, const py::array& waterfall_obj,
+               SizeType nbits) -> py::object {
+                if (waterfall_obj.dtype().kind() != 'u' ||
+                    waterfall_obj.itemsize() != 1) {
+                    throw py::type_error(
+                        "FDMTCPU.execute: nbits given, so waterfall must be a "
+                        "packed uint8 array");
                 }
-                if (waterfall.ndim() == 3) {
-                    if (static_cast<SizeType>(waterfall.shape(0)) != nbeams) {
-                        throw std::invalid_argument(std::format(
-                            "FDMTCPU: Invalid size of waterfall. Expected {}, "
-                            "got {}",
-                            nbeams * plan.get_nchans() * plan.get_nsamps(),
-                            waterfall.size()));
-                    }
-                    std::vector<float> dmt_buf(nbeams * buf_size, 0.0F);
-                    fdmt.execute(
-                        std::span<const float>(waterfall.data(),
-                                               waterfall.size()),
-                        std::span<float>(dmt_buf.data(), dmt_buf.size()));
-
-                    py::array_t<float, py::array::c_style> result(
-                        {nbeams, ncoords, nsamps});
-                    auto* res_ptr = result.mutable_data();
-                    for (SizeType b = 0; b < nbeams; ++b) {
-                        std::copy_n(dmt_buf.data() + (b * buf_size), dmt_size,
-                                    res_ptr + (b * dmt_size));
-                    }
-                    return result;
+                const auto packed =
+                    py::array_t<uint8_t, py::array::c_style>::ensure(
+                        waterfall_obj);
+                if (!packed || (packed.ndim() != 2 && packed.ndim() != 3)) {
+                    throw std::runtime_error(
+                        "Packed waterfall must be a 2D (nchans, row_bytes) or "
+                        "3D (nbeams, nchans, row_bytes) uint8 NumPy array.");
                 }
-                throw std::runtime_error("Input waterfall must be a 2D "
-                                         "(nchans, nsamps) or 3D (nbeams, "
-                                         "nchans, nsamps) NumPy array.");
+                return fdmt_execute_to_array(
+                    fdmt, packed.ndim() == 3,
+                    static_cast<SizeType>(packed.size()),
+                    fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
+                        (((fdmt.get_plan().get_nsamps() * nbits) + 7) / 8),
+                    [&](std::span<float> dmt) {
+                        fdmt.execute(std::span<const uint8_t>(packed.data(),
+                                                              packed.size()),
+                                     nbits, dmt);
+                    });
+            },
+            py::arg("waterfall_packed"), py::arg("nbits"),
+            R"doc(
+            Run the FDMT transform on packed low-bit integer input.
+
+            Parameters
+            ----------
+            waterfall_packed : numpy.ndarray, dtype uint8
+                C-contiguous ``(nchans, row_bytes)`` or ``(nbeams, nchans,
+                row_bytes)``; each row holds ``nsamps`` unsigned samples of
+                ``nbits`` bits, LSB-first for ``nbits < 8`` (same convention
+                as :class:`DDMTCPU`), ``row_bytes = ceil(nsamps*nbits/8)``.
+            nbits : int
+                1, 2, 4, 8 or 16.
+
+            Returns
+            -------
+            numpy.ndarray
+                float32, identical to :meth:`execute` on the same values.
+            )doc")
+        .def(
+            "execute",
+            [](FDMTCPU& fdmt, const py::array& waterfall_obj) -> py::object {
+                if (waterfall_obj.dtype().kind() == 'u' &&
+                    waterfall_obj.itemsize() == 1) {
+                    throw py::type_error(
+                        "FDMTCPU.execute: got a uint8 waterfall; pass nbits "
+                        "for packed input (execute(waterfall_packed, nbits)) "
+                        "or convert to float32 explicitly");
+                }
+                const auto waterfall = py::array_t<
+                    float, py::array::c_style |
+                               py::array::forcecast>::ensure(waterfall_obj);
+                if (!waterfall ||
+                    (waterfall.ndim() != 2 && waterfall.ndim() != 3)) {
+                    throw std::runtime_error("Input waterfall must be a 2D "
+                                             "(nchans, nsamps) or 3D (nbeams, "
+                                             "nchans, nsamps) NumPy array.");
+                }
+                return fdmt_execute_to_array(
+                    fdmt, waterfall.ndim() == 3,
+                    static_cast<SizeType>(waterfall.size()),
+                    fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
+                        fdmt.get_plan().get_nsamps(),
+                    [&](std::span<float> dmt) {
+                        fdmt.execute(std::span<const float>(waterfall.data(),
+                                                            waterfall.size()),
+                                     dmt);
+                    });
             },
             py::arg("waterfall"),
             R"doc(
@@ -276,6 +446,36 @@ void bind_fdmt(py::module_& mod) {
             In ``valid`` mode, successive calls keep inter-block history.
             Call :meth:`reset_history` to start a new stream.
             )doc")
+        .def(
+            "reset",
+            [](py::object self,
+               const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
+               SizeType nbits,
+               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+                auto& fdmt = self.cast<FDMTCPU&>();
+                if (waterfall_packed.ndim() != 2) {
+                    throw std::runtime_error(
+                        "Packed waterfall must be a 2D uint8 NumPy array "
+                        "(nchans, row_bytes).");
+                }
+                py::array_t<float, py::array::c_style> dmt;
+                if (dmt_opt.has_value()) {
+                    dmt = *dmt_opt;
+                } else {
+                    dmt = py::array_t<float, py::array::c_style>(
+                        fdmt.get_plan().get_buffer_size());
+                }
+                self.attr("_waterfall_buffer") = waterfall_packed;
+                self.attr("_dmt_buffer")       = dmt;
+                fdmt.reset(std::span<const uint8_t>(waterfall_packed.data(),
+                                                    waterfall_packed.size()),
+                           nbits,
+                           std::span<float>(dmt.mutable_data(), dmt.size()));
+            },
+            py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
+            py::arg("dmt") = py::none(),
+            "Reset and initialize the stepper with a packed low-bit waterfall "
+            "(see execute(waterfall_packed, nbits)) and optional dmt buffer.")
         .def(
             "reset",
             [](py::object self,
@@ -359,31 +559,41 @@ void bind_fdmt(py::module_& mod) {
              Size (in float32 elements) of this instance's streaming history state.
              Zero for "full" or "roll" modes.
              )doc")
-        .def("save_history", [](const FDMTCPU& fdmt) -> py::object {
-            const auto sz = fdmt.history_state_size();
-            py::array_t<float, py::array::c_style> hist(sz);
-            fdmt.save_history(std::span<float>(hist.mutable_data(), hist.size()));
-            return hist;
-        },
-        R"doc(
+        .def(
+            "save_history",
+            [](const FDMTCPU& fdmt) -> py::object {
+                const auto sz = fdmt.history_state_size();
+                py::array_t<float, py::array::c_style> hist(sz);
+                fdmt.save_history(
+                    std::span<float>(hist.mutable_data(), hist.size()));
+                return hist;
+            },
+            R"doc(
         Save the internal streaming history state into a 1D float32 NumPy array.
         Enables time-multiplexing multiple beams or sub-streams on a single FDMTCPU instance.
         )doc")
-        .def("load_history", [](FDMTCPU& fdmt, const py::array& hist_obj) {
-            if (hist_obj.dtype().kind() != 'f' || hist_obj.itemsize() != 4) {
-                throw std::invalid_argument(
-                    "FDMTCPU.load_history: expected a float32 array");
-            }
-            auto hist = hist_obj.cast<py::array_t<float, py::array::c_style>>();
-            if (static_cast<SizeType>(hist.size()) != fdmt.history_state_size()) {
-                throw std::invalid_argument(std::format(
-                    "FDMTCPU.load_history: expected buffer of size {}, got {}",
-                    fdmt.history_state_size(), hist.size()));
-            }
-            fdmt.load_history(std::span<const float>(hist.data(), hist.size()));
-        },
-        py::arg("history"),
-        R"doc(
+        .def(
+            "load_history",
+            [](FDMTCPU& fdmt, const py::array& hist_obj) {
+                if (hist_obj.dtype().kind() != 'f' ||
+                    hist_obj.itemsize() != 4) {
+                    throw std::invalid_argument(
+                        "FDMTCPU.load_history: expected a float32 array");
+                }
+                auto hist =
+                    hist_obj.cast<py::array_t<float, py::array::c_style>>();
+                if (static_cast<SizeType>(hist.size()) !=
+                    fdmt.history_state_size()) {
+                    throw std::invalid_argument(
+                        std::format("FDMTCPU.load_history: expected buffer of "
+                                    "size {}, got {}",
+                                    fdmt.history_state_size(), hist.size()));
+                }
+                fdmt.load_history(
+                    std::span<const float>(hist.data(), hist.size()));
+            },
+            py::arg("history"),
+            R"doc(
         Restore previously saved streaming history state from a 1D float32 NumPy array.
         )doc");
 

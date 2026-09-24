@@ -5,12 +5,12 @@ from dmtlib import FDMTCPU, FDMTFFTCPU, CohFDMTCPU
 
 @pytest.mark.cuda
 def test_fdmt_gpu_matches_cpu() -> None:
-    from dmtlib import FDMTGPU
+    from dmtlib import FDMTCUDA
 
     rng = np.random.default_rng(0)
     waterfall = rng.standard_normal((16, 64), dtype=np.float32)
     cpu = FDMTCPU(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
-    gpu = FDMTGPU(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
+    gpu = FDMTCUDA(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
     np.testing.assert_allclose(
         gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
     )
@@ -18,12 +18,12 @@ def test_fdmt_gpu_matches_cpu() -> None:
 
 @pytest.mark.cuda
 def test_fdmt_fft_gpu_matches_cpu() -> None:
-    from dmtlib import FDMTFFTGPU
+    from dmtlib import FDMTFFTCUDA
 
     rng = np.random.default_rng(1)
     waterfall = rng.standard_normal((16, 64), dtype=np.float32)
     cpu = FDMTFFTCPU(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
-    gpu = FDMTFFTGPU(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
+    gpu = FDMTFFTCUDA(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
     np.testing.assert_allclose(
         gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
     )
@@ -31,7 +31,7 @@ def test_fdmt_fft_gpu_matches_cpu() -> None:
 
 @pytest.mark.cuda
 def test_coh_fdmt_gpu_matches_cpu() -> None:
-    from dmtlib import CohFDMTGPU
+    from dmtlib import CohFDMTCUDA
 
     f_center = 1250.0
     bw_sub = 25.0
@@ -45,7 +45,7 @@ def test_coh_fdmt_gpu_matches_cpu() -> None:
     cpu = CohFDMTCPU(
         f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max, 0.0, noverlap
     )
-    gpu = CohFDMTGPU(
+    gpu = CohFDMTCUDA(
         f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max, 0.0, noverlap
     )
     in_size = 2 * 2 * cpu.plan.nsamp * nsub
@@ -54,3 +54,35 @@ def test_coh_fdmt_gpu_matches_cpu() -> None:
     np.testing.assert_allclose(
         gpu.execute(data), cpu.execute(data), rtol=2e-2, atol=2e-2
     )
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("int_tree", [False, True])
+def test_fdmt_gpu_packed_matches_cpu(nbits: int, int_tree: bool) -> None:
+    # Integer-valued input: every partial sum is exact, so GPU and CPU agree
+    # bit-for-bit (fast-math reassociation cannot change exact sums).
+    from dmtlib import FDMTExecConfig, FDMTCUDA
+
+    nchans, nsamps = 64, 203
+    rng = np.random.default_rng(nbits)
+    values = rng.integers(0, 2**nbits, size=(nchans, nsamps), dtype=np.uint32)
+    if nbits >= 8:
+        packed = values.astype(np.uint8 if nbits == 8 else "<u2").view(np.uint8)
+        packed = packed.reshape(nchans, -1)
+    else:
+        per_byte = 8 // nbits
+        row_bytes = (nsamps * nbits + 7) // 8
+        padded = np.zeros((nchans, row_bytes * per_byte), dtype=np.uint32)
+        padded[:, :nsamps] = values
+        shifts = (np.arange(per_byte, dtype=np.uint32) * nbits)[None, None, :]
+        packed = (
+            (padded.reshape(nchans, row_bytes, per_byte) << shifts)
+            .sum(axis=2)
+            .astype(np.uint8)
+        )
+    cpu = FDMTCPU(1000.0, 1500.0, nchans, nsamps, 0.001, 40)
+    gpu = FDMTCUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 40)
+    gpu.exec_config = FDMTExecConfig(int_tree=int_tree)
+    ref = cpu.execute(values.astype(np.float32))
+    np.testing.assert_array_equal(gpu.execute(packed, nbits), ref)

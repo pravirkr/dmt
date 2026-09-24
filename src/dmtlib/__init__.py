@@ -19,7 +19,10 @@ from .libdmt import (
     CohFDMTPlan,
     DDMTPlan,
     FDMTComplexity,
+    FDMTExecConfig,
     FDMTPlan,
+    FDMTSchedule,
+    FDMTStreamingStores,
     LevinConfig,
     add_frb_track,
     compute_fdmt,
@@ -27,24 +30,31 @@ from .libdmt import (
 )
 
 with contextlib.suppress(Exception):
-    from .libcudmt import DDMTCUDA, FDMTFFTGPU, FDMTGPU, CohFDMTCUDA, CohFDMTGPU
-    DDMTGPU = DDMTCUDA
+    from .libcudmt import (
+        CohFDMTCUDA,
+        DDMTCUDA,
+        FDMTCUDA,
+        FDMTFFTCUDA,
+    )
 
 __all__ = [
-    "DDMTCPU",
-    "DDMTCUDA",
-    "DDMTGPU",
-    "FDMTCPU",
-    "FDMTFFTCPU",
-    "FDMTFFTGPU",
-    "FDMTGPU",
     "CohFDMTCPU",
     "CohFDMTCUDA",
-    "CohFDMTGPU",
+    "CohFDMTPlan",
+    "DDMTCPU",
+    "DDMTCUDA",
+    "DDMTPlan",
+    "FDMTCPU",
+    "FDMTCUDA",
+    "FDMTFFTCPU",
+    "FDMTFFTCUDA",
     "CohFDMTPlan",
     "DDMTPlan",
     "FDMTComplexity",
+    "FDMTExecConfig",
     "FDMTPlan",
+    "FDMTSchedule",
+    "FDMTStreamingStores",
     "LevinConfig",
     "add_frb_track",
     "calculate_snr_loss",

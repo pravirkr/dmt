@@ -8,8 +8,8 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
     mod.doc() = R"doc(
     CUDA Python bindings for the Dispersion Measure Transform library.
 
-    This extension module is imported as ``dmtlib.libcudmt``. ``FDMTGPU``,
-    ``FDMTFFTGPU`` and ``CohFDMTGPU`` are aliases for the CUDA classes.
+    This extension module is imported as ``dmtlib.libcudmt``.
+    Classes: FDMTCUDA, FDMTFFTCUDA, CohFDMTCUDA, DDMTCUDA.
 
     See also
     --------

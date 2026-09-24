@@ -391,6 +391,51 @@ public:
     bool load_history(cuda::std::span<const uint8_t> d_in,
                       cudaStream_t stream = nullptr);
 
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<float, Alloc1>& waterfall,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
+
+    template <typename Alloc1 = std::allocator<uint8_t>,
+              typename Alloc2 = std::allocator<int32_t>>
+    void execute(const std::vector<uint8_t, Alloc1>& waterfall_packed,
+                 SizeType nsamps,
+                 std::vector<int32_t, Alloc2>& dmt) {
+        execute(std::span<const uint8_t>(waterfall_packed), nsamps,
+                std::span<int32_t>(dmt));
+    }
+
+    template <typename Alloc1 = std::allocator<uint8_t>,
+              typename Alloc2 = std::allocator<int32_t>>
+    void execute_time_major(const std::vector<uint8_t, Alloc1>& filterbank_packed,
+                            SizeType nsamps,
+                            std::vector<int32_t, Alloc2>& dmt) {
+        execute_time_major(std::span<const uint8_t>(filterbank_packed), nsamps,
+                           std::span<int32_t>(dmt));
+    }
+
+    template <typename Alloc = std::allocator<float>>
+    bool save_history(std::vector<float, Alloc>& out) const {
+        return save_history(std::span<float>(out));
+    }
+
+    template <typename Alloc = std::allocator<uint8_t>>
+    bool save_history(std::vector<uint8_t, Alloc>& out) const {
+        return save_history(std::span<uint8_t>(out));
+    }
+
+    template <typename Alloc = std::allocator<float>>
+    bool load_history(const std::vector<float, Alloc>& in) {
+        return load_history(std::span<const float>(in));
+    }
+
+    template <typename Alloc = std::allocator<uint8_t>>
+    bool load_history(const std::vector<uint8_t, Alloc>& in) {
+        return load_history(std::span<const uint8_t>(in));
+    }
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;

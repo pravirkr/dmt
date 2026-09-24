@@ -65,6 +65,7 @@ TEST_CASE("DDMTCUDA execute (device float span) matches the host overload",
 
     std::vector<float> dmt_host(dm_count * nsamps_reduced, 0.0F);
     ddmt.execute(waterfall, dmt_host);
+    ddmt.reset_history();
 
     thrust::device_vector<float> d_waterfall(waterfall.begin(), waterfall.end());
     thrust::device_vector<float> d_dmt(dm_count * nsamps_reduced, 0.0F);
@@ -267,13 +268,14 @@ TEST_CASE("DDMTCUDA streaming history across chunks matches monolithic execute",
     }
 
     const auto n_out1 = ddmt_stream.get_output_nsamps(split);
-    const auto n_out2 = ddmt_stream.get_output_nsamps(total_nsamps - split);
-    CHECK(n_out1 + n_out2 == nsamps_reduced);
-
     std::vector<float> dmt1(dms.size() * n_out1);
-    std::vector<float> dmt2(dms.size() * n_out2);
     ddmt_stream.execute(block1, dmt1);
+
+    const auto n_out2 = ddmt_stream.get_output_nsamps(total_nsamps - split);
+    std::vector<float> dmt2(dms.size() * n_out2);
     ddmt_stream.execute(block2, dmt2);
+
+    CHECK(n_out1 + n_out2 == nsamps_reduced);
 
     std::vector<float> dmt_streamed(dms.size() * nsamps_reduced);
     for (SizeType idm = 0; idm < dms.size(); ++idm) {

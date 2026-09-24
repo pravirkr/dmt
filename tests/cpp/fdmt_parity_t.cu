@@ -36,10 +36,18 @@ TEST_CASE("parity: FDMTCUDA execute and stepper match FDMTCPU",
     test::require_approx(dmt_gpu, dmt_cpu);
 
     std::vector<float> dmt_step(n, 0.0F);
+    thrust::device_vector<float> d_wf(waterfall.begin(), waterfall.end());
+    thrust::device_vector<float> d_dmt(n, 0.0F);
+    auto d_wf_span = cuda::std::span<const float>(
+        thrust::raw_pointer_cast(d_wf.data()), d_wf.size());
+    auto d_dmt_span = cuda::std::span<float>(
+        thrust::raw_pointer_cast(d_dmt.data()), d_dmt.size());
+
     gpu.reset_history();
-    gpu.reset(std::span<const float>(waterfall), std::span<float>(dmt_step));
+    gpu.reset(d_wf_span, d_dmt_span);
     gpu.advance_until_remaining(0);
     gpu.finalize();
+    thrust::copy(d_dmt.begin(), d_dmt.end(), dmt_step.begin());
     test::require_approx(dmt_step, dmt_cpu);
 }
 

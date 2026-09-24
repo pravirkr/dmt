@@ -88,7 +88,7 @@ void bind_cfdmt(py::module_& mod) {
 
         See also
         --------
-        CohFDMTPlan, CohFDMTGPU
+        CohFDMTPlan, CohFDMTCUDA
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
                       float, float, SizeType, std::string_view, bool, int>(),

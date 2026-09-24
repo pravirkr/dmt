@@ -1,10 +1,14 @@
 #include "dmt/algorithms/fdmt.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <format>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include <cuda/std/span>
@@ -13,8 +17,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
+#include "dmt/fdmt_int_tree.hpp"
 #include "dmt/plans_cuda.cuh"
 
 namespace dmt::algorithms {
@@ -41,6 +47,44 @@ FDMTMode parse_mode(std::string_view mode) {
         "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
 }
 
+/// @brief Level-0 input rows from a float waterfall, beam-major
+/// (nbeams * nsubs rows of nsamps).
+struct FDMTInputF32 {
+    const float* data;
+    int nsamps;
+
+    __device__ float load(int64_t row, int t) const {
+        return data[(static_cast<size_t>(row) * nsamps) + t];
+    }
+};
+
+/// @brief Level-0 input rows from a packed low-bit waterfall (nbeams * nsubs
+/// rows of row_bytes, LSB-first; see bit_pack_utils.hpp). `nbits` is a
+/// runtime value: the branch is uniform across the grid, and it keeps the
+/// kernel instantiation count down.
+struct FDMTInputPacked {
+    const uint8_t* data;
+    int row_bytes;
+    int nbits;
+
+    __device__ float load(int64_t row, int t) const {
+        const uint8_t* r = data + (static_cast<size_t>(row) * row_bytes);
+        const auto st    = static_cast<SizeType>(t);
+        switch (nbits) {
+        case 1:
+            return static_cast<float>(utils::read_packed_sample<1>(r, st));
+        case 2:
+            return static_cast<float>(utils::read_packed_sample<2>(r, st));
+        case 4:
+            return static_cast<float>(utils::read_packed_sample<4>(r, st));
+        case 8:
+            return static_cast<float>(utils::read_packed_sample<8>(r, st));
+        default:
+            return static_cast<float>(utils::read_packed_sample<16>(r, st));
+        }
+    }
+};
+
 /**
  * @brief Level-0 (per-channel) FDMT state initialization kernel.
  *
@@ -59,10 +103,10 @@ FDMTMode parse_mode(std::string_view mode) {
  * whichever of the +s / -s dt indices are actually present in this
  * sub-band's grid.
  */
-template <FDMTMode Mode, bool UseBoxSmearing>
+template <FDMTMode Mode, bool UseBoxSmearing, typename Input, typename TOut>
 __global__ void
-kernel_init_fdmt(const float* __restrict__ waterfall,
-                 float* __restrict__ state,
+kernel_init_fdmt(const Input waterfall,
+                 TOut* __restrict__ state,
                  const int* __restrict__ grids0_dt_grid_ptr,
                  const int* __restrict__ grids0_ndt_ptr,
                  const int* __restrict__ grids0_coord_offset_ptr,
@@ -73,8 +117,10 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
                  const float* __restrict__ hist) {
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_sub  = static_cast<int>(blockIdx.y);
-    const auto i_beam = static_cast<int>(blockIdx.z);
+    const auto i_sub = static_cast<int>(blockIdx.y);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (i_sub >= nsubs || isamp >= nsamps) {
         return;
     }
@@ -83,8 +129,8 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
         &grids0_dt_grid_ptr[grids0_coord_offset_ptr[i_sub]];
     const auto buffer_offset =
         (i_beam * state0_nelements) + (grids0_coord_offset_ptr[i_sub] * nsamps);
-    const auto ndt_grid_sub     = grids0_ndt_ptr[i_sub];
-    const auto waterfall_offset = (i_beam * nsubs * nsamps) + (i_sub * nsamps);
+    const auto ndt_grid_sub = grids0_ndt_ptr[i_sub];
+    const auto wf_row       = (i_beam * nsubs) + i_sub;
     const auto hist_offset =
         (i_beam * nsubs * dt_max_final) + (i_sub * dt_max_final);
     const auto dt_first = dt_grid_sub[0];
@@ -93,10 +139,10 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
     // Lambda to fetch sample at relative index (isamp - shift), shift >= 0.
     auto get_sample = [&](int t) -> float {
         if (t >= 0) {
-            return waterfall[waterfall_offset + t];
+            return waterfall.load(wf_row, t);
         }
         if constexpr (Mode == FDMTMode::kRoll) {
-            return waterfall[waterfall_offset + (t + nsamps)];
+            return waterfall.load(wf_row, t + nsamps);
         } else if constexpr (Mode == FDMTMode::kValid) {
             return (hist != nullptr) ? hist[hist_offset + dt_max_final + t]
                                      : 0.0F;
@@ -108,13 +154,17 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
     // Writes `val` into every dt row whose value has magnitude `s` (there
     // are up to two: +s and -s, whichever are actually present in this
     // dense sub-band grid).
+    // Level-0 values are computed in float; for integer TOut (packed input,
+    // int_tree) they are exact integers within the type's plan bound.
     auto write_matches = [&](int s, float val) {
         if (s >= dt_first && s <= dt_last) {
-            state[buffer_offset + ((s - dt_first) * nsamps) + isamp] = val;
+            state[buffer_offset + ((s - dt_first) * nsamps) + isamp] =
+                static_cast<TOut>(val);
         }
         const int neg = -s;
         if (s != 0 && neg >= dt_first && neg <= dt_last) {
-            state[buffer_offset + ((neg - dt_first) * nsamps) + isamp] = val;
+            state[buffer_offset + ((neg - dt_first) * nsamps) + isamp] =
+                static_cast<TOut>(val);
         }
     };
 
@@ -160,33 +210,35 @@ kernel_init_fdmt(const float* __restrict__ waterfall,
  * Supports arbitrary block sizes (nsamps < dt_max_final and nsamps >=
  * dt_max_final).
  */
-__global__ void
-kernel_advance_history_window(float* __restrict__ hist_out,
-                              const float* __restrict__ hist_in,
-                              const float* __restrict__ waterfall,
-                              int nsubs,
-                              int nsamps,
-                              int dt_max_final) {
+template <typename Input>
+__global__ void kernel_advance_history_window(float* __restrict__ hist_out,
+                                              const float* __restrict__ hist_in,
+                                              const Input waterfall,
+                                              int nsubs,
+                                              int nsamps,
+                                              int dt_max_final) {
     const auto t = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_sub  = static_cast<int>(blockIdx.y);
-    const auto i_beam = static_cast<int>(blockIdx.z);
+    const auto i_sub = static_cast<int>(blockIdx.y);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (t >= dt_max_final || i_sub >= nsubs) {
         return;
     }
     const auto hist_offset =
         (i_beam * nsubs * dt_max_final) + (i_sub * dt_max_final);
-    const auto wf_offset = (i_beam * nsubs * nsamps) + (i_sub * nsamps);
+    const auto wf_row = (i_beam * nsubs) + i_sub;
 
     if (nsamps >= dt_max_final) {
         hist_out[hist_offset + t] =
-            waterfall[wf_offset + (nsamps - dt_max_final + t)];
+            waterfall.load(wf_row, nsamps - dt_max_final + t);
     } else {
         if (t < dt_max_final - nsamps) {
             hist_out[hist_offset + t] =
                 (hist_in != nullptr) ? hist_in[hist_offset + t + nsamps] : 0.0F;
         } else {
             hist_out[hist_offset + t] =
-                waterfall[wf_offset + (t - (dt_max_final - nsamps))];
+                waterfall.load(wf_row, t - (dt_max_final - nsamps));
         }
     }
 }
@@ -194,9 +246,9 @@ kernel_advance_history_window(float* __restrict__ hist_out,
 /**
  * @brief Per-level tree merge kernel with multi-beam support.
  */
-template <FDMTMode Mode>
-__global__ void kernel_execute_iter(const float* __restrict__ state_in,
-                                    float* __restrict__ state_out,
+template <FDMTMode Mode, typename TIn = float, typename TOut = float>
+__global__ void kernel_execute_iter(const TIn* __restrict__ state_in,
+                                    TOut* __restrict__ state_out,
                                     const plans::FDMTCoordDPtrs coords_sum,
                                     const plans::FDMTCoordDPtrs coords_copy,
                                     const float* __restrict__ hist_in,
@@ -209,7 +261,9 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_coord = static_cast<int>(blockIdx.y);
-    const auto i_beam  = static_cast<int>(blockIdx.z);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (isamp >= nsamps) {
         return;
     }
@@ -228,44 +282,52 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
             (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
 
         if (isamp < nsamps_out) {
-            float tail_val = 0.0F;
-            float head_val = 0.0F;
+            // Summed in the output storage type: float as before, or the
+            // narrow integer type (int_tree), whose plan bound cannot wrap.
+            TOut tail_val = TOut{0};
+            TOut head_val = TOut{0};
             if constexpr (Mode == FDMTMode::kFull) {
                 if (isamp < nsamps_tail) {
-                    tail_val = state_in[tail_idx_base + isamp];
+                    tail_val =
+                        static_cast<TOut>(state_in[tail_idx_base + isamp]);
                 }
                 if (isamp >= offset && (isamp - offset) < nsamps_tail) {
-                    head_val = state_in[head_idx_base + (isamp - offset)];
+                    head_val = static_cast<TOut>(
+                        state_in[head_idx_base + (isamp - offset)]);
                 }
             } else if constexpr (Mode == FDMTMode::kValid) {
-                tail_val = state_in[tail_idx_base + isamp];
+                tail_val = static_cast<TOut>(state_in[tail_idx_base + isamp]);
                 if (isamp >= offset) {
-                    head_val = state_in[head_idx_base + (isamp - offset)];
+                    head_val = static_cast<TOut>(
+                        state_in[head_idx_base + (isamp - offset)]);
                 } else if (hist_in != nullptr) {
-                    head_val = hist_in[hist_off + isamp];
+                    head_val = static_cast<TOut>(hist_in[hist_off + isamp]);
                 }
             } else if constexpr (Mode == FDMTMode::kRoll) {
-                tail_val            = state_in[tail_idx_base + isamp];
+                tail_val = static_cast<TOut>(state_in[tail_idx_base + isamp]);
                 const int head_samp = (isamp >= offset)
                                           ? (isamp - offset)
                                           : (nsamps_tail - offset + isamp);
-                head_val            = state_in[head_idx_base + head_samp];
+                head_val =
+                    static_cast<TOut>(state_in[head_idx_base + head_samp]);
             }
-            state_out[out_idx_base + isamp] = tail_val + head_val;
+            state_out[out_idx_base + isamp] =
+                static_cast<TOut>(tail_val + head_val);
         }
     }
 
     if (i_coord < ncoords_copy_cur) {
         const auto nsamps_out  = coords_copy.nsamps[i_coord];
         const auto nsamps_tail = coords_copy.tail_nsamps[i_coord];
-        const int out_idx_base =
+        const auto out_idx_base =
             (i_beam * out_state_nelements) + coords_copy.buf_offset[i_coord];
         if (isamp < nsamps_tail) {
-            const int tail_idx_base = (i_beam * in_state_nelements) +
-                                      coords_copy.tail_buf_offset[i_coord];
-            state_out[out_idx_base + isamp] = state_in[tail_idx_base + isamp];
+            const auto tail_idx_base = (i_beam * in_state_nelements) +
+                                       coords_copy.tail_buf_offset[i_coord];
+            state_out[out_idx_base + isamp] =
+                static_cast<TOut>(state_in[tail_idx_base + isamp]);
         } else if (isamp < nsamps_out) {
-            state_out[out_idx_base + isamp] = 0.0F;
+            state_out[out_idx_base + isamp] = TOut{0};
         }
     }
 }
@@ -274,8 +336,9 @@ __global__ void kernel_execute_iter(const float* __restrict__ state_in,
  * @brief Advances tree-level cross-block FIFO history on GPU.
  * Supports arbitrary block sizes and offsets.
  */
+template <typename TIn = float>
 __global__ void
-kernel_advance_tree_history(const float* __restrict__ state_in,
+kernel_advance_tree_history(const TIn* __restrict__ state_in,
                             const plans::FDMTCoordDPtrs coords_sum,
                             const float* __restrict__ hist_in,
                             float* __restrict__ hist_out,
@@ -284,7 +347,9 @@ kernel_advance_tree_history(const float* __restrict__ state_in,
                             int tree_hist_size) {
     const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_coord = static_cast<int>(blockIdx.y);
-    const auto i_beam  = static_cast<int>(blockIdx.z);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (i_coord >= ncoords_sum_cur) {
         return;
     }
@@ -300,16 +365,16 @@ kernel_advance_tree_history(const float* __restrict__ state_in,
         (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
 
     if (nsamps_head >= offset) {
-        hist_out[hist_off + k] =
-            state_in[head_idx_base + (nsamps_head - offset + k)];
+        hist_out[hist_off + k] = static_cast<float>(
+            state_in[head_idx_base + (nsamps_head - offset + k)]);
     } else {
         if (k < offset - nsamps_head) {
             hist_out[hist_off + k] = (hist_in != nullptr)
                                          ? hist_in[hist_off + k + nsamps_head]
                                          : 0.0F;
         } else {
-            hist_out[hist_off + k] =
-                state_in[head_idx_base + (k - (offset - nsamps_head))];
+            hist_out[hist_off + k] = static_cast<float>(
+                state_in[head_idx_base + (k - (offset - nsamps_head))]);
         }
     }
 }
@@ -387,6 +452,7 @@ public:
     }
 
     void init_device_structures() {
+        check_int32_extents();
         cuda_utils::set_device(m_device_id);
         spdlog::debug("FDMTCUDA::Impl: Set device to {}", m_device_id);
         // Allocate internal state buffer on device for ping-pong
@@ -476,58 +542,83 @@ public:
         spdlog::debug("FDMTCUDA::Impl: Device execution complete on stream");
     }
 
+    void execute_h(std::span<const uint8_t> waterfall_h,
+                   SizeType nbits,
+                   std::span<float> dmt_h) {
+        check_packed_inputs(waterfall_h.size(), nbits, dmt_h.size());
+        cuda_utils::set_device(m_device_id);
+        // Only the packed bytes cross PCIe (32/nbits times less than float).
+        thrust::device_vector<uint8_t> waterfall_d(waterfall_h.size());
+        thrust::device_vector<float> dmt_d(dmt_h.size());
+        cudaStream_t stream = nullptr;
+        cudaMemcpyAsync(waterfall_d.data().get(), waterfall_h.data(),
+                        waterfall_h.size_bytes(), cudaMemcpyHostToDevice,
+                        stream);
+        cuda_utils::check_last_cuda_error(
+            "execute_h: cudaMemcpyAsync H->D packed waterfall failed");
+        execute_d(cuda::std::span<const uint8_t>(
+                      thrust::raw_pointer_cast(waterfall_d.data()),
+                      waterfall_d.size()),
+                  nbits,
+                  cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                                         dmt_d.size()),
+                  stream);
+        cudaMemcpyAsync(dmt_h.data(), dmt_d.data().get(), dmt_h.size_bytes(),
+                        cudaMemcpyDeviceToHost, stream);
+        cuda_utils::check_last_cuda_error(
+            "execute_h: cudaMemcpyAsync D->H dmt failed");
+        cudaStreamSynchronize(stream);
+        cuda_utils::check_last_cuda_error(
+            "execute_h: cudaStreamSynchronize failed");
+    }
+
+    void execute_d(cuda::std::span<const uint8_t> waterfall_d,
+                   SizeType nbits,
+                   cuda::std::span<float> dmt_d,
+                   cudaStream_t stream) {
+        reset(waterfall_d, nbits, dmt_d, stream);
+        advance_until_remaining(0, stream);
+        finalize(stream);
+    }
+
+    void reset(cuda::std::span<const uint8_t> d_waterfall,
+               SizeType nbits,
+               cuda::std::span<float> d_dmt,
+               cudaStream_t stream = nullptr) {
+        check_packed_inputs(d_waterfall.size(), nbits, d_dmt.size());
+        const auto row_bytes =
+            utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
+        const FDMTInputPacked input{.data      = d_waterfall.data(),
+                                    .row_bytes = static_cast<int>(row_bytes),
+                                    .nbits     = static_cast<int>(nbits)};
+        start(input,
+              m_exec_config.int_tree ? int_tree_levels(nbits)
+                                     : all_float_levels(),
+              d_dmt, stream);
+    }
+
+    void set_exec_config(const FDMTExecConfig& config) {
+        if (m_is_initialized && !is_finished()) {
+            throw std::logic_error(
+                "FDMTCUDA: set_exec_config() called mid-transform; finish the "
+                "current block first.");
+        }
+        m_exec_config = config;
+    }
+
+    [[nodiscard]] const FDMTExecConfig& get_exec_config() const noexcept {
+        return m_exec_config;
+    }
+
     void reset(cuda::std::span<const float> d_waterfall,
                cuda::std::span<float> d_dmt,
                cudaStream_t stream = nullptr) {
         check_inputs(d_waterfall.size(), d_dmt.size());
-        cuda_utils::set_device(m_device_id);
-        m_stream         = stream;
-        m_dmt_target_ptr = d_dmt.data();
-        m_current_level  = 0;
-
-        if (m_mode == FDMTMode::kValid) {
-            // Ping-pong once per block (not per level): every level's
-            // history lives in the same pair of buffers at disjoint
-            // offsets, and all levels of one block must agree on which
-            // buffer is "previous block" vs "this block".
-            if (m_tree_history_parity) {
-                m_hist_in_ptr =
-                    thrust::raw_pointer_cast(m_tree_history_b_d.data());
-                m_hist_out_ptr =
-                    thrust::raw_pointer_cast(m_tree_history_a_d.data());
-                m_level0_hist_in_ptr =
-                    thrust::raw_pointer_cast(m_history_b_d.data());
-                m_level0_hist_out_ptr =
-                    thrust::raw_pointer_cast(m_history_a_d.data());
-            } else {
-                m_hist_in_ptr =
-                    thrust::raw_pointer_cast(m_tree_history_a_d.data());
-                m_hist_out_ptr =
-                    thrust::raw_pointer_cast(m_tree_history_b_d.data());
-                m_level0_hist_in_ptr =
-                    thrust::raw_pointer_cast(m_history_a_d.data());
-                m_level0_hist_out_ptr =
-                    thrust::raw_pointer_cast(m_history_b_d.data());
-            }
-            m_tree_history_parity = !m_tree_history_parity;
-        }
-
-        const SizeType internal_iters =
-            total_levels() >= 2 ? total_levels() - 2 : 0;
-        const bool odd_swaps = (internal_iters % 2) == 1;
-        if (odd_swaps) {
-            m_current_in_ptr = d_dmt.data();
-            m_current_out_ptr =
-                thrust::raw_pointer_cast(m_state_internal_d.data());
-        } else {
-            m_current_in_ptr =
-                thrust::raw_pointer_cast(m_state_internal_d.data());
-            m_current_out_ptr = d_dmt.data();
-        }
-
-        initialise_device(d_waterfall.data(), m_current_in_ptr, stream);
-        m_is_initialized = true;
-        spdlog::debug("FDMTCUDA: Stepper initialized at level 0.");
+        const FDMTInputF32 input{
+            .data   = d_waterfall.data(),
+            .nsamps = static_cast<int>(m_plan.get_nsamps()),
+        };
+        start(input, all_float_levels(), d_dmt, stream);
     }
 
     void advance(SizeType levels = 1, cudaStream_t stream = nullptr) {
@@ -542,9 +633,7 @@ public:
             std::min(m_current_level + levels, total_lvl - 1);
 
         while (m_current_level < target_level) {
-            execute_iter_device(m_current_in_ptr, m_current_out_ptr,
-                                m_current_level + 1, active_stream);
-            std::swap(m_current_in_ptr, m_current_out_ptr);
+            execute_iter_device(m_current_level + 1, active_stream);
             m_current_level++;
         }
         spdlog::debug("FDMTCUDA: Stepper advanced to level {}.",
@@ -573,8 +662,11 @@ public:
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
         const auto& shape = m_plan.get_container().state_shape[m_current_level];
-        return cuda::std::span<const float>(m_current_in_ptr,
-                                            m_nbeams * shape.nelements);
+        // Beams are get_buffer_size() apart; the span covers through the
+        // last beam's valid elements.
+        return cuda::std::span<const float>(
+            current_level_f32(),
+            ((m_nbeams - 1) * m_plan.get_buffer_size()) + shape.nelements);
     }
 
     cuda::std::span<const float> view_subband_data(SizeType subband_idx) const {
@@ -588,7 +680,8 @@ public:
             m_plan.get_container().state_shape[m_current_level].nsamps;
         const auto offset = grid.coord_offset * nsamps;
         const auto count  = grid.ndt * nsamps;
-        return cuda::std::span<const float>(m_current_in_ptr + offset, count);
+        return cuda::std::span<const float>(current_level_f32() + offset,
+                                            count);
     }
 
     FDMTSubbandViewCUDA view_subband(SizeType subband_idx) const {
@@ -637,13 +730,16 @@ public:
         cudaStream_t active_stream = stream ? stream : m_stream;
         advance_until_remaining(0, active_stream);
 
-        if (m_current_in_ptr != m_dmt_target_ptr) {
+        const auto* final_ptr =
+            reinterpret_cast<const float*>(m_levels_d[m_current_level].base);
+        if (final_ptr != m_dmt_target_ptr) {
             spdlog::debug(
                 "FDMTCUDA::finalize: Copying final state from internal "
                 "scratch to dmt_target_ptr");
             const auto final_size =
-                m_nbeams * m_plan.get_container().state_shape.back().nelements;
-            cudaMemcpyAsync(m_dmt_target_ptr, m_current_in_ptr,
+                ((m_nbeams - 1) * m_plan.get_buffer_size()) +
+                m_plan.get_container().state_shape.back().nelements;
+            cudaMemcpyAsync(m_dmt_target_ptr, final_ptr,
                             final_size * sizeof(float),
                             cudaMemcpyDeviceToDevice, active_stream);
             cuda_utils::check_last_cuda_error(
@@ -758,8 +854,8 @@ public:
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
                 cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
-                                    dst_vec.size() * sizeof(float),
-                                    cudaMemcpyDeviceToDevice, stream);
+                                dst_vec.size() * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream);
             }
             src += dst_vec.size();
         };
@@ -796,15 +892,48 @@ private:
     float* m_hist_in_ptr{nullptr};
     float* m_hist_out_ptr{nullptr};
 
+    // Runtime switches (only FDMTExecConfig::int_tree applies on CUDA).
+    FDMTExecConfig m_exec_config;
+    using Elem = detail::FDMTLevelType;
+    std::array<std::vector<Elem>, 17> m_int_levels_cache; // indexed by nbits
+
+    // One tree level's device state: beam 0 at `base`, beam b at element
+    // offset b * get_buffer_size(), stored as `type`.
+    struct LevelBufD {
+        std::byte* base{nullptr};
+        Elem type{Elem::kF32};
+    };
+
     // Stepper state
     bool m_is_initialized{false};
     SizeType m_current_level{0};
-    float* m_current_in_ptr{nullptr};
-    float* m_current_out_ptr{nullptr};
+    std::vector<LevelBufD> m_levels_d;
     float* m_dmt_target_ptr{nullptr};
     cudaStream_t m_stream{nullptr};
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
+
+    // The device plan stores per-beam coordinate offsets as 32-bit ints (see
+    // plans_cuda.cuh), and the kernels index within one beam in 32-bit
+    // arithmetic (only the beam-strided part is 64-bit). Reject plans whose
+    // per-beam extents do not fit, instead of silently wrapping indices.
+    void check_int32_extents() const {
+        constexpr auto kMax =
+            static_cast<SizeType>(std::numeric_limits<int32_t>::max());
+        const auto check = [&](SizeType value, std::string_view what) {
+            if (value > kMax) {
+                throw std::invalid_argument(std::format(
+                    "FDMTCUDA: per-beam {} ({} elements) exceeds the 32-bit "
+                    "index range of the CUDA backend ({}); use a smaller "
+                    "block (nsamps) or fewer DM trials",
+                    what, value, kMax));
+            }
+        };
+        check(m_plan.get_buffer_size(), "state buffer");
+        check(m_plan.get_nchans() * m_plan.get_nsamps(), "waterfall");
+        check(m_plan.get_history_size(), "level-0 history");
+        check(m_plan.get_tree_history_size(), "tree history");
+    }
 
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const {
         const auto nchans = m_plan.get_nchans();
@@ -825,10 +954,180 @@ private:
                       m_nbeams, nchans, nsamps);
     }
 
-    void execute_iter_device(const float* __restrict__ in_ptr,
-                             float* __restrict__ out_ptr,
-                             SizeType next_level,
-                             cudaStream_t stream) {
+    void check_packed_inputs(SizeType waterfall_bytes,
+                             SizeType nbits,
+                             SizeType dmt_size) const {
+        if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
+            nbits != 16) {
+            throw std::invalid_argument(std::format(
+                "FDMTCUDA: nbits={} must be one of 1, 2, 4, 8, 16", nbits));
+        }
+        const auto row_bytes =
+            utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
+        const auto expected = m_nbeams * m_plan.get_nchans() * row_bytes;
+        if (waterfall_bytes != expected) {
+            throw std::invalid_argument(std::format(
+                "FDMTCUDA: Invalid size of packed waterfall (nbits={}). "
+                "Expected {} bytes, got {}",
+                nbits, expected, waterfall_bytes));
+        }
+        if (dmt_size < m_nbeams * m_plan.get_buffer_size()) {
+            throw std::invalid_argument(
+                std::format("FDMTCUDA: Invalid size of dmt. Expected at "
+                            "least {}, got {}",
+                            m_nbeams * m_plan.get_buffer_size(), dmt_size));
+        }
+    }
+
+    [[nodiscard]] int beam_stride_elements() const noexcept {
+        return static_cast<int>(m_plan.get_buffer_size());
+    }
+
+    [[nodiscard]] std::vector<Elem> all_float_levels() const {
+        return std::vector<Elem>(total_levels(), Elem::kF32);
+    }
+
+    [[nodiscard]] const std::vector<Elem>& int_tree_levels(SizeType nbits) {
+        auto& cached = m_int_levels_cache[nbits];
+        if (cached.empty()) {
+            cached =
+                detail::int_tree_level_types(m_plan, m_use_box_smearing, nbits);
+        }
+        return cached;
+    }
+
+    // Calls f(T{}) with the storage type of `e` (tag dispatch: plain C++14
+    // generic lambdas, the most portable form across nvcc versions).
+    template <typename F> static void with_elem(Elem e, F&& f) {
+        switch (e) {
+        case Elem::kU8:
+            f(uint8_t{});
+            break;
+        case Elem::kU16:
+            f(uint16_t{});
+            break;
+        case Elem::kF32:
+            f(float{});
+            break;
+        }
+    }
+
+    [[nodiscard]] const float* current_level_f32() const {
+        if (m_levels_d[m_current_level].type != Elem::kF32) {
+            throw std::logic_error(std::format(
+                "FDMTCUDA: level {} is stored as an integer type "
+                "(FDMTExecConfig::int_tree); disable int_tree to inspect "
+                "intermediate levels.",
+                m_current_level));
+        }
+        return reinterpret_cast<const float*>(m_levels_d[m_current_level].base);
+    }
+
+    /**
+     * Assigns each level's device buffer -- the same rule as FDMTCPU: float
+     * level l lives in the caller's dmt buffer iff niters - l is even (so
+     * the root always lands there and finalize() never copies), otherwise in
+     * m_state_internal_d; integer levels (int_tree) alternate between the
+     * two halves of m_state_internal_d, each nbeams * buffer_size * 2 bytes
+     * (every level's beams are buffer_size elements apart).
+     * detail::int_tree_level_types() guarantees the first float level after
+     * them is a dmt level.
+     */
+    void layout_levels(const std::vector<Elem>& types,
+                       cuda::std::span<float> d_dmt) {
+        const SizeType niters = m_plan.get_niters();
+        auto* dmt_bytes       = reinterpret_cast<std::byte*>(d_dmt.data());
+        auto* internal        = reinterpret_cast<std::byte*>(
+            thrust::raw_pointer_cast(m_state_internal_d.data()));
+        const SizeType half =
+            m_nbeams * m_plan.get_buffer_size() * sizeof(uint16_t);
+        m_levels_d.resize(niters + 1);
+        for (SizeType l = 0; l <= niters; ++l) {
+            if (types[l] == Elem::kF32) {
+                m_levels_d[l] = {.base = ((niters - l) % 2 == 0) ? dmt_bytes
+                                                                 : internal,
+                                 .type = Elem::kF32};
+            } else {
+                m_levels_d[l] = {.base = internal + ((l % 2 == 0) ? 0 : half),
+                                 .type = types[l]};
+            }
+        }
+    }
+
+    template <typename Input>
+    void start(const Input& input,
+               const std::vector<Elem>& types,
+               cuda::std::span<float> d_dmt,
+               cudaStream_t stream) {
+        cuda_utils::set_device(m_device_id);
+        m_stream         = stream;
+        m_dmt_target_ptr = d_dmt.data();
+        m_current_level  = 0;
+
+        if (m_mode == FDMTMode::kValid) {
+            // Ping-pong once per block (not per level): every level's
+            // history lives in the same pair of buffers at disjoint
+            // offsets, and all levels of one block must agree on which
+            // buffer is "previous block" vs "this block".
+            if (m_tree_history_parity) {
+                m_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_b_d.data());
+                m_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_a_d.data());
+                m_level0_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_history_b_d.data());
+                m_level0_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_history_a_d.data());
+            } else {
+                m_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_a_d.data());
+                m_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_tree_history_b_d.data());
+                m_level0_hist_in_ptr =
+                    thrust::raw_pointer_cast(m_history_a_d.data());
+                m_level0_hist_out_ptr =
+                    thrust::raw_pointer_cast(m_history_b_d.data());
+            }
+            m_tree_history_parity = !m_tree_history_parity;
+        }
+
+        layout_levels(types, d_dmt);
+        with_elem(m_levels_d[0].type, [&](auto tag0) {
+            using T0 = decltype(tag0);
+            initialise_device<Input, T0>(
+                input, reinterpret_cast<T0*>(m_levels_d[0].base), stream);
+        });
+        m_is_initialized = true;
+        spdlog::debug("FDMTCUDA: Stepper initialized at level 0.");
+    }
+
+    void execute_iter_device(SizeType next_level, cudaStream_t stream) {
+        with_elem(m_levels_d[next_level - 1].type, [&](auto tag_in) {
+            using TIn = decltype(tag_in);
+            with_elem(m_levels_d[next_level].type, [&](auto tag_out) {
+                using TOut = decltype(tag_out);
+                // Levels only ever widen (see detail::int_tree_level_types).
+                if constexpr (sizeof(TIn) <= sizeof(TOut) &&
+                              !(std::is_floating_point_v<TIn> &&
+                                !std::is_floating_point_v<TOut>)) {
+                    execute_iter_typed<TIn, TOut>(
+                        reinterpret_cast<const TIn*>(
+                            m_levels_d[next_level - 1].base),
+                        reinterpret_cast<TOut*>(m_levels_d[next_level].base),
+                        next_level, stream);
+                } else {
+                    throw std::logic_error(
+                        "FDMTCUDA: invalid narrowing level transition");
+                }
+            });
+        });
+    }
+
+    template <typename TIn, typename TOut>
+    void execute_iter_typed(const TIn* __restrict__ in_ptr,
+                            TOut* __restrict__ out_ptr,
+                            SizeType next_level,
+                            cudaStream_t stream) {
         const auto& shape = m_plan.get_container().state_shape[next_level];
         const int nsamps  = static_cast<int>(shape.nsamps);
         const int ncoords_sum_cur  = static_cast<int>(shape.ncoords_sum);
@@ -845,26 +1144,31 @@ private:
                                      coords_max, m_nbeams);
         cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
-        const auto in_state_nelements = static_cast<int>(
-            m_plan.get_container().state_shape[m_current_level].nelements);
-        const auto out_state_nelements = static_cast<int>(shape.nelements);
+        // Beam b of every level lives at element offset b * get_buffer_size()
+        // -- the documented beam-major layout, shared with FDMTCPU. (Using
+        // each level's own nelements as the stride put the root's beams at
+        // b * root nelements instead, which only matched the documented
+        // b * get_buffer_size() layout when the root was the largest level.)
+        const auto beam_stride         = beam_stride_elements();
+        const auto in_state_nelements  = beam_stride;
+        const auto out_state_nelements = beam_stride;
         const auto tree_hist_size =
             static_cast<int>(m_plan.get_tree_history_size());
 
         if (m_mode == FDMTMode::kFull) {
-            kernel_execute_iter<FDMTMode::kFull>
+            kernel_execute_iter<FDMTMode::kFull, TIn, TOut>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
                     m_hist_in_ptr, nsamps, ncoords_sum_cur, ncoords_copy_cur,
                     in_state_nelements, out_state_nelements, tree_hist_size);
         } else if (m_mode == FDMTMode::kRoll) {
-            kernel_execute_iter<FDMTMode::kRoll>
+            kernel_execute_iter<FDMTMode::kRoll, TIn, TOut>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
                     m_hist_in_ptr, nsamps, ncoords_sum_cur, ncoords_copy_cur,
                     in_state_nelements, out_state_nelements, tree_hist_size);
         } else {
-            kernel_execute_iter<FDMTMode::kValid>
+            kernel_execute_iter<FDMTMode::kValid, TIn, TOut>
                 <<<grid_size, block_size, 0, stream>>>(
                     in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
                     m_hist_in_ptr, nsamps, ncoords_sum_cur, ncoords_copy_cur,
@@ -877,10 +1181,11 @@ private:
                     const dim3 grid_thist =
                         dim3((max_offset + block_thist.x - 1) / block_thist.x,
                              ncoords_sum_cur, m_nbeams);
-                    kernel_advance_tree_history<<<grid_thist, block_thist, 0,
-                                                  stream>>>(
-                        in_ptr, coords_sum_cur, m_hist_in_ptr, m_hist_out_ptr,
-                        ncoords_sum_cur, in_state_nelements, tree_hist_size);
+                    kernel_advance_tree_history<TIn>
+                        <<<grid_thist, block_thist, 0, stream>>>(
+                            in_ptr, coords_sum_cur, m_hist_in_ptr,
+                            m_hist_out_ptr, ncoords_sum_cur, in_state_nelements,
+                            tree_hist_size);
                     cuda_utils::check_last_cuda_error(
                         "kernel_advance_tree_history launch failed");
                 }
@@ -889,68 +1194,64 @@ private:
         cuda_utils::check_last_cuda_error("kernel_execute_iter launch failed");
     }
 
-    void initialise_device(const float* __restrict__ waterfall_d,
-                           float* __restrict__ state_d,
+    template <FDMTMode Mode, bool Smear, typename Input, typename TOut>
+    void launch_init(const Input& waterfall_d,
+                     TOut* __restrict__ state_d,
+                     dim3 grid_size,
+                     dim3 block_size,
+                     cudaStream_t stream) {
+        const auto& plan_c = m_plan.get_container();
+        kernel_init_fdmt<Mode, Smear, Input, TOut>
+            <<<grid_size, block_size, 0, stream>>>(
+                waterfall_d, state_d, m_plan_d.grids0.dt_grid.data().get(),
+                m_plan_d.grids0.ndt.data().get(),
+                m_plan_d.grids0.coord_offset.data().get(),
+                static_cast<int>(plan_c.state_shape[0].nchans),
+                static_cast<int>(plan_c.state_shape[0].nsamps),
+                static_cast<int>(
+                    plan_c.state_shape[m_plan.get_niters()].dt_max),
+                beam_stride_elements(), m_level0_hist_in_ptr);
+    }
+
+    template <typename Input, typename TOut>
+    void initialise_device(const Input& waterfall_d,
+                           TOut* __restrict__ state_d,
                            cudaStream_t stream) {
         const auto& plan_c = m_plan.get_container();
         const int nsubs    = static_cast<int>(plan_c.state_shape[0].nchans);
         const int nsamps   = static_cast<int>(plan_c.state_shape[0].nsamps);
         const int dt_max_final =
             static_cast<int>(plan_c.state_shape[m_plan.get_niters()].dt_max);
-        const int state0_nelements =
-            static_cast<int>(plan_c.state_shape[0].nelements);
-
-        const int* grids0_dt_grid_ptr = m_plan_d.grids0.dt_grid.data().get();
-        const int* grids0_ndt_ptr     = m_plan_d.grids0.ndt.data().get();
-        const int* grids0_coord_offset_ptr =
-            m_plan_d.grids0.coord_offset.data().get();
-
         const dim3 block_size = dim3(1024, 1);
         const dim3 grid_size =
             dim3((nsamps + block_size.x - 1) / block_size.x, nsubs, m_nbeams);
         cuda_utils::check_kernel_launch_params(grid_size, block_size);
 
+        const auto launch = [&](auto mode_tag, auto smear_tag) {
+            launch_init<decltype(mode_tag)::value, decltype(smear_tag)::value,
+                        Input, TOut>(waterfall_d, state_d, grid_size,
+                                     block_size, stream);
+        };
+        using Full  = std::integral_constant<FDMTMode, FDMTMode::kFull>;
+        using Roll  = std::integral_constant<FDMTMode, FDMTMode::kRoll>;
+        using Valid = std::integral_constant<FDMTMode, FDMTMode::kValid>;
         if (m_mode == FDMTMode::kFull) {
             if (m_use_box_smearing) {
-                kernel_init_fdmt<FDMTMode::kFull, true>
-                    <<<grid_size, block_size, 0, stream>>>(
-                        waterfall_d, state_d, grids0_dt_grid_ptr,
-                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
+                launch(Full{}, std::true_type{});
             } else {
-                kernel_init_fdmt<FDMTMode::kFull, false>
-                    <<<grid_size, block_size, 0, stream>>>(
-                        waterfall_d, state_d, grids0_dt_grid_ptr,
-                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
+                launch(Full{}, std::false_type{});
             }
         } else if (m_mode == FDMTMode::kRoll) {
             if (m_use_box_smearing) {
-                kernel_init_fdmt<FDMTMode::kRoll, true>
-                    <<<grid_size, block_size, 0, stream>>>(
-                        waterfall_d, state_d, grids0_dt_grid_ptr,
-                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
+                launch(Roll{}, std::true_type{});
             } else {
-                kernel_init_fdmt<FDMTMode::kRoll, false>
-                    <<<grid_size, block_size, 0, stream>>>(
-                        waterfall_d, state_d, grids0_dt_grid_ptr,
-                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
+                launch(Roll{}, std::false_type{});
             }
         } else {
             if (m_use_box_smearing) {
-                kernel_init_fdmt<FDMTMode::kValid, true>
-                    <<<grid_size, block_size, 0, stream>>>(
-                        waterfall_d, state_d, grids0_dt_grid_ptr,
-                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
+                launch(Valid{}, std::true_type{});
             } else {
-                kernel_init_fdmt<FDMTMode::kValid, false>
-                    <<<grid_size, block_size, 0, stream>>>(
-                        waterfall_d, state_d, grids0_dt_grid_ptr,
-                        grids0_ndt_ptr, grids0_coord_offset_ptr, nsubs, nsamps,
-                        dt_max_final, state0_nelements, m_level0_hist_in_ptr);
+                launch(Valid{}, std::false_type{});
             }
         }
         cuda_utils::check_last_cuda_error("kernel_init_fdmt launch failed");
@@ -961,9 +1262,10 @@ private:
             const dim3 grid_hist =
                 dim3((dt_max_final + block_hist.x - 1) / block_hist.x, nsubs,
                      m_nbeams);
-            kernel_advance_history_window<<<grid_hist, block_hist, 0, stream>>>(
-                m_level0_hist_out_ptr, m_level0_hist_in_ptr, waterfall_d, nsubs,
-                nsamps, dt_max_final);
+            kernel_advance_history_window<Input>
+                <<<grid_hist, block_hist, 0, stream>>>(
+                    m_level0_hist_out_ptr, m_level0_hist_in_ptr, waterfall_d,
+                    nsubs, nsamps, dt_max_final);
             cuda_utils::check_last_cuda_error(
                 "kernel_advance_history_window launch failed");
         }
@@ -1056,6 +1358,29 @@ void FDMTCUDA::execute(cuda::std::span<const float> d_waterfall,
                        cuda::std::span<float> d_dmt,
                        cudaStream_t stream) {
     m_impl->execute_d(d_waterfall, d_dmt, stream);
+}
+void FDMTCUDA::execute(std::span<const uint8_t> waterfall_packed,
+                       SizeType nbits,
+                       std::span<float> dmt) {
+    m_impl->execute_h(waterfall_packed, nbits, dmt);
+}
+void FDMTCUDA::execute(cuda::std::span<const uint8_t> d_waterfall_packed,
+                       SizeType nbits,
+                       cuda::std::span<float> d_dmt,
+                       cudaStream_t stream) {
+    m_impl->execute_d(d_waterfall_packed, nbits, d_dmt, stream);
+}
+void FDMTCUDA::reset(cuda::std::span<const uint8_t> d_waterfall_packed,
+                     SizeType nbits,
+                     cuda::std::span<float> d_dmt,
+                     cudaStream_t stream) {
+    m_impl->reset(d_waterfall_packed, nbits, d_dmt, stream);
+}
+void FDMTCUDA::set_exec_config(const FDMTExecConfig& config) {
+    m_impl->set_exec_config(config);
+}
+const FDMTExecConfig& FDMTCUDA::get_exec_config() const noexcept {
+    return m_impl->get_exec_config();
 }
 void FDMTCUDA::reset(cuda::std::span<const float> d_waterfall,
                      cuda::std::span<float> d_dmt,

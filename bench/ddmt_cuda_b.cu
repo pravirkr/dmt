@@ -98,7 +98,18 @@ public:
         waterfall_d = generate_vector_device<float>(nbeams * nchans * nsamps);
     }
 
-    void TearDown(const ::benchmark::State& /*unused*/) override {}
+    void TearDown(const ::benchmark::State& /*unused*/) override {
+        waterfall_d.clear();
+        waterfall_d.shrink_to_fit();
+    }
+
+    void SetUp(benchmark::State& state) override {
+        SetUp(static_cast<const benchmark::State&>(state));
+    }
+
+    void TearDown(benchmark::State& state) override {
+        TearDown(static_cast<const benchmark::State&>(state));
+    }
 
     float f_min{}, f_max{}, tsamp{}, dm_max{}, dm_step{};
     SizeType nchans{}, nsamps{}, nbeams{1};
@@ -146,7 +157,18 @@ public:
         waterfall_packed_d.resize(nbeams * nchans * row_bytes, 0);
     }
 
-    void TearDown(const ::benchmark::State& /*unused*/) override {}
+    void TearDown(const ::benchmark::State& /*unused*/) override {
+        waterfall_packed_d.clear();
+        waterfall_packed_d.shrink_to_fit();
+    }
+
+    void SetUp(benchmark::State& state) override {
+        SetUp(static_cast<const benchmark::State&>(state));
+    }
+
+    void TearDown(benchmark::State& state) override {
+        TearDown(static_cast<const benchmark::State&>(state));
+    }
 
     float f_min{}, f_max{}, tsamp{}, dm_max{}, dm_step{};
     SizeType nchans{}, nsamps{}, nbits{8}, nbeams{1};

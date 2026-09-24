@@ -91,7 +91,18 @@ public:
         waterfall_d = generate_vector_device<float>(nchans * nsamps);
     }
 
-    void TearDown(const ::benchmark::State& /*unused*/) override {}
+    void TearDown(const ::benchmark::State& /*unused*/) override {
+        waterfall_d.clear();
+        waterfall_d.shrink_to_fit();
+    }
+
+    void SetUp(benchmark::State& state) override {
+        SetUp(static_cast<const benchmark::State&>(state));
+    }
+
+    void TearDown(benchmark::State& state) override {
+        TearDown(static_cast<const benchmark::State&>(state));
+    }
 
     float f_min{}, f_max{}, tsamp{};
     size_t nchans{}, dt_max{}, nsamps{};

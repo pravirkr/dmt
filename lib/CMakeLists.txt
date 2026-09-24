@@ -79,10 +79,10 @@ else()
   target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
 endif()
 
-# OpenMP is internal to libdmt
+# OpenMP for libdmt and internal headers
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
-  target_compile_definitions(${DMT_LIBRARY_NAME} PRIVATE DMT_ENABLE_OPENMP)
+  target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(${DMT_LIBRARY_NAME} PUBLIC DMT_ENABLE_OPENMP)
 endif()
 
 # Add CUDA options and libraries when available

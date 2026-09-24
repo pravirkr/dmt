@@ -31,7 +31,7 @@ void bind_cfdmt_cuda(py::module_& mod) {
         Hybrid coherent FDMT on CUDA.
 
         Same constructor arguments as :class:`~dmtlib.libdmt.CohFDMTCPU`, with
-        ``device_id`` instead of ``nthreads``. ``CohFDMTGPU`` is an alias.
+        ``device_id`` instead of ``nthreads``.
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
                       float, float, SizeType, std::string_view, bool, int>(),
@@ -69,10 +69,6 @@ void bind_cfdmt_cuda(py::module_& mod) {
                  return dmt;
              })
         .def("reset_history", &CohFDMTCUDA::reset_history);
-
-    mod.attr("FDMTGPU")    = mod.attr("FDMTCUDA");
-    mod.attr("FDMTFFTGPU") = mod.attr("FDMTFFTCUDA");
-    mod.attr("CohFDMTGPU") = mod.attr("CohFDMTCUDA");
 }
 
 } // namespace dmt

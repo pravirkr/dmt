@@ -115,6 +115,9 @@ target_compile_options(
             $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g> $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
 
+# OpenMP detection
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+
 # CUDA toolchain detection (DMT_CUDA user option; DMT_ENABLE_CUDA is the C++ macro).
 if(DMT_CUDA STREQUAL "ON" OR DMT_CUDA STREQUAL "AUTO")
   include(CheckLanguage)

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
@@ -26,6 +28,78 @@ struct FDMTSubbandView {
     float f_start;               ///< Start frequency of this sub-band (MHz)
     float f_end;                 ///< End frequency of this sub-band (MHz)
     std::span<const IndexType> dt_grid; ///< Delay trials in samples
+};
+
+/**
+ * @brief Execution order of the FDMT tree-merge loop (see FDMTExecConfig).
+ */
+enum class FDMTSchedule : uint8_t {
+    /// One full-row merge per output coordinate, parallel over coordinates
+    /// (the original schedule).
+    kCoord = 0,
+    /// Cache-blocked: consecutive coordinates of one output sub-band are
+    /// grouped into chunks, and each (chunk, time tile) work item merges
+    /// every coordinate of the chunk over that tile, so the chunk's shared
+    /// tail/head input tiles stay cache-resident across all their readers.
+    kTiled = 1,
+};
+
+/**
+ * @brief When FDMTCPU tree merges use non-temporal stores (see
+ * FDMTExecConfig::streaming_stores).
+ */
+enum class FDMTStreamingStores : uint8_t {
+    /// Ordinary cached stores (default).
+    kOff = 0,
+    /// Stream only levels whose output exceeds the detected last-level
+    /// cache; smaller levels are re-read from cache by the next level, where
+    /// streaming would add DRAM traffic.
+    kAuto = 1,
+    /// Stream every float level (benchmarking / testing).
+    kAlways = 2,
+};
+
+/**
+ * @brief Runtime execution switches for FDMTCPU. None of these change the
+ * plan or the numerical result: every schedule and state type produces
+ * bit-identical output for the same input.
+ */
+struct FDMTExecConfig {
+    /// Tree-merge schedule (default: kCoord, the original path).
+    FDMTSchedule schedule = FDMTSchedule::kCoord;
+    /// kTiled only: time samples per tile; 0 = auto (sized from the detected
+    /// per-core L2 cache).
+    SizeType tile_nsamps = 0;
+    /// kTiled only: max consecutive coordinates per work-item chunk; 0 = auto
+    /// (4).
+    SizeType tile_ndt = 0;
+    /// Packed (low-bit) input only: store tree levels whose exact value bound
+    /// fits as uint8/uint16 instead of float, cutting state memory traffic.
+    /// Ignored for float input.
+    bool int_tree = false;
+    /// Float tree merges only: non-temporal (cache-bypassing) stores for level
+    /// outputs, saving the read-for-ownership traffic (see
+    /// FDMTStreamingStores). x86 AVX2/AVX-512 builds only; a no-op elsewhere.
+    /// Output is unchanged.
+    FDMTStreamingStores streaming_stores = FDMTStreamingStores::kOff;
+    /// execute() only: fuse level-0 initialisation with the first
+    /// `fuse_levels` tree merges (0 = off, the original level-by-level path).
+    /// Channels are processed in groups of 2^fuse_levels (one sub-tree each):
+    /// a thread builds the group's level-0 rows in a cache-resident scratch
+    /// buffer and merges them up to level `fuse_levels` there, so the
+    /// intermediate levels never travel to and from main memory. Uses the
+    /// same kernels on the same rows, so the output is bit-identical. Values
+    /// above the plan's number of merge levels are clamped; kAutoFuse picks
+    /// the deepest fusion whose per-thread scratch fits the detected cache
+    /// (see FDMTCPU::get_effective_fuse_levels()). The stepper
+    /// (reset()/advance()) always uses the original path, so every level
+    /// stays inspectable.
+    SizeType fuse_levels = 0;
+
+    /// fuse_levels value selecting the depth automatically.
+    static constexpr SizeType kAutoFuse = static_cast<SizeType>(-1);
+
+    bool operator==(const FDMTExecConfig&) const = default;
 };
 
 /**
@@ -170,6 +244,47 @@ public:
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
+    /**
+     * @brief Executes the FDMT transform on packed low-bit integer input.
+     *
+     * Each channel row holds nsamps unsigned samples of `nbits` bits,
+     * LSB-first within a byte for nbits < 8 (same convention as DDMTCPU),
+     * padded to a whole byte: layout (nbeams, nchans,
+     * packed_row_bytes(nsamps, nbits)). The output is float and identical to
+     * execute() on the same values converted to float.
+     *
+     * @param waterfall_packed Packed input, beam-major flat.
+     * @param nbits Sample width: 1, 2, 4, 8 or 16.
+     * @param dmt Output DM-time array (size >= nbeams*get_buffer_size()).
+     */
+    void execute(std::span<const uint8_t> waterfall_packed,
+                 SizeType nbits,
+                 std::span<float> dmt);
+
+    /**
+     * @brief Sets the runtime execution switches (schedule, tiling,
+     * narrow-integer tree). May be changed between blocks, including
+     * mid-stream in "valid" mode; history state is unaffected.
+     * @throws std::logic_error if called while the stepper is mid-transform.
+     */
+    void set_exec_config(const FDMTExecConfig& config);
+
+    /// @brief Current runtime execution switches.
+    [[nodiscard]] const FDMTExecConfig& get_exec_config() const noexcept;
+
+    /**
+     * @brief Effective (auto-resolved) tile size in samples used by the
+     * kTiled schedule.
+     */
+    [[nodiscard]] SizeType get_effective_tile_nsamps() const noexcept;
+
+    /**
+     * @brief Fusion depth execute() actually uses: FDMTExecConfig::fuse_levels
+     * clamped to the plan's merge levels, or the auto-selected depth for
+     * FDMTExecConfig::kAutoFuse (0 = original unfused path).
+     */
+    [[nodiscard]] SizeType get_effective_fuse_levels() const noexcept;
+
     // =========================================================================
     // Stepper / Hierarchical DP Engine API
     // =========================================================================
@@ -192,6 +307,17 @@ public:
      * exposed by this API yet.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
+
+    /**
+     * @brief Packed low-bit analogue of reset() (see the packed execute()).
+     *
+     * @note With FDMTExecConfig::int_tree enabled, levels stored as integers
+     * cannot be inspected: the view_* methods throw std::logic_error at such
+     * a level.
+     */
+    void reset(std::span<const uint8_t> waterfall_packed,
+               SizeType nbits,
+               std::span<float> dmt);
 
     /**
      * @brief Steps forward by a given number of levels.
@@ -607,6 +733,71 @@ public:
     void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Executes the FDMT transform on packed low-bit input in host
+     * memory (see FDMTCPU::execute(std::span<const uint8_t>, ...) for the
+     * layout). Only the packed bytes are copied to the device -- 32 / nbits
+     * times less PCIe traffic than float input. The output is float and
+     * matches the float execute() on the same values.
+     *
+     * @param waterfall_packed Packed input (host), (nbeams, nchans,
+     * packed_row_bytes(nsamps, nbits)).
+     * @param nbits Sample width: 1, 2, 4, 8 or 16.
+     * @param dmt Output DM-time array (host).
+     */
+    void execute(std::span<const uint8_t> waterfall_packed,
+                 SizeType nbits,
+                 std::span<float> dmt);
+
+    /**
+     * @brief Packed low-bit analogue of the device-memory execute().
+     * @note Asynchronous on @p stream, like the float overload.
+     */
+    void execute(cuda::std::span<const uint8_t> d_waterfall_packed,
+                 SizeType nbits,
+                 cuda::std::span<float> d_dmt,
+                 cudaStream_t stream = nullptr);
+
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<float, Alloc1>& waterfall,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
+
+    template <typename Alloc1 = std::allocator<uint8_t>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<uint8_t, Alloc1>& waterfall_packed,
+                 SizeType nbits,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const uint8_t>(waterfall_packed), nbits,
+                std::span<float>(dmt));
+    }
+
+    /**
+     * @brief Packed low-bit analogue of reset() (device memory).
+     *
+     * @note With FDMTExecConfig::int_tree enabled, levels stored as integers
+     * cannot be inspected: the view_* methods throw std::logic_error at such
+     * a level.
+     */
+    void reset(cuda::std::span<const uint8_t> d_waterfall_packed,
+               SizeType nbits,
+               cuda::std::span<float> d_dmt,
+               cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Sets the runtime execution switches. Only
+     * FDMTExecConfig::int_tree applies to the CUDA backend (narrow-integer
+     * tree state for packed input, as on the CPU); the CPU-only fields are
+     * ignored. May be changed between blocks.
+     * @throws std::logic_error if called while the stepper is mid-transform.
+     */
+    void set_exec_config(const FDMTExecConfig& config);
+
+    /// @brief Current runtime execution switches.
+    [[nodiscard]] const FDMTExecConfig& get_exec_config() const noexcept;
 
     /**
      * @brief Resets and initializes the stepped execution state using device

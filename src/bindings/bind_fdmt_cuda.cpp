@@ -1,5 +1,7 @@
 #include "bindings/bind_cuda.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <format>
 #include <optional>
 #include <span>
@@ -20,19 +22,19 @@
 
 namespace dmt {
 using algorithms::FDMTCUDA;
+using algorithms::FDMTExecConfig;
 using algorithms::FDMTFFTCUDA;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
 void bind_fdmt_cuda(py::module_& mod) {
-    py::class_<FDMTCUDA>(
-        mod, "FDMTCUDA",
-        R"doc(
+    py::class_<FDMTCUDA>(mod, "FDMTCUDA",
+                         R"doc(
         Incoherent Fast Dispersion Measure Transform on CUDA.
 
         Same constructor arguments as :class:`~dmtlib.libdmt.FDMTCPU`, with
-        ``device_id`` instead of ``nthreads``. ``FDMTGPU`` is an alias.
+        ``device_id`` instead of ``nthreads``.
 
         See also
         --------
@@ -161,6 +163,69 @@ void bind_fdmt_cuda(py::module_& mod) {
             Copies ``waterfall`` to the device, executes, and returns a host
             array of the same layout as :meth:`dmtlib.libdmt.FDMTCPU.execute`.
             )doc")
+        .def(
+            "execute",
+            [](FDMTCUDA& fdmt, const py::array& waterfall_obj,
+               SizeType nbits) -> py::object {
+                if (waterfall_obj.dtype().kind() != 'u' ||
+                    waterfall_obj.itemsize() != 1) {
+                    throw py::type_error(
+                        "FDMTCUDA.execute: nbits given, so waterfall must be "
+                        "a packed uint8 array");
+                }
+                const auto packed =
+                    py::array_t<uint8_t, py::array::c_style>::ensure(
+                        waterfall_obj);
+                if (!packed || (packed.ndim() != 2 && packed.ndim() != 3)) {
+                    throw std::runtime_error(
+                        "Packed waterfall must be a 2D (nchans, row_bytes) or "
+                        "3D (nbeams, nchans, row_bytes) uint8 NumPy array.");
+                }
+                const auto nbeams   = fdmt.get_nbeams();
+                const auto& plan    = fdmt.get_plan();
+                const auto& plan_c  = plan.get_container();
+                const auto niters   = plan.get_niters();
+                const auto ncoords  = plan_c.state_shape[niters].ncoords;
+                const auto nsamps   = plan_c.state_shape[niters].nsamps;
+                const auto dmt_size = plan.get_dmt_size();
+                const auto buf_size = plan.get_buffer_size();
+                if (packed.ndim() == 2 && nbeams != 1) {
+                    throw std::invalid_argument(std::format(
+                        "FDMTCUDA: nbeams={} requires a 3D packed waterfall",
+                        nbeams));
+                }
+                std::vector<float> dmt_buf(nbeams * buf_size, 0.0F);
+                fdmt.execute(
+                    std::span<const uint8_t>(packed.data(), packed.size()),
+                    nbits, std::span<float>(dmt_buf.data(), dmt_buf.size()));
+                if (packed.ndim() == 2) {
+                    py::array_t<float, py::array::c_style> result(
+                        {ncoords, nsamps});
+                    std::copy_n(dmt_buf.data(), dmt_size,
+                                result.mutable_data());
+                    return result;
+                }
+                py::array_t<float, py::array::c_style> result(
+                    {nbeams, ncoords, nsamps});
+                auto* res_ptr = result.mutable_data();
+                for (SizeType b = 0; b < nbeams; ++b) {
+                    std::copy_n(dmt_buf.data() + (b * buf_size), dmt_size,
+                                res_ptr + (b * dmt_size));
+                }
+                return result;
+            },
+            py::arg("waterfall_packed"), py::arg("nbits"),
+            R"doc(
+            Run the FDMT transform on packed low-bit input on the GPU. Only the
+            packed bytes are copied to the device. Same layout and output as
+            :meth:`dmtlib.libdmt.FDMTCPU.execute` with ``nbits``.
+            )doc")
+        .def_property(
+            "exec_config",
+            [](const FDMTCUDA& fdmt) { return fdmt.get_exec_config(); },
+            &FDMTCUDA::set_exec_config,
+            "Runtime execution switches (FDMTExecConfig); only ``int_tree`` "
+            "applies on CUDA.")
         .def_property_readonly("current_level", &FDMTCUDA::current_level)
         .def_property_readonly("total_levels", &FDMTCUDA::total_levels)
         .def_property_readonly("remaining_levels", &FDMTCUDA::remaining_levels)
@@ -175,7 +240,7 @@ void bind_fdmt_cuda(py::module_& mod) {
         FFT-domain FDMT on CUDA.
 
         Same constructor arguments as :class:`~dmtlib.libdmt.FDMTFFTCPU`, with
-        ``device_id`` instead of ``nthreads``. ``FDMTFFTGPU`` is an alias.
+        ``device_id`` instead of ``nthreads``.
         )doc")
         .def(py::init<float, float, SizeType, SizeType, float, IndexType,
                       IndexType, SizeType, bool, std::string_view, bool, int,

@@ -4,9 +4,15 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 
+#include <cstdint>
+#include <random>
+#include <span>
+#include <vector>
+
 #include <benchmark/benchmark.h>
 
 #include "dmt/algorithms/fdmt.hpp"
+#include "dmt/bit_pack_utils.hpp"
 
 // https://github.com/jrhemstad/example_cuda_benchmark
 #define BENCH_CUDA_TRY(call)                                                   \
@@ -124,13 +130,14 @@ public:
         waterfall_d = generate_vector_device<float>(nchans * nsamps);
     }
 
-    void TearDown(const ::benchmark::State& /*unused*/) override {}
-
-    void SetUp(benchmark::State& state) override {
-        SetUp(static_cast<const benchmark::State&>(state));
+    void TearDown(const ::benchmark::State& /*unused*/) override {
+        waterfall_d.clear();
+        waterfall_d.shrink_to_fit();
     }
 
-    void TearDown(benchmark::State& /*unused*/) override {}
+    void TearDown(benchmark::State& state) override {
+        TearDown(static_cast<const benchmark::State&>(state));
+    }
 
     float f_min{}, f_max{}, tsamp{};
     size_t nchans{}, dt_max{}, nsamps{};
@@ -177,6 +184,78 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
     }
 }
 
+// Packed low-bit input. Args: (nsamps, nbits [32 = float reference],
+// int_tree). Device-resident input and output: measures the kernels (level-0
+// sample loads and narrow-integer tree state).
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
+(benchmark::State& state) {
+    const auto nbits = static_cast<SizeType>(state.range(1));
+    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    fdmt_cuda.set_exec_config({.int_tree = state.range(2) != 0});
+    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
+                                       0.0F);
+    const cuda::std::span<float> dmt_span(
+        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    if (nbits == 32) {
+        for (auto _ : state) {
+            CudaEventTimer raii{state};
+            fdmt_cuda.execute(cuda::std::span<const float>(
+                                  thrust::raw_pointer_cast(waterfall_d.data()),
+                                  waterfall_d.size()),
+                              dmt_span);
+        }
+        return;
+    }
+    std::vector<uint8_t> packed_h(nchans *
+                                  utils::packed_row_bytes(nsamps, nbits));
+    std::mt19937 gen(42);
+    for (auto& b : packed_h) {
+        b = static_cast<uint8_t>(gen() & 0xFFU);
+    }
+    thrust::device_vector<uint8_t> packed_d(packed_h.begin(), packed_h.end());
+    const cuda::std::span<const uint8_t> packed_span(
+        thrust::raw_pointer_cast(packed_d.data()), packed_d.size());
+    for (auto _ : state) {
+        CudaEventTimer raii{state};
+        fdmt_cuda.execute(packed_span, nbits, dmt_span);
+    }
+}
+
+// Host round trip (H2D input copy + transform + D2H output). Args: (nsamps,
+// nbits [32 = float]). Packed input moves 32 / nbits times fewer bytes over
+// PCIe; int_tree is on for packed input.
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
+(benchmark::State& state) {
+    const auto nbits = static_cast<SizeType>(state.range(1));
+    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    fdmt_cuda.set_exec_config({.int_tree = nbits != 32});
+    std::vector<float> dmt_h(fdmt_cuda.get_plan().get_buffer_size(), 0.0F);
+    std::mt19937 gen(42);
+    if (nbits == 32) {
+        std::vector<float> wf_h(nchans * nsamps);
+        std::uniform_real_distribution<float> dis(0.0F, 1.0F);
+        for (auto& v : wf_h) {
+            v = dis(gen);
+        }
+        for (auto _ : state) {
+            CudaEventTimer raii{state};
+            fdmt_cuda.execute(std::span<const float>(wf_h),
+                              std::span<float>(dmt_h));
+        }
+        return;
+    }
+    std::vector<uint8_t> packed_h(nchans *
+                                  utils::packed_row_bytes(nsamps, nbits));
+    for (auto& b : packed_h) {
+        b = static_cast<uint8_t>(gen() & 0xFFU);
+    }
+    for (auto _ : state) {
+        CudaEventTimer raii{state};
+        fdmt_cuda.execute(std::span<const uint8_t>(packed_h), nbits,
+                          std::span<float>(dmt_h));
+    }
+}
+
 constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 15;
 
@@ -190,6 +269,15 @@ BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_cuda) // NOLINT
 
 BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_overall_cuda) // NOLINT
     ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
+    ->UseManualTime();
+
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed) // NOLINT
+    ->ArgsProduct({{1 << 14, 1 << 15}, {32}, {0}})
+    ->ArgsProduct({{1 << 14, 1 << 15}, {1, 2, 4, 8, 16}, {0, 1}})
+    ->UseManualTime();
+
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda) // NOLINT
+    ->ArgsProduct({{1 << 14, 1 << 15}, {32, 1, 2, 4, 8}})
     ->UseManualTime();
 
 // BENCHMARK_MAIN();

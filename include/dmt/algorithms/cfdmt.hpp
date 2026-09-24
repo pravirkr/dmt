@@ -168,6 +168,14 @@ public:
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream = nullptr) const;
 
+    template <IntegralDataType DataType,
+              typename Alloc1 = std::allocator<DataType>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<DataType, Alloc1>& data_in,
+                 std::vector<float, Alloc2>& dmt) const {
+        execute<DataType>(std::span<const DataType>(data_in), std::span<float>(dmt));
+    }
+
     /**
      * @brief Resets every coarse-DM trial's fine-search streaming history to a cold state.
      */

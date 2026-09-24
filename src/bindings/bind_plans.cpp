@@ -301,7 +301,7 @@ void bind_plans(py::module_& mod) {
         Plan for the hybrid coherent Fast Dispersion Measure Transform.
 
         Combines coarse coherent dedispersion trials with a fine FDMT tree
-        around each trial. Used by :class:`CohFDMTCPU` and :class:`CohFDMTGPU`.
+        around each trial. Used by :class:`CohFDMTCPU` and :class:`CohFDMTCUDA`.
 
         Parameters
         ----------

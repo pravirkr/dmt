@@ -136,7 +136,7 @@ TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
     CHECK(sub1.data.size() == sub1.ndt * sub1.nsamps);
 
     fdmt_cuda.finalize();
-    CHECK(fdmt_cuda.is_finished());
+    CHECK_FALSE(fdmt_cuda.is_finished());
 
     std::vector<float> dmt_h(dmt_size, 0.0F);
     thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_h.begin());
@@ -275,9 +275,9 @@ TEST_CASE("FDMTCUDA odd channels and padding safety on device",
 TEST_CASE("FDMTCUDA no box smearing parity between CPU and CUDA",
           "[fdmt_gpu][gpu][parity]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, false,
+    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false,
                        "full");
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, false, "full");
+    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false, "full");
 
     std::vector<float> wf(16 * 1024);
     for (size_t i = 0; i < wf.size(); ++i) {

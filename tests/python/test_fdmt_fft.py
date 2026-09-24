@@ -264,7 +264,7 @@ class TestFDMTFFT:
 
     @pytest.mark.cuda
     def test_fdmt_fft_gpu_optional(self) -> None:
-        from dmtlib import FDMTFFTGPU
+        from dmtlib import FDMTFFTCUDA
 
         f_min = 1000.0
         f_max = 1500.0
@@ -277,7 +277,7 @@ class TestFDMTFFT:
         cpu = FDMTFFTCPU(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
         )
-        gpu = FDMTFFTGPU(
+        gpu = FDMTFFTCUDA(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
         )
         np.testing.assert_allclose(

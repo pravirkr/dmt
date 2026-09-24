@@ -36,7 +36,7 @@ struct UnpackAndPadFunctor {
     int ri_stride;
 
     // Constants
-    static constexpr int kNpol = 2;
+    [[maybe_unused]] static constexpr int kNpol = 2;
 
     __host__ __device__ inline int
     calculate_base_index(int isamp, int ipol, int isub) const {
@@ -146,10 +146,11 @@ public:
         std::byte* d_in_byte_ptr =
             thrust::raw_pointer_cast(m_d_in_buffer.data());
         auto* d_in_ptr = reinterpret_cast<DataType*>(d_in_byte_ptr);
-        DMT_CHECK_CUDA_CALL(cudaMemcpyAsync(d_in_ptr, data_in.data(),
-                                            data_in.size_bytes(),
-                                            cudaMemcpyHostToDevice, stream),
-                            "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
+        cuda_utils::check_cuda_call(cudaMemcpyAsync(d_in_ptr, data_in.data(),
+                                                    data_in.size_bytes(),
+                                                    cudaMemcpyHostToDevice,
+                                                    stream),
+                                    "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
 
         auto data_in_d_span = cuda::std::span(d_in_ptr, m_expected_in_size);
 

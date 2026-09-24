@@ -27,7 +27,7 @@ install(TARGETS ${DMT_PYMODULE_NAME} DESTINATION ${DMT_PYTHON_LIBRARY_NAME})
 
 # GPU module (if CUDA is available)
 if(CMAKE_CUDA_COMPILER)
-  set(DMT_PYGPUMODULE_NAME libcuda${DMT_LIBRARY_NAME})
+  set(DMT_PYGPUMODULE_NAME libcu${DMT_LIBRARY_NAME})
   pybind11_add_module(
     ${DMT_PYGPUMODULE_NAME} dmt_python_cuda.cpp bindings/bind_fdmt_cuda.cpp
     bindings/bind_cfdmt_cuda.cpp bindings/bind_ddmt_cuda.cpp

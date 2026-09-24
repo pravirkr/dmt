@@ -321,6 +321,20 @@ public:
     void reset(cuda::std::span<const float> d_waterfall,
                cuda::std::span<float> d_dmt,
                cudaStream_t stream = nullptr);
+
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<float, Alloc1>& waterfall,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
+
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void reset(const std::vector<float, Alloc1>& waterfall,
+               std::vector<float, Alloc2>& dmt) {
+        reset(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
     /// @brief Advances stepper forward by given levels on GPU
     void advance(SizeType levels = 1, cudaStream_t stream = nullptr);
     /// @brief Advances execution until specified remaining levels before root

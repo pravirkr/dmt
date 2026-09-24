@@ -13,7 +13,7 @@ def _cuda_available() -> bool:
     except Exception:
         return False
     try:
-        libcudmt.FDMTGPU(1000.0, 1500.0, 4, 8, 0.001, 2)
+        libcudmt.FDMTCUDA(1000.0, 1500.0, 4, 8, 0.001, 2)
     except Exception:
         return False
     return True

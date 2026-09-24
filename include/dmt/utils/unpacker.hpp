@@ -141,6 +141,15 @@ public:
                  cuda::std::span<ComplexTypeCUDA> data_p2,
                  cudaStream_t stream = nullptr) const;
 
+    template <IntegralDataType DataType, typename Alloc = std::allocator<DataType>>
+    void execute(const std::vector<DataType, Alloc>& data_in,
+                 cuda::std::span<ComplexTypeCUDA> data_p1,
+                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cudaStream_t stream = nullptr) const {
+        execute<DataType>(std::span<const DataType>(data_in), data_p1, data_p2,
+                          stream);
+    }
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
