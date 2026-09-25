@@ -7,6 +7,7 @@ This guide covers real-world telescope pipeline engineering: continuous data str
 
 streaming_and_history
 multibeam
+performance
 noise_calibration
 quirks_and_gotchas
 ```
@@ -17,5 +18,6 @@ quirks_and_gotchas
 
 - [Streaming & Overlap-Save History](streaming_and_history.md): How `dmt` preserves 100% of dispersed signals across block boundaries without edge artifacts.
 - [Multi-Beam Batching](multibeam.md): SIMD and GPU-accelerated batch processing across tied-array telescope beams.
+- [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree), packed low-bit input, threads and block size, and which optimizations were measured and rejected.
 - [Noise Calibration & SNR Scaling](noise_calibration.md): Converting raw integrated flux into true statistical Signal-to-Noise Ratio ($\text{SNR}$).
 - [Quirks & Gotchas](quirks_and_gotchas.md): Common edge cases, buffer alignments, memory footprint guidelines, and debugging tips.

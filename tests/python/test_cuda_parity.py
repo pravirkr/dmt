@@ -62,7 +62,7 @@ def test_coh_fdmt_gpu_matches_cpu() -> None:
 def test_fdmt_gpu_packed_matches_cpu(nbits: int, int_tree: bool) -> None:
     # Integer-valued input: every partial sum is exact, so GPU and CPU agree
     # bit-for-bit (fast-math reassociation cannot change exact sums).
-    from dmtlib import FDMTExecConfig, FDMTCUDA
+    from dmtlib import FDMTCUDA
 
     nchans, nsamps = 64, 203
     rng = np.random.default_rng(nbits)
@@ -82,7 +82,27 @@ def test_fdmt_gpu_packed_matches_cpu(nbits: int, int_tree: bool) -> None:
             .astype(np.uint8)
         )
     cpu = FDMTCPU(1000.0, 1500.0, nchans, nsamps, 0.001, 40)
-    gpu = FDMTCUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 40)
-    gpu.exec_config = FDMTExecConfig(int_tree=int_tree)
+    gpu = FDMTCUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 40, int_tree=int_tree)
     ref = cpu.execute(values.astype(np.float32))
     np.testing.assert_array_equal(gpu.execute(packed, nbits), ref)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("mode", ["full", "roll", "valid"])
+def test_fdmt_gpu_fused_matches_unfused(mode: str) -> None:
+    # Level fusion repeats the unfused kernels' float additions exactly.
+    from dmtlib import FDMTCUDA
+
+    nchans, nsamps = 256, 700
+    rng = np.random.default_rng(4)
+    data = rng.standard_normal((nchans, nsamps), dtype=np.float32)
+    ref = FDMTCUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 64, mode=mode, fuse_levels=0)
+    assert ref.fuse_levels == 0
+    expected = ref.execute(data)
+    for fuse in (1, 3, None):
+        gpu = FDMTCUDA(
+            1000.0, 1500.0, nchans, nsamps, 0.001, 64, mode=mode, fuse_levels=fuse
+        )
+        assert 0 <= gpu.fuse_levels <= gpu.plan.niters
+        assert gpu.memory_usage.total > 0
+        np.testing.assert_array_equal(gpu.execute(data), expected)

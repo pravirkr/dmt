@@ -51,7 +51,7 @@ TEST_CASE("FDMTCUDA execute method (on device)", "[fdmt_gpu][gpu]") {
 
     std::vector<float> dmt_h(dmt_size, 0.0F);
     thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_h.begin());
-    REQUIRE_THAT(dmt_h, Catch::Matchers::Approx(dmt).margin(0.0001));
+    test::require_approx(dmt_h, dmt, fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("FDMTCUDA execute method (on host)", "[fdmt_gpu][gpu]") {
@@ -66,7 +66,7 @@ TEST_CASE("FDMTCUDA execute method (on host)", "[fdmt_gpu][gpu]") {
     REQUIRE_NOTHROW(fdmt_cpu.execute(waterfall, dmt));
     REQUIRE_NOTHROW(fdmt_cuda.execute(std::span<const float>(waterfall),
                                       std::span<float>(dmt_h)));
-    REQUIRE_THAT(dmt_h, Catch::Matchers::Approx(dmt).margin(0.0001));
+    test::require_approx(dmt_h, dmt, fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("FDMTCUDA stepper: bit-exact equivalence with single-shot execute on "
@@ -99,7 +99,7 @@ TEST_CASE("FDMTCUDA stepper: bit-exact equivalence with single-shot execute on "
 
     std::vector<float> dmt_h(dmt_size, 0.0F);
     thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_h.begin());
-    REQUIRE_THAT(dmt_h, Catch::Matchers::Approx(dmt_ref).margin(0.0001));
+    test::require_approx(dmt_h, dmt_ref, fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
@@ -140,7 +140,7 @@ TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
 
     std::vector<float> dmt_h(dmt_size, 0.0F);
     thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_h.begin());
-    REQUIRE_THAT(dmt_h, Catch::Matchers::Approx(dmt_ref).margin(0.0001));
+    test::require_approx(dmt_h, dmt_ref, fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("FDMTCUDA stepper: 2 levels remaining (4 subbands) on device",
@@ -193,13 +193,15 @@ TEST_CASE("FDMTCUDA valid mode parity between CPU and CUDA",
     std::vector<float> dmt_cuda1(dmt_size, 0.0F);
     fdmt_cpu.execute(wf1, dmt_cpu1);
     fdmt_cuda.execute(wf1, dmt_cuda1);
-    REQUIRE_THAT(dmt_cuda1, Catch::Matchers::Approx(dmt_cpu1).margin(0.0001));
+    test::require_approx(dmt_cuda1, dmt_cpu1,
+                         fdmt_cpu.get_plan().get_dmt_size());
 
     std::vector<float> dmt_cpu2(dmt_size, 0.0F);
     std::vector<float> dmt_cuda2(dmt_size, 0.0F);
     fdmt_cpu.execute(wf2, dmt_cpu2);
     fdmt_cuda.execute(wf2, dmt_cuda2);
-    REQUIRE_THAT(dmt_cuda2, Catch::Matchers::Approx(dmt_cpu2).margin(0.0001));
+    test::require_approx(dmt_cuda2, dmt_cpu2,
+                         fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("FDMTCUDA roll mode parity between CPU and CUDA",
@@ -218,7 +220,7 @@ TEST_CASE("FDMTCUDA roll mode parity between CPU and CUDA",
     std::vector<float> dmt_cuda(dmt_size, 0.0F);
     fdmt_cpu.execute(wf, dmt_cpu);
     fdmt_cuda.execute(wf, dmt_cuda);
-    REQUIRE_THAT(dmt_cuda, Catch::Matchers::Approx(dmt_cpu).margin(0.0001));
+    test::require_approx(dmt_cuda, dmt_cpu, fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("FDMTCUDA odd channels and padding safety on device",
@@ -289,7 +291,7 @@ TEST_CASE("FDMTCUDA no box smearing parity between CPU and CUDA",
     std::vector<float> dmt_cuda(dmt_size, 0.0F);
     fdmt_cpu.execute(wf, dmt_cpu);
     fdmt_cuda.execute(wf, dmt_cuda);
-    REQUIRE_THAT(dmt_cuda, Catch::Matchers::Approx(dmt_cpu).margin(0.0001));
+    test::require_approx(dmt_cuda, dmt_cpu, fdmt_cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE(
@@ -326,8 +328,8 @@ TEST_CASE(
             std::vector<float> dmt_cuda(dmt_size, 0.0F);
             fdmt_cpu.execute(wf, dmt_cpu);
             fdmt_cuda.execute(wf, dmt_cuda);
-            REQUIRE_THAT(dmt_cuda,
-                         Catch::Matchers::Approx(dmt_cpu).margin(0.0001));
+            test::require_approx(dmt_cuda, dmt_cpu,
+                                 fdmt_cpu.get_plan().get_dmt_size());
         }
     }
 }
@@ -579,7 +581,8 @@ TEST_CASE("FDMTCUDA valid-mode tree-history streaming parity with CPU in "
         }
         fdmt_cpu.execute(block, dmt_cpu_block);
         fdmt_cuda.execute(block, dmt_cuda_block);
-        test::require_approx(dmt_cuda_block, dmt_cpu_block, 1e-3);
+        test::require_approx(dmt_cuda_block, dmt_cpu_block, plan.get_dmt_size(),
+                             1e-3);
     }
 }
 
@@ -652,7 +655,8 @@ TEST_CASE("FDMTCUDA sparse and custom dt_grid parity with CPU",
         std::vector<float> dmt_cuda(n, 0.0F);
         fdmt_cpu.execute(waterfall, dmt_cpu);
         fdmt_cuda.execute(waterfall, dmt_cuda);
-        test::require_approx(dmt_cuda, dmt_cpu);
+        test::require_approx(dmt_cuda, dmt_cpu,
+                             fdmt_cpu.get_plan().get_dmt_size());
         REQUIRE_THAT(
             fdmt_cuda.get_plan().get_dt_grid_final(),
             Catch::Matchers::Equals(fdmt_cpu.get_plan().get_dt_grid_final()));
@@ -669,7 +673,8 @@ TEST_CASE("FDMTCUDA sparse and custom dt_grid parity with CPU",
         std::vector<float> dmt_cuda(n, 0.0F);
         fdmt_cpu.execute(waterfall, dmt_cpu);
         fdmt_cuda.execute(waterfall, dmt_cuda);
-        test::require_approx(dmt_cuda, dmt_cpu);
+        test::require_approx(dmt_cuda, dmt_cpu,
+                             fdmt_cpu.get_plan().get_dmt_size());
     }
 }
 

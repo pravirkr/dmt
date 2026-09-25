@@ -116,3 +116,21 @@ batch_input = np.random.normal(0, 1, size=(nbeams, 256, 1024)).astype(np.float32
 batch_output = fdmt_beams.execute(batch_input)
 print("Batch output shape:", batch_output.shape)
 ```
+
+---
+
+## 5. Packed Low-Bit Input
+
+Low-bit digitiser output can be passed packed (LSB-first within each byte,
+rows padded to a whole byte); the result is identical to passing the same
+values as float, and 1-bit input runs 2-3x faster:
+
+```python
+nbits = 2
+packed = np.random.randint(0, 256, size=(256, 1024 * nbits // 8), dtype=np.uint8)
+dmt_plane = fdmt.execute(packed, nbits)  # float32 (n_dm, n_times)
+```
+
+The execution defaults (automatic level fusion, narrow-integer tree for
+packed input) are already the fastest settings; see
+[Performance Tuning](../pipeline_guide/performance.md).

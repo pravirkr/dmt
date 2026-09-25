@@ -1,7 +1,6 @@
 #include "bindings/bind.hpp"
 
 #include <algorithm>
-#include <array>
 #include <format>
 #include <memory>
 #include <optional>
@@ -22,10 +21,9 @@
 
 namespace dmt {
 using algorithms::FDMTCPU;
-using algorithms::FDMTExecConfig;
 using algorithms::FDMTFFTCPU;
-using algorithms::FDMTSchedule;
-using algorithms::FDMTStreamingStores;
+using algorithms::FDMTMemoryUsage;
+using algorithms::kFDMTAutoFuse;
 using plans::FDMTPlan;
 
 namespace py = pybind11;
@@ -77,92 +75,23 @@ py::object fdmt_execute_to_array(const FDMTCPU& fdmt,
 } // namespace
 
 void bind_fdmt(py::module_& mod) {
-    py::enum_<FDMTSchedule>(mod, "FDMTSchedule", R"doc(
-        Tree-merge execution order for :class:`FDMTCPU` (see
-        :class:`FDMTExecConfig`). Both produce bit-identical output.
-
-        COORD
-            One full-row merge per output coordinate (original schedule).
-        TILED
-            Cache-blocked: (coordinate chunk, time tile) work items so shared
-            input tiles are reused from cache.
+    py::class_<FDMTMemoryUsage>(mod, "FDMTMemoryUsage", R"doc(
+        Memory an FDMT engine allocates at construction, in bytes (host for
+        :class:`FDMTCPU`, device for :class:`FDMTCUDA`). ``execute`` allocates
+        nothing further; ``output`` is the caller-side output buffer per call
+        (managed automatically in Python) and is not part of ``total``.
         )doc")
-        .value("COORD", FDMTSchedule::kCoord)
-        .value("TILED", FDMTSchedule::kTiled);
-
-    py::enum_<FDMTStreamingStores>(mod, "FDMTStreamingStores", R"doc(
-        Non-temporal store policy for float tree merges (x86 AVX2/AVX-512
-        builds only; a no-op elsewhere). Output is unchanged.
-
-        OFF
-            Ordinary cached stores (default).
-        AUTO
-            Stream only levels whose output exceeds the last-level cache.
-        ALWAYS
-            Stream every float level (benchmarking / testing).
-        )doc")
-        .value("OFF", FDMTStreamingStores::kOff)
-        .value("AUTO", FDMTStreamingStores::kAuto)
-        .value("ALWAYS", FDMTStreamingStores::kAlways);
-
-    py::class_<FDMTExecConfig>(mod, "FDMTExecConfig", R"doc(
-        Runtime execution switches for :class:`FDMTCPU`. None of them change
-        the numerical result.
-
-        Parameters
-        ----------
-        schedule : FDMTSchedule, optional
-            Tree-merge schedule (default ``FDMTSchedule.COORD``).
-        tile_nsamps : int, optional
-            ``TILED`` only: samples per time tile; 0 = auto from L2 size.
-        tile_ndt : int, optional
-            ``TILED`` only: coordinates per chunk; 0 = auto (4).
-        int_tree : bool, optional
-            Packed input only: store tree levels as uint8/uint16 where the
-            exact value bound allows (default False).
-        streaming_stores : FDMTStreamingStores, optional
-            Non-temporal store policy for float merges (default OFF).
-        fuse_levels : int, optional
-            :meth:`FDMTCPU.execute` only: fuse level-0 initialisation with
-            the first ``fuse_levels`` tree merges in cache-resident channel
-            groups (0 = original path, default; ``FDMTExecConfig.AUTO_FUSE``
-            picks the depth from the cache size). Bit-identical output.
-        )doc")
-        .def(py::init([](FDMTSchedule schedule, SizeType tile_nsamps,
-                         SizeType tile_ndt, bool int_tree,
-                         FDMTStreamingStores streaming_stores,
-                         SizeType fuse_levels) {
-                 return FDMTExecConfig{.schedule         = schedule,
-                                       .tile_nsamps      = tile_nsamps,
-                                       .tile_ndt         = tile_ndt,
-                                       .int_tree         = int_tree,
-                                       .streaming_stores = streaming_stores,
-                                       .fuse_levels      = fuse_levels};
-             }),
-             "schedule"_a = FDMTSchedule::kCoord, "tile_nsamps"_a = 0,
-             "tile_ndt"_a = 0, "int_tree"_a = false,
-             "streaming_stores"_a = FDMTStreamingStores::kOff,
-             "fuse_levels"_a      = 0)
-        .def_readwrite("schedule", &FDMTExecConfig::schedule)
-        .def_readwrite("tile_nsamps", &FDMTExecConfig::tile_nsamps)
-        .def_readwrite("tile_ndt", &FDMTExecConfig::tile_ndt)
-        .def_readwrite("int_tree", &FDMTExecConfig::int_tree)
-        .def_readwrite("streaming_stores", &FDMTExecConfig::streaming_stores)
-        .def_readwrite("fuse_levels", &FDMTExecConfig::fuse_levels)
-        .def_readonly_static("AUTO_FUSE", &FDMTExecConfig::kAutoFuse)
-        .def(py::self == py::self) // NOLINT
-        .def("__repr__", [](const FDMTExecConfig& c) {
-            constexpr std::array<const char*, 3> kStreaming = {"OFF", "AUTO",
-                                                               "ALWAYS"};
+        .def_readonly("plan", &FDMTMemoryUsage::plan)
+        .def_readonly("state", &FDMTMemoryUsage::state)
+        .def_readonly("history", &FDMTMemoryUsage::history)
+        .def_readonly("workspace", &FDMTMemoryUsage::workspace)
+        .def_readonly("output", &FDMTMemoryUsage::output)
+        .def_property_readonly("total", &FDMTMemoryUsage::total)
+        .def("__repr__", [](const FDMTMemoryUsage& m) {
             return std::format(
-                "FDMTExecConfig(schedule={}, tile_nsamps={}, tile_ndt={}, "
-                "int_tree={}, streaming_stores={}, fuse_levels={})",
-                c.schedule == FDMTSchedule::kTiled ? "TILED" : "COORD",
-                c.tile_nsamps, c.tile_ndt, c.int_tree ? "True" : "False",
-                kStreaming.at(static_cast<std::size_t>(c.streaming_stores)),
-                c.fuse_levels == FDMTExecConfig::kAutoFuse
-                    ? std::string("AUTO_FUSE")
-                    : std::to_string(c.fuse_levels));
+                "FDMTMemoryUsage(plan={}, state={}, history={}, workspace={}, "
+                "total={}, output={})",
+                m.plan, m.state, m.history, m.workspace, m.total(), m.output);
         });
 
     py::class_<FDMTCPU>(mod, "FDMTCPU", py::dynamic_attr(),
@@ -195,36 +124,61 @@ void bind_fdmt(py::module_& mod) {
             OpenMP threads (default 1).
         nbeams : int, optional
             Independent beams packed as ``(nbeams, nchans, nsamps)``.
+        fuse_levels : int or None, optional
+            Performance parameter (most users keep the default): ``execute``
+            fuses level-0 initialisation with the first ``fuse_levels`` tree
+            merges in cache-resident channel groups. 0 = original
+            level-by-level path; ``None`` (default) picks the depth from the
+            plan and ``nthreads``. Bit-identical output.
+        int_tree : bool, optional
+            Performance parameter: packed input stores tree levels as
+            uint8/uint16 where the exact bound allows (default True). Set
+            False to inspect every level of a packed stepper run.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
+
+        All working memory is allocated by the constructor (see
+        :attr:`memory_usage`); ``execute`` allocates only its output array.
 
         See also
         --------
         FDMTPlan, FDMTFFTCPU, compute_fdmt
         )doc")
-        .def(py::init<float, float, SizeType, SizeType, float, IndexType,
-                      IndexType, SizeType, bool, std::string_view, bool, int,
-                      SizeType>(),
+        .def(py::init([](float f_min, float f_max, SizeType nchans,
+                         SizeType nsamps, float tsamp, IndexType dt_max,
+                         IndexType dt_min, SizeType dt_step,
+                         bool use_box_smearing, std::string_view mode,
+                         bool verbose, int nthreads, SizeType nbeams,
+                         std::optional<SizeType> fuse_levels, bool int_tree) {
+                 return FDMTCPU(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                dt_min, dt_step, use_box_smearing, mode,
+                                verbose, nthreads, nbeams,
+                                fuse_levels.value_or(kFDMTAutoFuse), int_tree);
+             }),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
              "use_box_smearing"_a = true, "mode"_a = "valid",
-             "verbose"_a = false, "nthreads"_a = 1, "nbeams"_a = 1)
+             "verbose"_a = false, "nthreads"_a = 1, "nbeams"_a = 1,
+             "fuse_levels"_a = py::none(), "int_tree"_a = true)
         .def(py::init([](float f_min, float f_max, SizeType nchans,
                          SizeType nsamps, float tsamp,
                          const py::object& dt_grid, const py::object& dt_arr,
                          const py::object& dm_grid, const py::object& dm_arr,
                          bool use_box_smearing, std::string_view mode,
-                         bool verbose, int nthreads, SizeType nbeams) {
+                         bool verbose, int nthreads, SizeType nbeams,
+                         std::optional<SizeType> fuse_levels, bool int_tree) {
                  const auto [type, obj] =
                      resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                 const auto fuse = fuse_levels.value_or(kFDMTAutoFuse);
                  if (type == CustomGridType::kDt) {
                      return FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
                                     extract_dt_grid(obj), use_box_smearing,
-                                    mode, verbose, nthreads, nbeams);
+                                    mode, verbose, nthreads, nbeams, fuse,
+                                    int_tree);
                  }
                  return FDMTCPU(f_min, f_max, nchans, nsamps, tsamp,
                                 extract_dm_grid(obj), use_box_smearing, mode,
-                                verbose, nthreads, nbeams);
+                                verbose, nthreads, nbeams, fuse, int_tree);
              }),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
@@ -232,22 +186,20 @@ void bind_fdmt(py::module_& mod) {
              py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
              py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
              py::arg("verbose") = false, py::arg("nthreads") = 1,
-             py::arg("nbeams") = 1)
+             py::arg("nbeams") = 1, py::arg("fuse_levels") = py::none(),
+             py::arg("int_tree") = true)
         .def_property_readonly(
             "plan", &FDMTCPU::get_plan,
             "Get the FDMTPlan object containing transform details.")
-        .def_property(
-            "exec_config",
-            [](const FDMTCPU& fdmt) { return fdmt.get_exec_config(); },
-            &FDMTCPU::set_exec_config,
-            "Runtime execution switches (FDMTExecConfig). Assign a new "
-            "config to change them; mutating the returned copy has no effect.")
         .def_property_readonly(
-            "effective_tile_nsamps", &FDMTCPU::get_effective_tile_nsamps,
-            "Tile size (samples) actually used by FDMTSchedule.TILED.")
+            "fuse_levels", &FDMTCPU::get_fuse_levels,
+            "Fusion depth execute() uses (0 = unfused); resolves the "
+            "automatic default for this plan and thread count.")
+        .def_property_readonly("int_tree", &FDMTCPU::get_int_tree,
+                               "Whether packed input uses the integer tree.")
         .def_property_readonly(
-            "effective_fuse_levels", &FDMTCPU::get_effective_fuse_levels,
-            "Fusion depth execute() actually uses (0 = unfused).")
+            "memory_usage", &FDMTCPU::get_memory_usage,
+            "FDMTMemoryUsage: bytes allocated at construction.")
         .def_property_readonly(
             "nbeams", &FDMTCPU::get_nbeams,
             "Number of beams this instance processes together (see the "

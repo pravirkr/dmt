@@ -26,7 +26,16 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. autoclass:: dmtlib.FDMTMemoryUsage
+   :members:
+   :undoc-members:
 ```
+
+The CUDA engines (`FDMTCUDA`, `DDMTCUDA`, `CohFDMTCUDA`, `FDMTFFTCUDA`) mirror
+their CPU counterparts' Python API and are importable from `dmtlib` when the
+CUDA extension is built; see the C++ API reference for their device-memory
+overloads.
 
 ## Execution Plans & Geometry
 

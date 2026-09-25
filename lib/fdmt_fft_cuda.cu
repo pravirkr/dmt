@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <memory>
 #include <stdexcept>
@@ -58,7 +59,9 @@ __global__ void kernel_fill_window(const float* __restrict__ wf,
                                    int nbeams) {
     const auto t = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_chan = static_cast<int>(blockIdx.y);
-    const auto i_beam = static_cast<int>(blockIdx.z);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (t >= n_fft || i_chan >= nchans || i_beam >= nbeams) {
         return;
     }
@@ -94,7 +97,9 @@ __global__ void kernel_update_overlap(const float* __restrict__ wf,
                                       int nbeams) {
     const auto i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_chan = static_cast<int>(blockIdx.y);
-    const auto i_beam = static_cast<int>(blockIdx.z);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (i >= overlap_len || i_chan >= nchans || i_beam >= nbeams) {
         return;
     }
@@ -122,8 +127,10 @@ kernel_init_fdmt_fft(const Cplx* __restrict__ spectra,
                      int n_bins,
                      int max_coords) {
     const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_sub  = static_cast<int>(blockIdx.y);
-    const auto i_beam = static_cast<int>(blockIdx.z);
+    const auto i_sub = static_cast<int>(blockIdx.y);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (k >= n_bins || i_sub >= nsubs) {
         return;
     }
@@ -152,7 +159,9 @@ __global__ void kernel_execute_iter_fft(const Cplx* __restrict__ state_in,
                                         int max_coords) {
     const auto linear =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto i_beam         = static_cast<int>(blockIdx.y);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam         = static_cast<int64_t>(blockIdx.y);
     const int max_iter_coords = (ncoords_sum_cur > ncoords_copy_cur)
                                     ? ncoords_sum_cur
                                     : ncoords_copy_cur;
@@ -206,7 +215,9 @@ __global__ void kernel_trim_scale(const float* __restrict__ time_out,
                                   float norm) {
     const auto t    = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_dm = static_cast<int>(blockIdx.y);
-    const auto i_beam = static_cast<int>(blockIdx.z);
+    // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
+    // int32 for large blocks with several beams.
+    const auto i_beam = static_cast<int64_t>(blockIdx.z);
     if (t >= nsamps_out || i_dm >= ndms || i_beam >= nbeams) {
         return;
     }

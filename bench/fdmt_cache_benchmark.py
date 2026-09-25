@@ -5,15 +5,18 @@ Analyzes:
 2. Distribution of coordinates per unique head row.
 3. Execution throughput (M elements/sec) as a function of time block size
    N_samps (testing L1/L2/L3 cache boundary effects).
-4. Input-row DRAM traffic model: rows read per output by the default
-   ``COORD`` schedule (reusing only the previous coordinate's operands) vs the
-   ``TILED`` schedule's chunks. This bounds what tiling can ever save.
-5. ``COORD`` vs ``TILED`` schedule sweep (block size x threads x tile config),
-   and packed low-bit input (nbits x ``int_tree``) vs float input.
+4. Input-row DRAM traffic model: rows read per output by the merge loop
+   (which reuses the previous coordinate's operands from cache) vs an ideal
+   intra-level blocking that reads each distinct operand row of a chunk of
+   coordinates once. This bounds what any intra-level cache tiling can save;
+   it is ~1%, which is why FDMT has no tiled schedule (see the performance
+   page of the pipeline guide).
+5. Level-fusion depth sweep (block size x threads x ``fuse_levels``), and
+   packed low-bit input (nbits x ``int_tree``) vs float input.
 
 Usage:
     python bench/fdmt_cache_benchmark.py                 # everything
-    python bench/fdmt_cache_benchmark.py --section schedule \
+    python bench/fdmt_cache_benchmark.py --section fusion \
         --nchans 4096 --dt-max 2048 --nsamps 16384 65536 --threads 1 8
     python bench/fdmt_cache_benchmark.py --section packed --nsamps 16384
 """
@@ -42,7 +45,7 @@ for p in (build_src, src_dir):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from dmtlib import FDMTCPU, FDMTExecConfig, FDMTPlan, FDMTSchedule
+from dmtlib import FDMTCPU, FDMTPlan
 
 
 def analyze_plan_reuse(plan: FDMTPlan) -> dict:
@@ -149,15 +152,17 @@ def benchmark_throughput_vs_blocksize(
     print("=" * 85)
 
 
-def analyze_schedule_traffic(
+def analyze_merge_traffic(
     plan: FDMTPlan, chunk_sizes: tuple[int, ...] = (1, 2, 4, 8, 32)
 ) -> dict:
     """Input rows read from memory per output row, summed over all levels.
 
-    ``COORD`` assumes only the previous coordinate's two operand rows are still
-    cached (true whenever ~4 rows fit in the per-core cache); a ``TILED`` chunk
-    reads each distinct operand row once. Each output also costs one write
-    (+ one read-for-ownership), so total row traffic is ``reads + 2``.
+    The merge loop (``coord``) is assumed to keep only the previous
+    coordinate's two operand rows cached (true whenever ~4 rows fit in the
+    per-core cache); an ideal blocking of ``ndt`` consecutive coordinates
+    reads each distinct operand row of the chunk once. Each output also costs
+    one write (+ one read-for-ownership), so total row traffic is
+    ``reads + 2``.
     """
     container = plan.container
     outputs = 0
@@ -204,28 +209,24 @@ def _median_time(fn, reps: int) -> float:
     return statistics.median(times)
 
 
-def benchmark_schedules(
+def benchmark_fusion(
     nchans: int,
     dt_max: int,
     block_sizes: list[int],
     threads: list[int],
-    mode: str = "full",
-    smearing: bool = False,
+    mode: str = "valid",
+    smearing: bool = True,
     reps: int = 5,
 ) -> None:
-    """``COORD`` vs ``TILED`` median wall time; output is bit-identical."""
-    configs = [
-        ("coord", FDMTExecConfig()),
-        ("tiled auto", FDMTExecConfig(schedule=FDMTSchedule.TILED)),
-        ("tiled T4096/ndt32", FDMTExecConfig(FDMTSchedule.TILED, 4096, 32)),
-        ("tiled T32768/ndt4", FDMTExecConfig(FDMTSchedule.TILED, 32768, 4)),
-    ]
+    """Median wall time per ``fuse_levels`` depth; output is bit-identical."""
+    depths = [0, 1, 2, 3, 4, 5, 6, None]  # None = automatic (default)
     print(
-        f"\nSchedule sweep (nchans={nchans}, dt_max={dt_max}, mode={mode}, "
-        f"smearing={smearing}, median of {reps})"
+        f"\nFusion sweep (nchans={nchans}, dt_max={dt_max}, mode={mode}, "
+        f"smearing={smearing}, median of {reps}; speedup vs unfused)"
     )
+    names = [("auto" if d is None else f"F{d}") for d in depths]
     header = f"{'N_samps':>9} | {'thr':>3} | " + " | ".join(
-        f"{name:>18}" for name, _ in configs
+        f"{name:>15}" for name in names
     )
     print(header)
     print("-" * len(header))
@@ -233,17 +234,18 @@ def benchmark_schedules(
     for nsamps in block_sizes:
         wf = rng.random((nchans, nsamps), dtype=np.float32)
         for nthreads in threads:
-            fdmt = FDMTCPU(
-                1000.0, 1500.0, nchans, nsamps, 0.001, dt_max,
-                use_box_smearing=smearing, mode=mode, nthreads=nthreads,
-            )
             cells = []
             base = None
-            for _, cfg in configs:
-                fdmt.exec_config = cfg
+            for depth in depths:
+                fdmt = FDMTCPU(
+                    1000.0, 1500.0, nchans, nsamps, 0.001, dt_max,
+                    use_box_smearing=smearing, mode=mode, nthreads=nthreads,
+                    fuse_levels=depth,
+                )
                 t = _median_time(lambda: fdmt.execute(wf), reps)
                 base = base or t
-                cells.append(f"{t * 1e3:9.1f}ms {base / t:5.2f}x")
+                tag = f"({fdmt.fuse_levels})" if depth is None else ""
+                cells.append(f"{t * 1e3:7.1f}ms {base / t:4.2f}x{tag}")
             print(f"{nsamps:9d} | {nthreads:3d} | " + " | ".join(cells))
 
 
@@ -263,10 +265,15 @@ def benchmark_packed(
     )
     rng = np.random.default_rng(0)
     for nthreads in threads:
-        fdmt = FDMTCPU(
-            1000.0, 1500.0, nchans, nsamps, 0.001, dt_max,
-            use_box_smearing=smearing, mode=mode, nthreads=nthreads,
-        )
+        engines = {
+            int_tree: FDMTCPU(
+                1000.0, 1500.0, nchans, nsamps, 0.001, dt_max,
+                use_box_smearing=smearing, mode=mode, nthreads=nthreads,
+                int_tree=int_tree,
+            )
+            for int_tree in (False, True)
+        }
+        fdmt = engines[True]
         wf = rng.random((nchans, nsamps), dtype=np.float32)
         t_float = _median_time(lambda: fdmt.execute(wf), reps)
         row = [f"float {t_float * 1e3:7.1f}ms"]
@@ -274,12 +281,10 @@ def benchmark_packed(
             packed = rng.integers(
                 0, 256, size=(nchans, (nsamps * nbits + 7) // 8), dtype=np.uint8
             )
-            for int_tree in (False, True):
-                fdmt.exec_config = FDMTExecConfig(int_tree=int_tree)
-                t = _median_time(lambda: fdmt.execute(packed, nbits), reps)
+            for int_tree, engine in engines.items():
+                t = _median_time(lambda: engine.execute(packed, nbits), reps)
                 tag = f"{nbits}b{'+int' if int_tree else ''}"
                 row.append(f"{tag} {t_float / t:4.2f}x")
-            fdmt.exec_config = FDMTExecConfig()
         print(f"threads={nthreads:2d}: " + "  ".join(row))
 
 
@@ -308,19 +313,20 @@ def print_reuse_table(nchans: int, dt_max: int) -> None:
     )
     print("=" * 80)
 
-    traffic = analyze_schedule_traffic(plan)
+    traffic = analyze_merge_traffic(plan)
     chunks = "  ".join(
         f"chunk{ndt}={r:.3f}" for ndt, r in traffic["chunks"].items()
     )
     print(
-        f"\nInput rows read per output row: COORD={traffic['coord']:.3f}  {chunks}"
+        f"\nInput rows read per output row: merge loop={traffic['coord']:.3f}  "
+        f"ideal blocking: {chunks}"
     )
     best = min(traffic["chunks"].values())
     gain = 1.0 - (best + 2.0) / (traffic["coord"] + 2.0)
     print(
-        f"Max TILED traffic saving while ~4 rows fit in cache: {gain * 100:.1f}% "
-        f"(COORD loses its reuse, reading 2 rows/output, only once 4 rows "
-        f"exceed the per-core cache)"
+        f"Max traffic saving of intra-level blocking while ~4 rows fit in "
+        f"cache: {gain * 100:.1f}% (the merge loop loses its reuse, reading 2 "
+        f"rows/output, only once 4 rows exceed the per-core cache)"
     )
 
 
@@ -328,7 +334,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
         "--section",
-        choices=["all", "reuse", "blocksize", "schedule", "packed"],
+        choices=["all", "reuse", "blocksize", "fusion", "packed"],
         default="all",
     )
     parser.add_argument("--nchans", type=int, default=None)
@@ -348,14 +354,14 @@ def main() -> None:
             nchans=args.nchans or 256, dt_max=args.dt_max or 256,
             block_sizes=args.nsamps,
         )
-    if run("schedule"):
-        benchmark_schedules(
+    if run("fusion"):
+        benchmark_fusion(
             nchans=args.nchans or 1024,
             dt_max=args.dt_max or 512,
             block_sizes=args.nsamps or [4096, 16384, 65536],
             threads=args.threads,
-            mode=args.mode or "full",
-            smearing=bool(args.smearing) if args.smearing is not None else False,
+            mode=args.mode or "valid",
+            smearing=bool(args.smearing) if args.smearing is not None else True,
             reps=args.reps,
         )
     if run("packed"):

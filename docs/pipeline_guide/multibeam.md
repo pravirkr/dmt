@@ -10,9 +10,9 @@ Modern radio interferometers (such as MeerKAT, CHIME, ASKAP, and SKA) generate d
 
 Instead of instantiating $N_{\text{beams}}$ separate engine objects or looping over single-beam calls, batching provides major advantages:
 
-1. **Amortized Plan Overhead**: Coordinate mapping, subband offsets, and tree indices are calculated and traversed once for all beams simultaneously.
-2. **Optimal Cache Locality**: Subband data from multiple beams share instruction cache lines and memory streams.
-3. **SIMD & GPU Concurrency**: Vector units (AVX2/AVX-512) and GPU warps execute across the beam dimension, achieving near-perfect compute saturation.
+1. **Amortized Plan Overhead**: The plan (coordinate DAG, subband offsets, tree indices) is built once and shared by all beams; only the state and history buffers scale with `nbeams`.
+2. **GPU Occupancy**: On CUDA, every beam of a level runs in the same kernel launch (beams are a grid dimension), so even small blocks keep the GPU busy.
+3. **One Engine, One Thread Pool**: On the CPU, beams are processed one after another, each spread over all `nthreads` threads with the same (fused, vectorized) kernels as a single beam.
 
 ---
 

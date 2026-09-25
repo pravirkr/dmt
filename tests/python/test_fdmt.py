@@ -1098,40 +1098,42 @@ def _pack_lsb_first(values: np.ndarray, nbits: int) -> np.ndarray:
     return lanes.sum(axis=2).astype(np.uint8)
 
 
-class TestFDMTExecConfig:
+class TestFDMTPerformanceParams:
     nchans = 64
     nsamps = 203
     dt_max = 40
 
-    def _make(self, mode: str = "valid") -> libdmt.FDMTCPU:
+    def _make(self, mode: str = "valid", **perf: object) -> libdmt.FDMTCPU:
         return libdmt.FDMTCPU(
-            1000.0, 1500.0, self.nchans, self.nsamps, 0.001, self.dt_max, mode=mode
+            1000.0, 1500.0, self.nchans, self.nsamps, 0.001, self.dt_max,
+            mode=mode, **perf,
         )
 
-    def test_exec_config_roundtrip(self) -> None:
+    def _make_ref(self, mode: str = "valid") -> libdmt.FDMTCPU:
+        # The original unfused, all-float path every variant is checked against.
+        return self._make(mode, fuse_levels=0, int_tree=False)
+
+    def test_defaults_and_memory_usage(self) -> None:
         fdmt = self._make()
-        assert fdmt.exec_config == libdmt.FDMTExecConfig()
-        cfg = libdmt.FDMTExecConfig(
-            schedule=libdmt.FDMTSchedule.TILED, tile_nsamps=64, tile_ndt=4
-        )
-        fdmt.exec_config = cfg
-        assert fdmt.exec_config == cfg
-        assert fdmt.effective_tile_nsamps == 64
-        # The getter returns a copy; mutating it doesn't bypass the setter.
-        copy = fdmt.exec_config
-        copy.tile_nsamps = 7
-        assert fdmt.exec_config.tile_nsamps == 64
+        assert fdmt.int_tree
+        assert 0 <= fdmt.fuse_levels <= fdmt.plan.niters
+        ref = self._make_ref()
+        assert ref.fuse_levels == 0
+        assert not ref.int_tree
+        assert self._make(fuse_levels=99).fuse_levels == fdmt.plan.niters
+        mem = self._make(fuse_levels=3).memory_usage
+        assert mem.total == mem.plan + mem.state + mem.history + mem.workspace
+        assert mem.state == fdmt.plan.buffer_size * 4
+        assert mem.workspace > ref.memory_usage.workspace
+        assert "workspace=" in repr(mem)
 
-    @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
-    def test_tiled_matches_coord(self, mode: str) -> None:
-        rng = np.random.default_rng(3)
-        waterfall = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
-        ref = self._make(mode).execute(waterfall)
-        fdmt = self._make(mode)
-        fdmt.exec_config = libdmt.FDMTExecConfig(
-            schedule=libdmt.FDMTSchedule.TILED, tile_nsamps=37, tile_ndt=3
+    def test_dm_grid_constructor_accepts_perf_params(self) -> None:
+        fdmt = libdmt.FDMTCPU(
+            1000.0, 1500.0, self.nchans, self.nsamps, 0.001,
+            dt_grid=[0, 2, 5, 9], fuse_levels=2, int_tree=False,
         )
-        np.testing.assert_array_equal(fdmt.execute(waterfall), ref)
+        assert fdmt.fuse_levels == 2
+        assert not fdmt.int_tree
 
     @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
     @pytest.mark.parametrize("int_tree", [False, True])
@@ -1142,9 +1144,8 @@ class TestFDMTExecConfig:
         )
         packed = _pack_lsb_first(values, nbits)
         assert packed.shape == (self.nchans, (self.nsamps * nbits + 7) // 8)
-        ref = self._make().execute(values.astype(np.float32))
-        fdmt = self._make()
-        fdmt.exec_config = libdmt.FDMTExecConfig(int_tree=int_tree)
+        ref = self._make_ref().execute(values.astype(np.float32))
+        fdmt = self._make(int_tree=int_tree)
         np.testing.assert_array_equal(fdmt.execute(packed, nbits), ref)
 
     def test_uint8_without_nbits_is_rejected(self) -> None:
@@ -1158,24 +1159,13 @@ class TestFDMTExecConfig:
             fdmt.execute(packed, 3)
 
     @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
-    @pytest.mark.parametrize(
-        "fuse_levels", [1, 3, libdmt.FDMTExecConfig.AUTO_FUSE]
-    )
-    def test_fused_levels_match_unfused(self, mode: str, fuse_levels: int) -> None:
+    @pytest.mark.parametrize("fuse_levels", [1, 3, None])
+    def test_fused_levels_match_unfused(
+        self, mode: str, fuse_levels: int | None
+    ) -> None:
         rng = np.random.default_rng(11)
         waterfall = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
-        ref = self._make(mode).execute(waterfall)
-        fdmt = self._make(mode)
-        fdmt.exec_config = libdmt.FDMTExecConfig(fuse_levels=fuse_levels)
-        assert fdmt.effective_fuse_levels <= fdmt.plan.niters
-        np.testing.assert_array_equal(fdmt.execute(waterfall), ref)
-
-    def test_streaming_stores_match(self) -> None:
-        rng = np.random.default_rng(12)
-        waterfall = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
-        ref = self._make().execute(waterfall)
-        fdmt = self._make()
-        fdmt.exec_config = libdmt.FDMTExecConfig(
-            streaming_stores=libdmt.FDMTStreamingStores.ALWAYS
-        )
+        ref = self._make_ref(mode).execute(waterfall)
+        fdmt = self._make(mode, fuse_levels=fuse_levels)
+        assert fdmt.fuse_levels <= fdmt.plan.niters
         np.testing.assert_array_equal(fdmt.execute(waterfall), ref)

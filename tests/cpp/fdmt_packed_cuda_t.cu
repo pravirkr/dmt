@@ -15,17 +15,17 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
 
-// FDMTCUDA packed low-bit input and narrow-integer tree (FDMTExecConfig::
-// int_tree). Integer-valued input keeps every partial sum an exact integer
-// below 2^24, which stays exact under any float reassociation (Release
-// builds use fast-math), so all comparisons here are bit-exact -- including
-// CUDA vs CPU.
+// FDMTCUDA packed low-bit input and narrow-integer tree (the int_tree
+// constructor parameter, on by default). Integer-valued input keeps every
+// partial sum an exact integer below 2^24, which stays exact under any float
+// reassociation (Release builds use fast-math), so all comparisons here are
+// bit-exact -- including CUDA vs CPU.
 
 namespace dmt {
 
 using algorithms::FDMTCPU;
 using algorithms::FDMTCUDA;
-using algorithms::FDMTExecConfig;
+using algorithms::kFDMTAutoFuse;
 
 namespace {
 
@@ -131,8 +131,8 @@ TEST_CASE("FDMTCUDA packed input matches float input and FDMTCPU",
                         for (const bool int_tree : {false, true}) {
                             FDMTCUDA gpu(kFMin, kFMax, c.nchans, c.nsamps,
                                          kTsamp, c.dt_max, c.dt_min, 1,
-                                         smearing, mode);
-                            gpu.set_exec_config({.int_tree = int_tree});
+                                         smearing, mode, false, 0, 1,
+                                         kFDMTAutoFuse, int_tree);
                             const auto got = run_packed(gpu, wf.packed, nbits);
                             REQUIRE_THAT(beam_slice(got, 0, 0, n),
                                          Catch::Matchers::Equals(
@@ -140,8 +140,8 @@ TEST_CASE("FDMTCUDA packed input matches float input and FDMTCPU",
 
                             FDMTCPU cpu(kFMin, kFMax, c.nchans, c.nsamps,
                                         kTsamp, c.dt_max, c.dt_min, 1, smearing,
-                                        mode);
-                            cpu.set_exec_config({.int_tree = int_tree});
+                                        mode, false, 1, 1, kFDMTAutoFuse,
+                                        int_tree);
                             const auto cpu_out =
                                 run_packed(cpu, wf.packed, nbits);
                             REQUIRE_THAT(beam_slice(got, 0, 0, n),
@@ -167,8 +167,6 @@ TEST_CASE("FDMTCUDA packed valid-mode streaming matches FDMTCPU",
                              true, "valid");
                 FDMTCPU cpu(kFMin, kFMax, nchans, block, kTsamp, 48, 0, 1, true,
                             "valid");
-                gpu.set_exec_config({.int_tree = true});
-                cpu.set_exec_config({.int_tree = true});
                 const auto n = cpu.get_plan().get_dmt_size();
                 for (SizeType b = 0; b < 8; ++b) {
                     const auto wf = random_packed(
@@ -193,7 +191,6 @@ TEST_CASE("FDMTCUDA packed multi-beam matches per-beam execution",
     const auto wf         = random_packed(nbeams * nchans, nsamps, nbits, 5);
     FDMTCUDA multi(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true, "full",
                    false, 0, nbeams);
-    multi.set_exec_config({.int_tree = true});
     const auto got        = run_packed(multi, wf.packed, nbits);
     const auto& plan      = multi.get_plan();
     const auto n          = plan.get_dmt_size();
@@ -207,7 +204,6 @@ TEST_CASE("FDMTCUDA packed multi-beam matches per-beam execution",
                 static_cast<std::ptrdiff_t>((b + 1) * nchans * row_bytes));
         FDMTCUDA single(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true,
                         "full");
-        single.set_exec_config({.int_tree = true});
         const auto ref = run_packed(single, one, nbits);
         REQUIRE_THAT(beam_slice(got, gpu_stride, b, n),
                      Catch::Matchers::Equals(beam_slice(ref, 0, 0, n)));
@@ -225,7 +221,6 @@ TEST_CASE("FDMTCUDA packed device-memory execute and stepper",
     const auto n        = ref.get_plan().get_dmt_size();
 
     FDMTCUDA gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full");
-    gpu.set_exec_config({.int_tree = true});
     thrust::device_vector<uint8_t> wf_d(wf.packed.begin(), wf.packed.end());
     thrust::device_vector<float> dmt_d(gpu.get_plan().get_buffer_size(), 0.0F);
     const cuda::std::span<const uint8_t> wf_span(

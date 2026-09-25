@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstddef>
@@ -14,22 +15,25 @@
 
 #include <catch2/matchers/catch_matchers_all.hpp>
 
-// FDMTExecConfig (schedule / tiling / int_tree) and packed low-bit input.
-// Every execution variant must be bit-identical to the default kCoord float
-// path, so all comparisons here are exact.
+// Performance parameters (fuse_levels / int_tree), construction-time memory,
+// and packed low-bit input. Every variant must be bit-identical to the
+// original level-by-level float path (fuse_levels = 0, int_tree = false), so
+// all comparisons here are exact.
 
 namespace dmt {
 
 using algorithms::FDMTCPU;
-using algorithms::FDMTExecConfig;
-using algorithms::FDMTSchedule;
-using algorithms::FDMTStreamingStores;
+using algorithms::kFDMTAutoFuse;
 
 namespace {
 
 constexpr float kFMin  = 1000.0F;
 constexpr float kFMax  = 1500.0F;
 constexpr float kTsamp = 0.001F;
+
+// fuse_levels / int_tree of the original unfused, all-float path.
+constexpr SizeType kUnfused = 0;
+constexpr bool kFloatTree   = false;
 
 std::vector<float> random_waterfall(SizeType n, unsigned seed) {
     std::mt19937 gen(seed);
@@ -112,182 +116,71 @@ void require_beams_exact(const std::vector<float>& actual,
     }
 }
 
-FDMTExecConfig tiled(SizeType tile_nsamps, SizeType tile_ndt) {
-    return {.schedule    = FDMTSchedule::kTiled,
-            .tile_nsamps = tile_nsamps,
-            .tile_ndt    = tile_ndt};
-}
-
-const std::vector<FDMTExecConfig>& tiled_configs() {
-    static const std::vector<FDMTExecConfig> configs = {
-        tiled(37, 1), tiled(64, 3), tiled(0, 0), tiled(4096, 32)};
-    return configs;
-}
-
-std::vector<float> column_block(const std::vector<float>& wf,
-                                SizeType nrows,
-                                SizeType total,
-                                SizeType start,
-                                SizeType len) {
-    std::vector<float> block(nrows * len);
-    for (SizeType r = 0; r < nrows; ++r) {
-        std::copy_n(wf.data() + (r * total) + start, len,
-                    block.data() + (r * len));
-    }
-    return block;
-}
-
 } // namespace
 
-TEST_CASE("FDMTCPU exec config defaults and validation", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMTCPU performance parameters and memory usage",
+          "[fdmt_cpu][cpu]") {
     FDMTCPU fdmt(kFMin, kFMax, 32, 128, kTsamp, 16);
-    CHECK(fdmt.get_exec_config() == FDMTExecConfig{});
-    CHECK(fdmt.get_effective_tile_nsamps() >= 512);
+    const auto niters = fdmt.get_plan().get_niters();
+    CHECK(fdmt.get_int_tree());
+    CHECK(fdmt.get_fuse_levels() <= niters);
 
-    fdmt.set_exec_config(tiled(100, 5));
-    CHECK(fdmt.get_exec_config().schedule == FDMTSchedule::kTiled);
-    CHECK(fdmt.get_effective_tile_nsamps() == 100);
+    FDMTCPU clamped(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+                    false, 1, 1, 99);
+    CHECK(clamped.get_fuse_levels() == niters);
+    FDMTCPU orig(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", false,
+                 1, 1, kUnfused, kFloatTree);
+    CHECK(orig.get_fuse_levels() == 0);
+    CHECK_FALSE(orig.get_int_tree());
 
-    // Cannot switch mid-transform.
-    const auto wf = random_waterfall(32 * 128, 1);
-    std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
-    fdmt.reset(wf, dmt);
-    fdmt.advance(1);
-    REQUIRE_THROWS_AS(fdmt.set_exec_config(FDMTExecConfig{}), std::logic_error);
-    fdmt.finalize();
-    REQUIRE_NOTHROW(fdmt.set_exec_config(FDMTExecConfig{}));
+    // Everything is accounted for, and scratch grows with the depth.
+    const auto& plan = clamped.get_plan();
+    const auto mem   = clamped.get_memory_usage();
+    CHECK(mem.plan == plan.get_container().get_memory_usage());
+    CHECK(mem.state == plan.get_buffer_size() * sizeof(float));
+    CHECK(mem.history == clamped.history_state_size() * sizeof(float));
+    CHECK(mem.output == plan.get_buffer_size() * sizeof(float));
+    CHECK(mem.total() == mem.plan + mem.state + mem.history + mem.workspace);
+    CHECK(mem.workspace > orig.get_memory_usage().workspace);
+    CHECK(orig.get_memory_usage().workspace > 0); // unpack + box rows
+
+    // Per-thread scratch: exactly one slice per thread.
+    FDMTCPU one(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", false,
+                1, 1, 3);
+    FDMTCPU two(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", false,
+                2, 1, 3);
+    CHECK(two.get_memory_usage().workspace ==
+          2 * one.get_memory_usage().workspace);
 }
 
-TEST_CASE("FDMTCPU tiled schedule is bit-exact with coord schedule",
-          "[fdmt_cpu][cpu]") {
-    struct Case {
-        SizeType nchans;
-        SizeType nsamps;
-        IndexType dt_max;
-        IndexType dt_min;
+TEST_CASE("FDMTCPU automatic fusion depth", "[fdmt_cpu][cpu]") {
+    // kFDMTAutoFuse picks the deepest depth whose two per-thread fusion
+    // buffers fit max(36 MiB / nthreads, 5 MiB): a rule on the plan alone.
+    // The fusion buffers are what the workspace holds beyond the three
+    // unpack/box rows of each thread.
+    const SizeType nchans  = 1024;
+    const SizeType nsamps  = 4096;
+    const auto fused_bytes = [&](const FDMTCPU& f, SizeType nthreads) {
+        const auto rows = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
+        return (f.get_memory_usage().workspace / nthreads) - rows;
     };
-    const std::vector<Case> cases = {
-        {32, 256, 48, 0},
-        {37, 100, 40, 0},   // odd channels -> copy coordinates
-        {64, 256, 32, -32}, // symmetric DM range
-        {32, 128, -4, -40}, // purely negative
-    };
-    const std::vector<std::string> modes = {"full", "roll", "valid"};
-
-    for (const auto& c : cases) {
-        for (const auto& mode : modes) {
-            for (const bool smearing : {true, false}) {
-                DYNAMIC_SECTION("nchans=" << c.nchans << " nsamps=" << c.nsamps
-                                          << " dt=[" << c.dt_min << ","
-                                          << c.dt_max << "] mode=" << mode
-                                          << " smearing=" << smearing) {
-                    const auto wf =
-                        random_waterfall(c.nchans * c.nsamps, 11 + c.nchans);
-                    FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                c.dt_max, c.dt_min, 1, smearing, mode);
-                    const auto expected = run(ref, wf);
-                    for (const auto& cfg : tiled_configs()) {
-                        FDMTCPU fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                     c.dt_max, c.dt_min, 1, smearing, mode);
-                        fdmt.set_exec_config(cfg);
-                        require_beams_exact(run(fdmt, wf), expected, fdmt);
-                    }
-                }
-            }
-        }
-    }
-}
-
-TEST_CASE("FDMTCPU tiled schedule with explicit dt_grid and multiple beams",
-          "[fdmt_cpu][cpu]") {
-    const std::vector<IndexType> dt_grid = {0, 1, 3, 7, 12, 20, 31, 45};
-    const SizeType nchans                = 64;
-    const SizeType nsamps                = 200;
-    const SizeType nbeams                = 3;
-    for (const std::string mode : {"full", "valid"}) {
-        DYNAMIC_SECTION("mode=" << mode) {
-            const auto wf = random_waterfall(nbeams * nchans * nsamps, 5);
-            FDMTCPU ref(kFMin, kFMax, nchans, nsamps, kTsamp, dt_grid, true,
-                        mode, false, 1, nbeams);
-            const auto expected = run(ref, wf);
-            for (const auto& cfg : tiled_configs()) {
-                FDMTCPU fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, dt_grid,
-                             true, mode, false, 1, nbeams);
-                fdmt.set_exec_config(cfg);
-                require_beams_exact(run(fdmt, wf), expected, fdmt);
-            }
-        }
-    }
-}
-
-TEST_CASE("FDMTCPU tiled schedule valid-mode streaming", "[fdmt_cpu][cpu]") {
-    // Includes blocks smaller than the delay (history spans several blocks)
-    // and flipping the schedule between blocks of one stream.
-    struct Case {
-        IndexType dt_max;
-        IndexType dt_min;
-        SizeType block;
-        SizeType nblocks;
-    };
-    const std::vector<Case> cases = {
-        {48, 0, 64, 5}, {48, 0, 16, 12}, {32, -32, 17, 10}};
-    const SizeType nchans = 32;
-    for (const auto& c : cases) {
-        for (const bool smearing : {true, false}) {
-            DYNAMIC_SECTION("dt=[" << c.dt_min << "," << c.dt_max << "] block="
-                                   << c.block << " smearing=" << smearing) {
-                const SizeType total = c.block * c.nblocks;
-                const auto wf        = random_waterfall(nchans * total, 3);
-                FDMTCPU ref(kFMin, kFMax, nchans, c.block, kTsamp, c.dt_max,
-                            c.dt_min, 1, smearing, "valid");
-                FDMTCPU tiled_fdmt(kFMin, kFMax, nchans, c.block, kTsamp,
-                                   c.dt_max, c.dt_min, 1, smearing, "valid");
-                FDMTCPU flip(kFMin, kFMax, nchans, c.block, kTsamp, c.dt_max,
-                             c.dt_min, 1, smearing, "valid");
-                tiled_fdmt.set_exec_config(tiled(7, 2));
-                for (SizeType b = 0; b < c.nblocks; ++b) {
-                    const auto block =
-                        column_block(wf, nchans, total, b * c.block, c.block);
-                    const auto expected = run(ref, block);
-                    require_beams_exact(run(tiled_fdmt, block), expected,
-                                        tiled_fdmt);
-                    flip.set_exec_config(b % 2 == 0 ? tiled(0, 0)
-                                                    : FDMTExecConfig{});
-                    require_beams_exact(run(flip, block), expected, flip);
-                }
-                // History state is schedule-independent.
-                std::vector<float> h_ref(ref.history_state_size());
-                std::vector<float> h_tiled(tiled_fdmt.history_state_size());
-                ref.save_history(h_ref);
-                tiled_fdmt.save_history(h_tiled);
-                REQUIRE_THAT(h_tiled, Catch::Matchers::Equals(h_ref));
-            }
-        }
-    }
-}
-
-TEST_CASE("FDMTCPU streaming stores are bit-exact", "[fdmt_cpu][cpu]") {
-    // kAlways forces the non-temporal path on every float level (a no-op on
-    // builds without streaming stores, where this still checks the switch).
-    const std::vector<std::string> modes = {"full", "roll", "valid"};
-    for (const auto& mode : modes) {
-        for (const bool smearing : {true, false}) {
-            DYNAMIC_SECTION("mode=" << mode << " smearing=" << smearing) {
-                const SizeType nchans = 37;
-                const SizeType block  = 300;
-                FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, 64, -20, 1,
-                            smearing, mode, false, 1, 2);
-                FDMTCPU fdmt(kFMin, kFMax, nchans, block, kTsamp, 64, -20, 1,
-                             smearing, mode, false, 1, 2);
-                for (int b = 0; b < 3; ++b) {
-                    fdmt.set_exec_config(
-                        {.streaming_stores =
-                             (b == 1) ? FDMTStreamingStores::kAuto
-                                      : FDMTStreamingStores::kAlways});
-                    const auto wf = random_waterfall(
-                        2 * nchans * block, static_cast<unsigned>(40 + b));
-                    require_beams_exact(run(fdmt, wf), run(ref, wf), fdmt);
-                }
+    SizeType prev_depth = SIZE_MAX;
+    for (const int nthreads : {1, 2, 4, 8}) {
+        DYNAMIC_SECTION("nthreads=" << nthreads) {
+            const auto n = static_cast<SizeType>(nthreads);
+            const SizeType budget =
+                std::max<SizeType>((SizeType{36} << 20) / n, SizeType{5} << 20);
+            FDMTCPU fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true,
+                         "valid", false, nthreads);
+            const auto depth = fdmt.get_fuse_levels();
+            REQUIRE(depth >= 1);
+            REQUIRE(depth <= prev_depth); // more threads never fuse deeper
+            prev_depth = depth;
+            CHECK(fused_bytes(fdmt, n) <= budget);
+            if (depth < fdmt.get_plan().get_niters()) {
+                FDMTCPU deeper(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1,
+                               true, "valid", false, nthreads, 1, depth + 1);
+                CHECK(fused_bytes(deeper, n) > budget);
             }
         }
     }
@@ -375,13 +268,14 @@ TEST_CASE("FDMTCPU fused levels are bit-exact with the original path",
                                                      21 + c.nchans);
                     FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                 c.dt_max, c.dt_min, 1, smearing, mode, false, 1,
-                                2);
+                                2, kUnfused, kFloatTree);
                     const auto expected = run(ref, wf);
-                    for (const SizeType fuse : {1, 2, 3, 9}) {
+                    for (const SizeType fuse :
+                         {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{9},
+                          kFDMTAutoFuse}) {
                         FDMTCPU fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                      c.dt_max, c.dt_min, 1, smearing, mode,
-                                     false, 1, 2);
-                        fdmt.set_exec_config({.fuse_levels = fuse});
+                                     false, 1, 2, fuse);
                         require_beams_exact(run(fdmt, wf), expected, fdmt);
                     }
                 }
@@ -395,51 +289,54 @@ TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
     SECTION("explicit dt_grid") {
         const std::vector<IndexType> dt_grid = {0, 1, 3, 7, 12, 20, 31, 45};
         const auto wf                        = random_waterfall(64 * 200, 8);
-        FDMTCPU ref(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid");
-        FDMTCPU fdmt(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid");
-        fdmt.set_exec_config({.fuse_levels = 3});
+        FDMTCPU ref(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid",
+                    false, 1, 1, kUnfused, kFloatTree);
+        FDMTCPU fdmt(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid",
+                     false, 1, 1, 3);
         require_beams_exact(run(fdmt, wf), run(ref, wf), fdmt);
     }
-    SECTION("valid-mode streaming, fusion toggled between blocks") {
+    SECTION("valid-mode streaming, fused and unfused engines alternating") {
+        // One stream handed between a fused and an unfused engine through
+        // save_history()/load_history(): the history is depth-independent.
         const SizeType nchans = 32;
         for (const SizeType block : {16, 64}) {
             FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
-                        "valid");
-            FDMTCPU fdmt(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
-                         "valid");
+                        "valid", false, 1, 1, kUnfused, kFloatTree);
+            FDMTCPU fused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
+                          "valid", false, 1, 1, 2);
+            FDMTCPU unfused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
+                            true, "valid", false, 1, 1, kUnfused);
+            std::vector<float> hist(ref.history_state_size(), 0.0F);
             for (SizeType b = 0; b < 10; ++b) {
-                fdmt.set_exec_config({.fuse_levels = (b % 3 == 2) ? 0U : 2U});
+                FDMTCPU& engine = (b % 3 == 2) ? unfused : fused;
                 const auto wf = random_waterfall(nchans * block,
                                                  static_cast<unsigned>(60 + b));
-                require_beams_exact(run(fdmt, wf), run(ref, wf), fdmt);
+                engine.load_history(hist);
+                const auto got = run(engine, wf);
+                engine.save_history(hist);
+                require_beams_exact(got, run(ref, wf), engine);
             }
             std::vector<float> h_ref(ref.history_state_size());
-            std::vector<float> h_fused(fdmt.history_state_size());
             ref.save_history(h_ref);
-            fdmt.save_history(h_fused);
-            REQUIRE_THAT(h_fused, Catch::Matchers::Equals(h_ref));
+            REQUIRE_THAT(hist, Catch::Matchers::Equals(h_ref));
         }
     }
-    SECTION("packed input with int tree and tiled schedule") {
+    SECTION("packed input with int tree") {
         for (const SizeType nbits : {1, 4, 8}) {
-            for (const std::string mode : {"full", "valid"}) {
+            for (const std::string mode : {"full", "roll", "valid"}) {
                 const auto wf = random_packed(256, 128, nbits, 30 + nbits);
                 FDMTCPU ref(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true,
-                            mode);
+                            mode, false, 1, 1, kUnfused, kFloatTree);
                 FDMTCPU fdmt(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true,
-                             mode);
-                fdmt.set_exec_config({.schedule    = FDMTSchedule::kTiled,
-                                      .tile_nsamps = 40,
-                                      .int_tree    = true,
-                                      .fuse_levels = 3});
+                             mode, false, 1, 1, 3, true);
                 require_beams_exact(run_packed(fdmt, wf.packed, nbits),
                                     run(ref, wf.values), fdmt);
             }
         }
     }
     SECTION("stepper stays unfused and inspectable") {
-        FDMTCPU fdmt(kFMin, kFMax, 32, 128, kTsamp, 16);
-        fdmt.set_exec_config({.fuse_levels = 3});
+        FDMTCPU fdmt(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+                     false, 1, 1, 3);
         const auto wf = random_waterfall(32 * 128, 2);
         std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
         fdmt.reset(wf, dmt);
@@ -476,18 +373,16 @@ TEST_CASE("FDMTCPU packed input matches float input", "[fdmt_cpu][cpu]") {
                         const auto wf = random_packed(c.nchans, c.nsamps, nbits,
                                                       17 + nbits);
                         FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                    c.dt_max, c.dt_min, 1, smearing, mode);
+                                    c.dt_max, c.dt_min, 1, smearing, mode,
+                                    false, 1, 1, kUnfused, kFloatTree);
                         const auto expected = run(ref, wf.values);
                         for (const bool int_tree : {false, true}) {
-                            for (const auto schedule :
-                                 {FDMTSchedule::kCoord, FDMTSchedule::kTiled}) {
+                            for (const SizeType fuse :
+                                 {SizeType{0}, kFDMTAutoFuse}) {
                                 FDMTCPU fdmt(kFMin, kFMax, c.nchans, c.nsamps,
                                              kTsamp, c.dt_max, c.dt_min, 1,
-                                             smearing, mode);
-                                fdmt.set_exec_config({.schedule    = schedule,
-                                                      .tile_nsamps = 50,
-                                                      .tile_ndt    = 4,
-                                                      .int_tree    = int_tree});
+                                             smearing, mode, false, 1, 1, fuse,
+                                             int_tree);
                                 require_beams_exact(
                                     run_packed(fdmt, wf.packed, nbits),
                                     expected, fdmt);
@@ -517,12 +412,11 @@ TEST_CASE("FDMTCPU packed valid-mode streaming and multiple beams",
                 const SizeType nchans = c.nchans;
                 const auto row_bytes  = utils::packed_row_bytes(block, nbits);
                 FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
-                            c.dt_min, 1, true, "valid", false, 1, nbeams);
+                            c.dt_min, 1, true, "valid", false, 1, nbeams,
+                            kUnfused, kFloatTree);
+                // Default performance parameters: int tree + auto fusion.
                 FDMTCPU fdmt(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
                              c.dt_min, 1, true, "valid", false, 1, nbeams);
-                fdmt.set_exec_config({.schedule    = FDMTSchedule::kTiled,
-                                      .tile_nsamps = 16,
-                                      .int_tree    = true});
                 for (SizeType b = 0; b < nblks; ++b) {
                     const auto wf =
                         random_packed(nbeams * nchans, block, nbits,
@@ -560,13 +454,15 @@ TEST_CASE("FDMTCPU packed input errors and integer-level inspection",
         std::invalid_argument);
 
     // Without int_tree every level is float and inspectable.
-    fdmt.reset(std::span<const uint8_t>(wf.packed), 1, dmt);
-    REQUIRE_NOTHROW(fdmt.view_level_data());
-    fdmt.finalize();
+    FDMTCPU flt(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
+                false, 1, 1, kFDMTAutoFuse, kFloatTree);
+    flt.reset(std::span<const uint8_t>(wf.packed), 1, dmt);
+    REQUIRE_NOTHROW(flt.view_level_data());
+    flt.finalize();
 
-    // With int_tree the 1-bit, 64-channel, no-smearing levels start as
-    // uint8 (bound 1) and cannot be viewed; the root is always float.
-    fdmt.set_exec_config({.int_tree = true});
+    // With int_tree (the default) the 1-bit, 64-channel, no-smearing levels
+    // start as uint8 (bound 1) and cannot be viewed; the root is always
+    // float.
     fdmt.reset(std::span<const uint8_t>(wf.packed), 1, dmt);
     REQUIRE_THROWS_AS(fdmt.view_level_data(), std::logic_error);
     REQUIRE_THROWS_AS(fdmt.view_subband(0), std::logic_error);

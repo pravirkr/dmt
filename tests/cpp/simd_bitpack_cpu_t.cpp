@@ -5,14 +5,13 @@
 #include <vector>
 
 #include "dmt/bit_pack_utils.hpp"
-#include "dmt/simd_intrinsics.hpp"
 
 #include <catch2/matchers/catch_matchers_all.hpp>
 
-// Kernel-level checks for the FDMT low-bit / SIMD helpers against their
-// scalar reference definitions, across every remainder length and output
-// alignment (the vector paths have head/tail loops that plain FDMT tests
-// with round block sizes would never reach).
+// Kernel-level checks for the FDMT low-bit unpack helper against its scalar
+// reference definition, across every remainder length (the vectorized
+// unpack loops have head/tail paths that plain FDMT tests with round block
+// sizes would never reach).
 
 namespace dmt {
 
@@ -69,40 +68,6 @@ TEST_CASE("unpack_row matches read_packed_sample", "[bitpack][cpu]") {
             }
             check_unpack<uint16_t>(nbits);
             check_unpack<float>(nbits);
-        }
-    }
-}
-
-TEST_CASE("add_stream_f32 is bit-exact with the plain add", "[simd][cpu]") {
-    INFO("backend: " << simd::backend_name());
-    std::mt19937 gen(7);
-    std::normal_distribution<float> dis;
-    std::vector<std::size_t> counts;
-    for (std::size_t n = 0; n <= 100; ++n) {
-        counts.push_back(n);
-    }
-    counts.push_back(8192 + 3);
-    counts.push_back(65536 + 17);
-    for (const auto n : counts) {
-        // Offsets 0..16 floats cover every alignment of `out` (and of the
-        // unaligned-load operands) relative to a 64-byte vector.
-        for (std::size_t off = 0; off <= 16; ++off) {
-            std::vector<float> a(n + off);
-            std::vector<float> b(n + off);
-            for (auto& v : a) {
-                v = dis(gen);
-            }
-            for (auto& v : b) {
-                v = dis(gen);
-            }
-            std::vector<float> out(n + off + 1, -1.0F);
-            std::vector<float> ref(n + off + 1, -1.0F);
-            simd::add_stream_f32(a.data() + off, b.data() + off,
-                                 out.data() + off, n);
-            for (std::size_t i = 0; i < n; ++i) {
-                ref[off + i] = a[off + i] + b[off + i];
-            }
-            REQUIRE_THAT(out, Catch::Matchers::Equals(ref));
         }
     }
 }

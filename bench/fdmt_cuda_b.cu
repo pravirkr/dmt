@@ -116,6 +116,7 @@ thrust::device_vector<T> generate_vector_device(size_t size) {
 
 namespace dmt {
 using algorithms::FDMTCUDA;
+using algorithms::kFDMTAutoFuse;
 using plans::FDMTPlan;
 
 class FDMTCUDAFixture : public benchmark::Fixture {
@@ -184,14 +185,20 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
     }
 }
 
-// Packed low-bit input. Args: (nsamps, nbits [32 = float reference],
-// int_tree). Device-resident input and output: measures the kernels (level-0
-// sample loads and narrow-integer tree state).
+// Packed low-bit input and level fusion. Args: (nsamps, nbits [32 = float
+// reference], int_tree, fuse_levels [-1 = kFDMTAutoFuse, the default]).
+// Device-resident input and output: measures the kernels (level-0 sample
+// loads, narrow-integer tree state, fused levels in shared memory). The
+// "fuse" counter is the depth actually used.
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
 (benchmark::State& state) {
     const auto nbits = static_cast<SizeType>(state.range(1));
-    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    fdmt_cuda.set_exec_config({.int_tree = state.range(2) != 0});
+    const auto fuse  = state.range(3) < 0
+                           ? kFDMTAutoFuse
+                           : static_cast<SizeType>(state.range(3));
+    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                       "valid", false, 0, 1, fuse, state.range(2) != 0);
+    state.counters["fuse"] = static_cast<double>(fdmt_cuda.get_fuse_levels());
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);
     const cuda::std::span<float> dmt_span(
@@ -228,7 +235,6 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
 (benchmark::State& state) {
     const auto nbits = static_cast<SizeType>(state.range(1));
     FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
-    fdmt_cuda.set_exec_config({.int_tree = nbits != 32});
     std::vector<float> dmt_h(fdmt_cuda.get_plan().get_buffer_size(), 0.0F);
     std::mt19937 gen(42);
     if (nbits == 32) {
@@ -271,9 +277,12 @@ BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_overall_cuda) // NOLINT
     ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
     ->UseManualTime();
 
+// Fusion depth sweep (float and 1-bit + int tree) calibrates kFDMTAutoFuse;
+// then the other bit depths at the default (automatic) and unfused depth.
 BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed) // NOLINT
-    ->ArgsProduct({{1 << 14, 1 << 15}, {32}, {0}})
-    ->ArgsProduct({{1 << 14, 1 << 15}, {1, 2, 4, 8, 16}, {0, 1}})
+    ->ArgsProduct({{1 << 14, 1 << 15}, {32}, {0}, {0, 1, 2, 3, 4, 5, -1}})
+    ->ArgsProduct({{1 << 14, 1 << 15}, {1}, {1}, {0, 1, 2, 3, 4, 5, -1}})
+    ->ArgsProduct({{1 << 14, 1 << 15}, {2, 4, 8, 16}, {0, 1}, {0, -1}})
     ->UseManualTime();
 
 BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda) // NOLINT

@@ -33,7 +33,7 @@ TEST_CASE("parity: FDMTCUDA execute and stepper match FDMTCPU",
     std::vector<float> dmt_gpu(n, 0.0F);
     cpu.execute(waterfall, dmt_cpu);
     gpu.execute(waterfall, dmt_gpu);
-    test::require_approx(dmt_gpu, dmt_cpu);
+    test::require_approx(dmt_gpu, dmt_cpu, cpu.get_plan().get_dmt_size());
 
     std::vector<float> dmt_step(n, 0.0F);
     thrust::device_vector<float> d_wf(waterfall.begin(), waterfall.end());
@@ -48,7 +48,7 @@ TEST_CASE("parity: FDMTCUDA execute and stepper match FDMTCPU",
     gpu.advance_until_remaining(0);
     gpu.finalize();
     thrust::copy(d_dmt.begin(), d_dmt.end(), dmt_step.begin());
-    test::require_approx(dmt_step, dmt_cpu);
+    test::require_approx(dmt_step, dmt_cpu, cpu.get_plan().get_dmt_size());
 }
 
 TEST_CASE("parity: FDMTFFTCUDA execute matches FDMTFFTCPU",
@@ -111,7 +111,7 @@ TEST_CASE("parity: FDMTCUDA add_frb_track recovery matches FDMTCPU",
     std::vector<float> dmt_gpu(n, 0.0F);
     cpu.execute(waterfall, dmt_cpu);
     gpu.execute(waterfall, dmt_gpu);
-    test::require_approx(dmt_gpu, dmt_cpu);
+    test::require_approx(dmt_gpu, dmt_cpu, plan.get_dmt_size());
     const auto ns = plan.get_dmt_nsamps();
     CHECK(dmt_cpu[(8 * ns) + 40] == Catch::Approx(static_cast<float>(nchans)));
     CHECK(dmt_gpu[(8 * ns) + 40] == Catch::Approx(static_cast<float>(nchans)));
@@ -134,8 +134,8 @@ TEST_CASE("parity: FDMTCUDA valid-mode second block matches FDMTCPU",
     gpu.execute(block1, gpu1);
     cpu.execute(block2, cpu2);
     gpu.execute(block2, gpu2);
-    test::require_approx(gpu1, cpu1);
-    test::require_approx(gpu2, cpu2);
+    test::require_approx(gpu1, cpu1, cpu.get_plan().get_dmt_size());
+    test::require_approx(gpu2, cpu2, cpu.get_plan().get_dmt_size());
 }
 
 } // namespace dmt
