@@ -81,7 +81,8 @@ void bind_cfdmt(py::module_& mod) {
             Convolution overlap. Must be smaller than ``nbin``.
         data_order : {'PRITF', 'FTPRI', 'RITFP'}, optional
             Packed baseband layout.
-        verbose : bool, optional
+        verbose : int, optional
+            0 = silent, 1 = info, 2 = debug.
             Print the plan summary.
         nthreads : int, optional
             OpenMP / FFTW threads.
@@ -94,7 +95,7 @@ void bind_cfdmt(py::module_& mod) {
                       float, float, SizeType, std::string_view, bool, int>(),
              "f_center"_a, "sub_bw"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "tp"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap"_a = 8192,
-             "data_order"_a = "PRITF", "verbose"_a = false, "nthreads"_a = 1)
+             "data_order"_a = "PRITF", "verbose"_a = 0, "nthreads"_a = 1)
         .def_property_readonly("plan", &CohFDMTCPU::get_plan)
         // Bind each data type to execute method
         .def("execute",

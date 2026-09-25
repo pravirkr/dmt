@@ -189,8 +189,8 @@ SizeType minimum_overlap(float dm_max,
     float fmin_bottom_sub = fcenter - (bw / 2);
     float fmax_bottom_sub = fmin_bottom_sub + bw_chan;
     float delay           = kDispConst * dm_max *
-                            (std::pow(fmin_bottom_sub, kDispCoeff) -
-                             std::pow(fmax_bottom_sub, kDispCoeff));
+                  (std::pow(fmin_bottom_sub, kDispCoeff) -
+                   std::pow(fmax_bottom_sub, kDispCoeff));
     if (delay < 0) {
         throw std::runtime_error("Negative dispersion delay is not allowed");
     }

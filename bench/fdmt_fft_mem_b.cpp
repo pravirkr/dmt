@@ -47,8 +47,8 @@ public:
 BENCHMARK_DEFINE_F(FDMTFFTMemFixture, BM_fdmt_fft_memory_execute)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                        "valid", false, /*nthreads=*/1);
+        FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
+                        false, "valid", false, /*nthreads=*/1);
         state.PauseTiming();
         std::vector<float> dmt(fdmt.get_plan().get_dmt_size());
         state.ResumeTiming();

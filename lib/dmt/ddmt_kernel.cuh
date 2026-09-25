@@ -26,29 +26,29 @@ namespace dmt::algorithms {
  * always 0) this is identical to the pre-multi-beam kernel.
  */
 template <int SAMPS_PER_THREAD = 2>
-__global__ void
-ddmt_kernel_float(const float* __restrict__ d_in,
-                  int in_chan_stride,
-                  int in_beam_stride,
-                  float* __restrict__ d_out,
-                  int out_dm_stride,
-                  int out_beam_stride,
-                  const int* __restrict__ delay_table,
-                  const int* __restrict__ kill_mask,
-                  int nchans,
-                  int dm_count,
-                  int nsamps_reduced) {
+__global__ void ddmt_kernel_float(const float* __restrict__ d_in,
+                                  int in_chan_stride,
+                                  int in_beam_stride,
+                                  float* __restrict__ d_out,
+                                  int out_dm_stride,
+                                  int out_beam_stride,
+                                  const int* __restrict__ delay_table,
+                                  const int* __restrict__ kill_mask,
+                                  int nchans,
+                                  int dm_count,
+                                  int nsamps_reduced) {
     const auto isamp_base =
-        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x) * SAMPS_PER_THREAD;
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x) *
+        SAMPS_PER_THREAD;
     if (isamp_base >= nsamps_reduced) {
         return;
     }
     const auto i_beam  = static_cast<int>(blockIdx.z);
     const auto* d_in_b = d_in + (i_beam * in_beam_stride);
-    auto* d_out_b       = d_out + (i_beam * out_beam_stride);
+    auto* d_out_b      = d_out + (i_beam * out_beam_stride);
 
     for (auto idm = static_cast<int>(blockIdx.y); idm < dm_count;
-        idm += static_cast<int>(gridDim.y)) {
+         idm += static_cast<int>(gridDim.y)) {
         const auto* delays = &delay_table[idm * nchans];
 
         float sum[SAMPS_PER_THREAD] = {0.0F};
@@ -87,30 +87,30 @@ ddmt_kernel_float(const float* __restrict__ d_in,
  * see execute()'s byte-alignment comment in lib/ddmt_cuda.cu for NBITS < 8.
  */
 template <unsigned NBITS, int SAMPS_PER_THREAD = 2>
-__global__ void
-ddmt_kernel_packed(const uint8_t* __restrict__ d_in,
-                   SizeType row_bytes,
-                   SizeType in_beam_stride,
-                   SizeType sample_offset,
-                   int32_t* __restrict__ d_out,
-                   int out_dm_stride,
-                   int out_beam_stride,
-                   const int* __restrict__ delay_table,
-                   const int* __restrict__ kill_mask,
-                   int nchans,
-                   int dm_count,
-                   int nsamps_reduced) {
+__global__ void ddmt_kernel_packed(const uint8_t* __restrict__ d_in,
+                                   SizeType row_bytes,
+                                   SizeType in_beam_stride,
+                                   SizeType sample_offset,
+                                   int32_t* __restrict__ d_out,
+                                   int out_dm_stride,
+                                   int out_beam_stride,
+                                   const int* __restrict__ delay_table,
+                                   const int* __restrict__ kill_mask,
+                                   int nchans,
+                                   int dm_count,
+                                   int nsamps_reduced) {
     const auto isamp_base =
-        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x) * SAMPS_PER_THREAD;
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x) *
+        SAMPS_PER_THREAD;
     if (isamp_base >= nsamps_reduced) {
         return;
     }
     const auto i_beam  = static_cast<SizeType>(blockIdx.z);
     const auto* d_in_b = d_in + (i_beam * in_beam_stride);
-    auto* d_out_b       = d_out + (static_cast<int>(i_beam) * out_beam_stride);
+    auto* d_out_b      = d_out + (static_cast<int>(i_beam) * out_beam_stride);
 
     for (auto idm = static_cast<int>(blockIdx.y); idm < dm_count;
-        idm += static_cast<int>(gridDim.y)) {
+         idm += static_cast<int>(gridDim.y)) {
         const auto* delays = &delay_table[idm * nchans];
 
         int32_t sum[SAMPS_PER_THREAD] = {0};
@@ -120,7 +120,8 @@ ddmt_kernel_packed(const uint8_t* __restrict__ d_in,
                 continue;
             }
             const int delay = delays[ichan];
-            const auto* row = d_in_b + (static_cast<SizeType>(ichan) * row_bytes);
+            const auto* row =
+                d_in_b + (static_cast<SizeType>(ichan) * row_bytes);
 
 #pragma unroll
             for (int s = 0; s < SAMPS_PER_THREAD; ++s) {
@@ -129,7 +130,8 @@ ddmt_kernel_packed(const uint8_t* __restrict__ d_in,
                         sample_offset +
                         static_cast<SizeType>(isamp_base + s + delay);
                     const auto sample =
-                        utils::read_packed_sample<NBITS>(row, sample_idx);
+                        bit_pack_utils::read_packed_sample<NBITS>(row,
+                                                                  sample_idx);
                     sum[s] += static_cast<int32_t>(sample);
                 }
             }
@@ -152,30 +154,30 @@ ddmt_kernel_packed(const uint8_t* __restrict__ d_in,
  * (blockIdx.z) layout.
  */
 template <unsigned NBITS, int SAMPS_PER_THREAD = 2>
-__global__ void
-ddmt_kernel_time_major(const uint8_t* __restrict__ d_in,
-                       SizeType samp_bytes,
-                       SizeType in_beam_stride,
-                       int32_t* __restrict__ d_out,
-                       int out_dm_stride,
-                       int out_beam_stride,
-                       const int* __restrict__ delay_table,
-                       const int* __restrict__ kill_mask,
-                       int nchans,
-                       int dm_count,
-                       int nsamps_reduced) {
+__global__ void ddmt_kernel_time_major(const uint8_t* __restrict__ d_in,
+                                       SizeType samp_bytes,
+                                       SizeType in_beam_stride,
+                                       int32_t* __restrict__ d_out,
+                                       int out_dm_stride,
+                                       int out_beam_stride,
+                                       const int* __restrict__ delay_table,
+                                       const int* __restrict__ kill_mask,
+                                       int nchans,
+                                       int dm_count,
+                                       int nsamps_reduced) {
     const auto isamp_base =
-        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x) * SAMPS_PER_THREAD;
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x) *
+        SAMPS_PER_THREAD;
     if (isamp_base >= nsamps_reduced) {
         return;
     }
     const auto i_beam  = static_cast<SizeType>(blockIdx.z);
     const auto* d_in_b = d_in + (i_beam * in_beam_stride);
-    auto* d_out_b       = d_out + (static_cast<int>(i_beam) * out_beam_stride);
+    auto* d_out_b      = d_out + (static_cast<int>(i_beam) * out_beam_stride);
 
     for (auto idm = static_cast<int>(blockIdx.y); idm < dm_count;
-        idm += static_cast<int>(gridDim.y)) {
-        const auto* delays = &delay_table[idm * nchans];
+         idm += static_cast<int>(gridDim.y)) {
+        const auto* delays            = &delay_table[idm * nchans];
         int32_t sum[SAMPS_PER_THREAD] = {0};
 
         for (int ichan = 0; ichan < nchans; ++ichan) {
@@ -187,10 +189,12 @@ ddmt_kernel_time_major(const uint8_t* __restrict__ d_in,
 #pragma unroll
             for (int s = 0; s < SAMPS_PER_THREAD; ++s) {
                 if (isamp_base + s < nsamps_reduced) {
-                    const auto samp_idx = static_cast<SizeType>(isamp_base + s + delay);
+                    const auto samp_idx =
+                        static_cast<SizeType>(isamp_base + s + delay);
                     const auto* samp_ptr = d_in_b + (samp_idx * samp_bytes);
                     const auto sample =
-                        utils::read_packed_sample<NBITS>(samp_ptr, static_cast<SizeType>(ichan));
+                        bit_pack_utils::read_packed_sample<NBITS>(
+                            samp_ptr, static_cast<SizeType>(ichan));
                     sum[s] += static_cast<int32_t>(sample);
                 }
             }

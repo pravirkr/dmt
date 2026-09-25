@@ -36,8 +36,9 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     const plans::FDMTPlan& plan, bool use_box_smearing, SizeType nbits) {
     const auto& pc        = plan.get_container();
     const SizeType niters = plan.get_niters();
-    const auto maxval     = static_cast<double>(utils::max_sample_value(nbits));
-    const auto type_for   = [](double bound) {
+    const auto maxval =
+        static_cast<double>(bit_pack_utils::max_sample_value(nbits));
+    const auto type_for = [](double bound) {
         if (bound <= 255.0) {
             return FDMTLevelType::kU8;
         }
@@ -58,7 +59,7 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
             prev[grid.coord_offset + i_dt] = maxval * width;
         }
     }
-    types[0] = type_for(*std::max_element(prev.begin(), prev.end()));
+    types[0] = type_for(*std::ranges::max_element(prev));
     for (SizeType l = 1; l <= niters; ++l) {
         const auto& coords = pc.coordinates[l];
         std::vector<double> cur(coords.size(), 0.0);
@@ -68,14 +69,13 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
                 cur[k] += prev[coords[k].i_coord_head];
             }
         }
-        types[l] = std::max(
-            types[l - 1], type_for(*std::max_element(cur.begin(), cur.end())));
+        types[l] =
+            std::max(types[l - 1], type_for(*std::ranges::max_element(cur)));
         prev.swap(cur);
     }
     types[niters]        = FDMTLevelType::kF32;
     const auto first_f32 = static_cast<SizeType>(
-        std::find(types.begin(), types.end(), FDMTLevelType::kF32) -
-        types.begin());
+        std::ranges::find(types, FDMTLevelType::kF32) - types.begin());
     if (first_f32 > 0 && (niters - first_f32) % 2 == 1) {
         types[first_f32 - 1] = FDMTLevelType::kF32;
     }

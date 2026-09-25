@@ -10,22 +10,17 @@
 #include <type_traits>
 #include <utility>
 
-#ifdef DMT_ENABLE_OPENMP
 #include <omp.h>
-#endif
-
 #include <spdlog/spdlog.h>
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/fdmt_int_tree.hpp"
-#include "dmt/omp_helper.hpp"
+#include "dmt/modes.hpp"
 
 namespace dmt::algorithms {
 
 namespace {
-
-enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
 
 /**
  * @brief Element-wise converting copy (`std::copy_n` when the types match).
@@ -219,9 +214,7 @@ void fdmt_copy_coords(const TIn* __restrict__ state_in,
                       TOut* __restrict__ state_out,
                       const plans::FDMTCoord* __restrict__ coords_copy_cur,
                       SizeType ncoords_copy_cur) noexcept {
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for
-#endif
     for (SizeType i_coord = 0; i_coord < ncoords_copy_cur; ++i_coord) {
         const auto* __restrict__ coord = &coords_copy_cur[i_coord];
         const TIn* __restrict__ tail   = &state_in[coord->tail_buf_offset];
@@ -266,13 +259,9 @@ struct FDMTWorkspace {
     }
 };
 
-/// Calling thread's index inside a parallel region (0 without OpenMP).
+/// Calling thread's index inside a parallel region.
 inline SizeType fdmt_thread_id() noexcept {
-#ifdef DMT_ENABLE_OPENMP
     return static_cast<SizeType>(omp_get_thread_num());
-#else
-    return 0;
-#endif
 }
 
 template <FDMTMode Mode, typename TIn = float, typename TOut = float>
@@ -283,18 +272,12 @@ void fdmt_iter(const TIn* __restrict__ state_in,
                const plans::FDMTCoord* __restrict__ coords_copy_cur,
                SizeType ncoords_sum_cur,
                SizeType ncoords_copy_cur,
-               int nthreads) noexcept {
-#ifdef DMT_ENABLE_OPENMP
+               [[maybe_unused]] int nthreads) noexcept {
 #pragma omp parallel default(none) num_threads(nthreads)                       \
     shared(state_in, state_out, hist_ptr, coords_sum_cur, coords_copy_cur,     \
                ncoords_sum_cur, ncoords_copy_cur)
-#else
-    (void)nthreads;
-#endif
     {
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for nowait
-#endif
         for (SizeType i_coord = 0; i_coord < ncoords_sum_cur; ++i_coord) {
             const auto* __restrict__ coord = &coords_sum_cur[i_coord];
             const TIn* __restrict__ tail   = &state_in[coord->tail_buf_offset];
@@ -565,7 +548,8 @@ struct FDMTInput {
                 return nullptr;
             }
         }
-        utils::unpack_row(packed + (i_sub * row_bytes), nbits, nsamps, scratch);
+        bit_pack_utils::unpack_row(packed + (i_sub * row_bytes), nbits, nsamps,
+                                   scratch);
         return scratch;
     }
 };
@@ -577,19 +561,15 @@ void fdmt_init_impl(const FDMTInput& input,
                     SizeType nsubs,
                     SizeType nsamps,
                     const FDMTWorkspace& ws) noexcept {
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel default(none) num_threads(ws.nthreads)                    \
     shared(input, init_buffer, grids_init, nsubs, nsamps, ws)
-#endif
     {
         // Integer level-0 state (int_tree) is fed integer samples directly.
         using TS = std::conditional_t<std::is_integral_v<TOut>, TOut, float>;
         const SizeType tid = fdmt_thread_id();
         TS* scratch        = ws.unpack<TS>(tid);
         TOut* rows         = ws.rows<TOut>(tid);
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for
-#endif
         for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
             const TS* __restrict__ wf_sub =
                 input.row<TS>(i_sub, nsamps, scratch);
@@ -772,20 +752,16 @@ void fdmt_init_valid_impl(const FDMTInput& input,
                           SizeType dt_max_init,
                           SizeType dt_max_final,
                           const FDMTWorkspace& ws) noexcept {
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel default(none) num_threads(ws.nthreads)                    \
     shared(input, init_buffer, hist_buffer, hist_init_buffer, grids_init,      \
                nsubs, nsamps, dt_max_init, dt_max_final, ws)
-#endif
     {
         // Integer level-0 state (int_tree) is fed integer samples directly.
         using TS = std::conditional_t<std::is_integral_v<TOut>, TOut, float>;
         const SizeType tid = fdmt_thread_id();
         TS* scratch        = ws.unpack<TS>(tid);
         TOut* rows         = ws.rows<TOut>(tid);
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for
-#endif
         for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
             const TS* __restrict__ wf_sub =
                 input.row<TS>(i_sub, nsamps, scratch);
@@ -819,16 +795,16 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int nthreads,
          SizeType nbeams,
          SizeType fuse_levels,
          bool int_tree)
         : m_use_box_smearing(use_box_smearing),
           m_int_tree(int_tree),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_nthreads(static_cast<SizeType>(set_dmt_openmp_threads(nthreads))),
+          m_nthreads(std::max(1, nthreads)),
           m_plan(f_min,
                  f_max,
                  nchans,
@@ -864,16 +840,16 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int nthreads,
          SizeType nbeams,
          SizeType fuse_levels,
          bool int_tree)
         : m_use_box_smearing(use_box_smearing),
           m_int_tree(int_tree),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_nthreads(static_cast<SizeType>(set_dmt_openmp_threads(nthreads))),
+          m_nthreads(std::max(1, nthreads)),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose),
           m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
                            std::byte{0}),
@@ -900,16 +876,16 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int nthreads,
          SizeType nbeams,
          SizeType fuse_levels,
          bool int_tree)
         : m_use_box_smearing(use_box_smearing),
           m_int_tree(int_tree),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_nthreads(static_cast<SizeType>(set_dmt_openmp_threads(nthreads))),
+          m_nthreads(std::max(1, nthreads)),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose),
           m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
                            std::byte{0}),
@@ -983,7 +959,7 @@ public:
         }
         const auto nchans    = m_plan.get_nchans();
         const auto nsamps    = m_plan.get_nsamps();
-        const auto row_bytes = utils::packed_row_bytes(nsamps, nbits);
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         if (waterfall_packed.size() != m_nbeams * nchans * row_bytes) {
             throw std::invalid_argument(std::format(
                 "FDMTCPU: Invalid size of packed waterfall (nbits={}). "
@@ -991,9 +967,11 @@ public:
                 nbits, m_nbeams * nchans * row_bytes, waterfall_packed.size()));
         }
         check_dmt_size(dmt);
-        const FDMTInput input{.packed    = waterfall_packed.data(),
-                              .nbits     = nbits,
-                              .row_bytes = row_bytes};
+        const FDMTInput input{
+            .packed    = waterfall_packed.data(),
+            .nbits     = nbits,
+            .row_bytes = row_bytes,
+        };
         start(input, nchans * row_bytes,
               m_int_tree ? m_int_levels[nbits] : m_float_levels, dmt);
     }
@@ -1164,9 +1142,9 @@ public:
     }
 
     void reset_history() noexcept {
-        std::fill(m_history.begin(), m_history.end(), 0.0F);
-        std::fill(m_history_init.begin(), m_history_init.end(), 0.0F);
-        std::fill(m_tree_history.begin(), m_tree_history.end(), 0.0F);
+        std::ranges::fill(m_history, 0.0F);
+        std::ranges::fill(m_history_init, 0.0F);
+        std::ranges::fill(m_tree_history, 0.0F);
     }
 
     [[nodiscard]] SizeType history_state_size() const noexcept {
@@ -1180,10 +1158,15 @@ public:
                             "Expected {}, got {}",
                             history_state_size(), out.size()));
         }
-        auto it = out.begin();
-        it      = std::copy(m_history.begin(), m_history.end(), it);
-        it      = std::copy(m_history_init.begin(), m_history_init.end(), it);
-        std::copy(m_tree_history.begin(), m_tree_history.end(), it);
+
+        const auto h  = out.first(m_history.size());
+        const auto hi = out.subspan(h.size(), m_history_init.size());
+        const auto th =
+            out.subspan(h.size() + hi.size(), m_tree_history.size());
+
+        std::ranges::copy(m_history, h.begin());
+        std::ranges::copy(m_history_init, hi.begin());
+        std::ranges::copy(m_tree_history, th.begin());
     }
 
     void load_history(std::span<const float> in) {
@@ -1193,15 +1176,14 @@ public:
                             "Expected {}, got {}",
                             history_state_size(), in.size()));
         }
-        auto it = in.begin();
-        std::copy(it, it + static_cast<IndexType>(m_history.size()),
-                  m_history.begin());
-        it += static_cast<IndexType>(m_history.size());
-        std::copy(it, it + static_cast<IndexType>(m_history_init.size()),
-                  m_history_init.begin());
-        it += static_cast<IndexType>(m_history_init.size());
-        std::copy(it, it + static_cast<IndexType>(m_tree_history.size()),
-                  m_tree_history.begin());
+
+        const auto h  = in.first(m_history.size());
+        const auto hi = in.subspan(h.size(), m_history_init.size());
+        const auto th = in.subspan(h.size() + hi.size(), m_tree_history.size());
+
+        std::ranges::copy(h, m_history.begin());
+        std::ranges::copy(hi, m_history_init.begin());
+        std::ranges::copy(th, m_tree_history.begin());
     }
 
 private:
@@ -1222,7 +1204,7 @@ private:
     bool m_int_tree;
     FDMTMode m_mode;
     SizeType m_nbeams;
-    SizeType m_nthreads;
+    int m_nthreads;
     plans::FDMTPlan m_plan;
     // Internal state buffer (for ping-pong buffering), zero-filled. Byte
     // storage holds float, uint8_t and uint16_t levels alike: with int_tree
@@ -1262,20 +1244,6 @@ private:
     };
     SizeType m_current_level{0};
     bool m_is_initialized{false};
-
-    static FDMTMode parse_mode(std::string_view mode) {
-        if (mode == "full") {
-            return FDMTMode::kFull;
-        }
-        if (mode == "roll") {
-            return FDMTMode::kRoll;
-        }
-        if (mode == "valid") {
-            return FDMTMode::kValid;
-        }
-        throw std::invalid_argument(std::format(
-            "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
-    }
 
     template <typename F> static void with_elem(Elem e, F&& f) {
         switch (e) {
@@ -1335,7 +1303,7 @@ private:
      * index, and the per-thread workspace (see FDMTWorkspace). Nothing is
      * allocated after this.
      */
-    void allocate_working_memory(SizeType fuse_levels, bool verbose) {
+    void allocate_working_memory(SizeType fuse_levels, int verbose) {
         const SizeType niters = m_plan.get_niters();
         m_float_levels.assign(niters + 1, Elem::kF32);
         for (const SizeType nbits : {1, 2, 4, 8, 16}) {
@@ -1363,7 +1331,7 @@ private:
                                ? round_up_64(fused_scratch_bytes(m_fuse_levels))
                                : 0;
         m_ws.stride      = (3 * m_ws.row_bytes) + (2 * m_ws.fused_bytes);
-        m_ws.nthreads    = static_cast<int>(m_nthreads);
+        m_ws.nthreads    = m_nthreads;
         m_workspace.assign(m_nthreads * m_ws.stride, std::byte{0});
         m_ws.base = m_workspace.data();
 
@@ -1377,7 +1345,7 @@ private:
                 static_cast<double>(m_workspace.size()) / 1048576.0, m_nthreads,
                 static_cast<double>(m_state_internal.size()) / 1048576.0);
         }
-        if (verbose) {
+        if (verbose >= 1) {
             const auto mem = get_memory_usage();
             const auto mib = [](SizeType b) {
                 return static_cast<double>(b) / 1048576.0;
@@ -1667,9 +1635,9 @@ private:
                                                    box_rows);
                 }
             } else {
-                float* hist_sub    = m_history.data() +
-                                     (beam * m_plan.get_history_size()) +
-                                     (c * dt_max_final);
+                float* hist_sub = m_history.data() +
+                                  (beam * m_plan.get_history_size()) +
+                                  (c * dt_max_final);
                 float* hist_init_b = m_history_init.data() +
                                      (beam * m_plan.get_history_init_size());
                 if (m_use_box_smearing) {
@@ -1747,22 +1715,18 @@ private:
             } else {
                 input_b.f32 += b * input_beam_stride;
             }
-            float* hist_b = (m_mode == FDMTMode::kValid)
-                                ? m_tree_history.data() + (b * tree_hist_stride)
-                                : nullptr;
+            float* hist_b        = (m_mode == FDMTMode::kValid)
+                                       ? m_tree_history.data() + (b * tree_hist_stride)
+                                       : nullptr;
             std::byte* final_out = level_ptr<std::byte>(fuse, b);
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel num_threads(m_ws.nthreads)
-#endif
             {
                 const SizeType tid = fdmt_thread_id();
                 std::byte* buf_a   = m_ws.fused_a(tid);
                 std::byte* buf_b   = m_ws.fused_b(tid);
                 // Groups at the bottom of the band carry more dt rows than
                 // those at the top, so hand them out dynamically.
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for schedule(dynamic)
-#endif
                 for (SizeType g = 0; g < ngroups; ++g) {
                     const SizeType ch_begin = g << fuse;
                     const SizeType ch_end =
@@ -1810,11 +1774,10 @@ private:
                 (Mode == FDMTMode::kValid)
                     ? m_tree_history.data() + (b * hist_beam_stride)
                     : nullptr;
-            fdmt_iter<Mode>(level_ptr<TIn>(i_iter - 1, b),
-                            level_ptr<TOut>(i_iter, b), hist_b,
-                            coords_sum_cur.data(), coords_copy_cur.data(),
-                            coords_sum_cur.size(), coords_copy_cur.size(),
-                            static_cast<int>(m_nthreads));
+            fdmt_iter<Mode>(
+                level_ptr<TIn>(i_iter - 1, b), level_ptr<TOut>(i_iter, b),
+                hist_b, coords_sum_cur.data(), coords_copy_cur.data(),
+                coords_sum_cur.size(), coords_copy_cur.size(), m_nthreads);
         }
     }
 
@@ -1852,7 +1815,7 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_step,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
+                 int verbose,
                  int nthreads,
                  SizeType nbeams,
                  SizeType fuse_levels,
@@ -1880,7 +1843,7 @@ FDMTCPU::FDMTCPU(float f_min,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
+                 int verbose,
                  int nthreads,
                  SizeType nbeams,
                  SizeType fuse_levels,
@@ -1907,7 +1870,7 @@ FDMTCPU::FDMTCPU(float f_min,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
+                 int verbose,
                  int nthreads,
                  SizeType nbeams,
                  SizeType fuse_levels,
@@ -2025,7 +1988,7 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType dt_step,
              bool use_box_smearing,
              std::string_view mode,
-             bool verbose,
+             int verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
@@ -2056,7 +2019,7 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing,
              std::string_view mode,
-             bool verbose,
+             int verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
@@ -2084,7 +2047,7 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<float>& dm_grid,
              bool use_box_smearing,
              std::string_view mode,
-             bool verbose,
+             int verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,

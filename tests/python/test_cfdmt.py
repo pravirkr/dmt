@@ -1,9 +1,9 @@
 import numpy as np
-import pytest
+
 from dmtlib import libdmt
 
-class TestCohFDMT:
 
+class TestCohFDMT:
     @staticmethod
     def _make_plan() -> libdmt.CohFDMTPlan:
         chan_per_sub = 4

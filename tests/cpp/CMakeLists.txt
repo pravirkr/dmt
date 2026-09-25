@@ -1,5 +1,10 @@
 # Catch2: prefer system package (apt/brew) when available; pin 3.16.0 via CPM otherwise.
-find_package(Catch2 3 CONFIG QUIET)
+find_package(
+  Catch2
+  3
+  CONFIG
+  QUIET
+)
 if(Catch2_FOUND)
   message(STATUS "Using system Catch2 ${Catch2_VERSION}")
 else()
@@ -54,12 +59,14 @@ if(CMAKE_CUDA_COMPILER)
 endif()
 
 target_link_libraries(
-  ${TARGET_TESTS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} Catch2::Catch2WithMain
-                          ${DMT_COMPILE_OPTIONS} spdlog::spdlog_header_only
+  ${TARGET_TESTS}
+  PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          Catch2::Catch2WithMain
+          ${DMT_COMPILE_OPTIONS}
+          spdlog::spdlog_header_only
+          OpenMP::OpenMP_CXX
 )
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(${TARGET_TESTS} PRIVATE OpenMP::OpenMP_CXX)
-endif()
+
 dmt_enable_coverage(${TARGET_TESTS})
 
 if(CMAKE_CUDA_COMPILER)
@@ -89,5 +96,10 @@ if(CMAKE_CUDA_COMPILER)
     "gpu"
   )
 else()
-  catch_discover_tests(${TARGET_TESTS} PROPERTIES LABELS "cpu")
+  catch_discover_tests(
+    ${TARGET_TESTS}
+    PROPERTIES
+    LABELS
+    "cpu"
+  )
 endif()

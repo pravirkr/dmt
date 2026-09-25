@@ -8,7 +8,7 @@
 
 #include <cuda/std/complex>
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
@@ -17,7 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include "dmt/cuda_utils.cuh"
-#include "dmt/bb_utils.hpp"
+#include "dmt/modes.hpp"
 
 namespace dmt::utils {
 
@@ -97,7 +97,8 @@ public:
           m_nbin(nbin),
           m_noverlap(noverlap),
           m_nfft(nfft),
-          m_device_id(device_id) {
+          m_device_id(device_id),
+          m_order(parse_baseband_data_order(in_order)) {
         cuda_utils::set_device(m_device_id);
         spdlog::debug("DataUnpackerCUDA::Impl: Set device to {}.", m_device_id);
         if (m_nbin <= 2 * m_noverlap) {
@@ -107,12 +108,6 @@ public:
                             m_nbin, m_noverlap));
         }
         m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
-        if (const auto order = bb_utils::find_baseband_data_order(in_order)) {
-            m_order = *order;
-        } else {
-            throw std::invalid_argument(
-                std::format("Invalid input order: {}", in_order));
-        }
         // Expected input size: 2 polarizations * Real/Imag * total input
         // samples * subbands
         m_expected_in_size = kNpol * 2 * m_nsamp * m_nsub;
@@ -146,11 +141,10 @@ public:
         std::byte* d_in_byte_ptr =
             thrust::raw_pointer_cast(m_d_in_buffer.data());
         auto* d_in_ptr = reinterpret_cast<DataType*>(d_in_byte_ptr);
-        cuda_utils::check_cuda_call(cudaMemcpyAsync(d_in_ptr, data_in.data(),
-                                                    data_in.size_bytes(),
-                                                    cudaMemcpyHostToDevice,
-                                                    stream),
-                                    "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(d_in_ptr, data_in.data(), data_in.size_bytes(),
+                            cudaMemcpyHostToDevice, stream),
+            "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
 
         auto data_in_d_span = cuda::std::span(d_in_ptr, m_expected_in_size);
 

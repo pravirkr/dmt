@@ -15,7 +15,7 @@
 #include <pybind11/stl.h>
 
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 
 #include "dmt/dmt.hpp"
 #include "pybind_utils.hpp"
@@ -47,7 +47,7 @@ void bind_fdmt_cuda(py::module_& mod) {
                          SizeType nsamps, float tsamp, IndexType dt_max,
                          IndexType dt_min, SizeType dt_step,
                          bool use_box_smearing, std::string_view mode,
-                         bool verbose, int device_id, SizeType nbeams,
+                         int verbose, int device_id, SizeType nbeams,
                          std::optional<SizeType> fuse_levels, bool int_tree) {
                  return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                  dt_min, dt_step, use_box_smearing, mode,
@@ -58,7 +58,7 @@ void bind_fdmt_cuda(py::module_& mod) {
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
              py::arg("dt_min") = 0, py::arg("dt_step") = 1,
              py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = false, py::arg("device_id") = 0,
+             py::arg("verbose") = 0, py::arg("device_id") = 0,
              py::arg("nbeams") = 1, py::arg("fuse_levels") = py::none(),
              py::arg("int_tree") = true)
         .def(py::init([](float f_min, float f_max, SizeType nchans,
@@ -66,7 +66,7 @@ void bind_fdmt_cuda(py::module_& mod) {
                          const py::object& dt_grid, const py::object& dt_arr,
                          const py::object& dm_grid, const py::object& dm_arr,
                          bool use_box_smearing, std::string_view mode,
-                         bool verbose, int device_id, SizeType nbeams,
+                         int verbose, int device_id, SizeType nbeams,
                          std::optional<SizeType> fuse_levels, bool int_tree) {
                  const auto [type, obj] =
                      resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
@@ -86,7 +86,7 @@ void bind_fdmt_cuda(py::module_& mod) {
              py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
              py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
              py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = false, py::arg("device_id") = 0,
+             py::arg("verbose") = 0, py::arg("device_id") = 0,
              py::arg("nbeams") = 1, py::arg("fuse_levels") = py::none(),
              py::arg("int_tree") = true)
         .def_property_readonly(
@@ -134,11 +134,10 @@ void bind_fdmt_cuda(py::module_& mod) {
                                         nbeams));
                     }
                     py::array_t<float, py::array::c_style> dmt_buf(buf_size);
-                    fdmt.execute(
-                        std::span<const float>(waterfall.data(),
-                                               waterfall.size()),
-                        std::span<float>(dmt_buf.mutable_data(),
-                                         dmt_buf.size()));
+                    fdmt.execute(std::span<const float>(waterfall.data(),
+                                                        waterfall.size()),
+                                 std::span<float>(dmt_buf.mutable_data(),
+                                                  dmt_buf.size()));
                     return py::array_t<float>(
                         {ncoords, nsamps},
                         {nsamps * sizeof(float), sizeof(float)}, dmt_buf.data(),
@@ -251,9 +250,8 @@ void bind_fdmt_cuda(py::module_& mod) {
         .def("reset_history", &FDMTCUDA::reset_history,
              "Reset the internal history buffers for valid-mode streaming.");
 
-    py::class_<FDMTFFTCUDA>(
-        mod, "FDMTFFTCUDA", py::dynamic_attr(),
-        R"doc(
+    py::class_<FDMTFFTCUDA>(mod, "FDMTFFTCUDA", py::dynamic_attr(),
+                            R"doc(
         FFT-domain FDMT on CUDA.
 
         Same constructor arguments as :class:`~dmtlib.libdmt.FDMTFFTCPU`, with
@@ -266,33 +264,32 @@ void bind_fdmt_cuda(py::module_& mod) {
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
              py::arg("dt_min") = 0, py::arg("dt_step") = 1,
              py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = false, py::arg("device_id") = 0,
+             py::arg("verbose") = 0, py::arg("device_id") = 0,
              py::arg("nbeams") = 1)
-        .def(
-            py::init([](float f_min, float f_max, SizeType nchans,
-                        SizeType nsamps, float tsamp, const py::object& dt_grid,
-                        const py::object& dt_arr, const py::object& dm_grid,
-                        const py::object& dm_arr, bool use_box_smearing,
-                        std::string_view mode, bool verbose, int device_id,
-                        SizeType nbeams) {
-                const auto [type, obj] =
-                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                if (type == CustomGridType::kDt) {
-                    return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
-                                       extract_dt_grid(obj), use_box_smearing,
-                                       mode, verbose, device_id, nbeams);
-                }
-                return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
-                                   extract_dm_grid(obj), use_box_smearing, mode,
-                                   verbose, device_id, nbeams);
-            }),
-            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
-            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
-            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-            py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-            py::arg("verbose") = false, py::arg("device_id") = 0,
-            py::arg("nbeams") = 1)
+        .def(py::init([](float f_min, float f_max, SizeType nchans,
+                         SizeType nsamps, float tsamp,
+                         const py::object& dt_grid, const py::object& dt_arr,
+                         const py::object& dm_grid, const py::object& dm_arr,
+                         bool use_box_smearing, std::string_view mode,
+                         int verbose, int device_id, SizeType nbeams) {
+                 const auto [type, obj] =
+                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                 if (type == CustomGridType::kDt) {
+                     return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                        extract_dt_grid(obj), use_box_smearing,
+                                        mode, verbose, device_id, nbeams);
+                 }
+                 return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                    extract_dm_grid(obj), use_box_smearing,
+                                    mode, verbose, device_id, nbeams);
+             }),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+             py::arg("verbose") = 0, py::arg("device_id") = 0,
+             py::arg("nbeams") = 1)
         .def_property_readonly("plan", &FDMTFFTCUDA::get_plan)
         .def_property_readonly("nbeams", &FDMTFFTCUDA::get_nbeams)
         .def_property_readonly("dt_grid_final",
@@ -317,10 +314,10 @@ void bind_fdmt_cuda(py::module_& mod) {
                 if (waterfall.ndim() == 2) {
                     py::array_t<float, py::array::c_style> result(
                         {ndms, nsamps_out});
-                    fdmt.execute(std::span<const float>(waterfall.data(),
-                                                        waterfall.size()),
-                                 std::span<float>(result.mutable_data(),
-                                                  result.size()));
+                    fdmt.execute(
+                        std::span<const float>(waterfall.data(),
+                                               waterfall.size()),
+                        std::span<float>(result.mutable_data(), result.size()));
                     return result;
                 }
                 if (waterfall.ndim() == 3) {
@@ -382,8 +379,7 @@ void bind_fdmt_cuda(py::module_& mod) {
             [](py::object self, SizeType subband_idx) {
                 auto& fdmt = self.cast<FDMTFFTCUDA&>();
                 auto v     = fdmt.view_subband(subband_idx);
-                py::array_t<float, py::array::c_style> host(
-                    {v.ndt, v.nsamps});
+                py::array_t<float, py::array::c_style> host({v.ndt, v.nsamps});
                 cudaMemcpy(host.mutable_data(), v.data.data(),
                            v.data.size() * sizeof(float),
                            cudaMemcpyDeviceToHost);
@@ -395,8 +391,7 @@ void bind_fdmt_cuda(py::module_& mod) {
             [](py::object self, SizeType subband_idx) {
                 auto& fdmt = self.cast<FDMTFFTCUDA&>();
                 auto v     = fdmt.view_subband(subband_idx);
-                py::array_t<float, py::array::c_style> host(
-                    {v.ndt, v.nsamps});
+                py::array_t<float, py::array::c_style> host({v.ndt, v.nsamps});
                 cudaMemcpy(host.mutable_data(), v.data.data(),
                            v.data.size() * sizeof(float),
                            cudaMemcpyDeviceToHost);

@@ -9,6 +9,7 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_fused_tile.hpp"
+#include "dmt/modes.hpp"
 
 #include <catch2/matchers/catch_matchers_all.hpp>
 
@@ -40,13 +41,6 @@ struct HostBlock {
     void sync() const {}
 };
 
-detail::FDMTMode parse(const std::string& mode) {
-    if (mode == "full") {
-        return detail::FDMTMode::kFull;
-    }
-    return mode == "roll" ? detail::FDMTMode::kRoll : detail::FDMTMode::kValid;
-}
-
 struct Waterfall {
     std::vector<float> values;   // (nchans, nsamps)
     std::vector<uint8_t> packed; // 2-bit rows
@@ -55,15 +49,15 @@ struct Waterfall {
 Waterfall random_ints(SizeType nchans, SizeType nsamps, unsigned seed) {
     std::mt19937 gen(seed);
     std::uniform_int_distribution<uint32_t> dis(0, 3);
-    const auto row_bytes = utils::packed_row_bytes(nsamps, 2);
+    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, 2);
     Waterfall wf{.values = std::vector<float>(nchans * nsamps),
                  .packed = std::vector<uint8_t>(nchans * row_bytes, 0)};
     for (SizeType c = 0; c < nchans; ++c) {
         for (SizeType s = 0; s < nsamps; ++s) {
             const auto v                = dis(gen);
             wf.values[(c * nsamps) + s] = static_cast<float>(v);
-            utils::write_packed_sample<2>(wf.packed.data() + (c * row_bytes), s,
-                                          v);
+            bit_pack_utils::write_packed_sample<2>(
+                wf.packed.data() + (c * row_bytes), s, v);
         }
     }
     return wf;
@@ -72,7 +66,7 @@ Waterfall random_ints(SizeType nchans, SizeType nsamps, unsigned seed) {
 // Runs every (group, tile) of the fused levels 0..fuse on the host and
 // returns level `fuse` as float. `thist_out` receives the fused levels'
 // tree-history slots (valid mode).
-template <detail::FDMTMode Mode, bool Smear, typename TOut>
+template <FDMTMode Mode, bool Smear, typename TOut>
 std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
                              const detail::FDMTFusedTilePlan& plan,
                              int tile,
@@ -95,12 +89,13 @@ std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
     const detail::FDMTInputF32 in_f32{.data   = wf.values.data(),
                                       .nsamps = nsamps};
     const detail::FDMTInputPacked in_pk{
-        .data      = wf.packed.data(),
-        .row_bytes = static_cast<int>(utils::packed_row_bytes(nsamps, 2)),
-        .nbits     = 2};
+        .data = wf.packed.data(),
+        .row_bytes =
+            static_cast<int>(bit_pack_utils::packed_row_bytes(nsamps, 2)),
+        .nbits = 2};
     for (int g = 0; g < plan.ngroups; ++g) {
         for (int t = 0; t < ntiles; ++t) {
-            std::fill(smem.begin(), smem.end(), kSentinel);
+            std::ranges::fill(smem, kSentinel);
             if (packed) {
                 detail::fdmt_fused_tile<Mode, Smear>(
                     HostBlock{}, in_pk, 0, out.data(), args, t, g, smem.data(),
@@ -120,7 +115,7 @@ std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
 }
 
 template <typename TOut>
-std::vector<float> run_tiles_dispatch(detail::FDMTMode mode,
+std::vector<float> run_tiles_dispatch(FDMTMode mode,
                                       bool smear,
                                       const plans::FDMTPlanContainer& pc,
                                       const detail::FDMTFusedTilePlan& plan,
@@ -130,21 +125,20 @@ std::vector<float> run_tiles_dispatch(detail::FDMTMode mode,
                                       const float* hist0,
                                       const float* thist_in,
                                       float* thist_out) {
-    using M       = detail::FDMTMode;
-    const auto go = [&]<M Mode, bool S>() {
+    const auto go = [&]<FDMTMode Mode, bool S>() {
         return run_tiles<Mode, S, TOut>(pc, plan, tile, wf, packed, hist0,
                                         thist_in, thist_out);
     };
-    if (mode == M::kFull) {
-        return smear ? go.template operator()<M::kFull, true>()
-                     : go.template operator()<M::kFull, false>();
+    if (mode == FDMTMode::kFull) {
+        return smear ? go.template operator()<FDMTMode::kFull, true>()
+                     : go.template operator()<FDMTMode::kFull, false>();
     }
-    if (mode == M::kRoll) {
-        return smear ? go.template operator()<M::kRoll, true>()
-                     : go.template operator()<M::kRoll, false>();
+    if (mode == FDMTMode::kRoll) {
+        return smear ? go.template operator()<FDMTMode::kRoll, true>()
+                     : go.template operator()<FDMTMode::kRoll, false>();
     }
-    return smear ? go.template operator()<M::kValid, true>()
-                 : go.template operator()<M::kValid, false>();
+    return smear ? go.template operator()<FDMTMode::kValid, true>()
+                 : go.template operator()<FDMTMode::kValid, false>();
 }
 
 // Level `fuse` of one block through FDMTCPU's original path.
@@ -199,8 +193,8 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
                             c.dt_min, 1, smear, mode, false, 1, 1, 0, false);
                 const auto& pc    = ref.get_plan().get_container();
                 const auto niters = ref.get_plan().get_niters();
-                const auto wf = random_ints(c.nchans, c.nsamps,
-                                            static_cast<unsigned>(c.nchans));
+                const auto wf     = random_ints(c.nchans, c.nsamps,
+                                                static_cast<unsigned>(c.nchans));
                 for (SizeType fuse = 1; fuse <= std::min<SizeType>(niters, 4);
                      ++fuse) {
                     ref.reset_history(); // first block of a stream
@@ -220,14 +214,15 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
                                 ref.get_plan().get_tree_history_size(), 0.0F);
                             std::vector<float> thist_out(thist_in.size(), 0.0F);
                             REQUIRE_THAT(run_tiles_dispatch<float>(
-                                             parse(mode), smear, pc, plan, tile,
-                                             wf, false, hist0.data(),
-                                             thist_in.data(), thist_out.data()),
+                                             parse_fdmt_mode(mode), smear, pc,
+                                             plan, tile, wf, false,
+                                             hist0.data(), thist_in.data(),
+                                             thist_out.data()),
                                          Catch::Matchers::Equals(expected));
                             // Packed input, integer level-F storage.
                             REQUIRE_THAT(run_tiles_dispatch<uint16_t>(
-                                             parse(mode), smear, pc, plan, tile,
-                                             wf, true, hist0.data(),
+                                             parse_fdmt_mode(mode), smear, pc,
+                                             plan, tile, wf, true, hist0.data(),
                                              thist_in.data(), thist_out.data()),
                                          Catch::Matchers::Equals(expected));
                         }
@@ -288,8 +283,8 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                         for (const int tile : {3, 7, 32}) {
                             std::vector<float> tree_out = tree_template;
                             const auto got = run_tiles_dispatch<float>(
-                                detail::FDMTMode::kValid, smear, pc, plan, tile,
-                                wf, false, hist0, tree_in, tree_out.data());
+                                FDMTMode::kValid, smear, pc, plan, tile, wf,
+                                false, hist0, tree_in, tree_out.data());
                             REQUIRE_THAT(got,
                                          Catch::Matchers::Equals(expected));
                             REQUIRE_THAT(tree_out,

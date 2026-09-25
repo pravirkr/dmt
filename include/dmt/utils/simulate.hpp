@@ -2,7 +2,8 @@
 
 /**
  * @file simulate.hpp
- * @brief Utilities for generating synthetic dispersed astronomical pulses (FRBs / pulsars).
+ * @brief Utilities for generating synthetic dispersed astronomical pulses (FRBs
+ * / pulsars).
  */
 
 #include <tuple>
@@ -13,12 +14,14 @@
 namespace dmt::utils {
 
 /**
- * @brief Injects a noise-free dispersed top-hat or fractional-delay pulse into a zero waterfall.
+ * @brief Injects a noise-free dispersed top-hat or fractional-delay pulse into
+ * a zero waterfall.
  *
- * Models physical intra-channel dispersion integration between the top and bottom edges
- * of each channel:
+ * Models physical intra-channel dispersion integration between the top and
+ * bottom edges of each channel:
  * @f[
- * \Delta t(\nu) = \Delta t_{\text{total}} \cdot \frac{f_{\text{min}}^{-2} - \nu_{\text{bot}}^{-2}}{f_{\text{min}}^{-2} - f_{\text{max}}^{-2}}
+ * \Delta t(\nu) = \Delta t_{\text{total}} \cdot \frac{f_{\text{min}}^{-2} -
+ * \nu_{\text{bot}}^{-2}}{f_{\text{min}}^{-2} - f_{\text{max}}^{-2}}
  * @f]
  *
  * @param nchans Number of frequency channels.

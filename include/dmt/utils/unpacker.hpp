@@ -2,7 +2,8 @@
 
 /**
  * @file unpacker.hpp
- * @brief Baseband voltage stream unpackers and format converters for LOFAR/telescope DAQ layouts.
+ * @brief Baseband voltage stream unpackers and format converters for
+ * LOFAR/telescope DAQ layouts.
  */
 
 #include <memory>
@@ -11,7 +12,7 @@
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/common/types.hpp"
@@ -141,7 +142,8 @@ public:
                  cuda::std::span<ComplexTypeCUDA> data_p2,
                  cudaStream_t stream = nullptr) const;
 
-    template <IntegralDataType DataType, typename Alloc = std::allocator<DataType>>
+    template <IntegralDataType DataType,
+              typename Alloc = std::allocator<DataType>>
     void execute(const std::vector<DataType, Alloc>& data_in,
                  cuda::std::span<ComplexTypeCUDA> data_p1,
                  cuda::std::span<ComplexTypeCUDA> data_p2,

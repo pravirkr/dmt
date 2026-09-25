@@ -1,238 +1,298 @@
 #include "dmt/utils/fft.hpp"
 
-#ifdef DMT_ENABLE_OPENMP
-#include <omp.h>
-#endif
+#include <algorithm>
+#include <format>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
+#include <utility>
+
 #include <fftw3.h>
-
 #include <spdlog/spdlog.h>
-
-#include "dmt/bb_utils.hpp"
 
 namespace dmt::utils {
 
-class FFTManagerCPU::Impl {
+namespace {
+
+std::mutex& fftw_planner_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void destroy_fftw_plan(fftwf_plan plan) noexcept {
+    if (plan == nullptr) {
+        return;
+    }
+    const std::scoped_lock lock(fftw_planner_mutex());
+    fftwf_destroy_plan(plan);
+}
+
+class FFTWPlan {
 public:
-    Impl(int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads)
-        : m_nfft(nfft),
-          m_nsub(nsub),
-          m_nbin(nbin),
-          m_mbin(mbin),
-          m_nchan(nchan),
-          m_nthreads(nthreads) {
-        configure_threading();
-        spdlog::debug("FFTManagerCPU::Impl: Initialized with nfft={}, "
-                      "nsub={}, nbin={}, mbin={}, nchan={}, nthreads={}",
-                      nfft, nsub, nbin, mbin, nchan, m_nthreads);
-    }
-
-    ~Impl() noexcept {
-        spdlog::debug("FFTManagerCPU::Impl: Destroying instance");
-        cleanup_resources();
-    }
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
-
-    void initialize_plans(std::span<ComplexType> unpack_buffer,
-                          std::span<ComplexType> delay_buffer) {
-        spdlog::debug("initialize_plans: Creating FFTW plans");
-        // Ensure pointers are valid complex types for FFTW
-        auto* unpack_buffer_ptr =
-            reinterpret_cast<fftwf_complex*>(unpack_buffer.data());
-        auto* delay_buffer_ptr =
-            reinterpret_cast<fftwf_complex*>(delay_buffer.data());
-
-        unsigned plan_flags = FFTW_MEASURE;
-        const int rank      = 1;
-
-        // --- Forward Plan ---
-        // 1D FFT of size m_nbin
-        // Batch size: m_nfft * m_nsub
-        // Input stride = 1, Input distance = m_nbin
-        // Output stride = 1, Output distance = m_nbin (in-place)
-        const std::array<int, 1> fft_size_fw = {m_nbin};
-
-        const int howmany_fw = (m_nfft * m_nsub);
-        const int idist_fw   = m_nbin;
-        const int odist_fw   = m_nbin;
-        const int istride_fw = 1;
-        const int ostride_fw = 1;
-
-        m_forward_plan =
-            fftwf_plan_many_dft(rank,               // rank
-                                fft_size_fw.data(), // n
-                                howmany_fw,         // howmany
-                                unpack_buffer_ptr,  // in
-                                nullptr,            // inembed
-                                istride_fw,         // istride
-                                idist_fw,           // idist
-                                unpack_buffer_ptr,  // out (in-place)
-                                nullptr,            // onembed
-                                ostride_fw,         // ostride
-                                odist_fw,           // odist
-                                FFTW_FORWARD,       // sign
-                                plan_flags          // flags
-            );
-        if (m_forward_plan == nullptr) {
-            throw std::runtime_error("Failed to create forward FFTW plan");
+    explicit FFTWPlan(fftwf_plan plan) noexcept : m_plan(plan) {}
+    ~FFTWPlan() { destroy_fftw_plan(m_plan); }
+    FFTWPlan(const FFTWPlan&)            = delete;
+    FFTWPlan& operator=(const FFTWPlan&) = delete;
+    FFTWPlan(FFTWPlan&& other) noexcept
+        : m_plan(std::exchange(other.m_plan, nullptr)) {}
+    FFTWPlan& operator=(FFTWPlan&& other) noexcept {
+        if (this != &other) {
+            destroy_fftw_plan(m_plan);
+            m_plan = std::exchange(other.m_plan, nullptr);
         }
-        spdlog::debug("Forward FFTW plan created");
+        return *this;
+    }
 
-        // --- Backward Plan ---
-        // 1D FFT of size m_mbin
-        // Batch size: m_nfft * m_nsub * m_nchan
-        // Input stride = 1, Input distance = m_mbin
-        // Output stride = 1, Output distance = m_mbin (in-place)
-        const std::array<int, 1> fft_size_bw = {m_mbin};
+    [[nodiscard]] fftwf_plan get() const noexcept { return m_plan; }
 
-        const int howmany_bw = (m_nfft * m_nsub * m_nchan);
-        const int idist_bw   = m_mbin;
-        const int odist_bw   = m_mbin;
-        const int istride_bw = 1;
-        const int ostride_bw = 1;
+private:
+    fftwf_plan m_plan{nullptr};
+};
 
-        m_backward_plan =
-            fftwf_plan_many_dft(rank,               // rank
-                                fft_size_bw.data(), // n
-                                howmany_bw,         // howmany
-                                delay_buffer_ptr,   // in
-                                nullptr,            // inembed
-                                istride_bw,         // istride
-                                idist_bw,           // idist
-                                delay_buffer_ptr,   // out (in-place)
-                                nullptr,            // onembed
-                                ostride_bw,         // ostride
-                                odist_bw,           // odist
-                                FFTW_BACKWARD,      // sign
-                                plan_flags          // flags
-            );
-        if (m_backward_plan == nullptr) {
-            // Clean up forward plan if backward fails
-            if (m_forward_plan != nullptr) {
-                fftwf_destroy_plan(m_forward_plan);
-                m_forward_plan = nullptr;
+int to_fftw_int(SizeType value, std::string_view what) {
+    if (value > static_cast<SizeType>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument(
+            std::format("FFTWManager: {} exceeds FFTW int limit", what));
+    }
+    return static_cast<int>(value);
+}
+
+void check_extent(SizeType count, SizeType stride, std::string_view what) {
+    const bool fits =
+        stride == 0 || count <= (std::numeric_limits<SizeType>::max() / stride);
+    if (!fits) {
+        throw std::invalid_argument(
+            std::format("FFTWManager: {} * batch overflows SizeType", what));
+    }
+}
+
+FFTWPlan make_c2c_plan(SizeType length, SizeType howmany, int sign) {
+    const int n         = to_fftw_int(length, "length");
+    const int howmany_i = to_fftw_int(howmany, "howmany");
+    fftwf_plan raw      = nullptr;
+    {
+        const std::scoped_lock lock(fftw_planner_mutex());
+        raw = fftwf_plan_many_dft(1, &n, howmany_i, nullptr, nullptr, 1, n,
+                                  nullptr, nullptr, 1, n, sign, FFTW_ESTIMATE);
+    }
+    if (raw == nullptr) {
+        throw std::runtime_error(std::format(
+            "FFTWManager: failed to create C2C plan (n={}, howmany={})", length,
+            howmany));
+    }
+    return FFTWPlan{raw};
+}
+
+FFTWPlan make_r2c_plan(SizeType length, SizeType n_complex, SizeType howmany) {
+    const int n_real_i    = to_fftw_int(length, "length");
+    const int n_complex_i = to_fftw_int(n_complex, "n_complex");
+    const int howmany_i   = to_fftw_int(howmany, "howmany");
+    fftwf_plan raw        = nullptr;
+    {
+        const std::scoped_lock lock(fftw_planner_mutex());
+        raw = fftwf_plan_many_dft_r2c(1, &n_real_i, howmany_i, nullptr, nullptr,
+                                      1, n_real_i, nullptr, nullptr, 1,
+                                      n_complex_i, FFTW_ESTIMATE);
+    }
+    if (raw == nullptr) {
+        throw std::runtime_error(std::format(
+            "FFTWManager: failed to create R2C plan (n={}, howmany={})", length,
+            howmany));
+    }
+    return FFTWPlan{raw};
+}
+
+FFTWPlan make_c2r_plan(SizeType length, SizeType n_complex, SizeType howmany) {
+    const int n_real_i    = to_fftw_int(length, "length");
+    const int n_complex_i = to_fftw_int(n_complex, "n_complex");
+    const int howmany_i   = to_fftw_int(howmany, "howmany");
+    fftwf_plan raw        = nullptr;
+    {
+        const std::scoped_lock lock(fftw_planner_mutex());
+        raw = fftwf_plan_many_dft_c2r(1, &n_real_i, howmany_i, nullptr, nullptr,
+                                      1, n_complex_i, nullptr, nullptr, 1,
+                                      n_real_i, FFTW_ESTIMATE);
+    }
+    if (raw == nullptr) {
+        throw std::runtime_error(std::format(
+            "FFTWManager: failed to create C2R plan (n={}, howmany={})", length,
+            howmany));
+    }
+    return FFTWPlan{raw};
+}
+
+struct Slice {
+    SizeType offset{};
+    SizeType count{};
+    bool use_extra{};
+};
+
+Slice slice_for(int worker, SizeType base, SizeType n_extra) {
+    const auto w = static_cast<SizeType>(worker);
+    if (w < n_extra) {
+        return Slice{
+            .offset    = w * (base + 1),
+            .count     = base + 1,
+            .use_extra = true,
+        };
+    }
+    return Slice{
+        .offset    = (n_extra * (base + 1)) + ((w - n_extra) * base),
+        .count     = base,
+        .use_extra = false,
+    };
+}
+
+} // namespace
+
+class FFTWManager::Impl {
+public:
+    Impl(FFTKind kind, SizeType length, SizeType howmany, int nthreads)
+        : m_kind(kind),
+          m_length(length),
+          m_howmany(howmany),
+          m_n_complex(is_real(kind) ? (length / 2) + 1 : length) {
+        if (length == 0 || howmany == 0) {
+            throw std::invalid_argument(
+                std::format("FFTWManager: length and howmany must be positive: "
+                            "length={}, howmany={}",
+                            length, howmany));
+        }
+        check_extent(howmany, length, "length");
+        if (is_real(kind)) {
+            check_extent(howmany, m_n_complex, "n_complex");
+        }
+
+        const int threads = std::max(1, nthreads);
+        m_n_workers =
+            static_cast<int>(std::min(static_cast<SizeType>(threads), howmany));
+        m_base    = howmany / static_cast<SizeType>(m_n_workers);
+        m_n_extra = howmany % static_cast<SizeType>(m_n_workers);
+
+        const SizeType extra_howmany = m_base + 1;
+        if (m_n_extra == 0) {
+            m_plan_base = make_plan(m_base);
+        } else {
+            m_plan_extra = make_plan(extra_howmany);
+            m_plan_base  = make_plan(m_base);
+        }
+        spdlog::debug("FFTWManager: kind={} length={} howmany={} workers={} "
+                      "base={} extra_workers={}",
+                      static_cast<int>(kind), length, howmany, m_n_workers,
+                      m_base, m_n_extra);
+    }
+
+    void execute(std::span<ComplexType> data) const {
+        if (m_kind != FFTKind::kC2CForward && m_kind != FFTKind::kC2CBackward) {
+            throw std::logic_error(
+                "FFTWManager: execute(complex) requires a C2C plan");
+        }
+        const SizeType expected = m_howmany * m_length;
+        if (data.size() != expected) {
+            throw std::invalid_argument(
+                std::format("FFTWManager: complex span size {} != {}",
+                            data.size(), expected));
+        }
+        auto* ptr              = reinterpret_cast<fftwf_complex*>(data.data());
+        const int n_workers    = m_n_workers;
+        const SizeType base    = m_base;
+        const SizeType n_extra = m_n_extra;
+        const SizeType length  = m_length;
+        fftwf_plan plan_base   = m_plan_base.get();
+        fftwf_plan plan_extra  = m_plan_extra.get();
+#pragma omp parallel for num_threads(n_workers) schedule(static) default(none) \
+    shared(ptr, n_workers, base, n_extra, length, plan_base, plan_extra)
+        for (int worker = 0; worker < n_workers; ++worker) {
+            const Slice slice  = slice_for(worker, base, n_extra);
+            fftwf_plan plan    = slice.use_extra ? plan_extra : plan_base;
+            fftwf_complex* row = ptr + (slice.offset * length);
+            fftwf_execute_dft(plan, row, row);
+        }
+    }
+
+    void execute(std::span<float> real, std::span<ComplexType> freq) const {
+        if (m_kind != FFTKind::kR2C && m_kind != FFTKind::kC2R) {
+            throw std::logic_error("FFTWManager: execute(real, freq) requires "
+                                   "an R2C or C2R plan");
+        }
+        const SizeType n_real    = m_howmany * m_length;
+        const SizeType n_complex = m_howmany * m_n_complex;
+        if (real.size() != n_real || freq.size() != n_complex) {
+            throw std::invalid_argument(std::format(
+                "FFTWManager: span sizes real={} freq={} != {} and {}",
+                real.size(), freq.size(), n_real, n_complex));
+        }
+        auto* real_ptr         = real.data();
+        auto* freq_ptr         = reinterpret_cast<fftwf_complex*>(freq.data());
+        const int n_workers    = m_n_workers;
+        const SizeType base    = m_base;
+        const SizeType n_extra = m_n_extra;
+        const SizeType length  = m_length;
+        const SizeType n_freq  = m_n_complex;
+        const bool forward     = m_kind == FFTKind::kR2C;
+        fftwf_plan plan_base   = m_plan_base.get();
+        fftwf_plan plan_extra  = m_plan_extra.get();
+#pragma omp parallel for num_threads(n_workers) schedule(static) default(none) \
+    shared(real_ptr, freq_ptr, n_workers, base, n_extra, length, n_freq,       \
+               forward, plan_base, plan_extra)
+        for (int worker = 0; worker < n_workers; ++worker) {
+            const Slice slice       = slice_for(worker, base, n_extra);
+            fftwf_plan plan         = slice.use_extra ? plan_extra : plan_base;
+            float* real_row         = real_ptr + (slice.offset * length);
+            fftwf_complex* freq_row = freq_ptr + (slice.offset * n_freq);
+            if (forward) {
+                fftwf_execute_dft_r2c(plan, real_row, freq_row);
+            } else {
+                fftwf_execute_dft_c2r(plan, freq_row, real_row);
             }
-            throw std::runtime_error("Failed to create FFTW plans");
         }
-        spdlog::debug("Backward FFTW plan created:");
-    }
-
-    void forward_fft(std::span<ComplexType> data1,
-                     std::span<ComplexType> data2) const {
-        if (m_forward_plan == nullptr) {
-            throw std::logic_error("Forward FFT plan not initialized.");
-        }
-        auto* data1_ptr = reinterpret_cast<fftwf_complex*>(data1.data());
-        auto* data2_ptr = reinterpret_cast<fftwf_complex*>(data2.data());
-        fftwf_execute_dft(m_forward_plan, data1_ptr, data1_ptr);
-        fftwf_execute_dft(m_forward_plan, data2_ptr, data2_ptr);
-        bb_utils::swap_spectrum(data1, data2, m_nbin, m_nfft * m_nsub);
-        spdlog::debug("forward_fft: Completed FFT and spectrum swap");
-    }
-
-    void backward_fft(std::span<ComplexType> data1,
-                      std::span<ComplexType> data2) const {
-        if (m_backward_plan == nullptr) {
-            throw std::logic_error("Backward FFT plan not initialized.");
-        }
-        auto* data1_ptr = reinterpret_cast<fftwf_complex*>(data1.data());
-        auto* data2_ptr = reinterpret_cast<fftwf_complex*>(data2.data());
-        bb_utils::swap_spectrum(data1, data2, m_mbin,
-                                m_nfft * m_nsub * m_nchan);
-        fftwf_execute_dft(m_backward_plan, data1_ptr, data1_ptr);
-        fftwf_execute_dft(m_backward_plan, data2_ptr, data2_ptr);
-        spdlog::debug("backward_fft: Completed spectrum swap and FFT");
     }
 
 private:
-    const int m_nfft;
-    const int m_nsub;
-    const int m_nbin;
-    const int m_mbin;
-    const int m_nchan;
-    int m_nthreads;
-
-    fftwf_plan m_forward_plan  = nullptr;
-    fftwf_plan m_backward_plan = nullptr;
-
-    // Configures threading for FFTW
-    void configure_threading() {
-#ifdef DMT_ENABLE_OPENMP
-        if (m_nthreads <= 0) {
-            m_nthreads = omp_get_max_threads();
-            spdlog::debug("configure_threading: Using max threads: {}",
-                          m_nthreads);
-        }
-        if (m_nthreads > 1) {
-            if (fftwf_init_threads() == 0) {
-                spdlog::error(
-                    "configure_threading: Failed to initialize FFTW threads");
-                throw std::runtime_error("Failed to initialize FFTW threads");
-            }
-            fftwf_plan_with_nthreads(m_nthreads);
-            spdlog::debug(
-                "configure_threading: FFTW initialized with {} threads",
-                m_nthreads);
-        }
-#else
-        if (m_nthreads > 1) {
-            spdlog::warn("configure_threading: nthreads={} requested but "
-                         "OpenMP disabled; using single thread",
-                         m_nthreads);
-            m_nthreads = 1;
-        }
-#endif
+    static bool is_real(FFTKind kind) {
+        return kind == FFTKind::kR2C || kind == FFTKind::kC2R;
     }
 
-    // Cleans up FFTW resources
-    void cleanup_resources() noexcept {
-        try {
-            if (m_forward_plan != nullptr) {
-                fftwf_destroy_plan(m_forward_plan);
-                m_forward_plan = nullptr;
-                spdlog::debug("cleanup_resources: Forward plan destroyed");
-            }
-            if (m_backward_plan != nullptr) {
-                fftwf_destroy_plan(m_backward_plan);
-                m_backward_plan = nullptr;
-                spdlog::debug("cleanup_resources: Backward plan destroyed");
-            }
-#ifdef DMT_ENABLE_OPENMP
-            if (m_nthreads > 1) {
-                fftwf_cleanup_threads();
-                spdlog::debug("cleanup_resources: FFTW threads cleaned up");
-            }
-#endif
-            fftwf_cleanup();
-            spdlog::debug("cleanup_resources: FFTW global cleanup completed");
-        } catch (...) {
-            spdlog::error(
-                "cleanup_resources: Unexpected exception during cleanup");
+    [[nodiscard]] FFTWPlan make_plan(SizeType howmany) const {
+        switch (m_kind) {
+        case FFTKind::kC2CForward:
+            return make_c2c_plan(m_length, howmany, FFTW_FORWARD);
+        case FFTKind::kC2CBackward:
+            return make_c2c_plan(m_length, howmany, FFTW_BACKWARD);
+        case FFTKind::kR2C:
+            return make_r2c_plan(m_length, m_n_complex, howmany);
+        case FFTKind::kC2R:
+            return make_c2r_plan(m_length, m_n_complex, howmany);
         }
+        throw std::invalid_argument("FFTWManager: unknown kind");
     }
 
-}; // End FFTManagerCPU::Impl definition
+    FFTKind m_kind;
+    SizeType m_length;
+    SizeType m_howmany;
+    SizeType m_n_complex;
+    int m_n_workers{1};
+    SizeType m_base{0};
+    SizeType m_n_extra{0};
+    FFTWPlan m_plan_base{nullptr};
+    FFTWPlan m_plan_extra{nullptr};
+};
 
-FFTManagerCPU::FFTManagerCPU(
-    int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads)
-    : m_impl(std::make_unique<Impl>(nfft, nsub, nbin, mbin, nchan, nthreads)) {}
-FFTManagerCPU::~FFTManagerCPU()                              = default;
-FFTManagerCPU::FFTManagerCPU(FFTManagerCPU&& other) noexcept = default;
-FFTManagerCPU&
-FFTManagerCPU::operator=(FFTManagerCPU&& other) noexcept = default;
-void FFTManagerCPU::initialize_plans(std::span<ComplexType> unpack_buffer,
-                                     std::span<ComplexType> delay_buffer) {
-    m_impl->initialize_plans(unpack_buffer, delay_buffer);
+FFTWManager::FFTWManager(FFTKind kind,
+                         SizeType length,
+                         SizeType howmany,
+                         int nthreads)
+    : m_impl(std::make_unique<Impl>(kind, length, howmany, nthreads)) {}
+FFTWManager::~FFTWManager()                                       = default;
+FFTWManager::FFTWManager(FFTWManager&& other) noexcept            = default;
+FFTWManager& FFTWManager::operator=(FFTWManager&& other) noexcept = default;
+
+void FFTWManager::execute(std::span<ComplexType> data) const {
+    m_impl->execute(data);
 }
-void FFTManagerCPU::forward_fft(std::span<ComplexType> data1,
-                                std::span<ComplexType> data2) const {
-    m_impl->forward_fft(data1, data2);
-}
-void FFTManagerCPU::backward_fft(std::span<ComplexType> data1,
-                                 std::span<ComplexType> data2) const {
-    m_impl->backward_fft(data1, data2);
+void FFTWManager::execute(std::span<float> real,
+                          std::span<ComplexType> freq) const {
+    m_impl->execute(real, freq);
 }
 
 } // namespace dmt::utils

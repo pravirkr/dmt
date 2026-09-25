@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
+
 from dmtlib import libdmt
 
-class TestFDMT:
 
+class TestFDMT:
     def test_initialise_ones(self) -> None:
         nchans = 500
         nsamples = 1024
@@ -1079,7 +1080,9 @@ class TestFDMT:
         engine.execute(wf_a1)
         res_continuous = engine.execute(wf_a2)
 
-        np.testing.assert_allclose(res_interrupted, res_continuous, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            res_interrupted, res_continuous, rtol=1e-5, atol=1e-5
+        )
 
 
 def _pack_lsb_first(values: np.ndarray, nbits: int) -> np.ndarray:
@@ -1105,8 +1108,14 @@ class TestFDMTPerformanceParams:
 
     def _make(self, mode: str = "valid", **perf: object) -> libdmt.FDMTCPU:
         return libdmt.FDMTCPU(
-            1000.0, 1500.0, self.nchans, self.nsamps, 0.001, self.dt_max,
-            mode=mode, **perf,
+            1000.0,
+            1500.0,
+            self.nchans,
+            self.nsamps,
+            0.001,
+            self.dt_max,
+            mode=mode,
+            **perf,
         )
 
     def _make_ref(self, mode: str = "valid") -> libdmt.FDMTCPU:
@@ -1129,8 +1138,14 @@ class TestFDMTPerformanceParams:
 
     def test_dm_grid_constructor_accepts_perf_params(self) -> None:
         fdmt = libdmt.FDMTCPU(
-            1000.0, 1500.0, self.nchans, self.nsamps, 0.001,
-            dt_grid=[0, 2, 5, 9], fuse_levels=2, int_tree=False,
+            1000.0,
+            1500.0,
+            self.nchans,
+            self.nsamps,
+            0.001,
+            dt_grid=[0, 2, 5, 9],
+            fuse_levels=2,
+            int_tree=False,
         )
         assert fdmt.fuse_levels == 2
         assert not fdmt.int_tree

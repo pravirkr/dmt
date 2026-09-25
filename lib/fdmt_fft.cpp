@@ -6,42 +6,21 @@
 #include <complex>
 #include <format>
 #include <memory>
-#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
-#ifdef DMT_ENABLE_OPENMP
-#include <omp.h>
-#endif
-#include <fftw3.h>
-
 #include <spdlog/spdlog.h>
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/omp_helper.hpp"
+#include "dmt/modes.hpp"
+#include "dmt/utils/fft.hpp"
 
 namespace dmt::algorithms {
 
 namespace {
-
-enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
-
-FDMTMode parse_mode(std::string_view mode) {
-    if (mode == "full") {
-        return FDMTMode::kFull;
-    }
-    if (mode == "roll") {
-        return FDMTMode::kRoll;
-    }
-    if (mode == "valid") {
-        return FDMTMode::kValid;
-    }
-    throw std::invalid_argument(std::format(
-        "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
-}
 
 void advance_overlap_window(const float* __restrict__ new_data,
                             float* __restrict__ hist,
@@ -58,13 +37,6 @@ void advance_overlap_window(const float* __restrict__ new_data,
     }
 }
 
-void ensure_fftw_threads() {
-#if defined(DMT_ENABLE_OPENMP)
-    static std::once_flag flag;
-    std::call_once(flag, [] { fftwf_init_threads(); });
-#endif
-}
-
 } // namespace
 
 class FDMTFFTCPU::Impl {
@@ -79,15 +51,15 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int nthreads,
          SizeType nbeams)
         : m_nchans(nchans),
           m_nsamps(nsamps),
           m_nbeams(nbeams),
-          m_nthreads(nthreads),
+          m_nthreads(std::max(1, nthreads)),
           m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(f_min,
                                                    f_max,
                                                    nchans,
@@ -109,15 +81,15 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int nthreads,
          SizeType nbeams)
         : m_nchans(nchans),
           m_nsamps(nsamps),
           m_nbeams(nbeams),
-          m_nthreads(nthreads),
+          m_nthreads(std::max(1, nthreads)),
           m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
               f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {
         initialize();
@@ -131,31 +103,21 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int nthreads,
          SizeType nbeams)
         : m_nchans(nchans),
           m_nsamps(nsamps),
           m_nbeams(nbeams),
-          m_nthreads(nthreads),
+          m_nthreads(std::max(1, nthreads)),
           m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
               f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {
         initialize();
     }
 
-    ~Impl() {
-        if (m_plan_forward != nullptr) {
-            fftwf_destroy_plan(m_plan_forward);
-            m_plan_forward = nullptr;
-        }
-        if (m_plan_backward != nullptr) {
-            fftwf_destroy_plan(m_plan_backward);
-            m_plan_backward = nullptr;
-        }
-    }
-
+    ~Impl()                      = default;
     Impl(const Impl&)            = delete;
     Impl& operator=(const Impl&) = delete;
     Impl(Impl&&)                 = delete;
@@ -211,9 +173,7 @@ public:
         // beam 0 only.
         for (SizeType b = 0; b < m_nbeams; ++b) {
             fill_window(waterfall.data() + (b * m_nchans * m_nsamps), b);
-            fftwf_execute_dft_r2c(
-                m_plan_forward, m_time_window.data(),
-                reinterpret_cast<fftwf_complex*>(m_spectra.data()));
+            m_fft_forward->execute(m_time_window, m_spectra);
             init_level0(m_state_in + (b * m_fft_buf_size));
         }
         m_is_initialized = true;
@@ -340,9 +300,7 @@ public:
                                                 m_use_box_smearing);
     }
 
-    void reset_history() noexcept {
-        std::fill(m_overlap.begin(), m_overlap.end(), 0.0F);
-    }
+    void reset_history() noexcept { std::ranges::fill(m_overlap, 0.0F); }
 
 private:
     SizeType m_nchans;
@@ -374,8 +332,8 @@ private:
     std::vector<float> m_overlap;
     mutable std::vector<ComplexType> m_ifft_in;
 
-    fftwf_plan m_plan_forward{nullptr};
-    fftwf_plan m_plan_backward{nullptr};
+    std::unique_ptr<utils::FFTWManager> m_fft_forward;
+    std::unique_ptr<utils::FFTWManager> m_fft_backward;
 
     const float* m_waterfall_ptr{nullptr};
     float* m_dmt_target_ptr{nullptr};
@@ -386,9 +344,6 @@ private:
     mutable bool m_view_valid{false};
 
     void initialize() {
-        set_dmt_openmp_threads(m_nthreads);
-        ensure_fftw_threads();
-
         m_ndms         = m_plan->get_dmt_ndms();
         m_n_fft        = m_plan->get_fft_size();
         m_n_bins       = m_plan->get_fft_n_bins();
@@ -424,33 +379,15 @@ private:
             m_overlap.assign(m_nbeams * m_nchans * m_overlap_len, 0.0F);
         }
 
-        int n_time     = static_cast<int>(m_n_fft);
-        m_plan_forward = fftwf_plan_many_dft_r2c(
-            1, &n_time, static_cast<int>(m_nchans), m_time_window.data(),
-            nullptr, 1, static_cast<int>(m_n_fft),
-            reinterpret_cast<fftwf_complex*>(m_spectra.data()), nullptr, 1,
-            static_cast<int>(m_n_bins), FFTW_ESTIMATE);
-        if (m_plan_forward == nullptr) {
-            throw std::runtime_error(
-                "FDMTFFTCPU: Failed to create forward FFTW plan");
-        }
-
-        m_plan_backward = fftwf_plan_many_dft_c2r(
-            1, &n_time, static_cast<int>(m_max_coords),
-            reinterpret_cast<fftwf_complex*>(m_ifft_in.data()), nullptr, 1,
-            static_cast<int>(m_n_bins), m_time_out.data(), nullptr, 1,
-            static_cast<int>(m_n_fft), FFTW_ESTIMATE);
-        if (m_plan_backward == nullptr) {
-            throw std::runtime_error(
-                "FDMTFFTCPU: Failed to create backward FFTW plan");
-        }
+        m_fft_forward = std::make_unique<utils::FFTWManager>(
+            utils::FFTKind::kR2C, m_n_fft, m_nchans, m_nthreads);
+        m_fft_backward = std::make_unique<utils::FFTWManager>(
+            utils::FFTKind::kC2R, m_n_fft, m_max_coords, m_nthreads);
     }
 
     void process_beam(const float* wf, float* dmt_ptr, SizeType beam) {
         fill_window(wf, beam);
-        fftwf_execute_dft_r2c(
-            m_plan_forward, m_time_window.data(),
-            reinterpret_cast<fftwf_complex*>(m_spectra.data()));
+        m_fft_forward->execute(m_time_window, m_spectra);
         ComplexType* state_in  = m_state_a.data();
         ComplexType* state_out = m_state_b.data();
         init_level0(state_in);
@@ -466,7 +403,7 @@ private:
     }
 
     void fill_window(const float* wf, SizeType beam) {
-        std::fill(m_time_window.begin(), m_time_window.end(), 0.0F);
+        std::ranges::fill(m_time_window, 0.0F);
         if (m_mode == FDMTMode::kRoll) {
             std::copy_n(wf, m_nchans * m_nsamps, m_time_window.data());
             return;
@@ -503,9 +440,8 @@ private:
 
     void init_level0(ComplexType* state_0) const {
         const auto& grid0 = m_plan->get_container().grids[0];
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for default(none) shared(grid0, state_0)
-#endif
+#pragma omp parallel for default(none) num_threads(m_nthreads)                 \
+    shared(grid0, state_0)
         for (SizeType i_sub = 0; i_sub < m_nchans; ++i_sub) {
             const auto& g           = grid0[i_sub];
             const auto coord_base   = g.coord_offset;
@@ -540,14 +476,10 @@ private:
         for (SizeType b = 0; b < nbeams; ++b) {
             const ComplexType* in_b = state_in + (b * m_fft_buf_size);
             ComplexType* out_b      = state_out + (b * m_fft_buf_size);
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel default(none)                                             \
+#pragma omp parallel default(none) num_threads(m_nthreads)                     \
     shared(in_b, out_b, coords_sum, coords_copy, n_sum, n_copy)
-#endif
             {
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for nowait
-#endif
                 for (SizeType i = 0; i < n_sum; ++i) {
                     const auto& coord   = coords_sum[i];
                     const auto tail_idx = coord_index_from_offset(
@@ -566,9 +498,7 @@ private:
                         out[k] = tail[k] + (head[k] * p[k]);
                     }
                 }
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for
-#endif
                 for (SizeType i = 0; i < n_copy; ++i) {
                     const auto& coord   = coords_copy[i];
                     const auto tail_idx = coord_index_from_offset(
@@ -595,14 +525,11 @@ private:
     // input-aligned region t < nsamps does match. See docs/fdmt-fft.md.
     void inverse_and_store(const ComplexType* state_root, float* dmt_ptr) {
         std::copy_n(state_root, m_fft_buf_size, m_ifft_in.data());
-        fftwf_execute_dft_c2r(
-            m_plan_backward, reinterpret_cast<fftwf_complex*>(m_ifft_in.data()),
-            m_time_out.data());
+        m_fft_backward->execute(m_time_out, m_ifft_in);
 
         const float norm = 1.0F / static_cast<float>(m_n_fft);
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for default(none) shared(dmt_ptr, norm)
-#endif
+#pragma omp parallel for default(none) num_threads(m_nthreads)                 \
+    shared(dmt_ptr, norm)
         for (SizeType dm = 0; dm < m_ndms; ++dm) {
             const float* src = m_time_out.data() + (dm * m_n_fft) + m_out_skip;
             float* dst       = dmt_ptr + (dm * m_nsamps_out);
@@ -628,9 +555,7 @@ private:
             return;
         }
         std::copy_n(m_state_in, m_fft_buf_size, m_ifft_in.data());
-        fftwf_execute_dft_c2r(
-            m_plan_backward, reinterpret_cast<fftwf_complex*>(m_ifft_in.data()),
-            m_time_out.data());
+        m_fft_backward->execute(m_time_out, m_ifft_in);
 
         const auto& shape =
             m_plan->get_container().state_shape[m_current_level];
@@ -668,7 +593,7 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                        SizeType dt_step,
                        bool use_box_smearing,
                        std::string_view mode,
-                       bool verbose,
+                       int verbose,
                        int nthreads,
                        SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -693,7 +618,7 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                        const std::vector<IndexType>& dt_grid,
                        bool use_box_smearing,
                        std::string_view mode,
-                       bool verbose,
+                       int verbose,
                        int nthreads,
                        SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -716,7 +641,7 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                        const std::vector<float>& dm_grid,
                        bool use_box_smearing,
                        std::string_view mode,
-                       bool verbose,
+                       int verbose,
                        int nthreads,
                        SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -804,7 +729,7 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  SizeType dt_step,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
+                 int verbose,
                  int nthreads,
                  SizeType nbeams) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
@@ -824,7 +749,7 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
+                 int verbose,
                  int nthreads,
                  SizeType nbeams) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
@@ -844,7 +769,7 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
+                 int verbose,
                  int nthreads,
                  SizeType nbeams) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,

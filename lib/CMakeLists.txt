@@ -1,7 +1,7 @@
 # System dependencies
 message(STATUS "Searching for required system dependencies...")
 find_package(OpenMP REQUIRED COMPONENTS CXX)
-find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
+find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
 # fmt — keep version in sync with spdlog's expected fmt release.
 CPMAddPackage(
@@ -74,16 +74,14 @@ target_link_libraries(
 
 # FFTW: shared dmt links privately; static dmt exposes FFTW to downstream linkers.
 if(BUILD_SHARED_LIBS)
-  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE FFTW::Float FFTW::FloatOpenMP)
+  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE FFTW::Float)
 else()
-  target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
+  target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC FFTW::Float)
 endif()
 
-# OpenMP for libdmt and internal headers
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX)
-  target_compile_definitions(${DMT_LIBRARY_NAME} PUBLIC DMT_ENABLE_OPENMP)
-endif()
+# OpenMP stays private: public headers do not include <omp.h> or pragmas.
+# A static lib still propagates the runtime onto the final link line.
+target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
 
 # Add CUDA options and libraries when available
 if(CMAKE_CUDA_COMPILER)

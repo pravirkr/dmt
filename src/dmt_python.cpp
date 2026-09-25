@@ -24,4 +24,3 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     dmt::bind_cfdmt(mod);
     dmt::bind_ddmt(mod);
 }
-

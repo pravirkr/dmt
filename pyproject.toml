@@ -93,11 +93,13 @@ indent-style = "space"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["COM812", "D1", "D301", "PLR2004", "G004"]
+ignore = ["COM812", "CPY001", "D1", "D301", "PLR2004", "G004"]
 
 [tool.ruff.lint.per-file-ignores]
+"src/dmtlib/simulate.py" = ["ANN401"]
 "tests/**/*.py" = ["S101", "FBT", "PLR2004", "PT011", "SLF001"]
 "docs/**" = ["INP001", "ARG001", "ANN401", "CPY001", "T201", "S607"]
+"bench/**" = ["INP001", "ARG001", "ANN401", "CPY001", "T201", "S607"]
 
 [tool.ruff.lint.pylint]
 max-args = 15

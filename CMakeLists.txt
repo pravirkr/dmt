@@ -57,8 +57,18 @@ set(DMT_CUDA
     CACHE STRING
           "CUDA build mode: AUTO (use GPU if toolchain found), ON (require GPU), OFF (CPU only)"
 )
-set_property(CACHE DMT_CUDA PROPERTY STRINGS "AUTO" "ON" "OFF")
-if(NOT DMT_CUDA MATCHES "^(AUTO|ON|OFF)$")
+set_property(
+  CACHE DMT_CUDA
+  PROPERTY STRINGS
+           "AUTO"
+           "ON"
+           "OFF"
+)
+if(NOT
+   DMT_CUDA
+   MATCHES
+   "^(AUTO|ON|OFF)$"
+)
   message(FATAL_ERROR "DMT_CUDA must be AUTO, ON, or OFF. Got: '${DMT_CUDA}'.")
 endif()
 
@@ -82,7 +92,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       CACHE STRING "Choose the type of build: Debug, Release, MinSizeRel, RelWithDebInfo." FORCE
   )
   set_property(
-    CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo"
+    CACHE CMAKE_BUILD_TYPE
+    PROPERTY STRINGS
+             "Debug"
+             "Release"
+             "MinSizeRel"
+             "RelWithDebInfo"
   )
 endif()
 
@@ -110,9 +125,11 @@ add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${DMT_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
-  INTERFACE $<$<CONFIG:Debug>:-O0;-g> $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
+  INTERFACE $<$<CONFIG:Debug>:-O0;-g>
+            $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
             $<$<AND:$<CONFIG:Release>,$<BOOL:${DMT_ENABLE_NATIVE_ARCH}>>:-march=native>
-            $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g> $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+            $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>
+            $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
 
 # OpenMP detection
@@ -167,7 +184,12 @@ if(CMAKE_CUDA_COMPILER AND DMT_CUDA STREQUAL "ON")
     RESULT_VARIABLE _dmt_gpu_status
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
   )
-  if(NOT _dmt_gpu_status EQUAL 0 OR _dmt_gpu_names STREQUAL "")
+  if(NOT
+     _dmt_gpu_status
+     EQUAL
+     0
+     OR _dmt_gpu_names STREQUAL ""
+  )
     message(
       FATAL_ERROR "DMT_CUDA=ON but nvidia-smi reports no usable GPU. Check driver installation."
     )
@@ -234,7 +256,11 @@ function(dmt_enable_coverage target)
   if(NOT DMT_ENABLE_COVERAGE)
     return()
   endif()
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  if(NOT
+     CMAKE_CXX_COMPILER_ID
+     MATCHES
+     "GNU|Clang"
+  )
     message(
       FATAL_ERROR
         "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."

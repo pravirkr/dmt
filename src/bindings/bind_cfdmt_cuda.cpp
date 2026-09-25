@@ -13,7 +13,7 @@
 #include <pybind11/stl.h>
 
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 
 #include "dmt/dmt.hpp"
 #include "pybind_utils.hpp"
@@ -25,9 +25,8 @@ namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
 void bind_cfdmt_cuda(py::module_& mod) {
-    py::class_<CohFDMTCUDA>(
-        mod, "CohFDMTCUDA",
-        R"doc(
+    py::class_<CohFDMTCUDA>(mod, "CohFDMTCUDA",
+                            R"doc(
         Hybrid coherent FDMT on CUDA.
 
         Same constructor arguments as :class:`~dmtlib.libdmt.CohFDMTCPU`, with
@@ -37,8 +36,7 @@ void bind_cfdmt_cuda(py::module_& mod) {
                       float, float, SizeType, std::string_view, bool, int>(),
              "f_center"_a, "sub_bw"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "tp"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap"_a = 8192,
-             "data_order"_a = "PRITF", "verbose"_a = false,
-             "device_id"_a = 0)
+             "data_order"_a = "PRITF", "verbose"_a = 0, "device_id"_a = 0)
         .def_property_readonly("plan", &CohFDMTCUDA::get_plan)
         .def("execute",
              [](CohFDMTCUDA& coh_fdmt,

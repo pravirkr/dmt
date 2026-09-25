@@ -52,7 +52,9 @@ public:
         m_peak = std::max(m_peak, m_current);
     }
 
-    void record_free(std::size_t n) noexcept { m_current -= std::min(n, m_current); }
+    void record_free(std::size_t n) noexcept {
+        m_current -= std::min(n, m_current);
+    }
 
     /// True high-water mark of outstanding bytes since the last Start(), in
     /// MiB. Iteration-count-invariant: every benchmark iteration's objects
@@ -90,12 +92,13 @@ extern PeakMemoryManager g_mem_manager; // NOLINT
 inline double get_process_peak_rss_mb() {
     struct rusage usage {};
     getrusage(RUSAGE_SELF, &usage);
-#if defined(__APPLE__)
+#ifdef __APPLE__
     constexpr double kBytesPerUnit = 1.0; // Darwin reports ru_maxrss in bytes
 #else
     constexpr double kBytesPerUnit = 1024.0; // Linux reports ru_maxrss in KiB
 #endif
-    return (static_cast<double>(usage.ru_maxrss) * kBytesPerUnit) / (1024.0 * 1024.0);
+    return (static_cast<double>(usage.ru_maxrss) * kBytesPerUnit) /
+           (1024.0 * 1024.0);
 }
 
 /// Reports the standard set of memory counters for a benchmark case: process
@@ -106,7 +109,8 @@ inline void report_memory_counters(benchmark::State& state) {
     state.counters["PeakHeap_MB"]       = g_mem_manager.peak_mb();
     state.counters["TotalAlloc_MB_per_iter"] =
         static_cast<double>(g_mem_manager.total_bytes()) /
-        (1024.0 * 1024.0 * static_cast<double>(std::max<int64_t>(1, state.iterations())));
+        (1024.0 * 1024.0 *
+         static_cast<double>(std::max<int64_t>(1, state.iterations())));
 }
 
 } // namespace dmt::bench

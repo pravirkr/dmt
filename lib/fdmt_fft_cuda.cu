@@ -1,7 +1,5 @@
 #include "dmt/algorithms/fdmt_fft.hpp"
 
-#ifdef DMT_ENABLE_CUDA
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -15,7 +13,6 @@
 #include <cuda/std/complex>
 #include <cuda/std/span>
 #include <cuda_runtime.h>
-#include <cufft.h>
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
@@ -24,29 +21,13 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
+#include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
+#include "dmt/utils/fft.hpp"
 
 namespace dmt::algorithms {
 
 namespace {
-
-using Cplx = cuda::std::complex<float>;
-
-enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
-
-FDMTMode parse_mode(std::string_view mode) {
-    if (mode == "full") {
-        return FDMTMode::kFull;
-    }
-    if (mode == "roll") {
-        return FDMTMode::kRoll;
-    }
-    if (mode == "valid") {
-        return FDMTMode::kValid;
-    }
-    throw std::invalid_argument(std::format(
-        "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
-}
 
 __global__ void kernel_fill_window(const float* __restrict__ wf,
                                    const float* __restrict__ overlap,
@@ -117,9 +98,9 @@ __global__ void kernel_update_overlap(const float* __restrict__ wf,
 }
 
 __global__ void
-kernel_init_fdmt_fft(const Cplx* __restrict__ spectra,
-                     const Cplx* __restrict__ win_table,
-                     Cplx* __restrict__ state,
+kernel_init_fdmt_fft(const ComplexTypeCUDA* __restrict__ spectra,
+                     const ComplexTypeCUDA* __restrict__ win_table,
+                     ComplexTypeCUDA* __restrict__ state,
                      const int* __restrict__ grids0_coord_offset_ptr,
                      const int* __restrict__ grids0_ndt_ptr,
                      const int* __restrict__ grids0_dt_grid_ptr,
@@ -138,25 +119,26 @@ kernel_init_fdmt_fft(const Cplx* __restrict__ spectra,
     const auto ndt         = grids0_ndt_ptr[i_sub];
     const auto* dt_grid    = &grids0_dt_grid_ptr[coord_base];
     const auto spec_offset = (i_beam * nsubs * n_bins) + (i_sub * n_bins) + k;
-    const Cplx sample      = spectra[spec_offset];
-    const auto beam_state_base = i_beam * max_coords * n_bins;
+    const ComplexTypeCUDA sample = spectra[spec_offset];
+    const auto beam_state_base   = i_beam * max_coords * n_bins;
     for (int i_dt = 0; i_dt < ndt; ++i_dt) {
-        const int s          = abs(dt_grid[i_dt]);
-        const Cplx win       = win_table[(s * n_bins) + k];
-        const auto coord_idx = coord_base + i_dt;
+        const int s               = abs(dt_grid[i_dt]);
+        const ComplexTypeCUDA win = win_table[(s * n_bins) + k];
+        const auto coord_idx      = coord_base + i_dt;
         state[beam_state_base + (coord_idx * n_bins) + k] = sample * win;
     }
 }
 
-__global__ void kernel_execute_iter_fft(const Cplx* __restrict__ state_in,
-                                        Cplx* __restrict__ state_out,
-                                        const plans::FDMTCoordDPtrs coords_sum,
-                                        const plans::FDMTCoordDPtrs coords_copy,
-                                        const Cplx* __restrict__ phasors,
-                                        int n_bins,
-                                        int ncoords_sum_cur,
-                                        int ncoords_copy_cur,
-                                        int max_coords) {
+__global__ void
+kernel_execute_iter_fft(const ComplexTypeCUDA* __restrict__ state_in,
+                        ComplexTypeCUDA* __restrict__ state_out,
+                        const plans::FDMTCoordDPtrs coords_sum,
+                        const plans::FDMTCoordDPtrs coords_copy,
+                        const ComplexTypeCUDA* __restrict__ phasors,
+                        int n_bins,
+                        int ncoords_sum_cur,
+                        int ncoords_copy_cur,
+                        int max_coords) {
     const auto linear =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
@@ -186,10 +168,10 @@ __global__ void kernel_execute_iter_fft(const Cplx* __restrict__ state_in,
             (i_beam * max_coords * n_bins) + (head_idx * n_bins);
         const auto out_base =
             (i_beam * max_coords * n_bins) + (out_idx * n_bins);
-        const Cplx tail         = state_in[tail_base + k];
-        const Cplx head         = state_in[head_base + k];
-        const Cplx p            = phasors[(s * n_bins) + k];
-        state_out[out_base + k] = tail + (head * p);
+        const ComplexTypeCUDA tail = state_in[tail_base + k];
+        const ComplexTypeCUDA head = state_in[head_base + k];
+        const ComplexTypeCUDA p    = phasors[(s * n_bins) + k];
+        state_out[out_base + k]    = tail + (head * p);
     }
     if (i_coord < ncoords_copy_cur) {
         const auto tail_idx = coords_copy.tail_buf_offset[i_coord] /
@@ -257,7 +239,7 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int device_id,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -265,7 +247,7 @@ public:
           m_nbeams(nbeams),
           m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(f_min,
                                                    f_max,
                                                    nchans,
@@ -287,7 +269,7 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int device_id,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -295,7 +277,7 @@ public:
           m_nbeams(nbeams),
           m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
               f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {
         initialize();
@@ -309,7 +291,7 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int device_id,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -317,22 +299,10 @@ public:
           m_nbeams(nbeams),
           m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
               f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {
         initialize();
-    }
-
-    ~Impl() {
-        cuda_utils::set_device(m_device_id);
-        if (m_plan_forward != 0) {
-            cufftDestroy(m_plan_forward);
-            m_plan_forward = 0;
-        }
-        if (m_plan_backward != 0) {
-            cufftDestroy(m_plan_backward);
-            m_plan_backward = 0;
-        }
     }
 
     [[nodiscard]] const plans::FDMTPlan& get_plan() const noexcept {
@@ -432,9 +402,9 @@ public:
         m_host_dmt_size   = 0;
         m_stream          = stream;
         m_current_level   = 0;
-        m_state_in        = reinterpret_cast<Cplx*>(
+        m_state_in        = reinterpret_cast<ComplexTypeCUDA*>(
             thrust::raw_pointer_cast(m_state_a_d.data()));
-        m_state_out = reinterpret_cast<Cplx*>(
+        m_state_out = reinterpret_cast<ComplexTypeCUDA*>(
             thrust::raw_pointer_cast(m_state_b_d.data()));
         m_view_valid = false;
         fill_and_init(d_waterfall.data(), stream);
@@ -618,15 +588,15 @@ private:
     thrust::device_vector<float> m_waterfall_d;
     thrust::device_vector<float> m_dmt_host_d;
 
-    cufftHandle m_plan_forward{0};
-    cufftHandle m_plan_backward{0};
+    std::unique_ptr<utils::CUFFTManager> m_fft_forward;
+    std::unique_ptr<utils::CUFFTManager> m_fft_backward;
 
     const float* m_d_waterfall_ptr{nullptr};
     float* m_dmt_target_ptr{nullptr};
     float* m_host_dmt_ptr{nullptr};
     SizeType m_host_dmt_size{0};
-    Cplx* m_state_in{nullptr};
-    Cplx* m_state_out{nullptr};
+    ComplexTypeCUDA* m_state_in{nullptr};
+    ComplexTypeCUDA* m_state_out{nullptr};
     cudaStream_t m_stream{nullptr};
     SizeType m_current_level{0};
     bool m_is_initialized{false};
@@ -692,24 +662,11 @@ private:
             m_overlap_scratch_d.resize(ov_n, 0.0F);
         }
 
-        int n_time      = static_cast<int>(m_n_fft);
-        int howmany_fwd = static_cast<int>(m_nbeams * m_nchans);
-        int inembed_fwd = n_time;
-        int onembed_fwd = static_cast<int>(m_n_bins);
-        cuda_utils::check_cuda_call(cufftPlanMany(&m_plan_forward, 1, &n_time,
-                                                  &inembed_fwd, 1, inembed_fwd,
-                                                  &onembed_fwd, 1, onembed_fwd,
-                                                  CUFFT_R2C, howmany_fwd),
-                                    "FDMTFFTCUDA: cufftPlanMany forward");
-
-        int howmany_bwd = static_cast<int>(m_nbeams * m_max_coords);
-        int inembed_bwd = static_cast<int>(m_n_bins);
-        int onembed_bwd = n_time;
-        cuda_utils::check_cuda_call(cufftPlanMany(&m_plan_backward, 1, &n_time,
-                                                  &inembed_bwd, 1, inembed_bwd,
-                                                  &onembed_bwd, 1, onembed_bwd,
-                                                  CUFFT_C2R, howmany_bwd),
-                                    "FDMTFFTCUDA: cufftPlanMany backward");
+        m_fft_forward = std::make_unique<utils::CUFFTManager>(
+            utils::FFTKind::kR2C, m_n_fft, m_nbeams * m_nchans, m_device_id);
+        m_fft_backward = std::make_unique<utils::CUFFTManager>(
+            utils::FFTKind::kC2R, m_n_fft, m_nbeams * m_max_coords,
+            m_device_id);
     }
 
     void run_transform(cuda::std::span<const float> d_waterfall,
@@ -730,9 +687,9 @@ private:
                 d_dmt.size(), total_out));
         }
         fill_and_init(d_waterfall.data(), stream);
-        Cplx* state_in = reinterpret_cast<Cplx*>(
+        ComplexTypeCUDA* state_in = reinterpret_cast<ComplexTypeCUDA*>(
             thrust::raw_pointer_cast(m_state_a_d.data()));
-        Cplx* state_out = reinterpret_cast<Cplx*>(
+        ComplexTypeCUDA* state_out = reinterpret_cast<ComplexTypeCUDA*>(
             thrust::raw_pointer_cast(m_state_b_d.data()));
         const auto niters = m_plan->get_niters();
         for (SizeType i_iter = 1; i_iter <= niters; ++i_iter) {
@@ -747,8 +704,6 @@ private:
     }
 
     void fill_and_init(const float* d_wf, cudaStream_t stream) {
-        cuda_utils::check_cuda_call(cufftSetStream(m_plan_forward, stream),
-                                    "FDMTFFTCUDA: cufftSetStream forward");
         const dim3 block(256);
         const dim3 grid_fill((m_n_fft + 255) / 256,
                              static_cast<unsigned>(m_nchans),
@@ -763,12 +718,13 @@ private:
             static_cast<int>(m_nchans), static_cast<int>(m_nsamps),
             static_cast<int>(m_n_fft), static_cast<int>(m_overlap_len), mode_i,
             static_cast<int>(m_nbeams));
-        cuda_utils::check_cuda_call(
-            cufftExecR2C(m_plan_forward,
-                         thrust::raw_pointer_cast(m_window_d.data()),
-                         reinterpret_cast<cufftComplex*>(
-                             thrust::raw_pointer_cast(m_spectra_d.data()))),
-            "FDMTFFTCUDA: cufftExecR2C");
+        m_fft_forward->execute(
+            cuda::std::span<float>(thrust::raw_pointer_cast(m_window_d.data()),
+                                   m_window_d.size()),
+            cuda::std::span<ComplexTypeCUDA>(
+                thrust::raw_pointer_cast(m_spectra_d.data()),
+                m_spectra_d.size()),
+            stream);
 
         const auto block_x = 256u;
         const dim3 init_grid((m_n_bins + block_x - 1) / block_x,
@@ -777,15 +733,15 @@ private:
         cuda_utils::check_kernel_launch_params(init_grid, dim3(block_x));
         const auto* win_ptr =
             m_use_box_smearing
-                ? reinterpret_cast<const Cplx*>(
+                ? reinterpret_cast<const ComplexTypeCUDA*>(
                       thrust::raw_pointer_cast(m_boxcar_window_d.data()))
-                : reinterpret_cast<const Cplx*>(
+                : reinterpret_cast<const ComplexTypeCUDA*>(
                       thrust::raw_pointer_cast(m_phasors_d.data()));
         kernel_init_fdmt_fft<<<init_grid, block_x, 0, stream>>>(
-            reinterpret_cast<const Cplx*>(
+            reinterpret_cast<const ComplexTypeCUDA*>(
                 thrust::raw_pointer_cast(m_spectra_d.data())),
             win_ptr,
-            reinterpret_cast<Cplx*>(
+            reinterpret_cast<ComplexTypeCUDA*>(
                 thrust::raw_pointer_cast(m_state_a_d.data())),
             thrust::raw_pointer_cast(m_plan_d.grids0.coord_offset.data()),
             thrust::raw_pointer_cast(m_plan_d.grids0.ndt.data()),
@@ -794,8 +750,8 @@ private:
             static_cast<int>(m_max_coords));
     }
 
-    void merge_iter_device(Cplx* state_in,
-                           Cplx* state_out,
+    void merge_iter_device(ComplexTypeCUDA* state_in,
+                           ComplexTypeCUDA* state_out,
                            SizeType i_iter,
                            cudaStream_t stream) {
         const auto& shape = m_plan->get_container().state_shape[i_iter];
@@ -816,7 +772,7 @@ private:
         cuda_utils::check_kernel_launch_params(grid, block);
         kernel_execute_iter_fft<<<grid, block, 0, stream>>>(
             state_in, state_out, coords_sum, coords_copy,
-            reinterpret_cast<const Cplx*>(
+            reinterpret_cast<const ComplexTypeCUDA*>(
                 thrust::raw_pointer_cast(m_phasors_d.data())),
             static_cast<int>(m_n_bins), n_sum, n_copy,
             static_cast<int>(m_max_coords));
@@ -824,23 +780,22 @@ private:
 
     // Full-mode tail t >= nsamps is the Fourier linear-convolution
     // continuation and is not required to match FDMTCPU (see docs/fdmt-fft.md).
-    void inverse_and_store(const Cplx* state_root,
+    void inverse_and_store(const ComplexTypeCUDA* state_root,
                            float* d_dmt,
                            cudaStream_t stream) {
-        cuda_utils::check_cuda_call(cufftSetStream(m_plan_backward, stream),
-                                    "FDMTFFTCUDA: cufftSetStream backward");
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_ifft_d.data()),
                             state_root,
-                            m_nbeams * m_fft_buf_size * sizeof(Cplx),
+                            m_nbeams * m_fft_buf_size * sizeof(ComplexTypeCUDA),
                             cudaMemcpyDeviceToDevice, stream),
             "FDMTFFTCUDA: snapshot for C2R");
-        cuda_utils::check_cuda_call(
-            cufftExecC2R(m_plan_backward,
-                         reinterpret_cast<cufftComplex*>(
-                             thrust::raw_pointer_cast(m_ifft_d.data())),
-                         thrust::raw_pointer_cast(m_time_out_d.data())),
-            "FDMTFFTCUDA: cufftExecC2R");
+        m_fft_backward->execute(
+            cuda::std::span<float>(
+                thrust::raw_pointer_cast(m_time_out_d.data()),
+                m_time_out_d.size()),
+            cuda::std::span<ComplexTypeCUDA>(
+                thrust::raw_pointer_cast(m_ifft_d.data()), m_ifft_d.size()),
+            stream);
         const float norm = 1.0F / static_cast<float>(m_n_fft);
         const dim3 block(256);
         const dim3 grid((m_nsamps_out + 255) / 256,
@@ -888,14 +843,15 @@ private:
         // IFFT beam 0 of the live state into time_out, then trim.
         cuda_utils::check_cuda_call(
             cudaMemcpy(thrust::raw_pointer_cast(m_ifft_d.data()), m_state_in,
-                       m_fft_buf_size * sizeof(Cplx), cudaMemcpyDeviceToDevice),
+                       m_fft_buf_size * sizeof(ComplexTypeCUDA),
+                       cudaMemcpyDeviceToDevice),
             "FDMTFFTCUDA: view snapshot");
-        cuda_utils::check_cuda_call(
-            cufftExecC2R(m_plan_backward,
-                         reinterpret_cast<cufftComplex*>(
-                             thrust::raw_pointer_cast(m_ifft_d.data())),
-                         thrust::raw_pointer_cast(m_time_out_d.data())),
-            "FDMTFFTCUDA: view C2R");
+        m_fft_backward->execute(
+            cuda::std::span<float>(
+                thrust::raw_pointer_cast(m_time_out_d.data()),
+                m_time_out_d.size()),
+            cuda::std::span<ComplexTypeCUDA>(
+                thrust::raw_pointer_cast(m_ifft_d.data()), m_ifft_d.size()));
         const auto& shape =
             m_plan->get_container().state_shape[m_current_level];
         const auto nsamps_v = view_nsamps();
@@ -933,7 +889,7 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                          SizeType dt_step,
                          bool use_box_smearing,
                          std::string_view mode,
-                         bool verbose,
+                         int verbose,
                          int device_id,
                          SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -958,7 +914,7 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                          const std::vector<IndexType>& dt_grid,
                          bool use_box_smearing,
                          std::string_view mode,
-                         bool verbose,
+                         int verbose,
                          int device_id,
                          SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -981,7 +937,7 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                          const std::vector<float>& dm_grid,
                          bool use_box_smearing,
                          std::string_view mode,
-                         bool verbose,
+                         int verbose,
                          int device_id,
                          SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -1072,5 +1028,3 @@ FDMTFFTCUDA::get_effective_sigma_grid(SizeType boxcar_width) const {
 void FDMTFFTCUDA::reset_history() noexcept { m_impl->reset_history(); }
 
 } // namespace dmt::algorithms
-
-#endif // DMT_ENABLE_CUDA

@@ -22,7 +22,7 @@ TEST_CASE("bb_utils CUDA swap_spectrum matches CPU",
                                   ComplexType(4.F, 0.F), ComplexType(5.F, 0.F),
                                   ComplexType(6.F, 0.F), ComplexType(7.F, 0.F)};
     auto b                     = a;
-    bb_utils::swap_spectrum(a, b, 4, 2);
+    bb_utils::swap_spectrum(a, b, 4, 2, /*nthreads=*/1);
 
     thrust::device_vector<ComplexTypeCUDA> d1(8);
     thrust::device_vector<ComplexTypeCUDA> d2(8);
@@ -53,7 +53,7 @@ TEST_CASE("bb_utils CUDA apply_chirp matches CPU",
     std::vector<ComplexType> out1(in1.size());
     std::vector<ComplexType> out2(in2.size());
     bb_utils::apply_chirp(in1, in2, chirp, out1, out2, nsub, nbin, nfft, 0,
-                          2.0F);
+                          2.0F, /*nthreads=*/1);
 
     thrust::device_vector<ComplexTypeCUDA> d_in1(in1.size());
     thrust::device_vector<ComplexTypeCUDA> d_in2(in2.size());

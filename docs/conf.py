@@ -388,7 +388,7 @@ def _convenience_functions_rst() -> str:
         "(std::span< const float > waterfall, float f_min, float f_max, "
         "SizeType nchans, SizeType nsamps, float tsamp, IndexType dt_max, "
         "IndexType dt_min=0, SizeType dt_step=1, bool use_box_smearing=true, "
-        'std::string_view mode="valid", bool verbose=false, int nthreads=1, '
+        'std::string_view mode="valid", int verbose=0, int nthreads=1, '
         "SizeType nbeams=1)"
     )
     dt_grid = (
@@ -396,7 +396,7 @@ def _convenience_functions_rst() -> str:
         "SizeType nchans, SizeType nsamps, float tsamp, "
         "const std::vector< IndexType > &dt_grid, "
         "bool use_box_smearing=true, "
-        'std::string_view mode="valid", bool verbose=false, int nthreads=1, '
+        'std::string_view mode="valid", int verbose=0, int nthreads=1, '
         "SizeType nbeams=1)"
     )
     dm_grid = (
@@ -404,7 +404,7 @@ def _convenience_functions_rst() -> str:
         "SizeType nchans, SizeType nsamps, float tsamp, "
         "const std::vector< float > &dm_grid, "
         "bool use_box_smearing=true, "
-        'std::string_view mode="valid", bool verbose=false, int nthreads=1, '
+        'std::string_view mode="valid", int verbose=0, int nthreads=1, '
         "SizeType nbeams=1)"
     )
     blocks = [
@@ -446,6 +446,10 @@ Compute Engines (``dmt::algorithms``)
    :project: dmt
    :members:
 
+.. doxygenclass:: dmt::utils::FFTWManager
+   :project: dmt
+   :members:
+
 CUDA Engines
 ------------
 
@@ -473,7 +477,7 @@ CUDA Engines
    :project: dmt
    :members:
 
-.. doxygenclass:: dmt::utils::FFTManagerCUDA
+.. doxygenclass:: dmt::utils::CUFFTManager
    :project: dmt
    :members:
 

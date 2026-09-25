@@ -29,23 +29,21 @@ from .libdmt import (
 
 with contextlib.suppress(Exception):
     from .libcudmt import (
-        CohFDMTCUDA,
         DDMTCUDA,
         FDMTCUDA,
         FDMTFFTCUDA,
+        CohFDMTCUDA,
     )
 
 __all__ = [
-    "CohFDMTCPU",
-    "CohFDMTCUDA",
-    "CohFDMTPlan",
     "DDMTCPU",
     "DDMTCUDA",
-    "DDMTPlan",
     "FDMTCPU",
     "FDMTCUDA",
     "FDMTFFTCPU",
     "FDMTFFTCUDA",
+    "CohFDMTCPU",
+    "CohFDMTCUDA",
     "CohFDMTPlan",
     "DDMTPlan",
     "FDMTComplexity",
@@ -59,4 +57,3 @@ __all__ = [
     "generate_optimal_dm_grid",
     "generate_optimal_dt_grid",
 ]
-

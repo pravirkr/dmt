@@ -1,68 +1,76 @@
-#include <complex>
-#include <span>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
 
 #include "dmt/utils/fft.hpp"
 
 namespace dmt {
 
-using utils::FFTManagerCPU;
+using utils::FFTKind;
+using utils::FFTWManager;
 
-TEST_CASE("FFTManagerCPU forward then backward recovers scaled input",
+TEST_CASE("FFTWManager C2C forward then backward recovers scaled input",
           "[fft][cpu]") {
-    const int nfft  = 2;
-    const int nsub  = 2;
-    const int nbin  = 16;
-    const int mbin  = 16;
-    const int nchan = 1;
+    const SizeType length  = 16;
+    const SizeType howmany = 5;
+    const int nthreads     = 3;
 
-    FFTManagerCPU fft(nfft, nsub, nbin, mbin, nchan, 1);
-    const auto unpack_n = nfft * nsub * nbin;
-    const auto delay_n  = nfft * nsub * nchan * mbin;
-    std::vector<ComplexType> unpack(unpack_n, ComplexType(0.0F, 0.0F));
-    std::vector<ComplexType> delay(delay_n, ComplexType(0.0F, 0.0F));
-    fft.initialize_plans(unpack, delay);
+    FFTWManager forward(FFTKind::kC2CForward, length, howmany, nthreads);
+    FFTWManager backward(FFTKind::kC2CBackward, length, howmany, nthreads);
 
-    // FFTW_MEASURE overwrites the planning buffers; fill afterwards.
-    std::vector<ComplexType> data1(unpack_n);
-    std::vector<ComplexType> data2(unpack_n);
-    for (SizeType i = 0; i < unpack_n; ++i) {
-        data1[i] = ComplexType(static_cast<float>(i + 1), 0.25F);
-        data2[i] = ComplexType(static_cast<float>(i + 2), -0.5F);
+    std::vector<ComplexType> data(length * howmany);
+    for (SizeType i = 0; i < data.size(); ++i) {
+        data[i] = ComplexType(static_cast<float>(i + 1), 0.25F);
     }
-    auto orig1 = data1;
-    auto orig2 = data2;
+    const auto original = data;
 
-    fft.forward_fft(data1, data2);
-    fft.backward_fft(data1, data2);
+    forward.execute(data);
+    backward.execute(data);
 
-    // Unnormalized C2C: IFFT(FFT(x)) = nbin * x. Spectrum swap cancels.
-    for (SizeType i = 0; i < unpack_n; ++i) {
-        CHECK(data1[i].real() ==
-              Catch::Approx(orig1[i].real() * static_cast<float>(nbin))
+    for (SizeType i = 0; i < data.size(); ++i) {
+        CHECK(data[i].real() ==
+              Catch::Approx(original[i].real() * static_cast<float>(length))
                   .margin(1e-3F));
-        CHECK(data1[i].imag() ==
-              Catch::Approx(orig1[i].imag() * static_cast<float>(nbin))
-                  .margin(1e-3F));
-        CHECK(data2[i].real() ==
-              Catch::Approx(orig2[i].real() * static_cast<float>(nbin))
-                  .margin(1e-3F));
-        CHECK(data2[i].imag() ==
-              Catch::Approx(orig2[i].imag() * static_cast<float>(nbin))
+        CHECK(data[i].imag() ==
+              Catch::Approx(original[i].imag() * static_cast<float>(length))
                   .margin(1e-3F));
     }
 }
 
-TEST_CASE("FFTManagerCPU throws if plans are used before initialize",
+TEST_CASE("FFTWManager R2C then C2R recovers scaled input", "[fft][cpu]") {
+    const SizeType length    = 32;
+    const SizeType howmany   = 7;
+    const SizeType n_complex = (length / 2) + 1;
+    const int nthreads       = 4;
+
+    FFTWManager forward(FFTKind::kR2C, length, howmany, nthreads);
+    FFTWManager backward(FFTKind::kC2R, length, howmany, nthreads);
+
+    std::vector<float> real(length * howmany);
+    std::vector<ComplexType> freq(howmany * n_complex);
+    for (SizeType i = 0; i < real.size(); ++i) {
+        real[i] = static_cast<float>(i + 1);
+    }
+    const auto original = real;
+
+    forward.execute(real, freq);
+    backward.execute(real, freq);
+
+    for (SizeType i = 0; i < real.size(); ++i) {
+        CHECK(real[i] == Catch::Approx(original[i] * static_cast<float>(length))
+                             .margin(1e-2F));
+    }
+}
+
+TEST_CASE("FFTWManager rejects a mismatched buffer and the wrong execute",
           "[fft][cpu]") {
-    FFTManagerCPU fft(1, 1, 8, 8, 1, 1);
+    FFTWManager plan(FFTKind::kC2CForward, 8, 2, 1);
     std::vector<ComplexType> data(8, ComplexType(1.0F, 0.0F));
-    CHECK_THROWS_AS(fft.forward_fft(data, data), std::logic_error);
-    CHECK_THROWS_AS(fft.backward_fft(data, data), std::logic_error);
+    std::vector<float> real(16, 1.0F);
+    CHECK_THROWS_AS(plan.execute(data), std::invalid_argument);
+    CHECK_THROWS_AS(plan.execute(real, data), std::logic_error);
+    CHECK_THROWS_AS(FFTWManager(FFTKind::kR2C, 0, 4, 1), std::invalid_argument);
 }
 
 } // namespace dmt

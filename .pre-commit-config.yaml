@@ -1,15 +1,31 @@
+minimum_pre_commit_version: "3.5.0"
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
       - id: check-yaml
         # .clang-format uses multiple YAML documents (global + Language: Cpp).
         exclude: ^\.clang-format$
+      - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: check-case-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      # Match [tool.ruff] include in pyproject.toml.
+      - id: ruff-check
+        types_or: [python, pyi]
+        files: ^(src/|pyproject\.toml)
+        args: [--fix]
+      - id: ruff-format
+        types_or: [python, pyi]
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v18.1.8
@@ -22,6 +38,9 @@ repos:
     hooks:
       - id: cmake-format
         additional_dependencies: [pyyaml]
+        args: [--config-files=.cmake-format.yaml]
+        exclude: cmake/CPM\.cmake$
       - id: cmake-lint
         additional_dependencies: [pyyaml]
-        exclude: cmake/FindFFTW.cmake
+        args: [--config-files=.cmake-format.yaml]
+        exclude: cmake/(CPM|FindFFTW)\.cmake$

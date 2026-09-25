@@ -52,15 +52,15 @@ struct Packed2 {
 Packed2 random_2bit(SizeType nrows, SizeType nsamps, unsigned seed) {
     std::mt19937 gen(seed);
     std::uniform_int_distribution<uint32_t> dis(0, 3);
-    const auto row_bytes = utils::packed_row_bytes(nsamps, 2);
+    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, 2);
     Packed2 out{.values = std::vector<float>(nrows * nsamps),
                 .packed = std::vector<uint8_t>(nrows * row_bytes, 0)};
     for (SizeType r = 0; r < nrows; ++r) {
         for (SizeType s = 0; s < nsamps; ++s) {
             const auto v                 = dis(gen);
             out.values[(r * nsamps) + s] = static_cast<float>(v);
-            utils::write_packed_sample<2>(out.packed.data() + (r * row_bytes),
-                                          s, v);
+            bit_pack_utils::write_packed_sample<2>(
+                out.packed.data() + (r * row_bytes), s, v);
         }
     }
     return out;

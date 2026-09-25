@@ -54,9 +54,9 @@ struct PackedWaterfall {
 PackedWaterfall
 random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
     std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(0,
-                                                utils::max_sample_value(nbits));
-    const auto row_bytes = utils::packed_row_bytes(nsamps, nbits);
+    std::uniform_int_distribution<uint32_t> dis(
+        0, bit_pack_utils::max_sample_value(nbits));
+    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
     PackedWaterfall out{.values = std::vector<float>(nrows * nsamps),
                         .packed = std::vector<uint8_t>(nrows * row_bytes, 0)};
     for (SizeType r = 0; r < nrows; ++r) {
@@ -66,19 +66,19 @@ random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
             out.values[(r * nsamps) + s] = static_cast<float>(v);
             switch (nbits) {
             case 1:
-                utils::write_packed_sample<1>(row, s, v);
+                bit_pack_utils::write_packed_sample<1>(row, s, v);
                 break;
             case 2:
-                utils::write_packed_sample<2>(row, s, v);
+                bit_pack_utils::write_packed_sample<2>(row, s, v);
                 break;
             case 4:
-                utils::write_packed_sample<4>(row, s, v);
+                bit_pack_utils::write_packed_sample<4>(row, s, v);
                 break;
             case 8:
-                utils::write_packed_sample<8>(row, s, v);
+                bit_pack_utils::write_packed_sample<8>(row, s, v);
                 break;
             default:
-                utils::write_packed_sample<16>(row, s, v);
+                bit_pack_utils::write_packed_sample<16>(row, s, v);
                 break;
             }
         }
@@ -309,8 +309,8 @@ TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
             std::vector<float> hist(ref.history_state_size(), 0.0F);
             for (SizeType b = 0; b < 10; ++b) {
                 FDMTCPU& engine = (b % 3 == 2) ? unfused : fused;
-                const auto wf = random_waterfall(nchans * block,
-                                                 static_cast<unsigned>(60 + b));
+                const auto wf   = random_waterfall(nchans * block,
+                                                   static_cast<unsigned>(60 + b));
                 engine.load_history(hist);
                 const auto got = run(engine, wf);
                 engine.save_history(hist);
@@ -410,7 +410,8 @@ TEST_CASE("FDMTCPU packed valid-mode streaming and multiple beams",
             DYNAMIC_SECTION("nchans=" << c.nchans << " dt_min=" << c.dt_min
                                       << " nbits=" << nbits) {
                 const SizeType nchans = c.nchans;
-                const auto row_bytes  = utils::packed_row_bytes(block, nbits);
+                const auto row_bytes =
+                    bit_pack_utils::packed_row_bytes(block, nbits);
                 FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
                             c.dt_min, 1, true, "valid", false, 1, nbeams,
                             kUnfused, kFloatTree);

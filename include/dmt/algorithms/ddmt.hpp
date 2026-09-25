@@ -6,7 +6,7 @@
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/common/plans.hpp"
@@ -14,7 +14,8 @@
 
 /**
  * @file ddmt.hpp
- * @brief Direct Dispersion Measure Transform (DDMT) brute-force delay-and-sum dedispersion.
+ * @brief Direct Dispersion Measure Transform (DDMT) brute-force delay-and-sum
+ * dedispersion.
  */
 
 namespace dmt::algorithms {
@@ -26,8 +27,9 @@ namespace dmt::algorithms {
  * @f[
  * D[\text{DM}, t] = \sum_{\nu} I[\nu, t + \Delta t(\nu, \text{DM})]
  * @f]
- * Supports 32-bit float waterfalls as well as packed low-bit integers (1, 2, 4, 8, 16 bits),
- * per-channel kill masks for RFI mitigation, multi-beam batching, and overlap-save streaming.
+ * Supports 32-bit float waterfalls as well as packed low-bit integers (1, 2, 4,
+ * 8, 16 bits), per-channel kill masks for RFI mitigation, multi-beam batching,
+ * and overlap-save streaming.
  */
 class DDMTCPU {
 public:
@@ -42,9 +44,12 @@ public:
      * @param dm_step Linear spacing between DM trials in pc/cm^3.
      * @param dm_min Minimum trial DM in pc/cm^3 (default: 0).
      * @param nthreads Number of OpenMP worker threads (default: 1).
-     * @param nbits Input precision: 32 (float), or 1, 2, 4, 8, 16 (packed integer).
-     * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=exclude from sum).
-     * @param nbeams Number of independent beams batched through one instance (default: 1).
+     * @param nbits Input precision: 32 (float), or 1, 2, 4, 8, 16 (packed
+     * integer).
+     * @param kill_mask Optional per-channel mask (size nchans, 1=keep,
+     * 0=exclude from sum).
+     * @param nbeams Number of independent beams batched through one instance
+     * (default: 1).
      */
     DDMTCPU(float f_min,
             float f_max,
@@ -88,7 +93,8 @@ public:
      * @param f_max Top edge frequency in MHz.
      * @param nchans Number of frequency channels.
      * @param tsamp Sampling interval in seconds.
-     * @param levin LevinConfig specifying dm_start, dm_end, pulse_width, and tol.
+     * @param levin LevinConfig specifying dm_start, dm_end, pulse_width, and
+     * tol.
      * @param nthreads Number of OpenMP threads.
      * @param nbits Input bit precision.
      * @param kill_mask Optional per-channel mask.
@@ -105,7 +111,8 @@ public:
             SizeType nbeams                    = 1);
 
     /**
-     * @brief Constructs a DDMTCPU engine directly from a pre-configured DDMTPlan.
+     * @brief Constructs a DDMTCPU engine directly from a pre-configured
+     * DDMTPlan.
      * @param plan Pre-initialized DDMT plan.
      * @param nthreads Number of OpenMP worker threads.
      * @param nbeams Number of batched beams.
@@ -126,33 +133,40 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept;
 
     /**
-     * @brief Dedisperses a beam-major float32 waterfall (nbeams, nchans, nsamps).
+     * @brief Dedisperses a beam-major float32 waterfall (nbeams, nchans,
+     * nsamps).
      *
      * Requires get_plan().get_nbits() == 32.
      *
      * @param waterfall Input waterfall buffer.
-     * @param dmt Output DM-time buffer: shape (nbeams, ndm, get_output_nsamps(nsamps)).
+     * @param dmt Output DM-time buffer: shape (nbeams, ndm,
+     * get_output_nsamps(nsamps)).
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
     /**
-     * @brief Dedisperses a beam-major packed-integer waterfall (nbeams, nchans, nsamps).
+     * @brief Dedisperses a beam-major packed-integer waterfall (nbeams, nchans,
+     * nsamps).
      *
-     * Each channel row is packed at get_plan().get_nbits() bits per sample, LSB-first.
-     * Summation accumulates in 32-bit integer arithmetic without float conversions.
+     * Each channel row is packed at get_plan().get_nbits() bits per sample,
+     * LSB-first. Summation accumulates in 32-bit integer arithmetic without
+     * float conversions.
      *
      * @param waterfall_packed Input packed bytes.
      * @param nsamps Explicit time sample count per channel.
-     * @param dmt Output int32 DM-time buffer: shape (nbeams, ndm, get_output_nsamps(nsamps)).
+     * @param dmt Output int32 DM-time buffer: shape (nbeams, ndm,
+     * get_output_nsamps(nsamps)).
      */
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nsamps,
                  std::span<int32_t> dmt);
 
     /**
-     * @brief Dedisperses a time-major packed filterbank of shape (nbeams, nsamps, nchans).
+     * @brief Dedisperses a time-major packed filterbank of shape (nbeams,
+     * nsamps, nchans).
      *
-     * Matches standard SIGPROC `.fil` disk format and telescope streaming DAQ buffers.
+     * Matches standard SIGPROC `.fil` disk format and telescope streaming DAQ
+     * buffers.
      *
      * @param filterbank_packed Input packed bytes in time-major order.
      * @param nsamps Sample count in time dimension.
@@ -163,7 +177,8 @@ public:
                             std::span<int32_t> dmt);
 
     /**
-     * @brief Computes output sample count for an incoming chunk of input_nsamps.
+     * @brief Computes output sample count for an incoming chunk of
+     * input_nsamps.
      *
      * On cold start: returns input_nsamps - max_delay.
      * Once stream is warm: returns input_nsamps.
@@ -174,22 +189,26 @@ public:
     [[nodiscard]] SizeType
     get_output_nsamps(SizeType input_nsamps) const noexcept;
 
-    /// @brief Discards retained cross-call history, returning execute to cold-start mode
+    /// @brief Discards retained cross-call history, returning execute to
+    /// cold-start mode
     void reset_history() noexcept;
 
     /// @brief Size of the warmed-up streaming history state buffer
     [[nodiscard]] SizeType history_state_size() const noexcept;
 
-    /// @brief Saves current float history state to caller-owned storage (nbits == 32)
+    /// @brief Saves current float history state to caller-owned storage (nbits
+    /// == 32)
     bool save_history(std::span<float> out) const;
 
-    /// @brief Saves current packed integer history state to caller-owned storage (nbits in {1,2,4,8,16})
+    /// @brief Saves current packed integer history state to caller-owned
+    /// storage (nbits in {1,2,4,8,16})
     bool save_history(std::span<uint8_t> out) const;
 
     /// @brief Restores previously saved float history state (nbits == 32)
     bool load_history(std::span<const float> in);
 
-    /// @brief Restores previously saved packed history state (nbits in {1,2,4,8,16})
+    /// @brief Restores previously saved packed history state (nbits in
+    /// {1,2,4,8,16})
     bool load_history(std::span<const uint8_t> in);
 
 private:
@@ -199,11 +218,13 @@ private:
 
 #ifdef DMT_ENABLE_CUDA
 /**
- * @brief Direct Dispersion Measure Transform (DDMT) engine for CUDA GPU execution.
+ * @brief Direct Dispersion Measure Transform (DDMT) engine for CUDA GPU
+ * execution.
  *
- * Accelerates brute-force delay-and-sum dedispersion using massively parallel CUDA kernels.
- * Supports host memory streaming with multi-stream pipelined memory transfers (H2D -> Kernel -> D2H)
- * as well as direct zero-copy device span execution.
+ * Accelerates brute-force delay-and-sum dedispersion using massively parallel
+ * CUDA kernels. Supports host memory streaming with multi-stream pipelined
+ * memory transfers (H2D -> Kernel -> D2H) as well as direct zero-copy device
+ * span execution.
  */
 class DDMTCUDA {
 public:
@@ -302,7 +323,8 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept;
 
     /**
-     * @brief Dedisperses a float32 waterfall from host memory with pipelined H2D/kernel/D2H transfers.
+     * @brief Dedisperses a float32 waterfall from host memory with pipelined
+     * H2D/kernel/D2H transfers.
      * @param waterfall Host input waterfall span.
      * @param dmt Host destination DMT array span.
      */
@@ -360,34 +382,43 @@ public:
 
     /// @brief Size of a fully-warmed-up history state: in floats (nbeams *
     /// nchans * max_delay) when nbits == 32, or in bytes (nbeams * nchans *
-    /// packed_row_bytes(max_delay, nbits)) when nbits is a packed integer width.
+    /// packed_row_bytes(max_delay, nbits)) when nbits is a packed integer
+    /// width.
     [[nodiscard]] SizeType history_state_size() const noexcept;
 
-    /// @brief Save the current float history state to host memory (nbits == 32).
+    /// @brief Save the current float history state to host memory (nbits ==
+    /// 32).
     bool save_history(std::span<float> out) const;
 
-    /// @brief Save the current float history state to device memory (nbits == 32).
+    /// @brief Save the current float history state to device memory (nbits ==
+    /// 32).
     bool save_history(cuda::std::span<float> d_out,
                       cudaStream_t stream = nullptr) const;
 
-    /// @brief Save the current packed history state to host memory (nbits in {1,2,4,8,16}).
+    /// @brief Save the current packed history state to host memory (nbits in
+    /// {1,2,4,8,16}).
     bool save_history(std::span<uint8_t> out) const;
 
-    /// @brief Save the current packed history state to device memory (nbits in {1,2,4,8,16}).
+    /// @brief Save the current packed history state to device memory (nbits in
+    /// {1,2,4,8,16}).
     bool save_history(cuda::std::span<uint8_t> d_out,
                       cudaStream_t stream = nullptr) const;
 
-    /// @brief Restore a previously saved float history state from host memory (nbits == 32).
+    /// @brief Restore a previously saved float history state from host memory
+    /// (nbits == 32).
     bool load_history(std::span<const float> in);
 
-    /// @brief Restore a previously saved float history state from device memory (nbits == 32).
+    /// @brief Restore a previously saved float history state from device memory
+    /// (nbits == 32).
     bool load_history(cuda::std::span<const float> d_in,
                       cudaStream_t stream = nullptr);
 
-    /// @brief Restore a previously saved packed history state from host memory (nbits in {1,2,4,8,16}).
+    /// @brief Restore a previously saved packed history state from host memory
+    /// (nbits in {1,2,4,8,16}).
     bool load_history(std::span<const uint8_t> in);
 
-    /// @brief Restore a previously saved packed history state from device memory (nbits in {1,2,4,8,16}).
+    /// @brief Restore a previously saved packed history state from device
+    /// memory (nbits in {1,2,4,8,16}).
     bool load_history(cuda::std::span<const uint8_t> d_in,
                       cudaStream_t stream = nullptr);
 
@@ -409,9 +440,10 @@ public:
 
     template <typename Alloc1 = std::allocator<uint8_t>,
               typename Alloc2 = std::allocator<int32_t>>
-    void execute_time_major(const std::vector<uint8_t, Alloc1>& filterbank_packed,
-                            SizeType nsamps,
-                            std::vector<int32_t, Alloc2>& dmt) {
+    void
+    execute_time_major(const std::vector<uint8_t, Alloc1>& filterbank_packed,
+                       SizeType nsamps,
+                       std::vector<int32_t, Alloc2>& dmt) {
         execute_time_major(std::span<const uint8_t>(filterbank_packed), nsamps,
                            std::span<int32_t>(dmt));
     }

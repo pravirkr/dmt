@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from dmtlib import FDMTCPU, FDMTFFTCPU, compute_fdmt_fft, libdmt
 
 
@@ -62,7 +63,9 @@ class TestFDMTFFT:
         fdmt = FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full")
         a = fdmt_fft.execute(waterfall)
         b = fdmt.execute(waterfall)
-        np.testing.assert_allclose(a[:, :nsamples], b[:, :nsamples], rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(
+            a[:, :nsamples], b[:, :nsamples], rtol=1e-4, atol=1e-4
+        )
 
     def test_fdmt_fft_valid_streaming(self) -> None:
         f_min = 1000.0
@@ -102,9 +105,7 @@ class TestFDMTFFT:
         fdmt_fft = FDMTFFTCPU(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
         )
-        fdmt_roll = FDMTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
-        )
+        fdmt_roll = FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
 
         np.testing.assert_allclose(
             fdmt_fft.execute(waterfall),
@@ -180,9 +181,7 @@ class TestFDMTFFT:
         tsamp = 0.001
         dt_max = 100
 
-        fdmt = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
-        )
+        fdmt = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
         waterfall = np.zeros((nchans, nsamples), dtype=np.float32)
 
         target_dm_idx = len(fdmt.dt_grid_final) // 2
@@ -228,9 +227,7 @@ class TestFDMTFFT:
         rng = np.random.default_rng(1)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
-        )
+        fdmt = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
         oneshot = fdmt.execute(waterfall)
         fdmt.reset(waterfall)
         fdmt.advance_until_remaining(1)
@@ -274,12 +271,8 @@ class TestFDMTFFT:
         dt_max = 8
         rng = np.random.default_rng(2)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
-        cpu = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
-        )
-        gpu = FDMTFFTCUDA(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
-        )
+        cpu = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        gpu = FDMTFFTCUDA(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
         np.testing.assert_allclose(
             gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
         )

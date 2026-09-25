@@ -279,7 +279,8 @@ TEST_CASE("FDMTCUDA no box smearing parity between CPU and CUDA",
 
     FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false,
                        "full");
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false, "full");
+    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false,
+                     "full");
 
     std::vector<float> wf(16 * 1024);
     for (size_t i = 0; i < wf.size(); ++i) {

@@ -7,17 +7,25 @@ smearing across arbitrary frequency bands.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, TypeVar
+
 import numpy as np
+
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 try:
     from numba import njit
 except ImportError:
-    def njit(*args, **kwargs):
-        def decorator(func):
+
+    def njit(*args: Any, **_kwargs: Any) -> Callable[[_F], _F] | _F:
+        def decorator(func: _F) -> _F:
             return func
+
         if len(args) == 1 and callable(args[0]):
             return args[0]
         return decorator
+
 
 # Dispersion constant (MHz^2 * s / (pc cm^-3)) - Lorimer & Kramer (2005)
 DM_CONSTANT = 4.148808e3
@@ -37,7 +45,8 @@ def get_dmdelays(
     Calculates the cold-plasma group delay for each channel frequency :math:`\\nu_i`:
 
     .. math::
-        \\Delta t_i = k_{\\text{DM}} \\cdot \\text{DM} \\cdot \\left( f_{\\text{min}}^{-2} - \\nu_i^{-2} \\right)
+        \\Delta t_i = k_{\\text{DM}} \\cdot \\text{DM} \\cdot \\left(
+            f_{\\text{min}}^{-2} - \\nu_i^{-2} \\right)
 
     Parameters
     ----------
@@ -159,7 +168,8 @@ def generate_pure_frb(
     Returns
     -------
     tuple[np.ndarray, float]
-        A tuple of (waterfall array of shape `(nchans, nsamps)`, number of dispersed samples).
+        Waterfall array with shape ``(nchans, nsamps)`` and the number of dispersed
+        samples.
     """
     arr = np.zeros((nchans, nsamps), dtype=np.float32)
     foff = (f_max - f_min) / nchans

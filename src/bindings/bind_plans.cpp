@@ -119,7 +119,8 @@ void bind_plans(py::module_& mod) {
             Spacing of the regular delay grid (default 1).
         mode : {'valid', 'full', 'roll'}, optional
             Output time alignment. ``valid`` is streaming-safe.
-        verbose : bool, optional
+        verbose : int, optional
+            0 = silent, 1 = info, 2 = debug.
             Print a plan summary during construction.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
@@ -133,12 +134,12 @@ void bind_plans(py::module_& mod) {
                       IndexType, SizeType, std::string_view, bool>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
-             "verbose"_a = false)
+             "verbose"_a = 0)
         .def(py::init([](float f_min, float f_max, SizeType nchans,
                          SizeType nsamps, float tsamp,
                          const py::object& dt_grid, const py::object& dt_arr,
                          const py::object& dm_grid, const py::object& dm_arr,
-                         std::string_view mode, bool verbose) {
+                         std::string_view mode, int verbose) {
                  const auto [type, obj] =
                      resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                  if (type == CustomGridType::kDt) {
@@ -152,7 +153,7 @@ void bind_plans(py::module_& mod) {
              py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
              py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
              py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("mode") = "valid", py::arg("verbose") = false)
+             py::arg("mode") = "valid", py::arg("verbose") = 0)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly("nchans", &FDMTPlan::get_nchans)
@@ -323,14 +324,15 @@ void bind_plans(py::module_& mod) {
             Overlap samples for the convolution (must be < ``nbin``).
         data_order : {'PRITF', 'FTPRI', 'RITFP'}, optional
             Packed baseband layout.
-        verbose : bool, optional
+        verbose : int, optional
+            0 = silent, 1 = info, 2 = debug.
             Print a plan summary during construction.
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
                       float, float, SizeType, std::string_view, bool>(),
              "fcenter"_a, "bwsub"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "t_p"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap_inp"_a = 8192,
-             "data_order"_a = "PRITF", "verbose"_a = false)
+             "data_order"_a = "PRITF", "verbose"_a = 0)
         .def_property_readonly("f_center", &CohFDMTPlan::get_f_center)
         .def_property_readonly("bw_sub", &CohFDMTPlan::get_bw_sub)
         .def_property_readonly("nsub", &CohFDMTPlan::get_nsub)
@@ -431,10 +433,9 @@ void bind_plans(py::module_& mod) {
         .def(py::init<float, float, SizeType, float, float, float, float, bool,
                       SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F, "verbose"_a = false,
-             "nbits"_a = 32)
+             "dm_step"_a, "dm_min"_a = 0.0F, "verbose"_a = 0, "nbits"_a = 32)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr, bool verbose,
+                         const py::array_t<float>& dm_arr, int verbose,
                          SizeType nbits) {
                  return DDMTPlan(
                      f_min, f_max, nchans, tsamp,
@@ -443,11 +444,11 @@ void bind_plans(py::module_& mod) {
                      verbose, nbits);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
-             "verbose"_a = false, "nbits"_a = 32)
+             "verbose"_a = 0, "nbits"_a = 32)
         .def(py::init<float, float, SizeType, float, const LevinConfig&, bool,
                       SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
-             "verbose"_a = false, "nbits"_a = 32)
+             "verbose"_a = 0, "nbits"_a = 32)
         .def_static(
             "generate_levin_dm_grid",
             [](float dm_start, float dm_end, float tsamp, float pulse_width,

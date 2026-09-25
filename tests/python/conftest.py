@@ -9,7 +9,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def _cuda_available() -> bool:
     try:
-        import dmtlib.libcudmt as libcudmt
+        from dmtlib import libcudmt
     except Exception:
         return False
     try:

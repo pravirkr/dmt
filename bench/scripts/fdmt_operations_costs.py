@@ -53,7 +53,9 @@ def run_cost_analysis(
         "iterations_breakdown": {},
     }
 
-    print(f"\nFDMT Operational Cost Analysis (N_chans={nchans}, Band={f_min}-{f_max} MHz)")
+    print(
+        f"\nFDMT Operational Cost Analysis (N_chans={nchans}, Band={f_min}-{f_max} MHz)"
+    )
     print("=" * 80)
     print(
         f"{'N_dt':>7} | {'Brute Force':>12} | {'Dense FDMT':>12} | "
@@ -85,8 +87,12 @@ def run_cost_analysis(
 
         # Store iteration breakdown for largest dt
         if dt_max == dt_values[-1]:
-            results["iterations_breakdown"]["dense"] = dense_plan.operations_by_iteration
-            results["iterations_breakdown"]["sparse"] = sparse_plan.operations_by_iteration
+            results["iterations_breakdown"]["dense"] = (
+                dense_plan.operations_by_iteration
+            )
+            results["iterations_breakdown"]["sparse"] = (
+                sparse_plan.operations_by_iteration
+            )
 
         print(
             f"{dt_max:7d} | {bf_ops:12d} | {dense_ops:12d} | "
@@ -108,8 +114,16 @@ def plot_costs(results: dict, out_path: str) -> None:
     dt_values = results["dt_values"]
 
     # Plot 1: Operations Scaling (log-log)
-    ax1.plot(dt_values, results["brute_force_ops"], "r--o", label="Brute Force", linewidth=1.5)
-    ax1.plot(dt_values, results["dense_fdmt_ops"], "b-s", label="Dense FDMT", linewidth=2)
+    ax1.plot(
+        dt_values,
+        results["brute_force_ops"],
+        "r--o",
+        label="Brute Force",
+        linewidth=1.5,
+    )
+    ax1.plot(
+        dt_values, results["dense_fdmt_ops"], "b-s", label="Dense FDMT", linewidth=2
+    )
     ax1.plot(
         dt_values,
         results["sparse_fdmt_ops"],
@@ -154,8 +168,12 @@ def plot_costs(results: dict, out_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--plot", action="store_true", help="Render operations scaling plot")
-    parser.add_argument("--out", default="fdmt_operations_costs.png", help="Output plot filename")
+    parser.add_argument(
+        "--plot", action="store_true", help="Render operations scaling plot"
+    )
+    parser.add_argument(
+        "--out", default="fdmt_operations_costs.png", help="Output plot filename"
+    )
     parser.add_argument("--nchans", type=int, default=256, help="Number of channels")
     args = parser.parse_args()
 

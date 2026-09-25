@@ -18,8 +18,8 @@ using utils::DataUnpackerCPU;
 namespace {
 constexpr SizeType kNpol = 2;
 
-SizeType input_size(SizeType nfft, SizeType nbin, SizeType noverlap,
-                    SizeType nsub) {
+SizeType
+input_size(SizeType nfft, SizeType nbin, SizeType noverlap, SizeType nsub) {
     const auto nsamp = nfft * (nbin - (2 * noverlap));
     return kNpol * 2 * nsamp * nsub;
 }
@@ -28,8 +28,7 @@ SizeType output_size(SizeType nfft, SizeType nsub, SizeType nbin) {
     return nfft * nsub * nbin;
 }
 
-template <typename T>
-std::vector<T> sequential_baseband(SizeType n) {
+template <typename T> std::vector<T> sequential_baseband(SizeType n) {
     std::vector<T> data(n);
     for (SizeType i = 0; i < n; ++i) {
         data[i] = static_cast<T>(static_cast<int>(i % 17) + 1);
@@ -39,11 +38,14 @@ std::vector<T> sequential_baseband(SizeType n) {
 } // namespace
 
 TEST_CASE("DataUnpackerCPU rejects invalid construction", "[unpacker][cpu]") {
-    CHECK_THROWS_AS(DataUnpackerCPU(2, 8, 8, 1, "PRITF"), std::invalid_argument);
-    CHECK_THROWS_AS(DataUnpackerCPU(2, 16, 2, 1, "NOPE"), std::invalid_argument);
+    CHECK_THROWS_AS(DataUnpackerCPU(2, 8, 8, 1, "PRITF"),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(DataUnpackerCPU(2, 16, 2, 1, "NOPE"),
+                    std::invalid_argument);
 }
 
-TEST_CASE("DataUnpackerCPU unpacks PRITF/FTPRI/RITFP layouts", "[unpacker][cpu]") {
+TEST_CASE("DataUnpackerCPU unpacks PRITF/FTPRI/RITFP layouts",
+          "[unpacker][cpu]") {
     const SizeType nsub     = 2;
     const SizeType nbin     = 8;
     const SizeType noverlap = 2;
@@ -104,7 +106,8 @@ TEST_CASE("DataUnpackerCPU throws on buffer size mismatch", "[unpacker][cpu]") {
     std::vector<uint8_t> bad_in(3, 1);
     std::vector<ComplexType> p1(16);
     std::vector<ComplexType> p2(16);
-    CHECK_THROWS_AS(unpacker.execute<uint8_t>(bad_in, p1, p2), std::runtime_error);
+    CHECK_THROWS_AS(unpacker.execute<uint8_t>(bad_in, p1, p2),
+                    std::runtime_error);
 }
 
 } // namespace dmt

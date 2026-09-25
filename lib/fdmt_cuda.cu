@@ -22,6 +22,7 @@
 #include "dmt/cuda_utils.cuh"
 #include "dmt/fdmt_fused_tile.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
 
 namespace dmt::algorithms {
@@ -30,21 +31,6 @@ namespace {
 
 using detail::FDMTInputF32;
 using detail::FDMTInputPacked;
-using detail::FDMTMode;
-
-FDMTMode parse_mode(std::string_view mode) {
-    if (mode == "full") {
-        return FDMTMode::kFull;
-    }
-    if (mode == "roll") {
-        return FDMTMode::kRoll;
-    }
-    if (mode == "valid") {
-        return FDMTMode::kValid;
-    }
-    throw std::invalid_argument(std::format(
-        "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
-}
 
 /**
  * @brief Level-0 (per-channel) FDMT state initialization kernel.
@@ -363,7 +349,7 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int device_id,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -371,7 +357,7 @@ public:
         : m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_int_tree(int_tree),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
           m_plan(f_min,
                  f_max,
@@ -394,7 +380,7 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int device_id,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -402,7 +388,7 @@ public:
         : m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_int_tree(int_tree),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose) {
         init_device_structures(fuse_levels);
@@ -416,7 +402,7 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
+         int verbose,
          int device_id,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -424,7 +410,7 @@ public:
         : m_device_id(device_id),
           m_use_box_smearing(use_box_smearing),
           m_int_tree(int_tree),
-          m_mode(parse_mode(mode)),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
           m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose) {
         init_device_structures(fuse_levels);
@@ -592,7 +578,7 @@ public:
                     bool fuse) {
         check_packed_inputs(d_waterfall.size(), nbits, d_dmt.size());
         const auto row_bytes =
-            utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
+            bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
         const FDMTInputPacked input{.data      = d_waterfall.data(),
                                     .row_bytes = static_cast<int>(row_bytes),
                                     .nbits     = static_cast<int>(nbits)};
@@ -887,8 +873,8 @@ public:
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
                 cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
-                                dst_vec.size() * sizeof(float),
-                                cudaMemcpyDeviceToDevice, stream);
+                                    dst_vec.size() * sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream);
             }
             src += dst_vec.size();
         };
@@ -1020,7 +1006,7 @@ private:
                 "FDMTCUDA: nbits={} must be one of 1, 2, 4, 8, 16", nbits));
         }
         const auto row_bytes =
-            utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
+            bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
         const auto expected = m_nbeams * m_plan.get_nchans() * row_bytes;
         if (waterfall_bytes != expected) {
             throw std::invalid_argument(std::format(
@@ -1488,7 +1474,7 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    SizeType dt_step,
                    bool use_box_smearing,
                    std::string_view mode,
-                   bool verbose,
+                   int verbose,
                    int device_id,
                    SizeType nbeams,
                    SizeType fuse_levels,
@@ -1516,7 +1502,7 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    const std::vector<IndexType>& dt_grid,
                    bool use_box_smearing,
                    std::string_view mode,
-                   bool verbose,
+                   int verbose,
                    int device_id,
                    SizeType nbeams,
                    SizeType fuse_levels,
@@ -1543,7 +1529,7 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    const std::vector<float>& dm_grid,
                    bool use_box_smearing,
                    std::string_view mode,
-                   bool verbose,
+                   int verbose,
                    int device_id,
                    SizeType nbeams,
                    SizeType fuse_levels,
@@ -1676,7 +1662,7 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   SizeType dt_step,
                   bool use_box_smearing,
                   std::string_view mode,
-                  bool verbose,
+                  int verbose,
                   int device_id,
                   SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
@@ -1704,7 +1690,7 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   const std::vector<IndexType>& dt_grid,
                   bool use_box_smearing,
                   std::string_view mode,
-                  bool verbose,
+                  int verbose,
                   int device_id,
                   SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
@@ -1732,7 +1718,7 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   const std::vector<float>& dm_grid,
                   bool use_box_smearing,
                   std::string_view mode,
-                  bool verbose,
+                  int verbose,
                   int device_id,
                   SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,

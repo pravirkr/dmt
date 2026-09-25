@@ -3,17 +3,14 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
-#ifdef DMT_ENABLE_OPENMP
 #include <omp.h>
-#endif
-
 #include <spdlog/spdlog.h>
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/omp_helper.hpp"
 
 namespace dmt::algorithms {
 
@@ -40,7 +37,7 @@ public:
                  false,
                  nbits,
                  kill_mask),
-          m_nthreads(set_dmt_openmp_threads(nthreads)),
+          m_nthreads(std::max(1, nthreads)),
           m_nbeams(nbeams) {}
 
     Impl(float f_min,
@@ -53,7 +50,7 @@ public:
          std::span<const uint8_t> kill_mask,
          SizeType nbeams)
         : m_plan(f_min, f_max, nchans, tsamp, dm_arr, false, nbits, kill_mask),
-          m_nthreads(set_dmt_openmp_threads(nthreads)),
+          m_nthreads(std::max(1, nthreads)),
           m_nbeams(nbeams) {}
 
     Impl(float f_min,
@@ -66,12 +63,12 @@ public:
          std::span<const uint8_t> kill_mask,
          SizeType nbeams)
         : m_plan(f_min, f_max, nchans, tsamp, levin, false, nbits, kill_mask),
-          m_nthreads(set_dmt_openmp_threads(nthreads)),
+          m_nthreads(std::max(1, nthreads)),
           m_nbeams(nbeams) {}
 
-    Impl(const plans::DDMTPlan& plan, int nthreads, SizeType nbeams)
-        : m_plan(plan),
-          m_nthreads(set_dmt_openmp_threads(nthreads)),
+    Impl(plans::DDMTPlan plan, int nthreads, SizeType nbeams)
+        : m_plan(std::move(plan)),
+          m_nthreads(std::max(1, nthreads)),
           m_nbeams(nbeams) {}
 
     const plans::DDMTPlan& get_plan() const { return m_plan; }
@@ -101,7 +98,7 @@ public:
             return m_nbeams * plan_c.nchans * max_delay;
         }
         return m_nbeams * plan_c.nchans *
-               utils::packed_row_bytes(max_delay, plan_c.nbits);
+               bit_pack_utils::packed_row_bytes(max_delay, plan_c.nbits);
     }
 
     bool save_history(std::span<float> out) const {
@@ -274,7 +271,7 @@ public:
         const size_t in_beam_stride  = nchans * in_chan_stride;
         const size_t out_beam_stride = dm_count * out_dm_stride;
         const size_t total_units     = nbeams * dm_count;
-#pragma omp parallel for default(none)                                         \
+#pragma omp parallel for default(none) num_threads(m_nthreads)                 \
     shared(d_in, d_out, delay_table, kill_mask, dm_count, nchans,              \
                nsamps_reduced, in_chan_stride, in_samp_stride, out_dm_stride,  \
                out_samp_stride, in_beam_stride, out_beam_stride, total_units)
@@ -324,7 +321,7 @@ public:
         }
         const auto nchans    = plan_c.nchans;
         const auto in_rows   = m_nbeams * nchans;
-        const auto row_bytes = utils::packed_row_bytes(nsamps, nbits);
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         if (waterfall_packed.size() != in_rows * row_bytes) {
             spdlog::error("Packed input buffer size mismatch: expected {} "
                           "bytes ({} beams x {} chans x {} bytes/row), got {}",
@@ -342,9 +339,10 @@ public:
             return;
         }
 
-        const auto combined_row_bytes = utils::packed_row_bytes(total, nbits);
+        const auto combined_row_bytes =
+            bit_pack_utils::packed_row_bytes(total, nbits);
         const auto hist_row_bytes =
-            utils::packed_row_bytes(m_history_len, nbits);
+            bit_pack_utils::packed_row_bytes(m_history_len, nbits);
 
         auto run_dedisp = [&](const uint8_t* ptr, SizeType stride_bytes) {
             if (nsamps_reduced == 0)
@@ -385,7 +383,7 @@ public:
 
         const auto new_history_len = std::min(total, max_delay);
         const auto new_hist_row_bytes =
-            utils::packed_row_bytes(new_history_len, nbits);
+            bit_pack_utils::packed_row_bytes(new_history_len, nbits);
         std::vector<uint8_t> new_history_packed(in_rows * new_hist_row_bytes,
                                                 0);
 
@@ -398,7 +396,7 @@ public:
                         waterfall_packed.data() + (row * row_bytes);
                     auto* dst_row =
                         new_history_packed.data() + (row * new_hist_row_bytes);
-                    utils::copy_packed_samples<NBITS>(
+                    bit_pack_utils::copy_packed_samples<NBITS>(
                         src_row, total - new_history_len, dst_row, 0,
                         new_history_len);
                 }
@@ -431,10 +429,10 @@ public:
                         waterfall_packed.data() + (row * row_bytes);
                     auto* comb_row =
                         combined_packed.data() + (row * combined_row_bytes);
-                    utils::copy_packed_samples<NBITS>(hist_row, 0, comb_row, 0,
-                                                      m_history_len);
-                    utils::copy_packed_samples<NBITS>(new_row, 0, comb_row,
-                                                      m_history_len, nsamps);
+                    bit_pack_utils::copy_packed_samples<NBITS>(
+                        hist_row, 0, comb_row, 0, m_history_len);
+                    bit_pack_utils::copy_packed_samples<NBITS>(
+                        new_row, 0, comb_row, m_history_len, nsamps);
                 }
             };
             switch (nbits) {
@@ -463,7 +461,7 @@ public:
                         combined_packed.data() + (row * combined_row_bytes);
                     auto* dst_row =
                         new_history_packed.data() + (row * new_hist_row_bytes);
-                    utils::copy_packed_samples<NBITS>(
+                    bit_pack_utils::copy_packed_samples<NBITS>(
                         comb_row, total - new_history_len, dst_row, 0,
                         new_history_len);
                 }
@@ -507,7 +505,7 @@ public:
         const size_t in_beam_stride  = nchans * row_bytes;
         const size_t out_beam_stride = dm_count * nsamps_reduced;
         const size_t total_units     = nbeams * dm_count;
-#pragma omp parallel for default(none) shared(                                 \
+#pragma omp parallel for default(none) num_threads(m_nthreads) shared(         \
         d_in, d_out, delay_table, kill_mask, dm_count, nchans, nsamps_reduced, \
             row_bytes, in_beam_stride, out_beam_stride, total_units)
         for (size_t u = 0; u < total_units; ++u) {
@@ -555,7 +553,7 @@ public:
                         const auto* row = d_in_b + (i_chan * row_bytes);
                         for (size_t s = 0; s < s_count; ++s) {
                             const auto sample =
-                                utils::read_packed_sample<NBITS>(
+                                bit_pack_utils::read_packed_sample<NBITS>(
                                     row, s_block + s + delay);
                             out_tile[s] += static_cast<int32_t>(sample);
                         }
@@ -578,7 +576,7 @@ public:
             return;
         }
         const auto nchans     = plan_c.nchans;
-        const auto samp_bytes = utils::packed_row_bytes(nchans, nbits);
+        const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, nbits);
         if (filterbank_packed.size() != m_nbeams * nsamps * samp_bytes) {
             spdlog::error(
                 "Time-major input buffer size mismatch: expected {}, got {}",
@@ -648,7 +646,7 @@ public:
         const size_t in_beam_stride  = nsamps_total * samp_bytes;
         const size_t out_beam_stride = dm_count * nsamps_reduced;
         const size_t total_units     = nbeams * dm_count;
-#pragma omp parallel for default(none) shared(                                 \
+#pragma omp parallel for default(none) num_threads(m_nthreads) shared(         \
         d_in, d_out, delay_table, kill_mask, dm_count, nchans, nsamps_reduced, \
             samp_bytes, in_beam_stride, out_beam_stride, total_units)
         for (size_t u = 0; u < total_units; ++u) {
@@ -666,8 +664,8 @@ public:
                     }
                     const auto samp_idx  = i_samp + delays[i_chan];
                     const auto* samp_ptr = d_in_b + (samp_idx * samp_bytes);
-                    const auto val =
-                        utils::read_packed_sample<NBITS>(samp_ptr, i_chan);
+                    const auto val = bit_pack_utils::read_packed_sample<NBITS>(
+                        samp_ptr, i_chan);
                     sum += static_cast<int32_t>(val);
                 }
                 d_out_b[out_idx + i_samp] = sum;

@@ -39,8 +39,6 @@
 
 namespace dmt::algorithms::detail {
 
-enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
-
 /// Deepest fusion the CUDA backend supports (fixed-size per-level arrays).
 inline constexpr int kMaxFusedLevels = 8;
 
@@ -50,7 +48,7 @@ struct FDMTInputF32 {
     const float* data;
     int nsamps;
 
-    DMT_HOST_DEVICE float load(int64_t row, int t) const {
+    DMT_HD float load(int64_t row, int t) const {
         return data[(static_cast<size_t>(row) * nsamps) + t];
     }
 };
@@ -64,20 +62,25 @@ struct FDMTInputPacked {
     int row_bytes;
     int nbits;
 
-    DMT_HOST_DEVICE float load(int64_t row, int t) const {
+    DMT_HD float load(int64_t row, int t) const {
         const uint8_t* r = data + (static_cast<size_t>(row) * row_bytes);
         const auto st    = static_cast<SizeType>(t);
         switch (nbits) {
         case 1:
-            return static_cast<float>(utils::read_packed_sample<1>(r, st));
+            return static_cast<float>(
+                bit_pack_utils::read_packed_sample<1>(r, st));
         case 2:
-            return static_cast<float>(utils::read_packed_sample<2>(r, st));
+            return static_cast<float>(
+                bit_pack_utils::read_packed_sample<2>(r, st));
         case 4:
-            return static_cast<float>(utils::read_packed_sample<4>(r, st));
+            return static_cast<float>(
+                bit_pack_utils::read_packed_sample<4>(r, st));
         case 8:
-            return static_cast<float>(utils::read_packed_sample<8>(r, st));
+            return static_cast<float>(
+                bit_pack_utils::read_packed_sample<8>(r, st));
         default:
-            return static_cast<float>(utils::read_packed_sample<16>(r, st));
+            return static_cast<float>(
+                bit_pack_utils::read_packed_sample<16>(r, st));
         }
     }
 };
@@ -94,11 +97,11 @@ struct FDMTInputPacked {
  * `write_row(i_dt, value)` stores row i_dt's value at t.
  */
 template <bool UseBoxSmearing, typename GetSample, typename WriteRow>
-DMT_HOST_DEVICE inline void fdmt_init_column(int dt_first,
-                                             int dt_last,
-                                             int t,
-                                             GetSample&& get_sample,
-                                             WriteRow&& write_row) {
+DMT_HD inline void fdmt_init_column(int dt_first,
+                                    int dt_last,
+                                    int t,
+                                    GetSample&& get_sample,
+                                    WriteRow&& write_row) {
     const auto write_matches = [&](int s, float val) {
         if (s >= dt_first && s <= dt_last) {
             write_row(s - dt_first, val);
@@ -172,14 +175,13 @@ struct FDMTFusedTileArgs {
     const int* ndt0;          ///< per channel
     const int* coord_offset0; ///< per channel
 
-    [[nodiscard]] DMT_HOST_DEVICE int group_stride() const {
+    [[nodiscard]] DMT_HD int group_stride() const {
         return kGroupHeader + (kLevelInfo * (fuse + 1));
     }
 };
 
 /// @brief Whether sample t of a level with L samples per row is computed.
-template <FDMTMode Mode>
-DMT_HOST_DEVICE inline bool fdmt_in_range(int t, int L) {
+template <FDMTMode Mode> DMT_HD inline bool fdmt_in_range(int t, int L) {
     if constexpr (Mode == FDMTMode::kRoll) {
         return t < L; // negative t is the wrapped end of the block
     } else {
@@ -193,12 +195,12 @@ DMT_HOST_DEVICE inline bool fdmt_in_range(int t, int L) {
  * lo_in). Mirrors kernel_execute_iter's arithmetic for each mode.
  */
 template <FDMTMode Mode>
-DMT_HOST_DEVICE inline float fdmt_fused_merge_cell(const float* in,
-                                                   int w_in,
-                                                   int lo_in,
-                                                   const int* coord,
-                                                   int t,
-                                                   const float* thist_in) {
+DMT_HD inline float fdmt_fused_merge_cell(const float* in,
+                                          int w_in,
+                                          int lo_in,
+                                          const int* coord,
+                                          int t,
+                                          const float* thist_in) {
     const int tail       = coord[0];
     const int head       = coord[1];
     const float tail_val = in[(tail * w_in) + (t - lo_in)];
@@ -228,19 +230,19 @@ DMT_HOST_DEVICE inline float fdmt_fused_merge_cell(const float* in,
  * (blocks shorter than the delay) by tile 0.
  */
 template <typename Block>
-DMT_HOST_DEVICE inline void fdmt_fused_tree_history(const Block& blk,
-                                                    const float* in,
-                                                    int w_in,
-                                                    int lo_in,
-                                                    const int* coords,
-                                                    int nrows,
-                                                    int max_delay,
-                                                    int nsamps,
-                                                    int tile,
-                                                    int t0,
-                                                    int t_end,
-                                                    const float* thist_in,
-                                                    float* thist_out) {
+DMT_HD inline void fdmt_fused_tree_history(const Block& blk,
+                                           const float* in,
+                                           int w_in,
+                                           int lo_in,
+                                           const int* coords,
+                                           int nrows,
+                                           int max_delay,
+                                           int nsamps,
+                                           int tile,
+                                           int t0,
+                                           int t_end,
+                                           const float* thist_in,
+                                           float* thist_out) {
     if (thist_out == nullptr || max_delay <= 0) {
         return;
     }
@@ -292,17 +294,17 @@ template <FDMTMode Mode,
           typename Block,
           typename Input,
           typename TOut>
-DMT_HOST_DEVICE void fdmt_fused_tile(const Block& blk,
-                                     const Input& input,
-                                     int64_t row_base,
-                                     TOut* out,
-                                     const FDMTFusedTileArgs& a,
-                                     int tile,
-                                     int group,
-                                     float* smem,
-                                     const float* hist0,
-                                     const float* thist_in,
-                                     float* thist_out) {
+DMT_HD void fdmt_fused_tile(const Block& blk,
+                            const Input& input,
+                            int64_t row_base,
+                            TOut* out,
+                            const FDMTFusedTileArgs& a,
+                            int tile,
+                            int group,
+                            float* smem,
+                            const float* hist0,
+                            const float* thist_in,
+                            float* thist_out) {
     constexpr int kLI = FDMTFusedTileArgs::kLevelInfo;
     constexpr int kCI = FDMTFusedTileArgs::kCoordInfo;
     const int* gi     = a.group_info + (group * a.group_stride());
@@ -387,10 +389,10 @@ DMT_HOST_DEVICE void fdmt_fused_tile(const Block& blk,
         blk.for_each(nrows(l) * w_out, [&](int i) {
             const int r = i / w_out;
             const int t = lo_out + (i % w_out);
-            dst[i] = fdmt_in_range<Mode>(t, n_l)
-                         ? fdmt_fused_merge_cell<Mode>(
+            dst[i]      = fdmt_in_range<Mode>(t, n_l)
+                              ? fdmt_fused_merge_cell<Mode>(
                                in, w_in, lo_in, cl + (kCI * r), t, thist_in)
-                         : 0.0F;
+                              : 0.0F;
         });
         if constexpr (Mode == FDMTMode::kValid) {
             fdmt_fused_tree_history(blk, in, w_in, lo_in, cl, nrows(l),
@@ -448,8 +450,8 @@ struct FDMTFusedTilePlan {
     [[nodiscard]] std::pair<SizeType, SizeType> smem_floats(int tile) const {
         const int stride = FDMTFusedTileArgs::kGroupHeader +
                            (FDMTFusedTileArgs::kLevelInfo * (fuse + 1));
-        SizeType cap_a   = 0;
-        SizeType cap_b   = 0;
+        SizeType cap_a = 0;
+        SizeType cap_b = 0;
         for (int g = 0; g < ngroups; ++g) {
             const int* gi     = group_info.data() + (g * stride);
             const int* lvl    = gi + FDMTFusedTileArgs::kGroupHeader;

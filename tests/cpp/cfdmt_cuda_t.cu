@@ -1,5 +1,3 @@
-#ifdef DMT_ENABLE_CUDA
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -195,5 +193,3 @@ TEST_CASE("CohFDMTCUDA synthetic impulse peaks near DM 0", "[cfdmt_gpu][gpu]") {
 }
 
 } // namespace dmt
-
-#endif // DMT_ENABLE_CUDA

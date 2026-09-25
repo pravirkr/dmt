@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from dmtlib import DDMTCPU, DDMTPlan, LevinConfig
 
 
@@ -60,9 +61,7 @@ class TestDDMT:
         mask[0] = 0
         mask[2] = 0
 
-        ddmt = DDMTCPU(
-            f_min, f_max, nchans, tsamp, 10.0, 5.0, 0.0, kill_mask=mask
-        )
+        ddmt = DDMTCPU(f_min, f_max, nchans, tsamp, 10.0, 5.0, 0.0, kill_mask=mask)
         waterfall = np.ones((nchans, nsamps), dtype=np.float32)
         dmt = ddmt.execute(waterfall)
         # DM=0 sums unmasked channels only (8 - 2 = 6)
@@ -98,7 +97,7 @@ class TestDDMT:
                     bit_off = s * nbits
                     byte_idx = bit_off // 8
                     bit_sub = bit_off % 8
-                    chan_major[c, byte_idx] |= (val << bit_sub)
+                    chan_major[c, byte_idx] |= val << bit_sub
 
         # Time-major packing
         time_samp_bytes = (nchans * nbits + 7) // 8
@@ -114,7 +113,7 @@ class TestDDMT:
                     bit_off = c * nbits
                     byte_idx = bit_off // 8
                     bit_sub = bit_off % 8
-                    time_major[s, byte_idx] |= (val << bit_sub)
+                    time_major[s, byte_idx] |= val << bit_sub
 
         out_chan = ddmt.execute(chan_major, nsamps)
         out_time = ddmt.execute_time_major(time_major, nsamps)
@@ -198,10 +197,12 @@ class TestDDMT:
         plan = DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits=8)
         ddmt_multi = DDMTCPU(plan, nbeams=nbeams)
 
-        raw = ((np.arange(nbeams * nchans * nsamps, dtype=np.uint64) * 17 + 3) % 256).astype(np.uint8)
+        raw = (
+            (np.arange(nbeams * nchans * nsamps, dtype=np.uint64) * 17 + 3) % 256
+        ).astype(np.uint8)
         chan_major = raw.reshape((nbeams, nchans, nsamps))
         time_major = np.ascontiguousarray(
-            chan_major.transpose((0, 2, 1)) # (nbeams, nsamps, nchans)
+            chan_major.transpose((0, 2, 1))  # (nbeams, nsamps, nchans)
         )
 
         out_chan = ddmt_multi.execute(chan_major, nsamps)
@@ -307,7 +308,9 @@ class TestDDMT:
 
         chunk1_samps = 64
         mask = (1 << nbits) - 1
-        raw1 = ((np.arange(nchans * chunk1_samps, dtype=np.uint64) * 11 + 3) & mask).reshape((nchans, chunk1_samps))
+        raw1 = (
+            (np.arange(nchans * chunk1_samps, dtype=np.uint64) * 11 + 3) & mask
+        ).reshape((nchans, chunk1_samps))
         r_bytes1 = (chunk1_samps * nbits + 7) // 8
         c1 = np.zeros((nchans, r_bytes1), dtype=np.uint8)
         for c in range(nchans):
@@ -331,7 +334,9 @@ class TestDDMT:
 
         # Feed chunk2 to both
         chunk2_samps = 48
-        raw2 = ((np.arange(nchans * chunk2_samps, dtype=np.uint64) * 19 + 5) & mask).reshape((nchans, chunk2_samps))
+        raw2 = (
+            (np.arange(nchans * chunk2_samps, dtype=np.uint64) * 19 + 5) & mask
+        ).reshape((nchans, chunk2_samps))
         r_bytes2 = (chunk2_samps * nbits + 7) // 8
         c2 = np.zeros((nchans, r_bytes2), dtype=np.uint8)
         for c in range(nchans):
@@ -347,5 +352,3 @@ class TestDDMT:
         # reset_history clears state
         ddmt2.reset_history()
         assert ddmt2.get_output_nsamps(32) < 32
-
-

@@ -16,9 +16,9 @@
 #include <spdlog/fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
-#include "dmt/bb_utils.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
+#include "dmt/modes.hpp"
 
 namespace dmt::plans {
 
@@ -109,7 +109,7 @@ public:
          IndexType dt_min,
          SizeType dt_step,
          std::string_view mode,
-         bool verbose)
+         int verbose)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -118,12 +118,8 @@ public:
           m_dt_max(dt_max),
           m_dt_min(dt_min),
           m_dt_step(dt_step),
-          m_mode(mode) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+          m_mode(parse_fdmt_mode(mode)) {
+        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
     }
@@ -135,7 +131,7 @@ public:
          float tsamp,
          const std::vector<IndexType>& dt_grid,
          std::string_view mode,
-         bool verbose)
+         int verbose)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -144,14 +140,10 @@ public:
           m_dt_max(0),
           m_dt_min(0),
           m_dt_step(0),
-          m_mode(mode),
+          m_mode(parse_fdmt_mode(mode)),
           m_is_custom_grid(true),
           m_dt_grid_target(dt_grid) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+        apply_log_verbosity(verbose);
         if (m_dt_grid_target.empty()) {
             throw std::invalid_argument("FDMT: dt_grid must not be empty");
         }
@@ -172,7 +164,7 @@ public:
          float tsamp,
          const std::vector<float>& dm_grid,
          std::string_view mode,
-         bool verbose)
+         int verbose)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -181,13 +173,9 @@ public:
           m_dt_max(0),
           m_dt_min(0),
           m_dt_step(0),
-          m_mode(mode),
+          m_mode(parse_fdmt_mode(mode)),
           m_is_custom_grid(true) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+        apply_log_verbosity(verbose);
         if (dm_grid.empty()) {
             throw std::invalid_argument("FDMT: dm_grid must not be empty");
         }
@@ -226,7 +214,9 @@ public:
     IndexType get_dt_max() const noexcept { return m_dt_max; }
     IndexType get_dt_min() const noexcept { return m_dt_min; }
     SizeType get_dt_step() const noexcept { return m_dt_step; }
-    std::string_view get_mode() const noexcept { return m_mode; }
+    std::string_view get_mode() const noexcept {
+        return fdmt_mode_to_string(m_mode);
+    }
     bool is_custom_grid() const noexcept { return m_is_custom_grid; }
     float get_df() const noexcept { return m_df; }
     SizeType get_niters() const noexcept { return m_niters; }
@@ -558,14 +548,14 @@ public:
         return m_nchans * m_container.state_shape[0].dt_max;
     }
     SizeType get_tree_history_size() const noexcept {
-        return m_container.get_tree_history_size();
+        return m_container.tree_history_size;
     }
     SizeType get_fft_overlap() const noexcept {
         return static_cast<SizeType>(
             std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
     }
     SizeType get_fft_size() const noexcept {
-        if (m_mode == "roll") {
+        if (m_mode == FDMTMode::kRoll) {
             return m_nsamps;
         }
         // Pad by the trial delay plus the largest tree/level-0 shift so
@@ -664,7 +654,7 @@ private:
     IndexType m_dt_max;
     IndexType m_dt_min;
     SizeType m_dt_step;
-    std::string m_mode;
+    FDMTMode m_mode;
     bool m_is_custom_grid{false};
     std::vector<IndexType> m_dt_grid_target;
 
@@ -725,10 +715,6 @@ private:
                                 "(dt_max - dt_min)={}",
                                 m_dt_step, m_dt_max - m_dt_min));
             }
-        }
-        if (m_mode != "full" && m_mode != "valid" && m_mode != "roll") {
-            throw std::invalid_argument(std::format(
-                "FDMT: mode={} must be 'full' or 'valid' or 'roll'", m_mode));
         }
     }
 
@@ -985,7 +971,7 @@ private:
         // blocks in that case rather than requiring one block to cover the
         // whole delay.
         const auto nsamps_iter =
-            m_nsamps + ((m_mode == "full") ? dt_max_iter : 0);
+            m_nsamps + ((m_mode == FDMTMode::kFull) ? dt_max_iter : 0);
 
         SizeType buf_offset = 0;
         SizeType ncoords    = 0;
@@ -1123,7 +1109,7 @@ private:
                         tail_n      = coords_prev[i_coord_head].nsamps;
                         head_offset = coords_prev[i_coord_tail]
                                           .buf_offset; // shifted by |dt_head|
-                        head_n      = coords_prev[i_coord_tail].nsamps;
+                        head_n = coords_prev[i_coord_tail].nsamps;
                     }
 
                     // "full"/"roll" have no cross-block history mechanism,
@@ -1134,7 +1120,8 @@ private:
                     // fdmt.cpp) is explicitly designed to support
                     // delay_shift >= nsamps_prev by accumulating real
                     // history across multiple blocks.
-                    if (m_mode != "valid" && delay_shift >= nsamps_prev) {
+                    if (m_mode != FDMTMode::kValid &&
+                        delay_shift >= nsamps_prev) {
                         throw std::runtime_error(
                             std::format("DM delay is greater than input size: "
                                         "delay_shift={}, nsamps_prev={}",
@@ -1203,7 +1190,7 @@ public:
          float dm_min                = 0.0F,
          SizeType noverlap           = 8192,
          std::string_view data_order = "PRITF",
-         bool verbose                = false)
+         int verbose                 = 0)
         : m_f_center(f_center),
           m_bw_sub(bw_sub),
           m_nsub(nsub),
@@ -1214,15 +1201,11 @@ public:
           m_dm_max(dm_max),
           m_dm_min(dm_min),
           m_noverlap(noverlap),
-          m_data_order(data_order),
+          m_data_order(parse_baseband_data_order(data_order)),
           m_bw(m_bw_sub * static_cast<float>(m_nsub)),
           m_f_min(m_f_center - (m_bw / 2)),
           m_f_max(m_f_center + (m_bw / 2)) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
     }
@@ -1284,9 +1267,9 @@ public:
             m_tsamp         = other.m_tsamp;
             m_dt_max        = other.m_dt_max;
             m_dt_min        = other.m_dt_min;
-            m_fdmt_plan = other.m_fdmt_plan
-                              ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
-                              : nullptr;
+            m_fdmt_plan     = other.m_fdmt_plan
+                                  ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
+                                  : nullptr;
         }
         return *this;
     }
@@ -1304,7 +1287,9 @@ public:
     float get_dm_max() const noexcept { return m_dm_max; }
     float get_dm_min() const noexcept { return m_dm_min; }
     SizeType get_noverlap() const noexcept { return m_noverlap; }
-    std::string_view get_data_order() const noexcept { return m_data_order; }
+    std::string_view get_data_order() const noexcept {
+        return baseband_data_order_to_string(m_data_order);
+    }
 
     float get_bw() const noexcept { return m_bw; }
     float get_f_min() const noexcept { return m_f_min; }
@@ -1436,7 +1421,7 @@ private:
     float m_dm_max;
     float m_dm_min;
     SizeType m_noverlap;
-    std::string_view m_data_order;
+    BasebandDataOrder m_data_order;
 
     float m_bw;
     float m_f_min;
@@ -1477,11 +1462,6 @@ private:
         if (m_dm_max < m_dm_min) {
             throw std::invalid_argument(
                 "dm_max must be greater than or equal to dm_min");
-        }
-        if (!bb_utils::find_baseband_data_order(m_data_order)) {
-            throw std::invalid_argument(std::format(
-                "Invalid data order: {}. Supported values are: {}",
-                m_data_order, bb_utils::supported_baseband_data_orders()));
         }
     }
 
@@ -1570,7 +1550,7 @@ public:
          float dm_max,
          float dm_step,
          float dm_min                       = 0.0F,
-         bool verbose                       = false,
+         int verbose                        = 0,
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
@@ -1580,11 +1560,7 @@ public:
           m_dm_arr(generate_dm_arr(dm_max, dm_step, dm_min)),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
         spdlog::debug("DDMT: dm_max={}, dm_min={}, dm_step={}", dm_max, dm_min,
@@ -1596,7 +1572,7 @@ public:
          SizeType nchans,
          float tsamp,
          std::span<const float> dm_arr,
-         bool verbose                       = false,
+         int verbose                        = 0,
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
@@ -1606,11 +1582,7 @@ public:
           m_dm_arr(dm_arr.begin(), dm_arr.end()),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
         spdlog::debug("DDMT: dm_count={}", m_dm_arr.size());
@@ -1621,7 +1593,7 @@ public:
          SizeType nchans,
          float tsamp,
          const LevinConfig& levin,
-         bool verbose                       = false,
+         int verbose                        = 0,
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
@@ -1638,11 +1610,7 @@ public:
                                                  levin.tol)),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        if (verbose) {
-            spdlog::set_level(spdlog::level::trace);
-        } else {
-            spdlog::set_level(spdlog::level::info);
-        }
+        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
         spdlog::debug("DDMT Levin: dm_start={}, dm_end={}, count={}",
@@ -1797,7 +1765,7 @@ FDMTPlan::FDMTPlan(float f_min,
                    IndexType dt_min,
                    SizeType dt_step,
                    std::string_view mode,
-                   bool verbose)
+                   int verbose)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1815,7 +1783,7 @@ FDMTPlan::FDMTPlan(float f_min,
                    float tsamp,
                    const std::vector<IndexType>& dt_grid,
                    std::string_view mode,
-                   bool verbose)
+                   int verbose)
     : m_impl(std::make_unique<Impl>(
           f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {}
 
@@ -1826,7 +1794,7 @@ FDMTPlan::FDMTPlan(float f_min,
                    float tsamp,
                    const std::vector<float>& dm_grid,
                    std::string_view mode,
-                   bool verbose)
+                   int verbose)
     : m_impl(std::make_unique<Impl>(
           f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {}
 
@@ -1976,7 +1944,7 @@ CohFDMTPlan::CohFDMTPlan(float f_center,
                          float dm_min,
                          SizeType noverlap,
                          std::string_view data_order,
-                         bool verbose)
+                         int verbose)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,
                                     nsub,
@@ -2089,7 +2057,7 @@ DDMTPlan::DDMTPlan(float f_min,
                    float dm_max,
                    float dm_step,
                    float dm_min,
-                   bool verbose,
+                   int verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -2108,7 +2076,7 @@ DDMTPlan::DDMTPlan(float f_min,
                    SizeType nchans,
                    float tsamp,
                    std::span<const float> dm_arr,
-                   bool verbose,
+                   int verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(
@@ -2119,7 +2087,7 @@ DDMTPlan::DDMTPlan(float f_min,
                    SizeType nchans,
                    float tsamp,
                    const LevinConfig& levin,
-                   bool verbose,
+                   int verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(

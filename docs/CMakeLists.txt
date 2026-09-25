@@ -15,6 +15,7 @@ else()
   add_custom_target(
     dmt_doxygen
     COMMAND ${CMAKE_COMMAND} -E echo "Doxygen not found; skipping XML generation"
+    COMMENT "Doxygen not found; skipping XML generation"
     VERBATIM
   )
 endif()
@@ -24,8 +25,7 @@ if(SPHINX_EXECUTABLE)
   set(SPHINX_HTML_DIR "${CMAKE_CURRENT_BINARY_DIR}/html")
   add_custom_target(
     docs
-    COMMAND ${CMAKE_COMMAND} -E env
-            DOXYGEN_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/doxygen"
+    COMMAND ${CMAKE_COMMAND} -E env DOXYGEN_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/doxygen"
             ${SPHINX_EXECUTABLE} -b html "${CMAKE_CURRENT_SOURCE_DIR}" "${SPHINX_HTML_DIR}"
     DEPENDS dmt_doxygen
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"

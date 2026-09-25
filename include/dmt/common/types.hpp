@@ -11,10 +11,6 @@
 #include <cstdint>
 #include <vector>
 
-#ifdef DMT_ENABLE_OPENMP
-#include <omp.h>
-#endif
-
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/complex>
 #include <cuda/std/span>
@@ -90,5 +86,21 @@ enum class BasebandDataOrder : uint8_t {
     kFTPRI, /**< Frequency -> Time -> Polarization -> Real/Imag */
     kRITFP, /**< Real/Imag -> Time -> Frequency -> Polarization */
 };
+
+/**
+ * @brief FDMT mode for the FDMT tree.
+ */
+enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
+
+// Callable from both host and device when compiled with nvcc.
+#if defined(DMT_ENABLE_CUDA) && defined(__CUDACC__)
+#define DMT_HD __host__ __device__
+#define DMT_D __device__
+#define DMT_H __host__
+#else
+#define DMT_HD
+#define DMT_D
+#define DMT_H
+#endif
 
 } // namespace dmt

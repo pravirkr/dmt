@@ -32,7 +32,7 @@ public:
          float dm_min,
          SizeType noverlap,
          std::string_view data_order,
-         bool verbose,
+         int verbose,
          int device_id)
         : m_plan(f_center,
                  bw_sub,
@@ -83,16 +83,24 @@ public:
             thrust::raw_pointer_cast(m_dedisperse_offset_table_d.data()),
             m_dedisperse_offset_table_d.size());
 
-        // Forward FFT
-        m_thefft->forward_fft(m_unpack_buf_p1_span, m_unpack_buf_p2_span,
-                              stream);
+        m_fft_forward->execute(m_unpack_buf_p1_span, stream);
+        m_fft_forward->execute(m_unpack_buf_p2_span, stream);
+        bb_utils::swap_spectrum(
+            m_unpack_buf_p1_span, m_unpack_buf_p2_span,
+            static_cast<int>(m_plan.get_nbin()),
+            static_cast<int>(m_plan.get_nfft() * m_plan.get_nsub()), stream);
         for (SizeType idm = 0; idm < dm_grid_coh.size(); ++idm) {
             // Apply chirp
             apply_chirp(m_unpack_buf_p1_span, m_unpack_buf_p2_span,
                         m_delay_buf_p1_span, m_delay_buf_p2_span, idm, stream);
-            // Backward FFT
-            m_thefft->backward_fft(m_delay_buf_p1_span, m_delay_buf_p2_span,
-                                   stream);
+            bb_utils::swap_spectrum(
+                m_delay_buf_p1_span, m_delay_buf_p2_span,
+                static_cast<int>(m_plan.get_mbin()),
+                static_cast<int>(m_plan.get_nfft() * m_plan.get_nsub() *
+                                 m_plan.get_nchan()),
+                stream);
+            m_fft_backward->execute(m_delay_buf_p1_span, stream);
+            m_fft_backward->execute(m_delay_buf_p2_span, stream);
             // Detect and unpad (produces ascending frequency channels)
             unpad_detect(m_delay_buf_p1_span, m_delay_buf_p2_span,
                          m_intensity_buf_span, stream);
@@ -191,7 +199,8 @@ public:
 private:
     plans::CohFDMTPlan m_plan;
     int m_device_id;
-    std::unique_ptr<utils::FFTManagerCUDA> m_thefft;
+    std::unique_ptr<utils::CUFFTManager> m_fft_forward;
+    std::unique_ptr<utils::CUFFTManager> m_fft_backward;
     std::unique_ptr<algorithms::FDMTCUDA> m_thefdmt;
     std::unique_ptr<utils::DataUnpackerCUDA> m_theunpacker;
 
@@ -214,10 +223,13 @@ private:
     std::vector<thrust::device_vector<float>> m_channel_delay_histories;
 
     void initialise() {
-        // Initialise the FFT manager, FDMT and data unpacker
-        m_thefft = std::make_unique<utils::FFTManagerCUDA>(
-            m_plan.get_nfft(), m_plan.get_nsub(), m_plan.get_nbin(),
-            m_plan.get_mbin(), m_plan.get_nchan(), m_device_id);
+        m_fft_forward = std::make_unique<utils::CUFFTManager>(
+            utils::FFTKind::kC2CForward, m_plan.get_nbin(),
+            m_plan.get_nfft() * m_plan.get_nsub(), m_device_id);
+        m_fft_backward = std::make_unique<utils::CUFFTManager>(
+            utils::FFTKind::kC2CBackward, m_plan.get_mbin(),
+            m_plan.get_nfft() * m_plan.get_nsub() * m_plan.get_nchan(),
+            m_device_id);
         // One shared FDMTCUDA instance for every coarse-DM trial
         m_thefdmt = std::make_unique<algorithms::FDMTCUDA>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
@@ -329,7 +341,7 @@ CohFDMTCUDA::CohFDMTCUDA(float f_center,
                          float dm_min,
                          SizeType noverlap,
                          std::string_view data_order,
-                         bool verbose,
+                         int verbose,
                          int device_id)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,

@@ -1,241 +1,223 @@
 #include "dmt/utils/fft.hpp"
 
-#include <array>
-#include <cstddef>
+#include <algorithm>
+#include <format>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
-#include <cuda/std/complex>
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <cufft.h>
 
 #include <spdlog/spdlog.h>
 
-#include "dmt/bb_utils_cuda.cuh"
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
 
 namespace dmt::utils {
 
-class FFTManagerCUDA::Impl {
-public:
-    Impl(int nfft, int nsub, int nbin, int mbin, int nchan, int device_id)
-        : m_nfft(nfft),
-          m_nsub(nsub),
-          m_nbin(nbin),
-          m_mbin(mbin),
-          m_nchan(nchan),
-          m_device_id(device_id) {
-        cuda_utils::set_device(m_device_id);
-        spdlog::debug("FFTManagerCUDA::Impl: Initialized CUDA device {}",
-                      m_device_id);
+namespace {
 
+int to_cufft_int(SizeType value, const char* what) {
+    if (value > static_cast<SizeType>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument(
+            std::format("CUFFTManager: {} exceeds cuFFT int limit", what));
+    }
+    return static_cast<int>(value);
+}
+
+void check_extent(SizeType count, SizeType stride, const char* what) {
+    const bool fits =
+        stride == 0 || count <= (std::numeric_limits<SizeType>::max() / stride);
+    if (!fits) {
+        throw std::invalid_argument(
+            std::format("CUFFTManager: {} * batch overflows SizeType", what));
+    }
+}
+
+} // namespace
+
+class CUFFTManager::Impl {
+public:
+    Impl(FFTKind kind, SizeType length, SizeType howmany, int device_id)
+        : m_kind(kind),
+          m_length(length),
+          m_howmany(howmany),
+          m_n_complex(is_real(kind) ? (length / 2) + 1 : length),
+          m_device_id(device_id) {
+        if (length == 0 || howmany == 0) {
+            throw std::invalid_argument(
+                "CUFFTManager: length and howmany must be positive");
+        }
+        check_extent(howmany, length, "length");
+        if (is_real(kind)) {
+            check_extent(howmany, m_n_complex, "n_complex");
+        }
+        cuda_utils::set_device(m_device_id);
         try {
-            create_plans();
-            allocate_workspace();
-        } catch (const std::exception& e) {
-            spdlog::error("FFTManagerCUDA::Impl: Initialization failed: {}",
-                          e.what());
-            cleanup_resources();
+            create_plan();
+        } catch (...) {
+            if (m_plan != 0) {
+                cufftDestroy(m_plan);
+                m_plan = 0;
+            }
+            if (m_workspace != nullptr) {
+                cudaFree(m_workspace);
+                m_workspace = nullptr;
+            }
             throw;
         }
-        spdlog::debug("FFTManagerCUDA::Impl: Successfully created with "
-                      "nfft={}, nsub={}, nbin={}, mbin={}, nchan={}",
-                      m_nfft, m_nsub, m_nbin, m_mbin, m_nchan);
+        spdlog::debug("CUFFTManager: kind={} length={} howmany={} device={} "
+                      "workspace={}",
+                      static_cast<int>(kind), length, howmany, m_device_id,
+                      m_workspace_size);
     }
 
     ~Impl() {
-        spdlog::debug("FFTManagerCUDA::Impl: Destroying instance");
-        cleanup_resources();
+        try {
+            cuda_utils::set_device(m_device_id);
+        } catch (...) {
+        }
+        if (m_plan != 0) {
+            cufftDestroy(m_plan);
+            m_plan = 0;
+        }
+        if (m_workspace != nullptr) {
+            cudaFree(m_workspace);
+            m_workspace = nullptr;
+        }
     }
+
     Impl(const Impl&)            = delete;
     Impl& operator=(const Impl&) = delete;
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    void forward_fft(cuda::std::span<ComplexTypeCUDA> data1,
-                     cuda::std::span<ComplexTypeCUDA> data2,
-                     cudaStream_t stream) const {
-        cuda_utils::check_cuda_call(cufftSetStream(m_forward_plan, stream),
-                                    "forward_fft: cufftSetStream");
-
-        auto* d1 = reinterpret_cast<cufftComplex*>(data1.data());
-        auto* d2 = reinterpret_cast<cufftComplex*>(data2.data());
-        cuda_utils::check_cuda_call(
-            cufftExecC2C(m_forward_plan, d1, d1, CUFFT_FORWARD),
-            "forward_fft: data1");
-        cuda_utils::check_cuda_call(
-            cufftExecC2C(m_forward_plan, d2, d2, CUFFT_FORWARD),
-            "forward_fft: data2");
-        bb_utils::swap_spectrum(data1, data2, m_nbin, m_nfft * m_nsub, stream);
-        spdlog::debug("forward_fft: Completed FFT and spectrum swap");
+    void execute(cuda::std::span<ComplexTypeCUDA> data,
+                 cudaStream_t stream) const {
+        if (m_kind != FFTKind::kC2CForward && m_kind != FFTKind::kC2CBackward) {
+            throw std::logic_error(
+                "CUFFTManager: execute(complex) requires a C2C plan");
+        }
+        const SizeType expected = m_howmany * m_length;
+        if (data.size() != expected) {
+            throw std::invalid_argument(
+                std::format("CUFFTManager: complex span size {} != {}",
+                            data.size(), expected));
+        }
+        cuda_utils::set_device(m_device_id);
+        cuda_utils::check_cuda_call(cufftSetStream(m_plan, stream),
+                                    "CUFFTManager: cufftSetStream");
+        auto* ptr = reinterpret_cast<cufftComplex*>(data.data());
+        const int direction =
+            m_kind == FFTKind::kC2CForward ? CUFFT_FORWARD : CUFFT_INVERSE;
+        cuda_utils::check_cuda_call(cufftExecC2C(m_plan, ptr, ptr, direction),
+                                    "CUFFTManager: cufftExecC2C");
     }
 
-    void backward_fft(cuda::std::span<ComplexTypeCUDA> data1,
-                      cuda::std::span<ComplexTypeCUDA> data2,
-                      cudaStream_t stream) const {
-        cuda_utils::check_cuda_call(cufftSetStream(m_backward_plan, stream),
-                                    "backward_fft: cufftSetStream");
-
-        bb_utils::swap_spectrum(data1, data2, m_mbin, m_nfft * m_nsub * m_nchan,
-                                stream);
-
-        auto* d1 = reinterpret_cast<cufftComplex*>(data1.data());
-        auto* d2 = reinterpret_cast<cufftComplex*>(data2.data());
-        cuda_utils::check_cuda_call(
-            cufftExecC2C(m_backward_plan, d1, d1, CUFFT_INVERSE),
-            "backward_fft: data1");
-        cuda_utils::check_cuda_call(
-            cufftExecC2C(m_backward_plan, d2, d2, CUFFT_INVERSE),
-            "backward_fft: data2");
-        spdlog::debug("backward_fft: Completed spectrum swap and FFT");
+    void execute(cuda::std::span<float> real,
+                 cuda::std::span<ComplexTypeCUDA> freq,
+                 cudaStream_t stream) const {
+        if (m_kind != FFTKind::kR2C && m_kind != FFTKind::kC2R) {
+            throw std::logic_error("CUFFTManager: execute(real, freq) requires "
+                                   "an R2C or C2R plan");
+        }
+        const SizeType n_real    = m_howmany * m_length;
+        const SizeType n_complex = m_howmany * m_n_complex;
+        if (real.size() != n_real || freq.size() != n_complex) {
+            throw std::invalid_argument(std::format(
+                "CUFFTManager: span sizes real={} freq={} != {} and {}",
+                real.size(), freq.size(), n_real, n_complex));
+        }
+        cuda_utils::set_device(m_device_id);
+        cuda_utils::check_cuda_call(cufftSetStream(m_plan, stream),
+                                    "CUFFTManager: cufftSetStream");
+        auto* real_ptr = real.data();
+        auto* freq_ptr = reinterpret_cast<cufftComplex*>(freq.data());
+        if (m_kind == FFTKind::kR2C) {
+            cuda_utils::check_cuda_call(
+                cufftExecR2C(m_plan, real_ptr, freq_ptr),
+                "CUFFTManager: cufftExecR2C");
+        } else {
+            cuda_utils::check_cuda_call(
+                cufftExecC2R(m_plan, freq_ptr, real_ptr),
+                "CUFFTManager: cufftExecC2R");
+        }
     }
 
 private:
-    const int m_nfft;
-    const int m_nsub;
-    const int m_nbin;
-    const int m_mbin;
-    const int m_nchan;
-    const int m_device_id;
-
-    cufftHandle m_forward_plan  = 0;
-    cufftHandle m_backward_plan = 0;
-    void* m_workspace_d         = nullptr;
-    size_t m_workspace_size     = 0;
-
-    void create_plans() {
-        const int rank = 1; // 1D FFTs
-
-        // --- Forward Plan ---
-        // 1D FFT of size m_nbin
-        // Batch size: m_nfft * m_nsub
-        // Input stride = 1, Input distance = m_nbin
-        // Output stride = 1, Output distance = m_nbin (in-place)
-        std::array<int, 1> n_fw = {m_nbin};
-        const int batch_fw      = m_nfft * m_nsub;
-        const int idist_fw      = m_nbin;
-        const int odist_fw      = m_nbin;
-        const int istride_fw    = 1;
-        const int ostride_fw    = 1;
-
-        SizeType forward_workspace_size = 0;
-        cuda_utils::check_cuda_call(cufftCreate(&m_forward_plan),
-                                    "create_plans: cufftCreate (forward)");
-        cuda_utils::check_cuda_call(
-            cufftMakePlanMany(m_forward_plan,           // plan handle
-                              rank,                     // rank
-                              n_fw.data(),              // n
-                              nullptr,                  // inembed
-                              istride_fw,               // istride
-                              idist_fw,                 // idist
-                              nullptr,                  // onembed
-                              ostride_fw,               // ostride
-                              odist_fw,                 // odist
-                              CUFFT_C2C,                // type
-                              batch_fw,                 // batch size
-                              &forward_workspace_size), // Get workspace size
-            "create_plans: cufftMakePlanMany (forward)");
-        spdlog::debug(
-            "create_plans: Forward plan created, workspace size: {} bytes",
-            forward_workspace_size);
-
-        // --- Backward Plan ---
-        // 1D FFT of size m_mbin
-        // Batch size: m_nfft * m_nsub * m_nchan
-        // Input stride = 1, Input distance = m_mbin
-        // Output stride = 1, Output distance = m_mbin (in-place)
-        std::array<int, 1> n_bw = {m_mbin};
-        const int batch_bw      = m_nfft * m_nsub * m_nchan;
-        const int idist_bw      = m_mbin;
-        const int odist_bw      = m_mbin;
-        const int istride_bw    = 1;
-        const int ostride_bw    = 1;
-
-        SizeType backward_workspace_size = 0;
-        cuda_utils::check_cuda_call(cufftCreate(&m_backward_plan),
-                                    "create_plans: cufftCreate (backward)");
-        cuda_utils::check_cuda_call(
-            cufftMakePlanMany(m_backward_plan,           // plan handle
-                              rank,                      // rank
-                              n_bw.data(),               // n
-                              nullptr,                   // inembed
-                              istride_bw,                // istride
-                              idist_bw,                  // idist
-                              nullptr,                   // onembed
-                              ostride_bw,                // ostride
-                              odist_bw,                  // odist
-                              CUFFT_C2C,                 // type
-                              batch_bw,                  // batch size
-                              &backward_workspace_size), // Get workspace size
-            "create_plans: cufftMakePlanMany (backward)");
-        spdlog::debug(
-            "create_plans: Backward plan created, workspace size: {} bytes",
-            backward_workspace_size);
-
-        // Set maximum workspace size
-        m_workspace_size =
-            std::max(forward_workspace_size, backward_workspace_size);
+    static bool is_real(FFTKind kind) {
+        return kind == FFTKind::kR2C || kind == FFTKind::kC2R;
     }
 
-    // Allocates workspace memory if needed
-    void allocate_workspace() {
+    void create_plan() {
+        int n             = to_cufft_int(m_length, "length");
+        const int howmany = to_cufft_int(m_howmany, "howmany");
+        const int n_freq  = to_cufft_int(m_n_complex, "n_complex");
+        const int idist =
+            is_real(m_kind) && m_kind == FFTKind::kC2R ? n_freq : n;
+        const int odist =
+            is_real(m_kind) && m_kind == FFTKind::kR2C ? n_freq : n;
+        const cufftType type = real_type(m_kind);
+
+        cuda_utils::check_cuda_call(cufftCreate(&m_plan),
+                                    "CUFFTManager: cufftCreate");
+        cuda_utils::check_cuda_call(cufftSetAutoAllocation(m_plan, 0),
+                                    "CUFFTManager: cufftSetAutoAllocation");
+        cuda_utils::check_cuda_call(
+            cufftMakePlanMany(m_plan, 1, &n, nullptr, 1, idist, nullptr, 1,
+                              odist, type, howmany, &m_workspace_size),
+            "CUFFTManager: cufftMakePlanMany");
         if (m_workspace_size > 0) {
             cuda_utils::check_cuda_call(
-                cudaMalloc(&m_workspace_d, m_workspace_size),
-                "allocate_workspace: cudaMalloc");
-            cuda_utils::check_cuda_call(
-                cufftSetWorkArea(m_forward_plan, m_workspace_d),
-                "allocate_workspace: cufftSetWorkArea (forward)");
-            cuda_utils::check_cuda_call(
-                cufftSetWorkArea(m_backward_plan, m_workspace_d),
-                "allocate_workspace: cufftSetWorkArea (backward)");
-            spdlog::debug(
-                "allocate_workspace: Allocated {} bytes for cuFFT workspace",
-                m_workspace_size);
+                cudaMalloc(&m_workspace, m_workspace_size),
+                "CUFFTManager: cudaMalloc workspace");
+            cuda_utils::check_cuda_call(cufftSetWorkArea(m_plan, m_workspace),
+                                        "CUFFTManager: cufftSetWorkArea");
         }
     }
 
-    // Cleans up CUDA resources
-    void cleanup_resources() noexcept {
-        if (m_forward_plan != 0) {
-            cuda_utils::check_cuda_call(
-                cufftDestroy(m_forward_plan),
-                "cleanup_resources: cufftDestroy (forward)");
-            m_forward_plan = 0;
+    static cufftType real_type(FFTKind kind) {
+        switch (kind) {
+        case FFTKind::kC2CForward:
+        case FFTKind::kC2CBackward:
+            return CUFFT_C2C;
+        case FFTKind::kR2C:
+            return CUFFT_R2C;
+        case FFTKind::kC2R:
+            return CUFFT_C2R;
         }
-        if (m_backward_plan != 0) {
-            cuda_utils::check_cuda_call(
-                cufftDestroy(m_backward_plan),
-                "cleanup_resources: cufftDestroy (backward)");
-            m_backward_plan = 0;
-        }
-        if (m_workspace_d != nullptr) {
-            cuda_utils::check_cuda_call(cudaFree(m_workspace_d),
-                                        "cleanup_resources: cudaFree");
-            m_workspace_d = nullptr;
-        }
-        m_workspace_size = 0;
+        throw std::invalid_argument("CUFFTManager: unknown kind");
     }
 
-}; // End FFTManagerCUDA::Impl definition
+    FFTKind m_kind;
+    SizeType m_length;
+    SizeType m_howmany;
+    SizeType m_n_complex;
+    int m_device_id;
+    cufftHandle m_plan{0};
+    void* m_workspace{nullptr};
+    size_t m_workspace_size{0};
+};
 
-FFTManagerCUDA::FFTManagerCUDA(
-    int nfft, int nsub, int nbin, int mbin, int nchan, int device_id)
-    : m_impl(std::make_unique<Impl>(nfft, nsub, nbin, mbin, nchan, device_id)) {
+CUFFTManager::CUFFTManager(FFTKind kind,
+                           SizeType length,
+                           SizeType howmany,
+                           int device_id)
+    : m_impl(std::make_unique<Impl>(kind, length, howmany, device_id)) {}
+CUFFTManager::~CUFFTManager()                                        = default;
+CUFFTManager::CUFFTManager(CUFFTManager&& other) noexcept            = default;
+CUFFTManager& CUFFTManager::operator=(CUFFTManager&& other) noexcept = default;
+
+void CUFFTManager::execute(cuda::std::span<ComplexTypeCUDA> data,
+                           cudaStream_t stream) const {
+    m_impl->execute(data, stream);
 }
-FFTManagerCUDA::~FFTManagerCUDA()                               = default;
-FFTManagerCUDA::FFTManagerCUDA(FFTManagerCUDA&& other) noexcept = default;
-FFTManagerCUDA&
-FFTManagerCUDA::operator=(FFTManagerCUDA&& other) noexcept = default;
-void FFTManagerCUDA::forward_fft(cuda::std::span<ComplexTypeCUDA> data1,
-                                 cuda::std::span<ComplexTypeCUDA> data2,
-                                 cudaStream_t stream) const {
-    m_impl->forward_fft(data1, data2, stream);
-}
-void FFTManagerCUDA::backward_fft(cuda::std::span<ComplexTypeCUDA> data1,
-                                  cuda::std::span<ComplexTypeCUDA> data2,
-                                  cudaStream_t stream) const {
-    m_impl->backward_fft(data1, data2, stream);
+void CUFFTManager::execute(cuda::std::span<float> real,
+                           cuda::std::span<ComplexTypeCUDA> freq,
+                           cudaStream_t stream) const {
+    m_impl->execute(real, freq, stream);
 }
 
 } // namespace dmt::utils

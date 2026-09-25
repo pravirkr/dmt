@@ -1,5 +1,5 @@
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
@@ -116,12 +116,11 @@ BENCHMARK_DEFINE_F(FDMTFFTCUDAFixture, BM_fdmt_fft_execute_roll_cuda)
     thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        fdmt.execute(
-            cuda::std::span<const float>(
-                thrust::raw_pointer_cast(waterfall_d.data()),
-                waterfall_d.size()),
-            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                   dmt_d.size()));
+        fdmt.execute(cuda::std::span<const float>(
+                         thrust::raw_pointer_cast(waterfall_d.data()),
+                         waterfall_d.size()),
+                     cuda::std::span<float>(
+                         thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size()));
     }
 }
 
@@ -132,23 +131,24 @@ BENCHMARK_DEFINE_F(FDMTFFTCUDAFixture, BM_fdmt_fft_execute_valid_cuda)
     thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        fdmt.execute(
-            cuda::std::span<const float>(
-                thrust::raw_pointer_cast(waterfall_d.data()),
-                waterfall_d.size()),
-            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                   dmt_d.size()));
+        fdmt.execute(cuda::std::span<const float>(
+                         thrust::raw_pointer_cast(waterfall_d.data()),
+                         waterfall_d.size()),
+                     cuda::std::span<float>(
+                         thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size()));
     }
 }
 
 constexpr size_t kMinNsamps = 1 << 10;
 constexpr size_t kMaxNsamps = 1 << 13;
 
-BENCHMARK_REGISTER_F(FDMTFFTCUDAFixture, BM_fdmt_fft_execute_roll_cuda) // NOLINT
+BENCHMARK_REGISTER_F(FDMTFFTCUDAFixture,
+                     BM_fdmt_fft_execute_roll_cuda) // NOLINT
     ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
     ->UseManualTime();
 
-BENCHMARK_REGISTER_F(FDMTFFTCUDAFixture, BM_fdmt_fft_execute_valid_cuda) // NOLINT
+BENCHMARK_REGISTER_F(FDMTFFTCUDAFixture,
+                     BM_fdmt_fft_execute_valid_cuda) // NOLINT
     ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
     ->UseManualTime();
 

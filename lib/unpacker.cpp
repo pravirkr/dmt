@@ -7,8 +7,7 @@
 
 #include "spdlog/spdlog.h"
 
-#include "dmt/bb_utils.hpp"
-#include "dmt/omp_helper.hpp"
+#include "dmt/modes.hpp"
 
 namespace dmt::utils {
 
@@ -27,19 +26,14 @@ public:
           m_nbin(nbin),
           m_noverlap(noverlap),
           m_nfft(nfft),
-          m_nthreads(set_dmt_openmp_threads(nthreads)) {
+          m_nthreads(std::max(1, nthreads)),
+          m_order(parse_baseband_data_order(in_order)) {
         if (m_nbin <= 2 * m_noverlap) {
             throw std::invalid_argument(
                 std::format("Invalid nbin and noverlap values: {} and {}",
                             m_nbin, m_noverlap));
         }
         m_nsamp = m_nfft * (m_nbin - (2 * m_noverlap));
-        if (const auto order = bb_utils::find_baseband_data_order(in_order)) {
-            m_order = *order;
-        } else {
-            throw std::invalid_argument(
-                std::format("Invalid input order: {}", in_order));
-        }
         spdlog::debug("DataUnpackerCPU::Impl: Initialised with {} threads.",
                       m_nthreads);
     }
@@ -116,10 +110,8 @@ private:
         const DataType* data_in_ptr = data_in.data();
         ComplexType* data_p1_ptr    = data_p1.data();
         ComplexType* data_p2_ptr    = data_p2.data();
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp parallel for collapse(2) default(none)                             \
     shared(data_in_ptr, data_p1_ptr, data_p2_ptr) num_threads(m_nthreads)
-#endif
         for (SizeType ifft = 0; ifft < m_nfft; ++ifft) {
             for (SizeType isub = 0; isub < m_nsub; ++isub) {
                 process_chunk<DataType, Order>(data_in_ptr, data_p1_ptr,

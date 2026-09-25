@@ -23,6 +23,8 @@ number and meaning of ArgsProduct() columns:
     different thread counts) still appear as separate, identifiable lines.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -37,7 +39,8 @@ FAMILY_PALETTE = {
     "DDMT": "#55A868",
 }
 
-MIN_NSAMPS_TOKEN = 256  # smallest nsamps swept anywhere; larger than nbits/threads/beams
+# smallest nsamps swept anywhere; larger than nbits/threads/beams
+MIN_NSAMPS_TOKEN = 256
 
 
 def classify_family(fixture: str) -> str:
@@ -97,7 +100,7 @@ def load_benchmarks(path: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def family_palette_for(labels) -> dict:
+def family_palette_for(labels: list[str]) -> dict[str, tuple[float, float, float]]:
     families = sorted({lbl.split(":")[0] for lbl in labels})
     base = {f: FAMILY_PALETTE.get(f, "#888888") for f in families}
     # Give distinct variants of the same family related but distinguishable
@@ -150,9 +153,15 @@ def plot_time_comparison(df: pd.DataFrame, out_path: str) -> None:
 
 
 def plot_throughput_comparison(df: pd.DataFrame, out_path: str) -> None:
-    df = df[df["bytes_per_second"].notna()] if "bytes_per_second" in df.columns else df.iloc[0:0]
+    df = (
+        df[df["bytes_per_second"].notna()]
+        if "bytes_per_second" in df.columns
+        else df.iloc[0:0]
+    )
     if df.empty:
-        print(f"No throughput data (bytes_per_second) to plot for {out_path}, skipping.")
+        print(
+            f"No throughput data (bytes_per_second) to plot for {out_path}, skipping."
+        )
         return
     df = df.copy()
     df["GB_per_s"] = df["bytes_per_second"] / 1e9
@@ -182,14 +191,20 @@ def plot_throughput_comparison(df: pd.DataFrame, out_path: str) -> None:
 
 
 def plot_memory_comparison(df: pd.DataFrame, out_path: str) -> None:
-    counters = [c for c in ("PeakHeap_MB", "ProcessPeakRSS_MB", "TotalAlloc_MB_per_iter") if c in df.columns]
+    counters = [
+        c
+        for c in ("PeakHeap_MB", "ProcessPeakRSS_MB", "TotalAlloc_MB_per_iter")
+        if c in df.columns
+    ]
     if df.empty or not counters:
         print(f"No memory counters to plot for {out_path}, skipping.")
         return
     df = df.sort_values(["label", "nsamps"])
     palette = family_palette_for(df["label"].unique())
 
-    fig, axes = plt.subplots(1, len(counters), figsize=(6 * len(counters), 5.5), squeeze=False)
+    fig, axes = plt.subplots(
+        1, len(counters), figsize=(6 * len(counters), 5.5), squeeze=False
+    )
     for ax, counter in zip(axes[0], counters, strict=False):
         sns.lineplot(
             data=df,
@@ -206,7 +221,9 @@ def plot_memory_comparison(df: pd.DataFrame, out_path: str) -> None:
         ax.set_yscale("log")
         ax.set_xlabel("Input samples (nsamps)")
         ax.set_ylabel(counter.replace("_", " "))
-    axes[0][0].legend(fontsize=8, loc="upper left", bbox_to_anchor=(-0.05, -0.25), ncol=2)
+    axes[0][0].legend(
+        fontsize=8, loc="upper left", bbox_to_anchor=(-0.05, -0.25), ncol=2
+    )
     fig.suptitle("DDMT vs FDMT vs FDMT-FFT: memory footprint")
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight", dpi=150)

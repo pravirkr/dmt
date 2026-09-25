@@ -27,29 +27,30 @@ template <typename T> void check_unpack(SizeType nbits) {
     lengths.push_back(1001);
     lengths.push_back(4099);
     for (const auto n : lengths) {
-        std::vector<uint8_t> row(utils::packed_row_bytes(n, nbits) + 1);
+        std::vector<uint8_t> row(bit_pack_utils::packed_row_bytes(n, nbits) +
+                                 1);
         for (auto& b : row) {
             b = static_cast<uint8_t>(byte(gen));
         }
         std::vector<T> out(n + 1, T{123});
-        utils::unpack_row(row.data(), nbits, n, out.data());
+        bit_pack_utils::unpack_row(row.data(), nbits, n, out.data());
         for (SizeType i = 0; i < n; ++i) {
             uint32_t ref = 0;
             switch (nbits) {
             case 1:
-                ref = utils::read_packed_sample<1>(row.data(), i);
+                ref = bit_pack_utils::read_packed_sample<1>(row.data(), i);
                 break;
             case 2:
-                ref = utils::read_packed_sample<2>(row.data(), i);
+                ref = bit_pack_utils::read_packed_sample<2>(row.data(), i);
                 break;
             case 4:
-                ref = utils::read_packed_sample<4>(row.data(), i);
+                ref = bit_pack_utils::read_packed_sample<4>(row.data(), i);
                 break;
             case 8:
-                ref = utils::read_packed_sample<8>(row.data(), i);
+                ref = bit_pack_utils::read_packed_sample<8>(row.data(), i);
                 break;
             default:
-                ref = utils::read_packed_sample<16>(row.data(), i);
+                ref = bit_pack_utils::read_packed_sample<16>(row.data(), i);
                 break;
             }
             REQUIRE(out[i] == static_cast<T>(ref));

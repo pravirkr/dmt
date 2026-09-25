@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+
 from dmtlib import libdmt
 
 try:
@@ -104,7 +105,8 @@ def reference_fdmt(
     absolute channel-edge frequencies by the algorithm itself -- exactly as
     the classic implementation always assumed, whether or not the caller's
     actual values really are edges (that potential mismatch is the
-    experiment `test_correction_never_improves_recovery` runs)."""
+    experiment `test_correction_never_improves_recovery` runs).
+    """
     nchans, nsamps = waterfall.shape
     if nchans & (nchans - 1) != 0:
         raise ValueError("reference_fdmt requires a power-of-2 channel count")
@@ -133,7 +135,8 @@ CHAN_WIDTH = (TRUE_F_MAX - TRUE_F_MIN) / NCHANS
 def _algorithm_inputs(convention: str) -> tuple[float, float]:
     """What a caller following each convention would pass as f_min/f_max --
     the pulse itself is always injected using the TRUE physical band edges
-    (`TRUE_F_MIN`/`TRUE_F_MAX`); only the algorithm's belief changes."""
+    (`TRUE_F_MIN`/`TRUE_F_MAX`); only the algorithm's belief changes.
+    """
     if convention == "edge":
         return TRUE_F_MIN, TRUE_F_MAX
     if convention == "center_of_extreme_channels":

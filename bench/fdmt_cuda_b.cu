@@ -1,5 +1,5 @@
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
@@ -213,8 +213,8 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
         }
         return;
     }
-    std::vector<uint8_t> packed_h(nchans *
-                                  utils::packed_row_bytes(nsamps, nbits));
+    std::vector<uint8_t> packed_h(
+        nchans * bit_pack_utils::packed_row_bytes(nsamps, nbits));
     std::mt19937 gen(42);
     for (auto& b : packed_h) {
         b = static_cast<uint8_t>(gen() & 0xFFU);
@@ -250,8 +250,8 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
         }
         return;
     }
-    std::vector<uint8_t> packed_h(nchans *
-                                  utils::packed_row_bytes(nsamps, nbits));
+    std::vector<uint8_t> packed_h(
+        nchans * bit_pack_utils::packed_row_bytes(nsamps, nbits));
     for (auto& b : packed_h) {
         b = static_cast<uint8_t>(gen() & 0xFFU);
     }

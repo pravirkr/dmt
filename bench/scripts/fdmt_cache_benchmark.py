@@ -45,7 +45,7 @@ for p in (build_src, src_dir):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from dmtlib import FDMTCPU, FDMTPlan
+from dmtlib import FDMTCPU, FDMTPlan  # noqa: E402
 
 
 def analyze_plan_reuse(plan: FDMTPlan) -> dict:
@@ -83,21 +83,27 @@ def analyze_plan_reuse(plan: FDMTPlan) -> dict:
         head_reuses += h_reuse
         tail_reuses += t_reuse
 
-        iter_stats.append({
-            "level": l,
-            "n_coords": n_sum,
-            "unique_heads": unique_heads,
-            "unique_tails": unique_tails,
-            "head_reuse_pct": (h_reuse / n_sum) * 100.0,
-            "tail_reuse_pct": (t_reuse / n_sum) * 100.0,
-            "max_head_fanout": max_head_fanout,
-            "avg_head_fanout": avg_head_fanout,
-        })
+        iter_stats.append(
+            {
+                "level": l,
+                "n_coords": n_sum,
+                "unique_heads": unique_heads,
+                "unique_tails": unique_tails,
+                "head_reuse_pct": (h_reuse / n_sum) * 100.0,
+                "tail_reuse_pct": (t_reuse / n_sum) * 100.0,
+                "max_head_fanout": max_head_fanout,
+                "avg_head_fanout": avg_head_fanout,
+            }
+        )
 
     return {
         "total_coords": total_coords,
-        "overall_head_reuse_pct": (head_reuses / total_coords) * 100.0 if total_coords else 0.0,
-        "overall_tail_reuse_pct": (tail_reuses / total_coords) * 100.0 if total_coords else 0.0,
+        "overall_head_reuse_pct": (head_reuses / total_coords) * 100.0
+        if total_coords
+        else 0.0,
+        "overall_tail_reuse_pct": (tail_reuses / total_coords) * 100.0
+        if total_coords
+        else 0.0,
         "iter_stats": iter_stats,
     }
 
@@ -147,7 +153,7 @@ def benchmark_throughput_vs_blocksize(
 
         print(
             f"{nsamps:9d} | {row_kb:8.1f} KB | {three_rows_kb:10.1f} KB | "
-            f"{elapsed*1000:9.2f} ms | {throughput_m:11.1f} MSamp/s | {bw_gbps:10.2f} GB/s"
+            f"{elapsed * 1000:9.2f} ms | {throughput_m:11.1f} MSamp/s | {bw_gbps:10.2f} GB/s"
         )
     print("=" * 85)
 
@@ -238,8 +244,15 @@ def benchmark_fusion(
             base = None
             for depth in depths:
                 fdmt = FDMTCPU(
-                    1000.0, 1500.0, nchans, nsamps, 0.001, dt_max,
-                    use_box_smearing=smearing, mode=mode, nthreads=nthreads,
+                    1000.0,
+                    1500.0,
+                    nchans,
+                    nsamps,
+                    0.001,
+                    dt_max,
+                    use_box_smearing=smearing,
+                    mode=mode,
+                    nthreads=nthreads,
                     fuse_levels=depth,
                 )
                 t = _median_time(lambda: fdmt.execute(wf), reps)
@@ -267,8 +280,15 @@ def benchmark_packed(
     for nthreads in threads:
         engines = {
             int_tree: FDMTCPU(
-                1000.0, 1500.0, nchans, nsamps, 0.001, dt_max,
-                use_box_smearing=smearing, mode=mode, nthreads=nthreads,
+                1000.0,
+                1500.0,
+                nchans,
+                nsamps,
+                0.001,
+                dt_max,
+                use_box_smearing=smearing,
+                mode=mode,
+                nthreads=nthreads,
                 int_tree=int_tree,
             )
             for int_tree in (False, True)
@@ -314,9 +334,7 @@ def print_reuse_table(nchans: int, dt_max: int) -> None:
     print("=" * 80)
 
     traffic = analyze_merge_traffic(plan)
-    chunks = "  ".join(
-        f"chunk{ndt}={r:.3f}" for ndt, r in traffic["chunks"].items()
-    )
+    chunks = "  ".join(f"chunk{ndt}={r:.3f}" for ndt, r in traffic["chunks"].items())
     print(
         f"\nInput rows read per output row: merge loop={traffic['coord']:.3f}  "
         f"ideal blocking: {chunks}"
@@ -351,7 +369,8 @@ def main() -> None:
         print_reuse_table(args.nchans or 256, args.dt_max or 256)
     if run("blocksize"):
         benchmark_throughput_vs_blocksize(
-            nchans=args.nchans or 256, dt_max=args.dt_max or 256,
+            nchans=args.nchans or 256,
+            dt_max=args.dt_max or 256,
             block_sizes=args.nsamps,
         )
     if run("fusion"):

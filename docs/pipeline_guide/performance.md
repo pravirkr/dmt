@@ -184,7 +184,7 @@ dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
 dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
                               0, 1, true, "valid", false, /*nthreads=*/8);
 std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
-// packed: nchans * dmt::utils::packed_row_bytes(nsamps, nbits) bytes
+// packed: nchans * dmt::bit_pack_utils::packed_row_bytes(nsamps, nbits) bytes
 fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
 ```
 

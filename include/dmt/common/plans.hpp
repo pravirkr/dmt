@@ -2,7 +2,8 @@
 
 /**
  * @file plans.hpp
- * @brief Dedispersion execution plans, coordinate graphs, complexity calculators, and parameter containers.
+ * @brief Dedispersion execution plans, coordinate graphs, complexity
+ * calculators, and parameter containers.
  */
 
 #include <memory>
@@ -15,108 +16,96 @@
 
 namespace dmt::plans {
 
-/**
- * @brief Memory buffer shape parameters of the FDMT state buffer at a single tree iteration level.
- */
+/** @brief FDMT state-buffer shape at one tree iteration level. */
 struct FDMTShape {
-    SizeType nchans;       ///< Number of frequency subbands at this iteration
-    SizeType ndt_min;      ///< Minimum delay trials at the highest frequency subband
-    SizeType ndt_max;      ///< Maximum delay trials at the lowest frequency subband
-    SizeType ncoords;      ///< Total active coordinates in this iteration (nchans * sum ndt)
-    SizeType ncoords_sum;  ///< Number of coordinates that perform a two-operand addition
-    SizeType ncoords_copy; ///< Number of coordinates that simply copy data from the previous iteration
-    SizeType nsamps;       ///< Number of time samples allocated per coordinate
-    SizeType nelements;    ///< Total memory buffer elements (ncoords * nsamps)
-    SizeType dt_max;       ///< Maximum subband delay (dt) value at this iteration
+    SizeType nchans;       ///< Frequency subbands at this level
+    SizeType ndt_min;      ///< Min delay trials (highest-frequency subband)
+    SizeType ndt_max;      ///< Max delay trials (lowest-frequency subband)
+    SizeType ncoords;      ///< Active coordinates (nchans * sum of ndt)
+    SizeType ncoords_sum;  ///< Coordinates that add tail + head operands
+    SizeType ncoords_copy; ///< Coordinates that copy from the previous level
+    SizeType nsamps;       ///< Time samples allocated per coordinate
+    SizeType nelements;    ///< Buffer length in elements (ncoords * nsamps)
+    SizeType dt_max;       ///< Max subband delay (dt) at this level
 
     static constexpr std::string_view header_fmt();
     std::string to_string() const;
 };
 
 /**
- * @brief Execution coordinate and dependency edge of the FDMT tree DAG in a single iteration.
+ * @brief Execution coordinate and dependency edge of the FDMT tree DAG in a
+ * single iteration.
  *
  * Encapsulates the binary merge node:
  * @code
- * state[coord.buf_offset + t] = state_prev[tail_buf_offset + t] + state_prev[head_buf_offset + t - delay]
+ * state[coord.buf_offset + t] = state_prev[tail_buf_offset + t] +
+ * state_prev[head_buf_offset + t - delay]
  * @endcode
  */
 struct FDMTCoord {
-    SizeType i_sub;           ///< Frequency subband index
-    SizeType i_dt;            ///< Delay trial index within this subband
-    SizeType nsamps;          ///< Number of valid output time samples
-    SizeType buf_offset;      ///< Starting element offset in the destination state buffer
-    SizeType i_coord_tail;    ///< Linear coordinate index of the tail (lower subband) in previous level
-    SizeType i_coord_head;    ///< Linear coordinate index of the head (upper subband) in previous level
-    SizeType delay;           ///< Dispersive time shift in samples applied to the head operand
-    SizeType tail_buf_offset; ///< Starting element offset of tail operand in source buffer
-    SizeType tail_nsamps;     ///< Number of valid samples in tail operand buffer
-    SizeType head_buf_offset; ///< Starting element offset of head operand in source buffer
-    SizeType head_nsamps;     ///< Number of valid samples in head operand buffer
-    SizeType hist_offset{0};  ///< Offset in the cross-block overlap-save history buffer (mode="valid")
+    SizeType i_sub;        ///< Subband index
+    SizeType i_dt;         ///< Delay-trial index within the subband
+    SizeType nsamps;       ///< Valid output time samples
+    SizeType buf_offset;   ///< Start offset in the destination state buffer
+    SizeType i_coord_tail; ///< Prev-level linear index of tail (lower subband)
+    SizeType i_coord_head; ///< Prev-level linear index of head (upper subband)
+    SizeType delay;        ///< Head dispersive shift in samples
+    SizeType tail_buf_offset; ///< Tail start offset in source buffer
+    SizeType tail_nsamps;     ///< Valid samples in tail operand
+    SizeType head_buf_offset; ///< Head start offset in source buffer
+    SizeType head_nsamps;     ///< Valid samples in the head operand
+    SizeType hist_offset{0};  ///< Overlap-save history offset (mode="valid")
 };
 
-/**
- * @brief Delay grid and frequency bounds for a single subband in an FDMT tree iteration.
- */
+/** @brief Subband delay grid and MHz edges for one FDMT iteration. */
 struct FDMTCoordGrid {
-    std::vector<IndexType> dt_grid; ///< Delay trials for this subband in units of time samples
+    std::vector<IndexType> dt_grid; ///< Delay trials in sample units
     SizeType ndt;                   ///< Number of delay trials
-    SizeType coord_offset;          ///< Offset in the global coordinates array
-    float f_start;                  ///< Bottom edge frequency of this subband in MHz
-    float f_end;                    ///< Top edge frequency of this subband in MHz
+    SizeType coord_offset;          ///< Offset into the global coordinate list
+    float f_start;                  ///< Subband lower edge frequency (MHz)
+    float f_end;                    ///< Subband upper edge frequency (MHz)
 };
 
-/**
- * @brief Precomputed execution graph and memory layout container for an FDMT plan.
- */
+/** @brief Precomputed FDMT execution graph and memory layout. */
 struct FDMTPlanContainer {
-    std::vector<FDMTShape> state_shape;                 ///< State shape parameters for levels 0..niters
-    std::vector<std::vector<FDMTCoordGrid>> grids;      ///< Per-subband coordinate grids across iterations
-    std::vector<std::vector<FDMTCoord>> coordinates;    ///< Full coordinate list per iteration level
-    std::vector<std::vector<FDMTCoord>> coordinates_sum;  ///< Coordinates requiring addition per iteration
-    std::vector<std::vector<FDMTCoord>> coordinates_copy; ///< Coordinates requiring pass-through copy per iteration
-    std::vector<std::vector<IndexType>> dt_grid_sub_top;  ///< Temporary delay tracking arrays
-    std::vector<float> df_top;                            ///< Subband channel bandwidths (top half)
-    std::vector<float> df_bot;                            ///< Subband channel bandwidths (bottom half)
-    SizeType tree_history_size{0};                        ///< Total floats required for tree streaming history
+    std::vector<FDMTShape> state_shape; ///< State shape per level (0..niters)
+    std::vector<std::vector<FDMTCoordGrid>> grids;   ///< Subband grids per iter
+    std::vector<std::vector<FDMTCoord>> coordinates; ///< Coords per iteration
+    std::vector<std::vector<FDMTCoord>> coordinates_sum;  ///< Add ops per iter
+    std::vector<std::vector<FDMTCoord>> coordinates_copy; ///< Copy ops per iter
+    std::vector<std::vector<IndexType>> dt_grid_sub_top;  ///< Scratch dt grids
+    std::vector<float> df_top;     ///< Channel bandwidths (top half)
+    std::vector<float> df_bot;     ///< Channel bandwidths (bottom half)
+    SizeType tree_history_size{0}; ///< Floats needed for streaming tree history
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
 
     [[nodiscard]] SizeType get_memory_usage() const noexcept;
     [[nodiscard]] SizeType get_buffer_size() const noexcept;
-    [[nodiscard]] SizeType get_tree_history_size() const noexcept {
-        return tree_history_size;
-    }
 };
 
-/**
- * @brief Precomputed delay tables and channel masks for direct dedispersion (DDMT).
- */
+/** @brief Precomputed DDMT delay tables and channel masks. */
 struct DDMTPlanContainer {
-    std::vector<float> dm_arr;                    ///< DM trials in pc/cm^3 (size ndm)
-    std::vector<SizeType> delay_table;            ///< Delay in samples: shape (ndm, nchans), row-major
-    std::vector<float> fractional_delay_table;    ///< Per-channel fractional delay rate in bins/(pc cm^-3)
-    std::vector<uint8_t> kill_mask;               ///< Channel mask: 1 = active, 0 = masked out (RFI)
-    SizeType nchans;                              ///< Total frequency channels
-    SizeType nbits = 32;                          ///< Bit depth per sample (32, 16, 8, 4, 2, 1)
+    std::vector<float> dm_arr;         ///< DM trials (pc/cm^3), length ndm
+    std::vector<SizeType> delay_table; ///< Row-major delays (ndm x nchans)
+    std::vector<float> fractional_delay_table; ///< d(delay)/d(DM) per channel
+    std::vector<uint8_t> kill_mask; ///< Channel mask: 1=active, 0=RFI masked
+    SizeType nchans;                ///< Number of frequency channels
+    SizeType nbits = 32;            ///< Bits per sample (32, 16, 8, 4, 2, 1)
 };
 
-/**
- * @brief Performance and complexity statistics comparing FDMT to brute-force
- * dedispersion.
- */
+/** @brief FDMT vs brute-force dedispersion complexity metrics. */
 struct FDMTComplexity {
-    SizeType n_dt;             ///< Number of DM delay trials
-    SizeType n_chans;          ///< Number of frequency channels
-    SizeType brute_force_ops;  ///< Ops per time sample (n_dt * n_chans)
-    SizeType total_tree_nodes; ///< Total active coordinates across levels 1..M
-    SizeType sum_additions; ///< Total additions per sample across levels 1..M
-    SizeType copy_nodes;    ///< Total copy/forwarding nodes across levels 1..M
-    float ops_ratio;        ///< Theoretical speedup (excludes level-0)
-    std::vector<SizeType> ops_by_iter; ///< Additions per sample per level 0..M
-    std::vector<SizeType> nodes_by_iter; ///< Active coordinates per level 0..M
+    SizeType n_dt;             ///< DM delay trials
+    SizeType n_chans;          ///< Frequency channels
+    SizeType brute_force_ops;  ///< Ops per sample (n_dt * n_chans)
+    SizeType total_tree_nodes; ///< Active coordinates on levels 1..M
+    SizeType sum_additions;    ///< Additions per sample on levels 1..M
+    SizeType copy_nodes;       ///< Copy nodes on levels 1..M
+    float ops_ratio;           ///< Theoretical speedup (excludes level 0)
+    std::vector<SizeType> ops_by_iter;   ///< Adds per sample per level (0..M)
+    std::vector<SizeType> nodes_by_iter; ///< Active coords per level (0..M)
 
     std::string to_string() const;
 };
@@ -124,15 +113,16 @@ struct FDMTComplexity {
 /**
  * @brief Fast Dispersion Measure Transform (FDMT) execution plan.
  *
- * Precomputes the hierarchical dyadic subband merge tree, coordinate dependency DAG,
- * and memory requirements for incoherent dedispersion.
+ * Precomputes the hierarchical dyadic subband merge tree, coordinate dependency
+ * DAG, and memory requirements for incoherent dedispersion.
  *
  * The algorithm recursively merges subbands:
  * @f[
  * N_{\text{subband}} \to \frac{N_{\text{subband}}}{2} \to \dots \to 1
  * @f]
- * reducing computational complexity from brute-force @f$ O(N_{\text{chans}} \cdot N_{\text{samps}} \cdot N_{\text{DM}}) @f$
- * to @f$ O(N_{\text{chans}} \cdot N_{\text{samps}} \log_2 N_{\text{chans}}) @f$.
+ * reducing computational complexity from brute-force @f$ O(N_{\text{chans}}
+ * \cdot N_{\text{samps}} \cdot N_{\text{DM}}) @f$ to @f$ O(N_{\text{chans}}
+ * \cdot N_{\text{samps}} \log_2 N_{\text{chans}}) @f$.
  */
 class FDMTPlan {
 public:
@@ -144,11 +134,14 @@ public:
      * @param nchans Number of frequency channels. Must be a power of two.
      * @param nsamps Number of time samples per processing block.
      * @param tsamp Sampling interval in seconds.
-     * @param dt_max Maximum dispersive delay trial in samples across the full band.
-     * @param dt_min Minimum dispersive delay trial in samples across the band (supports negative delays, default: 0).
+     * @param dt_max Maximum dispersive delay trial in samples across the full
+     * band.
+     * @param dt_min Minimum dispersive delay trial in samples across the band
+     * (supports negative delays, default: 0).
      * @param dt_step Stride between delay trials (default: 1).
-     * @param mode Output time alignment mode: "valid" (overlap-save streaming history), "full" (zero-padded), or "roll" (cyclic) (default: "valid").
-     * @param verbose If true, logs plan initialization diagnostics.
+     * @param mode Output time alignment mode: "valid" (overlap-save streaming
+     * history), "full" (zero-padded), or "roll" (cyclic) (default: "valid").
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -159,22 +152,24 @@ public:
              IndexType dt_min      = 0,
              SizeType dt_step      = 1,
              std::string_view mode = "valid",
-             bool verbose          = false);
+             int verbose           = 0);
 
     /**
      * @brief Constructs an FDMT plan with a custom delay trial grid.
      *
-     * Top-down pruning derives optimal intermediate subband delay sets that guarantee
-     * only the requested final delay trials are materialized at the tree root.
+     * Top-down pruning derives optimal intermediate subband delay sets that
+     * guarantee only the requested final delay trials are materialized at the
+     * tree root.
      *
      * @param f_min Bottom edge frequency in MHz.
      * @param f_max Top edge frequency in MHz.
      * @param nchans Number of channels (must be a power of two).
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
-     * @param dt_grid Explicit list of delay trials in samples (e.g. from generate_optimal_dt_grid).
+     * @param dt_grid Explicit list of delay trials in samples (e.g. from
+     * generate_optimal_dt_grid).
      * @param mode Transform mode: "valid", "full", or "roll".
-     * @param verbose If true, logs plan summary.
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -183,22 +178,25 @@ public:
              float tsamp,
              const std::vector<IndexType>& dt_grid,
              std::string_view mode = "valid",
-             bool verbose          = false);
+             int verbose           = 0);
 
     /**
      * @brief Constructs an FDMT plan with a custom physical DM trial grid.
      *
-     * Converts trial DMs (in pc/cm^3) to delay samples using the dispersion constant:
-     * @f$ \Delta t = k_{\text{DM}} \cdot \text{DM} \cdot (f_{\text{min}}^{-2} - f_{\text{max}}^{-2}) / t_{\text{samp}} @f$.
+     * Converts trial DMs (in pc/cm^3) to delay samples using the dispersion
+     * constant:
+     * @f$ \Delta t = k_{\text{DM}} \cdot \text{DM} \cdot (f_{\text{min}}^{-2} -
+     * f_{\text{max}}^{-2}) / t_{\text{samp}} @f$.
      *
      * @param f_min Bottom edge frequency in MHz.
      * @param f_max Top edge frequency in MHz.
      * @param nchans Number of channels (must be a power of two).
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
-     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports non-uniform spacing and negative DMs).
+     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
+     * non-uniform spacing and negative DMs).
      * @param mode Transform mode: "valid", "full", or "roll".
-     * @param verbose If true, logs plan summary.
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -207,7 +205,7 @@ public:
              float tsamp,
              const std::vector<float>& dm_grid,
              std::string_view mode = "valid",
-             bool verbose          = false);
+             int verbose           = 0);
 
     // --- Rule of five: PIMPL ---
     ~FDMTPlan();
@@ -253,22 +251,28 @@ public:
     [[nodiscard]] std::vector<float> get_smearing_grid_final() const noexcept;
 
     /**
-     * @brief Decompiles a final DM trial's tree lineage into per-channel time shifts.
+     * @brief Decompiles a final DM trial's tree lineage into per-channel time
+     * shifts.
      *
-     * Used by @ref dmt::algorithms::add_frb_track to inject a synthetic pulse landing
-     * exactly on trial @p dm_idx at the tree output.
+     * Used by @ref dmt::algorithms::add_frb_track to inject a synthetic pulse
+     * landing exactly on trial @p dm_idx at the tree output.
      *
-     * @param dm_idx Index in the final DM trial grid (0 <= dm_idx < get_dmt_ndms()).
-     * @return Vector of length nchans containing sample shifts relative to reference channel.
+     * @param dm_idx Index in the final DM trial grid (0 <= dm_idx <
+     * get_dmt_ndms()).
+     * @return Vector of length nchans containing sample shifts relative to
+     * reference channel.
      * @throws std::out_of_range if dm_idx is invalid.
      */
     [[nodiscard]] std::vector<IndexType> trace_dm(SizeType dm_idx) const;
 
     /**
-     * @brief Computes theoretical noise variance for a DM trial and boxcar width.
+     * @brief Computes theoretical noise variance for a DM trial and boxcar
+     * width.
      * @param dm_idx DM trial index.
-     * @param boxcar_width Downsampling / boxcar filter width in time samples (default: 1).
-     * @param use_box_smearing Whether intra-channel boxcar smearing was applied in the tree.
+     * @param boxcar_width Downsampling / boxcar filter width in time samples
+     * (default: 1).
+     * @param use_box_smearing Whether intra-channel boxcar smearing was applied
+     * in the tree.
      * @return Theoretical noise variance for unit input Gaussian noise.
      */
     [[nodiscard]] float
@@ -277,11 +281,13 @@ public:
                            bool use_box_smearing = true) const;
 
     /**
-     * @brief Computes theoretical noise standard deviation for a DM trial and boxcar width.
+     * @brief Computes theoretical noise standard deviation for a DM trial and
+     * boxcar width.
      * @param dm_idx DM trial index.
      * @param boxcar_width Boxcar filter width in samples.
      * @param use_box_smearing Whether boxcar smearing was enabled.
-     * @return Theoretical noise standard deviation (sqrt of effective variance).
+     * @return Theoretical noise standard deviation (sqrt of effective
+     * variance).
      */
     [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
                                             SizeType boxcar_width,
@@ -300,7 +306,8 @@ public:
     /**
      * @brief Evaluates theoretical noise sigma profile across all DM trials.
      *
-     * Dividing the raw output DMT matrix by this profile yields exact matched-filter S/N.
+     * Dividing the raw output DMT matrix by this profile yields exact
+     * matched-filter S/N.
      *
      * @param boxcar_width Boxcar filter width in samples.
      * @param use_box_smearing Whether boxcar smearing was enabled.
@@ -314,18 +321,22 @@ public:
     [[nodiscard]] SizeType get_dmt_ndms() const noexcept;
     /// @brief Number of time samples per DM trial in the output transform
     [[nodiscard]] SizeType get_dmt_nsamps() const noexcept;
-    /// @brief Total elements in the final DMT output buffer (get_dmt_ndms() * get_dmt_nsamps())
+    /// @brief Total elements in the final DMT output buffer (get_dmt_ndms() *
+    /// get_dmt_nsamps())
     [[nodiscard]] SizeType get_dmt_size() const noexcept;
-    /// @brief Scratch buffer size in floats needed for internal ping-pong state buffers
+    /// @brief Scratch buffer size in floats needed for internal ping-pong state
+    /// buffers
     [[nodiscard]] SizeType get_buffer_size() const noexcept;
     /// @brief Overlap-save history size in floats
     [[nodiscard]] SizeType get_history_size() const noexcept;
     /// @brief Boxcar smearing initialization history size in floats
     [[nodiscard]] SizeType get_history_init_size() const noexcept;
-    /// @brief Cross-block tree streaming history buffer size in floats (mode="valid")
+    /// @brief Cross-block tree streaming history buffer size in floats
+    /// (mode="valid")
     [[nodiscard]] SizeType get_tree_history_size() const noexcept;
 
-    /// @brief Overlap length L = max(|dt_min|, |dt_max|) for FDMT-FFT full/valid modes
+    /// @brief Overlap length L = max(|dt_min|, |dt_max|) for FDMT-FFT
+    /// full/valid modes
     [[nodiscard]] SizeType get_fft_overlap() const noexcept;
     /// @brief FFT length for FDMT-FFT convolution
     [[nodiscard]] SizeType get_fft_size() const noexcept;
@@ -335,13 +346,16 @@ public:
     [[nodiscard]] SizeType get_fft_buffer_size() const noexcept;
     /// @brief Maximum shift in samples across all tree coordinates
     [[nodiscard]] SizeType get_max_shift() const noexcept;
-    /// @brief Precomputed complex phasor rotation table of shape (max_shift + 1, n_bins)
+    /// @brief Precomputed complex phasor rotation table of shape (max_shift +
+    /// 1, n_bins)
     [[nodiscard]] std::vector<ComplexType> get_fft_phasor_table() const;
 
     /**
-     * @brief Computes complexity metrics comparing FDMT to direct brute-force dedispersion.
+     * @brief Computes complexity metrics comparing FDMT to direct brute-force
+     * dedispersion.
      * @param use_box_smearing Whether boxcar smearing is enabled.
-     * @return FDMTComplexity struct containing node counts, operations, and speedup ratio.
+     * @return FDMTComplexity struct containing node counts, operations, and
+     * speedup ratio.
      */
     [[nodiscard]] FDMTComplexity
     get_complexity(bool use_box_smearing = true) const noexcept;
@@ -360,7 +374,8 @@ public:
     [[nodiscard]] const std::vector<FDMTShape>&
     get_state_shapes() const noexcept;
 
-    /// @brief Total operations (additions) per time sample across all levels (0..M)
+    /// @brief Total operations (additions) per time sample across all levels
+    /// (0..M)
     [[nodiscard]] SizeType
     get_total_operations(bool use_box_smearing = true) const noexcept;
 
@@ -368,11 +383,13 @@ public:
     [[nodiscard]] SizeType
     get_total_flops(bool use_box_smearing = true) const noexcept;
 
-    /// @brief Theoretical compute throughput (GFLOPs/sec) required for real-time processing
+    /// @brief Theoretical compute throughput (GFLOPs/sec) required for
+    /// real-time processing
     [[nodiscard]] float
     get_theoretical_gflops(bool use_box_smearing = true) const noexcept;
 
-    /// @brief Prints human-readable summary of plan dimensions, memory, and parameters
+    /// @brief Prints human-readable summary of plan dimensions, memory, and
+    /// parameters
     void print_summary(std::string_view prefix = "") const;
 
 private:
@@ -384,8 +401,8 @@ private:
  * @brief Coherent Fast Dispersion Measure Transform (CohFDMT) execution plan.
  *
  * Implements the hybrid coherent/incoherent search algorithm (Zackay et al.).
- * Combines coherent dedispersion over sparse coarse DM trials on raw baseband voltages
- * with a fine-resolution FDMT tree covering residual subband delays.
+ * Combines coherent dedispersion over sparse coarse DM trials on raw baseband
+ * voltages with a fine-resolution FDMT tree covering residual subband delays.
  */
 class CohFDMTPlan {
 public:
@@ -395,15 +412,20 @@ public:
      * @param f_center Central radio frequency of the observation in MHz.
      * @param bw_sub Subband bandwidth in MHz.
      * @param nsub Number of subbands.
-     * @param tbin Raw baseband voltage time resolution in seconds (1 / total_bandwidth).
+     * @param tbin Raw baseband voltage time resolution in seconds (1 /
+     * total_bandwidth).
      * @param nbin FFT block size for coherent dedispersion.
-     * @param nfft Number of contiguous FFT blocks processed per coherent segment.
-     * @param t_p Desired output time resolution of detected Stokes I samples in seconds.
+     * @param nfft Number of contiguous FFT blocks processed per coherent
+     * segment.
+     * @param t_p Desired output time resolution of detected Stokes I samples in
+     * seconds.
      * @param dm_max Maximum coherent DM trial in pc/cm^3.
      * @param dm_min Minimum coherent DM trial in pc/cm^3 (default: 0).
-     * @param noverlap Overlap length in samples for overlap-save baseband convolution (default: 8192).
-     * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP" (default: "PRITF").
-     * @param verbose If true, logs plan initialization diagnostics.
+     * @param noverlap Overlap length in samples for overlap-save baseband
+     * convolution (default: 8192).
+     * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
+     * (default: "PRITF").
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
      */
     CohFDMTPlan(float f_center,
                 float bw_sub,
@@ -416,7 +438,7 @@ public:
                 float dm_min                = 0.0F,
                 SizeType noverlap           = 8192,
                 std::string_view data_order = "PRITF",
-                bool verbose                = false);
+                int verbose                 = 0);
 
     // --- Rule of five: PIMPL ---
     ~CohFDMTPlan();
@@ -476,7 +498,8 @@ public:
     [[nodiscard]] float get_tsamp() const noexcept;
     /// @brief Maximum residual delay in time samples for the fine FDMT tree
     [[nodiscard]] SizeType get_dt_max() const noexcept;
-    /// @brief Minimum (symmetric negative) delay in samples for the fine FDMT tree
+    /// @brief Minimum (symmetric negative) delay in samples for the fine FDMT
+    /// tree
     [[nodiscard]] IndexType get_dt_min() const noexcept;
 
     /// @brief Size of the complex chirp phase lookup table
@@ -501,9 +524,11 @@ public:
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1,
                              bool use_box_smearing = true) const;
-    /// @brief Cumulative sample accumulation count per channel-integrated DM trial
+    /// @brief Cumulative sample accumulation count per channel-integrated DM
+    /// trial
     [[nodiscard]] std::vector<float> get_cumulative_count_grid() const;
-    /// @brief Total float elements in the final output DMT transform (ndm * dmt_nsamps)
+    /// @brief Total float elements in the final output DMT transform (ndm *
+    /// dmt_nsamps)
     [[nodiscard]] SizeType get_dmt_size() const;
     /// @brief Scaling factor applied to phase chirps
     [[nodiscard]] float get_chirp_scale() const noexcept;
@@ -519,7 +544,8 @@ private:
 };
 
 /**
- * @brief Configuration parameters for generating an optimal DM trial grid using Lina Levin's formulation.
+ * @brief Configuration parameters for generating an optimal DM trial grid using
+ * Lina Levin's formulation.
  *
  * Implements the pulse-broadening tolerance criterion from Levin (2012):
  * @f$ W_{\text{eff}} \le \text{tol} \cdot W_0 @f$.
@@ -528,14 +554,16 @@ struct LevinConfig {
     float dm_start;    ///< Lowest DM trial in pc/cm^3 (must be >= 0)
     float dm_end;      ///< Upper DM search bound in pc/cm^3
     float pulse_width; ///< Intrinsic pulse width in seconds
-    float tol;         ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must be > 1.0)
+    float tol; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must
+               ///< be > 1.0)
 };
 
 /**
  * @brief Direct Dispersion Measure Transform (DDMT) execution plan.
  *
- * Precomputes per-channel delay tables, fractional delays, and channel kill masks
- * for brute-force delay-and-sum dedispersion on float or packed-integer filterbanks.
+ * Precomputes per-channel delay tables, fractional delays, and channel kill
+ * masks for brute-force delay-and-sum dedispersion on float or packed-integer
+ * filterbanks.
  */
 class DDMTPlan {
 public:
@@ -549,9 +577,11 @@ public:
      * @param dm_max Maximum trial DM in pc/cm^3.
      * @param dm_step Linear spacing between DM trials in pc/cm^3.
      * @param dm_min Minimum trial DM in pc/cm^3 (default: 0).
-     * @param verbose If true, logs initialization summary.
-     * @param nbits Precision per sample: 32 (float), or 1, 2, 4, 8, 16 (packed integers).
-     * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=mask out).
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param nbits Precision per sample: 32 (float), or 1, 2, 4, 8, 16 (packed
+     * integers).
+     * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=mask
+     * out).
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -560,7 +590,7 @@ public:
              float dm_max,
              float dm_step,
              float dm_min                       = 0.0F,
-             bool verbose                       = false,
+             int verbose                        = 0,
              SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
@@ -572,7 +602,7 @@ public:
      * @param nchans Number of frequency channels.
      * @param tsamp Sampling interval in seconds.
      * @param dm_arr Explicit span of DM trials in pc/cm^3.
-     * @param verbose If true, logs initialization summary.
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
      */
@@ -581,7 +611,7 @@ public:
              SizeType nchans,
              float tsamp,
              std::span<const float> dm_arr,
-             bool verbose                       = false,
+             int verbose                        = 0,
              SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
@@ -592,8 +622,9 @@ public:
      * @param f_max Top edge frequency in MHz.
      * @param nchans Number of channels.
      * @param tsamp Sampling interval in seconds.
-     * @param levin LevinConfig specifying dm_start, dm_end, pulse_width, and tol.
-     * @param verbose If true, logs initialization summary.
+     * @param levin LevinConfig specifying dm_start, dm_end, pulse_width, and
+     * tol.
+     * @param verbose 0 = silent, 1 = info, 2 = debug.
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
      */
@@ -602,7 +633,7 @@ public:
              SizeType nchans,
              float tsamp,
              const LevinConfig& levin,
-             bool verbose                       = false,
+             int verbose                        = 0,
              SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
@@ -628,16 +659,19 @@ public:
     [[nodiscard]] const DDMTPlanContainer& get_container() const noexcept;
     /// @brief DM grid in pc/cm^3
     [[nodiscard]] std::vector<float> get_dm_grid() const noexcept;
-    /// @brief Per-channel fractional delay rate array (size nchans) in bins / (pc cm^-3)
+    /// @brief Per-channel fractional delay rate array (size nchans) in bins /
+    /// (pc cm^-3)
     [[nodiscard]] std::vector<float>
     get_fractional_delay_table() const noexcept;
-    /// @brief Bit precision per input sample (32 => float, 1/2/4/8/16 => packed integer)
+    /// @brief Bit precision per input sample (32 => float, 1/2/4/8/16 => packed
+    /// integer)
     [[nodiscard]] SizeType get_nbits() const noexcept;
     /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans
     [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept;
 
     /**
-     * @brief Replaces the channel kill mask without recomputing the delay table.
+     * @brief Replaces the channel kill mask without recomputing the delay
+     * table.
      * @param kill_mask New per-channel mask (size must equal nchans).
      * @throws std::invalid_argument if kill_mask.size() != nchans.
      */
@@ -654,7 +688,8 @@ public:
     [[nodiscard]] std::vector<float> get_effective_sigma_grid() const noexcept;
 
     /**
-     * @brief Generates an optimal DM trial grid using Lina Levin's tolerance rule.
+     * @brief Generates an optimal DM trial grid using Lina Levin's tolerance
+     * rule.
      *
      * @param dm_start Lowest trial DM in pc/cm^3.
      * @param dm_end Highest search DM in pc/cm^3.

@@ -16,9 +16,12 @@ import numpy as np
 _DISP_COEFF = -2.0  # f^-2 dispersion law -- matches dmt's kDispCoeff
 
 
-def channel_edges(f_min: float, f_max: float, nchans: int) -> tuple[np.ndarray, np.ndarray]:
+def channel_edges(
+    f_min: float, f_max: float, nchans: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Per-channel [f_lo, f_hi) edges, in dmt's fixed band-edge convention
-    (`f_min`/`f_max` are the absolute edges of the outermost channels)."""
+    (`f_min`/`f_max` are the absolute edges of the outermost channels).
+    """
     edges = np.linspace(f_min, f_max, nchans + 1)
     return edges[:-1], edges[1:]
 
@@ -27,7 +30,8 @@ def channel_delay_fraction(f: np.ndarray, f_min: float, f_max: float) -> np.ndar
     """Fraction of the total [f_min, f_max] dispersive delay accumulated by
     frequency `f`, referenced to zero delay at `f_max` -- dmt's own `cff`
     ratio (`lib/dm_utils.cpp`), inlined here since it's a two-line closed
-    form and not worth a binding just for this."""
+    form and not worth a binding just for this.
+    """
     num = f**_DISP_COEFF - f_max**_DISP_COEFF
     den = f_min**_DISP_COEFF - f_max**_DISP_COEFF
     return num / den

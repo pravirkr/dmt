@@ -9,7 +9,7 @@
 #include "dmt/common/types.hpp"
 
 #ifdef DMT_ENABLE_CUDA
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif
 
 namespace dmt::test {
@@ -23,7 +23,8 @@ inline constexpr float kTsamp         = 0.001F;
 inline constexpr IndexType kDtMax     = 32;
 inline constexpr double kParityMargin = 1.0E-4;
 
-inline std::vector<float> sequential_waterfall(SizeType nchans, SizeType nsamps,
+inline std::vector<float> sequential_waterfall(SizeType nchans,
+                                               SizeType nsamps,
                                                SizeType modulus = 17,
                                                SizeType offset  = 1) {
     std::vector<float> waterfall(nchans * nsamps);
@@ -35,8 +36,7 @@ inline std::vector<float> sequential_waterfall(SizeType nchans, SizeType nsamps,
 
 inline std::vector<float> prefix(const std::vector<float>& values, SizeType n) {
     REQUIRE(values.size() >= n);
-    return {values.begin(),
-            values.begin() + static_cast<std::ptrdiff_t>(n)};
+    return {values.begin(), values.begin() + static_cast<std::ptrdiff_t>(n)};
 }
 
 inline void require_exact(const std::vector<float>& actual,
@@ -45,8 +45,10 @@ inline void require_exact(const std::vector<float>& actual,
 }
 
 inline void require_exact(const std::vector<float>& actual,
-                          const std::vector<float>& expected, SizeType n) {
-    REQUIRE_THAT(prefix(actual, n), Catch::Matchers::Equals(prefix(expected, n)));
+                          const std::vector<float>& expected,
+                          SizeType n) {
+    REQUIRE_THAT(prefix(actual, n),
+                 Catch::Matchers::Equals(prefix(expected, n)));
 }
 
 inline void require_approx(const std::vector<float>& actual,
@@ -56,7 +58,8 @@ inline void require_approx(const std::vector<float>& actual,
 }
 
 inline void require_approx(const std::vector<float>& actual,
-                           const std::vector<float>& expected, SizeType n,
+                           const std::vector<float>& expected,
+                           SizeType n,
                            double margin = kParityMargin) {
     REQUIRE_THAT(prefix(actual, n),
                  Catch::Matchers::Approx(prefix(expected, n)).margin(margin));

@@ -109,7 +109,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_packed)
             fdmt.execute(waterfall, dmt);
         }
     } else {
-        const auto row_bytes = utils::packed_row_bytes(nsamps, nbits);
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         std::vector<uint8_t> packed(nchans * row_bytes);
         std::uniform_int_distribution<int> dis(0, 255);
         std::generate(packed.begin(), packed.end(),

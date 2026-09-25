@@ -39,12 +39,12 @@ if(CMAKE_CUDA_COMPILER)
 endif()
 
 target_link_libraries(
-  ${TARGET_BENCHMARKS} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
-                               ${DMT_COMPILE_OPTIONS}
+  ${TARGET_BENCHMARKS}
+  PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          benchmark::benchmark_main
+          OpenMP::OpenMP_CXX
+          ${DMT_COMPILE_OPTIONS}
 )
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(${TARGET_BENCHMARKS} PRIVATE OpenMP::OpenMP_CXX)
-endif()
 
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${DMT_CUDA_OPTIONS})
@@ -61,8 +61,10 @@ endif()
 # main() (incompatible with benchmark::benchmark_main, which the timing
 # executable above links).
 set(BENCH_SOURCES_MEM
-    ${CMAKE_CURRENT_SOURCE_DIR}/mem_b_main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_mem_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_mem_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_mem_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mem_b_main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_mem_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_mem_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_mem_b.cpp
 )
 
 add_executable(${TARGET_BENCHMARKS_MEM} ${BENCH_SOURCES_MEM})
@@ -72,9 +74,9 @@ target_include_directories(
 )
 
 target_link_libraries(
-  ${TARGET_BENCHMARKS_MEM} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark
-                                   ${DMT_COMPILE_OPTIONS}
+  ${TARGET_BENCHMARKS_MEM}
+  PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          benchmark::benchmark
+          OpenMP::OpenMP_CXX
+          ${DMT_COMPILE_OPTIONS}
 )
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(${TARGET_BENCHMARKS_MEM} PRIVATE OpenMP::OpenMP_CXX)
-endif()

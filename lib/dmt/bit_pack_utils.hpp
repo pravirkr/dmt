@@ -8,39 +8,73 @@
 
 #include "dmt/common/types.hpp"
 
-#ifdef __CUDACC__
-#define DMT_HOST_DEVICE __host__ __device__
-#else
-#define DMT_HOST_DEVICE
-#endif
+namespace dmt::bit_pack_utils {
 
-namespace dmt::utils {
+namespace detail {
+
+/// Compile-time widths supported by the packed-sample helpers.
+constexpr bool is_packed_nbits(unsigned nbits) noexcept {
+    return nbits == 1 || nbits == 2 || nbits == 4 || nbits == 8 || nbits == 16;
+}
+
+/** @brief One LUT row: unpacked lanes for a single packed byte (LSB-first). */
+template <unsigned NBITS> struct UnpackLane {
+    static constexpr unsigned kPerByte = 8U / NBITS;
+    std::array<uint8_t, kPerByte> v;
+};
 
 /**
- * @brief Read the NBITS-wide sample at `sample_idx` from a packed row.
- * @details
- * Matches dedisp packing convention: for NBITS < 8, samples are packed
- * LSB-first within a byte (sample 0 occupies the low NBITS bits); for
- * NBITS == 8 a sample is exactly one byte; for NBITS == 16 a sample is two
- * bytes, little-endian. NBITS == 32 (float) never goes through this path.
+ * @brief 256-entry unpack LUT for sub-byte @c NBITS.
+ *
+ * The table blob is cache-line aligned.
+ */
+template <unsigned NBITS> struct UnpackTable {
+    static_assert(NBITS == 1 || NBITS == 2 || NBITS == 4);
+
+    static constexpr unsigned kPerByte = 8U / NBITS;
+    static constexpr unsigned kMask    = (1U << NBITS) - 1U;
+
+    struct alignas(64) Table {
+        std::array<UnpackLane<NBITS>, 256> rows{};
+    };
+
+    static constexpr Table kTable = []() constexpr {
+        Table t{};
+        for (uint32_t byte = 0; byte < 256; ++byte) {
+            for (uint32_t lane = 0; lane < kPerByte; ++lane) {
+                t.rows[byte].v[lane] =
+                    static_cast<uint8_t>((byte >> (lane * NBITS)) & kMask);
+            }
+        }
+        return t;
+    }();
+};
+
+} // namespace detail
+
+/**
+ * @brief Read one @c NBITS-wide unsigned sample from a packed channel row.
+ * @param row Base of the row (@c packed_row_bytes(nsamps, NBITS) bytes).
+ * @param sample_idx Sample index along time (0 .. nsamps-1).
  */
 template <unsigned NBITS>
-DMT_HOST_DEVICE inline uint32_t read_packed_sample(const uint8_t* row,
-                                                   SizeType sample_idx) noexcept {
-    static_assert(NBITS == 1 || NBITS == 2 || NBITS == 4 || NBITS == 8 ||
-                      NBITS == 16,
+DMT_HD inline uint32_t read_packed_sample(const uint8_t* row,
+                                          SizeType sample_idx) noexcept {
+    static_assert(detail::is_packed_nbits(NBITS),
                   "read_packed_sample: NBITS must be 1, 2, 4, 8, or 16");
     if constexpr (NBITS == 16) {
-        const auto* p = row + (sample_idx * 2);
-        return static_cast<uint32_t>(p[0]) |
-               (static_cast<uint32_t>(p[1]) << 8U);
+        // Byte loads: a uint16_t load faults on the GPU when the row is not
+        // 2-byte aligned (time-major samples are only byte-aligned).
+        const SizeType byte = sample_idx * 2;
+        return static_cast<uint32_t>(row[byte]) |
+               (static_cast<uint32_t>(row[byte + 1]) << 8);
     } else if constexpr (NBITS == 8) {
         return row[sample_idx];
     } else {
-        constexpr int kPerByte   = 8 / static_cast<int>(NBITS);
-        constexpr uint32_t kMask = (1U << NBITS) - 1U;
-        const auto byte_idx      = sample_idx / static_cast<SizeType>(kPerByte);
-        const auto sub_idx = sample_idx % static_cast<SizeType>(kPerByte);
+        constexpr unsigned kPerByte = 8U / NBITS;
+        constexpr uint32_t kMask    = (1U << NBITS) - 1U;
+        const auto byte_idx = sample_idx / static_cast<SizeType>(kPerByte);
+        const auto sub_idx  = sample_idx % static_cast<SizeType>(kPerByte);
         return (static_cast<uint32_t>(row[byte_idx]) >>
                 (static_cast<unsigned>(sub_idx) * NBITS)) &
                kMask;
@@ -48,42 +82,44 @@ DMT_HOST_DEVICE inline uint32_t read_packed_sample(const uint8_t* row,
 }
 
 /**
- * @brief Write the NBITS-wide sample at `sample_idx` into a packed row.
+ * @brief Write one @c NBITS-wide sample into a packed channel row.
+ * @param val Sample value; only the low @c NBITS bits are stored.
  */
 template <unsigned NBITS>
-DMT_HOST_DEVICE inline void write_packed_sample(uint8_t* row,
-                                                SizeType sample_idx,
-                                                uint32_t val) noexcept {
-    static_assert(NBITS == 1 || NBITS == 2 || NBITS == 4 || NBITS == 8 ||
-                      NBITS == 16,
+DMT_HD inline void
+write_packed_sample(uint8_t* row, SizeType sample_idx, uint32_t val) noexcept {
+    static_assert(detail::is_packed_nbits(NBITS),
                   "write_packed_sample: NBITS must be 1, 2, 4, 8, or 16");
     if constexpr (NBITS == 16) {
-        auto* p = row + (sample_idx * 2);
-        p[0] = static_cast<uint8_t>(val & 0xFFU);
-        p[1] = static_cast<uint8_t>((val >> 8U) & 0xFFU);
+        const SizeType byte = sample_idx * 2;
+        row[byte]           = static_cast<uint8_t>(val & 0xFFU);
+        row[byte + 1]       = static_cast<uint8_t>((val >> 8) & 0xFFU);
     } else if constexpr (NBITS == 8) {
         row[sample_idx] = static_cast<uint8_t>(val);
     } else {
-        constexpr int kPerByte   = 8 / static_cast<int>(NBITS);
-        constexpr uint32_t kMask = (1U << NBITS) - 1U;
-        const auto byte_idx      = sample_idx / static_cast<SizeType>(kPerByte);
-        const auto sub_idx       = sample_idx % static_cast<SizeType>(kPerByte);
-        const auto shift         = static_cast<unsigned>(sub_idx) * NBITS;
-        row[byte_idx] = static_cast<uint8_t>(
+        constexpr unsigned kPerByte = 8U / NBITS;
+        constexpr uint32_t kMask    = (1U << NBITS) - 1U;
+        const auto byte_idx = sample_idx / static_cast<SizeType>(kPerByte);
+        const auto sub_idx  = sample_idx % static_cast<SizeType>(kPerByte);
+        const auto shift    = static_cast<unsigned>(sub_idx) * NBITS;
+        row[byte_idx]       = static_cast<uint8_t>(
             (row[byte_idx] & ~(kMask << shift)) | ((val & kMask) << shift));
     }
 }
 
 /**
- * @brief Copy a slice of `count` packed samples from `src` to `dst`.
- * Handles sub-byte bit alignment for NBITS in {1, 2, 4} when offsets are not byte-aligned.
+ * @brief Copy @p count packed samples from @p src to @p dst at given offsets.
+ *
+ * For sub-byte widths, uses a byte @c memcpy when both offsets and @p count are
+ * aligned to whole bytes; otherwise falls back to per-sample read/write.
  */
 template <unsigned NBITS>
-inline void copy_packed_samples(const uint8_t* src, SizeType src_offset,
-                                uint8_t* dst, SizeType dst_offset,
+inline void copy_packed_samples(const uint8_t* src,
+                                SizeType src_offset,
+                                uint8_t* dst,
+                                SizeType dst_offset,
                                 SizeType count) noexcept {
-    static_assert(NBITS == 1 || NBITS == 2 || NBITS == 4 || NBITS == 8 ||
-                      NBITS == 16,
+    static_assert(detail::is_packed_nbits(NBITS),
                   "copy_packed_samples: NBITS must be 1, 2, 4, 8, or 16");
     if (count == 0) {
         return;
@@ -107,8 +143,8 @@ inline void copy_packed_samples(const uint8_t* src, SizeType src_offset,
     }
 }
 
-/// @brief Bytes needed to store `nsamps` samples of `nbits` width,
-/// LSB-first-packed for nbits < 8, byte/word-aligned otherwise.
+/** @brief Byte length of one channel row holding @p nsamps samples at @p nbits.
+ */
 constexpr SizeType packed_row_bytes(SizeType nsamps, SizeType nbits) noexcept {
     if (nbits < 8) {
         return ((nsamps * nbits) + 7) / 8;
@@ -116,133 +152,88 @@ constexpr SizeType packed_row_bytes(SizeType nsamps, SizeType nbits) noexcept {
     return nsamps * (nbits / 8);
 }
 
-/// @brief Maximum value representable by an NBITS-wide unsigned sample.
+/** @brief Largest unsigned value storable in @p nbits (@c (1&lt;&lt;nbits)-1).
+ */
 constexpr uint32_t max_sample_value(SizeType nbits) noexcept {
     return (1U << nbits) - 1U;
 }
 
-// Host-only below: bulk row unpacking (lookup tables, std::memcpy) is never
-// called from device code, so it is kept out of the CUDA device pass.
-#if !defined(__CUDA_ARCH__)
+#ifndef __CUDA_ARCH__
 namespace detail {
 
-struct alignas(8) Byte8 {
-    uint8_t v[8];
-};
-struct alignas(4) Byte4 {
-    uint8_t v[4];
-};
-struct alignas(2) Byte2 {
-    uint8_t v[2];
-};
+template <unsigned NBITS, typename T>
+DMT_H void unpack_row_subbyte(const uint8_t* __restrict__ row,
+                              SizeType nsamps,
+                              T* __restrict__ out) noexcept {
+    constexpr SizeType kPerByte = 8 / NBITS;
+    const SizeType nfull        = nsamps / kPerByte;
+    const SizeType tail_start   = nfull * kPerByte;
 
-template <unsigned NBITS> struct UnpackTable;
-
-template <> struct UnpackTable<1> {
-    static constexpr auto table = []() constexpr {
-        std::array<Byte8, 256> t{};
-        for (uint32_t i = 0; i < 256; ++i) {
-            for (uint32_t k = 0; k < 8; ++k) {
-                t[i].v[k] = static_cast<uint8_t>((i >> k) & 1U);
+    if constexpr (std::is_same_v<T, uint8_t>) {
+        const auto& lut_rows = UnpackTable<NBITS>::kTable.rows;
+        for (SizeType b = 0; b < nfull; ++b) {
+            std::memcpy(out + (b * kPerByte), lut_rows[row[b]].v.data(),
+                        kPerByte);
+        }
+    } else {
+        constexpr uint32_t kMask = (1U << NBITS) - 1U;
+        for (SizeType b = 0; b < nfull; ++b) {
+            const auto byte = static_cast<uint32_t>(row[b]);
+#if defined(_OPENMP) && !defined(__CUDACC__)
+#pragma omp simd
+#endif
+            for (SizeType k = 0; k < kPerByte; ++k) {
+                out[(b * kPerByte) + k] = static_cast<T>(
+                    (byte >> (static_cast<unsigned>(k) * NBITS)) & kMask);
             }
         }
-        return t;
-    }();
-};
-
-template <> struct UnpackTable<2> {
-    static constexpr auto table = []() constexpr {
-        std::array<Byte4, 256> t{};
-        for (uint32_t i = 0; i < 256; ++i) {
-            for (uint32_t k = 0; k < 4; ++k) {
-                t[i].v[k] = static_cast<uint8_t>((i >> (k * 2U)) & 3U);
-            }
-        }
-        return t;
-    }();
-};
-
-template <> struct UnpackTable<4> {
-    static constexpr auto table = []() constexpr {
-        std::array<Byte2, 256> t{};
-        for (uint32_t i = 0; i < 256; ++i) {
-            for (uint32_t k = 0; k < 2; ++k) {
-                t[i].v[k] = static_cast<uint8_t>((i >> (k * 4U)) & 15U);
-            }
-        }
-        return t;
-    }();
-};
+    }
+    for (SizeType i = tail_start; i < nsamps; ++i) {
+        out[i] = static_cast<T>(read_packed_sample<NBITS>(row, i));
+    }
+}
 
 } // namespace detail
 
 /**
- * @brief Unpack the first `nsamps` NBITS-wide samples of a packed row into
- * `out`, converting each to `T`. Same packing convention as
- * read_packed_sample(); sub-byte widths are unpacked a whole byte at a time
- * (a 256-entry lookup table for uint8_t output, constant shift/mask lanes
- * otherwise).
+ * @brief Unpack the first @p nsamps samples of a packed row into @p out.
+ *
+ * Serial host implementation: FDMT level-0 already parallelizes over subbands
+ * (@c omp for), so each thread unpacks its own row without nested parallelism.
  */
 template <unsigned NBITS, typename T>
-inline void unpack_row(const uint8_t* __restrict__ row,
-                       SizeType nsamps,
-                       T* __restrict__ out) noexcept {
-    static_assert(NBITS == 1 || NBITS == 2 || NBITS == 4 || NBITS == 8 ||
-                      NBITS == 16,
+DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
+                             SizeType nsamps,
+                             T* __restrict__ out) noexcept {
+    static_assert(detail::is_packed_nbits(NBITS),
                   "unpack_row: NBITS must be 1, 2, 4, 8, or 16");
     if constexpr (NBITS == 8) {
-#if defined(_OPENMP)
+#if defined(_OPENMP) && !defined(__CUDACC__)
 #pragma omp simd
 #endif
         for (SizeType i = 0; i < nsamps; ++i) {
             out[i] = static_cast<T>(row[i]);
         }
     } else if constexpr (NBITS == 16) {
-#if defined(_OPENMP)
+        const auto* words = reinterpret_cast<const uint16_t*>(row);
+#if defined(_OPENMP) && !defined(__CUDACC__)
 #pragma omp simd
 #endif
         for (SizeType i = 0; i < nsamps; ++i) {
-            out[i] =
-                static_cast<T>(static_cast<uint32_t>(row[2 * i]) |
-                               (static_cast<uint32_t>(row[(2 * i) + 1]) << 8U));
+            out[i] = static_cast<T>(words[i]);
         }
     } else {
-        constexpr SizeType kPerByte = 8 / NBITS;
-        constexpr uint32_t kMask    = (1U << NBITS) - 1U;
-        const SizeType nfull        = nsamps / kPerByte;
-        if constexpr (std::is_same_v<T, uint8_t>) {
-            // Byte output: one table lookup yields all kPerByte samples.
-            const auto& table = detail::UnpackTable<NBITS>::table;
-            for (SizeType b = 0; b < nfull; ++b) {
-                std::memcpy(out + (b * kPerByte), table[row[b]].v, kPerByte);
-            }
-        } else {
-            // Wider output: a constant-shift mask per lane vectorizes well
-            // (measured faster than the table for float output).
-            for (SizeType b = 0; b < nfull; ++b) {
-                const auto byte = static_cast<uint32_t>(row[b]);
-#if defined(_OPENMP)
-#pragma omp simd
-#endif
-                for (SizeType k = 0; k < kPerByte; ++k) {
-                    out[(b * kPerByte) + k] = static_cast<T>(
-                        (byte >> (static_cast<unsigned>(k) * NBITS)) & kMask);
-                }
-            }
-        }
-        for (SizeType i = nfull * kPerByte; i < nsamps; ++i) {
-            out[i] = static_cast<T>(read_packed_sample<NBITS>(row, i));
-        }
+        detail::unpack_row_subbyte<NBITS, T>(row, nsamps, out);
     }
 }
 
-/// @brief Runtime-nbits dispatch of unpack_row<NBITS>(); `nbits` must be one
-/// of 1, 2, 4, 8, 16 (validated by the caller).
+/** @brief Runtime @p nbits dispatch for unpack_row (caller validates @p nbits).
+ */
 template <typename T>
-inline void unpack_row(const uint8_t* __restrict__ row,
-                       SizeType nbits,
-                       SizeType nsamps,
-                       T* __restrict__ out) noexcept {
+DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
+                             SizeType nbits,
+                             SizeType nsamps,
+                             T* __restrict__ out) noexcept {
     switch (nbits) {
     case 1:
         unpack_row<1>(row, nsamps, out);
@@ -266,4 +257,4 @@ inline void unpack_row(const uint8_t* __restrict__ row,
 
 #endif // !defined(__CUDA_ARCH__)
 
-} // namespace dmt::utils
+} // namespace dmt::bit_pack_utils
