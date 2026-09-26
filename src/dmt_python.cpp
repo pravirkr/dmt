@@ -1,7 +1,7 @@
-#include <pybind11/iostream.h>
 #include <pybind11/pybind11.h>
 
 #include "bindings/bind.hpp"
+#include "pybind_utils.hpp"
 
 namespace py = pybind11;
 
@@ -18,7 +18,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     dmtlib.libcudmt : CUDA counterparts, when the library is built with GPU support.
     )doc";
 
-    py::add_ostream_redirect(mod, "ostream_redirect");
+    dmt::bind_logging(mod);
     dmt::bind_plans(mod);
     dmt::bind_fdmt(mod);
     dmt::bind_cfdmt(mod);

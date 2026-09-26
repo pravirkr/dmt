@@ -8,7 +8,7 @@
 #include <utility>
 
 #include <fftw3.h>
-#include <spdlog/spdlog.h>
+#include "dmt/logging.hpp"
 
 namespace dmt::utils {
 
@@ -176,10 +176,10 @@ public:
             m_plan_extra = make_plan(extra_howmany);
             m_plan_base  = make_plan(m_base);
         }
-        spdlog::debug("FFTWManager: kind={} length={} howmany={} workers={} "
-                      "base={} extra_workers={}",
-                      static_cast<int>(kind), length, howmany, m_n_workers,
-                      m_base, m_n_extra);
+        logging::debug("FFTWManager: kind={} length={} howmany={} workers={} "
+                       "base={} extra_workers={}",
+                       static_cast<int>(kind), length, howmany, m_n_workers,
+                       m_base, m_n_extra);
     }
 
     void execute(std::span<ComplexType> data) const {

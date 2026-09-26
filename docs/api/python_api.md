@@ -88,6 +88,14 @@ reference). They take the same constructor arguments as the CPU engines, with
 .. autofunction:: dmtlib.add_frb_track
 ```
 
+## Logging
+
+```{eval-rst}
+.. autofunction:: dmtlib.set_log_level
+
+.. autofunction:: dmtlib.get_log_level
+```
+
 ## Simulation Utilities (`dmtlib.simulate`)
 
 ```{eval-rst}

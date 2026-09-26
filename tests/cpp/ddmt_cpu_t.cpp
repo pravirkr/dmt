@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -110,8 +111,7 @@ TEST_CASE("DDMTCPU execute recovers a zero-DM ones waterfall", "[ddmt][cpu]") {
                           nsamps_reduced, static_cast<float>(nchans))));
 }
 
-TEST_CASE("DDMTCPU custom dm_arr and mismatched output is a no-op",
-          "[ddmt][cpu]") {
+TEST_CASE("DDMTCPU custom dm_arr and mismatched output throws", "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
     const SizeType nchans        = 8;
@@ -122,7 +122,8 @@ TEST_CASE("DDMTCPU custom dm_arr and mismatched output is a no-op",
     DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dms);
     std::vector<float> waterfall(nchans * nsamps, 1.0F);
     std::vector<float> bad(4, 42.0F);
-    ddmt.execute(waterfall, bad);
+    CHECK_THROWS_AS(ddmt.execute(waterfall, bad), std::invalid_argument);
+    // The buffer is left untouched.
     REQUIRE_THAT(bad, Catch::Matchers::Equals(std::vector<float>(4, 42.0F)));
 }
 
@@ -167,7 +168,7 @@ TEST_CASE("DDMTCPU packed-integer execute matches the float path",
     }
 }
 
-TEST_CASE("DDMTCPU wrong execute overload for the configured nbits is a no-op",
+TEST_CASE("DDMTCPU wrong execute overload for the configured nbits throws",
           "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
@@ -178,14 +179,16 @@ TEST_CASE("DDMTCPU wrong execute overload for the configured nbits is a no-op",
     DDMTCPU ddmt_float(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F);
     std::vector<uint8_t> packed(nchans * nsamps, 1);
     std::vector<int32_t> bad_out(4, 42);
-    ddmt_float.execute(packed, nsamps, bad_out);
+    CHECK_THROWS_AS(ddmt_float.execute(packed, nsamps, bad_out),
+                    std::invalid_argument);
     REQUIRE_THAT(bad_out, Catch::Matchers::Equals(std::vector<int32_t>(4, 42)));
 
     DDMTCPU ddmt_packed(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F,
                         /*nthreads=*/1, /*nbits=*/8);
     std::vector<float> float_waterfall(nchans * nsamps, 1.0F);
     std::vector<float> bad_out_f(4, 42.0F);
-    ddmt_packed.execute(float_waterfall, bad_out_f);
+    CHECK_THROWS_AS(ddmt_packed.execute(float_waterfall, bad_out_f),
+                    std::invalid_argument);
     REQUIRE_THAT(bad_out_f,
                  Catch::Matchers::Equals(std::vector<float>(4, 42.0F)));
 }
@@ -434,8 +437,7 @@ TEST_CASE("DDMTCPU execute_time_major matches channel-major packed",
 
     const auto test_bits = [&](unsigned nbits) {
         DYNAMIC_SECTION("nbits = " << nbits) {
-            DDMTPlan plan(f_min, f_max, nchans, tsamp, dms, /*verbose=*/false,
-                          nbits);
+            DDMTPlan plan(f_min, f_max, nchans, tsamp, dms, nbits);
             DDMTCPU ddmt(plan);
 
             const auto max_delay =
@@ -1035,13 +1037,13 @@ TEST_CASE("DDMTCPU packed history snapshot save, load, and validation",
 
     std::vector<uint8_t> hist_buf(state_bytes, 0);
 
-    // 1. save before stream is warmed up returns false
-    CHECK_FALSE(ddmt1.save_history(hist_buf));
+    // 1. save before stream is warmed up throws
+    CHECK_THROWS_AS(ddmt1.save_history(hist_buf), std::logic_error);
 
-    // 2. float overload on packed plan returns false
+    // 2. float overload on packed plan throws
     std::vector<float> float_buf(state_bytes);
-    CHECK_FALSE(ddmt1.save_history(float_buf));
-    CHECK_FALSE(ddmt1.load_history(float_buf));
+    CHECK_THROWS_AS(ddmt1.save_history(float_buf), std::invalid_argument);
+    CHECK_THROWS_AS(ddmt1.load_history(float_buf), std::invalid_argument);
 
     // Warm up stream with chunk1
     const SizeType chunk1_len = 64;
@@ -1059,17 +1061,17 @@ TEST_CASE("DDMTCPU packed history snapshot save, load, and validation",
     ddmt1.execute(chunk1, chunk1_len, dmt1);
 
     // 3. Save history succeeds now that stream is warm
-    CHECK(ddmt1.save_history(hist_buf));
+    CHECK_NOTHROW(ddmt1.save_history(hist_buf));
 
-    // Wrong size buffer fails
+    // Wrong size buffer throws
     std::vector<uint8_t> wrong_size_buf(state_bytes + 1, 0);
-    CHECK_FALSE(ddmt1.save_history(wrong_size_buf));
-    CHECK_FALSE(ddmt1.load_history(wrong_size_buf));
+    CHECK_THROWS_AS(ddmt1.save_history(wrong_size_buf), std::invalid_argument);
+    CHECK_THROWS_AS(ddmt1.load_history(wrong_size_buf), std::invalid_argument);
 
     // 4. Load history into fresh instance ddmt2
     DDMTCPU ddmt2(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1, nbits);
     CHECK(ddmt2.get_output_nsamps(32) == 32 - max_delay); // Cold state
-    CHECK(ddmt2.load_history(hist_buf));
+    CHECK_NOTHROW(ddmt2.load_history(hist_buf));
     CHECK(ddmt2.get_output_nsamps(32) == 32); // Warm state!
 
     // 5. Feed chunk2 to both instances, verify exact match
@@ -1095,7 +1097,7 @@ TEST_CASE("DDMTCPU packed history snapshot save, load, and validation",
     // 6. reset_history clears state
     ddmt2.reset_history();
     CHECK(ddmt2.get_output_nsamps(32) == 32 - max_delay);
-    CHECK_FALSE(ddmt2.save_history(hist_buf));
+    CHECK_THROWS_AS(ddmt2.save_history(hist_buf), std::logic_error);
 }
 
 } // namespace dmt

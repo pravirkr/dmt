@@ -48,7 +48,7 @@ BENCHMARK_DEFINE_F(FDMTMemFixture, BM_fdmt_memory_execute)
 (benchmark::State& state) {
     for (auto _ : state) {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "full", false, /*nthreads=*/1);
+                     "full", /*nthreads=*/1);
         state.PauseTiming();
         // execute() validates the output against get_buffer_size() (the
         // internal ping-pong buffer, which can exceed get_dmt_size()'s

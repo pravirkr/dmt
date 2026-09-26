@@ -196,20 +196,25 @@ public:
     /// @brief Size of the warmed-up streaming history state buffer
     [[nodiscard]] SizeType history_state_size() const noexcept;
 
+    // Errors: every execute()/save_history()/load_history() overload throws
+    // std::invalid_argument for the wrong overload (float vs packed nbits) or
+    // a buffer size mismatch; save_history() throws std::logic_error before
+    // the stream holds a full history (fewer than max-delay samples seen).
+
     /// @brief Saves current float history state to caller-owned storage (nbits
     /// == 32)
-    bool save_history(std::span<float> out) const;
+    void save_history(std::span<float> out) const;
 
     /// @brief Saves current packed integer history state to caller-owned
     /// storage (nbits in {1,2,4,8,16})
-    bool save_history(std::span<uint8_t> out) const;
+    void save_history(std::span<uint8_t> out) const;
 
     /// @brief Restores previously saved float history state (nbits == 32)
-    bool load_history(std::span<const float> in);
+    void load_history(std::span<const float> in);
 
     /// @brief Restores previously saved packed history state (nbits in
     /// {1,2,4,8,16})
-    bool load_history(std::span<const uint8_t> in);
+    void load_history(std::span<const uint8_t> in);
 
 private:
     class Impl;
@@ -386,40 +391,43 @@ public:
     /// width.
     [[nodiscard]] SizeType history_state_size() const noexcept;
 
+    // Errors: as DDMTCPU (std::invalid_argument for the wrong overload or a
+    // size mismatch; std::logic_error from save_history() before warm-up).
+
     /// @brief Save the current float history state to host memory (nbits ==
     /// 32).
-    bool save_history(std::span<float> out) const;
+    void save_history(std::span<float> out) const;
 
     /// @brief Save the current float history state to device memory (nbits ==
     /// 32).
-    bool save_history(cuda::std::span<float> d_out,
+    void save_history(cuda::std::span<float> d_out,
                       cudaStream_t stream = nullptr) const;
 
     /// @brief Save the current packed history state to host memory (nbits in
     /// {1,2,4,8,16}).
-    bool save_history(std::span<uint8_t> out) const;
+    void save_history(std::span<uint8_t> out) const;
 
     /// @brief Save the current packed history state to device memory (nbits in
     /// {1,2,4,8,16}).
-    bool save_history(cuda::std::span<uint8_t> d_out,
+    void save_history(cuda::std::span<uint8_t> d_out,
                       cudaStream_t stream = nullptr) const;
 
     /// @brief Restore a previously saved float history state from host memory
     /// (nbits == 32).
-    bool load_history(std::span<const float> in);
+    void load_history(std::span<const float> in);
 
     /// @brief Restore a previously saved float history state from device memory
     /// (nbits == 32).
-    bool load_history(cuda::std::span<const float> d_in,
+    void load_history(cuda::std::span<const float> d_in,
                       cudaStream_t stream = nullptr);
 
     /// @brief Restore a previously saved packed history state from host memory
     /// (nbits in {1,2,4,8,16}).
-    bool load_history(std::span<const uint8_t> in);
+    void load_history(std::span<const uint8_t> in);
 
     /// @brief Restore a previously saved packed history state from device
     /// memory (nbits in {1,2,4,8,16}).
-    bool load_history(cuda::std::span<const uint8_t> d_in,
+    void load_history(cuda::std::span<const uint8_t> d_in,
                       cudaStream_t stream = nullptr);
 
     template <typename Alloc1 = std::allocator<float>,
@@ -449,22 +457,22 @@ public:
     }
 
     template <typename Alloc = std::allocator<float>>
-    bool save_history(std::vector<float, Alloc>& out) const {
+    void save_history(std::vector<float, Alloc>& out) const {
         return save_history(std::span<float>(out));
     }
 
     template <typename Alloc = std::allocator<uint8_t>>
-    bool save_history(std::vector<uint8_t, Alloc>& out) const {
+    void save_history(std::vector<uint8_t, Alloc>& out) const {
         return save_history(std::span<uint8_t>(out));
     }
 
     template <typename Alloc = std::allocator<float>>
-    bool load_history(const std::vector<float, Alloc>& in) {
+    void load_history(const std::vector<float, Alloc>& in) {
         return load_history(std::span<const float>(in));
     }
 
     template <typename Alloc = std::allocator<uint8_t>>
-    bool load_history(const std::vector<uint8_t, Alloc>& in) {
+    void load_history(const std::vector<uint8_t, Alloc>& in) {
         return load_history(std::span<const uint8_t>(in));
     }
 

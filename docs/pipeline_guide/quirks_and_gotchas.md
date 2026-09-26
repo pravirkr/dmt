@@ -1,6 +1,6 @@
 # Quirks & Gotchas
 
-Every high-performance digital signal processing library has architectural edge cases. This page documents practical "gotchas" and quirks to ensure smooth pipeline integration.
+This page documents practical "gotchas" and quirks to ensure smooth pipeline integration.
 
 ---
 
@@ -73,10 +73,6 @@ tree level, not just the result:
   contents, which can differ between fusion depths or backends.
 - Beam $b$ starts at offset $b \cdot B$, so the buffer is
   `nbeams * get_buffer_size()` floats.
-- **Why:** the engine owns only one ping-pong half, which keeps total memory
-  at about $2B$ per beam (important on a GPU) with no final copy. Typically
-  $B \approx 3D$; for example, with 4096 channels and `dt_max=2048`, $B$ is
-  384 MiB and $D$ is 128 MiB at 16K samples.
 - **Reuse:** allocate one $B$-sized buffer per stream and pass it to every
   `execute()`. The engine allocates nothing per call. Copy out (or consume)
   the first $D$ values before the next call overwrites them.
@@ -103,15 +99,6 @@ base is the whole $B$-sized buffer, so:
 
 - Without `out=`, every returned array keeps its whole $B$-sized buffer
   alive. Use `dmt.copy()` if you keep many blocks.
-
-**CohFDMT arena.** `CohFDMTCPU` runs one fine FDMT per coarse-DM trial in
-place in your output buffer. Trial $i$ writes its result at offset $i \cdot D$
-and uses the following $B$ floats as scratch, which later trials then
-overwrite. The buffer is therefore `get_buffer_size()` $= (N-1) \cdot D + B$
-floats for $N$ coarse trials. Only the first `get_dmt_size()` $= N \cdot D$
-are the result, shaped $(N \cdot N_{\text{DM,fine}}, N_{\text{times}})$.
-`CohFDMTCUDA`'s host `execute()` owns its device arena and needs only
-`get_dmt_size()`. Python handles all of this for you.
 
 ---
 
@@ -147,8 +134,23 @@ dmt = fdmt.finalize()              # finish to the root
 
 ---
 
-## 6. Logging (`verbose`)
+## 6. Logging and Summaries
 
-`verbose` sets the **process-wide** spdlog level: 0 = warnings only (e.g. a
-clamped `fuse_levels`), 1 = info (plan and memory summary), 2 = debug. The
-most recently constructed object's value wins.
+dmt is silent by default.
+
+```python
+import dmtlib
+dmtlib.set_log_level("debug")   # "off" (default) or "debug"
+```
+
+```cpp
+#include <dmt/dmt.hpp>
+dmt::set_log_level(dmt::LogLevel::kDebug);   // kOff (default) or kDebug
+```
+
+To describe a plan or an engine, ask for its summary instead:
+
+```python
+print(fdmt.summary())        # plan + engine: mode, threads, fusion, memory
+print(fdmt.plan.summary())   # plan only (also CohFDMTPlan, DDMTPlan)
+```

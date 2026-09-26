@@ -147,7 +147,7 @@ TEST_CASE("parity: DDMTCUDA execute_time_major matches DDMTCPU across bits",
     const auto test_bits = [&](unsigned nbits) {
         DYNAMIC_SECTION("nbits = " << nbits) {
             plans::DDMTPlan plan(test::kFMin, test::kFMax, nchans, test::kTsamp,
-                                 dms, false, nbits);
+                                 dms, nbits);
             DDMTCPU cpu(plan);
             DDMTCUDA gpu(plan);
 

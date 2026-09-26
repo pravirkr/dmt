@@ -141,7 +141,6 @@ public:
      * @param dt_step Stride between delay trials (default: 1).
      * @param mode Output time alignment mode: "valid" (overlap-save streaming
      * history), "full" (zero-padded), or "roll" (cyclic) (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -151,8 +150,7 @@ public:
              IndexType dt_max,
              IndexType dt_min      = 0,
              SizeType dt_step      = 1,
-             std::string_view mode = "valid",
-             int verbose           = 0);
+             std::string_view mode = "valid");
 
     /**
      * @brief Constructs an FDMT plan with a custom delay trial grid.
@@ -169,7 +167,6 @@ public:
      * @param dt_grid Explicit list of delay trials in samples (e.g. from
      * generate_optimal_dt_grid).
      * @param mode Transform mode: "valid", "full", or "roll".
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -177,8 +174,7 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<IndexType>& dt_grid,
-             std::string_view mode = "valid",
-             int verbose           = 0);
+             std::string_view mode = "valid");
 
     /**
      * @brief Constructs an FDMT plan with a custom physical DM trial grid.
@@ -196,7 +192,6 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
      * non-uniform spacing and negative DMs).
      * @param mode Transform mode: "valid", "full", or "roll".
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -204,8 +199,7 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<float>& dm_grid,
-             std::string_view mode = "valid",
-             int verbose           = 0);
+             std::string_view mode = "valid");
 
     // --- Rule of five: PIMPL ---
     ~FDMTPlan();
@@ -360,9 +354,6 @@ public:
     [[nodiscard]] FDMTComplexity
     get_complexity(bool use_box_smearing = true) const noexcept;
 
-    /// @brief Prints a formatted comparison of FDMT vs brute-force operations
-    void print_complexity_summary() const;
-
     /// @brief Number of additions per time sample for each tree level (0..M)
     [[nodiscard]] std::vector<SizeType>
     get_operations_by_iteration(bool use_box_smearing = true) const;
@@ -388,9 +379,9 @@ public:
     [[nodiscard]] float
     get_theoretical_gflops(bool use_box_smearing = true) const noexcept;
 
-    /// @brief Prints human-readable summary of plan dimensions, memory, and
-    /// parameters
-    void print_summary(std::string_view prefix = "") const;
+    /// @brief Human-readable summary of the plan's dimensions, memory and
+    /// per-level shapes (each line starts with @p prefix).
+    [[nodiscard]] std::string summary(std::string_view prefix = "") const;
 
 private:
     class Impl;
@@ -425,7 +416,6 @@ public:
      * convolution (default: 8192).
      * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
      * (default: "PRITF").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     CohFDMTPlan(float f_center,
                 float bw_sub,
@@ -437,8 +427,7 @@ public:
                 float dm_max,
                 float dm_min                = 0.0F,
                 SizeType noverlap           = 8192,
-                std::string_view data_order = "PRITF",
-                int verbose                 = 0);
+                std::string_view data_order = "PRITF");
 
     // --- Rule of five: PIMPL ---
     ~CohFDMTPlan();
@@ -544,8 +533,9 @@ public:
 
     /// @brief Read-only reference to internal fine FDMT plan
     [[nodiscard]] const FDMTPlan& get_fdmt_plan() const;
-    /// @brief Prints human-readable summary of the CohFDMT search parameters
-    void print_summary() const;
+    /// @brief Human-readable summary of the CohFDMT search parameters,
+    /// including the fine FDMT plan.
+    [[nodiscard]] std::string summary() const;
 
 private:
     class Impl;
@@ -586,7 +576,6 @@ public:
      * @param dm_max Maximum trial DM in pc/cm^3.
      * @param dm_step Linear spacing between DM trials in pc/cm^3.
      * @param dm_min Minimum trial DM in pc/cm^3 (default: 0).
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nbits Precision per sample: 32 (float), or 1, 2, 4, 8, 16 (packed
      * integers).
      * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=mask
@@ -599,7 +588,6 @@ public:
              float dm_max,
              float dm_step,
              float dm_min                       = 0.0F,
-             int verbose                        = 0,
              SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
@@ -611,7 +599,6 @@ public:
      * @param nchans Number of frequency channels.
      * @param tsamp Sampling interval in seconds.
      * @param dm_arr Explicit span of DM trials in pc/cm^3.
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
      */
@@ -620,7 +607,6 @@ public:
              SizeType nchans,
              float tsamp,
              std::span<const float> dm_arr,
-             int verbose                        = 0,
              SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
@@ -633,7 +619,6 @@ public:
      * @param tsamp Sampling interval in seconds.
      * @param levin LevinConfig specifying dm_start, dm_end, pulse_width, and
      * tol.
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
      */
@@ -642,7 +627,6 @@ public:
              SizeType nchans,
              float tsamp,
              const LevinConfig& levin,
-             int verbose                        = 0,
              SizeType nbits                     = 32,
              std::span<const uint8_t> kill_mask = {});
 
@@ -677,6 +661,9 @@ public:
     [[nodiscard]] SizeType get_nbits() const noexcept;
     /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans
     [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept;
+    /// @brief Human-readable summary: band, channels, DM trials and range,
+    /// maximum delay, input width and masked channels.
+    [[nodiscard]] std::string summary() const;
 
     /**
      * @brief Replaces the channel kill mask without recomputing the delay

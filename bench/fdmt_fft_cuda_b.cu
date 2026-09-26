@@ -6,56 +6,11 @@
 
 #include <benchmark/benchmark.h>
 
+#include "bench_cuda_utils.cuh"
+
 #include "dmt/algorithms/fdmt_fft.hpp"
 
-#define BENCH_CUDA_TRY(call)                                                   \
-    do {                                                                       \
-        auto const status = (call);                                            \
-        if (cudaSuccess != status) {                                           \
-            throw std::runtime_error("CUDA error detected.");                  \
-        }                                                                      \
-    } while (0);
-
-#define BENCH_CUDA_CHECK_NOTHROW(call)                                         \
-    do {                                                                       \
-        auto const status = (call);                                            \
-        if (cudaSuccess != status) {                                           \
-            std::fprintf(stderr, "CUDA error in destructor: %s\n",             \
-                         cudaGetErrorString(status));                          \
-        }                                                                      \
-    } while (0)
-
 namespace {
-
-class CudaEventTimer {
-public:
-    explicit CudaEventTimer(benchmark::State& state, cudaStream_t stream = 0)
-        : m_stream(stream),
-          m_state(&state) {
-        BENCH_CUDA_TRY(cudaEventCreate(&m_start));
-        BENCH_CUDA_TRY(cudaEventCreate(&m_stop));
-        BENCH_CUDA_TRY(cudaEventRecord(m_start, m_stream));
-    }
-
-    CudaEventTimer() = delete;
-
-    ~CudaEventTimer() {
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventRecord(m_stop, m_stream));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventSynchronize(m_stop));
-        float milliseconds = 0.0F;
-        BENCH_CUDA_CHECK_NOTHROW(
-            cudaEventElapsedTime(&milliseconds, m_start, m_stop));
-        m_state->SetIterationTime(milliseconds / 1000.0F);
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_start));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_stop));
-    }
-
-private:
-    cudaEvent_t m_start{};
-    cudaEvent_t m_stop{};
-    cudaStream_t m_stream;
-    benchmark::State* m_state;
-};
 
 template <typename T>
 thrust::device_vector<T> generate_vector_device(size_t size) {

@@ -63,7 +63,6 @@ target_link_libraries(
   PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
           Catch2::Catch2WithMain
           ${DMT_COMPILE_OPTIONS}
-          spdlog::spdlog_header_only
           OpenMP::OpenMP_CXX
 )
 

@@ -59,7 +59,6 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP worker threads (default: 1).
      * @param nbeams Number of batched beams (default: 1).
      */
@@ -73,7 +72,6 @@ public:
                SizeType dt_step      = 1,
                bool use_box_smearing = true,
                std::string_view mode = "valid",
-               int verbose           = 0,
                int nthreads          = 1,
                SizeType nbeams       = 1);
 
@@ -88,7 +86,6 @@ public:
      * @param dt_grid Explicit list of delay trials.
      * @param use_box_smearing Whether to account for intra-channel smearing.
      * @param mode Mode: "valid", "full", or "roll".
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads OpenMP threads.
      * @param nbeams Number of batched beams.
      */
@@ -100,7 +97,6 @@ public:
                const std::vector<IndexType>& dt_grid,
                bool use_box_smearing = true,
                std::string_view mode = "valid",
-               int verbose           = 0,
                int nthreads          = 1,
                SizeType nbeams       = 1);
 
@@ -115,7 +111,6 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3.
      * @param use_box_smearing Whether to account for intra-channel smearing.
      * @param mode Mode: "valid", "full", or "roll".
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads OpenMP threads.
      * @param nbeams Number of batched beams.
      */
@@ -127,7 +122,6 @@ public:
                const std::vector<float>& dm_grid,
                bool use_box_smearing = true,
                std::string_view mode = "valid",
-               int verbose           = 0,
                int nthreads          = 1,
                SizeType nbeams       = 1);
 
@@ -216,7 +210,6 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  SizeType dt_step      = 1,
                  bool use_box_smearing = true,
                  std::string_view mode = "valid",
-                 int verbose           = 0,
                  int nthreads          = 1,
                  SizeType nbeams       = 1);
 
@@ -233,7 +226,6 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing = true,
                  std::string_view mode = "valid",
-                 int verbose           = 0,
                  int nthreads          = 1,
                  SizeType nbeams       = 1);
 
@@ -250,7 +242,6 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing = true,
                  std::string_view mode = "valid",
-                 int verbose           = 0,
                  int nthreads          = 1,
                  SizeType nbeams       = 1);
 
@@ -273,7 +264,6 @@ public:
                 SizeType dt_step      = 1,
                 bool use_box_smearing = true,
                 std::string_view mode = "valid",
-                int verbose           = 0,
                 int device_id         = 0,
                 SizeType nbeams       = 1);
 
@@ -288,7 +278,6 @@ public:
                 const std::vector<IndexType>& dt_grid,
                 bool use_box_smearing = true,
                 std::string_view mode = "valid",
-                int verbose           = 0,
                 int device_id         = 0,
                 SizeType nbeams       = 1);
 
@@ -303,7 +292,6 @@ public:
                 const std::vector<float>& dm_grid,
                 bool use_box_smearing = true,
                 std::string_view mode = "valid",
-                int verbose           = 0,
                 int device_id         = 0,
                 SizeType nbeams       = 1);
 

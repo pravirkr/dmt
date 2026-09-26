@@ -21,6 +21,7 @@
  */
 
 // Import common types and constants
+#include "common/logging.hpp" // IWYU pragma: export
 #include "common/plans.hpp"   // IWYU pragma: export
 #include "common/types.hpp"   // IWYU pragma: export
 #include "utils/simulate.hpp" // IWYU pragma: export

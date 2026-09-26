@@ -11,92 +11,10 @@
 
 #include <benchmark/benchmark.h>
 
+#include "bench_cuda_utils.cuh"
+
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
-
-// https://github.com/jrhemstad/example_cuda_benchmark
-#define BENCH_CUDA_TRY(call)                                                   \
-    do {                                                                       \
-        auto const status = (call);                                            \
-        if (cudaSuccess != status) {                                           \
-            throw std::runtime_error("CUDA error detected.");                  \
-        }                                                                      \
-    } while (0);
-
-#define BENCH_CUDA_CHECK_NOTHROW(call)                                         \
-    do {                                                                       \
-        auto const status = (call);                                            \
-        if (cudaSuccess != status) {                                           \
-            std::fprintf(stderr, "CUDA error in destructor: %s\n",             \
-                         cudaGetErrorString(status));                          \
-        }                                                                      \
-    } while (0)
-
-class CudaEventTimer {
-public:
-    /**
-     * @brief Constructs a `cuda_event_timer` beginning a manual timing range.
-     *
-     * Optionally flushes L2 cache.
-     *
-     * @param[in,out] state  This is the benchmark::State whose timer we are
-     * going to update.
-     * @param[in] flush_l2_cache_ whether or not to flush the L2 cache before
-     *                            every iteration.
-     * @param[in] m_stream The CUDA stream we are measuring time on.
-     */
-    explicit CudaEventTimer(benchmark::State& state,
-                            bool flush_l2_cache = false,
-                            cudaStream_t stream = 0)
-        : m_stream(stream),
-          m_state(&state) {
-        // flush all of L2 cache
-        if (flush_l2_cache) {
-            int current_device = 0;
-            BENCH_CUDA_TRY(cudaGetDevice(&current_device));
-
-            int l2_cache_bytes = 0;
-            BENCH_CUDA_TRY(cudaDeviceGetAttribute(
-                &l2_cache_bytes, cudaDevAttrL2CacheSize, current_device));
-
-            if (l2_cache_bytes > 0) {
-                const int memset_value = 0;
-                int* l2_cache_buffer   = nullptr;
-                BENCH_CUDA_TRY(cudaMalloc(&l2_cache_buffer, l2_cache_bytes));
-                BENCH_CUDA_TRY(cudaMemsetAsync(l2_cache_buffer, memset_value,
-                                               l2_cache_bytes, m_stream));
-                BENCH_CUDA_TRY(cudaFree(l2_cache_buffer));
-            }
-        }
-
-        BENCH_CUDA_TRY(cudaEventCreate(&m_start));
-        BENCH_CUDA_TRY(cudaEventCreate(&m_stop));
-        BENCH_CUDA_TRY(cudaEventRecord(m_start, m_stream));
-    }
-
-    CudaEventTimer() = delete;
-
-    /**
-     * @brief Destroy the `cuda_event_timer` and ending the manual time range.
-     *
-     */
-    ~CudaEventTimer() {
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventRecord(m_stop, m_stream));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventSynchronize(m_stop));
-        float milliseconds = 0.0F;
-        BENCH_CUDA_CHECK_NOTHROW(
-            cudaEventElapsedTime(&milliseconds, m_start, m_stop));
-        m_state->SetIterationTime(milliseconds / (1000.0F));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_start));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_stop));
-    }
-
-private:
-    cudaEvent_t m_start{};
-    cudaEvent_t m_stop{};
-    cudaStream_t m_stream;
-    benchmark::State* m_state;
-};
 
 namespace {
 template <typename T>
@@ -197,7 +115,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
                            ? kFDMTAutoFuse
                            : static_cast<SizeType>(state.range(3));
     FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                       "valid", false, 0, 1, fuse, state.range(2) != 0);
+                       "valid", 0, 1, fuse, state.range(2) != 0);
     state.counters["fuse"] = static_cast<double>(fdmt_cuda.get_fuse_levels());
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);

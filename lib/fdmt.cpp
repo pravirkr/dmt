@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -11,7 +12,6 @@
 #include <utility>
 
 #include <omp.h>
-#include <spdlog/spdlog.h>
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
@@ -795,7 +795,6 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int nthreads,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -813,8 +812,7 @@ public:
                  dt_max,
                  dt_min,
                  dt_step,
-                 mode,
-                 verbose),
+                 mode),
           m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
                            std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
@@ -829,7 +827,7 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        allocate_working_memory(fuse_levels, verbose);
+        allocate_working_memory(fuse_levels);
     }
 
     Impl(float f_min,
@@ -840,7 +838,6 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int nthreads,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -850,7 +847,7 @@ public:
           m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
           m_nthreads(std::max(1, nthreads)),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
           m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
                            std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
@@ -865,7 +862,7 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        allocate_working_memory(fuse_levels, verbose);
+        allocate_working_memory(fuse_levels);
     }
 
     Impl(float f_min,
@@ -876,7 +873,6 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int nthreads,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -886,7 +882,7 @@ public:
           m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
           m_nthreads(std::max(1, nthreads)),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
           m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
                            std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
@@ -901,7 +897,7 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        allocate_working_memory(fuse_levels, verbose);
+        allocate_working_memory(fuse_levels);
     }
 
     ~Impl()                      = default;
@@ -921,7 +917,6 @@ public:
         }
         advance_until_remaining(0);
         finalize();
-        spdlog::debug("FDMTCPU::Impl: Execution complete.");
     }
 
     void execute(std::span<const uint8_t> waterfall_packed,
@@ -933,7 +928,6 @@ public:
         }
         advance_until_remaining(0);
         finalize();
-        spdlog::debug("FDMTCPU::Impl: Packed execution complete.");
     }
 
     void reset(std::span<const float> waterfall, std::span<float> dmt) {
@@ -981,6 +975,26 @@ public:
     }
 
     [[nodiscard]] bool get_int_tree() const noexcept { return m_int_tree; }
+
+    [[nodiscard]] std::string summary() const {
+        const auto mem = get_memory_usage();
+        const auto mib = [](SizeType b) {
+            return static_cast<double>(b) / 1048576.0;
+        };
+        const auto summary = std::format(
+            "*** FDMTCPU ***\n"
+            "Mode: {}, {}, nbeams {}, fuse_levels {}, int_tree {}\n"
+            "Host memory: plan {:.1f} MiB, state {:.1f} MiB, history {:.1f} "
+            "MiB, "
+            "workspace {:.1f} MiB (total {:.1f} MiB); output buffer {:.1f} MiB "
+            "per execute()\n",
+            fdmt_mode_to_string(m_mode), std::format("{} threads", m_nthreads),
+            m_nbeams, m_fuse_levels, m_int_tree ? "on" : "off", mib(mem.plan),
+            mib(mem.state), mib(mem.history), mib(mem.workspace),
+            mib(mem.plan + mem.state + mem.history + mem.workspace),
+            mib(mem.output));
+        return m_plan.summary() + summary;
+    }
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept {
         return {
@@ -1320,7 +1334,7 @@ private:
      * index, and the per-thread workspace (see FDMTWorkspace). Nothing is
      * allocated after this.
      */
-    void allocate_working_memory(SizeType fuse_levels, int verbose) {
+    void allocate_working_memory(SizeType fuse_levels) {
         if (m_nbeams == 0) {
             throw std::invalid_argument("FDMTCPU: nbeams must be at least 1");
         }
@@ -1336,11 +1350,6 @@ private:
             m_fuse_levels = auto_fuse_levels();
         } else {
             m_fuse_levels = std::min(fuse_levels, niters);
-            if (fuse_levels > niters) {
-                spdlog::warn("FDMTCPU: fuse_levels={} clamped to the plan's {} "
-                             "merge levels",
-                             fuse_levels, niters);
-            }
         }
         if (m_fuse_levels > 0) {
             build_fused_sum_index();
@@ -1354,31 +1363,6 @@ private:
         m_ws.nthreads    = m_nthreads;
         m_workspace.assign(m_nthreads * m_ws.stride, std::byte{0});
         m_ws.base = m_workspace.data();
-
-        if (fuse_levels != kFDMTAutoFuse &&
-            m_workspace.size() > m_state_internal.size()) {
-            spdlog::warn(
-                "FDMTCPU: fuse_levels={} needs {:.1f} MiB of per-thread "
-                "scratch ({} threads), more than the {:.1f} MiB tree state; "
-                "consider a smaller depth or kFDMTAutoFuse",
-                m_fuse_levels,
-                static_cast<double>(m_workspace.size()) / 1048576.0, m_nthreads,
-                static_cast<double>(m_state_internal.size()) / 1048576.0);
-        }
-        if (verbose >= 1) {
-            const auto mem = get_memory_usage();
-            const auto mib = [](SizeType b) {
-                return static_cast<double>(b) / 1048576.0;
-            };
-            spdlog::info(
-                "FDMTCPU memory: plan {:.1f} MiB, state {:.1f} MiB, "
-                "history {:.1f} MiB, workspace {:.1f} MiB (fuse_levels="
-                "{}, {} threads) = {:.1f} MiB; output buffer per "
-                "execute() {:.1f} MiB",
-                mib(mem.plan), mib(mem.state), mib(mem.history),
-                mib(mem.workspace), m_fuse_levels, m_nthreads, mib(mem.total()),
-                mib(mem.output));
-        }
     }
 
     /**
@@ -1427,7 +1411,6 @@ private:
             initialise(input, input_beam_stride);
         }
         m_is_initialized = true;
-        spdlog::debug("FDMTCPU: Stepper initialized at level 0.");
     }
 
     // Beam-major layout: beam b's waterfall/state/history all live in
@@ -1836,7 +1819,6 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_step,
                  bool use_box_smearing,
                  std::string_view mode,
-                 int verbose,
                  int nthreads,
                  SizeType nbeams,
                  SizeType fuse_levels,
@@ -1851,7 +1833,6 @@ FDMTCPU::FDMTCPU(float f_min,
                                     dt_step,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
                                     nbeams,
                                     fuse_levels,
@@ -1864,7 +1845,6 @@ FDMTCPU::FDMTCPU(float f_min,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 int verbose,
                  int nthreads,
                  SizeType nbeams,
                  SizeType fuse_levels,
@@ -1877,7 +1857,6 @@ FDMTCPU::FDMTCPU(float f_min,
                                     dt_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
                                     nbeams,
                                     fuse_levels,
@@ -1891,7 +1870,6 @@ FDMTCPU::FDMTCPU(float f_min,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 int verbose,
                  int nthreads,
                  SizeType nbeams,
                  SizeType fuse_levels,
@@ -1904,7 +1882,6 @@ FDMTCPU::FDMTCPU(float f_min,
                                     dm_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
                                     nbeams,
                                     fuse_levels,
@@ -1937,6 +1914,7 @@ SizeType FDMTCPU::get_fuse_levels() const noexcept {
     return m_impl->get_fuse_levels();
 }
 bool FDMTCPU::get_int_tree() const noexcept { return m_impl->get_int_tree(); }
+std::string FDMTCPU::summary() const { return m_impl->summary(); }
 FDMTMemoryUsage FDMTCPU::get_memory_usage() const noexcept {
     return m_impl->get_memory_usage();
 }
@@ -2009,11 +1987,10 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType dt_step,
              bool use_box_smearing,
              std::string_view mode,
-             int verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                 use_box_smearing, mode, verbose, nthreads, nbeams);
+                 use_box_smearing, mode, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);
@@ -2040,11 +2017,10 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing,
              std::string_view mode,
-             int verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
-                 mode, verbose, nthreads, nbeams);
+                 mode, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);
@@ -2068,11 +2044,10 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<float>& dm_grid,
              bool use_box_smearing,
              std::string_view mode,
-             int verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,
-                 mode, verbose, nthreads, nbeams);
+                 mode, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);

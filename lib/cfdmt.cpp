@@ -1,10 +1,9 @@
 #include "dmt/algorithms/cfdmt.hpp"
 
+#include <algorithm>
 #include <format>
 #include <span>
 #include <stdexcept>
-
-#include <spdlog/spdlog.h>
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bb_utils.hpp"
@@ -28,7 +27,6 @@ public:
          float dm_min,
          SizeType noverlap,
          std::string_view data_order,
-         int verbose,
          int nthreads)
         : m_plan(f_center,
                  bw_sub,
@@ -40,8 +38,7 @@ public:
                  dm_max,
                  dm_min,
                  noverlap,
-                 data_order,
-                 verbose),
+                 data_order),
           m_nthreads(std::max(1, nthreads)) {
         initialise();
     }
@@ -152,7 +149,7 @@ private:
         m_thefdmt = std::make_unique<algorithms::FDMTCPU>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid", 0, m_nthreads);
+            m_plan.get_dt_min(), 1, true, "valid", m_nthreads);
         m_theunpacker = std::make_unique<utils::DataUnpackerCPU>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_nthreads);
@@ -207,7 +204,6 @@ CohFDMTCPU::CohFDMTCPU(float f_center,
                        float dm_min,
                        SizeType noverlap,
                        std::string_view data_order,
-                       int verbose,
                        int nthreads)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,
@@ -220,7 +216,6 @@ CohFDMTCPU::CohFDMTCPU(float f_center,
                                     dm_min,
                                     noverlap,
                                     data_order,
-                                    verbose,
                                     nthreads)) {}
 
 CohFDMTCPU::~CohFDMTCPU()                                      = default;

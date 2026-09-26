@@ -38,8 +38,8 @@ CohFDMTPlan make_test_plan() {
     const float t_p             = tbin * static_cast<float>(chan_per_sub);
     const float dm_max          = 5.0F;
     const float dm_min          = 0.0F;
-    return {f_center, bw_sub, nsub,   tbin, nbin,    nfft,
-            t_p,      dm_max, dm_min, 32,   "PRITF", false};
+    return {f_center, bw_sub, nsub,   tbin, nbin,   nfft,
+            t_p,      dm_max, dm_min, 32,   "PRITF"};
 }
 } // namespace
 
@@ -212,7 +212,7 @@ TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment",
     const float dm_min          = 0.0F;
 
     CohFDMTPlan plan(f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max,
-                     dm_min, 32, "PRITF", false);
+                     dm_min, 32, "PRITF");
     CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                         plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                         plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),

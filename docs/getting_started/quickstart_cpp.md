@@ -27,7 +27,7 @@ int main() {
     dmt::algorithms::FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                   /*dt_min=*/0, /*dt_step=*/1,
                                   /*use_box_smearing=*/true, /*mode=*/"valid",
-                                  /*verbose=*/0, /*nthreads=*/4);
+                                  /*nthreads=*/4);
 
     const auto& plan = fdmt.get_plan();
     std::cout << plan.get_dmt_ndms() << " DM trials x "

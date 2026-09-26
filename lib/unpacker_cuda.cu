@@ -14,8 +14,6 @@
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 
-#include <spdlog/spdlog.h>
-
 #include "dmt/cuda_utils.cuh"
 #include "dmt/modes.hpp"
 
@@ -100,7 +98,6 @@ public:
           m_device_id(device_id),
           m_order(parse_baseband_data_order(in_order)) {
         cuda_utils::set_device(m_device_id);
-        spdlog::debug("DataUnpackerCUDA::Impl: Set device to {}.", m_device_id);
         if (m_nbin <= 2 * m_noverlap) {
             throw std::invalid_argument(
                 std::format("DataUnpackerCUDA::Impl: Invalid nbin and noverlap "
@@ -118,9 +115,6 @@ public:
         const SizeType sizeof_datatype = 1; // Assuming int8/uint8
         const auto m_expected_in_bytes = m_expected_in_size * sizeof_datatype;
         m_d_in_buffer.resize(m_expected_in_bytes);
-
-        spdlog::debug("DataUnpackerCUDA::Impl: Initialised using device {}.",
-                      m_device_id);
     }
 
     ~Impl()                      = default;
@@ -166,7 +160,6 @@ public:
                 "DataUnpackerCUDA::Impl: Unsupported data order "
                 "encountered in execute.");
         }
-        spdlog::debug("DataUnpackerCUDA::Impl: Execution submitted to stream");
     }
 
     template <IntegralDataType DataType>
@@ -193,8 +186,6 @@ public:
                 "DataUnpackerCUDA::Impl: Unsupported data order "
                 "encountered in execute.");
         }
-        spdlog::debug(
-            "DataUnpackerCUDA::Impl: Device execution submitted to stream");
     }
 
 private:

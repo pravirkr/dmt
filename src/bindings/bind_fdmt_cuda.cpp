@@ -193,48 +193,45 @@ void bind_fdmt_cuda(py::module_& mod) {
                          SizeType nsamps, float tsamp, IndexType dt_max,
                          IndexType dt_min, SizeType dt_step,
                          bool use_box_smearing, std::string_view mode,
-                         int verbose, int device_id, SizeType nbeams,
+                         int device_id, SizeType nbeams,
                          std::optional<SizeType> fuse_levels, bool int_tree) {
                  return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                  dt_min, dt_step, use_box_smearing, mode,
-                                 verbose, device_id, nbeams,
+                                 device_id, nbeams,
                                  fuse_levels.value_or(kFDMTAutoFuse), int_tree);
              }),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
              py::arg("dt_min") = 0, py::arg("dt_step") = 1,
              py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = 0, py::arg("device_id") = 0,
-             py::arg("nbeams") = 1, py::arg("fuse_levels") = py::none(),
-             py::arg("int_tree") = true)
-        .def(py::init([](float f_min, float f_max, SizeType nchans,
-                         SizeType nsamps, float tsamp,
-                         const py::object& dt_grid, const py::object& dt_arr,
-                         const py::object& dm_grid, const py::object& dm_arr,
-                         bool use_box_smearing, std::string_view mode,
-                         int verbose, int device_id, SizeType nbeams,
-                         std::optional<SizeType> fuse_levels, bool int_tree) {
-                 const auto [type, obj] =
-                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                 const auto fuse = fuse_levels.value_or(kFDMTAutoFuse);
-                 if (type == CustomGridType::kDt) {
-                     return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp,
-                                     extract_dt_grid(obj), use_box_smearing,
-                                     mode, verbose, device_id, nbeams, fuse,
-                                     int_tree);
-                 }
-                 return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp,
-                                 extract_dm_grid(obj), use_box_smearing, mode,
-                                 verbose, device_id, nbeams, fuse, int_tree);
-             }),
-             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
-             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
-             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = 0, py::arg("device_id") = 0,
-             py::arg("nbeams") = 1, py::arg("fuse_levels") = py::none(),
-             py::arg("int_tree") = true)
+             py::arg("device_id") = 0, py::arg("nbeams") = 1,
+             py::arg("fuse_levels") = py::none(), py::arg("int_tree") = true)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, const py::object& dt_grid,
+                        const py::object& dt_arr, const py::object& dm_grid,
+                        const py::object& dm_arr, bool use_box_smearing,
+                        std::string_view mode, int device_id, SizeType nbeams,
+                        std::optional<SizeType> fuse_levels, bool int_tree) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                const auto fuse = fuse_levels.value_or(kFDMTAutoFuse);
+                if (type == CustomGridType::kDt) {
+                    return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                    extract_dt_grid(obj), use_box_smearing,
+                                    mode, device_id, nbeams, fuse, int_tree);
+                }
+                return FDMTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                extract_dm_grid(obj), use_box_smearing, mode,
+                                device_id, nbeams, fuse, int_tree);
+            }),
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+            py::arg("device_id") = 0, py::arg("nbeams") = 1,
+            py::arg("fuse_levels") = py::none(), py::arg("int_tree") = true)
         .def_property_readonly(
             "plan", &FDMTCUDA::get_plan,
             "Get the FDMTPlan object containing transform details.")
@@ -315,6 +312,8 @@ void bind_fdmt_cuda(py::module_& mod) {
         .def_property_readonly(
             "memory_usage", &FDMTCUDA::get_memory_usage,
             "FDMTMemoryUsage: device bytes allocated by the engine.")
+        .def("summary", &FDMTCUDA::summary,
+             "Human-readable summary: plan, engine configuration and memory.")
         .def("get_effective_variance", &FDMTCUDA::get_effective_variance,
              py::arg("dm_idx"), py::arg("boxcar_width") = 1,
              "Theoretical noise variance for a DM trial and boxcar width "
@@ -450,38 +449,36 @@ void bind_fdmt_cuda(py::module_& mod) {
         ``device_id`` instead of ``nthreads``.
         )doc")
         .def(py::init<float, float, SizeType, SizeType, float, IndexType,
-                      IndexType, SizeType, bool, std::string_view, bool, int,
+                      IndexType, SizeType, bool, std::string_view, int,
                       SizeType>(),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("dt_max"),
              py::arg("dt_min") = 0, py::arg("dt_step") = 1,
              py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = 0, py::arg("device_id") = 0,
-             py::arg("nbeams") = 1)
-        .def(py::init([](float f_min, float f_max, SizeType nchans,
-                         SizeType nsamps, float tsamp,
-                         const py::object& dt_grid, const py::object& dt_arr,
-                         const py::object& dm_grid, const py::object& dm_arr,
-                         bool use_box_smearing, std::string_view mode,
-                         int verbose, int device_id, SizeType nbeams) {
-                 const auto [type, obj] =
-                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                 if (type == CustomGridType::kDt) {
-                     return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
-                                        extract_dt_grid(obj), use_box_smearing,
-                                        mode, verbose, device_id, nbeams);
-                 }
-                 return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
-                                    extract_dm_grid(obj), use_box_smearing,
-                                    mode, verbose, device_id, nbeams);
-             }),
-             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
-             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
-             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
-             py::arg("verbose") = 0, py::arg("device_id") = 0,
-             py::arg("nbeams") = 1)
+             py::arg("device_id") = 0, py::arg("nbeams") = 1)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, const py::object& dt_grid,
+                        const py::object& dt_arr, const py::object& dm_grid,
+                        const py::object& dm_arr, bool use_box_smearing,
+                        std::string_view mode, int device_id, SizeType nbeams) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                if (type == CustomGridType::kDt) {
+                    return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                       extract_dt_grid(obj), use_box_smearing,
+                                       mode, device_id, nbeams);
+                }
+                return FDMTFFTCUDA(f_min, f_max, nchans, nsamps, tsamp,
+                                   extract_dm_grid(obj), use_box_smearing, mode,
+                                   device_id, nbeams);
+            }),
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+            py::arg("device_id") = 0, py::arg("nbeams") = 1)
         .def_property_readonly("plan", &FDMTFFTCUDA::get_plan)
         .def_property_readonly("nbeams", &FDMTFFTCUDA::get_nbeams)
         .def_property_readonly("dt_grid_final",

@@ -34,8 +34,8 @@ CohFDMTPlan make_cuda_test_plan() {
     const float t_p             = tbin * static_cast<float>(chan_per_sub);
     const float dm_max          = 5.0F;
     const float dm_min          = 0.0F;
-    return {f_center, bw_sub, nsub,   tbin, nbin,    nfft,
-            t_p,      dm_max, dm_min, 32,   "PRITF", false};
+    return {f_center, bw_sub, nsub,   tbin, nbin,   nfft,
+            t_p,      dm_max, dm_min, 32,   "PRITF"};
 }
 } // namespace
 

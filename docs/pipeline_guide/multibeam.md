@@ -64,7 +64,7 @@ const size_t nsamps = 1024;
 dmt::algorithms::FDMTCPU fdmt(
     1200.0f, 1600.0f, nchans, nsamps, 1e-3f,
     /*dt_max=*/100, /*dt_min=*/0, /*dt_step=*/1,
-    /*use_box_smearing=*/true, "valid", /*verbose=*/0,
+    /*use_box_smearing=*/true, "valid",
     /*nthreads=*/8, /*nbeams=*/nbeams
 );
 

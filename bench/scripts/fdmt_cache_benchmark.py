@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 
 # Ensure local build/src takes precedence
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 build_src = repo_root / "build" / "src"
 src_dir = repo_root / "src"
 

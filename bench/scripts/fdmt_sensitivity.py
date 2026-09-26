@@ -5,7 +5,7 @@ Not part of CI -- re-run this whenever `dt_step`, `use_box_smearing`, or the
 DM grid law changes, to visually characterize the resulting trade-off.
 
 Usage:
-    python bench/fdmt_sensitivity.py [--plot] [--out fdmt_sensitivity.png]
+    python bench/scripts/fdmt_sensitivity.py [--plot] [--out fdmt_sensitivity.png]
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 # Ensure the local build/src and src directories take precedence over stale editable site-packages
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 build_src = repo_root / "build" / "src"
 src_dir = repo_root / "src"
 tests_python = repo_root / "tests" / "python"

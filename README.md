@@ -37,20 +37,35 @@ from dmtlib.simulate import generate_frb
 # 1. Simulate an FRB in a 256-channel filterbank.
 # generate_frb returns one float32 waterfall of shape (nchans, nsamps).
 waterfall = generate_frb(
-    f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
-    tsamp=1e-3, dm=150.0, amp=3.0, offset=200, noise_rms=1.0,
+    f_min=1200.0,
+    f_max=1600.0,
+    nchans=256,
+    nsamps=1024,
+    tsamp=1e-3,
+    dm=150.0,
+    amp=3.0,
+    offset=200,
+    noise_rms=1.0,
 )
 
 # 2. Dedisperse with the Fast Dispersion Measure Transform
 dmt, plan = compute_fdmt(
-    waterfall, f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
-    tsamp=1e-3, dt_max=180, mode="valid",
+    waterfall,
+    f_min=1200.0,
+    f_max=1600.0,
+    nchans=256,
+    nsamps=1024,
+    tsamp=1e-3,
+    dt_max=180,
+    mode="valid",
 )
 
 # 3. Locate the candidate in the DM-time plane
 dmt_plane = dmt.reshape(plan.dmt_ndms, plan.dmt_nsamps)
 peak_dm_idx, peak_time = np.unravel_index(np.argmax(dmt_plane), dmt_plane.shape)
-print(f"Detected FRB at DM = {plan.dm_grid_final[peak_dm_idx]:.2f} pc cm^-3, sample = {peak_time}")
+print(
+    f"Detected FRB at DM = {plan.dm_grid_final[peak_dm_idx]:.2f} pc cm^-3, sample = {peak_time}"
+)
 ```
 
 ### C++20
@@ -128,11 +143,30 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ---
 
-## 📊 Benchmark
+## 📊 Benchmarks
 
-Execution time scaling for 4096 frequency channels searching up to 2048 delay trials:
+dmt 0.3.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both 8 threads) and
+an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
+16K-sample blocks (1.34 s), processed as a stream.
 
-![Benchmark results](bench/results/bench.png)
+- **Left:** time per block for FDMT, FFT-based FDMT and brute-force DDMT on
+  the same DM grid. The grey line is real time.
+- **Right:** how many times faster than real time FDMT runs, by input bit
+  width.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/dark/readme_highlight.png">
+  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT and DDMT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
+</picture>
+
+At 2049 DM trials, FDMT is 150–340× faster than brute-force dedispersion on
+the same CPU and 39× faster on the GPU. It runs 25–51× faster than real time
+on 8 CPU threads and 242× on the L40S, rising to 387× with packed 1-bit
+input.
+
+All sweeps, per-machine numbers and the operation-count comparison are on the
+[Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page.
+[`bench/README.md`](bench/README.md) shows how to reproduce them.
 
 ---
 

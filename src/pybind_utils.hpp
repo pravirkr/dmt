@@ -13,6 +13,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "dmt/common/logging.hpp"
 #include "dmt/common/types.hpp"
 
 namespace dmt {
@@ -196,6 +197,16 @@ py::object fdmt_execute_to_array(const Engine& fdmt,
     return py::array_t<float>(
         {static_cast<py::ssize_t>(nbeams), ncoords, nsamps},
         {buf_size * fsize, nsamps * fsize, fsize}, buf.data(), buf);
+}
+
+// Each extension module links its own copy of the library, so each exposes
+// the private setters; dmtlib.set_log_level() forwards to all loaded modules.
+inline void bind_logging(py::module_& mod) {
+    mod.def(
+        "_set_log_level",
+        [](int level) { set_log_level(static_cast<LogLevel>(level)); },
+        py::arg("level"));
+    mod.def("_get_log_level", [] { return static_cast<int>(get_log_level()); });
 }
 
 } // namespace dmt

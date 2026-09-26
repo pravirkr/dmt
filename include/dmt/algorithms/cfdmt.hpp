@@ -53,7 +53,6 @@ public:
      * convolution (default: 8192).
      * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
      * (default: "PRITF").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP worker threads (default: 1).
      */
     CohFDMTCPU(float f_center,
@@ -67,7 +66,6 @@ public:
                float dm_min                = 0.0F,
                SizeType noverlap           = 8192,
                std::string_view data_order = "PRITF",
-               int verbose                 = 0,
                int nthreads                = 1);
 
     ~CohFDMTCPU();
@@ -139,7 +137,6 @@ public:
      * @param noverlap Overlap sample count for convolution (default: 8192).
      * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
      * (default: "PRITF").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id Target CUDA device ID (default: 0).
      */
     CohFDMTCUDA(float f_center,
@@ -153,7 +150,6 @@ public:
                 float dm_min                = 0.0F,
                 SizeType noverlap           = 8192,
                 std::string_view data_order = "PRITF",
-                int verbose                 = 0,
                 int device_id               = 0);
 
     ~CohFDMTCUDA();

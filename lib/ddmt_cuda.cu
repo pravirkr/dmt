@@ -2,14 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <format>
 #include <stdexcept>
 #include <vector>
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
-
-#include <spdlog/spdlog.h>
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
@@ -117,7 +116,6 @@ public:
                  dm_max,
                  dm_step,
                  dm_min,
-                 false,
                  nbits,
                  kill_mask),
           m_device_id(device_id),
@@ -139,7 +137,6 @@ public:
                  nchans,
                  tsamp,
                  std::span<const float>(dm_arr),
-                 false,
                  nbits,
                  kill_mask),
           m_device_id(device_id),
@@ -156,7 +153,7 @@ public:
          SizeType nbits,
          std::span<const uint8_t> kill_mask,
          SizeType nbeams)
-        : m_plan(f_min, f_max, nchans, tsamp, levin, false, nbits, kill_mask),
+        : m_plan(f_min, f_max, nchans, tsamp, levin, nbits, kill_mask),
           m_device_id(device_id),
           m_nbeams(nbeams) {
         init();
@@ -202,152 +199,142 @@ public:
                bit_pack_utils::packed_row_bytes(max_delay, plan_c.nbits);
     }
 
-    bool save_history(std::span<float> out) const {
+    void save_history(std::span<float> out) const {
         if (m_plan.get_nbits() != 32) {
-            spdlog::error(
+            throw std::invalid_argument(std::format(
                 "DDMTCUDA::save_history(float): plan nbits={} != 32; "
                 "use the packed save_history(uint8_t) overload instead",
-                m_plan.get_nbits());
-            return false;
+                m_plan.get_nbits()));
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
-            spdlog::error("DDMTCUDA::save_history: stream is not fully "
-                          "warmed up yet ({} of {} history samples/channel)",
-                          m_history_len, max_delay);
-            return false;
+            throw std::logic_error(
+                std::format("DDMTCUDA::save_history: stream is not fully "
+                            "warmed up yet ({} of {} history samples/channel)",
+                            m_history_len, max_delay));
         }
         if (out.size() != m_history.size()) {
-            spdlog::error("DDMTCUDA::save_history: buffer size mismatch: "
-                          "expected {}, got {}",
-                          m_history.size(), out.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                            "expected {}, got {}",
+                            m_history.size(), out.size()));
         }
         std::ranges::copy(m_history, out.begin());
-        return true;
     }
 
-    bool save_history(cuda::std::span<float> d_out, cudaStream_t stream) const {
+    void save_history(cuda::std::span<float> d_out, cudaStream_t stream) const {
         if (m_plan.get_nbits() != 32) {
-            spdlog::error(
+            throw std::invalid_argument(std::format(
                 "DDMTCUDA::save_history(device float): plan nbits={} != 32; "
                 "use the packed save_history(uint8_t) overload instead",
-                m_plan.get_nbits());
-            return false;
+                m_plan.get_nbits()));
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
-            spdlog::error("DDMTCUDA::save_history: stream is not fully "
-                          "warmed up yet ({} of {} history samples/channel)",
-                          m_history_len, max_delay);
-            return false;
+            throw std::logic_error(
+                std::format("DDMTCUDA::save_history: stream is not fully "
+                            "warmed up yet ({} of {} history samples/channel)",
+                            m_history_len, max_delay));
         }
         if (d_out.size() != m_history.size()) {
-            spdlog::error("DDMTCUDA::save_history: buffer size mismatch: "
-                          "expected {}, got {}",
-                          m_history.size(), d_out.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                            "expected {}, got {}",
+                            m_history.size(), d_out.size()));
         }
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(d_out.data(), m_history.data(),
                             m_history.size() * sizeof(float),
                             cudaMemcpyHostToDevice, stream),
             "DDMTCUDA::save_history H2D copy failed");
-        return true;
     }
 
-    bool save_history(std::span<uint8_t> out) const {
+    void save_history(std::span<uint8_t> out) const {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
-            spdlog::error("DDMTCUDA::save_history(uint8_t): plan nbits=32; "
-                          "use the float save_history(float) overload instead");
-            return false;
+            throw std::invalid_argument(
+                "DDMTCUDA::save_history(uint8_t): plan nbits=32; "
+                "use the float save_history(float) overload instead");
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
-            spdlog::error("DDMTCUDA::save_history: stream is not fully "
-                          "warmed up yet ({} of {} history samples/channel)",
-                          m_history_len, max_delay);
-            return false;
+            throw std::logic_error(
+                std::format("DDMTCUDA::save_history: stream is not fully "
+                            "warmed up yet ({} of {} history samples/channel)",
+                            m_history_len, max_delay));
         }
         const auto expected_bytes = history_state_size();
         if (out.size() != expected_bytes) {
-            spdlog::error("DDMTCUDA::save_history: buffer size mismatch: "
-                          "expected {} bytes, got {}",
-                          expected_bytes, out.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                            "expected {} bytes, got {}",
+                            expected_bytes, out.size()));
         }
         std::ranges::copy(m_history_packed, out.begin());
-        return true;
     }
 
-    bool save_history(cuda::std::span<uint8_t> d_out,
+    void save_history(cuda::std::span<uint8_t> d_out,
                       cudaStream_t stream) const {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
-            spdlog::error(
+            throw std::invalid_argument(
                 "DDMTCUDA::save_history(device uint8_t): plan nbits=32; "
                 "use the float save_history(float) overload instead");
-            return false;
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
-            spdlog::error("DDMTCUDA::save_history: stream is not fully "
-                          "warmed up yet ({} of {} history samples/channel)",
-                          m_history_len, max_delay);
-            return false;
+            throw std::logic_error(
+                std::format("DDMTCUDA::save_history: stream is not fully "
+                            "warmed up yet ({} of {} history samples/channel)",
+                            m_history_len, max_delay));
         }
         const auto expected_bytes = history_state_size();
         if (d_out.size() != expected_bytes) {
-            spdlog::error("DDMTCUDA::save_history: buffer size mismatch: "
-                          "expected {} bytes, got {}",
-                          expected_bytes, d_out.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                            "expected {} bytes, got {}",
+                            expected_bytes, d_out.size()));
         }
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(d_out.data(), m_history_packed.data(),
                             m_history_packed.size(), cudaMemcpyHostToDevice,
                             stream),
             "DDMTCUDA::save_history(packed) H2D copy failed");
-        return true;
     }
 
-    bool load_history(std::span<const float> in) {
+    void load_history(std::span<const float> in) {
         if (m_plan.get_nbits() != 32) {
-            spdlog::error(
+            throw std::invalid_argument(std::format(
                 "DDMTCUDA::load_history(float): plan nbits={} != 32; "
                 "use the packed load_history(uint8_t) overload instead",
-                m_plan.get_nbits());
-            return false;
+                m_plan.get_nbits()));
         }
         if (in.size() != history_state_size()) {
-            spdlog::error("DDMTCUDA::load_history: buffer size mismatch: "
-                          "expected {}, got {}",
-                          history_state_size(), in.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                            "expected {}, got {}",
+                            history_state_size(), in.size()));
         }
         m_history.assign(in.begin(), in.end());
         m_history_len = in.size() / (m_nbeams * m_plan.get_nchans());
-        return true;
     }
 
-    bool load_history(cuda::std::span<const float> d_in, cudaStream_t stream) {
+    void load_history(cuda::std::span<const float> d_in, cudaStream_t stream) {
         if (m_plan.get_nbits() != 32) {
-            spdlog::error(
+            throw std::invalid_argument(std::format(
                 "DDMTCUDA::load_history(device float): plan nbits={} != 32; "
                 "use the packed load_history(uint8_t) overload instead",
-                m_plan.get_nbits());
-            return false;
+                m_plan.get_nbits()));
         }
         if (d_in.size() != history_state_size()) {
-            spdlog::error("DDMTCUDA::load_history: buffer size mismatch: "
-                          "expected {}, got {}",
-                          history_state_size(), d_in.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                            "expected {}, got {}",
+                            history_state_size(), d_in.size()));
         }
         m_history.resize(d_in.size());
         cuda_utils::check_cuda_call(
@@ -361,44 +348,41 @@ public:
             cuda_utils::check_cuda_call(cudaDeviceSynchronize());
         }
         m_history_len = d_in.size() / (m_nbeams * m_plan.get_nchans());
-        return true;
     }
 
-    bool load_history(std::span<const uint8_t> in) {
+    void load_history(std::span<const uint8_t> in) {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
-            spdlog::error("DDMTCUDA::load_history(uint8_t): plan nbits=32; "
-                          "use the float load_history(float) overload instead");
-            return false;
+            throw std::invalid_argument(
+                "DDMTCUDA::load_history(uint8_t): plan nbits=32; "
+                "use the float load_history(float) overload instead");
         }
         const auto expected_bytes = history_state_size();
         if (in.size() != expected_bytes) {
-            spdlog::error("DDMTCUDA::load_history: buffer size mismatch: "
-                          "expected {} bytes, got {}",
-                          expected_bytes, in.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                            "expected {} bytes, got {}",
+                            expected_bytes, in.size()));
         }
         m_history_packed.assign(in.begin(), in.end());
         m_history_len =
             *std::ranges::max_element(m_plan.get_container().delay_table);
-        return true;
     }
 
-    bool load_history(cuda::std::span<const uint8_t> d_in,
+    void load_history(cuda::std::span<const uint8_t> d_in,
                       cudaStream_t stream) {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
-            spdlog::error(
+            throw std::invalid_argument(
                 "DDMTCUDA::load_history(device uint8_t): plan nbits=32; "
                 "use the float load_history(float) overload instead");
-            return false;
         }
         const auto expected_bytes = history_state_size();
         if (d_in.size() != expected_bytes) {
-            spdlog::error("DDMTCUDA::load_history: buffer size mismatch: "
-                          "expected {} bytes, got {}",
-                          expected_bytes, d_in.size());
-            return false;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                            "expected {} bytes, got {}",
+                            expected_bytes, d_in.size()));
         }
         m_history_packed.resize(d_in.size());
         cuda_utils::check_cuda_call(
@@ -412,17 +396,16 @@ public:
         }
         m_history_len =
             *std::ranges::max_element(m_plan.get_container().delay_table);
-        return true;
     }
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
         cuda_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
-            spdlog::error("DDMTCUDA::execute(float): plan nbits={} != 32; "
-                          "use the packed-integer execute() overload instead",
-                          plan_c.nbits);
-            return;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::execute(float): plan nbits={} != 32; "
+                            "use the packed-integer execute() overload instead",
+                            plan_c.nbits));
         }
         const auto nchans     = plan_c.nchans;
         const auto nsamps_new = waterfall.size() / (nchans * m_nbeams);
@@ -431,9 +414,9 @@ public:
         const auto nsamps_reduced = total > max_delay ? total - max_delay : 0;
         const auto dm_count       = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
-            spdlog::error("Output buffer size mismatch: expected {}, got {}",
-                          m_nbeams * dm_count * nsamps_reduced, dmt.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
 
         // Beam-major (nbeams, nchans, total): prepend each beam's retained
@@ -600,10 +583,10 @@ public:
         cuda_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
-            spdlog::error("DDMTCUDA::execute(device float): plan nbits={} "
-                          "!= 32; use the packed-integer overload instead",
-                          plan_c.nbits);
-            return;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::execute(device float): plan nbits={} "
+                            "!= 32; use the packed-integer overload instead",
+                            plan_c.nbits));
         }
         const auto nchans     = plan_c.nchans;
         const auto nsamps_new = d_waterfall.size() / (nchans * m_nbeams);
@@ -612,9 +595,9 @@ public:
         const auto nsamps_reduced = total > max_delay ? total - max_delay : 0;
         const auto dm_count       = plan_c.dm_arr.size();
         if (d_dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
-            spdlog::error("Output buffer size mismatch: expected {}, got {}",
-                          m_nbeams * dm_count * nsamps_reduced, d_dmt.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                m_nbeams * dm_count * nsamps_reduced, d_dmt.size()));
         }
         const auto in_rows = m_nbeams * nchans;
 
@@ -739,29 +722,29 @@ public:
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
-            spdlog::error("DDMTCUDA::execute(packed): plan nbits={} is not "
-                          "a supported packed width (1,2,4,8,16)",
-                          nbits);
-            return;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::execute(packed): plan nbits={} is not "
+                            "a supported packed width (1,2,4,8,16)",
+                            nbits));
         }
         const auto nchans  = plan_c.nchans;
         const auto in_rows = m_nbeams * nchans;
         const auto row_bytes =
             bit_pack_utils::packed_row_bytes(nsamps_total, nbits);
         if (waterfall_packed.size() != in_rows * row_bytes) {
-            spdlog::error("Packed input buffer size mismatch: expected {} "
-                          "bytes, got {}",
-                          in_rows * row_bytes, waterfall_packed.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Packed input buffer size mismatch: expected {} "
+                "bytes, got {}",
+                in_rows * row_bytes, waterfall_packed.size()));
         }
         const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
         const auto total     = m_history_len + nsamps_total;
         const auto nsamps_reduced = total > max_delay ? total - max_delay : 0;
         const auto dm_count       = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
-            spdlog::error("Output buffer size mismatch: expected {}, got {}",
-                          m_nbeams * dm_count * nsamps_reduced, dmt.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
 
         const auto combined_row_bytes =
@@ -1005,29 +988,29 @@ public:
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
-            spdlog::error("DDMTCUDA::execute(device packed): plan nbits={} "
-                          "is not a supported packed width (1,2,4,8,16)",
-                          nbits);
-            return;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA::execute(device packed): plan nbits={} "
+                            "is not a supported packed width (1,2,4,8,16)",
+                            nbits));
         }
         const auto nchans  = plan_c.nchans;
         const auto in_rows = m_nbeams * nchans;
         const auto row_bytes =
             bit_pack_utils::packed_row_bytes(nsamps_total, nbits);
         if (d_waterfall_packed.size() != in_rows * row_bytes) {
-            spdlog::error("Packed input buffer size mismatch: expected {} "
-                          "bytes, got {}",
-                          in_rows * row_bytes, d_waterfall_packed.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Packed input buffer size mismatch: expected {} "
+                "bytes, got {}",
+                in_rows * row_bytes, d_waterfall_packed.size()));
         }
         const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
         const auto total     = m_history_len + nsamps_total;
         const auto nsamps_reduced = total > max_delay ? total - max_delay : 0;
         const auto dm_count       = plan_c.dm_arr.size();
         if (d_dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
-            spdlog::error("Output buffer size mismatch: expected {}, got {}",
-                          m_nbeams * dm_count * nsamps_reduced, d_dmt.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                m_nbeams * dm_count * nsamps_reduced, d_dmt.size()));
         }
 
         const auto combined_row_bytes =
@@ -1263,31 +1246,30 @@ public:
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
-            spdlog::error(
+            throw std::invalid_argument(std::format(
                 "DDMTCUDA::execute_time_major(device): plan nbits={} is not "
                 "a supported packed width (1,2,4,8,16)",
-                nbits);
-            return;
+                nbits));
         }
         const auto nchans     = plan_c.nchans;
         const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, nbits);
         if (d_filterbank_packed.size() !=
             m_nbeams * nsamps_total * samp_bytes) {
-            spdlog::error(
-                "Time-major packed input buffer size mismatch: expected {} "
-                "bytes, got {}",
-                m_nbeams * nsamps_total * samp_bytes,
-                d_filterbank_packed.size());
-            return;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA: Time-major packed input buffer size "
+                            "mismatch: expected {} "
+                            "bytes, got {}",
+                            m_nbeams * nsamps_total * samp_bytes,
+                            d_filterbank_packed.size()));
         }
         const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
         const auto nsamps_reduced =
             nsamps_total > max_delay ? nsamps_total - max_delay : 0;
         const auto dm_count = plan_c.dm_arr.size();
         if (d_dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
-            spdlog::error("Output buffer size mismatch: expected {}, got {}",
-                          m_nbeams * dm_count * nsamps_reduced, d_dmt.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                m_nbeams * dm_count * nsamps_reduced, d_dmt.size()));
         }
         if (nsamps_reduced == 0)
             return;
@@ -1313,29 +1295,29 @@ public:
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
-            spdlog::error(
+            throw std::invalid_argument(std::format(
                 "DDMTCUDA::execute_time_major(host): plan nbits={} is not "
                 "a supported packed width (1,2,4,8,16)",
-                nbits);
-            return;
+                nbits));
         }
         const auto nchans     = plan_c.nchans;
         const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, nbits);
         if (filterbank_packed.size() != m_nbeams * nsamps_total * samp_bytes) {
-            spdlog::error(
-                "Time-major packed input buffer size mismatch: expected {} "
-                "bytes, got {}",
-                m_nbeams * nsamps_total * samp_bytes, filterbank_packed.size());
-            return;
+            throw std::invalid_argument(
+                std::format("DDMTCUDA: Time-major packed input buffer size "
+                            "mismatch: expected {} "
+                            "bytes, got {}",
+                            m_nbeams * nsamps_total * samp_bytes,
+                            filterbank_packed.size()));
         }
         const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
         const auto nsamps_reduced =
             nsamps_total > max_delay ? nsamps_total - max_delay : 0;
         const auto dm_count = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
-            spdlog::error("Output buffer size mismatch: expected {}, got {}",
-                          m_nbeams * dm_count * nsamps_reduced, dmt.size());
-            return;
+            throw std::invalid_argument(std::format(
+                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
         if (nsamps_reduced == 0)
             return;
@@ -1699,31 +1681,31 @@ void DDMTCUDA::reset_history() noexcept { m_impl->reset_history(); }
 SizeType DDMTCUDA::history_state_size() const noexcept {
     return m_impl->history_state_size();
 }
-bool DDMTCUDA::save_history(std::span<float> out) const {
+void DDMTCUDA::save_history(std::span<float> out) const {
     return m_impl->save_history(out);
 }
-bool DDMTCUDA::save_history(cuda::std::span<float> d_out,
+void DDMTCUDA::save_history(cuda::std::span<float> d_out,
                             cudaStream_t stream) const {
     return m_impl->save_history(d_out, stream);
 }
-bool DDMTCUDA::load_history(std::span<const float> in) {
+void DDMTCUDA::load_history(std::span<const float> in) {
     return m_impl->load_history(in);
 }
-bool DDMTCUDA::load_history(cuda::std::span<const float> d_in,
+void DDMTCUDA::load_history(cuda::std::span<const float> d_in,
                             cudaStream_t stream) {
     return m_impl->load_history(d_in, stream);
 }
-bool DDMTCUDA::save_history(std::span<uint8_t> out) const {
+void DDMTCUDA::save_history(std::span<uint8_t> out) const {
     return m_impl->save_history(out);
 }
-bool DDMTCUDA::save_history(cuda::std::span<uint8_t> d_out,
+void DDMTCUDA::save_history(cuda::std::span<uint8_t> d_out,
                             cudaStream_t stream) const {
     return m_impl->save_history(d_out, stream);
 }
-bool DDMTCUDA::load_history(std::span<const uint8_t> in) {
+void DDMTCUDA::load_history(std::span<const uint8_t> in) {
     return m_impl->load_history(in);
 }
-bool DDMTCUDA::load_history(cuda::std::span<const uint8_t> d_in,
+void DDMTCUDA::load_history(cuda::std::span<const uint8_t> d_in,
                             cudaStream_t stream) {
     return m_impl->load_history(d_in, stream);
 }

@@ -71,7 +71,7 @@ TEST_CASE("parity: FDMTFFTCUDA execute matches FDMTFFTCPU",
 TEST_CASE("parity: CohFDMTCUDA execute matches CohFDMTCPU",
           "[cfdmt][gpu][parity]") {
     plans::CohFDMTPlan plan(1250.0F, 25.0F, 4, 1.0E-6F, 1 << 10, 2, 4.0E-6F,
-                            5.0F, 0.0F, 32, "PRITF", false);
+                            5.0F, 0.0F, 32, "PRITF");
     CohFDMTCPU cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                    plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                    plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),

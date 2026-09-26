@@ -16,8 +16,6 @@
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
-#include <spdlog/spdlog.h>
-
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
@@ -239,7 +237,6 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int device_id,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -256,8 +253,7 @@ public:
                                                    dt_max,
                                                    dt_min,
                                                    dt_step,
-                                                   mode,
-                                                   verbose)) {
+                                                   mode)) {
         initialize();
     }
 
@@ -269,7 +265,6 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int device_id,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -279,7 +274,7 @@ public:
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {
+              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode)) {
         initialize();
     }
 
@@ -291,7 +286,6 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int device_id,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -301,7 +295,7 @@ public:
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {
+              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode)) {
         initialize();
     }
 
@@ -889,7 +883,6 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                          SizeType dt_step,
                          bool use_box_smearing,
                          std::string_view mode,
-                         int verbose,
                          int device_id,
                          SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -902,7 +895,6 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                                     dt_step,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     device_id,
                                     nbeams)) {}
 
@@ -914,7 +906,6 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                          const std::vector<IndexType>& dt_grid,
                          bool use_box_smearing,
                          std::string_view mode,
-                         int verbose,
                          int device_id,
                          SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -925,7 +916,6 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                                     dt_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     device_id,
                                     nbeams)) {}
 
@@ -937,7 +927,6 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                          const std::vector<float>& dm_grid,
                          bool use_box_smearing,
                          std::string_view mode,
-                         int verbose,
                          int device_id,
                          SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -948,7 +937,6 @@ FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
                                     dm_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     device_id,
                                     nbeams)) {}
 

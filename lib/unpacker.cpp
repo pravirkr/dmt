@@ -5,8 +5,6 @@
 #include <stdexcept>
 #include <string_view>
 
-#include "spdlog/spdlog.h"
-
 #include "dmt/modes.hpp"
 
 namespace dmt::utils {
@@ -34,8 +32,6 @@ public:
                             m_nbin, m_noverlap));
         }
         m_nsamp = m_nfft * (m_nbin - (2 * m_noverlap));
-        spdlog::debug("DataUnpackerCPU::Impl: Initialised with {} threads.",
-                      m_nthreads);
     }
 
     ~Impl()                      = default;
@@ -66,7 +62,6 @@ public:
             throw std::logic_error("DataUnpackerCPU::Impl: Unsupported data "
                                    "order encountered in execute.");
         }
-        spdlog::debug("DataUnpackerCPU::Impl: Execution complete.");
     }
 
 private:

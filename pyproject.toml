@@ -44,6 +44,7 @@ docs = [
     "matplotlib",
 ]
 develop = ["ruff", "ty"]
+bench = ["matplotlib", "numpy"]
 
 [tool.scikit-build]
 cmake.version = ">=3.18"

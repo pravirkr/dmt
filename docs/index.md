@@ -91,6 +91,13 @@ Learn production telescope integration recipes: overlap-save history, multi-beam
 Hands-on Jupyter notebooks covering filterbanks, tree stepping, sparse grids, low-bit quantization, and baseband coherent search.
 :::
 
+:::{grid-item-card} 📊 Benchmarks
+:link: benchmarks
+:link-type: doc
+
+FDMT, FDMT-FFT and brute-force DDMT on CPUs and a GPU, on one fixed 4096-channel configuration: runtime, real-time throughput by input bit width, and operation counts.
+:::
+
 ::::
 
 ---
@@ -104,6 +111,7 @@ Hands-on Jupyter notebooks covering filterbanks, tree stepping, sparse grids, lo
 getting_started/index
 tutorials/index
 pipeline_guide/index
+benchmarks
 ```
 
 ```{toctree}

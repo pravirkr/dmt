@@ -9,8 +9,6 @@
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
-#include <spdlog/spdlog.h>
-
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bb_utils_cuda.cuh"
 #include "dmt/common/types.hpp"
@@ -34,7 +32,6 @@ public:
          float dm_min,
          SizeType noverlap,
          std::string_view data_order,
-         int verbose,
          int device_id)
         : m_plan(f_center,
                  bw_sub,
@@ -46,8 +43,7 @@ public:
                  dm_max,
                  dm_min,
                  noverlap,
-                 data_order,
-                 verbose),
+                 data_order),
           m_device_id(device_id) {
         cuda_utils::set_device(m_device_id);
         initialise();
@@ -251,7 +247,7 @@ private:
         m_thefdmt = std::make_unique<algorithms::FDMTCUDA>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid", 0, m_device_id);
+            m_plan.get_dt_min(), 1, true, "valid", m_device_id);
         m_theunpacker = std::make_unique<utils::DataUnpackerCUDA>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_device_id);
@@ -357,7 +353,6 @@ CohFDMTCUDA::CohFDMTCUDA(float f_center,
                          float dm_min,
                          SizeType noverlap,
                          std::string_view data_order,
-                         int verbose,
                          int device_id)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,
@@ -370,7 +365,6 @@ CohFDMTCUDA::CohFDMTCUDA(float f_center,
                                     dm_min,
                                     noverlap,
                                     data_order,
-                                    verbose,
                                     device_id)) {}
 CohFDMTCUDA::~CohFDMTCUDA()                                       = default;
 CohFDMTCUDA::CohFDMTCUDA(CohFDMTCUDA&& other) noexcept            = default;

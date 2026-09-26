@@ -517,7 +517,7 @@ TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
 
     SECTION("Symmetric range execution and variance queries") {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                     false, "full", false);
+                     false, "full");
 
         CHECK(fdmt.get_plan().get_dt_min() == -32);
         CHECK(fdmt.get_plan().get_dt_max() == 32);
@@ -552,7 +552,7 @@ TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
 
     SECTION("Negative DM pulse recovery") {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                     false, "full", false);
+                     false, "full");
 
         std::vector<float> waterfall(nchans * nsamps, 0.0F);
         const IndexType target_dt = -16;
@@ -1342,7 +1342,7 @@ TEST_CASE("FDMTCPU valid-mode stepper must finish a block before the next",
 TEST_CASE("FDMTCPU rejects incompatible configurations", "[fdmt_cpu][cpu]") {
     SECTION("nbeams == 0") {
         CHECK_THROWS_AS(FDMTCPU(1000.0F, 1500.0F, 32, 128, 0.001F, 32, 0, 1,
-                                true, "valid", 0, 1, /*nbeams=*/0),
+                                true, "valid", 1, /*nbeams=*/0),
                         std::invalid_argument);
     }
 }
@@ -1371,8 +1371,8 @@ TEST_CASE("FDMTCPU nbeams=1 is byte-identical to unbeamed execution",
             FDMTCPU fdmt_default(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                  dt_min, 1, true, mode);
             FDMTCPU fdmt_explicit_nbeams1(f_min, f_max, nchans, nsamps, tsamp,
-                                          dt_max, dt_min, 1, true, mode, false,
-                                          1, /*nbeams=*/1);
+                                          dt_max, dt_min, 1, true, mode, 1,
+                                          /*nbeams=*/1);
             CHECK(fdmt_default.get_nbeams() == 1);
             CHECK(fdmt_explicit_nbeams1.get_nbeams() == 1);
 
@@ -1414,7 +1414,7 @@ TEST_CASE("FDMTCPU nbeams>1 produces independent per-beam results",
             }
 
             FDMTCPU fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                               dt_min, 1, true, mode, false, 1, nbeams);
+                               dt_min, 1, true, mode, 1, nbeams);
             CHECK(fdmt_multi.get_nbeams() == nbeams);
             const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
             std::vector<float> dmt_multi(nbeams * buffer_size, 0.0F);
@@ -1470,7 +1470,7 @@ TEST_CASE("FDMTCPU nbeams>1 valid-mode streaming keeps per-beam history "
     }
 
     FDMTCPU fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                       1, true, "valid", false, 1, nbeams);
+                       1, true, "valid", 1, nbeams);
     const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
 
     std::vector<FDMTCPU> fdmt_singles;

@@ -190,7 +190,7 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
             for (const bool smear : {true, false}) {
                 // Original level-by-level float path (stepper inspection).
                 FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
-                            c.dt_min, 1, smear, mode, false, 1, 1, 0, false);
+                            c.dt_min, 1, smear, mode, 1, 1, 0, false);
                 const auto& pc    = ref.get_plan().get_container();
                 const auto niters = ref.get_plan().get_niters();
                 const auto wf     = random_ints(c.nchans, c.nsamps,
@@ -245,7 +245,7 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                 DYNAMIC_SECTION("block=" << block << " smear=" << smear
                                          << " fuse=" << fuse) {
                     FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                                smear, "valid", false, 1, 1, 0, false);
+                                smear, "valid", 1, 1, 0, false);
                     const auto& plan_h = ref.get_plan();
                     const auto& pc     = plan_h.get_container();
                     const auto plan    = detail::build_fused_tile_plan(

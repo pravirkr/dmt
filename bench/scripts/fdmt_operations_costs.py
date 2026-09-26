@@ -6,7 +6,7 @@ Compares:
 3. S/N-Loss-Bounded Sparse FDMT (dmtlib.grid): optimal non-uniform spacing
 
 Usage:
-    python bench/fdmt_operations_costs.py [--plot] [--out fdmt_operations_costs.png]
+    python bench/scripts/fdmt_operations_costs.py [--plot] [--out fdmt_operations_costs.png]
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 # Ensure the local build/src and src directories take precedence
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 build_src = repo_root / "build" / "src"
 src_dir = repo_root / "src"
 

@@ -33,10 +33,10 @@ void bind_cfdmt_cuda(py::module_& mod) {
         ``device_id`` instead of ``nthreads``.
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string_view, bool, int>(),
+                      float, float, SizeType, std::string_view, int>(),
              "f_center"_a, "sub_bw"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "tp"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap"_a = 8192,
-             "data_order"_a = "PRITF", "verbose"_a = 0, "device_id"_a = 0)
+             "data_order"_a = "PRITF", "device_id"_a = 0)
         .def_property_readonly("plan", &CohFDMTCUDA::get_plan)
         .def("execute",
              [](CohFDMTCUDA& coh_fdmt,

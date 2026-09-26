@@ -80,3 +80,29 @@ target_link_libraries(
           OpenMP::OpenMP_CXX
           ${DMT_COMPILE_OPTIONS}
 )
+
+# Published benchmark suite (bench/suite): one fixed configuration shared by
+# FDMT, FDMT-FFT and DDMT on CPU and CUDA, run by bench/scripts/run_suite.py
+# and plotted by bench/scripts/plot_suite.py. See bench/README.md.
+set(TARGET_BENCHMARKS_SUITE ${PROJECT_NAME}_bench_suite)
+set(BENCH_SOURCES_SUITE ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cpu.cpp)
+if(CMAKE_CUDA_COMPILER)
+  set(BENCH_SOURCES_SUITE_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cuda.cu)
+  set_source_files_properties(${BENCH_SOURCES_SUITE_CUDA} PROPERTIES LANGUAGE CUDA)
+  list(APPEND BENCH_SOURCES_SUITE ${BENCH_SOURCES_SUITE_CUDA})
+endif()
+
+add_executable(${TARGET_BENCHMARKS_SUITE} ${BENCH_SOURCES_SUITE})
+target_include_directories(
+  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
+)
+if(CMAKE_CUDA_COMPILER)
+  target_include_directories(${TARGET_BENCHMARKS_SUITE} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+endif()
+target_link_libraries(
+  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
+                                     ${DMT_COMPILE_OPTIONS}
+)
+if(CMAKE_CUDA_COMPILER)
+  target_link_libraries(${TARGET_BENCHMARKS_SUITE} PRIVATE ${DMT_CUDA_OPTIONS})
+endif()

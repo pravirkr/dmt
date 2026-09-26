@@ -125,16 +125,16 @@ TEST_CASE("FDMTCUDA fused levels are bit-exact with the unfused kernels",
                         random_floats(2 * c.nchans * c.nsamps,
                                       static_cast<unsigned>(c.nchans));
                     FDMTCUDA ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                 c.dt_max, c.dt_min, 1, smearing, mode, false,
-                                 0, 2, kUnfused);
+                                 c.dt_max, c.dt_min, 1, smearing, mode, 0, 2,
+                                 kUnfused);
                     REQUIRE(ref.get_fuse_levels() == 0);
                     const auto expected = beams(ref, run(ref, wf));
                     for (const SizeType fuse :
                          {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{5},
                           kFDMTAutoFuse}) {
                         FDMTCUDA gpu(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                     c.dt_max, c.dt_min, 1, smearing, mode,
-                                     false, 0, 2, fuse);
+                                     c.dt_max, c.dt_min, 1, smearing, mode, 0,
+                                     2, fuse);
                         INFO("fuse=" << fuse
                                      << " effective=" << gpu.get_fuse_levels());
                         REQUIRE_THAT(beams(gpu, run(gpu, wf)),
@@ -154,12 +154,12 @@ TEST_CASE("FDMTCUDA fused packed int tree matches FDMTCPU", "[fdmt_gpu][gpu]") {
                 const SizeType nsamps = 300;
                 const auto wf         = random_2bit(nchans, nsamps, 5);
                 FDMTCPU cpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
-                            smearing, mode, false, 1, 1, kUnfused, kFloatTree);
+                            smearing, mode, 1, 1, kUnfused, kFloatTree);
                 const auto expected = beams(cpu, run(cpu, wf.values));
                 for (const SizeType fuse :
                      {SizeType{2}, SizeType{4}, kFDMTAutoFuse}) {
                     FDMTCUDA gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
-                                 smearing, mode, false, 0, 1, fuse, true);
+                                 smearing, mode, 0, 1, fuse, true);
                     REQUIRE_THAT(beams(gpu, run_2bit(gpu, wf.packed)),
                                  Catch::Matchers::Equals(expected));
                 }
@@ -179,12 +179,11 @@ TEST_CASE("FDMTCUDA fused valid-mode streaming matches FDMTCPU",
         for (const bool smearing : {true, false}) {
             DYNAMIC_SECTION("block=" << block << " smearing=" << smearing) {
                 FDMTCPU cpu(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                            smearing, "valid", false, 1, nbeams, kUnfused,
-                            kFloatTree);
+                            smearing, "valid", 1, nbeams, kUnfused, kFloatTree);
                 FDMTCUDA fused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                               smearing, "valid", false, 0, nbeams, 3);
+                               smearing, "valid", 0, nbeams, 3);
                 FDMTCUDA unfused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                                 smearing, "valid", false, 0, nbeams, kUnfused);
+                                 smearing, "valid", 0, nbeams, kUnfused);
                 thrust::device_vector<float> hist(fused.history_state_size(),
                                                   0.0F);
                 const cuda::std::span<float> hist_out(
@@ -211,7 +210,7 @@ TEST_CASE("FDMTCUDA fusion depth resolution and memory usage",
           "[fdmt_gpu][gpu]") {
     const auto make = [](SizeType fuse) {
         return FDMTCUDA(704.0F, 1216.0F, 4096, 2048, 0.00008192F, 2048, 0, 1,
-                        true, "valid", false, 0, 1, fuse);
+                        true, "valid", 0, 1, fuse);
     };
     // Default: automatic, and a realistic band fuses at least one level.
     auto automatic    = make(kFDMTAutoFuse);
@@ -237,7 +236,7 @@ TEST_CASE("FDMTCUDA fusion depth resolution and memory usage",
     const SizeType nchans = 64;
     const SizeType nsamps = 256;
     FDMTCUDA small(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true,
-                   "valid", false, 0, 1, 3);
+                   "valid", 0, 1, 3);
     const auto wf = random_floats(nchans * nsamps, 3);
     thrust::device_vector<float> d_wf(wf.begin(), wf.end());
     thrust::device_vector<float> d_dmt(small.get_plan().get_buffer_size());

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -101,7 +102,6 @@ public:
      *   restart streaming from a cold state (e.g. for a new observation).
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together
      * (default: 1). The plan/coordinate DAG is shared across all beams
@@ -141,7 +141,6 @@ public:
             SizeType dt_step      = 1,
             bool use_box_smearing = true,
             std::string_view mode = "valid",
-            int verbose           = 0,
             int nthreads          = 1,
             SizeType nbeams       = 1,
             SizeType fuse_levels  = kFDMTAutoFuse,
@@ -160,7 +159,6 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -175,7 +173,6 @@ public:
             const std::vector<IndexType>& dt_grid,
             bool use_box_smearing = true,
             std::string_view mode = "valid",
-            int verbose           = 0,
             int nthreads          = 1,
             SizeType nbeams       = 1,
             SizeType fuse_levels  = kFDMTAutoFuse,
@@ -195,7 +192,6 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -210,7 +206,6 @@ public:
             const std::vector<float>& dm_grid,
             bool use_box_smearing = true,
             std::string_view mode = "valid",
-            int verbose           = 0,
             int nthreads          = 1,
             SizeType nbeams       = 1,
             SizeType fuse_levels  = kFDMTAutoFuse,
@@ -284,6 +279,13 @@ public:
      * buffer size each execute() call needs.
      */
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
+
+    /**
+     * @brief Human-readable summary: the plan (see FDMTPlan::summary()),
+     * then the engine configuration (mode, threads, beams, fusion depth,
+     * integer tree) and its memory breakdown.
+     */
+    [[nodiscard]] std::string summary() const;
 
     // =========================================================================
     // Stepper / Hierarchical DP Engine API
@@ -493,7 +495,6 @@ private:
  * @param use_box_smearing Whether to account for intra-channel smearing
  * (default: true).
  * @param mode Mode: "valid", "full", or "roll" (default: "valid").
- * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
  * @param nthreads Number of OpenMP threads (default: 1).
  * @param nbeams Number of batched beams (default: 1).
  * @return Tuple of (transformed DMT buffer as std::vector<float>, FDMTPlan
@@ -511,7 +512,6 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             int verbose           = 0,
              int nthreads          = 1,
              SizeType nbeams       = 1);
 
@@ -525,7 +525,6 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             int verbose           = 0,
              int nthreads          = 1,
              SizeType nbeams       = 1);
 
@@ -539,7 +538,6 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             int verbose           = 0,
              int nthreads          = 1,
              SizeType nbeams       = 1);
 
@@ -632,7 +630,6 @@ public:
      *   Call reset_history() to restart streaming from a cold state.
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together
      * (default: 1).
@@ -659,7 +656,6 @@ public:
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             int verbose           = 0,
              int device_id         = 0,
              SizeType nbeams       = 1,
              SizeType fuse_levels  = kFDMTAutoFuse,
@@ -677,7 +673,6 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -692,7 +687,6 @@ public:
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             int verbose           = 0,
              int device_id         = 0,
              SizeType nbeams       = 1,
              SizeType fuse_levels  = kFDMTAutoFuse,
@@ -711,7 +705,6 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -726,7 +719,6 @@ public:
              const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             int verbose           = 0,
              int device_id         = 0,
              SizeType nbeams       = 1,
              SizeType fuse_levels  = kFDMTAutoFuse,
@@ -853,6 +845,12 @@ public:
      * host-memory execute() staging once the first host call allocated it.
      */
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
+
+    /**
+     * @brief Human-readable summary, as FDMTCPU::summary() (device memory,
+     * device id instead of threads).
+     */
+    [[nodiscard]] std::string summary() const;
 
     /**
      * @brief Resets and initializes the stepped execution state using device
@@ -1088,7 +1086,6 @@ private:
  * @param use_box_smearing Whether to account for intra-channel smearing
  * (default: true).
  * @param mode Mode: "valid", "full", or "roll" (default: "valid").
- * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
  * @param device_id CUDA device ID.
  * @param nbeams Number of batched beams.
  * @return Transformed DMT buffer on host.
@@ -1104,7 +1101,6 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      SizeType dt_step      = 1,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "valid",
-                                     int verbose           = 0,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
 
@@ -1117,7 +1113,6 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      const std::vector<IndexType>& dt_grid,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "valid",
-                                     int verbose           = 0,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
 
@@ -1130,7 +1125,6 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      const std::vector<float>& dm_grid,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "valid",
-                                     int verbose           = 0,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
 

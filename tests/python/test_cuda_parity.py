@@ -136,8 +136,10 @@ def test_fdmt_gpu_stepper_matches_cpu(packed: bool) -> None:
         assert gpu.num_subbands == cpu.num_subbands
         for s in range(cpu.num_subbands):
             np.testing.assert_allclose(
-                gpu.view_subband_data(s), cpu.view_subband_data(s),
-                rtol=1e-5, atol=1e-4,
+                gpu.view_subband_data(s),
+                cpu.view_subband_data(s),
+                rtol=1e-5,
+                atol=1e-4,
             )
         cpu.advance()
         gpu.advance()

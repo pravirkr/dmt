@@ -97,9 +97,9 @@ TEST_CASE("FDMTFFTCUDA multi-beam", "[fdmt_fft_gpu][gpu][parity]") {
         v = dist(rng);
     }
     FDMTFFTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
-                          true, "roll", false, 0, nbeams);
+                          true, "roll", 0, nbeams);
     FDMTFFTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                        "roll", false, 1, nbeams);
+                        "roll", 1, nbeams);
     const auto n = nbeams * fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_cuda(n, 0.0F);

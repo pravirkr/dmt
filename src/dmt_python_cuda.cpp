@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 
 #include "bindings/bind_cuda.hpp"
+#include "pybind_utils.hpp"
 
 namespace py = pybind11;
 
@@ -16,6 +17,7 @@ PYBIND11_MODULE(libcudmt, mod) { // NOLINT
     dmtlib.libdmt : CPU counterparts.
     )doc";
 
+    dmt::bind_logging(mod);
     dmt::bind_fdmt_cuda(mod);
     dmt::bind_cfdmt_cuda(mod);
     dmt::bind_ddmt_cuda(mod);

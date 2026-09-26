@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cuda/std/span>
 #include <span>
-#include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 #include <vector>
 
@@ -35,7 +34,7 @@ TEST_CASE("FDMTCUDA Constructor and getter methods", "[fdmt_gpu][gpu]") {
 TEST_CASE("FDMTCUDA execute method (on device)", "[fdmt_gpu][gpu]") {
 
     FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
-    fdmt_cpu.get_plan().print_summary();
+    CHECK_FALSE(fdmt_cpu.get_plan().summary().empty());
     FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
@@ -57,7 +56,7 @@ TEST_CASE("FDMTCUDA execute method (on device)", "[fdmt_gpu][gpu]") {
 TEST_CASE("FDMTCUDA execute method (on host)", "[fdmt_gpu][gpu]") {
 
     FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
-    fdmt_cpu.get_plan().print_summary();
+    CHECK_FALSE(fdmt_cpu.get_plan().summary().empty());
     FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
@@ -632,7 +631,7 @@ TEST_CASE(
     }
 
     FDMTCUDA fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                        true, "full", false, 0, nbeams);
+                        true, "full", 0, nbeams);
     CHECK(fdmt_multi.get_nbeams() == nbeams);
 
     const auto buf_size = fdmt_multi.get_plan().get_buffer_size();
@@ -640,7 +639,7 @@ TEST_CASE(
     fdmt_multi.execute(multi_wf, multi_dmt);
 
     FDMTCUDA fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                         true, "full", false, 0, 1);
+                         true, "full", 0, 1);
     std::vector<float> single_wf(nchans * nsamps);
     std::vector<float> single_dmt(buf_size, 0.0F);
 
@@ -786,15 +785,14 @@ TEST_CASE(
     }
 
     FDMTCUDA fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                        1, true, "valid", false, 0, nbeams);
+                        1, true, "valid", 0, nbeams);
     const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
 
     std::vector<FDMTCUDA> fdmt_singles;
     fdmt_singles.reserve(nbeams);
     for (SizeType b = 0; b < nbeams; ++b) {
         fdmt_singles.emplace_back(f_min, f_max, nchans, block_size, tsamp,
-                                  dt_max, dt_min, 1, true, "valid", false, 0,
-                                  1);
+                                  dt_max, dt_min, 1, true, "valid", 0, 1);
     }
 
     for (SizeType blk = 0; blk < n_blocks; ++blk) {

@@ -19,7 +19,7 @@ print(fdmt.memory_usage)  # bytes allocated at construction
 ```cpp
 // ..., nthreads, nbeams, fuse_levels = kFDMTAutoFuse, int_tree = true
 dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
-                              0, 1, true, "valid", 0, 1, 1,
+                              0, 1, true, "valid", 1, 1,
                               dmt::algorithms::kFDMTAutoFuse, true);
 ```
 
@@ -78,27 +78,22 @@ DRAM.
   neighbouring tiles recompute. The automatic depth is the deepest $F$ whose
   tile of at least 256 samples fits in the portable 48 KiB of shared memory.
 
-  The time tile here is not the intra-level cache tiling rejected in
-  [section 5](#5-what-was-tried-and-rejected). That tiling reorders one
-  level's merges and moves the same bytes. The GPU tile exists only because a
-  block's shared memory (≤ 100 KiB) cannot hold whole rows the way a CPU
-  cache can, so the fused levels are cut into tiles. It is the same fusion,
-  and it removes the intermediate levels' DRAM traffic. The unfused CUDA
-  merge kernel is unchanged and untiled.
-
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)
 always runs level by level, so every level stays inspectable. Read the depth
 actually used with `fdmt.fuse_levels` (Python) or `get_fuse_levels()` (C++).
 An explicit depth is clamped to the plan's merge levels (and, on CUDA, reduced
-until it fits shared memory), with a warning.
+until it fits shared memory); `fuse_levels` / `get_fuse_levels()` report the
+depth actually used.
 
 ### Hybrid tree traversal: vertical depth-first meets horizontal breadth-first
 
 Conceptually, the FDMT tree can be traversed in two classical ways:
+
 1. **Horizontal Breadth-First (BFS):** The standard FDMT algorithm traverses the entire band level by level across all channels. While highly parallel and regular, it is cache-unfriendly: every level writes hundreds of megabytes to DRAM and reads them back.
 2. **Top-Down Recursive Depth-First (DFS):** Computing a final DM trial by recursively descending to its leaf channels is often proposed as cache-friendly. In practice, pure recursion is deeply flawed for FDMT: because FDMT is a Directed Acyclic Graph (DAG) with overlapping sub-band delay paths, pure recursion either causes exponential redundant calculations or requires dynamic memoization tables that destroy vectorization and fail on GPUs. Furthermore, near the top of the tree, sub-bands span thousands of channels and exceed cache capacity anyway.
 
 Level fusion implements the **best of both worlds**:
+
 - **First $F$ stages (Vertical truncated DFS):** The early channels form strictly disjoint binary sub-trees of size $2^F$ (e.g., 8 or 16 channels). For each sub-tree, all merges from level 0 up to level $F$ are evaluated vertically on-chip inside cache/shared memory. Intermediate levels $0 \dots F-1$ never touch DRAM. Because the early levels dominate data volume (representing ~45–50% of the entire transform's memory traffic), this eliminates the vast majority of memory bus round-trips.
 - **Remaining stages (Horizontal BFS):** Once level $F$ is reached, the sub-trees begin merging across wider frequency spans. Here, the engine transitions back to flat, breadth-first global ping-pong merges in memory.
 
@@ -182,7 +177,7 @@ dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
 #include "dmt/algorithms/fdmt.hpp"
 
 dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
-                              0, 1, true, "valid", 0, /*nthreads=*/8);
+                              0, 1, true, "valid", /*nthreads=*/8);
 std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
 // packed: nchans rows of ceil(nsamps * nbits / 8) bytes
 fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
@@ -236,8 +231,8 @@ construct the engine with `int_tree=False`.
   then allocates nothing (on the CPU a test enforces this), so a streaming
   pipeline constructs once and calls `execute()` block after block.
   `fdmt.memory_usage` (Python) / `get_memory_usage()` (C++) reports the
-  bytes per category and the output buffer each call needs; `verbose=1`
-  logs the same breakdown at construction. To multiplex several streams on
+  bytes per category and the output buffer each call needs;
+  `fdmt.summary()` prints the same breakdown together with the plan. To multiplex several streams on
   one engine, use `save_history()` / `load_history()` rather than building
   one engine per stream. The host-memory `FDMTCUDA.execute()` overloads
   stage the input and output on the device in buffers allocated on the first
@@ -247,44 +242,7 @@ construct the engine with `int_tree=False`.
 - **Multiple beams:** `nbeams > 1` shares one plan across beams. See
   [Multi-Beam Batching](multibeam.md).
 
----
-
-## 5. What was tried and rejected
-
-Everything below was implemented, measured, and removed, or analysed and not
-built. None of it is hardware-agnostic *and* faster.
-
-- **Intra-level cache tiling** (blocking one level's merges in time and DM).
-  Every merge level already runs at 93–99% of `c = a + b` bandwidth
-  (section 1). The reuse model gives 1.143 input rows read per output row for
-  the plain loop against 1.156 for ideal blocking, so tiling reorders the
-  same bytes.
-- **Non-temporal (streaming) stores**: 17–32% *slower* on 1 Xeon thread,
-  because the next level re-reads the rows just written.
-- **Fusing the top levels.** Near the root, channel groups are no longer
-  disjoint: every level carries about $N_\text{DM}$ rows. Time tiles need a
-  halo of about the sum of the fused delays (≈ `dt_max`), so a useful tile's
-  working set is $N_\text{DM} \times (\text{tile} + \text{halo}) \times 4$ B,
-  tens of MB. It only pays where that fits a particular LLC. Carrying the
-  halo as history instead moves history traffic of the same size.
-- **Bit-level (bit-sliced) arithmetic for 1-bit input.** With box smearing,
-  level-0 values are already multi-bit, and after one merge every value is
-  ≥ 2 bits. A bit-sliced add costs ~5 logic ops per bit-plane per 64
-  samples, i.e. $(l+1) \cdot 5/64$ per sample at level $l$, against $1/32$
-  for a `uint8` SIMD lane, so it loses at every level. The integer tree
-  (`uint8`/`uint16` lanes with exact bounds) is the right granularity.
-- **fp16 / bf16 tree storage** would halve the bytes of float input, but it
-  is lossy. fp16 overflows on data that isn't mean-subtracted (sums exceed
-  65504), and bf16's 8-bit mantissa costs S/N. dmt's results are exact, so
-  this was not built.
-- **Hardware detection for the fusion depth** (reading cache sizes at run
-  time). The plan-only rule is within ~10% of the best measured depth
-  everywhere tested, and it keeps results and memory reproducible across
-  machines.
-
----
-
-## 6. Summary of the performance parameters
+## 5. Summary of the performance parameters
 
 | constructor argument | default | applies to | effect |
 | :--- | :--- | :--- | :--- |
@@ -296,7 +254,7 @@ path, for example to compare against or to benchmark.
 
 ---
 
-## 7. Reproducing the numbers
+## 6. Reproducing the numbers
 
 Build with benchmarks (`-DDMT_BUILD_BENCHMARKS=ON`, Release), then run from
 the build directory (the Python script from the repository root):
@@ -312,3 +270,8 @@ python bench/scripts/fdmt_cache_benchmark.py --section fusion --nchans 4096 --dt
 ```
 
 The `fuse` counter in each benchmark row is the depth actually used.
+
+These are the tuning microbenchmarks (`dmt_bench`). The cross-algorithm,
+cross-machine numbers on the [Benchmarks](../benchmarks.md) page come from
+the separate published suite (`dmt_bench_suite`); `bench/README.md` describes
+how to run it.

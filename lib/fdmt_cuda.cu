@@ -15,7 +15,7 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
-#include <spdlog/spdlog.h>
+#include "dmt/logging.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
@@ -349,7 +349,6 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int device_id,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -367,8 +366,7 @@ public:
                  dt_max,
                  dt_min,
                  dt_step,
-                 mode,
-                 verbose) {
+                 mode) {
         init_device_structures(fuse_levels);
     }
 
@@ -380,7 +378,6 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int device_id,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -390,7 +387,7 @@ public:
           m_int_tree(int_tree),
           m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose) {
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode) {
         init_device_structures(fuse_levels);
     }
 
@@ -402,7 +399,6 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int device_id,
          SizeType nbeams,
          SizeType fuse_levels,
@@ -412,7 +408,7 @@ public:
           m_int_tree(int_tree),
           m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose) {
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode) {
         init_device_structures(fuse_levels);
     }
 
@@ -425,7 +421,6 @@ public:
         }
         check_int32_extents();
         cuda_utils::set_device(m_device_id);
-        spdlog::debug("FDMTCUDA::Impl: Set device to {}", m_device_id);
         // Allocate internal state buffer on device for ping-pong
         m_state_internal_d.resize(m_nbeams * m_plan.get_buffer_size(), 0.0F);
         if (m_mode == FDMTMode::kValid) {
@@ -484,7 +479,6 @@ public:
                       waterfall_h.size()),
                   stage_dmt_span(), nullptr);
         copy_result_to_host(dmt_h);
-        spdlog::debug("FDMTCUDA::Impl: Host execution complete.");
     }
 
     void execute_d(cuda::std::span<const float> waterfall_d,
@@ -493,7 +487,6 @@ public:
         reset_impl(waterfall_d, dmt_d, stream, /*fuse=*/true);
         advance_until_remaining(0, stream);
         finalize(stream);
-        spdlog::debug("FDMTCUDA::Impl: Device execution complete on stream");
     }
 
     void execute_h(std::span<const uint8_t> waterfall_h,
@@ -606,6 +599,26 @@ public:
 
     [[nodiscard]] int get_device_id() const noexcept { return m_device_id; }
 
+    [[nodiscard]] std::string summary() const {
+        const auto mem = get_memory_usage();
+        const auto mib = [](SizeType b) {
+            return static_cast<double>(b) / 1048576.0;
+        };
+        const auto summary = std::format(
+            "*** FDMTCUDA ***\n"
+            "Mode: {}, nbeams {}, fuse_levels {}, int_tree {}\n"
+            "Device memory: plan {:.1f} MiB, state {:.1f} MiB, history {:.1f} "
+            "MiB, workspace {:.1f} MiB (total {:.1f} MiB); output buffer "
+            "{:.1f} MiB "
+            "per execute()\n",
+            fdmt_mode_to_string(m_mode), m_nbeams, get_fuse_levels(),
+            m_int_tree, mib(mem.plan), mib(mem.state), mib(mem.history),
+            mib(mem.workspace),
+            mib(mem.plan + mem.state + mem.history + mem.workspace),
+            mib(mem.output));
+        return m_plan.summary() + summary;
+    }
+
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept {
         const auto coord_bytes = [](const plans::FDMTCoordD& c) {
             return (c.nsamps.size() + c.buf_offset.size() + c.offset.size() +
@@ -642,7 +655,7 @@ public:
                          (m_stage_wf_f32_d.size() * sizeof(float)) +
                          m_stage_wf_packed_d.size() +
                          (m_stage_dmt_d.size() * sizeof(float)),
-            .output    = m_nbeams * m_plan.get_buffer_size() * sizeof(float),
+            .output = m_nbeams * m_plan.get_buffer_size() * sizeof(float),
         };
     }
 
@@ -661,8 +674,6 @@ public:
             execute_iter_device(m_current_level + 1, active_stream);
             m_current_level++;
         }
-        spdlog::debug("FDMTCUDA: Stepper advanced to level {}.",
-                      m_current_level);
     }
 
     void advance_until_remaining(SizeType remaining_levels,
@@ -760,9 +771,6 @@ public:
         const auto* final_ptr =
             reinterpret_cast<const float*>(m_levels_d[m_current_level].base);
         if (final_ptr != m_dmt_target_ptr) {
-            spdlog::debug(
-                "FDMTCUDA::finalize: Copying final state from internal "
-                "scratch to dmt_target_ptr");
             const auto final_size =
                 ((m_nbeams - 1) * m_plan.get_buffer_size()) +
                 m_plan.get_container().state_shape.back().nelements;
@@ -879,8 +887,8 @@ public:
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
                 cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
-                                dst_vec.size() * sizeof(float),
-                                cudaMemcpyDeviceToDevice, stream);
+                                    dst_vec.size() * sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream);
             }
             src += dst_vec.size();
         };
@@ -997,8 +1005,6 @@ private:
                             "least {}, got {}",
                             m_nbeams * m_plan.get_buffer_size(), dmt_size));
         }
-        spdlog::debug("FDMTCUDA: Input dimensions check passed: {}x{}x{}",
-                      m_nbeams, nchans, nsamps);
     }
 
     void check_packed_inputs(SizeType waterfall_bytes,
@@ -1130,19 +1136,9 @@ private:
                 tile = std::max(tile, plan.max_tile_nsamps(optin, max_tile));
             }
             if (tile > 0) {
-                if (!automatic && f != requested) {
-                    spdlog::warn("FDMTCUDA: fuse_levels={} reduced to {} (plan "
-                                 "merge levels / shared memory)",
-                                 requested, f);
-                }
                 adopt_fused_plan(plan, tile);
                 return;
             }
-        }
-        if (!automatic) {
-            spdlog::warn("FDMTCUDA: fuse_levels={} does not fit shared memory; "
-                         "running unfused",
-                         requested);
         }
     }
 
@@ -1168,9 +1164,9 @@ private:
         fused->ntiles             = (plan.ntiles_nsamps + tile - 1) / tile;
         fused->ngroups            = plan.ngroups;
         cuda_utils::check_last_cuda_error("FDMTCUDA: fused plan upload failed");
-        spdlog::debug("FDMTCUDA: fusing levels 0..{} (tile {} samples, {} "
-                      "groups, {} B shared)",
-                      plan.fuse, tile, plan.ngroups, fused->smem_bytes);
+        logging::debug("FDMTCUDA: fusing levels 0..{} (tile {} samples, {} "
+                       "groups, {} B shared)",
+                       plan.fuse, tile, plan.ngroups, fused->smem_bytes);
         m_fused = std::move(fused);
     }
 
@@ -1323,7 +1319,6 @@ private:
             });
         }
         m_is_initialized = true;
-        spdlog::debug("FDMTCUDA: Stepper initialized at level 0.");
     }
 
     void execute_iter_device(SizeType next_level, cudaStream_t stream) {
@@ -1480,7 +1475,6 @@ private:
         cuda_utils::check_last_cuda_error("kernel_init_fdmt launch failed");
 
         advance_level0_history(waterfall_d, stream);
-        spdlog::debug("FDMTCUDA::Impl: Initialise device submitted to stream.");
     }
 
     // Valid mode: advance the per-channel level-0 input history by this
@@ -1518,7 +1512,6 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    SizeType dt_step,
                    bool use_box_smearing,
                    std::string_view mode,
-                   int verbose,
                    int device_id,
                    SizeType nbeams,
                    SizeType fuse_levels,
@@ -1533,7 +1526,6 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     dt_step,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     device_id,
                                     nbeams,
                                     fuse_levels,
@@ -1546,7 +1538,6 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    const std::vector<IndexType>& dt_grid,
                    bool use_box_smearing,
                    std::string_view mode,
-                   int verbose,
                    int device_id,
                    SizeType nbeams,
                    SizeType fuse_levels,
@@ -1559,7 +1550,6 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     dt_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     device_id,
                                     nbeams,
                                     fuse_levels,
@@ -1573,7 +1563,6 @@ FDMTCUDA::FDMTCUDA(float f_min,
                    const std::vector<float>& dm_grid,
                    bool use_box_smearing,
                    std::string_view mode,
-                   int verbose,
                    int device_id,
                    SizeType nbeams,
                    SizeType fuse_levels,
@@ -1586,7 +1575,6 @@ FDMTCUDA::FDMTCUDA(float f_min,
                                     dm_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     device_id,
                                     nbeams,
                                     fuse_levels,
@@ -1628,6 +1616,7 @@ SizeType FDMTCUDA::get_fuse_levels() const noexcept {
 }
 bool FDMTCUDA::get_int_tree() const noexcept { return m_impl->get_int_tree(); }
 int FDMTCUDA::get_device_id() const noexcept { return m_impl->get_device_id(); }
+std::string FDMTCUDA::summary() const { return m_impl->summary(); }
 FDMTMemoryUsage FDMTCUDA::get_memory_usage() const noexcept {
     return m_impl->get_memory_usage();
 }
@@ -1707,11 +1696,10 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   SizeType dt_step,
                   bool use_box_smearing,
                   std::string_view mode,
-                  int verbose,
                   int device_id,
                   SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                  use_box_smearing, mode, verbose, device_id, nbeams);
+                  use_box_smearing, mode, device_id, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);
@@ -1735,11 +1723,10 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   const std::vector<IndexType>& dt_grid,
                   bool use_box_smearing,
                   std::string_view mode,
-                  int verbose,
                   int device_id,
                   SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
-                  use_box_smearing, mode, verbose, device_id, nbeams);
+                  use_box_smearing, mode, device_id, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);
@@ -1763,11 +1750,10 @@ compute_fdmt_cuda(std::span<const float> waterfall,
                   const std::vector<float>& dm_grid,
                   bool use_box_smearing,
                   std::string_view mode,
-                  int verbose,
                   int device_id,
                   SizeType nbeams) {
     FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,
-                  use_box_smearing, mode, verbose, device_id, nbeams);
+                  use_box_smearing, mode, device_id, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);

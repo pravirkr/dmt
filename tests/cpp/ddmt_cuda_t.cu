@@ -172,7 +172,7 @@ TEST_CASE("DDMTCUDA execute_time_major matches channel-major packed",
     const auto test_bits = [&](unsigned nbits) {
         DYNAMIC_SECTION("nbits = " << nbits) {
             plans::DDMTPlan plan(test::kFMin, test::kFMax, nchans, test::kTsamp,
-                                 dms, false, nbits);
+                                 dms, nbits);
             DDMTCUDA ddmt(plan);
 
             const auto max_delay =

@@ -131,8 +131,8 @@ TEST_CASE("FDMTCUDA packed input matches float input and FDMTCPU",
                         for (const bool int_tree : {false, true}) {
                             FDMTCUDA gpu(kFMin, kFMax, c.nchans, c.nsamps,
                                          kTsamp, c.dt_max, c.dt_min, 1,
-                                         smearing, mode, false, 0, 1,
-                                         kFDMTAutoFuse, int_tree);
+                                         smearing, mode, 0, 1, kFDMTAutoFuse,
+                                         int_tree);
                             const auto got = run_packed(gpu, wf.packed, nbits);
                             REQUIRE_THAT(beam_slice(got, 0, 0, n),
                                          Catch::Matchers::Equals(
@@ -140,8 +140,7 @@ TEST_CASE("FDMTCUDA packed input matches float input and FDMTCPU",
 
                             FDMTCPU cpu(kFMin, kFMax, c.nchans, c.nsamps,
                                         kTsamp, c.dt_max, c.dt_min, 1, smearing,
-                                        mode, false, 1, 1, kFDMTAutoFuse,
-                                        int_tree);
+                                        mode, 1, 1, kFDMTAutoFuse, int_tree);
                             const auto cpu_out =
                                 run_packed(cpu, wf.packed, nbits);
                             REQUIRE_THAT(beam_slice(got, 0, 0, n),
@@ -190,7 +189,7 @@ TEST_CASE("FDMTCUDA packed multi-beam matches per-beam execution",
     const SizeType nbits  = 2;
     const auto wf         = random_packed(nbeams * nchans, nsamps, nbits, 5);
     FDMTCUDA multi(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true, "full",
-                   false, 0, nbeams);
+                   0, nbeams);
     const auto got        = run_packed(multi, wf.packed, nbits);
     const auto& plan      = multi.get_plan();
     const auto n          = plan.get_dmt_size();

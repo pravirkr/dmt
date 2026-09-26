@@ -10,7 +10,7 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 
-#include <spdlog/spdlog.h>
+#include "dmt/logging.hpp"
 
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
@@ -68,10 +68,10 @@ public:
             }
             throw;
         }
-        spdlog::debug("CUFFTManager: kind={} length={} howmany={} device={} "
-                      "workspace={}",
-                      static_cast<int>(kind), length, howmany, m_device_id,
-                      m_workspace_size);
+        logging::debug("CUFFTManager: kind={} length={} howmany={} device={} "
+                       "workspace={}",
+                       static_cast<int>(kind), length, howmany, m_device_id,
+                       m_workspace_size);
     }
 
     ~Impl() {

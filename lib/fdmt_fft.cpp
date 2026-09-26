@@ -11,8 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include <spdlog/spdlog.h>
-
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/modes.hpp"
@@ -51,7 +49,6 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int nthreads,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -68,8 +65,7 @@ public:
                                                    dt_max,
                                                    dt_min,
                                                    dt_step,
-                                                   mode,
-                                                   verbose)) {
+                                                   mode)) {
         initialize();
     }
 
@@ -81,7 +77,6 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int nthreads,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -91,7 +86,7 @@ public:
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {
+              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode)) {
         initialize();
     }
 
@@ -103,7 +98,6 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         int verbose,
          int nthreads,
          SizeType nbeams)
         : m_nchans(nchans),
@@ -113,7 +107,7 @@ public:
           m_use_box_smearing(use_box_smearing),
           m_mode(parse_fdmt_mode(mode)),
           m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {
+              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode)) {
         initialize();
     }
 
@@ -593,7 +587,6 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                        SizeType dt_step,
                        bool use_box_smearing,
                        std::string_view mode,
-                       int verbose,
                        int nthreads,
                        SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -606,7 +599,6 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                                     dt_step,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
                                     nbeams)) {}
 
@@ -618,7 +610,6 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                        const std::vector<IndexType>& dt_grid,
                        bool use_box_smearing,
                        std::string_view mode,
-                       int verbose,
                        int nthreads,
                        SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -629,7 +620,6 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                                     dt_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
                                     nbeams)) {}
 
@@ -641,7 +631,6 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                        const std::vector<float>& dm_grid,
                        bool use_box_smearing,
                        std::string_view mode,
-                       int verbose,
                        int nthreads,
                        SizeType nbeams)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -652,7 +641,6 @@ FDMTFFTCPU::FDMTFFTCPU(float f_min,
                                     dm_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
                                     nbeams)) {}
 
@@ -729,11 +717,10 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  SizeType dt_step,
                  bool use_box_smearing,
                  std::string_view mode,
-                 int verbose,
                  int nthreads,
                  SizeType nbeams) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
-                    dt_step, use_box_smearing, mode, verbose, nthreads, nbeams);
+                    dt_step, use_box_smearing, mode, nthreads, nbeams);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size() * nbeams);
     fdmt.execute(waterfall, dmt);
     return {std::move(dmt), fdmt.get_plan()};
@@ -749,11 +736,10 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 int verbose,
                  int nthreads,
                  SizeType nbeams) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
-                    use_box_smearing, mode, verbose, nthreads, nbeams);
+                    use_box_smearing, mode, nthreads, nbeams);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size() * nbeams);
     fdmt.execute(waterfall, dmt);
     return {std::move(dmt), fdmt.get_plan()};
@@ -769,11 +755,10 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 int verbose,
                  int nthreads,
                  SizeType nbeams) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,
-                    use_box_smearing, mode, verbose, nthreads, nbeams);
+                    use_box_smearing, mode, nthreads, nbeams);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size() * nbeams);
     fdmt.execute(waterfall, dmt);
     return {std::move(dmt), fdmt.get_plan()};

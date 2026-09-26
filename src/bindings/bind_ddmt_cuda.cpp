@@ -218,23 +218,13 @@ void bind_ddmt_cuda(py::module_& mod) {
                  const auto sz    = ddmt.history_state_size();
                  if (plan.get_nbits() == 32) {
                      py::array_t<float, py::array::c_style> hist(sz);
-                     if (!ddmt.save_history(std::span<float>(
-                             hist.mutable_data(), hist.size()))) {
-                         throw std::runtime_error(
-                             "DDMTCUDA.save_history: stream is not fully "
-                             "warmed up "
-                             "yet (call execute() with enough samples first)");
-                     }
+                     ddmt.save_history(
+                         std::span<float>(hist.mutable_data(), hist.size()));
                      return hist;
                  } else {
                      py::array_t<uint8_t, py::array::c_style> hist(sz);
-                     if (!ddmt.save_history(std::span<uint8_t>(
-                             hist.mutable_data(), hist.size()))) {
-                         throw std::runtime_error(
-                             "DDMTCUDA.save_history: stream is not fully "
-                             "warmed up "
-                             "yet (call execute() with enough samples first)");
-                     }
+                     ddmt.save_history(
+                         std::span<uint8_t>(hist.mutable_data(), hist.size()));
                      return hist;
                  }
              })
@@ -256,13 +246,8 @@ void bind_ddmt_cuda(py::module_& mod) {
                     }
                     auto hist =
                         py::array_t<float, py::array::c_style>(hist_obj);
-                    if (!ddmt.load_history(
-                            std::span<const float>(hist.data(), hist.size()))) {
-                        throw std::runtime_error(std::format(
-                            "DDMTCUDA.load_history: expected {} float "
-                            "elements, got {}",
-                            ddmt.history_state_size(), hist.size()));
-                    }
+                    ddmt.load_history(
+                        std::span<const float>(hist.data(), hist.size()));
                 } else {
                     if (hist_obj.dtype().kind() != 'u' ||
                         hist_obj.itemsize() != 1) {
@@ -273,13 +258,8 @@ void bind_ddmt_cuda(py::module_& mod) {
                     }
                     auto hist =
                         py::array_t<uint8_t, py::array::c_style>(hist_obj);
-                    if (!ddmt.load_history(std::span<const uint8_t>(
-                            hist.data(), hist.size()))) {
-                        throw std::runtime_error(std::format(
-                            "DDMTCUDA.load_history: expected {} uint8 bytes, "
-                            "got {}",
-                            ddmt.history_state_size(), hist.size()));
-                    }
+                    ddmt.load_history(
+                        std::span<const uint8_t>(hist.data(), hist.size()));
                 }
             },
             "history"_a);

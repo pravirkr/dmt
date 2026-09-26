@@ -1194,7 +1194,13 @@ class TestFDMTUsageContract:
 
     def _make(self, mode: str = "valid", nbeams: int = 1) -> libdmt.FDMTCPU:
         return libdmt.FDMTCPU(
-            1000.0, 1500.0, self.nchans, self.nsamps, 0.001, 32, mode=mode,
+            1000.0,
+            1500.0,
+            self.nchans,
+            self.nsamps,
+            0.001,
+            32,
+            mode=mode,
             nbeams=nbeams,
         )
 
@@ -1215,9 +1221,7 @@ class TestFDMTUsageContract:
     def test_batched_result_is_a_strided_view(self) -> None:
         nbeams = 3
         rng = np.random.default_rng(4)
-        wf = rng.standard_normal(
-            (nbeams, self.nchans, self.nsamps), dtype=np.float32
-        )
+        wf = rng.standard_normal((nbeams, self.nchans, self.nsamps), dtype=np.float32)
         fdmt = self._make(nbeams=nbeams)
         out = np.empty(nbeams * fdmt.plan.buffer_size, dtype=np.float32)
         got = fdmt.execute(wf, out=out)

@@ -69,8 +69,7 @@ TEST_CASE("FDMTCPU execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
                 DYNAMIC_SECTION("mode=" << mode << " fuse=" << fuse
                                         << " nthreads=" << nthreads) {
                     FDMTCPU fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32,
-                                 -16, 1, true, mode, false, nthreads, nbeams,
-                                 fuse);
+                                 -16, 1, true, mode, nthreads, nbeams, fuse);
                     std::vector<float> dmt(nbeams *
                                            fdmt.get_plan().get_buffer_size());
                     // Warm-up: starts the OpenMP thread pool.

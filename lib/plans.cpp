@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
-#include <iostream>
 #include <limits>
 #include <numbers>
 #include <ranges>
@@ -13,8 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include <spdlog/fmt/ranges.h>
-#include <spdlog/spdlog.h>
+#include "dmt/logging.hpp"
 
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
@@ -108,8 +106,7 @@ public:
          IndexType dt_max,
          IndexType dt_min,
          SizeType dt_step,
-         std::string_view mode,
-         int verbose)
+         std::string_view mode)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -119,7 +116,6 @@ public:
           m_dt_min(dt_min),
           m_dt_step(dt_step),
           m_mode(parse_fdmt_mode(mode)) {
-        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
     }
@@ -130,8 +126,7 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<IndexType>& dt_grid,
-         std::string_view mode,
-         int verbose)
+         std::string_view mode)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -143,7 +138,6 @@ public:
           m_mode(parse_fdmt_mode(mode)),
           m_is_custom_grid(true),
           m_dt_grid_target(dt_grid) {
-        apply_log_verbosity(verbose);
         if (m_dt_grid_target.empty()) {
             throw std::invalid_argument("FDMT: dt_grid must not be empty");
         }
@@ -163,8 +157,7 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<float>& dm_grid,
-         std::string_view mode,
-         int verbose)
+         std::string_view mode)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -175,7 +168,6 @@ public:
           m_dt_step(0),
           m_mode(parse_fdmt_mode(mode)),
           m_is_custom_grid(true) {
-        apply_log_verbosity(verbose);
         if (dm_grid.empty()) {
             throw std::invalid_argument("FDMT: dm_grid must not be empty");
         }
@@ -276,10 +268,6 @@ public:
             .ops_by_iter      = std::move(ops_by_iter),
             .nodes_by_iter    = std::move(nodes_by_iter),
         };
-    }
-    void print_complexity_summary() const {
-        const auto comp = get_complexity();
-        spdlog::info("{}", comp.to_string());
     }
     std::vector<SizeType>
     get_operations_by_iteration(bool use_box_smearing = true) const {
@@ -600,7 +588,7 @@ public:
         return phasors;
     }
 
-    void print_summary(std::string_view prefix) const {
+    std::string summary(std::string_view prefix) const {
         auto size_in_mb = [](SizeType count, SizeType size) {
             return static_cast<float>(count * size) / 1024.0F / 1024.0F;
         };
@@ -633,16 +621,16 @@ public:
                         history_size_mb),
             std::format("Plan Details: {}", FDMTShape::header_fmt()),
         };
-        std::cout << '\n';
+        std::string out;
         for (const auto& line : lines) {
-            std::cout << prefix << line << '\n';
+            out += std::format("{}{}\n", prefix, line);
         }
         for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
-            std::cout << prefix
-                      << std::format("Iteration {:2d}: {}\n", i_iter,
-                                     state_shape[i_iter].to_string());
+            out += std::format("{}Iteration {:2d}: {}\n", prefix, i_iter,
+                               state_shape[i_iter].to_string());
         }
-        std::cout << prefix << std::format("{:*>80}\n", "");
+        out += std::format("{}{:*>80}\n", prefix, "");
+        return out;
     }
 
 private:
@@ -841,10 +829,9 @@ private:
         m_container.tree_history_size = total_tree_hist;
 
         m_buffer_size = m_container.get_buffer_size();
-        spdlog::debug("FDMT: configured fdmt plan");
-        spdlog::debug(
-            "FDMT: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}", m_df,
-            m_dt_max, m_dt_min, m_dt_step, m_niters);
+        logging::debug(
+            "FDMTPlan: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}",
+            m_df, m_dt_max, m_dt_min, m_dt_step, m_niters);
     }
 
     void
@@ -1109,7 +1096,7 @@ private:
                         tail_n      = coords_prev[i_coord_head].nsamps;
                         head_offset = coords_prev[i_coord_tail]
                                           .buf_offset; // shifted by |dt_head|
-                        head_n = coords_prev[i_coord_tail].nsamps;
+                        head_n      = coords_prev[i_coord_tail].nsamps;
                     }
 
                     // "full"/"roll" have no cross-block history mechanism,
@@ -1189,8 +1176,7 @@ public:
          float dm_max,
          float dm_min                = 0.0F,
          SizeType noverlap           = 8192,
-         std::string_view data_order = "PRITF",
-         int verbose                 = 0)
+         std::string_view data_order = "PRITF")
         : m_f_center(f_center),
           m_bw_sub(bw_sub),
           m_nsub(nsub),
@@ -1205,7 +1191,6 @@ public:
           m_bw(m_bw_sub * static_cast<float>(m_nsub)),
           m_f_min(m_f_center - (m_bw / 2)),
           m_f_max(m_f_center + (m_bw / 2)) {
-        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
     }
@@ -1267,9 +1252,9 @@ public:
             m_tsamp         = other.m_tsamp;
             m_dt_max        = other.m_dt_max;
             m_dt_min        = other.m_dt_min;
-            m_fdmt_plan     = other.m_fdmt_plan
-                                  ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
-                                  : nullptr;
+            m_fdmt_plan = other.m_fdmt_plan
+                              ? std::make_unique<FDMTPlan>(*other.m_fdmt_plan)
+                              : nullptr;
         }
         return *this;
     }
@@ -1372,7 +1357,7 @@ public:
 
     const FDMTPlan& get_fdmt_plan() const { return *m_fdmt_plan; }
 
-    void print_summary() const {
+    std::string summary() const {
         auto size_in_mb = [](SizeType count, SizeType size) {
             return static_cast<float>(count * size) / 1024.0F / 1024.0F;
         };
@@ -1393,25 +1378,25 @@ public:
         const auto waterfall_size_mb =
             size_in_mb(waterfall_size, sizeof(float));
 
-        std::cout << std::format("\n*** CohFDMT Plan Summary ***\n");
-        std::cout << std::format(
+        std::string out = "*** CohFDMT Plan Summary ***\n";
+        out += std::format(
             "Input: Baseband Size: (2 x 2 x {} x {}; {:.1f} MB ), DMT "
             "Size: ({} x {}; {:.1f} MB )\n",
             m_nsub, m_nsamp, baseband_size_mb, m_dm_grid_final.size(),
             m_fdmt_plan->get_dmt_nsamps(), dmt_size_mb);
-        std::cout << std::format(
-            "Plan Buffer Size: ({}; {:.1f} MB ), Chirp: "
-            "({}; {:.1f} MB ), Waterfall: ({}; {:.1f} MB )\n",
-            buffer_size, buffer_size_mb, chirp_size, chirp_size_mb,
-            waterfall_size, waterfall_size_mb);
-        std::cout << std::format("Forward FFT-1D calls: {}(n={})\n",
-                                 m_nfft * m_nsub, m_nbin);
-        std::cout << std::format("Coherent DMs: {}\n", m_dm_grid_coh.size());
-        std::cout << std::format("Per coherent call details ...\n");
-        std::cout << std::format("\tBackward FFT-1D calls: {}(n={})\n",
-                                 m_nfft * m_nsub * m_nchan, m_mbin);
-        m_fdmt_plan->print_summary("\t");
-        std::cout << std::format("{:*>80}\n", "");
+        out += std::format("Plan Buffer Size: ({}; {:.1f} MB ), Chirp: "
+                           "({}; {:.1f} MB ), Waterfall: ({}; {:.1f} MB )\n",
+                           buffer_size, buffer_size_mb, chirp_size,
+                           chirp_size_mb, waterfall_size, waterfall_size_mb);
+        out += std::format("Forward FFT-1D calls: {}(n={})\n", m_nfft * m_nsub,
+                           m_nbin);
+        out += std::format("Coherent DMs: {}\n", m_dm_grid_coh.size());
+        out += std::format("Per coherent call details ...\n");
+        out += std::format("\tBackward FFT-1D calls: {}(n={})\n",
+                           m_nfft * m_nsub * m_nchan, m_mbin);
+        out += m_fdmt_plan->summary("\t");
+        out += std::format("{:*>80}\n", "");
+        return out;
     }
 
 private:
@@ -1529,9 +1514,9 @@ private:
         // streams its own cross-block history (see CohFDMTCPU/CohFDMTCUDA),
         // so contiguous baseband blocks produce contiguous fine-DMT output
         // per coherent trial. Must match the runtime FDMTCPU/FDMTCUDA mode.
-        m_fdmt_plan = std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan,
-                                                 m_msamp, m_tsamp, m_dt_max,
-                                                 m_dt_min, 1, "valid", false);
+        m_fdmt_plan =
+            std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan, m_msamp,
+                                       m_tsamp, m_dt_max, m_dt_min, 1, "valid");
 
         // Generate final DM grid
         const auto& fdmt_dm_grid = m_fdmt_plan->get_dm_grid_final();
@@ -1554,7 +1539,6 @@ public:
          float dm_max,
          float dm_step,
          float dm_min                       = 0.0F,
-         int verbose                        = 0,
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
@@ -1564,11 +1548,10 @@ public:
           m_dm_arr(generate_dm_arr(dm_max, dm_step, dm_min)),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
-        spdlog::debug("DDMT: dm_max={}, dm_min={}, dm_step={}", dm_max, dm_min,
-                      dm_step);
+        logging::debug("DDMT: dm_max={}, dm_min={}, dm_step={}", dm_max, dm_min,
+                       dm_step);
     }
 
     Impl(float f_min,
@@ -1576,7 +1559,6 @@ public:
          SizeType nchans,
          float tsamp,
          std::span<const float> dm_arr,
-         int verbose                        = 0,
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
@@ -1586,10 +1568,9 @@ public:
           m_dm_arr(dm_arr.begin(), dm_arr.end()),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
-        spdlog::debug("DDMT: dm_count={}", m_dm_arr.size());
+        logging::debug("DDMT: dm_count={}", m_dm_arr.size());
     }
 
     Impl(float f_min,
@@ -1597,7 +1578,6 @@ public:
          SizeType nchans,
          float tsamp,
          const LevinConfig& levin,
-         int verbose                        = 0,
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {})
         : m_f_min(f_min),
@@ -1614,11 +1594,10 @@ public:
                                                  levin.tol)),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        apply_log_verbosity(verbose);
         validate_inputs();
         configure_plan();
-        spdlog::debug("DDMT Levin: dm_start={}, dm_end={}, count={}",
-                      levin.dm_start, levin.dm_end, m_dm_arr.size());
+        logging::debug("DDMT Levin: dm_start={}, dm_end={}, count={}",
+                       levin.dm_start, levin.dm_end, m_dm_arr.size());
     }
 
     ~Impl()                                = default;
@@ -1768,28 +1747,19 @@ FDMTPlan::FDMTPlan(float f_min,
                    IndexType dt_max,
                    IndexType dt_min,
                    SizeType dt_step,
-                   std::string_view mode,
-                   int verbose)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_max,
-                                    dt_min,
-                                    dt_step,
-                                    mode,
-                                    verbose)) {}
+                   std::string_view mode)
+    : m_impl(std::make_unique<Impl>(
+          f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step, mode)) {
+}
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
                    SizeType nchans,
                    SizeType nsamps,
                    float tsamp,
                    const std::vector<IndexType>& dt_grid,
-                   std::string_view mode,
-                   int verbose)
+                   std::string_view mode)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose)) {}
+          f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode)) {}
 
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
@@ -1797,10 +1767,9 @@ FDMTPlan::FDMTPlan(float f_min,
                    SizeType nsamps,
                    float tsamp,
                    const std::vector<float>& dm_grid,
-                   std::string_view mode,
-                   int verbose)
+                   std::string_view mode)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose)) {}
+          f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode)) {}
 
 FDMTPlan::~FDMTPlan()                              = default;
 FDMTPlan::FDMTPlan(FDMTPlan&&) noexcept            = default;
@@ -1837,9 +1806,6 @@ const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
 }
 FDMTComplexity FDMTPlan::get_complexity(bool use_box_smearing) const noexcept {
     return m_impl->get_complexity(use_box_smearing);
-}
-void FDMTPlan::print_complexity_summary() const {
-    m_impl->print_complexity_summary();
 }
 std::vector<SizeType>
 FDMTPlan::get_operations_by_iteration(bool use_box_smearing) const {
@@ -1932,8 +1898,8 @@ SizeType FDMTPlan::get_max_shift() const noexcept {
 std::vector<ComplexType> FDMTPlan::get_fft_phasor_table() const {
     return m_impl->get_fft_phasor_table();
 }
-void FDMTPlan::print_summary(std::string_view prefix) const {
-    m_impl->print_summary(prefix);
+std::string FDMTPlan::summary(std::string_view prefix) const {
+    return m_impl->summary(prefix);
 }
 
 // --- Definitions for CohFDMTPlan ---
@@ -1947,8 +1913,7 @@ CohFDMTPlan::CohFDMTPlan(float f_center,
                          float dm_max,
                          float dm_min,
                          SizeType noverlap,
-                         std::string_view data_order,
-                         int verbose)
+                         std::string_view data_order)
     : m_impl(std::make_unique<Impl>(f_center,
                                     bw_sub,
                                     nsub,
@@ -1959,8 +1924,7 @@ CohFDMTPlan::CohFDMTPlan(float f_center,
                                     dm_max,
                                     dm_min,
                                     noverlap,
-                                    data_order,
-                                    verbose)) {}
+                                    data_order)) {}
 CohFDMTPlan::~CohFDMTPlan()                                 = default;
 CohFDMTPlan::CohFDMTPlan(CohFDMTPlan&&) noexcept            = default;
 CohFDMTPlan& CohFDMTPlan::operator=(CohFDMTPlan&&) noexcept = default;
@@ -2054,7 +2018,7 @@ std::vector<float> CohFDMTPlan::get_cumulative_count_grid() const {
 const FDMTPlan& CohFDMTPlan::get_fdmt_plan() const {
     return m_impl->get_fdmt_plan();
 }
-void CohFDMTPlan::print_summary() const { m_impl->print_summary(); }
+std::string CohFDMTPlan::summary() const { return m_impl->summary(); }
 
 // --- Definitions for DDMTPlan ---
 DDMTPlan::DDMTPlan(float f_min,
@@ -2064,7 +2028,6 @@ DDMTPlan::DDMTPlan(float f_min,
                    float dm_max,
                    float dm_step,
                    float dm_min,
-                   int verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(f_min,
@@ -2074,7 +2037,6 @@ DDMTPlan::DDMTPlan(float f_min,
                                     dm_max,
                                     dm_step,
                                     dm_min,
-                                    verbose,
                                     nbits,
                                     kill_mask)) {}
 
@@ -2083,22 +2045,20 @@ DDMTPlan::DDMTPlan(float f_min,
                    SizeType nchans,
                    float tsamp,
                    std::span<const float> dm_arr,
-                   int verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, tsamp, dm_arr, verbose, nbits, kill_mask)) {}
+          f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask)) {}
 
 DDMTPlan::DDMTPlan(float f_min,
                    float f_max,
                    SizeType nchans,
                    float tsamp,
                    const LevinConfig& levin,
-                   int verbose,
                    SizeType nbits,
                    std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, tsamp, levin, verbose, nbits, kill_mask)) {}
+          f_min, f_max, nchans, tsamp, levin, nbits, kill_mask)) {}
 
 DDMTPlan::~DDMTPlan()                              = default;
 DDMTPlan::DDMTPlan(DDMTPlan&&) noexcept            = default;
@@ -2131,6 +2091,27 @@ std::vector<float> DDMTPlan::get_fractional_delay_table() const noexcept {
 SizeType DDMTPlan::get_nbits() const noexcept { return m_impl->get_nbits(); }
 std::vector<uint8_t> DDMTPlan::get_kill_mask() const noexcept {
     return m_impl->get_kill_mask();
+}
+std::string DDMTPlan::summary() const {
+    const auto dms     = get_dm_arr();
+    const auto& delays = get_container().delay_table;
+    const auto max_delay =
+        delays.empty() ? SizeType{0} : *std::ranges::max_element(delays);
+    const auto kill_mask = get_kill_mask();
+    const auto n_masked  = static_cast<SizeType>(
+        std::ranges::count(kill_mask, static_cast<uint8_t>(0)));
+    const auto [dm_lo, dm_hi] =
+        dms.empty() ? std::pair{0.0F, 0.0F}
+                    : std::pair{std::ranges::min(dms), std::ranges::max(dms)};
+    return std::format(
+        "*** DDMT Plan Summary ***\n"
+        "Band: {} - {} MHz, {} channels ({} masked), tsamp {} s\n"
+        "DM trials: {} over [{}, {}] pc cm^-3, max delay {} samples\n"
+        "Input: {}\n",
+        get_f_min(), get_f_max(), get_nchans(), n_masked, get_tsamp(),
+        dms.size(), dm_lo, dm_hi, max_delay,
+        get_nbits() == 32 ? std::string("float32")
+                          : std::format("packed {}-bit", get_nbits()));
 }
 void DDMTPlan::set_kill_mask(std::span<const uint8_t> kill_mask) {
     m_impl->set_kill_mask(kill_mask);
