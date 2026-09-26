@@ -1,5 +1,6 @@
 #include "dmt/algorithms/cfdmt.hpp"
 
+#include <format>
 #include <span>
 #include <stdexcept>
 
@@ -49,8 +50,11 @@ public:
 
     template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in, std::span<float> dmt) {
-        if (dmt.size() != m_plan.get_dmt_size()) {
-            throw std::runtime_error("Invalid DMT size");
+        if (dmt.size() < m_plan.get_buffer_size()) {
+            throw std::invalid_argument(std::format(
+                "CohFDMTCPU: dmt buffer too small. Expected at least {} "
+                "(get_buffer_size()), got {}",
+                m_plan.get_buffer_size(), dmt.size()));
         }
         m_theunpacker->execute<DataType>(data_in, m_unpack_buf_p1,
                                          m_unpack_buf_p2);
@@ -86,13 +90,17 @@ public:
             // FDMTCPU instance (same plan geometry, "valid" mode); only the
             // small per-trial streaming history differs, so it's swapped in/out
             // around the shared instance's working-state buffers.
+            //
+            // Sliding arena: the trial runs in place at offset idm * D with
+            // its full B-sized ping-pong span. Its scratch tail only reaches
+            // later trials' slots, which are overwritten afterwards, so no
+            // copy is needed (see CohFDMTPlan::get_buffer_size()).
+            const auto& fine_plan = m_thefdmt->get_plan();
             m_thefdmt->load_history(m_dm_histories[idm]);
-            m_thefdmt->execute(m_aligned_buf, m_fdmt_scratch);
+            m_thefdmt->execute(m_aligned_buf,
+                               dmt.subspan(idm * fine_plan.get_dmt_size(),
+                                           fine_plan.get_buffer_size()));
             m_thefdmt->save_history(m_dm_histories[idm]);
-            const auto dmt_cur_size = m_thefdmt->get_plan().get_dmt_size();
-            auto dmt_cur_span = dmt.subspan(idm * dmt_cur_size, dmt_cur_size);
-            std::copy_n(m_fdmt_scratch.begin(), dmt_cur_size,
-                        dmt_cur_span.begin());
         }
     }
 
@@ -119,9 +127,6 @@ private:
     std::vector<float> m_intensity_buf;
     std::vector<float> m_aligned_buf;
     std::vector<ComplexType> m_chirp_table;
-    // FDMT ping-pong scratch, reused across coarse-DM trials -- sized to
-    // get_buffer_size() (>= get_dmt_size()); see execute()'s comment.
-    std::vector<float> m_fdmt_scratch;
     // Small per-coarse-DM-trial "valid"-mode streaming history, swapped
     // into the one shared m_thefdmt instance around each trial's execute()
     // call. Persists across CohFDMTCPU::execute() calls (future contiguous
@@ -147,12 +152,10 @@ private:
         m_thefdmt = std::make_unique<algorithms::FDMTCPU>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid", false, m_nthreads);
+            m_plan.get_dt_min(), 1, true, "valid", 0, m_nthreads);
         m_theunpacker = std::make_unique<utils::DataUnpackerCPU>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_nthreads);
-
-        m_fdmt_scratch.resize(m_thefdmt->get_plan().get_buffer_size());
 
         // One small streaming-history slot per coarse-DM trial.
         const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
@@ -228,6 +231,9 @@ const plans::CohFDMTPlan& CohFDMTCPU::get_plan() const noexcept {
 }
 SizeType CohFDMTCPU::get_dmt_size() const noexcept {
     return m_impl->get_plan().get_dmt_size();
+}
+SizeType CohFDMTCPU::get_buffer_size() const noexcept {
+    return m_impl->get_plan().get_buffer_size();
 }
 template <IntegralDataType DataType>
 void CohFDMTCPU::execute(std::span<const DataType> data_in,

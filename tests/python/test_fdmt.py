@@ -1184,3 +1184,72 @@ class TestFDMTPerformanceParams:
         fdmt = self._make(mode, fuse_levels=fuse_levels)
         assert fdmt.fuse_levels <= fdmt.plan.niters
         np.testing.assert_array_equal(fdmt.execute(waterfall), ref)
+
+
+class TestFDMTUsageContract:
+    """Output-buffer reuse, zero-copy views and hard fails for misuse."""
+
+    nchans = 32
+    nsamps = 128
+
+    def _make(self, mode: str = "valid", nbeams: int = 1) -> libdmt.FDMTCPU:
+        return libdmt.FDMTCPU(
+            1000.0, 1500.0, self.nchans, self.nsamps, 0.001, 32, mode=mode,
+            nbeams=nbeams,
+        )
+
+    def test_out_buffer_is_reused(self) -> None:
+        rng = np.random.default_rng(3)
+        wf = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
+        ref = self._make().execute(wf)
+        fdmt = self._make()
+        out = np.empty(fdmt.plan.buffer_size, dtype=np.float32)
+        got = fdmt.execute(wf, out=out)
+        np.testing.assert_array_equal(got, ref)
+        assert got.base is out or np.shares_memory(got, out)
+        with pytest.raises(ValueError):
+            fdmt.execute(wf, out=np.empty(fdmt.plan.buffer_size - 1, np.float32))
+        with pytest.raises(TypeError):
+            fdmt.execute(wf, out=np.empty(fdmt.plan.buffer_size, np.float64))
+
+    def test_batched_result_is_a_strided_view(self) -> None:
+        nbeams = 3
+        rng = np.random.default_rng(4)
+        wf = rng.standard_normal(
+            (nbeams, self.nchans, self.nsamps), dtype=np.float32
+        )
+        fdmt = self._make(nbeams=nbeams)
+        out = np.empty(nbeams * fdmt.plan.buffer_size, dtype=np.float32)
+        got = fdmt.execute(wf, out=out)
+        assert got.shape == (nbeams, fdmt.plan.dmt_ndms, fdmt.plan.dmt_nsamps)
+        assert np.shares_memory(got, out)
+        for b in range(nbeams):
+            np.testing.assert_array_equal(got[b], self._make().execute(wf[b]))
+
+    def test_reset_rejects_unpacked_uint8(self) -> None:
+        fdmt = self._make()
+        with pytest.raises(TypeError):
+            fdmt.reset(np.zeros((self.nchans, self.nsamps), dtype=np.uint8))
+
+    def test_valid_mode_block_must_be_finalized(self) -> None:
+        wf = np.ones((self.nchans, self.nsamps), dtype=np.float32)
+        fdmt = self._make("valid")
+        fdmt.reset(wf)
+        fdmt.advance_until_remaining(2)
+        with pytest.raises(RuntimeError):  # std::logic_error
+            fdmt.reset(wf)
+        with pytest.raises(RuntimeError):
+            fdmt.execute(wf)
+        fdmt.reset_history()
+        fdmt.reset(wf)
+        fdmt.finalize()
+        fdmt.execute(wf)
+
+    @pytest.mark.parametrize("mode", ["full", "roll"])
+    def test_modes_without_history_allow_restart(self, mode: str) -> None:
+        wf = np.ones((self.nchans, self.nsamps), dtype=np.float32)
+        fdmt = self._make(mode)
+        fdmt.reset(wf)
+        fdmt.advance_until_remaining(2)
+        fdmt.reset(wf)
+        fdmt.finalize()

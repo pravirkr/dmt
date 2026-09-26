@@ -1,6 +1,11 @@
 #pragma once
 
+#include <format>
 #include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -126,6 +131,71 @@ resolve_custom_grid(const py::object& dt_grid,
         return {CustomGridType::kDt, dt_obj};
     }
     return {CustomGridType::kDm, dm_obj};
+}
+
+// The engine's output buffer: the caller's `out` (validated, reused as is)
+// or a fresh array of nbeams * get_buffer_size() floats.
+template <typename Engine>
+py::array_t<float, py::array::c_style>
+fdmt_output_buffer(const Engine& fdmt,
+                   std::string_view name,
+                   const std::optional<py::array>& out) {
+    const auto needed = fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size();
+    if (!out.has_value()) {
+        return py::array_t<float, py::array::c_style>(
+            static_cast<py::ssize_t>(needed));
+    }
+    const auto& arr = *out;
+    if (arr.dtype().kind() != 'f' || arr.itemsize() != 4 ||
+        (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
+        throw py::type_error(std::format("{}.execute: out must be a writeable, "
+                                         "C-contiguous float32 array",
+                                         name));
+    }
+    if (static_cast<SizeType>(arr.size()) < needed) {
+        throw std::invalid_argument(std::format(
+            "{}.execute: out has {} elements, needs at least nbeams * "
+            "plan.buffer_size = {}",
+            name, arr.size(), needed));
+    }
+    return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
+}
+
+// FDMTCPU/FDMTCUDA execute(): runs `run(dmt_span)` into the output buffer
+// and returns a zero-copy view of the transform: (ndms, nsamps) when
+// `batched` is false (nbeams must be 1),
+// else (nbeams, ndms, nsamps) with beams plan.buffer_size apart. The view's
+// base is the whole buffer (each beam's scratch tail included). A fresh
+// buffer is allocated per call unless `out` is given. `expected_size` is the
+// full beam-major input size, used only for the error message.
+template <typename Engine, typename Run>
+py::object fdmt_execute_to_array(const Engine& fdmt,
+                                 std::string_view name,
+                                 bool batched,
+                                 SizeType input_size,
+                                 SizeType expected_size,
+                                 const std::optional<py::array>& out,
+                                 Run&& run) {
+    const auto nbeams   = fdmt.get_nbeams();
+    const auto& plan    = fdmt.get_plan();
+    const auto ncoords  = static_cast<py::ssize_t>(plan.get_dmt_ndms());
+    const auto nsamps   = static_cast<py::ssize_t>(plan.get_dmt_nsamps());
+    const auto buf_size = static_cast<py::ssize_t>(plan.get_buffer_size());
+    const auto fsize    = static_cast<py::ssize_t>(sizeof(float));
+    if (!batched && nbeams != 1) {
+        throw std::invalid_argument(
+            std::format("{}: Invalid size of waterfall. Expected {}, got {}",
+                        name, expected_size, input_size));
+    }
+    auto buf = fdmt_output_buffer(fdmt, name, out);
+    run(std::span<float>(buf.mutable_data(), buf.size()));
+    if (!batched) {
+        return py::array_t<float>({ncoords, nsamps}, {nsamps * fsize, fsize},
+                                  buf.data(), buf);
+    }
+    return py::array_t<float>(
+        {static_cast<py::ssize_t>(nbeams), ncoords, nsamps},
+        {buf_size * fsize, nsamps * fsize, fsize}, buf.data(), buf);
 }
 
 } // namespace dmt

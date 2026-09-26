@@ -86,7 +86,7 @@ mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_BUILD_TESTING=ON
 
 # Or configure with CUDA GPU acceleration
-cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native
+cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_CUDA=ON -DDMT_CUDA_ARCHITECTURES=native
 
 # Build and run unit tests
 cmake --build . -j
@@ -113,7 +113,35 @@ add_executable(search_engine main.cpp)
 target_link_libraries(search_engine PRIVATE dmt::dmt)
 ```
 
-If `dmt` was built with CUDA support, the target automatically propagates necessary CUDA flags and include directories.
+If `dmt` was built with CUDA support, the target automatically propagates necessary CUDA flags and include directories. Static and shared installs both work: the package config finds FFTW, OpenMP and CUDA for you where a static `dmt` needs them.
+
+### Using dmt as a dependency
+
+To build `dmt` inside your own project instead of installing it, use
+FetchContent, CPM or `add_subdirectory`. As a subproject, `dmt` defaults
+`DMT_BUILD_PYTHON` and `DMT_BUILD_TESTING` to `OFF`, so only the library is
+built. FFTW 3 (float) and OpenMP must be installed on the system.
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+  dmt
+  GIT_REPOSITORY https://github.com/pravirkr/dmt.git
+  GIT_TAG main            # pin a tag or commit in production
+)
+set(DMT_CUDA OFF CACHE STRING "" FORCE)   # or AUTO / ON
+FetchContent_MakeAvailable(dmt)
+
+target_link_libraries(my_pipeline PRIVATE dmt::dmt)
+```
+
+With CPM: `CPMAddPackage("gh:pravirkr/dmt#main")`. With a vendored copy:
+`add_subdirectory(external/dmt)`. In all cases include `<dmt/dmt.hpp>` (or
+`<dmt/algorithms/fdmt.hpp>`), then continue with the
+[C++ quickstart](quickstart_cpp.md).
+
+For a Python pipeline, install `dmtlib` from source as above (there is no
+PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
 
 ---
 
@@ -121,10 +149,14 @@ If `dmt` was built with CUDA support, the target automatically propagates necess
 
 | CMake Option | Default | Description |
 | :--- | :--- | :--- |
-| `DMT_BUILD_PYTHON` | `ON` | Build Python bindings via pybind11 |
-| `DMT_BUILD_TESTING` | `ON` | Build GoogleTest C++ unit test suite |
-| `DMT_BUILD_BENCHMARKS` | `OFF` | Build Google Benchmark performance suites |
+| `DMT_BUILD_PYTHON` | `ON` (top level), `OFF` (subproject) | Build Python bindings via pybind11 |
+| `DMT_BUILD_TESTING` | `ON` (top level), `OFF` (subproject) | Build the Catch2 C++ unit tests |
+| `DMT_BUILD_BENCHMARKS` | `OFF` | Build the Google Benchmark suites (`dmt_bench`) |
 | `DMT_BUILD_DOCS` | `OFF` | Configure Doxygen and Sphinx documentation targets |
-| `DMT_CUDA` | `AUTO` | CUDA support mode: `AUTO` (detect GPU), `ON` (require GPU), `OFF` (CPU-only) |
-| `DMT_ENABLE_NATIVE_ARCH`| `ON` | Enable `-march=native` compiler optimizations |
+| `DMT_CUDA` | `AUTO` | CUDA support mode: `AUTO` (use it if a toolchain is found), `ON` (require it), `OFF` (CPU only) |
+| `DMT_CUDA_ARCHITECTURES` | `native` | GPU architectures, e.g. `80` or `86;90` (passed to `CMAKE_CUDA_ARCHITECTURES`) |
+| `DMT_ENABLE_NATIVE_ARCH`| `ON` | `-march=native` in Release builds. Turn `OFF` for binaries or wheels that must run on other CPUs |
+| `DMT_ENABLE_IPO` | `OFF` | Link-time optimization in Release builds |
+| `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt, spdlog) |
+| `DMT_ENABLE_COVERAGE` | `OFF` | Coverage instrumentation |
 | `BUILD_SHARED_LIBS` | `OFF` | Build shared library (`ON`) or static library (`OFF`) |

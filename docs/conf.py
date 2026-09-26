@@ -407,6 +407,10 @@ def _convenience_functions_rst() -> str:
         'std::string_view mode="valid", int verbose=0, int nthreads=1, '
         "SizeType nbeams=1)"
     )
+    cuda = {
+        name: args.replace("int nthreads=1", "int device_id=0")
+        for name, args in (("linear", linear), ("dt", dt_grid), ("dm", dm_grid))
+    }
     blocks = [
         _doxygen_function("dmt::algorithms::compute_fdmt", linear),
         _doxygen_function("dmt::algorithms::compute_fdmt", dt_grid),
@@ -415,6 +419,9 @@ def _convenience_functions_rst() -> str:
         _doxygen_function("dmt::algorithms::compute_fdmt_fft", dt_grid),
         _doxygen_function("dmt::algorithms::compute_fdmt_fft", dm_grid),
         _doxygen_function("dmt::algorithms::add_frb_track"),
+        _doxygen_function("dmt::algorithms::compute_fdmt_cuda", cuda["linear"]),
+        _doxygen_function("dmt::algorithms::compute_fdmt_cuda", cuda["dt"]),
+        _doxygen_function("dmt::algorithms::compute_fdmt_cuda", cuda["dm"]),
     ]
     return "\n".join(blocks)
 
@@ -445,6 +452,17 @@ Compute Engines (``dmt::algorithms``)
 .. doxygenclass:: dmt::algorithms::FDMTFFTCPU
    :project: dmt
    :members:
+
+.. doxygenstruct:: dmt::algorithms::FDMTSubbandView
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::FDMTMemoryUsage
+   :project: dmt
+   :members:
+
+.. doxygenvariable:: dmt::algorithms::kFDMTAutoFuse
+   :project: dmt
 
 .. doxygenclass:: dmt::utils::FFTWManager
    :project: dmt

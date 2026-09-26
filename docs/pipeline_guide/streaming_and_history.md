@@ -17,7 +17,7 @@ If data blocks are dedispersed independently:
 
 ## 2. DMT's Overlap-Save Mechanism
 
-In `mode="valid"`, `FDMTCPU` and `DDMTCPU` maintain **internal state history buffers**:
+In `mode="valid"`, `FDMTCPU`/`FDMTCUDA` and `DDMTCPU` maintain **internal state history buffers**:
 
 ```
 Block 0:  [─────── Waterfall Data Block 0 ───────]
@@ -27,10 +27,33 @@ Block 1:  [Saved History] + [── Waterfall Data Block 1 ──]
                                            \ Tail / ──> [Update History Buffer]
 ```
 
-### How It Works:
-1. **Cold Start**: On the first call to `execute()`, the history buffer is empty. The output length is $N_{\text{samps}} - \Delta t_{\max}$ valid samples.
-2. **Streaming Steady State**: Intermediate delayed subband states up to $\Delta t_{\max}$ are retained in internal memory. On all subsequent calls, previous tail states are prepended before merging, producing a continuous stream of exactly $N_{\text{samps}}$ valid samples per block!
-3. **Zero Energy Loss**: Signals crossing block boundaries are fully integrated with $100\%$ peak SNR recovery.
+### How It Works
+
+The history is kept inside the tree, not on the raw input: every merge node
+with a delay keeps the last `delay` samples of its input from the previous
+block. That is overlap-save applied per node, so streaming reproduces a single
+monolithic transform **bit-exactly for every DM trial**, with no redundant
+recomputation of overlap samples.
+
+1. **Construct once, call per block.** Every `execute()` (or stepper
+   `reset()`) consumes one block and returns exactly $N_{\text{samps}}$
+   output samples (`plan.dmt_nsamps`).
+2. **Blocks must be contiguous and non-overlapping in time.** Then the output
+   blocks are contiguous too: concatenating them equals one full-mode transform
+   of the whole stream. Do not overlap blocks yourself; the history already
+   supplies the past samples.
+3. **Cold start.** After construction or `reset_history()`, the history is
+   zero, so the first $\Delta t_{\max}$ samples of the first block are partial
+   sums. Call `reset_history()` whenever the stream breaks (a new observation,
+   dropped data).
+4. **Block size is free.** `nsamps` may even be smaller than $\Delta t_{\max}$;
+   the per-node history then spans several blocks. Choose it for latency and
+   throughput (see [Performance](performance.md)).
+5. **Stepper.** A stepped block must be finalized before the next one; stopping
+   early raises instead of silently corrupting the history (see
+   {ref}`stepper rules <stepper-rules>`).
+
+`mode="full"` and `mode="roll"` keep no history; each block is independent.
 
 ---
 
@@ -85,3 +108,11 @@ fdmt.save_history(std::span<float>(beam0_state));
 // Restore state
 fdmt.load_history(std::span<const float>(beam0_state));
 ```
+
+The saved state is only the small history (`history_state_size()` floats),
+not the engine's working buffers, so one engine can serve many streams of the
+same plan geometry. `CohFDMTCPU`/`CohFDMTCUDA` use exactly this to share one
+fine FDMT across all coarse-DM trials. On `FDMTCUDA` (C++ only) the history
+lives in device memory, and both calls are asynchronous on the given stream.
+For beams that are processed together, `nbeams` is usually simpler (see
+[Multi-Beam Batching](multibeam.md)).

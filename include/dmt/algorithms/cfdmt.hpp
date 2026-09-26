@@ -53,7 +53,7 @@ public:
      * convolution (default: 8192).
      * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
      * (default: "PRITF").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP worker threads (default: 1).
      */
     CohFDMTCPU(float f_center,
@@ -79,9 +79,14 @@ public:
     /// @brief Read-only reference to underlying CohFDMT execution plan
     [[nodiscard]] const plans::CohFDMTPlan& get_plan() const noexcept;
 
-    /// @brief Total float elements in the output 2D DMT buffer (ndm_total *
-    /// nsamps)
+    /// @brief Float elements of the result: (ndm_total, nsamps), the leading
+    /// part of the execute() output buffer.
     [[nodiscard]] SizeType get_dmt_size() const noexcept;
+
+    /// @brief Output buffer length execute() needs (>= get_dmt_size(); see
+    /// plans::CohFDMTPlan::get_buffer_size()). The tail past get_dmt_size()
+    /// is scratch.
+    [[nodiscard]] SizeType get_buffer_size() const noexcept;
 
     /**
      * @brief Executes the end-to-end CFDMT pipeline on packed baseband voltage
@@ -89,8 +94,10 @@ public:
      *
      * @tparam DataType Integral baseband sample type (e.g. uint8_t, int8_t).
      * @param data_in View of contiguous input packed baseband voltages.
-     * @param dmt View of destination float output buffer of size
-     * get_dmt_size().
+     * @param dmt Output buffer of at least get_buffer_size() floats; the
+     * leading get_dmt_size() hold the (ndm_total, nsamps) result, coarse-DM
+     * trial i's fine trials at offset i * fine get_dmt_size().
+     * @throws std::invalid_argument if dmt is smaller than get_buffer_size().
      */
     template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in, std::span<float> dmt) const;
@@ -132,7 +139,7 @@ public:
      * @param noverlap Overlap sample count for convolution (default: 8192).
      * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
      * (default: "PRITF").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id Target CUDA device ID (default: 0).
      */
     CohFDMTCUDA(float f_center,
@@ -158,16 +165,23 @@ public:
     /// @brief Read-only reference to underlying CohFDMT execution plan
     [[nodiscard]] const plans::CohFDMTPlan& get_plan() const noexcept;
 
-    /// @brief Total float elements in the output 2D DMT buffer (ndm_total *
-    /// nsamps)
+    /// @brief Float elements of the result: (ndm_total, nsamps), the leading
+    /// part of the execute() output buffer.
     [[nodiscard]] SizeType get_dmt_size() const noexcept;
+
+    /// @brief Output buffer length execute() needs (>= get_dmt_size(); see
+    /// plans::CohFDMTPlan::get_buffer_size()). The tail past get_dmt_size()
+    /// is scratch.
+    [[nodiscard]] SizeType get_buffer_size() const noexcept;
 
     /**
      * @brief Executes CFDMT from host memory (internally transfers to device
      * and back).
      * @tparam DataType Integral baseband sample type (uint8_t, int8_t).
      * @param data_in Contiguous host input packed baseband voltages.
-     * @param dmt Destination host float buffer of size get_dmt_size().
+     * @param dmt Destination host buffer of at least get_dmt_size() floats
+     * (the result). The device arena of get_buffer_size() floats is owned by
+     * the engine, allocated on the first host call.
      */
     template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in, std::span<float> dmt) const;
@@ -176,7 +190,8 @@ public:
      * @brief Executes CFDMT directly on GPU device memory.
      * @tparam DataType Integral baseband sample type.
      * @param d_data_in Device pointer/span to input packed baseband voltages.
-     * @param d_dmt Device pointer/span to output DMT buffer.
+     * @param d_dmt Device output buffer of at least get_buffer_size()
+     * floats; the leading get_dmt_size() hold the result, the tail is scratch.
      * @param stream CUDA stream for non-blocking asynchronous execution.
      */
     template <IntegralDataType DataType>

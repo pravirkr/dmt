@@ -1330,6 +1330,10 @@ public:
     SizeType get_dmt_size() const {
         return m_dm_grid_coh.size() * m_fdmt_plan->get_dmt_size();
     }
+    SizeType get_buffer_size() const {
+        return ((m_dm_grid_coh.size() - 1) * m_fdmt_plan->get_dmt_size()) +
+               m_fdmt_plan->get_buffer_size();
+    }
     float get_chirp_scale() const noexcept {
         return 1.0F / static_cast<float>(m_nbin);
     }
@@ -2028,6 +2032,9 @@ SizeType CohFDMTPlan::get_dmt_nsamps() const noexcept {
     return m_impl->get_dmt_nsamps();
 }
 SizeType CohFDMTPlan::get_dmt_size() const { return m_impl->get_dmt_size(); }
+SizeType CohFDMTPlan::get_buffer_size() const {
+    return m_impl->get_buffer_size();
+}
 float CohFDMTPlan::get_chirp_scale() const noexcept {
     return m_impl->get_chirp_scale();
 }

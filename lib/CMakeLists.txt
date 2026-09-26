@@ -67,9 +67,11 @@ if(CMAKE_CUDA_COMPILER)
   target_include_directories(${DMT_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-# Header-only internal deps (not part of the installed export set).
+# Header-only internal deps (not part of the installed export set, so even a
+# static dmt does not ask consumers for these targets).
 target_link_libraries(
-  ${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}> spdlog::spdlog_header_only
+  ${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}>
+                              $<BUILD_INTERFACE:spdlog::spdlog_header_only>
 )
 
 # FFTW: shared dmt links privately; static dmt exposes FFTW to downstream linkers.

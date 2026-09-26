@@ -1145,6 +1145,8 @@ public:
         std::ranges::fill(m_history, 0.0F);
         std::ranges::fill(m_history_init, 0.0F);
         std::ranges::fill(m_tree_history, 0.0F);
+        // Abandons any unfinished stepper block along with its stream.
+        m_is_initialized = false;
     }
 
     [[nodiscard]] SizeType history_state_size() const noexcept {
@@ -1276,6 +1278,21 @@ private:
         return level_ptr<const float>(m_current_level, 0);
     }
 
+    // In "valid" mode every block must reach the root before the next one
+    // starts: levels a stepper run never executed would otherwise skip this
+    // block's cross-block history update and silently corrupt the stream.
+    void check_previous_block_finished() const {
+        if (m_mode == FDMTMode::kValid && m_is_initialized && !is_finished()) {
+            throw std::logic_error(std::format(
+                "FDMTCPU: the previous block's stepper run stopped at level "
+                "{} of {}. In mode='valid' every block must be finalized "
+                "before the next reset()/execute(), or its cross-block "
+                "history is lost. Call finalize(), or reset_history() to "
+                "abandon the stream.",
+                m_current_level, total_levels() - 1));
+        }
+    }
+
     void check_dmt_size(std::span<float> dmt) const {
         if (dmt.size() < m_nbeams * m_plan.get_buffer_size()) {
             throw std::invalid_argument(std::format(
@@ -1304,6 +1321,9 @@ private:
      * allocated after this.
      */
     void allocate_working_memory(SizeType fuse_levels, int verbose) {
+        if (m_nbeams == 0) {
+            throw std::invalid_argument("FDMTCPU: nbeams must be at least 1");
+        }
         const SizeType niters = m_plan.get_niters();
         m_float_levels.assign(niters + 1, Elem::kF32);
         for (const SizeType nbits : {1, 2, 4, 8, 16}) {
@@ -1396,6 +1416,7 @@ private:
                SizeType input_beam_stride,
                const std::vector<Elem>& types,
                std::span<float> dmt) {
+        check_previous_block_finished();
         layout_levels(types, dmt);
         const SizeType fuse = m_fuse_requested ? m_fuse_levels : 0;
         if (fuse > 0) {

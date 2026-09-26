@@ -2,7 +2,7 @@
 
 Modern radio interferometers (such as MeerKAT, CHIME, ASKAP, and SKA) generate dozens to thousands of simultaneous tied-array or synthesized beams to survey wide fields of view.
 
-`dmt` supports native **Multi-Beam Batching** across CPU SIMD and CUDA GPU kernels.
+`dmt` supports native **Multi-Beam Batching** on the CPU and the GPU: one engine, one plan, `nbeams` beams per call.
 
 ---
 
@@ -64,7 +64,7 @@ const size_t nsamps = 1024;
 dmt::algorithms::FDMTCPU fdmt(
     1200.0f, 1600.0f, nchans, nsamps, 1e-3f,
     /*dt_max=*/100, /*dt_min=*/0, /*dt_step=*/1,
-    /*use_box_smearing=*/true, "valid", /*verbose=*/false,
+    /*use_box_smearing=*/true, "valid", /*verbose=*/0,
     /*nthreads=*/8, /*nbeams=*/nbeams
 );
 
@@ -76,4 +76,9 @@ fdmt.execute(
     std::span<const float>(batch_input.data(), batch_input.size()),
     std::span<float>(batch_output.data(), batch_output.size())
 );
+
+// Beam b's (ndms, dmt_nsamps) result: the first get_dmt_size() floats at
+// offset b * get_buffer_size() (the rest of each slice is scratch).
+std::span<const float> beam3(batch_output.data() + 3 * plan.get_buffer_size(),
+                             plan.get_dmt_size());
 ```

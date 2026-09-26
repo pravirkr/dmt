@@ -9,8 +9,9 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
-// Narrow-integer FDMT tree state (FDMTExecConfig::int_tree), shared by the
-// CPU and CUDA backends so both pick identical per-level storage types.
+// Narrow-integer FDMT tree state (the `int_tree` constructor parameter),
+// shared by the CPU and CUDA backends so both pick identical per-level
+// storage types.
 
 namespace dmt::algorithms::detail {
 

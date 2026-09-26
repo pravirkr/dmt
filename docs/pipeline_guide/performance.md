@@ -19,7 +19,7 @@ print(fdmt.memory_usage)  # bytes allocated at construction
 ```cpp
 // ..., nthreads, nbeams, fuse_levels = kFDMTAutoFuse, int_tree = true
 dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
-                              0, 1, true, "valid", false, 1, 1,
+                              0, 1, true, "valid", 0, 1, 1,
                               dmt::algorithms::kFDMTAutoFuse, true);
 ```
 
@@ -150,8 +150,8 @@ halo <= half a tile) stops there.
 
 ## 3. Packed low-bit input and the integer tree (`int_tree`)
 
-Digitisers typically deliver 1-, 2-, 4- or 8-bit samples. Both engines accept
-them packed, with no float copy of the waterfall ever made:
+Digitisers typically deliver 1-, 2-, 4-, 8- or 16-bit samples. Both engines
+accept them packed, with no float copy of the waterfall ever made:
 
 - Rows are LSB-first within each byte for fewer than 8 bits (the DDMT
   convention), padded to a whole byte.
@@ -182,9 +182,9 @@ dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
 #include "dmt/algorithms/fdmt.hpp"
 
 dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
-                              0, 1, true, "valid", false, /*nthreads=*/8);
+                              0, 1, true, "valid", 0, /*nthreads=*/8);
 std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
-// packed: nchans * dmt::bit_pack_utils::packed_row_bytes(nsamps, nbits) bytes
+// packed: nchans rows of ceil(nsamps * nbits / 8) bytes
 fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
 ```
 
@@ -236,13 +236,51 @@ construct the engine with `int_tree=False`.
   then allocates nothing (on the CPU a test enforces this), so a streaming
   pipeline constructs once and calls `execute()` block after block.
   `fdmt.memory_usage` (Python) / `get_memory_usage()` (C++) reports the
-  bytes per category and the output buffer each call needs; `verbose=True`
+  bytes per category and the output buffer each call needs; `verbose=1`
   logs the same breakdown at construction. To multiplex several streams on
   one engine, use `save_history()` / `load_history()` rather than building
-  one engine per stream. The host-memory `FDMTCUDA.execute()` overloads are
-  the one exception: they stage the input and output on the device per call.
+  one engine per stream. The host-memory `FDMTCUDA.execute()` overloads
+  stage the input and output on the device in buffers allocated on the first
+  host call and reused afterwards. In Python, pass `out=` to `execute()` to
+  reuse the output array too; otherwise every call allocates and page-faults
+  a new one (~10% of the runtime at 16K samples).
 - **Multiple beams:** `nbeams > 1` shares one plan across beams. See
   [Multi-Beam Batching](multibeam.md).
+
+---
+
+## 5. What was tried and rejected
+
+Everything below was implemented, measured, and removed, or analysed and not
+built. None of it is hardware-agnostic *and* faster.
+
+- **Intra-level cache tiling** (blocking one level's merges in time and DM).
+  Every merge level already runs at 93–99% of `c = a + b` bandwidth
+  (section 1). The reuse model gives 1.143 input rows read per output row for
+  the plain loop against 1.156 for ideal blocking, so tiling reorders the
+  same bytes.
+- **Non-temporal (streaming) stores**: 17–32% *slower* on 1 Xeon thread,
+  because the next level re-reads the rows just written.
+- **Fusing the top levels.** Near the root, channel groups are no longer
+  disjoint: every level carries about $N_\text{DM}$ rows. Time tiles need a
+  halo of about the sum of the fused delays (≈ `dt_max`), so a useful tile's
+  working set is $N_\text{DM} \times (\text{tile} + \text{halo}) \times 4$ B,
+  tens of MB. It only pays where that fits a particular LLC. Carrying the
+  halo as history instead moves history traffic of the same size.
+- **Bit-level (bit-sliced) arithmetic for 1-bit input.** With box smearing,
+  level-0 values are already multi-bit, and after one merge every value is
+  ≥ 2 bits. A bit-sliced add costs ~5 logic ops per bit-plane per 64
+  samples, i.e. $(l+1) \cdot 5/64$ per sample at level $l$, against $1/32$
+  for a `uint8` SIMD lane, so it loses at every level. The integer tree
+  (`uint8`/`uint16` lanes with exact bounds) is the right granularity.
+- **fp16 / bf16 tree storage** would halve the bytes of float input, but it
+  is lossy. fp16 overflows on data that isn't mean-subtracted (sums exceed
+  65504), and bf16's 8-bit mantissa costs S/N. dmt's results are exact, so
+  this was not built.
+- **Hardware detection for the fusion depth** (reading cache sizes at run
+  time). The plan-only rule is within ~10% of the best measured depth
+  everywhere tested, and it keeps results and memory reproducible across
+  machines.
 
 ---
 
@@ -260,7 +298,8 @@ path, for example to compare against or to benchmark.
 
 ## 7. Reproducing the numbers
 
-Build with benchmarks (`-DDMT_BUILD_BENCHMARKS=ON`, Release), then run:
+Build with benchmarks (`-DDMT_BUILD_BENCHMARKS=ON`, Release), then run from
+the build directory (the Python script from the repository root):
 
 ```bash
 # CPU: fusion depth sweep, packed input x int_tree x fusion
@@ -268,8 +307,8 @@ Build with benchmarks (`-DDMT_BUILD_BENCHMARKS=ON`, Release), then run:
 # CUDA: device-resident, fusion depth sweep for float and 1-bit input
 ./bench/dmt_bench --benchmark_filter='BM_fdmt_execute_cuda_packed'
 # Plan traffic model and fusion sweep from Python
-python bench/fdmt_cache_benchmark.py --section reuse --nchans 4096 --dt-max 2048
-python bench/fdmt_cache_benchmark.py --section fusion --nchans 4096 --dt-max 2048
+python bench/scripts/fdmt_cache_benchmark.py --section reuse --nchans 4096 --dt-max 2048
+python bench/scripts/fdmt_cache_benchmark.py --section fusion --nchans 4096 --dt-max 2048
 ```
 
 The `fuse` counter in each benchmark row is the depth actually used.

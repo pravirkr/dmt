@@ -5,9 +5,11 @@ include(CMakeFindDependencyMacro)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 
-# Static dmt archives reference FFTW symbols; shared builds bundle FFTW privately.
+# Static dmt archives reference FFTW and the OpenMP runtime; shared builds
+# link both privately. FindFFTW.cmake is installed next to this file.
 if(NOT @DMT_BUILT_AS_SHARED@)
-  find_dependency(FFTW COMPONENTS ${FLOAT_LIB})
+  find_dependency(FFTW COMPONENTS FLOAT_LIB)
+  find_dependency(OpenMP COMPONENTS CXX)
 endif()
 
 # CUDA is only required when this dmt build was configured with CUDA support.

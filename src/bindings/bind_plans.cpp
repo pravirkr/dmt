@@ -120,7 +120,7 @@ void bind_plans(py::module_& mod) {
         mode : {'valid', 'full', 'roll'}, optional
             Output time alignment. ``valid`` is streaming-safe.
         verbose : int, optional
-            0 = silent, 1 = info, 2 = debug.
+            0 = warnings, 1 = info, 2 = debug (process-wide).
             Print a plan summary during construction.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
@@ -325,7 +325,7 @@ void bind_plans(py::module_& mod) {
         data_order : {'PRITF', 'FTPRI', 'RITFP'}, optional
             Packed baseband layout.
         verbose : int, optional
-            0 = silent, 1 = info, 2 = debug.
+            0 = warnings, 1 = info, 2 = debug (process-wide).
             Print a plan summary during construction.
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
@@ -360,6 +360,7 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("dmt_ndms", &CohFDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &CohFDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &CohFDMTPlan::get_dmt_size)
+        .def_property_readonly("buffer_size", &CohFDMTPlan::get_buffer_size)
         .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale)
         .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan)
         .def(

@@ -33,8 +33,15 @@ endif()
 
 # Configuration options
 option(DMT_BUILD_DOCS "Build documentation" OFF)
-option(DMT_BUILD_PYTHON "Build Python bindings" ON)
-option(DMT_BUILD_TESTING "Build C++ tests" ON)
+# Python bindings and tests default to ON only when dmt is the top-level
+# project, not when it is pulled in via add_subdirectory/FetchContent/CPM.
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  set(DMT_IS_TOP_LEVEL ON)
+else()
+  set(DMT_IS_TOP_LEVEL OFF)
+endif()
+option(DMT_BUILD_PYTHON "Build Python bindings" ${DMT_IS_TOP_LEVEL})
+option(DMT_BUILD_TESTING "Build C++ tests" ${DMT_IS_TOP_LEVEL})
 option(DMT_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(DMT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(DMT_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
@@ -320,6 +327,8 @@ endif()
 
 # Install headers
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# dmtConfig.cmake's find_dependency(FFTW) (static builds) needs the finder.
+install(FILES ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR})
 
 # Generate and install export file
 install(

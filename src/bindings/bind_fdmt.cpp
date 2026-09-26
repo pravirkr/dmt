@@ -29,51 +29,6 @@ using plans::FDMTPlan;
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
-namespace {
-
-// Runs `run(dmt_span)` into a fresh buffer and returns the transform as
-// (ndms, nsamps) when `batched` is false (nbeams must be 1), else
-// (nbeams, ndms, nsamps). `expected_size` is the full beam-major input size,
-// used only for the error message.
-template <typename Run>
-py::object fdmt_execute_to_array(const FDMTCPU& fdmt,
-                                 bool batched,
-                                 SizeType input_size,
-                                 SizeType expected_size,
-                                 Run&& run) {
-    const auto nbeams   = fdmt.get_nbeams();
-    const auto& plan    = fdmt.get_plan();
-    const auto& plan_c  = plan.get_container();
-    const auto niters   = plan.get_niters();
-    const auto ncoords  = plan_c.state_shape[niters].ncoords;
-    const auto nsamps   = plan_c.state_shape[niters].nsamps;
-    const auto dmt_size = plan.get_dmt_size();
-    const auto buf_size = plan.get_buffer_size();
-    if (!batched) {
-        if (nbeams != 1) {
-            throw std::invalid_argument(std::format(
-                "FDMTCPU: Invalid size of waterfall. Expected {}, got {}",
-                expected_size, input_size));
-        }
-        py::array_t<float, py::array::c_style> dmt_buf(buf_size);
-        run(std::span<float>(dmt_buf.mutable_data(), dmt_buf.size()));
-        return py::array_t<float>({ncoords, nsamps},
-                                  {nsamps * sizeof(float), sizeof(float)},
-                                  dmt_buf.data(), dmt_buf);
-    }
-    std::vector<float> dmt_buf(nbeams * buf_size, 0.0F);
-    run(std::span<float>(dmt_buf.data(), dmt_buf.size()));
-    py::array_t<float, py::array::c_style> result({nbeams, ncoords, nsamps});
-    auto* res_ptr = result.mutable_data();
-    for (SizeType b = 0; b < nbeams; ++b) {
-        std::copy_n(dmt_buf.data() + (b * buf_size), dmt_size,
-                    res_ptr + (b * dmt_size));
-    }
-    return result;
-}
-
-} // namespace
-
 void bind_fdmt(py::module_& mod) {
     py::class_<FDMTMemoryUsage>(mod, "FDMTMemoryUsage", R"doc(
         Memory an FDMT engine allocates at construction, in bytes (host for
@@ -119,7 +74,7 @@ void bind_fdmt(py::module_& mod) {
         mode : {'valid', 'full', 'roll'}, optional
             Output time alignment.
         verbose : int, optional
-            0 = silent, 1 = info, 2 = debug.
+            0 = warnings, 1 = info, 2 = debug (process-wide).
             Print the plan summary.
         nthreads : int, optional
             OpenMP threads (default 1).
@@ -139,7 +94,8 @@ void bind_fdmt(py::module_& mod) {
             Keyword-only custom trial grid. Provide exactly one of these.
 
         All working memory is allocated by the constructor (see
-        :attr:`memory_usage`); ``execute`` allocates only its output array.
+        :attr:`memory_usage`); ``execute`` allocates only its output array,
+        and nothing when ``out=`` is given.
 
         See also
         --------
@@ -302,8 +258,8 @@ void bind_fdmt(py::module_& mod) {
         // output
         .def(
             "execute",
-            [](FDMTCPU& fdmt, const py::array& waterfall_obj,
-               SizeType nbits) -> py::object {
+            [](FDMTCPU& fdmt, const py::array& waterfall_obj, SizeType nbits,
+               const std::optional<py::array>& out) -> py::object {
                 if (waterfall_obj.dtype().kind() != 'u' ||
                     waterfall_obj.itemsize() != 1) {
                     throw py::type_error(
@@ -319,17 +275,18 @@ void bind_fdmt(py::module_& mod) {
                         "3D (nbeams, nchans, row_bytes) uint8 NumPy array.");
                 }
                 return fdmt_execute_to_array(
-                    fdmt, packed.ndim() == 3,
+                    fdmt, "FDMTCPU", packed.ndim() == 3,
                     static_cast<SizeType>(packed.size()),
                     fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
                         (((fdmt.get_plan().get_nsamps() * nbits) + 7) / 8),
-                    [&](std::span<float> dmt) {
+                    out, [&](std::span<float> dmt) {
                         fdmt.execute(std::span<const uint8_t>(packed.data(),
                                                               packed.size()),
                                      nbits, dmt);
                     });
             },
-            py::arg("waterfall_packed"), py::arg("nbits"),
+            py::arg("waterfall_packed"), py::arg("nbits"), py::kw_only(),
+            py::arg("out") = py::none(),
             R"doc(
             Run the FDMT transform on packed low-bit integer input.
 
@@ -342,6 +299,8 @@ void bind_fdmt(py::module_& mod) {
                 as :class:`DDMTCPU`), ``row_bytes = ceil(nsamps*nbits/8)``.
             nbits : int
                 1, 2, 4, 8 or 16.
+            out : numpy.ndarray, optional
+                Output buffer to reuse, as in :meth:`execute`.
 
             Returns
             -------
@@ -350,7 +309,8 @@ void bind_fdmt(py::module_& mod) {
             )doc")
         .def(
             "execute",
-            [](FDMTCPU& fdmt, const py::array& waterfall_obj) -> py::object {
+            [](FDMTCPU& fdmt, const py::array& waterfall_obj,
+               const std::optional<py::array>& out) -> py::object {
                 if (waterfall_obj.dtype().kind() == 'u' &&
                     waterfall_obj.itemsize() == 1) {
                     throw py::type_error(
@@ -368,36 +328,48 @@ void bind_fdmt(py::module_& mod) {
                                              "nchans, nsamps) NumPy array.");
                 }
                 return fdmt_execute_to_array(
-                    fdmt, waterfall.ndim() == 3,
+                    fdmt, "FDMTCPU", waterfall.ndim() == 3,
                     static_cast<SizeType>(waterfall.size()),
                     fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
                         fdmt.get_plan().get_nsamps(),
-                    [&](std::span<float> dmt) {
+                    out, [&](std::span<float> dmt) {
                         fdmt.execute(std::span<const float>(waterfall.data(),
                                                             waterfall.size()),
                                      dmt);
                     });
             },
-            py::arg("waterfall"),
+            py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
             R"doc(
             Run the FDMT transform.
 
             Parameters
             ----------
-            waterfall : numpy.ndarray, dtype float32
-                C-contiguous array of shape ``(nchans, nsamps)`` for
-                ``nbeams=1``, or ``(nbeams, nchans, nsamps)``.
+            waterfall : numpy.ndarray
+                ``(nchans, nsamps)`` for ``nbeams=1``, or ``(nbeams, nchans,
+                nsamps)``. Other float dtypes are cast to float32 (a copy);
+                uint8 input needs ``nbits`` (packed overload).
+            out : numpy.ndarray, optional
+                Writeable C-contiguous float32 buffer of at least
+                ``nbeams * plan.buffer_size`` elements, reused instead of
+                allocating a new one per call (e.g.
+                ``np.empty(fdmt.nbeams * fdmt.plan.buffer_size, np.float32)``).
 
             Returns
             -------
             numpy.ndarray
-                ``(n_delays, n_times)`` or ``(nbeams, n_delays, n_times)``.
-                ``n_times`` follows ``plan.dmt_nsamps`` for the chosen mode.
+                float32 view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
+                n_times)``; ``n_times`` is ``plan.dmt_nsamps``. It is a
+                zero-copy view into the output buffer, which also holds each
+                beam's scratch tail (``plan.buffer_size`` floats per beam in
+                total), so a retained result keeps that whole buffer alive;
+                call ``.copy()`` to keep only the transform. With ``out``, the
+                next call overwrites the returned view.
 
             Notes
             -----
-            In ``valid`` mode, successive calls keep inter-block history.
-            Call :meth:`reset_history` to start a new stream.
+            In ``valid`` mode, successive calls keep inter-block history:
+            pass contiguous, non-overlapping blocks. Call
+            :meth:`reset_history` to start a new stream.
             )doc")
         .def(
             "reset",
@@ -431,11 +403,20 @@ void bind_fdmt(py::module_& mod) {
             "(see execute(waterfall_packed, nbits)) and optional dmt buffer.")
         .def(
             "reset",
-            [](py::object self,
-               const py::array_t<float, py::array::c_style>& waterfall,
+            [](py::object self, const py::array& waterfall_obj,
                std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
                 auto& fdmt = self.cast<FDMTCPU&>();
-                if (waterfall.ndim() != 2) {
+                if (waterfall_obj.dtype().kind() == 'u' &&
+                    waterfall_obj.itemsize() == 1) {
+                    throw py::type_error(
+                        "FDMTCPU.reset: got a uint8 waterfall; pass nbits for "
+                        "packed input (reset(waterfall_packed, nbits)) or "
+                        "convert to float32 explicitly");
+                }
+                const auto waterfall = py::array_t<
+                    float, py::array::c_style |
+                               py::array::forcecast>::ensure(waterfall_obj);
+                if (!waterfall || waterfall.ndim() != 2) {
                     throw std::runtime_error("Input waterfall must be a 2D "
                                              "NumPy array (nchans, nsamps).");
                 }
@@ -574,7 +555,7 @@ void bind_fdmt(py::module_& mod) {
         mode : {'valid', 'full', 'roll'}, optional
             Output time alignment.
         verbose : int, optional
-            0 = silent, 1 = info, 2 = debug.
+            0 = warnings, 1 = info, 2 = debug (process-wide).
             Print the plan summary.
         nthreads : int, optional
             OpenMP / FFTW threads.

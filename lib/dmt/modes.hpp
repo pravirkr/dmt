@@ -10,9 +10,11 @@
 
 namespace dmt {
 
+// Sets the process-wide spdlog level: the most recently constructed object's
+// `verbose` wins. 0 still reports warnings (e.g. a clamped fuse_levels).
 inline void apply_log_verbosity(int verbose) {
     if (verbose <= 0) {
-        spdlog::set_level(spdlog::level::off);
+        spdlog::set_level(spdlog::level::warn);
     } else if (verbose == 1) {
         spdlog::set_level(spdlog::level::info);
     } else {

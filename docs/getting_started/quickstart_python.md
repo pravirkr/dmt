@@ -57,13 +57,46 @@ fdmt = FDMTCPU(
     nthreads=4,         # Number of OpenMP threads
 )
 
-# Process successive incoming data blocks
+# Reuse one output buffer for every block (no per-call allocation)
+out = np.empty(fdmt.nbeams * fdmt.plan.buffer_size, dtype=np.float32)
+
+# Successive blocks, contiguous and non-overlapping in time
 for block_id in range(10):
-    waterfall = get_next_block() # shape: (256, 1024), float32
-    dmt_plane = fdmt.execute(waterfall)
-    # Output shape: (n_dm, n_times)
+    waterfall = get_next_block()            # (256, 1024), float32
+    dmt_plane = fdmt.execute(waterfall, out=out)
+    # (n_dm, n_times) float32 view into `out`, overwritten by the next call
     process_candidates(dmt_plane)
 ```
+
+In `mode="valid"` the engine keeps a per-node history, so the output blocks
+join seamlessly into one continuous DM-time stream. Call
+`fdmt.reset_history()` when the input stream breaks. See
+[Streaming](../pipeline_guide/streaming_and_history.md).
+
+### Inputs, outputs and errors
+
+| input | call | notes |
+| :--- | :--- | :--- |
+| float32 `(nchans, nsamps)` or `(nbeams, nchans, nsamps)` | `execute(waterfall)` | other float dtypes are cast (a copy); arrays must be C-contiguous |
+| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits)` | `nbits` ∈ {1, 2, 4, 8, 16}; `row_bytes = ceil(nsamps * nbits / 8)`; samples LSB-first within a byte |
+
+- The result is always float32 with shape `(n_dm, n_times)` or
+  `(nbeams, n_dm, n_times)`. `n_dm = plan.dmt_ndms` (DM values:
+  `fdmt.dm_grid_final`) and `n_times = plan.dmt_nsamps`.
+- The returned array is a zero-copy view whose base is the engine-sized
+  output buffer (`plan.buffer_size` floats per beam). Pass `out=` to reuse
+  one buffer, or `.copy()` results you keep. See
+  {ref}`Output Buffers <output-buffers>`.
+- Misuse fails loudly: wrong sizes or `nbits` raise `ValueError`, a
+  `uint8` array without `nbits` raises `TypeError`, and starting a new
+  `valid`-mode block before finishing a stepped one raises `RuntimeError`.
+- To inspect intermediate sub-bands, use the stepper (`reset`, `advance`,
+  `advance_until_remaining`, `view_subband`, `finalize`); see
+  {ref}`Stepper Rules <stepper-rules>`.
+- On a GPU, `FDMTCUDA` (`from dmtlib import FDMTCUDA`, present when dmt is
+  built with CUDA) takes the
+  same arguments, with `device_id` in place of `nthreads`, and the same
+  `execute`/stepper calls on host arrays.
 
 ---
 
@@ -94,7 +127,7 @@ print("Active delay trials:", fdmt_sparse.plan.dt_grid_final)
 
 ## 4. Multi-Beam Batching
 
-Process $N_{\text{beams}}$ simultaneously using vectorized SIMD loops:
+Process $N_{\text{beams}}$ beams that share one plan in a single call:
 
 ```python
 nbeams = 8
@@ -123,7 +156,7 @@ print("Batch output shape:", batch_output.shape)
 
 Low-bit digitiser output can be passed packed (LSB-first within each byte,
 rows padded to a whole byte); the result is identical to passing the same
-values as float, and 1-bit input runs 2-3x faster:
+values as float, and 1- to 4-bit input runs ~1.8-2.7x faster on 8 CPU threads:
 
 ```python
 nbits = 2

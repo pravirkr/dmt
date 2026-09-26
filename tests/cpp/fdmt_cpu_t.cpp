@@ -1312,6 +1312,41 @@ TEST_CASE("FDMTCPU stepper partial-advance across streamed blocks",
     }
 }
 
+TEST_CASE("FDMTCPU valid-mode stepper must finish a block before the next",
+          "[fdmt_cpu][cpu]") {
+    const SizeType nchans = 32;
+    const SizeType nsamps = 128;
+    std::vector<float> block(nchans * nsamps, 1.0F);
+    for (const std::string_view mode : {"valid", "full", "roll"}) {
+        FDMTCPU fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32, 0, 1, true,
+                     mode);
+        std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
+        fdmt.reset(block, dmt);
+        fdmt.advance_until_remaining(2);
+        if (mode == "valid") {
+            // Silently starting the next block would lose the upper levels'
+            // cross-block history.
+            CHECK_THROWS_AS(fdmt.reset(block, dmt), std::logic_error);
+            CHECK_THROWS_AS(fdmt.execute(block, dmt), std::logic_error);
+            fdmt.reset_history(); // abandons the block and the stream
+            CHECK_FALSE(fdmt.is_finished());
+        }
+        // No history in full/roll: a new block may replace an unfinished one.
+        CHECK_NOTHROW(fdmt.reset(block, dmt));
+        fdmt.finalize();
+        CHECK_NOTHROW(fdmt.execute(block, dmt));
+        CHECK_NOTHROW(fdmt.reset(block, dmt));
+    }
+}
+
+TEST_CASE("FDMTCPU rejects incompatible configurations", "[fdmt_cpu][cpu]") {
+    SECTION("nbeams == 0") {
+        CHECK_THROWS_AS(FDMTCPU(1000.0F, 1500.0F, 32, 128, 0.001F, 32, 0, 1,
+                                true, "valid", 0, 1, /*nbeams=*/0),
+                        std::invalid_argument);
+    }
+}
+
 TEST_CASE("FDMTCPU nbeams=1 is byte-identical to unbeamed execution",
           "[fdmt_cpu][cpu]") {
     // The zero-regression contract: explicitly passing nbeams=1 (the

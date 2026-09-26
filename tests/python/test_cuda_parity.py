@@ -107,3 +107,62 @@ def test_fdmt_gpu_fused_matches_unfused(mode: str) -> None:
         assert 0 <= gpu.fuse_levels <= gpu.plan.niters
         assert gpu.memory_usage.total > 0
         np.testing.assert_array_equal(gpu.execute(data), expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("packed", [False, True])
+def test_fdmt_gpu_stepper_matches_cpu(packed: bool) -> None:
+    from dmtlib import FDMTCUDA
+
+    nchans, nsamps = 32, 128
+    rng = np.random.default_rng(5)
+    values = rng.integers(0, 4, size=(nchans, nsamps), dtype=np.uint8)
+    # 2-bit LSB-first packing (4 samples per byte), matching the engines.
+    packed_wf = np.zeros((nchans, nsamps // 4), dtype=np.uint8)
+    for k in range(4):
+        packed_wf |= values[:, k::4] << (2 * k)
+    waterfall = values.astype(np.float32)
+
+    cpu = FDMTCPU(1000.0, 1500.0, nchans, nsamps, 0.001, 32, int_tree=False)
+    gpu = FDMTCUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 32, int_tree=False)
+    if packed:
+        cpu.reset(packed_wf, 2)
+        gpu.reset(packed_wf, 2)
+    else:
+        cpu.reset(waterfall)
+        gpu.reset(waterfall)
+    while not cpu.is_finished:
+        assert gpu.current_level == cpu.current_level
+        assert gpu.num_subbands == cpu.num_subbands
+        for s in range(cpu.num_subbands):
+            np.testing.assert_allclose(
+                gpu.view_subband_data(s), cpu.view_subband_data(s),
+                rtol=1e-5, atol=1e-4,
+            )
+        cpu.advance()
+        gpu.advance()
+    np.testing.assert_allclose(gpu.finalize(), cpu.finalize(), rtol=1e-5, atol=1e-4)
+
+    # Same streaming hard fail as the CPU.
+    gpu.reset(waterfall)
+    gpu.advance_until_remaining(2)
+    with pytest.raises(RuntimeError):
+        gpu.reset(waterfall)
+    gpu.reset_history()
+    np.testing.assert_allclose(
+        gpu.get_effective_sigma_grid(), cpu.get_effective_sigma_grid()
+    )
+
+
+@pytest.mark.cuda
+def test_fdmt_gpu_execute_out_buffer() -> None:
+    from dmtlib import FDMTCUDA
+
+    rng = np.random.default_rng(6)
+    waterfall = rng.standard_normal((2, 16, 64), dtype=np.float32)
+    gpu = FDMTCUDA(1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
+    cpu = FDMTCPU(1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
+    out = np.empty(2 * gpu.plan.buffer_size, dtype=np.float32)
+    got = gpu.execute(waterfall, out=out)
+    assert np.shares_memory(got, out)
+    np.testing.assert_allclose(got, cpu.execute(waterfall), rtol=2e-3, atol=2e-3)

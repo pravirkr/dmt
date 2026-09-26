@@ -77,6 +77,8 @@ int main() {
         std::span<float>(dmt_out.data(), dmt_out.size())
     );
 
+    // Result: the first plan.get_dmt_size() floats, (ndms, dmt_nsamps)
+    // row-major; the rest of the buffer is scratch.
     std::cout << "Dedispersed " << plan.get_dmt_ndms() << " DM trials!\n";
     return 0;
 }

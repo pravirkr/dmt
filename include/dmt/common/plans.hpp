@@ -141,7 +141,7 @@ public:
      * @param dt_step Stride between delay trials (default: 1).
      * @param mode Output time alignment mode: "valid" (overlap-save streaming
      * history), "full" (zero-padded), or "roll" (cyclic) (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -169,7 +169,7 @@ public:
      * @param dt_grid Explicit list of delay trials in samples (e.g. from
      * generate_optimal_dt_grid).
      * @param mode Transform mode: "valid", "full", or "roll".
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -196,7 +196,7 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
      * non-uniform spacing and negative DMs).
      * @param mode Transform mode: "valid", "full", or "roll".
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -425,7 +425,7 @@ public:
      * convolution (default: 8192).
      * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
      * (default: "PRITF").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      */
     CohFDMTPlan(float f_center,
                 float bw_sub,
@@ -530,6 +530,15 @@ public:
     /// @brief Total float elements in the final output DMT transform (ndm *
     /// dmt_nsamps)
     [[nodiscard]] SizeType get_dmt_size() const;
+    /**
+     * @brief Output buffer length execute() needs: (N - 1) * D + B, with N
+     * coarse-DM trials, D = the fine FDMT's get_dmt_size() and B = its
+     * get_buffer_size(). Trial i's fine FDMT runs in place at offset i * D
+     * (its B-sized ping-pong span overlaps the next trials' slots, which are
+     * written afterwards), so only the leading get_dmt_size() = N * D values
+     * are the result; the tail is scratch.
+     */
+    [[nodiscard]] SizeType get_buffer_size() const;
     /// @brief Scaling factor applied to phase chirps
     [[nodiscard]] float get_chirp_scale() const noexcept;
 
@@ -577,7 +586,7 @@ public:
      * @param dm_max Maximum trial DM in pc/cm^3.
      * @param dm_step Linear spacing between DM trials in pc/cm^3.
      * @param dm_min Minimum trial DM in pc/cm^3 (default: 0).
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nbits Precision per sample: 32 (float), or 1, 2, 4, 8, 16 (packed
      * integers).
      * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=mask
@@ -602,7 +611,7 @@ public:
      * @param nchans Number of frequency channels.
      * @param tsamp Sampling interval in seconds.
      * @param dm_arr Explicit span of DM trials in pc/cm^3.
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
      */
@@ -624,7 +633,7 @@ public:
      * @param tsamp Sampling interval in seconds.
      * @param levin LevinConfig specifying dm_start, dm_end, pulse_width, and
      * tol.
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
      */

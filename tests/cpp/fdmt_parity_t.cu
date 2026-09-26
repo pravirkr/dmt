@@ -86,10 +86,14 @@ TEST_CASE("parity: CohFDMTCUDA execute matches CohFDMTCPU",
     for (SizeType i = 0; i < in_size; ++i) {
         data_in[i] = static_cast<uint8_t>((i * 13) % 251);
     }
-    std::vector<float> dmt_cpu(cpu.get_dmt_size(), 0.0F);
+    // The CPU engine computes in the caller's get_buffer_size() arena (the
+    // result is its leading get_dmt_size()); the CUDA host entry point owns
+    // its device arena and writes only the get_dmt_size() result.
+    std::vector<float> dmt_cpu(cpu.get_buffer_size(), 0.0F);
     std::vector<float> dmt_gpu(gpu.get_dmt_size(), 0.0F);
     cpu.execute<uint8_t>(data_in, dmt_cpu);
     gpu.execute<uint8_t>(data_in, dmt_gpu);
+    dmt_cpu.resize(cpu.get_dmt_size());
     REQUIRE_THAT(
         dmt_gpu,
         Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-2).margin(1.0E-2));

@@ -1,5 +1,7 @@
 #include "dmt/algorithms/cfdmt.hpp"
 
+#include <format>
+#include <stdexcept>
 #include <vector>
 
 #include <cuda/std/span>
@@ -54,8 +56,11 @@ public:
     const plans::CohFDMTPlan& get_plan() const { return m_plan; }
 
     void execute_pipeline(cuda::std::span<float> dmt_d, cudaStream_t stream) {
-        if (dmt_d.size() != m_plan.get_dmt_size()) {
-            throw std::runtime_error("Invalid DMT size");
+        if (dmt_d.size() < m_plan.get_buffer_size()) {
+            throw std::invalid_argument(std::format(
+                "CohFDMTCUDA: dmt buffer too small. Expected at least {} "
+                "(get_buffer_size()), got {}",
+                m_plan.get_buffer_size(), dmt_d.size()));
         }
         const auto& dm_grid_coh   = m_plan.get_dm_grid_coh();
         auto m_unpack_buf_p1_span = cuda::std::span<ComplexTypeCUDA>(
@@ -123,17 +128,16 @@ public:
             auto hist_span = cuda::std::span<float>(
                 thrust::raw_pointer_cast(m_dm_histories[idm].data()),
                 m_dm_histories[idm].size());
-            auto fdmt_scratch_span = cuda::std::span<float>(
-                thrust::raw_pointer_cast(m_fdmt_scratch.data()),
-                m_fdmt_scratch.size());
+            // Sliding arena (see CohFDMTPlan::get_buffer_size()): the trial
+            // runs in place at offset idm * D; its B-sized scratch tail only
+            // reaches later trials' slots, which are overwritten afterwards.
+            const auto& fine_plan = m_thefdmt->get_plan();
             m_thefdmt->load_history(hist_span, stream);
-            m_thefdmt->execute(m_aligned_buf_span, fdmt_scratch_span, stream);
+            m_thefdmt->execute(m_aligned_buf_span,
+                               dmt_d.subspan(idm * fine_plan.get_dmt_size(),
+                                             fine_plan.get_buffer_size()),
+                               stream);
             m_thefdmt->save_history(hist_span, stream);
-            const auto dmt_cur_size = m_thefdmt->get_plan().get_dmt_size();
-            auto dmt_cur_span = dmt_d.subspan(idm * dmt_cur_size, dmt_cur_size);
-            cudaMemcpyAsync(dmt_cur_span.data(), fdmt_scratch_span.data(),
-                            dmt_cur_size * sizeof(float),
-                            cudaMemcpyDeviceToDevice, stream);
         }
     }
 
@@ -142,7 +146,17 @@ public:
     void execute_h(std::span<const DataType> data_in_h,
                    std::span<float> dmt_h) {
         cuda_utils::set_device(m_device_id);
-        thrust::device_vector<float> dmt_d(dmt_h.size());
+        if (dmt_h.size() < m_plan.get_dmt_size()) {
+            throw std::invalid_argument(std::format(
+                "CohFDMTCUDA: dmt buffer too small. Expected at least {} "
+                "(get_dmt_size()), got {}",
+                m_plan.get_dmt_size(), dmt_h.size()));
+        }
+        // Device arena for the host entry point, allocated on first use so
+        // device-memory callers (who pass their own arena) pay nothing.
+        if (m_host_arena_d.empty()) {
+            m_host_arena_d.resize(m_plan.get_buffer_size());
+        }
         cudaStream_t stream = nullptr;
 
         auto p1_span = cuda::std::span<ComplexTypeCUDA>(
@@ -153,13 +167,16 @@ public:
             m_unpack_buf_p2.size());
         m_theunpacker->execute<DataType>(data_in_h, p1_span, p2_span, stream);
 
-        execute_pipeline(
-            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                   dmt_d.size()),
-            stream);
+        execute_pipeline(cuda::std::span<float>(
+                             thrust::raw_pointer_cast(m_host_arena_d.data()),
+                             m_host_arena_d.size()),
+                         stream);
 
-        cudaMemcpyAsync(dmt_h.data(), thrust::raw_pointer_cast(dmt_d.data()),
-                        dmt_h.size_bytes(), cudaMemcpyDeviceToHost, stream);
+        // Only the leading get_dmt_size() values are the result.
+        cudaMemcpyAsync(dmt_h.data(),
+                        thrust::raw_pointer_cast(m_host_arena_d.data()),
+                        m_plan.get_dmt_size() * sizeof(float),
+                        cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
         cuda_utils::check_last_cuda_error(
             "CohFDMTCUDA::execute (host): D2H copy failed");
@@ -213,9 +230,9 @@ private:
     thrust::device_vector<ComplexTypeCUDA> m_chirp_table;
     thrust::device_vector<int> m_dedisperse_shift_table_d;
     thrust::device_vector<SizeType> m_dedisperse_offset_table_d;
-    // FDMT ping-pong scratch, reused across coarse-DM trials -- sized to
-    // get_buffer_size() (>= get_dmt_size()); see execute_core()'s comment.
-    thrust::device_vector<float> m_fdmt_scratch;
+    // Output arena for the host execute() entry point (get_buffer_size()),
+    // allocated on its first call.
+    thrust::device_vector<float> m_host_arena_d;
     // Small per-coarse-DM-trial "valid"-mode streaming history, swapped
     // into the one shared m_thefdmt instance around each trial's execute()
     // call -- mirrors CohFDMTCPU::Impl::m_dm_histories.
@@ -234,7 +251,7 @@ private:
         m_thefdmt = std::make_unique<algorithms::FDMTCUDA>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid", false, m_device_id);
+            m_plan.get_dt_min(), 1, true, "valid", 0, m_device_id);
         m_theunpacker = std::make_unique<utils::DataUnpackerCUDA>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_device_id);
@@ -247,7 +264,6 @@ private:
         m_intensity_buf.resize(m_plan.get_intensity_buf_size());
         m_aligned_buf.resize(m_plan.get_intensity_buf_size());
         m_chirp_table.resize(m_plan.get_chirp_table_size());
-        m_fdmt_scratch.resize(m_thefdmt->get_plan().get_buffer_size());
 
         // Precompute the inter-channel delay shift and offset tables once
         const auto& dm_grid_coh_h = m_plan.get_dm_grid_coh();
@@ -364,6 +380,9 @@ const plans::CohFDMTPlan& CohFDMTCUDA::get_plan() const noexcept {
 }
 SizeType CohFDMTCUDA::get_dmt_size() const noexcept {
     return m_impl->get_plan().get_dmt_size();
+}
+SizeType CohFDMTCUDA::get_buffer_size() const noexcept {
+    return m_impl->get_plan().get_buffer_size();
 }
 template <IntegralDataType DataType>
 void CohFDMTCUDA::execute(cuda::std::span<const DataType> data_in,

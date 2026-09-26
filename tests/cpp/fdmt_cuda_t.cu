@@ -168,6 +168,29 @@ TEST_CASE("FDMTCUDA stepper: 2 levels remaining (4 subbands) on device",
         CHECK(sub.data.data() == data_span.data());
         CHECK(sub.data.size() == data_span.size());
     }
+    CHECK_THROWS_AS(fdmt_cuda.view_subband(4), std::out_of_range);
+    CHECK_THROWS_AS(fdmt_cuda.view_subband_data(4), std::out_of_range);
+}
+
+TEST_CASE("FDMTCUDA valid-mode stepper must finish a block before the next",
+          "[fdmt_gpu][gpu]") {
+    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 64, 256, 0.001F, 64, 0);
+    thrust::device_vector<float> waterfall_d(64 * 256, 1.0F);
+    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size());
+    const auto d_wf = cuda::std::span<const float>(
+        thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size());
+    const auto d_dmt = cuda::std::span<float>(
+        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+
+    fdmt_cuda.reset(d_wf, d_dmt);
+    fdmt_cuda.advance_until_remaining(2);
+    CHECK_THROWS_AS(fdmt_cuda.reset(d_wf, d_dmt), std::logic_error);
+    CHECK_THROWS_AS(fdmt_cuda.execute(d_wf, d_dmt), std::logic_error);
+    fdmt_cuda.reset_history(); // abandons the block and the stream
+    CHECK_NOTHROW(fdmt_cuda.reset(d_wf, d_dmt));
+    fdmt_cuda.finalize();
+    CHECK_NOTHROW(fdmt_cuda.execute(d_wf, d_dmt));
+    cudaDeviceSynchronize();
 }
 
 TEST_CASE("FDMTCUDA stepper: lifecycle and error handling", "[fdmt_gpu][gpu]") {

@@ -15,10 +15,10 @@ Analyzes:
    packed low-bit input (nbits x ``int_tree``) vs float input.
 
 Usage:
-    python bench/fdmt_cache_benchmark.py                 # everything
-    python bench/fdmt_cache_benchmark.py --section fusion \
+    python bench/scripts/fdmt_cache_benchmark.py                 # everything
+    python bench/scripts/fdmt_cache_benchmark.py --section fusion \
         --nchans 4096 --dt-max 2048 --nsamps 16384 65536 --threads 1 8
-    python bench/fdmt_cache_benchmark.py --section packed --nsamps 16384
+    python bench/scripts/fdmt_cache_benchmark.py --section packed --nsamps 16384
 """
 
 from __future__ import annotations

@@ -59,7 +59,7 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP worker threads (default: 1).
      * @param nbeams Number of batched beams (default: 1).
      */
@@ -88,7 +88,7 @@ public:
      * @param dt_grid Explicit list of delay trials.
      * @param use_box_smearing Whether to account for intra-channel smearing.
      * @param mode Mode: "valid", "full", or "roll".
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads OpenMP threads.
      * @param nbeams Number of batched beams.
      */
@@ -115,7 +115,7 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3.
      * @param use_box_smearing Whether to account for intra-channel smearing.
      * @param mode Mode: "valid", "full", or "roll".
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads OpenMP threads.
      * @param nbeams Number of batched beams.
      */

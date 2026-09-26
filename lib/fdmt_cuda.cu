@@ -420,6 +420,9 @@ public:
     // allocated after construction except the per-call staging of the
     // host-memory execute() overloads.
     void init_device_structures(SizeType fuse_levels) {
+        if (m_nbeams == 0) {
+            throw std::invalid_argument("FDMTCUDA: nbeams must be at least 1");
+        }
         check_int32_extents();
         cuda_utils::set_device(m_device_id);
         spdlog::debug("FDMTCUDA::Impl: Set device to {}", m_device_id);
@@ -474,37 +477,13 @@ public:
 
     void execute_h(std::span<const float> waterfall_h, std::span<float> dmt_h) {
         check_inputs(waterfall_h.size(), dmt_h.size());
-
         cuda_utils::set_device(m_device_id);
-        thrust::device_vector<float> waterfall_d(waterfall_h.size());
-        thrust::device_vector<float> dmt_d(dmt_h.size());
-
-        cudaStream_t stream = nullptr;
-        // Copy H->D
-        cudaMemcpyAsync(waterfall_d.data().get(), waterfall_h.data(),
-                        waterfall_h.size_bytes(), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error(
-            "execute_h: cudaMemcpyAsync H->D waterfall failed");
-
-        // Execute on device
+        stage_to_device(m_stage_wf_f32_d, waterfall_h);
         execute_d(cuda::std::span<const float>(
-                      thrust::raw_pointer_cast(waterfall_d.data()),
-                      waterfall_d.size()),
-                  cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                         dmt_d.size()),
-                  stream);
-
-        // Copy D->H
-        cudaMemcpyAsync(dmt_h.data(), dmt_d.data().get(), dmt_h.size_bytes(),
-                        cudaMemcpyDeviceToHost, stream);
-        cuda_utils::check_last_cuda_error(
-            "execute_h: cudaMemcpyAsync D->H dmt failed");
-
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error(
-            "execute_h: cudaStreamSynchronize failed");
-
+                      thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
+                      waterfall_h.size()),
+                  stage_dmt_span(), nullptr);
+        copy_result_to_host(dmt_h);
         spdlog::debug("FDMTCUDA::Impl: Host execution complete.");
     }
 
@@ -523,28 +502,49 @@ public:
         check_packed_inputs(waterfall_h.size(), nbits, dmt_h.size());
         cuda_utils::set_device(m_device_id);
         // Only the packed bytes cross PCIe (32/nbits times less than float).
-        thrust::device_vector<uint8_t> waterfall_d(waterfall_h.size());
-        thrust::device_vector<float> dmt_d(dmt_h.size());
-        cudaStream_t stream = nullptr;
-        cudaMemcpyAsync(waterfall_d.data().get(), waterfall_h.data(),
-                        waterfall_h.size_bytes(), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error(
-            "execute_h: cudaMemcpyAsync H->D packed waterfall failed");
+        stage_to_device(m_stage_wf_packed_d, waterfall_h);
         execute_d(cuda::std::span<const uint8_t>(
-                      thrust::raw_pointer_cast(waterfall_d.data()),
-                      waterfall_d.size()),
-                  nbits,
-                  cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                         dmt_d.size()),
-                  stream);
-        cudaMemcpyAsync(dmt_h.data(), dmt_d.data().get(), dmt_h.size_bytes(),
-                        cudaMemcpyDeviceToHost, stream);
+                      thrust::raw_pointer_cast(m_stage_wf_packed_d.data()),
+                      waterfall_h.size()),
+                  nbits, stage_dmt_span(), nullptr);
+        copy_result_to_host(dmt_h);
+    }
+
+    // Host-memory execute() staging: device copies of the input and a
+    // B-per-beam output, allocated on the first host call and reused, so
+    // steady-state host calls allocate nothing (device-memory callers never
+    // pay for them).
+    template <typename T>
+    void stage_to_device(thrust::device_vector<T>& dst,
+                         std::span<const T> src) {
+        if (dst.size() < src.size()) {
+            dst.resize(src.size());
+        }
+        cudaMemcpyAsync(thrust::raw_pointer_cast(dst.data()), src.data(),
+                        src.size_bytes(), cudaMemcpyHostToDevice, nullptr);
         cuda_utils::check_last_cuda_error(
-            "execute_h: cudaMemcpyAsync D->H dmt failed");
-        cudaStreamSynchronize(stream);
+            "FDMTCUDA::execute (host): H->D copy failed");
+    }
+
+    cuda::std::span<float> stage_dmt_span() {
+        const auto size = m_nbeams * m_plan.get_buffer_size();
+        if (m_stage_dmt_d.size() < size) {
+            m_stage_dmt_d.resize(size);
+        }
+        return {thrust::raw_pointer_cast(m_stage_dmt_d.data()), size};
+    }
+
+    // Copies back only each beam's leading get_dmt_size() values (the
+    // result); the host buffer's scratch tail is left untouched.
+    void copy_result_to_host(std::span<float> dmt_h) {
+        const auto pitch = m_plan.get_buffer_size() * sizeof(float);
+        cudaMemcpy2DAsync(dmt_h.data(), pitch,
+                          thrust::raw_pointer_cast(m_stage_dmt_d.data()), pitch,
+                          m_plan.get_dmt_size() * sizeof(float), m_nbeams,
+                          cudaMemcpyDeviceToHost, nullptr);
+        cudaStreamSynchronize(nullptr);
         cuda_utils::check_last_cuda_error(
-            "execute_h: cudaStreamSynchronize failed");
+            "FDMTCUDA::execute (host): D->H copy failed");
     }
 
     void execute_d(cuda::std::span<const uint8_t> waterfall_d,
@@ -604,6 +604,8 @@ public:
 
     [[nodiscard]] bool get_int_tree() const noexcept { return m_int_tree; }
 
+    [[nodiscard]] int get_device_id() const noexcept { return m_device_id; }
+
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept {
         const auto coord_bytes = [](const plans::FDMTCoordD& c) {
             return (c.nsamps.size() + c.buf_offset.size() + c.offset.size() +
@@ -635,7 +637,11 @@ public:
             .history = (m_history_a_d.size() + m_history_b_d.size() +
                         m_tree_history_a_d.size() + m_tree_history_b_d.size()) *
                        sizeof(float),
-            .workspace = fused_bytes,
+            // Fused tables, plus the host-execute() staging once allocated.
+            .workspace = fused_bytes +
+                         (m_stage_wf_f32_d.size() * sizeof(float)) +
+                         m_stage_wf_packed_d.size() +
+                         (m_stage_dmt_d.size() * sizeof(float)),
             .output    = m_nbeams * m_plan.get_buffer_size() * sizeof(float),
         };
     }
@@ -693,6 +699,7 @@ public:
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
+        check_subband_idx(subband_idx);
         const auto& grid =
             m_plan.get_container().grids[m_current_level][subband_idx];
         const auto nsamps =
@@ -708,6 +715,7 @@ public:
             throw std::logic_error(
                 "FDMTCUDA: Stepper is not initialized. Call reset() first.");
         }
+        check_subband_idx(subband_idx);
         const auto& grid =
             m_plan.get_container().grids[m_current_level][subband_idx];
         const auto nsamps =
@@ -811,20 +819,24 @@ public:
             m_tree_history_b_d.assign(m_tree_history_b_d.size(), 0.0F);
         }
         m_tree_history_parity = false;
+        // Abandons any unfinished stepper block along with its stream.
+        m_is_initialized = false;
     }
 
-    /// Total device-buffer size (floats) of this instance's "valid"-mode
-    /// streaming history, as saved/restored by save_history()/load_history()
-    /// -- the two level-0 buffers, the two tree-level buffers, and one extra
-    /// float encoding m_tree_history_parity. Zero (well, the trailing flag
-    /// aside) for "full"/"roll" mode instances.
+    /// Size (floats) of this instance's "valid"-mode streaming history, as
+    /// saved/restored by save_history()/load_history(): one level-0 and one
+    /// tree-level buffer. Zero for "full"/"roll" mode instances.
+    ///
+    /// Only one buffer of each ping-pong pair is live between blocks: every
+    /// block rewrites its whole `hist_out` from `hist_in` plus new samples
+    /// (kernel_advance_history_window, kernel_execute_iter), so the other
+    /// buffer is dead until overwritten. The live one is the buffer the next
+    /// block will read, selected by the host-side m_tree_history_parity.
     [[nodiscard]] SizeType history_state_size() const noexcept {
-        return m_history_a_d.size() + m_history_b_d.size() +
-               m_tree_history_a_d.size() + m_tree_history_b_d.size() + 1;
+        return m_history_a_d.size() + m_tree_history_a_d.size();
     }
 
-    /// Copies this instance's current streaming history (both ping-pong
-    /// buffer pairs plus the parity flag) out to a caller-owned device
+    /// Copies the live streaming history out to a caller-owned device
     /// buffer, so one shared FDMTCUDA instance can multiplex several
     /// independent streams (each with its own history) instead of requiring
     /// one instance per stream. Enqueued on `stream`; synchronize before
@@ -846,21 +858,15 @@ public:
             }
             dst += src.size();
         };
-        copy_out(m_history_a_d);
-        copy_out(m_history_b_d);
-        copy_out(m_tree_history_a_d);
-        copy_out(m_tree_history_b_d);
-        const float parity = m_tree_history_parity ? 1.0F : 0.0F;
-        cudaMemcpyAsync(dst, &parity, sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
+        copy_out(next_level0_history());
+        copy_out(next_tree_history());
         cuda_utils::check_last_cuda_error("FDMTCUDA::save_history failed");
     }
 
-    /// Replaces this instance's current streaming history with a buffer
-    /// previously produced by save_history() (from an instance built with
-    /// the same plan geometry), resuming that stream. Blocks briefly to read
-    /// back the parity flag onto the host -- use reset_history() instead to
-    /// start a stream cold.
+    /// Replaces the live streaming history with a buffer previously produced
+    /// by save_history() (from an instance built with the same plan
+    /// geometry), resuming that stream. Fully asynchronous on `stream` --
+    /// use reset_history() instead to start a stream cold.
     void load_history(cuda::std::span<const float> in, cudaStream_t stream) {
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(std::format(
@@ -873,19 +879,13 @@ public:
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
                 cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
-                                    dst_vec.size() * sizeof(float),
-                                    cudaMemcpyDeviceToDevice, stream);
+                                dst_vec.size() * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream);
             }
             src += dst_vec.size();
         };
-        copy_in(m_history_a_d);
-        copy_in(m_history_b_d);
-        copy_in(m_tree_history_a_d);
-        copy_in(m_tree_history_b_d);
-        cudaStreamSynchronize(stream);
-        float parity = 0.0F;
-        cudaMemcpy(&parity, src, sizeof(float), cudaMemcpyDeviceToHost);
-        m_tree_history_parity = parity != 0.0F;
+        copy_in(next_level0_history());
+        copy_in(next_tree_history());
         cuda_utils::check_last_cuda_error("FDMTCUDA::load_history failed");
     }
 
@@ -955,6 +955,10 @@ private:
     cudaStream_t m_stream{nullptr};
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
+    // Host-memory execute() staging (see stage_to_device()).
+    thrust::device_vector<float> m_stage_wf_f32_d;
+    thrust::device_vector<uint8_t> m_stage_wf_packed_d;
+    thrust::device_vector<float> m_stage_dmt_d;
 
     // The device plan stores per-beam coordinate offsets as 32-bit ints (see
     // plans_cuda.cuh), and the kernels index within one beam in 32-bit
@@ -1020,6 +1024,33 @@ private:
                             "least {}, got {}",
                             m_nbeams * m_plan.get_buffer_size(), dmt_size));
         }
+    }
+
+    void check_subband_idx(SizeType subband_idx) const {
+        const auto nsubs = m_plan.get_container().grids[m_current_level].size();
+        if (subband_idx >= nsubs) {
+            throw std::out_of_range(std::format(
+                "FDMTCUDA: Subband index {} out of range (current level has {} "
+                "subbands)",
+                subband_idx, nsubs));
+        }
+    }
+
+    // The history buffers the next block's start() reads as `hist_in` (see
+    // the parity swap there): the only live ones between blocks.
+    [[nodiscard]] thrust::device_vector<float>& next_level0_history() {
+        return m_tree_history_parity ? m_history_b_d : m_history_a_d;
+    }
+    [[nodiscard]] const thrust::device_vector<float>&
+    next_level0_history() const {
+        return m_tree_history_parity ? m_history_b_d : m_history_a_d;
+    }
+    [[nodiscard]] thrust::device_vector<float>& next_tree_history() {
+        return m_tree_history_parity ? m_tree_history_b_d : m_tree_history_a_d;
+    }
+    [[nodiscard]] const thrust::device_vector<float>&
+    next_tree_history() const {
+        return m_tree_history_parity ? m_tree_history_b_d : m_tree_history_a_d;
     }
 
     [[nodiscard]] int beam_stride_elements() const noexcept {
@@ -1236,6 +1267,19 @@ private:
                cudaStream_t stream,
                bool fuse) {
         cuda_utils::set_device(m_device_id);
+        // In "valid" mode every block must reach the root before the next
+        // one starts: levels a stepper run never executed would skip this
+        // block's history update, and the next block would read the
+        // two-blocks-old ping-pong buffer.
+        if (m_mode == FDMTMode::kValid && m_is_initialized && !is_finished()) {
+            throw std::logic_error(std::format(
+                "FDMTCUDA: the previous block's stepper run stopped at level "
+                "{} of {}. In mode='valid' every block must be finalized "
+                "before the next reset()/execute(), or its cross-block "
+                "history is lost. Call finalize(), or reset_history() to "
+                "abandon the stream.",
+                m_current_level, total_levels() - 1));
+        }
         m_stream         = stream;
         m_dmt_target_ptr = d_dmt.data();
         m_current_level  = 0;
@@ -1583,6 +1627,7 @@ SizeType FDMTCUDA::get_fuse_levels() const noexcept {
     return m_impl->get_fuse_levels();
 }
 bool FDMTCUDA::get_int_tree() const noexcept { return m_impl->get_int_tree(); }
+int FDMTCUDA::get_device_id() const noexcept { return m_impl->get_device_id(); }
 FDMTMemoryUsage FDMTCUDA::get_memory_usage() const noexcept {
     return m_impl->get_memory_usage();
 }

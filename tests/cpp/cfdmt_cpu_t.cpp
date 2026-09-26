@@ -1,6 +1,9 @@
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <random>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -84,12 +87,18 @@ TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
         v = static_cast<uint8_t>(dist(rng));
     }
 
-    std::vector<float> dmt(coh_fdmt.get_dmt_size(), 0.0F);
+    // The result is the leading get_dmt_size(); the arena tail is scratch.
+    std::vector<float> dmt(coh_fdmt.get_buffer_size(), 0.0F);
+    REQUIRE(dmt.size() >= coh_fdmt.get_dmt_size());
+    std::vector<float> too_small(coh_fdmt.get_buffer_size() - 1, 0.0F);
+    CHECK_THROWS_AS(coh_fdmt.execute<uint8_t>(data_in, too_small),
+                    std::invalid_argument);
     REQUIRE_NOTHROW(coh_fdmt.execute<uint8_t>(data_in, dmt));
 
+    const auto result = std::span(dmt).first(coh_fdmt.get_dmt_size());
     CHECK(std::ranges::all_of(
-        dmt, [](float val) { return std::isfinite(val) && val >= 0.0F; }));
-    CHECK(std::ranges::any_of(dmt, [](float val) { return val != 0.0F; }));
+        result, [](float val) { return std::isfinite(val) && val >= 0.0F; }));
+    CHECK(std::ranges::any_of(result, [](float val) { return val != 0.0F; }));
 
     // A second call on independent data must also succeed and keep
     // streaming (rather than crash) via the per-coarse-DM history swap.
@@ -116,6 +125,11 @@ TEST_CASE("CohFDMTPlan dimension and buffer invariants", "[cfdmt][cpu]") {
                         plan.get_noverlap());
 
     CHECK(coh_fdmt.get_dmt_size() == plan.get_dmt_size());
+    const auto& fine = plan.get_fdmt_plan();
+    CHECK(plan.get_buffer_size() ==
+          ((plan.get_dm_grid_coh().size() - 1) * fine.get_dmt_size()) +
+              fine.get_buffer_size());
+    CHECK(coh_fdmt.get_buffer_size() == plan.get_buffer_size());
 
     const auto var_grid   = plan.get_effective_variance_grid();
     const auto sig_grid   = plan.get_effective_sigma_grid();
@@ -154,20 +168,24 @@ TEST_CASE("CohFDMTCPU multi-block streaming state and history reset",
         v = static_cast<uint8_t>(dist(rng));
     }
 
-    std::vector<float> dmt_b1_initial(coh_fdmt.get_dmt_size(), 0.0F);
-    std::vector<float> dmt_b2_streamed(coh_fdmt.get_dmt_size(), 0.0F);
-    std::vector<float> dmt_b2_cold(coh_fdmt.get_dmt_size(), 0.0F);
-    std::vector<float> dmt_b1_repeated(coh_fdmt.get_dmt_size(), 0.0F);
+    // Runs one block through one shared arena and keeps only the result.
+    std::vector<float> arena(coh_fdmt.get_buffer_size(), 0.0F);
+    const auto run = [&](const std::vector<uint8_t>& block) {
+        coh_fdmt.execute<uint8_t>(block, arena);
+        return std::vector<float>(arena.begin(),
+                                  arena.begin() + static_cast<std::ptrdiff_t>(
+                                                      coh_fdmt.get_dmt_size()));
+    };
 
     // 1. Process block 1 cold
-    coh_fdmt.execute<uint8_t>(block1, dmt_b1_initial);
+    const auto dmt_b1_initial = run(block1);
 
     // 2. Process block 2 continuous (warm history)
-    coh_fdmt.execute<uint8_t>(block2, dmt_b2_streamed);
+    const auto dmt_b2_streamed = run(block2);
 
     // 3. Reset history and process block 2 cold
     coh_fdmt.reset_history();
-    coh_fdmt.execute<uint8_t>(block2, dmt_b2_cold);
+    const auto dmt_b2_cold = run(block2);
 
     CHECK_FALSE(std::equal(
         dmt_b2_streamed.begin(), dmt_b2_streamed.end(), dmt_b2_cold.begin(),
@@ -176,7 +194,7 @@ TEST_CASE("CohFDMTCPU multi-block streaming state and history reset",
     // 4. Reset history and re-process block 1: must be bit-exact to
     // dmt_b1_initial
     coh_fdmt.reset_history();
-    coh_fdmt.execute<uint8_t>(block1, dmt_b1_repeated);
+    const auto dmt_b1_repeated = run(block1);
     test::require_exact(dmt_b1_initial, dmt_b1_repeated);
 }
 
@@ -214,8 +232,9 @@ TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment",
         }
     }
 
-    std::vector<float> dmt(coh_fdmt.get_dmt_size(), 0.0F);
+    std::vector<float> dmt(coh_fdmt.get_buffer_size(), 0.0F);
     coh_fdmt.execute<uint8_t>(data_in, dmt);
+    dmt.resize(coh_fdmt.get_dmt_size()); // drop the arena's scratch tail
 
     const SizeType ndm_total  = plan.get_ndm();
     const SizeType nsamps_out = plan.get_dmt_nsamps();

@@ -63,6 +63,16 @@ struct FDMTMemoryUsage {
  * Performs the FDMT algorithm using CPU cores with optional OpenMP
  * parallelization. Supports both single-shot transformation and stepped
  * execution for intermediate sub-band inspection.
+ *
+ * In short:
+ * - Input: float32 (nbeams, nchans, nsamps), or packed unsigned 1/2/4/8/16-bit
+ *   samples (see the packed execute()).
+ * - Output: always float32. Pass nbeams * plan.get_buffer_size() floats; each
+ *   beam's leading plan.get_dmt_size() values are the (ndms, dmt_nsamps)
+ *   result, and the rest is ping-pong scratch.
+ * - Construct once per plan: the constructor allocates everything, and
+ *   execute() allocates nothing. In mode "valid", call execute() on
+ *   contiguous, non-overlapping blocks to get a contiguous output stream.
  */
 class FDMTCPU {
 public:
@@ -91,7 +101,7 @@ public:
      *   restart streaming from a cold state (e.g. for a new observation).
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together
      * (default: 1). The plan/coordinate DAG is shared across all beams
@@ -150,7 +160,7 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -185,7 +195,7 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -243,13 +253,17 @@ public:
      *
      * Each channel row holds nsamps unsigned samples of `nbits` bits,
      * LSB-first within a byte for nbits < 8 (same convention as DDMTCPU),
-     * padded to a whole byte: layout (nbeams, nchans,
-     * packed_row_bytes(nsamps, nbits)). The output is float and identical to
-     * execute() on the same values converted to float.
+     * little-endian for 16, padded to a whole byte: layout (nbeams, nchans,
+     * ceil(nsamps * nbits / 8)) bytes. There is no 32-bit integer input;
+     * use the float overload for 32-bit float data. The output is float32
+     * and identical to execute() on the same values converted to float,
+     * laid out as for the float overload (only the leading get_dmt_size()
+     * values per beam are the result).
      *
      * @param waterfall_packed Packed input, beam-major flat.
      * @param nbits Sample width: 1, 2, 4, 8 or 16.
      * @param dmt Output DM-time array (size >= nbeams*get_buffer_size()).
+     * @throws std::invalid_argument for another nbits or a size mismatch.
      */
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nbits,
@@ -291,6 +305,14 @@ public:
      * slice -- advance()/advance_until_remaining()/finalize() still process
      * every beam correctly, but per-beam intermediate-level inspection isn't
      * exposed by this API yet.
+     * @note Each reset() (like each execute()) consumes one input block. In
+     * mode "valid" a block must be advanced to the root (finalize()) before
+     * the next reset()/execute(): stopping early would skip the upper
+     * levels' cross-block history update, so this throws std::logic_error
+     * instead. reset_history() abandons the unfinished block and the stream.
+     * The stepper always runs level by level (never fused), and its views
+     * are zero-copy: they are overwritten as later levels are computed.
+     * @throws std::logic_error if a "valid"-mode block is still unfinished.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -412,7 +434,8 @@ public:
 
     /**
      * @brief Resets the internal history buffer for valid-mode streaming across
-     * FDMT blocks.
+     * FDMT blocks (a cold start, e.g. for a new observation). Also abandons an
+     * unfinished stepper block.
      */
     void reset_history() noexcept;
 
@@ -470,7 +493,7 @@ private:
  * @param use_box_smearing Whether to account for intra-channel smearing
  * (default: true).
  * @param mode Mode: "valid", "full", or "roll" (default: "valid").
- * @param verbose 0 = silent, 1 = info, 2 = debug.
+ * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
  * @param nthreads Number of OpenMP threads (default: 1).
  * @param nbeams Number of batched beams (default: 1).
  * @return Tuple of (transformed DMT buffer as std::vector<float>, FDMTPlan
@@ -609,7 +632,7 @@ public:
      *   Call reset_history() to restart streaming from a cold state.
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together
      * (default: 1).
@@ -654,7 +677,7 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -688,7 +711,7 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose 0 = silent, 1 = info, 2 = debug.
+     * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together (default:
      * 1).
@@ -724,11 +747,17 @@ public:
     /**
      * @brief Executes the FDMT transform using host memory.
      *
-     * Input and output data reside on the host. This involves transferring data
-     * to/from the device internally.
+     * Input and output data reside on the host. The input is copied to a
+     * device staging buffer and each beam's leading plan.get_dmt_size()
+     * values (the result) are copied back; the rest of @p dmt is not
+     * written. The staging buffers are allocated on the first host call and
+     * reused (counted in get_memory_usage().workspace), so repeated calls
+     * allocate nothing. Blocks until the result is on the host.
      *
      * @param waterfall Input waterfall data view (host memory).
-     * @param dmt Output DM-time array view (host memory).
+     * @param dmt Output DM-time array view (host memory), at least
+     * nbeams * plan.get_buffer_size() floats, beam b at offset
+     * b * plan.get_buffer_size().
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -761,7 +790,7 @@ public:
      * matches the float execute() on the same values.
      *
      * @param waterfall_packed Packed input (host), (nbeams, nchans,
-     * packed_row_bytes(nsamps, nbits)).
+     * ceil(nsamps * nbits / 8)) bytes.
      * @param nbits Sample width: 1, 2, 4, 8 or 16.
      * @param dmt Output DM-time array (host).
      */
@@ -815,10 +844,13 @@ public:
     /// @brief Whether packed input uses the narrow-integer tree.
     [[nodiscard]] bool get_int_tree() const noexcept;
 
+    /// @brief CUDA device this engine allocates on and runs on.
+    [[nodiscard]] int get_device_id() const noexcept;
+
     /**
-     * @brief Device memory allocated at construction, plus the output buffer
-     * size each execute() call needs. The host-memory execute() overloads
-     * additionally stage the input and output on the device per call.
+     * @brief Device memory allocated by the engine, plus the output buffer
+     * size each execute() call needs. `workspace` also includes the
+     * host-memory execute() staging once the first host call allocated it.
      */
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
 
@@ -836,10 +868,14 @@ public:
      * @param stream CUDA stream for asynchronous execution (default: nullptr).
      * @throws std::invalid_argument If the input or output buffers are too
      * small.
+     * @throws std::logic_error If a "valid"-mode block is still unfinished.
      *
      * @note Kernels and memory copies are queued on @p stream. Synchronize
      *       before consuming @p d_dmt or calling reset() again on another
      *       stream unless ordering is guaranteed externally.
+     * @note As on the CPU, in mode "valid" a block must be finalized before
+     *       the next reset()/execute() (else std::logic_error);
+     *       reset_history() abandons it. The stepper never fuses.
      */
     void reset(cuda::std::span<const float> d_waterfall,
                cuda::std::span<float> d_dmt,
@@ -988,7 +1024,8 @@ public:
 
     /**
      * @brief Resets the internal history buffers for valid-mode streaming
-     * across FDMT blocks. Mirrors FDMTCPU::reset_history().
+     * across FDMT blocks, and abandons an unfinished stepper block. Mirrors
+     * FDMTCPU::reset_history().
      */
     void reset_history() noexcept;
 
@@ -1023,8 +1060,8 @@ public:
      * cold.
      *
      * @param in Source device span, size must equal history_state_size().
-     * @param stream CUDA stream to enqueue the copy on. Briefly synchronizes
-     * internally to read back a small parity flag onto the host.
+     * @param stream CUDA stream to enqueue the copy on (fully asynchronous;
+     * later work on the same stream sees the loaded history).
      * @throws std::invalid_argument if in.size() != history_state_size().
      */
     void load_history(cuda::std::span<const float> in,
@@ -1051,7 +1088,7 @@ private:
  * @param use_box_smearing Whether to account for intra-channel smearing
  * (default: true).
  * @param mode Mode: "valid", "full", or "roll" (default: "valid").
- * @param verbose 0 = silent, 1 = info, 2 = debug.
+ * @param verbose 0 = warnings, 1 = info, 2 = debug (process-wide).
  * @param device_id CUDA device ID.
  * @param nbeams Number of batched beams.
  * @return Transformed DMT buffer on host.
