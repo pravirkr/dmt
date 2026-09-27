@@ -228,7 +228,7 @@ TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment",
             const SizeType idx_re = (ipol * 2 * nsub * nsamp) +
                                     (0 * nsub * nsamp) + (isub * nsamp) +
                                     pulse_t;
-            data_in[idx_re] = 127;
+            data_in[idx_re]       = 127;
         }
     }
 

@@ -193,8 +193,8 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
                             c.dt_min, 1, smear, mode, 1, 1, 0, false);
                 const auto& pc    = ref.get_plan().get_container();
                 const auto niters = ref.get_plan().get_niters();
-                const auto wf     = random_ints(c.nchans, c.nsamps,
-                                                static_cast<unsigned>(c.nchans));
+                const auto wf = random_ints(c.nchans, c.nsamps,
+                                            static_cast<unsigned>(c.nchans));
                 for (SizeType fuse = 1; fuse <= std::min<SizeType>(niters, 4);
                      ++fuse) {
                     ref.reset_history(); // first block of a stream

@@ -389,10 +389,10 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
         blk.for_each(nrows(l) * w_out, [&](int i) {
             const int r = i / w_out;
             const int t = lo_out + (i % w_out);
-            dst[i]      = fdmt_in_range<Mode>(t, n_l)
-                              ? fdmt_fused_merge_cell<Mode>(
+            dst[i] = fdmt_in_range<Mode>(t, n_l)
+                         ? fdmt_fused_merge_cell<Mode>(
                                in, w_in, lo_in, cl + (kCI * r), t, thist_in)
-                              : 0.0F;
+                         : 0.0F;
         });
         if constexpr (Mode == FDMTMode::kValid) {
             fdmt_fused_tree_history(blk, in, w_in, lo_in, cl, nrows(l),
@@ -450,8 +450,8 @@ struct FDMTFusedTilePlan {
     [[nodiscard]] std::pair<SizeType, SizeType> smem_floats(int tile) const {
         const int stride = FDMTFusedTileArgs::kGroupHeader +
                            (FDMTFusedTileArgs::kLevelInfo * (fuse + 1));
-        SizeType cap_a = 0;
-        SizeType cap_b = 0;
+        SizeType cap_a   = 0;
+        SizeType cap_b   = 0;
         for (int g = 0; g < ngroups; ++g) {
             const int* gi     = group_info.data() + (g * stride);
             const int* lvl    = gi + FDMTFusedTileArgs::kGroupHeader;

@@ -309,8 +309,8 @@ TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
             std::vector<float> hist(ref.history_state_size(), 0.0F);
             for (SizeType b = 0; b < 10; ++b) {
                 FDMTCPU& engine = (b % 3 == 2) ? unfused : fused;
-                const auto wf   = random_waterfall(nchans * block,
-                                                   static_cast<unsigned>(60 + b));
+                const auto wf = random_waterfall(nchans * block,
+                                                 static_cast<unsigned>(60 + b));
                 engine.load_history(hist);
                 const auto got = run(engine, wf);
                 engine.save_history(hist);

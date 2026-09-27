@@ -78,7 +78,7 @@ TEST_CASE("FDMTCPU execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
                         count_allocations([&] { fdmt.execute(wf, dmt); });
                     const auto n_packed  = count_allocations([&] {
                         fdmt.execute(std::span<const uint8_t>(packed), nbits,
-                                      dmt);
+                                     dmt);
                     });
                     const auto n_stepper = count_allocations([&] {
                         fdmt.reset(wf, dmt);

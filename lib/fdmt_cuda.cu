@@ -655,7 +655,7 @@ public:
                          (m_stage_wf_f32_d.size() * sizeof(float)) +
                          m_stage_wf_packed_d.size() +
                          (m_stage_dmt_d.size() * sizeof(float)),
-            .output = m_nbeams * m_plan.get_buffer_size() * sizeof(float),
+            .output    = m_nbeams * m_plan.get_buffer_size() * sizeof(float),
         };
     }
 
@@ -887,8 +887,8 @@ public:
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
                 cudaMemcpyAsync(thrust::raw_pointer_cast(dst_vec.data()), src,
-                                    dst_vec.size() * sizeof(float),
-                                    cudaMemcpyDeviceToDevice, stream);
+                                dst_vec.size() * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream);
             }
             src += dst_vec.size();
         };

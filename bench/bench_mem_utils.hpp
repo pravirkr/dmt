@@ -90,7 +90,7 @@ extern PeakMemoryManager g_mem_manager; // NOLINT
 /// operator new), at the cost of being a whole-process monotonic counter
 /// rather than a per-iteration one.
 inline double get_process_peak_rss_mb() {
-    struct rusage usage {};
+    struct rusage usage{};
     getrusage(RUSAGE_SELF, &usage);
 #ifdef __APPLE__
     constexpr double kBytesPerUnit = 1.0; // Darwin reports ru_maxrss in bytes

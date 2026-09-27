@@ -1639,9 +1639,9 @@ private:
                                                    box_rows);
                 }
             } else {
-                float* hist_sub = m_history.data() +
-                                  (beam * m_plan.get_history_size()) +
-                                  (c * dt_max_final);
+                float* hist_sub    = m_history.data() +
+                                     (beam * m_plan.get_history_size()) +
+                                     (c * dt_max_final);
                 float* hist_init_b = m_history_init.data() +
                                      (beam * m_plan.get_history_init_size());
                 if (m_use_box_smearing) {
@@ -1719,9 +1719,9 @@ private:
             } else {
                 input_b.f32 += b * input_beam_stride;
             }
-            float* hist_b        = (m_mode == FDMTMode::kValid)
-                                       ? m_tree_history.data() + (b * tree_hist_stride)
-                                       : nullptr;
+            float* hist_b = (m_mode == FDMTMode::kValid)
+                                ? m_tree_history.data() + (b * tree_hist_stride)
+                                : nullptr;
             std::byte* final_out = level_ptr<std::byte>(fuse, b);
 #pragma omp parallel num_threads(m_ws.nthreads)
             {
@@ -1735,9 +1735,9 @@ private:
                     const SizeType ch_begin = g << fuse;
                     const SizeType ch_end =
                         std::min(ch_begin + (SizeType{1} << fuse), nchans);
-                    const auto [c0b, c0e] = fused_coord_range(0, g, fuse);
-                    std::byte* cur        = buf_a;
-                    std::byte* nxt        = buf_b;
+                    const SizeType c0b = fused_coord_range(0, g, fuse).first;
+                    std::byte* cur     = buf_a;
+                    std::byte* nxt     = buf_b;
                     with_elem(m_levels[0].type, [&]<typename T0>() {
                         fused_init_group<T0>(input_b,
                                              reinterpret_cast<T0*>(cur), c0b,
@@ -1745,7 +1745,9 @@ private:
                     });
                     SizeType in_base = c0b;
                     for (SizeType l = 1; l <= fuse; ++l) {
-                        const auto [cb, ce]     = fused_coord_range(l, g, fuse);
+                        const auto l_range      = fused_coord_range(l, g, fuse);
+                        const SizeType cb       = l_range.first;
+                        const SizeType ce       = l_range.second;
                         const bool last         = (l == fuse);
                         std::byte* out          = last ? final_out : nxt;
                         const SizeType out_base = last ? 0 : cb;

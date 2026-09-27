@@ -569,7 +569,7 @@ TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
             const double fc_inv2 = 1.0 / (fc * fc);
             const auto tau       = static_cast<IndexType>(
                 std::round(static_cast<double>(target_dt) *
-                                 (fc_inv2 - f_max_inv2) / (f_min_inv2 - f_max_inv2)));
+                           (fc_inv2 - f_max_inv2) / (f_min_inv2 - f_max_inv2)));
             const auto t = static_cast<IndexType>(t0) + tau;
             if (t >= 0 && std::cmp_less(t, nsamps)) {
                 waterfall[(c * nsamps) + static_cast<size_t>(t)] += 10.0F;
@@ -1458,8 +1458,8 @@ TEST_CASE("FDMTCPU nbeams>1 valid-mode streaming keeps per-beam history "
 
     const SizeType block_size = 8; // < dt_max: exercises Phase 1 + Phase 3
                                    // together
-    const SizeType n_blocks = 15;
-    const auto total_nsamp  = block_size * n_blocks;
+    const SizeType n_blocks   = 15;
+    const auto total_nsamp    = block_size * n_blocks;
 
     std::vector<float> waterfall_multi(nbeams * nchans * total_nsamp);
     for (SizeType b = 0; b < nbeams; ++b) {
