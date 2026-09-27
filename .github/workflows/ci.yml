@@ -27,6 +27,20 @@ jobs:
   # Tier 1 — run on every pull_request commit (and workflow_dispatch)
   # =============================================================================
 
+  pre-commit:
+    name: pre-commit
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: pre-commit/action@v3.0.1
+
   # C++ correctness (Release). CMake builds library + bindings; ctest only.
   cpp-tests:
     name: "C++ tests (${{ matrix.compiler.cc }})"

@@ -119,8 +119,6 @@ void bind_plans(py::module_& mod) {
             Spacing of the regular delay grid (default 1).
         mode : {'valid', 'full', 'roll'}, optional
             Output time alignment. ``valid`` is streaming-safe.
-        verbose : bool, optional
-            Print a plan summary during construction.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
 
@@ -130,29 +128,28 @@ void bind_plans(py::module_& mod) {
         for ``dt_max``. Unsorted or duplicate trials are sorted and uniqued.
         )doc")
         .def(py::init<float, float, SizeType, SizeType, float, IndexType,
-                      IndexType, SizeType, std::string_view, bool>(),
+                      IndexType, SizeType, std::string_view>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
-             "verbose"_a = false)
-        .def(py::init([](float f_min, float f_max, SizeType nchans,
-                         SizeType nsamps, float tsamp,
-                         const py::object& dt_grid, const py::object& dt_arr,
-                         const py::object& dm_grid, const py::object& dm_arr,
-                         std::string_view mode, bool verbose) {
-                 const auto [type, obj] =
-                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                 if (type == CustomGridType::kDt) {
-                     return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                     extract_dt_grid(obj), mode, verbose);
-                 }
-                 return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                 extract_dm_grid(obj), mode, verbose);
-             }),
-             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
-             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
-             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("mode") = "valid", py::arg("verbose") = false)
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid")
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, const py::object& dt_grid,
+                        const py::object& dt_arr, const py::object& dm_grid,
+                        const py::object& dm_arr, std::string_view mode) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                if (type == CustomGridType::kDt) {
+                    return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                    extract_dt_grid(obj), mode);
+                }
+                return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                extract_dm_grid(obj), mode);
+            }),
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("mode") = "valid")
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly("nchans", &FDMTPlan::get_nchans)
@@ -289,19 +286,15 @@ void bind_plans(py::module_& mod) {
                                &FDMTPlan::get_history_init_size)
         .def_property_readonly("tree_history_size",
                                &FDMTPlan::get_tree_history_size)
-        .def(
-            "print_summary",
-            [](FDMTPlan& plan, std::string_view prefix) {
-                plan.print_summary(prefix);
-            },
-            "prefix"_a = "")
-        .def("print_complexity_summary", &FDMTPlan::print_complexity_summary);
+        .def("summary", &FDMTPlan::summary, "prefix"_a = "",
+             "Human-readable summary of the plan (dimensions, memory, "
+             "per-level shapes); each line starts with ``prefix``.");
     py::class_<CohFDMTPlan>(mod, "CohFDMTPlan",
                             R"doc(
         Plan for the hybrid coherent Fast Dispersion Measure Transform.
 
         Combines coarse coherent dedispersion trials with a fine FDMT tree
-        around each trial. Used by :class:`CohFDMTCPU` and :class:`CohFDMTGPU`.
+        around each trial. Used by :class:`CohFDMTCPU` and :class:`CohFDMTCUDA`.
 
         Parameters
         ----------
@@ -323,14 +316,12 @@ void bind_plans(py::module_& mod) {
             Overlap samples for the convolution (must be < ``nbin``).
         data_order : {'PRITF', 'FTPRI', 'RITFP'}, optional
             Packed baseband layout.
-        verbose : bool, optional
-            Print a plan summary during construction.
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string_view, bool>(),
+                      float, float, SizeType, std::string_view>(),
              "fcenter"_a, "bwsub"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "t_p"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap_inp"_a = 8192,
-             "data_order"_a = "PRITF", "verbose"_a = false)
+             "data_order"_a = "PRITF")
         .def_property_readonly("f_center", &CohFDMTPlan::get_f_center)
         .def_property_readonly("bw_sub", &CohFDMTPlan::get_bw_sub)
         .def_property_readonly("nsub", &CohFDMTPlan::get_nsub)
@@ -358,6 +349,7 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("dmt_ndms", &CohFDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &CohFDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &CohFDMTPlan::get_dmt_size)
+        .def_property_readonly("buffer_size", &CohFDMTPlan::get_buffer_size)
         .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale)
         .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan)
         .def(
@@ -380,7 +372,8 @@ void bind_plans(py::module_& mod) {
              [](const CohFDMTPlan& plan) {
                  return as_pyarray(plan.get_cumulative_count_grid());
              })
-        .def("print_summary", &CohFDMTPlan::print_summary);
+        .def("summary", &CohFDMTPlan::summary,
+             "Human-readable summary of the CohFDMT plan.");
 
     py::class_<LevinConfig>(mod, "LevinConfig",
                             R"doc(
@@ -428,26 +421,26 @@ void bind_plans(py::module_& mod) {
         levin : LevinConfig, optional
             Lina Levin optimal grid configuration.
         )doc")
-        .def(py::init<float, float, SizeType, float, float, float, float, bool,
+        .def(py::init<float, float, SizeType, float, float, float, float,
                       SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F, "verbose"_a = false,
-             "nbits"_a = 32)
+             "dm_step"_a, "dm_min"_a = 0.0F, "nbits"_a = 32)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr, bool verbose,
-                         SizeType nbits) {
+                         const py::array_t<float>& dm_arr, SizeType nbits) {
                  return DDMTPlan(
                      f_min, f_max, nchans, tsamp,
                      std::vector<float>(dm_arr.data(),
                                         dm_arr.data() + dm_arr.size()),
-                     verbose, nbits);
+                     nbits);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
-             "verbose"_a = false, "nbits"_a = 32)
-        .def(py::init<float, float, SizeType, float, const LevinConfig&, bool,
+             "nbits"_a = 32)
+        .def(py::init<float, float, SizeType, float, const LevinConfig&,
                       SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
-             "verbose"_a = false, "nbits"_a = 32)
+             "nbits"_a = 32)
+        .def("summary", &DDMTPlan::summary,
+             "Human-readable summary of the DDMT plan.")
         .def_static(
             "generate_levin_dm_grid",
             [](float dm_start, float dm_end, float tsamp, float pulse_width,

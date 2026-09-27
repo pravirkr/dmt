@@ -2,7 +2,7 @@
 
 Modern radio interferometers (such as MeerKAT, CHIME, ASKAP, and SKA) generate dozens to thousands of simultaneous tied-array or synthesized beams to survey wide fields of view.
 
-`dmt` supports native **Multi-Beam Batching** across CPU SIMD and CUDA GPU kernels.
+`dmt` supports native **Multi-Beam Batching** on the CPU and the GPU: one engine, one plan, `nbeams` beams per call.
 
 ---
 
@@ -10,9 +10,9 @@ Modern radio interferometers (such as MeerKAT, CHIME, ASKAP, and SKA) generate d
 
 Instead of instantiating $N_{\text{beams}}$ separate engine objects or looping over single-beam calls, batching provides major advantages:
 
-1. **Amortized Plan Overhead**: Coordinate mapping, subband offsets, and tree indices are calculated and traversed once for all beams simultaneously.
-2. **Optimal Cache Locality**: Subband data from multiple beams share instruction cache lines and memory streams.
-3. **SIMD & GPU Concurrency**: Vector units (AVX2/AVX-512) and GPU warps execute across the beam dimension, achieving near-perfect compute saturation.
+1. **Amortized Plan Overhead**: The plan (coordinate DAG, subband offsets, tree indices) is built once and shared by all beams; only the state and history buffers scale with `nbeams`.
+2. **GPU Occupancy**: On CUDA, every beam of a level runs in the same kernel launch (beams are a grid dimension), so even small blocks keep the GPU busy.
+3. **One Engine, One Thread Pool**: On the CPU, beams are processed one after another, each spread over all `nthreads` threads with the same (fused, vectorized) kernels as a single beam.
 
 ---
 
@@ -64,7 +64,7 @@ const size_t nsamps = 1024;
 dmt::algorithms::FDMTCPU fdmt(
     1200.0f, 1600.0f, nchans, nsamps, 1e-3f,
     /*dt_max=*/100, /*dt_min=*/0, /*dt_step=*/1,
-    /*use_box_smearing=*/true, "valid", /*verbose=*/false,
+    /*use_box_smearing=*/true, "valid",
     /*nthreads=*/8, /*nbeams=*/nbeams
 );
 
@@ -76,4 +76,9 @@ fdmt.execute(
     std::span<const float>(batch_input.data(), batch_input.size()),
     std::span<float>(batch_output.data(), batch_output.size())
 );
+
+// Beam b's (ndms, dmt_nsamps) result: the first get_dmt_size() floats at
+// offset b * get_buffer_size() (the rest of each slice is scratch).
+std::span<const float> beam3(batch_output.data() + 3 * plan.get_buffer_size(),
+                             plan.get_dmt_size());
 ```

@@ -19,7 +19,7 @@ TEST_CASE("bb_utils::swap_spectrum rotates each row by n/2",
         ComplexType(6.F, 0.F), ComplexType(7.F, 0.F),
     };
     auto b = a;
-    bb_utils::swap_spectrum(a, b, 4, 2);
+    bb_utils::swap_spectrum(a, b, 4, 2, /*nthreads=*/1);
     const std::vector<ComplexType> expected = {
         ComplexType(2.F, 0.F), ComplexType(3.F, 0.F), ComplexType(0.F, 0.F),
         ComplexType(1.F, 0.F), ComplexType(6.F, 0.F), ComplexType(7.F, 0.F),
@@ -33,9 +33,12 @@ TEST_CASE("bb_utils::swap_spectrum rejects invalid sizes",
           "[bb_utils][cpu][internal]") {
     std::vector<ComplexType> a(4);
     std::vector<ComplexType> b(4);
-    CHECK_THROWS_AS(bb_utils::swap_spectrum(a, b, 0, 1), std::invalid_argument);
-    CHECK_THROWS_AS(bb_utils::swap_spectrum(a, b, 3, 1), std::invalid_argument);
-    CHECK_THROWS_AS(bb_utils::swap_spectrum(a, b, 4, 2), std::invalid_argument);
+    CHECK_THROWS_AS(bb_utils::swap_spectrum(a, b, 0, 1, 1),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(bb_utils::swap_spectrum(a, b, 3, 1, 1),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(bb_utils::swap_spectrum(a, b, 4, 2, 1),
+                    std::invalid_argument);
 }
 
 TEST_CASE("bb_utils::compute_chirp fills a unit-magnitude tapered table",
@@ -67,7 +70,7 @@ TEST_CASE("bb_utils::apply_chirp scales both polarisations",
     std::vector<ComplexType> out1(in1.size());
     std::vector<ComplexType> out2(in2.size());
     bb_utils::apply_chirp(in1, in2, chirp, out1, out2, nsub, nbin, nfft, 0,
-                          2.0F);
+                          2.0F, /*nthreads=*/1);
     REQUIRE_THAT(out1, Catch::Matchers::Equals(std::vector<ComplexType>(
                            in1.size(), ComplexType(2.0F, 0.0F))));
     REQUIRE_THAT(out2, Catch::Matchers::Equals(std::vector<ComplexType>(
@@ -87,8 +90,8 @@ TEST_CASE("bb_utils::unpad_detect writes Stokes I and drops overlap",
                                 ComplexType(0.0F, 0.0F));
     const SizeType mbin_adj = mbin - 2;
     std::vector<float> intensity(nsub * nchan * nfft * mbin_adj, -1.0F);
-    bb_utils::unpad_detect(p1, p2, intensity, nchan, nfft, nsub, mbin,
-                           noverlap);
+    bb_utils::unpad_detect(p1, p2, intensity, nchan, nfft, nsub, mbin, noverlap,
+                           /*nthreads=*/1);
     REQUIRE_THAT(intensity, Catch::Matchers::Equals(
                                 std::vector<float>(intensity.size(), 25.0F)));
 }

@@ -1,9 +1,5 @@
 #include "dmt/bb_utils.hpp"
 
-#ifdef USE_OPENMP
-#include <omp.h>
-#endif
-
 #include <algorithm>
 #include <format>
 #include <numbers>
@@ -11,36 +7,6 @@
 #include "dmt/common/types.hpp"
 
 namespace dmt::bb_utils {
-
-std::optional<BasebandDataOrder>
-find_baseband_data_order(std::string_view name) noexcept {
-    for (const auto& [key, order] : kBasebandDataOrders) {
-        if (key == name) {
-            return order;
-        }
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] std::string supported_baseband_data_orders() noexcept {
-    std::string supported_orders;
-    for (const auto& [key, _] : kBasebandDataOrders) {
-        if (!supported_orders.empty()) {
-            supported_orders += ", ";
-        }
-        supported_orders += key;
-    }
-    return supported_orders;
-}
-
-BasebandDataOrder parse_baseband_data_order(std::string_view name) {
-    if (const auto order = find_baseband_data_order(name)) {
-        return *order;
-    }
-    throw std::invalid_argument(
-        std::format("Invalid data order: {}. Supported values are: {}", name,
-                    supported_baseband_data_orders()));
-}
 
 void compute_chirp(std::span<const float> dm_grid,
                    std::span<ComplexType> chirp_table,
@@ -109,7 +75,9 @@ void compute_chirp(std::span<const float> dm_grid,
 void swap_spectrum(std::span<ComplexType> data1,
                    std::span<ComplexType> data2,
                    int n,
-                   int batch_size) {
+                   int batch_size,
+                   int nthreads) {
+    nthreads = std::max(1, nthreads);
     if (n == 0 || batch_size == 0) {
         throw std::invalid_argument(std::format(
             "Invalid dimensions: n={}, batch_size={}", n, batch_size));
@@ -129,10 +97,8 @@ void swap_spectrum(std::span<ComplexType> data1,
     ComplexType* data2_ptr = data2.data();
     // Swap the halves along the last dimension
     const auto mid_point = n / 2;
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for default(none)                                         \
+#pragma omp parallel for default(none) num_threads(nthreads)                   \
     shared(data1_ptr, data2_ptr, n, batch_size, mid_point)
-#endif
     for (int j = 0; j < batch_size; ++j) {
         const auto offset           = j * n;
         ComplexType* row_start1_ptr = data1_ptr + offset;
@@ -153,7 +119,8 @@ void apply_chirp(std::span<const ComplexType> data1_in,
                  SizeType nbin,
                  SizeType nfft,
                  SizeType idm,
-                 float scale) {
+                 float scale,
+                 int nthreads) {
     if (data1_in.size() != data1_out.size()) {
         throw std::runtime_error(
             "data1_in and data1_out must have the same size");
@@ -171,11 +138,10 @@ void apply_chirp(std::span<const ComplexType> data1_in,
         throw std::runtime_error("idm is out of range for chirp_table");
     }
     const auto ny = nfft;
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for default(none)                                         \
+    nthreads      = std::max(1, nthreads);
+#pragma omp parallel for default(none) num_threads(nthreads)                   \
     shared(data1_out, data2_out, data1_in, data2_in, chirp_table, nx, ny, idm, \
                scale)
-#endif
     for (SizeType i = 0; i < nx; ++i) {
         for (SizeType j = 0; j < ny; ++j) {
             const auto idx       = i + (nx * j);
@@ -193,7 +159,8 @@ void unpad_detect(std::span<const ComplexType> fft_p1,
                   SizeType nfft,
                   SizeType nsub,
                   SizeType mbin,
-                  SizeType noverlap) {
+                  SizeType noverlap,
+                  int nthreads) {
     const SizeType noverlap_per_channel = noverlap / nchan;
     const SizeType mbin_adjusted        = mbin - (2 * noverlap_per_channel);
     const SizeType msamp                = nfft * mbin_adjusted;
@@ -208,11 +175,10 @@ void unpad_detect(std::span<const ComplexType> fft_p1,
         throw std::runtime_error("Invalid output size");
     }
 
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for collapse(4) default(none)                             \
+    nthreads = std::max(1, nthreads);
+#pragma omp parallel for collapse(4) default(none) num_threads(nthreads)       \
     shared(intensity, fft_p1, fft_p2, nsub, nchan, nfft, msamp, mbin,          \
                mbin_adjusted, noverlap_per_channel)
-#endif
     for (SizeType ibin = 0; ibin < mbin_adjusted; ++ibin) {
         for (SizeType ichan = 0; ichan < nchan; ++ichan) {
             for (SizeType ifft = 0; ifft < nfft; ++ifft) {

@@ -221,9 +221,9 @@ TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu][cpu]") {
     auto waterfall      = random_waterfall(nbeams * nchans, nsamps, 999);
 
     FDMTFFTCPU fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
-                          true, "roll", false, 1, nbeams);
+                          true, "roll", 1, nbeams);
     FDMTFFTCPU fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
-                           true, "roll", false, 1, 1);
+                           true, "roll", 1, 1);
     const auto ndms = fdmt_multi.get_plan().get_dmt_ndms();
     std::vector<float> dmt_multi(nbeams * ndms * nsamps, 0.0F);
     fdmt_multi.execute(waterfall, dmt_multi);
@@ -344,7 +344,7 @@ TEST_CASE("FDMTFFTCPU multi-beam stepper matches execute",
     auto waterfall      = random_waterfall(nbeams * nchans, nsamps, 44);
 
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                    "roll", false, 1, nbeams);
+                    "roll", 1, nbeams);
     const auto n = nbeams * fdmt.get_plan().get_dmt_size();
     std::vector<float> dmt_one(n, 0.0F);
     fdmt.execute(waterfall, dmt_one);

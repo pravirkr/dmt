@@ -31,7 +31,7 @@
 :::{grid-item-card} 🚀 Comprehensive Algorithm Suite
 :class-card: sd-shadow-sm
 
-- **FDMT**: Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$)
+- **FDMT**: Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$), float or packed 1/2/4/8/16-bit input
 - **DDMT**: Direct Dedispersion with 1/2/4/8/32-bit SIMD kernels
 - **CFDMT**: Hybrid Coherent baseband dedispersion for microsecond pulses
 - **FDMT-FFT**: Frequency-domain phase-shift dedispersion
@@ -91,6 +91,13 @@ Learn production telescope integration recipes: overlap-save history, multi-beam
 Hands-on Jupyter notebooks covering filterbanks, tree stepping, sparse grids, low-bit quantization, and baseband coherent search.
 :::
 
+:::{grid-item-card} 📊 Benchmarks
+:link: benchmarks
+:link-type: doc
+
+FDMT, FDMT-FFT and brute-force DDMT on CPUs and a GPU, on one fixed 4096-channel configuration: runtime, real-time throughput by input bit width, and operation counts.
+:::
+
 ::::
 
 ---
@@ -104,6 +111,7 @@ Hands-on Jupyter notebooks covering filterbanks, tree stepping, sparse grids, lo
 getting_started/index
 tutorials/index
 pipeline_guide/index
+benchmarks
 ```
 
 ```{toctree}

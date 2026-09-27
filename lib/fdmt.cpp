@@ -1,24 +1,53 @@
 #include "dmt/algorithms/fdmt.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
-#ifdef DMT_ENABLE_OPENMP
 #include <omp.h>
-#endif
 
-#include <spdlog/spdlog.h>
-
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/omp_helper.hpp"
+#include "dmt/fdmt_int_tree.hpp"
+#include "dmt/modes.hpp"
 
 namespace dmt::algorithms {
 
 namespace {
 
-enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
+/**
+ * @brief Element-wise converting copy (`std::copy_n` when the types match).
+ */
+template <typename TIn, typename TOut>
+inline void fdmt_convert_copy(const TIn* __restrict__ src,
+                              SizeType n,
+                              TOut* __restrict__ dst) noexcept {
+    if constexpr (std::is_same_v<TIn, TOut>) {
+        std::copy_n(src, n, dst);
+    } else {
+#pragma omp simd
+        for (SizeType i = 0; i < n; ++i) {
+            dst[i] = static_cast<TOut>(src[i]);
+        }
+    }
+}
+
+/**
+ * @brief The single FDMT merge addition, performed in the output storage
+ * type. For TOut = float this is exactly `a + b`; for the narrow integer
+ * types the plan-derived value bound guarantees no wrap-around.
+ */
+template <typename TOut, typename TA, typename TB>
+inline TOut fdmt_add(TA a, TB b) noexcept {
+    return static_cast<TOut>(static_cast<TOut>(a) + static_cast<TOut>(b));
+}
 
 /**
  * @brief Advances a size-`capacity` FIFO history window (holding the most
@@ -33,9 +62,11 @@ enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
  * samples are shifted out and this whole block is appended. Shared by both
  * the tree-level history in `offset_add<kValid>` and the level-0 per-channel
  * history in `fdmt_init_valid_update_history`, so the two mechanisms can't
- * drift apart.
+ * drift apart. History is always stored as float, whatever the state type
+ * (`TIn`) of the stream feeding it.
  */
-void fdmt_advance_history_window(const float* __restrict__ new_data,
+template <typename TIn = float>
+void fdmt_advance_history_window(const TIn* __restrict__ new_data,
                                  float* __restrict__ hist,
                                  SizeType nsamps,
                                  SizeType capacity) noexcept {
@@ -43,10 +74,10 @@ void fdmt_advance_history_window(const float* __restrict__ new_data,
         return;
     }
     if (nsamps >= capacity) {
-        std::copy_n(new_data + nsamps - capacity, capacity, hist);
+        fdmt_convert_copy(new_data + nsamps - capacity, capacity, hist);
     } else {
         std::copy(hist + nsamps, hist + capacity, hist);
-        std::copy_n(new_data, nsamps, hist + capacity - nsamps);
+        fdmt_convert_copy(new_data, nsamps, hist + capacity - nsamps);
     }
 }
 
@@ -72,6 +103,8 @@ void fdmt_advance_history_window(const float* __restrict__ new_data,
  * - Roll: Cyclic boundary - head wraps around using modulo arithmetic
  *
  * @tparam Mode FDMTMode enum specifying boundary handling behavior
+ * @tparam TIn Storage type of the input (previous level) state.
+ * @tparam TOut Storage type of the output (current level) state.
  *
  * @param data_tail Input array (tail component) - lower frequency band
  * @param size_tail Size of tail array (must equal size_head)
@@ -83,14 +116,13 @@ void fdmt_advance_history_window(const float* __restrict__ new_data,
  * @param hist Valid-mode-only cross-block history slice for this
  * coordinate (size >= delay_shift); nullptr for kFull/kRoll or when no
  * history is needed (delay_shift == 0).
- *
  */
-template <FDMTMode Mode>
-void offset_add(const float* __restrict__ data_tail,
+template <FDMTMode Mode, typename TIn = float, typename TOut = float>
+void offset_add(const TIn* __restrict__ data_tail,
                 SizeType size_tail,
-                const float* __restrict__ data_head,
+                const TIn* __restrict__ data_head,
                 SizeType size_head,
-                float* __restrict__ out,
+                TOut* __restrict__ out,
                 SizeType size_out,
                 SizeType delay_shift,
                 float* __restrict__ hist = nullptr) noexcept {
@@ -106,24 +138,25 @@ void offset_add(const float* __restrict__ data_tail,
     if constexpr (Mode == FDMTMode::kFull) {
         // Full mode: Output can extend beyond input size
         // Part 1: Copy tail-only region [0, delay_shift)
-        std::copy_n(data_tail, delay_shift, out);
+        fdmt_convert_copy(data_tail, delay_shift, out);
 
         // Part 2: Overlap region [delay_shift, size_tail)
         const SizeType nsum = size_tail - delay_shift;
 #pragma omp simd
         for (SizeType i = 0; i < nsum; ++i) {
-            out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
+            out[delay_shift + i] =
+                fdmt_add<TOut>(data_tail[delay_shift + i], data_head[i]);
         }
 
         // Part 3: Head-only region [size_tail, size_tail + nrest)
         const SizeType nrest = std::min(delay_shift, size_out - size_tail);
         if (nrest > 0) {
-            std::copy_n(data_head + nsum, nrest, out + size_tail);
+            fdmt_convert_copy(data_head + nsum, nrest, out + size_tail);
         }
         // Part 4: Zero-fill any remaining [size_tail + nrest, size_out)
         const SizeType filled = size_tail + nrest;
         if (filled < size_out) {
-            std::fill(out + filled, out + size_out, 0.0F);
+            std::fill(out + filled, out + size_out, TOut{0});
         }
     } else if constexpr (Mode == FDMTMode::kValid) {
         // Valid mode: only overlap region
@@ -136,7 +169,7 @@ void offset_add(const float* __restrict__ data_tail,
         if (hist != nullptr && delay_shift > 0) {
             const SizeType boundary_len = std::min(delay_shift, size_tail);
             for (SizeType i = 0; i < boundary_len; ++i) {
-                out[i] = data_tail[i] + hist[i];
+                out[i] = fdmt_add<TOut>(data_tail[i], hist[i]);
             }
             // Update the size-delay_shift history FIFO with this block's own
             // head samples, so the next call sees a correctly-advanced
@@ -144,7 +177,7 @@ void offset_add(const float* __restrict__ data_tail,
             fdmt_advance_history_window(data_head, hist, size_head,
                                         delay_shift);
         } else {
-            std::copy_n(data_tail, delay_shift, out);
+            fdmt_convert_copy(data_tail, delay_shift, out);
         }
 
         // Part 2: Overlap region [delay_shift, size_tail), empty once
@@ -153,135 +186,162 @@ void offset_add(const float* __restrict__ data_tail,
             (delay_shift < size_tail) ? (size_tail - delay_shift) : 0;
 #pragma omp simd
         for (SizeType i = 0; i < nsum; ++i) {
-            out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
+            out[delay_shift + i] =
+                fdmt_add<TOut>(data_tail[delay_shift + i], data_head[i]);
         }
     } else if constexpr (Mode == FDMTMode::kRoll) {
         // Roll mode: cyclic addition
         assert(size_out == size_tail && "All sizes must be equal in roll mode");
         // Part 1: Wrapped region [0, delay_shift)
         for (SizeType k = 0; k < delay_shift; ++k) {
-            out[k] = data_tail[k] + data_head[size_tail - delay_shift + k];
+            out[k] = fdmt_add<TOut>(data_tail[k],
+                                    data_head[size_tail - delay_shift + k]);
         }
 
         // Part 2: Overlap region [delay_shift, size_tail)
         const SizeType nsum = size_tail - delay_shift;
 #pragma omp simd
         for (SizeType i = 0; i < nsum; ++i) {
-            out[delay_shift + i] = data_tail[delay_shift + i] + data_head[i];
+            out[delay_shift + i] =
+                fdmt_add<TOut>(data_tail[delay_shift + i], data_head[i]);
         }
     }
 }
 
-template <FDMTMode Mode>
-void fdmt_iter(const float* __restrict__ state_in,
-               float* __restrict__ state_out,
+/// @brief Copy coordinates (odd-channel padding): out = tail, zero-extended.
+template <typename TIn, typename TOut>
+void fdmt_copy_coords(const TIn* __restrict__ state_in,
+                      TOut* __restrict__ state_out,
+                      const plans::FDMTCoord* __restrict__ coords_copy_cur,
+                      SizeType ncoords_copy_cur) noexcept {
+#pragma omp for
+    for (SizeType i_coord = 0; i_coord < ncoords_copy_cur; ++i_coord) {
+        const auto* __restrict__ coord = &coords_copy_cur[i_coord];
+        const TIn* __restrict__ tail   = &state_in[coord->tail_buf_offset];
+        TOut* __restrict__ out         = &state_out[coord->buf_offset];
+        fdmt_convert_copy(tail, coord->tail_nsamps, out);
+        if (coord->nsamps > coord->tail_nsamps) {
+            std::fill(out + coord->tail_nsamps, out + coord->nsamps, TOut{0});
+        }
+    }
+}
+
+/**
+ * @brief Per-thread scratch carved out of one engine-owned buffer allocated
+ * at construction (see FDMTCPU::Impl::m_workspace), so execute() never
+ * allocates. Thread t's slice starts at base + t * stride and holds, at
+ * fixed offsets: one unpacked packed-input row (`unpack`, nsamps samples of
+ * <= 4 bytes), two running level-0 box rows for mixed-sign dt grids
+ * (`rows`), and the level-fusion ping-pong buffers (`fused_a`/`fused_b`).
+ * Every parallel region that uses it runs with exactly `nthreads` threads.
+ */
+struct FDMTWorkspace {
+    std::byte* base{nullptr};
+    SizeType stride{0};
+    SizeType row_bytes{0};   ///< one row of nsamps samples, <= 4 bytes each
+    SizeType fused_bytes{0}; ///< one fusion ping-pong buffer
+    int nthreads{1};
+
+    [[nodiscard]] std::byte* slice(SizeType tid) const noexcept {
+        return base + (tid * stride);
+    }
+    template <typename T> [[nodiscard]] T* unpack(SizeType tid) const noexcept {
+        return reinterpret_cast<T*>(slice(tid));
+    }
+    template <typename T> [[nodiscard]] T* rows(SizeType tid) const noexcept {
+        return reinterpret_cast<T*>(slice(tid) + row_bytes);
+    }
+    [[nodiscard]] std::byte* fused_a(SizeType tid) const noexcept {
+        return slice(tid) + (3 * row_bytes);
+    }
+    [[nodiscard]] std::byte* fused_b(SizeType tid) const noexcept {
+        return fused_a(tid) + fused_bytes;
+    }
+};
+
+/// Calling thread's index inside a parallel region.
+inline SizeType fdmt_thread_id() noexcept {
+    return static_cast<SizeType>(omp_get_thread_num());
+}
+
+template <FDMTMode Mode, typename TIn = float, typename TOut = float>
+void fdmt_iter(const TIn* __restrict__ state_in,
+               TOut* __restrict__ state_out,
                float* __restrict__ hist_ptr,
                const plans::FDMTCoord* __restrict__ coords_sum_cur,
                const plans::FDMTCoord* __restrict__ coords_copy_cur,
                SizeType ncoords_sum_cur,
-               SizeType ncoords_copy_cur) noexcept {
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel default(none)                                             \
+               SizeType ncoords_copy_cur,
+               [[maybe_unused]] int nthreads) noexcept {
+#pragma omp parallel default(none) num_threads(nthreads)                       \
     shared(state_in, state_out, hist_ptr, coords_sum_cur, coords_copy_cur,     \
                ncoords_sum_cur, ncoords_copy_cur)
-#endif
     {
-#ifdef DMT_ENABLE_OPENMP
 #pragma omp for nowait
-#endif
         for (SizeType i_coord = 0; i_coord < ncoords_sum_cur; ++i_coord) {
             const auto* __restrict__ coord = &coords_sum_cur[i_coord];
-            const float* __restrict__ tail = &state_in[coord->tail_buf_offset];
-            const float* __restrict__ head = &state_in[coord->head_buf_offset];
-            float* __restrict__ out        = &state_out[coord->buf_offset];
+            const TIn* __restrict__ tail   = &state_in[coord->tail_buf_offset];
+            const TIn* __restrict__ head   = &state_in[coord->head_buf_offset];
+            TOut* __restrict__ out         = &state_out[coord->buf_offset];
             float* __restrict__ hist = (hist_ptr != nullptr && coord->delay > 0)
                                            ? &hist_ptr[coord->hist_offset]
                                            : nullptr;
             offset_add<Mode>(tail, coord->tail_nsamps, head, coord->head_nsamps,
                              out, coord->nsamps, coord->delay, hist);
         }
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp for
-#endif
-        for (SizeType i_coord = 0; i_coord < ncoords_copy_cur; ++i_coord) {
-            const auto* __restrict__ coord = &coords_copy_cur[i_coord];
-            const float* __restrict__ tail = &state_in[coord->tail_buf_offset];
-            float* __restrict__ out        = &state_out[coord->buf_offset];
-            std::copy_n(tail, coord->tail_nsamps, out);
-            if (coord->nsamps > coord->tail_nsamps) {
-                std::fill(out + coord->tail_nsamps, out + coord->nsamps, 0.0F);
-            }
-        }
+        fdmt_copy_coords(state_in, state_out, coords_copy_cur,
+                         ncoords_copy_cur);
     }
 }
 
-template <bool UseRoll, bool UseBoxSmearing>
-void fdmt_init_impl_row0(const float* __restrict__ wf_sub,
-                         float* __restrict__ buf_row0,
-                         SizeType dt_min_sub,
-                         SizeType nsamps) noexcept {
-    // ===== First DT row (dt_min_sub) =====
-    if constexpr (UseBoxSmearing) {
-        float running_sum = 0.0F;
+/// @brief Level-0 box-sum extension `prev + sample`, stored as TOut. Integer
+/// state with integer samples (packed input, int_tree) adds
+/// in integer lanes; the plan-derived bound keeps it from wrapping. Anything
+/// else adds in float, the original arithmetic.
+template <typename TOut, typename TS>
+inline TOut fdmt_init_add(TOut prev, TS sample) noexcept {
+    if constexpr (std::is_integral_v<TOut> && std::is_integral_v<TS>) {
+        return static_cast<TOut>(prev + sample);
+    } else {
+        return static_cast<TOut>(static_cast<float>(prev) +
+                                 static_cast<float>(sample));
+    }
+}
 
-        // Initialize sum for isamp=0
-        if constexpr (UseRoll) {
-            // Sum samples at wrapped indices: [nsamps - dt_min_sub, nsamps)
-            // and [0]
-            for (SizeType i = 0; i < dt_min_sub; ++i) {
-                running_sum += wf_sub[nsamps - dt_min_sub + i];
-            }
-            running_sum += wf_sub[0];
-        } else {
-            running_sum = wf_sub[0];
-        }
-        buf_row0[0] = running_sum;
-
-        // Triangle region [1, dt_min_sub]: window slides into valid data
-        for (SizeType isamp = 1; isamp <= dt_min_sub; ++isamp) {
-            running_sum += wf_sub[isamp];
-            if constexpr (UseRoll) {
-                running_sum -= wf_sub[nsamps - dt_min_sub - 1 + isamp];
-            }
-            buf_row0[isamp] = running_sum;
-        }
-
-        // Main region [dt_min_sub + 1, nsamps): fully within bounds
-        for (SizeType isamp = dt_min_sub + 1; isamp < nsamps; ++isamp) {
-            running_sum += wf_sub[isamp];
-            running_sum -= wf_sub[isamp - dt_min_sub - 1];
-            buf_row0[isamp] = running_sum;
+/// @brief No-smearing level-0 row: the waterfall shifted by `shift` samples
+/// (wrapped for kRoll, zero-filled otherwise).
+template <bool UseRoll, typename TOut = float, typename TS = float>
+void fdmt_init_impl_row_shift(const TS* __restrict__ wf_sub,
+                              TOut* __restrict__ buf_row,
+                              SizeType shift,
+                              SizeType nsamps) noexcept {
+    if constexpr (UseRoll) {
+        for (SizeType isamp = 0; isamp < shift; ++isamp) {
+            buf_row[isamp] = static_cast<TOut>(wf_sub[nsamps - shift + isamp]);
         }
     } else {
-        // No smearing: just shift by dt_min_sub
-        if constexpr (UseRoll) {
-            // Triangle: wrap indices
-            for (SizeType isamp = 0; isamp < dt_min_sub; ++isamp) {
-                buf_row0[isamp] = wf_sub[nsamps - dt_min_sub + isamp];
-            }
-        } else {
-            // Triangle: partial (no history)
-            std::fill(buf_row0, buf_row0 + dt_min_sub, 0.0F);
-        }
-        // Main region
-        for (SizeType isamp = dt_min_sub; isamp < nsamps; ++isamp) {
-            buf_row0[isamp] = wf_sub[isamp - dt_min_sub];
-        }
+        std::fill(buf_row, buf_row + shift, TOut{0});
+    }
+    for (SizeType isamp = shift; isamp < nsamps; ++isamp) {
+        buf_row[isamp] = static_cast<TOut>(wf_sub[isamp - shift]);
     }
 }
 
-template <bool UseRoll, bool UseBoxSmearing>
-void fdmt_init_impl_row(const float* __restrict__ wf_sub,
-                        const float* __restrict__ buf_prev,
-                        float* __restrict__ buf_cur,
+template <bool UseRoll,
+          bool UseBoxSmearing,
+          typename TOut = float,
+          typename TS   = float>
+void fdmt_init_impl_row(const TS* __restrict__ wf_sub,
+                        const TOut* __restrict__ buf_prev,
+                        TOut* __restrict__ buf_cur,
                         SizeType dt_cur,
                         SizeType nsamps) noexcept {
     if constexpr (UseBoxSmearing) {
         // Extend box sum: new_sum = prev_sum + waterfall[isamp - dt_cur]
         if constexpr (UseRoll) {
             for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                buf_cur[isamp] =
-                    buf_prev[isamp] + wf_sub[nsamps - dt_cur + isamp];
+                buf_cur[isamp] = fdmt_init_add<TOut>(
+                    buf_prev[isamp], wf_sub[nsamps - dt_cur + isamp]);
             }
         } else {
             // No new sample available, just copy previous partial sum
@@ -290,19 +350,63 @@ void fdmt_init_impl_row(const float* __restrict__ wf_sub,
             }
         }
         for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
-            buf_cur[isamp] = buf_prev[isamp] + wf_sub[isamp - dt_cur];
+            buf_cur[isamp] =
+                fdmt_init_add<TOut>(buf_prev[isamp], wf_sub[isamp - dt_cur]);
         }
     } else {
         // No smearing: just shift by dt_cur
         if constexpr (UseRoll) {
             for (SizeType isamp = 0; isamp < dt_cur; ++isamp) {
-                buf_cur[isamp] = wf_sub[nsamps - dt_cur + isamp];
+                buf_cur[isamp] =
+                    static_cast<TOut>(wf_sub[nsamps - dt_cur + isamp]);
             }
         } else {
-            std::fill(buf_cur, buf_cur + dt_cur, 0.0F);
+            std::fill(buf_cur, buf_cur + dt_cur, TOut{0});
         }
         for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
-            buf_cur[isamp] = wf_sub[isamp - dt_cur];
+            buf_cur[isamp] = static_cast<TOut>(wf_sub[isamp - dt_cur]);
+        }
+    }
+}
+
+/**
+ * @brief First level-0 box row out[i] = sum_{k=0..s0} x[i - k], where
+ * `x[j < 0]` is 0 (kFull), the wrapped waterfall (kRoll) or the cross-block
+ * history (kValid).
+ *
+ * Evaluated as s0 + 1 vectorizable shifted adds (x[i], then + x[i-1], ...),
+ * the same summation order as the CUDA init kernel, so CPU and GPU level-0
+ * rows agree. This replaced a serial running sum (`+= x[i]; -= x[i-w]`)
+ * whose loop-carried float dependency dominated FDMT runtime with box
+ * smearing and accumulated rounding error along the block (it did not even
+ * reproduce a width-1 box exactly: (x0 + x1) - x0 != x1). Every output here
+ * is a sum of at most s0 + 1 samples, so its error is bounded per sample.
+ * Integer-valued input (packed low-bit) is exact; with integer TOut the sums
+ * run directly in uint8/uint16 lanes.
+ */
+template <FDMTMode Mode, typename TOut, typename TS>
+void fdmt_init_row0_box(const TS* __restrict__ wf_sub,
+                        const float* __restrict__ hist_sub,
+                        TOut* __restrict__ out,
+                        SizeType s0,
+                        SizeType dt_max_final,
+                        SizeType nsamps) noexcept {
+    fdmt_convert_copy(wf_sub, nsamps, out);
+    for (SizeType s = 1; s <= s0; ++s) {
+        const SizeType nb = std::min(s, nsamps);
+        if constexpr (Mode == FDMTMode::kRoll) {
+            for (SizeType i = 0; i < nb; ++i) {
+                out[i] = fdmt_init_add<TOut>(out[i], wf_sub[nsamps - s + i]);
+            }
+        } else if constexpr (Mode == FDMTMode::kValid) {
+            for (SizeType i = 0; i < nb; ++i) {
+                out[i] =
+                    fdmt_init_add<TOut>(out[i], hist_sub[dt_max_final - s + i]);
+            }
+        }
+#pragma omp simd
+        for (SizeType i = s; i < nsamps; ++i) {
+            out[i] = fdmt_init_add<TOut>(out[i], wf_sub[i - s]);
         }
     }
 }
@@ -325,14 +429,23 @@ void fdmt_init_impl_row(const float* __restrict__ wf_sub,
  * the non-negative and mixed-sign/negative cases below, and is why every
  * lookup here uses `std::abs(dt)` rather than the signed value directly.
  */
-template <bool UseRoll, bool UseBoxSmearing>
-void fdmt_init_subband(const float* __restrict__ wf_sub,
-                       float* __restrict__ buf_base,
+template <bool UseRoll,
+          bool UseBoxSmearing,
+          typename TOut = float,
+          typename TS   = float>
+void fdmt_init_subband(const TS* __restrict__ wf_sub,
+                       TOut* __restrict__ buf_base,
                        const std::vector<IndexType>& dt_grid_sub,
-                       SizeType nsamps) noexcept {
+                       SizeType nsamps,
+                       TOut* __restrict__ scratch_rows) noexcept {
     const auto ndt_sub  = dt_grid_sub.size();
     const auto dt_first = dt_grid_sub.front();
     const auto dt_last  = dt_grid_sub.back();
+    // First box row of width s0 + 1 (see fdmt_init_row0_box).
+    const auto row0_box = [&](TOut* __restrict__ row, SizeType s0) {
+        fdmt_init_row0_box<UseRoll ? FDMTMode::kRoll : FDMTMode::kFull>(
+            wf_sub, nullptr, row, s0, 0, nsamps);
+    };
 
     if constexpr (!UseBoxSmearing) {
         // No smearing: each row is an independent shift of the raw
@@ -341,22 +454,21 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
         // below).
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
             const auto s = static_cast<SizeType>(std::abs(dt_grid_sub[i_dt]));
-            fdmt_init_impl_row0<UseRoll, false>(
+            fdmt_init_impl_row_shift<UseRoll>(
                 wf_sub, buf_base + (i_dt * nsamps), s, nsamps);
         }
         return;
     }
 
     if (dt_first >= 0) {
-        // All-non-negative sub-band grid: original incremental algorithm,
-        // unchanged (numerically identical to the pre-negative-DM code path).
+        // All-non-negative sub-band grid: first box row, then each wider row
+        // extends the previous one by a single sample.
         const auto dt_min_sub = static_cast<SizeType>(dt_first);
-        fdmt_init_impl_row0<UseRoll, true>(wf_sub, buf_base, dt_min_sub,
-                                           nsamps);
+        row0_box(buf_base, dt_min_sub);
         for (SizeType i_dt = 1; i_dt < ndt_sub; ++i_dt) {
             const auto dt_cur = static_cast<SizeType>(dt_grid_sub[i_dt]);
-            float* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
-            const float* __restrict__ buf_prev =
+            TOut* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
+            const TOut* __restrict__ buf_prev =
                 buf_base + ((i_dt - 1) * nsamps);
             fdmt_init_impl_row<UseRoll, true>(wf_sub, buf_prev, buf_cur, dt_cur,
                                               nsamps);
@@ -376,10 +488,11 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
     const auto s_hi =
         static_cast<SizeType>(std::max(std::abs(dt_first), std::abs(dt_last)));
 
-    std::vector<float> row_prev(nsamps);
-    std::vector<float> row_curr(nsamps);
+    // Two running rows in the caller's scratch (2 * nsamps elements).
+    TOut* row_prev = scratch_rows;
+    TOut* row_curr = scratch_rows + nsamps;
 
-    auto write_matches = [&](SizeType s, const float* __restrict__ row) {
+    auto write_matches = [&](SizeType s, const TOut* __restrict__ row) {
         const auto s_signed = static_cast<IndexType>(s);
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
@@ -395,81 +508,83 @@ void fdmt_init_subband(const float* __restrict__ wf_sub,
     };
 
     if (s_lo == 0) {
-        std::copy_n(wf_sub, nsamps, row_prev.data());
+        fdmt_convert_copy(wf_sub, nsamps, row_prev);
     } else {
-        fdmt_init_impl_row0<UseRoll, true>(wf_sub, row_prev.data(), s_lo,
-                                           nsamps);
+        row0_box(row_prev, s_lo);
     }
-    write_matches(s_lo, row_prev.data());
+    write_matches(s_lo, row_prev);
 
     for (SizeType s = s_lo + 1; s <= s_hi; ++s) {
-        fdmt_init_impl_row<UseRoll, true>(wf_sub, row_prev.data(),
-                                          row_curr.data(), s, nsamps);
-        write_matches(s, row_curr.data());
-        row_prev.swap(row_curr);
+        fdmt_init_impl_row<UseRoll, true>(wf_sub, row_prev, row_curr, s,
+                                          nsamps);
+        write_matches(s, row_curr);
+        std::swap(row_prev, row_curr);
     }
 }
 
-template <bool UseRoll, bool UseBoxSmearing>
-void fdmt_init_impl(const float* __restrict__ waterfall,
-                    float* __restrict__ init_buffer,
+/**
+ * @brief One beam's level-0 input: either a float waterfall or a packed
+ * low-bit one (LSB-first rows of `row_bytes` bytes, see bit_pack_utils.hpp).
+ * Packed rows are unpacked one sub-band at a time into a per-thread scratch
+ * row, so a copy of the whole waterfall is never materialized.
+ */
+struct FDMTInput {
+    const float* f32{nullptr};
+    const uint8_t* packed{nullptr};
+    SizeType nbits{32};
+    SizeType row_bytes{0};
+
+    // Row `i_sub` as samples of type TS: the float waterfall row itself, or
+    // the packed row unpacked into `scratch` (nsamps elements). TS other
+    // than float is only requested for packed input (integer tree levels).
+    template <typename TS>
+    [[nodiscard]] const TS* row(SizeType i_sub,
+                                SizeType nsamps,
+                                TS* __restrict__ scratch) const noexcept {
+        if (packed == nullptr) {
+            if constexpr (std::is_same_v<TS, float>) {
+                return f32 + (i_sub * nsamps);
+            } else {
+                return nullptr;
+            }
+        }
+        bit_pack_utils::unpack_row(packed + (i_sub * row_bytes), nbits, nsamps,
+                                   scratch);
+        return scratch;
+    }
+};
+
+template <bool UseRoll, bool UseBoxSmearing, typename TOut = float>
+void fdmt_init_impl(const FDMTInput& input,
+                    TOut* __restrict__ init_buffer,
                     const plans::FDMTCoordGrid* __restrict__ grids_init,
                     SizeType nsubs,
-                    SizeType nsamps) noexcept {
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for default(none)                                         \
-    shared(waterfall, init_buffer, grids_init, nsubs, nsamps)
-#endif
-    for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
-        const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
-        float* __restrict__ buf_base =
-            init_buffer + (grids_init[i_sub].coord_offset * nsamps);
-        fdmt_init_subband<UseRoll, UseBoxSmearing>(
-            wf_sub, buf_base, grids_init[i_sub].dt_grid, nsamps);
+                    SizeType nsamps,
+                    const FDMTWorkspace& ws) noexcept {
+#pragma omp parallel default(none) num_threads(ws.nthreads)                    \
+    shared(input, init_buffer, grids_init, nsubs, nsamps, ws)
+    {
+        // Integer level-0 state (int_tree) is fed integer samples directly.
+        using TS = std::conditional_t<std::is_integral_v<TOut>, TOut, float>;
+        const SizeType tid = fdmt_thread_id();
+        TS* scratch        = ws.unpack<TS>(tid);
+        TOut* rows         = ws.rows<TOut>(tid);
+#pragma omp for
+        for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
+            const TS* __restrict__ wf_sub =
+                input.row<TS>(i_sub, nsamps, scratch);
+            TOut* __restrict__ buf_base =
+                init_buffer + (grids_init[i_sub].coord_offset * nsamps);
+            fdmt_init_subband<UseRoll, UseBoxSmearing>(
+                wf_sub, buf_base, grids_init[i_sub].dt_grid, nsamps, rows);
+        }
     }
 }
 
-void fdmt_init_valid_row0_box(const float* __restrict__ wf_sub,
-                              const float* __restrict__ hist_sub,
-                              float* __restrict__ buf_row0,
-                              SizeType dt_min_sub,
-                              SizeType dt_max_final,
-                              SizeType nsamps) noexcept {
-    // ===== First DT row (dt_min_sub) =====
-    // Box sum of (dt_min_sub + 1) samples ending at current position
-    float running_sum = 0.0F;
-
-    // --- isamp = 0: sum of logical indices [-dt_min_sub, 0] ---
-    // Samples [-dt_min_sub, -1] from hist_sub, [0] from wf_sub
-    for (SizeType i = 0; i < dt_min_sub; ++i) {
-        running_sum += hist_sub[dt_max_final - dt_min_sub + i];
-    }
-    running_sum += wf_sub[0];
-    buf_row0[0] = running_sum;
-
-    // --- isamp in [1, min(dt_min_sub, nsamps-1)]: window slides into valid
-    // data. Clamped to nsamps-1 so a per-channel delay exceeding the block
-    // size (dt_min_sub >= nsamps) can't write past the end of buf_row0; the
-    // main region loop below is then naturally empty in that case.
-    const SizeType boundary_end = std::min(dt_min_sub + 1, nsamps);
-    for (SizeType isamp = 1; isamp < boundary_end; ++isamp) {
-        running_sum += wf_sub[isamp];
-        running_sum -= hist_sub[dt_max_final + isamp - dt_min_sub - 1];
-        buf_row0[isamp] = running_sum;
-    }
-
-    // --- isamp in [dt_min_sub + 1, nsamps): fully within waterfall ---
-    // Add from wf_sub, remove from wf_sub
-    for (SizeType isamp = dt_min_sub + 1; isamp < nsamps; ++isamp) {
-        running_sum += wf_sub[isamp];
-        running_sum -= wf_sub[isamp - dt_min_sub - 1];
-        buf_row0[isamp] = running_sum;
-    }
-}
-
-void fdmt_init_valid_row0_shift(const float* __restrict__ wf_sub,
+template <typename TOut = float, typename TS = float>
+void fdmt_init_valid_row0_shift(const TS* __restrict__ wf_sub,
                                 const float* __restrict__ hist_sub,
-                                float* __restrict__ buf_row0,
+                                TOut* __restrict__ buf_row0,
                                 SizeType dt_min_sub,
                                 SizeType dt_max_final,
                                 SizeType nsamps) noexcept {
@@ -478,19 +593,20 @@ void fdmt_init_valid_row0_shift(const float* __restrict__ wf_sub,
     // so dt_min_sub >= nsamps can't write past the end of buf_row0.
     const SizeType boundary_len = std::min(dt_min_sub, nsamps);
     for (SizeType isamp = 0; isamp < boundary_len; ++isamp) {
-        buf_row0[isamp] = hist_sub[dt_max_final - dt_min_sub + isamp];
+        buf_row0[isamp] =
+            static_cast<TOut>(hist_sub[dt_max_final - dt_min_sub + isamp]);
     }
     // For isamp in [dt_min_sub, nsamps): read from waterfall
     for (SizeType isamp = dt_min_sub; isamp < nsamps; ++isamp) {
-        buf_row0[isamp] = wf_sub[isamp - dt_min_sub];
+        buf_row0[isamp] = static_cast<TOut>(wf_sub[isamp - dt_min_sub]);
     }
 }
 
-template <bool UseBoxSmearing>
-void fdmt_init_valid_row(const float* __restrict__ wf_sub,
+template <bool UseBoxSmearing, typename TOut = float, typename TS = float>
+void fdmt_init_valid_row(const TS* __restrict__ wf_sub,
                          const float* __restrict__ hist_sub,
-                         const float* __restrict__ buf_prev,
-                         float* __restrict__ buf_cur,
+                         const TOut* __restrict__ buf_prev,
+                         TOut* __restrict__ buf_cur,
                          SizeType dt_cur,
                          SizeType dt_max_final,
                          SizeType nsamps) noexcept {
@@ -500,41 +616,41 @@ void fdmt_init_valid_row(const float* __restrict__ wf_sub,
     if constexpr (UseBoxSmearing) {
         // Extend box: new_sum[isamp] = prev_sum[isamp] + input[isamp - dt_cur]
         for (SizeType isamp = 0; isamp < boundary_len; ++isamp) {
-            buf_cur[isamp] =
-                buf_prev[isamp] + hist_sub[dt_max_final + isamp - dt_cur];
+            buf_cur[isamp] = fdmt_init_add<TOut>(
+                buf_prev[isamp], hist_sub[dt_max_final + isamp - dt_cur]);
         }
         for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
-            buf_cur[isamp] = buf_prev[isamp] + wf_sub[isamp - dt_cur];
+            buf_cur[isamp] =
+                fdmt_init_add<TOut>(buf_prev[isamp], wf_sub[isamp - dt_cur]);
         }
     } else {
         // No smearing: just shift by dt_cur
         for (SizeType isamp = 0; isamp < boundary_len; ++isamp) {
-            buf_cur[isamp] = hist_sub[dt_max_final - dt_cur + isamp];
+            buf_cur[isamp] =
+                static_cast<TOut>(hist_sub[dt_max_final - dt_cur + isamp]);
         }
         for (SizeType isamp = dt_cur; isamp < nsamps; ++isamp) {
-            buf_cur[isamp] = wf_sub[isamp - dt_cur];
+            buf_cur[isamp] = static_cast<TOut>(wf_sub[isamp - dt_cur]);
         }
     }
 }
 
-void fdmt_init_valid_update_history(const float* __restrict__ waterfall,
-                                    float* __restrict__ hist_buffer,
-                                    float* __restrict__ hist_init_buffer,
-                                    SizeType nsubs,
+/**
+ * @brief Advances one sub-band's level-0 input history windows by this
+ * block. Sub-bands own disjoint history slices, so this runs per sub-band
+ * inside the parallel init loop, right after that sub-band's rows are
+ * built (which is the only point a packed input's unpacked row exists).
+ */
+template <typename TS>
+void fdmt_init_valid_update_history(const TS* __restrict__ wf_sub,
+                                    float* __restrict__ hist_sub,
+                                    float* __restrict__ hist_init_sub,
                                     SizeType nsamps,
                                     SizeType dt_max_init,
                                     SizeType dt_max_final) noexcept {
-    for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
-        const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
-        float* __restrict__ hist_sub     = hist_buffer + (i_sub * dt_max_final);
-        fdmt_advance_history_window(wf_sub, hist_sub, nsamps, dt_max_final);
-
-        if (hist_init_buffer != nullptr && dt_max_init > 0) {
-            float* __restrict__ hist_init_sub =
-                hist_init_buffer + (i_sub * dt_max_init);
-            fdmt_advance_history_window(wf_sub, hist_init_sub, nsamps,
-                                        dt_max_init);
-        }
+    fdmt_advance_history_window(wf_sub, hist_sub, nsamps, dt_max_final);
+    if (hist_init_sub != nullptr && dt_max_init > 0) {
+        fdmt_advance_history_window(wf_sub, hist_init_sub, nsamps, dt_max_init);
     }
 }
 
@@ -544,16 +660,22 @@ void fdmt_init_valid_update_history(const float* __restrict__ waterfall,
  * that need samples from before the start of the current block instead of
  * zero-padding them.
  */
-template <bool UseBoxSmearing>
-void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
+template <bool UseBoxSmearing, typename TOut = float, typename TS = float>
+void fdmt_init_valid_subband(const TS* __restrict__ wf_sub,
                              const float* __restrict__ hist_sub,
-                             float* __restrict__ buf_base,
+                             TOut* __restrict__ buf_base,
                              const std::vector<IndexType>& dt_grid_sub,
                              SizeType dt_max_final,
-                             SizeType nsamps) noexcept {
+                             SizeType nsamps,
+                             TOut* __restrict__ scratch_rows) noexcept {
     const auto ndt_sub  = dt_grid_sub.size();
     const auto dt_first = dt_grid_sub.front();
     const auto dt_last  = dt_grid_sub.back();
+    // First box row of width s0 + 1 (see fdmt_init_row0_box).
+    const auto row0_box = [&](TOut* __restrict__ row, SizeType s0) {
+        fdmt_init_row0_box<FDMTMode::kValid>(wf_sub, hist_sub, row, s0,
+                                             dt_max_final, nsamps);
+    };
 
     if constexpr (!UseBoxSmearing) {
         for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
@@ -567,12 +689,11 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
 
     if (dt_first >= 0) {
         const auto dt_min_sub = static_cast<SizeType>(dt_first);
-        fdmt_init_valid_row0_box(wf_sub, hist_sub, buf_base, dt_min_sub,
-                                 dt_max_final, nsamps);
+        row0_box(buf_base, dt_min_sub);
         for (SizeType i_dt = 1; i_dt < ndt_sub; ++i_dt) {
             const auto dt_cur = static_cast<SizeType>(dt_grid_sub[i_dt]);
-            float* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
-            const float* __restrict__ buf_prev =
+            TOut* __restrict__ buf_cur = buf_base + (i_dt * nsamps);
+            const TOut* __restrict__ buf_prev =
                 buf_base + ((i_dt - 1) * nsamps);
             fdmt_init_valid_row<true>(wf_sub, hist_sub, buf_prev, buf_cur,
                                       dt_cur, dt_max_final, nsamps);
@@ -585,10 +706,11 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
     const auto s_hi =
         static_cast<SizeType>(std::max(std::abs(dt_first), std::abs(dt_last)));
 
-    std::vector<float> row_prev(nsamps);
-    std::vector<float> row_curr(nsamps);
+    // Two running rows in the caller's scratch (2 * nsamps elements).
+    TOut* row_prev = scratch_rows;
+    TOut* row_curr = scratch_rows + nsamps;
 
-    auto write_matches = [&](SizeType s, const float* __restrict__ row) {
+    auto write_matches = [&](SizeType s, const TOut* __restrict__ row) {
         const auto s_signed = static_cast<IndexType>(s);
         if (s_signed >= dt_first && s_signed <= dt_last) {
             std::copy_n(row, nsamps,
@@ -604,51 +726,60 @@ void fdmt_init_valid_subband(const float* __restrict__ wf_sub,
     };
 
     if (s_lo == 0) {
-        std::copy_n(wf_sub, nsamps, row_prev.data());
+        fdmt_convert_copy(wf_sub, nsamps, row_prev);
     } else {
-        fdmt_init_valid_row0_box(wf_sub, hist_sub, row_prev.data(), s_lo,
-                                 dt_max_final, nsamps);
+        row0_box(row_prev, s_lo);
     }
-    write_matches(s_lo, row_prev.data());
+    write_matches(s_lo, row_prev);
 
     for (SizeType s = s_lo + 1; s <= s_hi; ++s) {
-        fdmt_init_valid_row<true>(wf_sub, hist_sub, row_prev.data(),
-                                  row_curr.data(), s, dt_max_final, nsamps);
-        write_matches(s, row_curr.data());
-        row_prev.swap(row_curr);
+        fdmt_init_valid_row<true>(wf_sub, hist_sub, row_prev, row_curr, s,
+                                  dt_max_final, nsamps);
+        write_matches(s, row_curr);
+        std::swap(row_prev, row_curr);
     }
 }
 
 // Specialized implementation for VALID mode with history
-template <bool UseBoxSmearing>
-void fdmt_init_valid_impl(const float* __restrict__ waterfall,
-                          float* __restrict__ init_buffer,
+template <bool UseBoxSmearing, typename TOut = float>
+void fdmt_init_valid_impl(const FDMTInput& input,
+                          TOut* __restrict__ init_buffer,
                           float* __restrict__ hist_buffer,
                           float* __restrict__ hist_init_buffer,
                           const plans::FDMTCoordGrid* __restrict__ grids_init,
                           SizeType nsubs,
                           SizeType nsamps,
                           SizeType dt_max_init,
-                          SizeType dt_max_final) noexcept {
-#ifdef DMT_ENABLE_OPENMP
-#pragma omp parallel for default(none)                                         \
-    shared(waterfall, init_buffer, hist_buffer, grids_init, nsubs, nsamps,     \
-               dt_max_final)
-#endif
-    for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
-        const float* __restrict__ wf_sub = waterfall + (i_sub * nsamps);
-        const float* __restrict__ hist_sub =
-            hist_buffer + (i_sub * dt_max_final);
-        float* __restrict__ buf_base =
-            init_buffer + (grids_init[i_sub].coord_offset * nsamps);
+                          SizeType dt_max_final,
+                          const FDMTWorkspace& ws) noexcept {
+#pragma omp parallel default(none) num_threads(ws.nthreads)                    \
+    shared(input, init_buffer, hist_buffer, hist_init_buffer, grids_init,      \
+               nsubs, nsamps, dt_max_init, dt_max_final, ws)
+    {
+        // Integer level-0 state (int_tree) is fed integer samples directly.
+        using TS = std::conditional_t<std::is_integral_v<TOut>, TOut, float>;
+        const SizeType tid = fdmt_thread_id();
+        TS* scratch        = ws.unpack<TS>(tid);
+        TOut* rows         = ws.rows<TOut>(tid);
+#pragma omp for
+        for (SizeType i_sub = 0; i_sub < nsubs; ++i_sub) {
+            const TS* __restrict__ wf_sub =
+                input.row<TS>(i_sub, nsamps, scratch);
+            float* __restrict__ hist_sub = hist_buffer + (i_sub * dt_max_final);
+            TOut* __restrict__ buf_base =
+                init_buffer + (grids_init[i_sub].coord_offset * nsamps);
 
-        fdmt_init_valid_subband<UseBoxSmearing>(wf_sub, hist_sub, buf_base,
-                                                grids_init[i_sub].dt_grid,
-                                                dt_max_final, nsamps);
+            fdmt_init_valid_subband<UseBoxSmearing>(wf_sub, hist_sub, buf_base,
+                                                    grids_init[i_sub].dt_grid,
+                                                    dt_max_final, nsamps, rows);
+            fdmt_init_valid_update_history(wf_sub, hist_sub,
+                                           (hist_init_buffer != nullptr)
+                                               ? hist_init_buffer +
+                                                     (i_sub * dt_max_init)
+                                               : nullptr,
+                                           nsamps, dt_max_init, dt_max_final);
+        }
     }
-
-    fdmt_init_valid_update_history(waterfall, hist_buffer, hist_init_buffer,
-                                   nsubs, nsamps, dt_max_init, dt_max_final);
 }
 } // namespace
 
@@ -664,12 +795,15 @@ public:
          SizeType dt_step,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
          int nthreads,
-         SizeType nbeams)
+         SizeType nbeams,
+         SizeType fuse_levels,
+         bool int_tree)
         : m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_int_tree(int_tree),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
+          m_nthreads(std::max(1, nthreads)),
           m_plan(f_min,
                  f_max,
                  nchans,
@@ -678,9 +812,9 @@ public:
                  dt_max,
                  dt_min,
                  dt_step,
-                 mode,
-                 verbose),
-          m_state_internal(m_nbeams * m_plan.get_buffer_size(), 0.0F),
+                 mode),
+          m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
+                           std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
                         ? m_nbeams * m_plan.get_history_size()
                         : 0,
@@ -693,7 +827,7 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        set_dmt_openmp_threads(nthreads);
+        allocate_working_memory(fuse_levels);
     }
 
     Impl(float f_min,
@@ -704,14 +838,18 @@ public:
          const std::vector<IndexType>& dt_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
          int nthreads,
-         SizeType nbeams)
+         SizeType nbeams,
+         SizeType fuse_levels,
+         bool int_tree)
         : m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_int_tree(int_tree),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, verbose),
-          m_state_internal(m_nbeams * m_plan.get_buffer_size(), 0.0F),
+          m_nthreads(std::max(1, nthreads)),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
+          m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
+                           std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
                         ? m_nbeams * m_plan.get_history_size()
                         : 0,
@@ -724,7 +862,7 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        set_dmt_openmp_threads(nthreads);
+        allocate_working_memory(fuse_levels);
     }
 
     Impl(float f_min,
@@ -735,14 +873,18 @@ public:
          const std::vector<float>& dm_grid,
          bool use_box_smearing,
          std::string_view mode,
-         bool verbose,
          int nthreads,
-         SizeType nbeams)
+         SizeType nbeams,
+         SizeType fuse_levels,
+         bool int_tree)
         : m_use_box_smearing(use_box_smearing),
-          m_mode(parse_mode(mode)),
+          m_int_tree(int_tree),
+          m_mode(parse_fdmt_mode(mode)),
           m_nbeams(nbeams),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, verbose),
-          m_state_internal(m_nbeams * m_plan.get_buffer_size(), 0.0F),
+          m_nthreads(std::max(1, nthreads)),
+          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
+          m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
+                           std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
                         ? m_nbeams * m_plan.get_history_size()
                         : 0,
@@ -755,7 +897,7 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        set_dmt_openmp_threads(nthreads);
+        allocate_working_memory(fuse_levels);
     }
 
     ~Impl()                      = default;
@@ -769,10 +911,23 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
-        reset(waterfall, dmt);
+        {
+            const FuseRequest fuse(*this);
+            reset(waterfall, dmt);
+        }
         advance_until_remaining(0);
         finalize();
-        spdlog::debug("FDMTCPU::Impl: Execution complete.");
+    }
+
+    void execute(std::span<const uint8_t> waterfall_packed,
+                 SizeType nbits,
+                 std::span<float> dmt) {
+        {
+            const FuseRequest fuse(*this);
+            reset(waterfall_packed, nbits, dmt);
+        }
+        advance_until_remaining(0);
+        finalize();
     }
 
     void reset(std::span<const float> waterfall, std::span<float> dmt) {
@@ -783,30 +938,72 @@ public:
                 "FDMTCPU: Invalid size of waterfall. Expected {}, got {}",
                 m_nbeams * nchans * nsamps, waterfall.size()));
         }
-        if (dmt.size() < m_nbeams * m_plan.get_buffer_size()) {
+        check_dmt_size(dmt);
+        const FDMTInput input{.f32 = waterfall.data()};
+        start(input, nchans * nsamps, m_float_levels, dmt);
+    }
+
+    void reset(std::span<const uint8_t> waterfall_packed,
+               SizeType nbits,
+               std::span<float> dmt) {
+        if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
+            nbits != 16) {
             throw std::invalid_argument(std::format(
-                "FDMTCPU: Invalid size of dmt. Expected at least {}, got {}",
-                m_nbeams * m_plan.get_buffer_size(), dmt.size()));
+                "FDMTCPU: nbits={} must be one of 1, 2, 4, 8, 16", nbits));
         }
-
-        m_dmt_target_ptr = dmt.data();
-        m_current_level  = 0;
-
-        // Number of internal ping-pong iterations (excluding the final write)
-        const SizeType internal_iters =
-            total_levels() >= 2 ? total_levels() - 2 : 0;
-        const bool odd_swaps = (internal_iters % 2) == 1;
-        if (odd_swaps) {
-            m_current_in_ptr  = dmt.data();
-            m_current_out_ptr = m_state_internal.data();
-        } else {
-            m_current_in_ptr  = m_state_internal.data();
-            m_current_out_ptr = dmt.data();
+        const auto nchans    = m_plan.get_nchans();
+        const auto nsamps    = m_plan.get_nsamps();
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
+        if (waterfall_packed.size() != m_nbeams * nchans * row_bytes) {
+            throw std::invalid_argument(std::format(
+                "FDMTCPU: Invalid size of packed waterfall (nbits={}). "
+                "Expected {} bytes, got {}",
+                nbits, m_nbeams * nchans * row_bytes, waterfall_packed.size()));
         }
+        check_dmt_size(dmt);
+        const FDMTInput input{
+            .packed    = waterfall_packed.data(),
+            .nbits     = nbits,
+            .row_bytes = row_bytes,
+        };
+        start(input, nchans * row_bytes,
+              m_int_tree ? m_int_levels[nbits] : m_float_levels, dmt);
+    }
 
-        initialise(waterfall, m_current_in_ptr);
-        m_is_initialized = true;
-        spdlog::debug("FDMTCPU: Stepper initialized at level 0.");
+    [[nodiscard]] SizeType get_fuse_levels() const noexcept {
+        return m_fuse_levels;
+    }
+
+    [[nodiscard]] bool get_int_tree() const noexcept { return m_int_tree; }
+
+    [[nodiscard]] std::string summary() const {
+        const auto mem = get_memory_usage();
+        const auto mib = [](SizeType b) {
+            return static_cast<double>(b) / 1048576.0;
+        };
+        const auto summary = std::format(
+            "*** FDMTCPU ***\n"
+            "Mode: {}, {}, nbeams {}, fuse_levels {}, int_tree {}\n"
+            "Host memory: plan {:.1f} MiB, state {:.1f} MiB, history {:.1f} "
+            "MiB, "
+            "workspace {:.1f} MiB (total {:.1f} MiB); output buffer {:.1f} MiB "
+            "per execute()\n",
+            fdmt_mode_to_string(m_mode), std::format("{} threads", m_nthreads),
+            m_nbeams, m_fuse_levels, m_int_tree ? "on" : "off", mib(mem.plan),
+            mib(mem.state), mib(mem.history), mib(mem.workspace),
+            mib(mem.plan + mem.state + mem.history + mem.workspace),
+            mib(mem.output));
+        return m_plan.summary() + summary;
+    }
+
+    [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept {
+        return {
+            .plan      = m_plan.get_container().get_memory_usage(),
+            .state     = m_state_internal.size(),
+            .history   = history_state_size() * sizeof(float),
+            .workspace = m_workspace.size(),
+            .output    = m_nbeams * m_plan.get_buffer_size() * sizeof(float),
+        };
     }
 
     void advance(SizeType levels = 1) {
@@ -817,8 +1014,7 @@ public:
         const auto total_lvl = total_levels();
         while (levels > 0 && m_current_level < total_lvl - 1) {
             const SizeType next_level = m_current_level + 1;
-            execute_iter(m_current_in_ptr, m_current_out_ptr, next_level);
-            std::swap(m_current_in_ptr, m_current_out_ptr);
+            execute_iter(next_level);
             m_current_level = next_level;
             --levels;
         }
@@ -846,7 +1042,7 @@ public:
         }
         const auto& state_shape =
             m_plan.get_container().state_shape[m_current_level];
-        return {m_current_in_ptr, state_shape.nelements};
+        return {current_level_f32(), state_shape.nelements};
     }
 
     [[nodiscard]] std::span<const float>
@@ -866,7 +1062,7 @@ public:
         const auto& grid  = plan_c.grids[m_current_level][subband_idx];
         const auto offset = grid.coord_offset * state_shape.nsamps;
         const auto count  = grid.ndt * state_shape.nsamps;
-        return {m_current_in_ptr + offset, count};
+        return {current_level_f32() + offset, count};
     }
 
     [[nodiscard]] FDMTSubbandView view_subband(SizeType subband_idx) const {
@@ -886,7 +1082,7 @@ public:
         const auto offset = grid.coord_offset * state_shape.nsamps;
         const auto count  = grid.ndt * state_shape.nsamps;
         return FDMTSubbandView{
-            .data = std::span<const float>(m_current_in_ptr + offset, count),
+            .data = std::span<const float>(current_level_f32() + offset, count),
             .subband_idx = subband_idx,
             .ndt         = grid.ndt,
             .nsamps      = state_shape.nsamps,
@@ -960,9 +1156,11 @@ public:
     }
 
     void reset_history() noexcept {
-        std::fill(m_history.begin(), m_history.end(), 0.0F);
-        std::fill(m_history_init.begin(), m_history_init.end(), 0.0F);
-        std::fill(m_tree_history.begin(), m_tree_history.end(), 0.0F);
+        std::ranges::fill(m_history, 0.0F);
+        std::ranges::fill(m_history_init, 0.0F);
+        std::ranges::fill(m_tree_history, 0.0F);
+        // Abandons any unfinished stepper block along with its stream.
+        m_is_initialized = false;
     }
 
     [[nodiscard]] SizeType history_state_size() const noexcept {
@@ -976,10 +1174,15 @@ public:
                             "Expected {}, got {}",
                             history_state_size(), out.size()));
         }
-        auto it = out.begin();
-        it      = std::copy(m_history.begin(), m_history.end(), it);
-        it      = std::copy(m_history_init.begin(), m_history_init.end(), it);
-        std::copy(m_tree_history.begin(), m_tree_history.end(), it);
+
+        const auto h  = out.first(m_history.size());
+        const auto hi = out.subspan(h.size(), m_history_init.size());
+        const auto th =
+            out.subspan(h.size() + hi.size(), m_tree_history.size());
+
+        std::ranges::copy(m_history, h.begin());
+        std::ranges::copy(m_history_init, hi.begin());
+        std::ranges::copy(m_tree_history, th.begin());
     }
 
     void load_history(std::span<const float> in) {
@@ -989,48 +1192,225 @@ public:
                             "Expected {}, got {}",
                             history_state_size(), in.size()));
         }
-        auto it = in.begin();
-        std::copy(it, it + static_cast<IndexType>(m_history.size()),
-                  m_history.begin());
-        it += static_cast<IndexType>(m_history.size());
-        std::copy(it, it + static_cast<IndexType>(m_history_init.size()),
-                  m_history_init.begin());
-        it += static_cast<IndexType>(m_history_init.size());
-        std::copy(it, it + static_cast<IndexType>(m_tree_history.size()),
-                  m_tree_history.begin());
+
+        const auto h  = in.first(m_history.size());
+        const auto hi = in.subspan(h.size(), m_history_init.size());
+        const auto th = in.subspan(h.size() + hi.size(), m_tree_history.size());
+
+        std::ranges::copy(h, m_history.begin());
+        std::ranges::copy(hi, m_history_init.begin());
+        std::ranges::copy(th, m_tree_history.begin());
     }
 
 private:
+    // Storage type of one tree level's state (int_tree).
+    using Elem = detail::FDMTLevelType;
+
+    // Where one level's state lives: `base` of beam 0, beams `beam_stride`
+    // bytes apart.
+    struct LevelBuf {
+        std::byte* base{nullptr};
+        Elem type{Elem::kF32};
+        SizeType beam_stride{0};
+    };
+
+    // Everything below is allocated in the constructor (see
+    // allocate_working_memory()); execute() and the stepper only index it.
     bool m_use_box_smearing;
+    bool m_int_tree;
     FDMTMode m_mode;
     SizeType m_nbeams;
+    int m_nthreads;
     plans::FDMTPlan m_plan;
-    // Internal state buffer (for ping-pong buffering)
-    std::vector<float> m_state_internal;
-    // History buffers for valid-mode streaming across FDMT blocks
+    // Internal state buffer (for ping-pong buffering), zero-filled. Byte
+    // storage holds float, uint8_t and uint16_t levels alike: with int_tree
+    // both integer ping-pong halves (<= 2 bytes/element each) live in here.
+    std::vector<std::byte> m_state_internal;
+    // History buffers for valid-mode streaming across FDMT blocks. Always
+    // float, whatever the input or tree state type.
     std::vector<float> m_history;
     std::vector<float> m_history_init; // only when use_box_smearing is true
     std::vector<float> m_tree_history;
 
+    SizeType m_fuse_levels{0}; // resolved fuse_levels
+    // Per-level storage types: all float, and per nbits for int_tree.
+    std::vector<Elem> m_float_levels;
+    std::array<std::vector<Elem>, 17> m_int_levels; // indexed by nbits
+    // Per-thread scratch (see FDMTWorkspace) and its layout.
+    std::vector<std::byte> m_workspace;
+    FDMTWorkspace m_ws;
+
     // Stepper state
-    float* m_current_in_ptr{nullptr};
-    float* m_current_out_ptr{nullptr};
-    float* m_dmt_target_ptr{nullptr};
+    std::vector<LevelBuf> m_levels;
+    // Set only while execute() runs reset(): level fusion replaces levels
+    // 0..fuse_levels there, never in the inspectable stepper path.
+    bool m_fuse_requested{false};
+    std::vector<std::vector<SizeType>> m_fused_sum_index; // per level
+
+    struct FuseRequest {
+        Impl& impl;
+        explicit FuseRequest(Impl& i) : impl(i) {
+            impl.m_fuse_requested = true;
+        }
+        ~FuseRequest() { impl.m_fuse_requested = false; }
+        FuseRequest(const FuseRequest&)            = delete;
+        FuseRequest& operator=(const FuseRequest&) = delete;
+        FuseRequest(FuseRequest&&)                 = delete;
+        FuseRequest& operator=(FuseRequest&&)      = delete;
+    };
     SizeType m_current_level{0};
     bool m_is_initialized{false};
 
-    static FDMTMode parse_mode(std::string_view mode) {
-        if (mode == "full") {
-            return FDMTMode::kFull;
+    template <typename F> static void with_elem(Elem e, F&& f) {
+        switch (e) {
+        case Elem::kU8:
+            f.template operator()<uint8_t>();
+            break;
+        case Elem::kU16:
+            f.template operator()<uint16_t>();
+            break;
+        case Elem::kF32:
+            f.template operator()<float>();
+            break;
         }
-        if (mode == "roll") {
-            return FDMTMode::kRoll;
+    }
+
+    template <typename T>
+    [[nodiscard]] T* level_ptr(SizeType level, SizeType beam) const noexcept {
+        const auto& lb = m_levels[level];
+        return reinterpret_cast<T*>(lb.base + (beam * lb.beam_stride));
+    }
+
+    [[nodiscard]] const float* current_level_f32() const {
+        if (m_levels[m_current_level].type != Elem::kF32) {
+            throw std::logic_error(std::format(
+                "FDMTCPU: level {} is stored as an integer type "
+                "(int_tree); construct with int_tree=false to inspect "
+                "intermediate levels.",
+                m_current_level));
         }
-        if (mode == "valid") {
-            return FDMTMode::kValid;
+        return level_ptr<const float>(m_current_level, 0);
+    }
+
+    // In "valid" mode every block must reach the root before the next one
+    // starts: levels a stepper run never executed would otherwise skip this
+    // block's cross-block history update and silently corrupt the stream.
+    void check_previous_block_finished() const {
+        if (m_mode == FDMTMode::kValid && m_is_initialized && !is_finished()) {
+            throw std::logic_error(std::format(
+                "FDMTCPU: the previous block's stepper run stopped at level "
+                "{} of {}. In mode='valid' every block must be finalized "
+                "before the next reset()/execute(), or its cross-block "
+                "history is lost. Call finalize(), or reset_history() to "
+                "abandon the stream.",
+                m_current_level, total_levels() - 1));
         }
-        throw std::invalid_argument(std::format(
-            "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
+    }
+
+    void check_dmt_size(std::span<float> dmt) const {
+        if (dmt.size() < m_nbeams * m_plan.get_buffer_size()) {
+            throw std::invalid_argument(std::format(
+                "FDMTCPU: Invalid size of dmt. Expected at least {}, got {}",
+                m_nbeams * m_plan.get_buffer_size(), dmt.size()));
+        }
+    }
+
+    // Automatic fusion depth (kFDMTAutoFuse): the deepest depth whose two
+    // per-thread scratch buffers fit max(kFuseBudgetTotal / nthreads,
+    // kFuseBudgetPerThread) -- a rule on the plan and thread count only, no
+    // hardware detection. Fitted on an M1 Pro and a Xeon Gold 6348H (4096
+    // channels, dt_max 2048, 4K-64K samples, 1-8 threads): within 5% of the
+    // best fixed depth except 4K-sample blocks on the Xeon (6-8.5%).
+    static constexpr SizeType kFuseBudgetTotal     = SizeType{36} << 20;
+    static constexpr SizeType kFuseBudgetPerThread = SizeType{5} << 20;
+
+    static constexpr SizeType round_up_64(SizeType n) noexcept {
+        return ((n + 63) / 64) * 64;
+    }
+
+    /**
+     * Resolves fuse_levels and allocates every buffer execute() and the
+     * stepper use: per-level type tables, the level layout, the fused
+     * index, and the per-thread workspace (see FDMTWorkspace). Nothing is
+     * allocated after this.
+     */
+    void allocate_working_memory(SizeType fuse_levels) {
+        if (m_nbeams == 0) {
+            throw std::invalid_argument("FDMTCPU: nbeams must be at least 1");
+        }
+        const SizeType niters = m_plan.get_niters();
+        m_float_levels.assign(niters + 1, Elem::kF32);
+        for (const SizeType nbits : {1, 2, 4, 8, 16}) {
+            m_int_levels[nbits] =
+                detail::int_tree_level_types(m_plan, m_use_box_smearing, nbits);
+        }
+        m_levels.resize(niters + 1);
+
+        if (fuse_levels == kFDMTAutoFuse) {
+            m_fuse_levels = auto_fuse_levels();
+        } else {
+            m_fuse_levels = std::min(fuse_levels, niters);
+        }
+        if (m_fuse_levels > 0) {
+            build_fused_sum_index();
+        }
+
+        m_ws.row_bytes   = round_up_64(m_plan.get_nsamps() * sizeof(float));
+        m_ws.fused_bytes = (m_fuse_levels > 0)
+                               ? round_up_64(fused_scratch_bytes(m_fuse_levels))
+                               : 0;
+        m_ws.stride      = (3 * m_ws.row_bytes) + (2 * m_ws.fused_bytes);
+        m_ws.nthreads    = m_nthreads;
+        m_workspace.assign(m_nthreads * m_ws.stride, std::byte{0});
+        m_ws.base = m_workspace.data();
+    }
+
+    /**
+     * Assigns each level's buffer. Float levels ping-pong between the
+     * caller's dmt buffer and m_state_internal so the root lands in dmt
+     * (level l is in dmt iff niters - l is even -- the original parity
+     * rule). Integer levels alternate between the two halves of
+     * m_state_internal; detail::int_tree_level_types() guarantees the first
+     * float level after them is a dmt level.
+     */
+    void layout_levels(const std::vector<Elem>& types, std::span<float> dmt) {
+        const SizeType niters = m_plan.get_niters();
+        const SizeType bufsz  = m_plan.get_buffer_size();
+        auto* dmt_bytes       = reinterpret_cast<std::byte*>(dmt.data());
+        auto* internal        = m_state_internal.data();
+        const SizeType half   = m_nbeams * bufsz * sizeof(uint16_t);
+        for (SizeType l = 0; l <= niters; ++l) {
+            if (types[l] == Elem::kF32) {
+                m_levels[l] = {
+                    .base = ((niters - l) % 2 == 0) ? dmt_bytes : internal,
+                    .type = Elem::kF32,
+                    .beam_stride = bufsz * sizeof(float),
+                };
+            } else {
+                m_levels[l] = {
+                    .base        = internal + ((l % 2 == 0) ? 0 : half),
+                    .type        = types[l],
+                    .beam_stride = bufsz * sizeof(uint16_t),
+                };
+            }
+        }
+    }
+
+    void start(const FDMTInput& input,
+               SizeType input_beam_stride,
+               const std::vector<Elem>& types,
+               std::span<float> dmt) {
+        check_previous_block_finished();
+        layout_levels(types, dmt);
+        const SizeType fuse = m_fuse_requested ? m_fuse_levels : 0;
+        if (fuse > 0) {
+            initialise_fused(input, input_beam_stride, fuse);
+            m_current_level = fuse;
+        } else {
+            m_current_level = 0;
+            initialise(input, input_beam_stride);
+        }
+        m_is_initialized = true;
     }
 
     // Beam-major layout: beam b's waterfall/state/history all live in
@@ -1044,8 +1424,7 @@ private:
     // call byte-for-byte. (Folding beam into the parallel region for better
     // multi-beam throughput is a follow-up optimization once this is
     // benchmarked, not part of this change.)
-    void initialise(std::span<const float> waterfall,
-                    float* __restrict__ init_buffer) {
+    void initialise(const FDMTInput& input, SizeType input_beam_stride) {
         const auto& plan_c     = m_plan.get_container();
         const auto& grids_init = plan_c.grids[0];
         const auto nsamps      = plan_c.state_shape[0].nsamps;
@@ -1054,86 +1433,380 @@ private:
             plan_c.state_shape[m_plan.get_niters()].dt_max;
         const auto nsubs = plan_c.state_shape[0].nchans;
 
-        const auto wf_beam_stride   = nsubs * nsamps;
-        const auto buf_beam_stride  = m_plan.get_buffer_size();
         const auto hist_beam_stride = m_plan.get_history_size();
         const auto hist_init_stride = m_plan.get_history_init_size();
 
-        for (SizeType b = 0; b < m_nbeams; ++b) {
-            const float* __restrict__ wf_b =
-                waterfall.data() + (b * wf_beam_stride);
-            float* __restrict__ init_buffer_b =
-                init_buffer + (b * buf_beam_stride);
+        with_elem(m_levels[0].type, [&]<typename T>() {
+            for (SizeType b = 0; b < m_nbeams; ++b) {
+                FDMTInput input_b = input;
+                if (input_b.packed != nullptr) {
+                    input_b.packed += b * input_beam_stride;
+                } else {
+                    input_b.f32 += b * input_beam_stride;
+                }
+                T* __restrict__ init_buffer_b = level_ptr<T>(0, b);
 
+                if (m_mode == FDMTMode::kFull) {
+                    if (m_use_box_smearing) {
+                        fdmt_init_impl<false, true>(input_b, init_buffer_b,
+                                                    grids_init.data(), nsubs,
+                                                    nsamps, m_ws);
+                    } else {
+                        fdmt_init_impl<false, false>(input_b, init_buffer_b,
+                                                     grids_init.data(), nsubs,
+                                                     nsamps, m_ws);
+                    }
+                } else if (m_mode == FDMTMode::kRoll) {
+                    if (m_use_box_smearing) {
+                        fdmt_init_impl<true, true>(input_b, init_buffer_b,
+                                                   grids_init.data(), nsubs,
+                                                   nsamps, m_ws);
+                    } else {
+                        fdmt_init_impl<true, false>(input_b, init_buffer_b,
+                                                    grids_init.data(), nsubs,
+                                                    nsamps, m_ws);
+                    }
+                } else {
+                    float* __restrict__ hist_b =
+                        m_history.data() + (b * hist_beam_stride);
+                    float* __restrict__ hist_init_b =
+                        m_history_init.data() + (b * hist_init_stride);
+                    if (m_use_box_smearing) {
+                        fdmt_init_valid_impl<true>(
+                            input_b, init_buffer_b, hist_b, hist_init_b,
+                            grids_init.data(), nsubs, nsamps, dt_max_init,
+                            dt_max_final, m_ws);
+                    } else {
+                        fdmt_init_valid_impl<false>(
+                            input_b, init_buffer_b, hist_b, hist_init_b,
+                            grids_init.data(), nsubs, nsamps, dt_max_init,
+                            dt_max_final, m_ws);
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Level fusion (fuse_levels)
+    // ---------------------------------------------------------------------
+
+    // Per level: linear coordinate index -> its index in coordinates_sum, or
+    // SIZE_MAX for a copy coordinate. Both lists are in coordinate order, so
+    // one merge-style pass per level builds it. The plan never changes, so
+    // this is built once.
+    void build_fused_sum_index() {
+        if (!m_fused_sum_index.empty()) {
+            return;
+        }
+        const auto& pc = m_plan.get_container();
+        m_fused_sum_index.assign(total_levels(), {});
+        for (SizeType l = 1; l < total_levels(); ++l) {
+            const auto& coords                      = pc.coordinates[l];
+            [[maybe_unused]] const auto& coords_sum = pc.coordinates_sum[l];
+            auto& index                             = m_fused_sum_index[l];
+            index.assign(coords.size(), SIZE_MAX);
+            SizeType j = 0;
+            for (SizeType k = 0; k < coords.size(); ++k) {
+                if (coords[k].i_coord_head != SIZE_MAX) {
+                    index[k] = j++;
+                }
+            }
+            assert(j == coords_sum.size());
+        }
+    }
+
+    // Coordinate range [begin, end) of level `l` owned by fused group `g`:
+    // the level-l sub-bands descending from level-F sub-band g, i.e.
+    // [g * 2^(F-l), (g+1) * 2^(F-l)) clipped to the level's sub-band count
+    // (odd counts end in a single-child copy sub-band, which still descends
+    // from sub-band floor(j / 2)).
+    [[nodiscard]] std::pair<SizeType, SizeType>
+    fused_coord_range(SizeType l, SizeType g, SizeType fuse) const noexcept {
+        const auto& grids    = m_plan.get_container().grids[l];
+        const SizeType width = SizeType{1} << (fuse - l);
+        const SizeType first = g * width;
+        const SizeType last  = std::min(first + width, grids.size()) - 1;
+        return {grids[first].coord_offset,
+                grids[last].coord_offset + grids[last].ndt};
+    }
+
+    // Merges level-l coordinates [c_begin, c_end) of one fused group. `in`
+    // / `out` hold the group's rows starting at coordinates in_base /
+    // out_base; the merge itself is the unmodified offset_add / copy used by
+    // fdmt_iter, so fused results are bit-identical.
+    template <FDMTMode Mode, typename TIn, typename TOut>
+    void fused_merge_group(const TIn* __restrict__ in,
+                           SizeType in_base,
+                           TOut* __restrict__ out,
+                           SizeType out_base,
+                           float* __restrict__ hist_b,
+                           SizeType l,
+                           SizeType c_begin,
+                           SizeType c_end) const noexcept {
+        const auto& pc            = m_plan.get_container();
+        const auto& coords        = pc.coordinates[l];
+        const auto& coords_sum    = pc.coordinates_sum[l];
+        const auto& sum_index     = m_fused_sum_index[l];
+        const SizeType in_origin  = in_base * pc.state_shape[l - 1].nsamps;
+        const SizeType out_origin = out_base * pc.state_shape[l].nsamps;
+        for (SizeType k = c_begin; k < c_end; ++k) {
+            // Sum coordinates are read from coordinates_sum: only those
+            // entries carry the valid-mode tree-history slot (hist_offset is
+            // assigned there after the plan is built).
+            const auto& coord    = (sum_index[k] == SIZE_MAX)
+                                       ? coords[k]
+                                       : coords_sum[sum_index[k]];
+            const TIn* tail      = in + (coord.tail_buf_offset - in_origin);
+            TOut* __restrict__ o = out + (coord.buf_offset - out_origin);
+            if (coord.i_coord_head == SIZE_MAX) {
+                fdmt_convert_copy(tail, coord.tail_nsamps, o);
+                if (coord.nsamps > coord.tail_nsamps) {
+                    std::fill(o + coord.tail_nsamps, o + coord.nsamps, TOut{0});
+                }
+                continue;
+            }
+            const TIn* head = in + (coord.head_buf_offset - in_origin);
+            float* hist     = (hist_b != nullptr && coord.delay > 0)
+                                  ? hist_b + coord.hist_offset
+                                  : nullptr;
+            offset_add<Mode>(tail, coord.tail_nsamps, head, coord.head_nsamps,
+                             o, coord.nsamps, coord.delay, hist);
+        }
+    }
+
+    template <FDMTMode Mode>
+    void fused_merge_dispatch(const std::byte* in,
+                              SizeType in_base,
+                              std::byte* out,
+                              SizeType out_base,
+                              float* hist_b,
+                              SizeType l,
+                              SizeType c_begin,
+                              SizeType c_end) const noexcept {
+        with_elem(m_levels[l - 1].type, [&]<typename TIn>() {
+            with_elem(m_levels[l].type, [&]<typename TOut>() {
+                if constexpr (sizeof(TIn) <= sizeof(TOut) &&
+                              !(std::is_floating_point_v<TIn> &&
+                                !std::is_floating_point_v<TOut>)) {
+                    fused_merge_group<Mode>(
+                        reinterpret_cast<const TIn*>(in), in_base,
+                        reinterpret_cast<TOut*>(out), out_base, hist_b, l,
+                        c_begin, c_end);
+                }
+            });
+        });
+    }
+
+    // Level-0 rows of channels [ch_begin, ch_end) into `buf` (rows from
+    // coordinate `base`), plus their valid-mode input history -- exactly
+    // the per-sub-band work of initialise(), for one fused group.
+    template <typename T0>
+    void fused_init_group(const FDMTInput& input_b,
+                          T0* __restrict__ buf,
+                          SizeType base,
+                          SizeType ch_begin,
+                          SizeType ch_end,
+                          SizeType beam,
+                          SizeType tid) {
+        using TS       = std::conditional_t<std::is_integral_v<T0>, T0, float>;
+        TS* scratch    = m_ws.unpack<TS>(tid);
+        T0* box_rows   = m_ws.rows<T0>(tid);
+        const auto& pc = m_plan.get_container();
+        const auto& grids       = pc.grids[0];
+        const SizeType nsamps   = pc.state_shape[0].nsamps;
+        const auto dt_max_init  = pc.state_shape[0].dt_max;
+        const auto dt_max_final = pc.state_shape[m_plan.get_niters()].dt_max;
+        for (SizeType c = ch_begin; c < ch_end; ++c) {
+            const TS* __restrict__ wf = input_b.row<TS>(c, nsamps, scratch);
+            T0* __restrict__ rows =
+                buf + ((grids[c].coord_offset - base) * nsamps);
+            const auto& dt_grid = grids[c].dt_grid;
             if (m_mode == FDMTMode::kFull) {
                 if (m_use_box_smearing) {
-                    fdmt_init_impl<false, true>(
-                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                    fdmt_init_subband<false, true>(wf, rows, dt_grid, nsamps,
+                                                   box_rows);
                 } else {
-                    fdmt_init_impl<false, false>(
-                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                    fdmt_init_subband<false, false>(wf, rows, dt_grid, nsamps,
+                                                    box_rows);
                 }
             } else if (m_mode == FDMTMode::kRoll) {
                 if (m_use_box_smearing) {
-                    fdmt_init_impl<true, true>(
-                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                    fdmt_init_subband<true, true>(wf, rows, dt_grid, nsamps,
+                                                  box_rows);
                 } else {
-                    fdmt_init_impl<true, false>(
-                        wf_b, init_buffer_b, grids_init.data(), nsubs, nsamps);
+                    fdmt_init_subband<true, false>(wf, rows, dt_grid, nsamps,
+                                                   box_rows);
                 }
             } else {
-                float* __restrict__ hist_b =
-                    m_history.data() + (b * hist_beam_stride);
-                float* __restrict__ hist_init_b =
-                    m_history_init.data() + (b * hist_init_stride);
+                float* hist_sub    = m_history.data() +
+                                     (beam * m_plan.get_history_size()) +
+                                     (c * dt_max_final);
+                float* hist_init_b = m_history_init.data() +
+                                     (beam * m_plan.get_history_init_size());
                 if (m_use_box_smearing) {
-                    fdmt_init_valid_impl<true>(wf_b, init_buffer_b, hist_b,
-                                               hist_init_b, grids_init.data(),
-                                               nsubs, nsamps, dt_max_init,
-                                               dt_max_final);
+                    fdmt_init_valid_subband<true>(wf, hist_sub, rows, dt_grid,
+                                                  dt_max_final, nsamps,
+                                                  box_rows);
                 } else {
-                    fdmt_init_valid_impl<false>(wf_b, init_buffer_b, hist_b,
-                                                hist_init_b, grids_init.data(),
-                                                nsubs, nsamps, dt_max_init,
-                                                dt_max_final);
+                    fdmt_init_valid_subband<false>(wf, hist_sub, rows, dt_grid,
+                                                   dt_max_final, nsamps,
+                                                   box_rows);
+                }
+                fdmt_init_valid_update_history(
+                    wf, hist_sub,
+                    (hist_init_b != nullptr) ? hist_init_b + (c * dt_max_init)
+                                             : nullptr,
+                    nsamps, dt_max_init, dt_max_final);
+            }
+        }
+    }
+
+    // Largest per-group scratch level buffer for fusion depth `fuse` (4
+    // bytes/element covers every storage type); two are live per thread.
+    [[nodiscard]] SizeType fused_scratch_bytes(SizeType fuse) const noexcept {
+        const auto& pc         = m_plan.get_container();
+        const SizeType ngroups = pc.state_shape[fuse].nchans;
+        SizeType max_bytes     = 0;
+        for (SizeType l = 0; l < fuse; ++l) {
+            for (SizeType g = 0; g < ngroups; ++g) {
+                const auto [cb, ce] = fused_coord_range(l, g, fuse);
+                max_bytes =
+                    std::max(max_bytes, (ce - cb) * pc.state_shape[l].nsamps *
+                                            sizeof(float));
+            }
+        }
+        return max_bytes;
+    }
+
+    // kFDMTAutoFuse (see kFuseBudgetTotal): the deepest depth whose two
+    // per-thread scratch buffers fit the per-thread budget.
+    [[nodiscard]] SizeType auto_fuse_levels() const noexcept {
+        const SizeType budget =
+            std::max(kFuseBudgetTotal / std::max<SizeType>(m_nthreads, 1),
+                     kFuseBudgetPerThread);
+        SizeType best = 0;
+        for (SizeType f = 1; f <= m_plan.get_niters(); ++f) {
+            if (2 * fused_scratch_bytes(f) > budget) {
+                break;
+            }
+            best = f;
+        }
+        return best;
+    }
+
+    /**
+     * Fused replacement for initialise() + levels 1..fuse. Level-F sub-band
+     * g depends only on the 2^F input channels below it, so each thread
+     * builds one such group at a time: level-0 rows into a per-thread
+     * scratch buffer, then each merge level ping-pongs between two scratch
+     * buffers, and only level F is written to its real state buffer. The
+     * group's rows (a few rows per channel) stay cache-resident, removing
+     * the main-memory write + read of every intermediate level.
+     */
+    void initialise_fused(const FDMTInput& input,
+                          SizeType input_beam_stride,
+                          SizeType fuse) {
+        const auto& pc              = m_plan.get_container();
+        const SizeType ngroups      = pc.state_shape[fuse].nchans;
+        const SizeType nchans       = pc.state_shape[0].nchans;
+        const auto tree_hist_stride = m_plan.get_tree_history_size();
+
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            FDMTInput input_b = input;
+            if (input_b.packed != nullptr) {
+                input_b.packed += b * input_beam_stride;
+            } else {
+                input_b.f32 += b * input_beam_stride;
+            }
+            float* hist_b = (m_mode == FDMTMode::kValid)
+                                ? m_tree_history.data() + (b * tree_hist_stride)
+                                : nullptr;
+            std::byte* final_out = level_ptr<std::byte>(fuse, b);
+#pragma omp parallel num_threads(m_ws.nthreads)
+            {
+                const SizeType tid = fdmt_thread_id();
+                std::byte* buf_a   = m_ws.fused_a(tid);
+                std::byte* buf_b   = m_ws.fused_b(tid);
+                // Groups at the bottom of the band carry more dt rows than
+                // those at the top, so hand them out dynamically.
+#pragma omp for schedule(dynamic)
+                for (SizeType g = 0; g < ngroups; ++g) {
+                    const SizeType ch_begin = g << fuse;
+                    const SizeType ch_end =
+                        std::min(ch_begin + (SizeType{1} << fuse), nchans);
+                    const SizeType c0b = fused_coord_range(0, g, fuse).first;
+                    std::byte* cur     = buf_a;
+                    std::byte* nxt     = buf_b;
+                    with_elem(m_levels[0].type, [&]<typename T0>() {
+                        fused_init_group<T0>(input_b,
+                                             reinterpret_cast<T0*>(cur), c0b,
+                                             ch_begin, ch_end, b, tid);
+                    });
+                    SizeType in_base = c0b;
+                    for (SizeType l = 1; l <= fuse; ++l) {
+                        const auto l_range      = fused_coord_range(l, g, fuse);
+                        const SizeType cb       = l_range.first;
+                        const SizeType ce       = l_range.second;
+                        const bool last         = (l == fuse);
+                        std::byte* out          = last ? final_out : nxt;
+                        const SizeType out_base = last ? 0 : cb;
+                        if (m_mode == FDMTMode::kFull) {
+                            fused_merge_dispatch<FDMTMode::kFull>(
+                                cur, in_base, out, out_base, hist_b, l, cb, ce);
+                        } else if (m_mode == FDMTMode::kRoll) {
+                            fused_merge_dispatch<FDMTMode::kRoll>(
+                                cur, in_base, out, out_base, hist_b, l, cb, ce);
+                        } else {
+                            fused_merge_dispatch<FDMTMode::kValid>(
+                                cur, in_base, out, out_base, hist_b, l, cb, ce);
+                        }
+                        std::swap(cur, nxt);
+                        in_base = cb;
+                    }
                 }
             }
         }
     }
 
-    void execute_iter(const float* __restrict__ state_in,
-                      float* __restrict__ state_out,
-                      SizeType i_iter) {
+    template <FDMTMode Mode, typename TIn, typename TOut>
+    void execute_iter_typed(SizeType i_iter) {
         const auto& plan_c          = m_plan.get_container();
         const auto& coords_sum_cur  = plan_c.coordinates_sum[i_iter];
         const auto& coords_copy_cur = plan_c.coordinates_copy[i_iter];
-        const auto ncoords_sum_cur  = coords_sum_cur.size();
-        const auto ncoords_copy_cur = coords_copy_cur.size();
-
-        const auto buf_beam_stride  = m_plan.get_buffer_size();
         const auto hist_beam_stride = m_plan.get_tree_history_size();
-
         for (SizeType b = 0; b < m_nbeams; ++b) {
-            const float* __restrict__ state_in_b =
-                state_in + (b * buf_beam_stride);
-            float* __restrict__ state_out_b = state_out + (b * buf_beam_stride);
-
-            if (m_mode == FDMTMode::kFull) {
-                fdmt_iter<FDMTMode::kFull>(
-                    state_in_b, state_out_b, nullptr, coords_sum_cur.data(),
-                    coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
-            } else if (m_mode == FDMTMode::kRoll) {
-                fdmt_iter<FDMTMode::kRoll>(
-                    state_in_b, state_out_b, nullptr, coords_sum_cur.data(),
-                    coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
-            } else {
-                float* __restrict__ hist_b =
-                    m_tree_history.data() + (b * hist_beam_stride);
-                fdmt_iter<FDMTMode::kValid>(
-                    state_in_b, state_out_b, hist_b, coords_sum_cur.data(),
-                    coords_copy_cur.data(), ncoords_sum_cur, ncoords_copy_cur);
-            }
+            float* __restrict__ hist_b =
+                (Mode == FDMTMode::kValid)
+                    ? m_tree_history.data() + (b * hist_beam_stride)
+                    : nullptr;
+            fdmt_iter<Mode>(
+                level_ptr<TIn>(i_iter - 1, b), level_ptr<TOut>(i_iter, b),
+                hist_b, coords_sum_cur.data(), coords_copy_cur.data(),
+                coords_sum_cur.size(), coords_copy_cur.size(), m_nthreads);
         }
+    }
+
+    void execute_iter(SizeType i_iter) {
+        with_elem(m_levels[i_iter - 1].type, [&]<typename TIn>() {
+            with_elem(m_levels[i_iter].type, [&]<typename TOut>() {
+                // Levels only ever widen (see int_tree_levels()).
+                if constexpr (sizeof(TIn) <= sizeof(TOut) &&
+                              !(std::is_floating_point_v<TIn> &&
+                                !std::is_floating_point_v<TOut>)) {
+                    if (m_mode == FDMTMode::kFull) {
+                        execute_iter_typed<FDMTMode::kFull, TIn, TOut>(i_iter);
+                    } else if (m_mode == FDMTMode::kRoll) {
+                        execute_iter_typed<FDMTMode::kRoll, TIn, TOut>(i_iter);
+                    } else {
+                        execute_iter_typed<FDMTMode::kValid, TIn, TOut>(i_iter);
+                    }
+                } else {
+                    throw std::logic_error(
+                        "FDMTCPU: invalid narrowing level transition");
+                }
+            });
+        });
     }
 
 }; // End FDMTCPU::Impl definition
@@ -1148,9 +1821,10 @@ FDMTCPU::FDMTCPU(float f_min,
                  SizeType dt_step,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
                  int nthreads,
-                 SizeType nbeams)
+                 SizeType nbeams,
+                 SizeType fuse_levels,
+                 bool int_tree)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1161,9 +1835,10 @@ FDMTCPU::FDMTCPU(float f_min,
                                     dt_step,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
-                                    nbeams)) {}
+                                    nbeams,
+                                    fuse_levels,
+                                    int_tree)) {}
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
                  SizeType nchans,
@@ -1172,9 +1847,10 @@ FDMTCPU::FDMTCPU(float f_min,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
                  int nthreads,
-                 SizeType nbeams)
+                 SizeType nbeams,
+                 SizeType fuse_levels,
+                 bool int_tree)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1183,9 +1859,10 @@ FDMTCPU::FDMTCPU(float f_min,
                                     dt_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
-                                    nbeams)) {}
+                                    nbeams,
+                                    fuse_levels,
+                                    int_tree)) {}
 
 FDMTCPU::FDMTCPU(float f_min,
                  float f_max,
@@ -1195,9 +1872,10 @@ FDMTCPU::FDMTCPU(float f_min,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing,
                  std::string_view mode,
-                 bool verbose,
                  int nthreads,
-                 SizeType nbeams)
+                 SizeType nbeams,
+                 SizeType fuse_levels,
+                 bool int_tree)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1206,9 +1884,10 @@ FDMTCPU::FDMTCPU(float f_min,
                                     dm_grid,
                                     use_box_smearing,
                                     mode,
-                                    verbose,
                                     nthreads,
-                                    nbeams)) {}
+                                    nbeams,
+                                    fuse_levels,
+                                    int_tree)) {}
 
 FDMTCPU::~FDMTCPU()                                   = default;
 FDMTCPU::FDMTCPU(FDMTCPU&& other) noexcept            = default;
@@ -1222,6 +1901,24 @@ void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
 }
 void FDMTCPU::reset(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->reset(waterfall, dmt);
+}
+void FDMTCPU::execute(std::span<const uint8_t> waterfall_packed,
+                      SizeType nbits,
+                      std::span<float> dmt) {
+    m_impl->execute(waterfall_packed, nbits, dmt);
+}
+void FDMTCPU::reset(std::span<const uint8_t> waterfall_packed,
+                    SizeType nbits,
+                    std::span<float> dmt) {
+    m_impl->reset(waterfall_packed, nbits, dmt);
+}
+SizeType FDMTCPU::get_fuse_levels() const noexcept {
+    return m_impl->get_fuse_levels();
+}
+bool FDMTCPU::get_int_tree() const noexcept { return m_impl->get_int_tree(); }
+std::string FDMTCPU::summary() const { return m_impl->summary(); }
+FDMTMemoryUsage FDMTCPU::get_memory_usage() const noexcept {
+    return m_impl->get_memory_usage();
 }
 void FDMTCPU::advance(SizeType levels) { m_impl->advance(levels); }
 void FDMTCPU::advance_until_remaining(SizeType remaining_levels) {
@@ -1292,11 +1989,10 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType dt_step,
              bool use_box_smearing,
              std::string_view mode,
-             bool verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                 use_box_smearing, mode, verbose, nthreads, nbeams);
+                 use_box_smearing, mode, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);
@@ -1323,11 +2019,10 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing,
              std::string_view mode,
-             bool verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
-                 mode, verbose, nthreads, nbeams);
+                 mode, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);
@@ -1351,11 +2046,10 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<float>& dm_grid,
              bool use_box_smearing,
              std::string_view mode,
-             bool verbose,
              int nthreads,
              SizeType nbeams) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,
-                 mode, verbose, nthreads, nbeams);
+                 mode, nthreads, nbeams);
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
     const auto buffer_size           = fdmt_plan.get_buffer_size();
     std::vector<float> dmt(nbeams * buffer_size, 0.0F);

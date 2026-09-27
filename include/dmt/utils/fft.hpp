@@ -2,15 +2,16 @@
 
 /**
  * @file fft.hpp
- * @brief FFT execution managers for CPU (FFTW) and CUDA GPU (cuFFT) transforms.
+ * @brief FFTW manager for batched CPU FFT plans and the CUDA cuFFT manager.
  */
 
+#include <cstdint>
 #include <memory>
 #include <span>
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/common/types.hpp"
@@ -18,56 +19,55 @@
 namespace dmt::utils {
 
 /**
- * @brief Manages FFT plans and execution for CPU (FFTW).
- *
- * Encapsulates the creation and management of FFT plans and provides
- * methods for forward and backward transforms. Performs the FFT using
- * FFTW.
+ * @brief Kind of batched 1D transform owned by FFTWManager.
  */
-class FFTManagerCPU {
+enum class FFTKind : std::uint8_t {
+    kC2CForward  = 0, ///< In-place complex-to-complex forward.
+    kC2CBackward = 1, ///< In-place complex-to-complex backward (unnormalized).
+    kR2C         = 2, ///< Out-of-place real-to-complex.
+    kC2R         = 3, ///< Out-of-place complex-to-real (unnormalized).
+};
+
+/**
+ * @brief One batched 1D FFT, planned once and executed later.
+ *
+ * Plans are single-threaded FFTW (`FFTW_ESTIMATE`). At execution the batch
+ * is split across @p nthreads OpenMP workers; each worker runs one plan on
+ * its contiguous slice. The same plan may be executed concurrently on
+ * non-overlapping slices.
+ */
+class FFTWManager {
 public:
     /**
-     * @brief Construct for CPU backend using FFTW.
-     * @param nfft Size of the FFT.
-     * @param nsub Number of subbands (for potential batching or planning).
-     * @param nbin Number of bins (for potential batching or planning).
-     * @param mbin Another dimension (for potential batching or planning).
-     * @param nchan Number of channels (for potential batching or planning).
-     * @param nthreads Number of threads for FFTW planning and execution.
+     * @brief Plan a batched 1D transform.
+     * @param kind Transform kind.
+     * @param length Real or complex length of one transform (`n` for C2C,
+     *        real length for R2C/C2R).
+     * @param howmany Number of contiguous transforms.
+     * @param nthreads OpenMP workers used at execute time (at least 1).
      */
-    FFTManagerCPU(
-        int nfft, int nsub, int nbin, int mbin, int nchan, int nthreads = 1);
+    FFTWManager(FFTKind kind, SizeType length, SizeType howmany, int nthreads);
 
-    ~FFTManagerCPU();
-    FFTManagerCPU(FFTManagerCPU&&) noexcept;
-    FFTManagerCPU& operator=(FFTManagerCPU&&) noexcept;
-    FFTManagerCPU(const FFTManagerCPU&)            = delete;
-    FFTManagerCPU& operator=(const FFTManagerCPU&) = delete;
+    ~FFTWManager();
+    FFTWManager(FFTWManager&&) noexcept;
+    FFTWManager& operator=(FFTWManager&&) noexcept;
+    FFTWManager(const FFTWManager&)            = delete;
+    FFTWManager& operator=(const FFTWManager&) = delete;
 
     /**
-     * @brief Initialize the FFT plans.
+     * @brief In-place C2C transform. @p data must hold `howmany * length`
+     *        complex samples.
+     */
+    void execute(std::span<ComplexType> data) const;
+
+    /**
+     * @brief Out-of-place R2C or C2R.
      *
-     * @param unpack_buffer The buffer to unpack the data.
-     * @param delay_buffer The buffer to delay the data.
+     * For R2C, @p real is the input (`howmany * length`) and @p freq is the
+     * output (`howmany * (length/2+1)`). For C2R the roles are reversed.
+     * C2R may overwrite @p freq.
      */
-    void initialize_plans(std::span<ComplexType> unpack_buffer,
-                          std::span<ComplexType> delay_buffer);
-
-    /**
-     * @brief Performs an in-place forward FFT on CPU data.
-     * @param data1 Host data buffer 1 (must match planned dimensions/size).
-     * @param data2 Host data buffer 2 (must match planned dimensions/size).
-     */
-    void forward_fft(std::span<ComplexType> data1,
-                     std::span<ComplexType> data2) const;
-
-    /**
-     * @brief Performs an in-place backward FFT on CPU data.
-     * @param data1 Host data buffer 1 (must match planned dimensions/size).
-     * @param data2 Host data buffer 2 (must match planned dimensions/size).
-     */
-    void backward_fft(std::span<ComplexType> data1,
-                      std::span<ComplexType> data2) const;
+    void execute(std::span<float> real, std::span<ComplexType> freq) const;
 
 private:
     class Impl;
@@ -76,55 +76,49 @@ private:
 
 #ifdef DMT_ENABLE_CUDA
 /**
- * @brief Manages FFT plans and execution for CUDA (cuFFT).
+ * @brief One batched 1D cuFFT, planned once and executed later.
  *
  * Encapsulates the creation and management of FFT plans and provides
  * methods for forward and backward transforms. Performs the FFT using
- * cuFFT.
+ * cuFFT. The caller passes the stream at execute time. Do not execute the
+ * same CUFFTManager concurrently.
  */
-class FFTManagerCUDA {
+class CUFFTManager {
 public:
     /**
-     * @brief Construct for CUDA backend using cuFFT.
-     * @param nfft Size of the FFT.
-     * @param nsub Number of subbands (for potential batching or planning).
-     * @param nbin Number of bins (for potential batching or planning).
-     * @param mbin Another dimension (for potential batching or planning).
-     * @param nchan Number of channels (for potential batching or planning).
-     * @param device_id CUDA device ID.
+     * @brief Plan a batched 1D transform on @p device_id.
+     * @param kind Transform kind.
+     * @param length Real or complex length of one transform.
+     * @param howmany Number of contiguous transforms.
+     * @param device_id CUDA device that owns the plan and its workspace.
      */
-    FFTManagerCUDA(
-        int nfft, int nsub, int nbin, int mbin, int nchan, int device_id = 0);
+    CUFFTManager(FFTKind kind,
+                 SizeType length,
+                 SizeType howmany,
+                 int device_id);
 
-    ~FFTManagerCUDA();
-    FFTManagerCUDA(FFTManagerCUDA&&) noexcept;
-    FFTManagerCUDA& operator=(FFTManagerCUDA&&) noexcept;
-    FFTManagerCUDA(const FFTManagerCUDA&)            = delete;
-    FFTManagerCUDA& operator=(const FFTManagerCUDA&) = delete;
+    ~CUFFTManager();
+    CUFFTManager(CUFFTManager&&) noexcept;
+    CUFFTManager& operator=(CUFFTManager&&) noexcept;
+    CUFFTManager(const CUFFTManager&)            = delete;
+    CUFFTManager& operator=(const CUFFTManager&) = delete;
 
     /**
-     * @brief Performs an in-place forward FFT on GPU data.
-     * @param data1 First device buffer (must match planned dimensions/size).
-     * @param data2 Second device buffer (must match planned dimensions/size).
-     * @param stream CUDA stream for execution.
+     * @brief In-place C2C transform. @p data must hold `howmany * length`
+     *        complex samples.
      */
-    void forward_fft(cuda::std::span<ComplexTypeCUDA> data1,
-                     cuda::std::span<ComplexTypeCUDA> data2,
-                     cudaStream_t stream = nullptr) const;
+    void execute(cuda::std::span<ComplexTypeCUDA> data,
+                 cudaStream_t stream = nullptr) const;
 
     /**
-     * @brief Performs an in-place backward FFT on GPU data.
-     * @param data1 First device buffer (must match planned dimensions/size).
-     * @param data2 Second device buffer (must match planned dimensions/size).
-     * @param stream CUDA stream for execution.
+     * @brief Out-of-place R2C or C2R.
+     *
+     * For R2C, @p real is the input and @p freq is the output. For C2R the
+     * roles are reversed. C2R may overwrite @p freq.
      */
-    void backward_fft(cuda::std::span<ComplexTypeCUDA> data1,
-                      cuda::std::span<ComplexTypeCUDA> data2,
-                      cudaStream_t stream = nullptr) const;
-
-    static void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data,
-                              SizeType nx,
-                              SizeType ny);
+    void execute(cuda::std::span<float> real,
+                 cuda::std::span<ComplexTypeCUDA> freq,
+                 cudaStream_t stream = nullptr) const;
 
 private:
     class Impl;

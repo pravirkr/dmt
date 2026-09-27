@@ -9,11 +9,11 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def _cuda_available() -> bool:
     try:
-        import dmtlib.libcudmt as libcudmt
+        from dmtlib import libcudmt
     except Exception:
         return False
     try:
-        libcudmt.FDMTGPU(1000.0, 1500.0, 4, 8, 0.001, 2)
+        libcudmt.FDMTCUDA(1000.0, 1500.0, 4, 8, 0.001, 2)
     except Exception:
         return False
     return True

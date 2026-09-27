@@ -4,10 +4,6 @@
 #include <span>
 #include <vector>
 
-#ifdef DMT_ENABLE_OPENMP
-#include <omp.h>
-#endif
-
 #include "dmt/common/types.hpp"
 
 namespace dmt::utils {

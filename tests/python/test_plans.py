@@ -1,5 +1,7 @@
 import numpy as np
 import pytest
+
+import dmtlib
 from dmtlib import libdmt
 
 
@@ -45,7 +47,6 @@ class TestPlans:
         assert comp.ops_ratio > 1.0
         assert "FDMT Complexity:" in repr(comp)
         assert "Theoretical Speedup Factor" in comp.to_string()
-        plan.print_complexity_summary()
 
     def test_plan_arbitrary_dt_and_dm_grids(self) -> None:
         nchans = 64
@@ -323,3 +324,28 @@ class TestPlans:
         ops_by_iter = plan.get_operations_by_iteration(use_box_smearing=True)
         assert ops_by_iter[0] == expected_lvl0_ops
         assert plan.get_total_operations(use_box_smearing=True) == sum(ops_by_iter)
+
+
+class TestLoggingAndSummary:
+    def test_log_level_round_trip(self) -> None:
+        assert dmtlib.get_log_level() == "off"
+        try:
+            for level in ("debug", "off"):
+                dmtlib.set_log_level(level)
+                assert dmtlib.get_log_level() == level
+        finally:
+            dmtlib.set_log_level("off")
+        with pytest.raises(ValueError):
+            dmtlib.set_log_level("warn")
+
+    def test_summaries(self) -> None:
+        fdmt = libdmt.FDMTCPU(1000.0, 1500.0, 64, 256, 0.001, 32)
+        plan_text = fdmt.plan.summary()
+        assert "FDMT Plan Summary" in plan_text
+        assert fdmt.plan.summary(prefix="  ").startswith("  ")
+        engine_text = fdmt.summary()
+        assert engine_text.startswith(plan_text)
+        assert "FDMTCPU" in engine_text
+        assert "Host memory" in engine_text
+        ddmt = libdmt.DDMTPlan(1000.0, 1500.0, 64, 0.001, 10.0, 1.0)
+        assert "DDMT Plan Summary" in ddmt.summary()

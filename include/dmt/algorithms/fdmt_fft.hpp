@@ -2,7 +2,8 @@
 
 /**
  * @file fdmt_fft.hpp
- * @brief Fast Dispersion Measure Transform using Fourier phase rotations (FDMT-FFT).
+ * @brief Fast Dispersion Measure Transform using Fourier phase rotations
+ * (FDMT-FFT).
  */
 
 #include <memory>
@@ -13,7 +14,7 @@
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/algorithms/fdmt.hpp"
@@ -23,18 +24,24 @@
 namespace dmt::algorithms {
 
 /**
- * @brief Fast Dispersion Measure Transform using Fourier shifts (FDMT-FFT) for CPU execution.
+ * @brief Fast Dispersion Measure Transform using Fourier shifts (FDMT-FFT) for
+ * CPU execution.
  *
  * Implements Algorithm 2 of Zackay & Ofek (2014). Converts time-domain
  * dedispersion shifts into complex phase rotations in the Fourier domain:
  * @f[
- * \widetilde{\text{out}}[k] = \widetilde{\text{in}}_{\text{tail}}[k] + \widetilde{\text{in}}_{\text{head}}[k] \cdot \exp\left(-2\pi i \cdot k \cdot \frac{\Delta t}{N_{\text{fft}}}\right)
+ * \widetilde{\text{out}}[k] = \widetilde{\text{in}}_{\text{tail}}[k] +
+ * \widetilde{\text{in}}_{\text{head}}[k] \cdot \exp\left(-2\pi i \cdot k \cdot
+ * \frac{\Delta t}{N_{\text{fft}}}\right)
  * @f]
- * Reuses @ref dmt::plans::FDMTPlan (same coordinate DAG as FDMTCPU). The FFT length and
- * padding depend on mode:
- * - "roll": cyclic, @f$ N_{\text{fft}} = N_{\text{samps}} @f$ (matches FDMTCPU roll).
- * - "full": zero-pad; @f$ N_{\text{fft}} = N_{\text{samps}} + L + \text{max\_shift} @f$.
- * - "valid": overlap-save of the linear operator across blocks. Overlap length @f$ L = \max(|\Delta t_{\text{min}}|, |\Delta t_{\text{max}}|) @f$.
+ * Reuses @ref dmt::plans::FDMTPlan (same coordinate DAG as FDMTCPU). The FFT
+ * length and padding depend on mode:
+ * - "roll": cyclic, @f$ N_{\text{fft}} = N_{\text{samps}} @f$ (matches FDMTCPU
+ * roll).
+ * - "full": zero-pad; @f$ N_{\text{fft}} = N_{\text{samps}} + L +
+ * \text{max\_shift} @f$.
+ * - "valid": overlap-save of the linear operator across blocks. Overlap length
+ * @f$ L = \max(|\Delta t_{\text{min}}|, |\Delta t_{\text{max}}|) @f$.
  */
 class FDMTFFTCPU {
 public:
@@ -49,9 +56,9 @@ public:
      * @param dt_max Maximum delay trial in samples.
      * @param dt_min Minimum delay trial in samples (default: 0).
      * @param dt_step Stride between delay trials (default: 1).
-     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param use_box_smearing Whether to account for intra-channel smearing
+     * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose Enable verbose output (default: false).
      * @param nthreads Number of OpenMP worker threads (default: 1).
      * @param nbeams Number of batched beams (default: 1).
      */
@@ -65,7 +72,6 @@ public:
                SizeType dt_step      = 1,
                bool use_box_smearing = true,
                std::string_view mode = "valid",
-               bool verbose          = false,
                int nthreads          = 1,
                SizeType nbeams       = 1);
 
@@ -80,7 +86,6 @@ public:
      * @param dt_grid Explicit list of delay trials.
      * @param use_box_smearing Whether to account for intra-channel smearing.
      * @param mode Mode: "valid", "full", or "roll".
-     * @param verbose Enable verbose output.
      * @param nthreads OpenMP threads.
      * @param nbeams Number of batched beams.
      */
@@ -92,7 +97,6 @@ public:
                const std::vector<IndexType>& dt_grid,
                bool use_box_smearing = true,
                std::string_view mode = "valid",
-               bool verbose          = false,
                int nthreads          = 1,
                SizeType nbeams       = 1);
 
@@ -107,7 +111,6 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3.
      * @param use_box_smearing Whether to account for intra-channel smearing.
      * @param mode Mode: "valid", "full", or "roll".
-     * @param verbose Enable verbose output.
      * @param nthreads OpenMP threads.
      * @param nbeams Number of batched beams.
      */
@@ -119,7 +122,6 @@ public:
                const std::vector<float>& dm_grid,
                bool use_box_smearing = true,
                std::string_view mode = "valid",
-               bool verbose          = false,
                int nthreads          = 1,
                SizeType nbeams       = 1);
 
@@ -142,14 +144,16 @@ public:
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
-    /// @brief Initializes stepper engine with input waterfall and scratch buffer
+    /// @brief Initializes stepper engine with input waterfall and scratch
+    /// buffer
     void reset(std::span<const float> waterfall, std::span<float> dmt);
     /// @brief Advances stepper forward by given number of levels
     void advance(SizeType levels = 1);
     /// @brief Advances execution until specified remaining levels before root
     void advance_until_remaining(SizeType remaining_levels);
 
-    /// @brief View all intermediate subband data at current level (IFFT computed on demand)
+    /// @brief View all intermediate subband data at current level (IFFT
+    /// computed on demand)
     [[nodiscard]] std::span<const float> view_level_data() const;
     /// @brief View data slice for a specific subband at current level
     [[nodiscard]] std::span<const float>
@@ -206,7 +210,6 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  SizeType dt_step      = 1,
                  bool use_box_smearing = true,
                  std::string_view mode = "valid",
-                 bool verbose          = false,
                  int nthreads          = 1,
                  SizeType nbeams       = 1);
 
@@ -223,7 +226,6 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<IndexType>& dt_grid,
                  bool use_box_smearing = true,
                  std::string_view mode = "valid",
-                 bool verbose          = false,
                  int nthreads          = 1,
                  SizeType nbeams       = 1);
 
@@ -240,7 +242,6 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  const std::vector<float>& dm_grid,
                  bool use_box_smearing = true,
                  std::string_view mode = "valid",
-                 bool verbose          = false,
                  int nthreads          = 1,
                  SizeType nbeams       = 1);
 
@@ -263,7 +264,6 @@ public:
                 SizeType dt_step      = 1,
                 bool use_box_smearing = true,
                 std::string_view mode = "valid",
-                bool verbose          = false,
                 int device_id         = 0,
                 SizeType nbeams       = 1);
 
@@ -278,7 +278,6 @@ public:
                 const std::vector<IndexType>& dt_grid,
                 bool use_box_smearing = true,
                 std::string_view mode = "valid",
-                bool verbose          = false,
                 int device_id         = 0,
                 SizeType nbeams       = 1);
 
@@ -293,7 +292,6 @@ public:
                 const std::vector<float>& dm_grid,
                 bool use_box_smearing = true,
                 std::string_view mode = "valid",
-                bool verbose          = false,
                 int device_id         = 0,
                 SizeType nbeams       = 1);
 
@@ -321,6 +319,20 @@ public:
     void reset(cuda::std::span<const float> d_waterfall,
                cuda::std::span<float> d_dmt,
                cudaStream_t stream = nullptr);
+
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<float, Alloc1>& waterfall,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
+
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void reset(const std::vector<float, Alloc1>& waterfall,
+               std::vector<float, Alloc2>& dmt) {
+        reset(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
     /// @brief Advances stepper forward by given levels on GPU
     void advance(SizeType levels = 1, cudaStream_t stream = nullptr);
     /// @brief Advances execution until specified remaining levels before root

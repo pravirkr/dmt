@@ -88,7 +88,7 @@ public:
         nsamps  = static_cast<SizeType>(state.range(0));
         nbits   = static_cast<SizeType>(state.range(1));
 
-        const auto row_bytes = utils::packed_row_bytes(nsamps, nbits);
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         waterfall_packed.resize(nchans * row_bytes);
         std::mt19937 gen(42);
         std::uniform_int_distribution<uint32_t> dis(0, 255);
@@ -119,7 +119,8 @@ BENCHMARK_DEFINE_F(DDMTPackedMemFixture, BM_ddmt_memory_execute_packed)
     bench::report_memory_counters(state);
 }
 
-BENCHMARK_REGISTER_F(DDMTPackedMemFixture, BM_ddmt_memory_execute_packed) // NOLINT
+BENCHMARK_REGISTER_F(DDMTPackedMemFixture,
+                     BM_ddmt_memory_execute_packed) // NOLINT
     ->ArgsProduct({{2048, 4096, 8192}, {1, 2, 4, 8, 16}})
     ->Iterations(4)
     ->MeasureProcessCPUTime()

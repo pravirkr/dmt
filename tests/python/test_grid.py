@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
 from dmtlib import (
     FDMTCPU,
     calculate_snr_loss,
@@ -13,7 +14,7 @@ from dmtlib import (
 try:
     from ._dispersed_pulse import sweep_recovery
 except ImportError:
-    from _dispersed_pulse import sweep_recovery
+    pass
 
 
 class TestGridGenerator:
@@ -156,7 +157,12 @@ class TestGridGenerator:
     def test_invalid_parameters_raise(self) -> None:
         with pytest.raises(ValueError, match="max_snr_loss"):
             generate_optimal_dm_grid(
-                self.f_min, self.f_max, self.nchans, self.tsamp, dm_max=10.0, max_snr_loss=1.5
+                self.f_min,
+                self.f_max,
+                self.nchans,
+                self.tsamp,
+                dm_max=10.0,
+                max_snr_loss=1.5,
             )
 
         with pytest.raises(ValueError, match="dm_max"):
@@ -212,7 +218,9 @@ class TestGridGenerator:
             dt_arr=dt_grid,
         )
         assert plan.is_custom_grid
-        out_compute = out_buf[: plan.dmt_size].reshape(plan.dt_grid_final.size, plan.dmt_nsamps)
+        out_compute = out_buf[: plan.dmt_size].reshape(
+            plan.dt_grid_final.size, plan.dmt_nsamps
+        )
         np.testing.assert_allclose(out_fdmt, out_compute, rtol=1e-5, atol=1e-5)
 
     def test_levin_method_parametrization(self) -> None:
@@ -270,4 +278,3 @@ class TestGridGenerator:
                 dm_max=50.0,
                 method="invalid",
             )
-

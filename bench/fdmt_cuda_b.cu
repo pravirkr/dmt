@@ -1,96 +1,20 @@
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 
+#include <cstdint>
+#include <random>
+#include <span>
+#include <vector>
+
 #include <benchmark/benchmark.h>
 
+#include "bench_cuda_utils.cuh"
+
 #include "dmt/algorithms/fdmt.hpp"
-
-// https://github.com/jrhemstad/example_cuda_benchmark
-#define BENCH_CUDA_TRY(call)                                                   \
-    do {                                                                       \
-        auto const status = (call);                                            \
-        if (cudaSuccess != status) {                                           \
-            throw std::runtime_error("CUDA error detected.");                  \
-        }                                                                      \
-    } while (0);
-
-#define BENCH_CUDA_CHECK_NOTHROW(call)                                         \
-    do {                                                                       \
-        auto const status = (call);                                            \
-        if (cudaSuccess != status) {                                           \
-            std::fprintf(stderr, "CUDA error in destructor: %s\n",             \
-                         cudaGetErrorString(status));                          \
-        }                                                                      \
-    } while (0)
-
-class CudaEventTimer {
-public:
-    /**
-     * @brief Constructs a `cuda_event_timer` beginning a manual timing range.
-     *
-     * Optionally flushes L2 cache.
-     *
-     * @param[in,out] state  This is the benchmark::State whose timer we are
-     * going to update.
-     * @param[in] flush_l2_cache_ whether or not to flush the L2 cache before
-     *                            every iteration.
-     * @param[in] m_stream The CUDA stream we are measuring time on.
-     */
-    explicit CudaEventTimer(benchmark::State& state,
-                            bool flush_l2_cache = false,
-                            cudaStream_t stream = 0)
-        : m_stream(stream),
-          m_state(&state) {
-        // flush all of L2 cache
-        if (flush_l2_cache) {
-            int current_device = 0;
-            BENCH_CUDA_TRY(cudaGetDevice(&current_device));
-
-            int l2_cache_bytes = 0;
-            BENCH_CUDA_TRY(cudaDeviceGetAttribute(
-                &l2_cache_bytes, cudaDevAttrL2CacheSize, current_device));
-
-            if (l2_cache_bytes > 0) {
-                const int memset_value = 0;
-                int* l2_cache_buffer   = nullptr;
-                BENCH_CUDA_TRY(cudaMalloc(&l2_cache_buffer, l2_cache_bytes));
-                BENCH_CUDA_TRY(cudaMemsetAsync(l2_cache_buffer, memset_value,
-                                               l2_cache_bytes, m_stream));
-                BENCH_CUDA_TRY(cudaFree(l2_cache_buffer));
-            }
-        }
-
-        BENCH_CUDA_TRY(cudaEventCreate(&m_start));
-        BENCH_CUDA_TRY(cudaEventCreate(&m_stop));
-        BENCH_CUDA_TRY(cudaEventRecord(m_start, m_stream));
-    }
-
-    CudaEventTimer() = delete;
-
-    /**
-     * @brief Destroy the `cuda_event_timer` and ending the manual time range.
-     *
-     */
-    ~CudaEventTimer() {
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventRecord(m_stop, m_stream));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventSynchronize(m_stop));
-        float milliseconds = 0.0F;
-        BENCH_CUDA_CHECK_NOTHROW(
-            cudaEventElapsedTime(&milliseconds, m_start, m_stop));
-        m_state->SetIterationTime(milliseconds / (1000.0F));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_start));
-        BENCH_CUDA_CHECK_NOTHROW(cudaEventDestroy(m_stop));
-    }
-
-private:
-    cudaEvent_t m_start{};
-    cudaEvent_t m_stop{};
-    cudaStream_t m_stream;
-    benchmark::State* m_state;
-};
+#include "dmt/bit_pack_utils.hpp"
 
 namespace {
 template <typename T>
@@ -110,6 +34,7 @@ thrust::device_vector<T> generate_vector_device(size_t size) {
 
 namespace dmt {
 using algorithms::FDMTCUDA;
+using algorithms::kFDMTAutoFuse;
 using plans::FDMTPlan;
 
 class FDMTCUDAFixture : public benchmark::Fixture {
@@ -124,13 +49,14 @@ public:
         waterfall_d = generate_vector_device<float>(nchans * nsamps);
     }
 
-    void TearDown(const ::benchmark::State& /*unused*/) override {}
-
-    void SetUp(benchmark::State& state) override {
-        SetUp(static_cast<const benchmark::State&>(state));
+    void TearDown(const ::benchmark::State& /*unused*/) override {
+        waterfall_d.clear();
+        waterfall_d.shrink_to_fit();
     }
 
-    void TearDown(benchmark::State& /*unused*/) override {}
+    void TearDown(benchmark::State& state) override {
+        TearDown(static_cast<const benchmark::State&>(state));
+    }
 
     float f_min{}, f_max{}, tsamp{};
     size_t nchans{}, dt_max{}, nsamps{};
@@ -177,6 +103,83 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
     }
 }
 
+// Packed low-bit input and level fusion. Args: (nsamps, nbits [32 = float
+// reference], int_tree, fuse_levels [-1 = kFDMTAutoFuse, the default]).
+// Device-resident input and output: measures the kernels (level-0 sample
+// loads, narrow-integer tree state, fused levels in shared memory). The
+// "fuse" counter is the depth actually used.
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
+(benchmark::State& state) {
+    const auto nbits = static_cast<SizeType>(state.range(1));
+    const auto fuse  = state.range(3) < 0
+                           ? kFDMTAutoFuse
+                           : static_cast<SizeType>(state.range(3));
+    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                       "valid", 0, 1, fuse, state.range(2) != 0);
+    state.counters["fuse"] = static_cast<double>(fdmt_cuda.get_fuse_levels());
+    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
+                                       0.0F);
+    const cuda::std::span<float> dmt_span(
+        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    if (nbits == 32) {
+        for (auto _ : state) {
+            CudaEventTimer raii{state};
+            fdmt_cuda.execute(cuda::std::span<const float>(
+                                  thrust::raw_pointer_cast(waterfall_d.data()),
+                                  waterfall_d.size()),
+                              dmt_span);
+        }
+        return;
+    }
+    std::vector<uint8_t> packed_h(
+        nchans * bit_pack_utils::packed_row_bytes(nsamps, nbits));
+    std::mt19937 gen(42);
+    for (auto& b : packed_h) {
+        b = static_cast<uint8_t>(gen() & 0xFFU);
+    }
+    thrust::device_vector<uint8_t> packed_d(packed_h.begin(), packed_h.end());
+    const cuda::std::span<const uint8_t> packed_span(
+        thrust::raw_pointer_cast(packed_d.data()), packed_d.size());
+    for (auto _ : state) {
+        CudaEventTimer raii{state};
+        fdmt_cuda.execute(packed_span, nbits, dmt_span);
+    }
+}
+
+// Host round trip (H2D input copy + transform + D2H output). Args: (nsamps,
+// nbits [32 = float]). Packed input moves 32 / nbits times fewer bytes over
+// PCIe; int_tree is on for packed input.
+BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
+(benchmark::State& state) {
+    const auto nbits = static_cast<SizeType>(state.range(1));
+    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    std::vector<float> dmt_h(fdmt_cuda.get_plan().get_buffer_size(), 0.0F);
+    std::mt19937 gen(42);
+    if (nbits == 32) {
+        std::vector<float> wf_h(nchans * nsamps);
+        std::uniform_real_distribution<float> dis(0.0F, 1.0F);
+        for (auto& v : wf_h) {
+            v = dis(gen);
+        }
+        for (auto _ : state) {
+            CudaEventTimer raii{state};
+            fdmt_cuda.execute(std::span<const float>(wf_h),
+                              std::span<float>(dmt_h));
+        }
+        return;
+    }
+    std::vector<uint8_t> packed_h(
+        nchans * bit_pack_utils::packed_row_bytes(nsamps, nbits));
+    for (auto& b : packed_h) {
+        b = static_cast<uint8_t>(gen() & 0xFFU);
+    }
+    for (auto _ : state) {
+        CudaEventTimer raii{state};
+        fdmt_cuda.execute(std::span<const uint8_t>(packed_h), nbits,
+                          std::span<float>(dmt_h));
+    }
+}
+
 constexpr size_t kMinNsamps = 1 << 11;
 constexpr size_t kMaxNsamps = 1 << 15;
 
@@ -190,6 +193,18 @@ BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_cuda) // NOLINT
 
 BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_overall_cuda) // NOLINT
     ->ArgsProduct({benchmark::CreateRange(kMinNsamps, kMaxNsamps, 2)})
+    ->UseManualTime();
+
+// Fusion depth sweep (float and 1-bit + int tree) calibrates kFDMTAutoFuse;
+// then the other bit depths at the default (automatic) and unfused depth.
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed) // NOLINT
+    ->ArgsProduct({{1 << 14, 1 << 15}, {32}, {0}, {0, 1, 2, 3, 4, 5, -1}})
+    ->ArgsProduct({{1 << 14, 1 << 15}, {1}, {1}, {0, 1, 2, 3, 4, 5, -1}})
+    ->ArgsProduct({{1 << 14, 1 << 15}, {2, 4, 8, 16}, {0, 1}, {0, -1}})
+    ->UseManualTime();
+
+BENCHMARK_REGISTER_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda) // NOLINT
+    ->ArgsProduct({{1 << 14, 1 << 15}, {32, 1, 2, 4, 8}})
     ->UseManualTime();
 
 // BENCHMARK_MAIN();

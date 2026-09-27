@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
+
 from dmtlib import libdmt
 
-class TestFDMT:
 
+class TestFDMT:
     def test_initialise_ones(self) -> None:
         nchans = 500
         nsamples = 1024
@@ -1079,4 +1080,180 @@ class TestFDMT:
         engine.execute(wf_a1)
         res_continuous = engine.execute(wf_a2)
 
-        np.testing.assert_allclose(res_interrupted, res_continuous, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            res_interrupted, res_continuous, rtol=1e-5, atol=1e-5
+        )
+
+
+def _pack_lsb_first(values: np.ndarray, nbits: int) -> np.ndarray:
+    """Pack unsigned ``nbits``-wide samples row-wise, LSB-first (DDMT convention)."""
+    nrows, nsamps = values.shape
+    if nbits == 8:
+        return values.astype(np.uint8)
+    if nbits == 16:
+        return values.astype("<u2").view(np.uint8).reshape(nrows, 2 * nsamps)
+    per_byte = 8 // nbits
+    row_bytes = (nsamps * nbits + 7) // 8
+    padded = np.zeros((nrows, row_bytes * per_byte), dtype=np.uint32)
+    padded[:, :nsamps] = values
+    shifts = (np.arange(per_byte, dtype=np.uint32) * nbits)[None, None, :]
+    lanes = padded.reshape(nrows, row_bytes, per_byte) << shifts
+    return lanes.sum(axis=2).astype(np.uint8)
+
+
+class TestFDMTPerformanceParams:
+    nchans = 64
+    nsamps = 203
+    dt_max = 40
+
+    def _make(self, mode: str = "valid", **perf: object) -> libdmt.FDMTCPU:
+        return libdmt.FDMTCPU(
+            1000.0,
+            1500.0,
+            self.nchans,
+            self.nsamps,
+            0.001,
+            self.dt_max,
+            mode=mode,
+            **perf,
+        )
+
+    def _make_ref(self, mode: str = "valid") -> libdmt.FDMTCPU:
+        # The original unfused, all-float path every variant is checked against.
+        return self._make(mode, fuse_levels=0, int_tree=False)
+
+    def test_defaults_and_memory_usage(self) -> None:
+        fdmt = self._make()
+        assert fdmt.int_tree
+        assert 0 <= fdmt.fuse_levels <= fdmt.plan.niters
+        ref = self._make_ref()
+        assert ref.fuse_levels == 0
+        assert not ref.int_tree
+        assert self._make(fuse_levels=99).fuse_levels == fdmt.plan.niters
+        mem = self._make(fuse_levels=3).memory_usage
+        assert mem.total == mem.plan + mem.state + mem.history + mem.workspace
+        assert mem.state == fdmt.plan.buffer_size * 4
+        assert mem.workspace > ref.memory_usage.workspace
+        assert "workspace=" in repr(mem)
+
+    def test_dm_grid_constructor_accepts_perf_params(self) -> None:
+        fdmt = libdmt.FDMTCPU(
+            1000.0,
+            1500.0,
+            self.nchans,
+            self.nsamps,
+            0.001,
+            dt_grid=[0, 2, 5, 9],
+            fuse_levels=2,
+            int_tree=False,
+        )
+        assert fdmt.fuse_levels == 2
+        assert not fdmt.int_tree
+
+    @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
+    @pytest.mark.parametrize("int_tree", [False, True])
+    def test_packed_matches_float(self, nbits: int, int_tree: bool) -> None:
+        rng = np.random.default_rng(nbits)
+        values = rng.integers(
+            0, 2**nbits, size=(self.nchans, self.nsamps), dtype=np.uint32
+        )
+        packed = _pack_lsb_first(values, nbits)
+        assert packed.shape == (self.nchans, (self.nsamps * nbits + 7) // 8)
+        ref = self._make_ref().execute(values.astype(np.float32))
+        fdmt = self._make(int_tree=int_tree)
+        np.testing.assert_array_equal(fdmt.execute(packed, nbits), ref)
+
+    def test_uint8_without_nbits_is_rejected(self) -> None:
+        fdmt = self._make()
+        packed = np.zeros((self.nchans, self.nsamps), dtype=np.uint8)
+        with pytest.raises(TypeError):
+            fdmt.execute(packed)
+        with pytest.raises(TypeError):
+            fdmt.execute(packed.astype(np.float32), 8)
+        with pytest.raises(ValueError):
+            fdmt.execute(packed, 3)
+
+    @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
+    @pytest.mark.parametrize("fuse_levels", [1, 3, None])
+    def test_fused_levels_match_unfused(
+        self, mode: str, fuse_levels: int | None
+    ) -> None:
+        rng = np.random.default_rng(11)
+        waterfall = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
+        ref = self._make_ref(mode).execute(waterfall)
+        fdmt = self._make(mode, fuse_levels=fuse_levels)
+        assert fdmt.fuse_levels <= fdmt.plan.niters
+        np.testing.assert_array_equal(fdmt.execute(waterfall), ref)
+
+
+class TestFDMTUsageContract:
+    """Output-buffer reuse, zero-copy views and hard fails for misuse."""
+
+    nchans = 32
+    nsamps = 128
+
+    def _make(self, mode: str = "valid", nbeams: int = 1) -> libdmt.FDMTCPU:
+        return libdmt.FDMTCPU(
+            1000.0,
+            1500.0,
+            self.nchans,
+            self.nsamps,
+            0.001,
+            32,
+            mode=mode,
+            nbeams=nbeams,
+        )
+
+    def test_out_buffer_is_reused(self) -> None:
+        rng = np.random.default_rng(3)
+        wf = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
+        ref = self._make().execute(wf)
+        fdmt = self._make()
+        out = np.empty(fdmt.plan.buffer_size, dtype=np.float32)
+        got = fdmt.execute(wf, out=out)
+        np.testing.assert_array_equal(got, ref)
+        assert got.base is out or np.shares_memory(got, out)
+        with pytest.raises(ValueError):
+            fdmt.execute(wf, out=np.empty(fdmt.plan.buffer_size - 1, np.float32))
+        with pytest.raises(TypeError):
+            fdmt.execute(wf, out=np.empty(fdmt.plan.buffer_size, np.float64))
+
+    def test_batched_result_is_a_strided_view(self) -> None:
+        nbeams = 3
+        rng = np.random.default_rng(4)
+        wf = rng.standard_normal((nbeams, self.nchans, self.nsamps), dtype=np.float32)
+        fdmt = self._make(nbeams=nbeams)
+        out = np.empty(nbeams * fdmt.plan.buffer_size, dtype=np.float32)
+        got = fdmt.execute(wf, out=out)
+        assert got.shape == (nbeams, fdmt.plan.dmt_ndms, fdmt.plan.dmt_nsamps)
+        assert np.shares_memory(got, out)
+        for b in range(nbeams):
+            np.testing.assert_array_equal(got[b], self._make().execute(wf[b]))
+
+    def test_reset_rejects_unpacked_uint8(self) -> None:
+        fdmt = self._make()
+        with pytest.raises(TypeError):
+            fdmt.reset(np.zeros((self.nchans, self.nsamps), dtype=np.uint8))
+
+    def test_valid_mode_block_must_be_finalized(self) -> None:
+        wf = np.ones((self.nchans, self.nsamps), dtype=np.float32)
+        fdmt = self._make("valid")
+        fdmt.reset(wf)
+        fdmt.advance_until_remaining(2)
+        with pytest.raises(RuntimeError):  # std::logic_error
+            fdmt.reset(wf)
+        with pytest.raises(RuntimeError):
+            fdmt.execute(wf)
+        fdmt.reset_history()
+        fdmt.reset(wf)
+        fdmt.finalize()
+        fdmt.execute(wf)
+
+    @pytest.mark.parametrize("mode", ["full", "roll"])
+    def test_modes_without_history_allow_restart(self, mode: str) -> None:
+        wf = np.ones((self.nchans, self.nsamps), dtype=np.float32)
+        fdmt = self._make(mode)
+        fdmt.reset(wf)
+        fdmt.advance_until_remaining(2)
+        fdmt.reset(wf)
+        fdmt.finalize()

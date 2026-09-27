@@ -19,6 +19,30 @@ using algorithms::CohFDMTCPU;
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
+namespace {
+
+// Runs CohFDMTCPU into a get_buffer_size() arena and returns a zero-copy
+// (ndm_total, nsamps) view of its leading get_dmt_size() result.
+template <typename DataType>
+py::array_t<float>
+coh_fdmt_execute(CohFDMTCPU& coh_fdmt,
+                 const py::array_t<DataType, py::array::c_style>& data_in) {
+    const auto& plan      = coh_fdmt.get_plan();
+    const auto ndm_total  = static_cast<py::ssize_t>(plan.get_ndm());
+    const auto nsamps_out = static_cast<py::ssize_t>(plan.get_dmt_nsamps());
+    py::array_t<float, py::array::c_style> arena(
+        static_cast<py::ssize_t>(plan.get_buffer_size()));
+    coh_fdmt.execute(std::span<const DataType>(data_in.data(), data_in.size()),
+                     std::span<float>(arena.mutable_data(), arena.size()));
+    return {{ndm_total, nsamps_out},
+            {nsamps_out * static_cast<py::ssize_t>(sizeof(float)),
+             static_cast<py::ssize_t>(sizeof(float))},
+            arena.data(),
+            arena};
+}
+
+} // namespace
+
 void bind_cfdmt(py::module_& mod) {
     mod.def(
         "generate_pure_frb",
@@ -81,50 +105,22 @@ void bind_cfdmt(py::module_& mod) {
             Convolution overlap. Must be smaller than ``nbin``.
         data_order : {'PRITF', 'FTPRI', 'RITFP'}, optional
             Packed baseband layout.
-        verbose : bool, optional
-            Print the plan summary.
         nthreads : int, optional
             OpenMP / FFTW threads.
 
         See also
         --------
-        CohFDMTPlan, CohFDMTGPU
+        CohFDMTPlan, CohFDMTCUDA
         )doc")
         .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string_view, bool, int>(),
+                      float, float, SizeType, std::string_view, int>(),
              "f_center"_a, "sub_bw"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
              "tp"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap"_a = 8192,
-             "data_order"_a = "PRITF", "verbose"_a = false, "nthreads"_a = 1)
+             "data_order"_a = "PRITF", "nthreads"_a = 1)
         .def_property_readonly("plan", &CohFDMTCPU::get_plan)
         // Bind each data type to execute method
-        .def("execute",
-             [](CohFDMTCPU& coh_fdmt,
-                const py::array_t<uint8_t, py::array::c_style>& data_in) {
-                 const auto& plan      = coh_fdmt.get_plan();
-                 const auto ndm_total  = plan.get_ndm();
-                 const auto nsamps_out = plan.get_dmt_nsamps();
-                 py::array_t<float, py::array::c_style> dmt(
-                     {static_cast<ssize_t>(ndm_total),
-                      static_cast<ssize_t>(nsamps_out)});
-                 coh_fdmt.execute(
-                     std::span<const uint8_t>(data_in.data(), data_in.size()),
-                     std::span<float>(dmt.mutable_data(), dmt.size()));
-                 return dmt;
-             })
-        .def("execute",
-             [](CohFDMTCPU& coh_fdmt,
-                const py::array_t<int8_t, py::array::c_style>& data_in) {
-                 const auto& plan      = coh_fdmt.get_plan();
-                 const auto ndm_total  = plan.get_ndm();
-                 const auto nsamps_out = plan.get_dmt_nsamps();
-                 py::array_t<float, py::array::c_style> dmt(
-                     {static_cast<ssize_t>(ndm_total),
-                      static_cast<ssize_t>(nsamps_out)});
-                 coh_fdmt.execute(
-                     std::span<const int8_t>(data_in.data(), data_in.size()),
-                     std::span<float>(dmt.mutable_data(), dmt.size()));
-                 return dmt;
-             })
+        .def("execute", &coh_fdmt_execute<uint8_t>, py::arg("data_in"))
+        .def("execute", &coh_fdmt_execute<int8_t>, py::arg("data_in"))
         .def("reset_history", &CohFDMTCPU::reset_history,
              R"doc(
              Clear streaming delay-line history between independent observations.

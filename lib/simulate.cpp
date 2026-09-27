@@ -27,8 +27,8 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
         const auto tstart_int  = static_cast<IndexType>(tstart);
         const auto tstart_frac = tstart - static_cast<float>(tstart_int);
 
-        const auto dt_sub = static_cast<float>(dt) *
-                            utils::cff(freq_min, freq_max, f_min, f_max);
+        const auto dt_sub    = static_cast<float>(dt) *
+                               utils::cff(freq_min, freq_max, f_min, f_max);
         const auto tend      = tstart - dt_sub;
         const auto tend_int  = static_cast<IndexType>(tend);
         const auto tend_frac = 1.0F - (tend - static_cast<float>(tend_int));

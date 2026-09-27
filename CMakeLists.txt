@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18...3.30)
 
 project(
   dmt
-  VERSION 0.2.0
+  VERSION 0.3.0
   LANGUAGES CXX
   DESCRIPTION "Dispersion Measure Transform Library"
 )
@@ -33,8 +33,15 @@ endif()
 
 # Configuration options
 option(DMT_BUILD_DOCS "Build documentation" OFF)
-option(DMT_BUILD_PYTHON "Build Python bindings" ON)
-option(DMT_BUILD_TESTING "Build C++ tests" ON)
+# Python bindings and tests default to ON only when dmt is the top-level
+# project, not when it is pulled in via add_subdirectory/FetchContent/CPM.
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  set(DMT_IS_TOP_LEVEL ON)
+else()
+  set(DMT_IS_TOP_LEVEL OFF)
+endif()
+option(DMT_BUILD_PYTHON "Build Python bindings" ${DMT_IS_TOP_LEVEL})
+option(DMT_BUILD_TESTING "Build C++ tests" ${DMT_IS_TOP_LEVEL})
 option(DMT_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(DMT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(DMT_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
@@ -57,8 +64,18 @@ set(DMT_CUDA
     CACHE STRING
           "CUDA build mode: AUTO (use GPU if toolchain found), ON (require GPU), OFF (CPU only)"
 )
-set_property(CACHE DMT_CUDA PROPERTY STRINGS "AUTO" "ON" "OFF")
-if(NOT DMT_CUDA MATCHES "^(AUTO|ON|OFF)$")
+set_property(
+  CACHE DMT_CUDA
+  PROPERTY STRINGS
+           "AUTO"
+           "ON"
+           "OFF"
+)
+if(NOT
+   DMT_CUDA
+   MATCHES
+   "^(AUTO|ON|OFF)$"
+)
   message(FATAL_ERROR "DMT_CUDA must be AUTO, ON, or OFF. Got: '${DMT_CUDA}'.")
 endif()
 
@@ -82,7 +99,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       CACHE STRING "Choose the type of build: Debug, Release, MinSizeRel, RelWithDebInfo." FORCE
   )
   set_property(
-    CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo"
+    CACHE CMAKE_BUILD_TYPE
+    PROPERTY STRINGS
+             "Debug"
+             "Release"
+             "MinSizeRel"
+             "RelWithDebInfo"
   )
 endif()
 
@@ -110,10 +132,15 @@ add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${DMT_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
-  INTERFACE $<$<CONFIG:Debug>:-O0;-g> $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
+  INTERFACE $<$<CONFIG:Debug>:-O0;-g>
+            $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
             $<$<AND:$<CONFIG:Release>,$<BOOL:${DMT_ENABLE_NATIVE_ARCH}>>:-march=native>
-            $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g> $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+            $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>
+            $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
+
+# OpenMP detection
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 
 # CUDA toolchain detection (DMT_CUDA user option; DMT_ENABLE_CUDA is the C++ macro).
 if(DMT_CUDA STREQUAL "ON" OR DMT_CUDA STREQUAL "AUTO")
@@ -164,7 +191,12 @@ if(CMAKE_CUDA_COMPILER AND DMT_CUDA STREQUAL "ON")
     RESULT_VARIABLE _dmt_gpu_status
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
   )
-  if(NOT _dmt_gpu_status EQUAL 0 OR _dmt_gpu_names STREQUAL "")
+  if(NOT
+     _dmt_gpu_status
+     EQUAL
+     0
+     OR _dmt_gpu_names STREQUAL ""
+  )
     message(
       FATAL_ERROR "DMT_CUDA=ON but nvidia-smi reports no usable GPU. Check driver installation."
     )
@@ -231,7 +263,11 @@ function(dmt_enable_coverage target)
   if(NOT DMT_ENABLE_COVERAGE)
     return()
   endif()
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  if(NOT
+     CMAKE_CXX_COMPILER_ID
+     MATCHES
+     "GNU|Clang"
+  )
     message(
       FATAL_ERROR
         "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
@@ -291,6 +327,8 @@ endif()
 
 # Install headers
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# dmtConfig.cmake's find_dependency(FFTW) (static builds) needs the finder.
+install(FILES ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR})
 
 # Generate and install export file
 install(

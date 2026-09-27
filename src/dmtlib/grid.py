@@ -221,7 +221,7 @@ def generate_optimal_dm_grid(
     )
 
 
-def generate_optimal_dt_grid(  # noqa: PLR0913
+def generate_optimal_dt_grid(
     f_min: float,
     f_max: float,
     nchans: int,

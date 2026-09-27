@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <cufft.h>
 
 #include "dmt/common/types.hpp"

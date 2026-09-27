@@ -1,7 +1,6 @@
-#ifdef DMT_ENABLE_CUDA
-
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <random>
 #include <ranges>
@@ -35,8 +34,8 @@ CohFDMTPlan make_cuda_test_plan() {
     const float t_p             = tbin * static_cast<float>(chan_per_sub);
     const float dm_max          = 5.0F;
     const float dm_min          = 0.0F;
-    return {f_center, bw_sub, nsub,   tbin, nbin,    nfft,
-            t_p,      dm_max, dm_min, 32,   "PRITF", false};
+    return {f_center, bw_sub, nsub,   tbin, nbin,   nfft,
+            t_p,      dm_max, dm_min, 32,   "PRITF"};
 }
 } // namespace
 
@@ -78,18 +77,22 @@ TEST_CASE("CohFDMTCUDA Host and Device Execution Parity",
     }
 
     const SizeType dmt_size = plan.get_dmt_size();
-    std::vector<float> dmt_cpu(dmt_size, 0.0F);
+    // CPU and CUDA-device outputs are get_buffer_size() arenas whose leading
+    // get_dmt_size() values are the result; the CUDA host entry point owns
+    // its arena and needs only get_dmt_size().
+    std::vector<float> dmt_cpu(plan.get_buffer_size(), 0.0F);
     std::vector<float> dmt_cuda_h(dmt_size, 0.0F);
 
     // CPU execution
     coh_fdmt_cpu.execute<uint8_t>(data_in_h, dmt_cpu);
+    dmt_cpu.resize(dmt_size);
 
     // CUDA execution on host buffers
     coh_fdmt_cuda.execute<uint8_t>(data_in_h, dmt_cuda_h);
 
     // Device execution via cuda::std::span
     thrust::device_vector<uint8_t> data_in_d = data_in_h;
-    thrust::device_vector<float> dmt_d(dmt_size, 0.0F);
+    thrust::device_vector<float> dmt_d(plan.get_buffer_size(), 0.0F);
 
     coh_fdmt_cuda.reset_history();
     coh_fdmt_cuda.execute<uint8_t>(
@@ -99,7 +102,9 @@ TEST_CASE("CohFDMTCUDA Host and Device Execution Parity",
                                dmt_d.size()));
 
     std::vector<float> dmt_cuda_dev(dmt_size, 0.0F);
-    thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_cuda_dev.begin());
+    thrust::copy(dmt_d.begin(),
+                 dmt_d.begin() + static_cast<std::ptrdiff_t>(dmt_size),
+                 dmt_cuda_dev.begin());
 
     test::require_approx(dmt_cuda_h, dmt_cuda_dev, 1.0E-3);
     REQUIRE_THAT(
@@ -181,9 +186,10 @@ TEST_CASE("CohFDMTCUDA synthetic impulse peaks near DM 0", "[cfdmt_gpu][gpu]") {
     }
 
     std::vector<float> dmt_cuda(coh_fdmt.get_dmt_size(), 0.0F);
-    std::vector<float> dmt_cpu(coh_cpu.get_dmt_size(), 0.0F);
+    std::vector<float> dmt_cpu(coh_cpu.get_buffer_size(), 0.0F);
     coh_fdmt.execute<uint8_t>(data_in, dmt_cuda);
     coh_cpu.execute<uint8_t>(data_in, dmt_cpu);
+    dmt_cpu.resize(coh_cpu.get_dmt_size());
     test::require_approx(dmt_cuda, dmt_cpu, 1.0E-2);
 
     const auto& dm_grid = plan.get_dm_grid_final();
@@ -195,5 +201,3 @@ TEST_CASE("CohFDMTCUDA synthetic impulse peaks near DM 0", "[cfdmt_gpu][gpu]") {
 }
 
 } // namespace dmt
-
-#endif // DMT_ENABLE_CUDA

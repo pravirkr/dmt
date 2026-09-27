@@ -5,7 +5,7 @@
 #   cd docs && doxygen Doxyfile
 
 PROJECT_NAME           = "dmt"
-PROJECT_NUMBER         = "0.2.0"
+PROJECT_NUMBER         = "0.3.0"
 PROJECT_BRIEF          = "Fast, Accurate Dispersion Measure Transform for Radio Astronomy"
 OUTPUT_DIRECTORY       = _build/doxygen
 CREATE_SUBDIRS         = NO

@@ -196,7 +196,7 @@ void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
            "data1_in and data1_out must have the same size");
     assert(data2_in.size() == data2_out.size() &&
            "data2_in and data2_out must have the same size");
-    const auto nx = static_cast<SizeType>(nsub * nbin);
+    [[maybe_unused]] const auto nx = static_cast<SizeType>(nsub * nbin);
     assert(nx > 0 && chirp_table.size() % nx == 0 &&
            "chirp_table size must be a multiple of nsub * nbin");
     assert(static_cast<SizeType>(idm) < chirp_table.size() / nx &&

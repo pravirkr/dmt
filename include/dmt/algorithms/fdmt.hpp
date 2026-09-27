@@ -1,12 +1,15 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef DMT_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // DMT_ENABLE_CUDA
 
 #include "dmt/common/plans.hpp"
@@ -29,11 +32,48 @@ struct FDMTSubbandView {
 };
 
 /**
+ * @brief `fuse_levels` value selecting the fusion depth from the plan (the
+ * default). See the `fuse_levels` constructor parameter.
+ */
+inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
+
+/**
+ * @brief Memory an FDMT engine allocates at construction, in bytes (host
+ * memory for FDMTCPU, device memory for FDMTCUDA). execute() allocates
+ * nothing further; the caller provides the input and the `output` bytes of
+ * output buffer per call.
+ */
+struct FDMTMemoryUsage {
+    SizeType plan;      ///< Plan tables (coordinate DAG, sub-band grids)
+    SizeType state;     ///< Internal ping-pong tree state
+    SizeType history;   ///< "valid"-mode streaming history
+    SizeType workspace; ///< CPU: per-thread fusion/unpack scratch;
+                        ///< CUDA: fused-kernel index tables
+    SizeType output;    ///< Caller-provided dmt buffer per execute() (not
+                        ///< owned by the engine)
+
+    /// Total allocated by the engine (excludes `output`).
+    [[nodiscard]] SizeType total() const noexcept {
+        return plan + state + history + workspace;
+    }
+};
+
+/**
  * @brief Fast Dispersion Measure Transform (FDMT) for CPU execution.
  *
  * Performs the FDMT algorithm using CPU cores with optional OpenMP
  * parallelization. Supports both single-shot transformation and stepped
  * execution for intermediate sub-band inspection.
+ *
+ * In short:
+ * - Input: float32 (nbeams, nchans, nsamps), or packed unsigned 1/2/4/8/16-bit
+ *   samples (see the packed execute()).
+ * - Output: always float32. Pass nbeams * plan.get_buffer_size() floats; each
+ *   beam's leading plan.get_dmt_size() values are the (ndms, dmt_nsamps)
+ *   result, and the rest is ping-pong scratch.
+ * - Construct once per plan: the constructor allocates everything, and
+ *   execute() allocates nothing. In mode "valid", call execute() on
+ *   contiguous, non-overlapping blocks to get a contiguous output stream.
  */
 class FDMTCPU {
 public:
@@ -62,7 +102,6 @@ public:
      *   restart streaming from a cold state (e.g. for a new observation).
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
-     * @param verbose Enable verbose output.
      * @param nthreads Number of OpenMP threads to use (default: 1).
      * @param nbeams Number of independent beams to process together
      * (default: 1). The plan/coordinate DAG is shared across all beams
@@ -72,6 +111,25 @@ public:
      * layout as before this parameter existed. `waterfall`/`dmt` become
      * beam-major: shape (nbeams, nchans, nsamps) / (nbeams, ndms, nsamps)
      * flattened, beam b at offset b*nchans*nsamps / b*get_buffer_size().
+     * @param fuse_levels Performance parameter (most users keep the
+     * default): execute() fuses level-0 initialisation with the first
+     * `fuse_levels` tree merges, processing channels in groups of
+     * 2^fuse_levels whose intermediate levels stay in a per-thread,
+     * cache-resident scratch buffer instead of travelling to and from main
+     * memory. Bit-identical output. 0 = the original level-by-level path;
+     * values above the plan's merge levels are clamped. kFDMTAutoFuse
+     * (default) picks the deepest depth whose two scratch buffers fit in
+     * max(36 MiB / nthreads, 5 MiB) per thread -- a rule on the plan alone,
+     * with no hardware detection (see get_fuse_levels()). The stepper
+     * (reset()/advance()) always runs level by level.
+     * @param int_tree Performance parameter: for packed low-bit input, store
+     * tree levels whose exact value bound fits as uint8/uint16 instead of
+     * float (exact; default true). Integer levels cannot be inspected through
+     * the stepper's view_* methods; pass false to inspect every level of a
+     * packed stepper run. Ignored for float input.
+     *
+     * All working memory is allocated here (see get_memory_usage()); execute()
+     * performs no allocation.
      */
     FDMTCPU(float f_min,
             float f_max,
@@ -83,9 +141,10 @@ public:
             SizeType dt_step      = 1,
             bool use_box_smearing = true,
             std::string_view mode = "valid",
-            bool verbose          = false,
             int nthreads          = 1,
-            SizeType nbeams       = 1);
+            SizeType nbeams       = 1,
+            SizeType fuse_levels  = kFDMTAutoFuse,
+            bool int_tree         = true);
 
     /**
      * @brief Constructs an FDMTCPU instance with a custom delay trial grid.
@@ -95,12 +154,16 @@ public:
      * @param nchans Number of frequency channels (power of 2).
      * @param nsamps Number of time samples per incoming block.
      * @param tsamp Sampling time (s).
-     * @param dt_grid Explicit list of delay trials in samples (e.g. from generate_optimal_dt_grid).
-     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param dt_grid Explicit list of delay trials in samples (e.g. from
+     * generate_optimal_dt_grid).
+     * @param use_box_smearing Whether to account for intra-channel smearing
+     * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose Enable verbose plan output.
      * @param nthreads Number of OpenMP threads to use (default: 1).
-     * @param nbeams Number of independent beams to process together (default: 1).
+     * @param nbeams Number of independent beams to process together (default:
+     * 1).
+     * @param fuse_levels, int_tree Performance parameters (see the first
+     * constructor).
      */
     FDMTCPU(float f_min,
             float f_max,
@@ -110,24 +173,30 @@ public:
             const std::vector<IndexType>& dt_grid,
             bool use_box_smearing = true,
             std::string_view mode = "valid",
-            bool verbose          = false,
             int nthreads          = 1,
-            SizeType nbeams       = 1);
+            SizeType nbeams       = 1,
+            SizeType fuse_levels  = kFDMTAutoFuse,
+            bool int_tree         = true);
 
     /**
-     * @brief Constructs an FDMTCPU instance with a custom physical DM trial grid.
+     * @brief Constructs an FDMTCPU instance with a custom physical DM trial
+     * grid.
      *
      * @param f_min Frequency of the lowest channel (MHz).
      * @param f_max Frequency of the highest channel (MHz).
      * @param nchans Number of frequency channels (power of 2).
      * @param nsamps Number of time samples per incoming block.
      * @param tsamp Sampling time (s).
-     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports non-uniform spacing and negative DMs).
-     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
+     * non-uniform spacing and negative DMs).
+     * @param use_box_smearing Whether to account for intra-channel smearing
+     * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose Enable verbose plan output.
      * @param nthreads Number of OpenMP threads to use (default: 1).
-     * @param nbeams Number of independent beams to process together (default: 1).
+     * @param nbeams Number of independent beams to process together (default:
+     * 1).
+     * @param fuse_levels, int_tree Performance parameters (see the first
+     * constructor).
      */
     FDMTCPU(float f_min,
             float f_max,
@@ -137,9 +206,10 @@ public:
             const std::vector<float>& dm_grid,
             bool use_box_smearing = true,
             std::string_view mode = "valid",
-            bool verbose          = false,
             int nthreads          = 1,
-            SizeType nbeams       = 1);
+            SizeType nbeams       = 1,
+            SizeType fuse_levels  = kFDMTAutoFuse,
+            bool int_tree         = true);
 
     ~FDMTCPU();
     FDMTCPU(FDMTCPU&&) noexcept;
@@ -166,9 +236,56 @@ public:
      * (nbeams*nchans*nsamps); nbeams=1 (the default) is just (nchans,
      * nsamps).
      * @param dmt Output DM-time array, beam-major flat
-     * (nbeams*get_buffer_size()).
+     * (nbeams*get_buffer_size()). Only the leading plan.get_dmt_size()
+     * values of each beam are the transform; the rest of each beam's slice
+     * is ping-pong scratch whose contents depend on the execution path
+     * (e.g. the fusion depth) and are unspecified.
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
+
+    /**
+     * @brief Executes the FDMT transform on packed low-bit integer input.
+     *
+     * Each channel row holds nsamps unsigned samples of `nbits` bits,
+     * LSB-first within a byte for nbits < 8 (same convention as DDMTCPU),
+     * little-endian for 16, padded to a whole byte: layout (nbeams, nchans,
+     * ceil(nsamps * nbits / 8)) bytes. There is no 32-bit integer input;
+     * use the float overload for 32-bit float data. The output is float32
+     * and identical to execute() on the same values converted to float,
+     * laid out as for the float overload (only the leading get_dmt_size()
+     * values per beam are the result).
+     *
+     * @param waterfall_packed Packed input, beam-major flat.
+     * @param nbits Sample width: 1, 2, 4, 8 or 16.
+     * @param dmt Output DM-time array (size >= nbeams*get_buffer_size()).
+     * @throws std::invalid_argument for another nbits or a size mismatch.
+     */
+    void execute(std::span<const uint8_t> waterfall_packed,
+                 SizeType nbits,
+                 std::span<float> dmt);
+
+    /**
+     * @brief Fusion depth execute() uses: the `fuse_levels` constructor
+     * argument clamped to the plan's merge levels, or the depth chosen for
+     * kFDMTAutoFuse (0 = original level-by-level path).
+     */
+    [[nodiscard]] SizeType get_fuse_levels() const noexcept;
+
+    /// @brief Whether packed input uses the narrow-integer tree.
+    [[nodiscard]] bool get_int_tree() const noexcept;
+
+    /**
+     * @brief Memory allocated at construction (host bytes), plus the output
+     * buffer size each execute() call needs.
+     */
+    [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
+
+    /**
+     * @brief Human-readable summary: the plan (see FDMTPlan::summary()),
+     * then the engine configuration (mode, threads, beams, fusion depth,
+     * integer tree) and its memory breakdown.
+     */
+    [[nodiscard]] std::string summary() const;
 
     // =========================================================================
     // Stepper / Hierarchical DP Engine API
@@ -190,8 +307,27 @@ public:
      * slice -- advance()/advance_until_remaining()/finalize() still process
      * every beam correctly, but per-beam intermediate-level inspection isn't
      * exposed by this API yet.
+     * @note Each reset() (like each execute()) consumes one input block. In
+     * mode "valid" a block must be advanced to the root (finalize()) before
+     * the next reset()/execute(): stopping early would skip the upper
+     * levels' cross-block history update, so this throws std::logic_error
+     * instead. reset_history() abandons the unfinished block and the stream.
+     * The stepper always runs level by level (never fused), and its views
+     * are zero-copy: they are overwritten as later levels are computed.
+     * @throws std::logic_error if a "valid"-mode block is still unfinished.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
+
+    /**
+     * @brief Packed low-bit analogue of reset() (see the packed execute()).
+     *
+     * @note With int_tree enabled (the default), levels stored as integers
+     * cannot be inspected: the view_* methods throw std::logic_error at such
+     * a level.
+     */
+    void reset(std::span<const uint8_t> waterfall_packed,
+               SizeType nbits,
+               std::span<float> dmt);
 
     /**
      * @brief Steps forward by a given number of levels.
@@ -300,7 +436,8 @@ public:
 
     /**
      * @brief Resets the internal history buffer for valid-mode streaming across
-     * FDMT blocks.
+     * FDMT blocks (a cold start, e.g. for a new observation). Also abandons an
+     * unfinished stepper block.
      */
     void reset_history() noexcept;
 
@@ -342,9 +479,11 @@ private:
 };
 
 /**
- * @brief High-level convenience function to execute FDMT on a waterfall block with a linear delay grid.
+ * @brief High-level convenience function to execute FDMT on a waterfall block
+ * with a linear delay grid.
  *
- * @param waterfall Input waterfall data, beam-major flat (nbeams*nchans*nsamps).
+ * @param waterfall Input waterfall data, beam-major flat
+ * (nbeams*nchans*nsamps).
  * @param f_min Bottom edge frequency in MHz.
  * @param f_max Top edge frequency in MHz.
  * @param nchans Number of frequency channels (power of 2).
@@ -353,12 +492,13 @@ private:
  * @param dt_max Maximum delay trial in samples.
  * @param dt_min Minimum delay trial in samples (default: 0).
  * @param dt_step Stride between delay trials (default: 1).
- * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+ * @param use_box_smearing Whether to account for intra-channel smearing
+ * (default: true).
  * @param mode Mode: "valid", "full", or "roll" (default: "valid").
- * @param verbose Enable verbose output (default: false).
  * @param nthreads Number of OpenMP threads (default: 1).
  * @param nbeams Number of batched beams (default: 1).
- * @return Tuple of (transformed DMT buffer as std::vector<float>, FDMTPlan object).
+ * @return Tuple of (transformed DMT buffer as std::vector<float>, FDMTPlan
+ * object).
  */
 [[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
 compute_fdmt(std::span<const float> waterfall,
@@ -372,7 +512,6 @@ compute_fdmt(std::span<const float> waterfall,
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             bool verbose          = false,
              int nthreads          = 1,
              SizeType nbeams       = 1);
 
@@ -386,7 +525,6 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             bool verbose          = false,
              int nthreads          = 1,
              SizeType nbeams       = 1);
 
@@ -400,7 +538,6 @@ compute_fdmt(std::span<const float> waterfall,
              const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             bool verbose          = false,
              int nthreads          = 1,
              SizeType nbeams       = 1);
 
@@ -493,10 +630,21 @@ public:
      *   Call reset_history() to restart streaming from a cold state.
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
-     * @param verbose Enable verbose output.
      * @param device_id CUDA device ID to use (default: 0).
      * @param nbeams Number of independent beams to process together
      * (default: 1).
+     * @param fuse_levels Performance parameter (most users keep the
+     * default): the device execute() overloads fuse level-0 initialisation
+     * with the first `fuse_levels` merges in one kernel, one thread block per
+     * (channel group, time tile) with the intermediate levels in shared
+     * memory. Bit-identical output. 0 = level-by-level kernels. An explicit
+     * depth is clamped to the plan's merge levels and to 8, and reduced
+     * until a tile fits the device's opt-in shared memory. kFDMTAutoFuse
+     * (default) picks the deepest depth whose tile of >= 256 samples fits
+     * the portable 48 KiB of shared memory with a level-0 halo of at most
+     * half a tile (see get_fuse_levels()).
+     * @param int_tree Performance parameter: narrow-integer tree state for
+     * packed input, as on the CPU (default true).
      */
     FDMTCUDA(float f_min,
              float f_max,
@@ -508,9 +656,10 @@ public:
              SizeType dt_step      = 1,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             bool verbose          = false,
              int device_id         = 0,
-             SizeType nbeams       = 1);
+             SizeType nbeams       = 1,
+             SizeType fuse_levels  = kFDMTAutoFuse,
+             bool int_tree         = true);
 
     /**
      * @brief Constructs an FDMTCUDA object with a custom delay trial grid.
@@ -521,11 +670,14 @@ public:
      * @param nsamps Number of time samples per incoming block.
      * @param tsamp Sampling time (s).
      * @param dt_grid Explicit list of delay trials in samples.
-     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param use_box_smearing Whether to account for intra-channel smearing
+     * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose Enable verbose output.
      * @param device_id CUDA device ID to use (default: 0).
-     * @param nbeams Number of independent beams to process together (default: 1).
+     * @param nbeams Number of independent beams to process together (default:
+     * 1).
+     * @param fuse_levels, int_tree Performance parameters (see the first
+     * constructor).
      */
     FDMTCUDA(float f_min,
              float f_max,
@@ -535,9 +687,10 @@ public:
              const std::vector<IndexType>& dt_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             bool verbose          = false,
              int device_id         = 0,
-             SizeType nbeams       = 1);
+             SizeType nbeams       = 1,
+             SizeType fuse_levels  = kFDMTAutoFuse,
+             bool int_tree         = true);
 
     /**
      * @brief Constructs an FDMTCUDA object with a custom DM trial grid.
@@ -547,12 +700,16 @@ public:
      * @param nchans Number of frequency channels (power of 2).
      * @param nsamps Number of time samples per incoming block.
      * @param tsamp Sampling time (s).
-     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports non-uniform and negative DMs).
-     * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+     * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
+     * non-uniform and negative DMs).
+     * @param use_box_smearing Whether to account for intra-channel smearing
+     * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param verbose Enable verbose output.
      * @param device_id CUDA device ID to use (default: 0).
-     * @param nbeams Number of independent beams to process together (default: 1).
+     * @param nbeams Number of independent beams to process together (default:
+     * 1).
+     * @param fuse_levels, int_tree Performance parameters (see the first
+     * constructor).
      */
     FDMTCUDA(float f_min,
              float f_max,
@@ -562,9 +719,10 @@ public:
              const std::vector<float>& dm_grid,
              bool use_box_smearing = true,
              std::string_view mode = "valid",
-             bool verbose          = false,
              int device_id         = 0,
-             SizeType nbeams       = 1);
+             SizeType nbeams       = 1,
+             SizeType fuse_levels  = kFDMTAutoFuse,
+             bool int_tree         = true);
 
     ~FDMTCUDA();
     FDMTCUDA(FDMTCUDA&&) noexcept;
@@ -581,11 +739,17 @@ public:
     /**
      * @brief Executes the FDMT transform using host memory.
      *
-     * Input and output data reside on the host. This involves transferring data
-     * to/from the device internally.
+     * Input and output data reside on the host. The input is copied to a
+     * device staging buffer and each beam's leading plan.get_dmt_size()
+     * values (the result) are copied back; the rest of @p dmt is not
+     * written. The staging buffers are allocated on the first host call and
+     * reused (counted in get_memory_usage().workspace), so repeated calls
+     * allocate nothing. Blocks until the result is on the host.
      *
      * @param waterfall Input waterfall data view (host memory).
-     * @param dmt Output DM-time array view (host memory).
+     * @param dmt Output DM-time array view (host memory), at least
+     * nbeams * plan.get_buffer_size() floats, beam b at offset
+     * b * plan.get_buffer_size().
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -597,7 +761,9 @@ public:
      * Allows specifying a CUDA stream for asynchronous execution.
      *
      * @param d_waterfall Input waterfall data view (device memory)
-     * @param d_dmt Output DM-time array view (device memory)
+     * @param d_dmt Output DM-time array view (device memory). As on the
+     * CPU, only the leading plan.get_dmt_size() values of each beam are the
+     * transform; the remainder is unspecified scratch.
      * @param stream The CUDA stream to execute the transform on.
      *
      * @note Work is submitted asynchronously to @p stream. Call
@@ -607,6 +773,84 @@ public:
     void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Executes the FDMT transform on packed low-bit input in host
+     * memory (see FDMTCPU::execute(std::span<const uint8_t>, ...) for the
+     * layout). Only the packed bytes are copied to the device -- 32 / nbits
+     * times less PCIe traffic than float input. The output is float and
+     * matches the float execute() on the same values.
+     *
+     * @param waterfall_packed Packed input (host), (nbeams, nchans,
+     * ceil(nsamps * nbits / 8)) bytes.
+     * @param nbits Sample width: 1, 2, 4, 8 or 16.
+     * @param dmt Output DM-time array (host).
+     */
+    void execute(std::span<const uint8_t> waterfall_packed,
+                 SizeType nbits,
+                 std::span<float> dmt);
+
+    /**
+     * @brief Packed low-bit analogue of the device-memory execute().
+     * @note Asynchronous on @p stream, like the float overload.
+     */
+    void execute(cuda::std::span<const uint8_t> d_waterfall_packed,
+                 SizeType nbits,
+                 cuda::std::span<float> d_dmt,
+                 cudaStream_t stream = nullptr);
+
+    template <typename Alloc1 = std::allocator<float>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<float, Alloc1>& waterfall,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const float>(waterfall), std::span<float>(dmt));
+    }
+
+    template <typename Alloc1 = std::allocator<uint8_t>,
+              typename Alloc2 = std::allocator<float>>
+    void execute(const std::vector<uint8_t, Alloc1>& waterfall_packed,
+                 SizeType nbits,
+                 std::vector<float, Alloc2>& dmt) {
+        execute(std::span<const uint8_t>(waterfall_packed), nbits,
+                std::span<float>(dmt));
+    }
+
+    /**
+     * @brief Packed low-bit analogue of reset() (device memory).
+     *
+     * @note With int_tree enabled (the default), levels stored as integers
+     * cannot be inspected: the view_* methods throw std::logic_error at such
+     * a level.
+     */
+    void reset(cuda::std::span<const uint8_t> d_waterfall_packed,
+               SizeType nbits,
+               cuda::std::span<float> d_dmt,
+               cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Fusion depth the device execute() overloads use (0 = unfused);
+     * see the `fuse_levels` constructor parameter.
+     */
+    [[nodiscard]] SizeType get_fuse_levels() const noexcept;
+
+    /// @brief Whether packed input uses the narrow-integer tree.
+    [[nodiscard]] bool get_int_tree() const noexcept;
+
+    /// @brief CUDA device this engine allocates on and runs on.
+    [[nodiscard]] int get_device_id() const noexcept;
+
+    /**
+     * @brief Device memory allocated by the engine, plus the output buffer
+     * size each execute() call needs. `workspace` also includes the
+     * host-memory execute() staging once the first host call allocated it.
+     */
+    [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
+
+    /**
+     * @brief Human-readable summary, as FDMTCPU::summary() (device memory,
+     * device id instead of threads).
+     */
+    [[nodiscard]] std::string summary() const;
 
     /**
      * @brief Resets and initializes the stepped execution state using device
@@ -622,10 +866,14 @@ public:
      * @param stream CUDA stream for asynchronous execution (default: nullptr).
      * @throws std::invalid_argument If the input or output buffers are too
      * small.
+     * @throws std::logic_error If a "valid"-mode block is still unfinished.
      *
      * @note Kernels and memory copies are queued on @p stream. Synchronize
      *       before consuming @p d_dmt or calling reset() again on another
      *       stream unless ordering is guaranteed externally.
+     * @note As on the CPU, in mode "valid" a block must be finalized before
+     *       the next reset()/execute() (else std::logic_error);
+     *       reset_history() abandons it. The stepper never fuses.
      */
     void reset(cuda::std::span<const float> d_waterfall,
                cuda::std::span<float> d_dmt,
@@ -774,7 +1022,8 @@ public:
 
     /**
      * @brief Resets the internal history buffers for valid-mode streaming
-     * across FDMT blocks. Mirrors FDMTCPU::reset_history().
+     * across FDMT blocks, and abandons an unfinished stepper block. Mirrors
+     * FDMTCPU::reset_history().
      */
     void reset_history() noexcept;
 
@@ -809,8 +1058,8 @@ public:
      * cold.
      *
      * @param in Source device span, size must equal history_state_size().
-     * @param stream CUDA stream to enqueue the copy on. Briefly synchronizes
-     * internally to read back a small parity flag onto the host.
+     * @param stream CUDA stream to enqueue the copy on (fully asynchronous;
+     * later work on the same stream sees the loaded history).
      * @throws std::invalid_argument if in.size() != history_state_size().
      */
     void load_history(cuda::std::span<const float> in,
@@ -822,7 +1071,8 @@ private:
 };
 
 /**
- * @brief Convenience function to run FDMT on GPU device using host memory views.
+ * @brief Convenience function to run FDMT on GPU device using host memory
+ * views.
  *
  * @param waterfall Input waterfall data on host.
  * @param f_min Bottom edge frequency in MHz.
@@ -833,9 +1083,9 @@ private:
  * @param dt_max Maximum delay trial in samples.
  * @param dt_min Minimum delay trial in samples (default: 0).
  * @param dt_step Stride between delay trials (default: 1).
- * @param use_box_smearing Whether to account for intra-channel smearing (default: true).
+ * @param use_box_smearing Whether to account for intra-channel smearing
+ * (default: true).
  * @param mode Mode: "valid", "full", or "roll" (default: "valid").
- * @param verbose Enable verbose output.
  * @param device_id CUDA device ID.
  * @param nbeams Number of batched beams.
  * @return Transformed DMT buffer on host.
@@ -851,7 +1101,6 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      SizeType dt_step      = 1,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "valid",
-                                     bool verbose          = false,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
 
@@ -864,7 +1113,6 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      const std::vector<IndexType>& dt_grid,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "valid",
-                                     bool verbose          = false,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
 
@@ -877,7 +1125,6 @@ std::vector<float> compute_fdmt_cuda(std::span<const float> waterfall,
                                      const std::vector<float>& dm_grid,
                                      bool use_box_smearing = true,
                                      std::string_view mode = "valid",
-                                     bool verbose          = false,
                                      int device_id         = 0,
                                      SizeType nbeams       = 1);
 

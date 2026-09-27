@@ -6,10 +6,12 @@
 #include <benchmark/benchmark.h>
 
 #include "dmt/algorithms/fdmt.hpp"
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 
 namespace dmt {
 using algorithms::FDMTCPU;
+using algorithms::kFDMTAutoFuse;
 using plans::FDMTPlan;
 
 // Helper function to generate random data
@@ -52,18 +54,20 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer)
 (benchmark::State& state) {
     for (auto _ : state) {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "full", false, nthreads);
+                     "full", nthreads);
     }
 }
 
+// Default execution config (automatic level fusion).
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute)
 (benchmark::State& state) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                 "full", false, nthreads);
+                 "full", nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
     }
+    state.counters["fuse"] = static_cast<double>(fdmt.get_fuse_levels());
 }
 
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
@@ -72,7 +76,7 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
     std::vector<float> dmt(tmp_plan.get_buffer_size(), 0.0F);
     for (auto _ : state) {
         FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "full", false, nthreads);
+                     "full", nthreads);
         fdmt.execute(waterfall, dmt);
     }
 }
@@ -80,11 +84,62 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_threads)
 (benchmark::State& state) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                 "full", false, nthreads);
+                 "full", nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
     }
+}
+
+// Packed low-bit input. Args: (nsamps, nthreads, nbits [32 = float
+// reference], int_tree, fuse_levels [-1 = kFDMTAutoFuse, the default]). Valid
+// mode with box smearing -- the streaming default -- on the same
+// 4096-channel band.
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_packed)
+(benchmark::State& state) {
+    const auto nbits = static_cast<SizeType>(state.range(2));
+    const auto fuse  = state.range(4) < 0
+                           ? kFDMTAutoFuse
+                           : static_cast<SizeType>(state.range(4));
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                 "valid", nthreads, 1, fuse, state.range(3) != 0);
+    std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
+    if (nbits == 32) {
+        for (auto _ : state) {
+            fdmt.execute(waterfall, dmt);
+        }
+    } else {
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
+        std::vector<uint8_t> packed(nchans * row_bytes);
+        std::uniform_int_distribution<int> dis(0, 255);
+        std::generate(packed.begin(), packed.end(),
+                      [&]() { return static_cast<uint8_t>(dis(gen)); });
+        for (auto _ : state) {
+            fdmt.execute(std::span<const uint8_t>(packed), nbits, dmt);
+        }
+    }
+    state.counters["fuse"] = static_cast<double>(fdmt.get_fuse_levels());
+    state.SetItemsProcessed(state.iterations() *
+                            static_cast<int64_t>(nchans * nsamps));
+}
+
+// Level fusion. Args: (nsamps, nthreads, fuse_levels [-1 = kFDMTAutoFuse]).
+// Valid mode with box smearing (the streaming default); fuse 0 is the
+// original level-by-level path.
+BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_fused)
+(benchmark::State& state) {
+    const auto fuse = state.range(2) < 0
+                          ? kFDMTAutoFuse
+                          : static_cast<SizeType>(state.range(2));
+    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                 "valid", nthreads, 1, fuse);
+    std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
+    for (auto _ : state) {
+        fdmt.execute(waterfall, dmt);
+    }
+    state.counters["fuse"] = static_cast<double>(fdmt.get_fuse_levels());
+    state.SetItemsProcessed(state.iterations() *
+                            static_cast<int64_t>(nchans * nsamps));
 }
 
 constexpr size_t kMinNsamps = 1 << 11;
@@ -107,6 +162,17 @@ BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_overall) // NOLINT
 
 BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_execute_threads) // NOLINT
     ->ArgsProduct({{0}, {1, 2, 4, 8, 10, 12, 16}})
+    ->MeasureProcessCPUTime()
+    ->UseRealTime();
+
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_fused) // NOLINT
+    ->ArgsProduct({{1 << 12, 1 << 14, 1 << 16}, {1, 8}, {0, 1, 2, 3, 4, -1}})
+    ->MeasureProcessCPUTime()
+    ->UseRealTime();
+
+BENCHMARK_REGISTER_F(FDMTCPUFixture, BM_fdmt_packed) // NOLINT
+    ->ArgsProduct({{1 << 14}, {1, 8}, {32}, {0}, {0, -1}})
+    ->ArgsProduct({{1 << 14}, {1, 8}, {1, 2, 4, 8, 16}, {0, 1}, {0, -1}})
     ->MeasureProcessCPUTime()
     ->UseRealTime();
 

@@ -49,7 +49,7 @@ public:
 BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_roll)
 (benchmark::State& state) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                    "roll", false, nthreads);
+                    "roll", nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
@@ -59,7 +59,7 @@ BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_roll)
 BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_valid)
 (benchmark::State& state) {
     FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                    "valid", false, nthreads);
+                    "valid", nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
@@ -69,7 +69,7 @@ BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_valid)
 BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_direct_execute_valid)
 (benchmark::State& state) {
     FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                 "valid", false, nthreads);
+                 "valid", nthreads);
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);

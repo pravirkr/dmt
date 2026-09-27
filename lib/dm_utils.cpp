@@ -4,11 +4,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
-#include <iterator>
+#include <format>
 #include <stdexcept>
 #include <vector>
-
-#include <spdlog/spdlog.h>
 
 namespace dmt::utils {
 
@@ -122,20 +120,33 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
                                           float f_max,
                                           SizeType nchans,
                                           float tol) {
-    if (dm_end < dm_start) {
-        throw std::invalid_argument("dm_end must be >= dm_start");
+    if (dm_start < 0.0F || dm_end < dm_start) {
+        throw std::invalid_argument(std::format(
+            "Invalid DM range[{}, {}]: require 0 <= dm_start <= dm_end",
+            dm_start, dm_end));
     }
     if (tsamp <= 0.0F || pulse_width < 0.0F) {
-        throw std::invalid_argument("tsamp must be > 0 and pulse_width >= 0");
+        throw std::invalid_argument(
+            std::format("Invalid tsamp[{}] or pulse_width[{}]: require tsamp > "
+                        "0 and pulse_width >= 0",
+                        tsamp, pulse_width));
     }
     if (f_min <= 0.0F || f_max <= f_min) {
-        throw std::invalid_argument("f_min must be > 0 and < f_max");
+        throw std::invalid_argument(std::format(
+            "Invalid f_min[{}], f_max[{}]: require 0 < f_min < f_max", f_min,
+            f_max));
     }
     if (nchans == 0) {
-        throw std::invalid_argument("nchans must be > 0");
+        throw std::invalid_argument(
+            std::format("Invalid nchans[{}]: require nchans > 0", nchans));
     }
     if (tol <= 1.0F) {
-        throw std::invalid_argument("tol must be > 1.0");
+        throw std::invalid_argument(
+            std::format("Invalid tol[{}]: require tol > 1.0", tol));
+    }
+
+    if (dm_start == dm_end) {
+        return {dm_start};
     }
 
     const double dt_us = static_cast<double>(tsamp) * 1.0e6;
@@ -149,9 +160,10 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
 
     const double a =
         8.3 * df_mhz / (f_center_ghz * f_center_ghz * f_center_ghz);
-    const double a2 = a * a;
-    const double b2 = a2 * (static_cast<double>(nchans * nchans) / 16.0);
-    const double c  = ((dt_us * dt_us) + (ti_us * ti_us)) * (tol2 - 1.0);
+    const double a2        = a * a;
+    const double b2        = a2 * (static_cast<double>(nchans * nchans) / 16.0);
+    const double c         = ((dt_us * dt_us) + (ti_us * ti_us)) * (tol2 - 1.0);
+    const double denom_inv = 1.0 / (a2 + b2);
 
     std::vector<float> dm_table;
     dm_table.push_back(dm_start);
@@ -160,21 +172,17 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
         const double prev2 = prev * prev;
         const double k     = c + (tol2 * a2 * prev2);
         const double disc  = (-a2 * b2 * prev2) + ((a2 + b2) * k);
-        if (disc < 0.0) {
-            break;
+        if (disc <= 0.0) {
+            throw std::runtime_error(std::format(
+                "Numerical collapse in generate_levin_dm_grid at DM={}", prev));
         }
-        const double next_dm = ((b2 * prev) + std::sqrt(disc)) / (a2 + b2);
+        const double next_dm = ((b2 * prev) + std::sqrt(disc)) * denom_inv;
         if (next_dm <= prev) {
-            break;
+            throw std::runtime_error(std::format(
+                "Zero step size encountered in generate_levin_dm_grid at DM={}",
+                prev));
         }
         dm_table.push_back(static_cast<float>(next_dm));
-    }
-    if (dm_table.back() < dm_end) {
-        spdlog::warn("generate_levin_dm_grid: step size collapsed before "
-                     "reaching dm_end={} (stopped at {}); the requested "
-                     "tolerance/pulse_width/tsamp combination has no valid "
-                     "further step -- DM coverage above {} is incomplete",
-                     dm_end, dm_table.back(), dm_table.back());
     }
     return dm_table;
 }
