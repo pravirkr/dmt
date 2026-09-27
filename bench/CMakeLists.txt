@@ -35,6 +35,9 @@ target_include_directories(
 )
 
 if(CMAKE_CUDA_COMPILER)
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
+    target_include_directories(${TARGET_BENCHMARKS} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+  endif()
   target_include_directories(${TARGET_BENCHMARKS} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
@@ -97,6 +100,11 @@ target_include_directories(
   ${TARGET_BENCHMARKS_SUITE} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
 )
 if(CMAKE_CUDA_COMPILER)
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
+    target_include_directories(
+      ${TARGET_BENCHMARKS_SUITE} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl"
+    )
+  endif()
   target_include_directories(${TARGET_BENCHMARKS_SUITE} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 target_link_libraries(

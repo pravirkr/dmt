@@ -33,11 +33,11 @@ include(CTest)
 set(TARGET_TESTS ${PROJECT_NAME}_tests)
 
 # Collect C++ test sources
-file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
 # Add CUDA test sources if available
 if(CMAKE_CUDA_COMPILER)
-  file(GLOB TEST_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  file(GLOB TEST_SOURCES_CUDA CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
   list(APPEND TEST_SOURCES ${TEST_SOURCES_CUDA})
 
   # Explicitly set CUDA files to be compiled with CUDA
@@ -56,6 +56,9 @@ if(CMAKE_CUDA_COMPILER)
     target_include_directories(${TARGET_TESTS} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl")
   endif()
   target_include_directories(${TARGET_TESTS} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  # The GPU tests use the library's private CUDA helpers and guards.
+  target_compile_definitions(${TARGET_TESTS} PRIVATE DMT_ENABLE_CUDA)
+  target_link_libraries(${TARGET_TESTS} PRIVATE CUDA::cudart CUDA::cufft)
 endif()
 
 target_link_libraries(

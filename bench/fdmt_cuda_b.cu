@@ -33,7 +33,7 @@ thrust::device_vector<T> generate_vector_device(size_t size) {
 } // namespace
 
 namespace dmt {
-using algorithms::FDMTCUDA;
+using algorithms::FDMT;
 using algorithms::kFDMTAutoFuse;
 using plans::FDMTPlan;
 
@@ -67,23 +67,25 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_planBuffer_cuda)
 (benchmark::State& state) {
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                  "valid", Exec::cuda(0));
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda)
 (benchmark::State& state) {
-    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                   "valid", Exec::cuda(0));
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
         fdmt_cuda.execute(
-            cuda::std::span<const float>(
+            DeviceSpan<const float>(
                 thrust::raw_pointer_cast(waterfall_d.data()),
                 waterfall_d.size()),
-            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                   dmt_d.size()));
+            DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                              dmt_d.size()));
     }
 }
 
@@ -93,13 +95,14 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
     thrust::device_vector<float> dmt_d(tmp_plan.get_buffer_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+        FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                       "valid", Exec::cuda(0));
         fdmt_cuda.execute(
-            cuda::std::span<const float>(
+            DeviceSpan<const float>(
                 thrust::raw_pointer_cast(waterfall_d.data()),
                 waterfall_d.size()),
-            cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                                   dmt_d.size()));
+            DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                              dmt_d.size()));
     }
 }
 
@@ -114,17 +117,17 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
     const auto fuse  = state.range(3) < 0
                            ? kFDMTAutoFuse
                            : static_cast<SizeType>(state.range(3));
-    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                       "valid", 0, 1, fuse, state.range(2) != 0);
+    FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                   "valid", Exec::cuda(0), 1, fuse, state.range(2) != 0);
     state.counters["fuse"] = static_cast<double>(fdmt_cuda.get_fuse_levels());
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);
-    const cuda::std::span<float> dmt_span(
-        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    const DeviceSpan<float> dmt_span(thrust::raw_pointer_cast(dmt_d.data()),
+                                     dmt_d.size());
     if (nbits == 32) {
         for (auto _ : state) {
             CudaEventTimer raii{state};
-            fdmt_cuda.execute(cuda::std::span<const float>(
+            fdmt_cuda.execute(DeviceSpan<const float>(
                                   thrust::raw_pointer_cast(waterfall_d.data()),
                                   waterfall_d.size()),
                               dmt_span);
@@ -138,7 +141,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
         b = static_cast<uint8_t>(gen() & 0xFFU);
     }
     thrust::device_vector<uint8_t> packed_d(packed_h.begin(), packed_h.end());
-    const cuda::std::span<const uint8_t> packed_span(
+    const DeviceSpan<const uint8_t> packed_span(
         thrust::raw_pointer_cast(packed_d.data()), packed_d.size());
     for (auto _ : state) {
         CudaEventTimer raii{state};
@@ -152,7 +155,8 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
 (benchmark::State& state) {
     const auto nbits = static_cast<SizeType>(state.range(1));
-    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+    FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                   "valid", Exec::cuda(0));
     std::vector<float> dmt_h(fdmt_cuda.get_plan().get_buffer_size(), 0.0F);
     std::mt19937 gen(42);
     if (nbits == 32) {

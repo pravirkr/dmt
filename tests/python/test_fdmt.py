@@ -9,7 +9,7 @@ class TestFDMT:
         nchans = 500
         nsamples = 1024
         dt_max = 512
-        thefdmt = libdmt.FDMTCPU(1000, 1500, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000, 1500, nchans, nsamples, 0.001, dt_max)
         waterfall = np.ones((nchans, nsamples), dtype=np.float32)
         dmt_output = thefdmt.execute(waterfall)
         np.testing.assert_equal(
@@ -23,7 +23,7 @@ class TestFDMT:
         nchans = 128
         nsamples = 512
         dt_max = 64
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
 
         rng = np.random.default_rng(42)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
@@ -44,7 +44,7 @@ class TestFDMT:
         nchans = 256
         nsamples = 1024
         dt_max = 128
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
 
         rng = np.random.default_rng(123)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
@@ -91,7 +91,7 @@ class TestFDMT:
         nchans = 256
         nsamples = 1024
         dt_max = 128
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
 
         rng = np.random.default_rng(456)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
@@ -123,7 +123,7 @@ class TestFDMT:
         nchans = 64
         nsamples = 256
         dt_max = 32
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
 
         rng = np.random.default_rng(789)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
@@ -147,7 +147,7 @@ class TestFDMT:
         nchans = 64
         nsamples = 256
         dt_max = 32
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
 
         rng = np.random.default_rng(999)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
@@ -168,7 +168,7 @@ class TestFDMT:
         nchans = 64
         nsamples = 256
         dt_max = 32
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
 
         rng = np.random.default_rng(101)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
@@ -208,7 +208,7 @@ class TestFDMT:
         nchans = 64
         nsamples = 256
         dt_max = 32
-        fdmt_sync = libdmt.FDMTCPU(
+        fdmt_sync = libdmt.FDMT(
             1000.0,
             1500.0,
             nchans,
@@ -229,7 +229,7 @@ class TestFDMT:
 
         sync_output = fdmt_sync.execute(waterfall)
 
-        fdmt_step = libdmt.FDMTCPU(
+        fdmt_step = libdmt.FDMT(
             1000.0,
             1500.0,
             nchans,
@@ -251,7 +251,7 @@ class TestFDMT:
         nchans = 32
         nsamples = 256
         dt_max = 32
-        thefdmt = libdmt.FDMTCPU(
+        thefdmt = libdmt.FDMT(
             1000.0, 1500.0, nchans, nsamples, 0.001, dt_max, mode="valid"
         )
         block1 = np.ones((nchans, nsamples), dtype=np.float32)
@@ -271,10 +271,10 @@ class TestFDMT:
         dt_min = 16
         dt_step = 4
 
-        fdmt_dense = libdmt.FDMTCPU(
+        fdmt_dense = libdmt.FDMT(
             1000.0, 1500.0, nchans, nsamples, 0.001, dt_max=dt_max, dt_min=0, dt_step=1
         )
-        fdmt_sparse = libdmt.FDMTCPU(
+        fdmt_sparse = libdmt.FDMT(
             1000.0,
             1500.0,
             nchans,
@@ -332,7 +332,7 @@ class TestFDMT:
         dmt = dmt_buf[: plan.dmt_size].reshape(plan.dt_grid_final.size, plan.dmt_nsamps)
         assert dmt.shape == (plan.dt_grid_final.size, plan.dmt_nsamps)
 
-        fdmt_sparse = libdmt.FDMTCPU(
+        fdmt_sparse = libdmt.FDMT(
             1000.0,
             1500.0,
             nchans,
@@ -352,7 +352,7 @@ class TestFDMT:
 
         dt_arr = np.array([12, 24, 36, 48, 64], dtype=np.uint64)
 
-        fdmt_dense = libdmt.FDMTCPU(
+        fdmt_dense = libdmt.FDMT(
             1000.0,
             1500.0,
             nchans,
@@ -363,7 +363,7 @@ class TestFDMT:
             dt_step=1,
             use_box_smearing=False,
         )
-        fdmt_custom = libdmt.FDMTCPU(
+        fdmt_custom = libdmt.FDMT(
             1000.0,
             1500.0,
             nchans,
@@ -408,7 +408,7 @@ class TestFDMT:
         np.testing.assert_array_equal(plan.dt_grid_final, dt_arr)
         dmt = dmt_buf[: plan.dmt_size].reshape(plan.dt_grid_final.size, plan.dmt_nsamps)
 
-        fdmt_dt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_arr=dt_arr)
+        fdmt_dt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_arr=dt_arr)
         sync_dt = fdmt_dt.execute(waterfall)
         np.testing.assert_allclose(dmt, sync_dt, rtol=1e-5, atol=1e-5)
 
@@ -422,7 +422,7 @@ class TestFDMT:
             plan_dm.dt_grid_final.size, plan_dm.dmt_nsamps
         )
 
-        fdmt_dm = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dm_arr=dm_arr)
+        fdmt_dm = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dm_arr=dm_arr)
         sync_dm = fdmt_dm.execute(waterfall)
         np.testing.assert_allclose(dmt_dm, sync_dm, rtol=1e-5, atol=1e-5)
 
@@ -436,7 +436,7 @@ class TestFDMT:
         dt_min = -32
 
         # 1. Symmetric range construction
-        fdmt = libdmt.FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min)
+        fdmt = libdmt.FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min)
         assert fdmt.plan.dt_min == -32
         assert fdmt.plan.dt_max == 32
         grid = fdmt.dt_grid_final
@@ -456,7 +456,7 @@ class TestFDMT:
             np.testing.assert_allclose(dmt[i, 200], dmt[opp_i, 200], rtol=1e-5)
 
         # Without smearing, steady-state central value is strictly nchans
-        fdmt_nosmear = libdmt.FDMTCPU(
+        fdmt_nosmear = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -472,7 +472,7 @@ class TestFDMT:
 
         # 3. Custom signed dt_grid
         signed_dts = [-20, -10, 0, 10, 20]
-        fdmt_custom = libdmt.FDMTCPU(
+        fdmt_custom = libdmt.FDMT(
             f_min, f_max, nchans, nsamples, tsamp, dt_grid=signed_dts
         )
         assert fdmt_custom.plan.is_custom_grid
@@ -511,7 +511,7 @@ class TestFDMT:
         nchans, nsamples, tsamp = 64, 256, 0.001
         dt_max, dt_min = -10, -50
 
-        fdmt = libdmt.FDMTCPU(
+        fdmt = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -556,7 +556,7 @@ class TestFDMT:
             waterfall, plan, target_idx, amplitude=1.0, toffset=toffset
         )
 
-        fdmt = libdmt.FDMTCPU(
+        fdmt = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -606,7 +606,7 @@ class TestFDMT:
         waterfall = np.zeros((nchans, nsamples), dtype=np.float32)
         libdmt.add_frb_track(waterfall, plan, dm_idx, amplitude=1.0, toffset=toffset)
 
-        fdmt = libdmt.FDMTCPU(
+        fdmt = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -640,7 +640,7 @@ class TestFDMT:
             toffset=toffset,
             width=width,
         )
-        fdmt = libdmt.FDMTCPU(
+        fdmt = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -671,7 +671,7 @@ class TestFDMT:
         rng = np.random.default_rng(7)
         waterfall = rng.uniform(1.0, 24.0, size=(nchans, total)).astype(np.float32)
 
-        fdmt_full = libdmt.FDMTCPU(
+        fdmt_full = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -684,7 +684,7 @@ class TestFDMT:
         )
         dmt_full = fdmt_full.execute(waterfall)
 
-        fdmt_valid = libdmt.FDMTCPU(
+        fdmt_valid = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -752,7 +752,7 @@ class TestFDMT:
         rng = np.random.default_rng(7)
         waterfall = rng.uniform(1.0, 24.0, size=(nchans, total)).astype(np.float32)
 
-        fdmt_full = libdmt.FDMTCPU(
+        fdmt_full = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -765,7 +765,7 @@ class TestFDMT:
         )
         dmt_full = fdmt_full.execute(waterfall)
 
-        fdmt_valid = libdmt.FDMTCPU(
+        fdmt_valid = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -797,12 +797,12 @@ class TestFDMT:
         rng = np.random.default_rng(42)
         wf = rng.standard_normal((nchans, total)).astype(np.float32)
 
-        full_engine = libdmt.FDMTCPU(
+        full_engine = libdmt.FDMT(
             1200.0, 1600.0, nchans, total, 1e-3, dt_max, 0, mode="full"
         )
         res_mono = full_engine.execute(wf)
 
-        valid_engine = libdmt.FDMTCPU(
+        valid_engine = libdmt.FDMT(
             1200.0, 1600.0, nchans, block_size, 1e-3, dt_max, 0, mode="valid"
         )
         res_valid = np.zeros_like(res_mono)
@@ -830,12 +830,12 @@ class TestFDMT:
         rng = np.random.default_rng(123)
         wf = rng.standard_normal((nbeams, nchans, total)).astype(np.float32)
 
-        full_engine = libdmt.FDMTCPU(
+        full_engine = libdmt.FDMT(
             1200.0, 1600.0, nchans, total, 1e-3, dt_max, 0, mode="full", nbeams=nbeams
         )
         res_mono = full_engine.execute(wf)
 
-        valid_engine = libdmt.FDMTCPU(
+        valid_engine = libdmt.FDMT(
             1200.0,
             1600.0,
             nchans,
@@ -868,7 +868,7 @@ class TestFDMT:
         block1 = rng.uniform(1.0, 24.0, size=(nchans, nsamps)).astype(np.float32)
         block2 = rng.uniform(1.0, 24.0, size=(nchans, nsamps)).astype(np.float32)
 
-        fdmt = libdmt.FDMTCPU(
+        fdmt = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -885,7 +885,7 @@ class TestFDMT:
         fdmt.reset_history()
         out_after_reset = fdmt.execute(block2)
 
-        fdmt_fresh = libdmt.FDMTCPU(
+        fdmt_fresh = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -924,7 +924,7 @@ class TestFDMT:
         waterfall = np.zeros((nchans, total), dtype=np.float32)
         libdmt.add_frb_track(waterfall, plan, dm_idx, amplitude=1.0, toffset=toffset)
 
-        fdmt_valid = libdmt.FDMTCPU(
+        fdmt_valid = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -951,7 +951,7 @@ class TestFDMT:
         rng = np.random.default_rng(11)
         waterfall = rng.uniform(1.0, 24.0, size=(nchans, total)).astype(np.float32)
 
-        fdmt_full = libdmt.FDMTCPU(
+        fdmt_full = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -964,7 +964,7 @@ class TestFDMT:
         )
         dmt_full = fdmt_full.execute(waterfall)
 
-        fdmt_valid = libdmt.FDMTCPU(
+        fdmt_valid = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -1006,10 +1006,8 @@ class TestFDMT:
         nchans, nsamps, tsamp = 32, 128, 0.001
         dt_max, dt_min = 32, 0
 
-        fdmt_default = libdmt.FDMTCPU(
-            f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min
-        )
-        fdmt_explicit = libdmt.FDMTCPU(
+        fdmt_default = libdmt.FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min)
+        fdmt_explicit = libdmt.FDMT(
             f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, nbeams=1
         )
         assert fdmt_default.nbeams == 1
@@ -1033,7 +1031,7 @@ class TestFDMT:
         dt_max, dt_min = 16, 0
         nbeams = 3
 
-        fdmt_multi = libdmt.FDMTCPU(
+        fdmt_multi = libdmt.FDMT(
             f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, nbeams=nbeams
         )
         assert fdmt_multi.nbeams == nbeams
@@ -1047,7 +1045,7 @@ class TestFDMT:
         nchans, nsamps, tsamp = 16, 64, 0.001
         dt_max = 16
 
-        engine = libdmt.FDMTCPU(
+        engine = libdmt.FDMT(
             f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max, mode="valid"
         )
         assert engine.history_state_size() > 0
@@ -1106,8 +1104,8 @@ class TestFDMTPerformanceParams:
     nsamps = 203
     dt_max = 40
 
-    def _make(self, mode: str = "valid", **perf: object) -> libdmt.FDMTCPU:
-        return libdmt.FDMTCPU(
+    def _make(self, mode: str = "valid", **perf: object) -> libdmt.FDMT:
+        return libdmt.FDMT(
             1000.0,
             1500.0,
             self.nchans,
@@ -1118,7 +1116,7 @@ class TestFDMTPerformanceParams:
             **perf,
         )
 
-    def _make_ref(self, mode: str = "valid") -> libdmt.FDMTCPU:
+    def _make_ref(self, mode: str = "valid") -> libdmt.FDMT:
         # The original unfused, all-float path every variant is checked against.
         return self._make(mode, fuse_levels=0, int_tree=False)
 
@@ -1137,7 +1135,7 @@ class TestFDMTPerformanceParams:
         assert "workspace=" in repr(mem)
 
     def test_dm_grid_constructor_accepts_perf_params(self) -> None:
-        fdmt = libdmt.FDMTCPU(
+        fdmt = libdmt.FDMT(
             1000.0,
             1500.0,
             self.nchans,
@@ -1192,8 +1190,8 @@ class TestFDMTUsageContract:
     nchans = 32
     nsamps = 128
 
-    def _make(self, mode: str = "valid", nbeams: int = 1) -> libdmt.FDMTCPU:
-        return libdmt.FDMTCPU(
+    def _make(self, mode: str = "valid", nbeams: int = 1) -> libdmt.FDMT:
+        return libdmt.FDMT(
             1000.0,
             1500.0,
             self.nchans,

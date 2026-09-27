@@ -16,7 +16,7 @@
 #include "pybind_utils.hpp"
 
 namespace dmt {
-using algorithms::DDMTCPU;
+using algorithms::DDMT;
 using plans::DDMTPlan;
 using plans::LevinConfig;
 
@@ -24,9 +24,9 @@ namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
 void bind_ddmt(py::module_& mod) {
-    py::class_<DDMTCPU>(mod, "DDMTCPU",
-                        R"doc(
-        Direct Dispersion Measure Transform (DDMT) incoherent dedispersion on the CPU.
+    py::class_<DDMT>(mod, "DDMT",
+                     R"doc(
+        Direct Dispersion Measure Transform (DDMT) incoherent dedispersion.
 
         Supports float32 waterfalls, packed low-bit integers (1, 2, 4, 8, 16 bits),
         channel kill masks, streaming history across consecutive chunks, and both
@@ -62,69 +62,98 @@ void bind_ddmt(py::module_& mod) {
             beam-major arrays (nbeams, nchans, nsamps) and return
             (nbeams, n_dm, output_nsamps); at nbeams == 1 the plain 2D
             shapes still work.
+        backend : {'cpu', 'cuda', 'hip', 'metal'}, optional
+            Keyword-only. Where to run (default ``'cpu'``); see
+            :func:`available_backends`.
+        device : int, optional
+            Keyword-only. Device ordinal on a GPU backend (default 0).
+
+        Input and output are NumPy (host) arrays on every backend; a GPU
+        backend pipelines the host transfers and blocks until the result is
+        on the host.
         )doc")
-        .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         float dm_max, float dm_step, float dm_min,
-                         int nthreads, SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
-                         SizeType nbeams) {
-                 std::vector<uint8_t> km_vec;
-                 if (kill_mask.has_value()) {
-                     km_vec.assign(kill_mask->data(),
-                                   kill_mask->data() + kill_mask->size());
-                 }
-                 return DDMTCPU(f_min, f_max, nchans, tsamp, dm_max, dm_step,
-                                dm_min, nthreads, nbits, km_vec, nbeams);
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                        float dm_max, float dm_step, float dm_min, int nthreads,
+                        SizeType nbits,
+                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbeams, std::string_view backend, int device) {
+                std::vector<uint8_t> km_vec;
+                if (kill_mask.has_value()) {
+                    km_vec.assign(kill_mask->data(),
+                                  kill_mask->data() + kill_mask->size());
+                }
+                return DDMT(f_min, f_max, nchans, tsamp, dm_max, dm_step,
+                            dm_min, make_exec(backend, nthreads, device), nbits,
+                            km_vec, nbeams);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
+            "dm_step"_a, "dm_min"_a = 0.0F, "nthreads"_a = 1, "nbits"_a = 32,
+            "kill_mask"_a = py::none(), "nbeams"_a = 1, py::kw_only(),
+            "backend"_a = "cpu", "device"_a = 0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                        const py::array_t<float>& dm_arr, int nthreads,
+                        SizeType nbits,
+                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbeams, std::string_view backend, int device) {
+                std::vector<uint8_t> km_vec;
+                if (kill_mask.has_value()) {
+                    km_vec.assign(kill_mask->data(),
+                                  kill_mask->data() + kill_mask->size());
+                }
+                return DDMT(
+                    f_min, f_max, nchans, tsamp,
+                    std::span<const float>(dm_arr.data(), dm_arr.size()),
+                    make_exec(backend, nthreads, device), nbits, km_vec,
+                    nbeams);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
+            "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
+            "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                        const LevinConfig& levin, int nthreads, SizeType nbits,
+                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbeams, std::string_view backend, int device) {
+                std::vector<uint8_t> km_vec;
+                if (kill_mask.has_value()) {
+                    km_vec.assign(kill_mask->data(),
+                                  kill_mask->data() + kill_mask->size());
+                }
+                return DDMT(f_min, f_max, nchans, tsamp, levin,
+                            make_exec(backend, nthreads, device), nbits, km_vec,
+                            nbeams);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
+            "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
+            "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
+        .def(py::init([](const DDMTPlan& plan, int nthreads, SizeType nbeams,
+                         std::string_view backend, int device) {
+                 return DDMT(plan, make_exec(backend, nthreads, device),
+                             nbeams);
              }),
-             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F, "nthreads"_a = 1, "nbits"_a = 32,
-             "kill_mask"_a = py::none(), "nbeams"_a = 1)
-        .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr, int nthreads,
-                         SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
-                         SizeType nbeams) {
-                 std::vector<uint8_t> km_vec;
-                 if (kill_mask.has_value()) {
-                     km_vec.assign(kill_mask->data(),
-                                   kill_mask->data() + kill_mask->size());
-                 }
-                 return DDMTCPU(
-                     f_min, f_max, nchans, tsamp,
-                     std::span<const float>(dm_arr.data(), dm_arr.size()),
-                     nthreads, nbits, km_vec, nbeams);
-             }),
-             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
-             "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
-             "nbeams"_a = 1)
-        .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const LevinConfig& levin, int nthreads, SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
-                         SizeType nbeams) {
-                 std::vector<uint8_t> km_vec;
-                 if (kill_mask.has_value()) {
-                     km_vec.assign(kill_mask->data(),
-                                   kill_mask->data() + kill_mask->size());
-                 }
-                 return DDMTCPU(f_min, f_max, nchans, tsamp, levin, nthreads,
-                                nbits, km_vec, nbeams);
-             }),
-             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
-             "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
-             "nbeams"_a = 1)
-        .def(py::init<const DDMTPlan&, int, SizeType>(), "plan"_a,
-             "nthreads"_a = 1, "nbeams"_a = 1)
-        .def_property_readonly("plan", &DDMTCPU::get_plan)
-        .def_property_readonly("nbeams", &DDMTCPU::get_nbeams)
+             "plan"_a, "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
+             "backend"_a = "cpu", "device"_a = 0)
+        .def_property_readonly(
+            "backend",
+            [](const DDMT& ddmt) {
+                return std::string(to_string(ddmt.backend()));
+            },
+            "Backend this instance runs on ('cpu', 'cuda', ...).")
+        .def_property_readonly("nthreads", &DDMT::nthreads)
+        .def_property_readonly("device", &DDMT::device)
+        .def_property_readonly("plan", &DDMT::get_plan)
+        .def_property_readonly("nbeams", &DDMT::get_nbeams)
         .def(
             "execute",
-            [](DDMTCPU& ddmt,
+            [](DDMT& ddmt,
                const py::array_t<float, py::array::c_style>& waterfall) {
                 const auto& plan = ddmt.get_plan();
                 const auto ndim  = waterfall.ndim();
                 if (ndim != 2 && ndim != 3) {
                     throw std::invalid_argument(
-                        "DDMTCPU.execute: waterfall must be 2D (nchans, "
+                        "DDMT.execute: waterfall must be 2D (nchans, "
                         "nsamps) or 3D (nbeams, nchans, nsamps)");
                 }
                 const auto* shape = waterfall.shape();
@@ -133,7 +162,7 @@ void bind_ddmt(py::module_& mod) {
                 const auto nsamps_in = static_cast<SizeType>(shape[ndim - 1]);
                 if (nbeams != ddmt.get_nbeams()) {
                     throw std::invalid_argument(std::format(
-                        "DDMTCPU.execute: waterfall has {} beam(s), but "
+                        "DDMT.execute: waterfall has {} beam(s), but "
                         "this instance was configured for {}",
                         nbeams, ddmt.get_nbeams()));
                 }
@@ -171,7 +200,7 @@ void bind_ddmt(py::module_& mod) {
             )doc")
         .def(
             "execute",
-            [](DDMTCPU& ddmt,
+            [](DDMT& ddmt,
                const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
                SizeType nsamps) {
                 const auto& plan      = ddmt.get_plan();
@@ -215,7 +244,7 @@ void bind_ddmt(py::module_& mod) {
             )doc")
         .def(
             "execute_time_major",
-            [](DDMTCPU& ddmt,
+            [](DDMT& ddmt,
                const py::array_t<uint8_t, py::array::c_style>&
                    filterbank_packed,
                SizeType nsamps) {
@@ -256,11 +285,11 @@ void bind_ddmt(py::module_& mod) {
             Produces ``(n_dm, nsamps - max_delay)`` or
             ``(nbeams, n_dm, nsamps - max_delay)``.
             )doc")
-        .def("get_output_nsamps", &DDMTCPU::get_output_nsamps, "input_nsamps"_a)
-        .def("reset_history", &DDMTCPU::reset_history)
-        .def("history_state_size", &DDMTCPU::history_state_size)
+        .def("get_output_nsamps", &DDMT::get_output_nsamps, "input_nsamps"_a)
+        .def("reset_history", &DDMT::reset_history)
+        .def("history_state_size", &DDMT::history_state_size)
         .def("save_history",
-             [](const DDMTCPU& ddmt) -> py::object {
+             [](const DDMT& ddmt) -> py::object {
                  const auto& plan = ddmt.get_plan();
                  const auto sz    = ddmt.history_state_size();
                  if (plan.get_nbits() == 32) {
@@ -277,7 +306,7 @@ void bind_ddmt(py::module_& mod) {
              })
         .def(
             "load_history",
-            [](DDMTCPU& ddmt, const py::array& hist_obj) {
+            [](DDMT& ddmt, const py::array& hist_obj) {
                 const auto& plan = ddmt.get_plan();
                 const auto nbits = plan.get_nbits();
                 // Validate the *actual* dtype before casting: py::array_t's
@@ -287,7 +316,7 @@ void bind_ddmt(py::module_& mod) {
                     if (hist_obj.dtype().kind() != 'f' ||
                         hist_obj.itemsize() != 4) {
                         throw std::invalid_argument(std::format(
-                            "DDMTCPU.load_history: plan nbits=32 expects a "
+                            "DDMT.load_history: plan nbits=32 expects a "
                             "float32 array, got dtype '{}'",
                             std::string(py::str(hist_obj.dtype()))));
                     }
@@ -299,7 +328,7 @@ void bind_ddmt(py::module_& mod) {
                     if (hist_obj.dtype().kind() != 'u' ||
                         hist_obj.itemsize() != 1) {
                         throw std::invalid_argument(std::format(
-                            "DDMTCPU.load_history: plan nbits={} expects a "
+                            "DDMT.load_history: plan nbits={} expects a "
                             "uint8 array, got dtype '{}'",
                             nbits, std::string(py::str(hist_obj.dtype()))));
                     }

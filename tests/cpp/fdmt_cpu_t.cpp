@@ -16,9 +16,9 @@
 
 namespace dmt {
 
-using algorithms::FDMTCPU;
+using algorithms::FDMT;
 
-TEST_CASE("FDMTCPU", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT", "[fdmt_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 500;
@@ -27,7 +27,7 @@ TEST_CASE("FDMTCPU", "[fdmt_cpu][cpu]") {
     const size_t dt_max = 512;
     const size_t dt_min = 0;
 
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
 
     SECTION("Constructor and getter methods") {
         const auto& plan         = fdmt.get_plan();
@@ -170,7 +170,7 @@ TEST_CASE("FDMTCPU", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU modes and smearing matrix", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT modes and smearing matrix", "[fdmt_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 64;
@@ -185,8 +185,8 @@ TEST_CASE("FDMTCPU modes and smearing matrix", "[fdmt_cpu][cpu]") {
     for (const auto& mode : modes) {
         for (const auto smearing : smearings) {
             DYNAMIC_SECTION("Mode: " << mode << ", Smearing: " << smearing) {
-                FDMTCPU fdmt_sync(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                                  dt_min, 1, smearing, mode);
+                FDMT fdmt_sync(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                               dt_min, 1, smearing, mode);
                 const auto& plan = fdmt_sync.get_plan();
 
                 if (mode == "full") {
@@ -213,8 +213,8 @@ TEST_CASE("FDMTCPU modes and smearing matrix", "[fdmt_cpu][cpu]") {
 
                 // Stepper execution with fresh instance (matching cold-start
                 // state) and dirty buffer reuse
-                FDMTCPU fdmt_stepped(f_min, f_max, nchans, nsamps, tsamp,
-                                     dt_max, dt_min, 1, smearing, mode);
+                FDMT fdmt_stepped(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                  dt_min, 1, smearing, mode);
                 std::vector<float> dmt_stepped(plan.get_buffer_size(), 999.0F);
                 fdmt_stepped.reset(waterfall, dmt_stepped);
                 fdmt_stepped.advance_until_remaining(0);
@@ -242,7 +242,7 @@ TEST_CASE("FDMTCPU modes and smearing matrix", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU odd channels and padding safety", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT odd channels and padding safety", "[fdmt_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nsamps = 256;
@@ -255,8 +255,8 @@ TEST_CASE("FDMTCPU odd channels and padding safety", "[fdmt_cpu][cpu]") {
 
     for (const auto nchans : odd_chans) {
         DYNAMIC_SECTION("nchans = " << nchans) {
-            FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                         true, "full");
+            FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                      true, "full");
             const auto& plan = fdmt.get_plan();
 
             std::vector<float> waterfall(nchans * nsamps);
@@ -282,7 +282,7 @@ TEST_CASE("FDMTCPU odd channels and padding safety", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU valid mode streaming history", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT valid mode streaming history", "[fdmt_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -291,8 +291,8 @@ TEST_CASE("FDMTCPU valid mode streaming history", "[fdmt_cpu][cpu]") {
     const size_t dt_max = 32;
     const size_t dt_min = 0;
 
-    FDMTCPU fdmt_valid(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                       true, "valid");
+    FDMT fdmt_valid(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                    true, "valid");
     const auto& plan = fdmt_valid.get_plan();
 
     std::vector<float> block1(nchans * nsamps, 1.0F);
@@ -318,8 +318,7 @@ TEST_CASE("FDMTCPU valid mode streaming history", "[fdmt_cpu][cpu]") {
     CHECK(sum2 > sum1);
 }
 
-TEST_CASE("FDMTCPU sparse and dt_min execution equivalence",
-          "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT sparse and dt_min execution equivalence", "[fdmt_cpu][cpu]") {
     const float f_min    = 1000.0F;
     const float f_max    = 1500.0F;
     const size_t nchans  = 64;
@@ -330,11 +329,11 @@ TEST_CASE("FDMTCPU sparse and dt_min execution equivalence",
     const size_t dt_step = 4;
 
     // Dense full FDMT: dt_min = 0, dt_step = 1
-    FDMTCPU fdmt_dense(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                       "full");
+    FDMT fdmt_dense(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                    "full");
     // Sparse FDMT: dt_min = 16, dt_step = 4
-    FDMTCPU fdmt_sparse(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
-                        dt_step, false, "full");
+    FDMT fdmt_sparse(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                     dt_step, false, "full");
 
     std::vector<float> waterfall(nchans * nsamps);
     for (size_t i = 0; i < waterfall.size(); ++i) {
@@ -379,8 +378,7 @@ TEST_CASE("FDMTCPU sparse and dt_min execution equivalence",
     }
 }
 
-TEST_CASE("FDMTCPU arbitrary dt_grid execution equivalence",
-          "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT arbitrary dt_grid execution equivalence", "[fdmt_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 64;
@@ -391,11 +389,11 @@ TEST_CASE("FDMTCPU arbitrary dt_grid execution equivalence",
     const std::vector<IndexType> custom_dts = {12, 23, 37, 49, 64};
 
     // Dense full FDMT: dt_min = 0, dt_step = 1, dt_max = 64
-    FDMTCPU fdmt_dense(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                       "full");
+    FDMT fdmt_dense(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                    "full");
     // Custom grid FDMT
-    FDMTCPU fdmt_custom(f_min, f_max, nchans, nsamps, tsamp, custom_dts, false,
-                        "full");
+    FDMT fdmt_custom(f_min, f_max, nchans, nsamps, tsamp, custom_dts, false,
+                     "full");
 
     std::vector<float> waterfall(nchans * nsamps);
     for (size_t i = 0; i < waterfall.size(); ++i) {
@@ -440,7 +438,7 @@ TEST_CASE("FDMTCPU arbitrary dt_grid execution equivalence",
     }
 }
 
-TEST_CASE("FDMTCPU physical FRB detection test", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT physical FRB detection test", "[fdmt_cpu][cpu]") {
     const float f_min          = 1000.0F;
     const float f_max          = 1500.0F;
     const SizeType nchans      = 64;
@@ -457,8 +455,7 @@ TEST_CASE("FDMTCPU physical FRB detection test", "[fdmt_cpu][cpu]") {
     // Dedisperse using custom grid containing injected_dt and other off-target
     // trials
     const std::vector<IndexType> target_dts = {10, 25, 40, 55, 70};
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, target_dts, false,
-                 "full");
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, target_dts, false, "full");
 
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     fdmt.execute(waterfall, dmt);
@@ -506,7 +503,7 @@ TEST_CASE("FDMTCPU physical FRB detection test", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
     const float f_min      = 1000.0F;
     const float f_max      = 1500.0F;
     const SizeType nchans  = 64;
@@ -516,8 +513,8 @@ TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
     const IndexType dt_min = -32;
 
     SECTION("Symmetric range execution and variance queries") {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                     false, "full");
+        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, false,
+                  "full");
 
         CHECK(fdmt.get_plan().get_dt_min() == -32);
         CHECK(fdmt.get_plan().get_dt_max() == 32);
@@ -551,8 +548,8 @@ TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
     }
 
     SECTION("Negative DM pulse recovery") {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                     false, "full");
+        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, false,
+                  "full");
 
         std::vector<float> waterfall(nchans * nsamps, 0.0F);
         const IndexType target_dt = -16;
@@ -604,7 +601,7 @@ TEST_CASE("FDMTCPU negative and symmetric dispersion", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU purely negative dt range", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT purely negative dt range", "[fdmt_cpu][cpu]") {
     // Regression test for a range with no positive/zero trials at all --
     // promised in the original implementation plan but never delivered.
     const float f_min      = 1000.0F;
@@ -619,7 +616,7 @@ TEST_CASE("FDMTCPU purely negative dt range", "[fdmt_cpu][cpu]") {
     // nchans regardless of trial dt (with smearing on, each row's value
     // depends on that trial's per-channel smearing width, which varies
     // continuously with dt -- not the point of this test).
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, false);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, false);
     const auto& plan = fdmt.get_plan();
     CHECK(plan.get_dt_min() == -50);
     CHECK(plan.get_dt_max() == -10);
@@ -641,7 +638,7 @@ TEST_CASE("FDMTCPU purely negative dt range", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU use_box_smearing=false with coarse channelization",
+TEST_CASE("FDMT use_box_smearing=false with coarse channelization",
           "[fdmt_cpu][cpu]") {
     // Regression test: with few channels relative to dt_max, a single
     // channel's own bandwidth induces a level-0 dt range spanning more than
@@ -659,8 +656,7 @@ TEST_CASE("FDMTCPU use_box_smearing=false with coarse channelization",
 
     for (const SizeType nchans : {2U, 3U, 4U, 5U, 7U}) {
         DYNAMIC_SECTION("nchans=" << nchans) {
-            FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
-                         false);
+            FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false);
             const auto& plan = fdmt.get_plan();
             const auto ndms  = plan.get_dmt_ndms();
             REQUIRE(ndms > 1);
@@ -680,8 +676,7 @@ TEST_CASE("FDMTCPU use_box_smearing=false with coarse channelization",
     }
 }
 
-TEST_CASE("FDMTCPU add_frb_track / trace_dm exact recovery",
-          "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT add_frb_track / trace_dm exact recovery", "[fdmt_cpu][cpu]") {
     // For every injected channel, add_frb_track places a unit impulse at
     // exactly the sample trace_dm computes; running FDMT on that waterfall
     // must reproduce a value of exactly nchans (all channels combining
@@ -708,8 +703,8 @@ TEST_CASE("FDMTCPU add_frb_track / trace_dm exact recovery",
         for (const bool use_box_smearing : {false, true}) {
             DYNAMIC_SECTION("nchans=" << cfg.nchans << " dt=" << cfg.target_dt
                                       << " smear=" << use_box_smearing) {
-                FDMTCPU fdmt(f_min, f_max, cfg.nchans, nsamps, tsamp,
-                             cfg.dt_max, cfg.dt_min, 1, use_box_smearing);
+                FDMT fdmt(f_min, f_max, cfg.nchans, nsamps, tsamp, cfg.dt_max,
+                          cfg.dt_min, 1, use_box_smearing);
                 const auto& plan    = fdmt.get_plan();
                 const auto& dt_grid = plan.get_dt_grid_final();
                 const auto it =
@@ -732,7 +727,7 @@ TEST_CASE("FDMTCPU add_frb_track / trace_dm exact recovery",
     }
 }
 
-TEST_CASE("FDMTCPU valid-mode cross-block streaming", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT valid-mode cross-block streaming", "[fdmt_cpu][cpu]") {
     // Seamless cross-block streaming in mode="valid": m_tree_history caches
     // trailing samples at each tree merge node, enabling bit-exact match
     // with monolithic continuous execution across consecutive blocks.
@@ -773,15 +768,15 @@ TEST_CASE("FDMTCPU valid-mode cross-block streaming", "[fdmt_cpu][cpu]") {
                 waterfall[i] = static_cast<float>((i % 23) + 1);
             }
 
-            FDMTCPU fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp,
-                              cfg.dt_max, cfg.dt_min, 1, false, "full");
+            FDMT fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp, cfg.dt_max,
+                           cfg.dt_min, 1, false, "full");
             std::vector<float> dmt_full(fdmt_full.get_plan().get_buffer_size(),
                                         0.0F);
             fdmt_full.execute(waterfall, dmt_full);
             const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
 
-            FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp,
-                               cfg.dt_max, cfg.dt_min, 1, false, "valid");
+            FDMT fdmt_valid(f_min, f_max, nchans, block_size, tsamp, cfg.dt_max,
+                            cfg.dt_min, 1, false, "valid");
             const auto& plan_valid = fdmt_valid.get_plan();
             const auto& dt_grid    = plan_valid.get_dt_grid_final();
             const auto ndms        = plan_valid.get_dmt_ndms();
@@ -822,9 +817,9 @@ TEST_CASE("FDMTCPU valid-mode cross-block streaming", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU save_history/load_history multiplexes independent streams",
+TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
           "[fdmt_cpu][cpu]") {
-    // This is the exact pattern CohFDMTCPU relies on: one shared FDMTCPU
+    // This is the exact pattern CohFDMT relies on: one shared FDMT
     // instance processes several *independent* streams (cfdmt's coarse-DM
     // trials) by swapping each stream's small history in/out around its
     // own block, rather than needing one instance per stream. Verify this
@@ -848,8 +843,8 @@ TEST_CASE("FDMTCPU save_history/load_history multiplexes independent streams",
         for (size_t i = 0; i < stream_data[s].size(); ++i) {
             stream_data[s][i] = static_cast<float>(((i + (s * 7)) % 23) + 1);
         }
-        FDMTCPU fdmt_dedicated(f_min, f_max, nchans, block_size, tsamp, dt_max,
-                               dt_min, 1, false, "valid");
+        FDMT fdmt_dedicated(f_min, f_max, nchans, block_size, tsamp, dt_max,
+                            dt_min, 1, false, "valid");
         expected[s].resize(fdmt_dedicated.get_plan().get_buffer_size() *
                            n_blocks);
         const auto buf_size = fdmt_dedicated.get_plan().get_buffer_size();
@@ -863,8 +858,8 @@ TEST_CASE("FDMTCPU save_history/load_history multiplexes independent streams",
     }
 
     // One shared instance, round-robin across streams via save/load_history.
-    FDMTCPU fdmt_shared(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                        1, false, "valid");
+    FDMT fdmt_shared(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                     false, "valid");
     const auto hist_size = fdmt_shared.history_state_size();
     REQUIRE(hist_size > 0);
     std::vector<std::vector<float>> histories(
@@ -898,7 +893,7 @@ namespace {
 // Streams `waterfall` (nchans x block_size*n_blocks) through `fdmt` in
 // consecutive non-overlapping blocks, writing results into `streamed`
 // (ndms x block_size*n_blocks).
-void stream_blocks(FDMTCPU& fdmt,
+void stream_blocks(FDMT& fdmt,
                    std::span<const float> waterfall,
                    SizeType nchans,
                    SizeType block_size,
@@ -924,7 +919,7 @@ void stream_blocks(FDMTCPU& fdmt,
 }
 } // namespace
 
-TEST_CASE("FDMTCPU valid-mode streaming stress: smearing, odd channels, "
+TEST_CASE("FDMT valid-mode streaming stress: smearing, odd channels, "
           "long chains",
           "[fdmt_cpu][cpu]") {
     // Beyond the base streaming test: box smearing combined with tree
@@ -970,16 +965,15 @@ TEST_CASE("FDMTCPU valid-mode streaming stress: smearing, odd channels, "
                 waterfall[i] = static_cast<float>((i % 23) + 1);
             }
 
-            FDMTCPU fdmt_full(f_min, f_max, cfg.nchans, total_nsamp, tsamp,
-                              dt_max, dt_min, 1, cfg.use_box_smearing, "full");
+            FDMT fdmt_full(f_min, f_max, cfg.nchans, total_nsamp, tsamp, dt_max,
+                           dt_min, 1, cfg.use_box_smearing, "full");
             std::vector<float> dmt_full(fdmt_full.get_plan().get_buffer_size(),
                                         0.0F);
             fdmt_full.execute(waterfall, dmt_full);
             const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
 
-            FDMTCPU fdmt_valid(f_min, f_max, cfg.nchans, cfg.block_size, tsamp,
-                               dt_max, dt_min, 1, cfg.use_box_smearing,
-                               "valid");
+            FDMT fdmt_valid(f_min, f_max, cfg.nchans, cfg.block_size, tsamp,
+                            dt_max, dt_min, 1, cfg.use_box_smearing, "valid");
             std::vector<float> streamed;
             stream_blocks(fdmt_valid, waterfall, cfg.nchans, cfg.block_size,
                           cfg.n_blocks, streamed);
@@ -998,7 +992,7 @@ TEST_CASE("FDMTCPU valid-mode streaming stress: smearing, odd channels, "
     }
 }
 
-TEST_CASE("FDMTCPU valid-mode ring-buffer warm-up transient across many small "
+TEST_CASE("FDMT valid-mode ring-buffer warm-up transient across many small "
           "blocks",
           "[fdmt_cpu][cpu]") {
     // Dedicated stress case for the cross-block history FIFO generalization:
@@ -1023,14 +1017,14 @@ TEST_CASE("FDMTCPU valid-mode ring-buffer warm-up transient across many small "
         waterfall[i] = static_cast<float>((i % 29) + 1);
     }
 
-    FDMTCPU fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp, dt_max, dt_min,
-                      1, true, "full");
+    FDMT fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp, dt_max, dt_min, 1,
+                   true, "full");
     std::vector<float> dmt_full(fdmt_full.get_plan().get_buffer_size(), 0.0F);
     fdmt_full.execute(waterfall, dmt_full);
     const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
 
-    FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                       1, true, "valid");
+    FDMT fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                    true, "valid");
     std::vector<float> streamed;
     stream_blocks(fdmt_valid, waterfall, nchans, block_size, n_blocks,
                   streamed);
@@ -1046,7 +1040,7 @@ TEST_CASE("FDMTCPU valid-mode ring-buffer warm-up transient across many small "
     }
 }
 
-TEST_CASE("FDMTCPU reset_history() actually resets streaming state",
+TEST_CASE("FDMT reset_history() actually resets streaming state",
           "[fdmt_cpu][cpu]") {
     // reset_history() must make the *next* block behave exactly like a
     // brand-new instance's first block, not merely be callable.
@@ -1065,8 +1059,8 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state",
         block2[i] = static_cast<float>((i % 13) + 1);
     }
 
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
-                 "valid");
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
+              "valid");
     std::vector<float> dmt1(fdmt.get_plan().get_buffer_size(), 0.0F);
     std::vector<float> dmt2_with_history(fdmt.get_plan().get_buffer_size(),
                                          0.0F);
@@ -1078,8 +1072,8 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state",
                                         0.0F);
     fdmt.execute(block2, dmt2_after_reset);
 
-    FDMTCPU fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                       true, "valid");
+    FDMT fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                    true, "valid");
     std::vector<float> dmt2_fresh(fdmt_fresh.get_plan().get_buffer_size(),
                                   0.0F);
     fdmt_fresh.execute(block2, dmt2_fresh);
@@ -1092,7 +1086,7 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state",
                            dmt2_after_reset.begin()));
 }
 
-TEST_CASE("FDMTCPU reset_history() actually resets streaming state "
+TEST_CASE("FDMT reset_history() actually resets streaming state "
           "(block_size < dt_max)",
           "[fdmt_cpu][cpu]") {
     // Same as the test above, but with block_size < dt_max so the history
@@ -1113,8 +1107,8 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state "
         block2[i] = static_cast<float>((i % 13) + 1);
     }
 
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
-                 "valid");
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
+              "valid");
     std::vector<float> dmt1(fdmt.get_plan().get_buffer_size(), 0.0F);
     std::vector<float> dmt2_with_history(fdmt.get_plan().get_buffer_size(),
                                          0.0F);
@@ -1126,8 +1120,8 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state "
                                         0.0F);
     fdmt.execute(block2, dmt2_after_reset);
 
-    FDMTCPU fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                       true, "valid");
+    FDMT fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                    true, "valid");
     std::vector<float> dmt2_fresh(fdmt_fresh.get_plan().get_buffer_size(),
                                   0.0F);
     fdmt_fresh.execute(block2, dmt2_fresh);
@@ -1140,7 +1134,7 @@ TEST_CASE("FDMTCPU reset_history() actually resets streaming state "
                            dmt2_after_reset.begin()));
 }
 
-TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary",
+TEST_CASE("FDMT add_frb_track recovery across a valid-mode block boundary",
           "[fdmt_cpu][cpu]") {
     // The end-to-end scenario the streaming fix exists for: a real dispersed
     // pulse straddling a block boundary must still recover at full
@@ -1179,8 +1173,8 @@ TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary",
                 algorithms::add_frb_track(waterfall, plan, dm_idx, 1.0F,
                                           static_cast<IndexType>(toffset), 1);
 
-                FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp,
-                                   dt_max, dt_min, 1, false, "valid");
+                FDMT fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max,
+                                dt_min, 1, false, "valid");
                 std::vector<float> streamed;
                 stream_blocks(fdmt_valid, waterfall, nchans, block_size,
                               n_blocks, streamed);
@@ -1192,7 +1186,7 @@ TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary",
     }
 }
 
-TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary "
+TEST_CASE("FDMT add_frb_track recovery across a valid-mode block boundary "
           "with block_size < dt_max",
           "[fdmt_cpu][cpu]") {
     // Same scenario as the block_size > dt_max test above, but with a block
@@ -1233,8 +1227,8 @@ TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary "
                 algorithms::add_frb_track(waterfall, plan, dm_idx, 1.0F,
                                           static_cast<IndexType>(toffset), 1);
 
-                FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp,
-                                   dt_max, dt_min, 1, false, "valid");
+                FDMT fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max,
+                                dt_min, 1, false, "valid");
                 std::vector<float> streamed;
                 stream_blocks(fdmt_valid, waterfall, nchans, block_size,
                               n_blocks, streamed);
@@ -1246,7 +1240,7 @@ TEST_CASE("FDMTCPU add_frb_track recovery across a valid-mode block boundary "
     }
 }
 
-TEST_CASE("FDMTCPU stepper partial-advance across streamed blocks",
+TEST_CASE("FDMT stepper partial-advance across streamed blocks",
           "[fdmt_cpu][cpu]") {
     // The "stop 1-2 levels before root to inspect sub-bands" usage pattern
     // must not break cross-block tree history, as long as finalize() always
@@ -1266,14 +1260,14 @@ TEST_CASE("FDMTCPU stepper partial-advance across streamed blocks",
         waterfall[i] = static_cast<float>((i % 23) + 1);
     }
 
-    FDMTCPU fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp, dt_max, dt_min,
-                      1, true, "full");
+    FDMT fdmt_full(f_min, f_max, nchans, total_nsamp, tsamp, dt_max, dt_min, 1,
+                   true, "full");
     std::vector<float> dmt_full(fdmt_full.get_plan().get_buffer_size(), 0.0F);
     fdmt_full.execute(waterfall, dmt_full);
     const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
 
-    FDMTCPU fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                       1, true, "valid");
+    FDMT fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                    true, "valid");
     const auto& plan_valid = fdmt_valid.get_plan();
     const auto ndms        = plan_valid.get_dmt_ndms();
     std::vector<float> streamed(ndms * total_nsamp, 0.0F);
@@ -1312,14 +1306,14 @@ TEST_CASE("FDMTCPU stepper partial-advance across streamed blocks",
     }
 }
 
-TEST_CASE("FDMTCPU valid-mode stepper must finish a block before the next",
+TEST_CASE("FDMT valid-mode stepper must finish a block before the next",
           "[fdmt_cpu][cpu]") {
     const SizeType nchans = 32;
     const SizeType nsamps = 128;
     std::vector<float> block(nchans * nsamps, 1.0F);
     for (const std::string_view mode : {"valid", "full", "roll"}) {
-        FDMTCPU fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32, 0, 1, true,
-                     mode);
+        FDMT fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32, 0, 1, true,
+                  mode);
         std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
         fdmt.reset(block, dmt);
         fdmt.advance_until_remaining(2);
@@ -1339,15 +1333,15 @@ TEST_CASE("FDMTCPU valid-mode stepper must finish a block before the next",
     }
 }
 
-TEST_CASE("FDMTCPU rejects incompatible configurations", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT rejects incompatible configurations", "[fdmt_cpu][cpu]") {
     SECTION("nbeams == 0") {
-        CHECK_THROWS_AS(FDMTCPU(1000.0F, 1500.0F, 32, 128, 0.001F, 32, 0, 1,
-                                true, "valid", 1, /*nbeams=*/0),
+        CHECK_THROWS_AS(FDMT(1000.0F, 1500.0F, 32, 128, 0.001F, 32, 0, 1, true,
+                             "valid", Exec::cpu(1), /*nbeams=*/0),
                         std::invalid_argument);
     }
 }
 
-TEST_CASE("FDMTCPU nbeams=1 is byte-identical to unbeamed execution",
+TEST_CASE("FDMT nbeams=1 is byte-identical to unbeamed execution",
           "[fdmt_cpu][cpu]") {
     // The zero-regression contract: explicitly passing nbeams=1 (the
     // trailing default) must produce exactly the same output as never
@@ -1368,11 +1362,12 @@ TEST_CASE("FDMTCPU nbeams=1 is byte-identical to unbeamed execution",
 
     for (const std::string_view mode : {"full", "valid", "roll"}) {
         DYNAMIC_SECTION("mode=" << mode) {
-            FDMTCPU fdmt_default(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                                 dt_min, 1, true, mode);
-            FDMTCPU fdmt_explicit_nbeams1(f_min, f_max, nchans, nsamps, tsamp,
-                                          dt_max, dt_min, 1, true, mode, 1,
-                                          /*nbeams=*/1);
+            FDMT fdmt_default(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                              dt_min, 1, true, mode);
+            FDMT fdmt_explicit_nbeams1(f_min, f_max, nchans, nsamps, tsamp,
+                                       dt_max, dt_min, 1, true, mode,
+                                       Exec::cpu(1),
+                                       /*nbeams=*/1);
             CHECK(fdmt_default.get_nbeams() == 1);
             CHECK(fdmt_explicit_nbeams1.get_nbeams() == 1);
 
@@ -1388,7 +1383,7 @@ TEST_CASE("FDMTCPU nbeams=1 is byte-identical to unbeamed execution",
     }
 }
 
-TEST_CASE("FDMTCPU nbeams>1 produces independent per-beam results",
+TEST_CASE("FDMT nbeams>1 produces independent per-beam results",
           "[fdmt_cpu][cpu]") {
     // Packing nbeams independent, differently-seeded waterfalls into one
     // beam-major multi-beam call must reproduce exactly what nbeams
@@ -1413,16 +1408,16 @@ TEST_CASE("FDMTCPU nbeams>1 produces independent per-beam results",
                 }
             }
 
-            FDMTCPU fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                               dt_min, 1, true, mode, 1, nbeams);
+            FDMT fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                            1, true, mode, Exec::cpu(1), nbeams);
             CHECK(fdmt_multi.get_nbeams() == nbeams);
             const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
             std::vector<float> dmt_multi(nbeams * buffer_size, 0.0F);
             fdmt_multi.execute(waterfall_multi, dmt_multi);
 
             for (SizeType b = 0; b < nbeams; ++b) {
-                FDMTCPU fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                                    dt_min, 1, true, mode);
+                FDMT fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                 dt_min, 1, true, mode);
                 std::vector<float> waterfall_single(
                     waterfall_multi.data() + (b * nchans * nsamps),
                     waterfall_multi.data() + ((b + 1) * nchans * nsamps));
@@ -1441,7 +1436,7 @@ TEST_CASE("FDMTCPU nbeams>1 produces independent per-beam results",
     }
 }
 
-TEST_CASE("FDMTCPU nbeams>1 valid-mode streaming keeps per-beam history "
+TEST_CASE("FDMT nbeams>1 valid-mode streaming keeps per-beam history "
           "isolated across blocks",
           "[fdmt_cpu][cpu]") {
     // Combines Phase 1 (cross-block history FIFO, including block_size <
@@ -1469,11 +1464,11 @@ TEST_CASE("FDMTCPU nbeams>1 valid-mode streaming keeps per-beam history "
         }
     }
 
-    FDMTCPU fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                       1, true, "valid", 1, nbeams);
+    FDMT fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                    true, "valid", Exec::cpu(1), nbeams);
     const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
 
-    std::vector<FDMTCPU> fdmt_singles;
+    std::vector<FDMT> fdmt_singles;
     fdmt_singles.reserve(nbeams);
     for (SizeType b = 0; b < nbeams; ++b) {
         fdmt_singles.emplace_back(f_min, f_max, nchans, block_size, tsamp,

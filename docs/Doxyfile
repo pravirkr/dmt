@@ -5,7 +5,7 @@
 #   cd docs && doxygen Doxyfile
 
 PROJECT_NAME           = "dmt"
-PROJECT_NUMBER         = "0.3.0"
+PROJECT_NUMBER         = "0.4.0"
 PROJECT_BRIEF          = "Fast, Accurate Dispersion Measure Transform for Radio Astronomy"
 OUTPUT_DIRECTORY       = _build/doxygen
 CREATE_SUBDIRS         = NO
@@ -53,14 +53,12 @@ XML_OUTPUT             = xml
 XML_PROGRAMLISTING     = YES
 
 # Preprocessor / Macro handling.
-# DMT_ENABLE_CUDA is defined so the CUDA class docstrings in the headers
-# are extracted. CUDA types stay as written in those headers.
-# Leave DMT_ENABLE_OPENMP undefined so omp.h is not required.
+# The public headers are the same in every build (no GPU macros), so no
+# predefined symbols are needed.
 ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = NO
 SEARCH_INCLUDES        = YES
 INCLUDE_PATH           = ../include
-PREDEFINED             = DMT_ENABLE_CUDA=1
 EXPAND_AS_DEFINED      =
 SKIP_FUNCTION_MACROS   = YES

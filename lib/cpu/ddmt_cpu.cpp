@@ -12,86 +12,38 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/engines.hpp"
 
 namespace dmt::algorithms {
 
-class DDMTCPU::Impl {
+namespace {
+
+class DDMTCpuEngine final : public detail::DDMTEngine {
 public:
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         float tsamp,
-         float dm_max,
-         float dm_step,
-         float dm_min,
-         int nthreads,
-         SizeType nbits,
-         std::span<const uint8_t> kill_mask,
-         SizeType nbeams)
-        : m_plan(f_min,
-                 f_max,
-                 nchans,
-                 tsamp,
-                 dm_max,
-                 dm_step,
-                 dm_min,
-                 nbits,
-                 kill_mask),
-          m_nthreads(std::max(1, nthreads)),
-          m_nbeams(nbeams) {}
-
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         float tsamp,
-         std::span<const float> dm_arr,
-         int nthreads,
-         SizeType nbits,
-         std::span<const uint8_t> kill_mask,
-         SizeType nbeams)
-        : m_plan(f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask),
-          m_nthreads(std::max(1, nthreads)),
-          m_nbeams(nbeams) {}
-
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         float tsamp,
-         const plans::LevinConfig& levin,
-         int nthreads,
-         SizeType nbits,
-         std::span<const uint8_t> kill_mask,
-         SizeType nbeams)
-        : m_plan(f_min, f_max, nchans, tsamp, levin, nbits, kill_mask),
-          m_nthreads(std::max(1, nthreads)),
-          m_nbeams(nbeams) {}
-
-    Impl(plans::DDMTPlan plan, int nthreads, SizeType nbeams)
-        : m_plan(std::move(plan)),
-          m_nthreads(std::max(1, nthreads)),
-          m_nbeams(nbeams) {}
-
-    const plans::DDMTPlan& get_plan() const { return m_plan; }
-    SizeType get_nbeams() const noexcept { return m_nbeams; }
+    DDMTCpuEngine(const plans::DDMTPlan& plan,
+                  const detail::DDMTEngineConfig& cfg)
+        : m_plan(plan),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
+          m_nbeams(cfg.nbeams) {}
 
     // Number of output samples execute(float) will produce for a block of
     // `input_nsamps` new samples, given the currently retained history
     // (see reset_history()'s doc comment for the streaming model).
     [[nodiscard]] SizeType
-    get_output_nsamps(SizeType input_nsamps) const noexcept {
+    get_output_nsamps(SizeType input_nsamps) const noexcept override {
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         const auto total = m_history_len + input_nsamps;
         return total > max_delay ? total - max_delay : 0;
     }
 
-    void reset_history() noexcept {
+    void reset_history() noexcept override {
         m_history.clear();
         m_history_packed.clear();
         m_history_len = 0;
     }
 
-    [[nodiscard]] SizeType history_state_size() const noexcept {
+    [[nodiscard]] SizeType history_state_size() const noexcept override {
         const auto& plan_c   = m_plan.get_container();
         const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
         if (plan_c.nbits == 32) {
@@ -101,10 +53,10 @@ public:
                bit_pack_utils::packed_row_bytes(max_delay, plan_c.nbits);
     }
 
-    void save_history(std::span<float> out) const {
+    void save_history(std::span<float> out) const override {
         if (m_plan.get_nbits() != 32) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU::save_history(float): plan nbits={} != 32; "
+                "DDMT::save_history(float): plan nbits={} != 32; "
                 "use the packed save_history(uint8_t) overload instead",
                 m_plan.get_nbits()));
         }
@@ -112,54 +64,54 @@ public:
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
             throw std::logic_error(
-                std::format("DDMTCPU::save_history: stream is not fully "
+                std::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, max_delay));
         }
         if (out.size() != m_history.size()) {
             throw std::invalid_argument(
-                std::format("DDMTCPU::save_history: buffer size mismatch: "
+                std::format("DDMT::save_history: buffer size mismatch: "
                             "expected {}, got {}",
                             m_history.size(), out.size()));
         }
         std::ranges::copy(m_history, out.begin());
     }
 
-    void save_history(std::span<uint8_t> out) const {
+    void save_history(std::span<uint8_t> out) const override {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
             throw std::invalid_argument(
-                "DDMTCPU::save_history(uint8_t): plan nbits=32; "
+                "DDMT::save_history(uint8_t): plan nbits=32; "
                 "use the float save_history(float) overload instead");
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
             throw std::logic_error(
-                std::format("DDMTCPU::save_history: stream is not fully "
+                std::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, max_delay));
         }
         const auto expected_bytes = history_state_size();
         if (out.size() != expected_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCPU::save_history: buffer size mismatch: "
+                std::format("DDMT::save_history: buffer size mismatch: "
                             "expected {} bytes, got {}",
                             expected_bytes, out.size()));
         }
         std::ranges::copy(m_history_packed, out.begin());
     }
 
-    void load_history(std::span<const float> in) {
+    void load_history(std::span<const float> in) override {
         if (m_plan.get_nbits() != 32) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU::load_history(float): plan nbits={} != 32; "
+                "DDMT::load_history(float): plan nbits={} != 32; "
                 "use the packed load_history(uint8_t) overload instead",
                 m_plan.get_nbits()));
         }
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("DDMTCPU::load_history: buffer size mismatch: "
+                std::format("DDMT::load_history: buffer size mismatch: "
                             "expected {}, got {}",
                             history_state_size(), in.size()));
         }
@@ -167,17 +119,17 @@ public:
         m_history_len = in.size() / (m_nbeams * m_plan.get_nchans());
     }
 
-    void load_history(std::span<const uint8_t> in) {
+    void load_history(std::span<const uint8_t> in) override {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
             throw std::invalid_argument(
-                "DDMTCPU::load_history(uint8_t): plan nbits=32; "
+                "DDMT::load_history(uint8_t): plan nbits=32; "
                 "use the float load_history(float) overload instead");
         }
         const auto expected_bytes = history_state_size();
         if (in.size() != expected_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCPU::load_history: buffer size mismatch: "
+                std::format("DDMT::load_history: buffer size mismatch: "
                             "expected {} bytes, got {}",
                             expected_bytes, in.size()));
         }
@@ -186,11 +138,12 @@ public:
             *std::ranges::max_element(m_plan.get_container().delay_table);
     }
 
-    void execute(std::span<const float> waterfall, std::span<float> dmt) {
+    void execute(std::span<const float> waterfall,
+                 std::span<float> dmt) override {
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
             throw std::invalid_argument(
-                std::format("DDMTCPU::execute(float): plan nbits={} != 32; use "
+                std::format("DDMT::execute(float): plan nbits={} != 32; use "
                             "the packed-integer execute() overload instead",
                             plan_c.nbits));
         }
@@ -205,7 +158,7 @@ public:
 
         if (dmt.size() != m_nbeams * dm_count * n_out) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU: Output buffer size mismatch: expected {}, got {}",
+                "DDMT: Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * n_out, dmt.size()));
         }
 
@@ -302,13 +255,13 @@ public:
 
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nsamps,
-                 std::span<int32_t> dmt) {
+                 std::span<int32_t> dmt) override {
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
             throw std::invalid_argument(
-                std::format("DDMTCPU::execute(packed): plan nbits={} is not a "
+                std::format("DDMT::execute(packed): plan nbits={} is not a "
                             "supported packed width (1,2,4,8,16); use the "
                             "float execute() overload for nbits==32",
                             nbits));
@@ -318,7 +271,7 @@ public:
         const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         if (waterfall_packed.size() != in_rows * row_bytes) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU: Packed input buffer size mismatch: expected {} "
+                "DDMT: Packed input buffer size mismatch: expected {} "
                 "bytes ({} beams x {} chans x {} bytes/row), got {}",
                 in_rows * row_bytes, m_nbeams, nchans, row_bytes,
                 waterfall_packed.size()));
@@ -329,7 +282,7 @@ public:
         const auto dm_count       = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU: Output buffer size mismatch: expected {}, got {}",
+                "DDMT: Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
 
@@ -559,20 +512,20 @@ public:
 
     void execute_time_major(std::span<const uint8_t> filterbank_packed,
                             SizeType nsamps,
-                            std::span<int32_t> dmt) {
+                            std::span<int32_t> dmt) override {
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU::execute_time_major: plan nbits={} is not supported",
+                "DDMT::execute_time_major: plan nbits={} is not supported",
                 nbits));
         }
         const auto nchans     = plan_c.nchans;
         const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, nbits);
         if (filterbank_packed.size() != m_nbeams * nsamps * samp_bytes) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU: Time-major input buffer size mismatch: expected {}, "
+                "DDMT: Time-major input buffer size mismatch: expected {}, "
                 "got {}",
                 m_nbeams * nsamps * samp_bytes, filterbank_packed.size()));
         }
@@ -581,7 +534,7 @@ public:
         const auto dm_count       = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCPU: Output buffer size mismatch: expected {}, got {}",
+                "DDMT: Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
         if (nsamps_reduced == 0) {
@@ -666,8 +619,13 @@ public:
         }
     }
 
+protected:
+    [[nodiscard]] Backend backend() const noexcept override {
+        return Backend::kCPU;
+    }
+
 private:
-    plans::DDMTPlan m_plan;
+    const plans::DDMTPlan& m_plan; // owned by the DDMT facade
     int m_nthreads;
     SizeType m_nbeams;
     // Retained tail from previous execute calls; see reset_history().
@@ -676,108 +634,12 @@ private:
     SizeType m_history_len = 0;
 };
 
-DDMTCPU::DDMTCPU(float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 float tsamp,
-                 float dm_max,
-                 float dm_step,
-                 float dm_min,
-                 int nthreads,
-                 SizeType nbits,
-                 std::span<const uint8_t> kill_mask,
-                 SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    tsamp,
-                                    dm_max,
-                                    dm_step,
-                                    dm_min,
-                                    nthreads,
-                                    nbits,
-                                    kill_mask,
-                                    nbeams)) {}
+} // namespace
 
-DDMTCPU::DDMTCPU(float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 float tsamp,
-                 std::span<const float> dm_arr,
-                 int nthreads,
-                 SizeType nbits,
-                 std::span<const uint8_t> kill_mask,
-                 SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    tsamp,
-                                    dm_arr,
-                                    nthreads,
-                                    nbits,
-                                    kill_mask,
-                                    nbeams)) {}
-
-DDMTCPU::DDMTCPU(float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 float tsamp,
-                 const plans::LevinConfig& levin,
-                 int nthreads,
-                 SizeType nbits,
-                 std::span<const uint8_t> kill_mask,
-                 SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    tsamp,
-                                    levin,
-                                    nthreads,
-                                    nbits,
-                                    kill_mask,
-                                    nbeams)) {}
-
-DDMTCPU::DDMTCPU(const plans::DDMTPlan& plan, int nthreads, SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(plan, nthreads, nbeams)) {}
-
-DDMTCPU::~DDMTCPU()                                   = default;
-DDMTCPU::DDMTCPU(DDMTCPU&& other) noexcept            = default;
-DDMTCPU& DDMTCPU::operator=(DDMTCPU&& other) noexcept = default;
-const plans::DDMTPlan& DDMTCPU::get_plan() const noexcept {
-    return m_impl->get_plan();
-}
-SizeType DDMTCPU::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
-void DDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
-    m_impl->execute(waterfall, dmt);
-}
-void DDMTCPU::execute(std::span<const uint8_t> waterfall_packed,
-                      SizeType nsamps,
-                      std::span<int32_t> dmt) {
-    m_impl->execute(waterfall_packed, nsamps, dmt);
-}
-void DDMTCPU::execute_time_major(std::span<const uint8_t> filterbank_packed,
-                                 SizeType nsamps,
-                                 std::span<int32_t> dmt) {
-    m_impl->execute_time_major(filterbank_packed, nsamps, dmt);
-}
-SizeType DDMTCPU::get_output_nsamps(SizeType input_nsamps) const noexcept {
-    return m_impl->get_output_nsamps(input_nsamps);
-}
-void DDMTCPU::reset_history() noexcept { m_impl->reset_history(); }
-SizeType DDMTCPU::history_state_size() const noexcept {
-    return m_impl->history_state_size();
-}
-void DDMTCPU::save_history(std::span<float> out) const {
-    return m_impl->save_history(out);
-}
-void DDMTCPU::save_history(std::span<uint8_t> out) const {
-    return m_impl->save_history(out);
-}
-void DDMTCPU::load_history(std::span<const float> in) {
-    return m_impl->load_history(in);
-}
-void DDMTCPU::load_history(std::span<const uint8_t> in) {
-    return m_impl->load_history(in);
+std::unique_ptr<detail::DDMTEngine>
+detail::make_ddmt_cpu(const plans::DDMTPlan& plan,
+                      const detail::DDMTEngineConfig& cfg) {
+    return std::make_unique<DDMTCpuEngine>(plan, cfg);
 }
 
 } // namespace dmt::algorithms

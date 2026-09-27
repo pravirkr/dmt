@@ -3,17 +3,17 @@ import pytest
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
-        "markers", "cuda: tests that require the CUDA Python extension and a GPU"
+        "markers", "cuda: tests that require the CUDA backend and a GPU"
     )
 
 
 def _cuda_available() -> bool:
-    try:
-        from dmtlib import libcudmt
-    except Exception:
+    import dmtlib
+
+    if "cuda" not in dmtlib.available_backends():
         return False
     try:
-        libcudmt.FDMTCUDA(1000.0, 1500.0, 4, 8, 0.001, 2)
+        dmtlib.FDMT(1000.0, 1500.0, 4, 8, 0.001, 2, backend="cuda")
     except Exception:
         return False
     return True
@@ -25,7 +25,7 @@ def pytest_collection_modifyitems(
     if _cuda_available():
         return
     skip_cuda = pytest.mark.skip(
-        reason="dmtlib.libcudmt is not importable or no CUDA device is available"
+        reason="this dmtlib build has no CUDA backend, or no CUDA device is available"
     )
     for item in items:
         if "cuda" in item.keywords:

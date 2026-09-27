@@ -12,12 +12,12 @@ namespace dmt::algorithms {
  * register unrolling.
  * @details
  * Reads the per-(dm,chan) delay table and kill mask from global memory
- * (device-resident DDMTPlanD arrays, one copy per DDMTCUDA instance).
+ * (device-resident DDMTPlanD arrays, one copy per CUDA DDMT instance).
  * Deliberately *not* backed by __constant__ memory: constant memory is one
- * resource shared by the whole device/process, and DDMTCUDA's device-span
- * execute() overloads are meant to let independent instances pipeline
- * concurrently on different streams -- a shared __constant__ table would
- * let one instance's upload race another's in-flight kernel.
+ * resource shared by the whole device/process, and the CUDA DDMT engine's
+ * device-span execute() overloads are meant to let independent instances
+ * pipeline concurrently on different streams -- a shared __constant__ table
+ * would let one instance's upload race another's in-flight kernel.
  *
  * `d_in`/`d_out` are beam-major: blockIdx.z selects the beam, offsetting
  * into (nbeams, nchans, in_chan_stride) and (nbeams, dm_count,

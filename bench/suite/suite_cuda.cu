@@ -26,15 +26,15 @@
 namespace dmt::bench_suite {
 namespace {
 
-using algorithms::DDMTCUDA;
-using algorithms::FDMTCUDA;
-using algorithms::FDMTFFTCUDA;
+using algorithms::DDMT;
+using algorithms::FDMT;
+using algorithms::FDMTFFT;
 
-template <typename T> cuda::std::span<T> dspan(thrust::device_vector<T>& v) {
+template <typename T> DeviceSpan<T> dspan(thrust::device_vector<T>& v) {
     return {thrust::raw_pointer_cast(v.data()), v.size()};
 }
 template <typename T>
-cuda::std::span<const T> dspan_c(const thrust::device_vector<T>& v) {
+DeviceSpan<const T> dspan_c(const thrust::device_vector<T>& v) {
     return {thrust::raw_pointer_cast(v.data()), v.size()};
 }
 
@@ -63,8 +63,8 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
     if (skip_if_over_device_budget(state, Algo::kFDMT, plan, p)) {
         return;
     }
-    FDMTCUDA fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
-                  "valid");
+    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
+              "valid", Exec::cuda(0));
     thrust::device_vector<float> dmt(plan.get_buffer_size());
     if (p.nbits == 32) {
         const auto host = make_float_input(kNchans * p.nsamps);
@@ -95,8 +95,8 @@ void bench_fdmt_cuda_host(benchmark::State& state, Point p) {
     if (skip_if_over_device_budget(state, Algo::kFDMT, plan, p)) {
         return;
     }
-    FDMTCUDA fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
-                  "valid");
+    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
+              "valid", Exec::cuda(0));
     std::vector<float> dmt(plan.get_buffer_size());
     if (p.nbits == 32) {
         const auto wf = make_float_input(kNchans * p.nsamps);
@@ -122,8 +122,8 @@ void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
         return;
     }
     try {
-        FDMTFFTCUDA fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0,
-                         1, true, "valid");
+        FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
+                     true, "valid", Exec::cuda(0));
         const auto host = make_float_input(kNchans * p.nsamps);
         const thrust::device_vector<float> wf(host.begin(), host.end());
         thrust::device_vector<float> dmt(plan.get_dmt_size());
@@ -146,7 +146,7 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         return;
     }
     const auto dms = plan.get_dm_grid_final();
-    DDMTCUDA ddmt(kFMin, kFMax, kNchans, kTsamp, dms, 0, p.nbits);
+    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, dms, Exec::cuda(0), p.nbits);
     const auto ndms   = dms.size();
     const auto n_cold = ddmt.get_output_nsamps(p.nsamps);
     if (p.nbits == 32) {
@@ -154,7 +154,7 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         const thrust::device_vector<float> wf(host.begin(), host.end());
         thrust::device_vector<float> dmt(ndms * p.nsamps);
         ddmt.execute(dspan_c(wf),
-                     cuda::std::span<float>(dspan(dmt).data(), ndms * n_cold));
+                     DeviceSpan<float>(dspan(dmt).data(), ndms * n_cold));
         BENCH_CUDA_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
             const CudaEventTimer timer{state};
@@ -164,9 +164,8 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         const auto host = make_packed_input(packed_bytes(p.nsamps, p.nbits));
         const thrust::device_vector<uint8_t> wf(host.begin(), host.end());
         thrust::device_vector<int32_t> dmt(ndms * p.nsamps);
-        ddmt.execute(
-            dspan_c(wf), p.nsamps,
-            cuda::std::span<int32_t>(dspan(dmt).data(), ndms * n_cold));
+        ddmt.execute(dspan_c(wf), p.nsamps,
+                     DeviceSpan<int32_t>(dspan(dmt).data(), ndms * n_cold));
         BENCH_CUDA_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
             const CudaEventTimer timer{state};

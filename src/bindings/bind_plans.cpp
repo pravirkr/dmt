@@ -103,7 +103,7 @@ void bind_plans(py::module_& mod) {
         Plan for an incoherent Fast Dispersion Measure Transform (FDMT).
 
         Encodes the delay/DM trial grid, tree geometry, buffer sizes, and
-        per-trial variance used by :class:`FDMTCPU` and :class:`FDMTFFTCPU`.
+        per-trial variance used by :class:`FDMT` and :class:`FDMTFFT`.
 
         Parameters
         ----------
@@ -294,7 +294,7 @@ void bind_plans(py::module_& mod) {
         Plan for the hybrid coherent Fast Dispersion Measure Transform.
 
         Combines coarse coherent dedispersion trials with a fine FDMT tree
-        around each trial. Used by :class:`CohFDMTCPU` and :class:`CohFDMTCUDA`.
+        around each trial. Used by :class:`CohFDMT`.
 
         Parameters
         ----------
@@ -402,7 +402,7 @@ void bind_plans(py::module_& mod) {
         Plan for brute-force incoherent dedispersion (DDMT).
 
         Stores the DM trial list and the per-channel delay table used by
-        :class:`DDMTCPU` and :class:`DDMTCUDA`.
+        :class:`DDMT`.
 
         Parameters
         ----------

@@ -1511,9 +1511,9 @@ private:
         m_dt_min = -static_cast<IndexType>(m_n_p);
 
         // mode="valid": each coherent DM trial's fine-search FDMT instance
-        // streams its own cross-block history (see CohFDMTCPU/CohFDMTCUDA),
+        // streams its own cross-block history (see CohFDMT),
         // so contiguous baseband blocks produce contiguous fine-DMT output
-        // per coherent trial. Must match the runtime FDMTCPU/FDMTCUDA mode.
+        // per coherent trial. Must match the runtime FDMT mode.
         m_fdmt_plan =
             std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_mchan, m_msamp,
                                        m_tsamp, m_dt_max, m_dt_min, 1, "valid");

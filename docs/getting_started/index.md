@@ -44,5 +44,5 @@ print(f"Detected FRB at DM trial: {plan.dm_grid_final[peak_dm_idx]:.2f} pc cm^-3
 
 - Follow the [Installation Guide](installation.md) for prerequisite toolchains, FFTW3, OpenMP, and CUDA build instructions.
 - Check the [Python Quickstart](quickstart_python.md) for object-oriented stepper usage and batch execution.
-- Check the [C++ Quickstart](quickstart_cpp.md) for integrating `dmt::algorithms::FDMTCPU` directly into real-time C++ telescope pipelines.
+- Check the [C++ Quickstart](quickstart_cpp.md) for integrating `dmt::algorithms::FDMT` directly into real-time C++ telescope pipelines.
 - The {doc}`worked example <example>` draws the waterfall and DM-time figures on the README.

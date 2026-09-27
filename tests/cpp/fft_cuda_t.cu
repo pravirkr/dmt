@@ -8,7 +8,7 @@
 
 #include "dmt/bb_utils.hpp"
 #include "dmt/bb_utils_cuda.cuh"
-#include "dmt/utils/fft.hpp"
+#include "dmt/fft_cuda.cuh"
 #include "test_helpers.hpp"
 
 namespace dmt {

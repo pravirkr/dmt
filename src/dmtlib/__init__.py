@@ -1,10 +1,9 @@
-import contextlib
 from importlib import metadata
 
 try:
     __version__ = metadata.version(__name__)
 except metadata.PackageNotFoundError:
-    __version__ = "0.3.0"
+    __version__ = "0.4.0"
 
 from . import libdmt as _libdmt
 from .grid import (
@@ -13,10 +12,10 @@ from .grid import (
     generate_optimal_dt_grid,
 )
 from .libdmt import (
-    DDMTCPU,
-    FDMTCPU,
-    FDMTFFTCPU,
-    CohFDMTCPU,
+    DDMT,
+    FDMT,
+    FDMTFFT,
+    CohFDMT,
     CohFDMTPlan,
     DDMTPlan,
     FDMTComplexity,
@@ -24,22 +23,10 @@ from .libdmt import (
     FDMTPlan,
     LevinConfig,
     add_frb_track,
+    available_backends,
     compute_fdmt,
     compute_fdmt_fft,
 )
-
-_log_modules = [_libdmt]
-
-with contextlib.suppress(Exception):
-    from . import libcudmt as _libcudmt
-    from .libcudmt import (
-        DDMTCUDA,
-        FDMTCUDA,
-        FDMTFFTCUDA,
-        CohFDMTCUDA,
-    )
-
-    _log_modules.append(_libcudmt)
 
 _LOG_LEVELS = {"off": 0, "debug": 1}
 
@@ -57,8 +44,7 @@ def set_log_level(level: str) -> None:
     except KeyError:
         msg = f"log level must be one of {sorted(_LOG_LEVELS)}, got {level!r}"
         raise ValueError(msg) from None
-    for module in _log_modules:
-        module._set_log_level(value)  # noqa: SLF001 - our own extensions
+    _libdmt._set_log_level(value)  # noqa: SLF001 - our own extension
 
 
 def get_log_level() -> str:
@@ -68,14 +54,10 @@ def get_log_level() -> str:
 
 
 __all__ = [
-    "DDMTCPU",
-    "DDMTCUDA",
-    "FDMTCPU",
-    "FDMTCUDA",
-    "FDMTFFTCPU",
-    "FDMTFFTCUDA",
-    "CohFDMTCPU",
-    "CohFDMTCUDA",
+    "DDMT",
+    "FDMT",
+    "FDMTFFT",
+    "CohFDMT",
     "CohFDMTPlan",
     "DDMTPlan",
     "FDMTComplexity",
@@ -83,6 +65,7 @@ __all__ = [
     "FDMTPlan",
     "LevinConfig",
     "add_frb_track",
+    "available_backends",
     "calculate_snr_loss",
     "compute_fdmt",
     "compute_fdmt_fft",

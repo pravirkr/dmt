@@ -15,7 +15,7 @@
 
 // The CUDA backend's fused-level tile (lib/dmt/fdmt_fused_tile.hpp), run
 // sequentially on the host -- one "thread", barriers as no-ops -- over every
-// (group, tile) of a block, against FDMTCPU's original level-by-level path.
+// (group, tile) of a block, against FDMT's original level-by-level path.
 // This checks the tile geometry (halos, boundaries, history ownership)
 // without a GPU; the GPU tests check the kernel launch itself. Integer-valued
 // input keeps every sum exact whatever the host compiler's float flags, so
@@ -23,7 +23,7 @@
 
 namespace dmt {
 
-using algorithms::FDMTCPU;
+using algorithms::FDMT;
 namespace detail = algorithms::detail;
 
 namespace {
@@ -141,9 +141,9 @@ std::vector<float> run_tiles_dispatch(FDMTMode mode,
                  : go.template operator()<FDMTMode::kValid, false>();
 }
 
-// Level `fuse` of one block through FDMTCPU's original path.
+// Level `fuse` of one block through FDMT's original path.
 std::vector<float>
-reference_level(FDMTCPU& ref, const std::vector<float>& block, SizeType fuse) {
+reference_level(FDMT& ref, const std::vector<float>& block, SizeType fuse) {
     std::vector<float> dmt(ref.get_plan().get_buffer_size());
     ref.reset(block, dmt);
     ref.advance(fuse);
@@ -189,8 +189,8 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
         for (const std::string mode : {"full", "roll", "valid"}) {
             for (const bool smear : {true, false}) {
                 // Original level-by-level float path (stepper inspection).
-                FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
-                            c.dt_min, 1, smear, mode, 1, 1, 0, false);
+                FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
+                         c.dt_min, 1, smear, mode, Exec::cpu(1), 1, 0, false);
                 const auto& pc    = ref.get_plan().get_container();
                 const auto niters = ref.get_plan().get_niters();
                 const auto wf = random_ints(c.nchans, c.nsamps,
@@ -244,8 +244,8 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
             for (const SizeType fuse : {1, 2, 3}) {
                 DYNAMIC_SECTION("block=" << block << " smear=" << smear
                                          << " fuse=" << fuse) {
-                    FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                                smear, "valid", 1, 1, 0, false);
+                    FDMT ref(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
+                             smear, "valid", Exec::cpu(1), 1, 0, false);
                     const auto& plan_h = ref.get_plan();
                     const auto& pc     = plan_h.get_container();
                     const auto plan    = detail::build_fused_tile_plan(
@@ -298,7 +298,7 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
 }
 
 TEST_CASE("CUDA fused tile plan sizing", "[fdmt_fused_tile][cpu]") {
-    FDMTCPU fdmt(704.0F, 1216.0F, 1024, 2048, 0.00008192F, 512);
+    FDMT fdmt(704.0F, 1216.0F, 1024, 2048, 0.00008192F, 512);
     const auto& pc    = fdmt.get_plan().get_container();
     const auto niters = fdmt.get_plan().get_niters();
     REQUIRE_THROWS_AS(detail::build_fused_tile_plan(pc, niters, 0),

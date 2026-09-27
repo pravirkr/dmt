@@ -45,7 +45,7 @@ for p in (build_src, src_dir):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from dmtlib import FDMTCPU, FDMTPlan  # noqa: E402
+from dmtlib import FDMT, FDMTPlan  # noqa: E402
 
 
 def analyze_plan_reuse(plan: FDMTPlan) -> dict:
@@ -127,7 +127,7 @@ def benchmark_throughput_vs_blocksize(
     print("-" * 85)
 
     for nsamps in block_sizes:
-        fdmt = FDMTCPU(f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max)
+        fdmt = FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max=dt_max)
         row_kb = (nsamps * 4) / 1024.0
         three_rows_kb = 3 * row_kb
 
@@ -243,7 +243,7 @@ def benchmark_fusion(
             cells = []
             base = None
             for depth in depths:
-                fdmt = FDMTCPU(
+                fdmt = FDMT(
                     1000.0,
                     1500.0,
                     nchans,
@@ -279,7 +279,7 @@ def benchmark_packed(
     rng = np.random.default_rng(0)
     for nthreads in threads:
         engines = {
-            int_tree: FDMTCPU(
+            int_tree: FDMT(
                 1000.0,
                 1500.0,
                 nchans,

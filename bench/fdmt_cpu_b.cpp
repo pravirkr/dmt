@@ -10,7 +10,7 @@
 #include "dmt/common/plans.hpp"
 
 namespace dmt {
-using algorithms::FDMTCPU;
+using algorithms::FDMT;
 using algorithms::kFDMTAutoFuse;
 using plans::FDMTPlan;
 
@@ -53,16 +53,16 @@ public:
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_planBuffer)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "full", nthreads);
+        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                  "full", Exec::cpu(nthreads));
     }
 }
 
 // Default execution config (automatic level fusion).
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute)
 (benchmark::State& state) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                 "full", nthreads);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false, "full",
+              Exec::cpu(nthreads));
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
@@ -75,16 +75,16 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_overall)
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     std::vector<float> dmt(tmp_plan.get_buffer_size(), 0.0F);
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "full", nthreads);
+        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                  "full", Exec::cpu(nthreads));
         fdmt.execute(waterfall, dmt);
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_execute_threads)
 (benchmark::State& state) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                 "full", nthreads);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false, "full",
+              Exec::cpu(nthreads));
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
@@ -101,8 +101,8 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_packed)
     const auto fuse  = state.range(4) < 0
                            ? kFDMTAutoFuse
                            : static_cast<SizeType>(state.range(4));
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                 "valid", nthreads, 1, fuse, state.range(3) != 0);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true, "valid",
+              Exec::cpu(nthreads), 1, fuse, state.range(3) != 0);
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     if (nbits == 32) {
         for (auto _ : state) {
@@ -131,8 +131,8 @@ BENCHMARK_DEFINE_F(FDMTCPUFixture, BM_fdmt_fused)
     const auto fuse = state.range(2) < 0
                           ? kFDMTAutoFuse
                           : static_cast<SizeType>(state.range(2));
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                 "valid", nthreads, 1, fuse);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true, "valid",
+              Exec::cpu(nthreads), 1, fuse);
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);

@@ -22,14 +22,14 @@ Set `nbeams > 1` in the engine constructor. The engine expects 3D inputs and pro
 
 ```python
 import numpy as np
-from dmtlib import FDMTCPU
+from dmtlib import FDMT
 
 nbeams = 16
 nchans = 256
 nsamps = 1024
 
 # Instantiate multi-beam engine
-fdmt = FDMTCPU(
+fdmt = FDMT(
     f_min=1200.0,
     f_max=1600.0,
     nchans=nchans,
@@ -61,11 +61,11 @@ const size_t nbeams = 16;
 const size_t nchans = 256;
 const size_t nsamps = 1024;
 
-dmt::algorithms::FDMTCPU fdmt(
+dmt::algorithms::FDMT fdmt(
     1200.0f, 1600.0f, nchans, nsamps, 1e-3f,
     /*dt_max=*/100, /*dt_min=*/0, /*dt_step=*/1,
     /*use_box_smearing=*/true, "valid",
-    /*nthreads=*/8, /*nbeams=*/nbeams
+    dmt::Exec::cpu(/*nthreads=*/8), /*nbeams=*/nbeams
 );
 
 const auto& plan = fdmt.get_plan();

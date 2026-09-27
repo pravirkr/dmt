@@ -29,9 +29,9 @@ thrust::device_vector<T> generate_vector_device(size_t size) {
 } // namespace
 
 namespace dmt {
-using algorithms::FDMTFFTCUDA;
+using algorithms::FDMTFFT;
 
-// Smaller than the ASKAP-like FDMTCUDA bench: FFT state is complex and
+// Smaller than the ASKAP-like FDMT bench: FFT state is complex and
 // full/valid pad N_fft = nsamps + L + max_shift, matching the CPU
 // FDMT-FFT fixture's configuration for apples-to-apples comparison.
 class FDMTFFTCUDAFixture : public benchmark::Fixture {
@@ -66,31 +66,31 @@ public:
 
 BENCHMARK_DEFINE_F(FDMTFFTCUDAFixture, BM_fdmt_fft_execute_roll_cuda)
 (benchmark::State& state) {
-    FDMTFFTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "roll");
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                 "roll", Exec::cuda(0));
     thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        fdmt.execute(cuda::std::span<const float>(
+        fdmt.execute(DeviceSpan<const float>(
                          thrust::raw_pointer_cast(waterfall_d.data()),
                          waterfall_d.size()),
-                     cuda::std::span<float>(
-                         thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size()));
+                     DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                                       dmt_d.size()));
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTFFTCUDAFixture, BM_fdmt_fft_execute_valid_cuda)
 (benchmark::State& state) {
-    FDMTFFTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "valid");
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                 "valid", Exec::cuda(0));
     thrust::device_vector<float> dmt_d(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         CudaEventTimer raii{state};
-        fdmt.execute(cuda::std::span<const float>(
+        fdmt.execute(DeviceSpan<const float>(
                          thrust::raw_pointer_cast(waterfall_d.data()),
                          waterfall_d.size()),
-                     cuda::std::span<float>(
-                         thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size()));
+                     DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                                       dmt_d.size()));
     }
 }
 

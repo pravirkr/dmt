@@ -14,47 +14,55 @@
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
 #include "dmt/dm_utils.hpp"
-#include "dmt/utils/fft.hpp"
-#include "dmt/utils/unpacker.hpp"
+#include "dmt/engines.hpp"
+#include "dmt/fft_cuda.cuh"
+#include "dmt/unpacker_cuda.cuh"
 
 namespace dmt::algorithms {
 
-class CohFDMTCUDA::Impl {
+namespace {
+
+template <typename T> cuda::std::span<T> to_cuda(DeviceSpan<T> span) {
+    return {span.data(), span.size()};
+}
+
+cudaStream_t to_cuda(Stream stream) {
+    return static_cast<cudaStream_t>(stream.native);
+}
+
+class CohFDMTCudaEngine final : public detail::CohFDMTEngine {
 public:
-    Impl(float f_center,
-         float bw_sub,
-         SizeType nsub,
-         float tbin,
-         SizeType nbin,
-         SizeType nfft,
-         float t_p,
-         float dm_max,
-         float dm_min,
-         SizeType noverlap,
-         std::string_view data_order,
-         int device_id)
-        : m_plan(f_center,
-                 bw_sub,
-                 nsub,
-                 tbin,
-                 nbin,
-                 nfft,
-                 t_p,
-                 dm_max,
-                 dm_min,
-                 noverlap,
-                 data_order),
-          m_device_id(device_id) {
+    CohFDMTCudaEngine(const plans::CohFDMTPlan& plan,
+                      const detail::CohFDMTEngineConfig& cfg)
+        : m_plan(plan),
+          m_device_id(cfg.exec.device) {
         cuda_utils::set_device(m_device_id);
         initialise();
     }
 
-    const plans::CohFDMTPlan& get_plan() const { return m_plan; }
+    void execute(std::span<const uint8_t> data_in,
+                 std::span<float> dmt) override {
+        execute_h<uint8_t>(data_in, dmt);
+    }
+    void execute(std::span<const int8_t> data_in,
+                 std::span<float> dmt) override {
+        execute_h<int8_t>(data_in, dmt);
+    }
+    void execute(DeviceSpan<const uint8_t> data_in,
+                 DeviceSpan<float> dmt,
+                 Stream stream) override {
+        execute_d<uint8_t>(to_cuda(data_in), to_cuda(dmt), to_cuda(stream));
+    }
+    void execute(DeviceSpan<const int8_t> data_in,
+                 DeviceSpan<float> dmt,
+                 Stream stream) override {
+        execute_d<int8_t>(to_cuda(data_in), to_cuda(dmt), to_cuda(stream));
+    }
 
     void execute_pipeline(cuda::std::span<float> dmt_d, cudaStream_t stream) {
         if (dmt_d.size() < m_plan.get_buffer_size()) {
             throw std::invalid_argument(std::format(
-                "CohFDMTCUDA: dmt buffer too small. Expected at least {} "
+                "CohFDMT (cuda): dmt buffer too small. Expected at least {} "
                 "(get_buffer_size()), got {}",
                 m_plan.get_buffer_size(), dmt_d.size()));
         }
@@ -118,7 +126,7 @@ public:
                 static_cast<int>(m_plan.get_msamp()), stream);
 
             // Perform the FDMT for this coarse-DM trial's fine residual
-            // search on the aligned waterfall. One shared FDMTCUDA instance
+            // search on the aligned waterfall. One shared FDMT instance
             // (same geometry for every coarse trial); only the small per-trial
             // streaming history differs.
             auto hist_span = cuda::std::span<float>(
@@ -128,12 +136,19 @@ public:
             // runs in place at offset idm * D; its B-sized scratch tail only
             // reaches later trials' slots, which are overwritten afterwards.
             const auto& fine_plan = m_thefdmt->get_plan();
-            m_thefdmt->load_history(hist_span, stream);
-            m_thefdmt->execute(m_aligned_buf_span,
-                               dmt_d.subspan(idm * fine_plan.get_dmt_size(),
-                                             fine_plan.get_buffer_size()),
-                               stream);
-            m_thefdmt->save_history(hist_span, stream);
+            const auto trial_dmt = dmt_d.subspan(idm * fine_plan.get_dmt_size(),
+                                                 fine_plan.get_buffer_size());
+            m_thefdmt->load_history(
+                DeviceSpan<const float>(hist_span.data(), hist_span.size()),
+                Stream{stream});
+            m_thefdmt->execute(
+                DeviceSpan<const float>(m_aligned_buf_span.data(),
+                                        m_aligned_buf_span.size()),
+                DeviceSpan<float>(trial_dmt.data(), trial_dmt.size()),
+                Stream{stream});
+            m_thefdmt->save_history(
+                DeviceSpan<float>(hist_span.data(), hist_span.size()),
+                Stream{stream});
         }
     }
 
@@ -144,7 +159,7 @@ public:
         cuda_utils::set_device(m_device_id);
         if (dmt_h.size() < m_plan.get_dmt_size()) {
             throw std::invalid_argument(std::format(
-                "CohFDMTCUDA: dmt buffer too small. Expected at least {} "
+                "CohFDMT (cuda): dmt buffer too small. Expected at least {} "
                 "(get_dmt_size()), got {}",
                 m_plan.get_dmt_size(), dmt_h.size()));
         }
@@ -175,7 +190,7 @@ public:
                         cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
         cuda_utils::check_last_cuda_error(
-            "CohFDMTCUDA::execute (host): D2H copy failed");
+            "CohFDMT::execute (host): D2H copy failed");
     }
 
     // Device entry point: input is already device-resident, unpacks directly on
@@ -196,7 +211,7 @@ public:
         execute_pipeline(dmt_d, stream);
     }
 
-    void reset_history() noexcept {
+    void reset_history() noexcept override {
         for (auto& hist : m_channel_delay_histories) {
             if (!hist.empty()) {
                 thrust::fill(hist.begin(), hist.end(), 0.0F);
@@ -209,12 +224,17 @@ public:
         }
     }
 
+protected:
+    [[nodiscard]] Backend backend() const noexcept override {
+        return Backend::kCUDA;
+    }
+
 private:
-    plans::CohFDMTPlan m_plan;
+    const plans::CohFDMTPlan& m_plan; // owned by the CohFDMT facade
     int m_device_id;
     std::unique_ptr<utils::CUFFTManager> m_fft_forward;
     std::unique_ptr<utils::CUFFTManager> m_fft_backward;
-    std::unique_ptr<algorithms::FDMTCUDA> m_thefdmt;
+    std::unique_ptr<algorithms::FDMT> m_thefdmt;
     std::unique_ptr<utils::DataUnpackerCUDA> m_theunpacker;
 
     thrust::device_vector<ComplexTypeCUDA> m_unpack_buf_p1;
@@ -231,7 +251,7 @@ private:
     thrust::device_vector<float> m_host_arena_d;
     // Small per-coarse-DM-trial "valid"-mode streaming history, swapped
     // into the one shared m_thefdmt instance around each trial's execute()
-    // call -- mirrors CohFDMTCPU::Impl::m_dm_histories.
+    // call -- mirrors the CPU engine's m_dm_histories.
     std::vector<thrust::device_vector<float>> m_dm_histories;
     std::vector<thrust::device_vector<float>> m_channel_delay_histories;
 
@@ -243,11 +263,11 @@ private:
             utils::FFTKind::kC2CBackward, m_plan.get_mbin(),
             m_plan.get_nfft() * m_plan.get_nsub() * m_plan.get_nchan(),
             m_device_id);
-        // One shared FDMTCUDA instance for every coarse-DM trial
-        m_thefdmt = std::make_unique<algorithms::FDMTCUDA>(
+        // One shared CUDA FDMT instance for every coarse-DM trial
+        m_thefdmt = std::make_unique<algorithms::FDMT>(
             m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
             m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid", m_device_id);
+            m_plan.get_dt_min(), 1, true, "valid", Exec::cuda(m_device_id));
         m_theunpacker = std::make_unique<utils::DataUnpackerCUDA>(
             m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
             m_plan.get_nfft(), m_plan.get_data_order(), m_device_id);
@@ -340,67 +360,14 @@ private:
                                static_cast<int>(m_plan.get_mbin()),
                                static_cast<int>(m_plan.get_noverlap()), stream);
     }
-}; // End CohFDMTCUDA::Impl definition
+}; // End CohFDMTCudaEngine definition
 
-CohFDMTCUDA::CohFDMTCUDA(float f_center,
-                         float bw_sub,
-                         SizeType nsub,
-                         float tbin,
-                         SizeType nbin,
-                         SizeType nfft,
-                         float t_p,
-                         float dm_max,
-                         float dm_min,
-                         SizeType noverlap,
-                         std::string_view data_order,
-                         int device_id)
-    : m_impl(std::make_unique<Impl>(f_center,
-                                    bw_sub,
-                                    nsub,
-                                    tbin,
-                                    nbin,
-                                    nfft,
-                                    t_p,
-                                    dm_max,
-                                    dm_min,
-                                    noverlap,
-                                    data_order,
-                                    device_id)) {}
-CohFDMTCUDA::~CohFDMTCUDA()                                       = default;
-CohFDMTCUDA::CohFDMTCUDA(CohFDMTCUDA&& other) noexcept            = default;
-CohFDMTCUDA& CohFDMTCUDA::operator=(CohFDMTCUDA&& other) noexcept = default;
-const plans::CohFDMTPlan& CohFDMTCUDA::get_plan() const noexcept {
-    return m_impl->get_plan();
-}
-SizeType CohFDMTCUDA::get_dmt_size() const noexcept {
-    return m_impl->get_plan().get_dmt_size();
-}
-SizeType CohFDMTCUDA::get_buffer_size() const noexcept {
-    return m_impl->get_plan().get_buffer_size();
-}
-template <IntegralDataType DataType>
-void CohFDMTCUDA::execute(cuda::std::span<const DataType> data_in,
-                          cuda::std::span<float> dmt,
-                          cudaStream_t stream) const {
-    m_impl->execute_d<DataType>(data_in, dmt, stream);
-}
-template <IntegralDataType DataType>
-void CohFDMTCUDA::execute(std::span<const DataType> data_in,
-                          std::span<float> dmt) const {
-    m_impl->execute_h<DataType>(data_in, dmt);
-}
-void CohFDMTCUDA::reset_history() noexcept { m_impl->reset_history(); }
+} // namespace
 
-// Instantiate the public execute methods for each supported DataType
-template void CohFDMTCUDA::execute<int8_t>(std::span<const int8_t>,
-                                           std::span<float>) const;
-template void CohFDMTCUDA::execute<uint8_t>(std::span<const uint8_t>,
-                                            std::span<float>) const;
-template void CohFDMTCUDA::execute<int8_t>(cuda::std::span<const int8_t>,
-                                           cuda::std::span<float>,
-                                           cudaStream_t) const;
-template void CohFDMTCUDA::execute<uint8_t>(cuda::std::span<const uint8_t>,
-                                            cuda::std::span<float>,
-                                            cudaStream_t) const;
+std::unique_ptr<detail::CohFDMTEngine>
+detail::make_cfdmt_cuda(const plans::CohFDMTPlan& plan,
+                        const detail::CohFDMTEngineConfig& cfg) {
+    return std::make_unique<CohFDMTCudaEngine>(plan, cfg);
+}
 
 } // namespace dmt::algorithms

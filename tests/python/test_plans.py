@@ -10,7 +10,7 @@ class TestPlans:
         nchans = 64
         nsamples = 256
         dt_max = 32
-        thefdmt = libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
+        thefdmt = libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, dt_max)
         smearing_grid = thefdmt.plan.smearing_grid_final
         assert smearing_grid.size == thefdmt.plan.dmt_ndms * nchans
         assert np.all(smearing_grid >= 0.0)
@@ -84,7 +84,7 @@ class TestPlans:
             libdmt.FDMTPlan(1000.0, 1500.0, nchans, nsamples, 0.001, [5.0, 15.5, 30.0])
 
         with pytest.raises(TypeError):
-            libdmt.FDMTCPU(1000.0, 1500.0, nchans, nsamples, 0.001, [5.0, 15.5, 30.0])
+            libdmt.FDMT(1000.0, 1500.0, nchans, nsamples, 0.001, [5.0, 15.5, 30.0])
 
         # 2. Both dt_grid and dt_arr are accepted keywords
         plan_dt_grid = libdmt.FDMTPlan(
@@ -117,8 +117,8 @@ class TestPlans:
         assert np.all(np.diff(plan_dm_int.dt_grid_final) > 0)
         assert np.all(np.diff(plan_dm_int.get_dm_grid_final()) > 0)
 
-        # 5. FDMTCPU getters for dt and dm truth grids
-        fdmt_cpu = libdmt.FDMTCPU(
+        # 5. FDMT getters for dt and dm truth grids
+        fdmt_cpu = libdmt.FDMT(
             1000.0, 1500.0, nchans, nsamples, 0.001, dt_grid=[60, 15, 45, 30]
         )
         np.testing.assert_array_equal(fdmt_cpu.dt_grid_final, [15, 30, 45, 60])
@@ -183,8 +183,8 @@ class TestPlans:
             assert len(var_grid) == ndms
             np.testing.assert_allclose(var_grid, float(nchans * w))
 
-        # FDMTCPU forwarding with use_box_smearing=False
-        fdmt_no_smear = libdmt.FDMTCPU(
+        # FDMT forwarding with use_box_smearing=False
+        fdmt_no_smear = libdmt.FDMT(
             f_min,
             f_max,
             nchans,
@@ -222,7 +222,7 @@ class TestPlans:
             assert var_neg == pytest.approx(var_pos)
 
         # 3. Monte Carlo validation of variance formula
-        fdmt_smeared = libdmt.FDMTCPU(
+        fdmt_smeared = libdmt.FDMT(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min, use_box_smearing=True
         )
         rng = np.random.default_rng(12345)
@@ -339,13 +339,13 @@ class TestLoggingAndSummary:
             dmtlib.set_log_level("warn")
 
     def test_summaries(self) -> None:
-        fdmt = libdmt.FDMTCPU(1000.0, 1500.0, 64, 256, 0.001, 32)
+        fdmt = libdmt.FDMT(1000.0, 1500.0, 64, 256, 0.001, 32)
         plan_text = fdmt.plan.summary()
         assert "FDMT Plan Summary" in plan_text
         assert fdmt.plan.summary(prefix="  ").startswith("  ")
         engine_text = fdmt.summary()
         assert engine_text.startswith(plan_text)
-        assert "FDMTCPU" in engine_text
+        assert "FDMT (cpu)" in engine_text
         assert "Host memory" in engine_text
         ddmt = libdmt.DDMTPlan(1000.0, 1500.0, 64, 0.001, 10.0, 1.0)
         assert "DDMT Plan Summary" in ddmt.summary()

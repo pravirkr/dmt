@@ -13,8 +13,9 @@
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/engines.hpp"
+#include "dmt/fft.hpp"
 #include "dmt/modes.hpp"
-#include "dmt/utils/fft.hpp"
 
 namespace dmt::algorithms {
 
@@ -35,105 +36,32 @@ void advance_overlap_window(const float* __restrict__ new_data,
     }
 }
 
-} // namespace
-
-class FDMTFFTCPU::Impl {
+class FDMTFFTCpuEngine final : public detail::FDMTFFTEngine {
 public:
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         IndexType dt_max,
-         IndexType dt_min,
-         SizeType dt_step,
-         bool use_box_smearing,
-         std::string_view mode,
-         int nthreads,
-         SizeType nbeams)
-        : m_nchans(nchans),
-          m_nsamps(nsamps),
-          m_nbeams(nbeams),
-          m_nthreads(std::max(1, nthreads)),
-          m_use_box_smearing(use_box_smearing),
-          m_mode(parse_fdmt_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(f_min,
-                                                   f_max,
-                                                   nchans,
-                                                   nsamps,
-                                                   tsamp,
-                                                   dt_max,
-                                                   dt_min,
-                                                   dt_step,
-                                                   mode)) {
+    FDMTFFTCpuEngine(const plans::FDMTPlan& plan,
+                     const detail::FDMTFFTEngineConfig& cfg)
+        : m_nchans(plan.get_nchans()),
+          m_nsamps(plan.get_nsamps()),
+          m_nbeams(cfg.nbeams),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
+          m_use_box_smearing(cfg.use_box_smearing),
+          m_mode(cfg.mode),
+          m_plan(&plan) {
         initialize();
     }
 
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         const std::vector<IndexType>& dt_grid,
-         bool use_box_smearing,
-         std::string_view mode,
-         int nthreads,
-         SizeType nbeams)
-        : m_nchans(nchans),
-          m_nsamps(nsamps),
-          m_nbeams(nbeams),
-          m_nthreads(std::max(1, nthreads)),
-          m_use_box_smearing(use_box_smearing),
-          m_mode(parse_fdmt_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode)) {
-        initialize();
-    }
-
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         const std::vector<float>& dm_grid,
-         bool use_box_smearing,
-         std::string_view mode,
-         int nthreads,
-         SizeType nbeams)
-        : m_nchans(nchans),
-          m_nsamps(nsamps),
-          m_nbeams(nbeams),
-          m_nthreads(std::max(1, nthreads)),
-          m_use_box_smearing(use_box_smearing),
-          m_mode(parse_fdmt_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode)) {
-        initialize();
-    }
-
-    ~Impl()                      = default;
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
-
-    [[nodiscard]] const plans::FDMTPlan& get_plan() const noexcept {
-        return *m_plan;
-    }
-
-    [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
-
-    void execute(std::span<const float> waterfall, std::span<float> dmt) {
+    void execute(std::span<const float> waterfall,
+                 std::span<float> dmt) override {
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (waterfall.size() != total_in) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCPU::execute: expected waterfall size {}, got {}",
+                "FDMTFFT::execute: expected waterfall size {}, got {}",
                 total_in, waterfall.size()));
         }
         if (dmt.size() < total_out) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCPU::execute: dmt buffer size {} must be >= {}",
+                "FDMTFFT::execute: dmt buffer size {} must be >= {}",
                 dmt.size(), total_out));
         }
         for (SizeType b = 0; b < m_nbeams; ++b) {
@@ -142,18 +70,19 @@ public:
         }
     }
 
-    void reset(std::span<const float> waterfall, std::span<float> dmt) {
+    void reset(std::span<const float> waterfall,
+               std::span<float> dmt) override {
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (waterfall.size() != total_in) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCPU::reset: expected waterfall size {}, got {}",
-                total_in, waterfall.size()));
+                "FDMTFFT::reset: expected waterfall size {}, got {}", total_in,
+                waterfall.size()));
         }
         if (dmt.size() < total_out) {
-            throw std::invalid_argument(std::format(
-                "FDMTFFTCPU::reset: dmt buffer size {} must be >= {}",
-                dmt.size(), total_out));
+            throw std::invalid_argument(
+                std::format("FDMTFFT::reset: dmt buffer size {} must be >= {}",
+                            dmt.size(), total_out));
         }
 
         m_waterfall_ptr  = waterfall.data();
@@ -163,7 +92,7 @@ public:
         m_state_out      = m_state_b.data();
         m_view_valid     = false;
 
-        // Every beam is transformed (same as FDMTCPU). Views still expose
+        // Every beam is transformed (same as the CPU FDMT). Views still expose
         // beam 0 only.
         for (SizeType b = 0; b < m_nbeams; ++b) {
             fill_window(waterfall.data() + (b * m_nchans * m_nsamps), b);
@@ -173,7 +102,7 @@ public:
         m_is_initialized = true;
     }
 
-    void advance(SizeType levels = 1) {
+    void advance(SizeType levels, Stream /*stream*/) override {
         require_stepper();
         const auto total_lvl = total_levels();
         while (levels > 0 && m_current_level < total_lvl - 1) {
@@ -186,7 +115,8 @@ public:
         }
     }
 
-    void advance_until_remaining(SizeType remaining_levels) {
+    void advance_until_remaining(SizeType remaining_levels,
+                                 Stream stream) override {
         require_stepper();
         const auto total_lvl = total_levels();
         if (remaining_levels >= total_lvl) {
@@ -194,11 +124,11 @@ public:
         }
         const SizeType target_level = total_lvl - 1 - remaining_levels;
         if (target_level > m_current_level) {
-            advance(target_level - m_current_level);
+            advance(target_level - m_current_level, stream);
         }
     }
 
-    [[nodiscard]] std::span<const float> view_level_data() const {
+    [[nodiscard]] std::span<const float> view_level_data() const override {
         require_stepper();
         materialize_view();
         const auto& shape =
@@ -206,19 +136,15 @@ public:
         return {m_view_time.data(), shape.ncoords * view_nsamps()};
     }
 
-    [[nodiscard]] std::span<const float>
-    view_subband_data(SizeType subband_idx) const {
-        return view_subband(subband_idx).data;
-    }
-
-    [[nodiscard]] FDMTSubbandView view_subband(SizeType subband_idx) const {
+    [[nodiscard]] FDMTSubbandView
+    view_subband(SizeType subband_idx) const override {
         require_stepper();
         materialize_view();
         const auto& plan_c = m_plan->get_container();
         const auto& shape  = plan_c.state_shape[m_current_level];
         if (subband_idx >= shape.nchans) {
             throw std::out_of_range(std::format(
-                "FDMTFFTCPU: Subband index {} out of range ({} subbands)",
+                "FDMTFFT: Subband index {} out of range ({} subbands)",
                 subband_idx, shape.nchans));
         }
         const auto& grid    = plan_c.grids[m_current_level][subband_idx];
@@ -237,30 +163,24 @@ public:
         };
     }
 
-    [[nodiscard]] SizeType current_level() const noexcept {
+    [[nodiscard]] SizeType current_level() const noexcept override {
         return m_current_level;
     }
     [[nodiscard]] SizeType total_levels() const noexcept {
         return m_plan->get_niters() + 1;
     }
-    [[nodiscard]] SizeType remaining_levels() const noexcept {
-        if (total_levels() <= 1 || m_current_level >= total_levels() - 1) {
-            return 0;
-        }
-        return (total_levels() - 1) - m_current_level;
-    }
-    [[nodiscard]] SizeType num_subbands() const {
+    [[nodiscard]] SizeType num_subbands() const override {
         require_stepper();
         return m_plan->get_container().state_shape[m_current_level].nchans;
     }
-    [[nodiscard]] bool is_finished() const noexcept {
+    [[nodiscard]] bool is_finished() const noexcept override {
         return m_is_initialized && (m_current_level >= total_levels() - 1);
     }
 
-    void finalize() {
+    void finalize(Stream stream) override {
         require_stepper();
         if (!is_finished()) {
-            advance_until_remaining(0);
+            advance_until_remaining(0, stream);
         }
         for (SizeType b = 0; b < m_nbeams; ++b) {
             inverse_and_store(m_state_in + (b * m_fft_buf_size),
@@ -273,28 +193,14 @@ public:
         m_view_valid     = false;
     }
 
-    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
-                                               SizeType boxcar_width) const {
-        return m_plan->get_effective_variance(dm_idx, boxcar_width,
-                                              m_use_box_smearing);
-    }
-    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
-                                            SizeType boxcar_width) const {
-        return m_plan->get_effective_sigma(dm_idx, boxcar_width,
-                                           m_use_box_smearing);
-    }
-    [[nodiscard]] std::vector<float>
-    get_effective_variance_grid(SizeType boxcar_width) const {
-        return m_plan->get_effective_variance_grid(boxcar_width,
-                                                   m_use_box_smearing);
-    }
-    [[nodiscard]] std::vector<float>
-    get_effective_sigma_grid(SizeType boxcar_width) const {
-        return m_plan->get_effective_sigma_grid(boxcar_width,
-                                                m_use_box_smearing);
+    void reset_history() noexcept override {
+        std::ranges::fill(m_overlap, 0.0F);
     }
 
-    void reset_history() noexcept { std::ranges::fill(m_overlap, 0.0F); }
+protected:
+    [[nodiscard]] Backend backend() const noexcept override {
+        return Backend::kCPU;
+    }
 
 private:
     SizeType m_nchans;
@@ -304,7 +210,7 @@ private:
     bool m_use_box_smearing;
     FDMTMode m_mode;
 
-    std::unique_ptr<plans::FDMTPlan> m_plan;
+    const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
     SizeType m_ndms{};
     SizeType m_n_bins{};
     SizeType m_n_fft{};
@@ -515,7 +421,7 @@ private:
     // Copies the IFFT of `state_root` into `dmt_ptr` of length
     // ndms * nsamps_out. For mode=full, samples t >= nsamps (the delay
     // tail) are the Fourier linear-convolution continuation and are not
-    // guaranteed to match FDMTCPU's per-level growing-buffer tail; the
+    // guaranteed to match the CPU FDMT's per-level growing-buffer tail; the
     // input-aligned region t < nsamps does match. See docs/fdmt-fft.md.
     void inverse_and_store(const ComplexType* state_root, float* dmt_ptr) {
         std::copy_n(state_root, m_fft_buf_size, m_ifft_in.data());
@@ -572,196 +478,17 @@ private:
     void require_stepper() const {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTFFTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMTFFT: Stepper is not initialized. Call reset() first.");
         }
     }
 };
 
-FDMTFFTCPU::FDMTFFTCPU(float f_min,
-                       float f_max,
-                       SizeType nchans,
-                       SizeType nsamps,
-                       float tsamp,
-                       IndexType dt_max,
-                       IndexType dt_min,
-                       SizeType dt_step,
-                       bool use_box_smearing,
-                       std::string_view mode,
-                       int nthreads,
-                       SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_max,
-                                    dt_min,
-                                    dt_step,
-                                    use_box_smearing,
-                                    mode,
-                                    nthreads,
-                                    nbeams)) {}
+} // namespace
 
-FDMTFFTCPU::FDMTFFTCPU(float f_min,
-                       float f_max,
-                       SizeType nchans,
-                       SizeType nsamps,
-                       float tsamp,
-                       const std::vector<IndexType>& dt_grid,
-                       bool use_box_smearing,
-                       std::string_view mode,
-                       int nthreads,
-                       SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_grid,
-                                    use_box_smearing,
-                                    mode,
-                                    nthreads,
-                                    nbeams)) {}
-
-FDMTFFTCPU::FDMTFFTCPU(float f_min,
-                       float f_max,
-                       SizeType nchans,
-                       SizeType nsamps,
-                       float tsamp,
-                       const std::vector<float>& dm_grid,
-                       bool use_box_smearing,
-                       std::string_view mode,
-                       int nthreads,
-                       SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dm_grid,
-                                    use_box_smearing,
-                                    mode,
-                                    nthreads,
-                                    nbeams)) {}
-
-FDMTFFTCPU::~FDMTFFTCPU()                                = default;
-FDMTFFTCPU::FDMTFFTCPU(FDMTFFTCPU&&) noexcept            = default;
-FDMTFFTCPU& FDMTFFTCPU::operator=(FDMTFFTCPU&&) noexcept = default;
-
-const plans::FDMTPlan& FDMTFFTCPU::get_plan() const noexcept {
-    return m_impl->get_plan();
-}
-SizeType FDMTFFTCPU::get_nbeams() const noexcept {
-    return m_impl->get_nbeams();
-}
-void FDMTFFTCPU::execute(std::span<const float> waterfall,
-                         std::span<float> dmt) {
-    m_impl->execute(waterfall, dmt);
-}
-void FDMTFFTCPU::reset(std::span<const float> waterfall, std::span<float> dmt) {
-    m_impl->reset(waterfall, dmt);
-}
-void FDMTFFTCPU::advance(SizeType levels) { m_impl->advance(levels); }
-void FDMTFFTCPU::advance_until_remaining(SizeType remaining_levels) {
-    m_impl->advance_until_remaining(remaining_levels);
-}
-std::span<const float> FDMTFFTCPU::view_level_data() const {
-    return m_impl->view_level_data();
-}
-std::span<const float>
-FDMTFFTCPU::view_subband_data(SizeType subband_idx) const {
-    return m_impl->view_subband_data(subband_idx);
-}
-FDMTSubbandView FDMTFFTCPU::view_subband(SizeType subband_idx) const {
-    return m_impl->view_subband(subband_idx);
-}
-SizeType FDMTFFTCPU::current_level() const noexcept {
-    return m_impl->current_level();
-}
-SizeType FDMTFFTCPU::total_levels() const noexcept {
-    return m_impl->total_levels();
-}
-SizeType FDMTFFTCPU::remaining_levels() const noexcept {
-    return m_impl->remaining_levels();
-}
-SizeType FDMTFFTCPU::num_subbands() const { return m_impl->num_subbands(); }
-bool FDMTFFTCPU::is_finished() const noexcept { return m_impl->is_finished(); }
-void FDMTFFTCPU::finalize() { m_impl->finalize(); }
-float FDMTFFTCPU::get_effective_variance(SizeType dm_idx,
-                                         SizeType boxcar_width) const {
-    return m_impl->get_effective_variance(dm_idx, boxcar_width);
-}
-float FDMTFFTCPU::get_effective_sigma(SizeType dm_idx,
-                                      SizeType boxcar_width) const {
-    return m_impl->get_effective_sigma(dm_idx, boxcar_width);
-}
-std::vector<float>
-FDMTFFTCPU::get_effective_variance_grid(SizeType boxcar_width) const {
-    return m_impl->get_effective_variance_grid(boxcar_width);
-}
-std::vector<float>
-FDMTFFTCPU::get_effective_sigma_grid(SizeType boxcar_width) const {
-    return m_impl->get_effective_sigma_grid(boxcar_width);
-}
-void FDMTFFTCPU::reset_history() noexcept { m_impl->reset_history(); }
-
-std::tuple<std::vector<float>, plans::FDMTPlan>
-compute_fdmt_fft(std::span<const float> waterfall,
-                 float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 SizeType nsamps,
-                 float tsamp,
-                 IndexType dt_max,
-                 IndexType dt_min,
-                 SizeType dt_step,
-                 bool use_box_smearing,
-                 std::string_view mode,
-                 int nthreads,
-                 SizeType nbeams) {
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
-                    dt_step, use_box_smearing, mode, nthreads, nbeams);
-    std::vector<float> dmt(fdmt.get_plan().get_dmt_size() * nbeams);
-    fdmt.execute(waterfall, dmt);
-    return {std::move(dmt), fdmt.get_plan()};
-}
-
-std::tuple<std::vector<float>, plans::FDMTPlan>
-compute_fdmt_fft(std::span<const float> waterfall,
-                 float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 SizeType nsamps,
-                 float tsamp,
-                 const std::vector<IndexType>& dt_grid,
-                 bool use_box_smearing,
-                 std::string_view mode,
-                 int nthreads,
-                 SizeType nbeams) {
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid,
-                    use_box_smearing, mode, nthreads, nbeams);
-    std::vector<float> dmt(fdmt.get_plan().get_dmt_size() * nbeams);
-    fdmt.execute(waterfall, dmt);
-    return {std::move(dmt), fdmt.get_plan()};
-}
-
-std::tuple<std::vector<float>, plans::FDMTPlan>
-compute_fdmt_fft(std::span<const float> waterfall,
-                 float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 SizeType nsamps,
-                 float tsamp,
-                 const std::vector<float>& dm_grid,
-                 bool use_box_smearing,
-                 std::string_view mode,
-                 int nthreads,
-                 SizeType nbeams) {
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid,
-                    use_box_smearing, mode, nthreads, nbeams);
-    std::vector<float> dmt(fdmt.get_plan().get_dmt_size() * nbeams);
-    fdmt.execute(waterfall, dmt);
-    return {std::move(dmt), fdmt.get_plan()};
+std::unique_ptr<detail::FDMTFFTEngine>
+detail::make_fdmt_fft_cpu(const plans::FDMTPlan& plan,
+                          const detail::FDMTFFTEngineConfig& cfg) {
+    return std::make_unique<FDMTFFTCpuEngine>(plan, cfg);
 }
 
 } // namespace dmt::algorithms

@@ -18,7 +18,7 @@
 
 namespace dmt {
 
-using algorithms::CohFDMTCPU;
+using algorithms::CohFDMT;
 using plans::CohFDMTPlan;
 
 namespace {
@@ -64,7 +64,7 @@ TEST_CASE("CohFDMTPlan symmetric dt range", "[cfdmt][cpu]") {
     }
 }
 
-TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
+TEST_CASE("CohFDMT::execute runs end-to-end with multiple coarse DM trials",
           "[cfdmt][cpu]") {
     // Regression test for the apply_chirp() size-invariant bug: this used to
     // throw unconditionally whenever dm_grid_coh.size() > 1, which is the
@@ -72,10 +72,10 @@ TEST_CASE("CohFDMTCPU::execute runs end-to-end with multiple coarse DM trials",
     const auto plan = make_test_plan();
     REQUIRE(plan.get_dm_grid_coh().size() > 1);
 
-    CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                        plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                        plan.get_noverlap());
+    CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                     plan.get_noverlap());
 
     const SizeType in_size = SizeType{2} * SizeType{2} *
                              coh_fdmt.get_plan().get_nsamp() *
@@ -119,10 +119,10 @@ TEST_CASE("CohFDMTPlan dimension and buffer invariants", "[cfdmt][cpu]") {
     CHECK(plan.get_dmt_nsamps() == plan.get_fdmt_plan().get_dmt_nsamps());
     CHECK(plan.get_dmt_size() == plan.get_ndm() * plan.get_dmt_nsamps());
 
-    CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                        plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                        plan.get_noverlap());
+    CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                     plan.get_noverlap());
 
     CHECK(coh_fdmt.get_dmt_size() == plan.get_dmt_size());
     const auto& fine = plan.get_fdmt_plan();
@@ -146,13 +146,13 @@ TEST_CASE("CohFDMTPlan dimension and buffer invariants", "[cfdmt][cpu]") {
     REQUIRE_THAT(sig_grid, Catch::Matchers::Approx(expected_sigma));
 }
 
-TEST_CASE("CohFDMTCPU multi-block streaming state and history reset",
+TEST_CASE("CohFDMT multi-block streaming state and history reset",
           "[cfdmt][cpu]") {
     const auto plan = make_test_plan();
-    CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                        plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                        plan.get_noverlap());
+    CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                     plan.get_noverlap());
 
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
@@ -198,7 +198,7 @@ TEST_CASE("CohFDMTCPU multi-block streaming state and history reset",
     test::require_exact(dmt_b1_initial, dmt_b1_repeated);
 }
 
-TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment",
+TEST_CASE("CohFDMT synthetic impulse response and DM alignment",
           "[cfdmt][cpu]") {
     const SizeType chan_per_sub = 4;
     const float f_center        = 1250.0F;
@@ -213,10 +213,10 @@ TEST_CASE("CohFDMTCPU synthetic impulse response and DM alignment",
 
     CohFDMTPlan plan(f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max,
                      dm_min, 32, "PRITF");
-    CohFDMTCPU coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                        plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                        plan.get_noverlap());
+    CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                     plan.get_noverlap());
 
     const SizeType nsamp   = plan.get_nsamp();
     const SizeType in_size = SizeType{2} * SizeType{2} * nsamp * nsub;

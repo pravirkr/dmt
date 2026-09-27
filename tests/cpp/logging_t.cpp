@@ -18,7 +18,7 @@ TEST_CASE("Log level is process-wide, defaults to off and round-trips",
     CHECK(get_log_level() == LogLevel::kDebug);
     CHECK(logging::enabled());
     // A debug-logged construction must not throw.
-    CHECK_NOTHROW(algorithms::FDMTCPU(1000.0F, 1500.0F, 64, 256, 0.001F, 32));
+    CHECK_NOTHROW(algorithms::FDMT(1000.0F, 1500.0F, 64, 256, 0.001F, 32));
 
     set_log_level(LogLevel::kOff);
     CHECK_FALSE(logging::enabled());
@@ -26,14 +26,14 @@ TEST_CASE("Log level is process-wide, defaults to off and round-trips",
 
 TEST_CASE("Plans and engines describe themselves via summary()",
           "[logging][cpu]") {
-    const algorithms::FDMTCPU fdmt(1000.0F, 1500.0F, 64, 256, 0.001F, 32);
+    const algorithms::FDMT fdmt(1000.0F, 1500.0F, 64, 256, 0.001F, 32);
     const auto plan_text = fdmt.get_plan().summary();
     CHECK(plan_text.find("FDMT Plan Summary") != std::string::npos);
     CHECK(fdmt.get_plan().summary("  ").starts_with("  "));
 
     const auto engine_text = fdmt.summary();
     CHECK(engine_text.starts_with(plan_text));
-    CHECK(engine_text.find("FDMTCPU") != std::string::npos);
+    CHECK(engine_text.find("FDMT") != std::string::npos);
     CHECK(engine_text.find("fuse_levels") != std::string::npos);
     CHECK(engine_text.find("Host memory") != std::string::npos);
 

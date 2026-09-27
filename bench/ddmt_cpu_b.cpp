@@ -10,7 +10,7 @@
 #include "dmt/common/plans.hpp"
 
 namespace dmt {
-using algorithms::DDMTCPU;
+using algorithms::DDMT;
 
 namespace {
 
@@ -56,8 +56,9 @@ public:
 
 BENCHMARK_DEFINE_F(DDMTCPUFloatFixture, BM_ddmt_cpu_float_execute)
 (benchmark::State& state) {
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F, nthreads,
-                 /*nbits=*/32, {}, nbeams);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
+              Exec::cpu(nthreads),
+              /*nbits=*/32, {}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps > max_delay ? nsamps - max_delay : 0;
@@ -115,8 +116,8 @@ public:
 
 BENCHMARK_DEFINE_F(DDMTCPUPackedFixture, BM_ddmt_cpu_packed_execute)
 (benchmark::State& state) {
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F, nthreads,
-                 nbits, {}, nbeams);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
+              Exec::cpu(nthreads), nbits, {}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps > max_delay ? nsamps - max_delay : 0;

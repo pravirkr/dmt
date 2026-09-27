@@ -23,13 +23,16 @@ CPMAddPackage(
   SYSTEM YES
 )
 
-# Collect source files
-file(GLOB DMT_LIBRARY_CXX_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+# Collect source files: backend-neutral facades and plans in lib/, one
+# directory per backend (lib/cpu always, lib/cuda when nvcc is found).
+file(GLOB DMT_LIBRARY_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/cpu/*.cpp
+)
 set(DMT_LIBRARY_ALL_SOURCES ${DMT_LIBRARY_CXX_SOURCES})
 
 # Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
-  file(GLOB DMT_LIBRARY_CUDA_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  file(GLOB DMT_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cu)
   list(APPEND DMT_LIBRARY_ALL_SOURCES ${DMT_LIBRARY_CUDA_SOURCES})
 
   # Explicitly set CUDA files to be compiled with CUDA
@@ -41,9 +44,11 @@ add_library(${PROJECT_NAME}::${DMT_LIBRARY_NAME} ALIAS ${DMT_LIBRARY_NAME})
 
 target_compile_features(${DMT_LIBRARY_NAME} PUBLIC cxx_std_20)
 
-# Optional GPU API in C++ via DMT_ENABLE_CUDA (preprocessor macro, not a CMake option).
+# DMT_ENABLE_CUDA is private: it only selects which engines the facades can
+# build. The installed headers are identical in every build; callers ask
+# dmt::available_backends() at runtime.
 if(CMAKE_CUDA_COMPILER)
-  target_compile_definitions(${DMT_LIBRARY_NAME} PUBLIC DMT_ENABLE_CUDA)
+  target_compile_definitions(${DMT_LIBRARY_NAME} PRIVATE DMT_ENABLE_CUDA)
 endif()
 
 dmt_enable_coverage(${DMT_LIBRARY_NAME})
@@ -59,12 +64,12 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Add CUDA include directories when available
+# CUDA headers are needed by the library's own GPU sources only.
 if(CMAKE_CUDA_COMPILER)
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
-    target_include_directories(${DMT_LIBRARY_NAME} PUBLIC "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+    target_include_directories(${DMT_LIBRARY_NAME} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl")
   endif()
-  target_include_directories(${DMT_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+  target_include_directories(${DMT_LIBRARY_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
 # Header-only internal deps (not part of the installed export set, so even a
@@ -85,11 +90,10 @@ endif()
 # A static lib still propagates the runtime onto the final link line.
 target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
 
-# Add CUDA options and libraries when available
+# Add CUDA options and libraries when available. Private: a static dmt still
+# carries them onto the consumer's link line (as $<LINK_ONLY:...>).
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
-    ${DMT_LIBRARY_NAME}
-    PRIVATE ${DMT_CUDA_OPTIONS} CUDA::cuda_driver
-    PUBLIC CUDA::cudart CUDA::cufft
+    ${DMT_LIBRARY_NAME} PRIVATE ${DMT_CUDA_OPTIONS} CUDA::cuda_driver CUDA::cudart CUDA::cufft
   )
 endif()

@@ -17,7 +17,7 @@ If data blocks are dedispersed independently:
 
 ## 2. DMT's Overlap-Save Mechanism
 
-In `mode="valid"`, `FDMTCPU`/`FDMTCUDA` and `DDMTCPU` maintain **internal state history buffers**:
+In `mode="valid"`, `FDMT` and `DDMT` (on every backend) maintain **internal state history buffers**:
 
 ```
 Block 0:  [─────── Waterfall Data Block 0 ───────]
@@ -67,9 +67,9 @@ In multi-beam systems, a single compute thread may process multiple beams in a r
 To prevent Beam 1 from overwriting the streaming state of Beam 0, use the History State API:
 
 ```python
-from dmtlib import FDMTCPU
+from dmtlib import FDMT
 
-fdmt = FDMTCPU(
+fdmt = FDMT(
     f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
     tsamp=1e-3, dt_max=100, mode="valid"
 )
@@ -111,8 +111,10 @@ fdmt.load_history(std::span<const float>(beam0_state));
 
 The saved state is only the small history (`history_state_size()` floats),
 not the engine's working buffers, so one engine can serve many streams of the
-same plan geometry. `CohFDMTCPU`/`CohFDMTCUDA` use exactly this to share one
-fine FDMT across all coarse-DM trials. On `FDMTCUDA` (C++ only) the history
-lives in device memory, and both calls are asynchronous on the given stream.
+same plan geometry. `CohFDMT` uses exactly this to share one fine FDMT across
+all coarse-DM trials. On a GPU backend the history lives in device memory;
+the `DeviceSpan` overloads (C++ only) are asynchronous on the given stream,
+and the host overloads copy synchronously. A saved history belongs to the
+backend that wrote it (the layout differs between backends).
 For beams that are processed together, `nbeams` is usually simpler (see
 [Multi-Beam Batching](multibeam.md)).

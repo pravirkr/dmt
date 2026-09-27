@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from dmtlib import (
-    FDMTCPU,
+    FDMT,
     calculate_snr_loss,
     compute_fdmt,
     generate_optimal_dm_grid,
@@ -188,7 +188,7 @@ class TestGridGenerator:
             integer_grid=True,
         )
 
-        fdmt = FDMTCPU(
+        fdmt = FDMT(
             self.f_min,
             self.f_max,
             self.nchans,

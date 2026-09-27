@@ -14,20 +14,18 @@
 
 namespace dmt {
 
-using algorithms::CohFDMTCPU;
-using algorithms::CohFDMTCUDA;
-using algorithms::FDMTCPU;
-using algorithms::FDMTCUDA;
-using algorithms::FDMTFFTCPU;
-using algorithms::FDMTFFTCUDA;
+using algorithms::CohFDMT;
+using algorithms::FDMT;
+using algorithms::FDMTFFT;
 
-TEST_CASE("parity: FDMTCUDA execute and stepper match FDMTCPU",
+TEST_CASE("parity: FDMT (cuda) execute and stepper match CPU",
           "[fdmt][gpu][parity]") {
     const SizeType nchans = 16;
     const SizeType nsamps = 64;
     auto waterfall        = test::sequential_waterfall(nchans, nsamps);
-    FDMTCPU cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
-    FDMTCUDA gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
+    FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
+    FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, 0, 1,
+             true, "valid", Exec::cuda(0));
     const auto n = cpu.get_plan().get_buffer_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_gpu(n, 0.0F);
@@ -38,10 +36,10 @@ TEST_CASE("parity: FDMTCUDA execute and stepper match FDMTCPU",
     std::vector<float> dmt_step(n, 0.0F);
     thrust::device_vector<float> d_wf(waterfall.begin(), waterfall.end());
     thrust::device_vector<float> d_dmt(n, 0.0F);
-    auto d_wf_span = cuda::std::span<const float>(
+    auto d_wf_span = DeviceSpan<const float>(
         thrust::raw_pointer_cast(d_wf.data()), d_wf.size());
-    auto d_dmt_span = cuda::std::span<float>(
-        thrust::raw_pointer_cast(d_dmt.data()), d_dmt.size());
+    auto d_dmt_span =
+        DeviceSpan<float>(thrust::raw_pointer_cast(d_dmt.data()), d_dmt.size());
 
     gpu.reset_history();
     gpu.reset(d_wf_span, d_dmt_span);
@@ -51,15 +49,15 @@ TEST_CASE("parity: FDMTCUDA execute and stepper match FDMTCPU",
     test::require_approx(dmt_step, dmt_cpu, cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("parity: FDMTFFTCUDA execute matches FDMTFFTCPU",
+TEST_CASE("parity: FDMTFFT (cuda) execute matches CPU",
           "[fdmt_fft][gpu][parity]") {
     const SizeType nchans = 8;
     const SizeType nsamps = 64;
     auto waterfall        = test::sequential_waterfall(nchans, nsamps, 11, 1);
-    FDMTFFTCPU cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 8, 0,
-                   1, true, "roll");
-    FDMTFFTCUDA gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 8,
-                    0, 1, true, "roll");
+    FDMTFFT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 8, 0, 1,
+                true, "roll");
+    FDMTFFT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 8, 0, 1,
+                true, "roll", Exec::cuda(0));
     const auto n = cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_gpu(n, 0.0F);
@@ -68,18 +66,18 @@ TEST_CASE("parity: FDMTFFTCUDA execute matches FDMTFFTCPU",
     test::require_approx(dmt_gpu, dmt_cpu, 0.05);
 }
 
-TEST_CASE("parity: CohFDMTCUDA execute matches CohFDMTCPU",
+TEST_CASE("parity: CohFDMT (cuda) execute matches CPU",
           "[cfdmt][gpu][parity]") {
     plans::CohFDMTPlan plan(1250.0F, 25.0F, 4, 1.0E-6F, 1 << 10, 2, 4.0E-6F,
                             5.0F, 0.0F, 32, "PRITF");
-    CohFDMTCPU cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                   plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                   plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                   plan.get_noverlap());
-    CohFDMTCUDA gpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                    plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                    plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                    plan.get_noverlap());
+    CohFDMT cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                plan.get_noverlap());
+    CohFDMT gpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                plan.get_noverlap(), "PRITF", Exec::cuda());
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
     std::vector<uint8_t> data_in(in_size);
@@ -99,14 +97,13 @@ TEST_CASE("parity: CohFDMTCUDA execute matches CohFDMTCPU",
         Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-2).margin(1.0E-2));
 }
 
-TEST_CASE("parity: FDMTCUDA add_frb_track recovery matches FDMTCPU",
+TEST_CASE("parity: FDMT (cuda) add_frb_track recovery matches CPU",
           "[fdmt][gpu][parity]") {
     const SizeType nchans = 32;
     const SizeType nsamps = 128;
-    FDMTCPU cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16,
-                -16);
-    FDMTCUDA gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16,
-                 -16);
+    FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, -16);
+    FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, -16, 1,
+             true, "valid", Exec::cuda(0));
     const auto& plan = cpu.get_plan();
     std::vector<float> waterfall(nchans * nsamps, 0.0F);
     algorithms::add_frb_track(waterfall, plan, 8, 1.0F, 40, 1);
@@ -121,12 +118,13 @@ TEST_CASE("parity: FDMTCUDA add_frb_track recovery matches FDMTCPU",
     CHECK(dmt_gpu[(8 * ns) + 40] == Catch::Approx(static_cast<float>(nchans)));
 }
 
-TEST_CASE("parity: FDMTCUDA valid-mode second block matches FDMTCPU",
+TEST_CASE("parity: FDMT (cuda) valid-mode second block matches CPU",
           "[fdmt][gpu][parity]") {
     const SizeType nchans = 16;
     const SizeType nsamps = 32;
-    FDMTCPU cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
-    FDMTCUDA gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
+    FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
+    FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, 0, 1,
+             true, "valid", Exec::cuda(0));
     const auto n = cpu.get_plan().get_buffer_size();
     auto block1  = test::sequential_waterfall(nchans, nsamps, 17, 1);
     auto block2  = test::sequential_waterfall(nchans, nsamps, 13, 3);

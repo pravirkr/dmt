@@ -6,8 +6,20 @@
 #include <string>
 #include <string_view>
 
+#include <cuda/std/complex>
+#include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>
+#include <thrust/complex.h>
+#include <thrust/device_vector.h>
+
+namespace dmt {
+
+// CUDA-side types of the library's GPU sources (never in public headers).
+using ComplexTypeCUDA                    = cuda::std::complex<float>;
+template <typename T> using DeviceVector = thrust::device_vector<T>;
+
+} // namespace dmt
 
 namespace dmt::cuda_utils {
 

@@ -19,9 +19,10 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/cuda_utils.cuh"
+#include "dmt/engines.hpp"
+#include "dmt/fft_cuda.cuh"
 #include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
-#include "dmt/utils/fft.hpp"
 
 namespace dmt::algorithms {
 
@@ -223,99 +224,62 @@ __global__ void kernel_materialize_view(const float* __restrict__ time_out,
     view[(i_c * nsamps_view) + t] = src * norm;
 }
 
-} // namespace
+template <typename T> cuda::std::span<T> to_cuda(DeviceSpan<T> span) {
+    return {span.data(), span.size()};
+}
 
-class FDMTFFTCUDA::Impl {
+cudaStream_t to_cuda(Stream stream) {
+    return static_cast<cudaStream_t>(stream.native);
+}
+
+class FDMTFFTCudaEngine final : public detail::FDMTFFTEngine {
 public:
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         IndexType dt_max,
-         IndexType dt_min,
-         SizeType dt_step,
-         bool use_box_smearing,
-         std::string_view mode,
-         int device_id,
-         SizeType nbeams)
-        : m_nchans(nchans),
-          m_nsamps(nsamps),
-          m_nbeams(nbeams),
-          m_device_id(device_id),
-          m_use_box_smearing(use_box_smearing),
-          m_mode(parse_fdmt_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(f_min,
-                                                   f_max,
-                                                   nchans,
-                                                   nsamps,
-                                                   tsamp,
-                                                   dt_max,
-                                                   dt_min,
-                                                   dt_step,
-                                                   mode)) {
+    FDMTFFTCudaEngine(const plans::FDMTPlan& plan,
+                      const detail::FDMTFFTEngineConfig& cfg)
+        : m_nchans(plan.get_nchans()),
+          m_nsamps(plan.get_nsamps()),
+          m_nbeams(cfg.nbeams),
+          m_device_id(cfg.exec.device),
+          m_use_box_smearing(cfg.use_box_smearing),
+          m_mode(cfg.mode),
+          m_plan(&plan) {
         initialize();
     }
 
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         const std::vector<IndexType>& dt_grid,
-         bool use_box_smearing,
-         std::string_view mode,
-         int device_id,
-         SizeType nbeams)
-        : m_nchans(nchans),
-          m_nsamps(nsamps),
-          m_nbeams(nbeams),
-          m_device_id(device_id),
-          m_use_box_smearing(use_box_smearing),
-          m_mode(parse_fdmt_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode)) {
-        initialize();
+    // Device-memory and stream entry points: forward to the cuda::std::span
+    // / cudaStream_t overloads below.
+    void execute(DeviceSpan<const float> d_waterfall,
+                 DeviceSpan<float> d_dmt,
+                 Stream stream) override {
+        execute(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
     }
-
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         const std::vector<float>& dm_grid,
-         bool use_box_smearing,
-         std::string_view mode,
-         int device_id,
-         SizeType nbeams)
-        : m_nchans(nchans),
-          m_nsamps(nsamps),
-          m_nbeams(nbeams),
-          m_device_id(device_id),
-          m_use_box_smearing(use_box_smearing),
-          m_mode(parse_fdmt_mode(mode)),
-          m_plan(std::make_unique<plans::FDMTPlan>(
-              f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode)) {
-        initialize();
+    void reset(DeviceSpan<const float> d_waterfall,
+               DeviceSpan<float> d_dmt,
+               Stream stream) override {
+        reset(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
     }
-
-    [[nodiscard]] const plans::FDMTPlan& get_plan() const noexcept {
-        return *m_plan;
+    void advance(SizeType levels, Stream stream) override {
+        advance(levels, to_cuda(stream));
     }
-    [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
+    void advance_until_remaining(SizeType remaining_levels,
+                                 Stream stream) override {
+        advance_until_remaining(remaining_levels, to_cuda(stream));
+    }
+    void finalize(Stream stream) override { finalize(to_cuda(stream)); }
 
-    void execute(std::span<const float> waterfall, std::span<float> dmt) {
+    void execute(std::span<const float> waterfall,
+                 std::span<float> dmt) override {
         cuda_utils::set_device(m_device_id);
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (waterfall.size() != total_in) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::execute: expected waterfall size {}, got {}",
+                "FDMTFFT::execute: expected waterfall size {}, got {}",
                 total_in, waterfall.size()));
         }
         if (dmt.size() < total_out) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::execute: dmt buffer size {} must be >= {}",
+                "FDMTFFT::execute: dmt buffer size {} must be >= {}",
                 dmt.size(), total_out));
         }
         m_waterfall_d.resize(total_in);
@@ -324,19 +288,19 @@ public:
             cudaMemcpy(thrust::raw_pointer_cast(m_waterfall_d.data()),
                        waterfall.data(), total_in * sizeof(float),
                        cudaMemcpyHostToDevice),
-            "FDMTFFTCUDA::execute: H2D waterfall");
+            "FDMTFFT::execute: H2D waterfall");
         execute(cuda::std::span<const float>(
                     thrust::raw_pointer_cast(m_waterfall_d.data()), total_in),
                 cuda::std::span<float>(
                     thrust::raw_pointer_cast(m_dmt_host_d.data()), total_out),
                 nullptr);
         cuda_utils::check_cuda_call(cudaDeviceSynchronize(),
-                                    "FDMTFFTCUDA::execute: sync");
+                                    "FDMTFFT::execute: sync");
         cuda_utils::check_cuda_call(
             cudaMemcpy(dmt.data(),
                        thrust::raw_pointer_cast(m_dmt_host_d.data()),
                        total_out * sizeof(float), cudaMemcpyDeviceToHost),
-            "FDMTFFTCUDA::execute: D2H dmt");
+            "FDMTFFT::execute: D2H dmt");
     }
 
     void execute(cuda::std::span<const float> d_waterfall,
@@ -345,19 +309,20 @@ public:
         run_transform(d_waterfall, d_dmt, stream, true);
     }
 
-    void reset(std::span<const float> waterfall, std::span<float> dmt) {
+    void reset(std::span<const float> waterfall,
+               std::span<float> dmt) override {
         cuda_utils::set_device(m_device_id);
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (waterfall.size() != total_in) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::reset: expected waterfall size {}, got {}",
-                total_in, waterfall.size()));
+                "FDMTFFT::reset: expected waterfall size {}, got {}", total_in,
+                waterfall.size()));
         }
         if (dmt.size() < total_out) {
-            throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::reset: dmt buffer size {} must be >= {}",
-                dmt.size(), total_out));
+            throw std::invalid_argument(
+                std::format("FDMTFFT::reset: dmt buffer size {} must be >= {}",
+                            dmt.size(), total_out));
         }
         m_waterfall_d.resize(total_in);
         m_dmt_host_d.resize(total_out);
@@ -365,7 +330,7 @@ public:
             cudaMemcpy(thrust::raw_pointer_cast(m_waterfall_d.data()),
                        waterfall.data(), total_in * sizeof(float),
                        cudaMemcpyHostToDevice),
-            "FDMTFFTCUDA::reset: H2D waterfall");
+            "FDMTFFT::reset: H2D waterfall");
         reset(cuda::std::span<const float>(
                   thrust::raw_pointer_cast(m_waterfall_d.data()), total_in),
               cuda::std::span<float>(
@@ -382,12 +347,12 @@ public:
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (d_waterfall.size() != total_in) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::reset: expected d_waterfall size {}, got {}",
+                "FDMTFFT::reset: expected d_waterfall size {}, got {}",
                 total_in, d_waterfall.size()));
         }
         if (d_dmt.size() < total_out) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::reset: d_dmt buffer size {} must be >= {}",
+                "FDMTFFT::reset: d_dmt buffer size {} must be >= {}",
                 d_dmt.size(), total_out));
         }
         m_d_waterfall_ptr = d_waterfall.data();
@@ -434,34 +399,57 @@ public:
         }
     }
 
-    cuda::std::span<const float> view_level_data() const {
+    [[nodiscard]] DeviceSpan<const float>
+    view_level_data_device() const override {
         require_stepper();
         materialize_view();
         const auto& shape =
             m_plan->get_container().state_shape[m_current_level];
         const auto n = shape.ncoords * view_nsamps();
-        return {thrust::raw_pointer_cast(m_view_d.data()), n};
+        return {thrust::raw_pointer_cast(m_view_d.data()), n, device()};
     }
 
-    cuda::std::span<const float> view_subband_data(SizeType subband_idx) const {
-        return view_subband(subband_idx).data;
+    [[nodiscard]] std::span<const float> view_level_data() const override {
+        const float* view = host_view();
+        const auto& shape =
+            m_plan->get_container().state_shape[m_current_level];
+        return {view, shape.ncoords * view_nsamps()};
     }
 
-    FDMTSubbandViewCUDA view_subband(SizeType subband_idx) const {
+    [[nodiscard]] FDMTSubbandView
+    view_subband(SizeType subband_idx) const override {
+        const auto dev    = view_subband_device(subband_idx);
+        const float* view = host_view();
+        const auto offset = static_cast<SizeType>(
+            dev.data.data() - thrust::raw_pointer_cast(m_view_d.data()));
+        return FDMTSubbandView{
+            .data = std::span<const float>(view + offset, dev.data.size()),
+            .subband_idx = dev.subband_idx,
+            .ndt         = dev.ndt,
+            .nsamps      = dev.nsamps,
+            .f_start     = dev.f_start,
+            .f_end       = dev.f_end,
+            .dt_grid     = dev.dt_grid,
+        };
+    }
+
+    [[nodiscard]] FDMTSubbandDeviceView
+    view_subband_device(SizeType subband_idx) const override {
         require_stepper();
         materialize_view();
         const auto& plan_c = m_plan->get_container();
         const auto& shape  = plan_c.state_shape[m_current_level];
         if (subband_idx >= shape.nchans) {
-            throw std::out_of_range("FDMTFFTCUDA: subband_idx out of range");
+            throw std::out_of_range("FDMTFFT (cuda): subband_idx out of range");
         }
         const auto& grid    = plan_c.grids[m_current_level][subband_idx];
         const auto nsamps_v = view_nsamps();
         const auto offset   = grid.coord_offset * nsamps_v;
         const auto count    = grid.ndt * nsamps_v;
-        return FDMTSubbandViewCUDA{
-            .data = cuda::std::span<const float>(
-                thrust::raw_pointer_cast(m_view_d.data()) + offset, count),
+        return FDMTSubbandDeviceView{
+            .data = DeviceSpan<const float>(
+                thrust::raw_pointer_cast(m_view_d.data()) + offset, count,
+                device()),
             .subband_idx = subband_idx,
             .ndt         = grid.ndt,
             .nsamps      = nsamps_v,
@@ -472,19 +460,13 @@ public:
         };
     }
 
-    SizeType current_level() const noexcept { return m_current_level; }
+    SizeType current_level() const noexcept override { return m_current_level; }
     SizeType total_levels() const noexcept { return m_plan->get_niters() + 1; }
-    SizeType remaining_levels() const noexcept {
-        if (total_levels() <= 1 || m_current_level >= total_levels() - 1) {
-            return 0;
-        }
-        return (total_levels() - 1) - m_current_level;
-    }
-    SizeType num_subbands() const {
+    SizeType num_subbands() const override {
         require_stepper();
         return m_plan->get_container().state_shape[m_current_level].nchans;
     }
-    bool is_finished() const noexcept {
+    bool is_finished() const noexcept override {
         return m_is_initialized && (m_current_level >= total_levels() - 1);
     }
 
@@ -502,41 +484,20 @@ public:
         }
         if (m_host_dmt_ptr != nullptr) {
             cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                        "FDMTFFTCUDA::finalize: sync");
+                                        "FDMTFFT::finalize: sync");
             cuda_utils::check_cuda_call(
                 cudaMemcpy(m_host_dmt_ptr,
                            thrust::raw_pointer_cast(m_dmt_host_d.data()),
                            m_host_dmt_size * sizeof(float),
                            cudaMemcpyDeviceToHost),
-                "FDMTFFTCUDA::finalize: D2H dmt");
+                "FDMTFFT::finalize: D2H dmt");
             m_host_dmt_ptr = nullptr;
         }
         m_is_initialized = false;
         m_view_valid     = false;
     }
 
-    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
-                                               SizeType boxcar_width) const {
-        return m_plan->get_effective_variance(dm_idx, boxcar_width,
-                                              m_use_box_smearing);
-    }
-    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
-                                            SizeType boxcar_width) const {
-        return m_plan->get_effective_sigma(dm_idx, boxcar_width,
-                                           m_use_box_smearing);
-    }
-    [[nodiscard]] std::vector<float>
-    get_effective_variance_grid(SizeType boxcar_width) const {
-        return m_plan->get_effective_variance_grid(boxcar_width,
-                                                   m_use_box_smearing);
-    }
-    [[nodiscard]] std::vector<float>
-    get_effective_sigma_grid(SizeType boxcar_width) const {
-        return m_plan->get_effective_sigma_grid(boxcar_width,
-                                                m_use_box_smearing);
-    }
-
-    void reset_history() noexcept {
+    void reset_history() noexcept override {
         if (!m_overlap_d.empty()) {
             thrust::fill(m_overlap_d.begin(), m_overlap_d.end(), 0.0F);
         }
@@ -546,6 +507,11 @@ public:
         }
     }
 
+protected:
+    [[nodiscard]] Backend backend() const noexcept override {
+        return Backend::kCUDA;
+    }
+
 private:
     SizeType m_nchans;
     SizeType m_nsamps;
@@ -553,7 +519,7 @@ private:
     int m_device_id;
     bool m_use_box_smearing;
     FDMTMode m_mode;
-    std::unique_ptr<plans::FDMTPlan> m_plan;
+    const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
     plans::FDMTPlanContainerD m_plan_d;
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
@@ -595,6 +561,32 @@ private:
     SizeType m_current_level{0};
     bool m_is_initialized{false};
     mutable bool m_view_valid{false};
+    // Host copy of m_view_d for the host view_* methods; stale whenever
+    // materialize_view() recomputes the device view.
+    mutable std::vector<float> m_view_h;
+    mutable bool m_view_h_valid{false};
+
+    [[nodiscard]] Device device() const noexcept {
+        return {.backend = Backend::kCUDA, .id = m_device_id};
+    }
+
+    [[nodiscard]] const float* host_view() const {
+        require_stepper();
+        materialize_view();
+        if (!m_view_h_valid) {
+            const auto& shape =
+                m_plan->get_container().state_shape[m_current_level];
+            const auto n = shape.ncoords * view_nsamps();
+            m_view_h.resize(n);
+            cuda_utils::check_cuda_call(
+                cudaMemcpy(m_view_h.data(),
+                           thrust::raw_pointer_cast(m_view_d.data()),
+                           n * sizeof(float), cudaMemcpyDeviceToHost),
+                "FDMTFFT (cuda): host view");
+            m_view_h_valid = true;
+        }
+        return m_view_h.data();
+    }
 
     void initialize() {
         cuda_utils::set_device(m_device_id);
@@ -672,12 +664,12 @@ private:
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (d_waterfall.size() != total_in) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::execute: expected d_waterfall size {}, got {}",
+                "FDMTFFT::execute: expected d_waterfall size {}, got {}",
                 total_in, d_waterfall.size()));
         }
         if (d_dmt.size() < total_out) {
             throw std::invalid_argument(std::format(
-                "FDMTFFTCUDA::execute: d_dmt buffer size {} must be >= {}",
+                "FDMTFFT::execute: d_dmt buffer size {} must be >= {}",
                 d_dmt.size(), total_out));
         }
         fill_and_init(d_waterfall.data(), stream);
@@ -694,7 +686,7 @@ private:
         if (update_hist && m_mode == FDMTMode::kValid) {
             launch_update_overlap(d_waterfall.data(), stream);
         }
-        cuda_utils::check_last_cuda_error("FDMTFFTCUDA::execute kernels");
+        cuda_utils::check_last_cuda_error("FDMTFFT::execute kernels");
     }
 
     void fill_and_init(const float* d_wf, cudaStream_t stream) {
@@ -773,7 +765,8 @@ private:
     }
 
     // Full-mode tail t >= nsamps is the Fourier linear-convolution
-    // continuation and is not required to match FDMTCPU (see docs/fdmt-fft.md).
+    // continuation and is not required to match the CPU FDMT (see
+    // docs/fdmt-fft.md).
     void inverse_and_store(const ComplexTypeCUDA* state_root,
                            float* d_dmt,
                            cudaStream_t stream) {
@@ -782,7 +775,7 @@ private:
                             state_root,
                             m_nbeams * m_fft_buf_size * sizeof(ComplexTypeCUDA),
                             cudaMemcpyDeviceToDevice, stream),
-            "FDMTFFTCUDA: snapshot for C2R");
+            "FDMTFFT (cuda): snapshot for C2R");
         m_fft_backward->execute(
             cuda::std::span<float>(
                 thrust::raw_pointer_cast(m_time_out_d.data()),
@@ -834,12 +827,13 @@ private:
         if (m_view_valid) {
             return;
         }
+        m_view_h_valid = false;
         // IFFT beam 0 of the live state into time_out, then trim.
         cuda_utils::check_cuda_call(
             cudaMemcpy(thrust::raw_pointer_cast(m_ifft_d.data()), m_state_in,
                        m_fft_buf_size * sizeof(ComplexTypeCUDA),
                        cudaMemcpyDeviceToDevice),
-            "FDMTFFTCUDA: view snapshot");
+            "FDMTFFT (cuda): view snapshot");
         m_fft_backward->execute(
             cuda::std::span<float>(
                 thrust::raw_pointer_cast(m_time_out_d.data()),
@@ -861,158 +855,24 @@ private:
             static_cast<int>(nsamps_v), static_cast<int>(skip),
             static_cast<int>(m_max_coords), norm);
         cuda_utils::check_cuda_call(cudaDeviceSynchronize(),
-                                    "FDMTFFTCUDA: view sync");
+                                    "FDMTFFT (cuda): view sync");
         m_view_valid = true;
     }
 
     void require_stepper() const {
         if (!m_is_initialized) {
-            throw std::logic_error(
-                "FDMTFFTCUDA: Stepper is not initialized. Call reset() first.");
+            throw std::logic_error("FDMTFFT (cuda): Stepper is not "
+                                   "initialized. Call reset() first.");
         }
     }
 };
 
-FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
-                         float f_max,
-                         SizeType nchans,
-                         SizeType nsamps,
-                         float tsamp,
-                         IndexType dt_max,
-                         IndexType dt_min,
-                         SizeType dt_step,
-                         bool use_box_smearing,
-                         std::string_view mode,
-                         int device_id,
-                         SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_max,
-                                    dt_min,
-                                    dt_step,
-                                    use_box_smearing,
-                                    mode,
-                                    device_id,
-                                    nbeams)) {}
+} // namespace
 
-FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
-                         float f_max,
-                         SizeType nchans,
-                         SizeType nsamps,
-                         float tsamp,
-                         const std::vector<IndexType>& dt_grid,
-                         bool use_box_smearing,
-                         std::string_view mode,
-                         int device_id,
-                         SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_grid,
-                                    use_box_smearing,
-                                    mode,
-                                    device_id,
-                                    nbeams)) {}
-
-FDMTFFTCUDA::FDMTFFTCUDA(float f_min,
-                         float f_max,
-                         SizeType nchans,
-                         SizeType nsamps,
-                         float tsamp,
-                         const std::vector<float>& dm_grid,
-                         bool use_box_smearing,
-                         std::string_view mode,
-                         int device_id,
-                         SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dm_grid,
-                                    use_box_smearing,
-                                    mode,
-                                    device_id,
-                                    nbeams)) {}
-
-FDMTFFTCUDA::~FDMTFFTCUDA()                                 = default;
-FDMTFFTCUDA::FDMTFFTCUDA(FDMTFFTCUDA&&) noexcept            = default;
-FDMTFFTCUDA& FDMTFFTCUDA::operator=(FDMTFFTCUDA&&) noexcept = default;
-
-const plans::FDMTPlan& FDMTFFTCUDA::get_plan() const noexcept {
-    return m_impl->get_plan();
+std::unique_ptr<detail::FDMTFFTEngine>
+detail::make_fdmt_fft_cuda(const plans::FDMTPlan& plan,
+                           const detail::FDMTFFTEngineConfig& cfg) {
+    return std::make_unique<FDMTFFTCudaEngine>(plan, cfg);
 }
-SizeType FDMTFFTCUDA::get_nbeams() const noexcept {
-    return m_impl->get_nbeams();
-}
-void FDMTFFTCUDA::execute(std::span<const float> waterfall,
-                          std::span<float> dmt) {
-    m_impl->execute(waterfall, dmt);
-}
-void FDMTFFTCUDA::execute(cuda::std::span<const float> d_waterfall,
-                          cuda::std::span<float> d_dmt,
-                          cudaStream_t stream) {
-    m_impl->execute(d_waterfall, d_dmt, stream);
-}
-void FDMTFFTCUDA::reset(std::span<const float> waterfall,
-                        std::span<float> dmt) {
-    m_impl->reset(waterfall, dmt);
-}
-void FDMTFFTCUDA::reset(cuda::std::span<const float> d_waterfall,
-                        cuda::std::span<float> d_dmt,
-                        cudaStream_t stream) {
-    m_impl->reset(d_waterfall, d_dmt, stream);
-}
-void FDMTFFTCUDA::advance(SizeType levels, cudaStream_t stream) {
-    m_impl->advance(levels, stream);
-}
-void FDMTFFTCUDA::advance_until_remaining(SizeType remaining_levels,
-                                          cudaStream_t stream) {
-    m_impl->advance_until_remaining(remaining_levels, stream);
-}
-cuda::std::span<const float> FDMTFFTCUDA::view_level_data() const {
-    return m_impl->view_level_data();
-}
-cuda::std::span<const float>
-FDMTFFTCUDA::view_subband_data(SizeType subband_idx) const {
-    return m_impl->view_subband_data(subband_idx);
-}
-FDMTSubbandViewCUDA FDMTFFTCUDA::view_subband(SizeType subband_idx) const {
-    return m_impl->view_subband(subband_idx);
-}
-SizeType FDMTFFTCUDA::current_level() const noexcept {
-    return m_impl->current_level();
-}
-SizeType FDMTFFTCUDA::total_levels() const noexcept {
-    return m_impl->total_levels();
-}
-SizeType FDMTFFTCUDA::remaining_levels() const noexcept {
-    return m_impl->remaining_levels();
-}
-SizeType FDMTFFTCUDA::num_subbands() const { return m_impl->num_subbands(); }
-bool FDMTFFTCUDA::is_finished() const noexcept { return m_impl->is_finished(); }
-void FDMTFFTCUDA::finalize(cudaStream_t stream) { m_impl->finalize(stream); }
-float FDMTFFTCUDA::get_effective_variance(SizeType dm_idx,
-                                          SizeType boxcar_width) const {
-    return m_impl->get_effective_variance(dm_idx, boxcar_width);
-}
-float FDMTFFTCUDA::get_effective_sigma(SizeType dm_idx,
-                                       SizeType boxcar_width) const {
-    return m_impl->get_effective_sigma(dm_idx, boxcar_width);
-}
-std::vector<float>
-FDMTFFTCUDA::get_effective_variance_grid(SizeType boxcar_width) const {
-    return m_impl->get_effective_variance_grid(boxcar_width);
-}
-std::vector<float>
-FDMTFFTCUDA::get_effective_sigma_grid(SizeType boxcar_width) const {
-    return m_impl->get_effective_sigma_grid(boxcar_width);
-}
-void FDMTFFTCUDA::reset_history() noexcept { m_impl->reset_history(); }
 
 } // namespace dmt::algorithms

@@ -15,6 +15,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/engines.hpp"
 #include "dmt/fdmt_int_tree.hpp"
 #include "dmt/modes.hpp"
 
@@ -97,7 +98,7 @@ void fdmt_advance_history_window(const TIn* __restrict__ new_data,
  *   block's own trailing `delay_shift` samples of `head` are captured into
  *   `hist` for the next call -- this is what makes mode="valid" streaming
  *   bit-exact across block boundaries for every trial, not just dt=0 (see
- *   FDMTCoord::hist_offset and FDMTCPU::reset_history()). Each coordinate
+ *   FDMTCoord::hist_offset and FDMT::reset_history()). Each coordinate
  *   owns a disjoint slice of the shared history buffer, so this is safe
  *   across the `#pragma omp for` in fdmt_iter below with no extra locking.
  * - Roll: Cyclic boundary - head wraps around using modulo arithmetic
@@ -228,7 +229,7 @@ void fdmt_copy_coords(const TIn* __restrict__ state_in,
 
 /**
  * @brief Per-thread scratch carved out of one engine-owned buffer allocated
- * at construction (see FDMTCPU::Impl::m_workspace), so execute() never
+ * at construction (see FDMTCpuEngine::m_workspace), so execute() never
  * allocates. Thread t's slice starts at base + t * stride and holds, at
  * fixed offsets: one unpacked packed-input row (`unpack`, nsamps samples of
  * <= 4 bytes), two running level-0 box rows for mixed-sign dt grids
@@ -781,38 +782,16 @@ void fdmt_init_valid_impl(const FDMTInput& input,
         }
     }
 }
-} // namespace
-
-class FDMTCPU::Impl {
+class FDMTCpuEngine final : public detail::FDMTEngine {
 public:
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         IndexType dt_max,
-         IndexType dt_min,
-         SizeType dt_step,
-         bool use_box_smearing,
-         std::string_view mode,
-         int nthreads,
-         SizeType nbeams,
-         SizeType fuse_levels,
-         bool int_tree)
-        : m_use_box_smearing(use_box_smearing),
-          m_int_tree(int_tree),
-          m_mode(parse_fdmt_mode(mode)),
-          m_nbeams(nbeams),
-          m_nthreads(std::max(1, nthreads)),
-          m_plan(f_min,
-                 f_max,
-                 nchans,
-                 nsamps,
-                 tsamp,
-                 dt_max,
-                 dt_min,
-                 dt_step,
-                 mode),
+    FDMTCpuEngine(const plans::FDMTPlan& plan,
+                  const detail::FDMTEngineConfig& cfg)
+        : m_use_box_smearing(cfg.use_box_smearing),
+          m_int_tree(cfg.int_tree),
+          m_mode(cfg.mode),
+          m_nbeams(cfg.nbeams),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
+          m_plan(plan),
           m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
                            std::byte{0}),
           m_history(m_mode == FDMTMode::kValid
@@ -827,115 +806,43 @@ public:
                              ? m_nbeams * m_plan.get_tree_history_size()
                              : 0,
                          0.0F) {
-        allocate_working_memory(fuse_levels);
+        allocate_working_memory(cfg.fuse_levels);
     }
 
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         const std::vector<IndexType>& dt_grid,
-         bool use_box_smearing,
-         std::string_view mode,
-         int nthreads,
-         SizeType nbeams,
-         SizeType fuse_levels,
-         bool int_tree)
-        : m_use_box_smearing(use_box_smearing),
-          m_int_tree(int_tree),
-          m_mode(parse_fdmt_mode(mode)),
-          m_nbeams(nbeams),
-          m_nthreads(std::max(1, nthreads)),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
-          m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
-                           std::byte{0}),
-          m_history(m_mode == FDMTMode::kValid
-                        ? m_nbeams * m_plan.get_history_size()
-                        : 0,
-                    0.0F),
-          m_history_init(m_mode == FDMTMode::kValid
-                             ? m_nbeams * m_plan.get_history_init_size()
-                             : 0,
-                         0.0F),
-          m_tree_history(m_mode == FDMTMode::kValid
-                             ? m_nbeams * m_plan.get_tree_history_size()
-                             : 0,
-                         0.0F) {
-        allocate_working_memory(fuse_levels);
-    }
+    ~FDMTCpuEngine() override                      = default;
+    FDMTCpuEngine(const FDMTCpuEngine&)            = delete;
+    FDMTCpuEngine& operator=(const FDMTCpuEngine&) = delete;
+    FDMTCpuEngine(FDMTCpuEngine&&)                 = delete;
+    FDMTCpuEngine& operator=(FDMTCpuEngine&&)      = delete;
 
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         SizeType nsamps,
-         float tsamp,
-         const std::vector<float>& dm_grid,
-         bool use_box_smearing,
-         std::string_view mode,
-         int nthreads,
-         SizeType nbeams,
-         SizeType fuse_levels,
-         bool int_tree)
-        : m_use_box_smearing(use_box_smearing),
-          m_int_tree(int_tree),
-          m_mode(parse_fdmt_mode(mode)),
-          m_nbeams(nbeams),
-          m_nthreads(std::max(1, nthreads)),
-          m_plan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
-          m_state_internal(m_nbeams * m_plan.get_buffer_size() * sizeof(float),
-                           std::byte{0}),
-          m_history(m_mode == FDMTMode::kValid
-                        ? m_nbeams * m_plan.get_history_size()
-                        : 0,
-                    0.0F),
-          m_history_init(m_mode == FDMTMode::kValid
-                             ? m_nbeams * m_plan.get_history_init_size()
-                             : 0,
-                         0.0F),
-          m_tree_history(m_mode == FDMTMode::kValid
-                             ? m_nbeams * m_plan.get_tree_history_size()
-                             : 0,
-                         0.0F) {
-        allocate_working_memory(fuse_levels);
-    }
-
-    ~Impl()                      = default;
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
-
-    const plans::FDMTPlan& get_plan() const { return m_plan; }
-
-    [[nodiscard]] SizeType get_nbeams() const noexcept { return m_nbeams; }
-
-    void execute(std::span<const float> waterfall, std::span<float> dmt) {
+    void execute(std::span<const float> waterfall,
+                 std::span<float> dmt) override {
         {
             const FuseRequest fuse(*this);
             reset(waterfall, dmt);
         }
-        advance_until_remaining(0);
-        finalize();
+        advance_until_remaining(0, {});
+        finalize({});
     }
 
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nbits,
-                 std::span<float> dmt) {
+                 std::span<float> dmt) override {
         {
             const FuseRequest fuse(*this);
             reset(waterfall_packed, nbits, dmt);
         }
-        advance_until_remaining(0);
-        finalize();
+        advance_until_remaining(0, {});
+        finalize({});
     }
 
-    void reset(std::span<const float> waterfall, std::span<float> dmt) {
+    void reset(std::span<const float> waterfall,
+               std::span<float> dmt) override {
         const auto nchans = m_plan.get_nchans();
         const auto nsamps = m_plan.get_nsamps();
         if (waterfall.size() != m_nbeams * nchans * nsamps) {
             throw std::invalid_argument(std::format(
-                "FDMTCPU: Invalid size of waterfall. Expected {}, got {}",
+                "FDMT: Invalid size of waterfall. Expected {}, got {}",
                 m_nbeams * nchans * nsamps, waterfall.size()));
         }
         check_dmt_size(dmt);
@@ -945,18 +852,18 @@ public:
 
     void reset(std::span<const uint8_t> waterfall_packed,
                SizeType nbits,
-               std::span<float> dmt) {
+               std::span<float> dmt) override {
         if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
             nbits != 16) {
             throw std::invalid_argument(std::format(
-                "FDMTCPU: nbits={} must be one of 1, 2, 4, 8, 16", nbits));
+                "FDMT: nbits={} must be one of 1, 2, 4, 8, 16", nbits));
         }
         const auto nchans    = m_plan.get_nchans();
         const auto nsamps    = m_plan.get_nsamps();
         const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         if (waterfall_packed.size() != m_nbeams * nchans * row_bytes) {
             throw std::invalid_argument(std::format(
-                "FDMTCPU: Invalid size of packed waterfall (nbits={}). "
+                "FDMT: Invalid size of packed waterfall (nbits={}). "
                 "Expected {} bytes, got {}",
                 nbits, m_nbeams * nchans * row_bytes, waterfall_packed.size()));
         }
@@ -970,19 +877,17 @@ public:
               m_int_tree ? m_int_levels[nbits] : m_float_levels, dmt);
     }
 
-    [[nodiscard]] SizeType get_fuse_levels() const noexcept {
+    [[nodiscard]] SizeType get_fuse_levels() const noexcept override {
         return m_fuse_levels;
     }
 
-    [[nodiscard]] bool get_int_tree() const noexcept { return m_int_tree; }
-
-    [[nodiscard]] std::string summary() const {
+    [[nodiscard]] std::string summary() const override {
         const auto mem = get_memory_usage();
         const auto mib = [](SizeType b) {
             return static_cast<double>(b) / 1048576.0;
         };
         const auto summary = std::format(
-            "*** FDMTCPU ***\n"
+            "*** FDMT (cpu) ***\n"
             "Mode: {}, {}, nbeams {}, fuse_levels {}, int_tree {}\n"
             "Host memory: plan {:.1f} MiB, state {:.1f} MiB, history {:.1f} "
             "MiB, "
@@ -996,7 +901,7 @@ public:
         return m_plan.summary() + summary;
     }
 
-    [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept {
+    [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override {
         return {
             .plan      = m_plan.get_container().get_memory_usage(),
             .state     = m_state_internal.size(),
@@ -1006,10 +911,10 @@ public:
         };
     }
 
-    void advance(SizeType levels = 1) {
+    void advance(SizeType levels, Stream /*stream*/) override {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMT: Stepper is not initialized. Call reset() first.");
         }
         const auto total_lvl = total_levels();
         while (levels > 0 && m_current_level < total_lvl - 1) {
@@ -1020,10 +925,11 @@ public:
         }
     }
 
-    void advance_until_remaining(SizeType remaining_levels) {
+    void advance_until_remaining(SizeType remaining_levels,
+                                 Stream stream) override {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMT: Stepper is not initialized. Call reset() first.");
         }
         const auto total_lvl = total_levels();
         if (remaining_levels >= total_lvl) {
@@ -1031,50 +937,31 @@ public:
         }
         const SizeType target_level = total_lvl - 1 - remaining_levels;
         if (target_level > m_current_level) {
-            advance(target_level - m_current_level);
+            advance(target_level - m_current_level, stream);
         }
     }
 
-    [[nodiscard]] std::span<const float> view_level_data() const {
+    [[nodiscard]] std::span<const float> view_level_data() const override {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMT: Stepper is not initialized. Call reset() first.");
         }
         const auto& state_shape =
             m_plan.get_container().state_shape[m_current_level];
         return {current_level_f32(), state_shape.nelements};
     }
 
-    [[nodiscard]] std::span<const float>
-    view_subband_data(SizeType subband_idx) const {
+    [[nodiscard]] FDMTSubbandView
+    view_subband(SizeType subband_idx) const override {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMT: Stepper is not initialized. Call reset() first.");
         }
         const auto& plan_c      = m_plan.get_container();
         const auto& state_shape = plan_c.state_shape[m_current_level];
         if (subband_idx >= state_shape.nchans) {
             throw std::out_of_range(std::format(
-                "FDMTCPU: Subband index {} out of range (current level has {} "
-                "subbands)",
-                subband_idx, state_shape.nchans));
-        }
-        const auto& grid  = plan_c.grids[m_current_level][subband_idx];
-        const auto offset = grid.coord_offset * state_shape.nsamps;
-        const auto count  = grid.ndt * state_shape.nsamps;
-        return {current_level_f32() + offset, count};
-    }
-
-    [[nodiscard]] FDMTSubbandView view_subband(SizeType subband_idx) const {
-        if (!m_is_initialized) {
-            throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
-        }
-        const auto& plan_c      = m_plan.get_container();
-        const auto& state_shape = plan_c.state_shape[m_current_level];
-        if (subband_idx >= state_shape.nchans) {
-            throw std::out_of_range(std::format(
-                "FDMTCPU: Subband index {} out of range (current level has {} "
+                "FDMT: Subband index {} out of range (current level has {} "
                 "subbands)",
                 subband_idx, state_shape.nchans));
         }
@@ -1093,7 +980,7 @@ public:
         };
     }
 
-    [[nodiscard]] SizeType current_level() const noexcept {
+    [[nodiscard]] SizeType current_level() const noexcept override {
         return m_current_level;
     }
 
@@ -1101,61 +988,30 @@ public:
         return m_plan.get_niters() + 1;
     }
 
-    [[nodiscard]] SizeType remaining_levels() const noexcept {
-        if (total_levels() <= 1 || m_current_level >= total_levels() - 1) {
-            return 0;
-        }
-        return (total_levels() - 1) - m_current_level;
-    }
-
-    [[nodiscard]] SizeType num_subbands() const {
+    [[nodiscard]] SizeType num_subbands() const override {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMT: Stepper is not initialized. Call reset() first.");
         }
         return m_plan.get_container().state_shape[m_current_level].nchans;
     }
 
-    [[nodiscard]] bool is_finished() const noexcept {
+    [[nodiscard]] bool is_finished() const noexcept override {
         return m_is_initialized && (m_current_level >= total_levels() - 1);
     }
 
-    void finalize() {
+    void finalize(Stream stream) override {
         if (!m_is_initialized) {
             throw std::logic_error(
-                "FDMTCPU: Stepper is not initialized. Call reset() first.");
+                "FDMT: Stepper is not initialized. Call reset() first.");
         }
         if (!is_finished()) {
-            advance_until_remaining(0);
+            advance_until_remaining(0, stream);
         }
         m_is_initialized = false;
     }
 
-    [[nodiscard]] float get_effective_variance(SizeType dm_idx,
-                                               SizeType boxcar_width) const {
-        return m_plan.get_effective_variance(dm_idx, boxcar_width,
-                                             m_use_box_smearing);
-    }
-
-    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
-                                            SizeType boxcar_width) const {
-        return m_plan.get_effective_sigma(dm_idx, boxcar_width,
-                                          m_use_box_smearing);
-    }
-
-    [[nodiscard]] std::vector<float>
-    get_effective_variance_grid(SizeType boxcar_width) const {
-        return m_plan.get_effective_variance_grid(boxcar_width,
-                                                  m_use_box_smearing);
-    }
-
-    [[nodiscard]] std::vector<float>
-    get_effective_sigma_grid(SizeType boxcar_width) const {
-        return m_plan.get_effective_sigma_grid(boxcar_width,
-                                               m_use_box_smearing);
-    }
-
-    void reset_history() noexcept {
+    void reset_history() noexcept override {
         std::ranges::fill(m_history, 0.0F);
         std::ranges::fill(m_history_init, 0.0F);
         std::ranges::fill(m_tree_history, 0.0F);
@@ -1163,14 +1019,14 @@ public:
         m_is_initialized = false;
     }
 
-    [[nodiscard]] SizeType history_state_size() const noexcept {
+    [[nodiscard]] SizeType history_state_size() const noexcept override {
         return m_history.size() + m_history_init.size() + m_tree_history.size();
     }
 
-    void save_history(std::span<float> out) const {
+    void save_history(std::span<float> out) const override {
         if (out.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("FDMTCPU::save_history: Invalid output size. "
+                std::format("FDMT::save_history: Invalid output size. "
                             "Expected {}, got {}",
                             history_state_size(), out.size()));
         }
@@ -1185,10 +1041,10 @@ public:
         std::ranges::copy(m_tree_history, th.begin());
     }
 
-    void load_history(std::span<const float> in) {
+    void load_history(std::span<const float> in) override {
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("FDMTCPU::load_history: Invalid input size. "
+                std::format("FDMT::load_history: Invalid input size. "
                             "Expected {}, got {}",
                             history_state_size(), in.size()));
         }
@@ -1200,6 +1056,11 @@ public:
         std::ranges::copy(h, m_history.begin());
         std::ranges::copy(hi, m_history_init.begin());
         std::ranges::copy(th, m_tree_history.begin());
+    }
+
+protected:
+    [[nodiscard]] Backend backend() const noexcept override {
+        return Backend::kCPU;
     }
 
 private:
@@ -1221,7 +1082,7 @@ private:
     FDMTMode m_mode;
     SizeType m_nbeams;
     int m_nthreads;
-    plans::FDMTPlan m_plan;
+    const plans::FDMTPlan& m_plan; // owned by the FDMT facade
     // Internal state buffer (for ping-pong buffering), zero-filled. Byte
     // storage holds float, uint8_t and uint16_t levels alike: with int_tree
     // both integer ping-pong halves (<= 2 bytes/element each) live in here.
@@ -1248,8 +1109,8 @@ private:
     std::vector<std::vector<SizeType>> m_fused_sum_index; // per level
 
     struct FuseRequest {
-        Impl& impl;
-        explicit FuseRequest(Impl& i) : impl(i) {
+        FDMTCpuEngine& impl;
+        explicit FuseRequest(FDMTCpuEngine& i) : impl(i) {
             impl.m_fuse_requested = true;
         }
         ~FuseRequest() { impl.m_fuse_requested = false; }
@@ -1284,7 +1145,7 @@ private:
     [[nodiscard]] const float* current_level_f32() const {
         if (m_levels[m_current_level].type != Elem::kF32) {
             throw std::logic_error(std::format(
-                "FDMTCPU: level {} is stored as an integer type "
+                "FDMT: level {} is stored as an integer type "
                 "(int_tree); construct with int_tree=false to inspect "
                 "intermediate levels.",
                 m_current_level));
@@ -1298,7 +1159,7 @@ private:
     void check_previous_block_finished() const {
         if (m_mode == FDMTMode::kValid && m_is_initialized && !is_finished()) {
             throw std::logic_error(std::format(
-                "FDMTCPU: the previous block's stepper run stopped at level "
+                "FDMT: the previous block's stepper run stopped at level "
                 "{} of {}. In mode='valid' every block must be finalized "
                 "before the next reset()/execute(), or its cross-block "
                 "history is lost. Call finalize(), or reset_history() to "
@@ -1310,7 +1171,7 @@ private:
     void check_dmt_size(std::span<float> dmt) const {
         if (dmt.size() < m_nbeams * m_plan.get_buffer_size()) {
             throw std::invalid_argument(std::format(
-                "FDMTCPU: Invalid size of dmt. Expected at least {}, got {}",
+                "FDMT: Invalid size of dmt. Expected at least {}, got {}",
                 m_nbeams * m_plan.get_buffer_size(), dmt.size()));
         }
     }
@@ -1336,7 +1197,7 @@ private:
      */
     void allocate_working_memory(SizeType fuse_levels) {
         if (m_nbeams == 0) {
-            throw std::invalid_argument("FDMTCPU: nbeams must be at least 1");
+            throw std::invalid_argument("FDMT: nbeams must be at least 1");
         }
         const SizeType niters = m_plan.get_niters();
         m_float_levels.assign(niters + 1, Elem::kF32);
@@ -1803,301 +1664,20 @@ private:
                     }
                 } else {
                     throw std::logic_error(
-                        "FDMTCPU: invalid narrowing level transition");
+                        "FDMT: invalid narrowing level transition");
                 }
             });
         });
     }
 
-}; // End FDMTCPU::Impl definition
+}; // End FDMTCpuEngine definition
 
-FDMTCPU::FDMTCPU(float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 SizeType nsamps,
-                 float tsamp,
-                 IndexType dt_max,
-                 IndexType dt_min,
-                 SizeType dt_step,
-                 bool use_box_smearing,
-                 std::string_view mode,
-                 int nthreads,
-                 SizeType nbeams,
-                 SizeType fuse_levels,
-                 bool int_tree)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_max,
-                                    dt_min,
-                                    dt_step,
-                                    use_box_smearing,
-                                    mode,
-                                    nthreads,
-                                    nbeams,
-                                    fuse_levels,
-                                    int_tree)) {}
-FDMTCPU::FDMTCPU(float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 SizeType nsamps,
-                 float tsamp,
-                 const std::vector<IndexType>& dt_grid,
-                 bool use_box_smearing,
-                 std::string_view mode,
-                 int nthreads,
-                 SizeType nbeams,
-                 SizeType fuse_levels,
-                 bool int_tree)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dt_grid,
-                                    use_box_smearing,
-                                    mode,
-                                    nthreads,
-                                    nbeams,
-                                    fuse_levels,
-                                    int_tree)) {}
+} // namespace
 
-FDMTCPU::FDMTCPU(float f_min,
-                 float f_max,
-                 SizeType nchans,
-                 SizeType nsamps,
-                 float tsamp,
-                 const std::vector<float>& dm_grid,
-                 bool use_box_smearing,
-                 std::string_view mode,
-                 int nthreads,
-                 SizeType nbeams,
-                 SizeType fuse_levels,
-                 bool int_tree)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    nsamps,
-                                    tsamp,
-                                    dm_grid,
-                                    use_box_smearing,
-                                    mode,
-                                    nthreads,
-                                    nbeams,
-                                    fuse_levels,
-                                    int_tree)) {}
-
-FDMTCPU::~FDMTCPU()                                   = default;
-FDMTCPU::FDMTCPU(FDMTCPU&& other) noexcept            = default;
-FDMTCPU& FDMTCPU::operator=(FDMTCPU&& other) noexcept = default;
-const plans::FDMTPlan& FDMTCPU::get_plan() const noexcept {
-    return m_impl->get_plan();
-}
-SizeType FDMTCPU::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
-void FDMTCPU::execute(std::span<const float> waterfall, std::span<float> dmt) {
-    m_impl->execute(waterfall, dmt);
-}
-void FDMTCPU::reset(std::span<const float> waterfall, std::span<float> dmt) {
-    m_impl->reset(waterfall, dmt);
-}
-void FDMTCPU::execute(std::span<const uint8_t> waterfall_packed,
-                      SizeType nbits,
-                      std::span<float> dmt) {
-    m_impl->execute(waterfall_packed, nbits, dmt);
-}
-void FDMTCPU::reset(std::span<const uint8_t> waterfall_packed,
-                    SizeType nbits,
-                    std::span<float> dmt) {
-    m_impl->reset(waterfall_packed, nbits, dmt);
-}
-SizeType FDMTCPU::get_fuse_levels() const noexcept {
-    return m_impl->get_fuse_levels();
-}
-bool FDMTCPU::get_int_tree() const noexcept { return m_impl->get_int_tree(); }
-std::string FDMTCPU::summary() const { return m_impl->summary(); }
-FDMTMemoryUsage FDMTCPU::get_memory_usage() const noexcept {
-    return m_impl->get_memory_usage();
-}
-void FDMTCPU::advance(SizeType levels) { m_impl->advance(levels); }
-void FDMTCPU::advance_until_remaining(SizeType remaining_levels) {
-    m_impl->advance_until_remaining(remaining_levels);
-}
-std::span<const float> FDMTCPU::view_level_data() const {
-    return m_impl->view_level_data();
-}
-std::span<const float> FDMTCPU::view_subband_data(SizeType subband_idx) const {
-    return m_impl->view_subband_data(subband_idx);
-}
-FDMTSubbandView FDMTCPU::view_subband(SizeType subband_idx) const {
-    return m_impl->view_subband(subband_idx);
-}
-SizeType FDMTCPU::current_level() const noexcept {
-    return m_impl->current_level();
-}
-SizeType FDMTCPU::total_levels() const noexcept {
-    return m_impl->total_levels();
-}
-SizeType FDMTCPU::remaining_levels() const noexcept {
-    return m_impl->remaining_levels();
-}
-SizeType FDMTCPU::num_subbands() const { return m_impl->num_subbands(); }
-bool FDMTCPU::is_finished() const noexcept { return m_impl->is_finished(); }
-void FDMTCPU::finalize() { m_impl->finalize(); }
-
-float FDMTCPU::get_effective_variance(SizeType dm_idx,
-                                      SizeType boxcar_width) const {
-    return m_impl->get_effective_variance(dm_idx, boxcar_width);
-}
-
-float FDMTCPU::get_effective_sigma(SizeType dm_idx,
-                                   SizeType boxcar_width) const {
-    return m_impl->get_effective_sigma(dm_idx, boxcar_width);
-}
-
-std::vector<float>
-FDMTCPU::get_effective_variance_grid(SizeType boxcar_width) const {
-    return m_impl->get_effective_variance_grid(boxcar_width);
-}
-
-std::vector<float>
-FDMTCPU::get_effective_sigma_grid(SizeType boxcar_width) const {
-    return m_impl->get_effective_sigma_grid(boxcar_width);
-}
-
-void FDMTCPU::reset_history() noexcept { m_impl->reset_history(); }
-SizeType FDMTCPU::history_state_size() const noexcept {
-    return m_impl->history_state_size();
-}
-void FDMTCPU::save_history(std::span<float> out) const {
-    m_impl->save_history(out);
-}
-void FDMTCPU::load_history(std::span<const float> in) {
-    m_impl->load_history(in);
-}
-
-[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
-compute_fdmt(std::span<const float> waterfall,
-             float f_min,
-             float f_max,
-             SizeType nchans,
-             SizeType nsamps,
-             float tsamp,
-             IndexType dt_max,
-             IndexType dt_min,
-             SizeType dt_step,
-             bool use_box_smearing,
-             std::string_view mode,
-             int nthreads,
-             SizeType nbeams) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                 use_box_smearing, mode, nthreads, nbeams);
-    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
-    fdmt.execute(waterfall, dmt);
-    // Compact each beam's leading get_dmt_size() samples (discarding the
-    // buffer_size-sized scratch tail) into a contiguous (nbeams, dmt_size)
-    // result.
-    const auto dmt_size = fdmt_plan.get_dmt_size();
-    std::vector<float> dmt_out(nbeams * dmt_size);
-    for (SizeType b = 0; b < nbeams; ++b) {
-        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
-                    dmt_out.data() + (b * dmt_size));
-    }
-    return std::make_tuple(std::move(dmt_out), fdmt_plan);
-}
-
-[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
-compute_fdmt(std::span<const float> waterfall,
-             float f_min,
-             float f_max,
-             SizeType nchans,
-             SizeType nsamps,
-             float tsamp,
-             const std::vector<IndexType>& dt_grid,
-             bool use_box_smearing,
-             std::string_view mode,
-             int nthreads,
-             SizeType nbeams) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
-                 mode, nthreads, nbeams);
-    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
-    fdmt.execute(waterfall, dmt);
-    const auto dmt_size = fdmt_plan.get_dmt_size();
-    std::vector<float> dmt_out(nbeams * dmt_size);
-    for (SizeType b = 0; b < nbeams; ++b) {
-        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
-                    dmt_out.data() + (b * dmt_size));
-    }
-    return std::make_tuple(std::move(dmt_out), fdmt_plan);
-}
-
-[[nodiscard]] std::tuple<std::vector<float>, plans::FDMTPlan>
-compute_fdmt(std::span<const float> waterfall,
-             float f_min,
-             float f_max,
-             SizeType nchans,
-             SizeType nsamps,
-             float tsamp,
-             const std::vector<float>& dm_grid,
-             bool use_box_smearing,
-             std::string_view mode,
-             int nthreads,
-             SizeType nbeams) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,
-                 mode, nthreads, nbeams);
-    const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
-    fdmt.execute(waterfall, dmt);
-    const auto dmt_size = fdmt_plan.get_dmt_size();
-    std::vector<float> dmt_out(nbeams * dmt_size);
-    for (SizeType b = 0; b < nbeams; ++b) {
-        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
-                    dmt_out.data() + (b * dmt_size));
-    }
-    return std::make_tuple(std::move(dmt_out), fdmt_plan);
-}
-
-void add_frb_track(std::span<float> waterfall,
-                   const plans::FDMTPlan& plan,
-                   SizeType dm_idx,
-                   float amplitude,
-                   IndexType toffset,
-                   SizeType width) {
-    if (width == 0) {
-        throw std::invalid_argument(
-            "add_frb_track: width must be greater than 0");
-    }
-    const auto nchans = plan.get_nchans();
-    const auto nsamps = plan.get_nsamps();
-    if (waterfall.size() != nchans * nsamps) {
-        throw std::invalid_argument(std::format(
-            "add_frb_track: Invalid size of waterfall. Expected {}, got {}",
-            nchans * nsamps, waterfall.size()));
-    }
-    // trace_dm() throws std::out_of_range if dm_idx is invalid.
-    const auto shifts = plan.trace_dm(dm_idx);
-
-    for (SizeType c = 0; c < nchans; ++c) {
-        const auto start = toffset + shifts[c];
-        const auto end   = start + static_cast<IndexType>(width);
-        if (start < 0 || end > static_cast<IndexType>(nsamps)) {
-            throw std::out_of_range(std::format(
-                "add_frb_track: injected pulse for channel {} falls outside "
-                "the waterfall (start={}, end={}, nsamps={}); choose a "
-                "smaller |toffset| or a dm_idx with less total delay",
-                c, start, end, nsamps));
-        }
-        float* __restrict__ row = waterfall.data() + (c * nsamps);
-        for (IndexType t = start; t < end; ++t) {
-            row[static_cast<SizeType>(t)] += amplitude;
-        }
-    }
+std::unique_ptr<detail::FDMTEngine>
+detail::make_fdmt_cpu(const plans::FDMTPlan& plan,
+                      const detail::FDMTEngineConfig& cfg) {
+    return std::make_unique<FDMTCpuEngine>(plan, cfg);
 }
 
 } // namespace dmt::algorithms

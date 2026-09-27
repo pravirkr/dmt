@@ -8,7 +8,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 
-#include "dmt/utils/unpacker.hpp"
+#include "dmt/unpacker_cuda.cuh"
 #include "test_helpers.hpp"
 
 namespace dmt {

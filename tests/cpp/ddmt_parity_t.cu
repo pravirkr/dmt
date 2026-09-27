@@ -12,10 +12,9 @@
 
 namespace dmt {
 
-using algorithms::DDMTCPU;
-using algorithms::DDMTCUDA;
+using algorithms::DDMT;
 
-TEST_CASE("parity: DDMTCUDA execute matches DDMTCPU on an injected FRB",
+TEST_CASE("parity: DDMT (cuda) execute matches CPU on an injected FRB",
           "[ddmt][gpu][parity]") {
     const SizeType nchans = 32;
     const SizeType nsamps = 256;
@@ -31,8 +30,8 @@ TEST_CASE("parity: DDMTCUDA execute matches DDMTCPU on an injected FRB",
                                     std::pow(test::kFMax, kDispCoeff)));
     const std::vector<float> dms = {0.0F, dm};
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cuda());
     const auto max_delay =
         *std::ranges::max_element(cpu.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -46,7 +45,7 @@ TEST_CASE("parity: DDMTCUDA execute matches DDMTCPU on an injected FRB",
     test::require_approx(dmt_gpu, dmt_cpu);
 }
 
-TEST_CASE("parity: DDMTCUDA packed-integer execute matches DDMTCPU",
+TEST_CASE("parity: DDMT (cuda) packed-integer execute matches CPU",
           "[ddmt][gpu][parity]") {
     const SizeType nchans        = 16;
     const SizeType nsamps        = 100;
@@ -60,10 +59,10 @@ TEST_CASE("parity: DDMTCUDA packed-integer execute matches DDMTCPU",
         }
     }
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                /*nthreads=*/1, /*nbits=*/8);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                 /*device_id=*/0, /*nbits=*/8);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cpu(1),
+             /*nbits=*/8);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cuda(0),
+             /*nbits=*/8);
     const auto max_delay =
         *std::ranges::max_element(cpu.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -77,8 +76,8 @@ TEST_CASE("parity: DDMTCUDA packed-integer execute matches DDMTCPU",
     REQUIRE_THAT(dmt_gpu, Catch::Matchers::Equals(dmt_cpu));
 }
 
-TEST_CASE("parity: DDMTCUDA spans multiple internal gulps and still matches "
-          "DDMTCPU",
+TEST_CASE("parity: DDMT (cuda) spans multiple internal gulps and still matches "
+          "CPU",
           "[ddmt][gpu][parity]") {
     // Deliberately larger than the CUDA implementation's internal gulp size
     // (65536 output samples/gulp), to exercise the double-buffered
@@ -89,7 +88,7 @@ TEST_CASE("parity: DDMTCUDA spans multiple internal gulps and still matches "
     const SizeType dm_max        = 5.0F;
     const std::vector<float> dms = {0.0F, dm_max};
 
-    DDMTCPU probe(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
+    DDMT probe(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
     const auto max_delay =
         *std::ranges::max_element(probe.get_plan().get_container().delay_table);
     const SizeType nsamps_reduced_target = 150000; // > 2 gulps
@@ -97,8 +96,8 @@ TEST_CASE("parity: DDMTCUDA spans multiple internal gulps and still matches "
 
     const auto waterfall = test::sequential_waterfall(nchans, nsamps);
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cuda());
     const auto nsamps_reduced = nsamps - max_delay;
     const auto dm_count       = dms.size();
 
@@ -110,7 +109,7 @@ TEST_CASE("parity: DDMTCUDA spans multiple internal gulps and still matches "
     test::require_approx(dmt_gpu, dmt_cpu);
 }
 
-TEST_CASE("parity: DDMTCUDA matches DDMTCPU with LevinConfig",
+TEST_CASE("parity: DDMT (cuda) matches CPU with LevinConfig",
           "[ddmt][gpu][parity]") {
     const SizeType nchans = 16;
     const SizeType nsamps = 128;
@@ -121,8 +120,9 @@ TEST_CASE("parity: DDMTCUDA matches DDMTCPU with LevinConfig",
         .tol         = 1.25F,
     };
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, levin);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, levin);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, levin);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, levin,
+             Exec::cuda());
 
     const auto waterfall = test::sequential_waterfall(nchans, nsamps);
     const auto max_delay =
@@ -138,7 +138,7 @@ TEST_CASE("parity: DDMTCUDA matches DDMTCPU with LevinConfig",
     test::require_approx(dmt_gpu, dmt_cpu);
 }
 
-TEST_CASE("parity: DDMTCUDA execute_time_major matches DDMTCPU across bits",
+TEST_CASE("parity: DDMT (cuda) execute_time_major matches CPU across bits",
           "[ddmt][gpu][parity]") {
     const SizeType nchans        = 16;
     const SizeType nsamps        = 64;
@@ -148,8 +148,8 @@ TEST_CASE("parity: DDMTCUDA execute_time_major matches DDMTCPU across bits",
         DYNAMIC_SECTION("nbits = " << nbits) {
             plans::DDMTPlan plan(test::kFMin, test::kFMax, nchans, test::kTsamp,
                                  dms, nbits);
-            DDMTCPU cpu(plan);
-            DDMTCUDA gpu(plan);
+            DDMT cpu(plan);
+            DDMT gpu(plan, Exec::cuda());
 
             const auto max_delay =
                 *std::ranges::max_element(plan.get_container().delay_table);
@@ -201,7 +201,7 @@ TEST_CASE("parity: DDMTCUDA execute_time_major matches DDMTCPU across bits",
     test_bits(16);
 }
 
-TEST_CASE("parity: DDMTCUDA multi-beam float execute matches DDMTCPU",
+TEST_CASE("parity: DDMT (cuda) multi-beam float execute matches CPU",
           "[ddmt][gpu][parity]") {
     const SizeType nchans        = 16;
     const SizeType nsamps        = 96;
@@ -213,10 +213,10 @@ TEST_CASE("parity: DDMTCUDA multi-beam float execute matches DDMTCPU",
         waterfall[i] = static_cast<float>((i % 37) + 1);
     }
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                /*nthreads=*/1, /*nbits=*/32, /*kill_mask=*/{}, nbeams);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                 /*device_id=*/0, /*nbits=*/32, /*kill_mask=*/{}, nbeams);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cpu(1),
+             /*nbits=*/32, /*kill_mask=*/{}, nbeams);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cuda(0),
+             /*nbits=*/32, /*kill_mask=*/{}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(cpu.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -230,15 +230,16 @@ TEST_CASE("parity: DDMTCUDA multi-beam float execute matches DDMTCPU",
     test::require_approx(dmt_gpu, dmt_cpu);
 }
 
-TEST_CASE("parity: DDMTCUDA multi-beam spans multiple internal gulps and still "
-          "matches DDMTCPU",
-          "[ddmt][gpu][parity]") {
+TEST_CASE(
+    "parity: DDMT (cuda) multi-beam spans multiple internal gulps and still "
+    "matches CPU",
+    "[ddmt][gpu][parity]") {
     const SizeType nchans        = 4;
     const SizeType nbeams        = 2;
     const std::vector<float> dms = {0.0F, 5.0F};
 
-    DDMTCPU probe(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, 1, 32,
-                  {}, nbeams);
+    DDMT probe(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+               Exec::cpu(1), 32, {}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(probe.get_plan().get_container().delay_table);
     const SizeType nsamps_reduced_target = 150000; // > 2 gulps
@@ -249,10 +250,10 @@ TEST_CASE("parity: DDMTCUDA multi-beam spans multiple internal gulps and still "
         waterfall[i] = static_cast<float>((i % 43) + 1);
     }
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, 1, 32, {},
-                nbeams);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, 0, 32, {},
-                 nbeams);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cpu(1),
+             32, {}, nbeams);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cuda(0),
+             32, {}, nbeams);
     const auto nsamps_reduced = nsamps - max_delay;
     const auto dm_count       = dms.size();
 
@@ -264,7 +265,7 @@ TEST_CASE("parity: DDMTCUDA multi-beam spans multiple internal gulps and still "
     test::require_approx(dmt_gpu, dmt_cpu);
 }
 
-TEST_CASE("parity: DDMTCUDA multi-beam packed-integer execute matches DDMTCPU",
+TEST_CASE("parity: DDMT (cuda) multi-beam packed-integer execute matches CPU",
           "[ddmt][gpu][parity]") {
     const SizeType nchans        = 8;
     const SizeType nsamps        = 64;
@@ -276,10 +277,10 @@ TEST_CASE("parity: DDMTCUDA multi-beam packed-integer execute matches DDMTCPU",
         waterfall[i] = static_cast<uint8_t>((i * 13 + 5) % 256);
     }
 
-    DDMTCPU cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, 1, 8, {},
-                nbeams);
-    DDMTCUDA gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, 0, 8, {},
-                 nbeams);
+    DDMT cpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cpu(1),
+             8, {}, nbeams);
+    DDMT gpu(test::kFMin, test::kFMax, nchans, test::kTsamp, dms, Exec::cuda(0),
+             8, {}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(cpu.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;

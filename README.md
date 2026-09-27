@@ -77,10 +77,11 @@ print(
 #include <dmt/dmt.hpp>
 
 int main() {
-    dmt::algorithms::FDMTCPU fdmt(
+    dmt::algorithms::FDMT fdmt(
         /*f_min=*/1200.0f, /*f_max=*/1600.0f, /*nchans=*/256, /*nsamps=*/1024,
         /*tsamp=*/1e-3f, /*dt_max=*/128, /*dt_min=*/0, /*dt_step=*/1,
-        /*use_box_smearing=*/true, /*mode=*/"valid"
+        /*use_box_smearing=*/true, /*mode=*/"valid",
+        dmt::Exec::cpu(/*nthreads=*/4)  // or dmt::Exec::cuda(/*device=*/0)
     );
 
     const auto& plan = fdmt.get_plan();

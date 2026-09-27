@@ -6,21 +6,22 @@
  * library.
  *
  * This header aggregates the core algorithms, execution plans, common types,
- * and simulation utilities provided by DMT:
+ * and simulation utilities provided by DMT. Every algorithm is one class whose
+ * backend (CPU, CUDA, ...) is chosen at construction with dmt::Exec; see
+ * dmt::available_backends().
  * - Incoherent Fast Dispersion Measure Transform (FDMT): @ref
- * dmt::algorithms::FDMTCPU, @ref dmt::algorithms::FDMTCUDA
- * - Direct Dedispersion Transform (DDMT): @ref dmt::algorithms::DDMTCPU, @ref
- * dmt::algorithms::DDMTCUDA
+ * dmt::algorithms::FDMT
+ * - Direct Dedispersion Transform (DDMT): @ref dmt::algorithms::DDMT
  * - Coherent Fast Dispersion Measure Transform (CFDMT): @ref
- * dmt::algorithms::CohFDMTCPU, @ref dmt::algorithms::CohFDMTCUDA
- * - Fourier-Shift FDMT (FDMT-FFT): @ref dmt::algorithms::FDMTFFTCPU
+ * dmt::algorithms::CohFDMT
+ * - Fourier-Shift FDMT (FDMT-FFT): @ref dmt::algorithms::FDMTFFT
  * - Execution Plans and Grid Generators: @ref dmt::plans::FDMTPlan, @ref
  * dmt::plans::DDMTPlan, @ref dmt::plans::CohFDMTPlan
- * - Utilities & Data Unpackers: @ref dmt::utils::DataUnpackerCPU, @ref
- * dmt::utils::generate_pure_frb
+ * - Simulation utilities: @ref dmt::utils::generate_pure_frb
  */
 
 // Import common types and constants
+#include "common/backend.hpp" // IWYU pragma: export
 #include "common/logging.hpp" // IWYU pragma: export
 #include "common/plans.hpp"   // IWYU pragma: export
 #include "common/types.hpp"   // IWYU pragma: export

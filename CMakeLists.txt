@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18...3.30)
 
 project(
   dmt
-  VERSION 0.3.0
+  VERSION 0.4.0
   LANGUAGES CXX
   DESCRIPTION "Dispersion Measure Transform Library"
 )
@@ -142,7 +142,8 @@ target_compile_options(
 # OpenMP detection
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 
-# CUDA toolchain detection (DMT_CUDA user option; DMT_ENABLE_CUDA is the C++ macro).
+# CUDA toolchain detection (DMT_CUDA user option; DMT_ENABLE_CUDA is the
+# library's private C++ macro).
 if(DMT_CUDA STREQUAL "ON" OR DMT_CUDA STREQUAL "AUTO")
   include(CheckLanguage)
   # nvcc usually lives outside the default PATH; seed CUDACXX before check_language.
@@ -338,11 +339,6 @@ install(
   DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
 )
 
-configure_file(
-  ${PROJECT_SOURCE_DIR}/cmake/dmtCUDAConfig.cmake.in
-  ${CMAKE_CURRENT_BINARY_DIR}/dmtCUDAConfig.cmake @ONLY
-)
-
 configure_package_config_file(
   ${PROJECT_SOURCE_DIR}/cmake/dmtConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
   INSTALL_DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
@@ -354,9 +350,10 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/dmtConfigVersion.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/dmtCUDAConfig.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
+install(
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/dmtConfigVersion.cmake
+  DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
 )
 
 # Print feature summary
@@ -364,7 +361,7 @@ include(FeatureSummary)
 feature_summary(WHAT ALL)
 
 if(CMAKE_CUDA_COMPILER)
-  message(STATUS "dmt build mode: CPU + CUDA (DMT_CUDA=${DMT_CUDA}, DMT_ENABLE_CUDA macro defined)")
+  message(STATUS "dmt build mode: CPU + CUDA backends (DMT_CUDA=${DMT_CUDA})")
 else()
   message(STATUS "dmt build mode: CPU-only (DMT_CUDA=${DMT_CUDA})")
 endif()

@@ -9,8 +9,8 @@
 #include "dmt/algorithms/fdmt_fft.hpp"
 
 namespace dmt {
-using algorithms::FDMTCPU;
-using algorithms::FDMTFFTCPU;
+using algorithms::FDMT;
+using algorithms::FDMTFFT;
 
 template <typename T>
 static std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
@@ -20,7 +20,7 @@ static std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
     return vec;
 }
 
-// Smaller than the ASKAP-like FDMTCPU bench: FFT state is complex and
+// Smaller than the ASKAP-like FDMT bench: FFT state is complex and
 // full/valid pad N_fft = nsamps + L + max_shift.
 class FDMTFFTCPUFixture : public benchmark::Fixture {
 public:
@@ -48,8 +48,8 @@ public:
 
 BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_roll)
 (benchmark::State& state) {
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                    "roll", nthreads);
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                 "roll", Exec::cpu(nthreads));
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
@@ -58,8 +58,8 @@ BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_roll)
 
 BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_valid)
 (benchmark::State& state) {
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                    "valid", nthreads);
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                 "valid", Exec::cpu(nthreads));
     std::vector<float> dmt(fdmt.get_plan().get_dmt_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
@@ -68,8 +68,8 @@ BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_fft_execute_valid)
 
 BENCHMARK_DEFINE_F(FDMTFFTCPUFixture, BM_fdmt_direct_execute_valid)
 (benchmark::State& state) {
-    FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                 "valid", nthreads);
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false, "valid",
+              Exec::cpu(nthreads));
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size(), 0.0F);
     for (auto _ : state) {
         fdmt.execute(waterfall, dmt);
