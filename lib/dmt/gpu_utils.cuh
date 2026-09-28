@@ -8,9 +8,9 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "dmt/gpu_compat.cuh"
 #include <thrust/complex.h>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 namespace dmt {
 
@@ -49,7 +49,8 @@ constexpr std::string_view fft_error_string(cufftResult error) noexcept {
     }
 }
 
-/** Runtime or FFT errors from the GPU toolchain (CUDA or HIP via gpu_compat). */
+/** Runtime or FFT errors from the GPU toolchain (CUDA or HIP via gpu_compat).
+ */
 class GPUException : public std::runtime_error {
 public:
     explicit GPUException(
@@ -106,9 +107,9 @@ private:
     static std::string format_runtime_error(cudaError_t code,
                                             std::string_view user_msg,
                                             const std::source_location& loc) {
-        auto base_msg = std::format("{} runtime error [{}]: {}", DMT_GPU_NAME,
-                                    static_cast<int>(code),
-                                    cudaGetErrorString(code));
+        auto base_msg =
+            std::format("{} runtime error [{}]: {}", DMT_GPU_NAME,
+                        static_cast<int>(code), cudaGetErrorString(code));
         return user_msg.empty()
                    ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
@@ -121,9 +122,9 @@ private:
     static std::string format_fft_error(cufftResult code,
                                         std::string_view user_msg,
                                         const std::source_location& loc) {
-        auto base_msg = std::format("{} FFT error [{}]: {}", DMT_GPU_NAME,
-                                    static_cast<int>(code),
-                                    fft_error_string(code));
+        auto base_msg =
+            std::format("{} FFT error [{}]: {}", DMT_GPU_NAME,
+                        static_cast<int>(code), fft_error_string(code));
         return user_msg.empty()
                    ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
@@ -227,14 +228,14 @@ public:
                 "DeviceWorkFence: event creation failed");
         }
         check_gpu_call(cudaEventRecord(m_event, stream),
-                        "DeviceWorkFence: event record failed");
+                       "DeviceWorkFence: event record failed");
         m_pending = true;
     }
 
     void wait() {
         if (m_pending) {
             check_gpu_call(cudaEventSynchronize(m_event),
-                            "DeviceWorkFence: waiting for device work failed");
+                           "DeviceWorkFence: waiting for device work failed");
             m_pending = false;
         }
     }

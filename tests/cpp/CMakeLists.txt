@@ -81,7 +81,7 @@ if(DMT_GPU_BACKEND)
   catch_discover_tests(
     ${TARGET_TESTS}
     TEST_SPEC
-    "~[gpu]~[parity]"
+    "~[gpu]"
     TEST_PREFIX
     "cpu:"
     PROPERTIES
@@ -91,7 +91,7 @@ if(DMT_GPU_BACKEND)
   catch_discover_tests(
     ${TARGET_TESTS}
     TEST_SPEC
-    "[gpu],[parity]"
+    "[gpu]"
     TEST_PREFIX
     "${_dmt_gpu_name}:"
     PROPERTIES
@@ -101,6 +101,8 @@ if(DMT_GPU_BACKEND)
 else()
   catch_discover_tests(
     ${TARGET_TESTS}
+    TEST_SPEC
+    "~[gpu]"
     PROPERTIES
     LABELS
     "cpu"

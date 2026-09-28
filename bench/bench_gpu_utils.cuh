@@ -21,22 +21,23 @@ inline dmt::Exec bench_gpu_exec(int device = 0) {
 #endif
 }
 
-#define BENCH_GPU_TRY(call)                                                      \
-    do {                                                                         \
-        auto const status = (call);                                              \
-        if (cudaSuccess != status) {                                             \
-            throw std::runtime_error(std::format(                                \
-                "{} runtime error: {}", DMT_GPU_NAME, cudaGetErrorString(status))); \
-        }                                                                        \
+#define BENCH_GPU_TRY(call)                                                    \
+    do {                                                                       \
+        auto const status = (call);                                            \
+        if (cudaSuccess != status) {                                           \
+            throw std::runtime_error(std::format("{} runtime error: {}",       \
+                                                 DMT_GPU_NAME,                 \
+                                                 cudaGetErrorString(status))); \
+        }                                                                      \
     } while (0)
 
-#define BENCH_GPU_CHECK_NOTHROW(call)                                            \
-    do {                                                                         \
-        auto const status = (call);                                              \
-        if (cudaSuccess != status) {                                             \
+#define BENCH_GPU_CHECK_NOTHROW(call)                                          \
+    do {                                                                       \
+        auto const status = (call);                                            \
+        if (cudaSuccess != status) {                                           \
             std::fprintf(stderr, "%s runtime error in destructor: %s\n",       \
-                         DMT_GPU_NAME, cudaGetErrorString(status));              \
-        }                                                                        \
+                         DMT_GPU_NAME, cudaGetErrorString(status));            \
+        }                                                                      \
     } while (0)
 
 /**
@@ -46,7 +47,7 @@ inline dmt::Exec bench_gpu_exec(int device = 0) {
 class GPUEventTimer {
 public:
     explicit GPUEventTimer(benchmark::State& state,
-                            cudaStream_t stream = nullptr)
+                           cudaStream_t stream = nullptr)
         : m_stream(stream),
           m_state(&state) {
         BENCH_GPU_TRY(cudaEventCreate(&m_start));
@@ -54,7 +55,7 @@ public:
         BENCH_GPU_TRY(cudaEventRecord(m_start, m_stream));
     }
 
-    GPUEventTimer()                                 = delete;
+    GPUEventTimer()                                = delete;
     GPUEventTimer(const GPUEventTimer&)            = delete;
     GPUEventTimer& operator=(const GPUEventTimer&) = delete;
     GPUEventTimer(GPUEventTimer&&)                 = delete;

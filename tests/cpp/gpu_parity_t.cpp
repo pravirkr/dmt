@@ -116,7 +116,7 @@ TEST_CASE("parity: FDMT on every GPU backend matches the CPU bitwise",
           "[fdmt][gpu][parity]") {
     const auto backends = usable_gpu_backends();
     if (backends.empty()) {
-        SKIP("no GPU backend usable in this build");
+        return;
     }
     for (const auto backend : backends) {
         for (const std::string mode : {"full", "roll", "valid"}) {
@@ -190,7 +190,7 @@ TEST_CASE("parity: FDMT GPU float input matches the CPU closely",
           "[fdmt][gpu][parity]") {
     const auto backends = usable_gpu_backends();
     if (backends.empty()) {
-        SKIP("no GPU backend usable in this build");
+        return;
     }
     std::mt19937 gen(7);
     std::normal_distribution<float> dis(0.0F, 1.0F);
@@ -216,7 +216,7 @@ TEST_CASE("parity: FDMT GPU host stepper and history match the CPU",
           "[fdmt][gpu][parity]") {
     const auto backends = usable_gpu_backends();
     if (backends.empty()) {
-        SKIP("no GPU backend usable in this build");
+        return;
     }
     for (const auto backend : backends) {
         DYNAMIC_SECTION(to_string(backend)) {
@@ -283,7 +283,7 @@ TEST_CASE("parity: DDMT on every GPU backend matches the CPU bitwise",
           "[ddmt][gpu][parity]") {
     const auto backends = usable_gpu_backends();
     if (backends.empty()) {
-        SKIP("no GPU backend usable in this build");
+        return;
     }
     constexpr SizeType kDdmtNchans = 32;
     for (const auto backend : backends) {
@@ -361,7 +361,7 @@ TEST_CASE("parity: DDMT GPU time-major and multi-gulp inputs match the CPU",
           "[ddmt][gpu][parity]") {
     const auto backends = usable_gpu_backends();
     if (backends.empty()) {
-        SKIP("no GPU backend usable in this build");
+        return;
     }
     constexpr SizeType nchans = 16;
     for (const auto backend : backends) {

@@ -35,9 +35,9 @@ def _pack(values: np.ndarray, nbits: int) -> np.ndarray:
     padded = np.zeros((rows, row_bytes * per_byte), dtype=np.uint32)
     padded[:, :nsamps] = values
     shifts = (np.arange(per_byte, dtype=np.uint32) * nbits)[None, None, :]
-    return (
-        (padded.reshape(rows, row_bytes, per_byte) << shifts).sum(axis=2)
-    ).astype(np.uint8)
+    return ((padded.reshape(rows, row_bytes, per_byte) << shifts).sum(axis=2)).astype(
+        np.uint8
+    )
 
 
 def _fdmt(out: dict, backend: str, kind: str, data: np.ndarray) -> None:
@@ -48,8 +48,16 @@ def _fdmt(out: dict, backend: str, kind: str, data: np.ndarray) -> None:
             for fuse in (0, None):
                 key = f"fdmt/{kind}/{mode}/b{nbeams}/f{fuse}"
                 f = dmtlib.FDMT(
-                    F_MIN, F_MAX, nchans, nsamps, TSAMP, 128, mode=mode,
-                    nbeams=nbeams, fuse_levels=fuse, backend=backend,
+                    F_MIN,
+                    F_MAX,
+                    nchans,
+                    nsamps,
+                    TSAMP,
+                    128,
+                    mode=mode,
+                    nbeams=nbeams,
+                    fuse_levels=fuse,
+                    backend=backend,
                 )
                 out[key] = f.execute(wf)
                 if mode == "valid":
@@ -64,7 +72,13 @@ def _fdmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
         packed = _pack(values, nbits)
         for int_tree in (False, True):
             f = dmtlib.FDMT(
-                F_MIN, F_MAX, nchans, nsamps, TSAMP, 128, int_tree=int_tree,
+                F_MIN,
+                F_MAX,
+                nchans,
+                nsamps,
+                TSAMP,
+                128,
+                int_tree=int_tree,
                 backend=backend,
             )
             out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(packed, nbits)
@@ -102,11 +116,13 @@ def _ddmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
 def _fft(out: dict, backend: str, data: np.ndarray) -> None:
     nchans, nsamps = data.shape
     for mode in ("full", "roll", "valid"):
-        f = dmtlib.FDMTFFT(F_MIN, F_MAX, nchans, nsamps, TSAMP, 128, mode=mode,
-                           backend=backend)
+        f = dmtlib.FDMTFFT(
+            F_MIN, F_MAX, nchans, nsamps, TSAMP, 128, mode=mode, backend=backend
+        )
         out[f"fdmt_fft/{mode}"] = f.execute(data)
-    coh = dmtlib.CohFDMT(1250.0, 25.0, 4, 1.0e-6, 1 << 10, 2, 4.0e-6, 5.0, 0.0, 32,
-                         backend=backend)
+    coh = dmtlib.CohFDMT(
+        1250.0, 25.0, 4, 1.0e-6, 1 << 10, 2, 4.0e-6, 5.0, 0.0, 32, backend=backend
+    )
     rng = np.random.default_rng(3)
     raw = rng.integers(0, 256, size=2 * 2 * coh.plan.nsamp * 4, dtype=np.uint8)
     out["cfdmt/u8"] = coh.execute(raw)

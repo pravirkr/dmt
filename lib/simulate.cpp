@@ -14,7 +14,7 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            float pulse_toa,
                                                            float amplitude) {
     if (nchans == 0 || nsamps == 0) {
-        return {{}, 0};
+        return std::make_tuple(std::vector<float>{}, SizeType{0});
     }
     std::vector<float> arr(nchans * nsamps, 0.0F);
     SizeType nsamps_dispersed = 0;
