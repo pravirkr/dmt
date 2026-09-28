@@ -19,9 +19,9 @@
 namespace dmt {
 
 /// @brief Execution backend of an algorithm instance.
-enum class Backend : std::uint8_t { kCPU, kCUDA, kHIP, kMetal };
+enum class Backend : std::uint8_t { kCPU, kCUDA, kHIP };
 
-/// @brief Lower-case name: "cpu", "cuda", "hip" or "metal".
+/// @brief Lower-case name: "cpu", "cuda" or "hip".
 [[nodiscard]] std::string_view to_string(Backend backend) noexcept;
 
 /// @brief Inverse of to_string().
@@ -55,9 +55,6 @@ struct Exec {
     }
     [[nodiscard]] static constexpr Exec hip(int device = 0) noexcept {
         return {.backend = Backend::kHIP, .nthreads = 1, .device = device};
-    }
-    [[nodiscard]] static constexpr Exec metal(int device = 0) noexcept {
-        return {.backend = Backend::kMetal, .nthreads = 1, .device = device};
     }
 };
 
@@ -119,6 +116,9 @@ template <typename T> struct DeviceSpan {
 
     /// Start of the view, for pointer-addressed backends (CUDA, HIP).
     [[nodiscard]] T* data() const noexcept {
+        if (handle == nullptr) {
+            return nullptr;
+        }
         return reinterpret_cast<T*>(static_cast<std::byte*>(handle) +
                                     byte_offset);
     }
@@ -129,8 +129,7 @@ template <typename T> struct DeviceSpan {
     [[nodiscard]] constexpr bool empty() const noexcept { return count == 0; }
 
     /// @p n elements starting @p offset elements in. Keeps `handle` and
-    /// advances `byte_offset`, so it also works where `handle` is not a
-    /// pointer (Metal buffers).
+    /// advances `byte_offset`.
     [[nodiscard]] constexpr DeviceSpan subspan(std::size_t offset,
                                                std::size_t n) const noexcept {
         DeviceSpan out = *this;

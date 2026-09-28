@@ -3,16 +3,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <format>
-#include <memory>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/engines.hpp"
 
@@ -26,28 +22,24 @@ std::string_view to_string(Backend backend) noexcept {
         return "cuda";
     case Backend::kHIP:
         return "hip";
-    case Backend::kMetal:
-        return "metal";
     }
     return "unknown";
 }
 
 Backend parse_backend(std::string_view name) {
-    for (const auto b :
-         {Backend::kCPU, Backend::kCUDA, Backend::kHIP, Backend::kMetal}) {
+    for (const auto b : {Backend::kCPU, Backend::kCUDA, Backend::kHIP}) {
         if (name == to_string(b)) {
             return b;
         }
     }
     throw std::invalid_argument(std::format(
-        "Unknown backend '{}'. Expected 'cpu', 'cuda', 'hip' or 'metal'",
-        name));
+        "Unknown backend '{}'. Expected 'cpu', 'cuda' or 'hip'", name));
 }
 
 std::vector<Backend> available_backends() {
     std::vector<Backend> out{Backend::kCPU};
-#ifdef DMT_ENABLE_CUDA
-    out.push_back(Backend::kCUDA);
+#ifdef DMT_ENABLE_GPU
+    out.push_back(algorithms::detail::kGPUBackend);
 #endif
     return out;
 }

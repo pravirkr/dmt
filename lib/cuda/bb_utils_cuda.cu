@@ -2,15 +2,13 @@
 
 #include <cassert>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#include <cufft.h>
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
+#include "dmt/gpu_utils.cuh"
 
 namespace dmt::bb_utils {
 
@@ -18,7 +16,7 @@ namespace {
 
 // Functor for in-place fftshift of two complex buffers
 struct SwapSpectrumDual {
-    ComplexTypeCUDA *buf1, *buf2;
+    ComplexTypeGPU *buf1, *buf2;
     int n, batch_size, mid_point;
 
     __device__ void operator()(int idx) const {
@@ -47,8 +45,8 @@ struct SwapSpectrumDual {
 // e[i + nx*j] = scale * (d[i + nx*j] * b[l*nx + i])
 // for i in [0, nx), j in [0, ny), where l is the row index of b.
 struct ComplexMulScaleDual {
-    const ComplexTypeCUDA *a, *d, *b;
-    ComplexTypeCUDA *c, *e;
+    const ComplexTypeGPU *a, *d, *b;
+    ComplexTypeGPU *c, *e;
     int nx, ny, l;
     float scale;
 
@@ -62,14 +60,14 @@ struct ComplexMulScaleDual {
                                -a[idx].imag() * b[(l * nx) + i].imag());
             float imag1 = fmaf(a[idx].real(), b[(l * nx) + i].imag(),
                                a[idx].imag() * b[(l * nx) + i].real());
-            c[idx]      = ComplexTypeCUDA(fmaf(scale, real1, 0.0F),
-                                          fmaf(scale, imag1, 0.0F));
+            c[idx]      = ComplexTypeGPU(fmaf(scale, real1, 0.0F),
+                                         fmaf(scale, imag1, 0.0F));
             float real2 = fmaf(d[idx].real(), b[(l * nx) + i].real(),
                                -d[idx].imag() * b[(l * nx) + i].imag());
             float imag2 = fmaf(d[idx].real(), b[(l * nx) + i].imag(),
                                d[idx].imag() * b[(l * nx) + i].real());
-            e[idx]      = ComplexTypeCUDA(fmaf(scale, real2, 0.0F),
-                                          fmaf(scale, imag2, 0.0F));
+            e[idx]      = ComplexTypeGPU(fmaf(scale, real2, 0.0F),
+                                         fmaf(scale, imag2, 0.0F));
         }
     }
 };
@@ -136,7 +134,7 @@ __global__ void update_delay_history_kernel(const float* in,
 
 // Functor for Transposing and Unpadding the FFTs and calculating the intensity
 struct TransposeUnpadDetect {
-    const ComplexTypeCUDA *fft_p1, *fft_p2;
+    const ComplexTypeGPU *fft_p1, *fft_p2;
     float* intensity;
     int nchan, nfft, nsub, mbin, noverlap_per_channel, mbin_adjusted, msamp;
 
@@ -157,8 +155,8 @@ struct TransposeUnpadDetect {
 };
 } // namespace
 
-void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data1,
-                   cuda::std::span<ComplexTypeCUDA> data2,
+void swap_spectrum(cuda::std::span<ComplexTypeGPU> data1,
+                   cuda::std::span<ComplexTypeGPU> data2,
                    int n,
                    int batch_size,
                    cudaStream_t stream) {
@@ -178,14 +176,14 @@ void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data1,
                              .batch_size = batch_size,
                              .mid_point  = mid_point};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    cuda_utils::check_last_cuda_error("thrust::for_each failed");
+    gpu_utils::check_last_gpu_error("thrust::for_each failed");
 }
 
-void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
-                 cuda::std::span<const ComplexTypeCUDA> data2_in,
-                 cuda::std::span<const ComplexTypeCUDA> chirp_table,
-                 cuda::std::span<ComplexTypeCUDA> data1_out,
-                 cuda::std::span<ComplexTypeCUDA> data2_out,
+void apply_chirp(cuda::std::span<const ComplexTypeGPU> data1_in,
+                 cuda::std::span<const ComplexTypeGPU> data2_in,
+                 cuda::std::span<const ComplexTypeGPU> chirp_table,
+                 cuda::std::span<ComplexTypeGPU> data1_out,
+                 cuda::std::span<ComplexTypeGPU> data2_out,
                  int nsub,
                  int nbin,
                  int nfft,
@@ -214,11 +212,11 @@ void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
                                 .l     = idm,
                                 .scale = scale};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    cuda_utils::check_last_cuda_error("thrust::for_each failed");
+    gpu_utils::check_last_gpu_error("thrust::for_each failed");
 }
 
-void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
-                  cuda::std::span<const ComplexTypeCUDA> fft_p2,
+void unpad_detect(cuda::std::span<const ComplexTypeGPU> fft_p1,
+                  cuda::std::span<const ComplexTypeGPU> fft_p2,
                   cuda::std::span<float> intensity,
                   int nchan,
                   int nfft,
@@ -249,7 +247,7 @@ void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
                                  .mbin_adjusted        = mbin_adjusted,
                                  .msamp                = msamp};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    cuda_utils::check_last_cuda_error("thrust::for_each failed");
+    gpu_utils::check_last_gpu_error("thrust::for_each failed");
 }
 
 void channel_delay_line(cuda::std::span<const float> in,
@@ -276,7 +274,7 @@ void channel_delay_line(cuda::std::span<const float> in,
                                     .nchans      = nchans,
                                     .nsamps      = nsamps};
     thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-    cuda_utils::check_last_cuda_error(
+    gpu_utils::check_last_gpu_error(
         "channel_delay_line: thrust::for_each failed");
 
     if (!history.empty()) {
@@ -285,14 +283,14 @@ void channel_delay_line(cuda::std::span<const float> in,
         update_delay_history_kernel<<<blocks, threads_per_block, 0, stream>>>(
             in.data(), history.data(), shift_table.data(), offsets.data(), idm,
             nchans, nsamps);
-        cuda_utils::check_last_cuda_error(
+        gpu_utils::check_last_gpu_error(
             "channel_delay_line: update_delay_history_kernel failed");
     }
 }
 
 namespace {
 __global__ void compute_chirp_kernel(const float* dm_grid,
-                                     ComplexTypeCUDA* chirp_table,
+                                     ComplexTypeGPU* chirp_table,
                                      double fcenter,
                                      double bw,
                                      double bw_sub,
@@ -334,13 +332,13 @@ __global__ void compute_chirp_kernel(const float* dm_grid,
 
     double s, c;
     sincos(phase_delay, &s, &c);
-    chirp_table[idx] = ComplexTypeCUDA(static_cast<float>(taper * c),
-                                       static_cast<float>(taper * s));
+    chirp_table[idx] = ComplexTypeGPU(static_cast<float>(taper * c),
+                                      static_cast<float>(taper * s));
 }
 } // namespace
 
 void compute_chirp(cuda::std::span<const float> dm_grid,
-                   cuda::std::span<ComplexTypeCUDA> chirp_table,
+                   cuda::std::span<ComplexTypeGPU> chirp_table,
                    float fcenter,
                    float bw,
                    SizeType nbin,
@@ -369,7 +367,7 @@ void compute_chirp(cuda::std::span<const float> dm_grid,
         dm_grid.data(), chirp_table.data(), static_cast<double>(fcenter),
         static_cast<double>(bw), bw_sub, bw_chan, bw_bin, taper_const,
         taper_exp, coeff_const, ndm, nsub, nchan, mbin, total);
-    cuda_utils::check_last_cuda_error("compute_chirp_kernel failed");
+    gpu_utils::check_last_gpu_error("compute_chirp_kernel failed");
 }
 
 } // namespace dmt::bb_utils

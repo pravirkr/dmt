@@ -9,11 +9,10 @@
 #include <span>
 #include <vector>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
+#include "dmt/gpu_utils.cuh"
 #include "dmt/unpacker.hpp"
 
 namespace dmt::utils {
@@ -57,15 +56,15 @@ public:
      * @param data_in Span viewing the input host data (copy to device is
      * internal).
      * @param data_p1 Span viewing the output device buffer for polarization 1
-     * (ComplexTypeCUDA).
+     * (ComplexTypeGPU).
      * @param data_p2 Span viewing the output device buffer for polarization 2
-     * (ComplexTypeCUDA).
+     * (ComplexTypeGPU).
      * @param stream CUDA stream for execution.
      */
     template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in,
-                 cuda::std::span<ComplexTypeCUDA> data_p1,
-                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cuda::std::span<ComplexTypeGPU> data_p1,
+                 cuda::std::span<ComplexTypeGPU> data_p2,
                  cudaStream_t stream = nullptr) const;
 
     /**
@@ -74,22 +73,22 @@ public:
      * @tparam DataType The integral input data type (e.g., uint8_t, int8_t).
      * @param data_in Span viewing the input device data.
      * @param data_p1 Span viewing the output device buffer for polarization 1
-     * (ComplexTypeCUDA).
+     * (ComplexTypeGPU).
      * @param data_p2 Span viewing the output device buffer for polarization 2
-     * (ComplexTypeCUDA).
+     * (ComplexTypeGPU).
      * @param stream CUDA stream for execution.
      */
     template <IntegralDataType DataType>
     void execute(cuda::std::span<const DataType> data_in,
-                 cuda::std::span<ComplexTypeCUDA> data_p1,
-                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cuda::std::span<ComplexTypeGPU> data_p1,
+                 cuda::std::span<ComplexTypeGPU> data_p2,
                  cudaStream_t stream = nullptr) const;
 
     template <IntegralDataType DataType,
               typename Alloc = std::allocator<DataType>>
     void execute(const std::vector<DataType, Alloc>& data_in,
-                 cuda::std::span<ComplexTypeCUDA> data_p1,
-                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cuda::std::span<ComplexTypeGPU> data_p1,
+                 cuda::std::span<ComplexTypeGPU> data_p2,
                  cudaStream_t stream = nullptr) const {
         execute<DataType>(std::span<const DataType>(data_in), data_p1, data_p2,
                           stream);

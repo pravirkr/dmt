@@ -6,14 +6,12 @@
 #include <stdexcept>
 #include <utility>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#include <cufft.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/logging.hpp"
 
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
+#include "dmt/gpu_utils.cuh"
 
 namespace dmt::utils {
 
@@ -54,7 +52,7 @@ public:
         if (is_real(kind)) {
             check_extent(howmany, m_n_complex, "n_complex");
         }
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         try {
             create_plan();
         } catch (...) {
@@ -76,7 +74,7 @@ public:
 
     ~Impl() {
         try {
-            cuda_utils::set_device(m_device_id);
+            gpu_utils::set_device(m_device_id);
         } catch (...) {
         }
         if (m_plan != 0) {
@@ -94,7 +92,7 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    void execute(cuda::std::span<ComplexTypeCUDA> data,
+    void execute(cuda::std::span<ComplexTypeGPU> data,
                  cudaStream_t stream) const {
         if (m_kind != FFTKind::kC2CForward && m_kind != FFTKind::kC2CBackward) {
             throw std::logic_error(
@@ -106,18 +104,18 @@ public:
                 std::format("CUFFTManager: complex span size {} != {}",
                             data.size(), expected));
         }
-        cuda_utils::set_device(m_device_id);
-        cuda_utils::check_cuda_call(cufftSetStream(m_plan, stream),
-                                    "CUFFTManager: cufftSetStream");
+        gpu_utils::set_device(m_device_id);
+        gpu_utils::check_gpu_call(cufftSetStream(m_plan, stream),
+                                  "CUFFTManager: cufftSetStream");
         auto* ptr = reinterpret_cast<cufftComplex*>(data.data());
         const int direction =
             m_kind == FFTKind::kC2CForward ? CUFFT_FORWARD : CUFFT_INVERSE;
-        cuda_utils::check_cuda_call(cufftExecC2C(m_plan, ptr, ptr, direction),
-                                    "CUFFTManager: cufftExecC2C");
+        gpu_utils::check_gpu_call(cufftExecC2C(m_plan, ptr, ptr, direction),
+                                  "CUFFTManager: cufftExecC2C");
     }
 
     void execute(cuda::std::span<float> real,
-                 cuda::std::span<ComplexTypeCUDA> freq,
+                 cuda::std::span<ComplexTypeGPU> freq,
                  cudaStream_t stream) const {
         if (m_kind != FFTKind::kR2C && m_kind != FFTKind::kC2R) {
             throw std::logic_error("CUFFTManager: execute(real, freq) requires "
@@ -130,19 +128,17 @@ public:
                 "CUFFTManager: span sizes real={} freq={} != {} and {}",
                 real.size(), freq.size(), n_real, n_complex));
         }
-        cuda_utils::set_device(m_device_id);
-        cuda_utils::check_cuda_call(cufftSetStream(m_plan, stream),
-                                    "CUFFTManager: cufftSetStream");
+        gpu_utils::set_device(m_device_id);
+        gpu_utils::check_gpu_call(cufftSetStream(m_plan, stream),
+                                  "CUFFTManager: cufftSetStream");
         auto* real_ptr = real.data();
         auto* freq_ptr = reinterpret_cast<cufftComplex*>(freq.data());
         if (m_kind == FFTKind::kR2C) {
-            cuda_utils::check_cuda_call(
-                cufftExecR2C(m_plan, real_ptr, freq_ptr),
-                "CUFFTManager: cufftExecR2C");
+            gpu_utils::check_gpu_call(cufftExecR2C(m_plan, real_ptr, freq_ptr),
+                                      "CUFFTManager: cufftExecR2C");
         } else {
-            cuda_utils::check_cuda_call(
-                cufftExecC2R(m_plan, freq_ptr, real_ptr),
-                "CUFFTManager: cufftExecC2R");
+            gpu_utils::check_gpu_call(cufftExecC2R(m_plan, freq_ptr, real_ptr),
+                                      "CUFFTManager: cufftExecC2R");
         }
     }
 
@@ -161,20 +157,20 @@ private:
             is_real(m_kind) && m_kind == FFTKind::kR2C ? n_freq : n;
         const cufftType type = real_type(m_kind);
 
-        cuda_utils::check_cuda_call(cufftCreate(&m_plan),
-                                    "CUFFTManager: cufftCreate");
-        cuda_utils::check_cuda_call(cufftSetAutoAllocation(m_plan, 0),
-                                    "CUFFTManager: cufftSetAutoAllocation");
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(cufftCreate(&m_plan),
+                                  "CUFFTManager: cufftCreate");
+        gpu_utils::check_gpu_call(cufftSetAutoAllocation(m_plan, 0),
+                                  "CUFFTManager: cufftSetAutoAllocation");
+        gpu_utils::check_gpu_call(
             cufftMakePlanMany(m_plan, 1, &n, nullptr, 1, idist, nullptr, 1,
                               odist, type, howmany, &m_workspace_size),
             "CUFFTManager: cufftMakePlanMany");
         if (m_workspace_size > 0) {
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMalloc(&m_workspace, m_workspace_size),
                 "CUFFTManager: cudaMalloc workspace");
-            cuda_utils::check_cuda_call(cufftSetWorkArea(m_plan, m_workspace),
-                                        "CUFFTManager: cufftSetWorkArea");
+            gpu_utils::check_gpu_call(cufftSetWorkArea(m_plan, m_workspace),
+                                      "CUFFTManager: cufftSetWorkArea");
         }
     }
 
@@ -210,12 +206,12 @@ CUFFTManager::~CUFFTManager()                                        = default;
 CUFFTManager::CUFFTManager(CUFFTManager&& other) noexcept            = default;
 CUFFTManager& CUFFTManager::operator=(CUFFTManager&& other) noexcept = default;
 
-void CUFFTManager::execute(cuda::std::span<ComplexTypeCUDA> data,
+void CUFFTManager::execute(cuda::std::span<ComplexTypeGPU> data,
                            cudaStream_t stream) const {
     m_impl->execute(data, stream);
 }
 void CUFFTManager::execute(cuda::std::span<float> real,
-                           cuda::std::span<ComplexTypeCUDA> freq,
+                           cuda::std::span<ComplexTypeGPU> freq,
                            cudaStream_t stream) const {
     m_impl->execute(real, freq, stream);
 }

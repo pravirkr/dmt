@@ -3,16 +3,16 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <random>
 #include <span>
 #include <string>
 #include <thrust/device_vector.h>
 #include <vector>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
+#include "test_helpers.hpp"
 
 // FDMT level fusion (the fuse_levels constructor parameter). The fused
 // kernel does the same float additions as the level-by-level kernels, so fused
@@ -124,7 +124,7 @@ TEST_CASE("FDMT fused levels are bit-exact with the unfused kernels",
                         random_floats(2 * c.nchans * c.nsamps,
                                       static_cast<unsigned>(c.nchans));
                     FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
-                             c.dt_min, 1, smearing, mode, Exec::cuda(0), 2,
+                             c.dt_min, 1, smearing, mode, test::gpu_exec(), 2,
                              kUnfused);
                     REQUIRE(ref.get_fuse_levels() == 0);
                     const auto expected = beams(ref, run(ref, wf));
@@ -133,7 +133,7 @@ TEST_CASE("FDMT fused levels are bit-exact with the unfused kernels",
                           kFDMTAutoFuse}) {
                         FDMT gpu(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                  c.dt_max, c.dt_min, 1, smearing, mode,
-                                 Exec::cuda(0), 2, fuse);
+                                 test::gpu_exec(), 2, fuse);
                         INFO("fuse=" << fuse
                                      << " effective=" << gpu.get_fuse_levels());
                         REQUIRE_THAT(beams(gpu, run(gpu, wf)),
@@ -158,7 +158,7 @@ TEST_CASE("FDMT fused packed int tree matches FDMT", "[fdmt_gpu][gpu]") {
                 for (const SizeType fuse :
                      {SizeType{2}, SizeType{4}, kFDMTAutoFuse}) {
                     FDMT gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
-                             smearing, mode, Exec::cuda(0), 1, fuse, true);
+                             smearing, mode, test::gpu_exec(), 1, fuse, true);
                     REQUIRE_THAT(beams(gpu, run_2bit(gpu, wf.packed)),
                                  Catch::Matchers::Equals(expected));
                 }
@@ -180,9 +180,9 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                          smearing, "valid", Exec::cpu(1), nbeams, kUnfused,
                          kFloatTree);
                 FDMT fused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                           smearing, "valid", Exec::cuda(0), nbeams, 3);
+                           smearing, "valid", test::gpu_exec(), nbeams, 3);
                 FDMT unfused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                             smearing, "valid", Exec::cuda(0), nbeams,
+                             smearing, "valid", test::gpu_exec(), nbeams,
                              kUnfused);
                 thrust::device_vector<float> hist(fused.history_state_size(),
                                                   0.0F);
@@ -209,7 +209,7 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
 TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
     const auto make = [](SizeType fuse) {
         return FDMT(704.0F, 1216.0F, 4096, 2048, 0.00008192F, 2048, 0, 1, true,
-                    "valid", Exec::cuda(0), 1, fuse);
+                    "valid", test::gpu_exec(), 1, fuse);
     };
     // Default: automatic, and a realistic band fuses at least one level.
     auto automatic    = make(kFDMTAutoFuse);
@@ -235,7 +235,7 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
     const SizeType nchans = 64;
     const SizeType nsamps = 256;
     FDMT small(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true, "valid",
-               Exec::cuda(0), 1, 3);
+               test::gpu_exec(), 1, 3);
     const auto wf = random_floats(nchans * nsamps, 3);
     thrust::device_vector<float> d_wf(wf.begin(), wf.end());
     thrust::device_vector<float> d_dmt(small.get_plan().get_buffer_size());

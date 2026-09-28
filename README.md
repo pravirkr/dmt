@@ -81,7 +81,7 @@ int main() {
         /*f_min=*/1200.0f, /*f_max=*/1600.0f, /*nchans=*/256, /*nsamps=*/1024,
         /*tsamp=*/1e-3f, /*dt_max=*/128, /*dt_min=*/0, /*dt_step=*/1,
         /*use_box_smearing=*/true, /*mode=*/"valid",
-        dmt::Exec::cpu(/*nthreads=*/4)  // or dmt::Exec::cuda(/*device=*/0)
+        dmt::Exec::cpu(/*nthreads=*/4)  // or Exec::cuda(0), Exec::hip(0)
     );
 
     const auto& plan = fdmt.get_plan();
@@ -119,10 +119,11 @@ pip install -e ".[develop,docs,tests]"
 uv sync --extra docs --extra tests
 ```
 
-To enable CUDA acceleration in Python:
+The GPU backend is picked up automatically (`DMT_GPU=AUTO`: CUDA, else
+ROCm/HIP); to require one:
 
 ```bash
-CMAKE_ARGS="-DDMT_CUDA=ON" pip install .
+CMAKE_ARGS="-DDMT_GPU=CUDA" pip install .   # or -DDMT_GPU=HIP
 ```
 
 ### C++ Library (CMake)

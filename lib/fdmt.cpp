@@ -28,9 +28,9 @@ make_fdmt_engine(const plans::FDMTPlan& plan,
     if (cfg.exec.backend == Backend::kCPU) {
         return detail::make_fdmt_cpu(plan, cfg);
     }
-#ifdef DMT_ENABLE_CUDA
-    if (cfg.exec.backend == Backend::kCUDA) {
-        return detail::make_fdmt_cuda(plan, cfg);
+#ifdef DMT_ENABLE_GPU
+    if (cfg.exec.backend == detail::kGPUBackend) {
+        return detail::make_fdmt_gpu(plan, cfg);
     }
 #endif
     detail::throw_unavailable("FDMT", cfg.exec.backend);

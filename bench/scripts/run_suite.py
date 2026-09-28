@@ -6,7 +6,8 @@ One command per machine; the JSON it writes is what plot_suite.py reads:
     python bench/scripts/run_suite.py --machine xeon-6348h --build-dir build
     python bench/scripts/run_suite.py --machine l40s --no-cpu      # GPU box
 
-Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_cuda.json``
+Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
+(``gpu`` is ``cuda`` or ``hip``, whichever the build has)
 (Google Benchmark JSON with the machine description in its ``context``).
 See bench/README.md for the full workflow.
 """
@@ -85,7 +86,13 @@ def ram_gb() -> float:
     return 16.0
 
 
-def gpu_model() -> str:
+def gpu_model(kind: str) -> str:
+    if kind == "hip":
+        if shutil.which("rocm-smi") is None:
+            return ""
+        out = _run(["rocm-smi", "--showproductname", "--csv"])
+        rows = [r for r in out.splitlines()[1:] if r.strip()]
+        return rows[0].split(",")[-1].strip() if rows else ""
     if shutil.which("nvidia-smi") is None:
         return ""
     names = _run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
@@ -113,10 +120,12 @@ def main() -> None:
     ap.add_argument("--max-gb", type=float, help="memory budget (default 60%% of RAM)")
     ap.add_argument("--cpu", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument(
+        "--gpu",
         "--cuda",
+        dest="gpu",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="run CUDA benchmarks (default: if the binary has them)",
+        help="run the GPU (CUDA or HIP) benchmarks (default: if the binary has them)",
     )
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")
@@ -128,14 +137,16 @@ def main() -> None:
         print(f"warning: {binary} is a {btype!r} build; publish Release numbers")
 
     listed = _run([str(binary), "--benchmark_list_tests"]).splitlines()
-    has_cuda = any("/cuda" in name for name in listed)
-    run_cuda = has_cuda if args.cuda is None else args.cuda
-    if run_cuda and not has_cuda:
-        sys.exit("the suite binary has no CUDA benchmarks (no CUDA build or no GPU)")
+    gpu_kind = next(
+        (k for k in ("cuda", "hip") if any(f"/{k}/" in name for name in listed)), ""
+    )
+    run_gpu = bool(gpu_kind) if args.gpu is None else args.gpu
+    if run_gpu and not gpu_kind:
+        sys.exit("the suite binary has no GPU benchmarks (no GPU build or no GPU)")
 
     out_dir = REPO / "bench" / "results" / args.machine
     out_dir.mkdir(parents=True, exist_ok=True)
-    gpu = gpu_model() if run_cuda else ""
+    gpu = gpu_model(gpu_kind) if run_gpu else ""
     ctx = {
         "machine": args.machine,
         "label": args.label or "",
@@ -157,8 +168,8 @@ def main() -> None:
     runs = []
     if args.cpu:
         runs.append(("cpu", r"^suite/.*/cpu[0-9]+/"))
-    if run_cuda:
-        runs.append(("cuda", r"^suite/.*/cuda(_host)?/"))
+    if run_gpu:
+        runs.append((gpu_kind, rf"^suite/.*/{gpu_kind}(_host)?/"))
     for kind, pattern in runs:
         regex = pattern + (f".*{args.filter}" if args.filter else "")
         out = out_dir / f"suite_{kind}.json"

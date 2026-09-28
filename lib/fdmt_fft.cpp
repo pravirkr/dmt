@@ -1,12 +1,10 @@
 #include "dmt/algorithms/fdmt_fft.hpp"
 
 #include <algorithm>
-#include <cstdint>
 #include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
-#include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -28,9 +26,9 @@ make_fdmt_fft_engine(const plans::FDMTPlan& plan,
     if (cfg.exec.backend == Backend::kCPU) {
         return detail::make_fdmt_fft_cpu(plan, cfg);
     }
-#ifdef DMT_ENABLE_CUDA
-    if (cfg.exec.backend == Backend::kCUDA) {
-        return detail::make_fdmt_fft_cuda(plan, cfg);
+#ifdef DMT_ENABLE_GPU
+    if (cfg.exec.backend == detail::kGPUBackend) {
+        return detail::make_fdmt_fft_gpu(plan, cfg);
     }
 #endif
     detail::throw_unavailable("FDMTFFT", cfg.exec.backend);
@@ -46,10 +44,12 @@ public:
          Exec exec,
          SizeType nbeams)
         : m_plan(std::move(plan)),
-          m_cfg{.use_box_smearing = use_box_smearing,
-                .mode             = parse_fdmt_mode(mode),
-                .nbeams           = nbeams,
-                .exec             = exec},
+          m_cfg{
+              .use_box_smearing = use_box_smearing,
+              .mode             = parse_fdmt_mode(mode),
+              .nbeams           = nbeams,
+              .exec             = exec,
+          },
           m_engine(make_fdmt_fft_engine(m_plan, m_cfg)) {}
 
     // The engine holds a pointer to m_plan; declaration order matters.

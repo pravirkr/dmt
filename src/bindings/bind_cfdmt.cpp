@@ -106,7 +106,7 @@ void bind_cfdmt(py::module_& mod) {
             Packed baseband layout.
         nthreads : int, optional
             OpenMP / FFTW threads on the CPU backend.
-        backend : {'cpu', 'cuda', 'hip', 'metal'}, optional
+        backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``); see
             :func:`available_backends`.
         device : int, optional

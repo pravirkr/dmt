@@ -58,7 +58,7 @@ DMT_BUILD_PYTHON = "ON"
 DMT_BUILD_TESTING = "OFF"
 DMT_BUILD_DOCS = "OFF"
 DMT_BUILD_BENCHMARKS = "OFF"
-DMT_CUDA = "AUTO"
+DMT_GPU = "AUTO"
 DMT_USE_SYSTEM_DEPS = "OFF"
 DMT_ENABLE_NATIVE_ARCH = "ON"
 DMT_ENABLE_COVERAGE = "OFF"
@@ -77,10 +77,10 @@ test-skip = "pp* *-musllinux* *-manylinux_i686"
 
 [tool.cibuildwheel.linux]
 # Wheels must run on machines other than the builder — no -march=native, pinned CPM deps.
-environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_CUDA = "AUTO" }
+environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_GPU = "AUTO" }
 
 [tool.cibuildwheel.macos]
-environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_CUDA = "OFF" }
+environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_GPU = "OFF" }
 
 [tool.ruff]
 include = ["pyproject.toml", "src/**/*.py"]
@@ -124,7 +124,7 @@ not-iterable = "ignore"        # For Numba prange
 minversion = "9.0"
 addopts = ["-ra", "-q"]
 testpaths = ["tests/python"]
-markers = ["cuda: tests that require the CUDA Python extension and a GPU"]
+
 
 [tool.coverage.run]
 source = ["dmtlib"]

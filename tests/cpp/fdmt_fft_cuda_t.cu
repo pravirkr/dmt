@@ -4,10 +4,10 @@
 #include <catch2/matchers/catch_matchers_all.hpp>
 
 #include <cstddef>
-#include <cuda/std/span>
 #include <random>
 #include <span>
 #include <vector>
+#include "dmt/gpu_compat.cuh"
 
 #include <thrust/device_vector.h>
 
@@ -39,7 +39,7 @@ TEST_CASE("FDMTFFT vs FDMTFFT roll", "[fdmt_fft_gpu][gpu][parity]") {
     FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "roll");
     FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                      "roll", Exec::cuda(0));
+                      "roll", test::gpu_exec());
     const auto n = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_cuda(n, 0.0F);
@@ -59,7 +59,7 @@ TEST_CASE("FDMTFFT device execute", "[fdmt_fft_gpu][gpu][parity]") {
 
     std::vector<float> waterfall(nchans * nsamps, 1.0F);
     FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                      "roll", Exec::cuda(0));
+                      "roll", test::gpu_exec());
     FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "roll");
     const auto n = fdmt_cpu.get_plan().get_dmt_size();
@@ -95,7 +95,7 @@ TEST_CASE("FDMTFFT multi-beam", "[fdmt_fft_gpu][gpu][parity]") {
         v = dist(rng);
     }
     FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                      "roll", Exec::cuda(0), nbeams);
+                      "roll", test::gpu_exec(), nbeams);
     FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "roll", Exec::cpu(1), nbeams);
     const auto n = nbeams * fdmt_cpu.get_plan().get_dmt_size();
@@ -120,7 +120,7 @@ TEST_CASE("FDMTFFT vs FDMTFFT valid first block",
     FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "valid");
     FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                      "valid", Exec::cuda(0));
+                      "valid", test::gpu_exec());
     const auto n = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_cuda(n, 0.0F);
@@ -142,7 +142,7 @@ TEST_CASE("FDMTFFT valid streaming nsamps < dt_max",
     FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "valid");
     FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                      "valid", Exec::cuda(0));
+                      "valid", test::gpu_exec());
     fdmt_cpu.reset_history();
     fdmt_cuda.reset_history();
     const auto n = fdmt_cpu.get_plan().get_dmt_size();
@@ -175,7 +175,7 @@ TEST_CASE("FDMTFFT full mode interior vs CPU FFT",
     FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "full");
     FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                      "full", Exec::cuda(0));
+                      "full", test::gpu_exec());
     const auto ndms       = fdmt_cpu.get_plan().get_dmt_ndms();
     const auto nsamps_out = fdmt_cpu.get_plan().get_dmt_nsamps();
     std::vector<float> dmt_cpu(ndms * nsamps_out, 0.0F);
@@ -202,7 +202,7 @@ TEST_CASE("FDMTFFT host stepper matches execute",
 
     std::vector<float> waterfall(nchans * nsamps, 1.1F);
     FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                 "roll", Exec::cuda(0));
+                 "roll", test::gpu_exec());
     const auto n = fdmt.get_plan().get_dmt_size();
     std::vector<float> dmt_one(n, 0.0F);
     fdmt.execute(waterfall, dmt_one);

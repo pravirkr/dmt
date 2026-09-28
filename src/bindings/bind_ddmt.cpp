@@ -62,7 +62,7 @@ void bind_ddmt(py::module_& mod) {
             beam-major arrays (nbeams, nchans, nsamps) and return
             (nbeams, n_dm, output_nsamps); at nbeams == 1 the plain 2D
             shapes still work.
-        backend : {'cpu', 'cuda', 'hip', 'metal'}, optional
+        backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``); see
             :func:`available_backends`.
         device : int, optional

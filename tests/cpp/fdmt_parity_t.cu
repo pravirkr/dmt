@@ -2,10 +2,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 #include <cstdint>
-#include <cuda/std/span>
 #include <span>
 #include <thrust/device_vector.h>
 #include <vector>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
@@ -18,14 +18,14 @@ using algorithms::CohFDMT;
 using algorithms::FDMT;
 using algorithms::FDMTFFT;
 
-TEST_CASE("parity: FDMT (cuda) execute and stepper match CPU",
+TEST_CASE("parity: FDMT (gpu) execute and stepper match CPU",
           "[fdmt][gpu][parity]") {
     const SizeType nchans = 16;
     const SizeType nsamps = 64;
     auto waterfall        = test::sequential_waterfall(nchans, nsamps);
     FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
     FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, 0, 1,
-             true, "valid", Exec::cuda(0));
+             true, "valid", test::gpu_exec());
     const auto n = cpu.get_plan().get_buffer_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_gpu(n, 0.0F);
@@ -49,7 +49,7 @@ TEST_CASE("parity: FDMT (cuda) execute and stepper match CPU",
     test::require_approx(dmt_step, dmt_cpu, cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("parity: FDMTFFT (cuda) execute matches CPU",
+TEST_CASE("parity: FDMTFFT (gpu) execute matches CPU",
           "[fdmt_fft][gpu][parity]") {
     const SizeType nchans = 8;
     const SizeType nsamps = 64;
@@ -57,7 +57,7 @@ TEST_CASE("parity: FDMTFFT (cuda) execute matches CPU",
     FDMTFFT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 8, 0, 1,
                 true, "roll");
     FDMTFFT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 8, 0, 1,
-                true, "roll", Exec::cuda(0));
+                true, "roll", test::gpu_exec());
     const auto n = cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_gpu(n, 0.0F);
@@ -66,8 +66,7 @@ TEST_CASE("parity: FDMTFFT (cuda) execute matches CPU",
     test::require_approx(dmt_gpu, dmt_cpu, 0.05);
 }
 
-TEST_CASE("parity: CohFDMT (cuda) execute matches CPU",
-          "[cfdmt][gpu][parity]") {
+TEST_CASE("parity: CohFDMT (gpu) execute matches CPU", "[cfdmt][gpu][parity]") {
     plans::CohFDMTPlan plan(1250.0F, 25.0F, 4, 1.0E-6F, 1 << 10, 2, 4.0E-6F,
                             5.0F, 0.0F, 32, "PRITF");
     CohFDMT cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
@@ -77,7 +76,7 @@ TEST_CASE("parity: CohFDMT (cuda) execute matches CPU",
     CohFDMT gpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                 plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                 plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                plan.get_noverlap(), "PRITF", Exec::cuda());
+                plan.get_noverlap(), "PRITF", test::gpu_exec());
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
     std::vector<uint8_t> data_in(in_size);
@@ -97,13 +96,13 @@ TEST_CASE("parity: CohFDMT (cuda) execute matches CPU",
         Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-2).margin(1.0E-2));
 }
 
-TEST_CASE("parity: FDMT (cuda) add_frb_track recovery matches CPU",
+TEST_CASE("parity: FDMT (gpu) add_frb_track recovery matches CPU",
           "[fdmt][gpu][parity]") {
     const SizeType nchans = 32;
     const SizeType nsamps = 128;
     FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, -16);
     FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, -16, 1,
-             true, "valid", Exec::cuda(0));
+             true, "valid", test::gpu_exec());
     const auto& plan = cpu.get_plan();
     std::vector<float> waterfall(nchans * nsamps, 0.0F);
     algorithms::add_frb_track(waterfall, plan, 8, 1.0F, 40, 1);
@@ -118,13 +117,13 @@ TEST_CASE("parity: FDMT (cuda) add_frb_track recovery matches CPU",
     CHECK(dmt_gpu[(8 * ns) + 40] == Catch::Approx(static_cast<float>(nchans)));
 }
 
-TEST_CASE("parity: FDMT (cuda) valid-mode second block matches CPU",
+TEST_CASE("parity: FDMT (gpu) valid-mode second block matches CPU",
           "[fdmt][gpu][parity]") {
     const SizeType nchans = 16;
     const SizeType nsamps = 32;
     FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
     FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, 0, 1,
-             true, "valid", Exec::cuda(0));
+             true, "valid", test::gpu_exec());
     const auto n = cpu.get_plan().get_buffer_size();
     auto block1  = test::sequential_waterfall(nchans, nsamps, 17, 1);
     auto block2  = test::sequential_waterfall(nchans, nsamps, 13, 3);

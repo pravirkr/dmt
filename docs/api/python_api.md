@@ -33,8 +33,8 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
 ```
 
 Every engine runs on the backend given by its keyword-only `backend=`
-argument (`"cpu"` by default; `"cuda"` in a CUDA build), with `nthreads` for
-the CPU and `device` for a GPU. `available_backends()` lists the backends in
+argument (`"cpu"` by default; `"cuda"` or `"hip"` when that backend is in the
+build), with `nthreads` for the CPU and `device` for a GPU. `available_backends()` lists the backends in
 the installed build; asking for any other raises `ValueError`. Inputs and
 outputs are NumPy arrays on every backend: a GPU backend copies the input to
 the device and the result back, and blocks until it is on the host. The

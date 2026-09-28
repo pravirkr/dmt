@@ -6,15 +6,14 @@
 #include <stdexcept>
 #include <vector>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
 #include "dmt/ddmt_kernel.cuh"
 #include "dmt/engines.hpp"
+#include "dmt/gpu_utils.cuh"
 #include "dmt/plans_cuda.cuh"
 
 namespace dmt::algorithms {
@@ -50,7 +49,7 @@ public:
             return;
         }
         release();
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaHostAlloc(reinterpret_cast<void**>(&m_ptr), n * sizeof(T),
                           cudaHostAllocDefault),
             "cudaHostAlloc failed");
@@ -222,7 +221,7 @@ public:
                             "expected {}, got {}",
                             m_history.size(), d_out.size()));
         }
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(d_out.data(), m_history.data(),
                             m_history.size() * sizeof(float),
                             cudaMemcpyHostToDevice, stream),
@@ -277,7 +276,7 @@ public:
                             "expected {} bytes, got {}",
                             expected_bytes, d_out.size()));
         }
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(d_out.data(), m_history_packed.data(),
                             m_history_packed.size(), cudaMemcpyHostToDevice,
                             stream),
@@ -315,15 +314,15 @@ public:
                             history_state_size(), d_in.size()));
         }
         m_history.resize(d_in.size());
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(m_history.data(), d_in.data(),
-                            d_in.size() * sizeof(float), cudaMemcpyDeviceToHost,
-                            stream),
-            "DDMT::load_history D2H copy failed");
+        gpu_utils::check_gpu_call(cudaMemcpyAsync(m_history.data(), d_in.data(),
+                                                  d_in.size() * sizeof(float),
+                                                  cudaMemcpyDeviceToHost,
+                                                  stream),
+                                  "DDMT::load_history D2H copy failed");
         if (stream != nullptr) {
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
         } else {
-            cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+            gpu_utils::check_gpu_call(cudaDeviceSynchronize());
         }
         m_history_len = d_in.size() / (m_nbeams * m_plan.get_nchans());
     }
@@ -363,14 +362,14 @@ public:
                             expected_bytes, d_in.size()));
         }
         m_history_packed.resize(d_in.size());
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(m_history_packed.data(), d_in.data(), d_in.size(),
                             cudaMemcpyDeviceToHost, stream),
             "DDMT::load_history(packed) D2H copy failed");
         if (stream != nullptr) {
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
         } else {
-            cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+            gpu_utils::check_gpu_call(cudaDeviceSynchronize());
         }
         m_history_len =
             *std::ranges::max_element(m_plan.get_container().delay_table);
@@ -378,7 +377,7 @@ public:
 
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
             throw std::invalid_argument(
@@ -473,7 +472,7 @@ public:
             const auto in_count = out_count + max_delay;
 
             if (g >= 2) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[buf]));
             }
 
@@ -482,16 +481,16 @@ public:
                             in_count, m_h_in_f[buf].data() + (row * max_in));
             }
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpy2DAsync(
                     thrust::raw_pointer_cast(m_d_in_f[buf].data()),
                     max_in * sizeof(float), m_h_in_f[buf].data(),
                     max_in * sizeof(float), in_count * sizeof(float), in_rows,
                     cudaMemcpyHostToDevice, m_htod_stream),
                 "H2D copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_htod_done[buf], m_htod_stream));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_exec_stream, m_htod_done[buf], 0));
 
             const auto out_beam_stride = dm_count * out_count;
@@ -503,23 +502,23 @@ public:
                 delay_ptr, kill_ptr, static_cast<int>(nchans),
                 static_cast<int>(dm_count), static_cast<int>(out_count),
                 static_cast<int>(m_nbeams), m_exec_stream);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_exec_done[buf], m_exec_stream));
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_dtoh_stream, m_exec_done[buf], 0));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(m_h_out_f[buf].data(),
                                 thrust::raw_pointer_cast(m_d_out_f[buf].data()),
                                 out_rows * out_count * sizeof(float),
                                 cudaMemcpyDeviceToHost, m_dtoh_stream),
                 "D2H copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_dtoh_done[buf], m_dtoh_stream));
 
             if (have_prev) {
                 const auto prev_buf = 1 - buf;
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[prev_buf]));
                 copy_out_strided(m_h_out_f[prev_buf].data(), prev_start,
                                  prev_count, out_rows, nsamps_reduced, dmt);
@@ -530,7 +529,7 @@ public:
         }
         if (have_prev) {
             const auto last_buf = (n_gulps - 1) % 2;
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventSynchronize(m_dtoh_done[last_buf]));
             copy_out_strided(m_h_out_f[last_buf].data(), prev_start, prev_count,
                              out_rows, nsamps_reduced, dmt);
@@ -559,7 +558,7 @@ public:
     void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
             throw std::invalid_argument(
@@ -584,12 +583,12 @@ public:
         // retained (host) history and return.
         if (nsamps_reduced == 0) {
             std::vector<float> new_block(in_rows * nsamps_new);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(new_block.data(), d_waterfall.data(),
                                 in_rows * nsamps_new * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream),
                 "DDMT::execute(device float) warm-up D2H copy failed");
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             std::vector<float> combined(in_rows * total);
             for (SizeType row = 0; row < in_rows; ++row) {
                 auto* dst = &combined[row * total];
@@ -627,13 +626,13 @@ public:
             thrust::device_vector<float> combined_d(in_rows * total);
             auto* combined_ptr = thrust::raw_pointer_cast(combined_d.data());
             for (SizeType row = 0; row < in_rows; ++row) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaMemcpyAsync(combined_ptr + (row * total),
                                     &m_history[row * m_history_len],
                                     m_history_len * sizeof(float),
                                     cudaMemcpyHostToDevice, stream),
                     "DDMT::execute(device float) history H2D copy failed");
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaMemcpyAsync(combined_ptr + (row * total) +
                                         m_history_len,
                                     d_waterfall.data() + (row * nsamps_new),
@@ -652,7 +651,7 @@ public:
             const auto new_history_len = std::min(total, max_delay);
             std::vector<float> new_history(in_rows * new_history_len);
             for (SizeType row = 0; row < in_rows; ++row) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaMemcpyAsync(&new_history[row * new_history_len],
                                     combined_ptr + (row * total) +
                                         (total - new_history_len),
@@ -666,7 +665,7 @@ public:
             // must be valid by then -- unlike the rest of this overload,
             // this one synchronization point can't be deferred to the
             // caller.
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             m_history     = std::move(new_history);
             m_history_len = new_history_len;
             return;
@@ -679,7 +678,7 @@ public:
         const auto new_history_len = std::min(total, max_delay);
         std::vector<float> new_history(in_rows * new_history_len);
         for (SizeType row = 0; row < in_rows; ++row) {
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(&new_history[row * new_history_len],
                                 d_waterfall.data() + (row * nsamps_new) +
                                     (nsamps_new - new_history_len),
@@ -688,7 +687,7 @@ public:
                 "DDMT::execute(device float) history retention D2H copy "
                 "failed");
         }
-        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
         m_history     = std::move(new_history);
         m_history_len = new_history_len;
     }
@@ -696,7 +695,7 @@ public:
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nsamps_total,
                  std::span<int32_t> dmt) override {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
@@ -854,7 +853,7 @@ public:
                 bit_pack_utils::packed_row_bytes(in_samps + align_pad, nbits);
 
             if (g >= 2) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[buf]));
             }
 
@@ -866,15 +865,15 @@ public:
                             m_h_in_u8[buf].data() + (row * max_in_bytes));
             }
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpy2DAsync(
                     thrust::raw_pointer_cast(m_d_in_u8[buf].data()),
                     max_in_bytes, m_h_in_u8[buf].data(), max_in_bytes, in_bytes,
                     in_rows, cudaMemcpyHostToDevice, m_htod_stream),
                 "H2D copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_htod_done[buf], m_htod_stream));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_exec_stream, m_htod_done[buf], 0));
 
             const auto out_beam_stride = dm_count * out_count;
@@ -886,24 +885,24 @@ public:
                 delay_ptr, kill_ptr, static_cast<int>(nchans),
                 static_cast<int>(dm_count), static_cast<int>(out_count),
                 static_cast<int>(m_nbeams), m_exec_stream);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_exec_done[buf], m_exec_stream));
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_dtoh_stream, m_exec_done[buf], 0));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(
                     m_h_out_i32[buf].data(),
                     thrust::raw_pointer_cast(m_d_out_i32[buf].data()),
                     out_rows * out_count * sizeof(int32_t),
                     cudaMemcpyDeviceToHost, m_dtoh_stream),
                 "D2H copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_dtoh_done[buf], m_dtoh_stream));
 
             if (have_prev) {
                 const auto prev_buf = 1 - buf;
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[prev_buf]));
                 copy_out_strided(m_h_out_i32[prev_buf].data(), prev_start,
                                  prev_count, out_rows, nsamps_reduced, dmt);
@@ -914,7 +913,7 @@ public:
         }
         if (have_prev) {
             const auto last_buf = (n_gulps - 1) % 2;
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventSynchronize(m_dtoh_done[last_buf]));
             copy_out_strided(m_h_out_i32[last_buf].data(), prev_start,
                              prev_count, out_rows, nsamps_reduced, dmt);
@@ -962,7 +961,7 @@ public:
                  SizeType nsamps_total,
                  cuda::std::span<int32_t> d_dmt,
                  cudaStream_t stream) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
@@ -1000,15 +999,15 @@ public:
         // Cold start or warm-up with insufficient samples to produce output
         if (nsamps_reduced == 0) {
             std::vector<uint8_t> new_block(in_rows * row_bytes);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(new_block.data(), d_waterfall_packed.data(),
                                 in_rows * row_bytes, cudaMemcpyDeviceToHost,
                                 stream),
                 "DDMT::execute(device packed) warm-up D2H copy failed");
             if (stream != nullptr) {
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             } else {
-                cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
             }
             std::vector<uint8_t> combined(in_rows * combined_row_bytes, 0);
             auto combine_rows = [&]<unsigned NBITS>() {
@@ -1072,16 +1071,16 @@ public:
                 in_rows * new_hist_row_bytes, 0);
 
             std::vector<uint8_t> host_input(in_rows * row_bytes);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(host_input.data(), d_waterfall_packed.data(),
                                 in_rows * row_bytes, cudaMemcpyDeviceToHost,
                                 stream),
                 "DDMT::execute(device packed) history retention D2H copy "
                 "failed");
             if (stream != nullptr) {
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             } else {
-                cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
             }
 
             auto extract_tail = [&]<unsigned NBITS>() {
@@ -1116,15 +1115,15 @@ public:
             m_history_len    = new_history_len;
         } else {
             std::vector<uint8_t> new_block(in_rows * row_bytes);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(new_block.data(), d_waterfall_packed.data(),
                                 in_rows * row_bytes, cudaMemcpyDeviceToHost,
                                 stream),
                 "DDMT::execute(device packed) input D2H copy failed");
             if (stream != nullptr) {
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             } else {
-                cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
             }
 
             std::vector<uint8_t> combined(in_rows * combined_row_bytes, 0);
@@ -1160,7 +1159,7 @@ public:
             }
 
             thrust::device_vector<uint8_t> combined_d(combined.size());
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(thrust::raw_pointer_cast(combined_d.data()),
                                 combined.data(), combined.size(),
                                 cudaMemcpyHostToDevice, stream),
@@ -1220,7 +1219,7 @@ public:
                             SizeType nsamps_total,
                             cuda::std::span<int32_t> d_dmt,
                             cudaStream_t stream) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
@@ -1269,7 +1268,7 @@ public:
     void execute_time_major(std::span<const uint8_t> filterbank_packed,
                             SizeType nsamps_total,
                             std::span<int32_t> dmt) override {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
@@ -1303,7 +1302,7 @@ public:
 
         thrust::device_vector<uint8_t> d_in(filterbank_packed.size());
         thrust::device_vector<int32_t> d_out(dmt.size());
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(thrust::raw_pointer_cast(d_in.data()),
                        filterbank_packed.data(), filterbank_packed.size(),
                        cudaMemcpyHostToDevice),
@@ -1322,9 +1321,9 @@ public:
             static_cast<int>(nchans), static_cast<int>(dm_count),
             static_cast<int>(nsamps_reduced), static_cast<int>(m_nbeams),
             nullptr);
-        cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+        gpu_utils::check_gpu_call(cudaDeviceSynchronize());
 
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(dmt.data(), thrust::raw_pointer_cast(d_out.data()),
                        dmt.size() * sizeof(int32_t), cudaMemcpyDeviceToHost),
             "D2H copy failed in execute_time_major");
@@ -1332,7 +1331,7 @@ public:
 
 protected:
     [[nodiscard]] Backend backend() const noexcept override {
-        return Backend::kCUDA;
+        return detail::kGPUBackend;
     }
 
 private:
@@ -1362,21 +1361,21 @@ private:
     SizeType m_history_len = 0;
 
     void init() {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         plans::transfer_ddmt_plan_to_device(m_plan.get_container(), m_plan_d);
 
-        cuda_utils::check_cuda_call(cudaStreamCreate(&m_htod_stream),
-                                    "Failed to create H2D stream");
-        cuda_utils::check_cuda_call(cudaStreamCreate(&m_exec_stream),
-                                    "Failed to create execute stream");
-        cuda_utils::check_cuda_call(cudaStreamCreate(&m_dtoh_stream),
-                                    "Failed to create D2H stream");
+        gpu_utils::check_gpu_call(cudaStreamCreate(&m_htod_stream),
+                                  "Failed to create H2D stream");
+        gpu_utils::check_gpu_call(cudaStreamCreate(&m_exec_stream),
+                                  "Failed to create execute stream");
+        gpu_utils::check_gpu_call(cudaStreamCreate(&m_dtoh_stream),
+                                  "Failed to create D2H stream");
         for (int i = 0; i < 2; ++i) {
-            cuda_utils::check_cuda_call(cudaEventCreateWithFlags(
+            gpu_utils::check_gpu_call(cudaEventCreateWithFlags(
                 &m_htod_done[i], cudaEventDisableTiming));
-            cuda_utils::check_cuda_call(cudaEventCreateWithFlags(
+            gpu_utils::check_gpu_call(cudaEventCreateWithFlags(
                 &m_exec_done[i], cudaEventDisableTiming));
-            cuda_utils::check_cuda_call(cudaEventCreateWithFlags(
+            gpu_utils::check_gpu_call(cudaEventCreateWithFlags(
                 &m_dtoh_done[i], cudaEventDisableTiming));
         }
     }
@@ -1415,7 +1414,7 @@ private:
             static_cast<unsigned>((total_threads + block.x - 1) / block.x),
             static_cast<unsigned>(std::min<SizeType>(dm_count, 65535)),
             static_cast<unsigned>(nbeams));
-        cuda_utils::check_kernel_launch_params(grid, block);
+        gpu_utils::check_kernel_launch_params(grid, block);
         return grid;
     }
 
@@ -1440,7 +1439,7 @@ private:
             d_in, in_chan_stride, in_beam_stride, d_out, out_dm_stride,
             out_beam_stride, delay_ptr, kill_ptr, nchans, dm_count,
             nsamps_reduced);
-        cuda_utils::check_last_cuda_error("ddmt_kernel_float launch failed");
+        gpu_utils::check_last_gpu_error("ddmt_kernel_float launch failed");
     }
 
     static void launch_packed(SizeType nbits,
@@ -1496,7 +1495,7 @@ private:
         default:
             break;
         }
-        cuda_utils::check_last_cuda_error("ddmt_kernel_packed launch failed");
+        gpu_utils::check_last_gpu_error("ddmt_kernel_packed launch failed");
     }
 
     static void launch_time_major(SizeType nbits,
@@ -1551,16 +1550,15 @@ private:
         default:
             break;
         }
-        cuda_utils::check_last_cuda_error(
-            "ddmt_kernel_time_major launch failed");
+        gpu_utils::check_last_gpu_error("ddmt_kernel_time_major launch failed");
     }
 };
 
 } // namespace
 
 std::unique_ptr<detail::DDMTEngine>
-detail::make_ddmt_cuda(const plans::DDMTPlan& plan,
-                       const detail::DDMTEngineConfig& cfg) {
+detail::make_ddmt_gpu(const plans::DDMTPlan& plan,
+                      const detail::DDMTEngineConfig& cfg) {
     return std::make_unique<DDMTCudaEngine>(plan, cfg);
 }
 

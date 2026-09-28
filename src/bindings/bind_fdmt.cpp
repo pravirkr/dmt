@@ -88,7 +88,7 @@ void bind_fdmt(py::module_& mod) {
             Performance parameter: packed input stores tree levels as
             uint8/uint16 where the exact bound allows (default True). Set
             False to inspect every level of a packed stepper run.
-        backend : {'cpu', 'cuda', 'hip', 'metal'}, optional
+        backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``). See
             :func:`available_backends` for the backends in this build; any
             other raises ``ValueError``.
@@ -591,7 +591,7 @@ void bind_fdmt(py::module_& mod) {
             OpenMP / FFTW threads.
         nbeams : int, optional
             Packed independent beams.
-        backend : {'cpu', 'cuda', 'hip', 'metal'}, optional
+        backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``); see
             :func:`available_backends`.
         device : int, optional

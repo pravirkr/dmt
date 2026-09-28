@@ -125,7 +125,7 @@ DMT_HD inline void fdmt_init_column(int dt_first,
             prev_val = get_sample(t);
         } else {
             float sum = 0.0F;
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #pragma unroll 4
 #endif
             for (int d = 0; d <= s_lo; ++d) {

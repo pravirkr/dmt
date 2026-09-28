@@ -13,18 +13,17 @@
 #include <utility>
 #include <vector>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/logging.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_fused_tile.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/gpu_utils.cuh"
 #include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
 
@@ -291,7 +290,7 @@ kernel_advance_tree_history(const TIn* __restrict__ state_in,
 struct DeviceBlock {
     template <typename F>
     __host__ __device__ void for_each(int n, F&& f) const {
-#ifdef __CUDA_ARCH__
+#if DMT_GPU_DEVICE_PASS
         for (int i = static_cast<int>(threadIdx.x); i < n;
              i += static_cast<int>(blockDim.x)) {
             f(i);
@@ -302,7 +301,7 @@ struct DeviceBlock {
 #endif
     }
     __host__ __device__ void sync() const {
-#ifdef __CUDA_ARCH__
+#if DMT_GPU_DEVICE_PASS
         __syncthreads();
 #endif
     }
@@ -368,7 +367,7 @@ public:
                 "FDMT (cuda): nbeams must be at least 1");
         }
         check_int32_extents();
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         // Allocate internal state buffer on device for ping-pong
         m_state_internal_d.resize(m_nbeams * m_plan.get_buffer_size(), 0.0F);
         if (m_mode == FDMTMode::kValid) {
@@ -407,7 +406,7 @@ public:
         }
         m_levels_d.resize(m_plan.get_niters() + 1);
         configure_fusion(fuse_levels);
-        cuda_utils::check_last_cuda_error("FDMT (cuda): constructor failed");
+        gpu_utils::check_last_gpu_error("FDMT (gpu): constructor failed");
     }
 
     ~FDMTCudaEngine() override                       = default;
@@ -419,7 +418,8 @@ public:
     void execute(std::span<const float> waterfall_h,
                  std::span<float> dmt_h) override {
         check_inputs(waterfall_h.size(), dmt_h.size());
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         stage_to_device(m_stage_wf_f32_d, waterfall_h);
         execute_d(cuda::std::span<const float>(
                       thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
@@ -440,7 +440,8 @@ public:
                  SizeType nbits,
                  std::span<float> dmt_h) override {
         check_packed_inputs(waterfall_h.size(), nbits, dmt_h.size());
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         // Only the packed bytes cross PCIe (32/nbits times less than float).
         stage_to_device(m_stage_wf_packed_d, waterfall_h);
         execute_d(cuda::std::span<const uint8_t>(
@@ -462,7 +463,7 @@ public:
         }
         cudaMemcpyAsync(thrust::raw_pointer_cast(dst.data()), src.data(),
                         src.size_bytes(), cudaMemcpyHostToDevice, nullptr);
-        cuda_utils::check_last_cuda_error(
+        gpu_utils::check_last_gpu_error(
             "FDMT::execute (host): H->D copy failed");
     }
 
@@ -483,7 +484,7 @@ public:
                           m_plan.get_dmt_size() * sizeof(float), m_nbeams,
                           cudaMemcpyDeviceToHost, nullptr);
         cudaStreamSynchronize(nullptr);
-        cuda_utils::check_last_cuda_error(
+        gpu_utils::check_last_gpu_error(
             "FDMT::execute (host): D->H copy failed");
     }
 
@@ -500,6 +501,7 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         execute_d(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
+        m_device_work.mark(to_cuda(stream));
     }
 
     void execute(DeviceSpan<const uint8_t> d_waterfall,
@@ -507,6 +509,7 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         execute_d(to_cuda(d_waterfall), nbits, to_cuda(d_dmt), to_cuda(stream));
+        m_device_work.mark(to_cuda(stream));
     }
 
     void reset(DeviceSpan<const uint8_t> d_waterfall,
@@ -515,6 +518,7 @@ public:
                Stream stream) override {
         reset_impl(to_cuda(d_waterfall), nbits, to_cuda(d_dmt), to_cuda(stream),
                    /*fuse=*/false);
+        m_device_work.mark(to_cuda(stream));
     }
 
     void reset(DeviceSpan<const float> d_waterfall,
@@ -522,6 +526,7 @@ public:
                Stream stream) override {
         reset_impl(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream),
                    /*fuse=*/false);
+        m_device_work.mark(to_cuda(stream));
     }
 
     // Host-memory stepper: the block is staged in the host-execute() device
@@ -530,7 +535,8 @@ public:
     void reset(std::span<const float> waterfall_h,
                std::span<float> dmt_h) override {
         check_inputs(waterfall_h.size(), dmt_h.size());
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         stage_to_device(m_stage_wf_f32_d, waterfall_h);
         reset_impl(cuda::std::span<const float>(
                        thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
@@ -543,7 +549,8 @@ public:
                SizeType nbits,
                std::span<float> dmt_h) override {
         check_packed_inputs(waterfall_h.size(), nbits, dmt_h.size());
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         stage_to_device(m_stage_wf_packed_d, waterfall_h);
         reset_impl(cuda::std::span<const uint8_t>(
                        thrust::raw_pointer_cast(m_stage_wf_packed_d.data()),
@@ -650,7 +657,7 @@ public:
             throw std::logic_error(
                 "FDMT (cuda): Stepper is not initialized. Call reset() first.");
         }
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         m_host_level_valid         = false;
         cudaStream_t stream        = to_cuda(stream_in);
         cudaStream_t active_stream = stream ? stream : m_stream;
@@ -662,6 +669,7 @@ public:
             execute_iter_device(m_current_level + 1, active_stream);
             m_current_level++;
         }
+        m_device_work.mark(active_stream);
     }
 
     void advance_until_remaining(SizeType remaining_levels,
@@ -779,7 +787,7 @@ public:
             throw std::logic_error(
                 "FDMT (cuda): Stepper is not initialized. Call reset() first.");
         }
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         cudaStream_t stream        = to_cuda(stream_in);
         cudaStream_t active_stream = stream ? stream : m_stream;
         advance_until_remaining(0, Stream{active_stream});
@@ -793,9 +801,10 @@ public:
             cudaMemcpyAsync(m_dmt_target_ptr, final_ptr,
                             final_size * sizeof(float),
                             cudaMemcpyDeviceToDevice, active_stream);
-            cuda_utils::check_last_cuda_error(
+            gpu_utils::check_last_gpu_error(
                 "finalize: cudaMemcpyAsync final state to dmt failed");
         }
+        m_device_work.mark(active_stream);
         if (!m_host_dmt.empty()) {
             // Host-memory stepper: the result goes back to the caller's
             // buffer (the staging copy runs on the default stream).
@@ -811,7 +820,7 @@ public:
     /// execute()/reset() call starts as if this were a brand-new instance.
     /// Mirrors the CPU engine's reset_history().
     void reset_history() noexcept override {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         if (!m_history_a_d.empty()) {
             m_history_a_d.assign(m_history_a_d.size(), 0.0F);
         }
@@ -857,7 +866,7 @@ public:
                 "got {}",
                 history_state_size(), out.size()));
         }
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         float* dst    = out.data();
         auto copy_out = [&](const thrust::device_vector<float>& src) {
             if (!src.empty()) {
@@ -869,7 +878,8 @@ public:
         };
         copy_out(next_level0_history());
         copy_out(next_tree_history());
-        cuda_utils::check_last_cuda_error("FDMT::save_history failed");
+        gpu_utils::check_last_gpu_error("FDMT::save_history failed");
+        m_device_work.mark(stream);
     }
 
     /// Replaces the live streaming history with a buffer previously produced
@@ -885,7 +895,7 @@ public:
                 "got {}",
                 history_state_size(), in.size()));
         }
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const float* src = in.data();
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
@@ -897,7 +907,8 @@ public:
         };
         copy_in(next_level0_history());
         copy_in(next_tree_history());
-        cuda_utils::check_last_cuda_error("FDMT::load_history failed");
+        gpu_utils::check_last_gpu_error("FDMT::load_history failed");
+        m_device_work.mark(stream);
     }
 
     // Host-memory history: the same live buffers as the device overloads,
@@ -909,8 +920,8 @@ public:
                 "got {}",
                 history_state_size(), out.size()));
         }
-        cuda_utils::set_device(m_device_id);
-        cudaStreamSynchronize(m_stream);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         float* dst    = out.data();
         auto copy_out = [&](const thrust::device_vector<float>& src) {
             if (!src.empty()) {
@@ -921,7 +932,7 @@ public:
         };
         copy_out(next_level0_history());
         copy_out(next_tree_history());
-        cuda_utils::check_last_cuda_error("FDMT::save_history failed");
+        gpu_utils::check_last_gpu_error("FDMT::save_history failed");
     }
 
     void load_history(std::span<const float> in) override {
@@ -931,8 +942,8 @@ public:
                 "got {}",
                 history_state_size(), in.size()));
         }
-        cuda_utils::set_device(m_device_id);
-        cudaStreamSynchronize(m_stream);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         const float* src = in.data();
         auto copy_in     = [&](thrust::device_vector<float>& dst_vec) {
             if (!dst_vec.empty()) {
@@ -944,17 +955,17 @@ public:
         };
         copy_in(next_level0_history());
         copy_in(next_tree_history());
-        cuda_utils::check_last_cuda_error("FDMT::load_history failed");
+        gpu_utils::check_last_gpu_error("FDMT::load_history failed");
     }
 
 protected:
     [[nodiscard]] Backend backend() const noexcept override {
-        return Backend::kCUDA;
+        return detail::kGPUBackend;
     }
 
 private:
     [[nodiscard]] Device device() const noexcept {
-        return {.backend = Backend::kCUDA, .id = m_device_id};
+        return {.backend = detail::kGPUBackend, .id = m_device_id};
     }
 
     // Host copy of beam 0's current level for the host view_* methods,
@@ -969,11 +980,11 @@ private:
             const auto nelements =
                 m_plan.get_container().state_shape[m_current_level].nelements;
             m_host_level.resize(nelements);
-            cuda_utils::set_device(m_device_id);
-            cudaStreamSynchronize(m_stream);
+            gpu_utils::set_device(m_device_id);
+            m_device_work.wait();
             cudaMemcpy(m_host_level.data(), level_d, nelements * sizeof(float),
                        cudaMemcpyDeviceToHost);
-            cuda_utils::check_last_cuda_error(
+            gpu_utils::check_last_gpu_error(
                 "FDMT::view (host): D->H copy failed");
             m_host_level_valid = true;
         }
@@ -1043,6 +1054,8 @@ private:
     std::vector<LevelBufD> m_levels_d;
     float* m_dmt_target_ptr{nullptr};
     cudaStream_t m_stream{nullptr};
+    // End of the latest device-memory call; host-memory calls wait for it.
+    mutable gpu_utils::DeviceWorkFence m_device_work;
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
     // Host-memory execute() staging (see stage_to_device()).
@@ -1231,7 +1244,7 @@ private:
     }
 
     void adopt_fused_plan(const detail::FDMTFusedTilePlan& plan, int tile) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         auto fused              = std::make_unique<FusedLevelsD>();
         fused->group_info       = plan.group_info;
         fused->coords           = plan.coords;
@@ -1251,7 +1264,7 @@ private:
         fused->smem_bytes         = (cap_a + cap_b) * sizeof(float);
         fused->ntiles             = (plan.ntiles_nsamps + tile - 1) / tile;
         fused->ngroups            = plan.ngroups;
-        cuda_utils::check_last_cuda_error(
+        gpu_utils::check_last_gpu_error(
             "FDMT (cuda): fused plan upload failed");
         logging::debug("FDMT (cuda): fusing levels 0..{} (tile {} samples, {} "
                        "groups, {} B shared)",
@@ -1272,7 +1285,7 @@ private:
                              static_cast<unsigned>(f.ngroups),
                              static_cast<unsigned>(m_nbeams));
         const dim3 block_size(kFusedThreads);
-        cuda_utils::check_kernel_launch_params(grid_size, block_size);
+        gpu_utils::check_kernel_launch_params(grid_size, block_size);
         const bool valid = Mode == FDMTMode::kValid;
         kernel_fused_levels<Mode, Smear, Input, TOut>
             <<<grid_size, block_size, f.smem_bytes, stream>>>(
@@ -1282,7 +1295,7 @@ private:
                 valid ? m_hist_in_ptr : nullptr,
                 valid ? m_hist_out_ptr : nullptr,
                 static_cast<int>(m_plan.get_tree_history_size()));
-        cuda_utils::check_last_cuda_error("kernel_fused_levels launch failed");
+        gpu_utils::check_last_gpu_error("kernel_fused_levels launch failed");
     }
 
     // Levels 0..F in one kernel, straight into level F's buffer (stored as
@@ -1351,7 +1364,7 @@ private:
                cuda::std::span<float> d_dmt,
                cudaStream_t stream,
                bool fuse) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         // In "valid" mode every block must reach the root before the next
         // one starts: levels a stepper run never executed would skip this
         // block's history update, and the next block would read the
@@ -1454,7 +1467,7 @@ private:
         const dim3 block_size = dim3(256, 1);
         const dim3 grid_size  = dim3((nsamps + block_size.x - 1) / block_size.x,
                                      coords_max, m_nbeams);
-        cuda_utils::check_kernel_launch_params(grid_size, block_size);
+        gpu_utils::check_kernel_launch_params(grid_size, block_size);
 
         // Beam b of every level lives at element offset b * get_buffer_size()
         // -- the documented beam-major layout, shared with the CPU FDMT. (Using
@@ -1498,12 +1511,12 @@ private:
                             in_ptr, coords_sum_cur, m_hist_in_ptr,
                             m_hist_out_ptr, ncoords_sum_cur, in_state_nelements,
                             tree_hist_size);
-                    cuda_utils::check_last_cuda_error(
+                    gpu_utils::check_last_gpu_error(
                         "kernel_advance_tree_history launch failed");
                 }
             }
         }
-        cuda_utils::check_last_cuda_error("kernel_execute_iter launch failed");
+        gpu_utils::check_last_gpu_error("kernel_execute_iter launch failed");
     }
 
     template <FDMTMode Mode, bool Smear, typename Input, typename TOut>
@@ -1535,7 +1548,7 @@ private:
         const dim3 block_size = dim3(1024, 1);
         const dim3 grid_size =
             dim3((nsamps + block_size.x - 1) / block_size.x, nsubs, m_nbeams);
-        cuda_utils::check_kernel_launch_params(grid_size, block_size);
+        gpu_utils::check_kernel_launch_params(grid_size, block_size);
 
         const auto launch = [&](auto mode_tag, auto smear_tag) {
             launch_init<decltype(mode_tag)::value, decltype(smear_tag)::value,
@@ -1564,7 +1577,7 @@ private:
                 launch(Valid{}, std::false_type{});
             }
         }
-        cuda_utils::check_last_cuda_error("kernel_init_fdmt launch failed");
+        gpu_utils::check_last_gpu_error("kernel_init_fdmt launch failed");
 
         advance_level0_history(waterfall_d, stream);
     }
@@ -1588,7 +1601,7 @@ private:
                 <<<grid_hist, block_hist, 0, stream>>>(
                     m_level0_hist_out_ptr, m_level0_hist_in_ptr, waterfall_d,
                     nsubs, nsamps, dt_max_final);
-            cuda_utils::check_last_cuda_error(
+            gpu_utils::check_last_gpu_error(
                 "kernel_advance_history_window launch failed");
         }
     }
@@ -1597,8 +1610,8 @@ private:
 } // namespace
 
 std::unique_ptr<detail::FDMTEngine>
-detail::make_fdmt_cuda(const plans::FDMTPlan& plan,
-                       const detail::FDMTEngineConfig& cfg) {
+detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
+                      const detail::FDMTEngineConfig& cfg) {
     return std::make_unique<FDMTCudaEngine>(plan, cfg);
 }
 

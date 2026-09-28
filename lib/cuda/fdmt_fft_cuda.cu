@@ -10,17 +10,15 @@
 #include <utility>
 #include <vector>
 
-#include <cuda/std/complex>
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
 #include "dmt/engines.hpp"
 #include "dmt/fft_cuda.cuh"
+#include "dmt/gpu_utils.cuh"
 #include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
 
@@ -97,9 +95,9 @@ __global__ void kernel_update_overlap(const float* __restrict__ wf,
 }
 
 __global__ void
-kernel_init_fdmt_fft(const ComplexTypeCUDA* __restrict__ spectra,
-                     const ComplexTypeCUDA* __restrict__ win_table,
-                     ComplexTypeCUDA* __restrict__ state,
+kernel_init_fdmt_fft(const ComplexTypeGPU* __restrict__ spectra,
+                     const ComplexTypeGPU* __restrict__ win_table,
+                     ComplexTypeGPU* __restrict__ state,
                      const int* __restrict__ grids0_coord_offset_ptr,
                      const int* __restrict__ grids0_ndt_ptr,
                      const int* __restrict__ grids0_dt_grid_ptr,
@@ -118,22 +116,22 @@ kernel_init_fdmt_fft(const ComplexTypeCUDA* __restrict__ spectra,
     const auto ndt         = grids0_ndt_ptr[i_sub];
     const auto* dt_grid    = &grids0_dt_grid_ptr[coord_base];
     const auto spec_offset = (i_beam * nsubs * n_bins) + (i_sub * n_bins) + k;
-    const ComplexTypeCUDA sample = spectra[spec_offset];
-    const auto beam_state_base   = i_beam * max_coords * n_bins;
+    const ComplexTypeGPU sample = spectra[spec_offset];
+    const auto beam_state_base  = i_beam * max_coords * n_bins;
     for (int i_dt = 0; i_dt < ndt; ++i_dt) {
-        const int s               = abs(dt_grid[i_dt]);
-        const ComplexTypeCUDA win = win_table[(s * n_bins) + k];
-        const auto coord_idx      = coord_base + i_dt;
+        const int s              = abs(dt_grid[i_dt]);
+        const ComplexTypeGPU win = win_table[(s * n_bins) + k];
+        const auto coord_idx     = coord_base + i_dt;
         state[beam_state_base + (coord_idx * n_bins) + k] = sample * win;
     }
 }
 
 __global__ void
-kernel_execute_iter_fft(const ComplexTypeCUDA* __restrict__ state_in,
-                        ComplexTypeCUDA* __restrict__ state_out,
+kernel_execute_iter_fft(const ComplexTypeGPU* __restrict__ state_in,
+                        ComplexTypeGPU* __restrict__ state_out,
                         const plans::FDMTCoordDPtrs coords_sum,
                         const plans::FDMTCoordDPtrs coords_copy,
-                        const ComplexTypeCUDA* __restrict__ phasors,
+                        const ComplexTypeGPU* __restrict__ phasors,
                         int n_bins,
                         int ncoords_sum_cur,
                         int ncoords_copy_cur,
@@ -167,10 +165,10 @@ kernel_execute_iter_fft(const ComplexTypeCUDA* __restrict__ state_in,
             (i_beam * max_coords * n_bins) + (head_idx * n_bins);
         const auto out_base =
             (i_beam * max_coords * n_bins) + (out_idx * n_bins);
-        const ComplexTypeCUDA tail = state_in[tail_base + k];
-        const ComplexTypeCUDA head = state_in[head_base + k];
-        const ComplexTypeCUDA p    = phasors[(s * n_bins) + k];
-        state_out[out_base + k]    = tail + (head * p);
+        const ComplexTypeGPU tail = state_in[tail_base + k];
+        const ComplexTypeGPU head = state_in[head_base + k];
+        const ComplexTypeGPU p    = phasors[(s * n_bins) + k];
+        state_out[out_base + k]   = tail + (head * p);
     }
     if (i_coord < ncoords_copy_cur) {
         const auto tail_idx = coords_copy.tail_buf_offset[i_coord] /
@@ -247,29 +245,39 @@ public:
     }
 
     // Device-memory and stream entry points: forward to the cuda::std::span
-    // / cudaStream_t overloads below.
+    // / cudaStream_t overloads below, then mark the end of their work for
+    // the next host-memory call.
     void execute(DeviceSpan<const float> d_waterfall,
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         execute(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
+        m_device_work.mark(to_cuda(stream));
     }
     void reset(DeviceSpan<const float> d_waterfall,
                DeviceSpan<float> d_dmt,
                Stream stream) override {
         reset(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
+        m_device_work.mark(to_cuda(stream));
     }
     void advance(SizeType levels, Stream stream) override {
         advance(levels, to_cuda(stream));
+        m_device_work.mark(active(stream));
     }
     void advance_until_remaining(SizeType remaining_levels,
                                  Stream stream) override {
         advance_until_remaining(remaining_levels, to_cuda(stream));
+        m_device_work.mark(active(stream));
     }
-    void finalize(Stream stream) override { finalize(to_cuda(stream)); }
+    void finalize(Stream stream) override {
+        const cudaStream_t used = active(stream);
+        finalize(to_cuda(stream));
+        m_device_work.mark(used);
+    }
 
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (waterfall.size() != total_in) {
@@ -284,7 +292,7 @@ public:
         }
         m_waterfall_d.resize(total_in);
         m_dmt_host_d.resize(total_out);
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(thrust::raw_pointer_cast(m_waterfall_d.data()),
                        waterfall.data(), total_in * sizeof(float),
                        cudaMemcpyHostToDevice),
@@ -294,9 +302,9 @@ public:
                 cuda::std::span<float>(
                     thrust::raw_pointer_cast(m_dmt_host_d.data()), total_out),
                 nullptr);
-        cuda_utils::check_cuda_call(cudaDeviceSynchronize(),
-                                    "FDMTFFT::execute: sync");
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
+                                  "FDMTFFT::execute: sync");
+        gpu_utils::check_gpu_call(
             cudaMemcpy(dmt.data(),
                        thrust::raw_pointer_cast(m_dmt_host_d.data()),
                        total_out * sizeof(float), cudaMemcpyDeviceToHost),
@@ -311,7 +319,8 @@ public:
 
     void reset(std::span<const float> waterfall,
                std::span<float> dmt) override {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (waterfall.size() != total_in) {
@@ -326,7 +335,7 @@ public:
         }
         m_waterfall_d.resize(total_in);
         m_dmt_host_d.resize(total_out);
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(thrust::raw_pointer_cast(m_waterfall_d.data()),
                        waterfall.data(), total_in * sizeof(float),
                        cudaMemcpyHostToDevice),
@@ -361,9 +370,9 @@ public:
         m_host_dmt_size   = 0;
         m_stream          = stream;
         m_current_level   = 0;
-        m_state_in        = reinterpret_cast<ComplexTypeCUDA*>(
+        m_state_in        = reinterpret_cast<ComplexTypeGPU*>(
             thrust::raw_pointer_cast(m_state_a_d.data()));
-        m_state_out = reinterpret_cast<ComplexTypeCUDA*>(
+        m_state_out = reinterpret_cast<ComplexTypeGPU*>(
             thrust::raw_pointer_cast(m_state_b_d.data()));
         m_view_valid = false;
         fill_and_init(d_waterfall.data(), stream);
@@ -483,9 +492,9 @@ public:
             launch_update_overlap(m_d_waterfall_ptr, stream);
         }
         if (m_host_dmt_ptr != nullptr) {
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                        "FDMTFFT::finalize: sync");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream),
+                                      "FDMTFFT::finalize: sync");
+            gpu_utils::check_gpu_call(
                 cudaMemcpy(m_host_dmt_ptr,
                            thrust::raw_pointer_cast(m_dmt_host_d.data()),
                            m_host_dmt_size * sizeof(float),
@@ -509,7 +518,7 @@ public:
 
 protected:
     [[nodiscard]] Backend backend() const noexcept override {
-        return Backend::kCUDA;
+        return detail::kGPUBackend;
     }
 
 private:
@@ -534,12 +543,12 @@ private:
     SizeType m_nsamps_out{};
     SizeType m_out_skip{};
 
-    thrust::device_vector<ComplexTypeCUDA> m_phasors_d;
-    thrust::device_vector<ComplexTypeCUDA> m_boxcar_window_d;
-    thrust::device_vector<ComplexTypeCUDA> m_spectra_d;
-    thrust::device_vector<ComplexTypeCUDA> m_state_a_d;
-    thrust::device_vector<ComplexTypeCUDA> m_state_b_d;
-    mutable thrust::device_vector<ComplexTypeCUDA> m_ifft_d;
+    thrust::device_vector<ComplexTypeGPU> m_phasors_d;
+    thrust::device_vector<ComplexTypeGPU> m_boxcar_window_d;
+    thrust::device_vector<ComplexTypeGPU> m_spectra_d;
+    thrust::device_vector<ComplexTypeGPU> m_state_a_d;
+    thrust::device_vector<ComplexTypeGPU> m_state_b_d;
+    mutable thrust::device_vector<ComplexTypeGPU> m_ifft_d;
     thrust::device_vector<float> m_window_d;
     mutable thrust::device_vector<float> m_time_out_d;
     mutable thrust::device_vector<float> m_view_d;
@@ -555,9 +564,17 @@ private:
     float* m_dmt_target_ptr{nullptr};
     float* m_host_dmt_ptr{nullptr};
     SizeType m_host_dmt_size{0};
-    ComplexTypeCUDA* m_state_in{nullptr};
-    ComplexTypeCUDA* m_state_out{nullptr};
+    ComplexTypeGPU* m_state_in{nullptr};
+    ComplexTypeGPU* m_state_out{nullptr};
     cudaStream_t m_stream{nullptr};
+    // End of the latest device-memory call; host-memory calls wait for it.
+    gpu_utils::DeviceWorkFence m_device_work;
+
+    // The stream a stepper call runs on (null: the one reset() was given).
+    [[nodiscard]] cudaStream_t active(Stream stream) const noexcept {
+        const auto s = to_cuda(stream);
+        return s != nullptr ? s : m_stream;
+    }
     SizeType m_current_level{0};
     bool m_is_initialized{false};
     mutable bool m_view_valid{false};
@@ -567,7 +584,7 @@ private:
     mutable bool m_view_h_valid{false};
 
     [[nodiscard]] Device device() const noexcept {
-        return {.backend = Backend::kCUDA, .id = m_device_id};
+        return {.backend = detail::kGPUBackend, .id = m_device_id};
     }
 
     [[nodiscard]] const float* host_view() const {
@@ -578,7 +595,7 @@ private:
                 m_plan->get_container().state_shape[m_current_level];
             const auto n = shape.ncoords * view_nsamps();
             m_view_h.resize(n);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpy(m_view_h.data(),
                            thrust::raw_pointer_cast(m_view_d.data()),
                            n * sizeof(float), cudaMemcpyDeviceToHost),
@@ -589,7 +606,7 @@ private:
     }
 
     void initialize() {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         m_ndms         = m_plan->get_dmt_ndms();
         m_n_fft        = m_plan->get_fft_size();
         m_n_bins       = m_plan->get_fft_n_bins();
@@ -619,15 +636,15 @@ private:
         }
 
         const auto phasors_h = m_plan->get_fft_phasor_table();
-        std::vector<ComplexTypeCUDA> phasors_cuda(phasors_h.size());
+        std::vector<ComplexTypeGPU> phasors_cuda(phasors_h.size());
         for (SizeType i = 0; i < phasors_h.size(); ++i) {
             phasors_cuda[i] =
-                ComplexTypeCUDA(phasors_h[i].real(), phasors_h[i].imag());
+                ComplexTypeGPU(phasors_h[i].real(), phasors_h[i].imag());
         }
         m_phasors_d = phasors_cuda;
-        std::vector<ComplexTypeCUDA> boxcar_h((m_max_s + 1) * m_n_bins);
+        std::vector<ComplexTypeGPU> boxcar_h((m_max_s + 1) * m_n_bins);
         for (SizeType k = 0; k < m_n_bins; ++k) {
-            ComplexTypeCUDA accum{0.0F, 0.0F};
+            ComplexTypeGPU accum{0.0F, 0.0F};
             for (SizeType s = 0; s <= m_max_s; ++s) {
                 accum += phasors_cuda[(s * m_n_bins) + k];
                 boxcar_h[(s * m_n_bins) + k] = accum;
@@ -659,7 +676,7 @@ private:
                        cuda::std::span<float> d_dmt,
                        cudaStream_t stream,
                        bool update_hist) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (d_waterfall.size() != total_in) {
@@ -673,9 +690,9 @@ private:
                 d_dmt.size(), total_out));
         }
         fill_and_init(d_waterfall.data(), stream);
-        ComplexTypeCUDA* state_in = reinterpret_cast<ComplexTypeCUDA*>(
+        ComplexTypeGPU* state_in = reinterpret_cast<ComplexTypeGPU*>(
             thrust::raw_pointer_cast(m_state_a_d.data()));
-        ComplexTypeCUDA* state_out = reinterpret_cast<ComplexTypeCUDA*>(
+        ComplexTypeGPU* state_out = reinterpret_cast<ComplexTypeGPU*>(
             thrust::raw_pointer_cast(m_state_b_d.data()));
         const auto niters = m_plan->get_niters();
         for (SizeType i_iter = 1; i_iter <= niters; ++i_iter) {
@@ -686,7 +703,7 @@ private:
         if (update_hist && m_mode == FDMTMode::kValid) {
             launch_update_overlap(d_waterfall.data(), stream);
         }
-        cuda_utils::check_last_cuda_error("FDMTFFT::execute kernels");
+        gpu_utils::check_last_gpu_error("FDMTFFT::execute kernels");
     }
 
     void fill_and_init(const float* d_wf, cudaStream_t stream) {
@@ -694,7 +711,7 @@ private:
         const dim3 grid_fill((m_n_fft + 255) / 256,
                              static_cast<unsigned>(m_nchans),
                              static_cast<unsigned>(m_nbeams));
-        cuda_utils::check_kernel_launch_params(grid_fill, block);
+        gpu_utils::check_kernel_launch_params(grid_fill, block);
         const int mode_i = static_cast<int>(m_mode);
         const float* ov_ptr =
             m_overlap_d.empty() ? nullptr
@@ -707,7 +724,7 @@ private:
         m_fft_forward->execute(
             cuda::std::span<float>(thrust::raw_pointer_cast(m_window_d.data()),
                                    m_window_d.size()),
-            cuda::std::span<ComplexTypeCUDA>(
+            cuda::std::span<ComplexTypeGPU>(
                 thrust::raw_pointer_cast(m_spectra_d.data()),
                 m_spectra_d.size()),
             stream);
@@ -716,18 +733,18 @@ private:
         const dim3 init_grid((m_n_bins + block_x - 1) / block_x,
                              static_cast<unsigned>(m_nchans),
                              static_cast<unsigned>(m_nbeams));
-        cuda_utils::check_kernel_launch_params(init_grid, dim3(block_x));
+        gpu_utils::check_kernel_launch_params(init_grid, dim3(block_x));
         const auto* win_ptr =
             m_use_box_smearing
-                ? reinterpret_cast<const ComplexTypeCUDA*>(
+                ? reinterpret_cast<const ComplexTypeGPU*>(
                       thrust::raw_pointer_cast(m_boxcar_window_d.data()))
-                : reinterpret_cast<const ComplexTypeCUDA*>(
+                : reinterpret_cast<const ComplexTypeGPU*>(
                       thrust::raw_pointer_cast(m_phasors_d.data()));
         kernel_init_fdmt_fft<<<init_grid, block_x, 0, stream>>>(
-            reinterpret_cast<const ComplexTypeCUDA*>(
+            reinterpret_cast<const ComplexTypeGPU*>(
                 thrust::raw_pointer_cast(m_spectra_d.data())),
             win_ptr,
-            reinterpret_cast<ComplexTypeCUDA*>(
+            reinterpret_cast<ComplexTypeGPU*>(
                 thrust::raw_pointer_cast(m_state_a_d.data())),
             thrust::raw_pointer_cast(m_plan_d.grids0.coord_offset.data()),
             thrust::raw_pointer_cast(m_plan_d.grids0.ndt.data()),
@@ -736,8 +753,8 @@ private:
             static_cast<int>(m_max_coords));
     }
 
-    void merge_iter_device(ComplexTypeCUDA* state_in,
-                           ComplexTypeCUDA* state_out,
+    void merge_iter_device(ComplexTypeGPU* state_in,
+                           ComplexTypeGPU* state_out,
                            SizeType i_iter,
                            cudaStream_t stream) {
         const auto& shape = m_plan->get_container().state_shape[i_iter];
@@ -755,10 +772,10 @@ private:
         const int total = max_c * static_cast<int>(m_n_bins);
         const dim3 block(256);
         const dim3 grid((total + 255) / 256, static_cast<unsigned>(m_nbeams));
-        cuda_utils::check_kernel_launch_params(grid, block);
+        gpu_utils::check_kernel_launch_params(grid, block);
         kernel_execute_iter_fft<<<grid, block, 0, stream>>>(
             state_in, state_out, coords_sum, coords_copy,
-            reinterpret_cast<const ComplexTypeCUDA*>(
+            reinterpret_cast<const ComplexTypeGPU*>(
                 thrust::raw_pointer_cast(m_phasors_d.data())),
             static_cast<int>(m_n_bins), n_sum, n_copy,
             static_cast<int>(m_max_coords));
@@ -767,20 +784,20 @@ private:
     // Full-mode tail t >= nsamps is the Fourier linear-convolution
     // continuation and is not required to match the CPU FDMT (see
     // docs/fdmt-fft.md).
-    void inverse_and_store(const ComplexTypeCUDA* state_root,
+    void inverse_and_store(const ComplexTypeGPU* state_root,
                            float* d_dmt,
                            cudaStream_t stream) {
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_ifft_d.data()),
                             state_root,
-                            m_nbeams * m_fft_buf_size * sizeof(ComplexTypeCUDA),
+                            m_nbeams * m_fft_buf_size * sizeof(ComplexTypeGPU),
                             cudaMemcpyDeviceToDevice, stream),
             "FDMTFFT (cuda): snapshot for C2R");
         m_fft_backward->execute(
             cuda::std::span<float>(
                 thrust::raw_pointer_cast(m_time_out_d.data()),
                 m_time_out_d.size()),
-            cuda::std::span<ComplexTypeCUDA>(
+            cuda::std::span<ComplexTypeGPU>(
                 thrust::raw_pointer_cast(m_ifft_d.data()), m_ifft_d.size()),
             stream);
         const float norm = 1.0F / static_cast<float>(m_n_fft);
@@ -788,7 +805,7 @@ private:
         const dim3 grid((m_nsamps_out + 255) / 256,
                         static_cast<unsigned>(m_ndms),
                         static_cast<unsigned>(m_nbeams));
-        cuda_utils::check_kernel_launch_params(grid, block);
+        gpu_utils::check_kernel_launch_params(grid, block);
         kernel_trim_scale<<<grid, block, 0, stream>>>(
             thrust::raw_pointer_cast(m_time_out_d.data()), d_dmt,
             static_cast<int>(m_ndms), static_cast<int>(m_n_fft),
@@ -804,7 +821,7 @@ private:
         const dim3 grid((m_overlap_len + 255) / 256,
                         static_cast<unsigned>(m_nchans),
                         static_cast<unsigned>(m_nbeams));
-        cuda_utils::check_kernel_launch_params(grid, block);
+        gpu_utils::check_kernel_launch_params(grid, block);
         kernel_update_overlap<<<grid, block, 0, stream>>>(
             d_wf, thrust::raw_pointer_cast(m_overlap_d.data()),
             thrust::raw_pointer_cast(m_overlap_scratch_d.data()),
@@ -829,16 +846,16 @@ private:
         }
         m_view_h_valid = false;
         // IFFT beam 0 of the live state into time_out, then trim.
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(thrust::raw_pointer_cast(m_ifft_d.data()), m_state_in,
-                       m_fft_buf_size * sizeof(ComplexTypeCUDA),
+                       m_fft_buf_size * sizeof(ComplexTypeGPU),
                        cudaMemcpyDeviceToDevice),
             "FDMTFFT (cuda): view snapshot");
         m_fft_backward->execute(
             cuda::std::span<float>(
                 thrust::raw_pointer_cast(m_time_out_d.data()),
                 m_time_out_d.size()),
-            cuda::std::span<ComplexTypeCUDA>(
+            cuda::std::span<ComplexTypeGPU>(
                 thrust::raw_pointer_cast(m_ifft_d.data()), m_ifft_d.size()));
         const auto& shape =
             m_plan->get_container().state_shape[m_current_level];
@@ -854,8 +871,8 @@ private:
             static_cast<int>(shape.ncoords), static_cast<int>(m_n_fft),
             static_cast<int>(nsamps_v), static_cast<int>(skip),
             static_cast<int>(m_max_coords), norm);
-        cuda_utils::check_cuda_call(cudaDeviceSynchronize(),
-                                    "FDMTFFT (cuda): view sync");
+        gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
+                                  "FDMTFFT (cuda): view sync");
         m_view_valid = true;
     }
 
@@ -870,8 +887,8 @@ private:
 } // namespace
 
 std::unique_ptr<detail::FDMTFFTEngine>
-detail::make_fdmt_fft_cuda(const plans::FDMTPlan& plan,
-                           const detail::FDMTFFTEngineConfig& cfg) {
+detail::make_fdmt_fft_gpu(const plans::FDMTPlan& plan,
+                          const detail::FDMTFFTEngineConfig& cfg) {
     return std::make_unique<FDMTFFTCudaEngine>(plan, cfg);
 }
 

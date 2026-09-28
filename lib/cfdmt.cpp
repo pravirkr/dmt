@@ -4,10 +4,8 @@
 #include <cstdint>
 #include <memory>
 #include <span>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
@@ -24,9 +22,9 @@ make_cfdmt_engine(const plans::CohFDMTPlan& plan,
     if (cfg.exec.backend == Backend::kCPU) {
         return detail::make_cfdmt_cpu(plan, cfg);
     }
-#ifdef DMT_ENABLE_CUDA
-    if (cfg.exec.backend == Backend::kCUDA) {
-        return detail::make_cfdmt_cuda(plan, cfg);
+#ifdef DMT_ENABLE_GPU
+    if (cfg.exec.backend == detail::kGPUBackend) {
+        return detail::make_cfdmt_gpu(plan, cfg);
     }
 #endif
     detail::throw_unavailable("CohFDMT", cfg.exec.backend);

@@ -1,40 +1,37 @@
-import functools
-
 import numpy as np
 import pytest
 
 from dmtlib import DDMT, FDMT, FDMTFFT, CohFDMT
 
-FDMT_CUDA = functools.partial(FDMT, backend="cuda")
-FDMTFFT_CUDA = functools.partial(FDMTFFT, backend="cuda")
-CohFDMT_CUDA = functools.partial(CohFDMT, backend="cuda")
-DDMT_CUDA = functools.partial(DDMT, backend="cuda")
+# Every test runs on the GPU backend of this build (the `gpu_backend`
+# parameter of conftest.py: "cuda" or "hip") and compares with the CPU.
 
 
-@pytest.mark.cuda
-def test_fdmt_gpu_matches_cpu() -> None:
+def on(backend: str, cls: type, *args: object, **kwargs: object) -> object:
+    return cls(*args, backend=backend, **kwargs)
+
+
+def test_fdmt_gpu_matches_cpu(gpu_backend: str) -> None:
     rng = np.random.default_rng(0)
     waterfall = rng.standard_normal((16, 64), dtype=np.float32)
     cpu = FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
-    gpu = FDMT_CUDA(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
+    gpu = on(gpu_backend, FDMT, 1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
     np.testing.assert_allclose(
         gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
     )
 
 
-@pytest.mark.cuda
-def test_fdmt_fft_gpu_matches_cpu() -> None:
+def test_fdmt_fft_gpu_matches_cpu(gpu_backend: str) -> None:
     rng = np.random.default_rng(1)
     waterfall = rng.standard_normal((16, 64), dtype=np.float32)
     cpu = FDMTFFT(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
-    gpu = FDMTFFT_CUDA(1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
+    gpu = on(gpu_backend, FDMTFFT, 1000.0, 1500.0, 16, 64, 0.001, 8, mode="roll")
     np.testing.assert_allclose(
         gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
     )
 
 
-@pytest.mark.cuda
-def test_coh_fdmt_gpu_matches_cpu() -> None:
+def test_coh_fdmt_gpu_matches_cpu(gpu_backend: str) -> None:
     f_center = 1250.0
     bw_sub = 25.0
     nsub = 4
@@ -45,8 +42,19 @@ def test_coh_fdmt_gpu_matches_cpu() -> None:
     dm_max = 5.0
     noverlap = 32
     cpu = CohFDMT(f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max, 0.0, noverlap)
-    gpu = CohFDMT_CUDA(
-        f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max, 0.0, noverlap
+    gpu = on(
+        gpu_backend,
+        CohFDMT,
+        f_center,
+        bw_sub,
+        nsub,
+        tbin,
+        nbin,
+        nfft,
+        t_p,
+        dm_max,
+        0.0,
+        noverlap,
     )
     in_size = 2 * 2 * cpu.plan.nsamp * nsub
     rng = np.random.default_rng(2)
@@ -56,10 +64,11 @@ def test_coh_fdmt_gpu_matches_cpu() -> None:
     )
 
 
-@pytest.mark.cuda
 @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("int_tree", [False, True])
-def test_fdmt_gpu_packed_matches_cpu(nbits: int, int_tree: bool) -> None:
+def test_fdmt_gpu_packed_matches_cpu(
+    nbits: int, int_tree: bool, gpu_backend: str
+) -> None:
     # Integer-valued input: every partial sum is exact, so GPU and CPU agree
     # bit-for-bit (fast-math reassociation cannot change exact sums).
     nchans, nsamps = 64, 203
@@ -80,33 +89,53 @@ def test_fdmt_gpu_packed_matches_cpu(nbits: int, int_tree: bool) -> None:
             .astype(np.uint8)
         )
     cpu = FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 40)
-    gpu = FDMT_CUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 40, int_tree=int_tree)
+    gpu = on(
+        gpu_backend, FDMT, 1000.0, 1500.0, nchans, nsamps, 0.001, 40, int_tree=int_tree
+    )
     ref = cpu.execute(values.astype(np.float32))
     np.testing.assert_array_equal(gpu.execute(packed, nbits), ref)
 
 
-@pytest.mark.cuda
 @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
-def test_fdmt_gpu_fused_matches_unfused(mode: str) -> None:
+def test_fdmt_gpu_fused_matches_unfused(mode: str, gpu_backend: str) -> None:
     # Level fusion repeats the unfused kernels' float additions exactly.
     nchans, nsamps = 256, 700
     rng = np.random.default_rng(4)
     data = rng.standard_normal((nchans, nsamps), dtype=np.float32)
-    ref = FDMT_CUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 64, mode=mode, fuse_levels=0)
+    ref = on(
+        gpu_backend,
+        FDMT,
+        1000.0,
+        1500.0,
+        nchans,
+        nsamps,
+        0.001,
+        64,
+        mode=mode,
+        fuse_levels=0,
+    )
     assert ref.fuse_levels == 0
     expected = ref.execute(data)
     for fuse in (1, 3, None):
-        gpu = FDMT_CUDA(
-            1000.0, 1500.0, nchans, nsamps, 0.001, 64, mode=mode, fuse_levels=fuse
+        gpu = on(
+            gpu_backend,
+            FDMT,
+            1000.0,
+            1500.0,
+            nchans,
+            nsamps,
+            0.001,
+            64,
+            mode=mode,
+            fuse_levels=fuse,
         )
         assert 0 <= gpu.fuse_levels <= gpu.plan.niters
         assert gpu.memory_usage.total > 0
         np.testing.assert_array_equal(gpu.execute(data), expected)
 
 
-@pytest.mark.cuda
 @pytest.mark.parametrize("packed", [False, True])
-def test_fdmt_gpu_stepper_matches_cpu(packed: bool) -> None:
+def test_fdmt_gpu_stepper_matches_cpu(packed: bool, gpu_backend: str) -> None:
     nchans, nsamps = 32, 128
     rng = np.random.default_rng(5)
     values = rng.integers(0, 4, size=(nchans, nsamps), dtype=np.uint8)
@@ -117,7 +146,9 @@ def test_fdmt_gpu_stepper_matches_cpu(packed: bool) -> None:
     waterfall = values.astype(np.float32)
 
     cpu = FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 32, int_tree=False)
-    gpu = FDMT_CUDA(1000.0, 1500.0, nchans, nsamps, 0.001, 32, int_tree=False)
+    gpu = on(
+        gpu_backend, FDMT, 1000.0, 1500.0, nchans, nsamps, 0.001, 32, int_tree=False
+    )
     if packed:
         cpu.reset(packed_wf, 2)
         gpu.reset(packed_wf, 2)
@@ -149,11 +180,10 @@ def test_fdmt_gpu_stepper_matches_cpu(packed: bool) -> None:
     )
 
 
-@pytest.mark.cuda
-def test_fdmt_gpu_execute_out_buffer() -> None:
+def test_fdmt_gpu_execute_out_buffer(gpu_backend: str) -> None:
     rng = np.random.default_rng(6)
     waterfall = rng.standard_normal((2, 16, 64), dtype=np.float32)
-    gpu = FDMT_CUDA(1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
+    gpu = on(gpu_backend, FDMT, 1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
     cpu = FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
     out = np.empty(2 * gpu.plan.buffer_size, dtype=np.float32)
     got = gpu.execute(waterfall, out=out)
@@ -161,13 +191,12 @@ def test_fdmt_gpu_execute_out_buffer() -> None:
     np.testing.assert_allclose(got, cpu.execute(waterfall), rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.cuda
-def test_ddmt_gpu_matches_cpu() -> None:
+def test_ddmt_gpu_matches_cpu(gpu_backend: str) -> None:
     nchans, nsamps = 64, 1024
     rng = np.random.default_rng(7)
     waterfall = rng.standard_normal((nchans, nsamps), dtype=np.float32)
     cpu = DDMT(1000.0, 1500.0, nchans, 0.001, 50.0, 1.0)
-    gpu = DDMT_CUDA(1000.0, 1500.0, nchans, 0.001, 50.0, 1.0)
+    gpu = on(gpu_backend, DDMT, 1000.0, 1500.0, nchans, 0.001, 50.0, 1.0)
     np.testing.assert_allclose(
         gpu.execute(waterfall), cpu.execute(waterfall), rtol=1e-5, atol=1e-4
     )
@@ -180,13 +209,12 @@ def test_ddmt_gpu_matches_cpu() -> None:
     )
 
 
-@pytest.mark.cuda
-def test_ddmt_gpu_packed_matches_cpu_exactly() -> None:
+def test_ddmt_gpu_packed_matches_cpu_exactly(gpu_backend: str) -> None:
     nchans, nsamps = 64, 1024
     rng = np.random.default_rng(8)
     packed = rng.integers(0, 256, size=(nchans, nsamps), dtype=np.uint8)
     cpu = DDMT(1000.0, 1500.0, nchans, 0.001, 50.0, 1.0, nbits=8)
-    gpu = DDMT_CUDA(1000.0, 1500.0, nchans, 0.001, 50.0, 1.0, nbits=8)
+    gpu = on(gpu_backend, DDMT, 1000.0, 1500.0, nchans, 0.001, 50.0, 1.0, nbits=8)
     # Integer accumulation: bit-identical.
     np.testing.assert_array_equal(
         gpu.execute(packed, nsamps), cpu.execute(packed, nsamps)

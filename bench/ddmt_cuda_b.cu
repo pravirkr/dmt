@@ -1,12 +1,11 @@
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
+#include "dmt/gpu_compat.cuh"
 
 #include <benchmark/benchmark.h>
 
-#include "bench_cuda_utils.cuh"
+#include "bench_gpu_utils.cuh"
 
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
@@ -72,7 +71,8 @@ public:
 
 BENCHMARK_DEFINE_F(DDMTCUDAFloatFixture, BM_ddmt_cuda_float_execute)
 (benchmark::State& state) {
-    DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F, Exec::cuda(0),
+    DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
+              bench_gpu_exec(),
               /*nbits=*/32, {}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
@@ -82,7 +82,7 @@ BENCHMARK_DEFINE_F(DDMTCUDAFloatFixture, BM_ddmt_cuda_float_execute)
                                        0.0F);
 
     for (auto _ : state) {
-        CudaEventTimer timer{state};
+        GPUEventTimer timer{state};
         ddmt.reset_history();
         ddmt.execute(DeviceSpan<const float>(
                          thrust::raw_pointer_cast(waterfall_d.data()),
@@ -133,8 +133,8 @@ public:
 
 BENCHMARK_DEFINE_F(DDMTCUDAPackedFixture, BM_ddmt_cuda_packed_execute)
 (benchmark::State& state) {
-    DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F, Exec::cuda(0),
-              nbits, {}, nbeams);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
+              bench_gpu_exec(), nbits, {}, nbeams);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps > max_delay ? nsamps - max_delay : 0;
@@ -142,7 +142,7 @@ BENCHMARK_DEFINE_F(DDMTCUDAPackedFixture, BM_ddmt_cuda_packed_execute)
     thrust::device_vector<int32_t> dmt_d(nbeams * dm_count * nsamps_reduced, 0);
 
     for (auto _ : state) {
-        CudaEventTimer timer{state};
+        GPUEventTimer timer{state};
         ddmt.reset_history();
         ddmt.execute(DeviceSpan<const uint8_t>(
                          thrust::raw_pointer_cast(waterfall_packed_d.data()),

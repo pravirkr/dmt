@@ -5,15 +5,24 @@ include(CMakeFindDependencyMacro)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 
-# Static dmt archives reference FFTW, the OpenMP runtime and (in a CUDA build)
-# the CUDA runtime and cuFFT; shared builds link all of them privately. The
-# installed headers never need CUDA. FindFFTW.cmake is installed next to this
-# file.
+# Static dmt archives reference FFTW, the OpenMP runtime and the GPU
+# libraries of the build (CUDA: the CUDA runtime and cuFFT; HIP: the HIP
+# runtime, hipFFT and rocThrust); shared builds link all of them privately.
+# The installed headers never need a GPU runtime. FindFFTW.cmake is
+# installed next to this file.
+set(DMT_BUILT_GPU "@DMT_BUILT_GPU@")
 if(NOT @DMT_BUILT_AS_SHARED@)
   find_dependency(FFTW COMPONENTS FLOAT_LIB)
   find_dependency(OpenMP COMPONENTS CXX)
-  if(@DMT_BUILT_WITH_CUDA@)
+  if(DMT_BUILT_GPU STREQUAL "CUDA")
     find_dependency(CUDAToolkit)
+  elseif(DMT_BUILT_GPU STREQUAL "HIP")
+    find_dependency(hip CONFIG)
+    find_dependency(hipfft CONFIG)
+    find_dependency(rocthrust CONFIG)
+    if(@DMT_BUILT_WITH_LIBHIPCXX@)
+      find_dependency(libhipcxx CONFIG)
+    endif()
   endif()
 endif()
 

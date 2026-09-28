@@ -9,12 +9,11 @@
 #include <span>
 #include <vector>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
 #include "dmt/fft.hpp"
+#include "dmt/gpu_utils.cuh"
 
 namespace dmt::utils {
 
@@ -50,7 +49,7 @@ public:
      * @brief In-place C2C transform. @p data must hold `howmany * length`
      *        complex samples.
      */
-    void execute(cuda::std::span<ComplexTypeCUDA> data,
+    void execute(cuda::std::span<ComplexTypeGPU> data,
                  cudaStream_t stream = nullptr) const;
 
     /**
@@ -60,7 +59,7 @@ public:
      * roles are reversed. C2R may overwrite @p freq.
      */
     void execute(cuda::std::span<float> real,
-                 cuda::std::span<ComplexTypeCUDA> freq,
+                 cuda::std::span<ComplexTypeGPU> freq,
                  cudaStream_t stream = nullptr) const;
 
 private:

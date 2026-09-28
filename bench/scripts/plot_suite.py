@@ -89,7 +89,7 @@ class Result:
     machine: str
     sweep: str
     algo: str
-    backend: str  # cpu<N>, cuda, cuda_host
+    backend: str  # cpu<N>, cuda, cuda_host, hip, hip_host
     nsamps: int
     dt_max: int
     nbits: int
@@ -121,10 +121,13 @@ class Machine:
     def platform(self, kind: str) -> str:
         """Display name of this machine's CPU or GPU."""
         ctx = self.context
-        if kind.startswith("cuda"):
+        if kind in GPU_KINDS:
             return ctx.get("gpu_model") or f"{self.name} GPU"
         return ctx.get("label") or ctx.get("cpu_model") or self.name
 
+
+# GPU backends; "<kind>_host" is the same engine fed from host arrays.
+GPU_KINDS = ("cuda", "hip")
 
 _UNIT = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}
 _CONTEXT_KEYS = (
@@ -358,10 +361,13 @@ def select(
 
 
 def platforms(results: list[Result]) -> list[tuple[str, str]]:
-    """Ordered (machine, "cpu" | "cuda") panels: CPU machines, then GPUs."""
+    """Ordered (machine, "cpu" | GPU kind) panels: CPU machines, then GPUs."""
     cpu = sorted({r.machine for r in results if r.backend.startswith("cpu")})
-    gpu = sorted({r.machine for r in results if r.backend.startswith("cuda")})
-    return [(m, "cpu") for m in cpu] + [(m, "cuda") for m in gpu]
+    panels = [(m, "cpu") for m in cpu]
+    for kind in GPU_KINDS:
+        gpu = sorted({r.machine for r in results if r.backend.startswith(kind)})
+        panels += [(m, kind) for m in gpu]
+    return panels
 
 
 def cpu_backends(results: list[Result], machine: str) -> list[str]:
@@ -375,13 +381,13 @@ def cpu_backends(results: list[Result], machine: str) -> list[str]:
 
 
 def kind_name(kind: str) -> str:
-    return "GPU" if kind == "cuda" else "CPU"
+    return "GPU" if kind in GPU_KINDS else "CPU"
 
 
 def backend_tag(backend: str) -> str:
-    if backend == "cuda":
+    if backend in GPU_KINDS:
         return ""
-    if backend == "cuda_host":
+    if backend.endswith("_host"):
         return " · incl. PCIe"
     return f" · {backend[3:]} thr"
 
@@ -417,7 +423,7 @@ def runtime_figure(
             lines = [(a, threads[-1], False) for a in ALGOS]
             lines += [("FDMT", t, True) for t in threads[:-1]]
         else:
-            lines = [(a, "cuda", False) for a in ALGOS]
+            lines = [(a, kind, False) for a in ALGOS]
         ax.set_title(f"{machines[mname].platform(kind)} · {kind_name(kind)}")
         for algo, backend, variant in lines:
             pts = sorted(
@@ -458,9 +464,9 @@ def throughput_figure(
             lines += [("FDMT", t, True) for t in threads[:-1]]
         else:
             lines = [
-                ("FDMT", "cuda", False),
-                ("FDMT", "cuda_host", True),
-                ("DDMT", "cuda", False),
+                ("FDMT", kind, False),
+                ("FDMT", f"{kind}_host", True),
+                ("DDMT", kind, False),
             ]
         ax.set_title(f"{machines[mname].platform(kind)} · {kind_name(kind)}")
         for algo, backend, variant in lines:
@@ -556,7 +562,7 @@ def highlight_figure(
     platform_labels: list[str] = []
     for i, (mname, kind) in enumerate(platforms(results)):
         marker = MARKERS[i % len(MARKERS)]
-        backend = cpu_backends(results, mname)[-1] if kind == "cpu" else "cuda"
+        backend = cpu_backends(results, mname)[-1] if kind == "cpu" else kind
         plat = machines[mname].platform(kind)
         if kind == "cpu":
             plat += f" · {backend[3:]} thr"
@@ -670,7 +676,7 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
         if r.sweep == "ndms" and r.ndms == NDMS_REF and r.times
     }
     for mname, kind in platforms(results):
-        backends = cpu_backends(results, mname) if kind == "cpu" else ["cuda"]
+        backends = cpu_backends(results, mname) if kind == "cpu" else [kind]
         for b in backends:
             t = {a: ref.get((mname, b, a)) for a in ALGOS}
             fdmt = t["FDMT"]
@@ -704,10 +710,15 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
     for r in results:
         if r.sweep == "nbits" and r.times:
             by[(r.machine, r.backend, r.algo)][r.nbits] = r.rtf
-    engines = {"cuda": "device-resident", "cuda_host": "host arrays (incl. PCIe)"}
+    engines = {
+        "cuda": "device-resident",
+        "cuda_host": "host arrays (incl. PCIe)",
+        "hip": "device-resident",
+        "hip_host": "host arrays (incl. PCIe)",
+    }
     for mname, kind in platforms(results):
         backends = (
-            cpu_backends(results, mname) if kind == "cpu" else ["cuda", "cuda_host"]
+            cpu_backends(results, mname) if kind == "cpu" else [kind, f"{kind}_host"]
         )
         for b in backends:
             for a in ("FDMT", "DDMT"):

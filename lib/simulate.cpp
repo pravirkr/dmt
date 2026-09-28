@@ -1,3 +1,5 @@
+#include <utility>
+
 #include "dmt/utils/simulate.hpp"
 
 #include "dmt/common/types.hpp"
@@ -11,10 +13,14 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            SizeType dt,
                                                            float pulse_toa,
                                                            float amplitude) {
+    if (nchans == 0 || nsamps == 0) {
+        return {{}, 0};
+    }
     std::vector<float> arr(nchans * nsamps, 0.0F);
-    const float foff          = (f_max - f_min) / static_cast<float>(nchans);
-    const float foff_half     = foff / 2.0F;
     SizeType nsamps_dispersed = 0;
+
+    const float foff      = (f_max - f_min) / static_cast<float>(nchans);
+    const float foff_half = foff / 2.0F;
 
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
         const auto freq =
@@ -35,12 +41,12 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
 
         float* arr_chan_start = &arr[ichan * nsamps];
 
-        if (tstart_int < 0 || tend_int >= static_cast<IndexType>(nsamps)) {
+        if (tstart_int < 0 || std::cmp_greater_equal(tend_int, nsamps)) {
             continue;
         }
 
         if (tend_int >= 0 && tend_int <= tstart_int &&
-            tstart_int < static_cast<IndexType>(nsamps)) {
+            std::cmp_less(tstart_int, nsamps)) {
             if (tend_int == tstart_int) {
                 arr_chan_start[tend_int] = amplitude;
                 nsamps_dispersed += 1;
@@ -54,19 +60,19 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                     static_cast<SizeType>(tstart_int - tend_int + 1);
             }
         } else if (tend_int < 0 && 0 <= tstart_int &&
-                   tstart_int < static_cast<IndexType>(nsamps)) {
+                   std::cmp_less(tstart_int, nsamps)) {
             const float amp_per_sample = amplitude / dt_sub;
             std::fill(arr_chan_start, arr_chan_start + tstart_int + 1,
                       amp_per_sample);
             arr_chan_start[tstart_int] *= tstart_frac;
             nsamps_dispersed += static_cast<SizeType>(tstart_int + 1);
-        } else if (tend_int >= 0 && tend_int < static_cast<IndexType>(nsamps) &&
-                   static_cast<IndexType>(nsamps) <= tstart_int) {
+        } else if (tend_int >= 0 && std::cmp_less(tend_int, nsamps) &&
+                   std::cmp_less_equal(nsamps, tstart_int)) {
             const float amp_per_sample = amplitude / dt_sub;
             std::fill(arr_chan_start + tend_int, arr_chan_start + nsamps,
                       amp_per_sample);
             arr_chan_start[tend_int] *= tend_frac;
-            nsamps_dispersed += static_cast<SizeType>(nsamps - tend_int);
+            nsamps_dispersed += (nsamps - tend_int);
         }
     }
     return {arr, nsamps_dispersed};

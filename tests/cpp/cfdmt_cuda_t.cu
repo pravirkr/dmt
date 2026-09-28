@@ -9,8 +9,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 
-#include <cuda/std/span>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
@@ -45,7 +45,7 @@ TEST_CASE("CohFDMT Constructor and Plan Invariants", "[cfdmt_gpu][gpu]") {
                           plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
                           plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
                           plan.get_dm_min(), plan.get_noverlap(), "PRITF",
-                          Exec::cuda());
+                          test::gpu_exec());
 
     CHECK(coh_fdmt_cuda.get_dmt_size() == plan.get_dmt_size());
     CHECK(coh_fdmt_cuda.get_plan().get_ndm() == plan.get_ndm());
@@ -66,7 +66,7 @@ TEST_CASE("CohFDMT Host and Device Execution Parity",
                           plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
                           plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
                           plan.get_dm_min(), plan.get_noverlap(), "PRITF",
-                          Exec::cuda());
+                          test::gpu_exec());
 
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
@@ -121,7 +121,7 @@ TEST_CASE("CohFDMT Multi-block Streaming and History Reset",
     CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                      plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                      plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                     plan.get_noverlap(), "PRITF", Exec::cuda());
+                     plan.get_noverlap(), "PRITF", test::gpu_exec());
 
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
@@ -167,7 +167,7 @@ TEST_CASE("CohFDMT synthetic impulse peaks near DM 0", "[cfdmt_gpu][gpu]") {
     CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                      plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                      plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                     plan.get_noverlap(), "PRITF", Exec::cuda());
+                     plan.get_noverlap(), "PRITF", test::gpu_exec());
     CohFDMT coh_cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),

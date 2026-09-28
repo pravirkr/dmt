@@ -1,4 +1,5 @@
-// CUDA half of dmt_bench_suite; see suite_common.hpp for the configuration.
+// GPU half of dmt_bench_suite (CUDA or HIP; backend names "cuda" / "hip");
+// see suite_common.hpp for the configuration.
 //
 // "cuda" benchmarks are device-resident (input and output already on the
 // GPU, timed with CUDA events). "cuda_host" benchmarks take host arrays, so
@@ -10,9 +11,8 @@
 #include <span>
 #include <vector>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include <benchmark/benchmark.h>
 
@@ -20,7 +20,7 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
 
-#include "bench_cuda_utils.cuh"
+#include "bench_gpu_utils.cuh"
 #include "suite_common.hpp"
 
 namespace dmt::bench_suite {
@@ -45,7 +45,7 @@ bool skip_if_over_device_budget(benchmark::State& state,
                                 const Point& p) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
-    BENCH_CUDA_TRY(cudaMemGetInfo(&free_bytes, &total_bytes));
+    BENCH_GPU_TRY(cudaMemGetInfo(&free_bytes, &total_bytes));
     const double need   = estimate_bytes(algo, plan, p);
     const double budget = 0.9 * static_cast<double>(free_bytes);
     if (need > budget) {
@@ -64,24 +64,24 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
         return;
     }
     FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
-              "valid", Exec::cuda(0));
+              "valid", bench_gpu_exec());
     thrust::device_vector<float> dmt(plan.get_buffer_size());
     if (p.nbits == 32) {
         const auto host = make_float_input(kNchans * p.nsamps);
         const thrust::device_vector<float> wf(host.begin(), host.end());
         fdmt.execute(dspan_c(wf), dspan(dmt));
-        BENCH_CUDA_TRY(cudaDeviceSynchronize());
+        BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             fdmt.execute(dspan_c(wf), dspan(dmt));
         }
     } else {
         const auto host = make_packed_input(packed_bytes(p.nsamps, p.nbits));
         const thrust::device_vector<uint8_t> wf(host.begin(), host.end());
         fdmt.execute(dspan_c(wf), p.nbits, dspan(dmt));
-        BENCH_CUDA_TRY(cudaDeviceSynchronize());
+        BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             fdmt.execute(dspan_c(wf), p.nbits, dspan(dmt));
         }
     }
@@ -96,20 +96,20 @@ void bench_fdmt_cuda_host(benchmark::State& state, Point p) {
         return;
     }
     FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
-              "valid", Exec::cuda(0));
+              "valid", bench_gpu_exec());
     std::vector<float> dmt(plan.get_buffer_size());
     if (p.nbits == 32) {
         const auto wf = make_float_input(kNchans * p.nsamps);
         fdmt.execute(wf, dmt); // warm-up, also allocates the staging
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             fdmt.execute(wf, dmt);
         }
     } else {
         const auto wf = make_packed_input(packed_bytes(p.nsamps, p.nbits));
         fdmt.execute(std::span<const uint8_t>(wf), p.nbits, dmt);
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             fdmt.execute(std::span<const uint8_t>(wf), p.nbits, dmt);
         }
     }
@@ -123,14 +123,14 @@ void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
     }
     try {
         FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
-                     true, "valid", Exec::cuda(0));
+                     true, "valid", bench_gpu_exec());
         const auto host = make_float_input(kNchans * p.nsamps);
         const thrust::device_vector<float> wf(host.begin(), host.end());
         thrust::device_vector<float> dmt(plan.get_dmt_size());
         fdmt.execute(dspan_c(wf), dspan(dmt));
-        BENCH_CUDA_TRY(cudaDeviceSynchronize());
+        BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             fdmt.execute(dspan_c(wf), dspan(dmt));
         }
     } catch (const std::bad_alloc&) {
@@ -146,7 +146,7 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         return;
     }
     const auto dms = plan.get_dm_grid_final();
-    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, dms, Exec::cuda(0), p.nbits);
+    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, dms, bench_gpu_exec(), p.nbits);
     const auto ndms   = dms.size();
     const auto n_cold = ddmt.get_output_nsamps(p.nsamps);
     if (p.nbits == 32) {
@@ -155,9 +155,9 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         thrust::device_vector<float> dmt(ndms * p.nsamps);
         ddmt.execute(dspan_c(wf),
                      DeviceSpan<float>(dspan(dmt).data(), ndms * n_cold));
-        BENCH_CUDA_TRY(cudaDeviceSynchronize());
+        BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             ddmt.execute(dspan_c(wf), dspan(dmt));
         }
     } else {
@@ -166,22 +166,22 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         thrust::device_vector<int32_t> dmt(ndms * p.nsamps);
         ddmt.execute(dspan_c(wf), p.nsamps,
                      DeviceSpan<int32_t>(dspan(dmt).data(), ndms * n_cold));
-        BENCH_CUDA_TRY(cudaDeviceSynchronize());
+        BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
-            const CudaEventTimer timer{state};
+            const GPUEventTimer timer{state};
             ddmt.execute(dspan_c(wf), p.nsamps, dspan(dmt));
         }
     }
     set_counters(state, plan, p, 0);
 }
 
-bool cuda_device_available() {
+bool gpu_device_available() {
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
 void register_cuda() {
-    if (!cuda_device_available()) {
+    if (!gpu_device_available()) {
         return;
     }
     const auto add = [](const std::string& name, auto fn, Point p) {
@@ -192,15 +192,17 @@ void register_cuda() {
     };
     for (const auto sweep : {Sweep::kNsamps, Sweep::kNdms}) {
         for (const auto& p : sweep_points(sweep)) {
-            add(bench_name(Algo::kFDMT, "cuda", p), bench_fdmt_cuda, p);
-            add(bench_name(Algo::kFDMTFFT, "cuda", p), bench_fdmt_fft_cuda, p);
-            add(bench_name(Algo::kDDMT, "cuda", p), bench_ddmt_cuda, p);
+            add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
+            add(bench_name(Algo::kFDMTFFT, DMT_GPU_NAME, p),
+                bench_fdmt_fft_cuda, p);
+            add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p), bench_ddmt_cuda, p);
         }
     }
     for (const auto& p : sweep_points(Sweep::kNbits)) {
-        add(bench_name(Algo::kFDMT, "cuda", p), bench_fdmt_cuda, p);
-        add(bench_name(Algo::kFDMT, "cuda_host", p), bench_fdmt_cuda_host, p);
-        add(bench_name(Algo::kDDMT, "cuda", p), bench_ddmt_cuda, p);
+        add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
+        add(bench_name(Algo::kFDMT, DMT_GPU_NAME "_host", p),
+            bench_fdmt_cuda_host, p);
+        add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p), bench_ddmt_cuda, p);
     }
 }
 

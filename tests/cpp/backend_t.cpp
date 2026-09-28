@@ -21,8 +21,7 @@ using algorithms::FDMT;
 using algorithms::FDMTFFT;
 
 TEST_CASE("Backend names round-trip", "[backend][cpu]") {
-    for (const auto b :
-         {Backend::kCPU, Backend::kCUDA, Backend::kHIP, Backend::kMetal}) {
+    for (const auto b : {Backend::kCPU, Backend::kCUDA, Backend::kHIP}) {
         CHECK(parse_backend(to_string(b)) == b);
     }
     CHECK_THROWS_AS(parse_backend("opencl"), std::invalid_argument);
@@ -38,8 +37,11 @@ TEST_CASE("available_backends matches the build", "[backend][cpu]") {
 #else
     CHECK_FALSE(is_available(Backend::kCUDA));
 #endif
+#ifdef DMT_ENABLE_HIP
+    CHECK(is_available(Backend::kHIP));
+#else
     CHECK_FALSE(is_available(Backend::kHIP));
-    CHECK_FALSE(is_available(Backend::kMetal));
+#endif
 }
 
 TEST_CASE("Constructing on a backend missing from the build throws",
@@ -54,22 +56,21 @@ TEST_CASE("Constructing on a backend missing from the build throws",
                            Catch::Matchers::ContainsSubstring("cpu"));
         }
     };
-    expect_unavailable([] {
-        return FDMT(1000.0F, 1500.0F, 16, 64, 0.001F, 8, 0, 1, true, "valid",
-                    Exec::metal());
-    });
-    expect_unavailable([] {
-        return FDMTFFT(1000.0F, 1500.0F, 16, 64, 0.001F, 8, 0, 1, true, "valid",
-                       Exec::hip());
-    });
-    expect_unavailable([] {
-        return DDMT(1000.0F, 1500.0F, 16, 0.001F, 10.0F, 1.0F, 0.0F,
-                    Exec::metal());
-    });
-    if (!is_available(Backend::kCUDA)) {
-        expect_unavailable([] {
+    for (const auto b : {Backend::kCUDA, Backend::kHIP}) {
+        if (is_available(b)) {
+            continue;
+        }
+        const Exec exec{.backend = b, .nthreads = 1, .device = 0};
+        expect_unavailable([&] {
             return FDMT(1000.0F, 1500.0F, 16, 64, 0.001F, 8, 0, 1, true,
-                        "valid", Exec::cuda());
+                        "valid", exec);
+        });
+        expect_unavailable([&] {
+            return FDMTFFT(1000.0F, 1500.0F, 16, 64, 0.001F, 8, 0, 1, true,
+                           "valid", exec);
+        });
+        expect_unavailable([&] {
+            return DDMT(1000.0F, 1500.0F, 16, 0.001F, 10.0F, 1.0F, 0.0F, exec);
         });
     }
 }
@@ -111,6 +112,14 @@ TEST_CASE("The CPU backend rejects device memory and streams",
     CHECK_THROWS_AS(fft.execute(d_wf, d_out), std::invalid_argument);
 }
 
+TEST_CASE("Default and empty DeviceSpan::data is nullptr", "[backend][cpu]") {
+    const DeviceSpan<float> empty{};
+    CHECK(empty.data() == nullptr);
+    CHECK(empty.empty());
+    const DeviceSpan<float> zero_count{nullptr, 0};
+    CHECK(zero_count.data() == nullptr);
+}
+
 TEST_CASE("DeviceSpan::subspan keeps the handle and advances the offset",
           "[backend][cpu]") {
     std::vector<float> buf(16);
@@ -130,9 +139,9 @@ TEST_CASE("Exec replaces the old nthreads / device_id slot", "[backend][cpu]") {
     constexpr auto kCpu = Exec::cpu(4);
     STATIC_REQUIRE(kCpu.backend == Backend::kCPU);
     STATIC_REQUIRE(kCpu.nthreads == 4);
-    constexpr auto kGpu = Exec::cuda(1);
-    STATIC_REQUIRE(kGpu.backend == Backend::kCUDA);
-    STATIC_REQUIRE(kGpu.device == 1);
+    constexpr auto kGPU = Exec::cuda(1);
+    STATIC_REQUIRE(kGPU.backend == Backend::kCUDA);
+    STATIC_REQUIRE(kGPU.device == 1);
     // An int never converts to Exec, so a stale positional nthreads argument
     // fails to compile instead of landing in the next parameter.
     STATIC_REQUIRE_FALSE(std::is_convertible_v<int, Exec>);

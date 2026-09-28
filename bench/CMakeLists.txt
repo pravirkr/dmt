@@ -15,16 +15,16 @@ set(BENCH_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp
 )
 
-# Add CUDA benchmark sources if available: same three algorithms.
-if(CMAKE_CUDA_COMPILER)
+# GPU benchmark sources (CUDA source, built for CUDA or HIP): same three
+# algorithms.
+if(DMT_GPU_BACKEND)
   set(BENCH_SOURCES_CUDA
       ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cuda_b.cu
       ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu
   )
   list(APPEND BENCH_SOURCES ${BENCH_SOURCES_CUDA})
 
-  # Explicitly set CUDA files to be compiled with CUDA
-  set_source_files_properties(${BENCH_SOURCES_CUDA} PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(${BENCH_SOURCES_CUDA} PROPERTIES LANGUAGE ${DMT_GPU_BACKEND})
 endif()
 
 # Performance benchmarks executable
@@ -34,7 +34,7 @@ target_include_directories(
   ${TARGET_BENCHMARKS} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/lib
 )
 
-if(CMAKE_CUDA_COMPILER)
+if(DMT_GPU_BACKEND STREQUAL "CUDA")
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
     target_include_directories(${TARGET_BENCHMARKS} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl")
   endif()
@@ -49,8 +49,9 @@ target_link_libraries(
           ${DMT_COMPILE_OPTIONS}
 )
 
-if(CMAKE_CUDA_COMPILER)
-  target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${DMT_CUDA_OPTIONS})
+target_compile_definitions(${TARGET_BENCHMARKS} PRIVATE ${DMT_BACKEND_DEFINITIONS})
+if(DMT_GPU_BACKEND)
+  target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})
 endif()
 
 # Memory benchmarks executable: FDMT, FDMT-FFT, and DDMT (float + packed),
@@ -85,21 +86,25 @@ target_link_libraries(
 )
 
 # Published benchmark suite (bench/suite): one fixed configuration shared by
-# FDMT, FDMT-FFT and DDMT on CPU and CUDA, run by bench/scripts/run_suite.py
+# FDMT, FDMT-FFT and DDMT on CPU and GPU (CUDA or HIP), run by bench/scripts/run_suite.py
 # and plotted by bench/scripts/plot_suite.py. See bench/README.md.
 set(TARGET_BENCHMARKS_SUITE ${PROJECT_NAME}_bench_suite)
 set(BENCH_SOURCES_SUITE ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cpu.cpp)
-if(CMAKE_CUDA_COMPILER)
+if(DMT_GPU_BACKEND)
   set(BENCH_SOURCES_SUITE_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cuda.cu)
-  set_source_files_properties(${BENCH_SOURCES_SUITE_CUDA} PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(
+    ${BENCH_SOURCES_SUITE_CUDA} PROPERTIES LANGUAGE ${DMT_GPU_BACKEND}
+  )
   list(APPEND BENCH_SOURCES_SUITE ${BENCH_SOURCES_SUITE_CUDA})
 endif()
 
 add_executable(${TARGET_BENCHMARKS_SUITE} ${BENCH_SOURCES_SUITE})
 target_include_directories(
-  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
+  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/lib
+                                     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-if(CMAKE_CUDA_COMPILER)
+target_compile_definitions(${TARGET_BENCHMARKS_SUITE} PRIVATE ${DMT_BACKEND_DEFINITIONS})
+if(DMT_GPU_BACKEND STREQUAL "CUDA")
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
     target_include_directories(
       ${TARGET_BENCHMARKS_SUITE} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl"
@@ -111,6 +116,6 @@ target_link_libraries(
   ${TARGET_BENCHMARKS_SUITE} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
                                      ${DMT_COMPILE_OPTIONS}
 )
-if(CMAKE_CUDA_COMPILER)
-  target_link_libraries(${TARGET_BENCHMARKS_SUITE} PRIVATE ${DMT_CUDA_OPTIONS})
+if(DMT_GPU_BACKEND)
+  target_link_libraries(${TARGET_BENCHMARKS_SUITE} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})
 endif()

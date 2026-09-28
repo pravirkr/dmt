@@ -14,15 +14,21 @@
 #include <string>
 #include <string_view>
 
-#include "dmt/algorithms/cfdmt.hpp"
-#include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
 namespace dmt::algorithms::detail {
+
+// The backend lib/cuda/ is compiled for: DMT_ENABLE_CUDA (nvcc) or
+// DMT_ENABLE_HIP (hip-clang, through dmt/gpu_compat.cuh); DMT_ENABLE_GPU is
+// set with either.
+#ifdef DMT_ENABLE_HIP
+inline constexpr Backend kGPUBackend = Backend::kHIP;
+#elif defined(DMT_ENABLE_CUDA)
+inline constexpr Backend kGPUBackend = Backend::kCUDA;
+#endif
 
 /// Throws std::invalid_argument: `what` needs device memory, which the
 /// `backend` engine does not have.
@@ -125,8 +131,8 @@ protected:
 // The plan outlives the engine (both are owned by the FDMT facade).
 std::unique_ptr<FDMTEngine> make_fdmt_cpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
-std::unique_ptr<FDMTEngine> make_fdmt_cuda(const plans::FDMTPlan& plan,
-                                           const FDMTEngineConfig& cfg);
+std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
+                                          const FDMTEngineConfig& cfg);
 
 // ---------------------------------------------------------------------------
 // DDMT
@@ -188,8 +194,8 @@ protected:
 
 std::unique_ptr<DDMTEngine> make_ddmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
-std::unique_ptr<DDMTEngine> make_ddmt_cuda(const plans::DDMTPlan& plan,
-                                           const DDMTEngineConfig& cfg);
+std::unique_ptr<DDMTEngine> make_ddmt_gpu(const plans::DDMTPlan& plan,
+                                          const DDMTEngineConfig& cfg);
 
 // ---------------------------------------------------------------------------
 // FDMT-FFT
@@ -249,7 +255,7 @@ protected:
 std::unique_ptr<FDMTFFTEngine>
 make_fdmt_fft_cpu(const plans::FDMTPlan& plan, const FDMTFFTEngineConfig& cfg);
 std::unique_ptr<FDMTFFTEngine>
-make_fdmt_fft_cuda(const plans::FDMTPlan& plan, const FDMTFFTEngineConfig& cfg);
+make_fdmt_fft_gpu(const plans::FDMTPlan& plan, const FDMTFFTEngineConfig& cfg);
 
 // ---------------------------------------------------------------------------
 // CohFDMT
@@ -290,7 +296,7 @@ protected:
 
 std::unique_ptr<CohFDMTEngine> make_cfdmt_cpu(const plans::CohFDMTPlan& plan,
                                               const CohFDMTEngineConfig& cfg);
-std::unique_ptr<CohFDMTEngine> make_cfdmt_cuda(const plans::CohFDMTPlan& plan,
-                                               const CohFDMTEngineConfig& cfg);
+std::unique_ptr<CohFDMTEngine> make_cfdmt_gpu(const plans::CohFDMTPlan& plan,
+                                              const CohFDMTEngineConfig& cfg);
 
 } // namespace dmt::algorithms::detail

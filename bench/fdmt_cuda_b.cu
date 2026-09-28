@@ -1,8 +1,7 @@
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
+#include "dmt/gpu_compat.cuh"
 
 #include <cstdint>
 #include <random>
@@ -11,7 +10,7 @@
 
 #include <benchmark/benchmark.h>
 
-#include "bench_cuda_utils.cuh"
+#include "bench_gpu_utils.cuh"
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
@@ -66,20 +65,20 @@ public:
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_planBuffer_cuda)
 (benchmark::State& state) {
     for (auto _ : state) {
-        CudaEventTimer raii{state};
+        GPUEventTimer raii{state};
         FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                  "valid", Exec::cuda(0));
+                  "valid", bench_gpu_exec());
     }
 }
 
 BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda)
 (benchmark::State& state) {
     FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                   "valid", Exec::cuda(0));
+                   "valid", bench_gpu_exec());
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);
     for (auto _ : state) {
-        CudaEventTimer raii{state};
+        GPUEventTimer raii{state};
         fdmt_cuda.execute(
             DeviceSpan<const float>(
                 thrust::raw_pointer_cast(waterfall_d.data()),
@@ -94,9 +93,9 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_overall_cuda)
     FDMTPlan tmp_plan(f_min, f_max, nchans, nsamps, tsamp, dt_max);
     thrust::device_vector<float> dmt_d(tmp_plan.get_buffer_size(), 0.0F);
     for (auto _ : state) {
-        CudaEventTimer raii{state};
+        GPUEventTimer raii{state};
         FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                       "valid", Exec::cuda(0));
+                       "valid", bench_gpu_exec());
         fdmt_cuda.execute(
             DeviceSpan<const float>(
                 thrust::raw_pointer_cast(waterfall_d.data()),
@@ -118,7 +117,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
                            ? kFDMTAutoFuse
                            : static_cast<SizeType>(state.range(3));
     FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                   "valid", Exec::cuda(0), 1, fuse, state.range(2) != 0);
+                   "valid", bench_gpu_exec(), 1, fuse, state.range(2) != 0);
     state.counters["fuse"] = static_cast<double>(fdmt_cuda.get_fuse_levels());
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size(),
                                        0.0F);
@@ -126,7 +125,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
                                      dmt_d.size());
     if (nbits == 32) {
         for (auto _ : state) {
-            CudaEventTimer raii{state};
+            GPUEventTimer raii{state};
             fdmt_cuda.execute(DeviceSpan<const float>(
                                   thrust::raw_pointer_cast(waterfall_d.data()),
                                   waterfall_d.size()),
@@ -144,7 +143,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_cuda_packed)
     const DeviceSpan<const uint8_t> packed_span(
         thrust::raw_pointer_cast(packed_d.data()), packed_d.size());
     for (auto _ : state) {
-        CudaEventTimer raii{state};
+        GPUEventTimer raii{state};
         fdmt_cuda.execute(packed_span, nbits, dmt_span);
     }
 }
@@ -156,7 +155,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
 (benchmark::State& state) {
     const auto nbits = static_cast<SizeType>(state.range(1));
     FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                   "valid", Exec::cuda(0));
+                   "valid", bench_gpu_exec());
     std::vector<float> dmt_h(fdmt_cuda.get_plan().get_buffer_size(), 0.0F);
     std::mt19937 gen(42);
     if (nbits == 32) {
@@ -166,7 +165,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
             v = dis(gen);
         }
         for (auto _ : state) {
-            CudaEventTimer raii{state};
+            GPUEventTimer raii{state};
             fdmt_cuda.execute(std::span<const float>(wf_h),
                               std::span<float>(dmt_h));
         }
@@ -178,7 +177,7 @@ BENCHMARK_DEFINE_F(FDMTCUDAFixture, BM_fdmt_execute_host_cuda)
         b = static_cast<uint8_t>(gen() & 0xFFU);
     }
     for (auto _ : state) {
-        CudaEventTimer raii{state};
+        GPUEventTimer raii{state};
         fdmt_cuda.execute(std::span<const uint8_t>(packed_h), nbits,
                           std::span<float>(dmt_h));
     }

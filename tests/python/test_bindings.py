@@ -45,7 +45,7 @@ class TestBackends:
     def test_available_backends(self) -> None:
         avail = dmtlib.available_backends()
         assert avail[0] == "cpu"
-        assert set(avail) <= {"cpu", "cuda", "hip", "metal"}
+        assert set(avail) <= {"cpu", "cuda", "hip"}
 
     @pytest.mark.parametrize(
         "cls", [dmtlib.FDMT, dmtlib.FDMTFFT], ids=["FDMT", "FDMTFFT"]
@@ -61,9 +61,7 @@ class TestBackends:
             dmtlib.FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, backend="opencl")
 
     def test_missing_backend_raises(self) -> None:
-        missing = [
-            b for b in ("cuda", "hip", "metal") if b not in dmtlib.available_backends()
-        ]
+        missing = [b for b in ("cuda", "hip") if b not in dmtlib.available_backends()]
         for backend in missing:
             with pytest.raises(ValueError, match="not available"):
                 dmtlib.FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, backend=backend)

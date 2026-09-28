@@ -21,7 +21,10 @@
 - **System Libraries**:
   - `libfftw3-dev` (FFTW 3.3+)
   - OpenMP runtime (`libomp` on macOS, standard in GCC on Linux)
-  - CUDA Toolkit 12.6+ (Optional, for GPU acceleration)
+  - Optional GPU toolchain (one per build; every algorithm runs on it):
+    - CUDA Toolkit 12.6+ (NVIDIA)
+    - ROCm 6.2+ with hipFFT and rocThrust, and CMake 3.21+ (AMD, via HIP);
+      libhipcxx is used when installed
 
 On Ubuntu/Debian:
 
@@ -55,12 +58,14 @@ uv pip install .
 uv pip install -e ".[develop,docs,tests]"
 ```
 
-### CUDA-Enabled Python Wheels
+### GPU-Enabled Python Builds
 
-To force building Python bindings with CUDA GPU support enabled:
+The default build uses whichever GPU toolchain it finds (`DMT_GPU=AUTO`:
+CUDA first, then ROCm). To require one:
 
 ```bash
-CMAKE_ARGS="-DDMT_CUDA=ON" uv pip install .
+CMAKE_ARGS="-DDMT_GPU=CUDA" uv pip install .   # NVIDIA
+CMAKE_ARGS="-DDMT_GPU=HIP" uv pip install .    # AMD (ROCm)
 ```
 
 To verify Python installation:
@@ -85,8 +90,9 @@ mkdir build && cd build
 # Configure CPU-only build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_BUILD_TESTING=ON
 
-# Or configure with CUDA GPU acceleration
-cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_CUDA=ON -DDMT_CUDA_ARCHITECTURES=native
+# Or configure with a GPU backend
+cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_GPU=CUDA -DDMT_CUDA_ARCHITECTURES=native
+cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_GPU=HIP -DDMT_HIP_ARCHITECTURES="gfx90a;gfx942"
 
 # Build and run unit tests
 cmake --build . -j
@@ -113,7 +119,7 @@ add_executable(search_engine main.cpp)
 target_link_libraries(search_engine PRIVATE dmt::dmt)
 ```
 
-If `dmt` was built with CUDA support, the target automatically propagates necessary CUDA flags and include directories. Static and shared installs both work: the package config finds FFTW, OpenMP and CUDA for you where a static `dmt` needs them.
+The installed headers are the same for every build and include no GPU runtime header; `dmt::available_backends()` reports the backends at run time. Static and shared installs both work: the package config finds FFTW, OpenMP and the GPU libraries (CUDA Toolkit, or HIP, hipFFT and rocThrust) for you where a static `dmt` needs them.
 
 ### Using dmt as a dependency
 
@@ -129,7 +135,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/pravirkr/dmt.git
   GIT_TAG main            # pin a tag or commit in production
 )
-set(DMT_CUDA OFF CACHE STRING "" FORCE)   # or AUTO / ON
+set(DMT_GPU OFF CACHE STRING "" FORCE)   # or AUTO / CUDA / HIP
 FetchContent_MakeAvailable(dmt)
 
 target_link_libraries(my_pipeline PRIVATE dmt::dmt)
@@ -153,8 +159,10 @@ PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
 | `DMT_BUILD_TESTING` | `ON` (top level), `OFF` (subproject) | Build the Catch2 C++ unit tests |
 | `DMT_BUILD_BENCHMARKS` | `OFF` | Build the Google Benchmark suites (`dmt_bench`) |
 | `DMT_BUILD_DOCS` | `OFF` | Configure Doxygen and Sphinx documentation targets |
-| `DMT_CUDA` | `AUTO` | CUDA support mode: `AUTO` (use it if a toolchain is found), `ON` (require it), `OFF` (CPU only) |
-| `DMT_CUDA_ARCHITECTURES` | `native` | GPU architectures, e.g. `80` or `86;90` (passed to `CMAKE_CUDA_ARCHITECTURES`) |
+| `DMT_GPU` | `AUTO` | GPU backend: `AUTO` (CUDA if nvcc is found, else HIP if ROCm is found), `CUDA`, `HIP` (require one), `OFF`. One per build |
+| `DMT_GPU_CHECK_DEVICE` | `ON` | With `DMT_GPU=CUDA`/`HIP`, require a visible GPU at configure time (`OFF` for build-only machines) |
+| `DMT_CUDA_ARCHITECTURES` | `native` | CUDA architectures, e.g. `80` or `86;90` (passed to `CMAKE_CUDA_ARCHITECTURES`) |
+| `DMT_HIP_ARCHITECTURES` | `gfx90a;gfx942` | AMD architectures (passed to `CMAKE_HIP_ARCHITECTURES`), e.g. `gfx1100` for RDNA3 |
 | `DMT_ENABLE_NATIVE_ARCH`| `ON` | `-march=native` in Release builds. Turn `OFF` for binaries or wheels that must run on other CPUs |
 | `DMT_ENABLE_IPO` | `OFF` | Link-time optimization in Release builds |
 | `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt, spdlog) |

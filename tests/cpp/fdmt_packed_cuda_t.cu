@@ -4,16 +4,17 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
-#include <cuda/std/span>
 #include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <thrust/device_vector.h>
 #include <vector>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
+#include "test_helpers.hpp"
 
 // FDMT packed low-bit input and narrow-integer tree (the int_tree
 // constructor parameter, on by default). Integer-valued input keeps every
@@ -123,13 +124,14 @@ TEST_CASE("FDMT packed input matches float input and FDMT", "[fdmt_gpu][gpu]") {
                                                       17 + nbits);
                         FDMT gpu_float(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                        c.dt_max, c.dt_min, 1, smearing, mode,
-                                       Exec::cuda(0));
+                                       test::gpu_exec());
                         const auto expected = run_float(gpu_float, wf.values);
                         const auto n = gpu_float.get_plan().get_dmt_size();
                         for (const bool int_tree : {false, true}) {
                             FDMT gpu(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                      c.dt_max, c.dt_min, 1, smearing, mode,
-                                     Exec::cuda(0), 1, kFDMTAutoFuse, int_tree);
+                                     test::gpu_exec(), 1, kFDMTAutoFuse,
+                                     int_tree);
                             const auto got = run_packed(gpu, wf.packed, nbits);
                             REQUIRE_THAT(beam_slice(got, 0, 0, n),
                                          Catch::Matchers::Equals(
@@ -159,7 +161,7 @@ TEST_CASE("FDMT packed valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
         for (const SizeType nbits : {1, 2, 8}) {
             DYNAMIC_SECTION("block=" << block << " nbits=" << nbits) {
                 FDMT gpu(kFMin, kFMax, nchans, block, kTsamp, 48, 0, 1, true,
-                         "valid", Exec::cuda(0));
+                         "valid", test::gpu_exec());
                 FDMT cpu(kFMin, kFMax, nchans, block, kTsamp, 48, 0, 1, true,
                          "valid");
                 const auto n = cpu.get_plan().get_dmt_size();
@@ -185,7 +187,7 @@ TEST_CASE("FDMT packed multi-beam matches per-beam execution",
     const SizeType nbits  = 2;
     const auto wf         = random_packed(nbeams * nchans, nsamps, nbits, 5);
     FDMT multi(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true, "full",
-               Exec::cuda(0), nbeams);
+               test::gpu_exec(), nbeams);
     const auto got        = run_packed(multi, wf.packed, nbits);
     const auto& plan      = multi.get_plan();
     const auto n          = plan.get_dmt_size();
@@ -198,7 +200,7 @@ TEST_CASE("FDMT packed multi-beam matches per-beam execution",
             wf.packed.begin() +
                 static_cast<std::ptrdiff_t>((b + 1) * nchans * row_bytes));
         FDMT single(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true,
-                    "full", Exec::cuda(0));
+                    "full", test::gpu_exec());
         const auto ref = run_packed(single, one, nbits);
         REQUIRE_THAT(beam_slice(got, gpu_stride, b, n),
                      Catch::Matchers::Equals(beam_slice(ref, 0, 0, n)));
@@ -211,12 +213,12 @@ TEST_CASE("FDMT packed device-memory execute and stepper", "[fdmt_gpu][gpu]") {
     const SizeType nbits  = 1;
     const auto wf         = random_packed(nchans, nsamps, nbits, 3);
     FDMT ref(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
-             Exec::cuda(0));
+             test::gpu_exec());
     const auto expected = run_float(ref, wf.values);
     const auto n        = ref.get_plan().get_dmt_size();
 
     FDMT gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
-             Exec::cuda(0));
+             test::gpu_exec());
     thrust::device_vector<uint8_t> wf_d(wf.packed.begin(), wf.packed.end());
     thrust::device_vector<float> dmt_d(gpu.get_plan().get_buffer_size(), 0.0F);
     const DeviceSpan<const uint8_t> wf_span(
@@ -262,7 +264,7 @@ TEST_CASE("FDMT rejects per-beam extents beyond 32-bit indexing",
             .get_buffer_size();
     REQUIRE(plan_sz > static_cast<SizeType>(INT32_MAX));
     REQUIRE_THROWS_AS(FDMT(f_min, f_max, 4096, nsamps, tsamp, 2048, 0, 1, true,
-                           "valid", Exec::cuda(0)),
+                           "valid", test::gpu_exec()),
                       std::invalid_argument);
 }
 

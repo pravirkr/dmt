@@ -251,8 +251,7 @@ class TestFDMTFFT:
                 atol=5e-3,
             )
 
-    @pytest.mark.cuda
-    def test_fdmt_fft_gpu_optional(self) -> None:
+    def test_fdmt_fft_gpu_optional(self, gpu_backend: str) -> None:
         f_min = 1000.0
         f_max = 1500.0
         nchans = 16
@@ -263,7 +262,14 @@ class TestFDMTFFT:
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
         cpu = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
         gpu = FDMTFFT(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll", backend="cuda"
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            mode="roll",
+            backend=gpu_backend,
         )
         np.testing.assert_allclose(
             gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
