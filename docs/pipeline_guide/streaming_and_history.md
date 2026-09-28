@@ -55,6 +55,23 @@ recomputation of overlap samples.
 
 `mode="full"` and `mode="roll"` keep no history; each block is independent.
 
+### DDMT
+
+`DDMT` always streams. Its history is the raw input tail: the last
+$\Delta t_{\max}$ samples of every (beam, channel) row, prepended to the next
+block. `get_output_nsamps(n)` is `n - max_delay` on a cold start and `n` once
+the stream is warm, and concatenating the outputs of consecutive blocks equals
+one call on the whole stream, bit for bit.
+
+- Every `execute()` overload shares this one history: float and packed input,
+  channel-major and time-major (`execute_time_major`), host and device memory.
+  They may be mixed within a stream; call `reset_history()` to start a new one.
+- On a GPU backend the history stays on the device. Device-memory calls are
+  then a single asynchronous launch sequence on the given stream, with no
+  host synchronisation; host-memory calls stream the block through the device
+  in chunks of `gulp_size` samples (`set_gulp_size()`), overlapping copies and
+  kernels.
+
 ---
 
 ## 3. Time-Division Multiplexing (`save_history` / `load_history`)

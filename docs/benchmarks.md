@@ -4,11 +4,14 @@ All numbers on this page come from one benchmark suite (`dmt_bench_suite`). Ever
 configuration, and one script turns the results into these plots and the
 table at the end. See [Reproducing](#reproducing) to run it yourself.
 
-The results below are for **dmt 0.3.0** (September 2026) on three machines:
+The results below are for three machines:
 
-- an Apple M1 Pro laptop;
-- an Intel Xeon Gold 6348H server;
-- an NVIDIA L40S GPU.
+- an Apple M1 Pro laptop (dmt 0.3.0);
+- an Intel Xeon Gold 6348H server (dmt 0.3.0);
+- an NVIDIA L40S GPU (dmt 0.4.0).
+
+The CPU DDMT engine was also rewritten in 0.4.0 (7–40× faster in
+development tests); the CPU numbers below still show 0.3.0.
 
 ## Key results
 
@@ -19,7 +22,7 @@ trials, float32 input):
 | :--- | ---: | ---: | ---: |
 | FDMT time per block | 26.5 ms | 53.5 ms | 5.5 ms |
 | FDMT real-time factor | 51× | 25× | 242× |
-| DDMT (brute force), slower by | 336× | 148× | 39× |
+| DDMT (brute force), slower by | 336× | 148× | 4× |
 | FDMT-FFT, slower by | 16× | 13× | 4× |
 | FDMT real-time factor, 1-bit input | 123× | 70× | 387× |
 
@@ -57,8 +60,9 @@ telescope.
 - **Brute-force DDMT** does `nchans × ndm` additions per output sample, so it
   scales linearly with the DM count.
   - On both CPUs it crosses the real-time line at ~256 DM trials.
-  - On the L40S it stays below real time at every DM count tested, still
-    30–75× behind FDMT.
+  - On the L40S it stays well below real time at every DM count tested
+    (32–340× real time), 3–5× behind FDMT: the DM-tiled kernels reuse each
+    staged input window across up to 64 DM trials.
 - **FDMT-FFT** applies the tree's shifts as FFT phase ramps. Its cost is
   dominated by the forward and inverse FFTs, so it is nearly flat in the DM
   count and depends on how well the FFT length factorises.
@@ -113,9 +117,10 @@ The real-time factor is seconds of data processed per second of compute.
   than float32.
 - **One CPU thread** keeps FDMT above real time at every input width on both
   CPUs: 5–13× on the Xeon and 16–41× on the M1 Pro.
-- **Brute-force DDMT** on the CPUs is below real time at every input width.
-  Its packed 1–4-bit path is slower than its float path.
-  - On the L40S it keeps up, at 6–14× real time.
+- **Brute-force DDMT** on the CPUs (0.3.0) is below real time at every input
+  width.
+  - On the L40S it runs 63× real time on float32 input and 92–95× on 1- to
+    8-bit input, which is summed two samples per instruction in 16-bit lanes.
 - **Host arrays (`incl. PCIe`)** show what a pipeline pays when data starts
   and ends in host memory.
   - The packed input crosses the bus cheaply, so the float32 DM-time output
@@ -148,8 +153,9 @@ How much of that shows up in wall-clock time depends on the platform:
 - **M1 Pro: 336×**, close to the operation ratio.
 - **Xeon: 148×.** Its wide SIMD speeds up brute force's compute-bound inner
   loop more than FDMT's memory-bound merges.
-- **L40S: 39×.** Brute force suits a GPU well: the same input is reused
-  across every DM trial, from on-chip memory.
+- **L40S: 4×.** Brute force suits a GPU well: each input window is staged
+  once in shared memory and reused by a whole tile of DM trials, so the
+  kernel runs at ~80% of the card's shared-memory load rate.
 
 FDMT does fewer operations, but each one is a memory access. So its speed
 follows the memory bandwidth, not the peak arithmetic rate.

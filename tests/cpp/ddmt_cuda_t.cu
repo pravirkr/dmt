@@ -236,6 +236,8 @@ TEST_CASE("DDMT execute_time_major matches channel-major packed",
             std::vector<int32_t> out_time(dm_count * nsamps_reduced, 0);
 
             ddmt.execute(chan_major, nsamps, out_chan);
+            // Both calls share one stream history; start the second cold.
+            ddmt.reset_history();
             ddmt.execute_time_major(time_major, nsamps, out_time);
 
             REQUIRE_THAT(out_time, Catch::Matchers::Equals(out_chan));

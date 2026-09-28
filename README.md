@@ -147,8 +147,8 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-dmt 0.3.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both 8 threads) and
-an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
+dmt 0.3.0 on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads),
+and dmt 0.4.0 on an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
 16K-sample blocks (1.34 s), processed as a stream.
 
 - **Left:** time per block for FDMT, FFT-based FDMT and brute-force DDMT on
@@ -162,7 +162,8 @@ an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
 </picture>
 
 At 2049 DM trials, FDMT is 150–340× faster than brute-force dedispersion on
-the same CPU and 39× faster on the GPU. It runs 25–51× faster than real time
+the same CPU and 4× faster on the GPU, where the DM-tiled DDMT kernels run
+60–95× faster than real time. It runs 25–51× faster than real time
 on 8 CPU threads and 242× on the L40S, rising to 387× with packed 1-bit
 input.
 

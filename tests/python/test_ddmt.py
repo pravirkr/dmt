@@ -116,6 +116,7 @@ class TestDDMT:
                     time_major[s, byte_idx] |= val << bit_sub
 
         out_chan = ddmt.execute(chan_major, nsamps)
+        ddmt.reset_history()  # shared stream history
         out_time = ddmt.execute_time_major(time_major, nsamps)
 
         np.testing.assert_array_equal(out_time, out_chan)
@@ -206,6 +207,7 @@ class TestDDMT:
         )
 
         out_chan = ddmt_multi.execute(chan_major, nsamps)
+        ddmt_multi.reset_history()  # shared stream history
         out_time = ddmt_multi.execute_time_major(time_major, nsamps)
         np.testing.assert_array_equal(out_time, out_chan)
         assert out_chan.shape[0] == nbeams
@@ -352,3 +354,33 @@ class TestDDMT:
         # reset_history clears state
         ddmt2.reset_history()
         assert ddmt2.get_output_nsamps(32) < 32
+
+    def test_time_major_streaming_matches_monolithic(self) -> None:
+        nchans = 16
+        nsamps = 200
+        dms = np.array([0.0, 3.0, 8.0, 15.0], dtype=np.float32)
+        plan = DDMTPlan(1000.0, 1500.0, nchans, 0.001, dms, nbits=8)
+        rng = np.random.default_rng(7)
+        chan_major = rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8)
+        time_major = np.ascontiguousarray(chan_major.T)
+
+        expected = DDMT(plan).execute(chan_major, nsamps)
+
+        ddmt = DDMT(plan)
+        bounds = [0, 3, 40, 41, 130, nsamps]
+        parts = [
+            ddmt.execute_time_major(
+                np.ascontiguousarray(time_major[a:b]), b - a
+            )
+            for a, b in zip(bounds[:-1], bounds[1:])
+        ]
+        np.testing.assert_array_equal(np.concatenate(parts, axis=1), expected)
+
+    def test_gulp_size(self) -> None:
+        ddmt = DDMT(1000.0, 1500.0, 8, 0.001, 10.0, 5.0, 0.0)
+        default = ddmt.gulp_size
+        assert default > 0
+        ddmt.set_gulp_size(1024)
+        assert ddmt.gulp_size == 1024
+        ddmt.set_gulp_size(0)
+        assert ddmt.gulp_size == default

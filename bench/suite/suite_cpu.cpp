@@ -122,6 +122,7 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
         }
     }
     set_counters(state, plan, p, nthreads);
+    set_ddmt_rate(state, plan, p);
 }
 
 // DDMT points above this many additions per call run one repetition.

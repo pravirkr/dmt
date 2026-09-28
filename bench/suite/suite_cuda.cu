@@ -173,6 +173,7 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         }
     }
     set_counters(state, plan, p, 0);
+    set_ddmt_rate(state, plan, p);
 }
 
 bool gpu_device_available() {

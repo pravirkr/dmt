@@ -165,6 +165,12 @@ SizeType DDMT::get_output_nsamps(SizeType input_nsamps) const noexcept {
     return m_impl->m_engine->get_output_nsamps(input_nsamps);
 }
 void DDMT::reset_history() noexcept { m_impl->m_engine->reset_history(); }
+void DDMT::set_gulp_size(SizeType gulp_size) {
+    m_impl->m_engine->set_gulp_size(gulp_size);
+}
+SizeType DDMT::get_gulp_size() const noexcept {
+    return m_impl->m_engine->get_gulp_size();
+}
 SizeType DDMT::history_state_size() const noexcept {
     return m_impl->m_engine->history_state_size();
 }

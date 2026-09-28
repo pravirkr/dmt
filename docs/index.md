@@ -32,7 +32,7 @@
 :class-card: sd-shadow-sm
 
 - **FDMT**: Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$), float or packed 1/2/4/8/16-bit input
-- **DDMT**: Direct Dedispersion with 1/2/4/8/32-bit SIMD kernels
+- **DDMT**: Direct (brute-force) dedispersion with DM-tiled CPU/GPU kernels, float or packed 1/2/4/8/16-bit input
 - **CFDMT**: Hybrid Coherent baseband dedispersion for microsecond pulses
 - **FDMT-FFT**: Frequency-domain phase-shift dedispersion
 :::

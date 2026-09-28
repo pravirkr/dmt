@@ -158,6 +158,10 @@ public:
     /**
      * @brief Dedisperses a float32 waterfall resident in device memory (GPU
      * backends), as one launch on @p stream with no internal chunking.
+     *
+     * The stream history is kept on the device, so the call is fully
+     * asynchronous with respect to the host; calls made on different streams
+     * are ordered after each other on the device automatically.
      */
     void execute(DeviceSpan<const float> d_waterfall,
                  DeviceSpan<float> d_dmt,
@@ -191,14 +195,17 @@ public:
      * nsamps, nchans).
      *
      * Matches standard SIGPROC `.fil` disk format and telescope streaming DAQ
-     * buffers. On a GPU backend this overload does not gulp: it stages the
-     * whole input/output on the device in one synchronous copy in, kernel
-     * launch, copy out, and each call is a self-contained cold-start
-     * transform (no cross-call history).
+     * buffers. The block is transposed to channel-major form and then
+     * streamed exactly like the channel-major packed execute(): it shares the
+     * same cross-call history (get_output_nsamps() applies, and the two
+     * overloads may be mixed within one stream). On a GPU backend the host
+     * overload streams the input through the device in chunks (see
+     * set_gulp_size()) and the transpose runs on the device.
      *
      * @param filterbank_packed Input packed bytes in time-major order.
      * @param nsamps Sample count in time dimension.
-     * @param dmt Output int32 DM-time buffer.
+     * @param dmt Output int32 DM-time buffer: shape (nbeams, ndm,
+     * get_output_nsamps(nsamps)).
      */
     void execute_time_major(std::span<const uint8_t> filterbank_packed,
                             SizeType nsamps,
@@ -226,6 +233,18 @@ public:
     /// @brief Discards retained cross-call history, returning execute to
     /// cold-start mode
     void reset_history() noexcept;
+
+    /**
+     * @brief Sets the chunk length, in input samples, that host-memory
+     * execute() calls on a GPU backend stream through the device (pinned
+     * staging, overlapped copy/kernel/copy). Larger chunks use more pinned
+     * and device memory (about nbeams * ndm * gulp_size output values per
+     * buffer, double buffered). 0 restores the default (65536). Results do
+     * not depend on it. The CPU backend stores it but does not use it.
+     */
+    void set_gulp_size(SizeType gulp_size);
+    /// @brief Current host-path chunk length in input samples.
+    [[nodiscard]] SizeType get_gulp_size() const noexcept;
 
     /// @brief Size of a fully-warmed-up history state: in floats (nbeams *
     /// nchans * max_delay) when nbits == 32, or in bytes (nbeams * nchans *

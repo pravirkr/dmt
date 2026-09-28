@@ -248,14 +248,10 @@ void bind_ddmt(py::module_& mod) {
                const py::array_t<uint8_t, py::array::c_style>&
                    filterbank_packed,
                SizeType nsamps) {
-                const auto& plan   = ddmt.get_plan();
-                const auto& plan_c = plan.get_container();
-                const auto max_delay =
-                    *std::ranges::max_element(plan_c.delay_table);
-                const auto nsamps_out =
-                    nsamps > max_delay ? nsamps - max_delay : 0;
-                const auto dm_count = plan_c.dm_arr.size();
-                const auto nbeams   = ddmt.get_nbeams();
+                const auto& plan_c    = ddmt.get_plan().get_container();
+                const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
+                const auto dm_count   = plan_c.dm_arr.size();
+                const auto nbeams     = ddmt.get_nbeams();
 
                 py::array_t<int32_t, py::array::c_style> dmt(
                     nbeams > 1
@@ -268,13 +264,12 @@ void bind_ddmt(py::module_& mod) {
                         : std::vector<py::ssize_t>{
                               static_cast<py::ssize_t>(dm_count),
                               static_cast<py::ssize_t>(nsamps_out)});
-                if (nsamps_out > 0) {
-                    ddmt.execute_time_major(
-                        std::span<const uint8_t>(filterbank_packed.data(),
-                                                 filterbank_packed.size()),
-                        nsamps,
-                        std::span<int32_t>(dmt.mutable_data(), dmt.size()));
-                }
+                // Always called, even with no output yet: the block still
+                // feeds the stream history.
+                ddmt.execute_time_major(
+                    std::span<const uint8_t>(filterbank_packed.data(),
+                                             filterbank_packed.size()),
+                    nsamps, std::span<int32_t>(dmt.mutable_data(), dmt.size()));
                 return dmt;
             },
             "filterbank_packed"_a, "nsamps"_a,
@@ -282,9 +277,19 @@ void bind_ddmt(py::module_& mod) {
             Dedisperse a time-major packed filterbank of shape
             ``(nsamps, samp_bytes)``, or ``(nbeams, nsamps, samp_bytes)`` if
             this instance's nbeams > 1.
-            Produces ``(n_dm, nsamps - max_delay)`` or
-            ``(nbeams, n_dm, nsamps - max_delay)``.
+            Produces ``(n_dm, output_nsamps)`` or
+            ``(nbeams, n_dm, output_nsamps)``, where ``output_nsamps =
+            get_output_nsamps(nsamps)``. Shares the stream history with
+            :meth:`execute`: consecutive calls continue one stream; call
+            :meth:`reset_history` to start a new one.
             )doc")
+        .def("set_gulp_size", &DDMT::set_gulp_size, "gulp_size"_a,
+             R"doc(
+            Set the chunk length (input samples) that host-memory calls on a
+            GPU backend stream through the device. 0 restores the default.
+            Results do not depend on it; the CPU backend ignores it.
+            )doc")
+        .def_property_readonly("gulp_size", &DDMT::get_gulp_size)
         .def("get_output_nsamps", &DDMT::get_output_nsamps, "input_nsamps"_a)
         .def("reset_history", &DDMT::reset_history)
         .def("history_state_size", &DDMT::history_state_size)

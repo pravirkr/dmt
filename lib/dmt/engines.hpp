@@ -188,6 +188,11 @@ public:
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
 
+    // Host-path chunk length in input samples (GPU; stored but unused on
+    // the CPU). 0 restores the default.
+    virtual void set_gulp_size(SizeType gulp_size)                = 0;
+    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept = 0;
+
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
 };

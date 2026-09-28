@@ -180,6 +180,18 @@ inline void set_counters(benchmark::State& state,
     state.counters["block_s"]  = static_cast<double>(p.nsamps) * kTsamp;
 }
 
+/// DDMT throughput in delay-and-sum additions per second (nchans x ndm per
+/// output sample), comparable against the machine's load/add roofline.
+inline void set_ddmt_rate(benchmark::State& state,
+                          const plans::FDMTPlan& plan,
+                          const Point& p) {
+    state.counters["adds_per_s"] =
+        benchmark::Counter(static_cast<double>(kNchans) *
+                               static_cast<double>(plan.get_dmt_ndms()) *
+                               static_cast<double>(p.nsamps),
+                           benchmark::Counter::kIsIterationInvariantRate);
+}
+
 /// Deterministic input: float samples in [0, 1) or packed random bytes.
 inline std::vector<float> make_float_input(SizeType n) {
     std::vector<float> v(n);

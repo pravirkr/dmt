@@ -500,6 +500,8 @@ TEST_CASE("DDMT execute_time_major matches channel-major packed",
             std::vector<int32_t> out_time(dm_count * nsamps_reduced, 0);
 
             ddmt.execute(chan_major, nsamps, out_chan);
+            // Both calls share one stream history; start the second cold.
+            ddmt.reset_history();
             ddmt.execute_time_major(time_major, nsamps, out_time);
 
             REQUIRE_THAT(out_time, Catch::Matchers::Equals(out_chan));
@@ -647,6 +649,7 @@ TEST_CASE("DDMT multi-beam time-major matches per-beam single-beam calls",
             filterbank.begin() +
                 static_cast<std::ptrdiff_t>((ibeam + 1) * nsamps * samp_bytes));
         std::vector<int32_t> dmt_single(dm_count * nsamps_reduced, 0);
+        ddmt_single.reset_history(); // each beam is an independent stream
         ddmt_single.execute_time_major(beam_filterbank, nsamps, dmt_single);
 
         const auto* beam_out =
