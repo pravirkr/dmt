@@ -12,20 +12,86 @@
 #include <pybind11/stl.h>
 
 #include "dmt/algorithms/ddmt.hpp"
+#include "dmt/algorithms/sdmt.hpp"
 #include "dmt/common/plans.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
 using algorithms::DDMT;
+using algorithms::SDMT;
 using plans::DDMTPlan;
 using plans::LevinConfig;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
+/// Binds the constructor set shared by DDMT and SDMT.
+template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
+    cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                        float dm_max, float dm_step, float dm_min, int nthreads,
+                        SizeType nbits,
+                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbeams, std::string_view backend, int device) {
+                std::vector<uint8_t> km_vec;
+                if (kill_mask.has_value()) {
+                    km_vec.assign(kill_mask->data(),
+                                  kill_mask->data() + kill_mask->size());
+                }
+                return T(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min,
+                         make_exec(backend, nthreads, device), nbits, km_vec,
+                         nbeams);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
+            "dm_step"_a, "dm_min"_a = 0.0F, "nthreads"_a = 1, "nbits"_a = 32,
+            "kill_mask"_a = py::none(), "nbeams"_a = 1, py::kw_only(),
+            "backend"_a = "cpu", "device"_a = 0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                        const py::array_t<float>& dm_arr, int nthreads,
+                        SizeType nbits,
+                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbeams, std::string_view backend, int device) {
+                std::vector<uint8_t> km_vec;
+                if (kill_mask.has_value()) {
+                    km_vec.assign(kill_mask->data(),
+                                  kill_mask->data() + kill_mask->size());
+                }
+                return T(f_min, f_max, nchans, tsamp,
+                         std::span<const float>(dm_arr.data(), dm_arr.size()),
+                         make_exec(backend, nthreads, device), nbits, km_vec,
+                         nbeams);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
+            "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
+            "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                        const LevinConfig& levin, int nthreads, SizeType nbits,
+                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbeams, std::string_view backend, int device) {
+                std::vector<uint8_t> km_vec;
+                if (kill_mask.has_value()) {
+                    km_vec.assign(kill_mask->data(),
+                                  kill_mask->data() + kill_mask->size());
+                }
+                return T(f_min, f_max, nchans, tsamp, levin,
+                         make_exec(backend, nthreads, device), nbits, km_vec,
+                         nbeams);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
+            "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
+            "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
+        .def(py::init([](const DDMTPlan& plan, int nthreads, SizeType nbeams,
+                         std::string_view backend, int device) {
+                 return T(plan, make_exec(backend, nthreads, device), nbeams);
+             }),
+             "plan"_a, "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
+             "backend"_a = "cpu", "device"_a = 0);
+}
+
 void bind_ddmt(py::module_& mod) {
-    py::class_<DDMT>(mod, "DDMT",
-                     R"doc(
+    py::class_<DDMT> ddmt_cls(mod, "DDMT",
+                              R"doc(
         Direct Dispersion Measure Transform (DDMT) incoherent dedispersion.
 
         Supports float32 waterfalls, packed low-bit integers (1, 2, 4, 8, 16 bits),
@@ -71,70 +137,9 @@ void bind_ddmt(py::module_& mod) {
         Input and output are NumPy (host) arrays on every backend; a GPU
         backend pipelines the host transfers and blocks until the result is
         on the host.
-        )doc")
-        .def(
-            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                        float dm_max, float dm_step, float dm_min, int nthreads,
-                        SizeType nbits,
-                        std::optional<py::array_t<uint8_t>> kill_mask,
-                        SizeType nbeams, std::string_view backend, int device) {
-                std::vector<uint8_t> km_vec;
-                if (kill_mask.has_value()) {
-                    km_vec.assign(kill_mask->data(),
-                                  kill_mask->data() + kill_mask->size());
-                }
-                return DDMT(f_min, f_max, nchans, tsamp, dm_max, dm_step,
-                            dm_min, make_exec(backend, nthreads, device), nbits,
-                            km_vec, nbeams);
-            }),
-            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-            "dm_step"_a, "dm_min"_a = 0.0F, "nthreads"_a = 1, "nbits"_a = 32,
-            "kill_mask"_a = py::none(), "nbeams"_a = 1, py::kw_only(),
-            "backend"_a = "cpu", "device"_a = 0)
-        .def(
-            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                        const py::array_t<float>& dm_arr, int nthreads,
-                        SizeType nbits,
-                        std::optional<py::array_t<uint8_t>> kill_mask,
-                        SizeType nbeams, std::string_view backend, int device) {
-                std::vector<uint8_t> km_vec;
-                if (kill_mask.has_value()) {
-                    km_vec.assign(kill_mask->data(),
-                                  kill_mask->data() + kill_mask->size());
-                }
-                return DDMT(
-                    f_min, f_max, nchans, tsamp,
-                    std::span<const float>(dm_arr.data(), dm_arr.size()),
-                    make_exec(backend, nthreads, device), nbits, km_vec,
-                    nbeams);
-            }),
-            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
-            "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
-            "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
-        .def(
-            py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                        const LevinConfig& levin, int nthreads, SizeType nbits,
-                        std::optional<py::array_t<uint8_t>> kill_mask,
-                        SizeType nbeams, std::string_view backend, int device) {
-                std::vector<uint8_t> km_vec;
-                if (kill_mask.has_value()) {
-                    km_vec.assign(kill_mask->data(),
-                                  kill_mask->data() + kill_mask->size());
-                }
-                return DDMT(f_min, f_max, nchans, tsamp, levin,
-                            make_exec(backend, nthreads, device), nbits, km_vec,
-                            nbeams);
-            }),
-            "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
-            "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
-            "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
-        .def(py::init([](const DDMTPlan& plan, int nthreads, SizeType nbeams,
-                         std::string_view backend, int device) {
-                 return DDMT(plan, make_exec(backend, nthreads, device),
-                             nbeams);
-             }),
-             "plan"_a, "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
-             "backend"_a = "cpu", "device"_a = 0)
+        )doc");
+    def_ddmt_inits<DDMT>(ddmt_cls);
+    ddmt_cls
         .def_property_readonly(
             "backend",
             [](const DDMT& ddmt) {
@@ -344,6 +349,26 @@ void bind_ddmt(py::module_& mod) {
                 }
             },
             "history"_a);
+
+    py::class_<SDMT, DDMT> sdmt_cls(mod, "SDMT",
+                                    R"doc(
+        Subband-shared Dispersion Measure Transform (SDMT).
+
+        Computes exactly the DDMT sums, with the same delay table, DM grid
+        and kill mask, but shares partial sums between DM trials: within
+        16-channel subbands, trials whose integer delays agree (relative to
+        a per-trial base) have identical partial sums, computed once.
+        Nothing is approximated. Integer output is bit-identical to DDMT;
+        float32 output differs only by rounding (order of additions).
+        Dense DM grids save the most additions (~7x fewer additions, yielding
+        ~3.5x wall-clock speedup at 4096 channels and 2049 trials); coarse or
+        sparse grids fall back to direct sums per subband (where DDMT's
+        uninterpreted loop has lower overhead).
+
+        Same parameters, methods and streaming behaviour as :class:`DDMT`.
+        CPU backend only (``backend='cpu'``).
+        )doc");
+    def_ddmt_inits<SDMT>(sdmt_cls);
 }
 
 } // namespace dmt

@@ -33,6 +33,7 @@
 
 - **FDMT**: Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$), float or packed 1/2/4/8/16-bit input
 - **DDMT**: Direct (brute-force) dedispersion with DM-tiled CPU/GPU kernels, float or packed 1/2/4/8/16-bit input
+- **SDMT**: Exact DDMT sums with partial sums shared between DM trials within subbands (CPU; bit-identical integer output)
 - **CFDMT**: Hybrid Coherent baseband dedispersion for microsecond pulses
 - **FDMT-FFT**: Frequency-domain phase-shift dedispersion
 :::
@@ -123,9 +124,21 @@ api/index
 
 ---
 
-## Citation & References
+## Algorithm References
 
-If you use `dmt` in your astronomical research or telescope data processing, please cite:
+`dmt` implements and optimizes several dedispersion algorithms based on the radio astronomy literature:
 
-1. **Zackay, B., & Ofek, E. O. (2017)**. *An Accurate and Efficient Algorithm for Detection of Radio Bursts with an Unknown Dispersion Measure, for Single-Dish Telescopes and Interferometers*. [The Astrophysical Journal](https://doi.org/10.3847/1538-4357/835/1/11), 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373)
+| Algorithm | Method & Description | Literature References |
+| :--- | :--- | :--- |
+| **FDMT** | Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$) | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
+| **DDMT** | Direct Dedispersion (brute-force delay-and-sum, DM-tiled GPU & CPU) | Barsdell, B. R. et al. (2012), *MNRAS*, 422(1), 379–392. [doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x); AstroAccelerate (Dimoudi et al. 2018) |
+| **SDMT** | Subband-shared Dedispersion (exact prefix tree / trie partial-sum sharing) | Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825)) |
+| **CFDMT** | Coherent Baseband Dedispersion + Incoherent FDMT | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
+| **FDMT-FFT** | Frequency-Domain Phase-Shift Dedispersion (chirp phase rotation) | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
+
+### Citation
+
+If you use `dmt` in your astronomical research or telescope processing pipelines, please cite:
+
+1. **Zackay, B. & Ofek, E. O. (2017)**. *An Accurate and Efficient Algorithm for Detection of Radio Bursts with an Unknown Dispersion Measure, for Single-Dish Telescopes and Interferometers*. [The Astrophysical Journal](https://doi.org/10.3847/1538-4357/835/1/11), 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373)
 2. **Kumar, P. & Zackay, B. (2026)**. *dmt: Fast Dispersion Measure Transform Library*. GitHub: [https://github.com/pravirkr/dmt](https://github.com/pravirkr/dmt)

@@ -1,11 +1,12 @@
 // Exhaustive GPU vs CPU parity for the DDMT GPU engine: every input width,
 // the tiled (wide / narrow DM tiles) and direct kernels, kill masks,
 // multiple beams, and streaming in uneven chunks through the device-span,
-// host-span and time-major entry points. Both engines sum each output in
-// ascending channel order from zero, so float results must match bitwise
-// and integer results exactly.
+// host-span and time-major entry points. Integer results must match exactly.
+// The CPU and GPU kernels add channels in different orders (and the build
+// uses -ffast-math), so float results match to rounding.
 
-#include <bit>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <random>
@@ -218,11 +219,16 @@ void require_same(const Output& gpu, const Output& cpu) {
     REQUIRE(gpu.f.size() == cpu.f.size());
     REQUIRE(gpu.i.size() == cpu.i.size());
     if (!cpu.f.empty()) {
-        // Bitwise: identical summation order on both backends.
-        REQUIRE(std::equal(
-            gpu.f.begin(), gpu.f.end(), cpu.f.begin(), [](float a, float b) {
-                return std::bit_cast<uint32_t>(a) == std::bit_cast<uint32_t>(b);
-            }));
+        // Same sums, different float addition order (inputs lie in
+        // [-3, 7), outputs are sums of at most a few hundred of them).
+        std::size_t bad = 0;
+        for (std::size_t k = 0; k < cpu.f.size(); ++k) {
+            if (std::abs(gpu.f[k] - cpu.f[k]) >
+                1.0E-4F + (1.0E-5F * std::abs(cpu.f[k]))) {
+                ++bad;
+            }
+        }
+        REQUIRE(bad == 0);
     }
     if (!cpu.i.empty()) {
         REQUIRE_THAT(gpu.i, Catch::Matchers::Equals(cpu.i));
@@ -261,7 +267,7 @@ std::vector<uint8_t> make_mask(SizeType nchans) {
 
 } // namespace
 
-TEST_CASE("parity: DDMT (gpu) tiled/direct kernels match CPU bitwise, "
+TEST_CASE("parity: DDMT (gpu) tiled/direct kernels match CPU, "
           "monolithic and streaming",
           "[ddmt][gpu][parity][streaming]") {
     for (const auto& sc : scenarios()) {

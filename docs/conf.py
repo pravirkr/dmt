@@ -74,8 +74,6 @@ exclude_patterns = [
     "logo-src",
     # Written by conf.py and included from api/cpp_api.md. Not a standalone page.
     "api/_breathe_body.rst",
-    # Internal design note for contributors.
-    "future_design.md",
 ]
 # "any" turns ordinary RST backticks into cross-references and fails the
 # build whenever a name is not in the domain index. Leave the default role
@@ -437,6 +435,10 @@ Compute Engines (``dmt::algorithms``)
    :members:
 
 .. doxygenclass:: dmt::algorithms::DDMT
+   :project: dmt
+   :members:
+
+.. doxygenclass:: dmt::algorithms::SDMT
    :project: dmt
    :members:
 

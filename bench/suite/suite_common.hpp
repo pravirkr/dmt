@@ -1,8 +1,8 @@
 #pragma once
 
 // Published benchmark suite (dmt_bench_suite): one fixed data configuration
-// shared by every algorithm and backend, so FDMT, FDMT-FFT and DDMT land on
-// the same plots. Only the block length (nsamps), the number of DM trials
+// shared by every algorithm and backend, so FDMT, FDMT-FFT, DDMT and SDMT land
+// on the same plots. Only the block length (nsamps), the number of DM trials
 // (via dt_max) and the input bit width are swept. See bench/README.md.
 
 #include <algorithm>
@@ -36,7 +36,7 @@ inline const std::vector<IndexType> kDtMaxSweep = {256, 512, 1024, 2048, 4096};
 inline const std::vector<SizeType> kNbitsSweep  = {1, 2, 4, 8, 16, 32};
 
 enum class Sweep { kNsamps, kNdms, kNbits };
-enum class Algo { kFDMT, kFDMTFFT, kDDMT };
+enum class Algo { kFDMT, kFDMTFFT, kDDMT, kSDMT };
 
 struct Point {
     Sweep sweep;
@@ -65,6 +65,8 @@ inline std::string_view algo_name(Algo a) {
         return "FDMT-FFT";
     case Algo::kDDMT:
         return "DDMT";
+    case Algo::kSDMT:
+        return "SDMT";
     }
     return "?";
 }
@@ -162,6 +164,7 @@ estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
         return input + d +
                (32.0 * static_cast<double>(plan.get_fft_buffer_size()));
     case Algo::kDDMT: // output + one block of history per channel
+    case Algo::kSDMT:
         return input + d + (static_cast<double>(kNchans) * 4.0 * p.dt_max);
     }
     return 0.0;
@@ -181,7 +184,8 @@ inline void set_counters(benchmark::State& state,
 }
 
 /// DDMT throughput in delay-and-sum additions per second (nchans x ndm per
-/// output sample), comparable against the machine's load/add roofline.
+/// output sample), comparable against the machine's load/add roofline. For
+/// SDMT it is the equivalent brute-force rate (it performs fewer additions).
 inline void set_ddmt_rate(benchmark::State& state,
                           const plans::FDMTPlan& plan,
                           const Point& p) {

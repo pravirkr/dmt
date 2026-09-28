@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import DDMT, DDMTPlan, LevinConfig
+from dmtlib import DDMT, SDMT, DDMTPlan, LevinConfig
 
 
 class TestDDMT:
@@ -369,9 +369,7 @@ class TestDDMT:
         ddmt = DDMT(plan)
         bounds = [0, 3, 40, 41, 130, nsamps]
         parts = [
-            ddmt.execute_time_major(
-                np.ascontiguousarray(time_major[a:b]), b - a
-            )
+            ddmt.execute_time_major(np.ascontiguousarray(time_major[a:b]), b - a)
             for a, b in zip(bounds[:-1], bounds[1:])
         ]
         np.testing.assert_array_equal(np.concatenate(parts, axis=1), expected)
@@ -384,3 +382,83 @@ class TestDDMT:
         assert ddmt.gulp_size == 1024
         ddmt.set_gulp_size(0)
         assert ddmt.gulp_size == default
+
+
+class TestSDMT:
+    # Dense grid: consecutive trials differ by about one sample across the
+    # band, so most partial sums are shared.
+    F_MIN, F_MAX, NCHANS, TSAMP = 1000.0, 1500.0, 256, 0.001
+    DMS = (0.4 * np.arange(400)).astype(np.float32)
+
+    def test_is_a_ddmt(self) -> None:
+        sdmt = SDMT(self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
+        assert isinstance(sdmt, DDMT)
+        assert sdmt.backend == "cpu"
+
+    @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
+    def test_packed_matches_ddmt_exactly(self, nbits: int) -> None:
+        nsamps = 2000
+        mask = (1 << nbits) - 1
+        rng = np.random.default_rng(3)
+        raw = rng.integers(0, 1 << nbits, (self.NCHANS, nsamps), dtype=np.uint64) & mask
+        chan_row_bytes = (
+            (nsamps * nbits + 7) // 8 if nbits < 8 else nsamps * (nbits // 8)
+        )
+        data = np.zeros((self.NCHANS, chan_row_bytes), dtype=np.uint8)
+        if nbits == 16:
+            data.view(np.uint16)[:] = raw
+        elif nbits == 8:
+            data[:] = raw.astype(np.uint8)
+        else:
+            for c in range(self.NCHANS):
+                for s in range(nsamps):
+                    val = int(raw[c, s])
+                    bit_off = s * nbits
+                    data[c, bit_off // 8] |= val << (bit_off % 8)
+
+        args = (self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
+        ddmt = DDMT(*args, nthreads=4, nbits=nbits)
+        sdmt = SDMT(*args, nthreads=4, nbits=nbits)
+        np.testing.assert_array_equal(
+            sdmt.execute(data, nsamps), ddmt.execute(data, nsamps)
+        )
+
+    def test_float_matches_ddmt_and_streams(self) -> None:
+        nsamps = 2000
+        rng = np.random.default_rng(4)
+        wf = rng.standard_normal((self.NCHANS, nsamps)).astype(np.float32)
+        args = (self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
+        expected = DDMT(*args).execute(wf)
+
+        sdmt = SDMT(*args, nthreads=4)
+        out1 = sdmt.execute(wf[:, :900])
+        out2 = sdmt.execute(wf[:, 900:])
+        got = np.concatenate([out1, out2], axis=1)
+        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-4)
+
+        hist = sdmt.save_history()
+        assert len(hist) == sdmt.history_state_size()
+        sdmt.reset_history()
+        sdmt.load_history(hist)
+        assert sdmt.execute(wf[:, :64]).shape[1] == 64
+
+    def test_time_major_matches_channel_major(self) -> None:
+        nsamps = 1500
+        rng = np.random.default_rng(5)
+        data = rng.integers(0, 256, (self.NCHANS, nsamps), dtype=np.uint8)
+        sdmt = SDMT(self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS, nbits=8)
+        out_chan = sdmt.execute(data, nsamps)
+        sdmt.reset_history()
+        out_time = sdmt.execute_time_major(np.ascontiguousarray(data.T), nsamps)
+        np.testing.assert_array_equal(out_time, out_chan)
+
+    def test_cpu_only(self) -> None:
+        with pytest.raises(ValueError):
+            SDMT(
+                self.F_MIN,
+                self.F_MAX,
+                self.NCHANS,
+                self.TSAMP,
+                self.DMS,
+                backend="cuda",
+            )

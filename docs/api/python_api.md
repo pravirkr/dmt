@@ -17,6 +17,11 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: dmtlib.SDMT
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: dmtlib.CohFDMT
    :members:
    :undoc-members:

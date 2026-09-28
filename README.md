@@ -17,7 +17,7 @@
 
 </div>
 
-**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **CFDMT**, and **FDMT-FFT**.
+**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, and **FDMT-FFT**.
 
 | Dispersed Waterfall Input $I(\nu, t)$ | Dedispersed DM-Time Plane $DMT(\text{DM}, t)$ |
 | :---: | :---: |
@@ -147,23 +147,24 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-dmt 0.3.0 on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads),
-and dmt 0.4.0 on an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
+Measured with dmt 0.4.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
+8 threads), and an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
 16K-sample blocks (1.34 s), processed as a stream.
 
-- **Left:** time per block for FDMT, FFT-based FDMT and brute-force DDMT on
-  the same DM grid. The grey line is real time.
+- **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT and
+  SDMT (exact DDMT sums with shared partial sums, CPU) on the same DM grid. The grey line is real time.
 - **Right:** how many times faster than real time FDMT runs, by input bit
   width.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/dark/readme_highlight.png">
-  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT and DDMT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
+  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT and SDMT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
 </picture>
 
-At 2049 DM trials, FDMT is 150–340× faster than brute-force dedispersion on
-the same CPU and 4× faster on the GPU, where the DM-tiled DDMT kernels run
-60–95× faster than real time. It runs 25–51× faster than real time
+At 2049 DM trials, FDMT is 11× faster than brute-force DDMT on the Xeon
+and 37× on the M1 Pro (down from 336× in 0.3.0), and 3–8× faster than SDMT, which
+runs 6–21× faster than real time across both CPUs; on the GPU FDMT is 4× faster, where
+the DM-tiled DDMT kernels run 60–95× faster than real time. FDMT runs 25–53× faster than real time
 on 8 CPU threads and 242× on the L40S, rising to 387× with packed 1-bit
 input.
 
@@ -173,20 +174,31 @@ All sweeps, per-machine numbers and the operation-count comparison are on the
 
 ---
 
-## 📜 Citation
+## 📜 Citations & Algorithm References
 
-If you use `dmt` in your research, please cite:
+If you use `dmt` in your research, please cite the library and the foundational FDMT paper:
 
 ```bibtex
-@article{zackay2017accurate,
-  title={An accurate and efficient algorithm for detection of radio bursts with an unknown dispersion measure, for single dish telescopes and interferometers},
-  author={Zackay, Barak and Ofek, Eran O},
-  journal={The Astrophysical Journal},
-  volume={835},
-  number={1},
-  pages={11},
-  year={2017}
+@ARTICLE{2017ApJ...835...11Z,
+       author = {{Zackay}, Barak and {Ofek}, Eran O.},
+        title = "{An Accurate and Efficient Algorithm for Detection of Radio Bursts with an Unknown Dispersion Measure, for Single-dish Telescopes and Interferometers}",
+      journal = {\apj},
+     keywords = {methods: data analysis, methods: statistical, Astrophysics - Instrumentation and Methods for Astrophysics},
+         year = 2017,
+        month = jan,
+       volume = {835},
+       number = {1},
+          eid = {11},
+        pages = {11},
+          doi = {10.3847/1538-4357/835/1/11},
+archivePrefix = {arXiv},
+       eprint = {1411.5373},
+ primaryClass = {astro-ph.IM},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2017ApJ...835...11Z},
+      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
+
+
 
 @software{kumar2026dmt,
   author = {Kumar, Pravir and Zackay, Barak},
@@ -195,6 +207,12 @@ If you use `dmt` in your research, please cite:
   year = {2026}
 }
 ```
+
+The algorithms implemented in `dmt` build upon foundational literature and open-source frameworks:
+
+- **FDMT, FDMT-FFT, CFDMT:** Zackay & Ofek (2017), *ApJ*, 835, 11 ([arXiv:1411.5373](https://arxiv.org/abs/1411.5373))
+- **DDMT:** Barsdell et al. (2012), *MNRAS*, 422, 379 ([doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x))
+- **SDMT:** Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825))
 
 ## 📄 License
 

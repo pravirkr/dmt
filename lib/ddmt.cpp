@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -18,7 +20,17 @@ namespace {
 
 std::unique_ptr<detail::DDMTEngine>
 make_ddmt_engine(const plans::DDMTPlan& plan,
-                 const detail::DDMTEngineConfig& cfg) {
+                 const detail::DDMTEngineConfig& cfg,
+                 bool shared_sums) {
+    if (shared_sums) {
+        if (cfg.exec.backend != Backend::kCPU) {
+            throw std::invalid_argument(
+                std::format("SDMT: runs on the CPU backend only (got '{}'); "
+                            "use DDMT on a GPU backend",
+                            to_string(cfg.exec.backend)));
+        }
+        return detail::make_sdmt_cpu(plan, cfg);
+    }
     if (cfg.exec.backend == Backend::kCPU) {
         return detail::make_ddmt_cpu(plan, cfg);
     }
@@ -34,10 +46,13 @@ make_ddmt_engine(const plans::DDMTPlan& plan,
 
 class DDMT::Impl {
 public:
-    Impl(plans::DDMTPlan plan, Exec exec, SizeType nbeams)
+    Impl(plans::DDMTPlan plan,
+         Exec exec,
+         SizeType nbeams,
+         bool shared_sums = false)
         : m_plan(std::move(plan)),
           m_cfg{.nbeams = nbeams, .exec = exec},
-          m_engine(make_ddmt_engine(m_plan, m_cfg)) {}
+          m_engine(make_ddmt_engine(m_plan, m_cfg, shared_sums)) {}
 
     // The engine holds a reference to m_plan; declaration order matters.
     plans::DDMTPlan m_plan;
@@ -105,6 +120,13 @@ DDMT::DDMT(float f_min,
 
 DDMT::DDMT(const plans::DDMTPlan& plan, Exec exec, SizeType nbeams)
     : m_impl(std::make_unique<Impl>(plan, exec, nbeams)) {}
+
+DDMT::DDMT(const plans::DDMTPlan& plan,
+           Exec exec,
+           SizeType nbeams,
+           EngineKind kind)
+    : m_impl(std::make_unique<Impl>(
+          plan, exec, nbeams, kind == EngineKind::kSharedSums)) {}
 
 DDMT::~DDMT()                                = default;
 DDMT::DDMT(DDMT&& other) noexcept            = default;

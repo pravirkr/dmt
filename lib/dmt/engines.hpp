@@ -201,6 +201,9 @@ std::unique_ptr<DDMTEngine> make_ddmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
 std::unique_ptr<DDMTEngine> make_ddmt_gpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
+// SDMT: exact shared-partial-sum engine (CPU only).
+std::unique_ptr<DDMTEngine> make_sdmt_cpu(const plans::DDMTPlan& plan,
+                                          const DDMTEngineConfig& cfg);
 
 // ---------------------------------------------------------------------------
 // FDMT-FFT

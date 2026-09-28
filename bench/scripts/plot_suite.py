@@ -54,8 +54,9 @@ NBITS = [1, 2, 4, 8, 16, 32]
 NBITS_LABELS = [f"{b}-bit" if b < 32 else "float32" for b in NBITS]
 
 Theme = dict[str, Any]
-ALGOS = ["FDMT", "FDMT-FFT", "DDMT"]
-# Validated categorical slots 1-3 (blue, orange, aqua) for each theme.
+ALGOS = ["FDMT", "FDMT-FFT", "DDMT", "SDMT"]
+# Validated categorical slots 1-4 (blue, orange, aqua, yellow) for each theme.
+# Slot 4 sits below 3:1 on the light surface, so every line is direct-labelled.
 THEMES: dict[str, Theme] = {
     "light": {
         "surface": "#fcfcfb",
@@ -64,7 +65,12 @@ THEMES: dict[str, Theme] = {
         "muted": "#898781",
         "grid": "#e1e0d9",
         "axis": "#c3c2b7",
-        "algo": {"FDMT": "#2a78d6", "FDMT-FFT": "#eb6834", "DDMT": "#1baf7a"},
+        "algo": {
+            "FDMT": "#2a78d6",
+            "FDMT-FFT": "#eb6834",
+            "DDMT": "#1baf7a",
+            "SDMT": "#eda100",
+        },
     },
     "dark": {
         "surface": "#1a1a19",
@@ -73,7 +79,12 @@ THEMES: dict[str, Theme] = {
         "muted": "#898781",
         "grid": "#2c2c2a",
         "axis": "#383835",
-        "algo": {"FDMT": "#3987e5", "FDMT-FFT": "#d95926", "DDMT": "#199e70"},
+        "algo": {
+            "FDMT": "#3987e5",
+            "FDMT-FFT": "#d95926",
+            "DDMT": "#199e70",
+            "SDMT": "#c98500",
+        },
     },
 }
 MARKERS = ["o", "s", "^", "D", "v", "P"]
@@ -460,7 +471,7 @@ def throughput_figure(
     for ax, (mname, kind) in zip(axes, panels, strict=False):
         if kind == "cpu":
             threads = cpu_backends(results, mname)
-            lines = [("FDMT", threads[-1], False), ("DDMT", threads[-1], False)]
+            lines = [(a, threads[-1], False) for a in ("FDMT", "DDMT", "SDMT")]
             lines += [("FDMT", t, True) for t in threads[:-1]]
         else:
             lines = [
@@ -531,7 +542,7 @@ def ops_figure(theme: Theme) -> Figure:
         (ax1, [int(r["ndms"]) for r in by_dms], by_dms, "number of DM trials"),
         (ax2, chans, by_chans, "number of channels"),
     ):
-        for algo in ALGOS:
+        for algo in labels:  # SDMT's count depends on the DM grid: no model
             ys = [r[algo] for r in rows]
             plot_line(ax, theme, xs, ys, algo=algo, label=labels[algo])
             end_label(ax, xs[-1], ys[-1], labels[algo])
@@ -665,10 +676,10 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
         ),
         "",
         (
-            "| platform | FDMT | FDMT-FFT | DDMT | DDMT / FDMT | FDMT-FFT / FDMT "
-            "| FDMT real-time factor |"
+            "| platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT / FDMT "
+            "| SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |"
         ),
-        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     ref = {
         (r.machine, r.backend, r.algo): r
@@ -685,7 +696,7 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
             cells = [fmt_seconds(t[a].time) if t[a] else "—" for a in ALGOS]
             ratios = [
                 f"{t[a].time / fdmt.time:.0f}{TIMES}" if t[a] else "—"
-                for a in ("DDMT", "FDMT-FFT")
+                for a in ("DDMT", "SDMT", "FDMT-FFT")
             ]
             plat = machines[mname].platform(kind) + backend_tag(b)
             out.append(
@@ -721,7 +732,7 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
             cpu_backends(results, mname) if kind == "cpu" else [kind, f"{kind}_host"]
         )
         for b in backends:
-            for a in ("FDMT", "DDMT"):
+            for a in ("FDMT", "DDMT", "SDMT"):
                 row = by.get((mname, b, a))
                 if not row:
                     continue

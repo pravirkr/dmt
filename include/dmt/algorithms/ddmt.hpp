@@ -28,6 +28,10 @@ namespace dmt::algorithms {
  * 8, 16 bits), per-channel kill masks for RFI mitigation, multi-beam batching,
  * and overlap-save streaming.
  *
+ * Every trial sums every active channel directly: the cost is
+ * nchans x ndm additions per output sample on every backend. SDMT computes
+ * the same sums with fewer additions on the CPU.
+ *
  * Runs on the backend chosen by the `Exec` constructor argument. Host memory
  * (`std::span`) works on every backend; a GPU backend streams it through
  * pipelined H2D/kernel/D2H transfers and blocks until the result is on the
@@ -126,7 +130,7 @@ public:
                   Exec exec       = {},
                   SizeType nbeams = 1);
 
-    ~DDMT();
+    virtual ~DDMT();
     DDMT(DDMT&&) noexcept;
     DDMT& operator=(DDMT&&) noexcept;
     DDMT(const DDMT&)            = delete;
@@ -323,6 +327,15 @@ public:
     void load_history(const std::vector<uint8_t, Alloc>& in) {
         load_history(std::span<const uint8_t>(in));
     }
+
+protected:
+    /// Engine an instance runs: DDMT always sums directly; SDMT (a thin
+    /// subclass) selects the shared-partial-sum CPU engine.
+    enum class EngineKind : uint8_t { kDirect, kSharedSums };
+    DDMT(const plans::DDMTPlan& plan,
+         Exec exec,
+         SizeType nbeams,
+         EngineKind kind);
 
 private:
     class Impl;

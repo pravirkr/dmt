@@ -4,14 +4,11 @@ All numbers on this page come from one benchmark suite (`dmt_bench_suite`). Ever
 configuration, and one script turns the results into these plots and the
 table at the end. See [Reproducing](#reproducing) to run it yourself.
 
-The results below are for three machines:
+The results below are for three machines (all measured with dmt 0.4.0):
 
-- an Apple M1 Pro laptop (dmt 0.3.0);
-- an Intel Xeon Gold 6348H server (dmt 0.3.0);
-- an NVIDIA L40S GPU (dmt 0.4.0).
-
-The CPU DDMT engine was also rewritten in 0.4.0 (7–40× faster in
-development tests); the CPU numbers below still show 0.3.0.
+- an Apple M1 Pro laptop (8 performance threads);
+- an Intel Xeon Gold 6348H server (8 threads);
+- an NVIDIA L40S GPU.
 
 ## Key results
 
@@ -20,11 +17,14 @@ trials, float32 input):
 
 | | Apple M1 Pro (8 threads) | Xeon Gold 6348H (8 threads) | NVIDIA L40S |
 | :--- | ---: | ---: | ---: |
-| FDMT time per block | 26.5 ms | 53.5 ms | 5.5 ms |
-| FDMT real-time factor | 51× | 25× | 242× |
-| DDMT (brute force), slower by | 336× | 148× | 4× |
+| FDMT time per block | 25.3 ms | 52.7 ms | 5.5 ms |
+| FDMT real-time factor | 53× | 25× | 242× |
+| DDMT (brute force), slower by | 37× | 11× | 4× |
+| DDMT real-time factor | 1.5× | 2.3× | 63× |
+| SDMT (exact, shared sums), slower by | 8× | 3× | — |
+| SDMT real-time factor | 6.8× | 8× | — |
 | FDMT-FFT, slower by | 16× | 13× | 4× |
-| FDMT real-time factor, 1-bit input | 123× | 70× | 387× |
+| FDMT real-time factor, 1-bit input | 122× | 71× | 387× |
 
 ## Setup
 
@@ -39,7 +39,7 @@ trials, float32 input):
 | GPU | device-resident input and output, CUDA-event timing; `incl. PCIe` = host arrays in and out |
 
 Colour always identifies the algorithm (FDMT blue, FDMT-FFT orange, DDMT
-green). The grey line marks real time: the duration of the data in one block.
+green, SDMT yellow). The grey line marks real time: the duration of the data in one block.
 Points below it (or above 1× in the throughput plot) keep up with the
 telescope.
 
@@ -59,10 +59,22 @@ telescope.
   count, not the DM count.
 - **Brute-force DDMT** does `nchans × ndm` additions per output sample, so it
   scales linearly with the DM count.
-  - On both CPUs it crosses the real-time line at ~256 DM trials.
+  - On the Xeon (0.4.0) it stays below the real-time line up to 4K DM trials
+    (16× real time at 256 trials, 1.1× at 4K), 6–12× behind FDMT.
+  - On the M1 Pro (0.4.0) it stays below real time up to ~2K DM trials
+    (11× real time at 256 trials, 1.6× at 2049 trials), crossing the line only
+    at 4K trials (up from crossing at ~256 trials in 0.3.0).
   - On the L40S it stays well below real time at every DM count tested
     (32–340× real time), 3–5× behind FDMT: the DM-tiled kernels reuse each
     staged input window across up to 64 DM trials.
+- **SDMT (CPU only)** computes the same sums as DDMT (integer output bit-identical,
+  float equal to rounding) but shares partial sums between DM trials within
+  16-channel subbands, so it needs ~7× fewer additions (0.14× the brute-force additions on this
+  grid, delivering ~3.5× wall-clock speedup). On the Xeon it runs 3.4–3.7× faster than DDMT at every DM count
+  (56× real time at 256 trials, 4× at 4K), 1.8–3.3× behind FDMT. On the M1 Pro
+  it runs 3.5–4.5× faster than DDMT (51× real time at 256 trials, 6.2× at 2049 trials).
+  The saving depends on the DM grid: dense grids save the most, while coarse or
+  sparse grids fall back to direct sums per subband.
 - **FDMT-FFT** applies the tree's shifts as FFT phase ramps. Its cost is
   dominated by the forward and inverse FFTs, so it is nearly flat in the DM
   count and depends on how well the FFT length factorises.
@@ -117,10 +129,17 @@ The real-time factor is seconds of data processed per second of compute.
   than float32.
 - **One CPU thread** keeps FDMT above real time at every input width on both
   CPUs: 5–13× on the Xeon and 16–41× on the M1 Pro.
-- **Brute-force DDMT** on the CPUs (0.3.0) is below real time at every input
-  width.
+- **Brute-force DDMT** runs above real time on both tested CPUs and GPU:
+  - On the Xeon (0.4.0, 8 threads) it runs 2.3× real time on float32, 2.6× on 16-bit
+    and 4.3–4.7× on 1- to 8-bit input (summed in 16-bit lanes).
+  - On the M1 Pro (0.4.0, 8 threads) it runs 1.6× real time on float32 (up from
+    0.2× in 0.3.0) and 2.5–3.5× on packed integer input.
   - On the L40S it runs 63× real time on float32 input and 92–95× on 1- to
     8-bit input, which is summed two samples per instruction in 16-bit lanes.
+- **SDMT (CPU only)** provides a further 3.5–4.5× speedup over direct DDMT:
+  - On the Xeon it runs 8× real time on float32, 10× on 16-bit and 17–21× on
+    1- to 8-bit input.
+  - On the M1 Pro it runs 6.2× real time on float32 and 12–16× on 1- to 8-bit input.
 - **Host arrays (`incl. PCIe`)** show what a pipeline pays when data starts
   and ends in host memory.
   - The packed input crosses the bus cheaply, so the float32 DM-time output
@@ -140,7 +159,9 @@ The real-time factor is seconds of data processed per second of compute.
 ```
 
 The theoretical cost per output time sample, summed over all DM trials:
-- **DDMT**: `nchans × ndm` additions.
+
+- **DDMT**: `nchans × ndm` additions (brute force). SDMT is not drawn: its
+  count depends on the DM grid (0.14× DDMT's at the reference point).
 - **FDMT**: the plan's exact addition count (`FDMTPlan.total_operations`).
 - **FDMT-FFT**: a flop model. It counts forward FFTs of every channel,
   inverse FFTs of every DM row, and one complex multiply-add per tree node
@@ -150,9 +171,12 @@ FDMT's advantage grows with both the channel count and the DM count: at the
 reference point brute force needs ~270× more operations.
 
 How much of that shows up in wall-clock time depends on the platform:
-- **M1 Pro: 336×**, close to the operation ratio.
-- **Xeon: 148×.** Its wide SIMD speeds up brute force's compute-bound inner
-  loop more than FDMT's memory-bound merges.
+
+- **M1 Pro (0.4.0): 37×** for brute-force DDMT (down from 336× in 0.3.0) and **8×** for SDMT.
+- **Xeon (0.4.0): 11×.** Its kernels add 16–32 samples per instruction
+  from cache-resident windows, 10–16 channels per accumulator pass, so brute
+  force's compute-bound inner loop gains more from the CPU than FDMT's
+  memory-bound merges.
 - **L40S: 4×.** Brute force suits a GPU well: each input window is staged
   once in shared memory and reused by a whole tile of DM trials, so the
   kernel runs at ~80% of the card's shared-memory load rate.

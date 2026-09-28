@@ -16,6 +16,7 @@
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
+#include "dmt/algorithms/sdmt.hpp"
 
 #include "suite_common.hpp"
 
@@ -25,6 +26,7 @@ namespace {
 using algorithms::DDMT;
 using algorithms::FDMT;
 using algorithms::FDMTFFT;
+using algorithms::SDMT;
 
 // Skips (without running) a point whose estimated memory exceeds the budget.
 bool skip_if_over_budget(benchmark::State& state,
@@ -91,14 +93,16 @@ void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
     set_counters(state, plan, p, nthreads);
 }
 
+/// DDMT or SDMT (Engine) on the FDMT plan's DM grid.
+template <typename Engine, Algo kAlgo>
 void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
     const auto plan = make_plan(p);
-    if (skip_if_over_budget(state, Algo::kDDMT, plan, p)) {
+    if (skip_if_over_budget(state, kAlgo, plan, p)) {
         return;
     }
     const auto dms = plan.get_dm_grid_final();
-    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
-              Exec::cpu(nthreads), p.nbits);
+    Engine ddmt(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
+                Exec::cpu(nthreads), p.nbits);
     const auto ndms = dms.size();
     // The first (cold) call returns nsamps - max_delay samples; warm calls
     // return nsamps.
@@ -141,8 +145,8 @@ void register_cpu() {
     // Brute-force DDMT calls run for seconds; one repetition of those is
     // already stable and keeps the whole suite to minutes.
     const auto add_ddmt = [&](const Point& p, int t) {
-        auto* bm =
-            add(bench_name(Algo::kDDMT, cpu_label(t), p), bench_ddmt, p, t);
+        auto* bm          = add(bench_name(Algo::kDDMT, cpu_label(t), p),
+                                bench_ddmt<DDMT, Algo::kDDMT>, p, t);
         const double adds = static_cast<double>(kNchans) *
                             static_cast<double>(p.dt_max + 1) *
                             static_cast<double>(p.nsamps);
@@ -159,6 +163,8 @@ void register_cpu() {
             add(bench_name(Algo::kFDMTFFT, cpu_label(multi), p), bench_fdmt_fft,
                 p, multi);
             add_ddmt(p, multi);
+            add(bench_name(Algo::kSDMT, cpu_label(multi), p),
+                bench_ddmt<SDMT, Algo::kSDMT>, p, multi);
         }
     }
     for (const auto& p : sweep_points(Sweep::kNbits)) {
@@ -166,6 +172,8 @@ void register_cpu() {
             add(bench_name(Algo::kFDMT, cpu_label(t), p), bench_fdmt, p, t);
         }
         add_ddmt(p, multi);
+        add(bench_name(Algo::kSDMT, cpu_label(multi), p),
+            bench_ddmt<SDMT, Algo::kSDMT>, p, multi);
     }
 }
 
