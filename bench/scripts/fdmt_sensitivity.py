@@ -43,7 +43,7 @@ def run_sweep(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     f_min, f_max, tsamp = 1000.0, 1500.0, 1.0
     nsamps = 4 * dt_max
-    fdmt = libdmt.FDMTCPU(f_min, f_max, nchans, nsamps, tsamp, dt_max)
+    fdmt = libdmt.FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max)
 
     dt_values = np.linspace(1.0, dt_max - 1.0, n_dt)
     phases = np.linspace(0.0, 0.9, n_phase)

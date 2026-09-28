@@ -1,246 +1,124 @@
 #include "dmt/algorithms/cfdmt.hpp"
 
 #include <algorithm>
-#include <format>
+#include <cstdint>
+#include <memory>
 #include <span>
-#include <stdexcept>
+#include <string_view>
+#include <utility>
 
-#include "dmt/algorithms/fdmt.hpp"
-#include "dmt/bb_utils.hpp"
+#include "dmt/common/backend.hpp"
+#include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/dm_utils.hpp"
-#include "dmt/utils/fft.hpp"
-#include "dmt/utils/unpacker.hpp"
+#include "dmt/engines.hpp"
 
 namespace dmt::algorithms {
 
-class CohFDMTCPU::Impl {
+namespace {
+
+std::unique_ptr<detail::CohFDMTEngine>
+make_cfdmt_engine(const plans::CohFDMTPlan& plan,
+                  const detail::CohFDMTEngineConfig& cfg) {
+    if (cfg.exec.backend == Backend::kCPU) {
+        return detail::make_cfdmt_cpu(plan, cfg);
+    }
+#ifdef DMT_ENABLE_GPU
+    if (cfg.exec.backend == detail::kGPUBackend) {
+        return detail::make_cfdmt_gpu(plan, cfg);
+    }
+#endif
+    detail::throw_unavailable("CohFDMT", cfg.exec.backend);
+}
+
+} // namespace
+
+class CohFDMT::Impl {
 public:
-    Impl(float f_center,
-         float bw_sub,
-         SizeType nsub,
-         float tbin,
-         SizeType nbin,
-         SizeType nfft,
-         float t_p,
-         float dm_max,
-         float dm_min,
-         SizeType noverlap,
-         std::string_view data_order,
-         int nthreads)
-        : m_plan(f_center,
-                 bw_sub,
-                 nsub,
-                 tbin,
-                 nbin,
-                 nfft,
-                 t_p,
-                 dm_max,
-                 dm_min,
-                 noverlap,
-                 data_order),
-          m_nthreads(std::max(1, nthreads)) {
-        initialise();
-    }
+    Impl(plans::CohFDMTPlan plan, Exec exec)
+        : m_plan(std::move(plan)),
+          m_cfg{.exec = exec},
+          m_engine(make_cfdmt_engine(m_plan, m_cfg)) {}
 
-    const plans::CohFDMTPlan& get_plan() const { return m_plan; }
-
-    template <IntegralDataType DataType>
-    void execute(std::span<const DataType> data_in, std::span<float> dmt) {
-        if (dmt.size() < m_plan.get_buffer_size()) {
-            throw std::invalid_argument(std::format(
-                "CohFDMTCPU: dmt buffer too small. Expected at least {} "
-                "(get_buffer_size()), got {}",
-                m_plan.get_buffer_size(), dmt.size()));
-        }
-        m_theunpacker->execute<DataType>(data_in, m_unpack_buf_p1,
-                                         m_unpack_buf_p2);
-        m_fft_forward->execute(m_unpack_buf_p1);
-        m_fft_forward->execute(m_unpack_buf_p2);
-        bb_utils::swap_spectrum(
-            m_unpack_buf_p1, m_unpack_buf_p2,
-            static_cast<int>(m_plan.get_nbin()),
-            static_cast<int>(m_plan.get_nfft() * m_plan.get_nsub()),
-            m_nthreads);
-        const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
-        for (SizeType idm = 0; idm < dm_grid_coh.size(); ++idm) {
-            // Apply chirp
-            apply_chirp(m_unpack_buf_p1, m_unpack_buf_p2, m_delay_buf_p1,
-                        m_delay_buf_p2, idm);
-            bb_utils::swap_spectrum(
-                m_delay_buf_p1, m_delay_buf_p2,
-                static_cast<int>(m_plan.get_mbin()),
-                static_cast<int>(m_plan.get_nfft() * m_plan.get_nsub() *
-                                 m_plan.get_nchan()),
-                m_nthreads);
-            m_fft_backward->execute(m_delay_buf_p1);
-            m_fft_backward->execute(m_delay_buf_p2);
-            // Detect and unpad
-            unpad_detect(m_delay_buf_p1, m_delay_buf_p2, m_intensity_buf);
-            // Apply causal streaming inter-channel delay line for this coarse
-            // trial
-            m_delay_line.process(m_intensity_buf, m_aligned_buf, idm,
-                                 m_plan.get_mchan(), m_plan.get_msamp());
-
-            // Perform the FDMT for this coarse-DM trial's fine residual
-            // search on the aligned waterfall. All coarse trials share one
-            // FDMTCPU instance (same plan geometry, "valid" mode); only the
-            // small per-trial streaming history differs, so it's swapped in/out
-            // around the shared instance's working-state buffers.
-            //
-            // Sliding arena: the trial runs in place at offset idm * D with
-            // its full B-sized ping-pong span. Its scratch tail only reaches
-            // later trials' slots, which are overwritten afterwards, so no
-            // copy is needed (see CohFDMTPlan::get_buffer_size()).
-            const auto& fine_plan = m_thefdmt->get_plan();
-            m_thefdmt->load_history(m_dm_histories[idm]);
-            m_thefdmt->execute(m_aligned_buf,
-                               dmt.subspan(idm * fine_plan.get_dmt_size(),
-                                           fine_plan.get_buffer_size()));
-            m_thefdmt->save_history(m_dm_histories[idm]);
-        }
-    }
-
-    void reset_history() noexcept {
-        m_delay_line.reset_history();
-        for (auto& hist : m_dm_histories) {
-            std::ranges::fill(hist, 0.0F);
-        }
-    }
-
-private:
+    // The engine holds a reference to m_plan; declaration order matters.
     plans::CohFDMTPlan m_plan;
-    int m_nthreads;
-    std::unique_ptr<utils::FFTWManager> m_fft_forward;
-    std::unique_ptr<utils::FFTWManager> m_fft_backward;
-    std::unique_ptr<algorithms::FDMTCPU> m_thefdmt;
-    std::unique_ptr<utils::DataUnpackerCPU> m_theunpacker;
-    utils::ChannelDelayLineCPU m_delay_line;
+    detail::CohFDMTEngineConfig m_cfg;
+    std::unique_ptr<detail::CohFDMTEngine> m_engine;
+};
 
-    std::vector<ComplexType> m_unpack_buf_p1;
-    std::vector<ComplexType> m_unpack_buf_p2;
-    std::vector<ComplexType> m_delay_buf_p1;
-    std::vector<ComplexType> m_delay_buf_p2;
-    std::vector<float> m_intensity_buf;
-    std::vector<float> m_aligned_buf;
-    std::vector<ComplexType> m_chirp_table;
-    // Small per-coarse-DM-trial "valid"-mode streaming history, swapped
-    // into the one shared m_thefdmt instance around each trial's execute()
-    // call. Persists across CohFDMTCPU::execute() calls (future contiguous
-    // baseband blocks); reset via reset_history().
-    std::vector<std::vector<float>> m_dm_histories;
+CohFDMT::CohFDMT(float f_center,
+                 float bw_sub,
+                 SizeType nsub,
+                 float tbin,
+                 SizeType nbin,
+                 SizeType nfft,
+                 float t_p,
+                 float dm_max,
+                 float dm_min,
+                 SizeType noverlap,
+                 std::string_view data_order,
+                 Exec exec)
+    : m_impl(std::make_unique<Impl>(plans::CohFDMTPlan(f_center,
+                                                       bw_sub,
+                                                       nsub,
+                                                       tbin,
+                                                       nbin,
+                                                       nfft,
+                                                       t_p,
+                                                       dm_max,
+                                                       dm_min,
+                                                       noverlap,
+                                                       data_order),
+                                    exec)) {}
 
-    void initialise() {
-        m_unpack_buf_p1.resize(m_plan.get_unpack_buf_size());
-        m_unpack_buf_p2.resize(m_plan.get_unpack_buf_size());
-        m_delay_buf_p1.resize(m_plan.get_delay_buf_size());
-        m_delay_buf_p2.resize(m_plan.get_delay_buf_size());
-        m_intensity_buf.resize(m_plan.get_intensity_buf_size());
-        m_aligned_buf.resize(m_plan.get_intensity_buf_size());
-        m_chirp_table.resize(m_plan.get_chirp_table_size());
+CohFDMT::~CohFDMT()                                   = default;
+CohFDMT::CohFDMT(CohFDMT&& other) noexcept            = default;
+CohFDMT& CohFDMT::operator=(CohFDMT&& other) noexcept = default;
 
-        m_fft_forward = std::make_unique<utils::FFTWManager>(
-            utils::FFTKind::kC2CForward, m_plan.get_nbin(),
-            m_plan.get_nfft() * m_plan.get_nsub(), m_nthreads);
-        m_fft_backward = std::make_unique<utils::FFTWManager>(
-            utils::FFTKind::kC2CBackward, m_plan.get_mbin(),
-            m_plan.get_nfft() * m_plan.get_nsub() * m_plan.get_nchan(),
-            m_nthreads);
-        m_thefdmt = std::make_unique<algorithms::FDMTCPU>(
-            m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
-            m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid", m_nthreads);
-        m_theunpacker = std::make_unique<utils::DataUnpackerCPU>(
-            m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
-            m_plan.get_nfft(), m_plan.get_data_order(), m_nthreads);
-
-        // One small streaming-history slot per coarse-DM trial.
-        const auto& dm_grid_coh = m_plan.get_dm_grid_coh();
-        m_dm_histories.assign(
-            dm_grid_coh.size(),
-            std::vector<float>(m_thefdmt->history_state_size(), 0.0F));
-
-        // Initialise the causal inter-channel streaming delay line
-        m_delay_line.initialise(dm_grid_coh, m_plan.get_f_min(),
-                                m_plan.get_f_max(), m_plan.get_mchan(),
-                                m_plan.get_tsamp());
-
-        // Compute the chirp table
-        bb_utils::compute_chirp(
-            dm_grid_coh, m_chirp_table, m_plan.get_f_center(), m_plan.get_bw(),
-            m_plan.get_nbin(), m_plan.get_nsub(), m_plan.get_nchan());
-    }
-
-    void apply_chirp(std::span<const ComplexType> data1_in,
-                     std::span<const ComplexType> data2_in,
-                     std::span<ComplexType> data1_out,
-                     std::span<ComplexType> data2_out,
-                     SizeType idm) {
-        const auto scale = m_plan.get_chirp_scale();
-        bb_utils::apply_chirp(data1_in, data2_in, m_chirp_table, data1_out,
-                              data2_out, m_plan.get_nsub(), m_plan.get_nbin(),
-                              m_plan.get_nfft(), idm, scale, m_nthreads);
-    }
-
-    void unpad_detect(std::span<const ComplexType> fft_p1,
-                      std::span<const ComplexType> fft_p2,
-                      std::span<float> intensity) const {
-        bb_utils::unpad_detect(fft_p1, fft_p2, intensity, m_plan.get_nchan(),
-                               m_plan.get_nfft(), m_plan.get_nsub(),
-                               m_plan.get_mbin(), m_plan.get_noverlap(),
-                               m_nthreads);
-    }
-
-}; // End CohFDMTCPU::Impl definition
-
-CohFDMTCPU::CohFDMTCPU(float f_center,
-                       float bw_sub,
-                       SizeType nsub,
-                       float tbin,
-                       SizeType nbin,
-                       SizeType nfft,
-                       float t_p,
-                       float dm_max,
-                       float dm_min,
-                       SizeType noverlap,
-                       std::string_view data_order,
-                       int nthreads)
-    : m_impl(std::make_unique<Impl>(f_center,
-                                    bw_sub,
-                                    nsub,
-                                    tbin,
-                                    nbin,
-                                    nfft,
-                                    t_p,
-                                    dm_max,
-                                    dm_min,
-                                    noverlap,
-                                    data_order,
-                                    nthreads)) {}
-
-CohFDMTCPU::~CohFDMTCPU()                                      = default;
-CohFDMTCPU::CohFDMTCPU(CohFDMTCPU&& other) noexcept            = default;
-CohFDMTCPU& CohFDMTCPU::operator=(CohFDMTCPU&& other) noexcept = default;
-const plans::CohFDMTPlan& CohFDMTCPU::get_plan() const noexcept {
-    return m_impl->get_plan();
+const plans::CohFDMTPlan& CohFDMT::get_plan() const noexcept {
+    return m_impl->m_plan;
 }
-SizeType CohFDMTCPU::get_dmt_size() const noexcept {
-    return m_impl->get_plan().get_dmt_size();
+Backend CohFDMT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
+int CohFDMT::nthreads() const noexcept {
+    return backend() == Backend::kCPU ? std::max(1, m_impl->m_cfg.exec.nthreads)
+                                      : 1;
 }
-SizeType CohFDMTCPU::get_buffer_size() const noexcept {
-    return m_impl->get_plan().get_buffer_size();
+int CohFDMT::device() const noexcept {
+    return backend() == Backend::kCPU ? -1 : m_impl->m_cfg.exec.device;
+}
+SizeType CohFDMT::get_dmt_size() const noexcept {
+    return m_impl->m_plan.get_dmt_size();
+}
+SizeType CohFDMT::get_buffer_size() const noexcept {
+    return m_impl->m_plan.get_buffer_size();
+}
+
+template <IntegralDataType DataType>
+void CohFDMT::execute(std::span<const DataType> data_in,
+                      std::span<float> dmt) const {
+    m_impl->m_engine->execute(data_in, dmt);
 }
 template <IntegralDataType DataType>
-void CohFDMTCPU::execute(std::span<const DataType> data_in,
-                         std::span<float> dmt) const {
-    m_impl->execute<DataType>(data_in, dmt);
+void CohFDMT::execute(DeviceSpan<const DataType> d_data_in,
+                      DeviceSpan<float> d_dmt,
+                      Stream stream) const {
+    detail::check_device(d_data_in.device, backend(), m_impl->m_cfg.exec.device,
+                         "CohFDMT::execute");
+    detail::check_device(d_dmt.device, backend(), m_impl->m_cfg.exec.device,
+                         "CohFDMT::execute");
+    m_impl->m_engine->execute(d_data_in, d_dmt, stream);
 }
-void CohFDMTCPU::reset_history() noexcept { m_impl->reset_history(); }
+void CohFDMT::reset_history() noexcept { m_impl->m_engine->reset_history(); }
 
-// Instantiate the public execute method for each supported DataType
-template void CohFDMTCPU::execute<int8_t>(std::span<const int8_t>,
-                                          std::span<float>) const;
-template void CohFDMTCPU::execute<uint8_t>(std::span<const uint8_t>,
-                                           std::span<float>) const;
+// Instantiate the public execute methods for each supported DataType
+template void CohFDMT::execute<int8_t>(std::span<const int8_t>,
+                                       std::span<float>) const;
+template void CohFDMT::execute<uint8_t>(std::span<const uint8_t>,
+                                        std::span<float>) const;
+template void CohFDMT::execute<int8_t>(DeviceSpan<const int8_t>,
+                                       DeviceSpan<float>,
+                                       Stream) const;
+template void CohFDMT::execute<uint8_t>(DeviceSpan<const uint8_t>,
+                                        DeviceSpan<float>,
+                                        Stream) const;
 
 } // namespace dmt::algorithms

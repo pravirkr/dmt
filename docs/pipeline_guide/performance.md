@@ -1,6 +1,6 @@
 # Performance Tuning
 
-The FDMT engines (`FDMTCPU`, `FDMTCUDA`) are tuned out of the box. Their two
+The FDMT engine (`FDMT`, on the CPU and CUDA backends) is tuned out of the box. Their two
 *performance parameters*, the last constructor arguments `fuse_levels` and
 `int_tree`, default to the fastest settings measured, and neither changes the
 result by a single bit. Most users never set them. This page explains what
@@ -9,18 +9,18 @@ memory is allocated, and why some optimizations that look promising were
 measured and rejected.
 
 ```python
-fdmt = FDMTCPU(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048, nthreads=1)
+fdmt = FDMT(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048, nthreads=1)
 fdmt.fuse_levels       # depth chosen for this plan (fuse_levels=None default)
-fdmt = FDMTCPU(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048,
+fdmt = FDMT(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048,
                fuse_levels=4, int_tree=True)  # explicit depth (advanced)
 print(fdmt.memory_usage)  # bytes allocated at construction
 ```
 
 ```cpp
-// ..., nthreads, nbeams, fuse_levels = kFDMTAutoFuse, int_tree = true
-dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
-                              0, 1, true, "valid", 1, 1,
-                              dmt::algorithms::kFDMTAutoFuse, true);
+// ..., exec, nbeams, fuse_levels = kFDMTAutoFuse, int_tree = true
+dmt::algorithms::FDMT fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
+                           0, 1, true, "valid", dmt::Exec::cpu(1), 1,
+                           dmt::algorithms::kFDMTAutoFuse, true);
 ```
 
 ---
@@ -162,10 +162,10 @@ bit-identical to the float path.
 
 ```python
 import numpy as np
-from dmtlib import FDMTCPU
+from dmtlib import FDMT
 
 nchans, nsamps, nbits = 4096, 16384, 2
-fdmt = FDMTCPU(704.0, 1216.0, nchans, nsamps, 8.192e-5, 2048, nthreads=8)
+fdmt = FDMT(704.0, 1216.0, nchans, nsamps, 8.192e-5, 2048, nthreads=8)
 
 # (nchans, nsamps * nbits / 8) uint8, sample 0 in the low bits of byte 0
 packed = np.random.randint(0, 256, size=(nchans, nsamps * nbits // 8),
@@ -176,15 +176,15 @@ dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
 ```cpp
 #include "dmt/algorithms/fdmt.hpp"
 
-dmt::algorithms::FDMTCPU fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
-                              0, 1, true, "valid", /*nthreads=*/8);
+dmt::algorithms::FDMT fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
+                           0, 1, true, "valid", dmt::Exec::cpu(/*nthreads=*/8));
 std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
 // packed: nchans rows of ceil(nsamps * nbits / 8) bytes
 fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
 ```
 
-On CUDA, `FDMTCUDA.execute(packed, nbits)` behaves the same way, and the host
-overload copies only the packed bytes over PCIe.
+On the CUDA backend, `execute(packed, nbits)` behaves the same way, and the
+host overload copies only the packed bytes over PCIe.
 
 Speedup over float input, both at the default configuration (automatic
 fusion, `int_tree` on; 4096 channels, `dt_max=2048`, 16 384 samples):
@@ -234,7 +234,7 @@ construct the engine with `int_tree=False`.
   bytes per category and the output buffer each call needs;
   `fdmt.summary()` prints the same breakdown together with the plan. To multiplex several streams on
   one engine, use `save_history()` / `load_history()` rather than building
-  one engine per stream. The host-memory `FDMTCUDA.execute()` overloads
+  one engine per stream. On a GPU backend, the host-memory `execute()` overloads
   stage the input and output on the device in buffers allocated on the first
   host call and reused afterwards. In Python, pass `out=` to `execute()` to
   reuse the output array too; otherwise every call allocates and page-faults

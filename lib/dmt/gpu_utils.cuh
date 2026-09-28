@@ -1,18 +1,28 @@
 #pragma once
 
 #include <format>
+#include <mutex>
 #include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
-#include <cuda_runtime.h>
-#include <cufft.h>
+#include <thrust/complex.h>
+#include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
-namespace dmt::cuda_utils {
+namespace dmt {
 
-// Error code to string conversion
-constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
+// Device-side complex type for shared GPU sources (never in public headers).
+using ComplexTypeGPU                     = cuda::std::complex<float>;
+template <typename T> using DeviceVector = thrust::device_vector<T>;
+
+} // namespace dmt
+
+namespace dmt::gpu_utils {
+
+constexpr std::string_view fft_error_string(cufftResult error) noexcept {
     switch (error) {
     case CUFFT_SUCCESS:
         return "CUFFT_SUCCESS";
@@ -35,44 +45,41 @@ constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
     case CUFFT_UNALIGNED_DATA:
         return "CUFFT_UNALIGNED_DATA";
     default:
-        return "Unknown cuFFT error";
+        return "Unknown FFT library error";
     }
 }
 
-/**
- * @brief Custom exception class for CUDA errors.
+/** Runtime or FFT errors from the GPU toolchain (CUDA or HIP via gpu_compat).
  */
-class CudaException : public std::runtime_error {
+class GPUException : public std::runtime_error {
 public:
-    // Constructor for cudaError_t
-    explicit CudaException(
+    explicit GPUException(
         cudaError_t code,
         std::string_view user_msg       = "",
         const std::source_location& loc = std::source_location::current())
-        : std::runtime_error(format_cuda_error(code, user_msg, loc)),
+        : std::runtime_error(format_runtime_error(code, user_msg, loc)),
           m_code(static_cast<int>(code)),
-          m_is_cuda(true),
+          m_is_runtime(true),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
           m_user_msg(user_msg) {}
 
-    // Constructor for cufftResult
-    explicit CudaException(
+    explicit GPUException(
         cufftResult code,
         std::string_view user_msg       = "",
         const std::source_location& loc = std::source_location::current())
-        : std::runtime_error(format_cufft_error(code, user_msg, loc)),
+        : std::runtime_error(format_fft_error(code, user_msg, loc)),
           m_code(static_cast<int>(code)),
-          m_is_cuda(false),
+          m_is_runtime(false),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
           m_user_msg(user_msg) {}
 
     [[nodiscard]] constexpr int code() const noexcept { return m_code; }
-    [[nodiscard]] constexpr bool is_cuda_error() const noexcept {
-        return m_is_cuda;
+    [[nodiscard]] constexpr bool is_runtime_error() const noexcept {
+        return m_is_runtime;
     }
     [[nodiscard]] constexpr const char* file() const noexcept { return m_file; }
     [[nodiscard]] constexpr uint32_t line() const noexcept { return m_line; }
@@ -83,26 +90,26 @@ public:
         return m_user_msg;
     }
     [[nodiscard]] std::string error_string() const {
-        return m_is_cuda ? cudaGetErrorString(static_cast<cudaError_t>(m_code))
-                         : std::string(cufft_error_string(
-                               static_cast<cufftResult>(m_code)));
+        return m_is_runtime
+                   ? cudaGetErrorString(static_cast<cudaError_t>(m_code))
+                   : std::string(
+                         fft_error_string(static_cast<cufftResult>(m_code)));
     }
 
 private:
     int m_code;
-    bool m_is_cuda;
+    bool m_is_runtime;
     const char* m_file;
     uint32_t m_line;
     const char* m_func;
     std::string m_user_msg;
 
-    // Helper to format the what() message for CUDA errors
-    static std::string format_cuda_error(cudaError_t code,
-                                         std::string_view user_msg,
-                                         const std::source_location& loc) {
+    static std::string format_runtime_error(cudaError_t code,
+                                            std::string_view user_msg,
+                                            const std::source_location& loc) {
         auto base_msg =
-            std::format("CUDA Error [{}]: {}", static_cast<int>(code),
-                        cudaGetErrorString(code));
+            std::format("{} runtime error [{}]: {}", DMT_GPU_NAME,
+                        static_cast<int>(code), cudaGetErrorString(code));
         return user_msg.empty()
                    ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
@@ -112,13 +119,12 @@ private:
                                  loc.line(), user_msg);
     }
 
-    // Helper to format the what() message for cuFFT errors
-    static std::string format_cufft_error(cufftResult code,
-                                          std::string_view user_msg,
-                                          const std::source_location& loc) {
+    static std::string format_fft_error(cufftResult code,
+                                        std::string_view user_msg,
+                                        const std::source_location& loc) {
         auto base_msg =
-            std::format("cuFFT Error [{}]: {}", static_cast<int>(code),
-                        cufft_error_string(code));
+            std::format("{} FFT error [{}]: {}", DMT_GPU_NAME,
+                        static_cast<int>(code), fft_error_string(code));
         return user_msg.empty()
                    ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
@@ -129,60 +135,60 @@ private:
     }
 };
 
-// Generic error checking function
 inline void
-check_cuda_call(cudaError_t result,
-                std::string_view msg     = "",
-                std::source_location loc = std::source_location::current()) {
+check_gpu_call(cudaError_t result,
+               std::string_view msg     = "",
+               std::source_location loc = std::source_location::current()) {
     if (result != cudaSuccess) {
-        throw CudaException(result, msg, loc);
+        throw GPUException(result, msg, loc);
     }
 }
 
 inline void
-check_cuda_call(cufftResult result,
-                std::string_view msg     = "",
-                std::source_location loc = std::source_location::current()) {
+check_gpu_call(cufftResult result,
+               std::string_view msg     = "",
+               std::source_location loc = std::source_location::current()) {
     if (result != CUFFT_SUCCESS) {
-        throw CudaException(result, msg, loc);
+        throw GPUException(result, msg, loc);
     }
 }
 
-// Specialized checks
-inline void check_last_cuda_error(
+inline void check_last_gpu_error(
     std::string_view msg     = "",
     std::source_location loc = std::source_location::current()) {
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
-        throw CudaException(error, msg, loc);
+        throw GPUException(error, msg, loc);
     }
 }
 
-inline void check_cuda_sync_error(
+inline void check_gpu_sync_error(
     std::string_view msg     = "",
     std::source_location loc = std::source_location::current()) {
-    check_cuda_call(cudaDeviceSynchronize(), "Synchronization failed", loc);
-    check_last_cuda_error(msg, loc);
+    check_gpu_call(cudaDeviceSynchronize(), "Synchronization failed", loc);
+    check_last_gpu_error(msg, loc);
 }
 
-/**
- * @brief Checks kernel launch parameters against device limits before
- * launching. Throws std::runtime_error on failure.
- * @param grid Grid dimensions.
- * @param block Block dimensions.
- * @param location Source location information (automatically captured).
- * @throws std::runtime_error if dimensions exceed device limits.
- */
+[[nodiscard]] inline const cudaDeviceProp& device_properties(int device) {
+    static std::mutex mutex;
+    static std::unordered_map<int, cudaDeviceProp> cache;
+    const std::lock_guard lock(mutex);
+    if (const auto it = cache.find(device); it != cache.end()) {
+        return it->second;
+    }
+    cudaDeviceProp props{};
+    check_gpu_call(cudaGetDeviceProperties(&props, device),
+                   "Failed to get device properties");
+    return cache.emplace(device, props).first->second;
+}
+
 inline void check_kernel_launch_params(
     dim3 grid,
     dim3 block,
     const std::source_location loc = std::source_location::current()) {
     int device;
-    cudaDeviceProp props{};
-    // Get current device, check for errors
-    check_cuda_call(cudaGetDevice(&device), "Failed to get device", loc);
-    check_cuda_call(cudaGetDeviceProperties(&props, device),
-                    "Failed to get device properties", loc);
+    check_gpu_call(cudaGetDevice(&device), "Failed to get device", loc);
+    const cudaDeviceProp& props = device_properties(device);
 
     auto check_limit = [&](auto val, auto max, std::string_view dim) {
         if (val > static_cast<unsigned>(max)) {
@@ -202,6 +208,43 @@ inline void check_kernel_launch_params(
     check_limit(grid.z, props.maxGridSize[2], "Grid Z");
 }
 
+class DeviceWorkFence {
+public:
+    DeviceWorkFence() = default;
+    ~DeviceWorkFence() {
+        if (m_event != nullptr) {
+            cudaEventDestroy(m_event);
+        }
+    }
+    DeviceWorkFence(const DeviceWorkFence&)            = delete;
+    DeviceWorkFence& operator=(const DeviceWorkFence&) = delete;
+    DeviceWorkFence(DeviceWorkFence&&)                 = delete;
+    DeviceWorkFence& operator=(DeviceWorkFence&&)      = delete;
+
+    void mark(cudaStream_t stream) {
+        if (m_event == nullptr) {
+            check_gpu_call(
+                cudaEventCreateWithFlags(&m_event, cudaEventDisableTiming),
+                "DeviceWorkFence: event creation failed");
+        }
+        check_gpu_call(cudaEventRecord(m_event, stream),
+                       "DeviceWorkFence: event record failed");
+        m_pending = true;
+    }
+
+    void wait() {
+        if (m_pending) {
+            check_gpu_call(cudaEventSynchronize(m_event),
+                           "DeviceWorkFence: waiting for device work failed");
+            m_pending = false;
+        }
+    }
+
+private:
+    cudaEvent_t m_event{nullptr};
+    bool m_pending{false};
+};
+
 [[nodiscard]] inline std::string get_device_info() noexcept {
     int device;
     cudaDeviceProp props{};
@@ -214,22 +257,22 @@ inline void check_kernel_launch_params(
                            cudaGetErrorString(err));
     }
 
-    return std::format("Device {}: {} (CC {}.{}), Mem: {} MiB", device,
-                       props.name, props.major, props.minor,
+    return std::format("{} device {}: {} (CC {}.{}), Mem: {} MiB", DMT_GPU_NAME,
+                       device, props.name, props.major, props.minor,
                        props.totalGlobalMem >> 20);
 }
 
 inline void set_device(int device_id) {
     int device_count;
-    check_cuda_call(cudaGetDeviceCount(&device_count),
-                    "Failed to get device count");
+    check_gpu_call(cudaGetDeviceCount(&device_count),
+                   "Failed to get device count");
     if (device_id < 0 || device_id >= device_count) {
-        throw CudaException(
+        throw GPUException(
             cudaErrorInvalidDevice,
             std::format("Invalid device_id: {}. Must be between 0 and {}",
                         device_id, device_count - 1));
     }
-    check_cuda_call(cudaSetDevice(device_id),
-                    std::format("Failed to set device {}", device_id));
+    check_gpu_call(cudaSetDevice(device_id),
+                   std::format("Failed to set device {}", device_id));
 }
-} // namespace dmt::cuda_utils
+} // namespace dmt::gpu_utils

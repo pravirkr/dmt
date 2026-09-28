@@ -83,7 +83,7 @@ editing. A full run takes about 8 minutes on the M1 Pro; brute-force DDMT is mos
 --label TEXT       display name in plots (default: the CPU / GPU model)
 --build-dir DIR    CMake build directory (default: build, build2, build*)
 --threads 1,8      CPU thread counts
---no-cpu / --no-cuda
+--no-cpu / --no-gpu (alias --no-cuda)
 --quick            1 repetition, short minimum time
 --filter REGEX     extra filter AND-ed with the suite (e.g. 'FDMT/')
 ```

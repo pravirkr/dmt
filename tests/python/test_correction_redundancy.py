@@ -146,7 +146,7 @@ def _algorithm_inputs(convention: str) -> tuple[float, float]:
 
 class TestCorrectionRedundancy:
     def test_reference_matches_dmt_real_engine(self) -> None:
-        fdmt = libdmt.FDMTCPU(TRUE_F_MIN, TRUE_F_MAX, NCHANS, NSAMPS, 1.0, DT_MAX)
+        fdmt = libdmt.FDMT(TRUE_F_MIN, TRUE_F_MAX, NCHANS, NSAMPS, 1.0, DT_MAX)
         dt_values = np.linspace(1.0, DT_MAX - 1.0, 10)
         phases = np.linspace(0.0, 0.9, 5)
 

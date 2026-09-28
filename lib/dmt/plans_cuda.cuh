@@ -6,6 +6,7 @@
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/gpu_utils.cuh"
 
 namespace dmt::plans {
 

@@ -16,7 +16,7 @@
 
 namespace dmt {
 
-using algorithms::DDMTCPU;
+using algorithms::DDMT;
 using plans::DDMTPlan;
 
 TEST_CASE("DDMTPlan construction and getters", "[ddmt][cpu]") {
@@ -86,14 +86,14 @@ TEST_CASE("DDMTPlan delay table is non-negative and non-increasing per DM",
     CHECK(front_of_last_row > 0);
 }
 
-TEST_CASE("DDMTCPU execute recovers a zero-DM ones waterfall", "[ddmt][cpu]") {
+TEST_CASE("DDMT execute recovers a zero-DM ones waterfall", "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
     const SizeType nchans = 8;
     const SizeType nsamps = 64;
     const float tsamp     = 0.001F;
 
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F);
     const auto& plan_c   = ddmt.get_plan().get_container();
     const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
     REQUIRE(nsamps > max_delay);
@@ -111,7 +111,7 @@ TEST_CASE("DDMTCPU execute recovers a zero-DM ones waterfall", "[ddmt][cpu]") {
                           nsamps_reduced, static_cast<float>(nchans))));
 }
 
-TEST_CASE("DDMTCPU custom dm_arr and mismatched output throws", "[ddmt][cpu]") {
+TEST_CASE("DDMT custom dm_arr and mismatched output throws", "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
     const SizeType nchans        = 8;
@@ -119,7 +119,7 @@ TEST_CASE("DDMTCPU custom dm_arr and mismatched output throws", "[ddmt][cpu]") {
     const float tsamp            = 0.001F;
     const std::vector<float> dms = {0.0F, 2.0F};
 
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dms);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, dms);
     std::vector<float> waterfall(nchans * nsamps, 1.0F);
     std::vector<float> bad(4, 42.0F);
     CHECK_THROWS_AS(ddmt.execute(waterfall, bad), std::invalid_argument);
@@ -127,8 +127,7 @@ TEST_CASE("DDMTCPU custom dm_arr and mismatched output throws", "[ddmt][cpu]") {
     REQUIRE_THAT(bad, Catch::Matchers::Equals(std::vector<float>(4, 42.0F)));
 }
 
-TEST_CASE("DDMTCPU packed-integer execute matches the float path",
-          "[ddmt][cpu]") {
+TEST_CASE("DDMT packed-integer execute matches the float path", "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
     const SizeType nchans        = 16;
@@ -148,9 +147,9 @@ TEST_CASE("DDMTCPU packed-integer execute matches the float path",
         }
     }
 
-    DDMTCPU ddmt_f(f_min, f_max, nchans, tsamp, dms);
-    DDMTCPU ddmt_i(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                   /*nbits=*/8);
+    DDMT ddmt_f(f_min, f_max, nchans, tsamp, dms);
+    DDMT ddmt_i(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                /*nbits=*/8);
     CHECK(ddmt_i.get_plan().get_nbits() == 8);
 
     const auto max_delay = *std::ranges::max_element(
@@ -168,7 +167,7 @@ TEST_CASE("DDMTCPU packed-integer execute matches the float path",
     }
 }
 
-TEST_CASE("DDMTCPU wrong execute overload for the configured nbits throws",
+TEST_CASE("DDMT wrong execute overload for the configured nbits throws",
           "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
@@ -176,15 +175,15 @@ TEST_CASE("DDMTCPU wrong execute overload for the configured nbits throws",
     const SizeType nsamps = 32;
     const float tsamp     = 0.001F;
 
-    DDMTCPU ddmt_float(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F);
+    DDMT ddmt_float(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F);
     std::vector<uint8_t> packed(nchans * nsamps, 1);
     std::vector<int32_t> bad_out(4, 42);
     CHECK_THROWS_AS(ddmt_float.execute(packed, nsamps, bad_out),
                     std::invalid_argument);
     REQUIRE_THAT(bad_out, Catch::Matchers::Equals(std::vector<int32_t>(4, 42)));
 
-    DDMTCPU ddmt_packed(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F,
-                        /*nthreads=*/1, /*nbits=*/8);
+    DDMT ddmt_packed(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F,
+                     Exec::cpu(1), /*nbits=*/8);
     std::vector<float> float_waterfall(nchans * nsamps, 1.0F);
     std::vector<float> bad_out_f(4, 42.0F);
     CHECK_THROWS_AS(ddmt_packed.execute(float_waterfall, bad_out_f),
@@ -193,7 +192,7 @@ TEST_CASE("DDMTCPU wrong execute overload for the configured nbits throws",
                  Catch::Matchers::Equals(std::vector<float>(4, 42.0F)));
 }
 
-TEST_CASE("DDMTCPU kill_mask excludes masked channels from the sum",
+TEST_CASE("DDMT kill_mask excludes masked channels from the sum",
           "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
@@ -204,8 +203,8 @@ TEST_CASE("DDMTCPU kill_mask excludes masked channels from the sum",
     std::vector<uint8_t> kill_mask(nchans, 1);
     kill_mask[0] = 0; // mask out channel 0
 
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F,
-                 /*nthreads=*/1, /*nbits=*/32, kill_mask);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F, Exec::cpu(1),
+              /*nbits=*/32, kill_mask);
     REQUIRE_THAT(ddmt.get_plan().get_kill_mask(),
                  Catch::Matchers::Equals(kill_mask));
 
@@ -249,7 +248,7 @@ TEST_CASE("DDMTPlan effective variance tracks active channel count",
     CHECK(plan.get_effective_variance() == Catch::Approx(nchans - 2));
 }
 
-TEST_CASE("DDMTCPU streaming reproduces a monolithic call", "[ddmt][cpu]") {
+TEST_CASE("DDMT streaming reproduces a monolithic call", "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
     const SizeType nchans        = 8;
@@ -266,7 +265,7 @@ TEST_CASE("DDMTCPU streaming reproduces a monolithic call", "[ddmt][cpu]") {
         }
     }
 
-    DDMTCPU monolithic(f_min, f_max, nchans, tsamp, dms);
+    DDMT monolithic(f_min, f_max, nchans, tsamp, dms);
     const auto max_delay = *std::ranges::max_element(
         monolithic.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -275,7 +274,7 @@ TEST_CASE("DDMTCPU streaming reproduces a monolithic call", "[ddmt][cpu]") {
 
     // Same data delivered as two unequal chunks to a fresh, history-aware
     // instance; concatenated output must match the monolithic call exactly.
-    DDMTCPU streamed(f_min, f_max, nchans, tsamp, dms);
+    DDMT streamed(f_min, f_max, nchans, tsamp, dms);
     const SizeType split = 70;
     std::vector<float> chunk1(nchans * split);
     std::vector<float> chunk2(nchans * (nsamps - split));
@@ -314,7 +313,7 @@ TEST_CASE("DDMTCPU streaming reproduces a monolithic call", "[ddmt][cpu]") {
     CHECK(streamed.get_output_nsamps(split) == split - max_delay);
 }
 
-TEST_CASE("DDMTCPU save_history/load_history multiplex two streams",
+TEST_CASE("DDMT save_history/load_history multiplex two streams",
           "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -322,7 +321,7 @@ TEST_CASE("DDMTCPU save_history/load_history multiplex two streams",
     const float tsamp            = 0.001F;
     const std::vector<float> dms = {0.0F, 4.0F};
 
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dms);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, dms);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
     REQUIRE(max_delay > 0);
@@ -358,8 +357,7 @@ TEST_CASE("DDMTCPU save_history/load_history multiplex two streams",
     }
 }
 
-TEST_CASE("DDMTCPU add_frb_track-style peak on the injected DM",
-          "[ddmt][cpu]") {
+TEST_CASE("DDMT add_frb_track-style peak on the injected DM", "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
     const SizeType nchans = 16;
@@ -375,7 +373,7 @@ TEST_CASE("DDMTCPU add_frb_track-style peak on the injected DM",
     const float dm = static_cast<float>(dt) * tsamp /
                      (kDispConst * (std::pow(f_min, kDispCoeff) -
                                     std::pow(f_max, kDispCoeff)));
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, std::vector<float>{0.0F, dm});
+    DDMT ddmt(f_min, f_max, nchans, tsamp, std::vector<float>{0.0F, dm});
     const auto& plan_c        = ddmt.get_plan().get_container();
     const auto max_delay      = *std::ranges::max_element(plan_c.delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -390,7 +388,7 @@ TEST_CASE("DDMTCPU add_frb_track-style peak on the injected DM",
     CHECK(peak1 > 0.0F);
 }
 
-TEST_CASE("DDMTPlan and DDMTCPU with LevinConfig", "[ddmt][cpu]") {
+TEST_CASE("DDMTPlan and DDMT with LevinConfig", "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
     const SizeType nchans = 16;
@@ -418,15 +416,15 @@ TEST_CASE("DDMTPlan and DDMTCPU with LevinConfig", "[ddmt][cpu]") {
     DDMTPlan plan(f_min, f_max, nchans, tsamp, levin);
     REQUIRE_THAT(plan.get_dm_arr(), Catch::Matchers::Equals(grid));
 
-    DDMTCPU ddmt(f_min, f_max, nchans, tsamp, levin);
+    DDMT ddmt(f_min, f_max, nchans, tsamp, levin);
     REQUIRE_THAT(ddmt.get_plan().get_dm_arr(), Catch::Matchers::Equals(grid));
 
-    DDMTCPU ddmt_from_plan(plan, /*nthreads=*/2);
+    DDMT ddmt_from_plan(plan, Exec::cpu(2));
     REQUIRE_THAT(ddmt_from_plan.get_plan().get_dm_arr(),
                  Catch::Matchers::Equals(grid));
 }
 
-TEST_CASE("DDMTCPU execute_time_major matches channel-major packed",
+TEST_CASE("DDMT execute_time_major matches channel-major packed",
           "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -438,7 +436,7 @@ TEST_CASE("DDMTCPU execute_time_major matches channel-major packed",
     const auto test_bits = [&](unsigned nbits) {
         DYNAMIC_SECTION("nbits = " << nbits) {
             DDMTPlan plan(f_min, f_max, nchans, tsamp, dms, nbits);
-            DDMTCPU ddmt(plan);
+            DDMT ddmt(plan);
 
             const auto max_delay =
                 *std::ranges::max_element(plan.get_container().delay_table);
@@ -515,7 +513,7 @@ TEST_CASE("DDMTCPU execute_time_major matches channel-major packed",
     test_bits(16);
 }
 
-TEST_CASE("DDMTCPU multi-beam float execute matches per-beam single-beam calls",
+TEST_CASE("DDMT multi-beam float execute matches per-beam single-beam calls",
           "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -537,8 +535,8 @@ TEST_CASE("DDMTCPU multi-beam float execute matches per-beam single-beam calls",
         }
     }
 
-    DDMTCPU ddmt_multi(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                       /*nbits=*/32, /*kill_mask=*/{}, nbeams);
+    DDMT ddmt_multi(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                    /*nbits=*/32, /*kill_mask=*/{}, nbeams);
     CHECK(ddmt_multi.get_nbeams() == nbeams);
     const auto max_delay = *std::ranges::max_element(
         ddmt_multi.get_plan().get_container().delay_table);
@@ -552,7 +550,7 @@ TEST_CASE("DDMTCPU multi-beam float execute matches per-beam single-beam calls",
     // reset_history()'s doc comment) -- a fresh instance per beam avoids
     // beam N's reference computation being contaminated by beam N-1's tail.
     for (SizeType ibeam = 0; ibeam < nbeams; ++ibeam) {
-        DDMTCPU ddmt_single(f_min, f_max, nchans, tsamp, dms);
+        DDMT ddmt_single(f_min, f_max, nchans, tsamp, dms);
         std::vector<float> beam_waterfall(
             waterfall.begin() +
                 static_cast<std::ptrdiff_t>(ibeam * nchans * nsamps),
@@ -569,9 +567,8 @@ TEST_CASE("DDMTCPU multi-beam float execute matches per-beam single-beam calls",
     }
 }
 
-TEST_CASE(
-    "DDMTCPU multi-beam packed execute matches per-beam single-beam calls",
-    "[ddmt][cpu]") {
+TEST_CASE("DDMT multi-beam packed execute matches per-beam single-beam calls",
+          "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
     const SizeType nchans        = 8;
@@ -585,8 +582,8 @@ TEST_CASE(
         waterfall[i] = static_cast<uint8_t>((i * 13 + 5) % 256);
     }
 
-    DDMTCPU ddmt_multi(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                       /*nbits=*/8, /*kill_mask=*/{}, nbeams);
+    DDMT ddmt_multi(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                    /*nbits=*/8, /*kill_mask=*/{}, nbeams);
     const auto max_delay = *std::ranges::max_element(
         ddmt_multi.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -597,8 +594,8 @@ TEST_CASE(
     ddmt_multi.execute(waterfall, nsamps, dmt_multi);
 
     for (SizeType ibeam = 0; ibeam < nbeams; ++ibeam) {
-        DDMTCPU ddmt_single(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                            /*nbits=*/8);
+        DDMT ddmt_single(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                         /*nbits=*/8);
         std::vector<uint8_t> beam_waterfall(
             waterfall.begin() +
                 static_cast<std::ptrdiff_t>(ibeam * nchans * row_bytes),
@@ -615,7 +612,7 @@ TEST_CASE(
     }
 }
 
-TEST_CASE("DDMTCPU multi-beam time-major matches per-beam single-beam calls",
+TEST_CASE("DDMT multi-beam time-major matches per-beam single-beam calls",
           "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -631,8 +628,8 @@ TEST_CASE("DDMTCPU multi-beam time-major matches per-beam single-beam calls",
         filterbank[i] = static_cast<uint8_t>((i * 17 + 3) % 256);
     }
 
-    DDMTCPU ddmt_multi(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                       /*nbits=*/8, /*kill_mask=*/{}, nbeams);
+    DDMT ddmt_multi(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                    /*nbits=*/8, /*kill_mask=*/{}, nbeams);
     const auto max_delay = *std::ranges::max_element(
         ddmt_multi.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -641,8 +638,8 @@ TEST_CASE("DDMTCPU multi-beam time-major matches per-beam single-beam calls",
     std::vector<int32_t> dmt_multi(nbeams * dm_count * nsamps_reduced, 0);
     ddmt_multi.execute_time_major(filterbank, nsamps, dmt_multi);
 
-    DDMTCPU ddmt_single(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                        /*nbits=*/8);
+    DDMT ddmt_single(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                     /*nbits=*/8);
     for (SizeType ibeam = 0; ibeam < nbeams; ++ibeam) {
         std::vector<uint8_t> beam_filterbank(
             filterbank.begin() +
@@ -660,7 +657,7 @@ TEST_CASE("DDMTCPU multi-beam time-major matches per-beam single-beam calls",
     }
 }
 
-TEST_CASE("DDMTCPU multi-beam streaming reproduces a monolithic call",
+TEST_CASE("DDMT multi-beam streaming reproduces a monolithic call",
           "[ddmt][cpu]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -677,16 +674,16 @@ TEST_CASE("DDMTCPU multi-beam streaming reproduces a monolithic call",
                                (0.01 * static_cast<double>(i)));
     }
 
-    DDMTCPU monolithic(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                       /*nbits=*/32, /*kill_mask=*/{}, nbeams);
+    DDMT monolithic(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                    /*nbits=*/32, /*kill_mask=*/{}, nbeams);
     const auto max_delay = *std::ranges::max_element(
         monolithic.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
     std::vector<float> dmt_mono(nbeams * dms.size() * nsamps_reduced, 0.0F);
     monolithic.execute(waterfall, dmt_mono);
 
-    DDMTCPU streamed(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                     /*nbits=*/32, /*kill_mask=*/{}, nbeams);
+    DDMT streamed(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1),
+                  /*nbits=*/32, /*kill_mask=*/{}, nbeams);
     const SizeType split = 70;
     std::vector<float> chunk1(nbeams * nchans * split);
     std::vector<float> chunk2(nbeams * nchans * (nsamps - split));
@@ -726,7 +723,7 @@ TEST_CASE("DDMTCPU multi-beam streaming reproduces a monolithic call",
     }
 }
 
-TEST_CASE("DDMTCPU packed streaming matches monolithic execution across all "
+TEST_CASE("DDMT packed streaming matches monolithic execution across all "
           "bit widths",
           "[ddmt][cpu][packed][streaming]") {
     const float f_min            = 1000.0F;
@@ -742,8 +739,7 @@ TEST_CASE("DDMTCPU packed streaming matches monolithic execution across all "
         // boundaries.
         const SizeType split = 67;
 
-        DDMTCPU ddmt_mono(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                          nbits);
+        DDMT ddmt_mono(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits);
         const auto max_delay = *std::ranges::max_element(
             ddmt_mono.get_plan().get_container().delay_table);
         const auto nsamps_reduced = nsamps - max_delay;
@@ -803,8 +799,7 @@ TEST_CASE("DDMTCPU packed streaming matches monolithic execution across all "
         std::vector<int32_t> dmt_mono(dm_count * nsamps_reduced, 0);
         ddmt_mono.execute(mono_waterfall, nsamps, dmt_mono);
 
-        DDMTCPU ddmt_stream(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                            nbits);
+        DDMT ddmt_stream(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits);
         const auto n_out1 = ddmt_stream.get_output_nsamps(split);
         REQUIRE(n_out1 == (split > max_delay ? split - max_delay : 0));
         std::vector<int32_t> dmt1(dm_count * n_out1, 0);
@@ -834,7 +829,7 @@ TEST_CASE("DDMTCPU packed streaming matches monolithic execution across all "
 }
 
 TEST_CASE(
-    "DDMTCPU packed sub-byte alignment stress test with multi-chunk streaming",
+    "DDMT packed sub-byte alignment stress test with multi-chunk streaming",
     "[ddmt][cpu][packed][streaming]") {
     const float f_min            = 800.0F;
     const float f_max            = 1200.0F;
@@ -851,8 +846,7 @@ TEST_CASE(
 
     for (SizeType nbits : {1, 2, 4}) {
         INFO("Stress test nbits = " << nbits);
-        DDMTCPU ddmt_mono(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                          nbits);
+        DDMT ddmt_mono(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits);
         const auto max_delay = *std::ranges::max_element(
             ddmt_mono.get_plan().get_container().delay_table);
         const auto nsamps_reduced = total_samps - max_delay;
@@ -889,8 +883,7 @@ TEST_CASE(
         ddmt_mono.execute(mono_waterfall, total_samps, dmt_mono);
 
         // Stream chunk by chunk
-        DDMTCPU ddmt_stream(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1,
-                            nbits);
+        DDMT ddmt_stream(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits);
         std::vector<int32_t> dmt_streamed(dm_count * nsamps_reduced, 0);
         SizeType curr_offset = 0;
         SizeType out_accum   = 0;
@@ -939,7 +932,7 @@ TEST_CASE(
     }
 }
 
-TEST_CASE("DDMTCPU packed multi-beam streaming matches monolithic execution",
+TEST_CASE("DDMT packed multi-beam streaming matches monolithic execution",
           "[ddmt][cpu][packed][streaming]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -952,8 +945,8 @@ TEST_CASE("DDMTCPU packed multi-beam streaming matches monolithic execution",
     const SizeType nsamps = 95;
     const SizeType split  = 53;
 
-    DDMTCPU ddmt_mono(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1, nbits,
-                      {}, nbeams);
+    DDMT ddmt_mono(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits, {},
+                   nbeams);
     const auto max_delay = *std::ranges::max_element(
         ddmt_mono.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -991,8 +984,8 @@ TEST_CASE("DDMTCPU packed multi-beam streaming matches monolithic execution",
     std::vector<int32_t> dmt_mono(nbeams * dm_count * nsamps_reduced, 0);
     ddmt_mono.execute(mono_waterfall, nsamps, dmt_mono);
 
-    DDMTCPU ddmt_stream(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1, nbits,
-                        {}, nbeams);
+    DDMT ddmt_stream(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits, {},
+                     nbeams);
     const auto n_out1 = ddmt_stream.get_output_nsamps(split);
     std::vector<int32_t> dmt1(nbeams * dm_count * n_out1, 0);
     ddmt_stream.execute(chunk1, split, dmt1);
@@ -1019,7 +1012,7 @@ TEST_CASE("DDMTCPU packed multi-beam streaming matches monolithic execution",
     }
 }
 
-TEST_CASE("DDMTCPU packed history snapshot save, load, and validation",
+TEST_CASE("DDMT packed history snapshot save, load, and validation",
           "[ddmt][cpu][packed][history]") {
     const float f_min            = 1000.0F;
     const float f_max            = 1500.0F;
@@ -1028,7 +1021,7 @@ TEST_CASE("DDMTCPU packed history snapshot save, load, and validation",
     const float tsamp            = 0.001F;
     const std::vector<float> dms = {0.0F, 5.0F};
 
-    DDMTCPU ddmt1(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1, nbits);
+    DDMT ddmt1(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits);
     const auto max_delay =
         *std::ranges::max_element(ddmt1.get_plan().get_container().delay_table);
     const auto state_bytes = ddmt1.history_state_size();
@@ -1069,7 +1062,7 @@ TEST_CASE("DDMTCPU packed history snapshot save, load, and validation",
     CHECK_THROWS_AS(ddmt1.load_history(wrong_size_buf), std::invalid_argument);
 
     // 4. Load history into fresh instance ddmt2
-    DDMTCPU ddmt2(f_min, f_max, nchans, tsamp, dms, /*nthreads=*/1, nbits);
+    DDMT ddmt2(f_min, f_max, nchans, tsamp, dms, Exec::cpu(1), nbits);
     CHECK(ddmt2.get_output_nsamps(32) == 32 - max_delay); // Cold state
     CHECK_NOTHROW(ddmt2.load_history(hist_buf));
     CHECK(ddmt2.get_output_nsamps(32) == 32); // Warm state!

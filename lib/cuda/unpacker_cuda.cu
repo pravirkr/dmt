@@ -1,20 +1,18 @@
 #include "dmt/common/types.hpp"
-#include "dmt/utils/unpacker.hpp"
+#include "dmt/unpacker_cuda.cuh"
 
 #include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 
-#include <cuda/std/complex>
-#include <cuda/std/span>
-#include <cuda_runtime.h>
+#include "dmt/gpu_compat.cuh"
 
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 
-#include "dmt/cuda_utils.cuh"
+#include "dmt/gpu_utils.cuh"
 #include "dmt/modes.hpp"
 
 namespace dmt::utils {
@@ -24,8 +22,8 @@ namespace {
 template <IntegralDataType InDataType, BasebandDataOrder Order>
 struct UnpackAndPadFunctor {
     const InDataType* __restrict__ d_in_ptr;
-    ComplexTypeCUDA* __restrict__ d_p1_ptr;
-    ComplexTypeCUDA* __restrict__ d_p2_ptr;
+    ComplexTypeGPU* __restrict__ d_p1_ptr;
+    ComplexTypeGPU* __restrict__ d_p2_ptr;
     int nsub;
     int nbin;
     int noverlap;
@@ -64,16 +62,16 @@ struct UnpackAndPadFunctor {
         // Check if padding is needed (input sample index out of bounds)
         if (current_input_samp_signed < 0 ||
             current_input_samp_signed >= nsamp) {
-            d_p1_ptr[idx_out] = ComplexTypeCUDA(0.0F, 0.0F);
-            d_p2_ptr[idx_out] = ComplexTypeCUDA(0.0F, 0.0F);
+            d_p1_ptr[idx_out] = ComplexTypeGPU(0.0F, 0.0F);
+            d_p2_ptr[idx_out] = ComplexTypeGPU(0.0F, 0.0F);
         } else {
             const auto isamp          = current_input_samp_signed;
             const auto idx_in_base_p1 = calculate_base_index(isamp, 0, isub);
             const auto idx_in_base_p2 = calculate_base_index(isamp, 1, isub);
-            d_p1_ptr[idx_out]         = ComplexTypeCUDA(
+            d_p1_ptr[idx_out]         = ComplexTypeGPU(
                 static_cast<float>(d_in_ptr[idx_in_base_p1]),
                 static_cast<float>(d_in_ptr[idx_in_base_p1 + ri_stride]));
-            d_p2_ptr[idx_out] = ComplexTypeCUDA(
+            d_p2_ptr[idx_out] = ComplexTypeGPU(
                 static_cast<float>(d_in_ptr[idx_in_base_p2]),
                 static_cast<float>(d_in_ptr[idx_in_base_p2 + ri_stride]));
         }
@@ -97,7 +95,7 @@ public:
           m_nfft(nfft),
           m_device_id(device_id),
           m_order(parse_baseband_data_order(in_order)) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         if (m_nbin <= 2 * m_noverlap) {
             throw std::invalid_argument(
                 std::format("DataUnpackerCUDA::Impl: Invalid nbin and noverlap "
@@ -125,8 +123,8 @@ public:
 
     template <IntegralDataType DataType>
     void execute(std::span<const DataType> data_in,
-                 cuda::std::span<ComplexTypeCUDA> data_p1,
-                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cuda::std::span<ComplexTypeGPU> data_p1,
+                 cuda::std::span<ComplexTypeGPU> data_p2,
                  cudaStream_t stream) {
         validate_sizes(data_in.size(), data_p1.size(), data_p2.size());
 
@@ -135,7 +133,7 @@ public:
         std::byte* d_in_byte_ptr =
             thrust::raw_pointer_cast(m_d_in_buffer.data());
         auto* d_in_ptr = reinterpret_cast<DataType*>(d_in_byte_ptr);
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(d_in_ptr, data_in.data(), data_in.size_bytes(),
                             cudaMemcpyHostToDevice, stream),
             "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
@@ -164,8 +162,8 @@ public:
 
     template <IntegralDataType DataType>
     void execute(cuda::std::span<const DataType> data_in_d,
-                 cuda::std::span<ComplexTypeCUDA> data_p1,
-                 cuda::std::span<ComplexTypeCUDA> data_p2,
+                 cuda::std::span<ComplexTypeGPU> data_p1,
+                 cuda::std::span<ComplexTypeGPU> data_p2,
                  cudaStream_t stream) {
         validate_sizes(data_in_d.size(), data_p1.size(), data_p2.size());
         switch (m_order) {
@@ -240,8 +238,8 @@ private:
 
     template <IntegralDataType DataType, BasebandDataOrder Order>
     void unpack_and_pad_dispatch(cuda::std::span<const DataType> data_in_d,
-                                 cuda::std::span<ComplexTypeCUDA> data_p1_d,
-                                 cuda::std::span<ComplexTypeCUDA> data_p2_d,
+                                 cuda::std::span<ComplexTypeGPU> data_p1_d,
+                                 cuda::std::span<ComplexTypeGPU> data_p2_d,
                                  cudaStream_t stream) const {
         const auto ri_stride = calculate_ri_stride<Order>();
         const auto n_output  = static_cast<int>(data_p1_d.size());
@@ -259,7 +257,7 @@ private:
             .nsamp     = static_cast<int>(m_nsamp),
             .ri_stride = static_cast<int>(ri_stride)};
         thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-        cuda_utils::check_last_cuda_error("thrust::for_each unpack/pad failed");
+        gpu_utils::check_last_gpu_error("thrust::for_each unpack/pad failed");
     }
 
 }; // End DataUnpackerCUDA::Impl definition
@@ -278,39 +276,37 @@ DataUnpackerCUDA&
 DataUnpackerCUDA::operator=(DataUnpackerCUDA&& other) noexcept = default;
 template <IntegralDataType DataType>
 void DataUnpackerCUDA::execute(std::span<const DataType> data_in,
-                               cuda::std::span<ComplexTypeCUDA> data_p1,
-                               cuda::std::span<ComplexTypeCUDA> data_p2,
+                               cuda::std::span<ComplexTypeGPU> data_p1,
+                               cuda::std::span<ComplexTypeGPU> data_p2,
                                cudaStream_t stream) const {
     m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
 }
 
 template <IntegralDataType DataType>
 void DataUnpackerCUDA::execute(cuda::std::span<const DataType> data_in,
-                               cuda::std::span<ComplexTypeCUDA> data_p1,
-                               cuda::std::span<ComplexTypeCUDA> data_p2,
+                               cuda::std::span<ComplexTypeGPU> data_p1,
+                               cuda::std::span<ComplexTypeGPU> data_p2,
                                cudaStream_t stream) const {
     m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
 }
 
-template void
-    DataUnpackerCUDA::execute<int8_t>(std::span<const int8_t>,
-                                      cuda::std::span<ComplexTypeCUDA>,
-                                      cuda::std::span<ComplexTypeCUDA>,
-                                      cudaStream_t) const;
+template void DataUnpackerCUDA::execute<int8_t>(std::span<const int8_t>,
+                                                cuda::std::span<ComplexTypeGPU>,
+                                                cuda::std::span<ComplexTypeGPU>,
+                                                cudaStream_t) const;
 template void
     DataUnpackerCUDA::execute<uint8_t>(std::span<const uint8_t>,
-                                       cuda::std::span<ComplexTypeCUDA>,
-                                       cuda::std::span<ComplexTypeCUDA>,
+                                       cuda::std::span<ComplexTypeGPU>,
+                                       cuda::std::span<ComplexTypeGPU>,
                                        cudaStream_t) const;
-template void
-    DataUnpackerCUDA::execute<int8_t>(cuda::std::span<const int8_t>,
-                                      cuda::std::span<ComplexTypeCUDA>,
-                                      cuda::std::span<ComplexTypeCUDA>,
-                                      cudaStream_t) const;
+template void DataUnpackerCUDA::execute<int8_t>(cuda::std::span<const int8_t>,
+                                                cuda::std::span<ComplexTypeGPU>,
+                                                cuda::std::span<ComplexTypeGPU>,
+                                                cudaStream_t) const;
 template void
     DataUnpackerCUDA::execute<uint8_t>(cuda::std::span<const uint8_t>,
-                                       cuda::std::span<ComplexTypeCUDA>,
-                                       cuda::std::span<ComplexTypeCUDA>,
+                                       cuda::std::span<ComplexTypeGPU>,
+                                       cuda::std::span<ComplexTypeGPU>,
                                        cudaStream_t) const;
 
 } // namespace dmt::utils

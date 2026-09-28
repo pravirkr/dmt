@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import dmtlib
 from dmtlib import libdmt
 
 
@@ -38,3 +39,51 @@ def test_simulate_python_helpers() -> None:
     assert arr.shape == (8, 32)
     assert n_disp > 0
     assert float(np.sum(arr)) > 0.0
+
+
+class TestBackends:
+    def test_available_backends(self) -> None:
+        avail = dmtlib.available_backends()
+        assert avail[0] == "cpu"
+        assert set(avail) <= {"cpu", "cuda", "hip"}
+
+    @pytest.mark.parametrize(
+        "cls", [dmtlib.FDMT, dmtlib.FDMTFFT], ids=["FDMT", "FDMTFFT"]
+    )
+    def test_default_backend_is_cpu(self, cls: type) -> None:
+        engine = cls(1000.0, 1500.0, 16, 64, 0.001, 8, nthreads=2)
+        assert engine.backend == "cpu"
+        assert engine.nthreads == 2
+        assert engine.device == -1
+
+    def test_unknown_backend_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown backend"):
+            dmtlib.FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, backend="opencl")
+
+    def test_missing_backend_raises(self) -> None:
+        missing = [b for b in ("cuda", "hip") if b not in dmtlib.available_backends()]
+        for backend in missing:
+            with pytest.raises(ValueError, match="not available"):
+                dmtlib.FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, backend=backend)
+            with pytest.raises(ValueError, match="not available"):
+                dmtlib.DDMT(1000.0, 1500.0, 16, 0.001, 10.0, 1.0, backend=backend)
+
+    def test_backend_is_keyword_only(self) -> None:
+        with pytest.raises(TypeError):
+            dmtlib.FDMT(
+                1000.0,
+                1500.0,
+                16,
+                64,
+                0.001,
+                8,
+                0,
+                1,
+                True,
+                "valid",
+                1,
+                1,
+                None,
+                True,
+                "cpu",
+            )

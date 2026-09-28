@@ -22,7 +22,7 @@
 
 namespace dmt {
 
-using algorithms::FDMTCPU;
+using algorithms::FDMT;
 using algorithms::kFDMTAutoFuse;
 
 namespace {
@@ -86,7 +86,7 @@ random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
     return out;
 }
 
-std::vector<float> run(FDMTCPU& fdmt, const std::vector<float>& wf) {
+std::vector<float> run(FDMT& fdmt, const std::vector<float>& wf) {
     std::vector<float> dmt(
         fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
     fdmt.execute(wf, dmt);
@@ -94,7 +94,7 @@ std::vector<float> run(FDMTCPU& fdmt, const std::vector<float>& wf) {
 }
 
 std::vector<float>
-run_packed(FDMTCPU& fdmt, const std::vector<uint8_t>& wf, SizeType nbits) {
+run_packed(FDMT& fdmt, const std::vector<uint8_t>& wf, SizeType nbits) {
     std::vector<float> dmt(
         fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
     fdmt.execute(std::span<const uint8_t>(wf), nbits, dmt);
@@ -104,7 +104,7 @@ run_packed(FDMTCPU& fdmt, const std::vector<uint8_t>& wf, SizeType nbits) {
 // Compares the leading dmt_size values of every beam.
 void require_beams_exact(const std::vector<float>& actual,
                          const std::vector<float>& expected,
-                         const FDMTCPU& fdmt) {
+                         const FDMT& fdmt) {
     const auto bufsz = fdmt.get_plan().get_buffer_size();
     const auto n     = fdmt.get_plan().get_dmt_size();
     for (SizeType b = 0; b < fdmt.get_nbeams(); ++b) {
@@ -118,18 +118,17 @@ void require_beams_exact(const std::vector<float>& actual,
 
 } // namespace
 
-TEST_CASE("FDMTCPU performance parameters and memory usage",
-          "[fdmt_cpu][cpu]") {
-    FDMTCPU fdmt(kFMin, kFMax, 32, 128, kTsamp, 16);
+TEST_CASE("FDMT performance parameters and memory usage", "[fdmt_cpu][cpu]") {
+    FDMT fdmt(kFMin, kFMax, 32, 128, kTsamp, 16);
     const auto niters = fdmt.get_plan().get_niters();
     CHECK(fdmt.get_int_tree());
     CHECK(fdmt.get_fuse_levels() <= niters);
 
-    FDMTCPU clamped(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", 1,
-                    1, 99);
+    FDMT clamped(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+                 Exec::cpu(1), 1, 99);
     CHECK(clamped.get_fuse_levels() == niters);
-    FDMTCPU orig(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", 1, 1,
-                 kUnfused, kFloatTree);
+    FDMT orig(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+              Exec::cpu(1), 1, kUnfused, kFloatTree);
     CHECK(orig.get_fuse_levels() == 0);
     CHECK_FALSE(orig.get_int_tree());
 
@@ -145,22 +144,22 @@ TEST_CASE("FDMTCPU performance parameters and memory usage",
     CHECK(orig.get_memory_usage().workspace > 0); // unpack + box rows
 
     // Per-thread scratch: exactly one slice per thread.
-    FDMTCPU one(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", 1, 1,
-                3);
-    FDMTCPU two(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", 2, 1,
-                3);
+    FDMT one(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+             Exec::cpu(1), 1, 3);
+    FDMT two(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+             Exec::cpu(2), 1, 3);
     CHECK(two.get_memory_usage().workspace ==
           2 * one.get_memory_usage().workspace);
 }
 
-TEST_CASE("FDMTCPU automatic fusion depth", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT automatic fusion depth", "[fdmt_cpu][cpu]") {
     // kFDMTAutoFuse picks the deepest depth whose two per-thread fusion
     // buffers fit max(36 MiB / nthreads, 5 MiB): a rule on the plan alone.
     // The fusion buffers are what the workspace holds beyond the three
     // unpack/box rows of each thread.
     const SizeType nchans  = 1024;
     const SizeType nsamps  = 4096;
-    const auto fused_bytes = [&](const FDMTCPU& f, SizeType nthreads) {
+    const auto fused_bytes = [&](const FDMT& f, SizeType nthreads) {
         const auto rows = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
         return (f.get_memory_usage().workspace / nthreads) - rows;
     };
@@ -170,23 +169,23 @@ TEST_CASE("FDMTCPU automatic fusion depth", "[fdmt_cpu][cpu]") {
             const auto n = static_cast<SizeType>(nthreads);
             const SizeType budget =
                 std::max<SizeType>((SizeType{36} << 20) / n, SizeType{5} << 20);
-            FDMTCPU fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true,
-                         "valid", nthreads);
+            FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true,
+                      "valid", Exec::cpu(nthreads));
             const auto depth = fdmt.get_fuse_levels();
             REQUIRE(depth >= 1);
             REQUIRE(depth <= prev_depth); // more threads never fuse deeper
             prev_depth = depth;
             CHECK(fused_bytes(fdmt, n) <= budget);
             if (depth < fdmt.get_plan().get_niters()) {
-                FDMTCPU deeper(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1,
-                               true, "valid", nthreads, 1, depth + 1);
+                FDMT deeper(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1,
+                            true, "valid", Exec::cpu(nthreads), 1, depth + 1);
                 CHECK(fused_bytes(deeper, n) > budget);
             }
         }
     }
 }
 
-TEST_CASE("FDMTCPU level-0 box rows match a float64 reference",
+TEST_CASE("FDMT level-0 box rows match a float64 reference",
           "[fdmt_cpu][cpu]") {
     // A large DC offset over a long block is where the former serial
     // running sum (+= x[i]; -= x[i-w]) drifted; the direct box sum keeps each
@@ -195,8 +194,8 @@ TEST_CASE("FDMTCPU level-0 box rows match a float64 reference",
     const SizeType nsamps = 1 << 16;
     for (const std::string mode : {"full", "roll", "valid"}) {
         DYNAMIC_SECTION("mode=" << mode) {
-            FDMTCPU fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 90, 60, 1, true,
-                         mode);
+            FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 90, 60, 1, true,
+                      mode);
             std::mt19937 gen(5);
             std::normal_distribution<float> dis(1000.0F, 1.0F);
             std::vector<float> wf(nchans * nsamps);
@@ -241,7 +240,7 @@ TEST_CASE("FDMTCPU level-0 box rows match a float64 reference",
     }
 }
 
-TEST_CASE("FDMTCPU fused levels are bit-exact with the original path",
+TEST_CASE("FDMT fused levels are bit-exact with the original path",
           "[fdmt_cpu][cpu]") {
     struct Case {
         SizeType nchans;
@@ -266,16 +265,16 @@ TEST_CASE("FDMTCPU fused levels are bit-exact with the original path",
                                           << mode << " smearing=" << smearing) {
                     const auto wf = random_waterfall(2 * c.nchans * c.nsamps,
                                                      21 + c.nchans);
-                    FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                c.dt_max, c.dt_min, 1, smearing, mode, 1, 2,
-                                kUnfused, kFloatTree);
+                    FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
+                             c.dt_min, 1, smearing, mode, Exec::cpu(1), 2,
+                             kUnfused, kFloatTree);
                     const auto expected = run(ref, wf);
                     for (const SizeType fuse :
                          {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{9},
                           kFDMTAutoFuse}) {
-                        FDMTCPU fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                     c.dt_max, c.dt_min, 1, smearing, mode, 1,
-                                     2, fuse);
+                        FDMT fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
+                                  c.dt_max, c.dt_min, 1, smearing, mode,
+                                  Exec::cpu(1), 2, fuse);
                         require_beams_exact(run(fdmt, wf), expected, fdmt);
                     }
                 }
@@ -284,15 +283,15 @@ TEST_CASE("FDMTCPU fused levels are bit-exact with the original path",
     }
 }
 
-TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
+TEST_CASE("FDMT fused levels: dt_grid, streaming, packed int tree",
           "[fdmt_cpu][cpu]") {
     SECTION("explicit dt_grid") {
         const std::vector<IndexType> dt_grid = {0, 1, 3, 7, 12, 20, 31, 45};
         const auto wf                        = random_waterfall(64 * 200, 8);
-        FDMTCPU ref(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid", 1, 1,
-                    kUnfused, kFloatTree);
-        FDMTCPU fdmt(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid", 1,
-                     1, 3);
+        FDMT ref(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid",
+                 Exec::cpu(1), 1, kUnfused, kFloatTree);
+        FDMT fdmt(kFMin, kFMax, 64, 200, kTsamp, dt_grid, true, "valid",
+                  Exec::cpu(1), 1, 3);
         require_beams_exact(run(fdmt, wf), run(ref, wf), fdmt);
     }
     SECTION("valid-mode streaming, fused and unfused engines alternating") {
@@ -300,15 +299,15 @@ TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
         // save_history()/load_history(): the history is depth-independent.
         const SizeType nchans = 32;
         for (const SizeType block : {16, 64}) {
-            FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
-                        "valid", 1, 1, kUnfused, kFloatTree);
-            FDMTCPU fused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
-                          "valid", 1, 1, 2);
-            FDMTCPU unfused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1,
-                            true, "valid", 1, 1, kUnfused);
+            FDMT ref(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
+                     "valid", Exec::cpu(1), 1, kUnfused, kFloatTree);
+            FDMT fused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
+                       "valid", Exec::cpu(1), 1, 2);
+            FDMT unfused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
+                         "valid", Exec::cpu(1), 1, kUnfused);
             std::vector<float> hist(ref.history_state_size(), 0.0F);
             for (SizeType b = 0; b < 10; ++b) {
-                FDMTCPU& engine = (b % 3 == 2) ? unfused : fused;
+                FDMT& engine  = (b % 3 == 2) ? unfused : fused;
                 const auto wf = random_waterfall(nchans * block,
                                                  static_cast<unsigned>(60 + b));
                 engine.load_history(hist);
@@ -325,18 +324,18 @@ TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
         for (const SizeType nbits : {1, 4, 8}) {
             for (const std::string mode : {"full", "roll", "valid"}) {
                 const auto wf = random_packed(256, 128, nbits, 30 + nbits);
-                FDMTCPU ref(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true,
-                            mode, 1, 1, kUnfused, kFloatTree);
-                FDMTCPU fdmt(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true,
-                             mode, 1, 1, 3, true);
+                FDMT ref(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true, mode,
+                         Exec::cpu(1), 1, kUnfused, kFloatTree);
+                FDMT fdmt(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true, mode,
+                          Exec::cpu(1), 1, 3, true);
                 require_beams_exact(run_packed(fdmt, wf.packed, nbits),
                                     run(ref, wf.values), fdmt);
             }
         }
     }
     SECTION("stepper stays unfused and inspectable") {
-        FDMTCPU fdmt(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid", 1,
-                     1, 3);
+        FDMT fdmt(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
+                  Exec::cpu(1), 1, 3);
         const auto wf = random_waterfall(32 * 128, 2);
         std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
         fdmt.reset(wf, dmt);
@@ -346,7 +345,7 @@ TEST_CASE("FDMTCPU fused levels: dt_grid, streaming, packed int tree",
     }
 }
 
-TEST_CASE("FDMTCPU packed input matches float input", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT packed input matches float input", "[fdmt_cpu][cpu]") {
     struct Case {
         SizeType nchans;
         SizeType nsamps;
@@ -372,17 +371,17 @@ TEST_CASE("FDMTCPU packed input matches float input", "[fdmt_cpu][cpu]") {
                                               << " smearing=" << smearing) {
                         const auto wf = random_packed(c.nchans, c.nsamps, nbits,
                                                       17 + nbits);
-                        FDMTCPU ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
-                                    c.dt_max, c.dt_min, 1, smearing, mode, 1, 1,
-                                    kUnfused, kFloatTree);
+                        FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
+                                 c.dt_max, c.dt_min, 1, smearing, mode,
+                                 Exec::cpu(1), 1, kUnfused, kFloatTree);
                         const auto expected = run(ref, wf.values);
                         for (const bool int_tree : {false, true}) {
                             for (const SizeType fuse :
                                  {SizeType{0}, kFDMTAutoFuse}) {
-                                FDMTCPU fdmt(kFMin, kFMax, c.nchans, c.nsamps,
-                                             kTsamp, c.dt_max, c.dt_min, 1,
-                                             smearing, mode, 1, 1, fuse,
-                                             int_tree);
+                                FDMT fdmt(kFMin, kFMax, c.nchans, c.nsamps,
+                                          kTsamp, c.dt_max, c.dt_min, 1,
+                                          smearing, mode, Exec::cpu(1), 1, fuse,
+                                          int_tree);
                                 require_beams_exact(
                                     run_packed(fdmt, wf.packed, nbits),
                                     expected, fdmt);
@@ -395,7 +394,7 @@ TEST_CASE("FDMTCPU packed input matches float input", "[fdmt_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTCPU packed valid-mode streaming and multiple beams",
+TEST_CASE("FDMT packed valid-mode streaming and multiple beams",
           "[fdmt_cpu][cpu]") {
     struct Case {
         SizeType nchans;
@@ -412,12 +411,12 @@ TEST_CASE("FDMTCPU packed valid-mode streaming and multiple beams",
                 const SizeType nchans = c.nchans;
                 const auto row_bytes =
                     bit_pack_utils::packed_row_bytes(block, nbits);
-                FDMTCPU ref(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
-                            c.dt_min, 1, true, "valid", 1, nbeams, kUnfused,
-                            kFloatTree);
+                FDMT ref(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
+                         c.dt_min, 1, true, "valid", Exec::cpu(1), nbeams,
+                         kUnfused, kFloatTree);
                 // Default performance parameters: int tree + auto fusion.
-                FDMTCPU fdmt(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
-                             c.dt_min, 1, true, "valid", 1, nbeams);
+                FDMT fdmt(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
+                          c.dt_min, 1, true, "valid", Exec::cpu(1), nbeams);
                 for (SizeType b = 0; b < nblks; ++b) {
                     const auto wf =
                         random_packed(nbeams * nchans, block, nbits,
@@ -437,11 +436,11 @@ TEST_CASE("FDMTCPU packed valid-mode streaming and multiple beams",
     }
 }
 
-TEST_CASE("FDMTCPU packed input errors and integer-level inspection",
+TEST_CASE("FDMT packed input errors and integer-level inspection",
           "[fdmt_cpu][cpu]") {
     const SizeType nchans = 64;
     const SizeType nsamps = 128;
-    FDMTCPU fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full");
+    FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full");
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
     const auto wf = random_packed(nchans, nsamps, 1, 9);
 
@@ -455,8 +454,8 @@ TEST_CASE("FDMTCPU packed input errors and integer-level inspection",
         std::invalid_argument);
 
     // Without int_tree every level is float and inspectable.
-    FDMTCPU flt(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
-                1, 1, kFDMTAutoFuse, kFloatTree);
+    FDMT flt(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
+             Exec::cpu(1), 1, kFDMTAutoFuse, kFloatTree);
     flt.reset(std::span<const uint8_t>(wf.packed), 1, dmt);
     REQUIRE_NOTHROW(flt.view_level_data());
     flt.finalize();

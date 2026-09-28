@@ -5,8 +5,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
-#include <cuda/std/span>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/common/plans.hpp"
@@ -14,12 +14,12 @@
 
 namespace dmt {
 
-using algorithms::DDMTCUDA;
+using algorithms::DDMT;
 using plans::DDMTPlan;
 
-TEST_CASE("DDMTCUDA construction and getters", "[ddmt_gpu][gpu]") {
-    DDMTCUDA ddmt(test::kFMin, test::kFMax, 16, test::kTsamp, 20.0F, 5.0F,
-                  0.0F);
+TEST_CASE("DDMT construction and getters", "[ddmt_gpu][gpu]") {
+    DDMT ddmt(test::kFMin, test::kFMax, 16, test::kTsamp, 20.0F, 5.0F, 0.0F,
+              test::gpu_exec());
     CHECK(ddmt.get_plan().get_f_min() == test::kFMin);
     CHECK(ddmt.get_plan().get_f_max() == test::kFMax);
     CHECK(ddmt.get_plan().get_nchans() == 16);
@@ -27,13 +27,13 @@ TEST_CASE("DDMTCUDA construction and getters", "[ddmt_gpu][gpu]") {
     CHECK(ddmt.get_plan().get_dm_arr().size() > 1);
 }
 
-TEST_CASE("DDMTCUDA execute (host float) recovers a zero-DM ones waterfall",
+TEST_CASE("DDMT execute (host float) recovers a zero-DM ones waterfall",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans = 8;
     const SizeType nsamps = 64;
 
-    DDMTCUDA ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 10.0F, 5.0F,
-                  0.0F);
+    DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 10.0F, 5.0F, 0.0F,
+              test::gpu_exec());
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
     REQUIRE(nsamps > max_delay);
@@ -50,13 +50,13 @@ TEST_CASE("DDMTCUDA execute (host float) recovers a zero-DM ones waterfall",
                           nsamps_reduced, static_cast<float>(nchans))));
 }
 
-TEST_CASE("DDMTCUDA execute (device float span) matches the host overload",
+TEST_CASE("DDMT execute (device float span) matches the host overload",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans = 16;
     const SizeType nsamps = 128;
 
-    DDMTCUDA ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp,
-                  std::vector<float>{0.0F, 5.0F, 10.0F});
+    DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp,
+              std::vector<float>{0.0F, 5.0F, 10.0F}, test::gpu_exec());
     const auto waterfall = test::sequential_waterfall(nchans, nsamps);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
@@ -71,10 +71,10 @@ TEST_CASE("DDMTCUDA execute (device float span) matches the host overload",
                                              waterfall.end());
     thrust::device_vector<float> d_dmt(dm_count * nsamps_reduced, 0.0F);
     ddmt.execute(
-        cuda::std::span<const float>(
-            thrust::raw_pointer_cast(d_waterfall.data()), d_waterfall.size()),
-        cuda::std::span<float>(thrust::raw_pointer_cast(d_dmt.data()),
-                               d_dmt.size()));
+        DeviceSpan<const float>(thrust::raw_pointer_cast(d_waterfall.data()),
+                                d_waterfall.size()),
+        DeviceSpan<float>(thrust::raw_pointer_cast(d_dmt.data()),
+                          d_dmt.size()));
     std::vector<float> dmt_device(d_dmt.size());
     thrust::copy(d_dmt.begin(), d_dmt.end(), dmt_device.begin());
     cudaDeviceSynchronize();
@@ -82,7 +82,7 @@ TEST_CASE("DDMTCUDA execute (device float span) matches the host overload",
     test::require_approx(dmt_device, dmt_host);
 }
 
-TEST_CASE("DDMTCUDA packed-integer execute matches the float path",
+TEST_CASE("DDMT packed-integer execute matches the float path",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans        = 16;
     const SizeType nsamps        = 96;
@@ -99,9 +99,10 @@ TEST_CASE("DDMTCUDA packed-integer execute matches the float path",
         }
     }
 
-    DDMTCUDA ddmt_f(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
-    DDMTCUDA ddmt_i(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                    /*device_id=*/0, /*nbits=*/8);
+    DDMT ddmt_f(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+                test::gpu_exec());
+    DDMT ddmt_i(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+                test::gpu_exec(), /*nbits=*/8);
     CHECK(ddmt_i.get_plan().get_nbits() == 8);
 
     const auto max_delay = *std::ranges::max_element(
@@ -119,7 +120,7 @@ TEST_CASE("DDMTCUDA packed-integer execute matches the float path",
     }
 }
 
-TEST_CASE("DDMTCUDA kill_mask excludes masked channels from the sum",
+TEST_CASE("DDMT kill_mask excludes masked channels from the sum",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans = 8;
     const SizeType nsamps = 64;
@@ -127,8 +128,8 @@ TEST_CASE("DDMTCUDA kill_mask excludes masked channels from the sum",
     std::vector<uint8_t> kill_mask(nchans, 1);
     kill_mask[0] = 0;
 
-    DDMTCUDA ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 10.0F, 5.0F,
-                  0.0F, /*device_id=*/0, /*nbits=*/32, kill_mask);
+    DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 10.0F, 5.0F, 0.0F,
+              test::gpu_exec(), /*nbits=*/32, kill_mask);
     const auto max_delay =
         *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
     const auto nsamps_reduced = nsamps - max_delay;
@@ -144,7 +145,7 @@ TEST_CASE("DDMTCUDA kill_mask excludes masked channels from the sum",
                           nsamps_reduced, static_cast<float>(nchans - 1))));
 }
 
-TEST_CASE("DDMTCUDA with LevinConfig", "[ddmt_gpu][gpu]") {
+TEST_CASE("DDMT with LevinConfig", "[ddmt_gpu][gpu]") {
     const SizeType nchans = 16;
     plans::LevinConfig levin{
         .dm_start    = 0.0F,
@@ -153,17 +154,18 @@ TEST_CASE("DDMTCUDA with LevinConfig", "[ddmt_gpu][gpu]") {
         .tol         = 1.25F,
     };
 
-    DDMTCUDA ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, levin);
+    DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, levin,
+              test::gpu_exec());
     CHECK(ddmt.get_plan().get_dm_arr().size() > 1);
     CHECK(ddmt.get_plan().get_dm_arr().front() == 0.0F);
     CHECK(ddmt.get_plan().get_dm_arr().back() >= levin.dm_end);
 
     plans::DDMTPlan plan(test::kFMin, test::kFMax, nchans, test::kTsamp, levin);
-    DDMTCUDA ddmt_from_plan(plan);
+    DDMT ddmt_from_plan(plan, test::gpu_exec());
     CHECK(ddmt_from_plan.get_plan().get_dm_arr() == plan.get_dm_arr());
 }
 
-TEST_CASE("DDMTCUDA execute_time_major matches channel-major packed",
+TEST_CASE("DDMT execute_time_major matches channel-major packed",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans        = 16;
     const SizeType nsamps        = 64;
@@ -173,7 +175,7 @@ TEST_CASE("DDMTCUDA execute_time_major matches channel-major packed",
         DYNAMIC_SECTION("nbits = " << nbits) {
             plans::DDMTPlan plan(test::kFMin, test::kFMax, nchans, test::kTsamp,
                                  dms, nbits);
-            DDMTCUDA ddmt(plan);
+            DDMT ddmt(plan, test::gpu_exec());
 
             const auto max_delay =
                 *std::ranges::max_element(plan.get_container().delay_table);
@@ -247,13 +249,15 @@ TEST_CASE("DDMTCUDA execute_time_major matches channel-major packed",
     test_bits(16);
 }
 
-TEST_CASE("DDMTCUDA streaming history across chunks matches monolithic execute",
+TEST_CASE("DDMT streaming history across chunks matches monolithic execute",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans        = 8;
     const std::vector<float> dms = {0.0F, 4.0F};
 
-    DDMTCUDA ddmt_mono(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
-    DDMTCUDA ddmt_stream(test::kFMin, test::kFMax, nchans, test::kTsamp, dms);
+    DDMT ddmt_mono(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+                   test::gpu_exec());
+    DDMT ddmt_stream(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+                     test::gpu_exec());
 
     const auto max_delay = *std::ranges::max_element(
         ddmt_mono.get_plan().get_container().delay_table);
@@ -307,9 +311,8 @@ TEST_CASE("DDMTCUDA streaming history across chunks matches monolithic execute",
     CHECK(ddmt_stream.get_output_nsamps(split) == split);
 }
 
-TEST_CASE(
-    "DDMTCUDA multi-beam float execute matches per-beam single-beam calls",
-    "[ddmt_gpu][gpu]") {
+TEST_CASE("DDMT multi-beam float execute matches per-beam single-beam calls",
+          "[ddmt_gpu][gpu]") {
     const SizeType nchans        = 8;
     const SizeType nsamps        = 64;
     const SizeType nbeams        = 3;
@@ -326,9 +329,8 @@ TEST_CASE(
         }
     }
 
-    DDMTCUDA ddmt_multi(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                        /*device_id=*/0, /*nbits=*/32, /*kill_mask=*/{},
-                        nbeams);
+    DDMT ddmt_multi(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+                    test::gpu_exec(), /*nbits=*/32, /*kill_mask=*/{}, nbeams);
     CHECK(ddmt_multi.get_nbeams() == nbeams);
     const auto max_delay = *std::ranges::max_element(
         ddmt_multi.get_plan().get_container().delay_table);
@@ -342,8 +344,8 @@ TEST_CASE(
     // history across calls by design, so reusing one instance across beams
     // would contaminate beam N's reference with beam N-1's tail.
     for (SizeType ibeam = 0; ibeam < nbeams; ++ibeam) {
-        DDMTCUDA ddmt_single(test::kFMin, test::kFMax, nchans, test::kTsamp,
-                             dms);
+        DDMT ddmt_single(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
+                         test::gpu_exec());
         std::vector<float> beam_waterfall(
             waterfall.begin() +
                 static_cast<std::ptrdiff_t>(ibeam * nchans * nsamps),

@@ -3,23 +3,23 @@
 #include <catch2/matchers/catch_matchers_all.hpp>
 
 #include <cstddef>
-#include <cuda/std/span>
 #include <span>
 #include <thrust/device_vector.h>
 #include <vector>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
 
-using algorithms::FDMTCPU;
-using algorithms::FDMTCUDA;
+using algorithms::FDMT;
 
-TEST_CASE("FDMTCUDA Constructor and getter methods", "[fdmt_gpu][gpu]") {
+TEST_CASE("FDMT Constructor and getter methods", "[fdmt_gpu][gpu]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     REQUIRE(fdmt_cuda.get_plan().get_df() == fdmt_cpu.get_plan().get_df());
     REQUIRE(fdmt_cuda.get_plan().get_niters() ==
             fdmt_cpu.get_plan().get_niters());
@@ -31,11 +31,12 @@ TEST_CASE("FDMTCUDA Constructor and getter methods", "[fdmt_gpu][gpu]") {
         Catch::Matchers::Equals(fdmt_cpu.get_plan().get_dm_grid_final()));
 }
 
-TEST_CASE("FDMTCUDA execute method (on device)", "[fdmt_gpu][gpu]") {
+TEST_CASE("FDMT execute method (on device)", "[fdmt_gpu][gpu]") {
 
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     CHECK_FALSE(fdmt_cpu.get_plan().summary().empty());
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
     const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
@@ -43,21 +44,22 @@ TEST_CASE("FDMTCUDA execute method (on device)", "[fdmt_gpu][gpu]") {
     thrust::device_vector<float> dmt_d = dmt;
     REQUIRE_NOTHROW(fdmt_cpu.execute(waterfall, dmt));
     REQUIRE_NOTHROW(fdmt_cuda.execute(
-        cuda::std::span<const float>(
-            thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size()),
-        cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                               dmt_d.size())));
+        DeviceSpan<const float>(thrust::raw_pointer_cast(waterfall_d.data()),
+                                waterfall_d.size()),
+        DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                          dmt_d.size())));
 
     std::vector<float> dmt_h(dmt_size, 0.0F);
     thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_h.begin());
     test::require_approx(dmt_h, dmt, fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("FDMTCUDA execute method (on host)", "[fdmt_gpu][gpu]") {
+TEST_CASE("FDMT execute method (on host)", "[fdmt_gpu][gpu]") {
 
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     CHECK_FALSE(fdmt_cpu.get_plan().summary().empty());
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
     std::vector<float> dmt(dmt_size, 0.0F);
@@ -68,12 +70,13 @@ TEST_CASE("FDMTCUDA execute method (on host)", "[fdmt_gpu][gpu]") {
     test::require_approx(dmt_h, dmt, fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("FDMTCUDA stepper: bit-exact equivalence with single-shot execute on "
+TEST_CASE("FDMT stepper: bit-exact equivalence with single-shot execute on "
           "device",
           "[fdmt_gpu][gpu]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
     const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
@@ -81,10 +84,10 @@ TEST_CASE("FDMTCUDA stepper: bit-exact equivalence with single-shot execute on "
     fdmt_cpu.execute(waterfall, dmt_ref);
 
     thrust::device_vector<float> dmt_d(dmt_size, 0.0F);
-    auto d_wf_span = cuda::std::span<const float>(
+    auto d_wf_span = DeviceSpan<const float>(
         thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size());
-    auto d_dmt_span = cuda::std::span<float>(
-        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    auto d_dmt_span =
+        DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
 
     fdmt_cuda.reset(d_wf_span, d_dmt_span);
     CHECK(fdmt_cuda.current_level() == 0);
@@ -101,11 +104,12 @@ TEST_CASE("FDMTCUDA stepper: bit-exact equivalence with single-shot execute on "
     test::require_approx(dmt_h, dmt_ref, fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
+TEST_CASE("FDMT stepper: 1 level remaining (2 subbands) on device",
           "[fdmt_gpu][gpu]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
     const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
@@ -113,10 +117,10 @@ TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
     fdmt_cpu.execute(waterfall, dmt_ref);
 
     thrust::device_vector<float> dmt_d(dmt_size, 0.0F);
-    auto d_wf_span = cuda::std::span<const float>(
+    auto d_wf_span = DeviceSpan<const float>(
         thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size());
-    auto d_dmt_span = cuda::std::span<float>(
-        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    auto d_dmt_span =
+        DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
 
     fdmt_cuda.reset(d_wf_span, d_dmt_span);
     fdmt_cuda.advance_until_remaining(1);
@@ -124,8 +128,8 @@ TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
     CHECK(fdmt_cuda.num_subbands() == 2);
     CHECK(!fdmt_cuda.is_finished());
 
-    auto sub0 = fdmt_cuda.view_subband(0);
-    auto sub1 = fdmt_cuda.view_subband(1);
+    auto sub0 = fdmt_cuda.view_subband_device(0);
+    auto sub1 = fdmt_cuda.view_subband_device(1);
     CHECK(sub0.subband_idx == 0);
     CHECK(sub1.subband_idx == 1);
     CHECK(sub0.f_start == Catch::Approx(1000.0F));
@@ -142,19 +146,20 @@ TEST_CASE("FDMTCUDA stepper: 1 level remaining (2 subbands) on device",
     test::require_approx(dmt_h, dmt_ref, fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("FDMTCUDA stepper: 2 levels remaining (4 subbands) on device",
+TEST_CASE("FDMT stepper: 2 levels remaining (4 subbands) on device",
           "[fdmt_gpu][gpu]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
     const size_t dmt_size = fdmt_cuda.get_plan().get_buffer_size();
     thrust::device_vector<float> dmt_d(dmt_size, 0.0F);
 
-    auto d_wf_span = cuda::std::span<const float>(
+    auto d_wf_span = DeviceSpan<const float>(
         thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size());
-    auto d_dmt_span = cuda::std::span<float>(
-        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    auto d_dmt_span =
+        DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
 
     fdmt_cuda.reset(d_wf_span, d_dmt_span);
     fdmt_cuda.advance_until_remaining(2);
@@ -162,24 +167,25 @@ TEST_CASE("FDMTCUDA stepper: 2 levels remaining (4 subbands) on device",
     CHECK(fdmt_cuda.num_subbands() == 4);
 
     for (size_t s = 0; s < 4; ++s) {
-        auto sub       = fdmt_cuda.view_subband(s);
-        auto data_span = fdmt_cuda.view_subband_data(s);
+        auto sub       = fdmt_cuda.view_subband_device(s);
+        auto data_span = fdmt_cuda.view_subband_device(s).data;
         CHECK(sub.data.data() == data_span.data());
         CHECK(sub.data.size() == data_span.size());
     }
-    CHECK_THROWS_AS(fdmt_cuda.view_subband(4), std::out_of_range);
-    CHECK_THROWS_AS(fdmt_cuda.view_subband_data(4), std::out_of_range);
+    CHECK_THROWS_AS(fdmt_cuda.view_subband_device(4), std::out_of_range);
+    CHECK_THROWS_AS(fdmt_cuda.view_subband_device(4).data, std::out_of_range);
 }
 
-TEST_CASE("FDMTCUDA valid-mode stepper must finish a block before the next",
+TEST_CASE("FDMT valid-mode stepper must finish a block before the next",
           "[fdmt_gpu][gpu]") {
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 64, 256, 0.001F, 64, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 64, 256, 0.001F, 64, 0, 1, true, "valid",
+                   test::gpu_exec());
     thrust::device_vector<float> waterfall_d(64 * 256, 1.0F);
     thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size());
-    const auto d_wf = cuda::std::span<const float>(
+    const auto d_wf = DeviceSpan<const float>(
         thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size());
-    const auto d_dmt = cuda::std::span<float>(
-        thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
+    const auto d_dmt =
+        DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
 
     fdmt_cuda.reset(d_wf, d_dmt);
     fdmt_cuda.advance_until_remaining(2);
@@ -192,20 +198,22 @@ TEST_CASE("FDMTCUDA valid-mode stepper must finish a block before the next",
     cudaDeviceSynchronize();
 }
 
-TEST_CASE("FDMTCUDA stepper: lifecycle and error handling", "[fdmt_gpu][gpu]") {
+TEST_CASE("FDMT stepper: lifecycle and error handling", "[fdmt_gpu][gpu]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
+                   "valid", test::gpu_exec());
     CHECK_THROWS_AS(fdmt_cuda.advance(), std::logic_error);
-    CHECK_THROWS_AS(fdmt_cuda.view_level_data(), std::logic_error);
-    CHECK_THROWS_AS(fdmt_cuda.view_subband(0), std::logic_error);
+    CHECK_THROWS_AS(fdmt_cuda.view_level_data_device(), std::logic_error);
+    CHECK_THROWS_AS(fdmt_cuda.view_subband_device(0), std::logic_error);
 }
 
-TEST_CASE("FDMTCUDA valid mode parity between CPU and CUDA",
+TEST_CASE("FDMT valid mode parity between CPU and CUDA",
           "[fdmt_gpu][gpu][parity]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, true,
-                       "valid");
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, true, "valid");
+    // dt_max=64, dt_min=0, dt_step=1, use_box_smearing=true
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, true, "valid",
+                   test::gpu_exec());
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, true, "valid");
 
     std::vector<float> wf1(16 * 1024, 1.0F);
     std::vector<float> wf2(16 * 1024, 2.0F);
@@ -226,11 +234,13 @@ TEST_CASE("FDMTCUDA valid mode parity between CPU and CUDA",
                          fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("FDMTCUDA roll mode parity between CPU and CUDA",
+TEST_CASE("FDMT roll mode parity between CPU and CUDA",
           "[fdmt_gpu][gpu][parity]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, true, "roll");
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, true, "roll");
+    // dt_max=64, dt_min=0, dt_step=1, use_box_smearing=true
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, true, "roll",
+                   test::gpu_exec());
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, true, "roll");
 
     std::vector<float> wf(16 * 1024);
     for (size_t i = 0; i < wf.size(); ++i) {
@@ -245,8 +255,7 @@ TEST_CASE("FDMTCUDA roll mode parity between CPU and CUDA",
     test::require_approx(dmt_cuda, dmt_cpu, fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE("FDMTCUDA odd channels and padding safety on device",
-          "[fdmt_gpu][gpu]") {
+TEST_CASE("FDMT odd channels and padding safety on device", "[fdmt_gpu][gpu]") {
 
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
@@ -259,10 +268,9 @@ TEST_CASE("FDMTCUDA odd channels and padding safety on device",
 
     for (const auto nchans : odd_chans) {
         DYNAMIC_SECTION("nchans = " << nchans) {
-            FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                               dt_min);
-            FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                             dt_min);
+            FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                           1, true, "valid", test::gpu_exec());
+            FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
             const auto& plan = fdmt_cpu.get_plan();
 
             std::vector<float> waterfall(nchans * nsamps);
@@ -275,10 +283,10 @@ TEST_CASE("FDMTCUDA odd channels and padding safety on device",
 
             thrust::device_vector<float> waterfall_d = waterfall;
             thrust::device_vector<float> dmt_d(plan.get_buffer_size(), -42.0F);
-            auto d_wf_span = cuda::std::span<const float>(
+            auto d_wf_span = DeviceSpan<const float>(
                 thrust::raw_pointer_cast(waterfall_d.data()),
                 waterfall_d.size());
-            auto d_dmt_span = cuda::std::span<float>(
+            auto d_dmt_span = DeviceSpan<float>(
                 thrust::raw_pointer_cast(dmt_d.data()), dmt_d.size());
 
             fdmt_cuda.reset(d_wf_span, d_dmt_span);
@@ -296,13 +304,12 @@ TEST_CASE("FDMTCUDA odd channels and padding safety on device",
     }
 }
 
-TEST_CASE("FDMTCUDA no box smearing parity between CPU and CUDA",
+TEST_CASE("FDMT no box smearing parity between CPU and CUDA",
           "[fdmt_gpu][gpu][parity]") {
 
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false,
-                       "full");
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false,
-                     "full");
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false, "full",
+                   test::gpu_exec());
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 16, 1024, 0.001F, 64, 0, 1, false, "full");
 
     std::vector<float> wf(16 * 1024);
     for (size_t i = 0; i < wf.size(); ++i) {
@@ -317,13 +324,12 @@ TEST_CASE("FDMTCUDA no box smearing parity between CPU and CUDA",
     test::require_approx(dmt_cuda, dmt_cpu, fdmt_cpu.get_plan().get_dmt_size());
 }
 
-TEST_CASE(
-    "FDMTCUDA negative and symmetric dispersion parity between CPU and CUDA",
-    "[fdmt_gpu][gpu][parity]") {
+TEST_CASE("FDMT negative and symmetric dispersion parity between CPU and CUDA",
+          "[fdmt_gpu][gpu][parity]") {
 
     // Exercises the sign-aware level-0 init path in kernel_init_fdmt
     // (mirroring the CPU fdmt_init_subband fix) and the IndexType
-    // dt_max/dt_min plumbing through FDMTCUDA/compute_fdmt_cuda.
+    // dt_max/dt_min plumbing through FDMT/compute_fdmt_cuda.
     const float f_min      = 1000.0F;
     const float f_max      = 1500.0F;
     const size_t nchans    = 32;
@@ -334,10 +340,10 @@ TEST_CASE(
 
     for (const bool use_box_smearing : {false, true}) {
         DYNAMIC_SECTION("use_box_smearing=" << use_box_smearing) {
-            FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                               dt_min, 1, use_box_smearing);
-            FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                             dt_min, 1, use_box_smearing);
+            FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                           1, use_box_smearing, "valid", test::gpu_exec());
+            FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                          1, use_box_smearing);
 
             CHECK(fdmt_cuda.get_plan().get_dt_min() == -32);
             CHECK(fdmt_cuda.get_plan().get_dt_max() == 32);
@@ -357,7 +363,7 @@ TEST_CASE(
     }
 }
 
-TEST_CASE("FDMTCUDA add_frb_track pulse recovery parity between CPU and CUDA",
+TEST_CASE("FDMT add_frb_track pulse recovery parity between CPU and CUDA",
           "[fdmt_gpu][gpu][parity]") {
 
     const float f_min      = 1000.0F;
@@ -369,8 +375,9 @@ TEST_CASE("FDMTCUDA add_frb_track pulse recovery parity between CPU and CUDA",
     const IndexType dt_min = -32;
     const SizeType toffset = 150;
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
-    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+    FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+    FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
+                   "valid", test::gpu_exec());
     const auto& plan = fdmt_cpu.get_plan();
 
     std::vector<float> waterfall(nchans * nsamps, 0.0F);
@@ -390,11 +397,12 @@ TEST_CASE("FDMTCUDA add_frb_track pulse recovery parity between CPU and CUDA",
     CHECK(value_cuda == Catch::Approx(static_cast<float>(nchans)));
 }
 
-TEST_CASE("FDMTCUDA get_effective_variance parity between CPU and CUDA",
+TEST_CASE("FDMT get_effective_variance parity between CPU and CUDA",
           "[fdmt_gpu][gpu][parity]") {
 
-    FDMTCPU fdmt_cpu(1000.0F, 1500.0F, 32, 512, 0.001F, 32, -32);
-    FDMTCUDA fdmt_cuda(1000.0F, 1500.0F, 32, 512, 0.001F, 32, -32);
+    FDMT fdmt_cpu(1000.0F, 1500.0F, 32, 512, 0.001F, 32, -32);
+    FDMT fdmt_cuda(1000.0F, 1500.0F, 32, 512, 0.001F, 32, -32, 1, true, "valid",
+                   test::gpu_exec());
     for (size_t dm_idx = 0; dm_idx < fdmt_cpu.get_plan().get_dmt_ndms();
          dm_idx += 8) {
         CHECK(fdmt_cuda.get_effective_variance(dm_idx, 4) ==
@@ -405,9 +413,8 @@ TEST_CASE("FDMTCUDA get_effective_variance parity between CPU and CUDA",
         Catch::Matchers::Approx(fdmt_cpu.get_effective_variance_grid(2)));
 }
 
-TEST_CASE(
-    "FDMTCUDA valid-mode tree-history streaming parity between CPU and CUDA",
-    "[fdmt_gpu][gpu][parity]") {
+TEST_CASE("FDMT valid-mode tree-history streaming parity between CPU and CUDA",
+          "[fdmt_gpu][gpu][parity]") {
 
     const float f_min       = 1000.0F;
     const float f_max       = 1500.0F;
@@ -419,8 +426,8 @@ TEST_CASE(
     const size_t n_blocks   = 5;
     const size_t total      = block_size * n_blocks;
 
-    FDMTCPU fdmt_full(f_min, f_max, nchans, total, tsamp, dt_max, dt_min, 1,
-                      true, "full");
+    FDMT fdmt_full(f_min, f_max, nchans, total, tsamp, dt_max, dt_min, 1, true,
+                   "full");
     std::vector<float> waterfall(nchans * total);
     for (size_t i = 0; i < waterfall.size(); ++i) {
         waterfall[i] = static_cast<float>((i % 23) + 1);
@@ -429,10 +436,10 @@ TEST_CASE(
     fdmt_full.execute(waterfall, dmt_full);
     const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
 
-    FDMTCPU fdmt_cpu_valid(f_min, f_max, nchans, block_size, tsamp, dt_max,
-                           dt_min, 1, true, "valid");
-    FDMTCUDA fdmt_cuda_valid(f_min, f_max, nchans, block_size, tsamp, dt_max,
-                             dt_min, 1, true, "valid");
+    FDMT fdmt_cpu_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
+                        1, true, "valid");
+    FDMT fdmt_cuda_valid(f_min, f_max, nchans, block_size, tsamp, dt_max,
+                         dt_min, 1, true, "valid", test::gpu_exec());
     const auto ndms = fdmt_cpu_valid.get_plan().get_dmt_ndms();
     REQUIRE(ndms == fdmt_cuda_valid.get_plan().get_dmt_ndms());
 
@@ -475,7 +482,7 @@ TEST_CASE(
     }
 }
 
-TEST_CASE("FDMTCUDA reset_history() on CUDA matches a fresh instance",
+TEST_CASE("FDMT reset_history() on CUDA matches a fresh instance",
           "[fdmt_gpu][gpu]") {
 
     const float f_min      = 1000.0F;
@@ -493,8 +500,8 @@ TEST_CASE("FDMTCUDA reset_history() on CUDA matches a fresh instance",
         block2[i] = static_cast<float>((i % 13) + 1);
     }
 
-    FDMTCUDA fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
-                  "valid");
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
+              "valid", test::gpu_exec());
     std::vector<float> dmt1(fdmt.get_plan().get_buffer_size(), 0.0F);
     std::vector<float> dmt2_with_history(fdmt.get_plan().get_buffer_size(),
                                          0.0F);
@@ -506,8 +513,8 @@ TEST_CASE("FDMTCUDA reset_history() on CUDA matches a fresh instance",
                                         0.0F);
     fdmt.execute(block2, dmt2_after_reset);
 
-    FDMTCUDA fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                        true, "valid");
+    FDMT fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                    true, "valid", test::gpu_exec());
     std::vector<float> dmt2_fresh(fdmt_fresh.get_plan().get_buffer_size(),
                                   0.0F);
     fdmt_fresh.execute(block2, dmt2_fresh);
@@ -518,7 +525,7 @@ TEST_CASE("FDMTCUDA reset_history() on CUDA matches a fresh instance",
                            dmt2_after_reset.begin()));
 }
 
-TEST_CASE("FDMTCUDA add_frb_track recovery across a valid-mode block boundary "
+TEST_CASE("FDMT add_frb_track recovery across a valid-mode block boundary "
           "on  CUDA",
           "[fdmt_gpu][gpu]") {
 
@@ -544,8 +551,8 @@ TEST_CASE("FDMTCUDA add_frb_track recovery across a valid-mode block boundary "
     algorithms::add_frb_track(waterfall, plan, dm_idx, 1.0F,
                               static_cast<IndexType>(toffset), 1);
 
-    FDMTCUDA fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                        1, false, "valid");
+    FDMT fdmt_valid(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                    false, "valid", test::gpu_exec());
     const auto ndms = plan.get_dmt_ndms();
     std::vector<float> streamed(ndms * total, 0.0F);
     for (size_t b = 0; b < n_blocks; ++b) {
@@ -567,7 +574,7 @@ TEST_CASE("FDMTCUDA add_frb_track recovery across a valid-mode block boundary "
           Catch::Approx(static_cast<float>(nchans)));
 }
 
-TEST_CASE("FDMTCUDA valid-mode tree-history streaming parity with CPU in "
+TEST_CASE("FDMT valid-mode tree-history streaming parity with CPU in "
           "small-block regime (nsamps < dt_max)",
           "[fdmt_gpu][gpu][parity]") {
 
@@ -586,10 +593,10 @@ TEST_CASE("FDMTCUDA valid-mode tree-history streaming parity with CPU in "
         waterfall[i] = static_cast<float>((i % 29) + 1);
     }
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
-                     true, "valid");
-    FDMTCUDA fdmt_cuda(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                       1, true, "valid");
+    FDMT fdmt_cpu(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                  true, "valid");
+    FDMT fdmt_cuda(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                   true, "valid", test::gpu_exec());
 
     const auto& plan = fdmt_cpu.get_plan();
     const auto ndms  = plan.get_dmt_ndms();
@@ -609,9 +616,8 @@ TEST_CASE("FDMTCUDA valid-mode tree-history streaming parity with CPU in "
     }
 }
 
-TEST_CASE(
-    "FDMTCUDA FDMTCUDA nbeams>1 multi-beam execution parity with single-beam",
-    "[fdmt_gpu][gpu][parity]") {
+TEST_CASE("FDMT FDMT nbeams>1 multi-beam execution parity with single-beam",
+          "[fdmt_gpu][gpu][parity]") {
 
     const float f_min      = 1000.0F;
     const float f_max      = 1500.0F;
@@ -630,16 +636,16 @@ TEST_CASE(
         }
     }
 
-    FDMTCUDA fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                        true, "full", 0, nbeams);
+    FDMT fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                    true, "full", test::gpu_exec(), nbeams);
     CHECK(fdmt_multi.get_nbeams() == nbeams);
 
     const auto buf_size = fdmt_multi.get_plan().get_buffer_size();
     std::vector<float> multi_dmt(nbeams * buf_size, 0.0F);
     fdmt_multi.execute(multi_wf, multi_dmt);
 
-    FDMTCUDA fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
-                         true, "full", 0, 1);
+    FDMT fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                     true, "full", test::gpu_exec(), 1);
     std::vector<float> single_wf(nchans * nsamps);
     std::vector<float> single_dmt(buf_size, 0.0F);
 
@@ -659,7 +665,7 @@ TEST_CASE(
     }
 }
 
-TEST_CASE("FDMTCUDA sparse and custom dt_grid parity with CPU",
+TEST_CASE("FDMT sparse and custom dt_grid parity with CPU",
           "[fdmt_gpu][gpu][parity]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
@@ -669,10 +675,10 @@ TEST_CASE("FDMTCUDA sparse and custom dt_grid parity with CPU",
     auto waterfall        = test::sequential_waterfall(nchans, nsamps, 29, 1);
 
     SECTION("dt_min and dt_step") {
-        FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, 32, 4, 4, false,
-                         "full");
-        FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, 32, 4, 4, false,
-                           "full");
+        FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, 32, 4, 4, false,
+                      "full");
+        FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, 32, 4, 4, false,
+                       "full", test::gpu_exec());
         const auto n = fdmt_cpu.get_plan().get_buffer_size();
         std::vector<float> dmt_cpu(n, 0.0F);
         std::vector<float> dmt_cuda(n, 0.0F);
@@ -687,10 +693,9 @@ TEST_CASE("FDMTCUDA sparse and custom dt_grid parity with CPU",
 
     SECTION("custom dt_grid") {
         const std::vector<IndexType> dts = {4, 8, 12, 16};
-        FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dts, false,
-                         "full");
-        FDMTCUDA fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dts, false,
-                           "full");
+        FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dts, false, "full");
+        FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dts, false, "full",
+                       test::gpu_exec());
         const auto n = fdmt_cpu.get_plan().get_buffer_size();
         std::vector<float> dmt_cpu(n, 0.0F);
         std::vector<float> dmt_cuda(n, 0.0F);
@@ -701,7 +706,7 @@ TEST_CASE("FDMTCUDA sparse and custom dt_grid parity with CPU",
     }
 }
 
-TEST_CASE("FDMTCUDA save_history/load_history multiplexes independent streams",
+TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
           "[fdmt_gpu][gpu]") {
     const float f_min         = 1000.0F;
     const float f_max         = 1500.0F;
@@ -718,8 +723,8 @@ TEST_CASE("FDMTCUDA save_history/load_history multiplexes independent streams",
     for (SizeType s = 0; s < n_streams; ++s) {
         stream_data[s] = test::sequential_waterfall(
             nchans, block_size * n_blocks, 23, 1 + s);
-        FDMTCUDA dedicated(f_min, f_max, nchans, block_size, tsamp, dt_max,
-                           dt_min, 1, false, "valid");
+        FDMT dedicated(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
+                       1, false, "valid", test::gpu_exec());
         expected[s].assign(dedicated.get_plan().get_buffer_size() * n_blocks,
                            0.0F);
         for (SizeType b = 0; b < n_blocks; ++b) {
@@ -734,8 +739,8 @@ TEST_CASE("FDMTCUDA save_history/load_history multiplexes independent streams",
         }
     }
 
-    FDMTCUDA shared(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
-                    false, "valid");
+    FDMT shared(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                false, "valid", test::gpu_exec());
     const auto hist_size = shared.history_state_size();
     REQUIRE(hist_size > 0);
     std::vector<thrust::device_vector<float>> histories(
@@ -746,14 +751,14 @@ TEST_CASE("FDMTCUDA save_history/load_history multiplexes independent streams",
 
     for (SizeType b = 0; b < n_blocks; ++b) {
         for (SizeType s = 0; s < n_streams; ++s) {
-            shared.load_history(cuda::std::span<const float>(
+            shared.load_history(DeviceSpan<const float>(
                 thrust::raw_pointer_cast(histories[s].data()), hist_size));
             std::span<const float> block(stream_data[s].data() +
                                              (b * nchans * block_size),
                                          nchans * block_size);
             std::span<float> out(actual[s].data() + (b * buf_size), buf_size);
             shared.execute(block, out);
-            shared.save_history(cuda::std::span<float>(
+            shared.save_history(DeviceSpan<float>(
                 thrust::raw_pointer_cast(histories[s].data()), hist_size));
         }
     }
@@ -762,9 +767,8 @@ TEST_CASE("FDMTCUDA save_history/load_history multiplexes independent streams",
     }
 }
 
-TEST_CASE(
-    "FDMTCUDA nbeams>1 valid-mode streaming keeps per-beam history isolated",
-    "[fdmt_gpu][gpu]") {
+TEST_CASE("FDMT nbeams>1 valid-mode streaming keeps per-beam history isolated",
+          "[fdmt_gpu][gpu]") {
     const float f_min         = 1000.0F;
     const float f_max         = 1500.0F;
     const SizeType nchans     = 8;
@@ -784,15 +788,16 @@ TEST_CASE(
         }
     }
 
-    FDMTCUDA fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
-                        1, true, "valid", 0, nbeams);
+    FDMT fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
+                    true, "valid", test::gpu_exec(), nbeams);
     const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
 
-    std::vector<FDMTCUDA> fdmt_singles;
+    std::vector<FDMT> fdmt_singles;
     fdmt_singles.reserve(nbeams);
     for (SizeType b = 0; b < nbeams; ++b) {
         fdmt_singles.emplace_back(f_min, f_max, nchans, block_size, tsamp,
-                                  dt_max, dt_min, 1, true, "valid", 0, 1);
+                                  dt_max, dt_min, 1, true, "valid",
+                                  test::gpu_exec(), 1);
     }
 
     for (SizeType blk = 0; blk < n_blocks; ++blk) {

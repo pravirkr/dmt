@@ -108,7 +108,7 @@ def sweep_recovery(
     `(len(dt_values), len(phases))` array of recovery fractions.
 
     `execute_fn(waterfall) -> (n_trials, nsamps)` is any dedispersion engine
-    with FDMT's output convention (dmt's `FDMTCPU.execute`, or a standalone
+    with FDMT's output convention (dmt's `FDMT.execute`, or a standalone
     reference merge).
 
     If `sigma_fn` is given, the recovery fraction is the achieved S/N (peak

@@ -4,11 +4,11 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
-#include <cuda/std/span>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include "dmt/gpu_compat.cuh"
 
-#include "dmt/utils/unpacker.hpp"
+#include "dmt/unpacker_cuda.cuh"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -37,17 +37,17 @@ TEST_CASE("DataUnpackerCUDA matches DataUnpackerCPU",
     std::vector<ComplexType> p2(out_n);
     cpu.execute<uint8_t>(data_in, p1, p2);
 
-    thrust::device_vector<ComplexTypeCUDA> d_p1(out_n);
-    thrust::device_vector<ComplexTypeCUDA> d_p2(out_n);
+    thrust::device_vector<ComplexTypeGPU> d_p1(out_n);
+    thrust::device_vector<ComplexTypeGPU> d_p2(out_n);
     gpu.execute<uint8_t>(
         std::span<const uint8_t>(data_in),
-        cuda::std::span<ComplexTypeCUDA>(thrust::raw_pointer_cast(d_p1.data()),
-                                         d_p1.size()),
-        cuda::std::span<ComplexTypeCUDA>(thrust::raw_pointer_cast(d_p2.data()),
-                                         d_p2.size()));
+        cuda::std::span<ComplexTypeGPU>(thrust::raw_pointer_cast(d_p1.data()),
+                                        d_p1.size()),
+        cuda::std::span<ComplexTypeGPU>(thrust::raw_pointer_cast(d_p2.data()),
+                                        d_p2.size()));
 
-    thrust::host_vector<ComplexTypeCUDA> h_p1 = d_p1;
-    thrust::host_vector<ComplexTypeCUDA> h_p2 = d_p2;
+    thrust::host_vector<ComplexTypeGPU> h_p1 = d_p1;
+    thrust::host_vector<ComplexTypeGPU> h_p2 = d_p2;
     for (SizeType i = 0; i < out_n; ++i) {
         CHECK(h_p1[i].real() == Catch::Approx(p1[i].real()));
         CHECK(h_p1[i].imag() == Catch::Approx(p1[i].imag()));

@@ -41,7 +41,7 @@ class TestCohFDMT:
 
     def test_execute_output_shape_2d(self) -> None:
         plan = self._make_plan()
-        coh_fdmt = libdmt.CohFDMTCPU(
+        coh_fdmt = libdmt.CohFDMT(
             plan.f_center,
             plan.bw_sub,
             plan.nsub,
@@ -72,7 +72,7 @@ class TestCohFDMT:
 
     def test_multi_block_streaming_and_reset(self) -> None:
         plan = self._make_plan()
-        coh_fdmt = libdmt.CohFDMTCPU(
+        coh_fdmt = libdmt.CohFDMT(
             plan.f_center,
             plan.bw_sub,
             plan.nsub,

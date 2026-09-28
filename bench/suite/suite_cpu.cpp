@@ -22,9 +22,9 @@
 namespace dmt::bench_suite {
 namespace {
 
-using algorithms::DDMTCPU;
-using algorithms::FDMTCPU;
-using algorithms::FDMTFFTCPU;
+using algorithms::DDMT;
+using algorithms::FDMT;
+using algorithms::FDMTFFT;
 
 // Skips (without running) a point whose estimated memory exceeds the budget.
 bool skip_if_over_budget(benchmark::State& state,
@@ -48,8 +48,8 @@ void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
     if (skip_if_over_budget(state, Algo::kFDMT, plan, p)) {
         return;
     }
-    FDMTCPU fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
-                 "valid", nthreads);
+    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
+              "valid", Exec::cpu(nthreads));
     std::vector<float> dmt(plan.get_buffer_size());
     if (p.nbits == 32) {
         const auto wf = make_float_input(kNchans * p.nsamps);
@@ -75,8 +75,8 @@ void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     try {
-        FDMTFFTCPU fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
-                        true, "valid", nthreads);
+        FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
+                     true, "valid", Exec::cpu(nthreads));
         const auto wf = make_float_input(kNchans * p.nsamps);
         std::vector<float> dmt(plan.get_dmt_size());
         fdmt.execute(wf, dmt);
@@ -97,8 +97,8 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     const auto dms = plan.get_dm_grid_final();
-    DDMTCPU ddmt(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
-                 nthreads, p.nbits);
+    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
+              Exec::cpu(nthreads), p.nbits);
     const auto ndms = dms.size();
     // The first (cold) call returns nsamps - max_delay samples; warm calls
     // return nsamps.

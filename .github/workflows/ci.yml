@@ -97,7 +97,7 @@ jobs:
           -DDMT_BUILD_PYTHON=ON
           -DDMT_BUILD_TESTING=ON
           -DDMT_ENABLE_COVERAGE=OFF
-          -DDMT_CUDA=OFF
+          -DDMT_GPU=OFF
           -DDMT_ENABLE_NATIVE_ARCH=OFF
           -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
 
@@ -160,7 +160,7 @@ jobs:
         run: uv sync --extra tests --reinstall-package dmtlib
         env:
           CMAKE_ARGS: >-
-            -DDMT_CUDA=OFF
+            -DDMT_GPU=OFF
             -DDMT_BUILD_TESTING=OFF
             -DDMT_ENABLE_NATIVE_ARCH=OFF
             -DCMAKE_C_COMPILER_LAUNCHER=ccache
@@ -206,7 +206,7 @@ jobs:
           -DDMT_BUILD_DOCS=OFF
           -DDMT_BUILD_PYTHON=OFF
           -DDMT_BUILD_TESTING=ON
-          -DDMT_CUDA=OFF
+          -DDMT_GPU=OFF
           -DDMT_ENABLE_NATIVE_ARCH=OFF
 
       - name: Build
@@ -222,7 +222,7 @@ jobs:
   # Tier 2 — run on push to main (post-merge) and workflow_dispatch
   # =============================================================================
 
-  # clang-tidy: compile_commands.json (DMT_CUDA=OFF) defines the TU set.
+  # clang-tidy: compile_commands.json (DMT_GPU=OFF) defines the TU set.
   clang-tidy:
     name: clang-tidy
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
@@ -262,7 +262,7 @@ jobs:
           -DDMT_BUILD_DOCS=OFF
           -DDMT_BUILD_PYTHON=ON
           -DDMT_BUILD_TESTING=ON
-          -DDMT_CUDA=OFF
+          -DDMT_GPU=OFF
           -DDMT_ENABLE_NATIVE_ARCH=OFF
           -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
 
@@ -313,7 +313,7 @@ jobs:
           -DDMT_BUILD_PYTHON=OFF
           -DDMT_BUILD_TESTING=ON
           -DDMT_ENABLE_COVERAGE=ON
-          -DDMT_CUDA=OFF
+          -DDMT_GPU=OFF
           -DDMT_ENABLE_NATIVE_ARCH=OFF
 
       - name: Build
@@ -378,7 +378,7 @@ jobs:
         run: uv sync --extra tests --reinstall-package dmtlib
         env:
           CMAKE_ARGS: >-
-            -DDMT_CUDA=OFF
+            -DDMT_GPU=OFF
             -DDMT_BUILD_TESTING=OFF
             -DDMT_ENABLE_NATIVE_ARCH=OFF
             -DCMAKE_C_COMPILER_LAUNCHER=ccache

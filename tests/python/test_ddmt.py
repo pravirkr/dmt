@@ -1,14 +1,14 @@
 import numpy as np
 import pytest
 
-from dmtlib import DDMTCPU, DDMTPlan, LevinConfig
+from dmtlib import DDMT, DDMTPlan, LevinConfig
 
 
 class TestDDMT:
     def test_execute_ones(self) -> None:
         nchans = 8
         nsamps = 64
-        ddmt = DDMTCPU(1000.0, 1500.0, nchans, 0.001, 10.0, 5.0, 0.0)
+        ddmt = DDMT(1000.0, 1500.0, nchans, 0.001, 10.0, 5.0, 0.0)
         waterfall = np.ones((nchans, nsamps), dtype=np.float32)
         dmt = ddmt.execute(waterfall)
         assert dmt.ndim == 2
@@ -20,7 +20,7 @@ class TestDDMT:
         nchans = 8
         nsamps = 32
         dm_arr = np.array([0.0, 2.5], dtype=np.float32)
-        ddmt = DDMTCPU(1000.0, 1500.0, nchans, 0.001, dm_arr)
+        ddmt = DDMT(1000.0, 1500.0, nchans, 0.001, dm_arr)
         waterfall = np.ones((nchans, nsamps), dtype=np.float32)
         dmt = ddmt.execute(waterfall)
         assert dmt.shape[0] == 2
@@ -47,7 +47,7 @@ class TestDDMT:
         plan = DDMTPlan(f_min, f_max, nchans, tsamp, levin)
         np.testing.assert_allclose(plan.dm_arr, grid, rtol=1e-5)
 
-        ddmt = DDMTCPU(f_min, f_max, nchans, tsamp, levin)
+        ddmt = DDMT(f_min, f_max, nchans, tsamp, levin)
         np.testing.assert_allclose(ddmt.plan.dm_arr, grid, rtol=1e-5)
 
     def test_kill_mask(self) -> None:
@@ -61,7 +61,7 @@ class TestDDMT:
         mask[0] = 0
         mask[2] = 0
 
-        ddmt = DDMTCPU(f_min, f_max, nchans, tsamp, 10.0, 5.0, 0.0, kill_mask=mask)
+        ddmt = DDMT(f_min, f_max, nchans, tsamp, 10.0, 5.0, 0.0, kill_mask=mask)
         waterfall = np.ones((nchans, nsamps), dtype=np.float32)
         dmt = ddmt.execute(waterfall)
         # DM=0 sums unmasked channels only (8 - 2 = 6)
@@ -77,7 +77,7 @@ class TestDDMT:
         dm_arr = np.array([0.0, 5.0, 15.0], dtype=np.float32)
 
         plan = DDMTPlan(f_min, f_max, nchans, tsamp, dm_arr, nbits=nbits)
-        ddmt = DDMTCPU(plan)
+        ddmt = DDMT(plan)
 
         mask = (1 << nbits) - 1
         raw = (np.arange(nchans * nsamps, dtype=np.uint64) * 37 + 11) & mask
@@ -127,14 +127,14 @@ class TestDDMT:
         tsamp = 0.001
         dms = np.array([0.0, 4.0], dtype=np.float32)
 
-        ddmt = DDMTCPU(f_min, f_max, nchans, tsamp, dms)
+        ddmt = DDMT(f_min, f_max, nchans, tsamp, dms)
 
         total_nsamps = 256
         rng = np.random.default_rng(42)
         full_waterfall = rng.standard_normal((nchans, total_nsamps)).astype(np.float32)
 
         # 1. Monolithic one-shot execute
-        ddmt_mono = DDMTCPU(f_min, f_max, nchans, tsamp, dms)
+        ddmt_mono = DDMT(f_min, f_max, nchans, tsamp, dms)
         dmt_expected = ddmt_mono.execute(full_waterfall)
 
         # 2. Streamed execution across two chunks
@@ -168,7 +168,7 @@ class TestDDMT:
         tsamp = 0.001
         dms = np.array([0.0, 5.0, 10.0], dtype=np.float32)
 
-        ddmt_multi = DDMTCPU(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
+        ddmt_multi = DDMT(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
         assert ddmt_multi.nbeams == nbeams
 
         rng = np.random.default_rng(123)
@@ -179,9 +179,9 @@ class TestDDMT:
         assert out_multi.shape[0] == nbeams
         assert out_multi.shape[1] == len(dms)
 
-        # Compare each beam against single-beam DDMTCPU
+        # Compare each beam against single-beam DDMT
         for b in range(nbeams):
-            ddmt_single = DDMTCPU(f_min, f_max, nchans, tsamp, dms)
+            ddmt_single = DDMT(f_min, f_max, nchans, tsamp, dms)
             out_single = ddmt_single.execute(waterfall[b])
             np.testing.assert_allclose(out_multi[b], out_single, rtol=1e-5, atol=1e-5)
 
@@ -195,7 +195,7 @@ class TestDDMT:
         dms = np.array([0.0, 4.0], dtype=np.float32)
 
         plan = DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits=8)
-        ddmt_multi = DDMTCPU(plan, nbeams=nbeams)
+        ddmt_multi = DDMT(plan, nbeams=nbeams)
 
         raw = (
             (np.arange(nbeams * nchans * nsamps, dtype=np.uint64) * 17 + 3) % 256
@@ -222,10 +222,10 @@ class TestDDMT:
         rng = np.random.default_rng(999)
         waterfall = rng.standard_normal((nbeams, nchans, nsamps)).astype(np.float32)
 
-        mono = DDMTCPU(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
+        mono = DDMT(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
         out_expected = mono.execute(waterfall)
 
-        streamed = DDMTCPU(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
+        streamed = DDMT(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
         split = 50
         out1 = streamed.execute(waterfall[:, :, :split])
         out2 = streamed.execute(waterfall[:, :, split:])
@@ -252,7 +252,7 @@ class TestDDMT:
         dm_arr = np.array([0.0, 5.0, 10.0], dtype=np.float32)
 
         plan = DDMTPlan(f_min, f_max, nchans, tsamp, dm_arr, nbits=nbits)
-        mono = DDMTCPU(plan)
+        mono = DDMT(plan)
 
         mask = (1 << nbits) - 1
         raw = (np.arange(nchans * nsamps, dtype=np.uint64) * 31 + 7) & mask
@@ -280,7 +280,7 @@ class TestDDMT:
         mono_packed = pack_data(raw)
         out_mono = mono.execute(mono_packed, nsamps)
 
-        streamed = DDMTCPU(plan)
+        streamed = DDMT(plan)
         c1_packed = pack_data(raw[:, :split])
         c2_packed = pack_data(raw[:, split:])
 
@@ -299,7 +299,7 @@ class TestDDMT:
         dms = np.array([0.0, 5.0], dtype=np.float32)
 
         plan = DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits=nbits)
-        ddmt1 = DDMTCPU(plan)
+        ddmt1 = DDMT(plan)
         state_sz = ddmt1.history_state_size()
 
         # Before warm-up, save_history raises runtime_error
@@ -327,7 +327,7 @@ class TestDDMT:
         assert hist.size == state_sz
 
         # Load into fresh ddmt2
-        ddmt2 = DDMTCPU(plan)
+        ddmt2 = DDMT(plan)
         assert ddmt2.get_output_nsamps(32) < 32  # cold
         ddmt2.load_history(hist)
         assert ddmt2.get_output_nsamps(32) == 32  # warm

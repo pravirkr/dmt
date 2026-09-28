@@ -38,15 +38,15 @@ print("Physical DM trials (pc cm^-3):", plan.dm_grid_final)
 
 ---
 
-## 2. Object-Oriented Engine: `FDMTCPU`
+## 2. Object-Oriented Engine: `FDMT`
 
-For production loops and streaming pipelines, pre-planning avoids recomputing tree indices on every block. Use the `FDMTCPU` class:
+For production loops and streaming pipelines, pre-planning avoids recomputing tree indices on every block. Use the `FDMT` class:
 
 ```python
-from dmtlib import FDMTCPU
+from dmtlib import FDMT
 
 # Initialize execution engine once
-fdmt = FDMTCPU(
+fdmt = FDMT(
     f_min=1200.0,
     f_max=1600.0,
     nchans=256,
@@ -55,6 +55,7 @@ fdmt = FDMTCPU(
     dt_max=150,
     mode="valid",
     nthreads=4,         # Number of OpenMP threads
+    # backend="cuda",   # run the same engine on a GPU (CUDA builds)
 )
 
 # Reuse one output buffer for every block (no per-call allocation)
@@ -93,10 +94,10 @@ join seamlessly into one continuous DM-time stream. Call
 - To inspect intermediate sub-bands, use the stepper (`reset`, `advance`,
   `advance_until_remaining`, `view_subband`, `finalize`); see
   {ref}`Stepper Rules <stepper-rules>`.
-- On a GPU, `FDMTCUDA` (`from dmtlib import FDMTCUDA`, present when dmt is
-  built with CUDA) takes the
-  same arguments, with `device_id` in place of `nthreads`, and the same
-  `execute`/stepper calls on host arrays.
+- On a GPU, pass `backend="cuda"` (and `device=` for another GPU); the
+  arguments and the `execute`/stepper calls on NumPy arrays are the same.
+  `dmtlib.available_backends()` lists the backends in your build, e.g.
+  `['cpu', 'cuda']`.
 
 ---
 
@@ -106,12 +107,12 @@ Instead of searching a dense linear integer range `[0, dt_max]`, specify custom 
 
 ```python
 import numpy as np
-from dmtlib import FDMTPlan, FDMTCPU
+from dmtlib import FDMTPlan, FDMT
 
 # Non-linear geometrically spaced delay trials
 custom_dt = np.array([0, 1, 2, 4, 8, 16, 32, 64, 128, 256], dtype=int)
 
-fdmt_sparse = FDMTCPU(
+fdmt_sparse = FDMT(
     f_min=1200.0,
     f_max=1600.0,
     nchans=256,
@@ -132,7 +133,7 @@ Process $N_{\text{beams}}$ beams that share one plan in a single call:
 ```python
 nbeams = 8
 
-fdmt_beams = FDMTCPU(
+fdmt_beams = FDMT(
     f_min=1200.0,
     f_max=1600.0,
     nchans=256,

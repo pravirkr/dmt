@@ -1,8 +1,8 @@
 # C++ Quickstart
 
-`dmt` is implemented in modern **C++20** (`std::span`, concepts, `<format>`). This guide shows how to construct an `FDMTCPU`, run it block by block, feed packed low-bit data, use the stepper, and link `dmt` into your own CMake project.
+`dmt` is implemented in modern **C++20** (`std::span`, concepts, `<format>`). This guide shows how to construct an `FDMT`, run it block by block, feed packed low-bit data, use the stepper, and link `dmt` into your own CMake project.
 
-The public API is in `<dmt/dmt.hpp>` (or just `<dmt/algorithms/fdmt.hpp>`); everything lives in `dmt::algorithms` and `dmt::plans`.
+The public API is in `<dmt/dmt.hpp>` (or just `<dmt/algorithms/fdmt.hpp>`); everything lives in `dmt::algorithms` and `dmt::plans`, with backend selection (`dmt::Exec`) in `dmt`.
 
 ---
 
@@ -24,10 +24,10 @@ int main() {
     const int32_t dt_max = 128;      // largest delay trial, in samples
 
     // Construct once: plans the tree and allocates all working memory.
-    dmt::algorithms::FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                                  /*dt_min=*/0, /*dt_step=*/1,
-                                  /*use_box_smearing=*/true, /*mode=*/"valid",
-                                  /*nthreads=*/4);
+    dmt::algorithms::FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                               /*dt_min=*/0, /*dt_step=*/1,
+                               /*use_box_smearing=*/true, /*mode=*/"valid",
+                               dmt::Exec::cpu(/*nthreads=*/4));
 
     const auto& plan = fdmt.get_plan();
     std::cout << plan.get_dmt_ndms() << " DM trials x "
@@ -109,17 +109,22 @@ levels. See {ref}`Stepper Rules <stepper-rules>`.
   multiplex several streams on one engine, use
   `history_state_size()`/`save_history()`/`load_history()`. See
   [Streaming](../pipeline_guide/streaming_and_history.md).
-- `FDMTCUDA` has the same constructor (with `device_id` in place of
-  `nthreads`) and API. Its `execute()` takes host spans (staged internally)
-  or device `cuda::std::span`s plus a `cudaStream_t`. The device path is
-  asynchronous, and its output buffer is also `nbeams * get_buffer_size()`
-  floats of device memory.
+- The same class runs on a GPU: pass `dmt::Exec::cuda(device)` in place of
+  `Exec::cpu(nthreads)` (check `dmt::available_backends()` first; a backend
+  missing from the build throws `std::invalid_argument`). Host `std::span`s
+  work on every backend (a GPU stages them and blocks). Device memory goes
+  through `dmt::DeviceSpan` plus an optional `dmt::Stream` (a `cudaStream_t`
+  converts to it); the device path is asynchronous, and its output buffer is
+  also `nbeams * get_buffer_size()` floats of device memory. The public
+  headers include no CUDA header, so a CPU-only and a CUDA build of `dmt`
+  expose the same declarations.
 
 ```cpp
-dmt::algorithms::FDMTCUDA gpu(f_min, f_max, nchans, nsamps, tsamp, dt_max);
+dmt::algorithms::FDMT gpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
+                          true, "valid", dmt::Exec::cuda(/*device=*/0));
 // d_wf: nchans * nsamps floats, d_dmt: get_buffer_size() floats, on the device
-gpu.execute(cuda::std::span<const float>(d_wf, nchans * nsamps),
-            cuda::std::span<float>(d_dmt, gpu.get_plan().get_buffer_size()),
+gpu.execute(dmt::DeviceSpan<const float>(d_wf, nchans * nsamps),
+            dmt::DeviceSpan<float>(d_dmt, gpu.get_plan().get_buffer_size()),
             stream);
 cudaStreamSynchronize(stream);
 ```

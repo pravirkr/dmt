@@ -7,22 +7,22 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
 ## Algorithms & Compute Engines
 
 ```{eval-rst}
-.. autoclass:: dmtlib.FDMTCPU
+.. autoclass:: dmtlib.FDMT
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: dmtlib.DDMTCPU
+.. autoclass:: dmtlib.DDMT
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: dmtlib.CohFDMTCPU
+.. autoclass:: dmtlib.CohFDMT
    :members:
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: dmtlib.FDMTFFTCPU
+.. autoclass:: dmtlib.FDMTFFT
    :members:
    :undoc-members:
    :show-inheritance:
@@ -32,28 +32,19 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
    :undoc-members:
 ```
 
-The CUDA engines (`FDMTCUDA`, `DDMTCUDA`, `CohFDMTCUDA`, `FDMTFFTCUDA`) are
-importable from `dmtlib` when the CUDA extension is built. They take host
-NumPy arrays; the device-memory overloads are C++ only (see the C++ API
-reference). They take the same constructor arguments as the CPU engines, with
-`device_id` in place of `nthreads`.
+Every engine runs on the backend given by its keyword-only `backend=`
+argument (`"cpu"` by default; `"cuda"` or `"hip"` when that backend is in the
+build), with `nthreads` for the CPU and `device` for a GPU. `available_backends()` lists the backends in
+the installed build; asking for any other raises `ValueError`. Inputs and
+outputs are NumPy arrays on every backend: a GPU backend copies the input to
+the device and the result back, and blocks until it is on the host. The
+stepper's `view_*` methods return host views of the current level (a host
+snapshot on a GPU). Device-memory overloads (`DeviceSpan`) are C++ only for
+now (see the C++ API reference).
 
-`FDMTCUDA` in Python provides:
-
-- `execute(waterfall, *, out=None)` and `execute(waterfall_packed, nbits, *,
-  out=None)`, with the same layout and return value as `FDMTCPU.execute`.
-- The stepper: `reset(waterfall)` / `reset(waterfall_packed, nbits)`,
-  `advance`, `advance_until_remaining`, `view_level_data`,
-  `view_subband_data`, `view_subband` and `finalize`. The block is staged on
-  the device; views and `finalize()` return **host copies**, and
-  `view_subband` returns a dict.
-- `current_level`, `total_levels`, `remaining_levels`, `num_subbands`,
-  `is_finished`, `reset_history`.
-- `get_effective_variance`/`get_effective_sigma` (and their `_grid`
-  variants), plus `plan`, `nbeams`, `device_id`, `fuse_levels`, `int_tree`,
-  `memory_usage`, `dt_grid_final` and `dm_grid_final`.
-- Not in Python: `save_history`/`load_history` (C++ only, used by
-  `CohFDMTCUDA`).
+```{eval-rst}
+.. autofunction:: dmtlib.available_backends
+```
 
 ## Execution Plans & Geometry
 

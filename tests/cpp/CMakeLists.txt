@@ -32,16 +32,14 @@ include(CTest)
 # Test executable
 set(TARGET_TESTS ${PROJECT_NAME}_tests)
 
-# Collect C++ test sources
-file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-
-# Add CUDA test sources if available
-if(CMAKE_CUDA_COMPILER)
-  file(GLOB TEST_SOURCES_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
-  list(APPEND TEST_SOURCES ${TEST_SOURCES_CUDA})
-
-  # Explicitly set CUDA files to be compiled with CUDA
-  set_source_files_properties(${TEST_SOURCES_CUDA} PROPERTIES LANGUAGE CUDA)
+# Collect C++ test sources: host tests (every build; the backend-generic
+# ones loop over the backends available at run time) and the GPU tests,
+# CUDA source compiled for this build's GPU backend (CUDA or HIP).
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+if(DMT_GPU_BACKEND)
+  file(GLOB TEST_SOURCES_GPU CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  set_source_files_properties(${TEST_SOURCES_GPU} PROPERTIES LANGUAGE ${DMT_GPU_BACKEND})
+  list(APPEND TEST_SOURCES ${TEST_SOURCES_GPU})
 endif()
 
 add_executable(${TARGET_TESTS} ${TEST_SOURCES})
@@ -51,7 +49,9 @@ target_include_directories(
                           ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-if(CMAKE_CUDA_COMPILER)
+# The GPU tests use the library's private helpers and backend guards.
+target_compile_definitions(${TARGET_TESTS} PRIVATE ${DMT_BACKEND_DEFINITIONS})
+if(DMT_GPU_BACKEND STREQUAL "CUDA")
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
     target_include_directories(${TARGET_TESTS} PRIVATE "${CUDAToolkit_INCLUDE_DIRS}/cccl")
   endif()
@@ -65,19 +65,23 @@ target_link_libraries(
           ${DMT_COMPILE_OPTIONS}
           OpenMP::OpenMP_CXX
 )
+# After DMT_COMPILE_OPTIONS, so the GPU flags come last on the command line.
+if(DMT_GPU_BACKEND)
+  target_link_libraries(${TARGET_TESTS} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})
+endif()
 
 dmt_enable_coverage(${TARGET_TESTS})
 
-if(CMAKE_CUDA_COMPILER)
-  target_link_libraries(${TARGET_TESTS} PRIVATE ${DMT_CUDA_OPTIONS})
-endif()
-
+# Device tests are tagged [gpu] (or [parity]); they run on this build's GPU
+# backend and are labelled `gpu` plus the backend name, so `ctest -LE gpu`
+# runs the host tests only.
 include(Catch)
-if(CMAKE_CUDA_COMPILER)
+if(DMT_GPU_BACKEND)
+  string(TOLOWER ${DMT_GPU_BACKEND} _dmt_gpu_name)
   catch_discover_tests(
     ${TARGET_TESTS}
     TEST_SPEC
-    "~[gpu]~[parity]"
+    "~[gpu]"
     TEST_PREFIX
     "cpu:"
     PROPERTIES
@@ -87,16 +91,18 @@ if(CMAKE_CUDA_COMPILER)
   catch_discover_tests(
     ${TARGET_TESTS}
     TEST_SPEC
-    "[gpu],[parity]"
+    "[gpu]"
     TEST_PREFIX
-    "gpu:"
+    "${_dmt_gpu_name}:"
     PROPERTIES
     LABELS
-    "gpu"
+    "gpu;${_dmt_gpu_name}"
   )
 else()
   catch_discover_tests(
     ${TARGET_TESTS}
+    TEST_SPEC
+    "~[gpu]"
     PROPERTIES
     LABELS
     "cpu"

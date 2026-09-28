@@ -33,9 +33,9 @@ Rather than wasting compute power estimating empirical variances across noisy ou
 
 ```python
 import numpy as np
-from dmtlib import FDMTCPU
+from dmtlib import FDMT
 
-fdmt = FDMTCPU(
+fdmt = FDMT(
     f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
     tsamp=1e-3, dt_max=150, mode="valid"
 )

@@ -13,6 +13,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "dmt/common/backend.hpp"
 #include "dmt/common/logging.hpp"
 #include "dmt/common/types.hpp"
 
@@ -162,7 +163,7 @@ fdmt_output_buffer(const Engine& fdmt,
     return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
 }
 
-// FDMTCPU/FDMTCUDA execute(): runs `run(dmt_span)` into the output buffer
+// FDMT execute(): runs `run(dmt_span)` into the output buffer
 // and returns a zero-copy view of the transform: (ndms, nsamps) when
 // `batched` is false (nbeams must be 1),
 // else (nbeams, ndms, nsamps) with beams plan.buffer_size apart. The view's
@@ -199,8 +200,27 @@ py::object fdmt_execute_to_array(const Engine& fdmt,
         {buf_size * fsize, nsamps * fsize, fsize}, buf.data(), buf);
 }
 
-// Each extension module links its own copy of the library, so each exposes
-// the private setters; dmtlib.set_log_level() forwards to all loaded modules.
+// Exec from the Python constructor keywords; an unknown backend name raises
+// ValueError (std::invalid_argument).
+inline Exec make_exec(std::string_view backend, int nthreads, int device) {
+    const auto b = parse_backend(backend);
+    return {.backend = b, .nthreads = nthreads, .device = device};
+}
+
+// The stepper's dmt buffer: the caller's, or a new nbeams * buffer_size one.
+// Kept alive as the engine's `_dmt_buffer` attribute by the caller.
+template <typename Engine>
+py::array_t<float, py::array::c_style> stepper_dmt_buffer(
+    const Engine& engine,
+    const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
+    if (dmt_opt.has_value()) {
+        return *dmt_opt;
+    }
+    return py::array_t<float, py::array::c_style>(static_cast<py::ssize_t>(
+        engine.get_nbeams() * engine.get_plan().get_buffer_size()));
+}
+
+// Private setters behind dmtlib.set_log_level() / get_log_level().
 inline void bind_logging(py::module_& mod) {
     mod.def(
         "_set_log_level",

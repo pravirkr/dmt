@@ -21,7 +21,7 @@ std::vector<T> generate_vector(size_t size, std::mt19937& gen) {
 } // namespace
 
 namespace dmt {
-using algorithms::FDMTCPU;
+using algorithms::FDMT;
 
 class FDMTMemFixture : public benchmark::Fixture {
 public:
@@ -47,8 +47,8 @@ public:
 BENCHMARK_DEFINE_F(FDMTMemFixture, BM_fdmt_memory_execute)
 (benchmark::State& state) {
     for (auto _ : state) {
-        FDMTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
-                     "full", /*nthreads=*/1);
+        FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                  "full", Exec::cpu(1));
         state.PauseTiming();
         // execute() validates the output against get_buffer_size() (the
         // internal ping-pong buffer, which can exceed get_dmt_size()'s

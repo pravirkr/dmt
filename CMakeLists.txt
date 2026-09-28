@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18...3.30)
 
 project(
   dmt
-  VERSION 0.3.0
+  VERSION 0.4.0
   LANGUAGES CXX
   DESCRIPTION "Dispersion Measure Transform Library"
 )
@@ -58,33 +58,6 @@ if(DMT_BUILD_PYTHON AND BUILD_SHARED_LIBS)
   )
 endif()
 
-# CUDA tristate: AUTO / ON / OFF
-set(DMT_CUDA
-    "AUTO"
-    CACHE STRING
-          "CUDA build mode: AUTO (use GPU if toolchain found), ON (require GPU), OFF (CPU only)"
-)
-set_property(
-  CACHE DMT_CUDA
-  PROPERTY STRINGS
-           "AUTO"
-           "ON"
-           "OFF"
-)
-if(NOT
-   DMT_CUDA
-   MATCHES
-   "^(AUTO|ON|OFF)$"
-)
-  message(FATAL_ERROR "DMT_CUDA must be AUTO, ON, or OFF. Got: '${DMT_CUDA}'.")
-endif()
-
-# GPU architecture(s) for nvcc ("native" = detect from local GPU at build time).
-set(DMT_CUDA_ARCHITECTURES
-    "native"
-    CACHE STRING "CUDA architectures passed to CMAKE_CUDA_ARCHITECTURES (e.g. native, 80, 86;90)"
-)
-
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -129,115 +102,32 @@ include(GNUInstallDirs)
 # Compiler flags (Interface target to hold global compile options)
 set(DMT_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
-target_compile_options(${DMT_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
+# Host-compiler flags; HIP sources get their own (dmt_gpu_options): no
+# -ffast-math or -march=native reaches device code there.
+set(_dmt_not_hip "$<NOT:$<COMPILE_LANGUAGE:HIP>>")
+# No -Wpedantic on CUDA: nvcc forwards it to the host compiler, which then
+# flags the line directives in nvcc's own generated code.
+target_compile_options(
+  ${DMT_COMPILE_OPTIONS} INTERFACE $<${_dmt_not_hip}:-Wall;-Wextra>
+                                   $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wpedantic>
+)
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
-  INTERFACE $<$<CONFIG:Debug>:-O0;-g>
-            $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
-            $<$<AND:$<CONFIG:Release>,$<BOOL:${DMT_ENABLE_NATIVE_ARCH}>>:-march=native>
-            $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>
-            $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+  INTERFACE
+    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:-O0;-g>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>>
+    $<${_dmt_not_hip}:$<$<AND:$<CONFIG:Release>,$<BOOL:${DMT_ENABLE_NATIVE_ARCH}>>:-march=native>>
+    $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>>
+    $<${_dmt_not_hip}:$<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>>
 )
 
 # OpenMP detection
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 
-# CUDA toolchain detection (DMT_CUDA user option; DMT_ENABLE_CUDA is the C++ macro).
-if(DMT_CUDA STREQUAL "ON" OR DMT_CUDA STREQUAL "AUTO")
-  include(CheckLanguage)
-  # nvcc usually lives outside the default PATH; seed CUDACXX before check_language.
-  if(NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
-    find_program(
-      DMT_NVCC_EXECUTABLE nvcc
-      HINTS ENV
-            CUDA_PATH
-            ENV
-            CUDA_HOME
-            ENV
-            CUDA_ROOT
-            /usr/local/cuda
-            /opt/cuda
-      PATH_SUFFIXES bin
-    )
-    if(DMT_NVCC_EXECUTABLE)
-      set(ENV{CUDACXX} "${DMT_NVCC_EXECUTABLE}")
-    endif()
-  endif()
-  check_language(CUDA)
-  if(CMAKE_CUDA_COMPILER)
-    enable_language(CUDA)
-  elseif(DMT_CUDA STREQUAL "ON")
-    message(FATAL_ERROR "DMT_CUDA=ON but no CUDA compiler (nvcc) was found. "
-                        "Install CUDA >= 12.6 or use DMT_CUDA=AUTO/OFF."
-    )
-  else()
-    message(STATUS "CUDA compiler not found. Building CPU-only (DMT_CUDA=AUTO).")
-  endif()
-elseif(DMT_CUDA STREQUAL "OFF")
-  message(STATUS "CUDA disabled by user (DMT_CUDA=OFF). Building CPU-only.")
-endif()
-
-# When CUDA is explicitly required, verify a driver/GPU is present (not just nvcc).
-if(CMAKE_CUDA_COMPILER AND DMT_CUDA STREQUAL "ON")
-  find_program(DMT_NVIDIA_SMI nvidia-smi)
-  if(NOT DMT_NVIDIA_SMI)
-    message(
-      FATAL_ERROR "DMT_CUDA=ON but nvidia-smi was not found. An NVIDIA driver and GPU are required."
-    )
-  endif()
-  execute_process(
-    COMMAND ${DMT_NVIDIA_SMI} --query-gpu=name --format=csv,noheader
-    OUTPUT_VARIABLE _dmt_gpu_names
-    RESULT_VARIABLE _dmt_gpu_status
-    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
-  )
-  if(NOT
-     _dmt_gpu_status
-     EQUAL
-     0
-     OR _dmt_gpu_names STREQUAL ""
-  )
-    message(
-      FATAL_ERROR "DMT_CUDA=ON but nvidia-smi reports no usable GPU. Check driver installation."
-    )
-  endif()
-  message(STATUS "DMT_CUDA=ON: detected GPU(s): ${_dmt_gpu_names}")
-endif()
-
-if(CMAKE_CUDA_COMPILER)
-  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.6.0)
-    message(FATAL_ERROR "CUDA >= 12.6 is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
-  endif()
-  message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
-
-  # Find CUDA Toolkit for proper include dirs and linking
-  find_package(CUDAToolkit REQUIRED)
-
-  set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
-  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  set(CMAKE_CUDA_EXTENSIONS OFF)
-
-  # Define a target for CUDA compilation options
-  set(DMT_CUDA_OPTIONS ${PROJECT_NAME}_cuda_options)
-  add_library(${DMT_CUDA_OPTIONS} INTERFACE)
-  target_compile_options(
-    ${DMT_CUDA_OPTIONS}
-    INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:
-              -Wno-pedantic
-              --expt-extended-lambda
-              --expt-relaxed-constexpr
-              -Xcompiler=-Wall,-Wextra
-              $<$<CONFIG:Debug>:-G;-g;-O0>
-              $<$<CONFIG:Release>:-O3;-use_fast_math;-DNDEBUG>
-              $<$<CONFIG:RelWithDebInfo>:-O2;-g;-lineinfo;-DNDEBUG>
-              $<$<CONFIG:MinSizeRel>:-O2;-DNDEBUG>
-              >
-  )
-  set(CMAKE_CUDA_ARCHITECTURES ${DMT_CUDA_ARCHITECTURES})
-  message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-  # Disable response files for better IDE integration
-  set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
-endif()
+# GPU backend: DMT_GPU selects the toolchain of lib/cuda/ (CUDA or HIP). The
+# library's private C++ macros (DMT_ENABLE_CUDA/HIP/GPU) follow from it
+# (lib/CMakeLists.txt).
+include(dmtGPU)
 
 # CPM.cmake Setup
 include(cmake/CPM.cmake)
@@ -300,9 +190,10 @@ endif()
 # Install / export: find_package(dmt) + target dmt::dmt
 include(CMakePackageConfigHelpers)
 
-set(DMT_BUILT_WITH_CUDA OFF)
-if(CMAKE_CUDA_COMPILER)
-  set(DMT_BUILT_WITH_CUDA ON)
+set(DMT_BUILT_GPU "${DMT_GPU_BACKEND}")
+set(DMT_BUILT_WITH_LIBHIPCXX OFF)
+if(DMT_GPU_BACKEND STREQUAL "HIP" AND libhipcxx_FOUND)
+  set(DMT_BUILT_WITH_LIBHIPCXX ON)
 endif()
 
 set(DMT_BUILT_AS_SHARED OFF)
@@ -321,8 +212,8 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-if(CMAKE_CUDA_COMPILER)
-  install(TARGETS ${DMT_CUDA_OPTIONS} EXPORT dmtTargets)
+if(DMT_GPU_OPTIONS)
+  install(TARGETS ${DMT_GPU_OPTIONS} EXPORT dmtTargets)
 endif()
 
 # Install headers
@@ -338,11 +229,6 @@ install(
   DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
 )
 
-configure_file(
-  ${PROJECT_SOURCE_DIR}/cmake/dmtCUDAConfig.cmake.in
-  ${CMAKE_CURRENT_BINARY_DIR}/dmtCUDAConfig.cmake @ONLY
-)
-
 configure_package_config_file(
   ${PROJECT_SOURCE_DIR}/cmake/dmtConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
   INSTALL_DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
@@ -356,15 +242,17 @@ write_basic_package_version_file(
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dmtConfig.cmake
               ${CMAKE_CURRENT_BINARY_DIR}/dmtConfigVersion.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/dmtCUDAConfig.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
+        DESTINATION ${DMT_CMAKE_PACKAGE_DIR}
 )
 
 # Print feature summary
 include(FeatureSummary)
 feature_summary(WHAT ALL)
 
-if(CMAKE_CUDA_COMPILER)
-  message(STATUS "dmt build mode: CPU + CUDA (DMT_CUDA=${DMT_CUDA}, DMT_ENABLE_CUDA macro defined)")
-else()
-  message(STATUS "dmt build mode: CPU-only (DMT_CUDA=${DMT_CUDA})")
+set(_dmt_modes "CPU")
+if(DMT_GPU_BACKEND STREQUAL "CUDA")
+  string(APPEND _dmt_modes " + CUDA (${CMAKE_CUDA_ARCHITECTURES})")
+elseif(DMT_GPU_BACKEND STREQUAL "HIP")
+  string(APPEND _dmt_modes " + HIP (${CMAKE_HIP_ARCHITECTURES})")
 endif()
+message(STATUS "dmt build mode: ${_dmt_modes} (DMT_GPU=${DMT_GPU})")

@@ -39,7 +39,7 @@ project = "dmt"
 author = "Pravir Kumar"
 year = datetime.datetime.now(tz=datetime.UTC).date().year
 copyright = f"{year}, {author}"  # noqa: A001
-release = getattr(dmtlib, "__version__", None) or "0.3.0"
+release = getattr(dmtlib, "__version__", None) or "0.4.0"
 version = release
 master_doc = "index"
 repo_url = "https://github.com/pravirkr/dmt"
@@ -74,6 +74,8 @@ exclude_patterns = [
     "logo-src",
     # Written by conf.py and included from api/cpp_api.md. Not a standalone page.
     "api/_breathe_body.rst",
+    # Internal design note for contributors.
+    "future_design.md",
 ]
 # "any" turns ordinary RST backticks into cross-references and fails the
 # build whenever a name is not in the domain index. Leave the default role
@@ -388,7 +390,7 @@ def _convenience_functions_rst() -> str:
         "(std::span< const float > waterfall, float f_min, float f_max, "
         "SizeType nchans, SizeType nsamps, float tsamp, IndexType dt_max, "
         "IndexType dt_min=0, SizeType dt_step=1, bool use_box_smearing=true, "
-        'std::string_view mode="valid", int nthreads=1, '
+        'std::string_view mode="valid", Exec exec={}, '
         "SizeType nbeams=1)"
     )
     dt_grid = (
@@ -396,7 +398,7 @@ def _convenience_functions_rst() -> str:
         "SizeType nchans, SizeType nsamps, float tsamp, "
         "const std::vector< IndexType > &dt_grid, "
         "bool use_box_smearing=true, "
-        'std::string_view mode="valid", int nthreads=1, '
+        'std::string_view mode="valid", Exec exec={}, '
         "SizeType nbeams=1)"
     )
     dm_grid = (
@@ -404,13 +406,9 @@ def _convenience_functions_rst() -> str:
         "SizeType nchans, SizeType nsamps, float tsamp, "
         "const std::vector< float > &dm_grid, "
         "bool use_box_smearing=true, "
-        'std::string_view mode="valid", int nthreads=1, '
+        'std::string_view mode="valid", Exec exec={}, '
         "SizeType nbeams=1)"
     )
-    cuda = {
-        name: args.replace("int nthreads=1", "int device_id=0")
-        for name, args in (("linear", linear), ("dt", dt_grid), ("dm", dm_grid))
-    }
     blocks = [
         _doxygen_function("dmt::algorithms::compute_fdmt", linear),
         _doxygen_function("dmt::algorithms::compute_fdmt", dt_grid),
@@ -419,9 +417,6 @@ def _convenience_functions_rst() -> str:
         _doxygen_function("dmt::algorithms::compute_fdmt_fft", dt_grid),
         _doxygen_function("dmt::algorithms::compute_fdmt_fft", dm_grid),
         _doxygen_function("dmt::algorithms::add_frb_track"),
-        _doxygen_function("dmt::algorithms::compute_fdmt_cuda", cuda["linear"]),
-        _doxygen_function("dmt::algorithms::compute_fdmt_cuda", cuda["dt"]),
-        _doxygen_function("dmt::algorithms::compute_fdmt_cuda", cuda["dm"]),
     ]
     return "\n".join(blocks)
 
@@ -437,23 +432,27 @@ def _write_cpp_api_body(*, has_xml: bool) -> None:
 Compute Engines (``dmt::algorithms``)
 --------------------------------------
 
-.. doxygenclass:: dmt::algorithms::FDMTCPU
+.. doxygenclass:: dmt::algorithms::FDMT
    :project: dmt
    :members:
 
-.. doxygenclass:: dmt::algorithms::DDMTCPU
+.. doxygenclass:: dmt::algorithms::DDMT
    :project: dmt
    :members:
 
-.. doxygenclass:: dmt::algorithms::CohFDMTCPU
+.. doxygenclass:: dmt::algorithms::CohFDMT
    :project: dmt
    :members:
 
-.. doxygenclass:: dmt::algorithms::FDMTFFTCPU
+.. doxygenclass:: dmt::algorithms::FDMTFFT
    :project: dmt
    :members:
 
 .. doxygenstruct:: dmt::algorithms::FDMTSubbandView
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::FDMTSubbandDeviceView
    :project: dmt
    :members:
 
@@ -464,40 +463,11 @@ Compute Engines (``dmt::algorithms``)
 .. doxygenvariable:: dmt::algorithms::kFDMTAutoFuse
    :project: dmt
 
-.. doxygenclass:: dmt::utils::FFTWManager
-   :project: dmt
-   :members:
+Backends (``dmt/common/backend.hpp``)
+-------------------------------------
 
-CUDA Engines
-------------
-
-.. doxygenclass:: dmt::algorithms::FDMTCUDA
+.. doxygenfile:: backend.hpp
    :project: dmt
-   :members:
-
-.. doxygenclass:: dmt::algorithms::DDMTCUDA
-   :project: dmt
-   :members:
-
-.. doxygenclass:: dmt::algorithms::CohFDMTCUDA
-   :project: dmt
-   :members:
-
-.. doxygenclass:: dmt::algorithms::FDMTFFTCUDA
-   :project: dmt
-   :members:
-
-.. doxygenstruct:: dmt::algorithms::FDMTSubbandViewCUDA
-   :project: dmt
-   :members:
-
-.. doxygenclass:: dmt::utils::DataUnpackerCUDA
-   :project: dmt
-   :members:
-
-.. doxygenclass:: dmt::utils::CUFFTManager
-   :project: dmt
-   :members:
 
 Plans & Geometry (``dmt::plans``)
 ---------------------------------

@@ -11,27 +11,12 @@
 #include <cstdint>
 #include <vector>
 
-#ifdef DMT_ENABLE_CUDA
-#include <cuda/std/complex>
-#include <cuda/std/span>
-#include <thrust/complex.h>
-#include <thrust/device_vector.h>
-#endif
-
 namespace dmt {
 
 // Basic Type Definitions
 using SizeType    = std::size_t;    // Common size type
 using IndexType   = std::ptrdiff_t; // Common index type (for signed indexing)
 using ComplexType = std::complex<float>;
-
-#ifdef DMT_ENABLE_CUDA
-using ComplexTypeCUDA = cuda::std::complex<float>;
-#endif
-
-#ifdef DMT_ENABLE_CUDA
-template <typename T> using DeviceVector = thrust::device_vector<T>;
-#endif
 
 // Constants for dispersion calculations
 inline constexpr float kDispCoeff = -2.0F;
@@ -92,8 +77,8 @@ enum class BasebandDataOrder : uint8_t {
  */
 enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
 
-// Callable from both host and device when compiled with nvcc.
-#if defined(DMT_ENABLE_CUDA) && defined(__CUDACC__)
+// Callable from both host and device when compiled with nvcc or hip-clang
+#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
 #define DMT_HD __host__ __device__
 #define DMT_D __device__
 #define DMT_H __host__

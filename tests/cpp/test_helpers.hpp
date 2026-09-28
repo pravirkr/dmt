@@ -8,8 +8,10 @@
 
 #include "dmt/common/types.hpp"
 
-#ifdef DMT_ENABLE_CUDA
-#include <cuda_runtime.h>
+#include "dmt/common/backend.hpp"
+
+#ifdef DMT_ENABLE_GPU
+#include "dmt/gpu_compat.cuh"
 #endif
 
 namespace dmt::test {
@@ -65,8 +67,17 @@ inline void require_approx(const std::vector<float>& actual,
                  Catch::Matchers::Approx(prefix(expected, n)).margin(margin));
 }
 
-#ifdef DMT_ENABLE_CUDA
-inline bool cuda_device_available() {
+#ifdef DMT_ENABLE_GPU
+/// The GPU backend of this build (CUDA or HIP), on device `device`.
+inline Exec gpu_exec(int device = 0) {
+#ifdef DMT_ENABLE_HIP
+    return Exec::hip(device);
+#else
+    return Exec::cuda(device);
+#endif
+}
+
+inline bool gpu_device_available() {
     int count      = 0;
     const auto err = cudaGetDeviceCount(&count);
     return err == cudaSuccess && count > 0;

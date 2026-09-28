@@ -11,7 +11,7 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
 
-// FDMTCPU allocates all working memory in its constructor: execute() and the
+// FDMT allocates all working memory in its constructor: execute() and the
 // stepper must not allocate. Checked by replacing the global operator new of
 // this test binary with a counting one that is only armed around the calls
 // under test.
@@ -37,7 +37,7 @@ void operator delete(void* p, std::size_t /*size*/) noexcept { std::free(p); }
 
 namespace dmt {
 
-using algorithms::FDMTCPU;
+using algorithms::FDMT;
 using algorithms::kFDMTAutoFuse;
 
 namespace {
@@ -53,7 +53,7 @@ template <typename F> std::size_t count_allocations(F&& f) {
 
 } // namespace
 
-TEST_CASE("FDMTCPU execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
+TEST_CASE("FDMT execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
     const SizeType nchans = 64;
     const SizeType nsamps = 256;
     const SizeType nbeams = 2;
@@ -68,8 +68,8 @@ TEST_CASE("FDMTCPU execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
             for (const int nthreads : {1, 4}) {
                 DYNAMIC_SECTION("mode=" << mode << " fuse=" << fuse
                                         << " nthreads=" << nthreads) {
-                    FDMTCPU fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32,
-                                 -16, 1, true, mode, nthreads, nbeams, fuse);
+                    FDMT fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32, -16,
+                              1, true, mode, Exec::cpu(nthreads), nbeams, fuse);
                     std::vector<float> dmt(nbeams *
                                            fdmt.get_plan().get_buffer_size());
                     // Warm-up: starts the OpenMP thread pool.

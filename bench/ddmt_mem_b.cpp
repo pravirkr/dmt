@@ -9,7 +9,7 @@
 #include "dmt/common/plans.hpp"
 
 namespace dmt {
-using algorithms::DDMTCPU;
+using algorithms::DDMT;
 
 namespace {
 
@@ -52,8 +52,8 @@ public:
 BENCHMARK_DEFINE_F(DDMTMemFixture, BM_ddmt_memory_execute_float)
 (benchmark::State& state) {
     for (auto _ : state) {
-        DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
-                     /*nthreads=*/1, /*nbits=*/32, {}, /*nbeams=*/1);
+        DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
+                  Exec::cpu(1), /*nbits=*/32, {}, /*nbeams=*/1);
         state.PauseTiming();
         const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
         const auto dm_count   = ddmt.get_plan().get_container().dm_arr.size();
@@ -107,8 +107,8 @@ public:
 BENCHMARK_DEFINE_F(DDMTPackedMemFixture, BM_ddmt_memory_execute_packed)
 (benchmark::State& state) {
     for (auto _ : state) {
-        DDMTCPU ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
-                     /*nthreads=*/1, nbits, {}, /*nbeams=*/1);
+        DDMT ddmt(f_min, f_max, nchans, tsamp, dm_max, dm_step, 0.0F,
+                  Exec::cpu(1), nbits, {}, /*nbeams=*/1);
         state.PauseTiming();
         const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
         const auto dm_count   = ddmt.get_plan().get_container().dm_arr.size();

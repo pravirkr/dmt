@@ -27,10 +27,10 @@ To prevent silent bugs where a floating-point DM array is accidentally passed in
 
 ```python
 # WRONG (Raises TypeError):
-# fdmt = FDMTCPU(1200.0, 1600.0, 256, 1024, 1e-3, my_dm_array)
+# fdmt = FDMT(1200.0, 1600.0, 256, 1024, 1e-3, my_dm_array)
 
 # CORRECT (Keyword-only):
-fdmt = FDMTCPU(
+fdmt = FDMT(
     1200.0, 1600.0, 256, 1024, 1e-3,
     dm_grid=my_dm_array  # or dt_grid=my_dt_array
 )

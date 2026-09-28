@@ -6,14 +6,14 @@
 #include <stdexcept>
 #include <vector>
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/cuda_utils.cuh"
 #include "dmt/ddmt_kernel.cuh"
+#include "dmt/engines.hpp"
+#include "dmt/gpu_utils.cuh"
 #include "dmt/plans_cuda.cuh"
 
 namespace dmt::algorithms {
@@ -49,7 +49,7 @@ public:
             return;
         }
         release();
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaHostAlloc(reinterpret_cast<void**>(&m_ptr), n * sizeof(T),
                           cudaHostAllocDefault),
             "cudaHostAlloc failed");
@@ -94,102 +94,79 @@ void copy_out_strided(const int32_t* h_out,
     }
 }
 
-} // namespace
+template <typename T> cuda::std::span<T> to_cuda(DeviceSpan<T> span) {
+    return {span.data(), span.size()};
+}
 
-class DDMTCUDA::Impl {
+cudaStream_t to_cuda(Stream stream) {
+    return static_cast<cudaStream_t>(stream.native);
+}
+
+class DDMTCudaEngine final : public detail::DDMTEngine {
 public:
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         float tsamp,
-         float dm_max,
-         float dm_step,
-         float dm_min,
-         int device_id,
-         SizeType nbits,
-         std::span<const uint8_t> kill_mask,
-         SizeType nbeams)
-        : m_plan(f_min,
-                 f_max,
-                 nchans,
-                 tsamp,
-                 dm_max,
-                 dm_step,
-                 dm_min,
-                 nbits,
-                 kill_mask),
-          m_device_id(device_id),
-          m_nbeams(nbeams) {
-        init();
-    }
-
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         float tsamp,
-         const std::vector<float>& dm_arr,
-         int device_id,
-         SizeType nbits,
-         std::span<const uint8_t> kill_mask,
-         SizeType nbeams)
-        : m_plan(f_min,
-                 f_max,
-                 nchans,
-                 tsamp,
-                 std::span<const float>(dm_arr),
-                 nbits,
-                 kill_mask),
-          m_device_id(device_id),
-          m_nbeams(nbeams) {
-        init();
-    }
-
-    Impl(float f_min,
-         float f_max,
-         SizeType nchans,
-         float tsamp,
-         const plans::LevinConfig& levin,
-         int device_id,
-         SizeType nbits,
-         std::span<const uint8_t> kill_mask,
-         SizeType nbeams)
-        : m_plan(f_min, f_max, nchans, tsamp, levin, nbits, kill_mask),
-          m_device_id(device_id),
-          m_nbeams(nbeams) {
-        init();
-    }
-
-    Impl(const plans::DDMTPlan& plan, int device_id, SizeType nbeams)
+    DDMTCudaEngine(const plans::DDMTPlan& plan,
+                   const detail::DDMTEngineConfig& cfg)
         : m_plan(plan),
-          m_device_id(device_id),
-          m_nbeams(nbeams) {
+          m_device_id(cfg.exec.device),
+          m_nbeams(cfg.nbeams) {
         init();
     }
 
-    ~Impl() { destroy_streams(); }
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
+    ~DDMTCudaEngine() override { destroy_streams(); }
+    DDMTCudaEngine(const DDMTCudaEngine&)            = delete;
+    DDMTCudaEngine& operator=(const DDMTCudaEngine&) = delete;
+    DDMTCudaEngine(DDMTCudaEngine&&)                 = delete;
+    DDMTCudaEngine& operator=(DDMTCudaEngine&&)      = delete;
 
-    const plans::DDMTPlan& get_plan() const { return m_plan; }
-    SizeType get_nbeams() const noexcept { return m_nbeams; }
+    // Device-memory entry points: forward to the cuda::std::span overloads
+    // below.
+    void execute(DeviceSpan<const float> d_waterfall,
+                 DeviceSpan<float> d_dmt,
+                 Stream stream) override {
+        execute(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
+    }
+    void execute(DeviceSpan<const uint8_t> d_waterfall_packed,
+                 SizeType nsamps,
+                 DeviceSpan<int32_t> d_dmt,
+                 Stream stream) override {
+        execute(to_cuda(d_waterfall_packed), nsamps, to_cuda(d_dmt),
+                to_cuda(stream));
+    }
+    void execute_time_major(DeviceSpan<const uint8_t> d_filterbank_packed,
+                            SizeType nsamps,
+                            DeviceSpan<int32_t> d_dmt,
+                            Stream stream) override {
+        execute_time_major(to_cuda(d_filterbank_packed), nsamps, to_cuda(d_dmt),
+                           to_cuda(stream));
+    }
+    void save_history(DeviceSpan<float> d_out, Stream stream) const override {
+        save_history(to_cuda(d_out), to_cuda(stream));
+    }
+    void save_history(DeviceSpan<uint8_t> d_out, Stream stream) const override {
+        save_history(to_cuda(d_out), to_cuda(stream));
+    }
+    void load_history(DeviceSpan<const float> d_in, Stream stream) override {
+        load_history(to_cuda(d_in), to_cuda(stream));
+    }
+    void load_history(DeviceSpan<const uint8_t> d_in, Stream stream) override {
+        load_history(to_cuda(d_in), to_cuda(stream));
+    }
 
     [[nodiscard]] SizeType
-    get_output_nsamps(SizeType input_nsamps) const noexcept {
+    get_output_nsamps(SizeType input_nsamps) const noexcept override {
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         const auto total = m_history_len + input_nsamps;
         return total > max_delay ? total - max_delay : 0;
     }
 
-    void reset_history() noexcept {
+    void reset_history() noexcept override {
         m_history.clear();
         m_history_packed.clear();
         m_history_len = 0;
     }
 
-    [[nodiscard]] SizeType history_state_size() const noexcept {
+    [[nodiscard]] SizeType history_state_size() const noexcept override {
         const auto& plan_c   = m_plan.get_container();
         const auto max_delay = *std::ranges::max_element(plan_c.delay_table);
         if (plan_c.nbits == 32) {
@@ -199,10 +176,10 @@ public:
                bit_pack_utils::packed_row_bytes(max_delay, plan_c.nbits);
     }
 
-    void save_history(std::span<float> out) const {
+    void save_history(std::span<float> out) const override {
         if (m_plan.get_nbits() != 32) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA::save_history(float): plan nbits={} != 32; "
+                "DDMT::save_history(float): plan nbits={} != 32; "
                 "use the packed save_history(uint8_t) overload instead",
                 m_plan.get_nbits()));
         }
@@ -210,13 +187,13 @@ public:
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
             throw std::logic_error(
-                std::format("DDMTCUDA::save_history: stream is not fully "
+                std::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, max_delay));
         }
         if (out.size() != m_history.size()) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                std::format("DDMT::save_history: buffer size mismatch: "
                             "expected {}, got {}",
                             m_history.size(), out.size()));
         }
@@ -226,7 +203,7 @@ public:
     void save_history(cuda::std::span<float> d_out, cudaStream_t stream) const {
         if (m_plan.get_nbits() != 32) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA::save_history(device float): plan nbits={} != 32; "
+                "DDMT::save_history(device float): plan nbits={} != 32; "
                 "use the packed save_history(uint8_t) overload instead",
                 m_plan.get_nbits()));
         }
@@ -234,42 +211,42 @@ public:
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
             throw std::logic_error(
-                std::format("DDMTCUDA::save_history: stream is not fully "
+                std::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, max_delay));
         }
         if (d_out.size() != m_history.size()) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                std::format("DDMT::save_history: buffer size mismatch: "
                             "expected {}, got {}",
                             m_history.size(), d_out.size()));
         }
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(d_out.data(), m_history.data(),
                             m_history.size() * sizeof(float),
                             cudaMemcpyHostToDevice, stream),
-            "DDMTCUDA::save_history H2D copy failed");
+            "DDMT::save_history H2D copy failed");
     }
 
-    void save_history(std::span<uint8_t> out) const {
+    void save_history(std::span<uint8_t> out) const override {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
             throw std::invalid_argument(
-                "DDMTCUDA::save_history(uint8_t): plan nbits=32; "
+                "DDMT::save_history(uint8_t): plan nbits=32; "
                 "use the float save_history(float) overload instead");
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
             throw std::logic_error(
-                std::format("DDMTCUDA::save_history: stream is not fully "
+                std::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, max_delay));
         }
         const auto expected_bytes = history_state_size();
         if (out.size() != expected_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                std::format("DDMT::save_history: buffer size mismatch: "
                             "expected {} bytes, got {}",
                             expected_bytes, out.size()));
         }
@@ -281,41 +258,41 @@ public:
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
             throw std::invalid_argument(
-                "DDMTCUDA::save_history(device uint8_t): plan nbits=32; "
+                "DDMT::save_history(device uint8_t): plan nbits=32; "
                 "use the float save_history(float) overload instead");
         }
         const auto max_delay =
             *std::ranges::max_element(m_plan.get_container().delay_table);
         if (m_history_len != max_delay) {
             throw std::logic_error(
-                std::format("DDMTCUDA::save_history: stream is not fully "
+                std::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, max_delay));
         }
         const auto expected_bytes = history_state_size();
         if (d_out.size() != expected_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::save_history: buffer size mismatch: "
+                std::format("DDMT::save_history: buffer size mismatch: "
                             "expected {} bytes, got {}",
                             expected_bytes, d_out.size()));
         }
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(d_out.data(), m_history_packed.data(),
                             m_history_packed.size(), cudaMemcpyHostToDevice,
                             stream),
-            "DDMTCUDA::save_history(packed) H2D copy failed");
+            "DDMT::save_history(packed) H2D copy failed");
     }
 
-    void load_history(std::span<const float> in) {
+    void load_history(std::span<const float> in) override {
         if (m_plan.get_nbits() != 32) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA::load_history(float): plan nbits={} != 32; "
+                "DDMT::load_history(float): plan nbits={} != 32; "
                 "use the packed load_history(uint8_t) overload instead",
                 m_plan.get_nbits()));
         }
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                std::format("DDMT::load_history: buffer size mismatch: "
                             "expected {}, got {}",
                             history_state_size(), in.size()));
         }
@@ -326,41 +303,41 @@ public:
     void load_history(cuda::std::span<const float> d_in, cudaStream_t stream) {
         if (m_plan.get_nbits() != 32) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA::load_history(device float): plan nbits={} != 32; "
+                "DDMT::load_history(device float): plan nbits={} != 32; "
                 "use the packed load_history(uint8_t) overload instead",
                 m_plan.get_nbits()));
         }
         if (d_in.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                std::format("DDMT::load_history: buffer size mismatch: "
                             "expected {}, got {}",
                             history_state_size(), d_in.size()));
         }
         m_history.resize(d_in.size());
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(m_history.data(), d_in.data(),
-                            d_in.size() * sizeof(float), cudaMemcpyDeviceToHost,
-                            stream),
-            "DDMTCUDA::load_history D2H copy failed");
+        gpu_utils::check_gpu_call(cudaMemcpyAsync(m_history.data(), d_in.data(),
+                                                  d_in.size() * sizeof(float),
+                                                  cudaMemcpyDeviceToHost,
+                                                  stream),
+                                  "DDMT::load_history D2H copy failed");
         if (stream != nullptr) {
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
         } else {
-            cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+            gpu_utils::check_gpu_call(cudaDeviceSynchronize());
         }
         m_history_len = d_in.size() / (m_nbeams * m_plan.get_nchans());
     }
 
-    void load_history(std::span<const uint8_t> in) {
+    void load_history(std::span<const uint8_t> in) override {
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
             throw std::invalid_argument(
-                "DDMTCUDA::load_history(uint8_t): plan nbits=32; "
+                "DDMT::load_history(uint8_t): plan nbits=32; "
                 "use the float load_history(float) overload instead");
         }
         const auto expected_bytes = history_state_size();
         if (in.size() != expected_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                std::format("DDMT::load_history: buffer size mismatch: "
                             "expected {} bytes, got {}",
                             expected_bytes, in.size()));
         }
@@ -374,36 +351,37 @@ public:
         const auto nbits = m_plan.get_nbits();
         if (nbits == 32) {
             throw std::invalid_argument(
-                "DDMTCUDA::load_history(device uint8_t): plan nbits=32; "
+                "DDMT::load_history(device uint8_t): plan nbits=32; "
                 "use the float load_history(float) overload instead");
         }
         const auto expected_bytes = history_state_size();
         if (d_in.size() != expected_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::load_history: buffer size mismatch: "
+                std::format("DDMT::load_history: buffer size mismatch: "
                             "expected {} bytes, got {}",
                             expected_bytes, d_in.size()));
         }
         m_history_packed.resize(d_in.size());
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpyAsync(m_history_packed.data(), d_in.data(), d_in.size(),
                             cudaMemcpyDeviceToHost, stream),
-            "DDMTCUDA::load_history(packed) D2H copy failed");
+            "DDMT::load_history(packed) D2H copy failed");
         if (stream != nullptr) {
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
         } else {
-            cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+            gpu_utils::check_gpu_call(cudaDeviceSynchronize());
         }
         m_history_len =
             *std::ranges::max_element(m_plan.get_container().delay_table);
     }
 
-    void execute(std::span<const float> waterfall, std::span<float> dmt) {
-        cuda_utils::set_device(m_device_id);
+    void execute(std::span<const float> waterfall,
+                 std::span<float> dmt) override {
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::execute(float): plan nbits={} != 32; "
+                std::format("DDMT::execute(float): plan nbits={} != 32; "
                             "use the packed-integer execute() overload instead",
                             plan_c.nbits));
         }
@@ -415,7 +393,7 @@ public:
         const auto dm_count       = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                "DDMT (cuda): Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
 
@@ -494,7 +472,7 @@ public:
             const auto in_count = out_count + max_delay;
 
             if (g >= 2) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[buf]));
             }
 
@@ -503,16 +481,16 @@ public:
                             in_count, m_h_in_f[buf].data() + (row * max_in));
             }
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpy2DAsync(
                     thrust::raw_pointer_cast(m_d_in_f[buf].data()),
                     max_in * sizeof(float), m_h_in_f[buf].data(),
                     max_in * sizeof(float), in_count * sizeof(float), in_rows,
                     cudaMemcpyHostToDevice, m_htod_stream),
                 "H2D copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_htod_done[buf], m_htod_stream));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_exec_stream, m_htod_done[buf], 0));
 
             const auto out_beam_stride = dm_count * out_count;
@@ -524,23 +502,23 @@ public:
                 delay_ptr, kill_ptr, static_cast<int>(nchans),
                 static_cast<int>(dm_count), static_cast<int>(out_count),
                 static_cast<int>(m_nbeams), m_exec_stream);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_exec_done[buf], m_exec_stream));
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_dtoh_stream, m_exec_done[buf], 0));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(m_h_out_f[buf].data(),
                                 thrust::raw_pointer_cast(m_d_out_f[buf].data()),
                                 out_rows * out_count * sizeof(float),
                                 cudaMemcpyDeviceToHost, m_dtoh_stream),
                 "D2H copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_dtoh_done[buf], m_dtoh_stream));
 
             if (have_prev) {
                 const auto prev_buf = 1 - buf;
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[prev_buf]));
                 copy_out_strided(m_h_out_f[prev_buf].data(), prev_start,
                                  prev_count, out_rows, nsamps_reduced, dmt);
@@ -551,7 +529,7 @@ public:
         }
         if (have_prev) {
             const auto last_buf = (n_gulps - 1) % 2;
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventSynchronize(m_dtoh_done[last_buf]));
             copy_out_strided(m_h_out_f[last_buf].data(), prev_start, prev_count,
                              out_rows, nsamps_reduced, dmt);
@@ -580,11 +558,11 @@ public:
     void execute(cuda::std::span<const float> d_waterfall,
                  cuda::std::span<float> d_dmt,
                  cudaStream_t stream) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         if (plan_c.nbits != 32) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::execute(device float): plan nbits={} "
+                std::format("DDMT::execute(device float): plan nbits={} "
                             "!= 32; use the packed-integer overload instead",
                             plan_c.nbits));
         }
@@ -596,7 +574,7 @@ public:
         const auto dm_count       = plan_c.dm_arr.size();
         if (d_dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                "DDMT (cuda): Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, d_dmt.size()));
         }
         const auto in_rows = m_nbeams * nchans;
@@ -605,12 +583,12 @@ public:
         // retained (host) history and return.
         if (nsamps_reduced == 0) {
             std::vector<float> new_block(in_rows * nsamps_new);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(new_block.data(), d_waterfall.data(),
                                 in_rows * nsamps_new * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream),
-                "DDMTCUDA::execute(device float) warm-up D2H copy failed");
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                "DDMT::execute(device float) warm-up D2H copy failed");
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             std::vector<float> combined(in_rows * total);
             for (SizeType row = 0; row < in_rows; ++row) {
                 auto* dst = &combined[row * total];
@@ -648,19 +626,19 @@ public:
             thrust::device_vector<float> combined_d(in_rows * total);
             auto* combined_ptr = thrust::raw_pointer_cast(combined_d.data());
             for (SizeType row = 0; row < in_rows; ++row) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaMemcpyAsync(combined_ptr + (row * total),
                                     &m_history[row * m_history_len],
                                     m_history_len * sizeof(float),
                                     cudaMemcpyHostToDevice, stream),
-                    "DDMTCUDA::execute(device float) history H2D copy failed");
-                cuda_utils::check_cuda_call(
+                    "DDMT::execute(device float) history H2D copy failed");
+                gpu_utils::check_gpu_call(
                     cudaMemcpyAsync(combined_ptr + (row * total) +
                                         m_history_len,
                                     d_waterfall.data() + (row * nsamps_new),
                                     nsamps_new * sizeof(float),
                                     cudaMemcpyDeviceToDevice, stream),
-                    "DDMTCUDA::execute(device float) D2D copy failed");
+                    "DDMT::execute(device float) D2D copy failed");
             }
             launch_float(combined_ptr, static_cast<int>(total),
                          static_cast<int>(combined_beam_stride), d_dmt.data(),
@@ -673,13 +651,13 @@ public:
             const auto new_history_len = std::min(total, max_delay);
             std::vector<float> new_history(in_rows * new_history_len);
             for (SizeType row = 0; row < in_rows; ++row) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaMemcpyAsync(&new_history[row * new_history_len],
                                     combined_ptr + (row * total) +
                                         (total - new_history_len),
                                     new_history_len * sizeof(float),
                                     cudaMemcpyDeviceToHost, stream),
-                    "DDMTCUDA::execute(device float) history retention D2H "
+                    "DDMT::execute(device float) history retention D2H "
                     "copy failed");
             }
             // m_history is host memory read by get_output_nsamps()/
@@ -687,7 +665,7 @@ public:
             // must be valid by then -- unlike the rest of this overload,
             // this one synchronization point can't be deferred to the
             // caller.
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             m_history     = std::move(new_history);
             m_history_len = new_history_len;
             return;
@@ -700,30 +678,30 @@ public:
         const auto new_history_len = std::min(total, max_delay);
         std::vector<float> new_history(in_rows * new_history_len);
         for (SizeType row = 0; row < in_rows; ++row) {
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(&new_history[row * new_history_len],
                                 d_waterfall.data() + (row * nsamps_new) +
                                     (nsamps_new - new_history_len),
                                 new_history_len * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream),
-                "DDMTCUDA::execute(device float) history retention D2H copy "
+                "DDMT::execute(device float) history retention D2H copy "
                 "failed");
         }
-        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
         m_history     = std::move(new_history);
         m_history_len = new_history_len;
     }
 
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nsamps_total,
-                 std::span<int32_t> dmt) {
-        cuda_utils::set_device(m_device_id);
+                 std::span<int32_t> dmt) override {
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::execute(packed): plan nbits={} is not "
+                std::format("DDMT::execute(packed): plan nbits={} is not "
                             "a supported packed width (1,2,4,8,16)",
                             nbits));
         }
@@ -733,7 +711,7 @@ public:
             bit_pack_utils::packed_row_bytes(nsamps_total, nbits);
         if (waterfall_packed.size() != in_rows * row_bytes) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Packed input buffer size mismatch: expected {} "
+                "DDMT (cuda): Packed input buffer size mismatch: expected {} "
                 "bytes, got {}",
                 in_rows * row_bytes, waterfall_packed.size()));
         }
@@ -743,7 +721,7 @@ public:
         const auto dm_count       = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                "DDMT (cuda): Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
 
@@ -875,7 +853,7 @@ public:
                 bit_pack_utils::packed_row_bytes(in_samps + align_pad, nbits);
 
             if (g >= 2) {
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[buf]));
             }
 
@@ -887,15 +865,15 @@ public:
                             m_h_in_u8[buf].data() + (row * max_in_bytes));
             }
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpy2DAsync(
                     thrust::raw_pointer_cast(m_d_in_u8[buf].data()),
                     max_in_bytes, m_h_in_u8[buf].data(), max_in_bytes, in_bytes,
                     in_rows, cudaMemcpyHostToDevice, m_htod_stream),
                 "H2D copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_htod_done[buf], m_htod_stream));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_exec_stream, m_htod_done[buf], 0));
 
             const auto out_beam_stride = dm_count * out_count;
@@ -907,24 +885,24 @@ public:
                 delay_ptr, kill_ptr, static_cast<int>(nchans),
                 static_cast<int>(dm_count), static_cast<int>(out_count),
                 static_cast<int>(m_nbeams), m_exec_stream);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_exec_done[buf], m_exec_stream));
 
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(m_dtoh_stream, m_exec_done[buf], 0));
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(
                     m_h_out_i32[buf].data(),
                     thrust::raw_pointer_cast(m_d_out_i32[buf].data()),
                     out_rows * out_count * sizeof(int32_t),
                     cudaMemcpyDeviceToHost, m_dtoh_stream),
                 "D2H copy failed");
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventRecord(m_dtoh_done[buf], m_dtoh_stream));
 
             if (have_prev) {
                 const auto prev_buf = 1 - buf;
-                cuda_utils::check_cuda_call(
+                gpu_utils::check_gpu_call(
                     cudaEventSynchronize(m_dtoh_done[prev_buf]));
                 copy_out_strided(m_h_out_i32[prev_buf].data(), prev_start,
                                  prev_count, out_rows, nsamps_reduced, dmt);
@@ -935,7 +913,7 @@ public:
         }
         if (have_prev) {
             const auto last_buf = (n_gulps - 1) % 2;
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaEventSynchronize(m_dtoh_done[last_buf]));
             copy_out_strided(m_h_out_i32[last_buf].data(), prev_start,
                              prev_count, out_rows, nsamps_reduced, dmt);
@@ -983,13 +961,13 @@ public:
                  SizeType nsamps_total,
                  cuda::std::span<int32_t> d_dmt,
                  cudaStream_t stream) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA::execute(device packed): plan nbits={} "
+                std::format("DDMT::execute(device packed): plan nbits={} "
                             "is not a supported packed width (1,2,4,8,16)",
                             nbits));
         }
@@ -999,7 +977,7 @@ public:
             bit_pack_utils::packed_row_bytes(nsamps_total, nbits);
         if (d_waterfall_packed.size() != in_rows * row_bytes) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Packed input buffer size mismatch: expected {} "
+                "DDMT (cuda): Packed input buffer size mismatch: expected {} "
                 "bytes, got {}",
                 in_rows * row_bytes, d_waterfall_packed.size()));
         }
@@ -1009,7 +987,7 @@ public:
         const auto dm_count       = plan_c.dm_arr.size();
         if (d_dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                "DDMT (cuda): Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, d_dmt.size()));
         }
 
@@ -1021,15 +999,15 @@ public:
         // Cold start or warm-up with insufficient samples to produce output
         if (nsamps_reduced == 0) {
             std::vector<uint8_t> new_block(in_rows * row_bytes);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(new_block.data(), d_waterfall_packed.data(),
                                 in_rows * row_bytes, cudaMemcpyDeviceToHost,
                                 stream),
-                "DDMTCUDA::execute(device packed) warm-up D2H copy failed");
+                "DDMT::execute(device packed) warm-up D2H copy failed");
             if (stream != nullptr) {
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             } else {
-                cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
             }
             std::vector<uint8_t> combined(in_rows * combined_row_bytes, 0);
             auto combine_rows = [&]<unsigned NBITS>() {
@@ -1093,16 +1071,16 @@ public:
                 in_rows * new_hist_row_bytes, 0);
 
             std::vector<uint8_t> host_input(in_rows * row_bytes);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(host_input.data(), d_waterfall_packed.data(),
                                 in_rows * row_bytes, cudaMemcpyDeviceToHost,
                                 stream),
-                "DDMTCUDA::execute(device packed) history retention D2H copy "
+                "DDMT::execute(device packed) history retention D2H copy "
                 "failed");
             if (stream != nullptr) {
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             } else {
-                cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
             }
 
             auto extract_tail = [&]<unsigned NBITS>() {
@@ -1137,15 +1115,15 @@ public:
             m_history_len    = new_history_len;
         } else {
             std::vector<uint8_t> new_block(in_rows * row_bytes);
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(new_block.data(), d_waterfall_packed.data(),
                                 in_rows * row_bytes, cudaMemcpyDeviceToHost,
                                 stream),
-                "DDMTCUDA::execute(device packed) input D2H copy failed");
+                "DDMT::execute(device packed) input D2H copy failed");
             if (stream != nullptr) {
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
             } else {
-                cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
             }
 
             std::vector<uint8_t> combined(in_rows * combined_row_bytes, 0);
@@ -1181,11 +1159,11 @@ public:
             }
 
             thrust::device_vector<uint8_t> combined_d(combined.size());
-            cuda_utils::check_cuda_call(
+            gpu_utils::check_gpu_call(
                 cudaMemcpyAsync(thrust::raw_pointer_cast(combined_d.data()),
                                 combined.data(), combined.size(),
                                 cudaMemcpyHostToDevice, stream),
-                "DDMTCUDA::execute(device packed) combined H2D copy failed");
+                "DDMT::execute(device packed) combined H2D copy failed");
 
             const auto comb_in_beam_stride = nchans * combined_row_bytes;
             launch_packed(
@@ -1241,13 +1219,13 @@ public:
                             SizeType nsamps_total,
                             cuda::std::span<int32_t> d_dmt,
                             cudaStream_t stream) {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA::execute_time_major(device): plan nbits={} is not "
+                "DDMT::execute_time_major(device): plan nbits={} is not "
                 "a supported packed width (1,2,4,8,16)",
                 nbits));
         }
@@ -1256,7 +1234,7 @@ public:
         if (d_filterbank_packed.size() !=
             m_nbeams * nsamps_total * samp_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA: Time-major packed input buffer size "
+                std::format("DDMT (cuda): Time-major packed input buffer size "
                             "mismatch: expected {} "
                             "bytes, got {}",
                             m_nbeams * nsamps_total * samp_bytes,
@@ -1268,7 +1246,7 @@ public:
         const auto dm_count = plan_c.dm_arr.size();
         if (d_dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                "DDMT (cuda): Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, d_dmt.size()));
         }
         if (nsamps_reduced == 0)
@@ -1289,14 +1267,14 @@ public:
 
     void execute_time_major(std::span<const uint8_t> filterbank_packed,
                             SizeType nsamps_total,
-                            std::span<int32_t> dmt) {
-        cuda_utils::set_device(m_device_id);
+                            std::span<int32_t> dmt) override {
+        gpu_utils::set_device(m_device_id);
         const auto& plan_c = m_plan.get_container();
         const auto nbits   = plan_c.nbits;
         if (nbits == 32 || (nbits != 1 && nbits != 2 && nbits != 4 &&
                             nbits != 8 && nbits != 16)) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA::execute_time_major(host): plan nbits={} is not "
+                "DDMT::execute_time_major(host): plan nbits={} is not "
                 "a supported packed width (1,2,4,8,16)",
                 nbits));
         }
@@ -1304,7 +1282,7 @@ public:
         const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, nbits);
         if (filterbank_packed.size() != m_nbeams * nsamps_total * samp_bytes) {
             throw std::invalid_argument(
-                std::format("DDMTCUDA: Time-major packed input buffer size "
+                std::format("DDMT (cuda): Time-major packed input buffer size "
                             "mismatch: expected {} "
                             "bytes, got {}",
                             m_nbeams * nsamps_total * samp_bytes,
@@ -1316,7 +1294,7 @@ public:
         const auto dm_count = plan_c.dm_arr.size();
         if (dmt.size() != m_nbeams * dm_count * nsamps_reduced) {
             throw std::invalid_argument(std::format(
-                "DDMTCUDA: Output buffer size mismatch: expected {}, got {}",
+                "DDMT (cuda): Output buffer size mismatch: expected {}, got {}",
                 m_nbeams * dm_count * nsamps_reduced, dmt.size()));
         }
         if (nsamps_reduced == 0)
@@ -1324,7 +1302,7 @@ public:
 
         thrust::device_vector<uint8_t> d_in(filterbank_packed.size());
         thrust::device_vector<int32_t> d_out(dmt.size());
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(thrust::raw_pointer_cast(d_in.data()),
                        filterbank_packed.data(), filterbank_packed.size(),
                        cudaMemcpyHostToDevice),
@@ -1343,16 +1321,21 @@ public:
             static_cast<int>(nchans), static_cast<int>(dm_count),
             static_cast<int>(nsamps_reduced), static_cast<int>(m_nbeams),
             nullptr);
-        cuda_utils::check_cuda_call(cudaDeviceSynchronize());
+        gpu_utils::check_gpu_call(cudaDeviceSynchronize());
 
-        cuda_utils::check_cuda_call(
+        gpu_utils::check_gpu_call(
             cudaMemcpy(dmt.data(), thrust::raw_pointer_cast(d_out.data()),
                        dmt.size() * sizeof(int32_t), cudaMemcpyDeviceToHost),
             "D2H copy failed in execute_time_major");
     }
 
+protected:
+    [[nodiscard]] Backend backend() const noexcept override {
+        return detail::kGPUBackend;
+    }
+
 private:
-    plans::DDMTPlan m_plan;
+    const plans::DDMTPlan& m_plan; // owned by the DDMT facade
     int m_device_id;
     SizeType m_nbeams;
     plans::DDMTPlanD m_plan_d;
@@ -1378,21 +1361,21 @@ private:
     SizeType m_history_len = 0;
 
     void init() {
-        cuda_utils::set_device(m_device_id);
+        gpu_utils::set_device(m_device_id);
         plans::transfer_ddmt_plan_to_device(m_plan.get_container(), m_plan_d);
 
-        cuda_utils::check_cuda_call(cudaStreamCreate(&m_htod_stream),
-                                    "Failed to create H2D stream");
-        cuda_utils::check_cuda_call(cudaStreamCreate(&m_exec_stream),
-                                    "Failed to create execute stream");
-        cuda_utils::check_cuda_call(cudaStreamCreate(&m_dtoh_stream),
-                                    "Failed to create D2H stream");
+        gpu_utils::check_gpu_call(cudaStreamCreate(&m_htod_stream),
+                                  "Failed to create H2D stream");
+        gpu_utils::check_gpu_call(cudaStreamCreate(&m_exec_stream),
+                                  "Failed to create execute stream");
+        gpu_utils::check_gpu_call(cudaStreamCreate(&m_dtoh_stream),
+                                  "Failed to create D2H stream");
         for (int i = 0; i < 2; ++i) {
-            cuda_utils::check_cuda_call(cudaEventCreateWithFlags(
+            gpu_utils::check_gpu_call(cudaEventCreateWithFlags(
                 &m_htod_done[i], cudaEventDisableTiming));
-            cuda_utils::check_cuda_call(cudaEventCreateWithFlags(
+            gpu_utils::check_gpu_call(cudaEventCreateWithFlags(
                 &m_exec_done[i], cudaEventDisableTiming));
-            cuda_utils::check_cuda_call(cudaEventCreateWithFlags(
+            gpu_utils::check_gpu_call(cudaEventCreateWithFlags(
                 &m_dtoh_done[i], cudaEventDisableTiming));
         }
     }
@@ -1431,7 +1414,7 @@ private:
             static_cast<unsigned>((total_threads + block.x - 1) / block.x),
             static_cast<unsigned>(std::min<SizeType>(dm_count, 65535)),
             static_cast<unsigned>(nbeams));
-        cuda_utils::check_kernel_launch_params(grid, block);
+        gpu_utils::check_kernel_launch_params(grid, block);
         return grid;
     }
 
@@ -1456,7 +1439,7 @@ private:
             d_in, in_chan_stride, in_beam_stride, d_out, out_dm_stride,
             out_beam_stride, delay_ptr, kill_ptr, nchans, dm_count,
             nsamps_reduced);
-        cuda_utils::check_last_cuda_error("ddmt_kernel_float launch failed");
+        gpu_utils::check_last_gpu_error("ddmt_kernel_float launch failed");
     }
 
     static void launch_packed(SizeType nbits,
@@ -1512,7 +1495,7 @@ private:
         default:
             break;
         }
-        cuda_utils::check_last_cuda_error("ddmt_kernel_packed launch failed");
+        gpu_utils::check_last_gpu_error("ddmt_kernel_packed launch failed");
     }
 
     static void launch_time_major(SizeType nbits,
@@ -1567,147 +1550,16 @@ private:
         default:
             break;
         }
-        cuda_utils::check_last_cuda_error(
-            "ddmt_kernel_time_major launch failed");
+        gpu_utils::check_last_gpu_error("ddmt_kernel_time_major launch failed");
     }
 };
 
-DDMTCUDA::DDMTCUDA(float f_min,
-                   float f_max,
-                   SizeType nchans,
-                   float tsamp,
-                   float dm_max,
-                   float dm_step,
-                   float dm_min,
-                   int device_id,
-                   SizeType nbits,
-                   std::span<const uint8_t> kill_mask,
-                   SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    tsamp,
-                                    dm_max,
-                                    dm_step,
-                                    dm_min,
-                                    device_id,
-                                    nbits,
-                                    kill_mask,
-                                    nbeams)) {}
+} // namespace
 
-DDMTCUDA::DDMTCUDA(float f_min,
-                   float f_max,
-                   SizeType nchans,
-                   float tsamp,
-                   const std::vector<float>& dm_arr,
-                   int device_id,
-                   SizeType nbits,
-                   std::span<const uint8_t> kill_mask,
-                   SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    tsamp,
-                                    dm_arr,
-                                    device_id,
-                                    nbits,
-                                    kill_mask,
-                                    nbeams)) {}
-
-DDMTCUDA::DDMTCUDA(float f_min,
-                   float f_max,
-                   SizeType nchans,
-                   float tsamp,
-                   const plans::LevinConfig& levin,
-                   int device_id,
-                   SizeType nbits,
-                   std::span<const uint8_t> kill_mask,
-                   SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(f_min,
-                                    f_max,
-                                    nchans,
-                                    tsamp,
-                                    levin,
-                                    device_id,
-                                    nbits,
-                                    kill_mask,
-                                    nbeams)) {}
-
-DDMTCUDA::DDMTCUDA(const plans::DDMTPlan& plan, int device_id, SizeType nbeams)
-    : m_impl(std::make_unique<Impl>(plan, device_id, nbeams)) {}
-
-DDMTCUDA::~DDMTCUDA()                                    = default;
-DDMTCUDA::DDMTCUDA(DDMTCUDA&& other) noexcept            = default;
-DDMTCUDA& DDMTCUDA::operator=(DDMTCUDA&& other) noexcept = default;
-const plans::DDMTPlan& DDMTCUDA::get_plan() const noexcept {
-    return m_impl->get_plan();
-}
-SizeType DDMTCUDA::get_nbeams() const noexcept { return m_impl->get_nbeams(); }
-void DDMTCUDA::execute(std::span<const float> waterfall, std::span<float> dmt) {
-    m_impl->execute(waterfall, dmt);
-}
-void DDMTCUDA::execute(cuda::std::span<const float> d_waterfall,
-                       cuda::std::span<float> d_dmt,
-                       cudaStream_t stream) {
-    m_impl->execute(d_waterfall, d_dmt, stream);
-}
-void DDMTCUDA::execute(std::span<const uint8_t> waterfall_packed,
-                       SizeType nsamps,
-                       std::span<int32_t> dmt) {
-    m_impl->execute(waterfall_packed, nsamps, dmt);
-}
-void DDMTCUDA::execute(cuda::std::span<const uint8_t> d_waterfall_packed,
-                       SizeType nsamps,
-                       cuda::std::span<int32_t> d_dmt,
-                       cudaStream_t stream) {
-    m_impl->execute(d_waterfall_packed, nsamps, d_dmt, stream);
-}
-void DDMTCUDA::execute_time_major(std::span<const uint8_t> filterbank_packed,
-                                  SizeType nsamps,
-                                  std::span<int32_t> dmt) {
-    m_impl->execute_time_major(filterbank_packed, nsamps, dmt);
-}
-void DDMTCUDA::execute_time_major(
-    cuda::std::span<const uint8_t> d_filterbank_packed,
-    SizeType nsamps,
-    cuda::std::span<int32_t> d_dmt,
-    cudaStream_t stream) {
-    m_impl->execute_time_major(d_filterbank_packed, nsamps, d_dmt, stream);
-}
-SizeType DDMTCUDA::get_output_nsamps(SizeType input_nsamps) const noexcept {
-    return m_impl->get_output_nsamps(input_nsamps);
-}
-void DDMTCUDA::reset_history() noexcept { m_impl->reset_history(); }
-SizeType DDMTCUDA::history_state_size() const noexcept {
-    return m_impl->history_state_size();
-}
-void DDMTCUDA::save_history(std::span<float> out) const {
-    return m_impl->save_history(out);
-}
-void DDMTCUDA::save_history(cuda::std::span<float> d_out,
-                            cudaStream_t stream) const {
-    return m_impl->save_history(d_out, stream);
-}
-void DDMTCUDA::load_history(std::span<const float> in) {
-    return m_impl->load_history(in);
-}
-void DDMTCUDA::load_history(cuda::std::span<const float> d_in,
-                            cudaStream_t stream) {
-    return m_impl->load_history(d_in, stream);
-}
-void DDMTCUDA::save_history(std::span<uint8_t> out) const {
-    return m_impl->save_history(out);
-}
-void DDMTCUDA::save_history(cuda::std::span<uint8_t> d_out,
-                            cudaStream_t stream) const {
-    return m_impl->save_history(d_out, stream);
-}
-void DDMTCUDA::load_history(std::span<const uint8_t> in) {
-    return m_impl->load_history(in);
-}
-void DDMTCUDA::load_history(cuda::std::span<const uint8_t> d_in,
-                            cudaStream_t stream) {
-    return m_impl->load_history(d_in, stream);
+std::unique_ptr<detail::DDMTEngine>
+detail::make_ddmt_gpu(const plans::DDMTPlan& plan,
+                      const detail::DDMTEngineConfig& cfg) {
+    return std::make_unique<DDMTCudaEngine>(plan, cfg);
 }
 
 } // namespace dmt::algorithms

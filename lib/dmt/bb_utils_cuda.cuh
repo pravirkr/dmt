@@ -1,16 +1,15 @@
 #pragma once
 
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#include <cufft.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/common/types.hpp"
+#include "dmt/gpu_utils.cuh"
 
 namespace dmt::bb_utils {
 
 // Compute the chirp table for coherent dedispersion.
 void compute_chirp(cuda::std::span<const float> dm_grid,
-                   cuda::std::span<ComplexTypeCUDA> chirp_table,
+                   cuda::std::span<ComplexTypeGPU> chirp_table,
                    float fcenter,
                    float bw,
                    SizeType nbin,
@@ -36,8 +35,8 @@ void compute_chirp(cuda::std::span<const float> dm_grid,
  * @param batch_size Number of rows.
  * @param stream CUDA stream for asynchronous execution.
  */
-void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data1,
-                   cuda::std::span<ComplexTypeCUDA> data2,
+void swap_spectrum(cuda::std::span<ComplexTypeGPU> data1,
+                   cuda::std::span<ComplexTypeGPU> data2,
                    int n,
                    int batch_size,
                    cudaStream_t stream);
@@ -62,11 +61,11 @@ void swap_spectrum(cuda::std::span<ComplexTypeCUDA> data1,
  * @param scale Scaling factor.
  * @param stream CUDA stream for asynchronous execution.
  */
-void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
-                 cuda::std::span<const ComplexTypeCUDA> data2_in,
-                 cuda::std::span<const ComplexTypeCUDA> chirp_table,
-                 cuda::std::span<ComplexTypeCUDA> data1_out,
-                 cuda::std::span<ComplexTypeCUDA> data2_out,
+void apply_chirp(cuda::std::span<const ComplexTypeGPU> data1_in,
+                 cuda::std::span<const ComplexTypeGPU> data2_in,
+                 cuda::std::span<const ComplexTypeGPU> chirp_table,
+                 cuda::std::span<ComplexTypeGPU> data1_out,
+                 cuda::std::span<ComplexTypeGPU> data2_out,
                  int nsub,
                  int nbin,
                  int nfft,
@@ -88,8 +87,8 @@ void apply_chirp(cuda::std::span<const ComplexTypeCUDA> data1_in,
  * @param noverlap Total overlap samples across channels.
  * @param stream CUDA stream for asynchronous execution.
  */
-void unpad_detect(cuda::std::span<const ComplexTypeCUDA> fft_p1,
-                  cuda::std::span<const ComplexTypeCUDA> fft_p2,
+void unpad_detect(cuda::std::span<const ComplexTypeGPU> fft_p1,
+                  cuda::std::span<const ComplexTypeGPU> fft_p2,
                   cuda::std::span<float> intensity,
                   int nchan,
                   int nfft,

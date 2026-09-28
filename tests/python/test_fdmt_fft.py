@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import FDMTCPU, FDMTFFTCPU, compute_fdmt_fft, libdmt
+from dmtlib import FDMT, FDMTFFT, compute_fdmt_fft, libdmt
 
 
 class TestFDMTFFT:
@@ -13,7 +13,7 @@ class TestFDMTFFT:
         tsamp = 0.001
         dt_max = 64
 
-        thefdmt = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max)
+        thefdmt = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max)
         waterfall = np.ones((nchans, nsamples), dtype=np.float32)
         dmt_output = thefdmt.execute(waterfall)
 
@@ -34,10 +34,10 @@ class TestFDMTFFT:
         rng = np.random.default_rng(42)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt_fft = FDMTFFTCPU(
+        fdmt_fft = FDMTFFT(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min, mode="roll"
         )
-        fdmt_roll = FDMTCPU(
+        fdmt_roll = FDMT(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min, mode="roll"
         )
 
@@ -57,10 +57,8 @@ class TestFDMTFFT:
         rng = np.random.default_rng(7)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt_fft = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full"
-        )
-        fdmt = FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full")
+        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full")
+        fdmt = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full")
         a = fdmt_fft.execute(waterfall)
         b = fdmt.execute(waterfall)
         np.testing.assert_allclose(
@@ -76,10 +74,8 @@ class TestFDMTFFT:
         dt_max = 24
         rng = np.random.default_rng(3)
 
-        fdmt_fft = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid"
-        )
-        fdmt = FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
         fdmt_fft.reset_history()
         fdmt.reset_history()
         for i in range(3):
@@ -102,10 +98,8 @@ class TestFDMTFFT:
         rng = np.random.default_rng(123)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt_fft = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
-        )
-        fdmt_roll = FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        fdmt_roll = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
 
         np.testing.assert_allclose(
             fdmt_fft.execute(waterfall),
@@ -128,7 +122,7 @@ class TestFDMTFFT:
         waterfall_beam1 = rng.standard_normal((nchans, nsamples), dtype=np.float32)
         waterfall_multi = np.stack([waterfall_beam0, waterfall_beam1], axis=0)
 
-        fdmt_multi = FDMTFFTCPU(
+        fdmt_multi = FDMTFFT(
             f_min,
             f_max,
             nchans,
@@ -138,7 +132,7 @@ class TestFDMTFFT:
             nbeams=nbeams,
             mode="roll",
         )
-        fdmt_single = FDMTFFTCPU(
+        fdmt_single = FDMTFFT(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll"
         )
 
@@ -167,7 +161,7 @@ class TestFDMTFFT:
         dmt_conv = dmt_conv[: plan.dmt_ndms * plan.dmt_nsamps].reshape(
             plan.dmt_ndms, plan.dmt_nsamps
         )
-        fdmt = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
         dmt_direct = fdmt.execute(waterfall)
 
         assert dmt_conv.shape == (plan.dmt_ndms, plan.dmt_nsamps)
@@ -181,7 +175,7 @@ class TestFDMTFFT:
         tsamp = 0.001
         dt_max = 100
 
-        fdmt = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        fdmt = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
         waterfall = np.zeros((nchans, nsamples), dtype=np.float32)
 
         target_dm_idx = len(fdmt.dt_grid_final) // 2
@@ -209,7 +203,7 @@ class TestFDMTFFT:
         tsamp = 0.001
 
         dt_arr = np.array([0, 5, 10, 20, 30, 45], dtype=np.int32)
-        fdmt_dt = FDMTFFTCPU(
+        fdmt_dt = FDMTFFT(
             f_min, f_max, nchans, nsamples, tsamp, dt_arr=dt_arr, mode="roll"
         )
         waterfall = np.ones((nchans, nsamples), dtype=np.float32)
@@ -227,7 +221,7 @@ class TestFDMTFFT:
         rng = np.random.default_rng(1)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        fdmt = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
         oneshot = fdmt.execute(waterfall)
         fdmt.reset(waterfall)
         fdmt.advance_until_remaining(1)
@@ -244,10 +238,8 @@ class TestFDMTFFT:
         tsamp = 0.001
         dt_max = 24
         rng = np.random.default_rng(4)
-        fdmt_fft = FDMTFFTCPU(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid"
-        )
-        fdmt = FDMTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
         fdmt_fft.reset_history()
         fdmt.reset_history()
         for _ in range(4):
@@ -259,10 +251,7 @@ class TestFDMTFFT:
                 atol=5e-3,
             )
 
-    @pytest.mark.cuda
-    def test_fdmt_fft_gpu_optional(self) -> None:
-        from dmtlib import FDMTFFTCUDA
-
+    def test_fdmt_fft_gpu_optional(self, gpu_backend: str) -> None:
         f_min = 1000.0
         f_max = 1500.0
         nchans = 16
@@ -271,8 +260,17 @@ class TestFDMTFFT:
         dt_max = 8
         rng = np.random.default_rng(2)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
-        cpu = FDMTFFTCPU(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
-        gpu = FDMTFFTCUDA(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        cpu = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        gpu = FDMTFFT(
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            mode="roll",
+            backend=gpu_backend,
+        )
         np.testing.assert_allclose(
             gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
         )

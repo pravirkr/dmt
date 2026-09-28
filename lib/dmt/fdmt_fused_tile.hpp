@@ -17,10 +17,10 @@
 // time tile, computed entirely in on-chip (shared) memory by one thread
 // block. Written against a small `Block` policy (strided for_each + barrier)
 // so the identical code also runs sequentially on the host, where the tests
-// check it bit-for-bit against FDMTCPU (see fdmt_fused_tile_cpu_t.cpp).
+// check it bit-for-bit against the CPU FDMT (see fdmt_fused_tile_cpu_t.cpp).
 //
 // Geometry. Level-F sub-band g depends only on the 2^F input channels below
-// it (the same sub-tree grouping as FDMTCPU's fused path). A tile produces
+// it (the same sub-tree grouping as the CPU FDMT's fused path). A tile produces
 // level-F samples [t0, t0 + T). Level l of the group is computed over the
 // window [t0 - H_l, t0 + T), where H_F = 0 and H_{l-1} = H_l + D_l, D_l being
 // the largest merge delay among the group's level-l coordinates: every head
@@ -125,7 +125,7 @@ DMT_HD inline void fdmt_init_column(int dt_first,
             prev_val = get_sample(t);
         } else {
             float sum = 0.0F;
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #pragma unroll 4
 #endif
             for (int d = 0; d <= s_lo; ++d) {

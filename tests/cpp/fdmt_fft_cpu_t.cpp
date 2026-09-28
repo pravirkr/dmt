@@ -15,8 +15,8 @@
 
 namespace dmt {
 
-using algorithms::FDMTCPU;
-using algorithms::FDMTFFTCPU;
+using algorithms::FDMT;
+using algorithms::FDMTFFT;
 using Catch::Approx;
 
 namespace {
@@ -34,8 +34,7 @@ random_waterfall(SizeType nchans, SizeType nsamps, unsigned seed = 42) {
 
 } // namespace
 
-TEST_CASE("FDMTFFTCPU basic constructor and properties",
-          "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT basic constructor and properties", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -44,7 +43,7 @@ TEST_CASE("FDMTFFTCPU basic constructor and properties",
     const size_t dt_max = 32;
     const size_t dt_min = 0;
 
-    FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
+    FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min);
 
     SECTION("Plan getters") {
         const auto& plan         = fdmt_fft.get_plan();
@@ -71,7 +70,7 @@ TEST_CASE("FDMTFFTCPU basic constructor and properties",
     }
 }
 
-TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
+TEST_CASE("FDMTFFT vs FDMT roll mode numerical equivalence",
           "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
@@ -83,10 +82,10 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
     auto waterfall      = random_waterfall(nchans, nsamps);
 
     SECTION("With box smearing") {
-        FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+        FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                      true, "roll");
+        FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
                          true, "roll");
-        FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
-                            1, true, "roll");
         const auto ndms = fdmt_cpu.get_plan().get_dmt_ndms();
         std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
         std::vector<float> dmt_fft(ndms * nsamps, 0.0F);
@@ -96,10 +95,10 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
     }
 
     SECTION("Without box smearing") {
-        FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+        FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                      false, "roll");
+        FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
                          false, "roll");
-        FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
-                            1, false, "roll");
         const auto ndms = fdmt_cpu.get_plan().get_dmt_ndms();
         std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
         std::vector<float> dmt_fft(ndms * nsamps, 0.0F);
@@ -109,7 +108,7 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU roll mode numerical equivalence",
     }
 }
 
-TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT vs FDMT full mode", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -118,10 +117,10 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu][cpu]") {
     const size_t dt_max = 32;
     auto waterfall      = random_waterfall(nchans, nsamps, 7);
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+    FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                  "full");
+    FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "full");
-    FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                        "full");
     const auto ndms       = fdmt_cpu.get_plan().get_dmt_ndms();
     const auto nsamps_out = fdmt_cpu.get_plan().get_dmt_nsamps();
     std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
@@ -130,7 +129,7 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu][cpu]") {
     fdmt_fft.execute(waterfall, dmt_fft);
     // Linear (padded) FFT matches time-domain full on the input-aligned
     // region t < nsamps. The extra delay tail t >= nsamps is produced by
-    // per-level buffer growth in FDMTCPU and is not required to match.
+    // per-level buffer growth in FDMT and is not required to match.
     for (SizeType dm = 0; dm < ndms; ++dm) {
         for (SizeType t = 0; t < nsamps; ++t) {
             const auto idx = (dm * nsamps_out) + t;
@@ -139,7 +138,7 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU full mode", "[fdmt_fft_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTFFTCPU vs FDMTCPU valid first block", "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT vs FDMT valid first block", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 32;
@@ -148,10 +147,10 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU valid first block", "[fdmt_fft_cpu][cpu]") {
     const size_t dt_max = 32;
     auto waterfall      = random_waterfall(nchans, nsamps, 11);
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+    FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                  "valid");
+    FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "valid");
-    FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                        "valid");
     const auto n = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
     std::vector<float> dmt_fft(n, 0.0F);
@@ -160,8 +159,7 @@ TEST_CASE("FDMTFFTCPU vs FDMTCPU valid first block", "[fdmt_fft_cpu][cpu]") {
     test::require_approx(dmt_fft, dmt_cpu, n, 0.08F);
 }
 
-TEST_CASE("FDMTFFTCPU valid streaming vs FDMTCPU valid",
-          "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT valid streaming vs FDMT valid", "[fdmt_fft_cpu][cpu]") {
     const float f_min    = 1200.0F;
     const float f_max    = 1600.0F;
     const size_t nchans  = 16;
@@ -170,10 +168,10 @@ TEST_CASE("FDMTFFTCPU valid streaming vs FDMTCPU valid",
     const size_t dt_max  = 24;
     const size_t nblocks = 3;
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+    FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                  "valid");
+    FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "valid");
-    FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                        "valid");
     const auto nout = fdmt_cpu.get_plan().get_dmt_size();
     fdmt_cpu.reset_history();
     fdmt_fft.reset_history();
@@ -189,7 +187,7 @@ TEST_CASE("FDMTFFTCPU valid streaming vs FDMTCPU valid",
     }
 }
 
-TEST_CASE("FDMTFFTCPU odd channel counts", "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT odd channel counts", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1200.0F;
     const float f_max   = 1600.0F;
     const size_t nchans = 13;
@@ -198,10 +196,10 @@ TEST_CASE("FDMTFFTCPU odd channel counts", "[fdmt_fft_cpu][cpu]") {
     const size_t dt_max = 24;
     auto waterfall      = random_waterfall(nchans, nsamps, 123);
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+    FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                  "roll");
+    FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "roll");
-    FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                        "roll");
     const auto ndms = fdmt_cpu.get_plan().get_dmt_ndms();
     std::vector<float> dmt_cpu(fdmt_cpu.get_plan().get_buffer_size(), 0.0F);
     std::vector<float> dmt_fft(ndms * nsamps, 0.0F);
@@ -210,7 +208,7 @@ TEST_CASE("FDMTFFTCPU odd channel counts", "[fdmt_fft_cpu][cpu]") {
     test::require_approx(dmt_fft, dmt_cpu, ndms * nsamps, 0.05F);
 }
 
-TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT multi-beam processing", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 16;
@@ -220,10 +218,10 @@ TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu][cpu]") {
     const size_t nbeams = 3;
     auto waterfall      = random_waterfall(nbeams * nchans, nsamps, 999);
 
-    FDMTFFTCPU fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
-                          true, "roll", 1, nbeams);
-    FDMTFFTCPU fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
-                           true, "roll", 1, 1);
+    FDMTFFT fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                       "roll", Exec::cpu(1), nbeams);
+    FDMTFFT fdmt_single(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                        "roll", Exec::cpu(1), 1);
     const auto ndms = fdmt_multi.get_plan().get_dmt_ndms();
     std::vector<float> dmt_multi(nbeams * ndms * nsamps, 0.0F);
     fdmt_multi.execute(waterfall, dmt_multi);
@@ -246,7 +244,7 @@ TEST_CASE("FDMTFFTCPU multi-beam processing", "[fdmt_fft_cpu][cpu]") {
     }
 }
 
-TEST_CASE("FDMTFFTCPU stepper matches execute", "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT stepper matches execute", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 16;
@@ -255,8 +253,8 @@ TEST_CASE("FDMTFFTCPU stepper matches execute", "[fdmt_fft_cpu][cpu]") {
     const size_t dt_max = 16;
     auto waterfall      = random_waterfall(nchans, nsamps, 5);
 
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                    "roll");
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                 "roll");
     const auto n = fdmt.get_plan().get_dmt_size();
     std::vector<float> dmt_one(n, 0.0F);
     fdmt.execute(waterfall, dmt_one);
@@ -273,8 +271,8 @@ TEST_CASE("FDMTFFTCPU stepper matches execute", "[fdmt_fft_cpu][cpu]") {
     test::require_approx(dmt_step, dmt_one, n, 1e-4F);
 }
 
-TEST_CASE("FDMTFFTCPU variance matches plan", "[fdmt_fft_cpu][cpu]") {
-    FDMTFFTCPU fdmt(1000.0F, 1500.0F, 16, 128, 0.001F, 16);
+TEST_CASE("FDMTFFT variance matches plan", "[fdmt_fft_cpu][cpu]") {
+    FDMTFFT fdmt(1000.0F, 1500.0F, 16, 128, 0.001F, 16);
     const auto& plan = fdmt.get_plan();
     CHECK(fdmt.get_effective_variance(0, 1) ==
           Approx(plan.get_effective_variance(0, 1, true)));
@@ -283,7 +281,7 @@ TEST_CASE("FDMTFFTCPU variance matches plan", "[fdmt_fft_cpu][cpu]") {
         grid, Catch::Matchers::Approx(plan.get_effective_sigma_grid(2, true)));
 }
 
-TEST_CASE("FDMTFFTCPU convenience function compute_fdmt_fft",
+TEST_CASE("FDMTFFT convenience function compute_fdmt_fft",
           "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
@@ -296,15 +294,15 @@ TEST_CASE("FDMTFFTCPU convenience function compute_fdmt_fft",
     auto [dmt, plan] =
         algorithms::compute_fdmt_fft(waterfall, f_min, f_max, nchans, nsamps,
                                      tsamp, dt_max, 0, 1, true, "valid");
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                    "valid");
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                 "valid");
     std::vector<float> dmt_class(plan.get_dmt_size(), 0.0F);
     fdmt.execute(waterfall, dmt_class);
     CHECK(dmt.size() == plan.get_dmt_ndms() * plan.get_dmt_nsamps());
     test::require_approx(dmt, dmt_class, plan.get_dmt_size(), 1e-4F);
 }
 
-TEST_CASE("FDMTFFTCPU valid streaming with nsamps < dt_max",
+TEST_CASE("FDMTFFT valid streaming with nsamps < dt_max",
           "[fdmt_fft_cpu][cpu]") {
     const float f_min    = 1000.0F;
     const float f_max    = 1500.0F;
@@ -314,10 +312,10 @@ TEST_CASE("FDMTFFTCPU valid streaming with nsamps < dt_max",
     const size_t dt_max  = 24;
     const size_t nblocks = 5;
 
-    FDMTCPU fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+    FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                  "valid");
+    FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                      "valid");
-    FDMTFFTCPU fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                        "valid");
     const auto nout = fdmt_cpu.get_plan().get_dmt_size();
     fdmt_cpu.reset_history();
     fdmt_fft.reset_history();
@@ -332,8 +330,7 @@ TEST_CASE("FDMTFFTCPU valid streaming with nsamps < dt_max",
     }
 }
 
-TEST_CASE("FDMTFFTCPU multi-beam stepper matches execute",
-          "[fdmt_fft_cpu][cpu]") {
+TEST_CASE("FDMTFFT multi-beam stepper matches execute", "[fdmt_fft_cpu][cpu]") {
     const float f_min   = 1000.0F;
     const float f_max   = 1500.0F;
     const size_t nchans = 8;
@@ -343,8 +340,8 @@ TEST_CASE("FDMTFFTCPU multi-beam stepper matches execute",
     const size_t nbeams = 3;
     auto waterfall      = random_waterfall(nbeams * nchans, nsamps, 44);
 
-    FDMTFFTCPU fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                    "roll", 1, nbeams);
+    FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                 "roll", Exec::cpu(1), nbeams);
     const auto n = nbeams * fdmt.get_plan().get_dmt_size();
     std::vector<float> dmt_one(n, 0.0F);
     fdmt.execute(waterfall, dmt_one);

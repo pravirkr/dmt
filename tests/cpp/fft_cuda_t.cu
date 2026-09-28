@@ -2,13 +2,13 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <cuda/std/span>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/bb_utils.hpp"
 #include "dmt/bb_utils_cuda.cuh"
-#include "dmt/utils/fft.hpp"
+#include "dmt/fft_cuda.cuh"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -40,21 +40,21 @@ TEST_CASE("CUFFTManager forward matches FFTWManager", "[fft][gpu][parity]") {
 
     CUFFTManager gpu(FFTKind::kC2CForward, static_cast<SizeType>(nbin),
                      static_cast<SizeType>(nfft * nsub), 0);
-    thrust::device_vector<ComplexTypeCUDA> d1(n);
-    thrust::device_vector<ComplexTypeCUDA> d2(n);
+    thrust::device_vector<ComplexTypeGPU> d1(n);
+    thrust::device_vector<ComplexTypeGPU> d2(n);
     for (SizeType i = 0; i < n; ++i) {
-        d1[i] = ComplexTypeCUDA(h1[i].real(), h1[i].imag());
-        d2[i] = ComplexTypeCUDA(h2[i].real(), h2[i].imag());
+        d1[i] = ComplexTypeGPU(h1[i].real(), h1[i].imag());
+        d2[i] = ComplexTypeGPU(h2[i].real(), h2[i].imag());
     }
-    auto d1_span = cuda::std::span<ComplexTypeCUDA>(
+    auto d1_span = cuda::std::span<ComplexTypeGPU>(
         thrust::raw_pointer_cast(d1.data()), d1.size());
-    auto d2_span = cuda::std::span<ComplexTypeCUDA>(
+    auto d2_span = cuda::std::span<ComplexTypeGPU>(
         thrust::raw_pointer_cast(d2.data()), d2.size());
     gpu.execute(d1_span);
     gpu.execute(d2_span);
     bb_utils::swap_spectrum(d1_span, d2_span, nbin, nfft * nsub, nullptr);
     cudaDeviceSynchronize();
-    thrust::host_vector<ComplexTypeCUDA> g1 = d1;
+    thrust::host_vector<ComplexTypeGPU> g1 = d1;
     for (SizeType i = 0; i < n; ++i) {
         CHECK(g1[i].real() == Catch::Approx(cpu1[i].real()).margin(1e-3F));
         CHECK(g1[i].imag() == Catch::Approx(cpu1[i].imag()).margin(1e-3F));

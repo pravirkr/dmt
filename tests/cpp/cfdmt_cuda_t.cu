@@ -9,8 +9,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 
-#include <cuda/std/span>
 #include <thrust/device_vector.h>
+#include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
@@ -18,8 +18,7 @@
 
 namespace dmt {
 
-using algorithms::CohFDMTCPU;
-using algorithms::CohFDMTCUDA;
+using algorithms::CohFDMT;
 using plans::CohFDMTPlan;
 
 namespace {
@@ -39,33 +38,35 @@ CohFDMTPlan make_cuda_test_plan() {
 }
 } // namespace
 
-TEST_CASE("CohFDMTCUDA Constructor and Plan Invariants", "[cfdmt_gpu][gpu]") {
+TEST_CASE("CohFDMT Constructor and Plan Invariants", "[cfdmt_gpu][gpu]") {
 
     const auto plan = make_cuda_test_plan();
-    CohFDMTCUDA coh_fdmt_cuda(
-        plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(), plan.get_t_p(),
-        plan.get_dm_max(), plan.get_dm_min(), plan.get_noverlap());
+    CohFDMT coh_fdmt_cuda(plan.get_f_center(), plan.get_bw_sub(),
+                          plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
+                          plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
+                          plan.get_dm_min(), plan.get_noverlap(), "PRITF",
+                          test::gpu_exec());
 
     CHECK(coh_fdmt_cuda.get_dmt_size() == plan.get_dmt_size());
     CHECK(coh_fdmt_cuda.get_plan().get_ndm() == plan.get_ndm());
     CHECK(coh_fdmt_cuda.get_plan().get_dmt_nsamps() == plan.get_dmt_nsamps());
 }
 
-TEST_CASE("CohFDMTCUDA Host and Device Execution Parity",
+TEST_CASE("CohFDMT Host and Device Execution Parity",
           "[cfdmt_gpu][gpu][parity]") {
 
     const auto plan = make_cuda_test_plan();
 
-    CohFDMTCPU coh_fdmt_cpu(plan.get_f_center(), plan.get_bw_sub(),
-                            plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
-                            plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
-                            plan.get_dm_min(), plan.get_noverlap());
+    CohFDMT coh_fdmt_cpu(plan.get_f_center(), plan.get_bw_sub(),
+                         plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
+                         plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
+                         plan.get_dm_min(), plan.get_noverlap());
 
-    CohFDMTCUDA coh_fdmt_cuda(
-        plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-        plan.get_tbin(), plan.get_nbin(), plan.get_nfft(), plan.get_t_p(),
-        plan.get_dm_max(), plan.get_dm_min(), plan.get_noverlap());
+    CohFDMT coh_fdmt_cuda(plan.get_f_center(), plan.get_bw_sub(),
+                          plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
+                          plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
+                          plan.get_dm_min(), plan.get_noverlap(), "PRITF",
+                          test::gpu_exec());
 
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
@@ -96,10 +97,10 @@ TEST_CASE("CohFDMTCUDA Host and Device Execution Parity",
 
     coh_fdmt_cuda.reset_history();
     coh_fdmt_cuda.execute<uint8_t>(
-        cuda::std::span<const uint8_t>(
-            thrust::raw_pointer_cast(data_in_d.data()), data_in_d.size()),
-        cuda::std::span<float>(thrust::raw_pointer_cast(dmt_d.data()),
-                               dmt_d.size()));
+        DeviceSpan<const uint8_t>(thrust::raw_pointer_cast(data_in_d.data()),
+                                  data_in_d.size()),
+        DeviceSpan<float>(thrust::raw_pointer_cast(dmt_d.data()),
+                          dmt_d.size()));
 
     std::vector<float> dmt_cuda_dev(dmt_size, 0.0F);
     thrust::copy(dmt_d.begin(),
@@ -112,15 +113,15 @@ TEST_CASE("CohFDMTCUDA Host and Device Execution Parity",
         Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-2).margin(1.0E-2));
 }
 
-TEST_CASE("CohFDMTCUDA Multi-block Streaming and History Reset",
+TEST_CASE("CohFDMT Multi-block Streaming and History Reset",
           "[cfdmt_gpu][gpu]") {
 
     const auto plan = make_cuda_test_plan();
 
-    CohFDMTCUDA coh_fdmt(plan.get_f_center(), plan.get_bw_sub(),
-                         plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
-                         plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
-                         plan.get_dm_min(), plan.get_noverlap());
+    CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                     plan.get_noverlap(), "PRITF", test::gpu_exec());
 
     const SizeType in_size =
         SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
@@ -161,16 +162,16 @@ TEST_CASE("CohFDMTCUDA Multi-block Streaming and History Reset",
     test::require_approx(dmt_b1_initial, dmt_b1_repeated, 1.0E-5);
 }
 
-TEST_CASE("CohFDMTCUDA synthetic impulse peaks near DM 0", "[cfdmt_gpu][gpu]") {
+TEST_CASE("CohFDMT synthetic impulse peaks near DM 0", "[cfdmt_gpu][gpu]") {
     const auto plan = make_cuda_test_plan();
-    CohFDMTCUDA coh_fdmt(plan.get_f_center(), plan.get_bw_sub(),
-                         plan.get_nsub(), plan.get_tbin(), plan.get_nbin(),
-                         plan.get_nfft(), plan.get_t_p(), plan.get_dm_max(),
-                         plan.get_dm_min(), plan.get_noverlap());
-    CohFDMTCPU coh_cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                       plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                       plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                       plan.get_noverlap());
+    CohFDMT coh_fdmt(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                     plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                     plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                     plan.get_noverlap(), "PRITF", test::gpu_exec());
+    CohFDMT coh_cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
+                    plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
+                    plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
+                    plan.get_noverlap());
 
     const SizeType nsamp   = plan.get_nsamp();
     const SizeType nsub    = plan.get_nsub();

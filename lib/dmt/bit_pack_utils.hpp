@@ -158,7 +158,7 @@ constexpr uint32_t max_sample_value(SizeType nbits) noexcept {
     return (1U << nbits) - 1U;
 }
 
-#ifndef __CUDA_ARCH__
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 namespace detail {
 
 template <unsigned NBITS, typename T>
@@ -179,7 +179,7 @@ DMT_H void unpack_row_subbyte(const uint8_t* __restrict__ row,
         constexpr uint32_t kMask = (1U << NBITS) - 1U;
         for (SizeType b = 0; b < nfull; ++b) {
             const auto byte = static_cast<uint32_t>(row[b]);
-#if defined(_OPENMP) && !defined(__CUDACC__)
+#if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd
 #endif
             for (SizeType k = 0; k < kPerByte; ++k) {
@@ -208,7 +208,7 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
     static_assert(detail::is_packed_nbits(NBITS),
                   "unpack_row: NBITS must be 1, 2, 4, 8, or 16");
     if constexpr (NBITS == 8) {
-#if defined(_OPENMP) && !defined(__CUDACC__)
+#if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd
 #endif
         for (SizeType i = 0; i < nsamps; ++i) {
@@ -216,7 +216,7 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
         }
     } else if constexpr (NBITS == 16) {
         const auto* words = reinterpret_cast<const uint16_t*>(row);
-#if defined(_OPENMP) && !defined(__CUDACC__)
+#if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd
 #endif
         for (SizeType i = 0; i < nsamps; ++i) {
@@ -255,6 +255,6 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
     }
 }
 
-#endif // !defined(__CUDA_ARCH__)
+#endif // host only
 
 } // namespace dmt::bit_pack_utils

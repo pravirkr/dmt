@@ -27,7 +27,7 @@ class TestFDMTSensitivity:
     def test_offgrid_recovery_fraction_floor(self) -> None:
         f_min, f_max, tsamp, nchans, dt_max = 1000.0, 1500.0, 1.0, 64, 64
         nsamps = 4 * dt_max
-        fdmt = libdmt.FDMTCPU(f_min, f_max, nchans, nsamps, tsamp, dt_max)
+        fdmt = libdmt.FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max)
 
         dt_values = np.linspace(1.0, dt_max - 1.0, 12)
         phases = np.linspace(0.0, 0.9, 5)
