@@ -1,6 +1,8 @@
 #pragma once
 
+#include <bit>
 #include <cassert>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -130,6 +132,41 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
                                           float f_max,
                                           SizeType nchans,
                                           float tol);
+
+/**
+ * @brief DDplan-style piecewise-uniform version of generate_levin_dm_grid().
+ *
+ * The range is split where the Levin step doubles; each segment is uniformly
+ * spaced at the smallest Levin step inside it (never coarser than the Levin
+ * grid, so at least its sensitivity), refined to at least @p min_run trials.
+ * DDMTFFT runs one NUFFT per segment. Ends at the Levin grid's last trial or
+ * just past it.
+ */
+std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
+                                                    float dm_end,
+                                                    float tsamp,
+                                                    float pulse_width,
+                                                    float f_min,
+                                                    float f_max,
+                                                    SizeType nchans,
+                                                    float tol,
+                                                    SizeType min_run = 32);
+
+/**
+ * @brief True if @p v is finite, tested on the bit pattern. Release builds
+ * use -ffast-math, under which std::isfinite and NaN comparisons may be
+ * folded away; validation of user input must not depend on them.
+ */
+[[nodiscard]] constexpr bool is_finite_bits(double v) noexcept {
+    constexpr std::uint64_t kExp = 0x7FF0000000000000ULL;
+    return (std::bit_cast<std::uint64_t>(v) & kExp) != kExp;
+}
+
+/**
+ * @brief Smallest FFT-friendly length >= n: even, and a product of the
+ * primes 2, 3, 5 and 7 only (FFTW and cuFFT have fast codelets for these).
+ */
+SizeType next_fft_size(SizeType n);
 
 // Compute the optimal minimum overlap based on the dispersion delay
 // and the number of channels.

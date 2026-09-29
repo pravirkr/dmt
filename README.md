@@ -17,7 +17,7 @@
 
 </div>
 
-**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, and **FDMT-FFT**.
+**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, **FDMT-FFT** and **DDMT-FFT** (NUFFT-accelerated).
 
 | Dispersed Waterfall Input $I(\nu, t)$ | Dedispersed DM-Time Plane $DMT(\text{DM}, t)$ |
 | :---: | :---: |
@@ -147,12 +147,13 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.5.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
-8 threads), and an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
+Measured on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads,
+dmt 0.6.0) and an NVIDIA L40S (dmt 0.5.0). The data are 4096 channels (704–1216 MHz, 81.92 µs) in
 16K-sample blocks (1.34 s), processed as a stream.
 
-- **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT and
-  SDMT (exact DDMT sums with shared partial sums) on the same DM grid. The grey line is real time.
+- **Left:** time per block for FDMT, FFT-based FDMT (fractional delays),
+  brute-force DDMT, SDMT (exact DDMT sums with shared partial sums) and
+  DDMT-FFT (exact fractional delays, NUFFT) on the same DM grid. The grey line is real time.
 - **Right:** how many times faster than real time FDMT runs, by input bit
   width.
 
@@ -162,8 +163,14 @@ Measured with dmt 0.5.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
 </picture>
 
 At 2049 DM trials, FDMT is 11× faster than brute-force DDMT on the Xeon
-and 37× on the M1 Pro (down from 336× in 0.3.0), and 3–8× faster than SDMT, which
-runs 6–21× faster than real time across both CPUs. On the L40S, FDMT is 4.4×
+and 33× on the M1 Pro (down from 336× in 0.3.0), and 3–8× faster than SDMT, which
+runs 6–21× faster than real time across both CPUs. In 0.6.0 the Fourier-domain engines
+use fractional delays. FDMT-FFT takes 83 ms per block on the M1 Pro (3.3× FDMT)
+and 1.7× FDMT on the Xeon, where 0.5.0's integer-only engine took 415 ms and
+13× FDMT. The new DDMT-FFT, with exact per-channel delays, runs 4–8× faster than
+the rounded-delay DDMT (111 ms on the M1 Pro). The 0.6.0 Xeon run
+shared its host with other jobs, so the Xeon figures above for the unchanged
+engines are from the quiet 0.5.0 run (see the Benchmarks page). On the L40S, FDMT is 4.4×
 faster than DDMT (whose DM-tiled kernels run 63–95× faster than real time) and
 1.8× faster than SDMT (159–178× real time). FDMT runs 25–53× faster than real
 time on 8 CPU threads and 280× on the L40S, rising to 610× with packed 1-bit
@@ -212,6 +219,7 @@ archivePrefix = {arXiv},
 The algorithms implemented in `dmt` build upon foundational literature and open-source frameworks:
 
 - **FDMT, FDMT-FFT, CFDMT:** Zackay & Ofek (2017), *ApJ*, 835, 11 ([arXiv:1411.5373](https://arxiv.org/abs/1411.5373))
+- **DDMT-FFT (FDD):** Bassa et al. (2022), *A&A*, 657, A46 (Fourier-domain dedispersion); NUFFT kernel: Barnett, Magland & af Klinteberg (2019), *SIAM J. Sci. Comput.*, 41, C479
 - **DDMT:** Barsdell et al. (2012), *MNRAS*, 422, 379 ([doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x))
 - **SDMT:** Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825))
 

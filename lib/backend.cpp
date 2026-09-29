@@ -173,6 +173,26 @@ void DDMTEngine::load_history(DeviceSpan<const uint8_t> /*in*/,
     throw_no_device_memory("DDMT::load_history", backend());
 }
 
+void DDMTFFTEngine::execute(DeviceSpan<const float> /*waterfall*/,
+                            DeviceSpan<float> /*dmt*/,
+                            Stream /*stream*/) {
+    throw_no_device_memory("DDMTFFT::execute", backend());
+}
+void DDMTFFTEngine::execute(DeviceSpan<const uint8_t> /*waterfall_packed*/,
+                            SizeType /*nsamps*/,
+                            DeviceSpan<float> /*dmt*/,
+                            Stream /*stream*/) {
+    throw_no_device_memory("DDMTFFT::execute", backend());
+}
+void DDMTFFTEngine::save_history(DeviceSpan<float> /*out*/,
+                                 Stream /*stream*/) const {
+    throw_no_device_memory("DDMTFFT::save_history", backend());
+}
+void DDMTFFTEngine::load_history(DeviceSpan<const float> /*in*/,
+                                 Stream /*stream*/) {
+    throw_no_device_memory("DDMTFFT::load_history", backend());
+}
+
 void FDMTFFTEngine::execute(DeviceSpan<const float> /*waterfall*/,
                             DeviceSpan<float> /*dmt*/,
                             Stream /*stream*/) {

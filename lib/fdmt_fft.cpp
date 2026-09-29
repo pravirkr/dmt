@@ -13,7 +13,10 @@
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/dm_utils.hpp"
 #include "dmt/engines.hpp"
+#include "dmt/fdmt_fft_common.hpp"
+#include "dmt/logging.hpp"
 #include "dmt/modes.hpp"
 
 namespace dmt::algorithms {
@@ -42,19 +45,44 @@ public:
          bool use_box_smearing,
          std::string_view mode,
          Exec exec,
-         SizeType nbeams)
+         SizeType nbeams,
+         bool fractional_delays)
         : m_plan(std::move(plan)),
           m_cfg{
-              .use_box_smearing = use_box_smearing,
-              .mode             = parse_fdmt_mode(mode),
-              .nbeams           = nbeams,
-              .exec             = exec,
+              .use_box_smearing  = use_box_smearing,
+              .mode              = parse_fdmt_mode(mode),
+              .nbeams            = nbeams,
+              .exec              = exec,
+              .fractional_delays = fractional_delays,
           },
-          m_engine(make_fdmt_fft_engine(m_plan, m_cfg)) {}
+          m_geom(fdmt_fft::make_geometry(
+              m_plan, m_cfg.mode, fractional_delays, use_box_smearing)),
+          m_engine(make_fdmt_fft_engine(m_plan, m_cfg)) {
+        const auto ns = m_plan.get_nsamps();
+        if (m_cfg.mode == FDMTMode::kValid && (2 * ns) < (3 * m_geom.overlap)) {
+            logging::debug("FDMTFFT: blocks of {} samples against a {}-sample "
+                           "overlap keep only {:.0f}% of each transform; "
+                           "blocks of >= {} samples (get_suggested_nsamps()) "
+                           "keep 80%",
+                           ns, m_geom.overlap,
+                           100.0 * static_cast<double>(ns) /
+                               static_cast<double>(ns + m_geom.overlap),
+                           suggested_nsamps());
+        }
+    }
+
+    [[nodiscard]] SizeType suggested_nsamps() const {
+        if (m_cfg.mode != FDMTMode::kValid) {
+            return m_plan.get_nsamps();
+        }
+        const auto h = std::max<SizeType>(m_geom.overlap, 1);
+        return utils::next_fft_size(5 * h) - h;
+    }
 
     // The engine holds a pointer to m_plan; declaration order matters.
     plans::FDMTPlan m_plan;
     detail::FDMTFFTEngineConfig m_cfg;
+    fdmt_fft::Geometry m_geom;
     std::unique_ptr<detail::FDMTFFTEngine> m_engine;
 
     [[nodiscard]] bool on_cpu() const noexcept {
@@ -88,7 +116,8 @@ FDMTFFT::FDMTFFT(float f_min,
                  bool use_box_smearing,
                  std::string_view mode,
                  Exec exec,
-                 SizeType nbeams)
+                 SizeType nbeams,
+                 bool fractional_delays)
     : m_impl(std::make_unique<Impl>(plans::FDMTPlan(f_min,
                                                     f_max,
                                                     nchans,
@@ -101,7 +130,8 @@ FDMTFFT::FDMTFFT(float f_min,
                                     use_box_smearing,
                                     mode,
                                     exec,
-                                    nbeams)) {}
+                                    nbeams,
+                                    fractional_delays)) {}
 
 FDMTFFT::FDMTFFT(float f_min,
                  float f_max,
@@ -112,13 +142,15 @@ FDMTFFT::FDMTFFT(float f_min,
                  bool use_box_smearing,
                  std::string_view mode,
                  Exec exec,
-                 SizeType nbeams)
+                 SizeType nbeams,
+                 bool fractional_delays)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
           use_box_smearing,
           mode,
           exec,
-          nbeams)) {}
+          nbeams,
+          fractional_delays)) {}
 
 FDMTFFT::FDMTFFT(float f_min,
                  float f_max,
@@ -129,13 +161,15 @@ FDMTFFT::FDMTFFT(float f_min,
                  bool use_box_smearing,
                  std::string_view mode,
                  Exec exec,
-                 SizeType nbeams)
+                 SizeType nbeams,
+                 bool fractional_delays)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
           use_box_smearing,
           mode,
           exec,
-          nbeams)) {}
+          nbeams,
+          fractional_delays)) {}
 
 FDMTFFT::~FDMTFFT()                                   = default;
 FDMTFFT::FDMTFFT(FDMTFFT&& other) noexcept            = default;
@@ -151,6 +185,15 @@ int FDMTFFT::nthreads() const noexcept {
 }
 int FDMTFFT::device() const noexcept {
     return m_impl->on_cpu() ? -1 : m_impl->m_cfg.exec.device;
+}
+bool FDMTFFT::fractional_delays() const noexcept {
+    return m_impl->m_cfg.fractional_delays;
+}
+SizeType FDMTFFT::get_output_latency() const noexcept {
+    return m_impl->m_geom.latency;
+}
+SizeType FDMTFFT::get_suggested_nsamps() const noexcept {
+    return m_impl->suggested_nsamps();
 }
 
 void FDMTFFT::execute(std::span<const float> waterfall, std::span<float> dmt) {
@@ -269,9 +312,10 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  bool use_box_smearing,
                  std::string_view mode,
                  Exec exec,
-                 SizeType nbeams) {
+                 SizeType nbeams,
+                 bool fractional_delays) {
     FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                 use_box_smearing, mode, exec, nbeams);
+                 use_box_smearing, mode, exec, nbeams, fractional_delays);
     return run_compute_fdmt_fft(fdmt, waterfall);
 }
 
@@ -286,9 +330,10 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  bool use_box_smearing,
                  std::string_view mode,
                  Exec exec,
-                 SizeType nbeams) {
+                 SizeType nbeams,
+                 bool fractional_delays) {
     FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_grid, use_box_smearing,
-                 mode, exec, nbeams);
+                 mode, exec, nbeams, fractional_delays);
     return run_compute_fdmt_fft(fdmt, waterfall);
 }
 
@@ -303,9 +348,10 @@ compute_fdmt_fft(std::span<const float> waterfall,
                  bool use_box_smearing,
                  std::string_view mode,
                  Exec exec,
-                 SizeType nbeams) {
+                 SizeType nbeams,
+                 bool fractional_delays) {
     FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dm_grid, use_box_smearing,
-                 mode, exec, nbeams);
+                 mode, exec, nbeams, fractional_delays);
     return run_compute_fdmt_fft(fdmt, waterfall);
 }
 

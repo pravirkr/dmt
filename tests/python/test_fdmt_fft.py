@@ -34,8 +34,17 @@ class TestFDMTFFT:
         rng = np.random.default_rng(42)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
+        # Integer delays: the FDMT-equivalence mode.
         fdmt_fft = FDMTFFT(
-            f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min, mode="roll"
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            dt_min,
+            mode="roll",
+            fractional_delays=False,
         )
         fdmt_roll = FDMT(
             f_min, f_max, nchans, nsamples, tsamp, dt_max, dt_min, mode="roll"
@@ -57,7 +66,16 @@ class TestFDMTFFT:
         rng = np.random.default_rng(7)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full")
+        fdmt_fft = FDMTFFT(
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            mode="full",
+            fractional_delays=False,
+        )
         fdmt = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="full")
         a = fdmt_fft.execute(waterfall)
         b = fdmt.execute(waterfall)
@@ -74,7 +92,16 @@ class TestFDMTFFT:
         dt_max = 24
         rng = np.random.default_rng(3)
 
-        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt_fft = FDMTFFT(
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            mode="valid",
+            fractional_delays=False,
+        )
         fdmt = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
         fdmt_fft.reset_history()
         fdmt.reset_history()
@@ -98,7 +125,16 @@ class TestFDMTFFT:
         rng = np.random.default_rng(123)
         waterfall = rng.standard_normal((nchans, nsamples), dtype=np.float32)
 
-        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
+        fdmt_fft = FDMTFFT(
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            mode="roll",
+            fractional_delays=False,
+        )
         fdmt_roll = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="roll")
 
         np.testing.assert_allclose(
@@ -238,7 +274,16 @@ class TestFDMTFFT:
         tsamp = 0.001
         dt_max = 24
         rng = np.random.default_rng(4)
-        fdmt_fft = FDMTFFT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
+        fdmt_fft = FDMTFFT(
+            f_min,
+            f_max,
+            nchans,
+            nsamples,
+            tsamp,
+            dt_max,
+            mode="valid",
+            fractional_delays=False,
+        )
         fdmt = FDMT(f_min, f_max, nchans, nsamples, tsamp, dt_max, mode="valid")
         fdmt_fft.reset_history()
         fdmt.reset_history()

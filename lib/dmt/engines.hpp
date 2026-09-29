@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 
+#include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
@@ -206,6 +207,79 @@ std::unique_ptr<DDMTEngine> make_sdmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
 std::unique_ptr<DDMTEngine> make_sdmt_gpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
+// ---------------------------------------------------------------------------
+// DDMTFFT
+// ---------------------------------------------------------------------------
+
+struct DDMTFFTEngineConfig {
+    SizeType nbeams{1};
+    Exec exec{};
+    DDMTFFTOptions options{}; // method resolved by the facade (never kAuto)
+};
+
+class DDMTFFTEngine {
+public:
+    DDMTFFTEngine()                                = default;
+    virtual ~DDMTFFTEngine()                       = default;
+    DDMTFFTEngine(const DDMTFFTEngine&)            = delete;
+    DDMTFFTEngine& operator=(const DDMTFFTEngine&) = delete;
+    DDMTFFTEngine(DDMTFFTEngine&&)                 = delete;
+    DDMTFFTEngine& operator=(DDMTFFTEngine&&)      = delete;
+
+    // Host memory: every backend.
+    virtual void execute(std::span<const float> waterfall,
+                         std::span<float> dmt)            = 0;
+    virtual void execute(std::span<const uint8_t> waterfall_packed,
+                         SizeType nsamps,
+                         std::span<float> dmt)            = 0;
+    virtual void execute_time_major(std::span<const uint8_t> filterbank_packed,
+                                    SizeType nsamps,
+                                    std::span<float> dmt) = 0;
+    virtual void save_history(std::span<float> out) const = 0;
+    virtual void load_history(std::span<const float> in)  = 0;
+
+    // Device memory: GPU backends.
+    virtual void execute(DeviceSpan<const float> waterfall,
+                         DeviceSpan<float> dmt,
+                         Stream stream);
+    virtual void execute(DeviceSpan<const uint8_t> waterfall_packed,
+                         SizeType nsamps,
+                         DeviceSpan<float> dmt,
+                         Stream stream);
+    virtual void save_history(DeviceSpan<float> out, Stream stream) const;
+    virtual void load_history(DeviceSpan<const float> in, Stream stream);
+
+    [[nodiscard]] virtual SizeType
+    get_output_nsamps(SizeType input_nsamps) const noexcept            = 0;
+    virtual void reset_history() noexcept                              = 0;
+    [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
+    [[nodiscard]] virtual SizeType max_delay() const noexcept          = 0;
+    virtual void set_gulp_size(SizeType gulp_size)                     = 0;
+    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept      = 0;
+    /// "nufft", "piecewise_nufft" or "brute": what the engine actually runs
+    /// (a GPU engine falls back to brute force for runs whose fine grid
+    /// does not fit shared memory).
+    [[nodiscard]] virtual std::string_view method_used() const noexcept = 0;
+
+protected:
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+};
+
+/// method_used() of an engine running `nruns` NUFFT runs plus `nbrute`
+/// brute-force trials.
+[[nodiscard]] inline std::string_view
+ddmt_fft_method_used(SizeType nruns, SizeType nbrute) noexcept {
+    if (nruns == 0) {
+        return "brute";
+    }
+    return (nruns == 1 && nbrute == 0) ? "nufft" : "piecewise_nufft";
+}
+
+std::unique_ptr<DDMTFFTEngine>
+make_ddmt_fft_cpu(const plans::DDMTPlan& plan, const DDMTFFTEngineConfig& cfg);
+std::unique_ptr<DDMTFFTEngine>
+make_ddmt_fft_gpu(const plans::DDMTPlan& plan, const DDMTFFTEngineConfig& cfg);
+
 // Testing hook: while set, SDMT GPU engines constructed afterwards run the
 // shared-sum kernel whenever its programs fit, even where the DDMT kernel is
 // estimated to be faster (so tests cover it on small plans).
@@ -221,6 +295,9 @@ struct FDMTFFTEngineConfig {
     FDMTMode mode{FDMTMode::kValid};
     SizeType nbeams{1};
     Exec exec{};
+    // Fractional merge delays (fdmt_fft_common.hpp); false only for
+    // FDMT-equivalence tests.
+    bool fractional_delays{true};
 };
 
 class FDMTFFTEngine {

@@ -39,7 +39,7 @@ project = "dmt"
 author = "Pravir Kumar"
 year = datetime.datetime.now(tz=datetime.UTC).date().year
 copyright = f"{year}, {author}"  # noqa: A001
-release = getattr(dmtlib, "__version__", None) or "0.5.0"
+release = getattr(dmtlib, "__version__", None) or "0.6.0"
 version = release
 master_doc = "index"
 repo_url = "https://github.com/pravirkr/dmt"
@@ -450,6 +450,17 @@ Compute Engines (``dmt::algorithms``)
    :project: dmt
    :members:
 
+.. doxygenclass:: dmt::algorithms::DDMTFFT
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::DDMTFFTOptions
+   :project: dmt
+   :members:
+
+.. doxygenenum:: dmt::algorithms::DDMTFFTMethod
+   :project: dmt
+
 .. doxygenstruct:: dmt::algorithms::FDMTSubbandView
    :project: dmt
    :members:
@@ -469,6 +480,12 @@ Backends (``dmt/common/backend.hpp``)
 -------------------------------------
 
 .. doxygenfile:: backend.hpp
+   :project: dmt
+
+FFT settings (``dmt/common/fft_config.hpp``)
+--------------------------------------------
+
+.. doxygenfile:: fft_config.hpp
    :project: dmt
 
 Plans & Geometry (``dmt::plans``)

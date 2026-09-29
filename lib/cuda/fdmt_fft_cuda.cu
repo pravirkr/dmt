@@ -1,6 +1,7 @@
 #include "dmt/algorithms/fdmt_fft.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -17,6 +18,7 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/engines.hpp"
+#include "dmt/fdmt_fft_common.hpp"
 #include "dmt/fft_cuda.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/modes.hpp"
@@ -183,6 +185,87 @@ kernel_execute_iter_fft(const ComplexTypeGPU* __restrict__ state_in,
     }
 }
 
+// (n * k) mod N for n, k < N < 2^31, exact: Barrett reduction with
+// magic = floor((2^64 - 1) / N), whose quotient is at most one short (no
+// 64-bit division in the hot loop).
+__device__ __forceinline__ unsigned
+fft_mod_mul(unsigned n, unsigned k, unsigned big_n, unsigned long long magic) {
+    const unsigned long long nk =
+        static_cast<unsigned long long>(n) * static_cast<unsigned long long>(k);
+    const unsigned long long q = __umul64hi(nk, magic);
+    unsigned long long r       = nk - (q * big_n);
+    if (r >= big_n) {
+        r -= big_n;
+    }
+    return static_cast<unsigned>(r);
+}
+
+// kernel_execute_iter_fft with real-valued merge shifts (fractional delays):
+// W^(s k) for s = s_int + s_frac, the integer part reduced exactly modulo N
+// (fft_mod_mul), the fractional part added in float, then sin/cos of the
+// turn count reduced to [-1/2, 1/2].
+__global__ void
+kernel_execute_iter_fft_frac(const ComplexTypeGPU* __restrict__ state_in,
+                             ComplexTypeGPU* __restrict__ state_out,
+                             const plans::FDMTCoordDPtrs coords_sum,
+                             const plans::FDMTCoordDPtrs coords_copy,
+                             const int* __restrict__ shift_int,
+                             const float* __restrict__ shift_frac,
+                             int n_fft,
+                             unsigned long long magic,
+                             int n_bins,
+                             int ncoords_sum_cur,
+                             int ncoords_copy_cur,
+                             int max_coords) {
+    const auto linear =
+        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto i_beam         = static_cast<int64_t>(blockIdx.y);
+    const int max_iter_coords = (ncoords_sum_cur > ncoords_copy_cur)
+                                    ? ncoords_sum_cur
+                                    : ncoords_copy_cur;
+    const int total           = max_iter_coords * n_bins;
+    if (linear >= total) {
+        return;
+    }
+    const int k       = linear % n_bins;
+    const int i_coord = linear / n_bins;
+
+    if (i_coord < ncoords_sum_cur) {
+        const auto tail_idx = coords_sum.tail_buf_offset[i_coord] /
+                              coords_sum.tail_nsamps[i_coord];
+        const auto head_idx = coords_sum.head_buf_offset[i_coord] /
+                              coords_sum.head_nsamps[i_coord];
+        const auto out_idx =
+            coords_sum.buf_offset[i_coord] / coords_sum.nsamps[i_coord];
+        const auto beam_base = i_beam * max_coords * n_bins;
+        const ComplexTypeGPU tail =
+            state_in[beam_base + (tail_idx * n_bins) + k];
+        const ComplexTypeGPU head =
+            state_in[beam_base + (head_idx * n_bins) + k];
+        const auto m = fft_mod_mul(static_cast<unsigned>(shift_int[i_coord]),
+                                   static_cast<unsigned>(k),
+                                   static_cast<unsigned>(n_fft), magic);
+        float u      = fmaf(shift_frac[i_coord], static_cast<float>(k),
+                            static_cast<float>(m)) /
+                       static_cast<float>(n_fft);
+        u -= rintf(u);
+        float sn = 0.0F;
+        float cs = 0.0F;
+        sincospif(-2.0F * u, &sn, &cs);
+        state_out[beam_base + (out_idx * n_bins) + k] =
+            tail + (head * ComplexTypeGPU(cs, sn));
+    }
+    if (i_coord < ncoords_copy_cur) {
+        const auto tail_idx = coords_copy.tail_buf_offset[i_coord] /
+                              coords_copy.tail_nsamps[i_coord];
+        const auto out_idx =
+            coords_copy.buf_offset[i_coord] / coords_copy.nsamps[i_coord];
+        const auto beam_base = i_beam * max_coords * n_bins;
+        state_out[beam_base + (out_idx * n_bins) + k] =
+            state_in[beam_base + (tail_idx * n_bins) + k];
+    }
+}
+
 __global__ void kernel_trim_scale(const float* __restrict__ time_out,
                                   float* __restrict__ dmt,
                                   int ndms,
@@ -240,6 +323,7 @@ public:
           m_device_id(cfg.exec.device),
           m_use_box_smearing(cfg.use_box_smearing),
           m_mode(cfg.mode),
+          m_frac(cfg.fractional_delays),
           m_plan(&plan) {
         initialize();
     }
@@ -528,8 +612,12 @@ private:
     int m_device_id;
     bool m_use_box_smearing;
     FDMTMode m_mode;
+    bool m_frac; // real-valued merge shifts (fdmt_fft_common.hpp)
     const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
     plans::FDMTPlanContainerD m_plan_d;
+    // Fractional merge shifts, flattened like the device coordinates_sum.
+    thrust::device_vector<int> m_shift_int_d;
+    thrust::device_vector<float> m_shift_frac_d;
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
 
@@ -607,17 +695,43 @@ private:
 
     void initialize() {
         gpu_utils::set_device(m_device_id);
-        m_ndms         = m_plan->get_dmt_ndms();
-        m_n_fft        = m_plan->get_fft_size();
-        m_n_bins       = m_plan->get_fft_n_bins();
-        m_fft_buf_size = m_plan->get_fft_buffer_size();
-        m_max_s        = m_plan->get_max_shift();
-        m_overlap_len  = m_plan->get_fft_overlap();
-        m_nsamps_out   = m_plan->get_dmt_nsamps();
-        m_out_skip     = (m_mode == FDMTMode::kValid) ? m_overlap_len : 0;
-        m_max_coords   = 0;
+        // Same transform geometry as the CPU engine (fdmt_fft_common.hpp):
+        // the plan's for integer delays, longer with fractional ones.
+        const auto geom = fdmt_fft::make_geometry(*m_plan, m_mode, m_frac,
+                                                  m_use_box_smearing);
+        m_ndms          = m_plan->get_dmt_ndms();
+        m_n_fft         = geom.n_fft;
+        m_n_bins        = (m_n_fft / 2) + 1;
+        m_max_s         = m_plan->get_max_shift();
+        m_overlap_len   = geom.overlap;
+        m_nsamps_out    = m_plan->get_dmt_nsamps();
+        m_out_skip      = geom.skip;
+        if (m_mode == FDMTMode::kValid &&
+            m_nsamps_out != m_plan->get_nsamps()) {
+            throw std::logic_error("FDMTFFT: valid mode expects nsamps output");
+        }
+        if (m_out_skip + m_nsamps_out > m_n_fft) {
+            throw std::logic_error("FDMTFFT: output exceeds the FFT length");
+        }
+        m_max_coords = 0;
         for (const auto& shape : m_plan->get_container().state_shape) {
             m_max_coords = std::max(m_max_coords, shape.ncoords);
+        }
+        m_fft_buf_size = m_max_coords * m_n_bins;
+        if (m_frac) {
+            const auto frac =
+                fdmt_fft::fractional_delays(*m_plan, m_use_box_smearing);
+            std::vector<int> si;
+            std::vector<float> sf;
+            for (SizeType l = 1; l < frac.shift.size(); ++l) {
+                for (const double v : frac.shift[l]) {
+                    const double fl = std::floor(v);
+                    si.push_back(static_cast<int>(fl));
+                    sf.push_back(static_cast<float>(v - fl));
+                }
+            }
+            m_shift_int_d  = si;
+            m_shift_frac_d = sf;
         }
 
         plans::transfer_fdmt_plan_to_device(m_plan->get_container(), m_plan_d);
@@ -635,17 +749,28 @@ private:
                 m_plan->get_container().state_shape[i].ncoords_copy);
         }
 
-        const auto phasors_h = m_plan->get_fft_phasor_table();
-        std::vector<ComplexTypeGPU> phasors_cuda(phasors_h.size());
-        for (SizeType i = 0; i < phasors_h.size(); ++i) {
-            phasors_cuda[i] =
-                ComplexTypeGPU(phasors_h[i].real(), phasors_h[i].imag());
+        // Phasors W^(s k) at this engine's transform length (exact in
+        // double): merges read them up to max_shift with integer delays;
+        // with fractional delays only the level-0 windows (s <= level-0
+        // dt_max) do.
+        const SizeType table_s =
+            m_frac ? m_plan->get_container().state_shape[0].dt_max : m_max_s;
+        std::vector<ComplexTypeGPU> phasors_cuda((table_s + 1) * m_n_bins);
+        for (SizeType sft = 0; sft <= table_s; ++sft) {
+            for (SizeType k = 0; k < m_n_bins; ++k) {
+                const double a = -2.0 * 3.14159265358979323846 *
+                                 static_cast<double>((sft * k) % m_n_fft) /
+                                 static_cast<double>(m_n_fft);
+                phasors_cuda[(sft * m_n_bins) + k] =
+                    ComplexTypeGPU(static_cast<float>(std::cos(a)),
+                                   static_cast<float>(std::sin(a)));
+            }
         }
         m_phasors_d = phasors_cuda;
-        std::vector<ComplexTypeGPU> boxcar_h((m_max_s + 1) * m_n_bins);
+        std::vector<ComplexTypeGPU> boxcar_h((table_s + 1) * m_n_bins);
         for (SizeType k = 0; k < m_n_bins; ++k) {
             ComplexTypeGPU accum{0.0F, 0.0F};
-            for (SizeType s = 0; s <= m_max_s; ++s) {
+            for (SizeType s = 0; s <= table_s; ++s) {
                 accum += phasors_cuda[(s * m_n_bins) + k];
                 boxcar_h[(s * m_n_bins) + k] = accum;
             }
@@ -773,6 +898,18 @@ private:
         const dim3 block(256);
         const dim3 grid((total + 255) / 256, static_cast<unsigned>(m_nbeams));
         gpu_utils::check_kernel_launch_params(grid, block);
+        if (m_frac) {
+            const auto off = m_coords_sum_offsets[i_iter];
+            kernel_execute_iter_fft_frac<<<grid, block, 0, stream>>>(
+                state_in, state_out, coords_sum, coords_copy,
+                thrust::raw_pointer_cast(m_shift_int_d.data()) + off,
+                thrust::raw_pointer_cast(m_shift_frac_d.data()) + off,
+                static_cast<int>(m_n_fft),
+                ~0ULL / static_cast<unsigned long long>(m_n_fft),
+                static_cast<int>(m_n_bins), n_sum, n_copy,
+                static_cast<int>(m_max_coords));
+            return;
+        }
         kernel_execute_iter_fft<<<grid, block, 0, stream>>>(
             state_in, state_out, coords_sum, coords_copy,
             reinterpret_cast<const ComplexTypeGPU*>(

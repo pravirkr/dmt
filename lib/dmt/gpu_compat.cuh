@@ -76,6 +76,7 @@ namespace cuda = ::thrust::hip;
 #define cudaFreeHost hipHostFree
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync
+#define cudaMemsetAsync hipMemsetAsync
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamDestroy hipStreamDestroy

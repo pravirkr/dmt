@@ -8,6 +8,7 @@ This guide covers real-world telescope pipeline engineering: continuous data str
 streaming_and_history
 multibeam
 performance
+fourier_variants
 noise_calibration
 quirks_and_gotchas
 ```
@@ -19,5 +20,6 @@ quirks_and_gotchas
 - [Streaming & Overlap-Save History](streaming_and_history.md): How `dmt` preserves 100% of dispersed signals across block boundaries without edge artifacts.
 - [Multi-Beam Batching](multibeam.md): Processing several tied-array beams with one shared plan, on the CPU and the GPU.
 - [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree), packed low-bit input, threads and block size, and which optimizations were measured and rejected.
+- [Fourier-Domain Variants](fourier_variants.md): FDMT-FFT and DDMT-FFT, when to use them, exact fractional delays, NUFFT / piecewise NUFFT / brute force, the piecewise-uniform Levin grid, block length, guard and FFT planner settings.
 - [Noise Calibration & SNR Scaling](noise_calibration.md): Converting raw integrated flux into true statistical Signal-to-Noise Ratio ($\text{SNR}$).
 - [Quirks & Gotchas](quirks_and_gotchas.md): Output lengths per mode, output buffers (`buffer_size` vs `dmt_size`), stepper rules, array contiguity and logging.

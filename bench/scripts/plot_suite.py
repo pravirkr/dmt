@@ -54,8 +54,23 @@ NBITS = [1, 2, 4, 8, 16, 32]
 NBITS_LABELS = [f"{b}-bit" if b < 32 else "float32" for b in NBITS]
 
 Theme = dict[str, Any]
-ALGOS = ["FDMT", "FDMT-FFT", "DDMT", "SDMT"]
-# Validated categorical slots 1-4 (blue, orange, aqua, yellow) for each theme.
+# The five engines compared. FDMT-FFT and DDMT-FFT are the Fourier-domain
+# engines with fractional delays (their point); the suite's integer-delay
+# FDMT-FFT (a verification mode, bit-for-bit comparable with FDMT) and the
+# brute-force DDMT-FFT are measured but not drawn (see SUITE_ALGOS).
+ALGOS = ["FDMT", "FDMT-FFT", "DDMT", "SDMT", "DDMT-FFT"]
+# Suite benchmark name -> plotted engine (None: not plotted).
+SUITE_ALGOS: dict[str, str | None] = {
+    "FDMT": "FDMT",
+    "FDMT-FFT-frac": "FDMT-FFT",
+    "FDMT-FFT": None,
+    "DDMT": "DDMT",
+    "SDMT": "SDMT",
+    "DDMT-FFT": "DDMT-FFT",
+    "DDMT-FFT-brute": None,
+}
+# Validated categorical slots 1-5 (blue, orange, aqua, yellow, magenta) for
+# each theme, in fixed order.
 # Slot 4 sits below 3:1 on the light surface, so every line is direct-labelled.
 THEMES: dict[str, Theme] = {
     "light": {
@@ -70,6 +85,7 @@ THEMES: dict[str, Theme] = {
             "FDMT-FFT": "#eb6834",
             "DDMT": "#1baf7a",
             "SDMT": "#eda100",
+            "DDMT-FFT": "#e87ba4",
         },
     },
     "dark": {
@@ -84,6 +100,7 @@ THEMES: dict[str, Theme] = {
             "FDMT-FFT": "#d95926",
             "DDMT": "#199e70",
             "SDMT": "#c98500",
+            "DDMT-FFT": "#d55181",
         },
     },
 }
@@ -172,10 +189,13 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:
             if parts[0] != "suite":
                 continue
             kv = dict(p.split(":", 1) for p in parts[4:7])
+            algo = SUITE_ALGOS.get(parts[2], parts[2])
+            if algo is None:
+                continue
             key = (
                 mname,
                 parts[1],
-                parts[2],
+                algo,
                 parts[3],
                 int(kv["nsamps"]),
                 int(kv["dtmax"]),
@@ -673,14 +693,17 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
         (
             f"**Reference point**: {NSAMPS_REF} samples {TIMES} {NDMS_REF} DM "
             f"trials ({NSAMPS_REF * TSAMP:.2f} s of data), float32 input, median "
-            "time per block."
+            "time per block. FDMT-FFT and DDMT-FFT use fractional delays "
+            "(DDMT-FFT: NUFFT over the DM axis)."
         ),
         "",
         (
-            "| platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT / FDMT "
-            "| SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |"
+            "| platform | "
+            + " | ".join(ALGOS)
+            + " | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT "
+            "| FDMT real-time factor |"
         ),
-        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| :--- | " + " | ".join("---:" for _ in range(len(ALGOS) + 4)) + " |",
     ]
     ref = {
         (r.machine, r.backend, r.algo): r
@@ -696,7 +719,7 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
                 continue
             cells = [fmt_seconds(t[a].time) if t[a] else "—" for a in ALGOS]
             ratios = [
-                f"{t[a].time / fdmt.time:.0f}{TIMES}" if t[a] else "—"
+                fmt_ratio(t[a].time / fdmt.time) if t[a] else "—"
                 for a in ("DDMT", "SDMT", "FDMT-FFT")
             ]
             plat = machines[mname].platform(kind) + backend_tag(b)
@@ -705,6 +728,10 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
                 f"| {fdmt.rtf:.0f}{TIMES} |"
             )
     return out
+
+
+def fmt_ratio(r: float) -> str:
+    return f"{r:.1f}{TIMES}" if r < 10 else f"{r:.0f}{TIMES}"
 
 
 def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[str]:
@@ -733,7 +760,7 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
             cpu_backends(results, mname) if kind == "cpu" else [kind, f"{kind}_host"]
         )
         for b in backends:
-            for a in ("FDMT", "DDMT", "SDMT"):
+            for a in ("FDMT", "DDMT", "SDMT", "DDMT-FFT"):
                 row = by.get((mname, b, a))
                 if not row:
                     continue

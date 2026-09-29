@@ -542,13 +542,51 @@ public:
         return static_cast<SizeType>(
             std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
     }
-    SizeType get_fft_size() const noexcept {
+    SizeType get_fft_support() const noexcept { return m_fft_support; }
+    SizeType get_fft_size() const noexcept { return m_fft_size; }
+    // Longest delay any root coordinate applies to any input sample, in the
+    // Fourier engines' convention: a level-0 node spans shifts [0, |dt|] and
+    // a merge adds `delay` to its head, so span = max(tail, delay + head).
+    SizeType compute_fft_support() const {
+        const auto& grid0 = m_container.grids[0];
+        std::vector<SizeType> span(m_container.state_shape[0].ncoords, 0);
+        for (const auto& g : grid0) {
+            for (SizeType i = 0; i < g.ndt; ++i) {
+                span[g.coord_offset + i] =
+                    static_cast<SizeType>(std::abs(g.dt_grid[i]));
+            }
+        }
+        for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
+            std::vector<SizeType> next(m_container.state_shape[i_iter].ncoords,
+                                       0);
+            for (const auto& c : m_container.coordinates_sum[i_iter]) {
+                const auto cur  = c.buf_offset / c.nsamps;
+                const auto tail = c.tail_buf_offset / c.tail_nsamps;
+                const auto head = c.head_buf_offset / c.head_nsamps;
+                next[cur]       = std::max(span[tail], c.delay + span[head]);
+            }
+            for (const auto& c : m_container.coordinates_copy[i_iter]) {
+                next[c.buf_offset / c.nsamps] =
+                    span[c.tail_buf_offset / c.tail_nsamps];
+            }
+            span = std::move(next);
+        }
+        return span.empty() ? 0 : std::ranges::max(span);
+    }
+    SizeType compute_fft_size() const {
         if (m_mode == FDMTMode::kRoll) {
             return m_nsamps;
         }
-        // Pad by the trial delay plus the largest tree/level-0 shift so
-        // circular convolution does not wrap into the linear region.
-        return m_nsamps + get_fft_overlap() + get_max_shift();
+        // Circular convolution equals the linear one on the kept samples as
+        // long as nothing the tree spreads past the transform length wraps
+        // back onto them: valid keeps [L, L + nsamps) of an (L + nsamps)
+        // window, full keeps [0, dmt_nsamps) of an nsamps window. Round up
+        // to a length with only small prime factors.
+        const auto support = m_fft_support;
+        const auto n_min = (m_mode == FDMTMode::kValid)
+                               ? m_nsamps + std::max(get_fft_overlap(), support)
+                               : std::max(m_nsamps + support, get_dmt_nsamps());
+        return utils::next_fft_size(n_min);
     }
     SizeType get_fft_n_bins() const noexcept {
         return (get_fft_size() / 2) + 1;
@@ -650,6 +688,8 @@ private:
     SizeType m_niters{};
     FDMTPlanContainer m_container;
     SizeType m_buffer_size{};
+    SizeType m_fft_support{};
+    SizeType m_fft_size{};
 
     void validate_inputs() const {
         if (m_f_min >= m_f_max) {
@@ -829,6 +869,8 @@ private:
         m_container.tree_history_size = total_tree_hist;
 
         m_buffer_size = m_container.get_buffer_size();
+        m_fft_support = compute_fft_support();
+        m_fft_size    = compute_fft_size();
         logging::debug(
             "FDMTPlan: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}",
             m_df, m_dt_max, m_dt_min, m_dt_step, m_niters);
@@ -1584,14 +1626,24 @@ public:
           m_f_max(f_max),
           m_nchans(nchans),
           m_tsamp(tsamp),
-          m_dm_arr(utils::generate_levin_dm_grid(levin.dm_start,
-                                                 levin.dm_end,
-                                                 tsamp,
-                                                 levin.pulse_width,
-                                                 f_min,
-                                                 f_max,
-                                                 nchans,
-                                                 levin.tol)),
+          m_dm_arr(
+              levin.piecewise_uniform
+                  ? utils::generate_levin_dm_grid_piecewise(levin.dm_start,
+                                                            levin.dm_end,
+                                                            tsamp,
+                                                            levin.pulse_width,
+                                                            f_min,
+                                                            f_max,
+                                                            nchans,
+                                                            levin.tol)
+                  : utils::generate_levin_dm_grid(levin.dm_start,
+                                                  levin.dm_end,
+                                                  tsamp,
+                                                  levin.pulse_width,
+                                                  f_min,
+                                                  f_max,
+                                                  nchans,
+                                                  levin.tol)),
           m_nbits(nbits),
           m_kill_mask(kill_mask.begin(), kill_mask.end()) {
         validate_inputs();
@@ -1886,6 +1938,9 @@ SizeType FDMTPlan::get_fft_overlap() const noexcept {
 SizeType FDMTPlan::get_fft_size() const noexcept {
     return m_impl->get_fft_size();
 }
+SizeType FDMTPlan::get_fft_support() const noexcept {
+    return m_impl->get_fft_support();
+}
 SizeType FDMTPlan::get_fft_n_bins() const noexcept {
     return m_impl->get_fft_n_bins();
 }
@@ -2138,5 +2193,19 @@ std::vector<float> DDMTPlan::generate_levin_dm_grid(float dm_start,
                                                     float tol) {
     return utils::generate_levin_dm_grid(dm_start, dm_end, tsamp, pulse_width,
                                          f_min, f_max, nchans, tol);
+}
+std::vector<float>
+DDMTPlan::generate_levin_dm_grid_piecewise(float dm_start,
+                                           float dm_end,
+                                           float tsamp,
+                                           float pulse_width,
+                                           float f_min,
+                                           float f_max,
+                                           SizeType nchans,
+                                           float tol,
+                                           SizeType min_run) {
+    return utils::generate_levin_dm_grid_piecewise(dm_start, dm_end, tsamp,
+                                                   pulse_width, f_min, f_max,
+                                                   nchans, tol, min_run);
 }
 } // namespace dmt::plans

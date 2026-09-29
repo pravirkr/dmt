@@ -129,6 +129,18 @@ def main() -> None:
     )
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")
+    ap.add_argument(
+        "--fftw-planner",
+        default="measure",
+        choices=["estimate", "measure", "patient"],
+        help="FFTW planner effort of the Fourier engines (default measure: what "
+        "a long-running pipeline uses with saved wisdom)",
+    )
+    ap.add_argument(
+        "--fftw-wisdom",
+        help="FFTW wisdom file, reused across runs (default: "
+        "<build-dir>/fftw_<machine>.wisdom)",
+    )
     args = ap.parse_args()
 
     binary = find_binary(args.build_dir)
@@ -156,13 +168,21 @@ def main() -> None:
         "dmt_version": dmt_version(),
         "build_type": btype,
         "threads": args.threads.replace(",", " "),
+        "fftw_planner": args.fftw_planner,
     }
+    wisdom = args.fftw_wisdom or str(
+        binary.parent.parent / f"fftw_{args.machine}.wisdom"
+    )
     env = {
         **os.environ,
         "DMT_BENCH_THREADS": args.threads,
         "DMT_BENCH_MAX_GB": f"{args.max_gb or 0.6 * ram_gb():.1f}",
         "OMP_PROC_BIND": os.environ.get("OMP_PROC_BIND", "close"),
         "OMP_PLACES": os.environ.get("OMP_PLACES", "cores"),
+        # Planned once per size and machine (the first run pays for it, at
+        # engine construction, outside the timed region).
+        "DMT_FFTW_PLANNER": args.fftw_planner,
+        "DMT_FFTW_WISDOM": wisdom,
     }
 
     runs = []

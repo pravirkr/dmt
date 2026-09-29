@@ -14,7 +14,9 @@
  * - Direct Dedispersion Transform (DDMT): @ref dmt::algorithms::DDMT
  * - Coherent Fast Dispersion Measure Transform (CFDMT): @ref
  * dmt::algorithms::CohFDMT
- * - Fourier-Shift FDMT (FDMT-FFT): @ref dmt::algorithms::FDMTFFT
+ * - Fourier-Shift FDMT with exact fractional delays (FDMT-FFT): @ref dmt::algorithms::FDMTFFT
+ * - Fourier-Shift direct dedispersion with exact fractional delays
+ * (DDMT-FFT): @ref dmt::algorithms::DDMTFFT
  * - Execution Plans and Grid Generators: @ref dmt::plans::FDMTPlan, @ref
  * dmt::plans::DDMTPlan, @ref dmt::plans::CohFDMTPlan
  * - Simulation utilities: @ref dmt::utils::generate_pure_frb
@@ -22,6 +24,7 @@
 
 // Import common types and constants
 #include "common/backend.hpp" // IWYU pragma: export
+#include "common/fft_config.hpp" // IWYU pragma: export
 #include "common/logging.hpp" // IWYU pragma: export
 #include "common/plans.hpp"   // IWYU pragma: export
 #include "common/types.hpp"   // IWYU pragma: export
@@ -30,6 +33,7 @@
 // Include headers for each algorithm
 #include "algorithms/cfdmt.hpp"    // IWYU pragma: export
 #include "algorithms/ddmt.hpp"     // IWYU pragma: export
+#include "algorithms/ddmt_fft.hpp" // IWYU pragma: export
 #include "algorithms/fdmt.hpp"     // IWYU pragma: export
 #include "algorithms/fdmt_fft.hpp" // IWYU pragma: export
 #include "algorithms/sdmt.hpp"     // IWYU pragma: export

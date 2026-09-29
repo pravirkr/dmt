@@ -598,32 +598,44 @@ void bind_fdmt(py::module_& mod) {
             Keyword-only. Device ordinal on a GPU backend (default 0).
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid.
+        fractional_delays : bool, optional
+            Keyword-only. True by default, and by the nature of the
+            Fourier-domain tree: each merge shifts by a real-valued,
+            least-squares delay (band-limited interpolation) instead of the
+            rounded integer delay of the time-domain FDMT, which roughly
+            halves the per-channel misalignment. In valid mode the output
+            then lags the input by 64 samples (:attr:`output_latency`).
+            ``False`` rounds the shifts like :class:`FDMT` and exists only for
+            equivalence tests against FDMT.
 
         See also
         --------
         FDMT, compute_fdmt_fft
         )doc")
-        .def(py::init([](float f_min, float f_max, SizeType nchans,
-                         SizeType nsamps, float tsamp, IndexType dt_max,
-                         IndexType dt_min, SizeType dt_step,
-                         bool use_box_smearing, std::string_view mode,
-                         int nthreads, SizeType nbeams,
-                         std::string_view backend, int device) {
-                 return FDMTFFT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                                dt_min, dt_step, use_box_smearing, mode,
-                                make_exec(backend, nthreads, device), nbeams);
-             }),
-             "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
-             "use_box_smearing"_a = true, "mode"_a = "valid", "nthreads"_a = 1,
-             "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, IndexType dt_max,
+                        IndexType dt_min, SizeType dt_step,
+                        bool use_box_smearing, std::string_view mode,
+                        int nthreads, SizeType nbeams, std::string_view backend,
+                        int device, bool fractional_delays) {
+                return FDMTFFT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                               dt_min, dt_step, use_box_smearing, mode,
+                               make_exec(backend, nthreads, device), nbeams,
+                               fractional_delays);
+            }),
+            "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a, "dt_max"_a,
+            "dt_min"_a = 0, "dt_step"_a = 1, "use_box_smearing"_a = true,
+            "mode"_a = "valid", "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
+            "backend"_a = "cpu", "device"_a = 0, "fractional_delays"_a = true)
         .def(
             py::init([](float f_min, float f_max, SizeType nchans,
                         SizeType nsamps, float tsamp, const py::object& dt_grid,
                         const py::object& dt_arr, const py::object& dm_grid,
                         const py::object& dm_arr, bool use_box_smearing,
                         std::string_view mode, int nthreads, SizeType nbeams,
-                        std::string_view backend, int device) {
+                        std::string_view backend, int device,
+                        bool fractional_delays) {
                 const auto [type, obj] =
                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                 const auto exec = make_exec(backend, nthreads, device);
@@ -631,11 +643,11 @@ void bind_fdmt(py::module_& mod) {
                     return std::make_unique<FDMTFFT>(
                         f_min, f_max, nchans, nsamps, tsamp,
                         extract_dt_grid(obj), use_box_smearing, mode, exec,
-                        nbeams);
+                        nbeams, fractional_delays);
                 }
                 return std::make_unique<FDMTFFT>(
                     f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
-                    use_box_smearing, mode, exec, nbeams);
+                    use_box_smearing, mode, exec, nbeams, fractional_delays);
             }),
             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
@@ -643,7 +655,8 @@ void bind_fdmt(py::module_& mod) {
             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
             py::arg("nthreads") = 1, py::arg("nbeams") = 1,
-            py::arg("backend") = "cpu", py::arg("device") = 0)
+            py::arg("backend") = "cpu", py::arg("device") = 0,
+            py::arg("fractional_delays") = true)
         .def_property_readonly(
             "backend",
             [](const FDMTFFT& fdmt) {
@@ -652,6 +665,18 @@ void bind_fdmt(py::module_& mod) {
             "Backend this instance runs on ('cpu', 'cuda', ...).")
         .def_property_readonly("nthreads", &FDMTFFT::nthreads)
         .def_property_readonly("device", &FDMTFFT::device)
+        .def_property_readonly("fractional_delays", &FDMTFFT::fractional_delays,
+                               "True if merges use real-valued (least-squares) "
+                               "delays (the default; False is the "
+                               "FDMT-equivalence test mode).")
+        .def_property_readonly(
+            "output_latency", &FDMTFFT::get_output_latency,
+            "Samples the output lags the input (the fractional-delay "
+            "look-ahead in valid mode, else 0).")
+        .def_property_readonly(
+            "suggested_nsamps", &FDMTFFT::get_suggested_nsamps,
+            "Valid mode: block length keeping >= 80% of every transform as "
+            "output (else the plan's nsamps).")
         .def_property_readonly("plan", &FDMTFFT::get_plan)
         .def_property_readonly("nbeams", &FDMTFFT::get_nbeams)
         .def_property_readonly("dt_grid_final",
@@ -834,12 +859,13 @@ void bind_fdmt(py::module_& mod) {
            float f_max, SizeType nchans, SizeType nsamps, float tsamp,
            IndexType dt_max, IndexType dt_min, SizeType dt_step,
            bool use_box_smearing, std::string_view mode, int nthreads,
-           SizeType nbeams, std::string_view backend, int device) {
+           SizeType nbeams, std::string_view backend, int device,
+           bool fractional_delays) {
             const auto exec       = make_exec(backend, nthreads, device);
             auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
                 std::span<const float>(waterfall.data(), waterfall.size()),
                 f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                use_box_smearing, mode, exec, nbeams);
+                use_box_smearing, mode, exec, nbeams, fractional_delays);
             return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
         },
         py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
@@ -848,11 +874,13 @@ void bind_fdmt(py::module_& mod) {
         py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
         py::arg("nthreads") = 1, py::arg("nbeams") = 1, py::kw_only(),
         py::arg("backend") = "cpu", py::arg("device") = 0,
+        py::arg("fractional_delays") = true,
         R"doc(
         One-shot FFT-domain FDMT.
 
         Runs the FFT-domain FDMT on an input waterfall array of shape (nchans, nsamps),
-        returning a tuple (dmt_matrix, plan).
+        returning a tuple (dmt_matrix, plan). ``fractional_delays`` is True by
+        default (see :class:`FDMTFFT`); False only for FDMT-equivalence tests.
         )doc");
 
     mod.def(
@@ -862,7 +890,8 @@ void bind_fdmt(py::module_& mod) {
            const py::object& dt_grid, const py::object& dt_arr,
            const py::object& dm_grid, const py::object& dm_arr,
            bool use_box_smearing, std::string_view mode, int nthreads,
-           SizeType nbeams, std::string_view backend, int device) {
+           SizeType nbeams, std::string_view backend, int device,
+           bool fractional_delays) {
             const auto exec = make_exec(backend, nthreads, device);
             const auto [type, obj] =
                 resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
@@ -870,13 +899,13 @@ void bind_fdmt(py::module_& mod) {
                 auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
                     std::span<const float>(waterfall.data(), waterfall.size()),
                     f_min, f_max, nchans, nsamps, tsamp, extract_dt_grid(obj),
-                    use_box_smearing, mode, exec, nbeams);
+                    use_box_smearing, mode, exec, nbeams, fractional_delays);
                 return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
             }
             auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
                 std::span<const float>(waterfall.data(), waterfall.size()),
                 f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
-                use_box_smearing, mode, exec, nbeams);
+                use_box_smearing, mode, exec, nbeams, fractional_delays);
             return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
         },
         py::arg("waterfall"), py::arg("f_min"), py::arg("f_max"),
@@ -885,7 +914,8 @@ void bind_fdmt(py::module_& mod) {
         py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
         py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
         py::arg("nthreads") = 1, py::arg("nbeams") = 1,
-        py::arg("backend") = "cpu", py::arg("device") = 0);
+        py::arg("backend") = "cpu", py::arg("device") = 0,
+        py::arg("fractional_delays") = true);
 
     mod.def(
 
