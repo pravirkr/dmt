@@ -22,7 +22,7 @@ box smearing on**. Three sweeps, each through the reference point
 - **ndms**: 256, 512, 1K, 2K, 4K DM trials (via `dt_max`), at 16K samples.
 - **nbits**: 1, 2, 4, 8, 16-bit packed and float32 input, at the reference point.
 
-DDMT and SDMT (CPU only) are given the FDMT plan's DM grid, so all
+DDMT and SDMT are given the FDMT plan's DM grid, so all
 algorithms compute the same trials. The backends are:
 
 - CPU with 1 and 8 threads. FDMT-FFT, DDMT and SDMT run at 8 threads only; DDMT at

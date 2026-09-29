@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <stdexcept>
-#include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <thrust/device_vector.h>
@@ -16,6 +18,9 @@
 #include "dmt/ddmt_kernel.cuh"
 #include "dmt/engines.hpp"
 #include "dmt/gpu_utils.cuh"
+#include "dmt/host_staging.cuh"
+#include "dmt/logging.hpp"
+#include "dmt/sdmt_kernel.cuh"
 
 namespace dmt::algorithms {
 
@@ -25,6 +30,8 @@ using ddmt_gpu::DDMTAcc;
 using ddmt_gpu::DDMTSegments;
 using ddmt_gpu::TileCfg;
 using ddmt_gpu::TileShape;
+using gpu_host::parallel_rows;
+using gpu_host::PinnedBuffer;
 
 // Default input samples per host-path chunk; bounds pinned/device staging
 // for very large inputs and lets H2D copy / kernel / D2H copy of
@@ -63,52 +70,30 @@ template <unsigned NBITS> struct CfgFor<NBITS, false> {
     using type = ByteNarrow;
 };
 
-enum class KernelKind : uint8_t { kWide, kNarrow, kDirect };
+enum class KernelKind : uint8_t { kWide, kNarrow, kDirect, kShared };
 
-/**
- * @brief RAII page-locked ("pinned") host buffer.
- * @details
- * cudaHostAlloc'd memory transfers 2-3x faster than regular heap memory and
- * is required for cudaMemcpyAsync to actually run asynchronously with
- * respect to the host -- see dedisp's TDDPlan (cu::HostMemory) for the same
- * rationale. reserve() never shrinks, so repeated chunks reuse one
- * allocation.
- */
-template <typename T> class PinnedBuffer {
-public:
-    PinnedBuffer() = default;
-    ~PinnedBuffer() { release(); }
-    PinnedBuffer(const PinnedBuffer&)            = delete;
-    PinnedBuffer& operator=(const PinnedBuffer&) = delete;
-    PinnedBuffer(PinnedBuffer&&)                 = delete;
-    PinnedBuffer& operator=(PinnedBuffer&&)      = delete;
+// SDMT kernel shapes (sdmt_gpu::sdmt_kernel<NBITS, TY, DPT, SPW>): TY warps
+// of DPT trials each, 32 * SPW output samples per block.
+template <int TY_, int DPT_, int SPW_> struct SdmtCfg {
+    static constexpr int kTY  = TY_;
+    static constexpr int kDPT = DPT_;
+    static constexpr int kSPW = SPW_;
+    static constexpr int kTDM = TY_ * DPT_;
+    static constexpr int kBT  = 32 * SPW_;
+};
+using SdmtCfgs = std::tuple<SdmtCfg<8, 16, 4>, SdmtCfg<8, 8, 4>>;
+inline constexpr int kNumSdmtCfgs = std::tuple_size_v<SdmtCfgs>;
 
-    void reserve(SizeType n) {
-        if (n <= m_capacity) {
+/// Calls f.template operator()<Cfg>() for SDMT configuration @p i.
+template <int I = 0, typename F> void with_sdmt_cfg(int i, F&& f) {
+    if constexpr (I < kNumSdmtCfgs) {
+        if (i == I) {
+            f.template operator()<std::tuple_element_t<I, SdmtCfgs>>();
             return;
         }
-        release();
-        gpu_utils::check_gpu_call(
-            cudaHostAlloc(reinterpret_cast<void**>(&m_ptr),
-                          std::max<SizeType>(n, 1) * sizeof(T),
-                          cudaHostAllocDefault),
-            "cudaHostAlloc failed");
-        m_capacity = n;
+        with_sdmt_cfg<I + 1>(i, std::forward<F>(f));
     }
-    [[nodiscard]] T* data() noexcept { return m_ptr; }
-    [[nodiscard]] const T* data() const noexcept { return m_ptr; }
-
-private:
-    void release() noexcept {
-        if (m_ptr != nullptr) {
-            cudaFreeHost(m_ptr);
-            m_ptr      = nullptr;
-            m_capacity = 0;
-        }
-    }
-    T* m_ptr            = nullptr;
-    SizeType m_capacity = 0;
-};
+}
 
 /// Grow-only raw device byte buffer.
 class DeviceBytes {
@@ -168,36 +153,6 @@ template <typename F> void dispatch_nbits(SizeType nbits, F&& f) {
     }
 }
 
-/**
- * @brief Runs f(i) for i in [0, n) on a few host threads when the rows
- * move enough bytes; staging copies between pageable and pinned memory are
- * otherwise bound by one core's memcpy bandwidth.
- */
-template <typename F>
-void parallel_rows(SizeType n, SizeType bytes_total, const F& f) {
-    constexpr SizeType kBytesPerThread = SizeType{4} << 20;
-    const auto hw                      = static_cast<SizeType>(
-        std::max(1U, std::thread::hardware_concurrency()));
-    const auto nt =
-        std::min({n, std::min<SizeType>(hw, 16),
-                  std::max<SizeType>(1, bytes_total / kBytesPerThread)});
-    if (nt <= 1) {
-        for (SizeType i = 0; i < n; ++i) {
-            f(i);
-        }
-        return;
-    }
-    std::vector<std::jthread> threads;
-    threads.reserve(nt);
-    for (SizeType t = 0; t < nt; ++t) {
-        threads.emplace_back([&f, n, nt, t] {
-            for (SizeType i = (n * t) / nt; i < (n * (t + 1)) / nt; ++i) {
-                f(i);
-            }
-        });
-    }
-}
-
 /// Bytes of one channel row holding @p nsamps samples (float when 32).
 SizeType row_bytes_for(SizeType nsamps, SizeType nbits) {
     return nbits == 32 ? nsamps * sizeof(float)
@@ -207,10 +162,12 @@ SizeType row_bytes_for(SizeType nsamps, SizeType nbits) {
 class DDMTCudaEngine final : public detail::DDMTEngine {
 public:
     DDMTCudaEngine(const plans::DDMTPlan& plan,
-                   const detail::DDMTEngineConfig& cfg)
+                   const detail::DDMTEngineConfig& cfg,
+                   bool shared_sums)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
-          m_nbeams(cfg.nbeams) {
+          m_nbeams(cfg.nbeams),
+          m_shared_sums(shared_sums) {
         init();
     }
 
@@ -478,6 +435,7 @@ private:
     const plans::DDMTPlan& m_plan; // owned by the DDMT facade
     int m_device_id;
     SizeType m_nbeams;
+    bool m_shared_sums; // SDMT: use the shared-sum kernel when it pays
     SizeType m_max_delay{0};
     SizeType m_ndm{0};
     SizeType m_gulp{kDefaultGulpSamples};
@@ -491,6 +449,15 @@ private:
     int m_spread{0};
     thrust::device_vector<int16_t> m_offs_d; // [tile][active][TDM]
     thrust::device_vector<int> m_base_d;     // [tile][active]
+    // SDMT programs (sdmt_gpu_plan.hpp).
+    int m_sdmt_cfg{0};
+    thrust::device_vector<int> m_sdmt_tile_sub_d;
+    int m_sdmt_max_nodes{0};
+    SizeType m_sdmt_smem{0};
+    thrust::device_vector<sdmt_gpu::SubProg> m_sdmt_subs_d;
+    thrust::device_vector<sdmt_gpu::Window> m_sdmt_wins_d;
+    thrust::device_vector<sdmt_gpu::Node> m_sdmt_nodes_d;
+    thrust::device_vector<int> m_sdmt_trials_d;
 
     // Retained history: m_history_len samples per row, row stride
     // m_hist_row_bytes, ping-pong so a call reads one buffer and writes the
@@ -618,6 +585,9 @@ private:
 
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
             select_kernel<NBITS>(delays, active);
+            if (m_shared_sums) {
+                select_shared<NBITS>(delays, active);
+            }
         });
 
         gpu_utils::check_gpu_call(cudaStreamCreate(&m_htod_stream),
@@ -759,6 +729,131 @@ private:
         }
     }
 
+    /**
+     * @brief SDMT: plans the shared-sum kernel (sdmt_gpu_plan.hpp) for DM
+     * tiles of 128 and 64 trials and keeps the one with fewer operations.
+     * @details
+     * Programs are split until they fit half the per-block shared memory
+     * (two resident blocks per SM). The kernel then runs if its estimated
+     * time is clearly below the DDMT kernel's; otherwise (sparse or coarse
+     * grids, little sharing) the DDMT kernel chosen by select_kernel() runs.
+     * Either way the sums are the same.
+     */
+    template <unsigned NBITS>
+    void select_shared(const std::vector<int>& delays,
+                       const std::vector<int>& active) {
+        if (m_ndm == 0 || active.empty()) {
+            return;
+        }
+        using E   = sdmt_gpu::Elem<NBITS>;
+        int optin = 0;
+        if (cudaDeviceGetAttribute(&optin,
+                                   cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                                   m_device_id) != cudaSuccess ||
+            optin <= 0) {
+            optin = 48 * 1024;
+        }
+        const auto budget =
+            static_cast<SizeType>(std::min(optin, 96 * 1024)) / 2;
+        const auto nchans = m_plan.get_nchans();
+        std::optional<sdmt_gpu::Plan> best;
+        int best_cfg = 0;
+        for (int ci = 0; ci < kNumSdmtCfgs; ++ci) {
+            with_sdmt_cfg(ci, [&]<class Cfg>() {
+                if (Cfg::kTDM > 64 &&
+                    m_ndm <= static_cast<SizeType>(Cfg::kTDM / 2)) {
+                    return;
+                }
+                const auto table =
+                    sdmt_gpu::trial_table_bytes(Cfg::kTDM) +
+                    sdmt_gpu::node_table_bytes(sdmt_gpu::kMaxNodes);
+                const auto max_arena =
+                    static_cast<int>((budget - table) / sizeof(E));
+                auto plan = sdmt_gpu::build_plan(delays, active, nchans, m_ndm,
+                                                 Cfg::kTDM, Cfg::kBT, max_arena,
+                                                 sdmt_gpu::kMaxNodes);
+                if (plan.arena <= max_arena &&
+                    (!best || plan.ops < best->ops)) {
+                    best     = std::move(plan);
+                    best_cfg = ci;
+                }
+            });
+        }
+        if (!best) {
+            logging::debug("SDMT ({}): no shared-sum program fits; running "
+                           "the DDMT kernel",
+                           DMT_GPU_NAME);
+            return;
+        }
+        // Estimated times from sustained rates measured on an L40S at the
+        // reference point (4096 channels, 2049 trials): ~3.4e12 arena
+        // operations/s for this kernel; ~6.6e12 (float), ~7.1e12 (16-bit)
+        // and ~9.6e12 (<= 8-bit, SWAR) additions/s for the DDMT kernel.
+        // Both are bound by the same shared-memory instruction rate, so the
+        // ratio carries over to other devices.
+        constexpr double kSharedRate = 3.4e12;
+        constexpr double kDdmtRate   = NBITS == 32   ? 6.6e12
+                                       : NBITS == 16 ? 7.1e12
+                                                     : 9.6e12;
+        const double speedup =
+            (best->ddmt / kDdmtRate) / (best->ops / kSharedRate);
+        if (speedup < 1.1 && !detail::sdmt_gpu_always_shared()) {
+            logging::debug("SDMT ({}): shared sums do not pay (estimated "
+                           "{:.2f}x); running the DDMT kernel",
+                           DMT_GPU_NAME, speedup);
+            return;
+        }
+        logging::debug("SDMT ({}): shared-sum kernel, DM tiles of {}, {} "
+                       "programs, arena {} elements, estimated {:.2f}x "
+                       "faster than DDMT",
+                       DMT_GPU_NAME, best->tdm, best->subs.size(), best->arena,
+                       speedup);
+        m_kind           = KernelKind::kShared;
+        m_sdmt_cfg       = best_cfg;
+        m_sdmt_max_nodes = best->max_nodes;
+        m_sdmt_smem = sdmt_gpu::smem_bytes<NBITS>(best->tdm, best->max_nodes,
+                                                  best->arena);
+        m_sdmt_tile_sub_d.assign(best->tile_sub.begin(), best->tile_sub.end());
+        m_sdmt_subs_d.assign(best->subs.begin(), best->subs.end());
+        m_sdmt_wins_d.assign(best->wins.begin(), best->wins.end());
+        m_sdmt_nodes_d.assign(best->nodes.begin(), best->nodes.end());
+        m_sdmt_trials_d.assign(best->trials.begin(), best->trials.end());
+        with_sdmt_cfg(best_cfg, [&]<class Cfg>() {
+            gpu_utils::check_gpu_call(
+                cudaFuncSetAttribute(
+                    sdmt_gpu::sdmt_kernel<NBITS, Cfg::kTY, Cfg::kDPT,
+                                          Cfg::kSPW>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, optin),
+                "SDMT: setting kernel shared memory failed");
+        });
+    }
+
+    template <unsigned NBITS, class Cfg>
+    void launch_shared(const DDMTSegments& seg,
+                       SizeType n_out,
+                       DDMTAcc<NBITS>* d_out,
+                       SizeType out_dm_stride,
+                       SizeType out_beam_stride,
+                       cudaStream_t stream) const {
+        const dim3 block(32, Cfg::kTY);
+        const dim3 grid(
+            static_cast<unsigned>((n_out + Cfg::kBT - 1) / Cfg::kBT),
+            static_cast<unsigned>((m_ndm + Cfg::kTDM - 1) / Cfg::kTDM),
+            static_cast<unsigned>(m_nbeams));
+        gpu_utils::check_kernel_launch_params(grid, block);
+        sdmt_gpu::sdmt_kernel<NBITS, Cfg::kTY, Cfg::kDPT, Cfg::kSPW>
+            <<<grid, block, m_sdmt_smem, stream>>>(
+                seg, d_out, out_dm_stride, out_beam_stride,
+                thrust::raw_pointer_cast(m_sdmt_subs_d.data()),
+                thrust::raw_pointer_cast(m_sdmt_wins_d.data()),
+                thrust::raw_pointer_cast(m_sdmt_nodes_d.data()),
+                thrust::raw_pointer_cast(m_sdmt_trials_d.data()),
+                thrust::raw_pointer_cast(m_sdmt_tile_sub_d.data()),
+                m_sdmt_max_nodes, static_cast<int>(m_plan.get_nchans()),
+                static_cast<int>(m_ndm), static_cast<int>(n_out));
+        gpu_utils::check_last_gpu_error("sdmt_kernel launch failed");
+    }
+
     // ---- Kernels
     // -------------------------------------------------------------
 
@@ -806,6 +901,12 @@ private:
         case KernelKind::kNarrow:
             launch_tiled<NBITS, typename CfgFor<NBITS, false>::type>(
                 seg, n_out, d_out, out_dm_stride, out_beam_stride, stream);
+            return;
+        case KernelKind::kShared:
+            with_sdmt_cfg(m_sdmt_cfg, [&]<class Cfg>() {
+                launch_shared<NBITS, Cfg>(seg, n_out, d_out, out_dm_stride,
+                                          out_beam_stride, stream);
+            });
             return;
         case KernelKind::kDirect:
             break;
@@ -1041,7 +1142,13 @@ private:
 std::unique_ptr<detail::DDMTEngine>
 detail::make_ddmt_gpu(const plans::DDMTPlan& plan,
                       const detail::DDMTEngineConfig& cfg) {
-    return std::make_unique<DDMTCudaEngine>(plan, cfg);
+    return std::make_unique<DDMTCudaEngine>(plan, cfg, false);
+}
+
+std::unique_ptr<detail::DDMTEngine>
+detail::make_sdmt_gpu(const plans::DDMTPlan& plan,
+                      const detail::DDMTEngineConfig& cfg) {
+    return std::make_unique<DDMTCudaEngine>(plan, cfg, true);
 }
 
 } // namespace dmt::algorithms

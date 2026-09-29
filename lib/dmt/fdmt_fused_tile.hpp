@@ -15,7 +15,8 @@
 // Level fusion for the CUDA backend (FDMTExecConfig::fuse_levels): level-0
 // initialisation plus the first F tree merges of one channel group, over one
 // time tile, computed entirely in on-chip (shared) memory by one thread
-// block. Written against a small `Block` policy (strided for_each + barrier)
+// block. Written against a small `Block` policy (row-wise for_each_row +
+// barrier)
 // so the identical code also runs sequentially on the host, where the tests
 // check it bit-for-bit against the CPU FDMT (see fdmt_fused_tile_cpu_t.cpp).
 //
@@ -194,33 +195,48 @@ template <FDMTMode Mode> DMT_HD inline bool fdmt_in_range(int t, int L) {
  * previous level's window `in` (rows of width w_in starting at sample
  * lo_in). Mirrors kernel_execute_iter's arithmetic for each mode.
  */
-template <FDMTMode Mode>
-DMT_HD inline float fdmt_fused_merge_cell(const float* in,
-                                          int w_in,
-                                          int lo_in,
-                                          const int* coord,
-                                          int t,
-                                          const float* thist_in) {
-    const int tail       = coord[0];
-    const int head       = coord[1];
-    const float tail_val = in[(tail * w_in) + (t - lo_in)];
-    if (head < 0) {
-        return tail_val; // copy coordinate (zero beyond the tail in kFull)
-    }
-    const int d = coord[2];
-    float head_val;
-    if constexpr (Mode == FDMTMode::kValid) {
-        if (t >= d) {
-            head_val = in[(head * w_in) + (t - d - lo_in)];
-        } else {
-            head_val = (thist_in != nullptr) ? thist_in[coord[3] + t] : 0.0F;
+/**
+ * @brief One group-local merge coordinate, resolved against the previous
+ * level's window (rows of width w_in starting at sample lo_in): cell(t) is
+ * the output at sample t. Mirrors kernel_execute_iter's arithmetic for each
+ * mode.
+ */
+template <FDMTMode Mode> struct FDMTFusedMergeRow {
+    const float* tail; // in-window sample 0 of the tail row
+    const float* head; // of the head row, shifted by the delay; or nullptr
+    int d;
+    const float* thist; // valid-mode tree history of the coordinate
+
+    DMT_HD FDMTFusedMergeRow(const float* in,
+                             int w_in,
+                             int lo_in,
+                             const int* coord,
+                             const float* thist_in)
+        : tail(in + (coord[0] * w_in) - lo_in),
+          head(coord[1] < 0 ? nullptr
+                            : in + (coord[1] * w_in) - lo_in - coord[2]),
+          d(coord[2]),
+          thist(thist_in != nullptr ? thist_in + coord[3] : nullptr) {}
+
+    [[nodiscard]] DMT_HD float cell(int t) const {
+        const float tail_val = tail[t];
+        if (head == nullptr) {
+            return tail_val; // copy coordinate (zero beyond the tail in kFull)
         }
-    } else {
-        // kFull: cells outside [0, L_in) are zero; kRoll: unwrapped window.
-        head_val = in[(head * w_in) + (t - d - lo_in)];
+        float head_val;
+        if constexpr (Mode == FDMTMode::kValid) {
+            if (t >= d) {
+                head_val = head[t];
+            } else {
+                head_val = (thist != nullptr) ? thist[t] : 0.0F;
+            }
+        } else {
+            // kFull: cells outside [0, L_in) are zero; kRoll: unwrapped.
+            head_val = head[t];
+        }
+        return tail_val + head_val;
     }
-    return tail_val + head_val;
-}
+};
 
 /**
  * @brief Valid-mode tree history of the group's level-l coordinates (same
@@ -246,39 +262,42 @@ DMT_HD inline void fdmt_fused_tree_history(const Block& blk,
     if (thist_out == nullptr || max_delay <= 0) {
         return;
     }
-    blk.for_each(nrows * max_delay, [&](int i) {
-        const int* coord =
-            coords + (FDMTFusedTileArgs::kCoordInfo * (i / max_delay));
-        const int k    = i % max_delay;
-        const int head = coord[1];
-        const int d    = coord[2];
-        if (head < 0 || k >= d) {
-            return;
-        }
-        float val;
-        if (nsamps >= d || k >= d - nsamps) {
-            const int p = (nsamps >= d) ? (nsamps - d + k) : (k - (d - nsamps));
-            if (p < t0 || p >= t_end) {
+    blk.for_each_row(nrows, max_delay, [&](int r) {
+        const int* coord = coords + (FDMTFusedTileArgs::kCoordInfo * r);
+        const int head   = coord[1];
+        const int d      = coord[2];
+        const int hoff   = coord[3];
+        return [=](int k) {
+            if (head < 0 || k >= d) {
                 return;
             }
-            val = in[(head * w_in) + (p - lo_in)];
-        } else {
-            if (tile != 0) {
-                return;
+            float val;
+            if (nsamps >= d || k >= d - nsamps) {
+                const int p =
+                    (nsamps >= d) ? (nsamps - d + k) : (k - (d - nsamps));
+                if (p < t0 || p >= t_end) {
+                    return;
+                }
+                val = in[(head * w_in) + (p - lo_in)];
+            } else {
+                if (tile != 0) {
+                    return;
+                }
+                val =
+                    (thist_in != nullptr) ? thist_in[hoff + k + nsamps] : 0.0F;
             }
-            val =
-                (thist_in != nullptr) ? thist_in[coord[3] + k + nsamps] : 0.0F;
-        }
-        thist_out[coord[3] + k] = val;
+            thist_out[hoff + k] = val;
+        };
     });
 }
 
 /**
  * @brief Fused levels 0..F of channel group `group` over time tile `tile`.
  *
- * @param blk     Execution policy: for_each(n, f) runs f(i) for i in [0, n)
- *                (strided over the thread block on the GPU), sync() is a
- *                block barrier.
+ * @param blk     Execution policy: for_each_row(n, w, row) runs row(r) once
+ *                per row r in [0, n) and the returned cell(j) for j in
+ *                [0, w) (rows over warps, cells over lanes on the GPU);
+ *                sync() is a block barrier.
  * @param input   Level-0 input rows; this beam's channel c is row
  *                row_base + c.
  * @param out     This beam's level-F state (row k at k * L_F), stored as
@@ -329,22 +348,29 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
     const int x_lo    = lo(0) - s_halo;
     const int x_width = t_end - x_lo;
     float* x          = buf_b;
-    blk.for_each(nch * x_width, [&](int i) {
-        const int c  = i / x_width;
-        const int tt = x_lo + (i % x_width);
-        float v      = 0.0F;
-        if constexpr (Mode == FDMTMode::kRoll) {
-            const int tw = ((tt % l0) + l0) % l0;
-            v            = input.load(row_base + ch0 + c, tw);
-        } else {
-            if (tt >= 0 && tt < l0) {
-                v = input.load(row_base + ch0 + c, tt);
-            } else if (Mode == FDMTMode::kValid && tt < 0 &&
-                       tt >= -a.dt_max_final && hist0 != nullptr) {
-                v = hist0[((ch0 + c) * a.dt_max_final) + a.dt_max_final + tt];
+    blk.for_each_row(nch, x_width, [&](int c) {
+        const int64_t row = row_base + ch0 + c;
+        float* xr         = x + (c * x_width);
+        const float* h0 =
+            (hist0 != nullptr)
+                ? hist0 + ((ch0 + c) * a.dt_max_final) + a.dt_max_final
+                : nullptr;
+        return [=, &input, &a](int j) {
+            const int tt = x_lo + j;
+            float v      = 0.0F;
+            if constexpr (Mode == FDMTMode::kRoll) {
+                const int tw = ((tt % l0) + l0) % l0;
+                v            = input.load(row, tw);
+            } else {
+                if (tt >= 0 && tt < l0) {
+                    v = input.load(row, tt);
+                } else if (Mode == FDMTMode::kValid && tt < 0 &&
+                           tt >= -a.dt_max_final && h0 != nullptr) {
+                    v = h0[tt];
+                }
             }
-        }
-        x[i] = v;
+            xr[j] = v;
+        };
     });
     blk.sync();
 
@@ -353,25 +379,26 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
         const int w0  = width(0);
         const int lo0 = lo(0);
         float* dst    = buf_a;
-        blk.for_each(nch * w0, [&](int i) {
-            const int c    = i / w0;
-            const int j    = i % w0;
-            const int t    = lo0 + j;
-            const int ch   = ch0 + c;
-            const int coff = a.coord_offset0[ch];
-            const int r0   = coff - row0(0);
-            const int ndt  = a.ndt0[ch];
-            const int* dts = a.dt_grid0 + coff;
-            if (!fdmt_in_range<Mode>(t, l0)) {
-                for (int k = 0; k < ndt; ++k) {
-                    dst[((r0 + k) * w0) + j] = 0.0F;
+        blk.for_each_row(nch, w0, [&](int c) {
+            const int ch    = ch0 + c;
+            const int coff  = a.coord_offset0[ch];
+            const int ndt   = a.ndt0[ch];
+            const int dt_lo = a.dt_grid0[coff];
+            const int dt_hi = a.dt_grid0[coff + ndt - 1];
+            float* dr       = dst + ((coff - row0(0)) * w0);
+            const float* xc = x + (c * x_width) - x_lo;
+            return [=](int j) {
+                const int t = lo0 + j;
+                if (!fdmt_in_range<Mode>(t, l0)) {
+                    for (int k = 0; k < ndt; ++k) {
+                        dr[(k * w0) + j] = 0.0F;
+                    }
+                    return;
                 }
-                return;
-            }
-            const float* xc = x + (c * x_width);
-            fdmt_init_column<UseBoxSmearing>(
-                dts[0], dts[ndt - 1], t, [&](int tt) { return xc[tt - x_lo]; },
-                [&](int i_dt, float v) { dst[((r0 + i_dt) * w0) + j] = v; });
+                fdmt_init_column<UseBoxSmearing>(
+                    dt_lo, dt_hi, t, [&](int tt) { return xc[tt]; },
+                    [&](int i_dt, float v) { dr[(i_dt * w0) + j] = v; });
+            };
         });
         blk.sync();
     }
@@ -386,13 +413,14 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
         const int lo_out = lo(l);
         const int n_l    = a.level_nsamps[l];
         const int* cl    = a.coords + (kCI * (a.coords_offset[l] + row0(l)));
-        blk.for_each(nrows(l) * w_out, [&](int i) {
-            const int r = i / w_out;
-            const int t = lo_out + (i % w_out);
-            dst[i] = fdmt_in_range<Mode>(t, n_l)
-                         ? fdmt_fused_merge_cell<Mode>(
-                               in, w_in, lo_in, cl + (kCI * r), t, thist_in)
-                         : 0.0F;
+        blk.for_each_row(nrows(l), w_out, [&](int r) {
+            const FDMTFusedMergeRow<Mode> m(in, w_in, lo_in, cl + (kCI * r),
+                                            thist_in);
+            float* dr = dst + (r * w_out);
+            return [=](int j) {
+                const int t = lo_out + j;
+                dr[j]       = fdmt_in_range<Mode>(t, n_l) ? m.cell(t) : 0.0F;
+            };
         });
         if constexpr (Mode == FDMTMode::kValid) {
             fdmt_fused_tree_history(blk, in, w_in, lo_in, cl, nrows(l),
@@ -411,15 +439,16 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
         const int tn    = a.tile_nsamps;
         const int first = row0(fuse);
         const int* cl   = a.coords + (kCI * (a.coords_offset[fuse] + first));
-        blk.for_each(nrows(fuse) * tn, [&](int i) {
-            const int r = i / tn;
-            const int t = t0 + (i % tn);
-            if (t >= n_f) {
-                return;
-            }
-            out[(static_cast<int64_t>(first + r) * n_f) + t] =
-                static_cast<TOut>(fdmt_fused_merge_cell<Mode>(
-                    in, w_in, lo_in, cl + (kCI * r), t, thist_in));
+        blk.for_each_row(nrows(fuse), tn, [&](int r) {
+            const FDMTFusedMergeRow<Mode> m(in, w_in, lo_in, cl + (kCI * r),
+                                            thist_in);
+            TOut* orow = out + (static_cast<int64_t>(first + r) * n_f);
+            return [=](int j) {
+                const int t = t0 + j;
+                if (t < n_f) {
+                    orow[t] = static_cast<TOut>(m.cell(t));
+                }
+            };
         });
         if constexpr (Mode == FDMTMode::kValid) {
             fdmt_fused_tree_history(

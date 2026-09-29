@@ -1,6 +1,7 @@
 #include "dmt/common/backend.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <format>
 #include <stdexcept>
@@ -84,6 +85,18 @@ void check_device(const Device& view,
             "{}: memory is on {}:{} but this instance runs on {}:{}", what,
             to_string(view.backend), view.id, to_string(backend), device));
     }
+}
+
+namespace {
+std::atomic<bool> g_sdmt_gpu_always_shared{false};
+} // namespace
+
+void set_sdmt_gpu_always_shared(bool on) noexcept {
+    g_sdmt_gpu_always_shared.store(on, std::memory_order_relaxed);
+}
+
+bool sdmt_gpu_always_shared() noexcept {
+    return g_sdmt_gpu_always_shared.load(std::memory_order_relaxed);
 }
 
 // Device-memory defaults: host-only engines inherit these.

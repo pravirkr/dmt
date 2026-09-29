@@ -33,7 +33,7 @@
 
 - **FDMT**: Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$), float or packed 1/2/4/8/16-bit input
 - **DDMT**: Direct (brute-force) dedispersion with DM-tiled CPU/GPU kernels, float or packed 1/2/4/8/16-bit input
-- **SDMT**: Exact DDMT sums with partial sums shared between DM trials within subbands (CPU; bit-identical integer output)
+- **SDMT**: Exact DDMT sums with partial sums shared between DM trials within subbands (CPU and GPU; bit-identical integer output)
 - **CFDMT**: Hybrid Coherent baseband dedispersion for microsecond pulses
 - **FDMT-FFT**: Frequency-domain phase-shift dedispersion
 :::

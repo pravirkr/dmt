@@ -76,7 +76,9 @@ DRAM.
   shared memory. Each fused level is computed over the tile plus a small
   left halo, the sum of the group's merge delays at the fused levels, which
   neighbouring tiles recompute. The automatic depth is the deepest $F$ whose
-  tile of at least 256 samples fits in the portable 48 KiB of shared memory.
+  tile of at least 128 samples fits a quarter of the SM's shared memory
+  (four resident blocks; 24 KiB on an L40S, at most 48 KiB), with a level-0
+  halo of at most half a tile.
 
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)
 always runs level by level, so every level stays inspectable. Read the depth
@@ -129,17 +131,19 @@ On CUDA (L40S, device-resident, 4096 channels, `dt_max=2048`, valid mode):
 
 | input | samples | unfused | automatic (depth 3) | speedup | best fixed depth |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| float | 16 384 | 7.50 ms | 5.48 ms | 1.37× | 4: 5.34 ms |
-| float | 32 768 | 14.70 ms | 10.68 ms | 1.38× | 4: 10.28 ms |
-| 1-bit, `int_tree` | 16 384 | 3.69 ms | 3.44 ms | 1.07× | 1: 3.42 ms |
-| 1-bit, `int_tree` | 32 768 | 7.42 ms | 6.93 ms | 1.07× | 3: 6.92 ms |
+| float | 16 384 | 7.33 ms | 4.74 ms | 1.55× | 4: 4.61 ms |
+| float | 32 768 | 14.34 ms | 9.38 ms | 1.53× | 4: 9.08 ms |
+| 1-bit, `int_tree` | 16 384 | 2.74 ms | 2.15 ms | 1.27× | 3: 2.15 ms |
+| 1-bit, `int_tree` | 32 768 | 5.70 ms | 4.52 ms | 1.26× | 3: 4.52 ms |
 
-Fusion saves less on packed input, because the integer tree has already made
-the early levels small. Deeper tiles also cost more there: at depth 5 the
-tile shrinks to 64 samples with a 39-sample halo, and 1-bit input becomes 15%
-*slower* than at depth 3. Depth 3 is the one depth within 3% of the best for
-every input, so the automatic rule (shared memory <= 48 KiB, tile >= 256 samples,
-halo <= half a tile) stops there.
+(dmt 0.5.0.) Fusion saves less on packed input, because the integer tree has
+already made the early levels small. Deeper tiles also cost more there: at
+depth 4 the tile shrinks to 160 samples, and 1-bit input becomes 18% *slower*
+than at depth 3 (float gains 3%). Depth 3 is within 3% of the best for every
+input. Smaller tiles at four resident blocks per SM beat larger tiles at two:
+the fused kernel is bound by load latency and instruction issue, not by the
+halo it recomputes (48 KiB / 384-sample tiles gave 5.17 ms, 24 KiB / 192
+samples 4.91 ms, float, before the 0.5.0 level-kernel change).
 
 ---
 
@@ -191,11 +195,11 @@ fusion, `int_tree` on; 4096 channels, `dt_max=2048`, 16 384 samples):
 
 | input | M1 Pro (8 threads) | Xeon 6348H (8 threads) | L40S (device-resident) |
 | :--- | ---: | ---: | ---: |
-| 1-bit | 2.02× | 2.73× | 1.59× |
-| 2-bit | 2.00× | 2.58× | 1.53× |
-| 4-bit | 1.77× | 2.23× | 1.43× |
-| 8-bit | 1.25× | 1.36× | 1.10× |
-| 16-bit | 0.89× | 1.00× | 0.99× |
+| 1-bit | 2.02× | 2.73× | 2.18× |
+| 2-bit | 2.00× | 2.58× | 2.02× |
+| 4-bit | 1.77× | 2.23× | 1.75× |
+| 8-bit | 1.25× | 1.36× | 1.19× |
+| 16-bit | 0.89× | 1.00× | 1.01× |
 
 Packed input without the integer tree runs no faster than float input: the
 gain comes from the narrow tree state. At 16 bits nearly every level stays
@@ -203,7 +207,7 @@ float, so the per-channel unpack becomes a small net cost; pass 16-bit data
 as float if you already have it in that form. Against the original
 level-by-level float path, the default configuration with 1-bit input is
 **3.2× faster on the M1 Pro** (39.1 → 12.2 ms, 8 threads), **3.9× on the
-Xeon** (76.4 → 19.5 ms, 8 threads) and **2.2× on the L40S** (7.50 → 3.44 ms).
+Xeon** (76.4 → 19.5 ms, 8 threads) and **3.3× on the L40S** (7.33 → 2.20 ms, dmt 0.5.0).
 
 ```{note}
 Integer tree levels cannot be viewed through the stepper's `view_*` methods,

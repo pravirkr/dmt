@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import DDMT, FDMT, FDMTFFT, CohFDMT
+from dmtlib import DDMT, FDMT, FDMTFFT, SDMT, CohFDMT
 
 # Every test runs on the GPU backend of this build (the `gpu_backend`
 # parameter of conftest.py: "cuda" or "hip") and compares with the CPU.
@@ -219,3 +219,36 @@ def test_ddmt_gpu_packed_matches_cpu_exactly(gpu_backend: str) -> None:
     np.testing.assert_array_equal(
         gpu.execute(packed, nsamps), cpu.execute(packed, nsamps)
     )
+
+
+# SDMT: a dense grid over many channels, so the GPU runs its shared-sum
+# kernel (the DDMT kernel otherwise; the results are the same either way).
+SDMT_ARGS = (1000.0, 1500.0, 256, 0.001, (0.4 * np.arange(400)).astype(np.float32))
+
+
+def test_sdmt_gpu_matches_cpu(gpu_backend: str) -> None:
+    nsamps = 1500
+    rng = np.random.default_rng(9)
+    waterfall = rng.standard_normal((256, nsamps), dtype=np.float32)
+    cpu = DDMT(*SDMT_ARGS)
+    gpu = on(gpu_backend, SDMT, *SDMT_ARGS)
+    assert gpu.backend == gpu_backend
+    for block in (waterfall, waterfall[:, ::-1].copy()):
+        np.testing.assert_allclose(
+            gpu.execute(block), cpu.execute(block), rtol=1e-5, atol=1e-3
+        )
+
+
+@pytest.mark.parametrize("nbits", [2, 8, 16])
+def test_sdmt_gpu_packed_matches_ddmt_exactly(nbits: int, gpu_backend: str) -> None:
+    nsamps = 1600
+    rng = np.random.default_rng(10 + nbits)
+    row_bytes = (nsamps * nbits + 7) // 8
+    packed = rng.integers(0, 256, size=(256, row_bytes), dtype=np.uint8)
+    cpu = DDMT(*SDMT_ARGS, nbits=nbits)
+    gpu = on(gpu_backend, SDMT, *SDMT_ARGS, nbits=nbits)
+    # Integer sums: bit-identical to brute force, also when streaming.
+    for part in (packed[:, : row_bytes // 2], packed[:, row_bytes // 2 :]):
+        n = part.shape[1] * 8 // nbits
+        part = np.ascontiguousarray(part)
+        np.testing.assert_array_equal(gpu.execute(part, n), cpu.execute(part, n))

@@ -19,6 +19,7 @@
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
+#include "dmt/algorithms/sdmt.hpp"
 
 #include "bench_gpu_utils.cuh"
 #include "suite_common.hpp"
@@ -29,6 +30,7 @@ namespace {
 using algorithms::DDMT;
 using algorithms::FDMT;
 using algorithms::FDMTFFT;
+using algorithms::SDMT;
 
 template <typename T> DeviceSpan<T> dspan(thrust::device_vector<T>& v) {
     return {thrust::raw_pointer_cast(v.data()), v.size()};
@@ -140,13 +142,16 @@ void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
     set_counters(state, plan, p, 0);
 }
 
+// DDMT and SDMT (same interface; SDMT's plan is built in the constructor,
+// outside the timed loop).
+template <typename Engine, Algo kAlgo>
 void bench_ddmt_cuda(benchmark::State& state, Point p) {
     const auto plan = make_plan(p);
-    if (skip_if_over_device_budget(state, Algo::kDDMT, plan, p)) {
+    if (skip_if_over_device_budget(state, kAlgo, plan, p)) {
         return;
     }
     const auto dms = plan.get_dm_grid_final();
-    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, dms, bench_gpu_exec(), p.nbits);
+    Engine ddmt(kFMin, kFMax, kNchans, kTsamp, dms, bench_gpu_exec(), p.nbits);
     const auto ndms   = dms.size();
     const auto n_cold = ddmt.get_output_nsamps(p.nsamps);
     if (p.nbits == 32) {
@@ -196,14 +201,20 @@ void register_cuda() {
             add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
             add(bench_name(Algo::kFDMTFFT, DMT_GPU_NAME, p),
                 bench_fdmt_fft_cuda, p);
-            add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p), bench_ddmt_cuda, p);
+            add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
+                bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
+            add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
+                bench_ddmt_cuda<SDMT, Algo::kSDMT>, p);
         }
     }
     for (const auto& p : sweep_points(Sweep::kNbits)) {
         add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
         add(bench_name(Algo::kFDMT, DMT_GPU_NAME "_host", p),
             bench_fdmt_cuda_host, p);
-        add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p), bench_ddmt_cuda, p);
+        add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
+            bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
+        add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
+            bench_ddmt_cuda<SDMT, Algo::kSDMT>, p);
     }
 }
 

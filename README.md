@@ -147,12 +147,12 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.4.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
-8 threads), and an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
+Measured on an Apple M1 Pro, an Intel Xeon Gold 6348H (both 8 threads; dmt
+0.4.0), and an NVIDIA L40S (dmt 0.5.0). The data are 4096 channels (704–1216 MHz, 81.92 µs) in
 16K-sample blocks (1.34 s), processed as a stream.
 
 - **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT and
-  SDMT (exact DDMT sums with shared partial sums, CPU) on the same DM grid. The grey line is real time.
+  SDMT (exact DDMT sums with shared partial sums) on the same DM grid. The grey line is real time.
 - **Right:** how many times faster than real time FDMT runs, by input bit
   width.
 
@@ -163,9 +163,10 @@ Measured with dmt 0.4.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
 
 At 2049 DM trials, FDMT is 11× faster than brute-force DDMT on the Xeon
 and 37× on the M1 Pro (down from 336× in 0.3.0), and 3–8× faster than SDMT, which
-runs 6–21× faster than real time across both CPUs; on the GPU FDMT is 4× faster, where
-the DM-tiled DDMT kernels run 60–95× faster than real time. FDMT runs 25–53× faster than real time
-on 8 CPU threads and 242× on the L40S, rising to 387× with packed 1-bit
+runs 6–21× faster than real time across both CPUs. On the L40S, FDMT is 4.4×
+faster than DDMT (whose DM-tiled kernels run 63–95× faster than real time) and
+1.8× faster than SDMT (159–178× real time). FDMT runs 25–53× faster than real
+time on 8 CPU threads and 280× on the L40S, rising to 610× with packed 1-bit
 input.
 
 All sweeps, per-machine numbers and the operation-count comparison are on the

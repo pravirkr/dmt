@@ -40,7 +40,7 @@ static_assert(kGroupSubbands * kSubband <= kU16FlushChans<8> / 2);
 
 class SharedSumAlgo {
 public:
-    // static constexpr std::string_view kName = "SDMT";
+    static constexpr const char* kName = "SDMT";
     // Output samples per work unit (time tile). A unit's accumulators (up
     // to kMaxTileDM x kTimeTile values) stay in L2.
     static constexpr int kTimeTile = 512;

@@ -360,13 +360,14 @@ void bind_ddmt(py::module_& mod) {
         a per-trial base) have identical partial sums, computed once.
         Nothing is approximated. Integer output is bit-identical to DDMT;
         float32 output differs only by rounding (order of additions).
-        Dense DM grids save the most additions (~7x fewer additions, yielding
-        ~3.5x wall-clock speedup at 4096 channels and 2049 trials); coarse or
-        sparse grids fall back to direct sums per subband (where DDMT's
-        uninterpreted loop has lower overhead).
+        Dense DM grids save the most additions (~7x fewer additions at 4096
+        channels and 2049 trials: ~3.5x faster than DDMT on a CPU, ~2.5x on
+        an NVIDIA L40S); coarse or sparse grids fall back to direct sums
+        per subband (where DDMT's uninterpreted loop has lower overhead).
 
-        Same parameters, methods and streaming behaviour as :class:`DDMT`.
-        CPU backend only (``backend='cpu'``).
+        Same parameters, methods, backends and streaming behaviour as
+        :class:`DDMT`. On a GPU, grids that share too little (sparse or
+        coarse) run the DDMT kernel instead, with the same result.
         )doc");
     def_ddmt_inits<SDMT>(sdmt_cls);
 }

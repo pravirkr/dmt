@@ -33,9 +33,13 @@ constexpr float kFMax  = 1500.0F;
 constexpr float kTsamp = 0.001F;
 
 struct HostBlock {
-    template <typename F> void for_each(int n, F&& f) const {
-        for (int i = 0; i < n; ++i) {
-            f(i);
+    template <typename Row>
+    void for_each_row(int nrows, int width, Row&& row) const {
+        for (int r = 0; r < nrows; ++r) {
+            auto cell = row(r);
+            for (int j = 0; j < width; ++j) {
+                cell(j);
+            }
         }
     }
     void sync() const {}

@@ -39,7 +39,7 @@ project = "dmt"
 author = "Pravir Kumar"
 year = datetime.datetime.now(tz=datetime.UTC).date().year
 copyright = f"{year}, {author}"  # noqa: A001
-release = getattr(dmtlib, "__version__", None) or "0.4.0"
+release = getattr(dmtlib, "__version__", None) or "0.5.0"
 version = release
 master_doc = "index"
 repo_url = "https://github.com/pravirkr/dmt"

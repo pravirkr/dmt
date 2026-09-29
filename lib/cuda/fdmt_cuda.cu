@@ -24,6 +24,7 @@
 #include "dmt/fdmt_fused_tile.hpp"
 #include "dmt/fdmt_int_tree.hpp"
 #include "dmt/gpu_utils.cuh"
+#include "dmt/host_staging.cuh"
 #include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
 
@@ -149,28 +150,37 @@ __global__ void kernel_advance_history_window(float* __restrict__ hist_out,
     }
 }
 
+/// Threads per block and output samples per thread of kernel_execute_iter.
+inline constexpr int kIterThreads    = 256;
+inline constexpr int kIterSampsPerTh = 4;
+
 /**
- * @brief Per-level tree merge kernel with multi-beam support.
+ * @brief Per-level tree merge kernel with multi-beam support. A block covers
+ * kIterThreads * kIterSampsPerTh samples of one coordinate (samples strided
+ * by kIterThreads, so every load and store stays coalesced); the
+ * coordinate's table entries are read once per thread.
  */
 template <FDMTMode Mode, typename TIn = float, typename TOut = float>
-__global__ void kernel_execute_iter(const TIn* __restrict__ state_in,
-                                    TOut* __restrict__ state_out,
-                                    const plans::FDMTCoordDPtrs coords_sum,
-                                    const plans::FDMTCoordDPtrs coords_copy,
-                                    const float* __restrict__ hist_in,
-                                    int nsamps,
-                                    int ncoords_sum_cur,
-                                    int ncoords_copy_cur,
-                                    int in_state_nelements,
-                                    int out_state_nelements,
-                                    int tree_hist_size) {
-    const auto isamp =
-        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+__global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
+    const TIn* __restrict__ state_in,
+    TOut* __restrict__ state_out,
+    const plans::FDMTCoordDPtrs coords_sum,
+    const plans::FDMTCoordDPtrs coords_copy,
+    const float* __restrict__ hist_in,
+    int nsamps,
+    int ncoords_sum_cur,
+    int ncoords_copy_cur,
+    int in_state_nelements,
+    int out_state_nelements,
+    int tree_hist_size) {
+    const int isamp0 =
+        (static_cast<int>(blockIdx.x) * kIterThreads * kIterSampsPerTh) +
+        static_cast<int>(threadIdx.x);
     const auto i_coord = static_cast<int>(blockIdx.y);
     // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
     // int32 for large blocks with several beams.
     const auto i_beam = static_cast<int64_t>(blockIdx.z);
-    if (isamp >= nsamps) {
+    if (isamp0 >= nsamps) {
         return;
     }
 
@@ -178,62 +188,66 @@ __global__ void kernel_execute_iter(const TIn* __restrict__ state_in,
         const auto nsamps_out  = coords_sum.nsamps[i_coord];
         const auto offset      = coords_sum.offset[i_coord];
         const auto nsamps_tail = coords_sum.tail_nsamps[i_coord];
-        const auto out_idx_base =
-            (i_beam * out_state_nelements) + coords_sum.buf_offset[i_coord];
-        const auto tail_idx_base =
-            (i_beam * in_state_nelements) + coords_sum.tail_buf_offset[i_coord];
-        const auto head_idx_base =
-            (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
-        const auto hist_off =
-            (i_beam * tree_hist_size) + coords_sum.hist_offset[i_coord];
-
-        if (isamp < nsamps_out) {
+        TOut* out              = state_out + (i_beam * out_state_nelements) +
+                                 coords_sum.buf_offset[i_coord];
+        const TIn* tail        = state_in + (i_beam * in_state_nelements) +
+                                 coords_sum.tail_buf_offset[i_coord];
+        const TIn* head        = state_in + (i_beam * in_state_nelements) +
+                                 coords_sum.head_buf_offset[i_coord];
+        const float* hist      = hist_in != nullptr
+                                     ? hist_in + (i_beam * tree_hist_size) +
+                                           coords_sum.hist_offset[i_coord]
+                                     : nullptr;
+#pragma unroll
+        for (int k = 0; k < kIterSampsPerTh; ++k) {
+            const int isamp = isamp0 + (k * kIterThreads);
+            if (isamp >= nsamps_out) {
+                break;
+            }
             // Summed in the output storage type: float as before, or the
             // narrow integer type (int_tree), whose plan bound cannot wrap.
             TOut tail_val = TOut{0};
             TOut head_val = TOut{0};
             if constexpr (Mode == FDMTMode::kFull) {
                 if (isamp < nsamps_tail) {
-                    tail_val =
-                        static_cast<TOut>(state_in[tail_idx_base + isamp]);
+                    tail_val = static_cast<TOut>(tail[isamp]);
                 }
                 if (isamp >= offset && (isamp - offset) < nsamps_tail) {
-                    head_val = static_cast<TOut>(
-                        state_in[head_idx_base + (isamp - offset)]);
+                    head_val = static_cast<TOut>(head[isamp - offset]);
                 }
             } else if constexpr (Mode == FDMTMode::kValid) {
-                tail_val = static_cast<TOut>(state_in[tail_idx_base + isamp]);
+                tail_val = static_cast<TOut>(tail[isamp]);
                 if (isamp >= offset) {
-                    head_val = static_cast<TOut>(
-                        state_in[head_idx_base + (isamp - offset)]);
-                } else if (hist_in != nullptr) {
-                    head_val = static_cast<TOut>(hist_in[hist_off + isamp]);
+                    head_val = static_cast<TOut>(head[isamp - offset]);
+                } else if (hist != nullptr) {
+                    head_val = static_cast<TOut>(hist[isamp]);
                 }
             } else if constexpr (Mode == FDMTMode::kRoll) {
-                tail_val = static_cast<TOut>(state_in[tail_idx_base + isamp]);
+                tail_val            = static_cast<TOut>(tail[isamp]);
                 const int head_samp = (isamp >= offset)
                                           ? (isamp - offset)
                                           : (nsamps_tail - offset + isamp);
-                head_val =
-                    static_cast<TOut>(state_in[head_idx_base + head_samp]);
+                head_val            = static_cast<TOut>(head[head_samp]);
             }
-            state_out[out_idx_base + isamp] =
-                static_cast<TOut>(tail_val + head_val);
+            out[isamp] = static_cast<TOut>(tail_val + head_val);
         }
     }
 
     if (i_coord < ncoords_copy_cur) {
         const auto nsamps_out  = coords_copy.nsamps[i_coord];
         const auto nsamps_tail = coords_copy.tail_nsamps[i_coord];
-        const auto out_idx_base =
-            (i_beam * out_state_nelements) + coords_copy.buf_offset[i_coord];
-        if (isamp < nsamps_tail) {
-            const auto tail_idx_base = (i_beam * in_state_nelements) +
-                                       coords_copy.tail_buf_offset[i_coord];
-            state_out[out_idx_base + isamp] =
-                static_cast<TOut>(state_in[tail_idx_base + isamp]);
-        } else if (isamp < nsamps_out) {
-            state_out[out_idx_base + isamp] = TOut{0};
+        TOut* out              = state_out + (i_beam * out_state_nelements) +
+                                 coords_copy.buf_offset[i_coord];
+        const TIn* tail        = state_in + (i_beam * in_state_nelements) +
+                                 coords_copy.tail_buf_offset[i_coord];
+#pragma unroll
+        for (int k = 0; k < kIterSampsPerTh; ++k) {
+            const int isamp = isamp0 + (k * kIterThreads);
+            if (isamp < nsamps_tail) {
+                out[isamp] = static_cast<TOut>(tail[isamp]);
+            } else if (isamp < nsamps_out) {
+                out[isamp] = TOut{0};
+            }
         }
     }
 }
@@ -285,19 +299,28 @@ kernel_advance_tree_history(const TIn* __restrict__ state_in,
     }
 }
 
-/// @brief Thread-block execution policy of detail::fdmt_fused_tile: work
-/// items strided over the block's threads, __syncthreads() as the barrier.
+/// @brief Thread-block execution policy of detail::fdmt_fused_tile: rows
+/// strided over the block's warps, a row's cells over the warp's lanes, and
+/// __syncthreads() as the barrier.
 struct DeviceBlock {
-    template <typename F>
-    __host__ __device__ void for_each(int n, F&& f) const {
+    template <typename Row>
+    __host__ __device__ void
+    for_each_row(int nrows, int width, Row&& row) const {
 #if DMT_GPU_DEVICE_PASS
-        for (int i = static_cast<int>(threadIdx.x); i < n;
-             i += static_cast<int>(blockDim.x)) {
-            f(i);
+        constexpr int kWarp = 32;
+        const int lane      = static_cast<int>(threadIdx.x) % kWarp;
+        const int nwarps    = static_cast<int>(blockDim.x) / kWarp;
+        for (int r = static_cast<int>(threadIdx.x) / kWarp; r < nrows;
+             r += nwarps) {
+            auto cell = row(r);
+            for (int j = lane; j < width; j += kWarp) {
+                cell(j);
+            }
         }
 #else
-        (void)n;
-        (void)f;
+        (void)nrows;
+        (void)width;
+        (void)row;
 #endif
     }
     __host__ __device__ void sync() const {
@@ -424,7 +447,7 @@ public:
         execute_d(cuda::std::span<const float>(
                       thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
                       waterfall_h.size()),
-                  stage_dmt_span(), nullptr);
+                  stage_dmt_span(), m_host.stream());
         copy_result_to_host(dmt_h);
     }
 
@@ -447,24 +470,23 @@ public:
         execute_d(cuda::std::span<const uint8_t>(
                       thrust::raw_pointer_cast(m_stage_wf_packed_d.data()),
                       waterfall_h.size()),
-                  nbits, stage_dmt_span(), nullptr);
+                  nbits, stage_dmt_span(), m_host.stream());
         copy_result_to_host(dmt_h);
     }
 
     // Host-memory execute() staging: device copies of the input and a
     // B-per-beam output, allocated on the first host call and reused, so
     // steady-state host calls allocate nothing (device-memory callers never
-    // pay for them).
+    // pay for them). Transfers and the block's kernels run on
+    // m_host.stream() (see gpu_host::ChunkedStager).
     template <typename T>
     void stage_to_device(thrust::device_vector<T>& dst,
                          std::span<const T> src) {
         if (dst.size() < src.size()) {
             dst.resize(src.size());
         }
-        cudaMemcpyAsync(thrust::raw_pointer_cast(dst.data()), src.data(),
-                        src.size_bytes(), cudaMemcpyHostToDevice, nullptr);
-        gpu_utils::check_last_gpu_error(
-            "FDMT::execute (host): H->D copy failed");
+        m_host.to_device(thrust::raw_pointer_cast(dst.data()), src.data(),
+                         src.size_bytes());
     }
 
     cuda::std::span<float> stage_dmt_span() {
@@ -476,16 +498,18 @@ public:
     }
 
     // Copies back only each beam's leading get_dmt_size() values (the
-    // result); the host buffer's scratch tail is left untouched.
+    // result), after the work on m_host.stream(); the host buffer's scratch
+    // tail is left untouched.
     void copy_result_to_host(std::span<float> dmt_h) {
-        const auto pitch = m_plan.get_buffer_size() * sizeof(float);
-        cudaMemcpy2DAsync(dmt_h.data(), pitch,
-                          thrust::raw_pointer_cast(m_stage_dmt_d.data()), pitch,
-                          m_plan.get_dmt_size() * sizeof(float), m_nbeams,
-                          cudaMemcpyDeviceToHost, nullptr);
-        cudaStreamSynchronize(nullptr);
-        gpu_utils::check_last_gpu_error(
-            "FDMT::execute (host): D->H copy failed");
+        const auto pitch = m_plan.get_buffer_size();
+        std::vector<gpu_host::ChunkedStager::Segment> segs;
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            segs.push_back(
+                {dmt_h.data() + (b * pitch),
+                 thrust::raw_pointer_cast(m_stage_dmt_d.data()) + (b * pitch),
+                 m_plan.get_dmt_size() * sizeof(float)});
+        }
+        m_host.to_host(segs);
     }
 
     void execute_d(cuda::std::span<const uint8_t> waterfall_d,
@@ -541,7 +565,7 @@ public:
         reset_impl(cuda::std::span<const float>(
                        thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
                        waterfall_h.size()),
-                   stage_dmt_span(), nullptr, /*fuse=*/false);
+                   stage_dmt_span(), m_host.stream(), /*fuse=*/false);
         m_host_dmt = dmt_h;
     }
 
@@ -555,7 +579,7 @@ public:
         reset_impl(cuda::std::span<const uint8_t>(
                        thrust::raw_pointer_cast(m_stage_wf_packed_d.data()),
                        waterfall_h.size()),
-                   nbits, stage_dmt_span(), nullptr, /*fuse=*/false);
+                   nbits, stage_dmt_span(), m_host.stream(), /*fuse=*/false);
         m_host_dmt = dmt_h;
     }
 
@@ -807,8 +831,8 @@ public:
         m_device_work.mark(active_stream);
         if (!m_host_dmt.empty()) {
             // Host-memory stepper: the result goes back to the caller's
-            // buffer (the staging copy runs on the default stream).
-            cudaStreamSynchronize(active_stream);
+            // buffer (through the staging stream).
+            gpu_utils::check_gpu_call(cudaStreamSynchronize(active_stream));
             copy_result_to_host(m_host_dmt);
             m_host_dmt = {};
         }
@@ -1034,12 +1058,16 @@ private:
     };
     std::unique_ptr<FusedLevelsD> m_fused;
     // Auto depth: the deepest fusion whose shared memory at a tile of at
-    // least kMinAutoTile samples fits kAutoSmemBytes (two or more blocks per
-    // SM on current GPUs) with a level-0 halo of at most half a tile.
-    static constexpr SizeType kAutoSmemBytes = SizeType{48} * 1024;
-    static constexpr int kMinAutoTile        = 256;
-    static constexpr int kMaxTile            = 1024;
-    static constexpr int kFusedThreads       = 256;
+    // least kMinAutoTile samples fits auto_smem_bytes() (kAutoBlocksPerSM
+    // resident blocks per SM) with a level-0 halo of at most half a tile.
+    // Four blocks (32 warps) hide the fused kernel's global-load latency
+    // better than larger tiles at two blocks save halo work (L40S: 4.9 vs
+    // 5.2 ms at 4096 channels, 16384 samples, 2049 DMs).
+    static constexpr SizeType kDefaultSmemBytes = SizeType{48} * 1024;
+    static constexpr int kAutoBlocksPerSM       = 4;
+    static constexpr int kMinAutoTile           = 128;
+    static constexpr int kMaxTile               = 1024;
+    static constexpr int kFusedThreads          = 256;
 
     // One tree level's device state: beam 0 at `base`, beam b at element
     // offset b * get_buffer_size(), stored as `type`.
@@ -1065,6 +1093,7 @@ private:
     // Host-memory stepper: the caller's dmt buffer (empty after a
     // device-memory reset) and the host snapshot behind the view_* methods.
     std::span<float> m_host_dmt;
+    gpu_host::ChunkedStager m_host; // pinned pipeline of the host overloads
     mutable std::vector<float> m_host_level;
     mutable bool m_host_level_valid{false};
 
@@ -1197,9 +1226,26 @@ private:
                                    cudaDevAttrMaxSharedMemoryPerBlockOptin,
                                    m_device_id) != cudaSuccess ||
             bytes <= 0) {
-            return kAutoSmemBytes;
+            return kDefaultSmemBytes;
         }
         return static_cast<SizeType>(bytes);
+    }
+
+    /// Shared memory per fused block for kAutoBlocksPerSM resident blocks
+    /// (less the ~1 KiB the runtime reserves per block), at most the
+    /// no-opt-in limit.
+    [[nodiscard]] SizeType auto_smem_bytes() const {
+        constexpr SizeType kReserved = 1024;
+        int per_sm                   = 0;
+        if (cudaDeviceGetAttribute(&per_sm,
+                                   cudaDevAttrMaxSharedMemoryPerMultiprocessor,
+                                   m_device_id) != cudaSuccess ||
+            per_sm <= 0) {
+            return kDefaultSmemBytes;
+        }
+        const auto share = static_cast<SizeType>(per_sm) / kAutoBlocksPerSM;
+        return std::min(kDefaultSmemBytes,
+                        share > kReserved ? share - kReserved : share);
     }
 
     /**
@@ -1207,7 +1253,7 @@ private:
      * and uploads the fused kernel's tables. An explicit depth is clamped to
      * the plan's merge levels and kMaxFusedLevels, and reduced until a tile
      * fits the device's (opt-in) shared memory; kFDMTAutoFuse follows the rule
-     * at kAutoSmemBytes. Leaves m_fused empty when no depth qualifies.
+     * at auto_smem_bytes(). Leaves m_fused empty when no depth qualifies.
      */
     void configure_fusion(SizeType requested) {
         m_fused.reset();
@@ -1217,17 +1263,17 @@ private:
         if (requested == 0 || deepest == 0) {
             return;
         }
-        const bool automatic = requested == kFDMTAutoFuse;
-        const auto& pc       = m_plan.get_container();
-        const SizeType optin =
-            automatic ? kAutoSmemBytes : max_optin_smem_bytes();
+        const bool automatic  = requested == kFDMTAutoFuse;
+        const auto& pc        = m_plan.get_container();
+        const SizeType budget = auto_smem_bytes();
+        const SizeType optin  = automatic ? budget : max_optin_smem_bytes();
         for (SizeType f = automatic ? deepest : std::min(requested, deepest);
              f >= 1; --f) {
             const auto plan = detail::build_fused_tile_plan(pc, niters, f);
             // Never wider than the (32-rounded) level-F row itself.
             const int max_tile =
                 std::min(kMaxTile, ((plan.ntiles_nsamps + 31) / 32) * 32);
-            int tile = plan.max_tile_nsamps(kAutoSmemBytes, max_tile);
+            int tile = plan.max_tile_nsamps(budget, max_tile);
             if (automatic) {
                 const int min_tile = std::min(kMinAutoTile, max_tile);
                 if (tile < min_tile || 2 * plan.max_level0_halo > tile) {
@@ -1276,7 +1322,7 @@ private:
     void
     launch_fused_typed(const Input& input, TOut* out, cudaStream_t stream) {
         const auto& f = *m_fused;
-        if (f.smem_bytes > kAutoSmemBytes) {
+        if (f.smem_bytes > kDefaultSmemBytes) {
             cudaFuncSetAttribute(kernel_fused_levels<Mode, Smear, Input, TOut>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(f.smem_bytes));
@@ -1463,10 +1509,11 @@ private:
         coords_sum_cur.update_offsets(m_coords_sum_offsets[next_level]);
         coords_copy_cur.update_offsets(m_coords_copy_offsets[next_level]);
 
-        const auto coords_max = std::max(ncoords_sum_cur, ncoords_copy_cur);
-        const dim3 block_size = dim3(256, 1);
-        const dim3 grid_size  = dim3((nsamps + block_size.x - 1) / block_size.x,
-                                     coords_max, m_nbeams);
+        const auto coords_max     = std::max(ncoords_sum_cur, ncoords_copy_cur);
+        constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
+        const dim3 block_size     = dim3(kIterThreads, 1);
+        const dim3 grid_size = dim3((nsamps + kBlockSamps - 1) / kBlockSamps,
+                                    coords_max, m_nbeams);
         gpu_utils::check_kernel_launch_params(grid_size, block_size);
 
         // Beam b of every level lives at element offset b * get_buffer_size()

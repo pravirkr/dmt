@@ -478,6 +478,7 @@ def throughput_figure(
                 ("FDMT", kind, False),
                 ("FDMT", f"{kind}_host", True),
                 ("DDMT", kind, False),
+                ("SDMT", kind, False),
             ]
         ax.set_title(f"{machines[mname].platform(kind)} · {kind_name(kind)}")
         for algo, backend, variant in lines:

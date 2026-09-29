@@ -2,10 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
-#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -22,24 +20,17 @@ std::unique_ptr<detail::DDMTEngine>
 make_ddmt_engine(const plans::DDMTPlan& plan,
                  const detail::DDMTEngineConfig& cfg,
                  bool shared_sums) {
-    if (shared_sums) {
-        if (cfg.exec.backend != Backend::kCPU) {
-            throw std::invalid_argument(
-                std::format("SDMT: runs on the CPU backend only (got '{}'); "
-                            "use DDMT on a GPU backend",
-                            to_string(cfg.exec.backend)));
-        }
-        return detail::make_sdmt_cpu(plan, cfg);
-    }
     if (cfg.exec.backend == Backend::kCPU) {
-        return detail::make_ddmt_cpu(plan, cfg);
+        return shared_sums ? detail::make_sdmt_cpu(plan, cfg)
+                           : detail::make_ddmt_cpu(plan, cfg);
     }
 #ifdef DMT_ENABLE_GPU
     if (cfg.exec.backend == detail::kGPUBackend) {
-        return detail::make_ddmt_gpu(plan, cfg);
+        return shared_sums ? detail::make_sdmt_gpu(plan, cfg)
+                           : detail::make_ddmt_gpu(plan, cfg);
     }
 #endif
-    detail::throw_unavailable("DDMT", cfg.exec.backend);
+    detail::throw_unavailable(shared_sums ? "SDMT" : "DDMT", cfg.exec.backend);
 }
 
 } // namespace

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import DDMT, SDMT, DDMTPlan, LevinConfig
+from dmtlib import DDMT, SDMT, DDMTPlan, LevinConfig, available_backends
 
 
 class TestDDMT:
@@ -452,7 +452,10 @@ class TestSDMT:
         out_time = sdmt.execute_time_major(np.ascontiguousarray(data.T), nsamps)
         np.testing.assert_array_equal(out_time, out_chan)
 
-    def test_cpu_only(self) -> None:
+    def test_unavailable_backend_raises(self) -> None:
+        missing = [b for b in ("cuda", "hip") if b not in available_backends()]
+        if not missing:
+            pytest.skip("every GPU backend is available in this build")
         with pytest.raises(ValueError):
             SDMT(
                 self.F_MIN,
@@ -460,5 +463,5 @@ class TestSDMT:
                 self.NCHANS,
                 self.TSAMP,
                 self.DMS,
-                backend="cuda",
+                backend=missing[0],
             )

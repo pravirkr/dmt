@@ -201,9 +201,16 @@ std::unique_ptr<DDMTEngine> make_ddmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
 std::unique_ptr<DDMTEngine> make_ddmt_gpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
-// SDMT: exact shared-partial-sum engine (CPU only).
+// SDMT: exact shared-partial-sum engines (same interface as DDMT).
 std::unique_ptr<DDMTEngine> make_sdmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
+std::unique_ptr<DDMTEngine> make_sdmt_gpu(const plans::DDMTPlan& plan,
+                                          const DDMTEngineConfig& cfg);
+// Testing hook: while set, SDMT GPU engines constructed afterwards run the
+// shared-sum kernel whenever its programs fit, even where the DDMT kernel is
+// estimated to be faster (so tests cover it on small plans).
+void set_sdmt_gpu_always_shared(bool on) noexcept;
+[[nodiscard]] bool sdmt_gpu_always_shared() noexcept;
 
 // ---------------------------------------------------------------------------
 // FDMT-FFT

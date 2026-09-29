@@ -1318,13 +1318,17 @@ TEST_CASE("SDMT integer output equals DDMT exactly", "[sdmt][cpu]") {
     REQUIRE_THAT(out_s, Catch::Matchers::Equals(out_d));
 }
 
-TEST_CASE("SDMT runs on the CPU backend only", "[sdmt][cpu]") {
+TEST_CASE("SDMT reports its backend; unavailable backends throw",
+          "[sdmt][cpu]") {
     const std::vector<float> dms = {0.0F, 5.0F};
-    CHECK_THROWS_AS(SDMT(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cuda(0)),
-                    std::invalid_argument);
     const SDMT sdmt(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cpu(2));
     CHECK(sdmt.backend() == Backend::kCPU);
     CHECK(sdmt.nthreads() == 2);
+    const auto backends = available_backends();
+    if (std::ranges::find(backends, Backend::kCUDA) == backends.end()) {
+        CHECK_THROWS_AS(SDMT(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cuda(0)),
+                        std::invalid_argument);
+    }
 }
 
 } // namespace dmt

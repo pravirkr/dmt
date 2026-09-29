@@ -30,9 +30,12 @@ namespace dmt::algorithms {
  * are bit-identical to DDMT, and float results differ only by the order of
  * additions (rounding).
  *
- * The API, streaming model and history are those of DDMT (SDMT is-a DDMT).
- * CPU backend only: the constructors throw std::invalid_argument for any
- * other backend. Constructing an SDMT builds the sharing plan, which takes
+ * The API, streaming model and history are those of DDMT (SDMT is-a DDMT),
+ * on every backend. On a GPU, the sharing is organised in a fixed two-level
+ * hierarchy per DM tile (unique 4-channel sums, then unique 16-channel sums
+ * built from them); when a DM grid shares too little for that to pay
+ * (sparse or coarse grids), the GPU runs the DDMT kernel instead, with the
+ * same result. Constructing an SDMT builds the sharing plan, which takes
  * longer than a DDMT.
  */
 class SDMT final : public DDMT {

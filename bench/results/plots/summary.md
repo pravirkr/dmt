@@ -4,7 +4,7 @@
 
 | results | CPU | GPU | RAM | CPU threads | dmt |
 | :--- | :--- | :--- | ---: | :--- | :--- |
-| `l40s` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | — | 0.4.0 |
+| `l40s` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | — | 0.5.0 |
 | `m1-pro` | Apple M1 Pro | — | 32 GB | 1 8 | 0.4.0 |
 | `xeon-6348h` | Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz | — | 755 GB | 1 8 | 0.4.0 |
 
@@ -16,7 +16,7 @@
 | Apple M1 Pro · 8 thr | 25.3 ms | 415 ms | 938 ms | 211 ms | 37× | 8× | 16× | 53× |
 | Xeon Gold 6348H · 1 thr | 271 ms | — | — | — | — | — | — | 5× |
 | Xeon Gold 6348H · 8 thr | 52.7 ms | 701 ms | 602 ms | 168 ms | 11× | 3× | 13× | 25× |
-| NVIDIA L40S | 5.54 ms | 22.2 ms | 21.2 ms | — | 4× | — | 4× | 242× |
+| NVIDIA L40S | 4.8 ms | 22.2 ms | 21.2 ms | 8.44 ms | 4× | 2× | 5× | 280× |
 
 **Real-time factor by input width** (data seconds per compute second, 16384 samples × 2049 DM trials):
 
@@ -30,6 +30,7 @@
 | Xeon Gold 6348H | FDMT, 8 threads | 70.7× | 64.9× | 57.1× | 34.6× | 25.7× | 25.4× |
 | Xeon Gold 6348H | DDMT, 8 threads | 4.7× | 4.6× | 4.6× | 4.3× | 2.6× | 2.3× |
 | Xeon Gold 6348H | SDMT, 8 threads | 21.4× | 20.4× | 20.4× | 16.6× | 9.7× | 8.0× |
-| NVIDIA L40S | FDMT, device-resident | 387.6× | 371.3× | 348.9× | 267.7× | 242.1× | 242.7× |
-| NVIDIA L40S | DDMT, device-resident | 95.0× | 94.0× | 92.5× | 92.2× | 69.7× | 63.4× |
-| NVIDIA L40S | FDMT, host arrays (incl. PCIe) | 100.2× | 96.8× | 85.3× | 69.2× | 53.9× | 35.1× |
+| NVIDIA L40S | FDMT, device-resident | 610.0× | 564.3× | 490.5× | 331.6× | 283.4× | 279.7× |
+| NVIDIA L40S | DDMT, device-resident | 95.0× | 94.1× | 92.6× | 92.3× | 69.7× | 63.5× |
+| NVIDIA L40S | SDMT, device-resident | 165.3× | 165.4× | 165.0× | 177.8× | 169.4× | 159.2× |
+| NVIDIA L40S | FDMT, host arrays (incl. PCIe) | 83.6× | 77.2× | 69.4× | 55.8× | 44.1× | 32.3× |
