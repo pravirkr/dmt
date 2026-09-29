@@ -23,17 +23,38 @@ std::atomic<std::size_t> g_allocations{0};
 
 } // namespace
 
+void* allocate_test_heap(std::size_t size) {
+    return std::malloc(size == 0 ? 1 : size);
+}
+
 void* operator new(std::size_t size) {
     if (g_counting.load(std::memory_order_relaxed)) {
         g_allocations.fetch_add(1, std::memory_order_relaxed);
     }
-    if (void* p = std::malloc(size == 0 ? 1 : size)) {
+    if (void* p = allocate_test_heap(size)) {
         return p;
     }
     throw std::bad_alloc();
 }
+
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    return allocate_test_heap(size);
+}
+
+void* operator new[](std::size_t size) { return ::operator new(size); }
+
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    return allocate_test_heap(size);
+}
+
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t /*size*/) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t /*size*/) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
 
 namespace dmt {
 

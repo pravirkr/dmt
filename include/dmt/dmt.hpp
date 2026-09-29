@@ -32,3 +32,4 @@
 #include "algorithms/ddmt.hpp"     // IWYU pragma: export
 #include "algorithms/fdmt.hpp"     // IWYU pragma: export
 #include "algorithms/fdmt_fft.hpp" // IWYU pragma: export
+#include "algorithms/sdmt.hpp"     // IWYU pragma: export

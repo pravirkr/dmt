@@ -188,6 +188,11 @@ public:
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
 
+    // Host-path chunk length in input samples (GPU; stored but unused on
+    // the CPU). 0 restores the default.
+    virtual void set_gulp_size(SizeType gulp_size)                = 0;
+    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept = 0;
+
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
 };
@@ -196,6 +201,16 @@ std::unique_ptr<DDMTEngine> make_ddmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
 std::unique_ptr<DDMTEngine> make_ddmt_gpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
+// SDMT: exact shared-partial-sum engines (same interface as DDMT).
+std::unique_ptr<DDMTEngine> make_sdmt_cpu(const plans::DDMTPlan& plan,
+                                          const DDMTEngineConfig& cfg);
+std::unique_ptr<DDMTEngine> make_sdmt_gpu(const plans::DDMTPlan& plan,
+                                          const DDMTEngineConfig& cfg);
+// Testing hook: while set, SDMT GPU engines constructed afterwards run the
+// shared-sum kernel whenever its programs fit, even where the DDMT kernel is
+// estimated to be faster (so tests cover it on small plans).
+void set_sdmt_gpu_always_shared(bool on) noexcept;
+[[nodiscard]] bool sdmt_gpu_always_shared() noexcept;
 
 // ---------------------------------------------------------------------------
 // FDMT-FFT

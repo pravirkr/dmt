@@ -39,7 +39,7 @@ project = "dmt"
 author = "Pravir Kumar"
 year = datetime.datetime.now(tz=datetime.UTC).date().year
 copyright = f"{year}, {author}"  # noqa: A001
-release = getattr(dmtlib, "__version__", None) or "0.4.0"
+release = getattr(dmtlib, "__version__", None) or "0.5.0"
 version = release
 master_doc = "index"
 repo_url = "https://github.com/pravirkr/dmt"
@@ -74,8 +74,6 @@ exclude_patterns = [
     "logo-src",
     # Written by conf.py and included from api/cpp_api.md. Not a standalone page.
     "api/_breathe_body.rst",
-    # Internal design note for contributors.
-    "future_design.md",
 ]
 # "any" turns ordinary RST backticks into cross-references and fails the
 # build whenever a name is not in the domain index. Leave the default role
@@ -437,6 +435,10 @@ Compute Engines (``dmt::algorithms``)
    :members:
 
 .. doxygenclass:: dmt::algorithms::DDMT
+   :project: dmt
+   :members:
+
+.. doxygenclass:: dmt::algorithms::SDMT
    :project: dmt
    :members:
 

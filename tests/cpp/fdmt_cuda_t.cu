@@ -70,6 +70,72 @@ TEST_CASE("FDMT execute method (on host)", "[fdmt_gpu][gpu]") {
     test::require_approx(dmt_h, dmt, fdmt_cpu.get_plan().get_dmt_size());
 }
 
+TEST_CASE("FDMT host-memory execute matches device execute (large, "
+          "multi-beam, streaming)",
+          "[fdmt_gpu][gpu]") {
+    // Two beams of 257 x 32768 float results (~67 MB): large enough for the
+    // host path's pinned multi-threaded copy-back.
+    const SizeType nchans = 256;
+    const SizeType nsamps = 32768;
+    const SizeType nbeams = 2;
+    for (const SizeType nbits : {32, 1}) {
+        DYNAMIC_SECTION("nbits = " << nbits) {
+            FDMT host(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 256, 0, 1, true,
+                      "valid", test::gpu_exec(), nbeams);
+            FDMT dev(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 256, 0, 1, true,
+                     "valid", test::gpu_exec(), nbeams);
+            const auto buf      = host.get_plan().get_buffer_size();
+            const auto dsz      = host.get_plan().get_dmt_size();
+            const auto in_bytes = nbits == 32
+                                      ? nbeams * nchans * nsamps * sizeof(float)
+                                      : nbeams * nchans * nsamps / 8;
+            thrust::device_vector<float> d_out(nbeams * buf);
+            for (int call = 0; call < 2; ++call) {
+                std::vector<uint8_t> in(in_bytes);
+                for (SizeType i = 0; i < in.size(); ++i) {
+                    in[i] =
+                        static_cast<uint8_t>((i * 2654435761U) >> 13) & 0x3F;
+                }
+                std::vector<float> h_out(nbeams * buf, -1.0F);
+                const thrust::device_vector<uint8_t> d_in(in.begin(), in.end());
+                if (nbits == 32) {
+                    const std::span<const float> fin(
+                        reinterpret_cast<const float*>(in.data()),
+                        in.size() / sizeof(float));
+                    host.execute(fin, std::span<float>(h_out));
+                    dev.execute(DeviceSpan<const float>(
+                                    reinterpret_cast<const float*>(
+                                        thrust::raw_pointer_cast(d_in.data())),
+                                    fin.size()),
+                                DeviceSpan<float>(
+                                    thrust::raw_pointer_cast(d_out.data()),
+                                    d_out.size()));
+                } else {
+                    host.execute(std::span<const uint8_t>(in), nbits,
+                                 std::span<float>(h_out));
+                    dev.execute(
+                        DeviceSpan<const uint8_t>(
+                            thrust::raw_pointer_cast(d_in.data()), d_in.size()),
+                        nbits,
+                        DeviceSpan<float>(
+                            thrust::raw_pointer_cast(d_out.data()),
+                            d_out.size()));
+                }
+                std::vector<float> expected(d_out.size());
+                thrust::copy(d_out.begin(), d_out.end(), expected.begin());
+                for (SizeType b = 0; b < nbeams; ++b) {
+                    const auto first = h_out.begin() + (b * buf);
+                    REQUIRE(std::equal(first, first + dsz,
+                                       expected.begin() + (b * buf)));
+                    // The scratch tail beyond the result is left untouched.
+                    REQUIRE(std::all_of(first + dsz, first + buf,
+                                        [](float v) { return v == -1.0F; }));
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("FDMT stepper: bit-exact equivalence with single-shot execute on "
           "device",
           "[fdmt_gpu][gpu]") {

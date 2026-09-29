@@ -50,10 +50,13 @@ namespace cuda = ::thrust::hip;
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define cudaMemcpyKind hipMemcpyKind
 #define cudaEventDisableTiming hipEventDisableTiming
 #define cudaHostAllocDefault hipHostMallocDefault
 #define cudaDevAttrMaxSharedMemoryPerBlockOptin                                \
     hipDeviceAttributeSharedMemPerBlockOptin
+#define cudaDevAttrMaxSharedMemoryPerMultiprocessor                            \
+    hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #define cudaFuncAttributeMaxDynamicSharedMemorySize                            \
     hipFuncAttributeMaxDynamicSharedMemorySize
 

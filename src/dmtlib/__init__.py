@@ -3,7 +3,7 @@ from importlib import metadata
 try:
     __version__ = metadata.version(__name__)
 except metadata.PackageNotFoundError:
-    __version__ = "0.4.0"
+    __version__ = "0.5.0"
 
 from . import libdmt as _libdmt
 from .grid import (
@@ -15,6 +15,7 @@ from .libdmt import (
     DDMT,
     FDMT,
     FDMTFFT,
+    SDMT,
     CohFDMT,
     CohFDMTPlan,
     DDMTPlan,
@@ -57,6 +58,7 @@ __all__ = [
     "DDMT",
     "FDMT",
     "FDMTFFT",
+    "SDMT",
     "CohFDMT",
     "CohFDMTPlan",
     "DDMTPlan",

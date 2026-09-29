@@ -18,26 +18,32 @@ namespace {
 
 std::unique_ptr<detail::DDMTEngine>
 make_ddmt_engine(const plans::DDMTPlan& plan,
-                 const detail::DDMTEngineConfig& cfg) {
+                 const detail::DDMTEngineConfig& cfg,
+                 bool shared_sums) {
     if (cfg.exec.backend == Backend::kCPU) {
-        return detail::make_ddmt_cpu(plan, cfg);
+        return shared_sums ? detail::make_sdmt_cpu(plan, cfg)
+                           : detail::make_ddmt_cpu(plan, cfg);
     }
 #ifdef DMT_ENABLE_GPU
     if (cfg.exec.backend == detail::kGPUBackend) {
-        return detail::make_ddmt_gpu(plan, cfg);
+        return shared_sums ? detail::make_sdmt_gpu(plan, cfg)
+                           : detail::make_ddmt_gpu(plan, cfg);
     }
 #endif
-    detail::throw_unavailable("DDMT", cfg.exec.backend);
+    detail::throw_unavailable(shared_sums ? "SDMT" : "DDMT", cfg.exec.backend);
 }
 
 } // namespace
 
 class DDMT::Impl {
 public:
-    Impl(plans::DDMTPlan plan, Exec exec, SizeType nbeams)
+    Impl(plans::DDMTPlan plan,
+         Exec exec,
+         SizeType nbeams,
+         bool shared_sums = false)
         : m_plan(std::move(plan)),
           m_cfg{.nbeams = nbeams, .exec = exec},
-          m_engine(make_ddmt_engine(m_plan, m_cfg)) {}
+          m_engine(make_ddmt_engine(m_plan, m_cfg, shared_sums)) {}
 
     // The engine holds a reference to m_plan; declaration order matters.
     plans::DDMTPlan m_plan;
@@ -106,6 +112,13 @@ DDMT::DDMT(float f_min,
 DDMT::DDMT(const plans::DDMTPlan& plan, Exec exec, SizeType nbeams)
     : m_impl(std::make_unique<Impl>(plan, exec, nbeams)) {}
 
+DDMT::DDMT(const plans::DDMTPlan& plan,
+           Exec exec,
+           SizeType nbeams,
+           EngineKind kind)
+    : m_impl(std::make_unique<Impl>(
+          plan, exec, nbeams, kind == EngineKind::kSharedSums)) {}
+
 DDMT::~DDMT()                                = default;
 DDMT::DDMT(DDMT&& other) noexcept            = default;
 DDMT& DDMT::operator=(DDMT&& other) noexcept = default;
@@ -165,6 +178,12 @@ SizeType DDMT::get_output_nsamps(SizeType input_nsamps) const noexcept {
     return m_impl->m_engine->get_output_nsamps(input_nsamps);
 }
 void DDMT::reset_history() noexcept { m_impl->m_engine->reset_history(); }
+void DDMT::set_gulp_size(SizeType gulp_size) {
+    m_impl->m_engine->set_gulp_size(gulp_size);
+}
+SizeType DDMT::get_gulp_size() const noexcept {
+    return m_impl->m_engine->get_gulp_size();
+}
 SizeType DDMT::history_state_size() const noexcept {
     return m_impl->m_engine->history_state_size();
 }

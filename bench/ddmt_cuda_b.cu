@@ -171,4 +171,39 @@ BENCHMARK_REGISTER_F(DDMTCUDAPackedFixture, BM_ddmt_cuda_packed_execute)
     ->ArgsProduct({{4096}, {8}, {1, 4}})
     ->UseManualTime();
 
+// ============================================================================
+// DDMT host-memory streaming benchmark (suite reference point: 4096 chans,
+// 704-1216 MHz, ~2049 DM trials up to a 2048-sample delay, warm stream).
+// Wall time of one host-span execute(), PCIe copies included.
+// ============================================================================
+
+void BM_ddmt_cuda_float_host_stream(benchmark::State& state) {
+    constexpr float kFMin = 704.0F, kFMax = 1216.0F, kTsamp = 8.192e-5F;
+    constexpr SizeType kNchans = 4096, kNdm = 2049;
+    const auto df   = (kFMax - kFMin) / static_cast<float>(kNchans);
+    const auto a    = 1.0F / kFMin;
+    const auto b    = 1.0F / (kFMin + (static_cast<float>(kNchans - 1) * df));
+    const auto dmax = 2048.0F / (4148.808F / kTsamp * ((a * a) - (b * b)));
+    std::vector<float> dms(kNdm);
+    for (SizeType i = 0; i < kNdm; ++i) {
+        dms[i] = dmax * static_cast<float>(i) / static_cast<float>(kNdm - 1);
+    }
+    DDMT ddmt(kFMin, kFMax, kNchans, kTsamp, dms, bench_gpu_exec());
+    ddmt.set_gulp_size(static_cast<SizeType>(state.range(1)));
+    const auto n = static_cast<SizeType>(state.range(0));
+    std::vector<float> wf(kNchans * n, 1.0F);
+    std::vector<float> warm(kNdm * ddmt.get_output_nsamps(n));
+    ddmt.execute(std::span<const float>(wf), std::span<float>(warm));
+    std::vector<float> out(kNdm * ddmt.get_output_nsamps(n));
+    for (auto _ : state) {
+        ddmt.execute(std::span<const float>(wf), std::span<float>(out));
+        benchmark::DoNotOptimize(out.data());
+    }
+}
+
+BENCHMARK(BM_ddmt_cuda_float_host_stream)
+    ->ArgsProduct({{16384, 65536}, {0, 4096, 8192, 16384}})
+    ->Unit(benchmark::kMillisecond)
+    ->UseRealTime();
+
 } // namespace dmt

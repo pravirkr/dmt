@@ -2,7 +2,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -10,6 +13,7 @@
 #include <catch2/matchers/catch_matchers_all.hpp>
 
 #include "dmt/algorithms/ddmt.hpp"
+#include "dmt/algorithms/sdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/utils/simulate.hpp"
@@ -17,6 +21,7 @@
 namespace dmt {
 
 using algorithms::DDMT;
+using algorithms::SDMT;
 using plans::DDMTPlan;
 
 TEST_CASE("DDMTPlan construction and getters", "[ddmt][cpu]") {
@@ -500,6 +505,8 @@ TEST_CASE("DDMT execute_time_major matches channel-major packed",
             std::vector<int32_t> out_time(dm_count * nsamps_reduced, 0);
 
             ddmt.execute(chan_major, nsamps, out_chan);
+            // Both calls share one stream history; start the second cold.
+            ddmt.reset_history();
             ddmt.execute_time_major(time_major, nsamps, out_time);
 
             REQUIRE_THAT(out_time, Catch::Matchers::Equals(out_chan));
@@ -647,6 +654,7 @@ TEST_CASE("DDMT multi-beam time-major matches per-beam single-beam calls",
             filterbank.begin() +
                 static_cast<std::ptrdiff_t>((ibeam + 1) * nsamps * samp_bytes));
         std::vector<int32_t> dmt_single(dm_count * nsamps_reduced, 0);
+        ddmt_single.reset_history(); // each beam is an independent stream
         ddmt_single.execute_time_major(beam_filterbank, nsamps, dmt_single);
 
         const auto* beam_out =
@@ -1091,6 +1099,236 @@ TEST_CASE("DDMT packed history snapshot save, load, and validation",
     ddmt2.reset_history();
     CHECK(ddmt2.get_output_nsamps(32) == 32 - max_delay);
     CHECK_THROWS_AS(ddmt2.save_history(hist_buf), std::logic_error);
+}
+
+namespace {
+
+void pack_sample(uint8_t* row, SizeType s, uint32_t v, SizeType nbits) {
+    switch (nbits) {
+    case 1:
+        bit_pack_utils::write_packed_sample<1>(row, s, v);
+        break;
+    case 2:
+        bit_pack_utils::write_packed_sample<2>(row, s, v);
+        break;
+    case 4:
+        bit_pack_utils::write_packed_sample<4>(row, s, v);
+        break;
+    case 8:
+        bit_pack_utils::write_packed_sample<8>(row, s, v);
+        break;
+    default:
+        bit_pack_utils::write_packed_sample<16>(row, s, v);
+        break;
+    }
+}
+
+/**
+ * Streams `values` (nbeams x nchans x nsamps, integer-valued unless nbits ==
+ * 32) through `ddmt` in the given chunk lengths and checks the concatenated
+ * output against sum_c values[c][t + delay(d, c)] over the active channels.
+ * Integer inputs must match exactly; float to a relative tolerance.
+ */
+void check_against_reference(DDMT& ddmt,
+                             const std::vector<double>& values,
+                             SizeType nbeams,
+                             SizeType nsamps,
+                             const std::vector<SizeType>& chunks) {
+    const auto& pc    = ddmt.get_plan().get_container();
+    const auto nchans = pc.nchans;
+    const auto nbits  = pc.nbits;
+    const auto ndm    = pc.dm_arr.size();
+    const auto maxd   = *std::ranges::max_element(pc.delay_table);
+    const auto n_out  = nsamps - maxd;
+    std::vector<double> ref(nbeams * ndm * n_out, 0.0);
+    std::vector<double> mag(ref.size(), 0.0);
+    for (SizeType b = 0; b < nbeams; ++b) {
+        for (SizeType d = 0; d < ndm; ++d) {
+            for (SizeType c = 0; c < nchans; ++c) {
+                if (pc.kill_mask[c] == 0) {
+                    continue;
+                }
+                const auto dl = pc.delay_table[(d * nchans) + c];
+                const auto* x = values.data() + ((b * nchans + c) * nsamps);
+                auto* r       = ref.data() + ((b * ndm + d) * n_out);
+                auto* m       = mag.data() + ((b * ndm + d) * n_out);
+                for (SizeType t = 0; t < n_out; ++t) {
+                    r[t] += x[t + dl];
+                    m[t] += std::abs(x[t + dl]);
+                }
+            }
+        }
+    }
+
+    std::vector<double> got(ref.size(), 0.0);
+    SizeType s0    = 0;
+    SizeType t_out = 0;
+    for (const auto len : chunks) {
+        const auto n = ddmt.get_output_nsamps(len);
+        std::vector<double> out(nbeams * ndm * n);
+        if (nbits == 32) {
+            std::vector<float> in(nbeams * nchans * len);
+            for (SizeType r = 0; r < nbeams * nchans; ++r) {
+                for (SizeType s = 0; s < len; ++s) {
+                    in[(r * len) + s] =
+                        static_cast<float>(values[(r * nsamps) + s0 + s]);
+                }
+            }
+            std::vector<float> o(out.size());
+            ddmt.execute(in, o);
+            std::ranges::copy(o, out.begin());
+        } else {
+            const auto rb = bit_pack_utils::packed_row_bytes(len, nbits);
+            std::vector<uint8_t> in(nbeams * nchans * rb, 0);
+            for (SizeType r = 0; r < nbeams * nchans; ++r) {
+                for (SizeType s = 0; s < len; ++s) {
+                    pack_sample(
+                        in.data() + (r * rb), s,
+                        static_cast<uint32_t>(values[(r * nsamps) + s0 + s]),
+                        nbits);
+                }
+            }
+            std::vector<int32_t> o(out.size());
+            ddmt.execute(in, len, o);
+            std::ranges::copy(o, out.begin());
+        }
+        for (SizeType r = 0; r < nbeams * ndm; ++r) {
+            std::copy_n(out.data() + (r * n), n,
+                        got.data() + (r * n_out) + t_out);
+        }
+        s0 += len;
+        t_out += n;
+    }
+    REQUIRE(s0 == nsamps);
+    REQUIRE(t_out == n_out);
+
+    SizeType bad = 0;
+    for (SizeType i = 0; i < ref.size(); ++i) {
+        const bool ok = nbits == 32
+                            ? std::abs(got[i] - ref[i]) <= 1.0E-5 * (mag[i] + 1)
+                            : got[i] == ref[i];
+        if (!ok && bad++ < 5) {
+            UNSCOPED_INFO("index " << i << ": got " << got[i] << ", expected "
+                                   << ref[i]);
+        }
+    }
+    CHECK(bad == 0);
+}
+
+} // namespace
+
+TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
+          "[ddmt][sdmt][cpu]") {
+    const float f_min     = 1000.0F;
+    const float f_max     = 1500.0F;
+    const SizeType nchans = 300;
+    const float tsamp     = 0.001F;
+    const SizeType nbeams = 2;
+    const SizeType nsamps = 2000;
+
+    std::mt19937 gen(1234);
+    std::vector<uint8_t> mask(nchans, 1);
+    for (auto& m : mask) {
+        m = std::uniform_int_distribution<int>(0, 9)(gen) == 0 ? 0 : 1;
+    }
+
+    std::vector<std::pair<std::string, std::vector<float>>> grids;
+    {
+        // Fine: consecutive trials differ by about one sample across the
+        // band (the most shared partial sums); spans several DM tiles.
+        std::vector<float> fine(300);
+        for (SizeType i = 0; i < fine.size(); ++i) {
+            fine[i] = 0.4F * static_cast<float>(i);
+        }
+        grids.emplace_back("fine", fine);
+        std::vector<float> coarse(40);
+        for (SizeType i = 0; i < coarse.size(); ++i) {
+            coarse[i] = 5.0F * static_cast<float>(i);
+        }
+        grids.emplace_back("coarse", coarse);
+        std::vector<float> sparse(50);
+        for (auto& v : sparse) {
+            v = std::uniform_real_distribution<float>(0.0F, 150.0F)(gen);
+        }
+        grids.emplace_back("unsorted-random", sparse);
+    }
+
+    for (const bool shared : {false, true}) {
+        for (const auto& [name, dms] : grids) {
+            for (const SizeType nbits : {1U, 2U, 4U, 8U, 16U, 32U}) {
+                DYNAMIC_SECTION((shared ? "SDMT, " : "DDMT, ")
+                                << name << ", nbits = " << nbits) {
+                    std::unique_ptr<DDMT> engine =
+                        shared
+                            ? std::make_unique<SDMT>(f_min, f_max, nchans,
+                                                     tsamp, dms, Exec::cpu(4),
+                                                     nbits, mask, nbeams)
+                            : std::make_unique<DDMT>(f_min, f_max, nchans,
+                                                     tsamp, dms, Exec::cpu(4),
+                                                     nbits, mask, nbeams);
+                    DDMT& ddmt      = *engine;
+                    const auto maxd = *std::ranges::max_element(
+                        ddmt.get_plan().get_container().delay_table);
+                    REQUIRE(maxd > 40);
+                    REQUIRE(maxd < 600);
+                    std::vector<double> values(nbeams * nchans * nsamps);
+                    const auto hi =
+                        nbits == 32 ? 0.0
+                                    : static_cast<double>((1U << nbits) - 1);
+                    for (auto& v : values) {
+                        v = nbits == 32
+                                ? std::uniform_real_distribution<double>(
+                                      -1.0, 3.0)(gen)
+                                : std::floor(
+                                      std::uniform_real_distribution<double>(
+                                          0.0, hi + 1.0)(gen));
+                    }
+                    // Uneven chunks, one shorter than the maximum delay.
+                    check_against_reference(ddmt, values, nbeams, nsamps,
+                                            {700, 37, 900, nsamps - 1637});
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("SDMT integer output equals DDMT exactly", "[sdmt][cpu]") {
+    // A dense grid (about one sample per trial across the band), where most
+    // partial sums are shared.
+    const SizeType nchans = 512;
+    const SizeType nsamps = 3000;
+    const float tsamp     = 0.001F;
+    std::vector<float> dms(600);
+    for (SizeType i = 0; i < dms.size(); ++i) {
+        dms[i] = 0.4F * static_cast<float>(i);
+    }
+    DDMT ddmt(1000.0F, 1500.0F, nchans, tsamp, dms, Exec::cpu(4), 8);
+    SDMT sdmt(1000.0F, 1500.0F, nchans, tsamp, dms, Exec::cpu(4), 8);
+    std::mt19937 gen(99);
+    std::vector<uint8_t> in(nchans * nsamps);
+    for (auto& v : in) {
+        v = static_cast<uint8_t>(gen());
+    }
+    const auto n = ddmt.get_output_nsamps(nsamps);
+    REQUIRE(sdmt.get_output_nsamps(nsamps) == n);
+    std::vector<int32_t> out_d(dms.size() * n);
+    std::vector<int32_t> out_s(dms.size() * n);
+    ddmt.execute(in, nsamps, out_d);
+    sdmt.execute(in, nsamps, out_s);
+    REQUIRE_THAT(out_s, Catch::Matchers::Equals(out_d));
+}
+
+TEST_CASE("SDMT reports its backend; unavailable backends throw",
+          "[sdmt][cpu]") {
+    const std::vector<float> dms = {0.0F, 5.0F};
+    const SDMT sdmt(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cpu(2));
+    CHECK(sdmt.backend() == Backend::kCPU);
+    CHECK(sdmt.nthreads() == 2);
+    const auto backends = available_backends();
+    if (std::ranges::find(backends, Backend::kCUDA) == backends.end()) {
+        CHECK_THROWS_AS(SDMT(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cuda(0)),
+                        std::invalid_argument);
+    }
 }
 
 } // namespace dmt

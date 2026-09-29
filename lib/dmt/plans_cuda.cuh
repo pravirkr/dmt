@@ -190,25 +190,4 @@ __host__ inline void transfer_fdmt_plan_to_device(const FDMTPlanContainer& plan,
                                  plan_d.coordinates_copy);
 }
 
-struct DDMTPlanD {
-    // Flat (ndm, nchans), matches DDMTPlanContainer::delay_table, narrowed
-    // to int32_t: dispersion delays are always a few thousand samples at
-    // most, so this can't overflow, and int arithmetic is cheaper on-device
-    // than the host's 64-bit SizeType.
-    DeviceVector<int> delay_arr_d;
-    // Flat (nchans,); 1 = channel contributes to the sum, 0 = masked out.
-    DeviceVector<int> kill_mask_d;
-};
-
-__host__ inline void transfer_ddmt_plan_to_device(const DDMTPlanContainer& plan,
-                                                  DDMTPlanD& plan_d) {
-    std::vector<int> delay_i(plan.delay_table.size());
-    std::ranges::transform(plan.delay_table, delay_i.begin(),
-                           [](SizeType v) { return static_cast<int>(v); });
-    plan_d.delay_arr_d.assign(delay_i.begin(), delay_i.end());
-
-    std::vector<int> kill_i(plan.kill_mask.begin(), plan.kill_mask.end());
-    plan_d.kill_mask_d.assign(kill_i.begin(), kill_i.end());
-}
-
 } // namespace dmt::plans

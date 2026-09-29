@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import DDMT, DDMTPlan, LevinConfig
+from dmtlib import DDMT, SDMT, DDMTPlan, LevinConfig, available_backends
 
 
 class TestDDMT:
@@ -116,6 +116,7 @@ class TestDDMT:
                     time_major[s, byte_idx] |= val << bit_sub
 
         out_chan = ddmt.execute(chan_major, nsamps)
+        ddmt.reset_history()  # shared stream history
         out_time = ddmt.execute_time_major(time_major, nsamps)
 
         np.testing.assert_array_equal(out_time, out_chan)
@@ -206,6 +207,7 @@ class TestDDMT:
         )
 
         out_chan = ddmt_multi.execute(chan_major, nsamps)
+        ddmt_multi.reset_history()  # shared stream history
         out_time = ddmt_multi.execute_time_major(time_major, nsamps)
         np.testing.assert_array_equal(out_time, out_chan)
         assert out_chan.shape[0] == nbeams
@@ -352,3 +354,114 @@ class TestDDMT:
         # reset_history clears state
         ddmt2.reset_history()
         assert ddmt2.get_output_nsamps(32) < 32
+
+    def test_time_major_streaming_matches_monolithic(self) -> None:
+        nchans = 16
+        nsamps = 200
+        dms = np.array([0.0, 3.0, 8.0, 15.0], dtype=np.float32)
+        plan = DDMTPlan(1000.0, 1500.0, nchans, 0.001, dms, nbits=8)
+        rng = np.random.default_rng(7)
+        chan_major = rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8)
+        time_major = np.ascontiguousarray(chan_major.T)
+
+        expected = DDMT(plan).execute(chan_major, nsamps)
+
+        ddmt = DDMT(plan)
+        bounds = [0, 3, 40, 41, 130, nsamps]
+        parts = [
+            ddmt.execute_time_major(np.ascontiguousarray(time_major[a:b]), b - a)
+            for a, b in zip(bounds[:-1], bounds[1:])
+        ]
+        np.testing.assert_array_equal(np.concatenate(parts, axis=1), expected)
+
+    def test_gulp_size(self) -> None:
+        ddmt = DDMT(1000.0, 1500.0, 8, 0.001, 10.0, 5.0, 0.0)
+        default = ddmt.gulp_size
+        assert default > 0
+        ddmt.set_gulp_size(1024)
+        assert ddmt.gulp_size == 1024
+        ddmt.set_gulp_size(0)
+        assert ddmt.gulp_size == default
+
+
+class TestSDMT:
+    # Dense grid: consecutive trials differ by about one sample across the
+    # band, so most partial sums are shared.
+    F_MIN, F_MAX, NCHANS, TSAMP = 1000.0, 1500.0, 256, 0.001
+    DMS = (0.4 * np.arange(400)).astype(np.float32)
+
+    def test_is_a_ddmt(self) -> None:
+        sdmt = SDMT(self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
+        assert isinstance(sdmt, DDMT)
+        assert sdmt.backend == "cpu"
+
+    @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
+    def test_packed_matches_ddmt_exactly(self, nbits: int) -> None:
+        nsamps = 2000
+        mask = (1 << nbits) - 1
+        rng = np.random.default_rng(3)
+        raw = rng.integers(0, 1 << nbits, (self.NCHANS, nsamps), dtype=np.uint64) & mask
+        chan_row_bytes = (
+            (nsamps * nbits + 7) // 8 if nbits < 8 else nsamps * (nbits // 8)
+        )
+        data = np.zeros((self.NCHANS, chan_row_bytes), dtype=np.uint8)
+        if nbits == 16:
+            data.view(np.uint16)[:] = raw
+        elif nbits == 8:
+            data[:] = raw.astype(np.uint8)
+        else:
+            for c in range(self.NCHANS):
+                for s in range(nsamps):
+                    val = int(raw[c, s])
+                    bit_off = s * nbits
+                    data[c, bit_off // 8] |= val << (bit_off % 8)
+
+        args = (self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
+        ddmt = DDMT(*args, nthreads=4, nbits=nbits)
+        sdmt = SDMT(*args, nthreads=4, nbits=nbits)
+        np.testing.assert_array_equal(
+            sdmt.execute(data, nsamps), ddmt.execute(data, nsamps)
+        )
+
+    def test_float_matches_ddmt_and_streams(self) -> None:
+        nsamps = 2000
+        rng = np.random.default_rng(4)
+        wf = rng.standard_normal((self.NCHANS, nsamps)).astype(np.float32)
+        args = (self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
+        expected = DDMT(*args).execute(wf)
+
+        sdmt = SDMT(*args, nthreads=4)
+        out1 = sdmt.execute(wf[:, :900])
+        out2 = sdmt.execute(wf[:, 900:])
+        got = np.concatenate([out1, out2], axis=1)
+        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-4)
+
+        hist = sdmt.save_history()
+        assert len(hist) == sdmt.history_state_size()
+        sdmt.reset_history()
+        sdmt.load_history(hist)
+        assert sdmt.execute(wf[:, :64]).shape[1] == 64
+
+    def test_time_major_matches_channel_major(self) -> None:
+        nsamps = 1500
+        rng = np.random.default_rng(5)
+        data = rng.integers(0, 256, (self.NCHANS, nsamps), dtype=np.uint8)
+        sdmt = SDMT(self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS, nbits=8)
+        out_chan = sdmt.execute(data, nsamps)
+        sdmt.reset_history()
+        out_time = sdmt.execute_time_major(np.ascontiguousarray(data.T), nsamps)
+        np.testing.assert_array_equal(out_time, out_chan)
+
+    def test_unavailable_backend_raises(self) -> None:
+        missing = [b for b in ("cuda", "hip") if b not in available_backends()]
+        if not missing:
+            pytest.skip("every GPU backend is available in this build")
+        with pytest.raises(ValueError):
+            SDMT(
+                self.F_MIN,
+                self.F_MAX,
+                self.NCHANS,
+                self.TSAMP,
+                self.DMS,
+                backend=missing[0],
+            )
