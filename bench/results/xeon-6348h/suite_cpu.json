@@ -39,7 +39,7 @@
     "json_schema_version": 1,
     "build_type": "Release",
     "cpu_model": "Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz",
-    "dmt_version": "0.4.0",
+    "dmt_version": "0.5.0",
     "gpu_model": "-",
     "label": "Xeon Gold 6348H",
     "machine": "xeon-6348h",

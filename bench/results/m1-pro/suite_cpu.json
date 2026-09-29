@@ -32,7 +32,7 @@
     "json_schema_version": 1,
     "build_type": "Release",
     "cpu_model": "Apple M1 Pro",
-    "dmt_version": "0.4.0",
+    "dmt_version": "0.5.0",
     "gpu_model": "-",
     "label": "-",
     "machine": "m1-pro",

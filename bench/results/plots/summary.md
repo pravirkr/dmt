@@ -5,8 +5,8 @@
 | results | CPU | GPU | RAM | CPU threads | dmt |
 | :--- | :--- | :--- | ---: | :--- | :--- |
 | `l40s` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | — | 0.5.0 |
-| `m1-pro` | Apple M1 Pro | — | 32 GB | 1 8 | 0.4.0 |
-| `xeon-6348h` | Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz | — | 755 GB | 1 8 | 0.4.0 |
+| `m1-pro` | Apple M1 Pro | — | 32 GB | 1 8 | 0.5.0 |
+| `xeon-6348h` | Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz | — | 755 GB | 1 8 | 0.5.0 |
 
 **Reference point**: 16384 samples × 2049 DM trials (1.34 s of data), float32 input, median time per block.
 

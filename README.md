@@ -147,8 +147,8 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-Measured on an Apple M1 Pro, an Intel Xeon Gold 6348H (both 8 threads; dmt
-0.4.0), and an NVIDIA L40S (dmt 0.5.0). The data are 4096 channels (704–1216 MHz, 81.92 µs) in
+Measured with dmt 0.5.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
+8 threads), and an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
 16K-sample blocks (1.34 s), processed as a stream.
 
 - **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT and

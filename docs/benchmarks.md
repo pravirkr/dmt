@@ -4,12 +4,15 @@ All numbers on this page come from one benchmark suite (`dmt_bench_suite`). Ever
 configuration, and one script turns the results into these plots and the
 table at the end. See [Reproducing](#reproducing) to run it yourself.
 
-The results below are for three machines (the CPUs measured with dmt 0.4.0,
-the GPU with dmt 0.5.0; the CPU engines did not change in 0.5.0):
+The results below are dmt 0.5.0 on three machines:
 
 - an Apple M1 Pro laptop (8 performance threads);
 - an Intel Xeon Gold 6348H server (8 threads);
 - an NVIDIA L40S GPU.
+
+The CPU engines did not change after their 0.4.0 measurements, so those
+figures are the 0.5.0 CPU results. The L40S device-resident numbers were
+measured with 0.5.0.
 
 ## Key results
 
@@ -61,9 +64,9 @@ telescope.
   count, not the DM count.
 - **Brute-force DDMT** does `nchans × ndm` additions per output sample, so it
   scales linearly with the DM count.
-  - On the Xeon (0.4.0) it stays below the real-time line up to 4K DM trials
+  - On the Xeon it stays below the real-time line up to 4K DM trials
     (16× real time at 256 trials, 1.1× at 4K), 6–12× behind FDMT.
-  - On the M1 Pro (0.4.0) it stays below real time up to ~2K DM trials
+  - On the M1 Pro it stays below real time up to ~2K DM trials
     (11× real time at 256 trials, 1.6× at 2049 trials), crossing the line only
     at 4K trials (up from crossing at ~256 trials in 0.3.0).
   - On the L40S it stays well below real time at every DM count tested
@@ -75,7 +78,7 @@ telescope.
   grid, delivering ~3.5× wall-clock speedup). On the Xeon it runs 3.4–3.7× faster than DDMT at every DM count
   (56× real time at 256 trials, 4× at 4K), 1.8–3.3× behind FDMT. On the M1 Pro
   it runs 3.5–4.5× faster than DDMT (51× real time at 256 trials, 6.2× at 2049 trials).
-  On the L40S (0.5.0) it runs 2.2–3.5× faster than DDMT (740× real time at
+  On the L40S it runs 2.2–3.5× faster than DDMT (740× real time at
   256 trials, 82× at 4K), 1.6–2.3× behind FDMT. The GPU shares sums through
   a fixed two-level hierarchy (unique 4-channel sums, then unique 16-channel
   sums, per tile of 128 trials) evaluated in shared memory.
@@ -138,9 +141,9 @@ The real-time factor is seconds of data processed per second of compute.
 - **One CPU thread** keeps FDMT above real time at every input width on both
   CPUs: 5–13× on the Xeon and 16–41× on the M1 Pro.
 - **Brute-force DDMT** runs above real time on both tested CPUs and GPU:
-  - On the Xeon (0.4.0, 8 threads) it runs 2.3× real time on float32, 2.6× on 16-bit
+  - On the Xeon (8 threads) it runs 2.3× real time on float32, 2.6× on 16-bit
     and 4.3–4.7× on 1- to 8-bit input (summed in 16-bit lanes).
-  - On the M1 Pro (0.4.0, 8 threads) it runs 1.6× real time on float32 (up from
+  - On the M1 Pro (8 threads) it runs 1.6× real time on float32 (up from
     0.2× in 0.3.0) and 2.5–3.5× on packed integer input.
   - On the L40S it runs 63× real time on float32 input and 92–95× on 1- to
     8-bit input, which is summed two samples per instruction in 16-bit lanes.
@@ -187,8 +190,8 @@ reference point brute force needs ~270× more operations.
 
 How much of that shows up in wall-clock time depends on the platform:
 
-- **M1 Pro (0.4.0): 37×** for brute-force DDMT (down from 336× in 0.3.0) and **8×** for SDMT.
-- **Xeon (0.4.0): 11×.** Its kernels add 16–32 samples per instruction
+- **M1 Pro: 37×** for brute-force DDMT (down from 336× in 0.3.0) and **8×** for SDMT.
+- **Xeon: 11×.** Its kernels add 16–32 samples per instruction
   from cache-resident windows, 10–16 channels per accumulator pass, so brute
   force's compute-bound inner loop gains more from the CPU than FDMT's
   memory-bound merges.
