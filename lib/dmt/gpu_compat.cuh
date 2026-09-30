@@ -109,6 +109,7 @@ func_set_attribute(Kernel kernel, hipFuncAttribute attr, int value) {
 #define cufftCreate hipfftCreate
 #define cufftDestroy hipfftDestroy
 #define cufftMakePlanMany hipfftMakePlanMany
+#define cufftMakePlanMany64 hipfftMakePlanMany64
 #define cufftSetAutoAllocation hipfftSetAutoAllocation
 #define cufftSetWorkArea hipfftSetWorkArea
 #define cufftSetStream hipfftSetStream

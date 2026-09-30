@@ -232,6 +232,15 @@ public:
         m_pending = true;
     }
 
+    /// Makes later work on @p stream wait for the marked work (no host
+    /// blocking).
+    void order(cudaStream_t stream) const {
+        if (m_pending) {
+            check_gpu_call(cudaStreamWaitEvent(stream, m_event, 0),
+                           "DeviceWorkFence: stream wait failed");
+        }
+    }
+
     void wait() {
         if (m_pending) {
             check_gpu_call(cudaEventSynchronize(m_event),

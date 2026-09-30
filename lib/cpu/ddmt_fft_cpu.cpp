@@ -30,6 +30,7 @@
 #include "dmt/simd_math.hpp"
 
 #include "fdmt_fft_cpu_kernels.hpp"
+#include "packed_source_cpu.hpp"
 
 // DDMT-FFT on the CPU.
 //
@@ -55,6 +56,8 @@ namespace dmt::algorithms {
 
 namespace {
 
+using fft_cpu::copy_samples;
+using fft_cpu::Source;
 using utils::FFTVector;
 
 constexpr int kBins           = 512; // bins per tile
@@ -88,60 +91,6 @@ struct Geometry {
           c2r(std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n)) {}
 };
 
-// Input rows of one call: float32, or packed at nbits (LSB first), read
-// straight into the transform rows (no unpacked copy of the block).
-struct Source {
-    const float* f{nullptr};
-    const uint8_t* p{nullptr};
-    SizeType row_bytes{0};
-    SizeType nbits{32};
-    SizeType nsamps{0};
-};
-
-// Samples [s0, s0 + n) of packed row @p row as float.
-template <unsigned NB>
-void unpack_range(const uint8_t* row, SizeType s0, SizeType n, float* out) {
-    constexpr SizeType kPer = (NB < 8) ? (8 / NB) : 1;
-    SizeType i              = 0;
-    if constexpr (NB < 8) {
-        for (; i < n && ((s0 + i) % kPer) != 0; ++i) {
-            out[i] = static_cast<float>(
-                bit_pack_utils::read_packed_sample<NB>(row, s0 + i));
-        }
-    }
-    if (i < n) {
-        const auto byte0 = ((s0 + i) * NB) / 8;
-        bit_pack_utils::unpack_row<NB>(row + byte0, n - i, out + i);
-    }
-}
-
-void copy_samples(
-    const Source& src, SizeType row, SizeType s0, SizeType n, float* out) {
-    if (src.f != nullptr) {
-        std::copy_n(src.f + (row * src.nsamps) + s0, n, out);
-        return;
-    }
-    const uint8_t* r = src.p + (row * src.row_bytes);
-    switch (src.nbits) {
-    case 1:
-        unpack_range<1>(r, s0, n, out);
-        break;
-    case 2:
-        unpack_range<2>(r, s0, n, out);
-        break;
-    case 4:
-        unpack_range<4>(r, s0, n, out);
-        break;
-    case 8:
-        unpack_range<8>(r, s0, n, out);
-        break;
-    case 16:
-        unpack_range<16>(r, s0, n, out);
-        break;
-    default:
-        break;
-    }
-}
 
 class DDMTFFTCpuEngine final : public detail::DDMTFFTEngine {
 public:
@@ -157,6 +106,9 @@ public:
           m_nact(m_model.active.size()),
           m_ctx(m_model.context()) {
         m_seg_n = ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
+        if (const auto cap = detail::fft_segment_cap(); cap > 0) {
+            m_seg_n = std::min(m_seg_n, cap); // testing hook
+        }
         m_hist.assign(m_nbeams * m_nchans * m_ctx, 0.0F);
         m_hist_next.assign(m_hist.size(), 0.0F);
         reset_history();

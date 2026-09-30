@@ -10,9 +10,10 @@ time shift is a phase ramp, $x(t-\tau) \leftrightarrow
 | Delays | fractional merge delays (default); `fractional_delays=False` rounds like FDMT, for equivalence tests only | exact fractional delays, always |
 | Grid | FDMT delay grids (`dt_max`, custom `dt`/DM grids) | any DDMT grid: linear, explicit, Levin, piecewise-uniform Levin |
 | Streaming | `mode="valid"` overlap-save, `"full"`, `"roll"` | DDMT's model: history across calls |
-| Input | float32 | float32, packed 1/2/4/8/16-bit (channel- or time-major) |
+| Input | float32, packed 1/2/4/8/16-bit (channel- or time-major) | float32, packed 1/2/4/8/16-bit (channel- or time-major) |
+| Kill mask, history save/load | yes | yes |
 | Stepper / level views | yes | no |
-| Backends | CPU, CUDA/HIP | CPU, CUDA/HIP |
+| Backends | CPU, CUDA/HIP (same results to float rounding) | CPU, CUDA/HIP (same results to float rounding) |
 
 Both use the same conventions as the time-domain engines: channel `c` at
 `f_min + c * df`, delays referenced to the highest channel, the same DM
@@ -31,8 +32,19 @@ constant, and time at native resolution.
 
 The Fourier engines transform to complex float spectra. Low-bit input does
 not make them any faster algorithmically; it only reduces the input bytes read
-(`DDMTFFT` unpacks packed rows straight into the transform rows). They pay
+(both engines unpack packed rows straight into the transform rows). They pay
 off for float waterfalls, and when fractional delays matter.
+
+Packed input, the kill mask and the history work as for the time-domain
+engines:
+
+```python
+fdmt = dmtlib.FDMTFFT(1200.0, 1600.0, 1024, 16384, 6.4e-5, 1024,
+                      kill_mask=mask, backend="cuda")
+dmt = fdmt.execute(packed_rows, 2)              # (nchans, row_bytes) uint8
+dmt = fdmt.execute_time_major(filterbank, 2)    # (nsamps, sample_bytes) uint8
+state = fdmt.save_history()                     # same layout on every backend
+```
 
 ## Why Fourier-domain dedispersion
 
@@ -199,28 +211,56 @@ overlap-save segments whose length is chosen from FFTW's own cost estimate.
 The result is the same linear convolution as one long transform. Memory stays
 bounded, and the transform length no longer grows with the block.
 
+## GPU engines
+
+Both engines run on CUDA and HIP with the CPU engines' geometry: the same
+transform lengths, overlap-save segments (one shared rule; a GPU shortens
+them only when device memory is short), delays, NUFFT parameters and
+conventions. Their results agree with the CPU to float rounding (the tests
+use 2e-5 of the output peak).
+
+- **`FDMTFFT`** runs the tree as *programs* over tiles of 32 frequency bins,
+  one bin per lane. A warp applies one merge to 32 bins at a time, so the
+  merge list is read once per 32 bins. The tree is cut into stages. Each
+  program keeps its intermediate levels in shared memory, so only the stage
+  boundaries go through device memory (two stages at the reference point:
+  ~90 KB of traffic per bin, against ~770 KB for a level-by-level tree).
+- **Phases** in both engines come from an exact 0.64 fixed-point turn count
+  per shift, multiplied by the bin index modulo 2^64: no phasor tables and
+  no FP64, which the L40S runs at 1/64 rate.
+- **`DDMTFFT` brute force** holds 8 bins × 4 trials per thread. Each
+  (trial, channel) phasor is set up once and rotated along the bins, and it
+  runs near the FP32 issue limit.
+- **`DDMTFFT` NUFFT** spreads with integer shared-memory atomics. Float
+  shared-memory atomics are compare-and-swap loops on GPUs before sm_90; the
+  integers are scaled per bin, so the rounding stays far below the
+  tolerance. A uniform run whose fine grid would not fit shared memory
+  (above ~4K trials) is transformed as a few equal sub-runs, still by NUFFT.
+- Device-memory calls run asynchronously on the given stream, ordered after
+  the engine's previous work. Host-array calls stage through the device and
+  block. `set_gulp_size()` is stored but not used, as on the CPU, because
+  chunking a call would move the transform boundaries.
+
 ## Performance
 
-At the benchmark reference point (4096 channels, 16K samples, 2049 trials, 8
-threads, FFTW MEASURE plans; see the [benchmarks](../benchmarks.md) for the
-sweeps):
+At the benchmark reference point (4096 channels, 16K samples, 2049 trials;
+CPUs with 8 threads and FFTW MEASURE plans, the GPU with device-resident data;
+see the [benchmarks](../benchmarks.md) for the sweeps):
 
-| Engine | Apple M1 Pro | Xeon Gold 6348H (under load) | Delays |
-| :--- | ---: | ---: | :--- |
-| FDMT | 25.5 ms | 82 ms | rounded tree |
-| FDMT-FFT (fractional delays, the default) | 83 ms | 143 ms | least-squares tree |
-| FDMT-FFT, `fractional_delays=False` (equivalence tests) | 57 ms | 111 ms | rounded tree (FDMT-identical) |
-| SDMT | 206 ms | 319 ms | rounded per channel |
-| DDMT | 851 ms | 1.15 s | rounded per channel |
-| DDMT-FFT, NUFFT | 111 ms | 274 ms | exact per channel |
-| DDMT-FFT, brute force | 3.33 s | 2.89 s | exact per channel |
+| Engine | Apple M1 Pro | Xeon Gold 6348H | NVIDIA L40S | Delays |
+| :--- | ---: | ---: | ---: | :--- |
+| FDMT | 25.5 ms | 53 ms | 4.8 ms | rounded tree |
+| FDMT-FFT (fractional delays, the default) | 83 ms | 77 ms | 5.5 ms | least-squares tree |
+| FDMT-FFT, `fractional_delays=False` (equivalence tests) | 57 ms | 58 ms | 5.0 ms | rounded tree (FDMT-identical) |
+| SDMT | 206 ms | 170 ms | 8.5 ms | rounded per channel |
+| DDMT | 851 ms | 573 ms | 21 ms | rounded per channel |
+| DDMT-FFT, NUFFT | 111 ms | 127 ms | 10.7 ms | exact per channel |
+| DDMT-FFT, brute force | 3.33 s | 1.35 s | 39 ms | exact per channel |
 
-In 0.5.0 FDMT-FFT took 415 ms on the M1 Pro and 701 ms on the Xeon. The 0.6.0
-Xeon run shared its host with other jobs (load average ~130), which made
-even the unchanged engines 1.5–2x slower than in a quiet run; compare the
-engines within a column.
+In 0.5.0 FDMT-FFT took 415 ms on the M1 Pro, 701 ms on the Xeon and 22 ms
+on the L40S.
 
-Where the time goes (M1 Pro, reference point):
+Where the time goes (reference point; M1 Pro unless noted):
 
 - **`FDMTFFT` is FFT-bound.** 4096 forward and 2049 inverse real FFTs of
   18432 points take about half the time, and the scatter into bin tiles about
@@ -228,7 +268,8 @@ Where the time goes (M1 Pro, reference point):
   time: about 30%, near the cache-bandwidth limit of its indexed operand
   reads. The FFT alone costs about as much as the whole time-domain FDMT, so
   on this machine `FDMTFFT` stays about 2x behind `FDMT`. On the Xeon, where
-  FDMT is memory-bound, it is 1.1–1.4x FDMT from 2K trials or 8K samples on.
+  FDMT is memory-bound, it is 1.05–1.45x FDMT from 2K trials or 8K samples
+  on.
 - **`DDMTFFT` (NUFFT)** spends roughly a third on the channel FFTs, a third on
   preparing and spreading the points (a vectorised, register-blocked Horner
   kernel, the ES kernel at width 7 for $10^{-6}$), and the rest on the fine-grid
@@ -236,3 +277,8 @@ Where the time goes (M1 Pro, reference point):
 - **`DDMTFFT` brute force** is bound by its complex FMA rate: 8 vector
   operations per 16 complex terms, half of them for the exact phase rotation.
   That is inherent, since every (trial, channel, bin) needs its own phasor.
+- **On the L40S** the Fourier engines are cuFFT-bound: the forward and
+  inverse transforms take about half of `FDMTFFT` (whose tree stages run
+  near the shared-memory limit) and of `DDMTFFT`'s NUFFT path (spreading is
+  about a fifth). Brute force runs near the card's FP32 issue rate, ~10
+  instructions per complex term.

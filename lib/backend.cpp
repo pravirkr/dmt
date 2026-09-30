@@ -99,6 +99,18 @@ bool sdmt_gpu_always_shared() noexcept {
     return g_sdmt_gpu_always_shared.load(std::memory_order_relaxed);
 }
 
+namespace {
+std::atomic<SizeType> g_fft_segment_cap{0};
+} // namespace
+
+void set_fft_segment_cap(SizeType nsamps) noexcept {
+    g_fft_segment_cap.store(nsamps, std::memory_order_relaxed);
+}
+
+SizeType fft_segment_cap() noexcept {
+    return g_fft_segment_cap.load(std::memory_order_relaxed);
+}
+
 // Device-memory defaults: host-only engines inherit these.
 void FDMTEngine::execute(DeviceSpan<const float> /*waterfall*/,
                          DeviceSpan<float> /*dmt*/,
@@ -202,6 +214,26 @@ void FDMTFFTEngine::reset(DeviceSpan<const float> /*waterfall*/,
                           DeviceSpan<float> /*dmt*/,
                           Stream /*stream*/) {
     throw_no_device_memory("FDMTFFT::reset", backend());
+}
+void FDMTFFTEngine::execute(DeviceSpan<const uint8_t> /*packed*/,
+                            SizeType /*nbits*/,
+                            DeviceSpan<float> /*dmt*/,
+                            Stream /*stream*/) {
+    throw_no_device_memory("FDMTFFT::execute", backend());
+}
+void FDMTFFTEngine::reset(DeviceSpan<const uint8_t> /*packed*/,
+                          SizeType /*nbits*/,
+                          DeviceSpan<float> /*dmt*/,
+                          Stream /*stream*/) {
+    throw_no_device_memory("FDMTFFT::reset", backend());
+}
+void FDMTFFTEngine::save_history(DeviceSpan<float> /*out*/,
+                                 Stream /*stream*/) const {
+    throw_no_device_memory("FDMTFFT::save_history", backend());
+}
+void FDMTFFTEngine::load_history(DeviceSpan<const float> /*in*/,
+                                 Stream /*stream*/) {
+    throw_no_device_memory("FDMTFFT::load_history", backend());
 }
 DeviceSpan<const float> FDMTFFTEngine::view_level_data_device() const {
     throw_no_device_memory("FDMTFFT::view_level_data_device", backend());

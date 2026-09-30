@@ -17,17 +17,20 @@
 
 #include <omp.h>
 
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_fft_common.hpp"
+#include "dmt/fdmt_fft_tree.hpp"
 #include "dmt/fft.hpp"
 #include "dmt/logging.hpp"
 #include "dmt/modes.hpp"
 #include "dmt/simd_math.hpp"
 
 #include "fdmt_fft_cpu_kernels.hpp"
+#include "packed_source_cpu.hpp"
 
 // FDMT-FFT on the CPU.
 //
@@ -65,8 +68,10 @@ namespace {
 using fft_cpu::cmadd;
 using fft_cpu::cmadd_level1;
 using fft_cpu::cmul;
+using fft_cpu::copy_samples;
 using fft_cpu::copy_tile;
 using fft_cpu::cscale;
+using fft_cpu::Source;
 using utils::FFTVector;
 
 // Bins per tile: one AVX-512 register (two AVX2, four NEON) per component
@@ -80,21 +85,22 @@ constexpr SizeType kTileFl = 2 * kTile;
 constexpr SizeType kMaxSlice = 2048 / kTile;
 // Channels per forward-FFT task (see forward()): their rows stay in L2.
 constexpr SizeType kFwdBatch = 8;
-// Shortest overlap-save segment considered.
-constexpr SizeType kMinSegment = 2048;
 
-void advance_overlap_window(const float* __restrict__ new_data,
+// Slides the overlap window of one channel (row `row` of `src`) forward by
+// the block.
+void advance_overlap_window(const Source& src,
+                            SizeType row,
                             float* __restrict__ hist,
-                            SizeType nsamps,
                             SizeType capacity) noexcept {
+    const auto nsamps = src.nsamps;
     if (capacity == 0) {
         return;
     }
     if (nsamps >= capacity) {
-        std::copy_n(new_data + nsamps - capacity, capacity, hist);
+        copy_samples(src, row, nsamps - capacity, capacity, hist);
     } else {
         std::copy(hist + nsamps, hist + capacity, hist);
-        std::copy_n(new_data, nsamps, hist + capacity - nsamps);
+        copy_samples(src, row, 0, nsamps, hist + capacity - nsamps);
     }
 }
 
@@ -152,19 +158,6 @@ struct Geometry {
     }
 };
 
-// Rough relative FFT cost per n * log2(n) from the length's factors, used
-// only to shortlist candidate lengths before asking FFTW.
-double radix_penalty(SizeType n) {
-    double p = 1.0;
-    for (const SizeType f : {3U, 5U, 7U}) {
-        while (n % f == 0) {
-            n /= f;
-            p *= (f == 3) ? 1.03 : 1.1;
-        }
-    }
-    return p;
-}
-
 class FDMTFFTCpuEngine final : public detail::FDMTFFTEngine {
 public:
     FDMTFFTCpuEngine(const plans::FDMTPlan& plan,
@@ -176,45 +169,70 @@ public:
           m_use_box_smearing(cfg.use_box_smearing),
           m_mode(cfg.mode),
           m_frac(cfg.fractional_delays),
+          m_kill(cfg.kill_mask),
           m_plan(&plan) {
         initialize();
     }
 
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
-        check_buffers(waterfall, dmt, "execute");
-        for (SizeType b = 0; b < m_nbeams; ++b) {
-            const float* wf = waterfall.data() + (b * m_nchans * m_nsamps);
-            float* out      = dmt.data() + (b * m_ndms * m_nsamps_out);
-            for (SizeType seg = 0; seg < m_nseg; ++seg) {
-                forward(wf, b, seg);
-                run_tiles();
-                inverse(out, seg);
-            }
-            if (m_mode == FDMTMode::kValid) {
-                update_overlap(wf, b);
+        check_buffers(waterfall.size(), dmt, "execute");
+        run(float_source(waterfall), dmt);
+    }
+
+    void execute(std::span<const uint8_t> packed,
+                 SizeType nbits,
+                 bool time_major,
+                 std::span<float> dmt) override {
+        if (!time_major) {
+            const auto src = packed_source(packed, nbits, "execute");
+            check_buffers(m_nbeams * m_nchans * m_nsamps, dmt, "execute");
+            run(src, dmt);
+            return;
+        }
+        check_nbits(nbits, "execute_time_major");
+        const auto samp_bytes =
+            bit_pack_utils::packed_row_bytes(m_nchans, nbits);
+        if (packed.size() != m_nbeams * m_nsamps * samp_bytes) {
+            throw std::invalid_argument(std::format(
+                "FDMTFFT::execute_time_major: expected {} bytes, got {}",
+                m_nbeams * m_nsamps * samp_bytes, packed.size()));
+        }
+        check_buffers(m_nbeams * m_nchans * m_nsamps, dmt,
+                      "execute_time_major");
+        m_unpacked.resize(m_nbeams * m_nchans * m_nsamps);
+        const auto n = static_cast<std::int64_t>(m_nbeams * m_nsamps);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+            std::vector<float> spectrum(m_nchans);
+#pragma omp for schedule(static)
+            for (std::int64_t i = 0; i < n; ++i) {
+                const auto b = static_cast<SizeType>(i) / m_nsamps;
+                const auto t = static_cast<SizeType>(i) % m_nsamps;
+                bit_pack_utils::unpack_row(
+                    packed.data() + (((b * m_nsamps) + t) * samp_bytes), nbits,
+                    m_nchans, spectrum.data());
+                float* dst = m_unpacked.data() + (b * m_nchans * m_nsamps) + t;
+                for (SizeType c = 0; c < m_nchans; ++c) {
+                    dst[c * m_nsamps] = spectrum[c];
+                }
             }
         }
+        run(float_source(m_unpacked), dmt);
     }
 
     void reset(std::span<const float> waterfall,
                std::span<float> dmt) override {
-        check_buffers(waterfall, dmt, "reset");
-        ensure_stepper_state();
-        m_waterfall_ptr  = waterfall.data();
-        m_dmt_target_ptr = dmt.data();
-        m_current_level  = 0;
-        m_state_in       = m_state_a.data();
-        m_state_out      = m_state_b.data();
-        m_view_valid     = false;
+        check_buffers(waterfall.size(), dmt, "reset");
+        start_stepper(float_source(waterfall), dmt);
+    }
 
-        // Every beam is transformed (same as the CPU FDMT). Views still expose
-        // beam 0 only.
-        for (SizeType b = 0; b < m_nbeams; ++b) {
-            step_forward(waterfall.data() + (b * m_nchans * m_nsamps), b);
-            step_level0(m_state_in + (b * m_state_stride));
-        }
-        m_is_initialized = true;
+    void reset(std::span<const uint8_t> packed,
+               SizeType nbits,
+               std::span<float> dmt) override {
+        const auto src = packed_source(packed, nbits, "reset");
+        check_buffers(m_nbeams * m_nchans * m_nsamps, dmt, "reset");
+        start_stepper(src, dmt);
     }
 
     void advance(SizeType levels, Stream /*stream*/) override {
@@ -304,8 +322,8 @@ public:
             step_inverse(m_state_in + (b * m_state_stride), m_ndms,
                          m_single_skip, m_nsamps_out,
                          m_dmt_target_ptr + (b * m_ndms * m_nsamps_out));
-            if (m_mode == FDMTMode::kValid && m_waterfall_ptr != nullptr) {
-                update_overlap(m_waterfall_ptr + (b * m_nchans * m_nsamps), b);
+            if (m_mode == FDMTMode::kValid) {
+                update_overlap(m_step_src, b);
             }
         }
         m_is_initialized = false;
@@ -314,6 +332,18 @@ public:
 
     void reset_history() noexcept override {
         std::ranges::fill(m_overlap, 0.0F);
+    }
+
+    [[nodiscard]] SizeType history_state_size() const noexcept override {
+        return m_overlap.size();
+    }
+    void save_history(std::span<float> out) const override {
+        check_history(out.size(), "save_history");
+        std::ranges::copy(m_overlap, out.begin());
+    }
+    void load_history(std::span<const float> in) override {
+        check_history(in.size(), "load_history");
+        std::ranges::copy(in, m_overlap.begin());
     }
 
 protected:
@@ -344,7 +374,8 @@ private:
     int m_nthreads;
     bool m_use_box_smearing;
     FDMTMode m_mode;
-    bool m_frac; // exact merge delays
+    bool m_frac;                // exact merge delays
+    std::vector<uint8_t> m_kill; // per channel, 1 = keep (empty: all)
 
     const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
     fdmt_fft::Geometry m_geom;     // single-transform geometry
@@ -391,6 +422,7 @@ private:
     // Interleaved DM rows [ndms][bins_stride], the inverse FFT's input.
     FFTVector<ComplexType> m_out_spec;
     std::vector<float> m_overlap;
+    std::vector<float> m_unpacked; // time-major input, channel-major
     std::vector<Workspace> m_ws;
 
     // Stepper state (lazy), at the plan's FFT length.
@@ -400,7 +432,7 @@ private:
     std::vector<ComplexType> m_state_a;
     std::vector<ComplexType> m_state_b;
     mutable std::vector<float> m_view_time;
-    const float* m_waterfall_ptr{nullptr};
+    Source m_step_src{}; // the stepper's block (read again by finalize())
     float* m_dmt_target_ptr{nullptr};
     ComplexType* m_state_in{nullptr};
     ComplexType* m_state_out{nullptr};
@@ -487,76 +519,21 @@ private:
 
     SizeType m_seg_len{};
 
-    // Picks execute()'s transform length: the plan's single transform, or
-    // overlap-save segments of a length that transforms faster per output
-    // sample. Cost of a choice ~ nseg * N * (log2(N) * fft(N) + tree), with
-    // fft(N) FFTW's own estimate (deterministic, so the choice and hence the
-    // result bits do not depend on timing) and `tree` the tree nodes per
-    // transformed row.
+    // Picks execute()'s transform length (fdmt_fft::choose_segments(), the
+    // rule every engine shares).
     void choose_segment() {
-        const auto n_single = m_geom.n_fft;
-        m_seg_len           = n_single;
-        m_nseg              = 1;
-        m_seg_hop           = m_nsamps_out;
-        m_seg_skip          = m_single_skip;
-        m_seg_zeros         = 0;
-        if (m_mode == FDMTMode::kRoll) {
-            return; // cyclic: the block is the period
-        }
-        // A segment keeps transform samples [skip, skip + hop): at least the
-        // tree support behind the first (the single transform's skip in
-        // valid mode, which starts with the history) and, with fractional
-        // delays, `guard` samples of look-ahead past the last.
-        const auto discard = std::max(m_single_skip, m_geom.support);
-        const auto ahead   = m_geom.guard;
-        SizeType nodes     = m_level0.size();
+        SizeType nodes = m_level0.size();
         for (const auto& l : m_levels) {
             nodes += l.sum.size() + l.copy.size();
         }
-        // FFT work of (nchans + ndms) rows vs tree work of `nodes` nodes on
-        // n/2 bins, a node costing about 1.5 FFT butterflies' worth.
-        const double tree = 1.5 * 0.33 * static_cast<double>(nodes) /
-                            static_cast<double>(m_nchans + m_ndms);
-        const auto model  = [&](SizeType n, SizeType nseg, double fft) {
-            const double nd = static_cast<double>(n);
-            return static_cast<double>(nseg) * nd *
-                   ((std::log2(nd) * fft) + tree);
-        };
-        struct Cand {
-            SizeType n;
-            SizeType nseg;
-            double rough;
-        };
-        std::vector<Cand> cands;
-        for (SizeType n = utils::next_fft_size(
-                 std::max(kMinSegment, (2 * (discard + ahead)) + 2));
-             n < n_single; n = utils::next_fft_size(n + 1)) {
-            const auto hop  = n - discard - ahead;
-            const auto nseg = (m_nsamps_out + hop - 1) / hop;
-            if (nseg < 2) {
-                break;
-            }
-            cands.push_back({n, nseg, model(n, nseg, 0.33 * radix_penalty(n))});
-        }
-        std::ranges::sort(cands, {}, &Cand::rough);
-        if (cands.size() > 8) {
-            cands.resize(8);
-        }
-        double best = model(n_single, 1, utils::r2c_cost_per_nlogn(n_single));
-        for (const auto& c : cands) {
-            const double cost =
-                model(c.n, c.nseg, utils::r2c_cost_per_nlogn(c.n));
-            // Segment only for a clear predicted gain: the estimate is rough
-            // and every segment adds fixed per-pass costs.
-            if (cost < 0.9 * best) {
-                best        = cost;
-                m_seg_len   = c.n;
-                m_nseg      = c.nseg;
-                m_seg_hop   = c.n - discard - ahead;
-                m_seg_skip  = discard;
-                m_seg_zeros = discard - m_single_skip;
-            }
-        }
+        const auto seg = fdmt_fft::choose_segments(
+            m_geom, m_mode, m_nsamps_out, nodes, m_nchans, m_ndms,
+            detail::fft_segment_cap());
+        m_seg_len   = seg.n_fft;
+        m_nseg      = seg.nseg;
+        m_seg_hop   = seg.hop;
+        m_seg_skip  = seg.skip;
+        m_seg_zeros = seg.zeros;
     }
 
     void build_tree_ops() {
@@ -705,21 +682,95 @@ private:
         return buf_offset / nsamps;
     }
 
-    void check_buffers(std::span<const float> waterfall,
+    void check_buffers(SizeType in_size,
                        std::span<float> dmt,
                        std::string_view what) const {
         const auto total_in  = m_nbeams * m_nchans * m_nsamps;
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
-        if (waterfall.size() != total_in) {
+        if (in_size != total_in) {
             throw std::invalid_argument(
                 std::format("FDMTFFT::{}: expected waterfall size {}, got {}",
-                            what, total_in, waterfall.size()));
+                            what, total_in, in_size));
         }
         if (dmt.size() < total_out) {
             throw std::invalid_argument(
                 std::format("FDMTFFT::{}: dmt buffer size {} must be >= {}",
                             what, dmt.size(), total_out));
         }
+    }
+
+    static void check_nbits(SizeType nbits, std::string_view what) {
+        if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
+            nbits != 16) {
+            throw std::invalid_argument(std::format(
+                "FDMTFFT::{}: nbits must be 1, 2, 4, 8 or 16, got {}", what,
+                nbits));
+        }
+    }
+
+    void check_history(SizeType size, std::string_view what) const {
+        if (size != m_overlap.size()) {
+            throw std::invalid_argument(
+                std::format("FDMTFFT::{}: expected {} floats, got {}", what,
+                            m_overlap.size(), size));
+        }
+    }
+
+    [[nodiscard]] Source float_source(std::span<const float> wf) const {
+        return {.f = wf.data(), .nsamps = m_nsamps};
+    }
+
+    [[nodiscard]] Source packed_source(std::span<const uint8_t> packed,
+                                       SizeType nbits,
+                                       std::string_view what) const {
+        check_nbits(nbits, what);
+        const auto row_bytes =
+            bit_pack_utils::packed_row_bytes(m_nsamps, nbits);
+        if (packed.size() != m_nbeams * m_nchans * row_bytes) {
+            throw std::invalid_argument(std::format(
+                "FDMTFFT::{}: expected {} packed bytes, got {}", what,
+                m_nbeams * m_nchans * row_bytes, packed.size()));
+        }
+        return {.p         = packed.data(),
+                .row_bytes = row_bytes,
+                .nbits     = nbits,
+                .nsamps    = m_nsamps};
+    }
+
+    [[nodiscard]] bool killed(SizeType c) const noexcept {
+        return !m_kill.empty() && m_kill[c] == 0;
+    }
+
+    void run(const Source& src, std::span<float> dmt) {
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            float* out = dmt.data() + (b * m_ndms * m_nsamps_out);
+            for (SizeType seg = 0; seg < m_nseg; ++seg) {
+                forward(src, b, seg);
+                run_tiles();
+                inverse(out, seg);
+            }
+            if (m_mode == FDMTMode::kValid) {
+                update_overlap(src, b);
+            }
+        }
+    }
+
+    void start_stepper(const Source& src, std::span<float> dmt) {
+        ensure_stepper_state();
+        m_step_src       = src;
+        m_dmt_target_ptr = dmt.data();
+        m_current_level  = 0;
+        m_state_in       = m_state_a.data();
+        m_state_out      = m_state_b.data();
+        m_view_valid     = false;
+
+        // Every beam is transformed (same as the CPU FDMT). Views still expose
+        // beam 0 only.
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            step_forward(src, b);
+            step_level0(m_state_in + (b * m_state_stride));
+        }
+        m_is_initialized = true;
     }
 
     [[nodiscard]] Workspace& ws() {
@@ -736,7 +787,8 @@ private:
     // Transform input of segment `seg` of one channel: the samples
     // [seg * hop, seg * hop + N) of v = [zeros(z) | overlap | block | 0...].
     void fill_segment(float* row,
-                      const float* block,
+                      const Source& src,
+                      SizeType src_row,
                       const float* ov,
                       SizeType seg) const {
         const auto n    = m_geo->n_fft;
@@ -753,16 +805,25 @@ private:
             }
         };
         std::fill_n(row, n, 0.0F);
+        if (killed(src_row % m_nchans)) {
+            return;
+        }
         if (lov > 0) {
             part(z, lov, ov);
         }
-        part(z + lov, m_nsamps, block);
+        // Block samples v[z + lov, z + lov + nsamps).
+        const auto begin = z + lov;
+        const auto lo    = std::max(begin, p0);
+        const auto hi    = std::min(begin + m_nsamps, p0 + n);
+        if (lo < hi) {
+            copy_samples(src, src_row, lo - begin, hi - lo, row + (lo - p0));
+        }
     }
 
     // Channel rows of one beam and segment -> m_spectra. kFwdBatch
     // consecutive channels per task, so each tile receives one contiguous
     // run of kFwdBatch * kTile bins.
-    void forward(const float* wf, SizeType beam, SizeType seg) {
+    void forward(const Source& src, SizeType beam, SizeType seg) {
         const auto& g = *m_geo;
         const auto nblocks =
             static_cast<std::int64_t>((m_nchans + kFwdBatch - 1) / kFwdBatch);
@@ -773,7 +834,7 @@ private:
             const auto nc = std::min(kFwdBatch, m_nchans - c0);
             for (SizeType i = 0; i < nc; ++i) {
                 const auto c = c0 + i;
-                fill_segment(w.time.data(), wf + (c * m_nsamps),
+                fill_segment(w.time.data(), src, (beam * m_nchans) + c,
                              m_overlap_len > 0 ? overlap_row(beam, c) : nullptr,
                              seg);
                 g.r2c->r2c(w.time.data(), w.batch.data() + (i * g.bins_stride));
@@ -791,7 +852,7 @@ private:
         fft_cpu::stream_fence();
     }
 
-    void update_overlap(const float* wf, SizeType beam) {
+    void update_overlap(const Source& src, SizeType beam) {
         if (m_overlap_len == 0) {
             return;
         }
@@ -800,7 +861,7 @@ private:
         for (std::int64_t ci = 0; ci < nchans; ++ci) {
             const auto c = static_cast<SizeType>(ci);
             float* ov    = &m_overlap[((beam * m_nchans) + c) * m_overlap_len];
-            advance_overlap_window(wf + (c * m_nsamps), ov, m_nsamps,
+            advance_overlap_window(src, (beam * m_nchans) + c, ov,
                                    m_overlap_len);
         }
     }
@@ -1005,7 +1066,7 @@ private:
     }
 
     // Channel rows of one beam -> m_step_spectra (single transform window).
-    void step_forward(const float* wf, SizeType beam) {
+    void step_forward(const Source& src, SizeType beam) {
         const auto& g     = *m_step_geo;
         const auto nchans = static_cast<std::int64_t>(m_nchans);
 #pragma omp parallel for schedule(static) num_threads(m_nthreads)
@@ -1013,12 +1074,15 @@ private:
             const auto c = static_cast<SizeType>(ci);
             float* row   = ws().time.data();
             SizeType pos = 0;
-            if (m_mode == FDMTMode::kValid && m_overlap_len > 0) {
-                std::copy_n(overlap_row(beam, c), m_overlap_len, row);
-                pos = m_overlap_len;
+            std::fill_n(row, g.n_fft, 0.0F);
+            if (!killed(c)) {
+                if (m_mode == FDMTMode::kValid && m_overlap_len > 0) {
+                    std::copy_n(overlap_row(beam, c), m_overlap_len, row);
+                    pos = m_overlap_len;
+                }
+                copy_samples(src, (beam * m_nchans) + c, 0, m_nsamps,
+                             row + pos);
             }
-            std::copy_n(wf + (c * m_nsamps), m_nsamps, row + pos);
-            std::fill(row + pos + m_nsamps, row + g.n_fft, 0.0F);
             g.r2c->r2c(row, &m_step_spectra[c * g.bins_stride]);
         }
     }

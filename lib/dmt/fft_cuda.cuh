@@ -39,6 +39,26 @@ public:
                  SizeType howmany,
                  int device_id);
 
+    /**
+     * @brief As above, with row distances: @p real_dist floats between real
+     *        rows and @p freq_dist complex values between spectra (0: packed,
+     *        i.e. the length and length / 2 + 1), and element strides within
+     *        a row (e.g. freq_stride = howmany, freq_dist = 1 for a
+     *        bin-major spectrum). Spans passed to execute() must then hold
+     *        (howmany - 1) * dist + (row - 1) * stride + 1 elements at least.
+     */
+    CUFFTManager(FFTKind kind,
+                 SizeType length,
+                 SizeType howmany,
+                 int device_id,
+                 SizeType real_dist,
+                 SizeType freq_dist,
+                 SizeType real_stride = 1,
+                 SizeType freq_stride = 1);
+
+    /// @brief Bytes of the plan's device work area.
+    [[nodiscard]] SizeType workspace_bytes() const noexcept;
+
     ~CUFFTManager();
     CUFFTManager(CUFFTManager&&) noexcept;
     CUFFTManager& operator=(CUFFTManager&&) noexcept;

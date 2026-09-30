@@ -319,3 +319,60 @@ class TestFDMTFFT:
         np.testing.assert_allclose(
             gpu.execute(waterfall), cpu.execute(waterfall), rtol=2e-3, atol=2e-3
         )
+
+
+def _pack(vals: np.ndarray, nbits: int) -> np.ndarray:
+    """Rows of unsigned values -> LSB-first packed uint8 rows."""
+    if nbits == 16:
+        return np.ascontiguousarray(vals.astype("<u2")).view(np.uint8)
+    if nbits == 8:
+        return vals.astype(np.uint8)
+    per = 8 // nbits
+    rows, n = vals.shape
+    out = np.zeros((rows, (n * nbits + 7) // 8), dtype=np.uint8)
+    for i in range(n):
+        out[:, i // per] |= (vals[:, i].astype(np.uint8) << ((i % per) * nbits)).astype(
+            np.uint8
+        )
+    return out
+
+
+class TestFDMTFFTInputs:
+    args = (1100.0, 1500.0, 64, 512, 0.001, 48)
+
+    @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
+    def test_packed_and_time_major_match_float(self, nbits: int) -> None:
+        rng = np.random.default_rng(nbits)
+        vals = rng.integers(0, 2**nbits, size=(64, 512))
+        ref = FDMTFFT(*self.args).execute(vals.astype(np.float32))
+        packed = FDMTFFT(*self.args).execute(_pack(vals, nbits), nbits)
+        tm = FDMTFFT(*self.args).execute_time_major(_pack(vals.T.copy(), nbits), nbits)
+        np.testing.assert_allclose(packed, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
+        np.testing.assert_allclose(tm, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
+
+    def test_kill_mask(self) -> None:
+        rng = np.random.default_rng(1)
+        waterfall = rng.standard_normal((64, 512), dtype=np.float32)
+        mask = np.ones(64, dtype=np.uint8)
+        mask[[0, 9, 63]] = 0
+        zeroed = waterfall.copy()
+        zeroed[mask == 0] = 0.0
+        np.testing.assert_allclose(
+            FDMTFFT(*self.args, kill_mask=mask).execute(waterfall),
+            FDMTFFT(*self.args).execute(zeroed),
+            atol=1e-5,
+        )
+        with pytest.raises(ValueError):
+            FDMTFFT(*self.args, kill_mask=np.ones(3, dtype=np.uint8))
+
+    def test_history_round_trip(self) -> None:
+        rng = np.random.default_rng(2)
+        a = FDMTFFT(*self.args)
+        b = FDMTFFT(*self.args)
+        a.execute(rng.standard_normal((64, 512), dtype=np.float32))
+        hist = a.save_history()
+        assert hist.size == a.history_state_size() > 0
+        b.load_history(hist)
+        block = rng.standard_normal((64, 512), dtype=np.float32)
+        np.testing.assert_array_equal(a.execute(block), b.execute(block))
+        assert FDMTFFT(*self.args, mode="roll").history_state_size() == 0

@@ -28,7 +28,10 @@ algorithms compute the same trials. The backends are:
 - CPU with 1 and 8 threads. FDMT-FFT, DDMT and SDMT run at 8 threads only; DDMT at
   1 thread takes ~25 s per call.
 - CUDA with device-resident data (`cuda`).
-- CUDA with host arrays including PCIe (`cuda_host`), for FDMT throughput.
+- CUDA with host arrays including PCIe (`cuda_host`), for FDMT, FDMT-FFT
+  and DDMT-FFT throughput in the nbits sweep. These rows include host-side
+  staging (pageable copies, pinned chunking), so they depend on the host's
+  load as well as the GPU.
 
 Points whose estimated memory exceeds the budget are skipped and listed in
 the summary.

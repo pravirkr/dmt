@@ -1,6 +1,7 @@
 #include "dmt/algorithms/fdmt_fft.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <format>
 #include <memory>
 #include <span>
@@ -22,6 +23,20 @@
 namespace dmt::algorithms {
 
 namespace {
+
+std::vector<uint8_t> checked_kill_mask(std::span<const uint8_t> mask,
+                                       SizeType nchans) {
+    if (!mask.empty() && mask.size() != nchans) {
+        throw std::invalid_argument(
+            std::format("FDMTFFT: kill_mask has {} entries, expected nchans = "
+                        "{}",
+                        mask.size(), nchans));
+    }
+    if (std::ranges::all_of(mask, [](uint8_t v) { return v != 0; })) {
+        return {}; // keeps every channel
+    }
+    return {mask.begin(), mask.end()};
+}
 
 std::unique_ptr<detail::FDMTFFTEngine>
 make_fdmt_fft_engine(const plans::FDMTPlan& plan,
@@ -46,7 +61,8 @@ public:
          std::string_view mode,
          Exec exec,
          SizeType nbeams,
-         bool fractional_delays)
+         bool fractional_delays,
+         std::span<const uint8_t> kill_mask)
         : m_plan(std::move(plan)),
           m_cfg{
               .use_box_smearing  = use_box_smearing,
@@ -54,6 +70,7 @@ public:
               .nbeams            = nbeams,
               .exec              = exec,
               .fractional_delays = fractional_delays,
+              .kill_mask = checked_kill_mask(kill_mask, m_plan.get_nchans()),
           },
           m_geom(fdmt_fft::make_geometry(
               m_plan, m_cfg.mode, fractional_delays, use_box_smearing)),
@@ -117,7 +134,8 @@ FDMTFFT::FDMTFFT(float f_min,
                  std::string_view mode,
                  Exec exec,
                  SizeType nbeams,
-                 bool fractional_delays)
+                 bool fractional_delays,
+                 std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(plans::FDMTPlan(f_min,
                                                     f_max,
                                                     nchans,
@@ -131,7 +149,8 @@ FDMTFFT::FDMTFFT(float f_min,
                                     mode,
                                     exec,
                                     nbeams,
-                                    fractional_delays)) {}
+                                    fractional_delays,
+                                    kill_mask)) {}
 
 FDMTFFT::FDMTFFT(float f_min,
                  float f_max,
@@ -143,14 +162,16 @@ FDMTFFT::FDMTFFT(float f_min,
                  std::string_view mode,
                  Exec exec,
                  SizeType nbeams,
-                 bool fractional_delays)
+                 bool fractional_delays,
+                 std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
           use_box_smearing,
           mode,
           exec,
           nbeams,
-          fractional_delays)) {}
+          fractional_delays,
+          kill_mask)) {}
 
 FDMTFFT::FDMTFFT(float f_min,
                  float f_max,
@@ -162,14 +183,16 @@ FDMTFFT::FDMTFFT(float f_min,
                  std::string_view mode,
                  Exec exec,
                  SizeType nbeams,
-                 bool fractional_delays)
+                 bool fractional_delays,
+                 std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
           use_box_smearing,
           mode,
           exec,
           nbeams,
-          fractional_delays)) {}
+          fractional_delays,
+          kill_mask)) {}
 
 FDMTFFT::~FDMTFFT()                                   = default;
 FDMTFFT::FDMTFFT(FDMTFFT&& other) noexcept            = default;
@@ -206,8 +229,39 @@ void FDMTFFT::execute(DeviceSpan<const float> d_waterfall,
     m_impl->check_device(d_dmt, "FDMTFFT::execute");
     m_impl->m_engine->execute(d_waterfall, d_dmt, stream);
 }
+void FDMTFFT::execute(std::span<const uint8_t> waterfall_packed,
+                      SizeType nbits,
+                      std::span<float> dmt) {
+    m_impl->m_engine->execute(waterfall_packed, nbits, false, dmt);
+}
+void FDMTFFT::execute(DeviceSpan<const uint8_t> d_waterfall_packed,
+                      SizeType nbits,
+                      DeviceSpan<float> d_dmt,
+                      Stream stream) {
+    m_impl->check_device(d_waterfall_packed, "FDMTFFT::execute");
+    m_impl->check_device(d_dmt, "FDMTFFT::execute");
+    m_impl->m_engine->execute(d_waterfall_packed, nbits, d_dmt, stream);
+}
+void FDMTFFT::execute_time_major(std::span<const uint8_t> filterbank_packed,
+                                 SizeType nbits,
+                                 std::span<float> dmt) {
+    m_impl->m_engine->execute(filterbank_packed, nbits, true, dmt);
+}
 void FDMTFFT::reset(std::span<const float> waterfall, std::span<float> dmt) {
     m_impl->m_engine->reset(waterfall, dmt);
+}
+void FDMTFFT::reset(std::span<const uint8_t> waterfall_packed,
+                    SizeType nbits,
+                    std::span<float> dmt) {
+    m_impl->m_engine->reset(waterfall_packed, nbits, dmt);
+}
+void FDMTFFT::reset(DeviceSpan<const uint8_t> d_waterfall_packed,
+                    SizeType nbits,
+                    DeviceSpan<float> d_dmt,
+                    Stream stream) {
+    m_impl->check_device(d_waterfall_packed, "FDMTFFT::reset");
+    m_impl->check_device(d_dmt, "FDMTFFT::reset");
+    m_impl->m_engine->reset(d_waterfall_packed, nbits, d_dmt, stream);
 }
 void FDMTFFT::reset(DeviceSpan<const float> d_waterfall,
                     DeviceSpan<float> d_dmt,
@@ -287,6 +341,24 @@ FDMTFFT::get_effective_sigma_grid(SizeType boxcar_width) const {
 }
 
 void FDMTFFT::reset_history() noexcept { m_impl->m_engine->reset_history(); }
+
+SizeType FDMTFFT::history_state_size() const noexcept {
+    return m_impl->m_engine->history_state_size();
+}
+void FDMTFFT::save_history(std::span<float> out) const {
+    m_impl->m_engine->save_history(out);
+}
+void FDMTFFT::load_history(std::span<const float> in) {
+    m_impl->m_engine->load_history(in);
+}
+void FDMTFFT::save_history(DeviceSpan<float> d_out, Stream stream) const {
+    m_impl->check_device(d_out, "FDMTFFT::save_history");
+    m_impl->m_engine->save_history(d_out, stream);
+}
+void FDMTFFT::load_history(DeviceSpan<const float> d_in, Stream stream) {
+    m_impl->check_device(d_in, "FDMTFFT::load_history");
+    m_impl->m_engine->load_history(d_in, stream);
+}
 
 namespace {
 

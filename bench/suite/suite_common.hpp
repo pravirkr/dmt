@@ -176,12 +176,12 @@ estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
     switch (algo) {
     case Algo::kFDMT: // caller buffer + internal ping-pong half
         return input + (2.0 * b);
-    case Algo::kFDMTFFT: // channel + DM spectra (complex, one transform)
+    case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
     case Algo::kFDMTFFTFrac:
     case Algo::kDDMTFFT:
     case Algo::kDDMTFFTBrute:
         return input + d +
-               (4.0 * static_cast<double>(plan.get_fft_size()) *
+               (10.0 * static_cast<double>(plan.get_fft_size()) *
                 static_cast<double>(kNchans + plan.get_dmt_ndms()));
     case Algo::kDDMT: // output + one block of history per channel
     case Algo::kSDMT:

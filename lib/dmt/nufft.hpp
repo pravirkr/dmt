@@ -55,6 +55,12 @@ public:
     /// @brief 1 / Psi(d - half()) for d < modes(): the deconvolution
     /// factors (other backends reuse them to compute the same transform).
     [[nodiscard]] std::span<const float> deconvolution() const noexcept;
+    /// @brief The kernel on the w cells a point touches as polynomials in
+    /// its offset u (see locate()): coefficient q of cell i at
+    /// [i * (kernel_degree() + 1) + q], value sum_q c_q u^q (Horner, float),
+    /// so other backends evaluate exactly the same kernel.
+    [[nodiscard]] std::span<const float> kernel_monomials() const noexcept;
+    [[nodiscard]] int kernel_degree() const noexcept;
 
     /// @brief f(d) for d < modes(); x.size() == a.size(), f.size() ==
     /// modes(). Thread-safe with a distinct @p scratch per thread.

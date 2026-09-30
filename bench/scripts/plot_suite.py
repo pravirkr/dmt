@@ -491,7 +491,10 @@ def throughput_figure(
     for ax, (mname, kind) in zip(axes, panels, strict=False):
         if kind == "cpu":
             threads = cpu_backends(results, mname)
-            lines = [(a, threads[-1], False) for a in ("FDMT", "DDMT", "SDMT")]
+            lines = [
+                (a, threads[-1], False)
+                for a in ("FDMT", "DDMT", "SDMT", "FDMT-FFT", "DDMT-FFT")
+            ]
             lines += [("FDMT", t, True) for t in threads[:-1]]
         else:
             lines = [
@@ -499,6 +502,8 @@ def throughput_figure(
                 ("FDMT", f"{kind}_host", True),
                 ("DDMT", kind, False),
                 ("SDMT", kind, False),
+                ("FDMT-FFT", kind, False),
+                ("DDMT-FFT", kind, False),
             ]
         ax.set_title(f"{machines[mname].platform(kind)} · {kind_name(kind)}")
         for algo, backend, variant in lines:
@@ -760,7 +765,7 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
             cpu_backends(results, mname) if kind == "cpu" else [kind, f"{kind}_host"]
         )
         for b in backends:
-            for a in ("FDMT", "DDMT", "SDMT", "DDMT-FFT"):
+            for a in ("FDMT", "DDMT", "SDMT", "FDMT-FFT", "DDMT-FFT"):
                 row = by.get((mname, b, a))
                 if not row:
                     continue

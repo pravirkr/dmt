@@ -497,5 +497,9 @@ double Type1Plan::beta() const noexcept { return m_impl->m_beta; }
 std::span<const float> Type1Plan::deconvolution() const noexcept {
     return m_impl->m_inv_psi;
 }
+std::span<const float> Type1Plan::kernel_monomials() const noexcept {
+    return m_impl->m_cheb;
+}
+int Type1Plan::kernel_degree() const noexcept { return m_impl->m_deg; }
 
 } // namespace dmt::nufft
