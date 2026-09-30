@@ -175,6 +175,8 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:
     results: dict[tuple[str, str, str, str, int, int, int], Result] = {}
     machines: dict[str, Machine] = {}
     for path in sorted(results_dir.glob("*/suite_*.json")):
+        if path.name.startswith("suite_cfdmt_"):
+            continue  # CohFDMT has its own plots (plot_cfdmt.py)
         data = json.loads(path.read_text())
         mname = path.parent.name
         mach = machines.setdefault(mname, Machine(mname))

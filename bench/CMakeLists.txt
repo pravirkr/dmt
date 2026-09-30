@@ -13,6 +13,7 @@ set(TARGET_BENCHMARKS_MEM ${PROJECT_NAME}_bench_mem)
 set(BENCH_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cpu_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cpu_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cpu_b.cpp
 )
 
 # GPU benchmark sources (CUDA source, built for CUDA or HIP): same three
@@ -90,9 +91,13 @@ target_link_libraries(
 # FDMT, FDMT-FFT and DDMT on CPU and GPU (CUDA or HIP), run by bench/scripts/run_suite.py
 # and plotted by bench/scripts/plot_suite.py. See bench/README.md.
 set(TARGET_BENCHMARKS_SUITE ${PROJECT_NAME}_bench_suite)
-set(BENCH_SOURCES_SUITE ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cpu.cpp)
+set(BENCH_SOURCES_SUITE ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cpu.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cfdmt_cpu.cpp
+)
 if(DMT_GPU_BACKEND)
-  set(BENCH_SOURCES_SUITE_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cuda.cu)
+  set(BENCH_SOURCES_SUITE_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cuda.cu
+                               ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cfdmt_cuda.cu
+  )
   set_source_files_properties(
     ${BENCH_SOURCES_SUITE_CUDA} PROPERTIES LANGUAGE ${DMT_GPU_BACKEND}
   )

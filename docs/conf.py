@@ -526,6 +526,18 @@ Plans & Geometry (``dmt::plans``)
    :project: dmt
    :members:
 
+.. doxygenstruct:: dmt::CohFDMTConfig
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::BasebandFormat
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::plans::CohFDMTMemoryUsage
+   :project: dmt
+   :members:
+
 .. doxygenstruct:: dmt::plans::FDMTComplexity
    :project: dmt
    :members:

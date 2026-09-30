@@ -17,7 +17,9 @@ from .libdmt import (
     FDMT,
     FDMTFFT,
     SDMT,
+    BasebandFormat,
     CohFDMT,
+    CohFDMTConfig,
     CohFDMTPlan,
     DDMTPlan,
     FDMTComplexity,
@@ -33,7 +35,9 @@ from .libdmt import (
     forget_fft_wisdom,
     get_fft_planner,
     import_fft_wisdom,
+    pack_baseband,
     set_fft_planner,
+    simulate_baseband,
 )
 
 _LOG_LEVELS = {"off": 0, "debug": 1}
@@ -67,7 +71,9 @@ __all__ = [
     "FDMT",
     "FDMTFFT",
     "SDMT",
+    "BasebandFormat",
     "CohFDMT",
+    "CohFDMTConfig",
     "CohFDMTPlan",
     "DDMTPlan",
     "FDMTComplexity",
@@ -87,6 +93,8 @@ __all__ = [
     "get_fft_planner",
     "get_log_level",
     "import_fft_wisdom",
+    "pack_baseband",
     "set_fft_planner",
+    "simulate_baseband",
     "set_log_level",
 ]

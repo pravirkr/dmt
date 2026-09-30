@@ -9,6 +9,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 namespace dmt {
@@ -60,17 +61,6 @@ template <typename T> using AlignedVector = std::vector<T, AlignedAllocator<T>>;
 
 template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
-
-/**
- * @enum BasebandDataOrder
- * @brief Memory layouts for raw telescope complex baseband voltage streams.
- */
-enum class BasebandDataOrder : uint8_t {
-    kPRITF, /**< Polarization -> Real/Imag -> Time -> Frequency (LOFAR default)
-             */
-    kFTPRI, /**< Frequency -> Time -> Polarization -> Real/Imag */
-    kRITFP, /**< Real/Imag -> Time -> Frequency -> Polarization */
-};
 
 /**
  * @brief FDMT mode for the FDMT tree.

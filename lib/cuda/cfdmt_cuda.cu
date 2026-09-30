@@ -1,25 +1,38 @@
 #include "dmt/algorithms/cfdmt.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <format>
+#include <memory>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
-#include <thrust/copy.h>
-#include <thrust/device_vector.h>
 #include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/bb_utils_cuda.cuh"
+#include "dmt/cfdmt_common.hpp"
 #include "dmt/common/types.hpp"
-#include "dmt/dm_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fft_cuda.cuh"
+#include "dmt/fourier_gpu.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/unpacker_cuda.cuh"
+
+// GPU engine: the CPU engine's pipeline (lib/cpu/cfdmt_cpu.cpp) as kernels
+// on one stream. Per block:
+//   unpack -> batched forward cuFFT -> channel noise statistics ->
+//   per coarse trial, in channel chunks: gather x chirp (exact fixed-point
+//   phases, identical to the CPU) -> batched inverse cuFFT -> detect,
+//   normalise, trim and write the delay-aligned waterfall -> fine FDMT ->
+//   crop of the valid output window.
 
 namespace dmt::algorithms {
 
 namespace {
+
+using fourier_gpu::DevBuf;
+using fourier_gpu::kBlock;
 
 template <typename T> cuda::std::span<T> to_cuda(DeviceSpan<T> span) {
     return {span.data(), span.size()};
@@ -29,198 +42,326 @@ cudaStream_t to_cuda(Stream stream) {
     return static_cast<cudaStream_t>(stream.native);
 }
 
+unsigned grid_for(uint64_t n) {
+    return static_cast<unsigned>(std::clamp<uint64_t>(
+        (n + kBlock - 1) / kBlock, 1, uint64_t{1} << 20));
+}
+
+// Per (subband, FFT block, channel): filtered power of each polarisation,
+// sum_b |c_b|^2 |X_p(b)|^2 (see the CPU engine's front_end()).
+__global__ void channel_power_kernel(const float2* __restrict__ spec,
+                                     const float* __restrict__ taper,
+                                     uint64_t n_p,
+                                     uint64_t nbin,
+                                     uint64_t mbin,
+                                     float* __restrict__ power) {
+    __shared__ float red[2][kBlock];
+    const uint64_t cell  = blockIdx.x; // (s * nfft + j) * n_p + ichan
+    const uint64_t ichan = cell % n_p;
+    const uint64_t task  = cell / n_p;
+    const float2* row0   = spec + (task * 2 * nbin);
+    const float2* row1   = row0 + nbin;
+    const uint64_t off   = ((ichan * mbin) + (nbin / 2)) % nbin;
+    float acc0           = 0.0F;
+    float acc1           = 0.0F;
+    for (uint64_t b = threadIdx.x; b < mbin; b += blockDim.x) {
+        uint64_t idx = off + b;
+        idx          = idx >= nbin ? idx - nbin : idx;
+        const float w2 = taper[b] * taper[b];
+        const float2 x = row0[idx];
+        const float2 y = row1[idx];
+        acc0 += w2 * ((x.x * x.x) + (x.y * x.y));
+        acc1 += w2 * ((y.x * y.x) + (y.y * y.y));
+    }
+    red[0][threadIdx.x] = acc0;
+    red[1][threadIdx.x] = acc1;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s /= 2) {
+        if (threadIdx.x < s) {
+            red[0][threadIdx.x] += red[0][threadIdx.x + s];
+            red[1][threadIdx.x] += red[1][threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        power[(cell * 2) + 0] = red[0][0];
+        power[(cell * 2) + 1] = red[1][0];
+    }
+}
+
+// Per channel: mean m0 + m1 and 1 / sqrt(m0^2 + m1^2) of detected noise.
+__global__ void channel_stats_kernel(const float* __restrict__ power,
+                                     uint64_t nchans,
+                                     uint64_t n_p,
+                                     uint64_t nfft,
+                                     float* __restrict__ mean,
+                                     float* __restrict__ inv_sigma) {
+    const uint64_t c =
+        (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (c >= nchans) {
+        return;
+    }
+    const uint64_t isub  = c / n_p;
+    const uint64_t ichan = c % n_p;
+    double m0            = 0.0;
+    double m1            = 0.0;
+    for (uint64_t j = 0; j < nfft; ++j) {
+        const float* pw = power + (((((isub * nfft) + j) * n_p) + ichan) * 2);
+        m0 += static_cast<double>(pw[0]);
+        m1 += static_cast<double>(pw[1]);
+    }
+    m0 /= static_cast<double>(nfft);
+    m1 /= static_cast<double>(nfft);
+    const double sigma = sqrt((m0 * m0) + (m1 * m1));
+    mean[c]            = static_cast<float>(m0 + m1);
+    inv_sigma[c] = sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 0.0F;
+}
+
+// Channel c's window of channel samples [m_lo, m_hi) and first FFT block.
+struct Window {
+    int64_t m_lo;
+    int64_t m_hi;
+    int64_t j_first;
+};
+
+__device__ __forceinline__ Window channel_window(int64_t a,
+                                                 int64_t nf,
+                                                 int64_t msamp,
+                                                 int64_t shift,
+                                                 int64_t lc) {
+    Window w{};
+    const int64_t lo = a - shift;
+    const int64_t hi = a + nf - shift;
+    w.m_lo           = lo > 0 ? lo : 0;
+    w.m_hi           = hi < msamp ? hi : msamp;
+    w.j_first = w.m_lo / lc;
+    return w;
+}
+
+// Thread per (channel of the chunk, bin): the trial's chirp once, applied to
+// the channel's bins of every FFT block of its window (both pols).
+__global__ void gather_chirp_kernel(const float2* __restrict__ spec,
+                                    const unsigned long long* __restrict__ base,
+                                    const unsigned long long* __restrict__ inc,
+                                    const float* __restrict__ taper,
+                                    const int64_t* __restrict__ shifts,
+                                    unsigned long long k,
+                                    uint64_t c0,
+                                    uint64_t nchans,
+                                    uint64_t n_p,
+                                    uint64_t nfft,
+                                    uint64_t nbin,
+                                    uint64_t mbin,
+                                    uint64_t nwin,
+                                    int64_t a,
+                                    int64_t nf,
+                                    int64_t msamp,
+                                    int64_t lc,
+                                    float2* __restrict__ work) {
+    const uint64_t b  = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
+                        threadIdx.x;
+    const uint64_t cc = blockIdx.y; // channel within the chunk
+    const uint64_t c  = c0 + cc;
+    if (b >= mbin) {
+        return;
+    }
+    float2* dst = work + (cc * nwin * 2 * mbin) + b;
+    if (c >= nchans) {
+        for (uint64_t r = 0; r < nwin * 2; ++r) {
+            dst[r * mbin] = {0.0F, 0.0F};
+        }
+        return;
+    }
+    const auto w = channel_window(a, nf, msamp, shifts[c], lc);
+    const unsigned long long ph = base[(c * mbin) + b] + (k * inc[(c * mbin) + b]);
+    float sn = 0.0F;
+    float cs = 0.0F;
+    sincospif(2.0F * static_cast<float>(static_cast<long long>(ph)) *
+                  5.42101086242752217e-20F,
+              &sn, &cs);
+    const float2 h = {taper[b] * cs, taper[b] * sn};
+    const uint64_t isub  = c / n_p;
+    const uint64_t ichan = c % n_p;
+    uint64_t idx         = (ichan * mbin) + (nbin / 2) + b;
+    idx                  = idx % nbin;
+    for (uint64_t q = 0; q < nwin; ++q) {
+        const int64_t j = w.j_first + static_cast<int64_t>(q);
+        float2 y0       = {0.0F, 0.0F};
+        float2 y1       = {0.0F, 0.0F};
+        if (w.m_lo < w.m_hi && j < static_cast<int64_t>(nfft)) {
+            const float2* row =
+                spec + (((isub * nfft) + static_cast<uint64_t>(j)) * 2 * nbin);
+            y0 = fourier_gpu::cmul(row[idx], h);
+            y1 = fourier_gpu::cmul(row[nbin + idx], h);
+        }
+        dst[(2 * q) * mbin]       = y0;
+        dst[((2 * q) + 1) * mbin] = y1;
+    }
+}
+
+// Thread per (window sample u, channel of the chunk): detected (and
+// normalised) intensity at aligned time a + u.
+__global__ void detect_kernel(const float2* __restrict__ work,
+                              const int64_t* __restrict__ shifts,
+                              const float* __restrict__ mean,
+                              const float* __restrict__ inv_sigma,
+                              bool norm,
+                              uint64_t c0,
+                              uint64_t nchans,
+                              uint64_t mbin,
+                              uint64_t nwin,
+                              uint64_t novc,
+                              int64_t a,
+                              int64_t nf,
+                              int64_t msamp,
+                              int64_t lc,
+                              float* __restrict__ waterfall) {
+    const uint64_t u  = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
+                        threadIdx.x;
+    const uint64_t cc = blockIdx.y;
+    const uint64_t c  = c0 + cc;
+    if (u >= static_cast<uint64_t>(nf) || c >= nchans) {
+        return;
+    }
+    const auto w    = channel_window(a, nf, msamp, shifts[c], lc);
+    const int64_t m = a + static_cast<int64_t>(u) - shifts[c];
+    float v         = 0.0F;
+    if (m >= w.m_lo && m < w.m_hi) {
+        const int64_t j = m / lc;
+        const auto q    = static_cast<uint64_t>(j - w.j_first);
+        const auto i    = static_cast<uint64_t>(m - (j * lc)) + novc;
+        const float2* y = work + (((cc * nwin) + q) * 2 * mbin) + i;
+        const float2 y0 = y[0];
+        const float2 y1 = y[mbin];
+        v = (y0.x * y0.x) + (y0.y * y0.y) + (y1.x * y1.x) + (y1.y * y1.y);
+        if (norm) {
+            v = (v - mean[c]) * inv_sigma[c];
+        }
+    }
+    waterfall[(c * static_cast<uint64_t>(nf)) + u] = v;
+}
+
+// out row r of trial k = FDMT output row r from its reference offset.
+__global__ void crop_kernel(const float* __restrict__ fdmt_out,
+                            const uint64_t* __restrict__ offsets,
+                            uint64_t nfine,
+                            uint64_t nf,
+                            uint64_t nout,
+                            float* __restrict__ out) {
+    const uint64_t total = nfine * nout;
+    for (uint64_t idx = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
+                        threadIdx.x;
+         idx < total;
+         idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+        const uint64_t r = idx / nout;
+        const uint64_t t = idx % nout;
+        out[idx]         = fdmt_out[(r * nf) + offsets[r] + t];
+    }
+}
+
 class CohFDMTCudaEngine final : public detail::CohFDMTEngine {
 public:
     CohFDMTCudaEngine(const plans::CohFDMTPlan& plan,
                       const detail::CohFDMTEngineConfig& cfg)
         : m_plan(plan),
-          m_device_id(cfg.exec.device) {
-        gpu_utils::set_device(m_device_id);
+          m_device_id(cfg.exec.device),
+          m_unpacker((gpu_utils::set_device(m_device_id), plan.get_format()),
+                     plan.get_subband_groups(),
+                     plan.get_nbin(),
+                     plan.get_nfft(),
+                     plan.get_noverlap(),
+                     m_device_id),
+          m_fdmt(plan.get_f_min(),
+                 plan.get_f_max(),
+                 plan.get_nchans(),
+                 plan.get_fdmt_nsamps(),
+                 plan.get_tsamp(),
+                 static_cast<IndexType>(plan.get_fine_dt_max()),
+                 -static_cast<IndexType>(plan.get_fine_dt_max()),
+                 plan.get_config().dt_step,
+                 true,
+                 "valid",
+                 Exec{.backend  = detail::kGPUBackend,
+                      .nthreads = 1,
+                      .device   = m_device_id}) {
         initialise();
     }
 
-    void execute(std::span<const uint8_t> data_in,
+    void execute(std::span<const std::span<const uint8_t>> groups,
                  std::span<float> dmt) override {
-        execute_h<uint8_t>(data_in, dmt);
-    }
-    void execute(std::span<const int8_t> data_in,
-                 std::span<float> dmt) override {
-        execute_h<int8_t>(data_in, dmt);
-    }
-    void execute(DeviceSpan<const uint8_t> data_in,
-                 DeviceSpan<float> dmt,
-                 Stream stream) override {
-        execute_d<uint8_t>(to_cuda(data_in), to_cuda(dmt), to_cuda(stream));
-    }
-    void execute(DeviceSpan<const int8_t> data_in,
-                 DeviceSpan<float> dmt,
-                 Stream stream) override {
-        execute_d<int8_t>(to_cuda(data_in), to_cuda(dmt), to_cuda(stream));
-    }
-
-    void execute_pipeline(cuda::std::span<float> dmt_d, cudaStream_t stream) {
-        if (dmt_d.size() < m_plan.get_buffer_size()) {
-            throw std::invalid_argument(std::format(
-                "CohFDMT (cuda): dmt buffer too small. Expected at least {} "
-                "(get_buffer_size()), got {}",
-                m_plan.get_buffer_size(), dmt_d.size()));
-        }
-        const auto& dm_grid_coh   = m_plan.get_dm_grid_coh();
-        auto m_unpack_buf_p1_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_unpack_buf_p1.data()),
-            m_unpack_buf_p1.size());
-        auto m_unpack_buf_p2_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_unpack_buf_p2.data()),
-            m_unpack_buf_p2.size());
-        auto m_delay_buf_p1_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_delay_buf_p1.data()),
-            m_delay_buf_p1.size());
-        auto m_delay_buf_p2_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_delay_buf_p2.data()),
-            m_delay_buf_p2.size());
-        auto m_intensity_buf_span = cuda::std::span<float>(
-            thrust::raw_pointer_cast(m_intensity_buf.data()),
-            m_intensity_buf.size());
-        auto m_aligned_buf_span = cuda::std::span<float>(
-            thrust::raw_pointer_cast(m_aligned_buf.data()),
-            m_aligned_buf.size());
-        auto shift_table_span = cuda::std::span<const int>(
-            thrust::raw_pointer_cast(m_dedisperse_shift_table_d.data()),
-            m_dedisperse_shift_table_d.size());
-        auto offset_table_span = cuda::std::span<const SizeType>(
-            thrust::raw_pointer_cast(m_dedisperse_offset_table_d.data()),
-            m_dedisperse_offset_table_d.size());
-
-        m_fft_forward->execute(m_unpack_buf_p1_span, stream);
-        m_fft_forward->execute(m_unpack_buf_p2_span, stream);
-        bb_utils::swap_spectrum(
-            m_unpack_buf_p1_span, m_unpack_buf_p2_span,
-            static_cast<int>(m_plan.get_nbin()),
-            static_cast<int>(m_plan.get_nfft() * m_plan.get_nsub()), stream);
-        for (SizeType idm = 0; idm < dm_grid_coh.size(); ++idm) {
-            // Apply chirp
-            apply_chirp(m_unpack_buf_p1_span, m_unpack_buf_p2_span,
-                        m_delay_buf_p1_span, m_delay_buf_p2_span, idm, stream);
-            bb_utils::swap_spectrum(
-                m_delay_buf_p1_span, m_delay_buf_p2_span,
-                static_cast<int>(m_plan.get_mbin()),
-                static_cast<int>(m_plan.get_nfft() * m_plan.get_nsub() *
-                                 m_plan.get_nchan()),
-                stream);
-            m_fft_backward->execute(m_delay_buf_p1_span, stream);
-            m_fft_backward->execute(m_delay_buf_p2_span, stream);
-            // Detect and unpad (produces ascending frequency channels)
-            unpad_detect(m_delay_buf_p1_span, m_delay_buf_p2_span,
-                         m_intensity_buf_span, stream);
-
-            // Apply causal streaming inter-channel delay line for this coarse
-            // trial
-            auto delay_hist_span = cuda::std::span<float>(
-                thrust::raw_pointer_cast(m_channel_delay_histories[idm].data()),
-                m_channel_delay_histories[idm].size());
-            bb_utils::channel_delay_line(
-                m_intensity_buf_span, m_aligned_buf_span, delay_hist_span,
-                shift_table_span, offset_table_span, static_cast<int>(idm),
-                static_cast<int>(m_plan.get_mchan()),
-                static_cast<int>(m_plan.get_msamp()), stream);
-
-            // Perform the FDMT for this coarse-DM trial's fine residual
-            // search on the aligned waterfall. One shared FDMT instance
-            // (same geometry for every coarse trial); only the small per-trial
-            // streaming history differs.
-            auto hist_span = cuda::std::span<float>(
-                thrust::raw_pointer_cast(m_dm_histories[idm].data()),
-                m_dm_histories[idm].size());
-            // Sliding arena (see CohFDMTPlan::get_buffer_size()): the trial
-            // runs in place at offset idm * D; its B-sized scratch tail only
-            // reaches later trials' slots, which are overwritten afterwards.
-            const auto& fine_plan = m_thefdmt->get_plan();
-            const auto trial_dmt = dmt_d.subspan(idm * fine_plan.get_dmt_size(),
-                                                 fine_plan.get_buffer_size());
-            m_thefdmt->load_history(
-                DeviceSpan<const float>(hist_span.data(), hist_span.size()),
-                Stream{stream});
-            m_thefdmt->execute(
-                DeviceSpan<const float>(m_aligned_buf_span.data(),
-                                        m_aligned_buf_span.size()),
-                DeviceSpan<float>(trial_dmt.data(), trial_dmt.size()),
-                Stream{stream});
-            m_thefdmt->save_history(
-                DeviceSpan<float>(hist_span.data(), hist_span.size()),
-                Stream{stream});
-        }
-    }
-
-    // Host entry point: feeds input host span directly into DataUnpackerCUDA
-    template <IntegralDataType DataType>
-    void execute_h(std::span<const DataType> data_in_h,
-                   std::span<float> dmt_h) {
         gpu_utils::set_device(m_device_id);
-        if (dmt_h.size() < m_plan.get_dmt_size()) {
+        if (dmt.size() < m_plan.get_dmt_size()) {
             throw std::invalid_argument(std::format(
-                "CohFDMT (cuda): dmt buffer too small. Expected at least {} "
+                "CohFDMT (gpu): dmt buffer too small. Expected at least {} "
                 "(get_dmt_size()), got {}",
-                m_plan.get_dmt_size(), dmt_h.size()));
+                m_plan.get_dmt_size(), dmt.size()));
         }
-        // Device arena for the host entry point, allocated on first use so
-        // device-memory callers (who pass their own arena) pay nothing.
-        if (m_host_arena_d.empty()) {
-            m_host_arena_d.resize(m_plan.get_buffer_size());
+        const auto& sizes = m_plan.get_subband_groups();
+        if (groups.size() != sizes.size()) {
+            throw std::invalid_argument(
+                std::format("CohFDMT: expected {} input group(s), got {}",
+                            sizes.size(), groups.size()));
         }
         cudaStream_t stream = nullptr;
-
-        auto p1_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_unpack_buf_p1.data()),
-            m_unpack_buf_p1.size());
-        auto p2_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_unpack_buf_p2.data()),
-            m_unpack_buf_p2.size());
-        m_theunpacker->execute<DataType>(data_in_h, p1_span, p2_span, stream);
-
-        execute_pipeline(cuda::std::span<float>(
-                             thrust::raw_pointer_cast(m_host_arena_d.data()),
-                             m_host_arena_d.size()),
-                         stream);
-
-        // Only the leading get_dmt_size() values are the result.
-        cudaMemcpyAsync(dmt_h.data(),
-                        thrust::raw_pointer_cast(m_host_arena_d.data()),
-                        m_plan.get_dmt_size() * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        gpu_utils::check_last_gpu_error(
-            "CohFDMT::execute (host): D2H copy failed");
+        m_raw.resize(groups.size());
+        std::vector<cuda::std::span<const uint8_t>> d_groups;
+        for (SizeType g = 0; g < groups.size(); ++g) {
+            if (groups[g].size() != m_plan.get_input_size(g)) {
+                throw std::invalid_argument(std::format(
+                    "CohFDMT: input group {} has {} bytes, expected {}", g,
+                    groups[g].size(), m_plan.get_input_size(g)));
+            }
+            m_raw[g].reserve(groups[g].size());
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(m_raw[g].data(), groups[g].data(),
+                                groups[g].size(), cudaMemcpyHostToDevice,
+                                stream),
+                "CohFDMT: input upload failed");
+            d_groups.emplace_back(m_raw[g].data(), groups[g].size());
+        }
+        m_out.reserve(m_plan.get_dmt_size());
+        run(d_groups, m_out.data(), stream);
+        gpu_utils::check_gpu_call(
+            cudaMemcpyAsync(dmt.data(), m_out.data(),
+                            m_plan.get_dmt_size() * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream),
+            "CohFDMT: output download failed");
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(stream),
+                                  "CohFDMT: execute failed");
     }
 
-    // Device entry point: input is already device-resident, unpacks directly on
-    // GPU
-    template <IntegralDataType DataType>
-    void execute_d(cuda::std::span<const DataType> data_in_d,
-                   cuda::std::span<float> dmt_d,
-                   cudaStream_t stream) {
+    void execute(std::span<const DeviceSpan<const uint8_t>> groups,
+                 DeviceSpan<float> dmt,
+                 Stream stream) override {
         gpu_utils::set_device(m_device_id);
-        auto p1_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_unpack_buf_p1.data()),
-            m_unpack_buf_p1.size());
-        auto p2_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_unpack_buf_p2.data()),
-            m_unpack_buf_p2.size());
-        m_theunpacker->execute<DataType>(data_in_d, p1_span, p2_span, stream);
-
-        execute_pipeline(dmt_d, stream);
+        if (dmt.size() < m_plan.get_dmt_size()) {
+            throw std::invalid_argument(std::format(
+                "CohFDMT (gpu): dmt buffer too small. Expected at least {} "
+                "(get_dmt_size()), got {}",
+                m_plan.get_dmt_size(), dmt.size()));
+        }
+        std::vector<cuda::std::span<const uint8_t>> d_groups;
+        d_groups.reserve(groups.size());
+        for (const auto& g : groups) {
+            d_groups.push_back(to_cuda(g));
+        }
+        run(d_groups, to_cuda(dmt).data(), to_cuda(stream));
     }
 
-    void reset_history() noexcept override {
-        for (auto& hist : m_channel_delay_histories) {
-            if (!hist.empty()) {
-                thrust::fill(hist.begin(), hist.end(), 0.0F);
-            }
-        }
-        for (auto& hist : m_dm_histories) {
-            if (!hist.empty()) {
-                thrust::fill(hist.begin(), hist.end(), 0.0F);
-            }
-        }
+    [[nodiscard]] plans::CohFDMTMemoryUsage
+    memory_usage() const noexcept override {
+        const auto fdmt_mem = m_fdmt.get_memory_usage();
+        return {.spectrum  = m_spec.capacity() * sizeof(ComplexTypeGPU),
+                .waterfall = m_waterfall.capacity() * sizeof(float),
+                .fdmt      = fdmt_mem.total() +
+                        (m_fdmt_out.capacity() * sizeof(float)),
+                .workspace = (m_work.capacity() * sizeof(ComplexTypeGPU)) +
+                             m_fwd->workspace_bytes() +
+                             m_inv->workspace_bytes() +
+                             ((m_base.capacity() + m_inc.capacity()) *
+                              sizeof(unsigned long long)) +
+                             (m_power.capacity() * sizeof(float)),
+                .output    = m_plan.get_dmt_size() * sizeof(float)};
     }
 
 protected:
@@ -229,138 +370,160 @@ protected:
     }
 
 private:
+    // Inverse-FFT work buffer budget per channel chunk.
+    static constexpr SizeType kWorkBytes = SizeType{256} << 20U;
+
     const plans::CohFDMTPlan& m_plan; // owned by the CohFDMT facade
     int m_device_id;
-    std::unique_ptr<utils::CUFFTManager> m_fft_forward;
-    std::unique_ptr<utils::CUFFTManager> m_fft_backward;
-    std::unique_ptr<algorithms::FDMT> m_thefdmt;
-    std::unique_ptr<utils::DataUnpackerCUDA> m_theunpacker;
+    utils::BasebandUnpackerCUDA m_unpacker;
+    algorithms::FDMT m_fdmt;
+    std::unique_ptr<utils::CUFFTManager> m_fwd;
+    std::unique_ptr<utils::CUFFTManager> m_inv;
+    SizeType m_nwin{};
+    SizeType m_chunk{};
 
-    thrust::device_vector<ComplexTypeGPU> m_unpack_buf_p1;
-    thrust::device_vector<ComplexTypeGPU> m_unpack_buf_p2;
-    thrust::device_vector<ComplexTypeGPU> m_delay_buf_p1;
-    thrust::device_vector<ComplexTypeGPU> m_delay_buf_p2;
-    thrust::device_vector<float> m_intensity_buf;
-    thrust::device_vector<float> m_aligned_buf;
-    thrust::device_vector<ComplexTypeGPU> m_chirp_table;
-    thrust::device_vector<int> m_dedisperse_shift_table_d;
-    thrust::device_vector<SizeType> m_dedisperse_offset_table_d;
-    // Output arena for the host execute() entry point (get_buffer_size()),
-    // allocated on its first call.
-    thrust::device_vector<float> m_host_arena_d;
-    // Small per-coarse-DM-trial "valid"-mode streaming history, swapped
-    // into the one shared m_thefdmt instance around each trial's execute()
-    // call -- mirrors the CPU engine's m_dm_histories.
-    std::vector<thrust::device_vector<float>> m_dm_histories;
-    std::vector<thrust::device_vector<float>> m_channel_delay_histories;
+    DevBuf<ComplexTypeGPU> m_spec; // (sub, ifft, pol, nbin)
+    DevBuf<ComplexTypeGPU> m_work; // (chunk chan, window block, pol, mbin)
+    DevBuf<float> m_power;
+    DevBuf<float> m_mean;
+    DevBuf<float> m_inv_sigma;
+    DevBuf<float> m_taper;
+    DevBuf<unsigned long long> m_base;
+    DevBuf<unsigned long long> m_inc;
+    DevBuf<int64_t> m_shifts; // (ndm_coh, nchans)
+    DevBuf<uint64_t> m_offsets;
+    DevBuf<float> m_waterfall;
+    DevBuf<float> m_fdmt_out;
+    DevBuf<float> m_out; // host entry point only
+    std::vector<DevBuf<uint8_t>> m_raw;
 
     void initialise() {
-        m_fft_forward = std::make_unique<utils::CUFFTManager>(
-            utils::FFTKind::kC2CForward, m_plan.get_nbin(),
-            m_plan.get_nfft() * m_plan.get_nsub(), m_device_id);
-        m_fft_backward = std::make_unique<utils::CUFFTManager>(
-            utils::FFTKind::kC2CBackward, m_plan.get_mbin(),
-            m_plan.get_nfft() * m_plan.get_nsub() * m_plan.get_nchan(),
+        gpu_utils::set_device(m_device_id);
+        const auto nchans = m_plan.get_nchans();
+        const auto nsub   = m_plan.get_nsub();
+        const auto nfft   = m_plan.get_nfft();
+        const auto nbin   = m_plan.get_nbin();
+        const auto mbin   = m_plan.get_mbin();
+        const auto n_p    = m_plan.get_n_p();
+        const auto novc   = m_plan.get_noverlap() / n_p;
+        const auto lc     = mbin - (2 * novc);
+        m_nwin  = ((m_plan.get_fdmt_nsamps() + lc - 1) / lc) + 1;
+        // Channels per chunk: the grid's y extent (<= kMaxGridY) and the
+        // work buffer budget.
+        m_chunk = std::clamp<SizeType>(
+            kWorkBytes / (m_nwin * 2 * mbin * sizeof(ComplexTypeGPU)), 1,
+            std::min<SizeType>(nchans, fourier_gpu::kMaxGridY));
+
+        m_fwd = std::make_unique<utils::CUFFTManager>(
+            utils::FFTKind::kC2CForward, nbin, nsub * nfft * 2, m_device_id);
+        m_inv = std::make_unique<utils::CUFFTManager>(
+            utils::FFTKind::kC2CBackward, mbin, m_chunk * m_nwin * 2,
             m_device_id);
-        // One shared CUDA FDMT instance for every coarse-DM trial
-        m_thefdmt = std::make_unique<algorithms::FDMT>(
-            m_plan.get_f_min(), m_plan.get_f_max(), m_plan.get_mchan(),
-            m_plan.get_msamp(), m_plan.get_tsamp(), m_plan.get_dt_max(),
-            m_plan.get_dt_min(), 1, true, "valid",
-            Exec{.backend  = detail::kGPUBackend,
-                 .nthreads = 1,
-                 .device   = m_device_id});
-        m_theunpacker = std::make_unique<utils::DataUnpackerCUDA>(
-            m_plan.get_nsub(), m_plan.get_nbin(), m_plan.get_noverlap(),
-            m_plan.get_nfft(), m_plan.get_data_order(), m_device_id);
+        m_spec.reserve(m_unpacker.output_size());
+        m_work.reserve(m_chunk * m_nwin * 2 * mbin);
+        m_power.reserve(nsub * nfft * n_p * 2);
+        m_waterfall.reserve(nchans * m_plan.get_fdmt_nsamps());
+        m_fdmt_out.reserve(m_fdmt.get_plan().get_buffer_size());
 
-        // Allocate buffers
-        m_unpack_buf_p1.resize(m_plan.get_unpack_buf_size());
-        m_unpack_buf_p2.resize(m_plan.get_unpack_buf_size());
-        m_delay_buf_p1.resize(m_plan.get_delay_buf_size());
-        m_delay_buf_p2.resize(m_plan.get_delay_buf_size());
-        m_intensity_buf.resize(m_plan.get_intensity_buf_size());
-        m_aligned_buf.resize(m_plan.get_intensity_buf_size());
-        m_chirp_table.resize(m_plan.get_chirp_table_size());
-
-        // Precompute the inter-channel delay shift and offset tables once
-        const auto& dm_grid_coh_h = m_plan.get_dm_grid_coh();
-        const auto shift_table_h  = dmt::utils::generate_dedisperse_shift_table(
-            dm_grid_coh_h, m_plan.get_f_min(), m_plan.get_f_max(),
-            m_plan.get_mchan(), m_plan.get_tsamp());
-        m_dedisperse_shift_table_d.resize(shift_table_h.size());
-        thrust::copy(shift_table_h.begin(), shift_table_h.end(),
-                     m_dedisperse_shift_table_d.begin());
-
-        const auto offset_table_h =
-            dmt::utils::generate_dedisperse_offset_table(
-                dm_grid_coh_h, m_plan.get_f_min(), m_plan.get_f_max(),
-                m_plan.get_mchan(), m_plan.get_tsamp());
-        m_dedisperse_offset_table_d.resize(offset_table_h.size());
-        thrust::copy(offset_table_h.begin(), offset_table_h.end(),
-                     m_dedisperse_offset_table_d.begin());
-
-        // Allocate per-channel delay histories for each coarse-DM trial
-        m_channel_delay_histories.resize(dm_grid_coh_h.size());
-        for (SizeType idm = 0; idm < dm_grid_coh_h.size(); ++idm) {
-            SizeType total_h = 0;
-            for (SizeType c = 0; c < m_plan.get_mchan(); ++c) {
-                int s = shift_table_h[(idm * m_plan.get_mchan()) + c];
-                if (s > 0) {
-                    total_h += static_cast<SizeType>(s);
-                }
-            }
-            m_channel_delay_histories[idm].resize(total_h, 0.0F);
+        const auto ph = cfdmt::make_chirp_phases(m_plan);
+        std::vector<unsigned long long> base(ph.base.begin(), ph.base.end());
+        std::vector<unsigned long long> inc(ph.inc.begin(), ph.inc.end());
+        m_base.upload(base);
+        m_inc.upload(inc);
+        const auto& taper = m_plan.get_channel_taper();
+        std::vector<float> scaled(mbin);
+        for (SizeType b = 0; b < mbin; ++b) {
+            scaled[b] = taper[b] / static_cast<float>(nbin);
         }
-
-        // One small streaming-history slot per coarse-DM trial for FDMT
-        m_dm_histories.assign(dm_grid_coh_h.size(),
-                              thrust::device_vector<float>(
-                                  m_thefdmt->history_state_size(), 0.0F));
-
-        // Compute the chirp table
-        thrust::device_vector<float> dm_grid_coh_d(dm_grid_coh_h.size());
-        thrust::copy(dm_grid_coh_h.begin(), dm_grid_coh_h.end(),
-                     dm_grid_coh_d.begin());
-        auto dm_grid_coh_span = cuda::std::span<const float>(
-            thrust::raw_pointer_cast(dm_grid_coh_d.data()),
-            dm_grid_coh_d.size());
-        auto m_chirp_table_span = cuda::std::span<ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_chirp_table.data()),
-            m_chirp_table.size());
-        bb_utils::compute_chirp(dm_grid_coh_span, m_chirp_table_span,
-                                m_plan.get_f_center(), m_plan.get_bw(),
-                                m_plan.get_nbin(), m_plan.get_nsub(),
-                                m_plan.get_nchan());
+        m_taper.upload(scaled);
+        std::vector<int64_t> shifts;
+        shifts.reserve(m_plan.get_ndm_coh() * nchans);
+        for (SizeType k = 0; k < m_plan.get_ndm_coh(); ++k) {
+            const auto s = m_plan.get_channel_shifts(k);
+            shifts.insert(shifts.end(), s.begin(), s.end());
+        }
+        m_shifts.upload(shifts);
+        const auto& offs = m_plan.get_row_offsets();
+        m_offsets.upload(std::vector<uint64_t>(offs.begin(), offs.end()));
+        // Without normalisation the stats are identity.
+        m_mean.upload(std::vector<float>(nchans, 0.0F));
+        m_inv_sigma.upload(std::vector<float>(nchans, 1.0F));
     }
 
-    void apply_chirp(cuda::std::span<const ComplexTypeGPU> data1_in,
-                     cuda::std::span<const ComplexTypeGPU> data2_in,
-                     cuda::std::span<ComplexTypeGPU> data1_out,
-                     cuda::std::span<ComplexTypeGPU> data2_out,
-                     SizeType idm,
-                     cudaStream_t stream) {
-        const auto scale        = m_plan.get_chirp_scale();
-        auto m_chirp_table_span = cuda::std::span<const ComplexTypeGPU>(
-            thrust::raw_pointer_cast(m_chirp_table.data()),
-            m_chirp_table.size());
-        bb_utils::apply_chirp(data1_in, data2_in, m_chirp_table_span, data1_out,
-                              data2_out, static_cast<int>(m_plan.get_nsub()),
-                              static_cast<int>(m_plan.get_nbin()),
-                              static_cast<int>(m_plan.get_nfft()),
-                              static_cast<int>(idm), scale, stream);
-    }
+    void run(std::span<const cuda::std::span<const uint8_t>> groups,
+             float* out,
+             cudaStream_t stream) {
+        const auto nchans = m_plan.get_nchans();
+        const auto nsub   = m_plan.get_nsub();
+        const auto nfft   = m_plan.get_nfft();
+        const auto nbin   = m_plan.get_nbin();
+        const auto mbin   = m_plan.get_mbin();
+        const auto n_p    = m_plan.get_n_p();
+        const auto novc   = m_plan.get_noverlap() / n_p;
+        const auto lc     = static_cast<int64_t>(mbin - (2 * novc));
+        const auto nf     = static_cast<int64_t>(m_plan.get_fdmt_nsamps());
+        const auto msamp  = static_cast<int64_t>(m_plan.get_msamp());
+        const auto a      = static_cast<int64_t>(m_plan.get_fdmt_window_start());
+        const bool norm   = m_plan.get_config().normalize;
+        const auto nfine  = m_plan.get_ndm_fine();
+        const auto nout   = m_plan.get_output_nsamps();
+        auto* spec        = reinterpret_cast<float2*>(m_spec.data());
+        auto* work        = reinterpret_cast<float2*>(m_work.data());
 
-    void unpad_detect(cuda::std::span<const ComplexTypeGPU> fft_p1,
-                      cuda::std::span<const ComplexTypeGPU> fft_p2,
-                      cuda::std::span<float> intensity,
-                      cudaStream_t stream) {
-        bb_utils::unpad_detect(fft_p1, fft_p2, intensity,
-                               static_cast<int>(m_plan.get_nchan()),
-                               static_cast<int>(m_plan.get_nfft()),
-                               static_cast<int>(m_plan.get_nsub()),
-                               static_cast<int>(m_plan.get_mbin()),
-                               static_cast<int>(m_plan.get_noverlap()), stream);
+        m_unpacker.execute(groups,
+                           cuda::std::span<ComplexTypeGPU>(
+                               m_spec.data(), m_unpacker.output_size()),
+                           stream);
+        m_fwd->execute(cuda::std::span<ComplexTypeGPU>(
+                           m_spec.data(), m_unpacker.output_size()),
+                       stream);
+        if (norm) {
+            const auto ncells = nsub * nfft * n_p;
+            channel_power_kernel<<<static_cast<unsigned>(ncells), kBlock, 0,
+                                   stream>>>(spec, m_taper.data(), n_p, nbin,
+                                             mbin, m_power.data());
+            channel_stats_kernel<<<grid_for(nchans), kBlock, 0, stream>>>(
+                m_power.data(), nchans, n_p, nfft, m_mean.data(),
+                m_inv_sigma.data());
+            gpu_utils::check_last_gpu_error("CohFDMT: channel statistics");
+        }
+        const cuda::std::span<ComplexTypeGPU> work_span(
+            m_work.data(), m_chunk * m_nwin * 2 * mbin);
+        for (SizeType k = 0; k < m_plan.get_ndm_coh(); ++k) {
+            const int64_t* shifts = m_shifts.data() + (k * nchans);
+            for (SizeType c0 = 0; c0 < nchans; c0 += m_chunk) {
+                const dim3 g_gather(
+                    static_cast<unsigned>((mbin + kBlock - 1) / kBlock),
+                    static_cast<unsigned>(m_chunk));
+                gather_chirp_kernel<<<g_gather, kBlock, 0, stream>>>(
+                    spec, m_base.data(), m_inc.data(), m_taper.data(), shifts,
+                    static_cast<unsigned long long>(k), c0, nchans, n_p, nfft,
+                    nbin, mbin, m_nwin, a, nf, msamp, lc, work);
+                m_inv->execute(work_span, stream);
+                const dim3 g_detect(
+                    static_cast<unsigned>((static_cast<uint64_t>(nf) + kBlock -
+                                           1) /
+                                          kBlock),
+                    static_cast<unsigned>(std::min(m_chunk, nchans - c0)));
+                detect_kernel<<<g_detect, kBlock, 0, stream>>>(
+                    work, shifts, m_mean.data(), m_inv_sigma.data(), norm, c0,
+                    nchans, mbin, m_nwin, novc, a, nf, msamp, lc,
+                    m_waterfall.data());
+                gpu_utils::check_last_gpu_error("CohFDMT: coherent stage");
+            }
+            // No reset_history(): the FDMT window's lead-in keeps its history
+            // out of every cropped output (see CohFDMTPlan).
+            m_fdmt.execute(
+                DeviceSpan<const float>(m_waterfall.data(),
+                                        nchans * static_cast<SizeType>(nf)),
+                DeviceSpan<float>(m_fdmt_out.data(),
+                                  m_fdmt.get_plan().get_buffer_size()),
+                Stream{stream});
+            crop_kernel<<<grid_for(nfine * nout), kBlock, 0, stream>>>(
+                m_fdmt_out.data(), m_offsets.data(), nfine,
+                static_cast<uint64_t>(nf), nout, out + (k * nfine * nout));
+            gpu_utils::check_last_gpu_error("CohFDMT: crop");
+        }
     }
 }; // End CohFDMTCudaEngine definition
 

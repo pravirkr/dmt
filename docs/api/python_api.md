@@ -27,6 +27,18 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: dmtlib.CohFDMTConfig
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.BasebandFormat
+   :members:
+   :undoc-members:
+
+.. autofunction:: dmtlib.simulate_baseband
+
+.. autofunction:: dmtlib.pack_baseband
+
 .. autoclass:: dmtlib.FDMTFFT
    :members:
    :undoc-members:

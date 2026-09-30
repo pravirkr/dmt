@@ -9,6 +9,7 @@ streaming_and_history
 multibeam
 performance
 fourier_variants
+coherent_hybrid
 noise_calibration
 quirks_and_gotchas
 ```
@@ -21,5 +22,6 @@ quirks_and_gotchas
 - [Multi-Beam Batching](multibeam.md): Processing several tied-array beams with one shared plan, on the CPU and the GPU.
 - [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree), packed low-bit input, threads and block size, and which optimizations were measured and rejected.
 - [Fourier-Domain Variants](fourier_variants.md): FDMT-FFT and DDMT-FFT, when to use them, exact fractional delays, NUFFT / piecewise NUFFT / brute force, the piecewise-uniform Levin grid, block length, guard and FFT planner settings.
+- [Coherent Hybrid Search](coherent_hybrid.md): CohFDMT on recorded baseband: input formats (GUPPI, LOFAR, PSRDADA), stateless block processing with a file-pointer stride, the exact multi-subband DM grid, exact noise statistics and memory.
 - [Noise Calibration & SNR Scaling](noise_calibration.md): Converting raw integrated flux into true statistical Signal-to-Noise Ratio ($\text{SNR}$).
 - [Quirks & Gotchas](quirks_and_gotchas.md): Output lengths per mode, output buffers (`buffer_size` vs `dmt_size`), stepper rules, array contiguity and logging.

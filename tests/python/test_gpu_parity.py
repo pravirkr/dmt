@@ -1,3 +1,4 @@
+import dmtlib
 import numpy as np
 import pytest
 
@@ -32,36 +33,14 @@ def test_fdmt_fft_gpu_matches_cpu(gpu_backend: str) -> None:
 
 
 def test_coh_fdmt_gpu_matches_cpu(gpu_backend: str) -> None:
-    f_center = 1250.0
-    bw_sub = 25.0
-    nsub = 4
-    tbin = 1.0e-6
-    nbin = 1 << 10
-    nfft = 2
-    t_p = tbin * 4
-    dm_max = 5.0
-    noverlap = 32
-    cpu = CohFDMT(f_center, bw_sub, nsub, tbin, nbin, nfft, t_p, dm_max, 0.0, noverlap)
-    gpu = on(
-        gpu_backend,
-        CohFDMT,
-        f_center,
-        bw_sub,
-        nsub,
-        tbin,
-        nbin,
-        nfft,
-        t_p,
-        dm_max,
-        0.0,
-        noverlap,
-    )
-    in_size = 2 * 2 * cpu.plan.nsamp * nsub
+    cfg = dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0)
+    cpu = CohFDMT(cfg, 4)
+    gpu = on(gpu_backend, CohFDMT, cfg)
     rng = np.random.default_rng(2)
-    data = rng.integers(0, 256, size=in_size, dtype=np.uint8)
-    np.testing.assert_allclose(
-        gpu.execute(data), cpu.execute(data), rtol=2e-2, atol=2e-2
-    )
+    data = rng.normal(0.0, 8.0, size=cpu.input_size()).astype(np.int8)
+    want = cpu.execute(data)
+    got = gpu.execute(data)
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-4 * np.abs(want).max())
 
 
 @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])

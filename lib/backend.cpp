@@ -243,14 +243,10 @@ FDMTFFTEngine::view_subband_device(SizeType /*subband_idx*/) const {
     throw_no_device_memory("FDMTFFT::view_subband_device", backend());
 }
 
-void CohFDMTEngine::execute(DeviceSpan<const uint8_t> /*data_in*/,
-                            DeviceSpan<float> /*dmt*/,
-                            Stream /*stream*/) {
-    throw_no_device_memory("CohFDMT::execute", backend());
-}
-void CohFDMTEngine::execute(DeviceSpan<const int8_t> /*data_in*/,
-                            DeviceSpan<float> /*dmt*/,
-                            Stream /*stream*/) {
+void CohFDMTEngine::execute(
+    std::span<const DeviceSpan<const uint8_t>> /*groups*/,
+    DeviceSpan<float> /*dmt*/,
+    Stream /*stream*/) {
     throw_no_device_memory("CohFDMT::execute", backend());
 }
 

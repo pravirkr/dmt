@@ -1,113 +1,255 @@
-#include <cmath>
+#include <array>
 #include <complex>
 #include <cstdint>
+#include <random>
 #include <stdexcept>
-#include <string_view>
+#include <string>
 #include <vector>
 
-#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
 
+#include "dmt/baseband_layout.hpp"
+#include "dmt/common/baseband.hpp"
 #include "dmt/unpacker.hpp"
+#include "dmt/utils/simulate.hpp"
 
 namespace dmt {
 
-using utils::DataUnpackerCPU;
+using utils::BasebandUnpackerCPU;
 
 namespace {
-constexpr SizeType kNpol = 2;
 
-SizeType
-input_size(SizeType nfft, SizeType nbin, SizeType noverlap, SizeType nsub) {
-    const auto nsamp = nfft * (nbin - (2 * noverlap));
-    return kNpol * 2 * nsamp * nsub;
-}
+constexpr SizeType kNbin     = 64;
+constexpr SizeType kNfft     = 3;
+constexpr SizeType kNoverlap = 8;
+constexpr SizeType kStep     = kNbin - (2 * kNoverlap);
+constexpr SizeType kNsamps   = (kNfft * kStep) + (2 * kNoverlap);
 
-SizeType output_size(SizeType nfft, SizeType nsub, SizeType nbin) {
-    return nfft * nsub * nbin;
-}
-
-template <typename T> std::vector<T> sequential_baseband(SizeType n) {
-    std::vector<T> data(n);
-    for (SizeType i = 0; i < n; ++i) {
-        data[i] = static_cast<T>(static_cast<int>(i % 17) + 1);
+// Random integer-valued voltages representable exactly by @p format.
+std::vector<ComplexType> random_voltages(const BasebandFormat& format,
+                                         SizeType nsub,
+                                         uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::vector<ComplexType> v(2 * nsub * kNsamps);
+    const auto draw = [&]() -> float {
+        if (format.nbits == 2) {
+            return format.levels_2bit[rng() % 4];
+        }
+        const int half = 1 << (format.nbits - 1);
+        return static_cast<float>(static_cast<int>(rng() % (2 * half)) - half);
+    };
+    for (auto& x : v) {
+        const float re = draw();
+        const float im = draw();
+        x              = {re, im};
     }
-    return data;
-}
-} // namespace
-
-TEST_CASE("DataUnpackerCPU rejects invalid construction", "[unpacker][cpu]") {
-    CHECK_THROWS_AS(DataUnpackerCPU(2, 8, 8, 1, "PRITF"),
-                    std::invalid_argument);
-    CHECK_THROWS_AS(DataUnpackerCPU(2, 16, 2, 1, "NOPE"),
-                    std::invalid_argument);
+    return v;
 }
 
-TEST_CASE("DataUnpackerCPU unpacks PRITF/FTPRI/RITFP layouts",
-          "[unpacker][cpu]") {
-    const SizeType nsub     = 2;
-    const SizeType nbin     = 8;
-    const SizeType noverlap = 2;
-    const SizeType nfft     = 2;
-    const auto in_n         = input_size(nfft, nbin, noverlap, nsub);
-    const auto out_n        = output_size(nfft, nsub, nbin);
-    const auto nsamp        = nfft * (nbin - (2 * noverlap));
-
-    const std::vector<std::string_view> orders = {"PRITF", "FTPRI", "RITFP"};
-    for (const auto order : orders) {
-        DYNAMIC_SECTION("order=" << order) {
-            DataUnpackerCPU unpacker(nsub, nbin, noverlap, nfft, order);
-            auto data_in = sequential_baseband<uint8_t>(in_n);
-            std::vector<ComplexType> p1(out_n, ComplexType(99.0F, 99.0F));
-            std::vector<ComplexType> p2(out_n, ComplexType(99.0F, 99.0F));
-            unpacker.execute<uint8_t>(data_in, p1, p2);
-
-            // Overlap pad at the start of FFT 0 is zeros.
-            CHECK(p1[0] == ComplexType(0.0F, 0.0F));
-            CHECK(p2[0] == ComplexType(0.0F, 0.0F));
-
-            // A valid interior bin of FFT 0 / sub 0 is a finite conversion
-            // of the packed integer input (not left as the dirty sentinel).
-            const SizeType ibin = noverlap + 1;
-            CHECK(p1[ibin].real() != 99.0F);
-            CHECK(std::isfinite(p1[ibin].real()));
-            CHECK(std::isfinite(p1[ibin].imag()));
-            CHECK(p1.size() == out_n);
-            CHECK(nsamp > 0);
+// out[s][j][p][i] must equal v[p][s][j * step + i].
+void check_blocks(const std::vector<ComplexType>& v,
+                  const std::vector<ComplexType>& out,
+                  SizeType nsub) {
+    for (SizeType p = 0; p < 2; ++p) {
+        for (SizeType j = 0; j < kNfft; ++j) {
+            for (SizeType s = 0; s < nsub; ++s) {
+                for (SizeType i = 0; i < kNbin; ++i) {
+                    const auto got =
+                        out[(((((s * kNfft) + j) * 2) + p) * kNbin) + i];
+                    const auto want =
+                        v[(((p * nsub) + s) * kNsamps) + (j * kStep) + i];
+                    if (got != want) {
+                        FAIL("mismatch at pol " << p << " block " << j
+                                                << " sub " << s << " bin "
+                                                << i);
+                    }
+                }
+            }
         }
     }
 }
 
-TEST_CASE("DataUnpackerCPU uint8 and int8 agree up to signed conversion",
-          "[unpacker][cpu]") {
-    const SizeType nsub     = 1;
-    const SizeType nbin     = 8;
-    const SizeType noverlap = 2;
-    const SizeType nfft     = 1;
-    DataUnpackerCPU unpacker(nsub, nbin, noverlap, nfft, "PRITF");
-    const auto in_n  = input_size(nfft, nbin, noverlap, nsub);
-    const auto out_n = output_size(nfft, nsub, nbin);
+} // namespace
 
-    std::vector<uint8_t> u8(in_n, 7);
-    std::vector<int8_t> i8(in_n, 7);
-    std::vector<ComplexType> p1_u(out_n);
-    std::vector<ComplexType> p2_u(out_n);
-    std::vector<ComplexType> p1_i(out_n);
-    std::vector<ComplexType> p2_i(out_n);
-    unpacker.execute<uint8_t>(u8, p1_u, p2_u);
-    unpacker.execute<int8_t>(i8, p1_i, p2_i);
-    REQUIRE_THAT(p1_u, Catch::Matchers::Equals(p1_i));
-    REQUIRE_THAT(p2_u, Catch::Matchers::Equals(p2_i));
+TEST_CASE("BasebandUnpackerCPU round-trips every order and bit width",
+          "[unpacker][cpu]") {
+    const std::array<std::string, 24> orders = {
+        "PRITF", "PRIFT", "PTRIF", "PTFRI", "PFRIT", "PFTRI",
+        "RIPTF", "RIPFT", "RITPF", "RITFP", "RIFPT", "RIFTP",
+        "TPRIF", "TPFRI", "TRIPF", "TRIFP", "TFPRI", "TFRIP",
+        "FPRIT", "FPTRI", "FRIPT", "FRITP", "FTPRI", "FTRIP"};
+    const auto order = GENERATE_COPY(from_range(orders));
+    struct Enc {
+        SizeType nbits;
+        bool is_signed;
+        bool msb_first;
+    };
+    const auto enc = GENERATE(Enc{8, true, true}, Enc{8, false, true},
+                              Enc{4, true, true}, Enc{4, false, false},
+                              Enc{2, true, false}, Enc{2, true, true});
+    const BasebandFormat format{.order     = order,
+                                .nbits     = enc.nbits,
+                                .is_signed = enc.is_signed,
+                                .msb_first = enc.msb_first};
+    const SizeType nsub = 3;
+    CAPTURE(order, enc.nbits, enc.is_signed, enc.msb_first);
+    const auto v     = random_voltages(format, nsub, 7);
+    const auto bytes = utils::pack_baseband(v, nsub, kNsamps, format, 1.0F);
+    const std::vector<SizeType> groups{nsub};
+    const BasebandUnpackerCPU unpacker(format, groups, kNbin, kNfft,
+                                       kNoverlap, 2);
+    REQUIRE(unpacker.block_nsamps() == kNsamps);
+    REQUIRE(bytes.size() == unpacker.input_size(0));
+    std::vector<ComplexType> out(unpacker.output_size());
+    const std::span<const uint8_t> in(bytes);
+    unpacker.execute(std::span(&in, 1), out);
+    check_blocks(v, out, nsub);
 }
 
-TEST_CASE("DataUnpackerCPU throws on buffer size mismatch", "[unpacker][cpu]") {
-    DataUnpackerCPU unpacker(2, 8, 2, 1, "PRITF");
-    std::vector<uint8_t> bad_in(3, 1);
-    std::vector<ComplexType> p1(16);
-    std::vector<ComplexType> p2(16);
-    CHECK_THROWS_AS(unpacker.execute<uint8_t>(bad_in, p1, p2),
-                    std::runtime_error);
+TEST_CASE("BasebandUnpackerCPU decodes hand-built GUPPI and LOFAR bytes",
+          "[unpacker][cpu]") {
+    const SizeType nsub = 2;
+    // Distinct value per (pol, ri, t, s) within int8 range.
+    const auto value = [](SizeType p, SizeType ri, SizeType t, SizeType s) {
+        return static_cast<int>((((p * 2) + ri) * 29) + (t % 13) + (s * 5)) -
+               64;
+    };
+    std::vector<ComplexType> v(2 * nsub * kNsamps);
+    for (SizeType p = 0; p < 2; ++p) {
+        for (SizeType s = 0; s < nsub; ++s) {
+            for (SizeType t = 0; t < kNsamps; ++t) {
+                v[(((p * nsub) + s) * kNsamps) + t] = {
+                    static_cast<float>(value(p, 0, t, s)),
+                    static_cast<float>(value(p, 1, t, s))};
+            }
+        }
+    }
+    const std::vector<SizeType> groups{nsub};
+    SECTION("GUPPI FTPRI int8: Re(X), Im(X), Re(Y), Im(Y) per sample") {
+        std::vector<int8_t> raw(4 * nsub * kNsamps);
+        for (SizeType s = 0; s < nsub; ++s) {
+            for (SizeType t = 0; t < kNsamps; ++t) {
+                for (SizeType p = 0; p < 2; ++p) {
+                    for (SizeType ri = 0; ri < 2; ++ri) {
+                        raw[(s * kNsamps * 4) + (t * 4) + (p * 2) + ri] =
+                            static_cast<int8_t>(value(p, ri, t, s));
+                    }
+                }
+            }
+        }
+        const BasebandUnpackerCPU unpacker(BasebandFormat{.order = "FTPRI"},
+                                           groups, kNbin, kNfft, kNoverlap);
+        std::vector<ComplexType> out(unpacker.output_size());
+        const std::span<const uint8_t> in(
+            reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
+        unpacker.execute(std::span(&in, 1), out);
+        check_blocks(v, out, nsub);
+    }
+    SECTION("GUPPI FTPRI 4-bit: real in the high nibble") {
+        std::vector<ComplexType> v4(v.size());
+        for (SizeType i = 0; i < v.size(); ++i) {
+            v4[i] = {static_cast<float>((static_cast<int>(v[i].real()) & 7) -
+                                        4),
+                     static_cast<float>((static_cast<int>(v[i].imag()) & 7) -
+                                        3)};
+        }
+        std::vector<uint8_t> raw(2 * nsub * kNsamps);
+        for (SizeType s = 0; s < nsub; ++s) {
+            for (SizeType t = 0; t < kNsamps; ++t) {
+                for (SizeType p = 0; p < 2; ++p) {
+                    const auto x  = v4[(((p * nsub) + s) * kNsamps) + t];
+                    const auto re = static_cast<unsigned>(
+                                        static_cast<int>(x.real())) &
+                                    0xFU;
+                    const auto im = static_cast<unsigned>(
+                                        static_cast<int>(x.imag())) &
+                                    0xFU;
+                    raw[(s * kNsamps * 2) + (t * 2) + p] =
+                        static_cast<uint8_t>((re << 4U) | im);
+                }
+            }
+        }
+        const BasebandUnpackerCPU unpacker(
+            BasebandFormat{.order = "FTPRI", .nbits = 4}, groups, kNbin, kNfft,
+            kNoverlap);
+        std::vector<ComplexType> out(unpacker.output_size());
+        const std::span<const uint8_t> in(raw);
+        unpacker.execute(std::span(&in, 1), out);
+        check_blocks(v4, out, nsub);
+    }
+    SECTION("LOFAR PRITF uint8 offset binary") {
+        std::vector<uint8_t> raw(4 * nsub * kNsamps);
+        for (SizeType p = 0; p < 2; ++p) {
+            for (SizeType ri = 0; ri < 2; ++ri) {
+                for (SizeType t = 0; t < kNsamps; ++t) {
+                    for (SizeType s = 0; s < nsub; ++s) {
+                        raw[(((((p * 2) + ri) * kNsamps) + t) * nsub) + s] =
+                            static_cast<uint8_t>(value(p, ri, t, s) + 128);
+                    }
+                }
+            }
+        }
+        const BasebandUnpackerCPU unpacker(
+            BasebandFormat{.order = "PRITF", .is_signed = false}, groups,
+            kNbin, kNfft, kNoverlap);
+        std::vector<ComplexType> out(unpacker.output_size());
+        const std::span<const uint8_t> in(raw);
+        unpacker.execute(std::span(&in, 1), out);
+        check_blocks(v, out, nsub);
+    }
+}
+
+TEST_CASE("BasebandUnpackerCPU multi-group input equals one group",
+          "[unpacker][cpu]") {
+    const BasebandFormat format{.order = "TFPRI"};
+    const SizeType nsub = 5;
+    const auto v        = random_voltages(format, nsub, 11);
+    const std::vector<SizeType> one{nsub};
+    const std::vector<SizeType> two{2, 3};
+    const BasebandUnpackerCPU u1(format, one, kNbin, kNfft, kNoverlap);
+    const BasebandUnpackerCPU u2(format, two, kNbin, kNfft, kNoverlap);
+    const auto all = utils::pack_baseband(v, nsub, kNsamps, format, 1.0F);
+    const auto g0  = utils::pack_baseband(v, nsub, kNsamps, format, 1.0F, 0, 2);
+    const auto g1  = utils::pack_baseband(v, nsub, kNsamps, format, 1.0F, 2, 3);
+    std::vector<ComplexType> out1(u1.output_size());
+    std::vector<ComplexType> out2(u2.output_size());
+    const std::span<const uint8_t> in_all(all);
+    u1.execute(std::span(&in_all, 1), out1);
+    const std::array<std::span<const uint8_t>, 2> in_two{
+        std::span<const uint8_t>(g0), std::span<const uint8_t>(g1)};
+    u2.execute(in_two, out2);
+    REQUIRE(out1 == out2);
+    check_blocks(v, out1, nsub);
+}
+
+TEST_CASE("BasebandUnpackerCPU validation", "[unpacker][cpu]") {
+    const std::vector<SizeType> groups{2};
+    CHECK_THROWS_AS(utils::parse_baseband_order("PRIT"), std::invalid_argument);
+    CHECK_THROWS_AS(utils::parse_baseband_order("PPRITF"),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(utils::parse_baseband_order("PRXTF"),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        BasebandUnpackerCPU(BasebandFormat{.nbits = 3}, groups, kNbin, kNfft,
+                            kNoverlap),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        BasebandUnpackerCPU(BasebandFormat{}, groups, 16, kNfft, 8),
+        std::invalid_argument);
+    const BasebandUnpackerCPU unpacker(BasebandFormat{}, groups, kNbin, kNfft,
+                                       kNoverlap);
+    std::vector<uint8_t> bad(unpacker.input_size(0) - 1);
+    std::vector<ComplexType> out(unpacker.output_size());
+    const std::span<const uint8_t> in(bad);
+    CHECK_THROWS_AS(unpacker.execute(std::span(&in, 1), out),
+                    std::invalid_argument);
+    std::vector<uint8_t> good(unpacker.input_size(0));
+    const std::span<const uint8_t> in_good(good);
+    std::vector<ComplexType> small(unpacker.output_size() - 1);
+    CHECK_THROWS_AS(unpacker.execute(std::span(&in_good, 1), small),
+                    std::invalid_argument);
 }
 
 } // namespace dmt

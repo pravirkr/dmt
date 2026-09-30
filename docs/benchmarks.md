@@ -345,10 +345,53 @@ NVIDIA L40S (device-resident data, cuFFT), reference block vs DM trials:
   force 39 ms (1.8× DDMT, near the card's FP32 issue rate). About half of the
   NUFFT path is the channel and DM-row FFTs.
 
+## Coherent hybrid search (CohFDMT)
+
+CohFDMT searches baseband voltages rather than a filterbank, so it has its own
+fixed configuration and is **not** compared with the engines above:
+
+- **Reference configuration:** one GUPPI node (64 × 2.93 MHz at
+  1.31–1.50 GHz, int8 FTPRI), t_p = 10 µs (n_p = 30), DM 50–60 pc cm⁻³ with
+  `dt_step` 16, and the automatic block length.
+- **Sweeps:** each one passes through the reference point and varies the
+  target resolution, the input bit width, the DM range width (and with it the
+  number of coarse coherent trials) or the block length.
+- **Real-time factor:** seconds of baseband searched per second of compute,
+  counting one stride per block, i.e. excluding the overlap.
+
+```{image} ../bench/results/plots/light/cfdmt_rtf.png
+:class: only-light
+:alt: CohFDMT real-time factor against t_p, input bits, DM range width and block length
+```
+```{image} ../bench/results/plots/dark/cfdmt_rtf.png
+:class: only-dark
+:alt: CohFDMT real-time factor against t_p, input bits, DM range width and block length
+```
+
+How to read it:
+
+- **One coarse trial.** With DM ranges of a few tens of pc cm⁻³ at L-band, the
+  exact multi-subband grid needs a single coherent trial. Time then goes to
+  the forward transform of the block, which is run once and shared by all
+  trials. Longer blocks raise the useful fraction (`stride / block`) until
+  memory becomes the limit.
+- **More coarse trials.** For wider DM ranges, each additional trial costs the
+  per-channel inverse transforms over the valid window plus one fine FDMT.
+- **Measured against FFTW.** On the CPU both regimes run at the speed of FFTW
+  and the FDMT. The chirp, detection, normalisation and channel alignment are
+  fused into the per-channel inverse-transform pass, and the unpack and the
+  channel statistics into the forward pass.
+  `dmt_bench --benchmark_filter=cfdmt` prints the stage timings and the FFTW
+  roofline of the inverse transforms.
+
+```{include} ../bench/results/plots/cfdmt_summary.md
+```
+
 ## Reproducing
 
 The suite, the runner and the plotting script live in `bench/`.
 `bench/README.md` gives the per-machine steps (build, `run_suite.py`, commit
-the JSON, `plot_suite.py`) and the tips for comparable numbers. The
+the JSON, `plot_suite.py`; for CohFDMT `run_suite.py --suite cfdmt` and
+`plot_cfdmt.py`) and the tips for comparable numbers. The
 tuning microbenchmarks behind [Performance Tuning](pipeline_guide/performance.md)
 are a separate binary (`dmt_bench`).
