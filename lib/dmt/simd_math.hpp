@@ -19,9 +19,7 @@ namespace dmt::simd {
 
 /// Fractional part of a turn count, in [-0.5, 0.5) turns.
 #pragma omp declare simd
-inline double wrap_turns(double t) noexcept {
-    return t - std::nearbyint(t);
-}
+inline double wrap_turns(double t) noexcept { return t - std::nearbyint(t); }
 
 /**
  * @brief sin and cos of 2 pi u for |u| <= 0.5 turns (wider arguments work
@@ -33,8 +31,8 @@ inline double wrap_turns(double t) noexcept {
  */
 #pragma omp declare simd
 inline void sincos_turns(float u, float& s, float& c) noexcept {
-    const float x  = 4.0F * u;                // quarter turns
-    const float qf = std::nearbyint(x);       // quadrant
+    const float x  = 4.0F * u;                           // quarter turns
+    const float qf = std::nearbyint(x);                  // quadrant
     const float r  = (x - qf) * 1.57079632679489661923F; // [-pi/4, pi/4]
     const float r2 = r * r;
     const float sp =

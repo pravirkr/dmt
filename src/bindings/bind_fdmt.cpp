@@ -700,7 +700,7 @@ void bind_fdmt(py::module_& mod) {
             py::arg("nthreads") = 1, py::arg("nbeams") = 1,
             py::arg("backend") = "cpu", py::arg("device") = 0,
             py::arg("fractional_delays") = true,
-            py::arg("kill_mask") = py::none())
+            py::arg("kill_mask")         = py::none())
         .def_property_readonly(
             "backend",
             [](const FDMTFFT& fdmt) {

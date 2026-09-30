@@ -368,8 +368,8 @@ public:
     // Valid-mode overlap history, [beam][chan][overlap] on every backend
     // (empty in the other modes).
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
-    virtual void save_history(std::span<float> out) const               = 0;
-    virtual void load_history(std::span<const float> in)                = 0;
+    virtual void save_history(std::span<float> out) const              = 0;
+    virtual void load_history(std::span<const float> in)               = 0;
     virtual void save_history(DeviceSpan<float> out, Stream stream) const;
     virtual void load_history(DeviceSpan<const float> in, Stream stream);
 

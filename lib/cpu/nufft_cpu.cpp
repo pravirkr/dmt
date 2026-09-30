@@ -37,21 +37,17 @@ constexpr int kMaxWidth = 16;
 // vec[i] fails ("subscripted value is neither array nor pointer"). Literal
 // sizes in explicit specializations stay real vectors on GCC and Clang.
 // Only the two widths the spreader instantiates are provided.
-template <int KP>
-struct kernel_vec_type;
+template <int KP> struct kernel_vec_type;
 
-template <>
-struct kernel_vec_type<8> {
+template <> struct kernel_vec_type<8> {
     using type = float __attribute__((vector_size(32)));
 };
 
-template <>
-struct kernel_vec_type<16> {
+template <> struct kernel_vec_type<16> {
     using type = float __attribute__((vector_size(64)));
 };
 
-template <int KP>
-using kernel_vec_t = typename kernel_vec_type<KP>::type;
+template <int KP> using kernel_vec_t = typename kernel_vec_type<KP>::type;
 
 // Copy KP lanes into a real float[KP]. GNU vectors do not subscript reliably
 // in C++ (a reference or a dependent type is not an array), and handing the
@@ -307,7 +303,7 @@ public:
         // the kP accumulators stay in registers on every ISA: kP * KP /
         // lanes independent Horner chains keep the FMA pipes busy (one point
         // alone is latency bound).
-        using V = kernel_vec_t<KP>;
+        using V          = kernel_vec_t<KP>;
         constexpr int kP = 8;
         const auto* c    = reinterpret_cast<const V*>(m_coef_t.data());
         V v[kP];

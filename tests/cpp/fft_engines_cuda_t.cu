@@ -79,7 +79,8 @@ std::vector<uint8_t> pack_rows(const std::vector<uint32_t>& vals,
     return out;
 }
 
-template <typename T> std::vector<T> to_host(const thrust::device_vector<T>& d) {
+template <typename T>
+std::vector<T> to_host(const thrust::device_vector<T>& d) {
     std::vector<T> h(d.size());
     thrust::copy(d.begin(), d.end(), h.begin());
     return h;
@@ -107,7 +108,9 @@ struct SegmentCap {
 // A non-blocking stream (no implicit ordering with the legacy stream).
 struct NonBlockingStream {
     cudaStream_t s{nullptr};
-    NonBlockingStream() { cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking); }
+    NonBlockingStream() {
+        cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+    }
     ~NonBlockingStream() { cudaStreamDestroy(s); }
     NonBlockingStream(const NonBlockingStream&)            = delete;
     NonBlockingStream& operator=(const NonBlockingStream&) = delete;
@@ -157,8 +160,8 @@ TEST_CASE("FDMTFFT GPU matches CPU on varied grids and plans",
     // Odd channel counts (copy nodes), negative delays, no box smearing,
     // and a plan big enough for several tree stages.
     const std::vector<Case> cases{
-        {24, 40, 0, true, "valid"},    {48, 64, -16, true, "valid"},
-        {64, 48, 0, false, "full"},    {37, 32, 0, true, "roll"},
+        {24, 40, 0, true, "valid"},   {48, 64, -16, true, "valid"},
+        {64, 48, 0, false, "full"},   {37, 32, 0, true, "roll"},
         {512, 256, 0, true, "valid"},
     };
     for (const auto& c : cases) {
@@ -241,10 +244,10 @@ TEST_CASE("FDMTFFT GPU streams like one long call",
           "[fdmt_fft_gpu][gpu][parity]") {
     // Fractional valid mode: output lags by the guard; blocks of one stream
     // equal a single long block (to the sinc truncation).
-    const SizeType nch   = 32;
-    const SizeType blk   = 1024;
-    const SizeType nblk  = 4;
-    const auto long_wf   = noise(nch * blk * nblk, 90);
+    const SizeType nch  = 32;
+    const SizeType blk  = 1024;
+    const SizeType nblk = 4;
+    const auto long_wf  = noise(nch * blk * nblk, 90);
     FDMTFFT one(kFMin, kFMax, nch, blk * nblk, kTsamp, 40, 0, 1, true, "valid",
                 test::gpu_exec());
     FDMTFFT stream(kFMin, kFMax, nch, blk, kTsamp, 40, 0, 1, true, "valid",
@@ -261,11 +264,9 @@ TEST_CASE("FDMTFFT GPU streams like one long call",
     std::vector<float> wf(nch * blk);
     for (SizeType b = 0; b < nblk; ++b) {
         for (SizeType c = 0; c < nch; ++c) {
-            std::copy_n(long_wf.begin() +
-                            static_cast<std::ptrdiff_t>((c * blk * nblk) +
-                                                        (b * blk)),
-                        blk,
-                        wf.begin() + static_cast<std::ptrdiff_t>(c * blk));
+            std::copy_n(long_wf.begin() + static_cast<std::ptrdiff_t>(
+                                              (c * blk * nblk) + (b * blk)),
+                        blk, wf.begin() + static_cast<std::ptrdiff_t>(c * blk));
         }
         stream.execute(wf, out);
         cpu_stream.execute(wf, cpu_out);
@@ -376,8 +377,8 @@ TEST_CASE("FDMTFFT GPU packed, time-major, kill mask and history",
                     test::gpu_exec(), 2, true, mask);
         FDMTFFT gpu_tm(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
                        test::gpu_exec(), 2, true, mask);
-        FDMTFFT gpu_dev(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true,
-                        "valid", test::gpu_exec(), 2, true, mask);
+        FDMTFFT gpu_dev(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
+                        test::gpu_exec(), 2, true, mask);
         const auto n = 2 * cpu.get_plan().get_dmt_size();
         std::vector<float> a(n);
         std::vector<float> b(n);
@@ -456,14 +457,15 @@ TEST_CASE("DDMTFFT GPU edge cases", "[ddmt_fft_gpu][gpu][parity]") {
         DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
                     test::gpu_exec(), 32, mask);
         const auto ns = SizeType{1000};
-        const auto n  = gpu.get_plan().get_dm_arr().size() *
-                       gpu.get_output_nsamps(ns);
+        const auto n =
+            gpu.get_plan().get_dm_arr().size() * gpu.get_output_nsamps(ns);
         std::vector<float> out(n, 1.0F);
         gpu.execute(noise(nch * ns, 1), out);
         CHECK(std::ranges::all_of(out, [](float v) { return v == 0.0F; }));
     }
     SECTION("short blocks, changing lengths (plan cache eviction)") {
-        for (const auto method : {DDMTFFTMethod::kBrute, DDMTFFTMethod::kNUFFT}) {
+        for (const auto method :
+             {DDMTFFTMethod::kBrute, DDMTFFTMethod::kNUFFT}) {
             CAPTURE(algorithms::to_string(method));
             const DDMTFFTOptions opts{.method = method, .guard = 16};
             DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
@@ -472,7 +474,8 @@ TEST_CASE("DDMTFFT GPU edge cases", "[ddmt_fft_gpu][gpu][parity]") {
                         test::gpu_exec(), 32, {}, 1, opts);
             const auto ndm = cpu.get_plan().get_dm_arr().size();
             unsigned seed  = 200;
-            for (const SizeType ns : {10, 30, 700, 1100, 1700, 2600, 3100, 900}) {
+            for (const SizeType ns :
+                 {10, 30, 700, 1100, 1700, 2600, 3100, 900}) {
                 CAPTURE(ns);
                 REQUIRE(gpu.get_output_nsamps(ns) == cpu.get_output_nsamps(ns));
                 const auto n = ndm * cpu.get_output_nsamps(ns);
@@ -497,16 +500,16 @@ TEST_CASE("DDMTFFT GPU NUFFT accuracy follows the tolerance",
     DDMTFFT brute(kFMin, kFMax, nch, kTsamp, 40.0F, 0.25F, 0.0F,
                   test::gpu_exec(), 32, {}, 1,
                   DDMTFFTOptions{.method = DDMTFFTMethod::kBrute});
-    const auto n = brute.get_plan().get_dm_arr().size() *
-                   brute.get_output_nsamps(ns);
+    const auto n =
+        brute.get_plan().get_dm_arr().size() * brute.get_output_nsamps(ns);
     std::vector<float> ref(n);
     brute.execute(wf, ref);
     for (const double tol : {1e-7, 1e-5, 1e-3}) {
         CAPTURE(tol);
-        DDMTFFT nu(kFMin, kFMax, nch, kTsamp, 40.0F, 0.25F, 0.0F,
-                   test::gpu_exec(), 32, {}, 1,
-                   DDMTFFTOptions{.method = DDMTFFTMethod::kNUFFT,
-                                  .tolerance = tol});
+        DDMTFFT nu(
+            kFMin, kFMax, nch, kTsamp, 40.0F, 0.25F, 0.0F, test::gpu_exec(), 32,
+            {}, 1,
+            DDMTFFTOptions{.method = DDMTFFTMethod::kNUFFT, .tolerance = tol});
         std::vector<float> got(n);
         nu.execute(wf, got);
         // Relative to the output scale (~ sum |a| per bin); the float
@@ -522,10 +525,10 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
     const SizeType nch = 16;
     const SizeType ns  = 3000;
     const DDMTFFTOptions opts{.method = DDMTFFTMethod::kNUFFT};
-    DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F, Exec::cpu(4),
+    DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F, Exec::cpu(4), 32,
+                {}, 1, opts);
+    DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F, test::gpu_exec(),
                 32, {}, 1, opts);
-    DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F,
-                test::gpu_exec(), 32, {}, 1, opts);
     CHECK(gpu.method_used() == cpu.method_used());
     const auto n =
         cpu.get_plan().get_dm_arr().size() * cpu.get_output_nsamps(ns);
@@ -541,8 +544,8 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
     DDMTFFT gpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F,
                   test::gpu_exec());
     const auto ns2 = SizeType{6000};
-    const auto n2  = cpu_s.get_plan().get_dm_arr().size() *
-                    cpu_s.get_output_nsamps(ns2);
+    const auto n2 =
+        cpu_s.get_plan().get_dm_arr().size() * cpu_s.get_output_nsamps(ns2);
     std::vector<float> c(n2);
     std::vector<float> d(n2);
     const auto wf2 = noise(32 * ns2, 401);
@@ -558,8 +561,8 @@ TEST_CASE("DDMTFFT GPU device input, device history and streams",
     const NonBlockingStream nb;
     DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 32,
                 {}, 2);
-    DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
-                test::gpu_exec(), 32, {}, 2);
+    DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, test::gpu_exec(),
+                32, {}, 2);
     const auto ndm = cpu.get_plan().get_dm_arr().size();
     for (unsigned blk = 0; blk < 3; ++blk) {
         const auto wf = noise(2 * nch * ns, 500 + blk);

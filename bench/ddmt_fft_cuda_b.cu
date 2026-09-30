@@ -26,10 +26,9 @@ void BM_ddmt_fft_gpu(benchmark::State& state) {
     const thrust::device_vector<float> wf(1024 * nsamps, 1.0F);
     thrust::device_vector<float> out(ndm * nsamps);
     const auto cold = e.get_output_nsamps(nsamps);
-    e.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()),
-                                      wf.size()),
-              DeviceSpan<float>(thrust::raw_pointer_cast(out.data()),
-                                ndm * cold));
+    e.execute(
+        DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()), wf.size()),
+        DeviceSpan<float>(thrust::raw_pointer_cast(out.data()), ndm * cold));
     BENCH_GPU_TRY(cudaDeviceSynchronize());
     for (auto _ : state) {
         const GPUEventTimer timer{state};

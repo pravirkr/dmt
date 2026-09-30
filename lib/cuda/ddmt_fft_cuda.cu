@@ -71,22 +71,22 @@ using fourier_gpu::phasor_fast;
 
 // Brute force: bins per thread (stride 32), trials per thread, warps per
 // block, channels per shared-memory chunk.
-constexpr int kBJ        = 8;
-constexpr int kBD        = 4;
-constexpr int kBWarps    = 16;
-constexpr int kBChan     = 16;
-constexpr int kBBins     = 32 * kBJ;      // bins per block
-constexpr int kBTrials   = kBWarps * kBD; // trials per block
-constexpr int kBThreads  = 32 * kBWarps;
-constexpr int kSpreadThr = 512;
+constexpr int kBJ          = 8;
+constexpr int kBD          = 4;
+constexpr int kBWarps      = 16;
+constexpr int kBChan       = 16;
+constexpr int kBBins       = 32 * kBJ;      // bins per block
+constexpr int kBTrials     = kBWarps * kBD; // trials per block
+constexpr int kBThreads    = 32 * kBWarps;
+constexpr int kSpreadThr   = 512;
 constexpr int kSpreadChunk = 1024; // channels staged per spread pass
 // Largest NUFFT sub-run: its fine grid (~2.2 x trials complex floats) must
 // fit the shared memory of one block.
-constexpr SizeType kMaxSubRun   = 4096;
-constexpr SizeType kMaxWidth    = 16; // NUFFT kernel width bound (nufft_cpu)
-constexpr SizeType kMaxDegree   = kMaxWidth + 2;
-constexpr int kTile             = 32; // deconvolution transpose tile
-constexpr int kTileRows         = 8;
+constexpr SizeType kMaxSubRun = 4096;
+constexpr SizeType kMaxWidth  = 16; // NUFFT kernel width bound (nufft_cpu)
+constexpr SizeType kMaxDegree = kMaxWidth + 2;
+constexpr int kTile           = 32; // deconvolution transpose tile
+constexpr int kTileRows       = 8;
 // The CPU engine's channel-spectra cap (ddmt_fft_cpu.cpp): same segments.
 constexpr SizeType kMaxSpectraBytes = SizeType{1} << 29;
 
@@ -108,7 +108,8 @@ __global__ void kernel_fill_rows(const float* __restrict__ hist,
                                  int64_t n_new,
                                  int64_t p0,
                                  int64_t n_fft) {
-    const auto t = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto t =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (t >= n_fft) {
         return;
     }
@@ -163,17 +164,18 @@ __global__ void __launch_bounds__(kBThreads)
             const int c  = i / kBBins;
             const int b  = i % kBBins;
             const auto k = k0 + b;
-            xs[c][b]     = (c < na && k < n_bins)
-                               ? spec[((static_cast<int64_t>(a0) + c) * n_bins) + k]
-                               : float2{0.0F, 0.0F};
+            xs[c][b] = (c < na && k < n_bins)
+                           ? spec[((static_cast<int64_t>(a0) + c) * n_bins) + k]
+                           : float2{0.0F, 0.0F};
         }
         for (int i = tid; i < kBTrials * kBChan; i += kBThreads) {
-            const int t   = i / kBChan;
-            const int c   = i % kBChan;
-            const int tr  = tr0 + t;
-            const auto sv = (tr < ntrials && c < na)
-                                ? sfx[(static_cast<int64_t>(tr) * nact) + a0 + c]
-                                : 0ULL;
+            const int t  = i / kBChan;
+            const int c  = i % kBChan;
+            const int tr = tr0 + t;
+            const auto sv =
+                (tr < ntrials && c < na)
+                    ? sfx[(static_cast<int64_t>(tr) * nact) + a0 + c]
+                    : 0ULL;
             ss[t][c] = sv;
             st[t][c] = phasor_fast(sv, 32ULL); // step to bin + 32
         }
@@ -186,8 +188,8 @@ __global__ void __launch_bounds__(kBThreads)
             }
 #pragma unroll
             for (int d = 0; d < kBD; ++d) {
-                const int t   = (warp * kBD) + d;
-                float2 p      = phasor_fast(ss[t][c], kl);
+                const int t    = (warp * kBD) + d;
+                float2 p       = phasor_fast(ss[t][c], kl);
                 const float2 w = st[t][c];
 #pragma unroll
                 for (int j = 0; j < kBJ; ++j) {
@@ -271,67 +273,69 @@ __global__ void __launch_bounds__(kSpreadThr)
     }
     const float total = s_part[0];
     const float scale = total > 0.0F ? 1073741824.0F / total : 0.0F;
-    const auto ku = static_cast<unsigned long long>(k);
+    const auto ku     = static_cast<unsigned long long>(k);
     for (int c0 = 0; c0 < nact; c0 += kSpreadChunk) {
-    const int nc = min(kSpreadChunk, nact - c0);
-    __syncthreads();
-    for (int i = tid; i < nc; i += nthr) {
-        s_x[i] = xr[c0 + i];
-        s_s[i] = sr[c0 + i];
-        s_v[i] = spec[(static_cast<int64_t>(c0 + i) * n_bins) + k];
-    }
-    __syncthreads();
-    // Point j -> staged channel: lanes spread across the chunk (stride
-    // per), so the lanes of a warp land on different cells.
-    const int per = (nc + 31) / 32;
-    for (int j = tid; j < 32 * per; j += nthr) {
-        const int a = ((j % 32) * per) + (j / 32);
-        if (a >= nc) {
-            continue;
+        const int nc = min(kSpreadChunk, nact - c0);
+        __syncthreads();
+        for (int i = tid; i < nc; i += nthr) {
+            s_x[i] = xr[c0 + i];
+            s_s[i] = sr[c0 + i];
+            s_v[i] = spec[(static_cast<int64_t>(c0 + i) * n_bins) + k];
         }
-        // g = frac(x) * nf = cell + fr.
-        const unsigned long long x = s_x[a] * ku;
-        const auto cell = static_cast<int>(__umul64hi(x, static_cast<unsigned long long>(nf)));
-        const unsigned long long lo = x * static_cast<unsigned long long>(nf);
-        const float fr = static_cast<float>(lo >> 40U) * 5.9604644775390625e-08F;
-        int lc   = 0;
-        float off = 0.0F; // lc - g + w/2, in [0, 1]
-        if constexpr (W % 2 == 0) {
-            const int inc = fr > 0.0F ? 1 : 0;
-            lc            = cell - (W / 2) + inc;
-            off           = static_cast<float>(inc) - fr;
-        } else {
-            const int inc = fr > 0.5F ? 1 : 0;
-            lc            = cell - (W / 2) + inc;
-            off           = static_cast<float>(inc) - fr + 0.5F;
-        }
-        const float u = (2.0F * off) - 1.0F;
-        float sn      = 0.0F;
-        float cs      = 0.0F;
-        sincospif(2.0F * fixed_turn(s_s[a], ku), &sn, &cs);
-        const float2 amp = cmul(s_v[a], float2{cs * scale, sn * scale});
-#pragma unroll
-        for (int i = 0; i < W; ++i) {
-            const float* c = s_coef + (i * kNp);
-            float v        = c[kNp - 1];
-#pragma unroll
-            for (int q = kNp - 2; q >= 0; --q) {
-                v = fmaf(v, u, c[q]);
+        __syncthreads();
+        // Point j -> staged channel: lanes spread across the chunk (stride
+        // per), so the lanes of a warp land on different cells.
+        const int per = (nc + 31) / 32;
+        for (int j = tid; j < 32 * per; j += nthr) {
+            const int a = ((j % 32) * per) + (j / 32);
+            if (a >= nc) {
+                continue;
             }
-            int cc = lc + i;
-            cc     = cc < 0 ? cc + nf : (cc >= nf ? cc - nf : cc);
-            atomicAdd(&s_grid[cc].x, __float2int_rn(amp.x * v));
-            atomicAdd(&s_grid[cc].y, __float2int_rn(amp.y * v));
+            // g = frac(x) * nf = cell + fr.
+            const unsigned long long x = s_x[a] * ku;
+            const auto cell            = static_cast<int>(
+                __umul64hi(x, static_cast<unsigned long long>(nf)));
+            const unsigned long long lo =
+                x * static_cast<unsigned long long>(nf);
+            const float fr =
+                static_cast<float>(lo >> 40U) * 5.9604644775390625e-08F;
+            int lc    = 0;
+            float off = 0.0F; // lc - g + w/2, in [0, 1]
+            if constexpr (W % 2 == 0) {
+                const int inc = fr > 0.0F ? 1 : 0;
+                lc            = cell - (W / 2) + inc;
+                off           = static_cast<float>(inc) - fr;
+            } else {
+                const int inc = fr > 0.5F ? 1 : 0;
+                lc            = cell - (W / 2) + inc;
+                off           = static_cast<float>(inc) - fr + 0.5F;
+            }
+            const float u = (2.0F * off) - 1.0F;
+            float sn      = 0.0F;
+            float cs      = 0.0F;
+            sincospif(2.0F * fixed_turn(s_s[a], ku), &sn, &cs);
+            const float2 amp = cmul(s_v[a], float2{cs * scale, sn * scale});
+#pragma unroll
+            for (int i = 0; i < W; ++i) {
+                const float* c = s_coef + (i * kNp);
+                float v        = c[kNp - 1];
+#pragma unroll
+                for (int q = kNp - 2; q >= 0; --q) {
+                    v = fmaf(v, u, c[q]);
+                }
+                int cc = lc + i;
+                cc     = cc < 0 ? cc + nf : (cc >= nf ? cc - nf : cc);
+                atomicAdd(&s_grid[cc].x, __float2int_rn(amp.x * v));
+                atomicAdd(&s_grid[cc].y, __float2int_rn(amp.y * v));
+            }
         }
-    }
     }
     __syncthreads();
     const float inv = scale > 0.0F ? 1.0F / scale : 0.0F;
     float2* dst     = grids + (k * nf);
     for (int j = tid; j < nf; j += nthr) {
         const int2 v = s_grid[j];
-        dst[j]       = {static_cast<float>(v.x) * inv,
-                        static_cast<float>(v.y) * inv};
+        dst[j] = {static_cast<float>(v.x) * inv, static_cast<float>(v.y) * inv};
     }
 }
 
@@ -370,8 +374,8 @@ __global__ void kernel_nufft_deconv(const float2* __restrict__ grids,
             const int d  = d0 + dy;
             const auto k = k0 + static_cast<int64_t>(threadIdx.x);
             if (k < n_bins && d < count) {
-                const float s  = inv_psi[d] * inv_n;
-                const float2 v = tile[threadIdx.x][dy];
+                const float s                  = inv_psi[d] * inv_n;
+                const float2 v                 = tile[threadIdx.x][dy];
                 out[((row0 + d) * n_bins) + k] = {v.x * s, v.y * s};
             }
         }
@@ -386,7 +390,8 @@ __global__ void kernel_trim(const float* __restrict__ time,
                             int64_t n_out,
                             int64_t p0,
                             int64_t cnt) {
-    const auto i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto i =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= cnt) {
         return;
     }
@@ -405,15 +410,16 @@ __global__ void kernel_update_history(const float* __restrict__ hist,
                                       int64_t n_new,
                                       int64_t start,
                                       int64_t new_len) {
-    const auto i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto i =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= new_len) {
         return;
     }
     for (int64_t r = blockIdx.y; r < rows; r += gridDim.y) {
-        const auto p = start + i;
-        hist_next[(r * ctx) + i] =
-            p < hist_len ? hist[(r * ctx) + p]
-                         : block[(r * n_new) + (p - hist_len)];
+        const auto p             = start + i;
+        hist_next[(r * ctx) + i] = p < hist_len
+                                       ? hist[(r * ctx) + p]
+                                       : block[(r * n_new) + (p - hist_len)];
     }
 }
 
@@ -424,7 +430,8 @@ __global__ void kernel_unpack(const uint8_t* __restrict__ packed,
                               int64_t row_bytes,
                               int64_t nsamps,
                               int64_t rows) {
-    const auto s = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto s =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (s >= nsamps) {
         return;
     }
@@ -445,10 +452,9 @@ void unpack_channel_major(const uint8_t* packed,
     const dim3 grid(blocks_for(static_cast<int64_t>(nsamps)),
                     grid_y(static_cast<int64_t>(rows)));
     const auto launch = [&](auto kernel) {
-        kernel<<<grid, kBlock, 0, st>>>(packed, out,
-                                        static_cast<int64_t>(row_bytes),
-                                        static_cast<int64_t>(nsamps),
-                                        static_cast<int64_t>(rows));
+        kernel<<<grid, kBlock, 0, st>>>(
+            packed, out, static_cast<int64_t>(row_bytes),
+            static_cast<int64_t>(nsamps), static_cast<int64_t>(rows));
     };
     switch (nbits) {
     case 1:
@@ -603,10 +609,10 @@ public:
         gpu_utils::set_device(m_device_id);
         const auto st = to_cuda(stream);
         m_device_work.order(st);
-        gpu_utils::check_gpu_call(
-            cudaMemcpyAsync(hist(), in.data(), in.size() * sizeof(float),
-                            cudaMemcpyDeviceToDevice, st),
-            "DDMTFFT::load_history (device)");
+        gpu_utils::check_gpu_call(cudaMemcpyAsync(hist(), in.data(),
+                                                  in.size() * sizeof(float),
+                                                  cudaMemcpyDeviceToDevice, st),
+                                  "DDMTFFT::load_history (device)");
         m_device_work.mark(st);
         m_hist_len  = m_ctx;
         m_hist_zero = false;
@@ -753,8 +759,8 @@ private:
                     const auto b1 = (r.count * (i + 1)) / nsub;
                     add_run({.begin = r.begin + b0,
                              .count = b1 - b0,
-                             .dm0 = r.dm0 + (static_cast<double>(b0) * r.ddm),
-                             .ddm = r.ddm});
+                             .dm0   = r.dm0 + (static_cast<double>(b0) * r.ddm),
+                             .ddm   = r.ddm});
                 }
                 std::fill_n(by_nufft.begin() +
                                 static_cast<std::ptrdiff_t>(r.begin),
@@ -791,9 +797,8 @@ private:
         }
         int optin = 0;
         gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(&optin,
-                                   cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                                   m_device_id),
+            cudaDeviceGetAttribute(
+                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
             "DDMTFFT (gpu): shared memory limit");
         if (p->fine_grid() * sizeof(float2) > static_cast<SizeType>(optin)) {
             throw std::runtime_error(std::format(
@@ -805,9 +810,9 @@ private:
             p->kernel_degree() != p->width() + 2) {
             throw std::logic_error("DDMTFFT (gpu): unexpected NUFFT kernel");
         }
-        auto run      = std::make_unique<GpuRun>();
-        run->run      = r;
-        run->plan     = p.get();
+        auto run  = std::make_unique<GpuRun>();
+        run->run  = r;
+        run->plan = p.get();
         run->inv_psi.upload(p->deconvolution());
         run->coef.upload(p->kernel_monomials());
         m_runs.push_back(std::move(run));
@@ -848,7 +853,8 @@ private:
     // bits), capped by the testing hook and by half the free device memory
     // for the per-segment buffers (bytes per transform sample below).
     [[nodiscard]] SizeType segment_cap() const {
-        auto cap = ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
+        auto cap =
+            ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
         if (const auto hook = detail::fft_segment_cap(); hook > 0) {
             cap = std::min(cap, hook);
         }
@@ -948,8 +954,8 @@ private:
                     (static_cast<double>(run->plan->half()) * run->run.ddm);
                 for (SizeType a = 0; a < m_nact; ++a) {
                     const double r = m_model.rate[m_model.active[a]];
-                    xr[a] = phase_fixed(-(run->run.ddm * r), n);
-                    sr[a] = phase_fixed(-(shift * r), n);
+                    xr[a]          = phase_fixed(-(run->run.ddm * r), n);
+                    sr[a]          = phase_fixed(-(shift * r), n);
                 }
                 g.xr.emplace_back().upload(xr);
                 g.sr.emplace_back().upload(sr);
@@ -997,10 +1003,9 @@ private:
         m_host.to_device(m_packed_d.data(), packed.data(), packed.size());
         m_unpacked_d.reserve(rows * nsamps);
         if (time_major) {
-            fourier_gpu::unpack_time_major(m_packed_d.data(),
-                                           m_unpacked_d.data(),
-                                           m_plan.get_nbits(), m_nbeams,
-                                           m_nchans, nsamps, st);
+            fourier_gpu::unpack_time_major(
+                m_packed_d.data(), m_unpacked_d.data(), m_plan.get_nbits(),
+                m_nbeams, m_nchans, nsamps, st);
         } else {
             unpack_channel_major(m_packed_d.data(), m_unpacked_d.data(),
                                  m_plan.get_nbits(), row_bytes, nsamps, rows,
@@ -1017,8 +1022,8 @@ private:
         const auto out_n = out_size(n_new);
         m_out_d.reserve(out_n);
         core(rows_d, n_new, m_out_d.data(), st);
-        const gpu_host::ChunkedStager::Segment seg{
-            out.data(), m_out_d.data(), out_n * sizeof(float)};
+        const gpu_host::ChunkedStager::Segment seg{out.data(), m_out_d.data(),
+                                                   out_n * sizeof(float)};
         m_host.to_host(std::span(&seg, out_n > 0 ? 1 : 0));
     }
 
@@ -1102,10 +1107,10 @@ private:
                     reinterpret_cast<ComplexTypeGPU*>(m_grids_d.data()),
                     g.n_bins * nf),
                 st);
-            const dim3 dgrid(blocks_for(nb, kTile),
-                             grid_y((static_cast<int64_t>(run.run.count) +
-                                     kTile - 1) /
-                                    kTile));
+            const dim3 dgrid(
+                blocks_for(nb, kTile),
+                grid_y((static_cast<int64_t>(run.run.count) + kTile - 1) /
+                       kTile));
             const dim3 dblock(kTile, kTileRows);
             kernel_nufft_deconv<<<dgrid, dblock, 0, st>>>(
                 m_grids_d.data(), run.inv_psi.data(), m_out_spec_d.data(),

@@ -22,7 +22,8 @@ struct Source {
 
 // Samples [s0, s0 + n) of packed row @p row as float.
 template <unsigned NB>
-inline void unpack_range(const uint8_t* row, SizeType s0, SizeType n, float* out) {
+inline void
+unpack_range(const uint8_t* row, SizeType s0, SizeType n, float* out) {
     constexpr SizeType kPer = (NB < 8) ? (8 / NB) : 1;
     SizeType i              = 0;
     if constexpr (NB < 8) {

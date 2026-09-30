@@ -172,7 +172,7 @@ private:
             st.lvl_off.push_back(to_u32(st.ops.size()));
         }
         st.out_begin.push_back(to_u32(i));
-        st.max_nodes = std::max(st.max_nodes, inner_max());
+        st.max_nodes   = std::max(st.max_nodes, inner_max());
         const auto& in = m_list[0];
         if (m_lo == 0) {
             // Level-0 nodes are read as channel spectra.
@@ -191,8 +191,7 @@ private:
 };
 
 double stage_cost(const TreeDag& dag, const TreeStage& st) {
-    return (8.0 * static_cast<double>(st.in_rows +
-                                      dag.ncoords[st.level_out])) +
+    return (8.0 * static_cast<double>(st.in_rows + dag.ncoords[st.level_out])) +
            (kOpCost * static_cast<double>(st.ops.size()));
 }
 
@@ -272,15 +271,15 @@ TreeDag make_tree_dag(const plans::FDMTPlan& plan, bool fractional, bool box) {
         for (const auto& c : pc.coordinates_copy[l]) {
             const auto cur = index_of(c.buf_offset, c.nsamps);
             prod[cur]      = {
-                     .tail = to_u32(index_of(c.tail_buf_offset, c.tail_nsamps)),
-                     .head = kTreeCopy,
-                     .sid  = 0,
+                .tail = to_u32(index_of(c.tail_buf_offset, c.tail_nsamps)),
+                .head = kTreeCopy,
+                .sid  = 0,
             };
             seen[cur] = true;
         }
         if (!std::ranges::all_of(seen, [](bool b) { return b; })) {
-            throw std::logic_error(
-                std::format("FDMTFFT: level {} has a node without producer", l));
+            throw std::logic_error(std::format(
+                "FDMTFFT: level {} has a node without producer", l));
         }
     }
     if (!fractional) {
@@ -340,8 +339,7 @@ plan_tree_stages(const TreeDag& dag, SizeType budget, SizeType max_out) {
     return stages;
 }
 
-std::vector<TreeStage> level_tree_stages(const TreeDag& dag,
-                                         SizeType max_out) {
+std::vector<TreeStage> level_tree_stages(const TreeDag& dag, SizeType max_out) {
     std::vector<TreeStage> stages;
     for (SizeType l = 1; l <= dag.levels(); ++l) {
         stages.push_back(*make_tree_stage(dag, l - 1, l, 0, max_out));
@@ -378,7 +376,7 @@ Segments choose_segments(const Geometry& geom,
     // bins, a node costing about 1.5 FFT butterflies' worth.
     const double tree = 1.5 * 0.33 * static_cast<double>(tree_nodes) /
                         static_cast<double>(nchans + ndms);
-    const auto model = [&](SizeType n, SizeType nseg, double fft) {
+    const auto model  = [&](SizeType n, SizeType nseg, double fft) {
         const double nd = static_cast<double>(n);
         return static_cast<double>(nseg) * nd * ((std::log2(nd) * fft) + tree);
     };
@@ -410,9 +408,9 @@ Segments choose_segments(const Geometry& geom,
     if (cands.size() > 8) {
         cands.resize(8);
     }
-    double best = capped ? std::numeric_limits<double>::max()
-                         : model(n_single, 1,
-                                 utils::r2c_cost_per_nlogn(n_single));
+    double best = capped
+                      ? std::numeric_limits<double>::max()
+                      : model(n_single, 1, utils::r2c_cost_per_nlogn(n_single));
     for (const auto& c : cands) {
         const double cost = model(c.n, c.nseg, utils::r2c_cost_per_nlogn(c.n));
         // Segment only for a clear predicted gain: the estimate is rough and

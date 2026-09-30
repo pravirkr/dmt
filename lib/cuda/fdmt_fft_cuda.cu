@@ -80,14 +80,16 @@ constexpr SizeType kViewBatch = 256;
 
 // Sample s of row `row` of the input: float32 (NB = 32) or packed at NB bits.
 template <int NB>
-__device__ __forceinline__ float
-read_sample(const void* __restrict__ src, int64_t row, int64_t row_len, int64_t s) {
+__device__ __forceinline__ float read_sample(const void* __restrict__ src,
+                                             int64_t row,
+                                             int64_t row_len,
+                                             int64_t s) {
     if constexpr (NB == 32) {
         return static_cast<const float*>(src)[(row * row_len) + s];
     } else {
         const auto* r = static_cast<const uint8_t*>(src) + (row * row_len);
-        return static_cast<float>(
-            bit_pack_utils::read_packed_sample<NB>(r, static_cast<SizeType>(s)));
+        return static_cast<float>(bit_pack_utils::read_packed_sample<NB>(
+            r, static_cast<SizeType>(s)));
     }
 }
 
@@ -107,7 +109,8 @@ __global__ void kernel_fill(const void* __restrict__ src,
                             int64_t p0,
                             int64_t z,
                             int64_t lov) {
-    const auto t = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto t =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (t >= n_fft) {
         return;
     }
@@ -135,7 +138,8 @@ __global__ void kernel_update_history(const void* __restrict__ src,
                                       int64_t nrows,
                                       int64_t nsamps,
                                       int64_t len) {
-    const auto i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto i =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= len) {
         return;
     }
@@ -148,12 +152,13 @@ __global__ void kernel_update_history(const void* __restrict__ src,
 }
 
 // Level-0 windows W0[s][k] = (box ? sum_{u <= s} W^(u k) : W^(s k)) / N.
-__global__ void kernel_level0_windows(const unsigned long long* __restrict__ sfx,
-                                      float2* __restrict__ w0,
-                                      int dt0_max,
-                                      int nb,
-                                      int box,
-                                      float norm) {
+__global__ void
+kernel_level0_windows(const unsigned long long* __restrict__ sfx,
+                      float2* __restrict__ w0,
+                      int dt0_max,
+                      int nb,
+                      int box,
+                      float norm) {
     const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (k >= nb) {
         return;
@@ -163,7 +168,7 @@ __global__ void kernel_level0_windows(const unsigned long long* __restrict__ sfx
         const float2 w = phasor(sfx[s], static_cast<unsigned>(k));
         acc.x += w.x;
         acc.y += w.y;
-        const float2 v = box != 0 ? acc : w;
+        const float2 v                         = box != 0 ? acc : w;
         w0[(static_cast<int64_t>(s) * nb) + k] = {v.x * norm, v.y * norm};
     }
 }
@@ -197,28 +202,27 @@ __global__ void __launch_bounds__(kStageThreads)
     const int warp  = static_cast<int>(threadIdx.x) >> 5;
     const int nwarp = static_cast<int>(blockDim.x) >> 5;
     const auto p    = static_cast<int64_t>(blockIdx.x);
-    const auto k    = ((static_cast<int64_t>(blockIdx.y) + tile0) * kTileBins) +
-                   lane;
-    const auto beam = static_cast<int64_t>(blockIdx.z);
-    const float2* src = in + (beam * in_beam);
-    float2* dst       = out + (beam * out_beam);
-    float2* bufs[2]   = {smem, smem + (static_cast<int64_t>(max_nodes) * 32)};
+    const auto k =
+        ((static_cast<int64_t>(blockIdx.y) + tile0) * kTileBins) + lane;
+    const auto beam     = static_cast<int64_t>(blockIdx.z);
+    const float2* src   = in + (beam * in_beam);
+    float2* dst         = out + (beam * out_beam);
+    float2* bufs[2]     = {smem, smem + (static_cast<int64_t>(max_nodes) * 32)};
     const uint32_t* off = lvl_off + (p * nlev);
     const uint32_t ob   = out_begin[p];
     // kL0 with half_m > 0: `in` holds the length-M complex FFTs of the
     // channel rows read as x[2n] + i x[2n + 1] (M = N / 2); bin k of the
     // real FFT is E + W^k O from Z[k] and conj(Z[M - k]).
-    const float2 wk = (kL0 && half_m > 0)
-                          ? phasor(s1, static_cast<unsigned>(k))
-                          : float2{1.0F, 0.0F};
-    int cur = 0;
+    const float2 wk = (kL0 && half_m > 0) ? phasor(s1, static_cast<unsigned>(k))
+                                          : float2{1.0F, 0.0F};
+    int cur         = 0;
     for (int lev = 0; lev < nlev; ++lev) {
-        const uint32_t o0   = off[lev];
-        const uint32_t o1   = off[lev + 1];
-        const bool last     = lev == nlev - 1;
-        const float2* prev  = bufs[cur ^ 1];
-        float2* next        = bufs[cur];
-        const auto fetch    = [&](uint32_t idx) -> float2 {
+        const uint32_t o0  = off[lev];
+        const uint32_t o1  = off[lev + 1];
+        const bool last    = lev == nlev - 1;
+        const float2* prev = bufs[cur ^ 1];
+        float2* next       = bufs[cur];
+        const auto fetch   = [&](uint32_t idx) -> float2 {
             if (lev == 0) {
                 if constexpr (kL0) {
                     const float2 w =
@@ -275,14 +279,16 @@ __global__ void kernel_level0_state(const float2* __restrict__ spec,
                                     int64_t nb,
                                     int64_t spec_beam,
                                     int64_t state_beam) {
-    const auto k    = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto k =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const auto beam = static_cast<int64_t>(blockIdx.z);
     if (k >= nb) {
         return;
     }
     for (int64_t n = blockIdx.y; n < nodes; n += gridDim.y) {
         state[(beam * state_beam) + (n * nb) + k] =
-            cmul(spec[(beam * spec_beam) + (static_cast<int64_t>(l0_chan[n]) * nb) + k],
+            cmul(spec[(beam * spec_beam) +
+                      (static_cast<int64_t>(l0_chan[n]) * nb) + k],
                  w0[(static_cast<int64_t>(l0_shift[n]) * nb) + k]);
     }
 }
@@ -297,7 +303,8 @@ __global__ void kernel_trim(const float* __restrict__ time,
                             int64_t o0,
                             int64_t cnt,
                             int64_t skip) {
-    const auto t = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto t =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (t >= cnt) {
         return;
     }
@@ -313,7 +320,8 @@ __global__ void kernel_copy_rows(const float2* __restrict__ src,
                                  float2* __restrict__ dst,
                                  int64_t nrows,
                                  int64_t nb) {
-    const auto k = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    const auto k =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (k >= nb) {
         return;
     }
@@ -393,9 +401,9 @@ struct Geo {
     // Even N: forward transforms as in-place length-N/2 C2C of the window
     // rows (the real-FFT post-processing is done by the first tree stage).
     std::unique_ptr<utils::CUFFTManager> half;
-    unsigned long long s1{}; // phase_fixed(1, N)
-    DevBuf<unsigned long long> sfx;           // per merge sid
-    DevBuf<float2> w0;                        // [dt0_max + 1][nb]
+    unsigned long long s1{};        // phase_fixed(1, N)
+    DevBuf<unsigned long long> sfx; // per merge sid
+    DevBuf<float2> w0;              // [dt0_max + 1][nb]
 };
 
 class FDMTFFTCudaEngine final : public detail::FDMTFFTEngine {
@@ -453,18 +461,17 @@ public:
         check_nbits(nbits, time_major ? "execute_time_major" : "execute");
         const auto bytes = time_major ? tm_bytes(nbits) : cm_bytes(nbits);
         if (packed.size() != bytes) {
-            throw std::invalid_argument(std::format(
-                "FDMTFFT::{}: expected {} packed bytes, got {}",
-                time_major ? "execute_time_major" : "execute", bytes,
-                packed.size()));
+            throw std::invalid_argument(
+                std::format("FDMTFFT::{}: expected {} packed bytes, got {}",
+                            time_major ? "execute_time_major" : "execute",
+                            bytes, packed.size()));
         }
         check_out(dmt.size(), "execute");
         const auto s = host_begin();
         m_packed_d.reserve(packed.size());
         m_host.to_device(m_packed_d.data(), packed.data(), packed.size());
         if (time_major) {
-            run(unpack_time_major(m_packed_d.data(), nbits, s), out_stage(),
-                s);
+            run(unpack_time_major(m_packed_d.data(), nbits, s), out_stage(), s);
         } else {
             run(packed_input(m_packed_d.data(), nbits), out_stage(), s);
         }
@@ -523,9 +530,9 @@ public:
         gpu_utils::set_device(m_device_id);
         check_nbits(nbits, "reset");
         if (packed.size() != cm_bytes(nbits)) {
-            throw std::invalid_argument(std::format(
-                "FDMTFFT::reset: expected {} packed bytes, got {}",
-                cm_bytes(nbits), packed.size()));
+            throw std::invalid_argument(
+                std::format("FDMTFFT::reset: expected {} packed bytes, got {}",
+                            cm_bytes(nbits), packed.size()));
         }
         check_out(dmt.size(), "reset");
         const auto s = host_begin();
@@ -556,9 +563,9 @@ public:
         gpu_utils::set_device(m_device_id);
         check_nbits(nbits, "reset");
         if (d_packed.size() != cm_bytes(nbits)) {
-            throw std::invalid_argument(std::format(
-                "FDMTFFT::reset: expected {} packed bytes, got {}",
-                cm_bytes(nbits), d_packed.size()));
+            throw std::invalid_argument(
+                std::format("FDMTFFT::reset: expected {} packed bytes, got {}",
+                            cm_bytes(nbits), d_packed.size()));
         }
         check_out(d_dmt.size(), "reset");
         const auto s = to_cuda(stream);
@@ -618,8 +625,8 @@ public:
                     static_cast<int64_t>(m_ndms), static_cast<int64_t>(g.nb));
             }
         }
-        inverse(g, m_step_out, m_step_time_d.data(), m_step_dmt,
-                m_geom.skip, 0, m_nsamps_out, s);
+        inverse(g, m_step_out, m_step_time_d.data(), m_step_dmt, m_geom.skip, 0,
+                m_nsamps_out, s);
         if (m_mode == FDMTMode::kValid) {
             update_history(m_step_src, s);
         }
@@ -690,9 +697,9 @@ public:
         const auto& grid    = plan_c.grids[m_level][subband_idx];
         const auto nsamps_v = view_nsamps();
         return FDMTSubbandDeviceView{
-            .data        = DeviceSpan<const float>(
-                m_view_d.data() + (grid.coord_offset * nsamps_v),
-                grid.ndt * nsamps_v, device()),
+            .data = DeviceSpan<const float>(m_view_d.data() +
+                                                (grid.coord_offset * nsamps_v),
+                                            grid.ndt * nsamps_v, device()),
             .subband_idx = subband_idx,
             .ndt         = grid.ndt,
             .nsamps      = nsamps_v,
@@ -738,10 +745,10 @@ public:
         gpu_utils::set_device(m_device_id);
         m_device_work.wait();
         if (!in.empty()) {
-            gpu_utils::check_gpu_call(
-                cudaMemcpy(m_hist[m_hist_cur].data(), in.data(),
-                           in.size_bytes(), cudaMemcpyHostToDevice),
-                "FDMTFFT::load_history");
+            gpu_utils::check_gpu_call(cudaMemcpy(m_hist[m_hist_cur].data(),
+                                                 in.data(), in.size_bytes(),
+                                                 cudaMemcpyHostToDevice),
+                                      "FDMTFFT::load_history");
         }
     }
 
@@ -815,9 +822,9 @@ private:
     // execute()
     std::unique_ptr<Geo> m_geo;
     StagesD m_stages;
-    DevBuf<float> m_win;     // windows, then C2R output
-    DevBuf<float2> m_spec;   // [beam][chan][nb]
-    DevBuf<float2> m_mid[2]; // inner stage boundaries [beam][rows][nb]
+    DevBuf<float> m_win;       // windows, then C2R output
+    DevBuf<float2> m_spec;     // [beam][chan][nb]
+    DevBuf<float2> m_mid[2];   // inner stage boundaries [beam][rows][nb]
     DevBuf<float2> m_out_spec; // [beam][ndm][nb]
 
     // History [beam][chan][m_hist_len] (valid mode), double-buffered.
@@ -898,7 +905,8 @@ private:
             for (auto& h : m_hist) {
                 h.reserve(history_state_size());
                 gpu_utils::check_gpu_call(
-                    cudaMemset(h.data(), 0, history_state_size() * sizeof(float)),
+                    cudaMemset(h.data(), 0,
+                               history_state_size() * sizeof(float)),
                     "FDMTFFT (cuda): history");
             }
         }
@@ -918,15 +926,15 @@ private:
         for (const auto kernel :
              {kernel_tree_stage<true>, kernel_tree_stage<false>}) {
             gpu_utils::check_gpu_call(
-                cudaFuncSetAttribute(kernel,
-                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     m_smem_optin),
+                cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    m_smem_optin),
                 "FDMTFFT (cuda): shared-memory opt-in");
         }
 
-        m_seg = fdmt_fft::choose_segments(
-            m_geom, m_mode, m_nsamps_out, m_dag.ncoords[0] + m_dag.nops(),
-            m_nchans, m_ndms, segment_cap());
+        m_seg = fdmt_fft::choose_segments(m_geom, m_mode, m_nsamps_out,
+                                          m_dag.ncoords[0] + m_dag.nops(),
+                                          m_nchans, m_ndms, segment_cap());
         m_geo = make_geo(m_seg.n_fft);
         const auto rows_win = m_nbeams * std::max(m_nchans, m_ndms);
         m_win.reserve(rows_win * m_seg.n_fft);
@@ -976,8 +984,8 @@ private:
                     m_geom.n_fft));
             }
             logging::debug("FDMTFFT (cuda): device memory caps the transform "
-                          "at {} samples (single transform {})",
-                          fit, m_geom.n_fft);
+                           "at {} samples (single transform {})",
+                           fit, m_geom.n_fft);
             cap = cap == 0 ? fit : std::min(cap, fit);
         }
         return cap;
@@ -1100,9 +1108,8 @@ private:
                 .nbits   = nbits};
     }
 
-    Input unpack_time_major(const uint8_t* packed,
-                            SizeType nbits,
-                            cudaStream_t s) {
+    Input
+    unpack_time_major(const uint8_t* packed, SizeType nbits, cudaStream_t s) {
         m_unpacked_d.reserve(m_nbeams * m_nchans * m_nsamps);
         fourier_gpu::unpack_time_major(packed, m_unpacked_d.data(), nbits,
                                        m_nbeams, m_nchans, m_nsamps, s);
@@ -1111,7 +1118,8 @@ private:
 
     // ---- pipeline ----
 
-    template <typename F> void dispatch_nbits(SizeType nbits, const F& f) const {
+    template <typename F>
+    void dispatch_nbits(SizeType nbits, const F& f) const {
         switch (nbits) {
         case 1:
             f(std::integral_constant<int, 1>{});
@@ -1144,15 +1152,15 @@ private:
         const auto nrows = static_cast<int64_t>(m_nbeams * m_nchans);
         const dim3 grid(blocks_for(static_cast<int64_t>(g.n_fft)),
                         grid_y(nrows));
-        const float* hist = m_hist_len > 0 ? m_hist[m_hist_cur].data() : nullptr;
+        const float* hist =
+            m_hist_len > 0 ? m_hist[m_hist_cur].data() : nullptr;
         dispatch_nbits(in.nbits, [&](auto nb) {
             kernel_fill<decltype(nb)::value><<<grid, kBlock, 0, s>>>(
                 in.data, static_cast<int64_t>(in.row_len), hist,
                 m_has_kill ? m_keep.data() : nullptr, win, nrows,
                 static_cast<int>(m_nchans), static_cast<int64_t>(m_nsamps),
                 static_cast<int64_t>(g.n_fft), static_cast<int64_t>(p0),
-                static_cast<int64_t>(zeros),
-                static_cast<int64_t>(m_hist_len));
+                static_cast<int64_t>(zeros), static_cast<int64_t>(m_hist_len));
         });
     }
 
@@ -1166,8 +1174,8 @@ private:
         dispatch_nbits(in.nbits, [&](auto nb) {
             kernel_update_history<decltype(nb)::value><<<grid, kBlock, 0, s>>>(
                 in.data, static_cast<int64_t>(in.row_len),
-                m_hist[m_hist_cur].data(), m_hist[m_hist_cur ^ 1].data(),
-                nrows, static_cast<int64_t>(m_nsamps),
+                m_hist[m_hist_cur].data(), m_hist[m_hist_cur ^ 1].data(), nrows,
+                static_cast<int64_t>(m_nsamps),
                 static_cast<int64_t>(m_hist_len));
         });
         m_hist_cur ^= 1;
@@ -1183,7 +1191,7 @@ private:
                       bool from_level0,
                       cudaStream_t s,
                       bool half = false) const {
-        const auto smem = 2 * st.max_nodes * kTileBins * sizeof(float2);
+        const auto smem   = 2 * st.max_nodes * kTileBins * sizeof(float2);
         const auto ntiles = static_cast<int64_t>(g.nb / kTileBins);
         for (int64_t t0 = 0; t0 < ntiles; t0 += kMaxGridY) {
             const dim3 grid(static_cast<unsigned>(st.nprog),
@@ -1193,9 +1201,9 @@ private:
             const auto kernel = from_level0 ? kernel_tree_stage<true>
                                             : kernel_tree_stage<false>;
             kernel<<<grid, kStageThreads, smem, s>>>(
-                sd.out_begin.data() + st.out_off, sd.lvl_off.data() + st.lvl_off,
-                sd.ops.data() + st.ops_off, g.sfx.data(), in,
-                static_cast<int64_t>(in_beam),
+                sd.out_begin.data() + st.out_off,
+                sd.lvl_off.data() + st.lvl_off, sd.ops.data() + st.ops_off,
+                g.sfx.data(), in, static_cast<int64_t>(in_beam),
                 m_l0_chan.data(), m_l0_shift.data(), g.w0.data(), out,
                 static_cast<int64_t>(out_beam), static_cast<int64_t>(g.nb),
                 static_cast<int>(st.nlev), static_cast<int>(st.max_nodes),
@@ -1355,8 +1363,8 @@ private:
         const auto nsv  = view_nsamps();
         if (!m_view_c2r) {
             m_view_c2r = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kC2R, g.n_fft, kViewBatch, m_device_id,
-                g.n_fft, g.nb);
+                utils::FFTKind::kC2R, g.n_fft, kViewBatch, m_device_id, g.n_fft,
+                g.nb);
             m_view_spec.reserve(kViewBatch * g.nb);
             m_view_time.reserve(kViewBatch * g.n_fft);
         }
@@ -1370,10 +1378,11 @@ private:
             kernel_copy_rows<<<grid, kBlock, 0, s>>>(
                 m_step_in + (r0 * g.nb), m_view_spec.data(),
                 static_cast<int64_t>(n), static_cast<int64_t>(g.nb));
-            fourier_gpu::hermitian_edges(m_view_spec.data(), n, g.nb,
-                                         g.n_bins, g.n_fft, s);
+            fourier_gpu::hermitian_edges(m_view_spec.data(), n, g.nb, g.n_bins,
+                                         g.n_fft, s);
             m_view_c2r->execute(
-                cuda::std::span<float>(m_view_time.data(), kViewBatch * g.n_fft),
+                cuda::std::span<float>(m_view_time.data(),
+                                       kViewBatch * g.n_fft),
                 cuda::std::span<ComplexTypeGPU>(
                     reinterpret_cast<ComplexTypeGPU*>(m_view_spec.data()),
                     kViewBatch * g.nb),

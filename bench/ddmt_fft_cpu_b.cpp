@@ -39,15 +39,15 @@ public:
     template <typename Engine> void run(benchmark::State& state, Engine& e) {
         const auto ndm = e.get_plan().get_dm_arr().size();
         std::vector<float> out(ndm * nsamps);
-        e.execute(waterfall,
-                  std::span<float>(out).first(ndm * e.get_output_nsamps(nsamps)));
+        e.execute(waterfall, std::span<float>(out).first(
+                                 ndm * e.get_output_nsamps(nsamps)));
         for (auto _ : state) {
             e.execute(waterfall, out);
             benchmark::DoNotOptimize(out.data());
         }
-        state.counters["cmacs_per_s"] = benchmark::Counter(
-            static_cast<double>(kNchans * ndm * nsamps),
-            benchmark::Counter::kIsIterationInvariantRate);
+        state.counters["cmacs_per_s"] =
+            benchmark::Counter(static_cast<double>(kNchans * ndm * nsamps),
+                               benchmark::Counter::kIsIterationInvariantRate);
     }
 };
 

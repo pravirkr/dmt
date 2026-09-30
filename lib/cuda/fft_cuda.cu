@@ -180,17 +180,17 @@ private:
         const auto rstr  = static_cast<long long>(m_real_stride);
         const auto fstr  = static_cast<long long>(m_freq_stride);
         // Embedding: the row extent in elements (strides handle the rest).
-        const auto rrow = static_cast<long long>(m_length);
-        const auto frow = static_cast<long long>(m_n_complex);
-        const bool in_freq  = m_kind == FFTKind::kC2R || !is_real(m_kind);
-        const bool out_freq = m_kind == FFTKind::kR2C || !is_real(m_kind);
+        const auto rrow       = static_cast<long long>(m_length);
+        const auto frow       = static_cast<long long>(m_n_complex);
+        const bool in_freq    = m_kind == FFTKind::kC2R || !is_real(m_kind);
+        const bool out_freq   = m_kind == FFTKind::kR2C || !is_real(m_kind);
         long long inembed[1]  = {in_freq ? frow : rrow};
         long long onembed[1]  = {out_freq ? frow : rrow};
         const long long idist = in_freq ? fdist : rdist;
         const long long odist = out_freq ? fdist : rdist;
         const long long istr  = in_freq ? fstr : rstr;
         const long long ostr  = out_freq ? fstr : rstr;
-        const cufftType type = real_type(m_kind);
+        const cufftType type  = real_type(m_kind);
 
         gpu_utils::check_gpu_call(cufftCreate(&m_plan),
                                   "CUFFTManager: cufftCreate");

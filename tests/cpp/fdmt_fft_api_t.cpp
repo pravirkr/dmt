@@ -77,7 +77,9 @@ double max_rel(const std::vector<float>& a, const std::vector<float>& b) {
 
 // Restores the segment-cap hook at scope exit.
 struct SegmentCap {
-    explicit SegmentCap(SizeType n) { algorithms::detail::set_fft_segment_cap(n); }
+    explicit SegmentCap(SizeType n) {
+        algorithms::detail::set_fft_segment_cap(n);
+    }
     ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
     SegmentCap(const SegmentCap&)            = delete;
     SegmentCap& operator=(const SegmentCap&) = delete;
@@ -111,11 +113,11 @@ TEST_CASE("FDMTFFT packed and time-major input match float input",
                     }
                 }
             }
-            const auto packed = pack_rows(vals, 2 * kNch, kNs, nbits);
+            const auto packed    = pack_rows(vals, 2 * kNch, kNs, nbits);
             const auto tm_packed = pack_rows(tm, 2 * kNs, kNch, nbits);
             const auto make      = [&] {
-                return FDMTFFT(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1,
-                               true, mode, Exec::cpu(2), 2);
+                return FDMTFFT(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true,
+                               mode, Exec::cpu(2), 2);
             };
             auto f_float  = make();
             auto f_packed = make();
@@ -234,8 +236,8 @@ TEST_CASE("FDMTFFT forced segments equal the single transform",
     for (const auto* mode : {"valid", "full"}) {
         for (const bool frac : {true, false}) {
             CAPTURE(mode, frac);
-            FDMTFFT single(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true,
-                           mode, Exec::cpu(2), 1, frac);
+            FDMTFFT single(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true, mode,
+                           Exec::cpu(2), 1, frac);
             const SegmentCap cap(1024);
             FDMTFFT segmented(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true,
                               mode, Exec::cpu(2), 1, frac);

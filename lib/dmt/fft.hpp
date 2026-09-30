@@ -93,11 +93,10 @@ template <typename T> struct FFTAllocator {
     FFTAllocator()   = default;
     template <typename U> explicit FFTAllocator(const FFTAllocator<U>&) {}
     T* allocate(std::size_t n) {
-        const std::size_t bytes =
-            ((n * sizeof(T)) + kFFTAlignment - 1) / kFFTAlignment *
-            kFFTAlignment;
-        void* ptr = std::aligned_alloc(kFFTAlignment, bytes == 0 ? kFFTAlignment
-                                                                 : bytes);
+        const std::size_t bytes = ((n * sizeof(T)) + kFFTAlignment - 1) /
+                                  kFFTAlignment * kFFTAlignment;
+        void* ptr = std::aligned_alloc(kFFTAlignment,
+                                       bytes == 0 ? kFFTAlignment : bytes);
         if (ptr == nullptr) {
             throw std::bad_alloc();
         }

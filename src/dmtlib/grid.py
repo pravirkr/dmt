@@ -126,6 +126,7 @@ def generate_optimal_dm_grid(
         ``method="snr_loss"``.
     method : str, default="snr_loss"
         Grid generation algorithm:
+
         - "snr_loss": S/N-loss-bounded, non-collapsing, edge-frequency smearing.
         - "levin": Classical Lina Levin (2012) broadening tolerance at band center.
         - "levin_piecewise": DDplan-style piecewise-uniform Levin grid (uniform

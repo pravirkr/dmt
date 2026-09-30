@@ -374,7 +374,7 @@ private:
     int m_nthreads;
     bool m_use_box_smearing;
     FDMTMode m_mode;
-    bool m_frac;                // exact merge delays
+    bool m_frac;                 // exact merge delays
     std::vector<uint8_t> m_kill; // per channel, 1 = keep (empty: all)
 
     const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
@@ -526,14 +526,14 @@ private:
         for (const auto& l : m_levels) {
             nodes += l.sum.size() + l.copy.size();
         }
-        const auto seg = fdmt_fft::choose_segments(
-            m_geom, m_mode, m_nsamps_out, nodes, m_nchans, m_ndms,
-            detail::fft_segment_cap());
-        m_seg_len   = seg.n_fft;
-        m_nseg      = seg.nseg;
-        m_seg_hop   = seg.hop;
-        m_seg_skip  = seg.skip;
-        m_seg_zeros = seg.zeros;
+        const auto seg = fdmt_fft::choose_segments(m_geom, m_mode, m_nsamps_out,
+                                                   nodes, m_nchans, m_ndms,
+                                                   detail::fft_segment_cap());
+        m_seg_len      = seg.n_fft;
+        m_nseg         = seg.nseg;
+        m_seg_hop      = seg.hop;
+        m_seg_skip     = seg.skip;
+        m_seg_zeros    = seg.zeros;
     }
 
     void build_tree_ops() {

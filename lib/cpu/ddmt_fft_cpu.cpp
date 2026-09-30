@@ -91,7 +91,6 @@ struct Geometry {
           c2r(std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n)) {}
 };
 
-
 class DDMTFFTCpuEngine final : public detail::DDMTFFTEngine {
 public:
     DDMTFFTCpuEngine(const plans::DDMTPlan& plan,

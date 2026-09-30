@@ -6,7 +6,7 @@ time shift is a phase ramp, $x(t-\tau) \leftrightarrow
 
 | | `FDMTFFT` | `DDMTFFT` |
 | :--- | :--- | :--- |
-| Algorithm | the FDMT tree, merges as phase ramps | direct sum over channels, per frequency bin (FDD) |
+| Algorithm | the FDMT tree, merges as phase ramps | direct sum over channels, per frequency bin |
 | Delays | fractional merge delays (default); `fractional_delays=False` rounds like FDMT, for equivalence tests only | exact fractional delays, always |
 | Grid | FDMT delay grids (`dt_max`, custom `dt`/DM grids) | any DDMT grid: linear, explicit, Levin, piecewise-uniform Levin |
 | Streaming | `mode="valid"` overlap-save, `"full"`, `"roll"` | DDMT's model: history across calls |
@@ -18,17 +18,6 @@ time shift is a phase ramp, $x(t-\tau) \leftrightarrow
 Both use the same conventions as the time-domain engines: channel `c` at
 `f_min + c * df`, delays referenced to the highest channel, the same DM
 constant, and time at native resolution.
-
-## When to use them
-
-| Use | Engine |
-| :--- | :--- |
-| Fastest blind search, any bit width | `FDMT` (time domain) |
-| Low-bit (1–8 bit) raw data, throughput first | `FDMT`, `SDMT` (integer adds on packed data) |
-| Exact per-channel fractional delays, uniform or piecewise-uniform DM grid | `DDMTFFT` (NUFFT) |
-| Exact per-channel delays on an arbitrary DM list | `DDMTFFT` (`method="brute"`), or `DDMT` if rounding is acceptable |
-| FDMT tree with sub-sample merges (less rounding smear) | `FDMTFFT` (fractional delays by default) |
-| FDMT-identical output from the Fourier engine (equivalence tests only) | `FDMTFFT(fractional_delays=False)` |
 
 The Fourier engines transform to complex float spectra. Low-bit input does
 not make them any faster algorithmically; it only reduces the input bytes read
@@ -54,19 +43,11 @@ sample per channel, so narrow pulses lose S/N. A phase ramp shifts by any
 real amount, at no extra cost:
 
 - `DDMTFFT` delays every channel by its exact $\tau_{d,c} = \mathrm{DM}_d\,
-  r_c$. On a band-limited pulse it recovers the ideal peak to 0.1%, where
-  DDMT loses about 4% (test `DDMTFFT recovers fractional-delay pulses better
-  than DDMT`).
+  r_c$.
 - `FDMTFFT` (fractional delays are its default and its nature) replaces each
   merge's rounded shift with
   the least-squares shift that aligns the mean timing of the head sub-band's
-  channels with the tail's at the node's DM. The children stay on integer
-  delay grids, so this is not simply the unrounded `dt * phi`: in the integer
-  tree a child's trial and the merge shift use the same rounded value, and
-  their errors partly cancel. Rounding away only the merge shift breaks that
-  cancellation and *loses* S/N. The least-squares shift roughly halves the
-  rms per-channel misalignment of the integer tree (0.53 to 0.31 samples at
-  4096 channels and 2049 trials), for about 1.5x the integer mode's time.
+  channels with the tail's at the node's DM.
 - `FDMTFFT(fractional_delays=False)` rounds every merge shift exactly as the
   time-domain FDMT does and reproduces its output through the Fourier domain.
   It exists only for equivalence tests: rounding the shifts gives up what the
@@ -211,36 +192,6 @@ overlap-save segments whose length is chosen from FFTW's own cost estimate.
 The result is the same linear convolution as one long transform. Memory stays
 bounded, and the transform length no longer grows with the block.
 
-## GPU engines
-
-Both engines run on CUDA and HIP with the CPU engines' geometry: the same
-transform lengths, overlap-save segments (one shared rule; a GPU shortens
-them only when device memory is short), delays, NUFFT parameters and
-conventions. Their results agree with the CPU to float rounding (the tests
-use 2e-5 of the output peak).
-
-- **`FDMTFFT`** runs the tree as *programs* over tiles of 32 frequency bins,
-  one bin per lane. A warp applies one merge to 32 bins at a time, so the
-  merge list is read once per 32 bins. The tree is cut into stages. Each
-  program keeps its intermediate levels in shared memory, so only the stage
-  boundaries go through device memory (two stages at the reference point:
-  ~90 KB of traffic per bin, against ~770 KB for a level-by-level tree).
-- **Phases** in both engines come from an exact 0.64 fixed-point turn count
-  per shift, multiplied by the bin index modulo 2^64: no phasor tables and
-  no FP64, which the L40S runs at 1/64 rate.
-- **`DDMTFFT` brute force** holds 8 bins × 4 trials per thread. Each
-  (trial, channel) phasor is set up once and rotated along the bins, and it
-  runs near the FP32 issue limit.
-- **`DDMTFFT` NUFFT** spreads with integer shared-memory atomics. Float
-  shared-memory atomics are compare-and-swap loops on GPUs before sm_90; the
-  integers are scaled per bin, so the rounding stays far below the
-  tolerance. A uniform run whose fine grid would not fit shared memory
-  (above ~4K trials) is transformed as a few equal sub-runs, still by NUFFT.
-- Device-memory calls run asynchronously on the given stream, ordered after
-  the engine's previous work. Host-array calls stage through the device and
-  block. `set_gulp_size()` is stored but not used, as on the CPU, because
-  chunking a call would move the transform boundaries.
-
 ## Performance
 
 At the benchmark reference point (4096 channels, 16K samples, 2049 trials;
@@ -256,29 +207,3 @@ see the [benchmarks](../benchmarks.md) for the sweeps):
 | DDMT | 851 ms | 573 ms | 21 ms | rounded per channel |
 | DDMT-FFT, NUFFT | 111 ms | 127 ms | 10.7 ms | exact per channel |
 | DDMT-FFT, brute force | 3.33 s | 1.35 s | 39 ms | exact per channel |
-
-In 0.5.0 FDMT-FFT took 415 ms on the M1 Pro, 701 ms on the Xeon and 22 ms
-on the L40S.
-
-Where the time goes (reference point; M1 Pro unless noted):
-
-- **`FDMTFFT` is FFT-bound.** 4096 forward and 2049 inverse real FFTs of
-  18432 points take about half the time, and the scatter into bin tiles about
-  a sixth. The whole tree runs out of per-thread cache one 16-bin tile at a
-  time: about 30%, near the cache-bandwidth limit of its indexed operand
-  reads. The FFT alone costs about as much as the whole time-domain FDMT, so
-  on this machine `FDMTFFT` stays about 2x behind `FDMT`. On the Xeon, where
-  FDMT is memory-bound, it is 1.05–1.45x FDMT from 2K trials or 8K samples
-  on.
-- **`DDMTFFT` (NUFFT)** spends roughly a third on the channel FFTs, a third on
-  preparing and spreading the points (a vectorised, register-blocked Horner
-  kernel, the ES kernel at width 7 for $10^{-6}$), and the rest on the fine-grid
-  FFTs.
-- **`DDMTFFT` brute force** is bound by its complex FMA rate: 8 vector
-  operations per 16 complex terms, half of them for the exact phase rotation.
-  That is inherent, since every (trial, channel, bin) needs its own phasor.
-- **On the L40S** the Fourier engines are cuFFT-bound: the forward and
-  inverse transforms take about half of `FDMTFFT` (whose tree stages run
-  near the shared-memory limit) and of `DDMTFFT`'s NUFFT path (spreading is
-  about a fifth). Brute force runs near the card's FP32 issue rate, ~10
-  instructions per complex term.

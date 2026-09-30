@@ -151,9 +151,8 @@ Measured on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads) and
 an NVIDIA L40S, all with dmt 0.6.0. The data are 4096 channels (704–1216 MHz,
 81.92 µs) in 16K-sample blocks (1.34 s), processed as a stream.
 
-- **Left:** time per block for FDMT, FFT-based FDMT (fractional delays),
-  brute-force DDMT, SDMT (exact DDMT sums with shared partial sums) and
-  DDMT-FFT (exact fractional delays, NUFFT) on the same DM grid. The grey line is real time.
+- **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT,
+  SDMT (exact DDMT sums with shared partial sums) and DDMT-FFT (NUFFT-accelerated) on the same DM grid. The grey line is real time.
 - **Right:** how many times faster than real time FDMT runs, by input bit
   width.
 
@@ -168,7 +167,9 @@ which runs 6–8× faster than real time on both CPUs. On the L40S, FDMT is 4.5�
 faster than DDMT (whose DM-tiled kernels run 63–95× faster than real time) and
 1.8× faster than SDMT (159–179× real time). FDMT runs 25–53× faster than real
 time on 8 CPU threads and 282× on the L40S, rising to 615× with packed 1-bit
-input.
+input. The Fourier-domain engines add exact fractional delays with sub-sample
+precision: **FDMT-FFT** trails FDMT by only 1.2–1.4× on the Xeon and L40S
+(5.5 ms on GPU), while **DDMT-FFT (NUFFT)** is 2–4.5× faster than brute-force DDMT.
 
 All sweeps, per-machine numbers and the operation-count comparison are on the
 [Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page.

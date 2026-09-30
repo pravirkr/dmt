@@ -23,8 +23,8 @@
 
 namespace dmt::fourier_gpu {
 
-inline constexpr int kBlock          = 256;
-inline constexpr unsigned kMaxGridY  = 65535;
+inline constexpr int kBlock         = 256;
+inline constexpr unsigned kMaxGridY = 65535;
 
 /// Grow-only raw device buffer: no default-stream work (unlike
 /// thrust::device_vector), contents undefined after a growth.
@@ -178,10 +178,10 @@ void hermitian_edges(T* spec,
     if (nrows == 0) {
         return;
     }
-    kernel_hermitian_edges<T><<<blocks_for(static_cast<int64_t>(nrows)),
-                                kBlock, 0, s>>>(
-        spec, static_cast<int64_t>(nrows), static_cast<int64_t>(row_dist),
-        static_cast<int64_t>(n_bins), (n_fft % 2 == 0) ? 1 : 0);
+    kernel_hermitian_edges<T>
+        <<<blocks_for(static_cast<int64_t>(nrows)), kBlock, 0, s>>>(
+            spec, static_cast<int64_t>(nrows), static_cast<int64_t>(row_dist),
+            static_cast<int64_t>(n_bins), (n_fft % 2 == 0) ? 1 : 0);
 }
 
 /// Time-major packed (nbeams, nsamps, nchans) -> channel-major float
@@ -234,9 +234,9 @@ void launch_unpack_time_major(const uint8_t* packed,
                     static_cast<unsigned>((nchans + 31) / 32),
                     static_cast<unsigned>(nbeams));
     gpu_utils::check_kernel_launch_params(grid, block);
-    kernel_unpack_time_major<NB><<<grid, block, 0, s>>>(
-        packed, out, static_cast<int>(nchans), static_cast<int64_t>(nsamps),
-        samp_bytes);
+    kernel_unpack_time_major<NB>
+        <<<grid, block, 0, s>>>(packed, out, static_cast<int>(nchans),
+                                static_cast<int64_t>(nsamps), samp_bytes);
 }
 
 /// Time-major packed input at `nbits` -> channel-major float rows.

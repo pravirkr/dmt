@@ -29,10 +29,10 @@ namespace dmt::bench_suite {
 namespace {
 
 using algorithms::DDMT;
-using algorithms::FDMT;
 using algorithms::DDMTFFT;
 using algorithms::DDMTFFTMethod;
 using algorithms::DDMTFFTOptions;
+using algorithms::FDMT;
 using algorithms::FDMTFFT;
 using algorithms::SDMT;
 
@@ -218,18 +218,17 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
 // in and out; float or packed input.
 template <DDMTFFTMethod kMethod, bool kHost>
 void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
-    constexpr auto kAlgo = kMethod == DDMTFFTMethod::kBrute
-                               ? Algo::kDDMTFFTBrute
-                               : Algo::kDDMTFFT;
-    const auto plan      = make_plan(p);
+    constexpr auto kAlgo =
+        kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
+    const auto plan = make_plan(p);
     if (skip_if_over_device_budget(state, kAlgo, plan, p)) {
         return;
     }
     try {
         const auto dms = plan.get_dm_grid_final();
-        DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp,
-                    std::span<const float>(dms), bench_gpu_exec(), p.nbits, {},
-                    1, DDMTFFTOptions{.method = kMethod});
+        DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
+                    bench_gpu_exec(), p.nbits, {}, 1,
+                    DDMTFFTOptions{.method = kMethod});
         const auto ndms   = dms.size();
         const auto n_cold = ndms * eng.get_output_nsamps(p.nsamps);
         const auto n_warm = ndms * p.nsamps;
