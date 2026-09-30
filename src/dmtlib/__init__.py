@@ -3,7 +3,7 @@ from importlib import metadata
 try:
     __version__ = metadata.version(__name__)
 except metadata.PackageNotFoundError:
-    __version__ = "0.5.0"
+    __version__ = "0.6.0"
 
 from . import libdmt as _libdmt
 from .grid import (
@@ -13,6 +13,7 @@ from .grid import (
 )
 from .libdmt import (
     DDMT,
+    DDMTFFT,
     FDMT,
     FDMTFFT,
     SDMT,
@@ -22,11 +23,17 @@ from .libdmt import (
     FDMTComplexity,
     FDMTMemoryUsage,
     FDMTPlan,
+    FFTPlanner,
     LevinConfig,
     add_frb_track,
     available_backends,
     compute_fdmt,
     compute_fdmt_fft,
+    export_fft_wisdom,
+    forget_fft_wisdom,
+    get_fft_planner,
+    import_fft_wisdom,
+    set_fft_planner,
 )
 
 _LOG_LEVELS = {"off": 0, "debug": 1}
@@ -56,6 +63,7 @@ def get_log_level() -> str:
 
 __all__ = [
     "DDMT",
+    "DDMTFFT",
     "FDMT",
     "FDMTFFT",
     "SDMT",
@@ -65,14 +73,20 @@ __all__ = [
     "FDMTComplexity",
     "FDMTMemoryUsage",
     "FDMTPlan",
+    "FFTPlanner",
     "LevinConfig",
     "add_frb_track",
     "available_backends",
     "calculate_snr_loss",
     "compute_fdmt",
     "compute_fdmt_fft",
+    "export_fft_wisdom",
+    "forget_fft_wisdom",
     "generate_optimal_dm_grid",
     "generate_optimal_dt_grid",
+    "get_fft_planner",
     "get_log_level",
+    "import_fft_wisdom",
+    "set_fft_planner",
     "set_log_level",
 ]

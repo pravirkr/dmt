@@ -12,7 +12,7 @@ set(TARGET_BENCHMARKS_MEM ${PROJECT_NAME}_bench_mem)
 # Collect CPU benchmark sources: FDMT, FDMT-FFT, and DDMT on equal footing.
 set(BENCH_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cpu_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cpu_b.cpp
 )
 
 # GPU benchmark sources (CUDA source, built for CUDA or HIP): same three
@@ -20,7 +20,7 @@ set(BENCH_SOURCES
 if(DMT_GPU_BACKEND)
   set(BENCH_SOURCES_CUDA
       ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cuda_b.cu
-      ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cuda_b.cu
   )
   list(APPEND BENCH_SOURCES ${BENCH_SOURCES_CUDA})
 
@@ -69,6 +69,7 @@ set(BENCH_SOURCES_MEM
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_mem_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_mem_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_mem_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_mem_b.cpp
 )
 
 add_executable(${TARGET_BENCHMARKS_MEM} ${BENCH_SOURCES_MEM})

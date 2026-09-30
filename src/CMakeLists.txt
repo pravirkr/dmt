@@ -16,6 +16,7 @@ pybind11_add_module(
   bindings/bind_fdmt.cpp
   bindings/bind_cfdmt.cpp
   bindings/bind_ddmt.cpp
+  bindings/bind_ddmt_fft.cpp
 )
 target_compile_features(${DMT_PYMODULE_NAME} PRIVATE cxx_std_20)
 target_include_directories(

@@ -389,13 +389,28 @@ void bind_plans(py::module_& mod) {
             Intrinsic pulse width in seconds.
         tol : float
             Pulse-broadening tolerance factor (> 1.0, typically 1.10 - 1.25).
+        piecewise_uniform : bool, optional
+            Use the DDplan-style piecewise-uniform grid
+            (:meth:`DDMTPlan.generate_levin_dm_grid_piecewise`): uniform
+            segments where the Levin step doubles, never coarser than Levin.
+            Lets :class:`DDMTFFT` run its NUFFT on every segment. Default
+            False.
         )doc")
-        .def(py::init<float, float, float, float>(), "dm_start"_a, "dm_end"_a,
-             "pulse_width"_a, "tol"_a = 1.25F)
+        .def(py::init([](float dm_start, float dm_end, float pulse_width,
+                         float tol, bool piecewise_uniform) {
+                 return LevinConfig{.dm_start          = dm_start,
+                                    .dm_end            = dm_end,
+                                    .pulse_width       = pulse_width,
+                                    .tol               = tol,
+                                    .piecewise_uniform = piecewise_uniform};
+             }),
+             "dm_start"_a, "dm_end"_a, "pulse_width"_a, "tol"_a = 1.25F,
+             "piecewise_uniform"_a = false)
         .def_readwrite("dm_start", &LevinConfig::dm_start)
         .def_readwrite("dm_end", &LevinConfig::dm_end)
         .def_readwrite("pulse_width", &LevinConfig::pulse_width)
-        .def_readwrite("tol", &LevinConfig::tol);
+        .def_readwrite("tol", &LevinConfig::tol)
+        .def_readwrite("piecewise_uniform", &LevinConfig::piecewise_uniform);
 
     py::class_<DDMTPlan>(mod, "DDMTPlan",
                          R"doc(
@@ -451,6 +466,27 @@ void bind_plans(py::module_& mod) {
             },
             "dm_start"_a, "dm_end"_a, "tsamp"_a, "pulse_width"_a, "f_min"_a,
             "f_max"_a, "nchans"_a, "tol"_a = 1.25F)
+        .def_static(
+            "generate_levin_dm_grid_piecewise",
+            [](float dm_start, float dm_end, float tsamp, float pulse_width,
+               float f_min, float f_max, SizeType nchans, float tol,
+               SizeType min_run) {
+                return as_pyarray(DDMTPlan::generate_levin_dm_grid_piecewise(
+                    dm_start, dm_end, tsamp, pulse_width, f_min, f_max, nchans,
+                    tol, min_run));
+            },
+            "dm_start"_a, "dm_end"_a, "tsamp"_a, "pulse_width"_a, "f_min"_a,
+            "f_max"_a, "nchans"_a, "tol"_a = 1.25F, "min_run"_a = 32,
+            R"doc(
+            DDplan-style piecewise-uniform Levin grid.
+
+            The DM range is split where the Levin step doubles; each segment
+            is uniformly spaced at the smallest Levin step inside it (never
+            coarser than :meth:`generate_levin_dm_grid`, typically 1.2-1.4x
+            its trials) and holds at least ``min_run`` trials.
+            :class:`DDMTFFT` detects the segments and runs one NUFFT per
+            segment instead of the brute-force sum.
+            )doc")
         .def_property_readonly("f_min", &DDMTPlan::get_f_min)
         .def_property_readonly("f_max", &DDMTPlan::get_f_max)
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)

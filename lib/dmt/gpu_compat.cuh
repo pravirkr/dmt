@@ -76,6 +76,7 @@ namespace cuda = ::thrust::hip;
 #define cudaFreeHost hipHostFree
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync
+#define cudaMemsetAsync hipMemsetAsync
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamDestroy hipStreamDestroy
@@ -108,6 +109,7 @@ func_set_attribute(Kernel kernel, hipFuncAttribute attr, int value) {
 #define cufftCreate hipfftCreate
 #define cufftDestroy hipfftDestroy
 #define cufftMakePlanMany hipfftMakePlanMany
+#define cufftMakePlanMany64 hipfftMakePlanMany64
 #define cufftSetAutoAllocation hipfftSetAutoAllocation
 #define cufftSetWorkArea hipfftSetWorkArea
 #define cufftSetStream hipfftSetStream

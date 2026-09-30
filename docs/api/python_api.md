@@ -32,6 +32,11 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: dmtlib.DDMTFFT
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: dmtlib.FDMTMemoryUsage
    :members:
    :undoc-members:
@@ -82,6 +87,22 @@ now (see the C++ API reference).
 .. autofunction:: dmtlib.compute_fdmt_fft
 
 .. autofunction:: dmtlib.add_frb_track
+```
+
+## FFT Planner (CPU)
+
+```{eval-rst}
+.. autoclass:: dmtlib.FFTPlanner
+
+.. autofunction:: dmtlib.set_fft_planner
+
+.. autofunction:: dmtlib.get_fft_planner
+
+.. autofunction:: dmtlib.import_fft_wisdom
+
+.. autofunction:: dmtlib.export_fft_wisdom
+
+.. autofunction:: dmtlib.forget_fft_wisdom
 ```
 
 ## Logging

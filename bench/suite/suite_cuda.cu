@@ -17,6 +17,7 @@
 #include <benchmark/benchmark.h>
 
 #include "dmt/algorithms/ddmt.hpp"
+#include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/algorithms/sdmt.hpp"
@@ -28,6 +29,9 @@ namespace dmt::bench_suite {
 namespace {
 
 using algorithms::DDMT;
+using algorithms::DDMTFFT;
+using algorithms::DDMTFFTMethod;
+using algorithms::DDMTFFTOptions;
 using algorithms::FDMT;
 using algorithms::FDMTFFT;
 using algorithms::SDMT;
@@ -118,22 +122,51 @@ void bench_fdmt_cuda_host(benchmark::State& state, Point p) {
     set_counters(state, plan, p, 0);
 }
 
+// FDMT-FFT: device-resident, or (kHost) host arrays in and out; float or
+// packed input.
+template <bool kFrac, bool kHost>
 void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
     const auto plan = make_plan(p);
-    if (skip_if_over_device_budget(state, Algo::kFDMTFFT, plan, p)) {
+    if (skip_if_over_device_budget(
+            state, kFrac ? Algo::kFDMTFFTFrac : Algo::kFDMTFFT, plan, p)) {
         return;
     }
     try {
         FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
-                     true, "valid", bench_gpu_exec());
-        const auto host = make_float_input(kNchans * p.nsamps);
-        const thrust::device_vector<float> wf(host.begin(), host.end());
-        thrust::device_vector<float> dmt(plan.get_dmt_size());
-        fdmt.execute(dspan_c(wf), dspan(dmt));
-        BENCH_GPU_TRY(cudaDeviceSynchronize());
-        for (auto _ : state) {
-            const GPUEventTimer timer{state};
-            fdmt.execute(dspan_c(wf), dspan(dmt));
+                     true, "valid", bench_gpu_exec(), 1, kFrac);
+        const auto run = [&](const auto& call) {
+            call(); // warm-up (history, plans, staging)
+            BENCH_GPU_TRY(cudaDeviceSynchronize());
+            for (auto _ : state) {
+                const GPUEventTimer timer{state};
+                call();
+            }
+        };
+        if constexpr (kHost) {
+            std::vector<float> dmt(plan.get_dmt_size());
+            if (p.nbits == 32) {
+                const auto wf = make_float_input(kNchans * p.nsamps);
+                run([&] { fdmt.execute(wf, dmt); });
+            } else {
+                const auto wf =
+                    make_packed_input(packed_bytes(p.nsamps, p.nbits));
+                run([&] {
+                    fdmt.execute(std::span<const uint8_t>(wf), p.nbits, dmt);
+                });
+            }
+        } else {
+            thrust::device_vector<float> dmt(plan.get_dmt_size());
+            if (p.nbits == 32) {
+                const auto host = make_float_input(kNchans * p.nsamps);
+                const thrust::device_vector<float> wf(host.begin(), host.end());
+                run([&] { fdmt.execute(dspan_c(wf), dspan(dmt)); });
+            } else {
+                const auto host =
+                    make_packed_input(packed_bytes(p.nsamps, p.nbits));
+                const thrust::device_vector<uint8_t> wf(host.begin(),
+                                                        host.end());
+                run([&] { fdmt.execute(dspan_c(wf), p.nbits, dspan(dmt)); });
+            }
         }
     } catch (const std::bad_alloc&) {
         state.SkipWithError("skipped: out of device memory");
@@ -181,6 +214,68 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
     set_ddmt_rate(state, plan, p);
 }
 
+// DDMT-FFT (NUFFT or brute force): device-resident, or (kHost) host arrays
+// in and out; float or packed input.
+template <DDMTFFTMethod kMethod, bool kHost>
+void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
+    constexpr auto kAlgo =
+        kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
+    const auto plan = make_plan(p);
+    if (skip_if_over_device_budget(state, kAlgo, plan, p)) {
+        return;
+    }
+    try {
+        const auto dms = plan.get_dm_grid_final();
+        DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
+                    bench_gpu_exec(), p.nbits, {}, 1,
+                    DDMTFFTOptions{.method = kMethod});
+        const auto ndms   = dms.size();
+        const auto n_cold = ndms * eng.get_output_nsamps(p.nsamps);
+        const auto n_warm = ndms * p.nsamps;
+        // The first (cold) call fills the history and has fewer outputs.
+        const auto run = [&](const auto& call) {
+            call(n_cold);
+            BENCH_GPU_TRY(cudaDeviceSynchronize());
+            for (auto _ : state) {
+                const GPUEventTimer timer{state};
+                call(n_warm);
+            }
+        };
+        const bool packed = p.nbits != 32;
+        const auto fin    = make_float_input(packed ? 0 : kNchans * p.nsamps);
+        const auto pin =
+            make_packed_input(packed ? packed_bytes(p.nsamps, p.nbits) : 0);
+        if constexpr (kHost) {
+            std::vector<float> dmt(n_warm);
+            run([&](SizeType n) {
+                const std::span<float> out(dmt.data(), n);
+                if (packed) {
+                    eng.execute(std::span<const uint8_t>(pin), p.nsamps, out);
+                } else {
+                    eng.execute(fin, out);
+                }
+            });
+        } else {
+            const thrust::device_vector<float> wf(fin.begin(), fin.end());
+            const thrust::device_vector<uint8_t> wp(pin.begin(), pin.end());
+            thrust::device_vector<float> dmt(n_warm);
+            run([&](SizeType n) {
+                const DeviceSpan<float> out(dspan(dmt).data(), n);
+                if (packed) {
+                    eng.execute(dspan_c(wp), p.nsamps, out);
+                } else {
+                    eng.execute(dspan_c(wf), out);
+                }
+            });
+        }
+    } catch (const std::bad_alloc&) {
+        state.SkipWithError("skipped: out of device memory");
+        return;
+    }
+    set_counters(state, plan, p, 0);
+    set_ddmt_rate(state, plan, p);
+}
+
 bool gpu_device_available() {
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
@@ -200,7 +295,13 @@ void register_cuda() {
         for (const auto& p : sweep_points(sweep)) {
             add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
             add(bench_name(Algo::kFDMTFFT, DMT_GPU_NAME, p),
-                bench_fdmt_fft_cuda, p);
+                bench_fdmt_fft_cuda<false, false>, p);
+            add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
+                bench_fdmt_fft_cuda<true, false>, p);
+            add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
+                bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
+            add(bench_name(Algo::kDDMTFFTBrute, DMT_GPU_NAME, p),
+                bench_ddmt_fft_cuda<DDMTFFTMethod::kBrute, false>, p);
             add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
                 bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
             add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
@@ -215,6 +316,14 @@ void register_cuda() {
             bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
         add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
             bench_ddmt_cuda<SDMT, Algo::kSDMT>, p);
+        add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
+            bench_fdmt_fft_cuda<true, false>, p);
+        add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME "_host", p),
+            bench_fdmt_fft_cuda<true, true>, p);
+        add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
+            bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
+        add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME "_host", p),
+            bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, true>, p);
     }
 }
 

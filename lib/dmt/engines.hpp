@@ -13,7 +13,9 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
+#include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
@@ -206,11 +208,90 @@ std::unique_ptr<DDMTEngine> make_sdmt_cpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
 std::unique_ptr<DDMTEngine> make_sdmt_gpu(const plans::DDMTPlan& plan,
                                           const DDMTEngineConfig& cfg);
+// ---------------------------------------------------------------------------
+// DDMTFFT
+// ---------------------------------------------------------------------------
+
+struct DDMTFFTEngineConfig {
+    SizeType nbeams{1};
+    Exec exec{};
+    DDMTFFTOptions options{}; // method resolved by the facade (never kAuto)
+};
+
+class DDMTFFTEngine {
+public:
+    DDMTFFTEngine()                                = default;
+    virtual ~DDMTFFTEngine()                       = default;
+    DDMTFFTEngine(const DDMTFFTEngine&)            = delete;
+    DDMTFFTEngine& operator=(const DDMTFFTEngine&) = delete;
+    DDMTFFTEngine(DDMTFFTEngine&&)                 = delete;
+    DDMTFFTEngine& operator=(DDMTFFTEngine&&)      = delete;
+
+    // Host memory: every backend.
+    virtual void execute(std::span<const float> waterfall,
+                         std::span<float> dmt)            = 0;
+    virtual void execute(std::span<const uint8_t> waterfall_packed,
+                         SizeType nsamps,
+                         std::span<float> dmt)            = 0;
+    virtual void execute_time_major(std::span<const uint8_t> filterbank_packed,
+                                    SizeType nsamps,
+                                    std::span<float> dmt) = 0;
+    virtual void save_history(std::span<float> out) const = 0;
+    virtual void load_history(std::span<const float> in)  = 0;
+
+    // Device memory: GPU backends.
+    virtual void execute(DeviceSpan<const float> waterfall,
+                         DeviceSpan<float> dmt,
+                         Stream stream);
+    virtual void execute(DeviceSpan<const uint8_t> waterfall_packed,
+                         SizeType nsamps,
+                         DeviceSpan<float> dmt,
+                         Stream stream);
+    virtual void save_history(DeviceSpan<float> out, Stream stream) const;
+    virtual void load_history(DeviceSpan<const float> in, Stream stream);
+
+    [[nodiscard]] virtual SizeType
+    get_output_nsamps(SizeType input_nsamps) const noexcept            = 0;
+    virtual void reset_history() noexcept                              = 0;
+    [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
+    [[nodiscard]] virtual SizeType max_delay() const noexcept          = 0;
+    virtual void set_gulp_size(SizeType gulp_size)                     = 0;
+    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept      = 0;
+    /// "nufft", "piecewise_nufft" or "brute": how the grid's trials are
+    /// summed, the same on every backend (a GPU engine transforms a run
+    /// too long for shared memory as equal NUFFT sub-runs).
+    [[nodiscard]] virtual std::string_view method_used() const noexcept = 0;
+
+protected:
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
+};
+
+/// method_used() of an engine running `nruns` NUFFT runs plus `nbrute`
+/// brute-force trials.
+[[nodiscard]] inline std::string_view
+ddmt_fft_method_used(SizeType nruns, SizeType nbrute) noexcept {
+    if (nruns == 0) {
+        return "brute";
+    }
+    return (nruns == 1 && nbrute == 0) ? "nufft" : "piecewise_nufft";
+}
+
+std::unique_ptr<DDMTFFTEngine>
+make_ddmt_fft_cpu(const plans::DDMTPlan& plan, const DDMTFFTEngineConfig& cfg);
+std::unique_ptr<DDMTFFTEngine>
+make_ddmt_fft_gpu(const plans::DDMTPlan& plan, const DDMTFFTEngineConfig& cfg);
+
 // Testing hook: while set, SDMT GPU engines constructed afterwards run the
 // shared-sum kernel whenever its programs fit, even where the DDMT kernel is
 // estimated to be faster (so tests cover it on small plans).
 void set_sdmt_gpu_always_shared(bool on) noexcept;
 [[nodiscard]] bool sdmt_gpu_always_shared() noexcept;
+
+// Testing hook: while non-zero, FDMTFFT and DDMTFFT engines constructed
+// afterwards cap their overlap-save transform length at this many samples
+// (so tests cover several segments on small inputs). 0: no cap.
+void set_fft_segment_cap(SizeType nsamps) noexcept;
+[[nodiscard]] SizeType fft_segment_cap() noexcept;
 
 // ---------------------------------------------------------------------------
 // FDMT-FFT
@@ -221,6 +302,11 @@ struct FDMTFFTEngineConfig {
     FDMTMode mode{FDMTMode::kValid};
     SizeType nbeams{1};
     Exec exec{};
+    // Fractional merge delays (fdmt_fft_common.hpp); false only for
+    // FDMT-equivalence tests.
+    bool fractional_delays{true};
+    // Per channel, 1 = keep (empty: keep all); killed channels read as zero.
+    std::vector<uint8_t> kill_mask{};
 };
 
 class FDMTFFTEngine {
@@ -232,10 +318,19 @@ public:
     FDMTFFTEngine(FDMTFFTEngine&&)                 = delete;
     FDMTFFTEngine& operator=(FDMTFFTEngine&&)      = delete;
 
-    // Host memory: every backend.
+    // Host memory: every backend. Packed input is (nbeams, nchans,
+    // row bytes) at `nbits` (LSB first), or with `time_major` (nbeams,
+    // nsamps, sample bytes), as FDMT's and DDMT's packed layouts.
     virtual void execute(std::span<const float> waterfall,
                          std::span<float> dmt)                           = 0;
+    virtual void execute(std::span<const uint8_t> packed,
+                         SizeType nbits,
+                         bool time_major,
+                         std::span<float> dmt)                           = 0;
     virtual void reset(std::span<const float> waterfall,
+                       std::span<float> dmt)                             = 0;
+    virtual void reset(std::span<const uint8_t> packed,
+                       SizeType nbits,
                        std::span<float> dmt)                             = 0;
     [[nodiscard]] virtual std::span<const float> view_level_data() const = 0;
     [[nodiscard]] virtual algorithms::FDMTSubbandView
@@ -245,7 +340,15 @@ public:
     virtual void execute(DeviceSpan<const float> waterfall,
                          DeviceSpan<float> dmt,
                          Stream stream);
+    virtual void execute(DeviceSpan<const uint8_t> packed,
+                         SizeType nbits,
+                         DeviceSpan<float> dmt,
+                         Stream stream);
     virtual void reset(DeviceSpan<const float> waterfall,
+                       DeviceSpan<float> dmt,
+                       Stream stream);
+    virtual void reset(DeviceSpan<const uint8_t> packed,
+                       SizeType nbits,
                        DeviceSpan<float> dmt,
                        Stream stream);
     [[nodiscard]] virtual DeviceSpan<const float>
@@ -262,6 +365,13 @@ public:
     [[nodiscard]] virtual bool is_finished() const noexcept                 = 0;
 
     virtual void reset_history() noexcept = 0;
+    // Valid-mode overlap history, [beam][chan][overlap] on every backend
+    // (empty in the other modes).
+    [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
+    virtual void save_history(std::span<float> out) const              = 0;
+    virtual void load_history(std::span<const float> in)               = 0;
+    virtual void save_history(DeviceSpan<float> out, Stream stream) const;
+    virtual void load_history(DeviceSpan<const float> in, Stream stream);
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

@@ -1,7 +1,9 @@
 #pragma once
 
 // Published benchmark suite (dmt_bench_suite): one fixed data configuration
-// shared by every algorithm and backend, so FDMT, FDMT-FFT, DDMT and SDMT land
+// shared by every algorithm and backend, so FDMT, FDMT-FFT (integer and
+// fractional merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force)
+// land
 // on the same plots. Only the block length (nsamps), the number of DM trials
 // (via dt_max) and the input bit width are swept. See bench/README.md.
 
@@ -36,7 +38,15 @@ inline const std::vector<IndexType> kDtMaxSweep = {256, 512, 1024, 2048, 4096};
 inline const std::vector<SizeType> kNbitsSweep  = {1, 2, 4, 8, 16, 32};
 
 enum class Sweep { kNsamps, kNdms, kNbits };
-enum class Algo { kFDMT, kFDMTFFT, kDDMT, kSDMT };
+enum class Algo {
+    kFDMT,
+    kFDMTFFT,
+    kFDMTFFTFrac,
+    kDDMT,
+    kSDMT,
+    kDDMTFFT,
+    kDDMTFFTBrute,
+};
 
 struct Point {
     Sweep sweep;
@@ -67,6 +77,12 @@ inline std::string_view algo_name(Algo a) {
         return "DDMT";
     case Algo::kSDMT:
         return "SDMT";
+    case Algo::kFDMTFFTFrac:
+        return "FDMT-FFT-frac";
+    case Algo::kDDMTFFT:
+        return "DDMT-FFT";
+    case Algo::kDDMTFFTBrute:
+        return "DDMT-FFT-brute";
     }
     return "?";
 }
@@ -160,9 +176,13 @@ estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
     switch (algo) {
     case Algo::kFDMT: // caller buffer + internal ping-pong half
         return input + (2.0 * b);
-    case Algo::kFDMTFFT: // 2 complex ping-pong + IFFT buffers + time rows
+    case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
+    case Algo::kFDMTFFTFrac:
+    case Algo::kDDMTFFT:
+    case Algo::kDDMTFFTBrute:
         return input + d +
-               (32.0 * static_cast<double>(plan.get_fft_buffer_size()));
+               (10.0 * static_cast<double>(plan.get_fft_size()) *
+                static_cast<double>(kNchans + plan.get_dmt_ndms()));
     case Algo::kDDMT: // output + one block of history per channel
     case Algo::kSDMT:
         return input + d + (static_cast<double>(kNchans) * 4.0 * p.dt_max);

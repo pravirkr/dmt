@@ -39,7 +39,7 @@ project = "dmt"
 author = "Pravir Kumar"
 year = datetime.datetime.now(tz=datetime.UTC).date().year
 copyright = f"{year}, {author}"  # noqa: A001
-release = getattr(dmtlib, "__version__", None) or "0.5.0"
+release = getattr(dmtlib, "__version__", None) or "0.6.0"
 version = release
 master_doc = "index"
 repo_url = "https://github.com/pravirkr/dmt"
@@ -407,13 +407,36 @@ def _convenience_functions_rst() -> str:
         'std::string_view mode="valid", Exec exec={}, '
         "SizeType nbeams=1)"
     )
+    linear_fft = (
+        "(std::span< const float > waterfall, float f_min, float f_max, "
+        "SizeType nchans, SizeType nsamps, float tsamp, IndexType dt_max, "
+        "IndexType dt_min=0, SizeType dt_step=1, bool use_box_smearing=true, "
+        'std::string_view mode="valid", Exec exec={}, '
+        "SizeType nbeams=1, bool fractional_delays=true)"
+    )
+    dt_grid_fft = (
+        "(std::span< const float > waterfall, float f_min, float f_max, "
+        "SizeType nchans, SizeType nsamps, float tsamp, "
+        "const std::vector< IndexType > &dt_grid, "
+        "bool use_box_smearing=true, "
+        'std::string_view mode="valid", Exec exec={}, '
+        "SizeType nbeams=1, bool fractional_delays=true)"
+    )
+    dm_grid_fft = (
+        "(std::span< const float > waterfall, float f_min, float f_max, "
+        "SizeType nchans, SizeType nsamps, float tsamp, "
+        "const std::vector< float > &dm_grid, "
+        "bool use_box_smearing=true, "
+        'std::string_view mode="valid", Exec exec={}, '
+        "SizeType nbeams=1, bool fractional_delays=true)"
+    )
     blocks = [
         _doxygen_function("dmt::algorithms::compute_fdmt", linear),
         _doxygen_function("dmt::algorithms::compute_fdmt", dt_grid),
         _doxygen_function("dmt::algorithms::compute_fdmt", dm_grid),
-        _doxygen_function("dmt::algorithms::compute_fdmt_fft", linear),
-        _doxygen_function("dmt::algorithms::compute_fdmt_fft", dt_grid),
-        _doxygen_function("dmt::algorithms::compute_fdmt_fft", dm_grid),
+        _doxygen_function("dmt::algorithms::compute_fdmt_fft", linear_fft),
+        _doxygen_function("dmt::algorithms::compute_fdmt_fft", dt_grid_fft),
+        _doxygen_function("dmt::algorithms::compute_fdmt_fft", dm_grid_fft),
         _doxygen_function("dmt::algorithms::add_frb_track"),
     ]
     return "\n".join(blocks)
@@ -450,6 +473,17 @@ Compute Engines (``dmt::algorithms``)
    :project: dmt
    :members:
 
+.. doxygenclass:: dmt::algorithms::DDMTFFT
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::DDMTFFTOptions
+   :project: dmt
+   :members:
+
+.. doxygenenum:: dmt::algorithms::DDMTFFTMethod
+   :project: dmt
+
 .. doxygenstruct:: dmt::algorithms::FDMTSubbandView
    :project: dmt
    :members:
@@ -469,6 +503,12 @@ Backends (``dmt/common/backend.hpp``)
 -------------------------------------
 
 .. doxygenfile:: backend.hpp
+   :project: dmt
+
+FFT settings (``dmt/common/fft_config.hpp``)
+--------------------------------------------
+
+.. doxygenfile:: fft_config.hpp
    :project: dmt
 
 Plans & Geometry (``dmt::plans``)

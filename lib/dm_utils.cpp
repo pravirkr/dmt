@@ -187,6 +187,80 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
     return dm_table;
 }
 
+std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
+                                                    float dm_end,
+                                                    float tsamp,
+                                                    float pulse_width,
+                                                    float f_min,
+                                                    float f_max,
+                                                    SizeType nchans,
+                                                    float tol,
+                                                    SizeType min_run) {
+    const auto levin = generate_levin_dm_grid(
+        dm_start, dm_end, tsamp, pulse_width, f_min, f_max, nchans, tol);
+    if (levin.size() < 2) {
+        return levin;
+    }
+    min_run = std::max<SizeType>(min_run, 1);
+    // Local Levin step at trial i (non-decreasing in practice; the minimum
+    // over a segment is used, so no segment is ever coarser than Levin).
+    const auto n  = levin.size();
+    const auto st = [&](SizeType i) {
+        return static_cast<double>(levin[i + 1]) -
+               static_cast<double>(levin[i]);
+    };
+    const double end = static_cast<double>(levin.back());
+    std::vector<float> out;
+    double a   = static_cast<double>(levin.front());
+    SizeType i = 0; // Levin index with levin[i] <= a
+    while (a < end) {
+        while (i + 2 < n && static_cast<double>(levin[i + 1]) <= a) {
+            ++i;
+        }
+        // Segment: from a while the Levin step stays below twice its value
+        // at a (DDplan-style doublings), at that smallest step.
+        double step = st(i);
+        SizeType j  = i;
+        while (j + 2 < n && st(j + 1) < 2.0 * st(i)) {
+            ++j;
+            step = std::min(step, st(j));
+        }
+        const double b = std::min(end, static_cast<double>(levin[j + 1]));
+        auto count     = static_cast<SizeType>(std::ceil((b - a) / step));
+        if (count < min_run) {
+            // Too short for the NUFFT: refine it (never coarser).
+            step  = (b - a) / static_cast<double>(min_run);
+            count = min_run;
+        }
+        count = std::max<SizeType>(count, 1);
+        for (SizeType q = 0; q < count; ++q) {
+            out.push_back(
+                static_cast<float>(a + (step * static_cast<double>(q))));
+        }
+        a += step * static_cast<double>(count);
+    }
+    // The last point closes the final run (exactly one more step).
+    out.push_back(static_cast<float>(a));
+    return out;
+}
+
+SizeType next_fft_size(SizeType n) {
+    // Even lengths only: R2C/C2R of an odd length loses the Nyquist bin
+    // symmetry FFTW exploits. Search m = 2 * (7-smooth) >= n.
+    const SizeType half = std::max<SizeType>(1, (n + 1) / 2);
+    for (SizeType m = half;; ++m) {
+        SizeType r = m;
+        for (const SizeType p : {2U, 3U, 5U, 7U}) {
+            while (r % p == 0) {
+                r /= p;
+            }
+        }
+        if (r == 1) {
+            return 2 * m;
+        }
+    }
+}
+
 SizeType minimum_overlap(float dm_max,
                          float fcenter,
                          float bw,

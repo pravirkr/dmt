@@ -14,7 +14,8 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     Python bindings for the Dispersion Measure Transform library.
 
     This extension module is imported as ``dmtlib.libdmt``. The public
-    classes (``FDMT``, ``FDMTFFT``, ``CohFDMT``, ``DDMT`` and their plans)
+    classes (``FDMT``, ``FDMTFFT``, ``CohFDMT``, ``DDMT``, ``DDMTFFT`` and
+    their plans)
     are also re-exported from the ``dmtlib`` package. Each class runs on the
     backend given by its ``backend=`` keyword; :func:`available_backends`
     lists the backends in this build.
@@ -38,4 +39,5 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
     dmt::bind_fdmt(mod);
     dmt::bind_cfdmt(mod);
     dmt::bind_ddmt(mod);
+    dmt::bind_ddmt_fft(mod);
 }

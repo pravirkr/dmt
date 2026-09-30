@@ -125,7 +125,7 @@ threads; 4K, 16K and 64K samples):
 - **M1, 1 thread:** it trails the best depth by 5–8%, where the M1's large
   shared L2 favours a shallower depth.
 
-Defaults and automatic budgets are explicitly targeted at **Intel x86 HPC server architectures (Xeon/EPYC)**—the production environment for radio astronomy pipelines. The default memory budget of $\max(36\,\text{MiB} / n_\text{threads}, 5\,\text{MiB})$ is sized for standard ~32–36 MiB L3 cache slices on server sockets with typical 1–8 thread allocations per pipeline instance. Pass an explicit `fuse_levels` if a sweep on your specific hardware (`BM_fdmt_fused`, see [Reproducing](#7-reproducing-the-numbers)) finds a better depth.
+Defaults and automatic budgets are explicitly targeted at **Intel x86 HPC server architectures (Xeon/EPYC)**—the production environment for radio astronomy pipelines. The default memory budget of $\max(36\,\text{MiB} / n_\text{threads}, 5\,\text{MiB})$ is sized for standard ~32–36 MiB L3 cache slices on server sockets with typical 1–8 thread allocations per pipeline instance. Pass an explicit `fuse_levels` if a sweep on your specific hardware (`BM_fdmt_fused`, see [Reproducing](#6-reproducing-the-numbers)) finds a better depth.
 
 On CUDA (L40S, device-resident, 4096 channels, `dt_max=2048`, valid mode):
 

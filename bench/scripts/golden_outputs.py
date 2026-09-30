@@ -116,10 +116,19 @@ def _ddmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
 def _fft(out: dict, backend: str, data: np.ndarray) -> None:
     nchans, nsamps = data.shape
     for mode in ("full", "roll", "valid"):
-        f = dmtlib.FDMTFFT(
-            F_MIN, F_MAX, nchans, nsamps, TSAMP, 128, mode=mode, backend=backend
-        )
-        out[f"fdmt_fft/{mode}"] = f.execute(data)
+        for frac, tag in ((True, ""), (False, "_int")):
+            f = dmtlib.FDMTFFT(
+                F_MIN,
+                F_MAX,
+                nchans,
+                nsamps,
+                TSAMP,
+                128,
+                mode=mode,
+                backend=backend,
+                fractional_delays=frac,
+            )
+            out[f"fdmt_fft{tag}/{mode}"] = f.execute(data)
     coh = dmtlib.CohFDMT(
         1250.0, 25.0, 4, 1.0e-6, 1 << 10, 2, 4.0e-6, 5.0, 0.0, 32, backend=backend
     )

@@ -215,4 +215,35 @@ TEST_CASE("FDMTFFT host stepper matches execute",
     REQUIRE_THAT(dmt_step, Catch::Matchers::Approx(dmt_one).margin(0.05));
 }
 
+// Fractional merge delays and the smooth transform lengths: the CUDA
+// engine reproduces the CPU engine (single transform vs. the CPU's
+// segmented execute, both the same linear convolution) in every mode.
+TEST_CASE("FDMTFFT fractional delays parity", "[fdmt_fft_gpu][gpu][parity]") {
+    for (const auto* mode : {"roll", "valid", "full"}) {
+        for (const bool frac : {false, true}) {
+            CAPTURE(mode, frac);
+            const size_t nchans = 32;
+            const size_t nsamps = 4096;
+            std::mt19937 rng(7);
+            std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
+            std::vector<float> waterfall(nchans * nsamps);
+            for (auto& v : waterfall) {
+                v = dist(rng);
+            }
+            FDMTFFT cpu(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 48, 0, 1,
+                        true, mode, Exec::cpu(2), 1, frac);
+            FDMTFFT gpu(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 48, 0, 1,
+                        true, mode, test::gpu_exec(), 1, frac);
+            const auto n = cpu.get_plan().get_dmt_size();
+            for (int blk = 0; blk < 2; ++blk) { // valid: history too
+                std::vector<float> a(n, 0.0F);
+                std::vector<float> b(n, 0.0F);
+                cpu.execute(waterfall, a);
+                gpu.execute(waterfall, b);
+                REQUIRE_THAT(b, Catch::Matchers::Approx(a).margin(2e-3));
+            }
+        }
+    }
+}
+
 } // namespace dmt

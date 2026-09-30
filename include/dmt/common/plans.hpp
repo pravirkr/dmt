@@ -332,8 +332,13 @@ public:
     /// @brief Overlap length L = max(|dt_min|, |dt_max|) for FDMT-FFT
     /// full/valid modes
     [[nodiscard]] SizeType get_fft_overlap() const noexcept;
-    /// @brief FFT length for FDMT-FFT convolution
+    /// @brief FFT length for FDMT-FFT convolution: the shortest length with
+    /// only 2/3/5/7 prime factors that keeps circular wrap-around off the
+    /// output samples (equal to nsamps in roll mode)
     [[nodiscard]] SizeType get_fft_size() const noexcept;
+    /// @brief Longest delay (samples) the tree applies to any input sample
+    /// on the way to a root coordinate, box smearing included
+    [[nodiscard]] SizeType get_fft_support() const noexcept;
     /// @brief Number of complex bins in R2C Fourier domain (fft_size / 2 + 1)
     [[nodiscard]] SizeType get_fft_n_bins() const noexcept;
     /// @brief Buffer size in complex elements for FDMT-FFT ping-pong buffers
@@ -555,6 +560,11 @@ struct LevinConfig {
     float pulse_width; ///< Intrinsic pulse width in seconds
     float tol; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must
                ///< be > 1.0)
+    /// Use the DDplan-style piecewise-uniform grid
+    /// (DDMTPlan::generate_levin_dm_grid_piecewise()) instead of the
+    /// continuously varying Levin grid: typically 1.2-1.4x the trials, and
+    /// DDMTFFT runs one NUFFT per segment instead of brute force.
+    bool piecewise_uniform{false};
 };
 
 /**
@@ -706,6 +716,26 @@ public:
                            float f_max,
                            SizeType nchans,
                            float tol);
+
+    /**
+     * @brief DDplan-style piecewise-uniform variant of
+     * generate_levin_dm_grid(): uniformly spaced segments, split where the
+     * Levin step doubles, each at the smallest Levin step inside it (never
+     * coarser than Levin, so at least its sensitivity; typically 1.2-1.4x
+     * its trials) and at least @p min_run trials long. The grid to use for
+     * DDMTFFT on a non-linear DM range: DDMTFFT detects the segments and
+     * runs one NUFFT per segment.
+     */
+    [[nodiscard]] static std::vector<float>
+    generate_levin_dm_grid_piecewise(float dm_start,
+                                     float dm_end,
+                                     float tsamp,
+                                     float pulse_width,
+                                     float f_min,
+                                     float f_max,
+                                     SizeType nchans,
+                                     float tol,
+                                     SizeType min_run = 32);
 
 private:
     class Impl;

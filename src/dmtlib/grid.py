@@ -29,6 +29,12 @@ Algorithms supported:
    by a tolerance factor tol > 1.0 (typically 1.15 to 1.25). Calls into C++
    ``DDMTPlan.generate_levin_dm_grid``. Note that the quadratic equation can
    collapse at high DM when the discriminant becomes negative.
+
+3. ``method="levin_piecewise"`` (DDplan-style):
+   The Levin grid made piecewise uniform: the range is split where the Levin
+   step doubles and each segment is uniformly spaced at its smallest Levin
+   step (``DDMTPlan.generate_levin_dm_grid_piecewise``). Typically 1.2-1.4x
+   the Levin trials; the grid for :class:`DDMTFFT`'s NUFFT path.
 """
 
 from __future__ import annotations
@@ -120,8 +126,12 @@ def generate_optimal_dm_grid(
         ``method="snr_loss"``.
     method : str, default="snr_loss"
         Grid generation algorithm:
+
         - "snr_loss": S/N-loss-bounded, non-collapsing, edge-frequency smearing.
         - "levin": Classical Lina Levin (2012) broadening tolerance at band center.
+        - "levin_piecewise": DDplan-style piecewise-uniform Levin grid (uniform
+          segments where the Levin step doubles, never coarser than "levin").
+          Use it with :class:`DDMTFFT`, which runs one NUFFT per segment.
     tol : float, optional
         Pulse broadening factor (tol > 1.0, e.g. 1.25) for ``method="levin"``.
         If omitted when using "levin", defaults to 1 / (1 - max_snr_loss).
@@ -131,7 +141,7 @@ def generate_optimal_dm_grid(
     np.ndarray
         Sorted 1-D array of trial DMs (float64).
     """
-    if method == "levin":
+    if method in {"levin", "levin_piecewise"}:
         if dm_min < 0.0:
             msg = f"Levin method does not support negative dm_min ({dm_min})"
             raise ValueError(msg)
@@ -143,8 +153,13 @@ def generate_optimal_dm_grid(
         if effective_tol <= 1.0:
             msg = f"Levin tol must be > 1.0, got {effective_tol}"
             raise ValueError(msg)
+        generate = (
+            DDMTPlan.generate_levin_dm_grid_piecewise
+            if method == "levin_piecewise"
+            else DDMTPlan.generate_levin_dm_grid
+        )
         return np.asarray(
-            DDMTPlan.generate_levin_dm_grid(
+            generate(
                 dm_min,
                 dm_max,
                 tsamp,
@@ -158,7 +173,10 @@ def generate_optimal_dm_grid(
         )
 
     if method != "snr_loss":
-        msg = f"Unknown grid generation method '{method}'; choose 'snr_loss' or 'levin'"
+        msg = (
+            f"Unknown grid generation method '{method}'; choose 'snr_loss', "
+            "'levin' or 'levin_piecewise'"
+        )
         raise ValueError(msg)
 
     if not 0.0 < max_snr_loss < 1.0:

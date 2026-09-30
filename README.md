@@ -17,7 +17,7 @@
 
 </div>
 
-**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, and **FDMT-FFT**.
+**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, **FDMT-FFT** and **DDMT-FFT** (NUFFT-accelerated).
 
 | Dispersed Waterfall Input $I(\nu, t)$ | Dedispersed DM-Time Plane $DMT(\text{DM}, t)$ |
 | :---: | :---: |
@@ -147,27 +147,29 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.5.0 on an Apple M1 Pro, an Intel Xeon Gold 6348H (both
-8 threads), and an NVIDIA L40S. The data are 4096 channels (704–1216 MHz, 81.92 µs) in
-16K-sample blocks (1.34 s), processed as a stream.
+Measured on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads) and
+an NVIDIA L40S, all with dmt 0.6.0. The data are 4096 channels (704–1216 MHz,
+81.92 µs) in 16K-sample blocks (1.34 s), processed as a stream.
 
-- **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT and
-  SDMT (exact DDMT sums with shared partial sums) on the same DM grid. The grey line is real time.
+- **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT,
+  SDMT (exact DDMT sums with shared partial sums) and DDMT-FFT (NUFFT-accelerated) on the same DM grid. The grey line is real time.
 - **Right:** how many times faster than real time FDMT runs, by input bit
   width.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/dark/readme_highlight.png">
-  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT and SDMT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
+  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
 </picture>
 
 At 2049 DM trials, FDMT is 11× faster than brute-force DDMT on the Xeon
-and 37× on the M1 Pro (down from 336× in 0.3.0), and 3–8× faster than SDMT, which
-runs 6–21× faster than real time across both CPUs. On the L40S, FDMT is 4.4×
+and 33× on the M1 Pro, and 3–8× faster than SDMT,
+which runs 6–8× faster than real time on both CPUs. On the L40S, FDMT is 4.5×
 faster than DDMT (whose DM-tiled kernels run 63–95× faster than real time) and
-1.8× faster than SDMT (159–178× real time). FDMT runs 25–53× faster than real
-time on 8 CPU threads and 280× on the L40S, rising to 610× with packed 1-bit
-input.
+1.8× faster than SDMT (159–179× real time). FDMT runs 25–53× faster than real
+time on 8 CPU threads and 282× on the L40S, rising to 615× with packed 1-bit
+input. The Fourier-domain engines add exact fractional delays with sub-sample
+precision: **FDMT-FFT** trails FDMT by only 1.2–1.4× on the Xeon and L40S
+(5.5 ms on GPU), while **DDMT-FFT (NUFFT)** is 2–4.5× faster than brute-force DDMT.
 
 All sweeps, per-machine numbers and the operation-count comparison are on the
 [Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page.
@@ -212,6 +214,7 @@ archivePrefix = {arXiv},
 The algorithms implemented in `dmt` build upon foundational literature and open-source frameworks:
 
 - **FDMT, FDMT-FFT, CFDMT:** Zackay & Ofek (2017), *ApJ*, 835, 11 ([arXiv:1411.5373](https://arxiv.org/abs/1411.5373))
+- **DDMT-FFT (FDD):** Bassa et al. (2022), *A&A*, 657, A46 (Fourier-domain dedispersion); NUFFT kernel: Barnett, Magland & af Klinteberg (2019), *SIAM J. Sci. Comput.*, 41, C479
 - **DDMT:** Barsdell et al. (2012), *MNRAS*, 422, 379 ([doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x))
 - **SDMT:** Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825))
 

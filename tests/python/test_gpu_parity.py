@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import DDMT, FDMT, FDMTFFT, SDMT, CohFDMT
+from dmtlib import DDMT, DDMTFFT, FDMT, FDMTFFT, SDMT, CohFDMT
 
 # Every test runs on the GPU backend of this build (the `gpu_backend`
 # parameter of conftest.py: "cuda" or "hip") and compares with the CPU.
@@ -252,3 +252,46 @@ def test_sdmt_gpu_packed_matches_ddmt_exactly(nbits: int, gpu_backend: str) -> N
         n = part.shape[1] * 8 // nbits
         part = np.ascontiguousarray(part)
         np.testing.assert_array_equal(gpu.execute(part, n), cpu.execute(part, n))
+
+
+@pytest.mark.parametrize("mode", ["valid", "full", "roll"])
+@pytest.mark.parametrize("frac", [True, False])
+def test_fdmt_fft_gpu_modes_match_cpu(mode: str, frac: bool, gpu_backend: str) -> None:
+    rng = np.random.default_rng(11)
+    args = (1100.0, 1500.0, 64, 1024, 0.001, 48)
+    cpu = FDMTFFT(*args, mode=mode, fractional_delays=frac)
+    gpu = on(gpu_backend, FDMTFFT, *args, mode=mode, fractional_delays=frac)
+    for _ in range(2):
+        waterfall = rng.standard_normal((64, 1024), dtype=np.float32)
+        a = cpu.execute(waterfall)
+        b = gpu.execute(waterfall)
+        np.testing.assert_allclose(b, a, rtol=0, atol=2e-5 * np.abs(a).max())
+
+
+def test_fdmt_fft_gpu_packed_kill_mask_history(gpu_backend: str) -> None:
+    rng = np.random.default_rng(12)
+    args = (1100.0, 1500.0, 64, 1024, 0.001, 48)
+    mask = np.ones(64, dtype=np.uint8)
+    mask[[1, 30]] = 0
+    cpu = FDMTFFT(*args, kill_mask=mask)
+    gpu = on(gpu_backend, FDMTFFT, *args, kill_mask=mask)
+    packed = rng.integers(0, 256, size=(64, 1024), dtype=np.uint8)
+    for _ in range(2):
+        a = cpu.execute(packed, 8)
+        b = gpu.execute(packed, 8)
+        np.testing.assert_allclose(b, a, rtol=0, atol=2e-5 * np.abs(a).max())
+    np.testing.assert_array_equal(gpu.save_history(), cpu.save_history())
+
+
+@pytest.mark.parametrize("method", ["brute", "nufft"])
+def test_ddmt_fft_gpu_matches_cpu(method: str, gpu_backend: str) -> None:
+    rng = np.random.default_rng(13)
+    args = (1100.0, 1500.0, 64, 0.001, 30.0, 0.25)
+    cpu = DDMTFFT(*args, nbeams=2, method=method)
+    gpu = on(gpu_backend, DDMTFFT, *args, nbeams=2, method=method)
+    assert gpu.method_used == cpu.method_used
+    for _ in range(3):
+        waterfall = rng.standard_normal((2, 64, 2000), dtype=np.float32)
+        a = cpu.execute(waterfall)
+        b = gpu.execute(waterfall)
+        np.testing.assert_allclose(b, a, rtol=0, atol=2e-5 * np.abs(a).max())

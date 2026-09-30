@@ -38,7 +38,14 @@ void check_extent(SizeType count, SizeType stride, const char* what) {
 
 class CUFFTManager::Impl {
 public:
-    Impl(FFTKind kind, SizeType length, SizeType howmany, int device_id)
+    Impl(FFTKind kind,
+         SizeType length,
+         SizeType howmany,
+         int device_id,
+         SizeType real_dist   = 0,
+         SizeType freq_dist   = 0,
+         SizeType real_stride = 1,
+         SizeType freq_stride = 1)
         : m_kind(kind),
           m_length(length),
           m_howmany(howmany),
@@ -48,10 +55,17 @@ public:
             throw std::invalid_argument(
                 "CUFFTManager: length and howmany must be positive");
         }
-        check_extent(howmany, length, "length");
-        if (is_real(kind)) {
-            check_extent(howmany, m_n_complex, "n_complex");
+        m_real_dist   = real_dist == 0 ? length : real_dist;
+        m_freq_dist   = freq_dist == 0 ? m_n_complex : freq_dist;
+        m_real_stride = std::max<SizeType>(real_stride, 1);
+        m_freq_stride = std::max<SizeType>(freq_stride, 1);
+        if ((m_real_stride == 1 && m_real_dist < length) ||
+            (m_freq_stride == 1 && m_freq_dist < m_n_complex)) {
+            throw std::invalid_argument(
+                "CUFFTManager: row distance shorter than a row");
         }
+        check_extent(howmany, m_real_dist, "real distance");
+        check_extent(howmany, m_freq_dist, "spectrum distance");
         gpu_utils::set_device(m_device_id);
         try {
             create_plan();
@@ -98,8 +112,8 @@ public:
             throw std::logic_error(
                 "CUFFTManager: execute(complex) requires a C2C plan");
         }
-        const SizeType expected = m_howmany * m_length;
-        if (data.size() != expected) {
+        const SizeType expected = extent(m_freq_dist, m_freq_stride, m_length);
+        if (data.size() < expected) {
             throw std::invalid_argument(
                 std::format("CUFFTManager: complex span size {} != {}",
                             data.size(), expected));
@@ -121,9 +135,11 @@ public:
             throw std::logic_error("CUFFTManager: execute(real, freq) requires "
                                    "an R2C or C2R plan");
         }
-        const SizeType n_real    = m_howmany * m_length;
-        const SizeType n_complex = m_howmany * m_n_complex;
-        if (real.size() != n_real || freq.size() != n_complex) {
+        const SizeType n_real =
+            is_real(m_kind) ? extent(m_real_dist, m_real_stride, m_length) : 0;
+        const SizeType n_complex =
+            extent(m_freq_dist, m_freq_stride, m_n_complex);
+        if (real.size() < n_real || freq.size() < n_complex) {
             throw std::invalid_argument(std::format(
                 "CUFFTManager: span sizes real={} freq={} != {} and {}",
                 real.size(), freq.size(), n_real, n_complex));
@@ -143,28 +159,47 @@ public:
     }
 
 private:
+    // Elements spanned by the batch.
+    [[nodiscard]] SizeType
+    extent(SizeType dist, SizeType stride, SizeType row) const noexcept {
+        return ((m_howmany - 1) * dist) + ((row - 1) * stride) + 1;
+    }
+
     static bool is_real(FFTKind kind) {
         return kind == FFTKind::kR2C || kind == FFTKind::kC2R;
     }
 
     void create_plan() {
-        int n             = to_cufft_int(m_length, "length");
-        const int howmany = to_cufft_int(m_howmany, "howmany");
-        const int n_freq  = to_cufft_int(m_n_complex, "n_complex");
-        const int idist =
-            is_real(m_kind) && m_kind == FFTKind::kC2R ? n_freq : n;
-        const int odist =
-            is_real(m_kind) && m_kind == FFTKind::kR2C ? n_freq : n;
-        const cufftType type = real_type(m_kind);
+        // 64-bit planning: batch * distance may exceed int (the length and
+        // batch themselves are checked against cuFFT's int limits).
+        long long n = to_cufft_int(m_length, "length");
+        const auto howmany =
+            static_cast<long long>(to_cufft_int(m_howmany, "howmany"));
+        const auto rdist = static_cast<long long>(m_real_dist);
+        const auto fdist = static_cast<long long>(m_freq_dist);
+        const auto rstr  = static_cast<long long>(m_real_stride);
+        const auto fstr  = static_cast<long long>(m_freq_stride);
+        // Embedding: the row extent in elements (strides handle the rest).
+        const auto rrow       = static_cast<long long>(m_length);
+        const auto frow       = static_cast<long long>(m_n_complex);
+        const bool in_freq    = m_kind == FFTKind::kC2R || !is_real(m_kind);
+        const bool out_freq   = m_kind == FFTKind::kR2C || !is_real(m_kind);
+        long long inembed[1]  = {in_freq ? frow : rrow};
+        long long onembed[1]  = {out_freq ? frow : rrow};
+        const long long idist = in_freq ? fdist : rdist;
+        const long long odist = out_freq ? fdist : rdist;
+        const long long istr  = in_freq ? fstr : rstr;
+        const long long ostr  = out_freq ? fstr : rstr;
+        const cufftType type  = real_type(m_kind);
 
         gpu_utils::check_gpu_call(cufftCreate(&m_plan),
                                   "CUFFTManager: cufftCreate");
         gpu_utils::check_gpu_call(cufftSetAutoAllocation(m_plan, 0),
                                   "CUFFTManager: cufftSetAutoAllocation");
         gpu_utils::check_gpu_call(
-            cufftMakePlanMany(m_plan, 1, &n, nullptr, 1, idist, nullptr, 1,
-                              odist, type, howmany, &m_workspace_size),
-            "CUFFTManager: cufftMakePlanMany");
+            cufftMakePlanMany64(m_plan, 1, &n, inembed, istr, idist, onembed,
+                                ostr, odist, type, howmany, &m_workspace_size),
+            "CUFFTManager: cufftMakePlanMany64");
         if (m_workspace_size > 0) {
             gpu_utils::check_gpu_call(
                 cudaMalloc(&m_workspace, m_workspace_size),
@@ -187,10 +222,20 @@ private:
         throw std::invalid_argument("CUFFTManager: unknown kind");
     }
 
+public:
+    [[nodiscard]] SizeType workspace_bytes() const noexcept {
+        return m_workspace_size;
+    }
+
+private:
     FFTKind m_kind;
     SizeType m_length;
     SizeType m_howmany;
     SizeType m_n_complex;
+    SizeType m_real_dist{};
+    SizeType m_freq_dist{};
+    SizeType m_real_stride{1};
+    SizeType m_freq_stride{1};
     int m_device_id;
     cufftHandle m_plan{0};
     void* m_workspace{nullptr};
@@ -202,6 +247,25 @@ CUFFTManager::CUFFTManager(FFTKind kind,
                            SizeType howmany,
                            int device_id)
     : m_impl(std::make_unique<Impl>(kind, length, howmany, device_id)) {}
+CUFFTManager::CUFFTManager(FFTKind kind,
+                           SizeType length,
+                           SizeType howmany,
+                           int device_id,
+                           SizeType real_dist,
+                           SizeType freq_dist,
+                           SizeType real_stride,
+                           SizeType freq_stride)
+    : m_impl(std::make_unique<Impl>(kind,
+                                    length,
+                                    howmany,
+                                    device_id,
+                                    real_dist,
+                                    freq_dist,
+                                    real_stride,
+                                    freq_stride)) {}
+SizeType CUFFTManager::workspace_bytes() const noexcept {
+    return m_impl->workspace_bytes();
+}
 CUFFTManager::~CUFFTManager()                                        = default;
 CUFFTManager::CUFFTManager(CUFFTManager&& other) noexcept            = default;
 CUFFTManager& CUFFTManager::operator=(CUFFTManager&& other) noexcept = default;

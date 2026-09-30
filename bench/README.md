@@ -28,10 +28,20 @@ algorithms compute the same trials. The backends are:
 - CPU with 1 and 8 threads. FDMT-FFT, DDMT and SDMT run at 8 threads only; DDMT at
   1 thread takes ~25 s per call.
 - CUDA with device-resident data (`cuda`).
-- CUDA with host arrays including PCIe (`cuda_host`), for FDMT throughput.
+- CUDA with host arrays including PCIe (`cuda_host`), for FDMT, FDMT-FFT
+  and DDMT-FFT throughput in the nbits sweep. These rows include host-side
+  staging (pageable copies, pinned chunking), so they depend on the host's
+  load as well as the GPU.
 
 Points whose estimated memory exceeds the budget are skipped and listed in
 the summary.
+
+The Fourier-domain engines (FDMT-FFT, DDMT-FFT) are FFT-bound, so the suite
+plans their FFTs with `FFTW_MEASURE` (`run_suite.py --fftw-planner`, default
+`measure`), as a long-running pipeline would. The wisdom is kept in
+`<build-dir>/fftw_<machine>.wisdom`, so only the first run pays the planning
+time (a few seconds per transform length, at engine construction, outside
+the timed region).
 
 ### Running it on a machine
 
