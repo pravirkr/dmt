@@ -5,8 +5,11 @@ One command per machine; the JSON it writes is what plot_suite.py reads:
     python bench/scripts/run_suite.py --machine m1-pro
     python bench/scripts/run_suite.py --machine xeon-6348h --build-dir build
     python bench/scripts/run_suite.py --machine l40s --no-cpu      # GPU box
+    python bench/scripts/run_suite.py --machine m1-pro --suite cfdmt
 
 Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
+(``--suite cfdmt``: ``suite_cfdmt_cpu.json`` / ``suite_cfdmt_<gpu>.json``, the
+CohFDMT baseband search, which has its own configuration and plots)
 (``gpu`` is ``cuda`` or ``hip``, whichever the build has)
 (Google Benchmark JSON with the machine description in its ``context``).
 See bench/README.md for the full workflow.
@@ -127,6 +130,13 @@ def main() -> None:
         default=None,
         help="run the GPU (CUDA or HIP) benchmarks (default: if the binary has them)",
     )
+    ap.add_argument(
+        "--suite",
+        default="main",
+        choices=["main", "cfdmt"],
+        help="main: the filterbank algorithms (FDMT, DDMT, ...); cfdmt: the "
+        "CohFDMT baseband search",
+    )
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")
     ap.add_argument(
@@ -185,14 +195,27 @@ def main() -> None:
         "DMT_FFTW_WISDOM": wisdom,
     }
 
+    prefix, stem = (
+        ("cfdmt", "suite_cfdmt") if args.suite == "cfdmt" else ("suite", "suite")
+    )
     runs = []
     if args.cpu:
-        runs.append(("cpu", r"^suite/.*/cpu[0-9]+/"))
+        runs.append(("cpu", rf"^{prefix}/.*/cpu[0-9]+/"))
     if run_gpu:
-        runs.append((gpu_kind, rf"^suite/.*/{gpu_kind}(_host)?/"))
+        runs.append((gpu_kind, rf"^{prefix}/.*/{gpu_kind}(_host)?/"))
     for kind, pattern in runs:
         regex = pattern + (f".*{args.filter}" if args.filter else "")
-        out = out_dir / f"suite_{kind}.json"
+        out = out_dir / f"{stem}_{kind}.json"
+        run_env = env
+        if kind != "cpu":
+            # Thread binding is for the CPU runs. On a GPU run it pins the
+            # host thread that stages the *_host copies to a single core,
+            # which on a busy machine halves their speed or worse.
+            run_env = {
+                k: v
+                for k, v in env.items()
+                if k not in ("OMP_PROC_BIND", "OMP_PLACES") or k in os.environ
+            }
         cmd = [
             str(binary),
             f"--benchmark_filter={regex}",
@@ -204,9 +227,10 @@ def main() -> None:
         ]
         print(f"[{kind}] {binary.name} -> {out.relative_to(REPO)}", flush=True)
         start = time.monotonic()
-        subprocess.run(cmd, check=True, env=env, cwd=REPO)  # noqa: S603
+        subprocess.run(cmd, check=True, env=run_env, cwd=REPO)  # noqa: S603
         print(f"[{kind}] done in {(time.monotonic() - start) / 60:.1f} min")
-    print("Next: python bench/scripts/plot_suite.py")
+    script = "plot_cfdmt.py" if args.suite == "cfdmt" else "plot_suite.py"
+    print(f"Next: python bench/scripts/{script}")
 
 
 if __name__ == "__main__":

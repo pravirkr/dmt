@@ -291,87 +291,127 @@ void bind_plans(py::module_& mod) {
              "per-level shapes); each line starts with ``prefix``.");
     py::class_<CohFDMTPlan>(mod, "CohFDMTPlan",
                             R"doc(
-        Plan for the hybrid coherent Fast Dispersion Measure Transform.
+        Geometry of a CohFDMT (hybrid coherent + FDMT) search.
 
-        Combines coarse coherent dedispersion trials with a fine FDMT tree
-        around each trial. Used by :class:`CohFDMT`.
+        Built from a :class:`CohFDMTConfig`. The coarse coherent DM step is
+        the largest for which the residual intra-channel smearing of the
+        bottom channel stays below ``smear_tol`` output samples, counting all
+        ``nsub * n_p`` channels. Blocks are stateless: advance the read
+        position by ``stride_nsamps`` between blocks of ``block_nsamps``
+        samples per subband; output sample j of a block starting at raw
+        sample s0 is the arrival time at ``f_ref`` of ``s0 * tbin +
+        output_time_offset + j * tsamp``.
 
         Parameters
         ----------
-        fcenter : float
-            Band centre frequency in MHz.
-        bwsub : float
-            Subband bandwidth in MHz.
-        nsub : int
-            Number of subbands.
-        tbin : float
-            Raw voltage sampling interval in seconds.
-        nbin, nfft : int
-            FFT length and number of FFT blocks per coherent segment.
-        t_p : float
-            Detected-time resolution in seconds after channelisation.
-        dm_max, dm_min : float
-            Coherent DM search range in pc cm^-3.
-        noverlap_inp : int, optional
-            Overlap samples for the convolution (must be < ``nbin``).
-        data_order : {'PRITF', 'FTPRI', 'RITFP'}, optional
-            Packed baseband layout.
+        config : CohFDMTConfig
+            The search parameters.
         )doc")
-        .def(py::init<float, float, SizeType, float, SizeType, SizeType, float,
-                      float, float, SizeType, std::string_view>(),
-             "fcenter"_a, "bwsub"_a, "nsub"_a, "tbin"_a, "nbin"_a, "nfft"_a,
-             "t_p"_a, "dm_max"_a, "dm_min"_a = 0.0F, "noverlap_inp"_a = 8192,
-             "data_order"_a = "PRITF")
+        .def(py::init<const CohFDMTConfig&>(), "config"_a)
+        .def_property_readonly("config", &CohFDMTPlan::get_config)
+        .def_property_readonly("format", &CohFDMTPlan::get_format)
         .def_property_readonly("f_center", &CohFDMTPlan::get_f_center)
         .def_property_readonly("bw_sub", &CohFDMTPlan::get_bw_sub)
         .def_property_readonly("nsub", &CohFDMTPlan::get_nsub)
-        .def_property_readonly("tbin", &CohFDMTPlan::get_tbin)
-        .def_property_readonly("nbin", &CohFDMTPlan::get_nbin)
-        .def_property_readonly("nfft", &CohFDMTPlan::get_nfft)
-        .def_property_readonly("t_p", &CohFDMTPlan::get_t_p)
-        .def_property_readonly("dm_max", &CohFDMTPlan::get_dm_max)
-        .def_property_readonly("dm_min", &CohFDMTPlan::get_dm_min)
+        .def_property_readonly("subband_groups",
+                               &CohFDMTPlan::get_subband_groups)
         .def_property_readonly("bw", &CohFDMTPlan::get_bw)
         .def_property_readonly("f_min", &CohFDMTPlan::get_f_min)
         .def_property_readonly("f_max", &CohFDMTPlan::get_f_max)
+        .def_property_readonly("tbin", &CohFDMTPlan::get_tbin)
+        .def_property_readonly("dm_min", &CohFDMTPlan::get_dm_min)
+        .def_property_readonly("dm_max", &CohFDMTPlan::get_dm_max)
         .def_property_readonly("n_p", &CohFDMTPlan::get_n_p)
-        .def_property_readonly("nchan", &CohFDMTPlan::get_nchan)
-        .def_property_readonly("dm_grid_coh", &CohFDMTPlan::get_dm_grid_coh)
-        .def_property_readonly("dm_grid_final", &CohFDMTPlan::get_dm_grid_final)
-        .def_property_readonly("noverlap", &CohFDMTPlan::get_noverlap)
-        .def_property_readonly("nsamp", &CohFDMTPlan::get_nsamp)
-        .def_property_readonly("mbin", &CohFDMTPlan::get_mbin)
-        .def_property_readonly("mchan", &CohFDMTPlan::get_mchan)
-        .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
+        .def_property_readonly("nchans", &CohFDMTPlan::get_nchans)
+        .def_property_readonly("bw_chan", &CohFDMTPlan::get_bw_chan)
         .def_property_readonly("tsamp", &CohFDMTPlan::get_tsamp)
-        .def_property_readonly("dt_max", &CohFDMTPlan::get_dt_max)
+        .def_property_readonly("f_ref", &CohFDMTPlan::get_f_ref)
+        .def_property_readonly("nbin", &CohFDMTPlan::get_nbin)
+        .def_property_readonly("mbin", &CohFDMTPlan::get_mbin)
+        .def_property_readonly("noverlap", &CohFDMTPlan::get_noverlap)
+        .def_property_readonly("nfft", &CohFDMTPlan::get_nfft)
+        .def_property_readonly("block_nsamps", &CohFDMTPlan::get_block_nsamps)
+        .def_property_readonly("stride_nsamps", &CohFDMTPlan::get_stride_nsamps)
+        .def_property_readonly("overlap_nsamps",
+                               &CohFDMTPlan::get_overlap_nsamps)
+        .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
+        .def_property_readonly("output_nsamps", &CohFDMTPlan::get_output_nsamps)
+        .def_property_readonly("output_time_offset",
+                               &CohFDMTPlan::get_output_time_offset)
+        .def("input_size", &CohFDMTPlan::get_input_size, "igroup"_a = 0,
+             "Bytes of subband group ``igroup`` per block.")
+        .def_property_readonly("dm_grid_coh",
+                               [](const CohFDMTPlan& p) {
+                                   return as_pyarray_ref(p.get_dm_grid_coh());
+                               })
+        .def_property_readonly("dm_step_coh", &CohFDMTPlan::get_dm_step_coh)
+        .def_property_readonly("ndm_coh", &CohFDMTPlan::get_ndm_coh)
+        .def_property_readonly("ndm_fine", &CohFDMTPlan::get_ndm_fine)
+        .def_property_readonly("fine_dt_max", &CohFDMTPlan::get_fine_dt_max)
+        .def_property_readonly("dm_grid_final",
+                               [](const CohFDMTPlan& p) {
+                                   return as_pyarray_ref(p.get_dm_grid_final());
+                               })
         .def_property_readonly("ndm", &CohFDMTPlan::get_ndm)
+        .def_property_readonly("max_delay", &CohFDMTPlan::get_max_delay)
+        .def_property_readonly("intra_channel_smear",
+                               &CohFDMTPlan::get_intra_channel_smear)
         .def_property_readonly("dmt_ndms", &CohFDMTPlan::get_dmt_ndms)
         .def_property_readonly("dmt_nsamps", &CohFDMTPlan::get_dmt_nsamps)
         .def_property_readonly("dmt_size", &CohFDMTPlan::get_dmt_size)
         .def_property_readonly("buffer_size", &CohFDMTPlan::get_buffer_size)
-        .def_property_readonly("chirp_scale", &CohFDMTPlan::get_chirp_scale)
-        .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan)
+        .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan,
+                               py::return_value_policy::reference_internal)
+        .def(
+            "get_channel_shifts",
+            [](const CohFDMTPlan& p, SizeType idm_coh) {
+                const auto s = p.get_channel_shifts(idm_coh);
+                return as_pyarray(std::vector<IndexType>(s.begin(), s.end()));
+            },
+            "idm_coh"_a,
+            "Inter-channel shifts (samples) of every channel at a coarse "
+            "trial.")
         .def(
             "get_effective_variance_grid",
-            [](const CohFDMTPlan& plan, SizeType boxcar_width,
-               bool use_box_smearing) {
-                return as_pyarray(plan.get_effective_variance_grid(
-                    boxcar_width, use_box_smearing));
+            [](const CohFDMTPlan& plan, SizeType boxcar_width) {
+                return as_pyarray(
+                    plan.get_effective_variance_grid(boxcar_width));
             },
-            py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+            "boxcar_width"_a = 1,
+            "Output noise variance of every row after a boxcar of "
+            "``boxcar_width`` samples (Gaussian noise, normalize=True), "
+            "including the channel filter's lag correlation.")
         .def(
             "get_effective_sigma_grid",
-            [](const CohFDMTPlan& plan, SizeType boxcar_width,
-               bool use_box_smearing) {
-                return as_pyarray(plan.get_effective_sigma_grid(
-                    boxcar_width, use_box_smearing));
+            [](const CohFDMTPlan& plan, SizeType boxcar_width) {
+                return as_pyarray(plan.get_effective_sigma_grid(boxcar_width));
             },
-            py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
-        .def("get_cumulative_count_grid",
-             [](const CohFDMTPlan& plan) {
-                 return as_pyarray(plan.get_cumulative_count_grid());
-             })
+            "boxcar_width"_a = 1,
+            "Square root of :meth:`get_effective_variance_grid`.")
+        .def(
+            "get_cumulative_count_grid",
+            [](const CohFDMTPlan& plan) {
+                return as_pyarray(plan.get_cumulative_count_grid());
+            },
+            "Channel samples summed into every row (box smearing included).")
+        .def(
+            "get_lag_correlation",
+            [](const CohFDMTPlan& plan, SizeType max_lag) {
+                return as_pyarray(plan.get_lag_correlation(max_lag));
+            },
+            "max_lag"_a,
+            "Correlation coefficient of detected noise within a channel at "
+            "lags 0..max_lag.")
+        .def(
+            "memory_estimate",
+            [](const CohFDMTPlan& plan) {
+                const auto m = plan.get_memory_estimate();
+                return py::dict("spectrum"_a  = m.spectrum,
+                                "waterfall"_a = m.waterfall, "fdmt"_a = m.fdmt,
+                                "workspace"_a = m.workspace,
+                                "output"_a = m.output, "total"_a = m.total());
+            },
+            "Estimated engine memory in bytes, by kind.")
         .def("summary", &CohFDMTPlan::summary,
              "Human-readable summary of the CohFDMT plan.");
 

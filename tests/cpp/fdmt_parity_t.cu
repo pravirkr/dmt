@@ -67,33 +67,26 @@ TEST_CASE("parity: FDMTFFT (gpu) execute matches CPU",
 }
 
 TEST_CASE("parity: CohFDMT (gpu) execute matches CPU", "[cfdmt][gpu][parity]") {
-    plans::CohFDMTPlan plan(1250.0F, 25.0F, 4, 1.0E-6F, 1 << 10, 2, 4.0E-6F,
-                            5.0F, 0.0F, 32, "PRITF");
-    CohFDMT cpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                plan.get_noverlap());
-    CohFDMT gpu(plan.get_f_center(), plan.get_bw_sub(), plan.get_nsub(),
-                plan.get_tbin(), plan.get_nbin(), plan.get_nfft(),
-                plan.get_t_p(), plan.get_dm_max(), plan.get_dm_min(),
-                plan.get_noverlap(), "PRITF", test::gpu_exec());
-    const SizeType in_size =
-        SizeType{2} * SizeType{2} * plan.get_nsamp() * plan.get_nsub();
-    std::vector<uint8_t> data_in(in_size);
-    for (SizeType i = 0; i < in_size; ++i) {
+    const CohFDMTConfig cfg{.f_center = 1250.0F,
+                            .bw_sub   = 4.0F,
+                            .nsub     = 4,
+                            .t_p      = 4.0E-6F,
+                            .dm_min   = 0.0F,
+                            .dm_max   = 5.0F,
+                            .format   = BasebandFormat{.order = "PRITF"}};
+    const CohFDMT cpu(cfg);
+    const CohFDMT gpu(cfg, test::gpu_exec());
+    std::vector<uint8_t> data_in(cpu.get_input_size());
+    for (SizeType i = 0; i < data_in.size(); ++i) {
         data_in[i] = static_cast<uint8_t>((i * 13) % 251);
     }
-    // The CPU engine computes in the caller's get_buffer_size() arena (the
-    // result is its leading get_dmt_size()); the CUDA host entry point owns
-    // its device arena and writes only the get_dmt_size() result.
-    std::vector<float> dmt_cpu(cpu.get_buffer_size(), 0.0F);
+    std::vector<float> dmt_cpu(cpu.get_dmt_size(), 0.0F);
     std::vector<float> dmt_gpu(gpu.get_dmt_size(), 0.0F);
     cpu.execute<uint8_t>(data_in, dmt_cpu);
     gpu.execute<uint8_t>(data_in, dmt_gpu);
-    dmt_cpu.resize(cpu.get_dmt_size());
     REQUIRE_THAT(
         dmt_gpu,
-        Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-2).margin(1.0E-2));
+        Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-4).margin(1.0E-3));
 }
 
 TEST_CASE("parity: FDMT (gpu) add_frb_track recovery matches CPU",

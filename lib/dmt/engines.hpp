@@ -386,10 +386,23 @@ make_fdmt_fft_gpu(const plans::FDMTPlan& plan, const FDMTFFTEngineConfig& cfg);
 // CohFDMT
 // ---------------------------------------------------------------------------
 
-struct CohFDMTEngineConfig {
-    Exec exec{};
+/// GPU coherent-stage implementation (internal; tests and benchmarks pin
+/// one, the facade always uses kAuto).
+enum class CohFDMTCoherentPath : uint8_t {
+    kAuto,  ///< fused when the channel FFT length allows, else cuFFT
+    kFused, ///< fused shared-memory kernel (throws if unsupported)
+    kCuFFT, ///< gather -> batched cuFFT -> detect through a work buffer
 };
 
+struct CohFDMTEngineConfig {
+    Exec exec{};
+    CohFDMTCoherentPath coherent_path{CohFDMTCoherentPath::kAuto};
+    /// cuFFT path work-buffer budget in bytes (0 = sized from free memory).
+    SizeType work_bytes{0};
+};
+
+// Stateless: one self-contained block per execute(), one input span per
+// subband group (raw bytes, decoded per the plan's BasebandFormat).
 class CohFDMTEngine {
 public:
     CohFDMTEngine()                                = default;
@@ -399,21 +412,17 @@ public:
     CohFDMTEngine(CohFDMTEngine&&)                 = delete;
     CohFDMTEngine& operator=(CohFDMTEngine&&)      = delete;
 
-    // Host memory: every backend. One overload per supported sample type.
-    virtual void execute(std::span<const uint8_t> data_in,
-                         std::span<float> dmt) = 0;
-    virtual void execute(std::span<const int8_t> data_in,
+    // Host memory: every backend.
+    virtual void execute(std::span<const std::span<const uint8_t>> groups,
                          std::span<float> dmt) = 0;
 
     // Device memory: GPU backends.
-    virtual void execute(DeviceSpan<const uint8_t> data_in,
-                         DeviceSpan<float> dmt,
-                         Stream stream);
-    virtual void execute(DeviceSpan<const int8_t> data_in,
+    virtual void execute(std::span<const DeviceSpan<const uint8_t>> groups,
                          DeviceSpan<float> dmt,
                          Stream stream);
 
-    virtual void reset_history() noexcept = 0;
+    [[nodiscard]] virtual plans::CohFDMTMemoryUsage
+    memory_usage() const noexcept = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

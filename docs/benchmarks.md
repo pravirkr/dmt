@@ -27,16 +27,16 @@ trials, float32 input):
 
 | | Apple M1 Pro (8 threads) | Xeon Gold 6348H (8 threads) | NVIDIA L40S |
 | :--- | ---: | ---: | ---: |
-| FDMT time per block | 25.5 ms | 53.4 ms | 4.75 ms |
-| FDMT real-time factor | 53× | 25× | 282× |
-| DDMT (brute force), slower by | 33× | 11× | 4.5× |
-| DDMT real-time factor | 1.6× | 2.3× | 63× |
-| SDMT (exact, shared sums), slower by | 8× | 3.2× | 1.8× |
-| SDMT real-time factor | 6.5× | 8× | 158× |
-| FDMT-FFT (fractional delays), slower by | 3.3× | 1.4× | 1.2× |
+| FDMT time per block | 25.5 ms | 71.9 ms | 4.75 ms |
+| FDMT real-time factor | 53× | 19× | 282× |
+| DDMT (brute force), slower by | 33× | 10× | 4.5× |
+| DDMT real-time factor | 1.6× | 1.8× | 63× |
+| SDMT (exact, shared sums), slower by | 8× | 3.1× | 1.8× |
+| SDMT real-time factor | 6.5× | 6× | 158× |
+| FDMT-FFT (fractional delays), slower by | 3.3× | 1.7× | 1.2× |
 | DDMT-FFT (exact fractional delays), slower by | 4.3× | 2.4× | 2.3× |
-| DDMT-FFT, faster than DDMT by | 7.7× | 4.5× | 2.0× |
-| FDMT real-time factor, 1-bit input | 111× | 70× | 615× |
+| DDMT-FFT, faster than DDMT by | 7.7× | 4.3× | 2.0× |
+| FDMT real-time factor, 1-bit input | 111× | 48× | 615× |
 
 ## Setup
 
@@ -72,14 +72,6 @@ telescope.
   count, not the DM count.
 - **Brute-force DDMT** does `nchans × ndm` additions per output sample, so it
   scales linearly with the DM count.
-  - On the Xeon it stays below the real-time line up to 4K DM trials
-    (16× real time at 256 trials, 1.1× at 4K), 6–12× behind FDMT.
-  - On the M1 Pro it stays below real time up to ~2K DM trials
-    (11× real time at 256 trials, 1.6× at 2049 trials), crossing the line only
-    at 4K trials (up from crossing at ~256 trials in 0.3.0).
-  - On the L40S it stays well below real time at every DM count tested
-    (32–340× real time), 4–7× behind FDMT: the DM-tiled kernels reuse each
-    staged input window across up to 64 DM trials.
 - **SDMT** computes the same sums as DDMT (integer output bit-identical,
   float equal to rounding) but shares partial sums between DM trials within
   16-channel subbands, so it needs ~7× fewer additions (0.14× the brute-force additions on this
@@ -131,7 +123,7 @@ telescope.
   real-time line stays constant as blocks grow. In valid mode the streaming
   history makes the result independent of the block size, so choose the
   block for latency.
-- FDMT-FFT and DDMT-FFT (0.6.0) are linear in the block length: they
+- FDMT-FFT and DDMT-FFT (0.7.0) are linear in the block length: they
   transform cache-sized bin tiles, and long blocks in overlap-save segments.
   FDMT-FFT takes 292 ms per 64K-sample block on the M1 Pro, 259 ms on the
   Xeon (1.05× FDMT there) and 20 ms on the L40S (1.08× FDMT). The 0.5.0 CPU
@@ -242,7 +234,7 @@ follows the memory bandwidth, not the peak arithmetic rate.
 
 ## Fourier-domain engines
 
-The 0.6.0 Fourier-domain engines on the Apple M1 Pro (8 threads, FFTW MEASURE
+The 0.7.0 Fourier-domain engines on the Apple M1 Pro (8 threads, FFTW MEASURE
 plans; from the suite above). `FDMT-FFT` is the engine with fractional
 delays (the plotted one). `FDMT-FFT int` is the integer-delay verification
 mode, which reproduces FDMT. `DDMT-FFT` uses the NUFFT over the (uniform) DM
@@ -289,21 +281,21 @@ trials:
 
 | dt_max (trials) | FDMT | FDMT-FFT int | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT-FFT brute |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 (257) | 13.1 ms | 30 ms | 38 ms | 81 ms | 24 ms | 57 ms | 190 ms |
-| 512 (513) | 17.6 ms | 35 ms | 38 ms | 153 ms | 46 ms | 78 ms | 342 ms |
-| 1024 | 30 ms | 42 ms | 53 ms | 292 ms | 89 ms | 76 ms | 647 ms |
-| 2048 | 53 ms | 58 ms | 77 ms | 573 ms | 170 ms | 127 ms | 1.35 s |
-| 4096 | 102 ms | 101 ms | 127 ms | 1.16 s | 329 ms | 178 ms | 2.87 s |
+| 256 (257) | 21.5 ms | 59 ms | 58 ms | 117 ms | 32 ms | 81 ms | 274 ms |
+| 512 (513) | 22.3 ms | 50 ms | 50 ms | 196 ms | 56 ms | 139 ms | 446 ms |
+| 1024 | 48 ms | 94 ms | 104 ms | 448 ms | 120 ms | 110 ms | 933 ms |
+| 2048 | 70 ms | 90 ms | 111 ms | 734 ms | 194 ms | 172 ms | 1.76 s |
+| 4096 | 167 ms | 162 ms | 187 ms | 1.71 s | 398 ms | 216 ms | 3.92 s |
 
 2049 trials vs block length:
 
 | nsamps | FDMT | FDMT-FFT int | FDMT-FFT | DDMT | DDMT-FFT | DDMT-FFT brute |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096 | 12.2 ms | 18.1 ms | 26 ms | 157 ms | 36 ms | 491 ms |
-| 8192 | 25 ms | 30 ms | 46 ms | 307 ms | 58 ms | 771 ms |
-| 16384 | 54 ms | 58 ms | 76 ms | 583 ms | 125 ms | 1.35 s |
-| 32768 | 112 ms | 118 ms | 137 ms | 1.13 s | 249 ms | 2.70 s |
-| 65536 | 246 ms | 218 ms | 259 ms | 2.28 s | 404 ms | 5.02 s |
+| 4096 | 13.1 ms | 18.3 ms | 28 ms | 189 ms | 43 ms | 591 ms |
+| 8192 | 31 ms | 34 ms | 50 ms | 362 ms | 69 ms | 869 ms |
+| 16384 | 68 ms | 62 ms | 80 ms | 656 ms | 153 ms | 1.63 s |
+| 32768 | 127 ms | 125 ms | 163 ms | 1.45 s | 373 ms | 3.32 s |
+| 65536 | 336 ms | 360 ms | 514 ms | 3.52 s | 505 ms | 7.24 s |
 
 - On the Xeon, **FDMT-FFT** is 1.4× FDMT at the reference point and 1.05×
   at 64K samples; the integer verification mode is 0.9–1.4× FDMT from 1K
@@ -345,10 +337,66 @@ NVIDIA L40S (device-resident data, cuFFT), reference block vs DM trials:
   force 39 ms (1.8× DDMT, near the card's FP32 issue rate). About half of the
   NUFFT path is the channel and DM-row FFTs.
 
+## Coherent hybrid search (CohFDMT)
+
+CohFDMT searches baseband voltages rather than a filterbank, so it has its own
+fixed configuration and is **not** compared with the engines above:
+
+- **Reference configuration:** one GUPPI node (64 × 2.93 MHz at
+  1.31–1.50 GHz, int8 FTPRI), t_p = 10 µs (n_p = 30), DM 50–60 pc cm⁻³ with
+  `dt_step` 16, and the automatic block length.
+- **Sweeps:** each one passes through the reference point and varies the
+  target resolution, the input bit width, the DM range width (and with it the
+  number of coarse coherent trials) or the block length.
+- **Real-time factor:** seconds of baseband searched per second of compute,
+  counting one stride per block, i.e. excluding the overlap.
+
+```{image} ../bench/results/plots/light/cfdmt_rtf.png
+:class: only-light
+:alt: CohFDMT real-time factor against t_p, input bits, DM range width and block length
+```
+```{image} ../bench/results/plots/dark/cfdmt_rtf.png
+:class: only-dark
+:alt: CohFDMT real-time factor against t_p, input bits, DM range width and block length
+```
+
+How to read it:
+
+- **One coarse trial.** With DM ranges of a few tens of pc cm⁻³ at L-band, the
+  exact multi-subband grid needs a single coherent trial. Time then goes to
+  the forward transform of the block, which is run once and shared by all
+  trials. Longer blocks raise the useful fraction (`stride / block`) until
+  memory becomes the limit.
+- **More coarse trials.** For wider DM ranges, each additional trial costs the
+  per-channel inverse transforms over the valid window plus one fine FDMT.
+- **Measured against FFTW.** On the CPU both regimes run at the speed of FFTW
+  and the FDMT. The chirp, detection, normalisation and channel alignment are
+  fused into the per-channel inverse-transform pass, and the unpack and the
+  channel statistics into the forward pass.
+  `dmt_bench --benchmark_filter=cfdmt_(execute|stage)` prints the stage
+  timings and the FFTW roofline of the inverse transforms.
+- **On the GPU.**
+  - The front end runs in L2-sized chunks of subbands.
+  - Each coarse trial's coherent stage is one fused kernel: gather times chirp,
+    inverse FFT in shared memory, detection, alignment.
+  - With several coarse trials, the fine FDMT is the largest per-trial cost
+    (DM 50–250: 4.7 ms per trial, against 1.2 ms for the coherent stage).
+  - The `host arrays` series include the PCIe upload of the block (about
+    130 MB for 8-bit input), overlapped chunk by chunk with the front end.
+    They are bound by that copy.
+  - `dmt_bench --benchmark_filter=cfdmt_cuda` compares the fused and cuFFT
+    coherent stages, and reports the fused kernel's speed against a
+    device-to-device copy (`roofline`).
+- **CPU series.** Measured on Apple M1 Pro and Intel Xeon Gold 6348H (8 threads).
+
+```{include} ../bench/results/plots/cfdmt_summary.md
+```
+
 ## Reproducing
 
 The suite, the runner and the plotting script live in `bench/`.
 `bench/README.md` gives the per-machine steps (build, `run_suite.py`, commit
-the JSON, `plot_suite.py`) and the tips for comparable numbers. The
+the JSON, `plot_suite.py`; for CohFDMT `run_suite.py --suite cfdmt` and
+`plot_cfdmt.py`) and the tips for comparable numbers. The
 tuning microbenchmarks behind [Performance Tuning](pipeline_guide/performance.md)
 are a separate binary (`dmt_bench`).

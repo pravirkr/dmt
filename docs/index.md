@@ -28,38 +28,40 @@
 ::::{grid} 1 2 2 2
 :gutter: 3
 
-:::{grid-item-card} 🚀 Comprehensive Algorithm Suite
+:::{grid-item-card} 🚀 Algorithm Suite
 :class-card: sd-shadow-sm
 
-- **FDMT**: Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$), float or packed 1/2/4/8/16-bit input
-- **DDMT**: Direct (brute-force) dedispersion with DM-tiled CPU/GPU kernels, float or packed 1/2/4/8/16-bit input
-- **SDMT**: Exact DDMT sums with partial sums shared between DM trials within subbands (CPU and GPU; bit-identical integer output)
-- **CFDMT**: Hybrid Coherent baseband dedispersion for microsecond pulses
-- **FDMT-FFT**: Frequency-domain phase-shift dedispersion
+- **FDMT & FDMT-FFT**: Time and frequency-domain Fast Dispersion Measure Transforms.
+- **DDMT & SDMT**: Brute-force and subband-shared dedispersion with DM-tiled loops.
+- **CohFDMT**: Hybrid coherent + FDMT baseband search with exact physical grid scaling.
+- **Low-Bit Input**: Native packed 1, 2, 4, 8, 16-bit integer and float32 support.
 :::
 
 :::{grid-item-card} ⚡ Hardware Acceleration
 :class-card: sd-shadow-sm
 
-- **CPU**: Highly vectorized C++20 code with OpenMP multi-threading and cache-conscious memory layouts.
-- **GPU**: Native CUDA kernel support.
+- **SIMD & Multi-Threading**: Vectorized C++20 with OpenMP, AVX2, AVX-512, and ARM NEON.
+- **Native GPU Kernels**: Custom CUDA kernels for FDMT, DDMT, SDMT, and fused CohFDMT.
+- **Roofline Efficiency**: Register-resident partial sums and L2-chunked streaming passes.
+- **Zero-Copy Host Staging**: Asynchronous pinned memory transfers and overlapped PCIe streaming.
 :::
 
-:::{grid-item-card} 📡 Real-Time Pipeline Integration
+:::{grid-item-card} 📡 Pipeline Integration
 :class-card: sd-shadow-sm
 
-- **Sparse DM Grids**: Non-linear trial spacing.
-- **Stepper API**: Interactive inspection of subband trees.
-- **Overlap-Save Streaming**: Continuous data processing across block boundaries.
-- **Multi-Beam Batching**: Batching across dozens of tied-array telescope beams.
+- **Streaming & Block**: Stateless overlap-save history tiling and memory-free block modes.
+- **Multi-Beam Batching**: Batch execution across dozens of tied-array telescope beams.
+- **Sparse DM Grids**: Non-linear trial spacing and stepper API for subband inspection.
+- **Theoretical Variance**: Exact noise variance tracking.
 :::
 
-:::{grid-item-card} 🐍 Python & C++ Parity / Documentation
+:::{grid-item-card} 🐍 Python & C++ Parity
 :class-card: sd-shadow-sm
 
-- Production pipeline engines in low-level C++20.
-- Exposed bindings for Python with zero-copy NumPy arrays.
-- Rich documentation for both C++ and Python, including tutorials.
+- **Production C++20 Core**: Low-latency header/library architecture with clean RAII interfaces.
+- **Zero-Copy NumPy Bindings**: Direct memory sharing via `dmtlib` matching native C++ speed.
+- **Thorough Test Suite**: Catch2 assertions, Python pytest suite, and bit-exact checks.
+- **Rich Documentation**: Interactive Jupyter tutorials, production pipeline guides, and benchmarks.
 :::
 
 ::::

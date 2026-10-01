@@ -128,8 +128,8 @@ fdmt.load_history(std::span<const float>(beam0_state));
 
 The saved state is only the small history (`history_state_size()` floats),
 not the engine's working buffers, so one engine can serve many streams of the
-same plan geometry. `CohFDMT` uses exactly this to share one fine FDMT across
-all coarse-DM trials. On a GPU backend the history lives in device memory;
+same plan geometry. (`CohFDMT` does not need it: it is stateless across
+blocks, see [Coherent Hybrid Search](coherent_hybrid.md).) On a GPU backend the history lives in device memory;
 the `DeviceSpan` overloads (C++ only) are asynchronous on the given stream,
 and the host overloads copy synchronously. A saved history belongs to the
 backend that wrote it (the layout differs between backends).

@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "dmt/common/baseband.hpp"
 #include "dmt/common/types.hpp"
 
 namespace dmt::plans {
@@ -394,45 +395,60 @@ private:
 };
 
 /**
- * @brief Coherent Fast Dispersion Measure Transform (CohFDMT) execution plan.
+ * @brief Memory a CohFDMT engine allocates at construction, in bytes (host
+ * memory on the CPU backend, device memory on a GPU backend).
+ */
+struct CohFDMTMemoryUsage {
+    SizeType spectrum;  ///< Unpacked, forward-transformed input block
+    SizeType waterfall; ///< One coarse trial's aligned waterfall
+    SizeType fdmt;      ///< Fine FDMT engine and its output buffer
+    SizeType workspace; ///< Tables and per-thread scratch
+    SizeType output;    ///< Caller-provided result per execute() (not
+                        ///< owned by the engine)
+
+    /// Total allocated by the engine (excludes `output`).
+    [[nodiscard]] SizeType total() const noexcept {
+        return spectrum + waterfall + fdmt + workspace;
+    }
+};
+
+/**
+ * @brief Geometry of a CohFDMT (hybrid coherent + FDMT) search.
  *
- * Implements the hybrid coherent/incoherent search algorithm (Zackay et al.).
- * Combines coherent dedispersion over sparse coarse DM trials on raw baseband
- * voltages with a fine-resolution FDMT tree covering residual subband delays.
+ * Implements the hybrid algorithm of Zackay & Ofek for subband-channelised
+ * baseband:
+ * 1. Each subband block is Fourier transformed once (length nbin).
+ * 2. For each coarse DM trial d_k the spectrum is split into n_p channels
+ *    per subband, each coherently dedispersed to d_k within the channel
+ *    (a chirp about the channel centre), inverse transformed (length mbin =
+ *    nbin / n_p) and detected: Stokes I at tsamp = n_p / bw_sub.
+ * 3. Channels are shifted by their inter-channel delay at d_k and a fine
+ *    FDMT searches the residual dt in [-Delta, Delta] around d_k.
+ *
+ * The coarse step is the largest for which the residual smearing inside the
+ * bottom channel at a window edge stays below smear_tol * tsamp, using the
+ * total channel count nsub * n_p (not the single-band N_p^2 rule with the
+ * subband sampling time, which over-partitions multi-subband data by about
+ * nsub / 2).
+ *
+ * **Blocks (stateless skipback).** execute() processes one self-contained
+ * block of get_block_nsamps() raw samples per subband and keeps no state
+ * between calls. The caller advances the read position by
+ * get_stride_nsamps() between calls (consecutive blocks overlap by
+ * get_overlap_nsamps(), the dispersion sweep plus the coherent filter
+ * margins), so the get_output_nsamps() valid output samples of consecutive
+ * blocks tile the time axis. Output sample j of a block starting at raw
+ * sample s0 is the arrival time at get_f_ref() (the centre of the lowest
+ * channel) t = (s0 * tbin) + get_output_time_offset() + j * tsamp, for every
+ * DM row.
  */
 class CohFDMTPlan {
 public:
     /**
-     * @brief Constructs a coherent hybrid search plan.
-     *
-     * @param f_center Central radio frequency of the observation in MHz.
-     * @param bw_sub Subband bandwidth in MHz.
-     * @param nsub Number of subbands.
-     * @param tbin Raw baseband voltage time resolution in seconds (1 /
-     * total_bandwidth).
-     * @param nbin FFT block size for coherent dedispersion.
-     * @param nfft Number of contiguous FFT blocks processed per coherent
-     * segment.
-     * @param t_p Desired output time resolution of detected Stokes I samples in
-     * seconds.
-     * @param dm_max Maximum coherent DM trial in pc/cm^3.
-     * @param dm_min Minimum coherent DM trial in pc/cm^3 (default: 0).
-     * @param noverlap Overlap length in samples for overlap-save baseband
-     * convolution (default: 8192).
-     * @param data_order Voltage memory order: "PRITF", "FTPRI", or "RITFP"
-     * (default: "PRITF").
+     * @brief Builds the plan.
+     * @throws std::invalid_argument for an invalid or inconsistent config.
      */
-    CohFDMTPlan(float f_center,
-                float bw_sub,
-                SizeType nsub,
-                float tbin,
-                SizeType nbin,
-                SizeType nfft,
-                float t_p,
-                float dm_max,
-                float dm_min                = 0.0F,
-                SizeType noverlap           = 8192,
-                std::string_view data_order = "PRITF");
+    explicit CohFDMTPlan(const CohFDMTConfig& config);
 
     // --- Rule of five: PIMPL ---
     ~CohFDMTPlan();
@@ -441,105 +457,146 @@ public:
     CohFDMTPlan(const CohFDMTPlan&);
     CohFDMTPlan& operator=(const CohFDMTPlan&);
 
-    // --- Getters ---
-    /// @brief Center frequency in MHz
+    // --- Configuration and band ---
+    /// @brief The configuration the plan was built from
+    [[nodiscard]] const CohFDMTConfig& get_config() const noexcept;
+    /// @brief Input format
+    [[nodiscard]] const BasebandFormat& get_format() const noexcept;
+    /// @brief Centre frequency of the whole band in MHz
     [[nodiscard]] float get_f_center() const noexcept;
     /// @brief Bandwidth per subband in MHz
     [[nodiscard]] float get_bw_sub() const noexcept;
-    /// @brief Number of synthesized subbands
+    /// @brief Number of subbands (all groups)
     [[nodiscard]] SizeType get_nsub() const noexcept;
-    /// @brief Baseband voltage time sample interval in seconds
-    [[nodiscard]] float get_tbin() const noexcept;
-    /// @brief Number of voltage time bins per FFT block
-    [[nodiscard]] SizeType get_nbin() const noexcept;
-    /// @brief Number of FFT segments
-    [[nodiscard]] SizeType get_nfft() const noexcept;
-    /// @brief Output detected pulse resolution in seconds
-    [[nodiscard]] float get_t_p() const noexcept;
-    /// @brief Maximum coherent search DM in pc/cm^3
-    [[nodiscard]] float get_dm_max() const noexcept;
-    /// @brief Minimum coherent search DM in pc/cm^3
-    [[nodiscard]] float get_dm_min() const noexcept;
-    /// @brief Overlap sample count for linear convolution
-    [[nodiscard]] SizeType get_noverlap() const noexcept;
-    /// @brief Baseband memory layout identifier
-    [[nodiscard]] std::string_view get_data_order() const noexcept;
-
-    // --- Methods ---
-    /// @brief Total processed RF bandwidth in MHz (nsub * bw_sub)
+    /// @brief Subbands per input group (sums to get_nsub())
+    [[nodiscard]] const std::vector<SizeType>&
+    get_subband_groups() const noexcept;
+    /// @brief Total bandwidth in MHz (nsub * bw_sub)
     [[nodiscard]] float get_bw() const noexcept;
-    /// @brief Lowest RF frequency in MHz
+    /// @brief Bottom edge of the band in MHz
     [[nodiscard]] float get_f_min() const noexcept;
-    /// @brief Highest RF frequency in MHz
+    /// @brief Top edge of the band in MHz
     [[nodiscard]] float get_f_max() const noexcept;
-    /// @brief Pulse width in voltage time bins
+    /// @brief Subband sampling interval in seconds (1 / bw_sub)
+    [[nodiscard]] double get_tbin() const noexcept;
+    /// @brief Lowest DM searched in pc cm^-3
+    [[nodiscard]] float get_dm_min() const noexcept;
+    /// @brief Highest DM searched in pc cm^-3
+    [[nodiscard]] float get_dm_max() const noexcept;
+
+    // --- Channelisation ---
+    /// @brief Channels per subband = subband samples per output sample
     [[nodiscard]] SizeType get_n_p() const noexcept;
-    /// @brief Total synthesized channels
-    [[nodiscard]] SizeType get_nchan() const noexcept;
-    /// @brief Coarse coherent DM grid in pc/cm^3
-    [[nodiscard]] std::vector<float> get_dm_grid_coh() const noexcept;
-    /// @brief Final fine DM grid across all trials in pc/cm^3
-    [[nodiscard]] std::vector<float> get_dm_grid_final() const noexcept;
-    /// @brief Total voltage samples per segment
-    [[nodiscard]] SizeType get_nsamp() const noexcept;
-    /// @brief Voltage bins per channel
-    [[nodiscard]] SizeType get_mbin() const noexcept;
-    /// @brief Channels per subband
-    [[nodiscard]] SizeType get_mchan() const noexcept;
-    /// @brief Detected time samples per channel
-    [[nodiscard]] SizeType get_msamp() const noexcept;
-    /// @brief Detected sampling interval in seconds
+    /// @brief Total channels (nsub * n_p), ascending frequency
+    [[nodiscard]] SizeType get_nchans() const noexcept;
+    /// @brief Channel bandwidth in MHz
+    [[nodiscard]] float get_bw_chan() const noexcept;
+    /// @brief Output (detected) sampling interval in seconds (n_p * tbin)
     [[nodiscard]] float get_tsamp() const noexcept;
-    /// @brief Maximum residual delay in time samples for the fine FDMT tree
-    [[nodiscard]] SizeType get_dt_max() const noexcept;
-    /// @brief Minimum (symmetric negative) delay in samples for the fine FDMT
-    /// tree
-    [[nodiscard]] IndexType get_dt_min() const noexcept;
+    /// @brief Reference frequency of output times: centre of the lowest
+    /// channel, MHz
+    [[nodiscard]] float get_f_ref() const noexcept;
 
-    /// @brief Size of the complex chirp phase lookup table
-    [[nodiscard]] SizeType get_chirp_table_size() const noexcept;
-    /// @brief Size of the baseband unpacking scratch buffer
-    [[nodiscard]] SizeType get_unpack_buf_size() const noexcept;
-    /// @brief Size of the inter-channel delay buffer
-    [[nodiscard]] SizeType get_delay_buf_size() const noexcept;
-    /// @brief Size of the detected Stokes I intensity buffer
-    [[nodiscard]] SizeType get_intensity_buf_size() const noexcept;
-    /// @brief Total number of final DM trials across all coarse and fine steps
+    // --- FFT geometry ---
+    /// @brief Forward FFT length per subband block (n_p * mbin)
+    [[nodiscard]] SizeType get_nbin() const noexcept;
+    /// @brief Inverse FFT length per channel block
+    [[nodiscard]] SizeType get_mbin() const noexcept;
+    /// @brief Coherent filter margin per FFT block side, raw samples (a
+    /// multiple of n_p)
+    [[nodiscard]] SizeType get_noverlap() const noexcept;
+    /// @brief Forward FFT blocks per execute() block
+    [[nodiscard]] SizeType get_nfft() const noexcept;
+
+    // --- Block bookkeeping ---
+    /// @brief Raw samples per subband per execute() block
+    [[nodiscard]] SizeType get_block_nsamps() const noexcept;
+    /// @brief Raw samples per subband to advance between blocks
+    [[nodiscard]] SizeType get_stride_nsamps() const noexcept;
+    /// @brief Raw samples shared by consecutive blocks (block - stride)
+    [[nodiscard]] SizeType get_overlap_nsamps() const noexcept;
+    /// @brief Channel samples produced per block by the coherent stage
+    [[nodiscard]] SizeType get_msamp() const noexcept;
+    /// @brief Valid output samples per DM row per block
+    [[nodiscard]] SizeType get_output_nsamps() const noexcept;
+    /// @brief Seconds from the block's first raw sample to output sample 0
+    /// (arrival time at get_f_ref())
+    [[nodiscard]] double get_output_time_offset() const noexcept;
+    /// @brief Input bytes of group @p igroup per execute() block
+    [[nodiscard]] SizeType get_input_size(SizeType igroup = 0) const;
+
+    // --- DM grids ---
+    /// @brief Coarse (coherent) DM trials: centres of windows tiling
+    /// [dm_min, dm_max]
+    [[nodiscard]] const std::vector<float>& get_dm_grid_coh() const noexcept;
+    /// @brief Coarse DM step (window width) in pc cm^-3
+    [[nodiscard]] float get_dm_step_coh() const noexcept;
+    /// @brief Number of coarse trials
+    [[nodiscard]] SizeType get_ndm_coh() const noexcept;
+    /// @brief Fine rows per coarse trial
+    [[nodiscard]] SizeType get_ndm_fine() const noexcept;
+    /// @brief Half-width Delta of the fine FDMT delay range, samples
+    [[nodiscard]] SizeType get_fine_dt_max() const noexcept;
+    /// @brief Final DM of every output row (coarse-major) in pc cm^-3
+    [[nodiscard]] const std::vector<float>& get_dm_grid_final() const noexcept;
+    /// @brief Total output rows (ndm_coh * ndm_fine)
     [[nodiscard]] SizeType get_ndm() const noexcept;
-    /// @brief Total number of final DM trials (alias for get_ndm())
-    [[nodiscard]] SizeType get_dmt_ndms() const noexcept;
-    /// @brief Number of detected time samples per DM trial in output matrix
-    [[nodiscard]] SizeType get_dmt_nsamps() const noexcept;
-    /// @brief Theoretical noise variance grid across all DM trials
-    [[nodiscard]] std::vector<float>
-    get_effective_variance_grid(SizeType boxcar_width = 1,
-                                bool use_box_smearing = true) const;
-    /// @brief Theoretical noise standard deviation profile across all DM trials
-    [[nodiscard]] std::vector<float>
-    get_effective_sigma_grid(SizeType boxcar_width = 1,
-                             bool use_box_smearing = true) const;
-    /// @brief Cumulative sample accumulation count per channel-integrated DM
-    /// trial
-    [[nodiscard]] std::vector<float> get_cumulative_count_grid() const;
-    /// @brief Total float elements in the final output DMT transform (ndm *
-    /// dmt_nsamps)
-    [[nodiscard]] SizeType get_dmt_size() const;
-    /**
-     * @brief Output buffer length execute() needs: (N - 1) * D + B, with N
-     * coarse-DM trials, D = the fine FDMT's get_dmt_size() and B = its
-     * get_buffer_size(). Trial i's fine FDMT runs in place at offset i * D
-     * (its B-sized ping-pong span overlaps the next trials' slots, which are
-     * written afterwards), so only the leading get_dmt_size() = N * D values
-     * are the result; the tail is scratch.
-     */
-    [[nodiscard]] SizeType get_buffer_size() const;
-    /// @brief Scaling factor applied to phase chirps
-    [[nodiscard]] float get_chirp_scale() const noexcept;
+    /// @brief Largest total channel delay over all rows, samples
+    [[nodiscard]] SizeType get_max_delay() const noexcept;
+    /// @brief Time samples of the fine FDMT input window
+    [[nodiscard]] SizeType get_fdmt_nsamps() const noexcept;
+    /// @brief Aligned-frame sample at which the FDMT input window starts
+    /// (may be negative: samples before the block are zero)
+    [[nodiscard]] IndexType get_fdmt_window_start() const noexcept;
+    /// @brief Inter-channel shifts (samples, per channel) at coarse trial
+    /// @p idm_coh
+    [[nodiscard]] std::span<const IndexType>
+    get_channel_shifts(SizeType idm_coh) const;
+    /// @brief Start of each fine row's output in the FDMT output row
+    [[nodiscard]] const std::vector<SizeType>& get_row_offsets() const noexcept;
+    /// @brief Largest residual intra-channel smearing of the coarse grid, in
+    /// tsamp (bottom channel, window edge; <= smear_tol)
+    [[nodiscard]] float get_intra_channel_smear() const noexcept;
 
-    /// @brief Read-only reference to internal fine FDMT plan
-    [[nodiscard]] const FDMTPlan& get_fdmt_plan() const;
-    /// @brief Human-readable summary of the CohFDMT search parameters,
-    /// including the fine FDMT plan.
+    // --- Output ---
+    /// @brief Output rows (alias of get_ndm())
+    [[nodiscard]] SizeType get_dmt_ndms() const noexcept;
+    /// @brief Output samples per row (alias of get_output_nsamps())
+    [[nodiscard]] SizeType get_dmt_nsamps() const noexcept;
+    /// @brief Floats of the (ndm, output_nsamps) result
+    [[nodiscard]] SizeType get_dmt_size() const noexcept;
+    /// @brief Floats execute() needs in its output (== get_dmt_size())
+    [[nodiscard]] SizeType get_buffer_size() const noexcept;
+
+    // --- Noise statistics ---
+    /// @brief Channel response |H(f)| sampled on the mbin bins of a channel
+    /// (DC-centred, bin mbin/2 at the channel centre)
+    [[nodiscard]] const std::vector<float>& get_channel_taper() const noexcept;
+    /// @brief Correlation coefficient of detected noise at lags 0..max_lag
+    /// (1 at lag 0) within a channel
+    [[nodiscard]] std::vector<double>
+    get_lag_correlation(SizeType max_lag) const;
+    /**
+     * @brief Output noise variance of every row after a boxcar of
+     * @p boxcar_width samples, for Gaussian noise with normalize = true.
+     *
+     * Each channel contributes a (box smearing * boxcar) window of unit-
+     * variance samples whose lag correlation (get_lag_correlation()) comes
+     * from the channel taper; both are included exactly.
+     */
+    [[nodiscard]] std::vector<float>
+    get_effective_variance_grid(SizeType boxcar_width = 1) const;
+    /// @brief sqrt of get_effective_variance_grid()
+    [[nodiscard]] std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width = 1) const;
+    /// @brief Channel samples summed into every row (box smearing included)
+    [[nodiscard]] std::vector<float> get_cumulative_count_grid() const;
+
+    /// @brief Fine FDMT plan shared by all coarse trials
+    [[nodiscard]] const FDMTPlan& get_fdmt_plan() const noexcept;
+    /// @brief Estimated engine memory (see CohFDMT::get_memory_usage())
+    [[nodiscard]] CohFDMTMemoryUsage get_memory_estimate() const noexcept;
+    /// @brief Human-readable summary of the search geometry
     [[nodiscard]] std::string summary() const;
 
 private:

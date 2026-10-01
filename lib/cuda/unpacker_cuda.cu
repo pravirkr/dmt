@@ -1,312 +1,247 @@
-#include "dmt/common/types.hpp"
 #include "dmt/unpacker_cuda.cuh"
 
-#include <memory>
+#include <algorithm>
+#include <cstdint>
+#include <format>
 #include <stdexcept>
-#include <string_view>
-#include <unordered_map>
+#include <vector>
 
-#include "dmt/gpu_compat.cuh"
-
-#include <thrust/execution_policy.h>
-#include <thrust/for_each.h>
-#include <thrust/iterator/counting_iterator.h>
-
-#include "dmt/gpu_utils.cuh"
-#include "dmt/modes.hpp"
+#include "dmt/baseband_layout.hpp"
+#include "dmt/fourier_gpu.cuh"
 
 namespace dmt::utils {
 
 namespace {
-// Templated functor to perform the unpacking logic for a single output element
-template <IntegralDataType InDataType, BasebandDataOrder Order>
-struct UnpackAndPadFunctor {
-    const InDataType* __restrict__ d_in_ptr;
-    ComplexTypeGPU* __restrict__ d_p1_ptr;
-    ComplexTypeGPU* __restrict__ d_p2_ptr;
-    int nsub;
-    int nbin;
-    int noverlap;
-    int nfft;
-    int nsamp;
-    int ri_stride;
 
-    // Constants
-    [[maybe_unused]] static constexpr int kNpol = 2;
-
-    __host__ __device__ inline int
-    calculate_base_index(int isamp, int ipol, int isub) const {
-        if constexpr (Order == BasebandDataOrder::kPRITF) {
-            return (ipol * 2 * nsamp * nsub) + (isamp * nsub) + isub;
-        } else if constexpr (Order == BasebandDataOrder::kFTPRI) {
-            return (isub * nsamp * kNpol * 2) + (isamp * kNpol * 2) +
-                   (ipol * 2);
-        } else if constexpr (Order == BasebandDataOrder::kRITFP) {
-            return (isamp * nsub * kNpol) + (isub * kNpol) + ipol;
-        }
-        return 0; // Should not be reached
-    }
-
-    __host__ __device__ void operator()(int idx_out) const {
-        // Deconstruct linear output index idx_out into (ifft, isub, ibin)
-        // Output layout is assumed: [nfft][nsub][nbin]
-        const int isub_x_nbin = nsub * nbin;
-        const int ifft        = idx_out / isub_x_nbin;
-        const int remainder   = idx_out % isub_x_nbin;
-        const int isub        = remainder / nbin;
-        const int ibin        = remainder % nbin;
-
-        const auto start_sample = ((nbin - 2 * noverlap) * ifft) - noverlap;
-        const auto current_input_samp_signed = start_sample + ibin;
-
-        // Check if padding is needed (input sample index out of bounds)
-        if (current_input_samp_signed < 0 ||
-            current_input_samp_signed >= nsamp) {
-            d_p1_ptr[idx_out] = ComplexTypeGPU(0.0F, 0.0F);
-            d_p2_ptr[idx_out] = ComplexTypeGPU(0.0F, 0.0F);
-        } else {
-            const auto isamp          = current_input_samp_signed;
-            const auto idx_in_base_p1 = calculate_base_index(isamp, 0, isub);
-            const auto idx_in_base_p2 = calculate_base_index(isamp, 1, isub);
-            d_p1_ptr[idx_out]         = ComplexTypeGPU(
-                static_cast<float>(d_in_ptr[idx_in_base_p1]),
-                static_cast<float>(d_in_ptr[idx_in_base_p1 + ri_stride]));
-            d_p2_ptr[idx_out] = ComplexTypeGPU(
-                static_cast<float>(d_in_ptr[idx_in_base_p2]),
-                static_cast<float>(d_in_ptr[idx_in_base_p2 + ri_stride]));
-        }
-    }
+// Where one subband's elements live: element e of (pol, ri, t) is
+// data[e] (8-bit) or a field of data[e / per_byte].
+struct SubbandDesc {
+    const uint8_t* data;
+    uint64_t base; // subband offset (elements)
+    uint64_t pol;  // element strides
+    uint64_t ri;
+    uint64_t time;
 };
+
+__device__ __forceinline__ float decode(const uint8_t* data,
+                                        uint64_t e,
+                                        unsigned nbits,
+                                        bool is_signed,
+                                        const float* lut) {
+    if (nbits == 8) {
+        const uint8_t b = data[e];
+        return is_signed ? static_cast<float>(static_cast<int8_t>(b))
+                         : static_cast<float>(b) - 128.0F;
+    }
+    const unsigned per = 8U / nbits;
+    return lut[(static_cast<unsigned>(data[e / per]) * 4U) +
+               static_cast<unsigned>(e % per)];
+}
+
+// One thread per (subband, FFT block, sample) of subbands [sub_begin,
+// sub_begin + nsub): both polarisations.
+__global__ void unpack_kernel(const SubbandDesc* __restrict__ desc,
+                              const float* __restrict__ lut,
+                              unsigned nbits,
+                              bool is_signed,
+                              uint64_t sub_begin,
+                              uint64_t nsub,
+                              uint64_t nfft,
+                              uint64_t nbin,
+                              uint64_t step,
+                              float2* __restrict__ out) {
+    const uint64_t total = nsub * nfft * nbin;
+    for (uint64_t idx =
+             (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+         idx < total; idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+        const uint64_t i    = idx % nbin;
+        const uint64_t row  = (idx / nbin) + (sub_begin * nfft); // s * nfft + j
+        const uint64_t j    = row % nfft;
+        const uint64_t s    = row / nfft;
+        const SubbandDesc d = desc[s];
+        const uint64_t e0   = d.base + (((j * step) + i) * d.time);
+        const uint64_t e1   = e0 + d.pol;
+        float2* dst         = out + (row * 2 * nbin) + i;
+        dst[0]    = {decode(d.data, e0, nbits, is_signed, lut),
+                     decode(d.data, e0 + d.ri, nbits, is_signed, lut)};
+        dst[nbin] = {decode(d.data, e1, nbits, is_signed, lut),
+                     decode(d.data, e1 + d.ri, nbits, is_signed, lut)};
+    }
+}
+
 } // namespace
 
-class DataUnpackerCUDA::Impl {
+class BasebandUnpackerCUDA::Impl {
 public:
-    static constexpr SizeType kNpol = 2;
-
-    Impl(SizeType nsub,
+    Impl(const BasebandFormat& format,
+         std::span<const SizeType> subband_groups,
          SizeType nbin,
-         SizeType noverlap,
          SizeType nfft,
-         std::string_view in_order,
+         SizeType noverlap,
          int device_id)
-        : m_nsub(nsub),
+        : m_format(format),
+          m_groups(subband_groups.begin(), subband_groups.end()),
           m_nbin(nbin),
-          m_noverlap(noverlap),
           m_nfft(nfft),
-          m_device_id(device_id),
-          m_order(parse_baseband_data_order(in_order)) {
+          m_noverlap(noverlap),
+          m_device_id(device_id) {
+        if (m_groups.empty() || nbin <= 2 * noverlap || nfft == 0) {
+            throw std::invalid_argument(std::format(
+                "BasebandUnpackerCUDA: invalid geometry (groups={}, nbin={}, "
+                "noverlap={}, nfft={})",
+                m_groups.size(), nbin, noverlap, nfft));
+        }
         gpu_utils::set_device(m_device_id);
-        if (m_nbin <= 2 * m_noverlap) {
+        m_step   = m_nbin - (2 * m_noverlap);
+        m_nsamps = (m_nfft * m_step) + (2 * m_noverlap);
+        m_nsub   = 0;
+        for (const auto g : m_groups) {
+            m_nsub += g;
+        }
+        const auto table = make_decode_table(m_format);
+        std::vector<float> lut(256 * 4);
+        for (SizeType b = 0; b < 256; ++b) {
+            for (SizeType k = 0; k < 4; ++k) {
+                lut[(b * 4) + k] = table.value[b][k];
+            }
+        }
+        m_lut.upload(lut);
+        m_desc_h.resize(m_nsub);
+        m_desc.reserve(m_nsub);
+    }
+
+    SizeType block_nsamps() const noexcept { return m_nsamps; }
+    SizeType input_size(SizeType igroup) const {
+        return baseband_block_bytes(m_format, m_nsamps, m_groups.at(igroup));
+    }
+    SizeType output_size() const noexcept {
+        return m_nsub * m_nfft * 2 * m_nbin;
+    }
+
+    void execute(std::span<const cuda::std::span<const uint8_t>> groups,
+                 cuda::std::span<ComplexTypeGPU> out,
+                 cudaStream_t stream) {
+        prepare(groups, stream);
+        unpack(out, 0, m_nsub, stream);
+    }
+
+    void prepare(std::span<const cuda::std::span<const uint8_t>> groups,
+                 cudaStream_t stream) {
+        if (groups.size() != m_groups.size()) {
             throw std::invalid_argument(
-                std::format("DataUnpackerCUDA::Impl: Invalid nbin and noverlap "
-                            "values: {} and {}",
-                            m_nbin, m_noverlap));
+                std::format("CohFDMT: expected {} input group(s), got {}",
+                            m_groups.size(), groups.size()));
         }
-        m_nsamp = m_nfft * (m_nbin - 2 * m_noverlap);
-        // Expected input size: 2 polarizations * Real/Imag * total input
-        // samples * subbands
-        m_expected_in_size = kNpol * 2 * m_nsamp * m_nsub;
-        // Expected output size: FFT blocks * subbands * bins per FFT
-        m_expected_out_size = m_nfft * m_nsub * m_nbin;
-
-        // Make this robust if other DataType sizes are supported later
-        const SizeType sizeof_datatype = 1; // Assuming int8/uint8
-        const auto m_expected_in_bytes = m_expected_in_size * sizeof_datatype;
-        m_d_in_buffer.resize(m_expected_in_bytes);
-    }
-
-    ~Impl()                      = default;
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
-
-    template <IntegralDataType DataType>
-    void execute(std::span<const DataType> data_in,
-                 cuda::std::span<ComplexTypeGPU> data_p1,
-                 cuda::std::span<ComplexTypeGPU> data_p2,
-                 cudaStream_t stream) {
-        validate_sizes(data_in.size(), data_p1.size(), data_p2.size());
-
-        // Copy input data from host to device
-        // Cast the byte pointer to the specific DataType pointer needed now
-        std::byte* d_in_byte_ptr =
-            thrust::raw_pointer_cast(m_d_in_buffer.data());
-        auto* d_in_ptr = reinterpret_cast<DataType*>(d_in_byte_ptr);
+        SizeType isub = 0;
+        for (SizeType g = 0; g < groups.size(); ++g) {
+            if (groups[g].size() != input_size(g)) {
+                throw std::invalid_argument(std::format(
+                    "CohFDMT: input group {} has {} bytes, expected {}", g,
+                    groups[g].size(), input_size(g)));
+            }
+            const auto st = baseband_strides(m_format, m_nsamps, m_groups[g]);
+            for (SizeType s = 0; s < m_groups[g]; ++s) {
+                m_desc_h[isub++] = {.data = groups[g].data(),
+                                    .base = s * st.freq,
+                                    .pol  = st.pol,
+                                    .ri   = st.ri,
+                                    .time = st.time};
+            }
+        }
+        gpu_utils::set_device(m_device_id);
+        // The descriptors hold this call's pointers; the (pageable) copy is
+        // staged by the runtime before cudaMemcpyAsync returns.
         gpu_utils::check_gpu_call(
-            cudaMemcpyAsync(d_in_ptr, data_in.data(), data_in.size_bytes(),
+            cudaMemcpyAsync(m_desc.data(), m_desc_h.data(),
+                            m_nsub * sizeof(SubbandDesc),
                             cudaMemcpyHostToDevice, stream),
-            "DataUnpackerCUDA::Impl: cudaMemcpyAsync");
-
-        auto data_in_d_span = cuda::std::span(d_in_ptr, m_expected_in_size);
-
-        switch (m_order) {
-        case BasebandDataOrder::kPRITF:
-            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kPRITF>(
-                data_in_d_span, data_p1, data_p2, stream);
-            break;
-        case BasebandDataOrder::kFTPRI:
-            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kFTPRI>(
-                data_in_d_span, data_p1, data_p2, stream);
-            break;
-        case BasebandDataOrder::kRITFP:
-            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kRITFP>(
-                data_in_d_span, data_p1, data_p2, stream);
-            break;
-        default:
-            throw std::logic_error(
-                "DataUnpackerCUDA::Impl: Unsupported data order "
-                "encountered in execute.");
-        }
+            "BasebandUnpackerCUDA: descriptor upload failed");
     }
 
-    template <IntegralDataType DataType>
-    void execute(cuda::std::span<const DataType> data_in_d,
-                 cuda::std::span<ComplexTypeGPU> data_p1,
-                 cuda::std::span<ComplexTypeGPU> data_p2,
-                 cudaStream_t stream) {
-        validate_sizes(data_in_d.size(), data_p1.size(), data_p2.size());
-        switch (m_order) {
-        case BasebandDataOrder::kPRITF:
-            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kPRITF>(
-                data_in_d, data_p1, data_p2, stream);
-            break;
-        case BasebandDataOrder::kFTPRI:
-            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kFTPRI>(
-                data_in_d, data_p1, data_p2, stream);
-            break;
-        case BasebandDataOrder::kRITFP:
-            unpack_and_pad_dispatch<DataType, BasebandDataOrder::kRITFP>(
-                data_in_d, data_p1, data_p2, stream);
-            break;
-        default:
-            throw std::logic_error(
-                "DataUnpackerCUDA::Impl: Unsupported data order "
-                "encountered in execute.");
+    void unpack(cuda::std::span<ComplexTypeGPU> out,
+                SizeType sub_begin,
+                SizeType sub_end,
+                cudaStream_t stream) {
+        if (out.size() != output_size()) {
+            throw std::invalid_argument(std::format(
+                "BasebandUnpackerCUDA: output has {} elements, expected {}",
+                out.size(), output_size()));
         }
+        if (sub_begin > sub_end || sub_end > m_nsub) {
+            throw std::invalid_argument(std::format(
+                "BasebandUnpackerCUDA: subband range [{}, {}) out of [0, {})",
+                sub_begin, sub_end, m_nsub));
+        }
+        if (sub_begin == sub_end) {
+            return;
+        }
+        gpu_utils::set_device(m_device_id);
+        const auto nsub       = sub_end - sub_begin;
+        const auto total      = static_cast<int64_t>(nsub * m_nfft * m_nbin);
+        const unsigned blocks = static_cast<unsigned>(std::min<int64_t>(
+            (total + fourier_gpu::kBlock - 1) / fourier_gpu::kBlock,
+            int64_t{1} << 20));
+        unpack_kernel<<<blocks, fourier_gpu::kBlock, 0, stream>>>(
+            m_desc.data(), m_lut.data(), static_cast<unsigned>(m_format.nbits),
+            m_format.is_signed, sub_begin, nsub, m_nfft, m_nbin, m_step,
+            reinterpret_cast<float2*>(out.data()));
+        gpu_utils::check_last_gpu_error("BasebandUnpackerCUDA: unpack kernel");
     }
 
 private:
-    SizeType m_nsub;
+    BasebandFormat m_format;
+    std::vector<SizeType> m_groups;
     SizeType m_nbin;
-    SizeType m_noverlap;
     SizeType m_nfft;
-    SizeType m_nsamp;
+    SizeType m_noverlap;
     int m_device_id;
-    BasebandDataOrder m_order;
-    SizeType m_expected_in_size;
-    SizeType m_expected_out_size;
-    DeviceVector<std::byte> m_d_in_buffer;
+    SizeType m_step{};
+    SizeType m_nsamps{};
+    SizeType m_nsub{};
+    fourier_gpu::DevBuf<float> m_lut;
+    std::vector<SubbandDesc> m_desc_h;
+    fourier_gpu::DevBuf<SubbandDesc> m_desc;
+};
 
-    void validate_sizes(SizeType in_size,
-                        SizeType out1_size,
-                        SizeType out2_size) const {
-        if (in_size != m_expected_in_size) {
-            throw std::runtime_error(
-                std::format("DataUnpackerCUDA::Impl: Invalid input size. "
-                            "Expected {}, got {}.",
-                            m_expected_in_size, in_size));
-        }
-        if (out1_size != m_expected_out_size) {
-            throw std::runtime_error(
-                std::format("DataUnpackerCUDA::Impl: Invalid output size. "
-                            "Expected {}, got {}.",
-                            m_expected_out_size, out1_size));
-        }
-        if (out2_size != m_expected_out_size) {
-            throw std::runtime_error(
-                std::format("DataUnpackerCUDA::Impl: Invalid output size. "
-                            "Expected {}, got {}.",
-                            m_expected_out_size, out2_size));
-        }
-    }
-
-    template <BasebandDataOrder Order>
-    constexpr SizeType calculate_ri_stride() const {
-        static_assert(Order == BasebandDataOrder::kPRITF ||
-                          Order == BasebandDataOrder::kFTPRI ||
-                          Order == BasebandDataOrder::kRITFP,
-                      "Unsupported Order");
-        if constexpr (Order == BasebandDataOrder::kPRITF) {
-            return m_nsamp * m_nsub;
-        } else if constexpr (Order == BasebandDataOrder::kFTPRI) {
-            return 1;
-        } else if constexpr (Order == BasebandDataOrder::kRITFP) {
-            return m_nsamp * m_nsub * kNpol;
-        }
-    }
-
-    template <IntegralDataType DataType, BasebandDataOrder Order>
-    void unpack_and_pad_dispatch(cuda::std::span<const DataType> data_in_d,
-                                 cuda::std::span<ComplexTypeGPU> data_p1_d,
-                                 cuda::std::span<ComplexTypeGPU> data_p2_d,
-                                 cudaStream_t stream) const {
-        const auto ri_stride = calculate_ri_stride<Order>();
-        const auto n_output  = static_cast<int>(data_p1_d.size());
-
-        auto first = thrust::counting_iterator<int>(0);
-        auto last  = thrust::counting_iterator<int>(n_output);
-        UnpackAndPadFunctor<DataType, Order> functor{
-            .d_in_ptr  = data_in_d.data(),
-            .d_p1_ptr  = data_p1_d.data(),
-            .d_p2_ptr  = data_p2_d.data(),
-            .nsub      = static_cast<int>(m_nsub),
-            .nbin      = static_cast<int>(m_nbin),
-            .noverlap  = static_cast<int>(m_noverlap),
-            .nfft      = static_cast<int>(m_nfft),
-            .nsamp     = static_cast<int>(m_nsamp),
-            .ri_stride = static_cast<int>(ri_stride)};
-        thrust::for_each(thrust::cuda::par.on(stream), first, last, functor);
-        gpu_utils::check_last_gpu_error("thrust::for_each unpack/pad failed");
-    }
-
-}; // End DataUnpackerCUDA::Impl definition
-
-DataUnpackerCUDA::DataUnpackerCUDA(SizeType nsub,
-                                   SizeType nbin,
-                                   SizeType noverlap,
-                                   SizeType nfft,
-                                   std::string_view in_order,
-                                   int device_id)
+BasebandUnpackerCUDA::BasebandUnpackerCUDA(
+    const BasebandFormat& format,
+    std::span<const SizeType> subband_groups,
+    SizeType nbin,
+    SizeType nfft,
+    SizeType noverlap,
+    int device_id)
     : m_impl(std::make_unique<Impl>(
-          nsub, nbin, noverlap, nfft, in_order, device_id)) {}
-DataUnpackerCUDA::~DataUnpackerCUDA()                                 = default;
-DataUnpackerCUDA::DataUnpackerCUDA(DataUnpackerCUDA&& other) noexcept = default;
-DataUnpackerCUDA&
-DataUnpackerCUDA::operator=(DataUnpackerCUDA&& other) noexcept = default;
-template <IntegralDataType DataType>
-void DataUnpackerCUDA::execute(std::span<const DataType> data_in,
-                               cuda::std::span<ComplexTypeGPU> data_p1,
-                               cuda::std::span<ComplexTypeGPU> data_p2,
-                               cudaStream_t stream) const {
-    m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
+          format, subband_groups, nbin, nfft, noverlap, device_id)) {}
+BasebandUnpackerCUDA::~BasebandUnpackerCUDA() = default;
+BasebandUnpackerCUDA::BasebandUnpackerCUDA(BasebandUnpackerCUDA&&) noexcept =
+    default;
+BasebandUnpackerCUDA&
+BasebandUnpackerCUDA::operator=(BasebandUnpackerCUDA&&) noexcept = default;
+SizeType BasebandUnpackerCUDA::block_nsamps() const noexcept {
+    return m_impl->block_nsamps();
 }
-
-template <IntegralDataType DataType>
-void DataUnpackerCUDA::execute(cuda::std::span<const DataType> data_in,
-                               cuda::std::span<ComplexTypeGPU> data_p1,
-                               cuda::std::span<ComplexTypeGPU> data_p2,
-                               cudaStream_t stream) const {
-    m_impl->execute<DataType>(data_in, data_p1, data_p2, stream);
+SizeType BasebandUnpackerCUDA::input_size(SizeType igroup) const {
+    return m_impl->input_size(igroup);
 }
-
-template void DataUnpackerCUDA::execute<int8_t>(std::span<const int8_t>,
-                                                cuda::std::span<ComplexTypeGPU>,
-                                                cuda::std::span<ComplexTypeGPU>,
-                                                cudaStream_t) const;
-template void
-    DataUnpackerCUDA::execute<uint8_t>(std::span<const uint8_t>,
-                                       cuda::std::span<ComplexTypeGPU>,
-                                       cuda::std::span<ComplexTypeGPU>,
-                                       cudaStream_t) const;
-template void DataUnpackerCUDA::execute<int8_t>(cuda::std::span<const int8_t>,
-                                                cuda::std::span<ComplexTypeGPU>,
-                                                cuda::std::span<ComplexTypeGPU>,
-                                                cudaStream_t) const;
-template void
-    DataUnpackerCUDA::execute<uint8_t>(cuda::std::span<const uint8_t>,
-                                       cuda::std::span<ComplexTypeGPU>,
-                                       cuda::std::span<ComplexTypeGPU>,
-                                       cudaStream_t) const;
+SizeType BasebandUnpackerCUDA::output_size() const noexcept {
+    return m_impl->output_size();
+}
+void BasebandUnpackerCUDA::execute(
+    std::span<const cuda::std::span<const uint8_t>> groups,
+    cuda::std::span<ComplexTypeGPU> out,
+    cudaStream_t stream) {
+    m_impl->execute(groups, out, stream);
+}
+void BasebandUnpackerCUDA::prepare(
+    std::span<const cuda::std::span<const uint8_t>> groups,
+    cudaStream_t stream) {
+    m_impl->prepare(groups, stream);
+}
+void BasebandUnpackerCUDA::unpack(cuda::std::span<ComplexTypeGPU> out,
+                                  SizeType sub_begin,
+                                  SizeType sub_end,
+                                  cudaStream_t stream) {
+    m_impl->unpack(out, sub_begin, sub_end, stream);
+}
 
 } // namespace dmt::utils

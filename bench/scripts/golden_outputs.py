@@ -130,10 +130,10 @@ def _fft(out: dict, backend: str, data: np.ndarray) -> None:
             )
             out[f"fdmt_fft{tag}/{mode}"] = f.execute(data)
     coh = dmtlib.CohFDMT(
-        1250.0, 25.0, 4, 1.0e-6, 1 << 10, 2, 4.0e-6, 5.0, 0.0, 32, backend=backend
+        dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0), backend=backend
     )
     rng = np.random.default_rng(3)
-    raw = rng.integers(0, 256, size=2 * 2 * coh.plan.nsamp * 4, dtype=np.uint8)
+    raw = rng.integers(0, 256, size=coh.input_size(), dtype=np.uint8)
     out["cfdmt/u8"] = coh.execute(raw)
     out["cfdmt/u8/block2"] = coh.execute(raw[::-1].copy())
 

@@ -6,8 +6,6 @@
 #include <thrust/host_vector.h>
 #include "dmt/gpu_compat.cuh"
 
-#include "dmt/bb_utils.hpp"
-#include "dmt/bb_utils_cuda.cuh"
 #include "dmt/fft_cuda.cuh"
 #include "test_helpers.hpp"
 
@@ -36,7 +34,6 @@ TEST_CASE("CUFFTManager forward matches FFTWManager", "[fft][gpu][parity]") {
     auto cpu2 = h2;
     cpu.execute(cpu1);
     cpu.execute(cpu2);
-    bb_utils::swap_spectrum(cpu1, cpu2, nbin, nfft * nsub, 1);
 
     CUFFTManager gpu(FFTKind::kC2CForward, static_cast<SizeType>(nbin),
                      static_cast<SizeType>(nfft * nsub), 0);
@@ -52,7 +49,6 @@ TEST_CASE("CUFFTManager forward matches FFTWManager", "[fft][gpu][parity]") {
         thrust::raw_pointer_cast(d2.data()), d2.size());
     gpu.execute(d1_span);
     gpu.execute(d2_span);
-    bb_utils::swap_spectrum(d1_span, d2_span, nbin, nfft * nsub, nullptr);
     cudaDeviceSynchronize();
     thrust::host_vector<ComplexTypeGPU> g1 = d1;
     for (SizeType i = 0; i < n; ++i) {

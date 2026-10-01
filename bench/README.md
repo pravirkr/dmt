@@ -96,7 +96,35 @@ editing. A full run takes about 8 minutes on the M1 Pro; brute-force DDMT is mos
 --no-cpu / --no-gpu (alias --no-cuda)
 --quick            1 repetition, short minimum time
 --filter REGEX     extra filter AND-ed with the suite (e.g. 'FDMT/')
+--suite cfdmt      the CohFDMT baseband search instead (own config and plots)
 ```
+
+### CohFDMT section
+
+CohFDMT searches baseband voltages, so it has its own fixed configuration
+(one GUPPI node: 64 x 2.93 MHz at 1.31-1.50 GHz, int8 FTPRI, t_p = 10 us,
+DM 50-60, `dt_step` 16; `bench/suite/suite_cfdmt_common.hpp`) swept over t_p,
+input bit width, DM range width and block length. It is not compared with the
+filterbank algorithms:
+
+```bash
+python bench/scripts/run_suite.py --machine <name> --suite cfdmt  # suite_cfdmt_<kind>.json
+python bench/scripts/plot_cfdmt.py   # plots/{light,dark}/cfdmt_rtf.png, plots/cfdmt_summary.md
+```
+
+The stage microbenchmarks are in `dmt_bench`:
+
+- CPU (`--benchmark_filter=cfdmt_(execute|stage)`): unpack, forward FFT, fine
+  FDMT per trial, and the FFTW roofline of the per-trial inverse transforms.
+- GPU (`--benchmark_filter=cfdmt_cuda`): end to end with the fused or the
+  cuFFT coherent stage, unpack, the forward FFT as one batch or in L2-sized
+  chunks, and the fused coherent kernel. For the fused kernel, `roofline` is
+  its speed against a device-to-device copy of the same bytes. The fine FDMT
+  per trial is also timed.
+
+On a shared host, run only the GPU half (`run_suite.py --no-cpu`): the device
+timings do not depend on host load, except for the `*_host` points, which
+include the PCIe copies.
 
 The raw binary can also be run directly, e.g.
 `build/bench/dmt_bench_suite --benchmark_filter='suite/ndms/FDMT/'`.

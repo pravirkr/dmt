@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18...3.30)
 
 project(
   dmt
-  VERSION 0.6.0
+  VERSION 0.7.0
   LANGUAGES CXX
   DESCRIPTION "Dispersion Measure Transform Library"
 )

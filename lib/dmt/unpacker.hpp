@@ -2,67 +2,71 @@
 
 /**
  * @file unpacker.hpp
- * @brief Baseband voltage stream unpackers and format converters for
- * LOFAR/telescope DAQ layouts.
+ * @brief Baseband block unpacker: any BasebandFormat -> overlapping FFT
+ * blocks of complex float per polarisation and subband.
  */
 
 #include <memory>
 #include <span>
-#include <string_view>
 
+#include "dmt/common/baseband.hpp"
 #include "dmt/common/types.hpp"
 
 namespace dmt::utils {
 
-// Input ordered as polarisation-Real/Imag-time-frequency (PTF) - LOFAR
-// data_in shape: (npol=2, R/I=2, nsamp, nsub)
-// noverlap = n_d * n_c // 2
-// nsamp = nfft * (nbin - 2 * noverlap)
-// data_out shape: (2, nfft, nsub, nbin)
 /**
- * @brief Unpacks and pads input data based on specified order and type.
+ * @brief Decodes one baseband block (one span per subband group) into the
+ * forward-FFT input layout (sub, ifft, pol, nbin) of complex float.
  *
- * Handles different input data types (uint8_t, int8_t) and memory layouts
- * (BasebandDataOrder), converting to complex float output suitable for FFT.
+ * FFT block j of a subband holds raw samples [j * L, j * L + nbin), with
+ * L = nbin - 2 * noverlap, so consecutive blocks overlap by 2 * noverlap
+ * (overlap-save). The input block holds nfft * L + 2 * noverlap samples per
+ * subband; nothing is zero-padded.
  */
-class DataUnpackerCPU {
+class BasebandUnpackerCPU {
 public:
-    /**
-     * @brief Construct for CPU backend.
-     * @param nsub Number of subbands.
-     * @param nbin Number of frequency bins per subband in output.
-     * @param noverlap Overlap size for FFT processing.
-     * @param nfft Number of FFTs / time blocks.
-     * @param in_order String identifier for input data order (e.g., "PRITF",
-     * "FTPRI").
-     * @param nthreads Number of threads for OpenMP execution.
-     */
-    DataUnpackerCPU(SizeType nsub,
-                    SizeType nbin,
-                    SizeType noverlap,
-                    SizeType nfft,
-                    std::string_view in_order,
-                    int nthreads = 1);
+    BasebandUnpackerCPU(const BasebandFormat& format,
+                        std::span<const SizeType> subband_groups,
+                        SizeType nbin,
+                        SizeType nfft,
+                        SizeType noverlap,
+                        int nthreads = 1);
 
-    ~DataUnpackerCPU();
-    DataUnpackerCPU(DataUnpackerCPU&&) noexcept;
-    DataUnpackerCPU& operator=(DataUnpackerCPU&&) noexcept;
-    DataUnpackerCPU(const DataUnpackerCPU&)            = delete;
-    DataUnpackerCPU& operator=(const DataUnpackerCPU&) = delete;
+    ~BasebandUnpackerCPU();
+    BasebandUnpackerCPU(BasebandUnpackerCPU&&) noexcept;
+    BasebandUnpackerCPU& operator=(BasebandUnpackerCPU&&) noexcept;
+    BasebandUnpackerCPU(const BasebandUnpackerCPU&)            = delete;
+    BasebandUnpackerCPU& operator=(const BasebandUnpackerCPU&) = delete;
+
+    /// Raw samples per subband of one block (nfft * L + 2 * noverlap).
+    [[nodiscard]] SizeType block_nsamps() const noexcept;
+    /// Bytes of group @p igroup per block.
+    [[nodiscard]] SizeType input_size(SizeType igroup) const;
+    /// Complex elements of the output (nsub * nfft * 2 * nbin).
+    [[nodiscard]] SizeType output_size() const noexcept;
+
+    /// @throws std::invalid_argument unless there is one span of
+    /// input_size(g) bytes per group.
+    void validate(std::span<const std::span<const uint8_t>> groups) const;
 
     /**
-     * @brief Unpacks input data and pads for FFT (CPU version).
-     * @tparam DataType The integral input data type (e.g., uint8_t, int8_t).
-     * @param data_in Span viewing the input host data.
-     * @param data_p1 Span viewing the output host buffer for polarization 1
-     * (ComplexType).
-     * @param data_p2 Span viewing the output host buffer for polarization 2
-     * (ComplexType).
+     * @brief Decodes FFT block @p ifft of subband @p isub (both
+     * polarisations, nbin samples each). No validation: call validate()
+     * once per block of input first.
      */
-    template <IntegralDataType DataType>
-    void execute(std::span<const DataType> data_in,
-                 std::span<ComplexType> data_p1,
-                 std::span<ComplexType> data_p2) const;
+    void unpack_block(std::span<const std::span<const uint8_t>> groups,
+                      SizeType isub,
+                      SizeType ifft,
+                      ComplexType* pol0,
+                      ComplexType* pol1) const noexcept;
+
+    /**
+     * @param groups One span per subband group, each input_size(g) bytes.
+     * @param out output_size() complex values.
+     * @throws std::invalid_argument on a size mismatch.
+     */
+    void execute(std::span<const std::span<const uint8_t>> groups,
+                 std::span<ComplexType> out) const;
 
 private:
     class Impl;

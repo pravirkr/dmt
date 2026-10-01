@@ -34,34 +34,4 @@ namespace dmt {
     throw std::invalid_argument("Invalid FDMTMode");
 }
 
-[[nodiscard]] inline BasebandDataOrder
-parse_baseband_data_order(std::string_view name) {
-    if (name == "FTPRI") {
-        return BasebandDataOrder::kFTPRI;
-    }
-    if (name == "PRITF") {
-        return BasebandDataOrder::kPRITF;
-    }
-    if (name == "RITFP") {
-        return BasebandDataOrder::kRITFP;
-    }
-    throw std::invalid_argument(
-        std::format("Invalid baseband data order: {}. Expected 'FTPRI', "
-                    "'PRITF', or 'RITFP'",
-                    name));
-}
-
-[[nodiscard]] inline std::string_view
-baseband_data_order_to_string(BasebandDataOrder order) {
-    switch (order) {
-    case BasebandDataOrder::kFTPRI:
-        return "FTPRI";
-    case BasebandDataOrder::kPRITF:
-        return "PRITF";
-    case BasebandDataOrder::kRITFP:
-        return "RITFP";
-    }
-    throw std::invalid_argument("Invalid BasebandDataOrder");
-}
-
 } // namespace dmt
