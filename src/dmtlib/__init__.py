@@ -3,7 +3,7 @@ from importlib import metadata
 try:
     __version__ = metadata.version(__name__)
 except metadata.PackageNotFoundError:
-    __version__ = "0.6.0"
+    __version__ = "0.7.0"
 
 from . import libdmt as _libdmt
 from .grid import (

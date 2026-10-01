@@ -39,7 +39,7 @@
     "json_schema_version": 1,
     "build_type": "Release",
     "cpu_model": "AMD EPYC 9654 96-Core Processor",
-    "dmt_version": "0.6.0",
+    "dmt_version": "0.7.0",
     "fftw_planner": "measure",
     "gpu_model": "NVIDIA L40S",
     "label": "NVIDIA L40S",

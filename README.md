@@ -148,7 +148,7 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 ## 📊 Benchmarks
 
 Measured on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads) and
-an NVIDIA L40S, all with dmt 0.6.0. The data are 4096 channels (704–1216 MHz,
+an NVIDIA L40S, all with dmt 0.7.0. The data are 4096 channels (704–1216 MHz,
 81.92 µs) in 16K-sample blocks (1.34 s), processed as a stream.
 
 - **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT,
@@ -172,9 +172,7 @@ precision: **FDMT-FFT** trails FDMT by only 1.2–1.4× on the Xeon and L40S
 (5.5 ms on GPU), while **DDMT-FFT (NUFFT)** is 2–4.5× faster than brute-force DDMT.
 
 **CohFDMT** (coherent hybrid search of baseband voltages) takes one GUPPI node
-(64 × 2.93 MHz at 1.31–1.50 GHz, int8, t_p = 10 µs, DM 50–60). It runs 48×
-faster than real time on the L40S with device-resident data, 13.5× with host
-arrays (bound by the PCIe upload), and 1.6× on 8 M1 Pro threads.
+(64 × 2.93 MHz at 1.31–1.50 GHz, int8, t_p = 10 µs, DM 50–60).
 
 All sweeps, per-machine numbers and the operation-count comparison are on the
 [Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page.
