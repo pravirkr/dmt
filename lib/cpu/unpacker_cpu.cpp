@@ -43,8 +43,8 @@ public:
                 "noverlap={}, nfft={})",
                 m_groups.size(), nbin, noverlap, nfft));
         }
-        m_step   = m_nbin - (2 * m_noverlap);
-        m_nsamps = (m_nfft * m_step) + (2 * m_noverlap);
+        m_step          = m_nbin - (2 * m_noverlap);
+        m_nsamps        = (m_nfft * m_step) + (2 * m_noverlap);
         SizeType offset = 0;
         for (const auto g : m_groups) {
             for (SizeType s = 0; s < g; ++s) {
@@ -90,8 +90,8 @@ public:
         const SizeType g    = m_sub_group[isub];
         const auto& st      = m_strides[g];
         const uint8_t* data = groups[g].data();
-        const SizeType base = ((isub - m_group_offset[g]) * st.freq) +
-                              (ifft * m_step * st.time);
+        const SizeType base =
+            ((isub - m_group_offset[g]) * st.freq) + (ifft * m_step * st.time);
         const bool interleaved = st.ri == 1 && st.pol == 2 && st.time == 4;
         if (m_format.nbits == 8) {
             if (interleaved) {
@@ -129,8 +129,7 @@ public:
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
         for (SizeType row = 0; row < nrows; ++row) {
             ComplexType* dst = out_ptr + (row * 2 * m_nbin);
-            unpack_block(groups, row / m_nfft, row % m_nfft, dst,
-                         dst + m_nbin);
+            unpack_block(groups, row / m_nfft, row % m_nfft, dst, dst + m_nbin);
         }
     }
 
@@ -170,8 +169,8 @@ private:
                   const BasebandStrides& st,
                   ComplexType* __restrict__ pol0,
                   ComplexType* __restrict__ pol1) const noexcept {
-        auto* d0 = reinterpret_cast<float*>(pol0);
-        auto* d1 = reinterpret_cast<float*>(pol1);
+        auto* d0          = reinterpret_cast<float*>(pol0);
+        auto* d1          = reinterpret_cast<float*>(pol1);
         const uint8_t* p0 = data + base;
         const uint8_t* p1 = data + base + st.pol;
         const SizeType ts = st.time;

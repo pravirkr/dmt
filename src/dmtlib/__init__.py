@@ -95,6 +95,6 @@ __all__ = [
     "import_fft_wisdom",
     "pack_baseband",
     "set_fft_planner",
-    "simulate_baseband",
     "set_log_level",
+    "simulate_baseband",
 ]

@@ -116,16 +116,15 @@ struct BasebandDecodeTable {
 make_decode_table(const BasebandFormat& format) {
     validate_baseband_format(format);
     BasebandDecodeTable table;
-    table.per_byte = 8 / format.nbits;
+    table.per_byte       = 8 / format.nbits;
     const unsigned nbits = static_cast<unsigned>(format.nbits);
     const unsigned mask  = (1U << nbits) - 1U;
     for (unsigned byte = 0; byte < 256; ++byte) {
         for (unsigned k = 0; k < table.per_byte; ++k) {
-            const unsigned shift = format.msb_first
-                                       ? 8U - (nbits * (k + 1U))
-                                       : nbits * k;
-            const unsigned code  = (byte >> shift) & mask;
-            float v              = 0.0F;
+            const unsigned shift =
+                format.msb_first ? 8U - (nbits * (k + 1U)) : nbits * k;
+            const unsigned code = (byte >> shift) & mask;
+            float v             = 0.0F;
             if (nbits == 2) {
                 v = format.levels_2bit[code];
             } else if (format.is_signed) {

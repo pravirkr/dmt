@@ -15,10 +15,10 @@
 #include <thrust/host_vector.h>
 #include "dmt/gpu_compat.cuh"
 
+#include "cfdmt_behaviour.hpp"
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/utils/simulate.hpp"
-#include "cfdmt_behaviour.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -43,8 +43,9 @@ std::vector<uint8_t> make_block(const CohFDMTConfig& cfg, SizeType n) {
                               (static_cast<double>(plan.get_f_ref()) *
                                static_cast<double>(plan.get_f_ref()))),
         .fluence   = 1.0E7};
-    const auto v = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub,
-                                            n, std::span(&pulse, 1), 4.0F, 5, 4);
+    const auto v =
+        utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub, n,
+                                 std::span(&pulse, 1), 4.0F, 5, 4);
     return utils::pack_baseband(v, cfg.nsub, n, cfg.format, 1.0F);
 }
 
@@ -59,8 +60,7 @@ void require_close(const std::vector<float>& gpu,
     }
     double worst = 0.0;
     for (SizeType i = 0; i < cpu.size(); ++i) {
-        worst = std::max(worst,
-                         std::abs(static_cast<double>(gpu[i] - cpu[i])));
+        worst = std::max(worst, std::abs(static_cast<double>(gpu[i] - cpu[i])));
     }
     INFO("max |gpu - cpu| / max |cpu| = " << worst / scale);
     CHECK(worst <= rel * scale);
@@ -167,10 +167,9 @@ TEST_CASE("CohFDMT (gpu) execute validates buffers", "[cfdmt_gpu][gpu]") {
     CHECK_THROWS_AS(gpu.execute<uint8_t>(din, dout.subspan(0, dout.size() - 1)),
                     std::invalid_argument);
     const std::array<DeviceSpan<const uint8_t>, 2> two{din, din};
-    CHECK_THROWS_AS(
-        gpu.execute<uint8_t>(std::span<const DeviceSpan<const uint8_t>>(two),
-                             dout),
-        std::invalid_argument);
+    CHECK_THROWS_AS(gpu.execute<uint8_t>(
+                        std::span<const DeviceSpan<const uint8_t>>(two), dout),
+                    std::invalid_argument);
 }
 
 TEST_CASE("CohFDMT (gpu) trimmed filter margin matches a 1e-6 margin",
@@ -251,13 +250,12 @@ TEST_CASE("CohFDMT (gpu) fused and cuFFT coherent stages agree",
     require_close(fused, cufft, 1.0E-5);
     SECTION("cuFFT path in channel chunks") {
         // A work buffer of a few channels forces several chunks per trial.
-        const auto nwin = ((plan.get_fdmt_nsamps() +
-                            (plan.get_mbin() - (2 * plan.get_noverlap() /
-                                                plan.get_n_p())) -
-                            1) /
-                           (plan.get_mbin() -
-                            (2 * plan.get_noverlap() / plan.get_n_p()))) +
-                          1;
+        const auto nwin =
+            ((plan.get_fdmt_nsamps() +
+              (plan.get_mbin() - (2 * plan.get_noverlap() / plan.get_n_p())) -
+              1) /
+             (plan.get_mbin() - (2 * plan.get_noverlap() / plan.get_n_p()))) +
+            1;
         const SizeType per_chan = nwin * 2 * plan.get_mbin() * 8;
         const auto chunked = run_engine(cfg, in, CohFDMTCoherentPath::kCuFFT,
                                         (5 * per_chan) + 7);
@@ -333,9 +331,8 @@ TEST_CASE("CohFDMT (gpu) device and multi-group execute match the host path",
     const auto full = make_block(one, n);
     // FTPRI is subband-major: the groups are consecutive byte ranges.
     const SizeType split = gpu.get_input_size(0);
-    const std::vector<uint8_t> g0(full.begin(),
-                                  full.begin() +
-                                      static_cast<std::ptrdiff_t>(split));
+    const std::vector<uint8_t> g0(
+        full.begin(), full.begin() + static_cast<std::ptrdiff_t>(split));
     const std::vector<uint8_t> g1(
         full.begin() + static_cast<std::ptrdiff_t>(split), full.end());
 
@@ -366,16 +363,14 @@ TEST_CASE("CohFDMT (gpu) device and multi-group execute match the host path",
     thrust::device_vector<float> d_out(gpu.get_dmt_size() + 3);
     gpu.execute<uint8_t>(
         std::span<const DeviceSpan<const uint8_t>>(d_groups),
-        DeviceSpan<float>(thrust::raw_pointer_cast(d_out.data()),
-                          d_out.size())
+        DeviceSpan<float>(thrust::raw_pointer_cast(d_out.data()), d_out.size())
             .subspan(3, gpu.get_dmt_size()));
     cudaDeviceSynchronize();
     const thrust::host_vector<float> h_out = d_out;
     CHECK(std::vector<float>(h_out.begin() + 3, h_out.end()) == want);
 }
 
-TEST_CASE("CohFDMT (gpu) device execute on user streams",
-          "[cfdmt_gpu][gpu]") {
+TEST_CASE("CohFDMT (gpu) device execute on user streams", "[cfdmt_gpu][gpu]") {
     if (!test::gpu_device_available()) {
         SKIP("no GPU device");
     }
@@ -411,9 +406,8 @@ TEST_CASE("CohFDMT (gpu) device execute on user streams",
     for (SizeType i = 0; i < 4; ++i) {
         CAPTURE(i);
         CHECK(std::vector<float>(h.begin() + static_cast<std::ptrdiff_t>(i * n),
-                                 h.begin() +
-                                     static_cast<std::ptrdiff_t>((i + 1) * n)) ==
-              want);
+                                 h.begin() + static_cast<std::ptrdiff_t>(
+                                                 (i + 1) * n)) == want);
     }
     // A host call right after device calls on another stream.
     std::vector<float> host_again(n);
@@ -457,9 +451,9 @@ TEST_CASE("CohFDMT (gpu) spectrum beyond 2^31 elements",
         SKIP("needs " << need / 1.0737e9 << " GB of device memory");
     }
     // Raw impulse (DM 0) in every subband near the end of the block.
-    const auto nout  = plan.get_output_nsamps();
-    const auto n_p   = plan.get_n_p();
-    const SizeType j = nout - 10;
+    const auto nout   = plan.get_output_nsamps();
+    const auto n_p    = plan.get_n_p();
+    const SizeType j  = nout - 10;
     const SizeType s0 = static_cast<SizeType>(std::llround(
                             plan.get_output_time_offset() / plan.get_tbin())) +
                         (j * n_p);
@@ -473,8 +467,8 @@ TEST_CASE("CohFDMT (gpu) spectrum beyond 2^31 elements",
     const CohFDMT gpu(cfg, test::gpu_exec());
     std::vector<float> out(gpu.get_dmt_size());
     gpu.execute<uint8_t>(std::span<const uint8_t>(in), out);
-    const auto it  = std::ranges::max_element(out);
-    const auto idx = static_cast<SizeType>(std::distance(out.begin(), it));
+    const auto it    = std::ranges::max_element(out);
+    const auto idx   = static_cast<SizeType>(std::distance(out.begin(), it));
     const auto& grid = plan.get_dm_grid_final();
     CHECK(std::abs(grid[idx / nout]) <= std::abs(grid[1] - grid[0]));
     CHECK(std::abs(static_cast<double>(idx % nout) - static_cast<double>(j)) <=

@@ -29,13 +29,12 @@ TEST_CASE("BasebandUnpackerCUDA matches BasebandUnpackerCPU",
     const SizeType noverlap = 8;
     const SizeType nsub     = 5;
     const SizeType nsamps   = (nfft * (nbin - (2 * noverlap))) + (2 * noverlap);
-    const auto order = GENERATE(std::string("FTPRI"), std::string("PRITF"),
-                                std::string("TFPRI"), std::string("RITFP"));
-    const auto nbits = GENERATE(SizeType{8}, SizeType{4}, SizeType{2});
+    const auto order     = GENERATE(std::string("FTPRI"), std::string("PRITF"),
+                                    std::string("TFPRI"), std::string("RITFP"));
+    const auto nbits     = GENERATE(SizeType{8}, SizeType{4}, SizeType{2});
     const auto is_signed = GENERATE(true, false);
-    const BasebandFormat format{.order     = order,
-                                .nbits     = nbits,
-                                .is_signed = is_signed};
+    const BasebandFormat format{
+        .order = order, .nbits = nbits, .is_signed = is_signed};
     CAPTURE(order, nbits, is_signed);
     std::mt19937 rng(3);
     std::vector<ComplexType> v(2 * nsub * nsamps);

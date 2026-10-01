@@ -331,20 +331,19 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("noverlap", &CohFDMTPlan::get_noverlap)
         .def_property_readonly("nfft", &CohFDMTPlan::get_nfft)
         .def_property_readonly("block_nsamps", &CohFDMTPlan::get_block_nsamps)
-        .def_property_readonly("stride_nsamps",
-                               &CohFDMTPlan::get_stride_nsamps)
+        .def_property_readonly("stride_nsamps", &CohFDMTPlan::get_stride_nsamps)
         .def_property_readonly("overlap_nsamps",
                                &CohFDMTPlan::get_overlap_nsamps)
         .def_property_readonly("msamp", &CohFDMTPlan::get_msamp)
-        .def_property_readonly("output_nsamps",
-                               &CohFDMTPlan::get_output_nsamps)
+        .def_property_readonly("output_nsamps", &CohFDMTPlan::get_output_nsamps)
         .def_property_readonly("output_time_offset",
                                &CohFDMTPlan::get_output_time_offset)
         .def("input_size", &CohFDMTPlan::get_input_size, "igroup"_a = 0,
              "Bytes of subband group ``igroup`` per block.")
-        .def_property_readonly(
-            "dm_grid_coh",
-            [](const CohFDMTPlan& p) { return as_pyarray_ref(p.get_dm_grid_coh()); })
+        .def_property_readonly("dm_grid_coh",
+                               [](const CohFDMTPlan& p) {
+                                   return as_pyarray_ref(p.get_dm_grid_coh());
+                               })
         .def_property_readonly("dm_step_coh", &CohFDMTPlan::get_dm_step_coh)
         .def_property_readonly("ndm_coh", &CohFDMTPlan::get_ndm_coh)
         .def_property_readonly("ndm_fine", &CohFDMTPlan::get_ndm_fine)
@@ -363,18 +362,20 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("buffer_size", &CohFDMTPlan::get_buffer_size)
         .def_property_readonly("fdmt_plan", &CohFDMTPlan::get_fdmt_plan,
                                py::return_value_policy::reference_internal)
-        .def("get_channel_shifts",
-             [](const CohFDMTPlan& p, SizeType idm_coh) {
-                 const auto s = p.get_channel_shifts(idm_coh);
-                 return as_pyarray(std::vector<IndexType>(s.begin(), s.end()));
-             },
-             "idm_coh"_a,
-             "Inter-channel shifts (samples) of every channel at a coarse "
-             "trial.")
+        .def(
+            "get_channel_shifts",
+            [](const CohFDMTPlan& p, SizeType idm_coh) {
+                const auto s = p.get_channel_shifts(idm_coh);
+                return as_pyarray(std::vector<IndexType>(s.begin(), s.end()));
+            },
+            "idm_coh"_a,
+            "Inter-channel shifts (samples) of every channel at a coarse "
+            "trial.")
         .def(
             "get_effective_variance_grid",
             [](const CohFDMTPlan& plan, SizeType boxcar_width) {
-                return as_pyarray(plan.get_effective_variance_grid(boxcar_width));
+                return as_pyarray(
+                    plan.get_effective_variance_grid(boxcar_width));
             },
             "boxcar_width"_a = 1,
             "Output noise variance of every row after a boxcar of "
@@ -387,23 +388,25 @@ void bind_plans(py::module_& mod) {
             },
             "boxcar_width"_a = 1,
             "Square root of :meth:`get_effective_variance_grid`.")
-        .def("get_cumulative_count_grid",
-             [](const CohFDMTPlan& plan) {
-                 return as_pyarray(plan.get_cumulative_count_grid());
-             },
-             "Channel samples summed into every row (box smearing included).")
-        .def("get_lag_correlation",
-             [](const CohFDMTPlan& plan, SizeType max_lag) {
-                 return as_pyarray(plan.get_lag_correlation(max_lag));
-             },
-             "max_lag"_a,
-             "Correlation coefficient of detected noise within a channel at "
-             "lags 0..max_lag.")
+        .def(
+            "get_cumulative_count_grid",
+            [](const CohFDMTPlan& plan) {
+                return as_pyarray(plan.get_cumulative_count_grid());
+            },
+            "Channel samples summed into every row (box smearing included).")
+        .def(
+            "get_lag_correlation",
+            [](const CohFDMTPlan& plan, SizeType max_lag) {
+                return as_pyarray(plan.get_lag_correlation(max_lag));
+            },
+            "max_lag"_a,
+            "Correlation coefficient of detected noise within a channel at "
+            "lags 0..max_lag.")
         .def(
             "memory_estimate",
             [](const CohFDMTPlan& plan) {
                 const auto m = plan.get_memory_estimate();
-                return py::dict("spectrum"_a = m.spectrum,
+                return py::dict("spectrum"_a  = m.spectrum,
                                 "waterfall"_a = m.waterfall, "fdmt"_a = m.fdmt,
                                 "workspace"_a = m.workspace,
                                 "output"_a = m.output, "total"_a = m.total());

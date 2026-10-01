@@ -82,14 +82,15 @@ struct BasebandPulse {
  * @param nthreads OpenMP threads for the transforms.
  * @return (pol=2, nsub, nsamps) complex voltages.
  */
-std::vector<ComplexType> simulate_baseband(float f_center,
-                                           float bw_sub,
-                                           SizeType nsub,
-                                           SizeType nsamps,
-                                           std::span<const BasebandPulse> pulses,
-                                           float noise_sigma = 0.0F,
-                                           uint64_t seed     = 42,
-                                           int nthreads      = 1);
+std::vector<ComplexType>
+simulate_baseband(float f_center,
+                  float bw_sub,
+                  SizeType nsub,
+                  SizeType nsamps,
+                  std::span<const BasebandPulse> pulses,
+                  float noise_sigma = 0.0F,
+                  uint64_t seed     = 42,
+                  int nthreads      = 1);
 
 /**
  * @brief Quantises (pol, nsub, nsamps) complex voltages into a baseband

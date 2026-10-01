@@ -52,10 +52,9 @@ template <bool Host> void bench_gpu(benchmark::State& state, const Point& p) {
         for (auto _ : state) {
             const auto t0 = std::chrono::steady_clock::now();
             search.execute<uint8_t>(std::span<const uint8_t>(in), dmt);
-            state.SetIterationTime(
-                std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                              t0)
-                    .count());
+            state.SetIterationTime(std::chrono::duration<double>(
+                                       std::chrono::steady_clock::now() - t0)
+                                       .count());
         }
     } else {
         const thrust::device_vector<uint8_t> d_in(in.begin(), in.end());

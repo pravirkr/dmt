@@ -100,8 +100,7 @@ TEST_CASE("find_nearest_sorted_idx", "[fdmt_utils][cpu][internal]") {
     }
 }
 
-TEST_CASE("get_dmconv and delay tables",
-          "[fdmt_utils][cpu][internal]") {
+TEST_CASE("get_dmconv and delay tables", "[fdmt_utils][cpu][internal]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
     const float tsamp     = 0.001F;

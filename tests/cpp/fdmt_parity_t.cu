@@ -84,8 +84,9 @@ TEST_CASE("parity: CohFDMT (gpu) execute matches CPU", "[cfdmt][gpu][parity]") {
     std::vector<float> dmt_gpu(gpu.get_dmt_size(), 0.0F);
     cpu.execute<uint8_t>(data_in, dmt_cpu);
     gpu.execute<uint8_t>(data_in, dmt_gpu);
-    REQUIRE_THAT(dmt_gpu,
-                 Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-4).margin(1.0E-3));
+    REQUIRE_THAT(
+        dmt_gpu,
+        Catch::Matchers::Approx(dmt_cpu).epsilon(1.0E-4).margin(1.0E-3));
 }
 
 TEST_CASE("parity: FDMT (gpu) add_frb_track recovery matches CPU",

@@ -60,7 +60,7 @@ public:
         const auto nchans = plan.get_nchans();
         const auto mbin   = plan.get_mbin();
         m_spec.resize(m_unpacker.output_size());
-        m_phases = cfdmt::make_chirp_phases(plan);
+        m_phases          = cfdmt::make_chirp_phases(plan);
         const auto& taper = plan.get_channel_taper();
         const float scale = 1.0F / static_cast<float>(plan.get_nbin());
         m_taper.resize(mbin);
@@ -109,15 +109,14 @@ public:
         const auto fdmt_mem = m_fdmt.get_memory_usage();
         return {.spectrum  = m_spec.size() * sizeof(ComplexType),
                 .waterfall = m_waterfall.size() * sizeof(float),
-                .fdmt      = fdmt_mem.total() +
-                        (m_fdmt_out.size() * sizeof(float)),
-                .workspace = ((m_phases.base.size() + m_phases.inc.size()) *
-                              sizeof(uint64_t)) +
-                             (m_scratch.size() * sizeof(ComplexType)) +
-                             ((m_mean.size() + m_inv_sigma.size() +
-                               m_taper.size()) *
-                              sizeof(float)),
-                .output    = m_plan.get_dmt_size() * sizeof(float)};
+                .fdmt = fdmt_mem.total() + (m_fdmt_out.size() * sizeof(float)),
+                .workspace =
+                    ((m_phases.base.size() + m_phases.inc.size()) *
+                     sizeof(uint64_t)) +
+                    (m_scratch.size() * sizeof(ComplexType)) +
+                    ((m_mean.size() + m_inv_sigma.size() + m_taper.size()) *
+                     sizeof(float)),
+                .output = m_plan.get_dmt_size() * sizeof(float)};
     }
 
 protected:
@@ -169,13 +168,13 @@ private:
     // m0^2 + m1^2.
     void front_end(std::span<const std::span<const uint8_t>> groups) {
         m_unpacker.validate(groups);
-        const auto n_p    = m_plan.get_n_p();
-        const auto nsub   = m_plan.get_nsub();
-        const auto nfft   = m_plan.get_nfft();
-        const auto nbin   = m_plan.get_nbin();
-        const auto mbin   = m_plan.get_mbin();
-        const bool norm   = m_plan.get_config().normalize;
-        ComplexType* spec = m_spec.data();
+        const auto n_p     = m_plan.get_n_p();
+        const auto nsub    = m_plan.get_nsub();
+        const auto nfft    = m_plan.get_nfft();
+        const auto nbin    = m_plan.get_nbin();
+        const auto mbin    = m_plan.get_mbin();
+        const bool norm    = m_plan.get_config().normalize;
+        ComplexType* spec  = m_spec.data();
         const float* taper = m_taper.data();
         float* power       = m_power.data();
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
@@ -229,7 +228,8 @@ private:
             m[1] /= static_cast<double>(nfft);
             const double sigma = std::sqrt((m[0] * m[0]) + (m[1] * m[1]));
             m_mean[c]          = static_cast<float>(m[0] + m[1]);
-            m_inv_sigma[c] = sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 0.0F;
+            m_inv_sigma[c] =
+                sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 0.0F;
         }
     }
 
@@ -238,20 +238,20 @@ private:
     // window start), i.e. channel samples m = t - S_c(k); samples outside the
     // block are zero.
     void coherent_trial(SizeType k) {
-        const auto nchans  = m_plan.get_nchans();
-        const auto n_p     = m_plan.get_n_p();
-        const auto nsub    = m_plan.get_nsub();
-        const auto nfft    = m_plan.get_nfft();
-        const auto nbin    = m_plan.get_nbin();
-        const auto mbin    = m_plan.get_mbin();
-        const auto novc    = m_plan.get_noverlap() / n_p;
-        const auto lc      = mbin - (2 * novc);
-        const auto msamp   = static_cast<IndexType>(m_plan.get_msamp());
-        const auto nf      = static_cast<IndexType>(m_plan.get_fdmt_nsamps());
-        const auto a       = m_plan.get_fdmt_window_start();
-        const auto shifts  = m_plan.get_channel_shifts(k);
-        const bool norm    = m_plan.get_config().normalize;
-        const auto kk      = static_cast<uint64_t>(k);
+        const auto nchans = m_plan.get_nchans();
+        const auto n_p    = m_plan.get_n_p();
+        const auto nsub   = m_plan.get_nsub();
+        const auto nfft   = m_plan.get_nfft();
+        const auto nbin   = m_plan.get_nbin();
+        const auto mbin   = m_plan.get_mbin();
+        const auto novc   = m_plan.get_noverlap() / n_p;
+        const auto lc     = mbin - (2 * novc);
+        const auto msamp  = static_cast<IndexType>(m_plan.get_msamp());
+        const auto nf     = static_cast<IndexType>(m_plan.get_fdmt_nsamps());
+        const auto a      = m_plan.get_fdmt_window_start();
+        const auto shifts = m_plan.get_channel_shifts(k);
+        const bool norm   = m_plan.get_config().normalize;
+        const auto kk     = static_cast<uint64_t>(k);
         const ComplexType* spec  = m_spec.data();
         ComplexType* scratch_all = m_scratch.data();
         const SizeType sstride   = scratch_stride();
@@ -289,14 +289,14 @@ private:
                 chirp[b] = {taper[b] * cs, taper[b] * sn};
             }
 
-            const SizeType isub  = c / n_p;
-            const SizeType off   = bin_offset(c % n_p);
-            const SizeType head  = std::min(mbin, nbin - off); // before wrap
-            const float mean     = m_mean[c];
-            const float inv_sig  = m_inv_sigma[c];
-            const auto j_first   = static_cast<SizeType>(m_lo) / lc;
-            const auto j_last    = static_cast<SizeType>(m_hi - 1) / lc;
-            float* dst           = row + (s - a);
+            const SizeType isub = c / n_p;
+            const SizeType off  = bin_offset(c % n_p);
+            const SizeType head = std::min(mbin, nbin - off); // before wrap
+            const float mean    = m_mean[c];
+            const float inv_sig = m_inv_sigma[c];
+            const auto j_first  = static_cast<SizeType>(m_lo) / lc;
+            const auto j_last   = static_cast<SizeType>(m_hi - 1) / lc;
+            float* dst          = row + (s - a);
             for (SizeType j0 = j_first; j0 <= j_last; j0 += m_chunk) {
                 const SizeType nj = std::min(m_chunk, j_last + 1 - j0);
                 for (SizeType q = 0; q < nj; ++q) {
@@ -310,7 +310,7 @@ private:
                 for (SizeType q = 0; q < nj; ++q) {
                     // Kept samples of block j: channel samples [j lc,
                     // (j + 1) lc) from inverse-FFT bins [novc, novc + lc).
-                    const auto m0 = static_cast<IndexType>((j0 + q) * lc);
+                    const auto m0       = static_cast<IndexType>((j0 + q) * lc);
                     const IndexType beg = std::max(m_lo, m0);
                     const IndexType end =
                         std::min(m_hi, m0 + static_cast<IndexType>(lc));
@@ -344,10 +344,9 @@ private:
         }
 #pragma omp simd
         for (SizeType i = 0; i < n; ++i) {
-            const float v = (y0[2 * i] * y0[2 * i]) +
-                            (y0[(2 * i) + 1] * y0[(2 * i) + 1]) +
-                            (y1[2 * i] * y1[2 * i]) +
-                            (y1[(2 * i) + 1] * y1[(2 * i) + 1]);
+            const float v =
+                (y0[2 * i] * y0[2 * i]) + (y0[(2 * i) + 1] * y0[(2 * i) + 1]) +
+                (y1[2 * i] * y1[2 * i]) + (y1[(2 * i) + 1] * y1[(2 * i) + 1]);
             dst[i] = (v - mean) * inv_sig;
         }
     }
@@ -387,12 +386,12 @@ private:
 
     // Row r of trial k: the FDMT output row from its reference offset.
     void crop_rows(SizeType k, std::span<float> dmt) const {
-        const auto nfine   = m_plan.get_ndm_fine();
-        const auto nout    = m_plan.get_output_nsamps();
-        const auto nf      = m_plan.get_fdmt_nsamps();
-        const auto& offs   = m_plan.get_row_offsets();
-        const float* src   = m_fdmt_out.data();
-        float* dst         = dmt.data() + (k * nfine * nout);
+        const auto nfine = m_plan.get_ndm_fine();
+        const auto nout  = m_plan.get_output_nsamps();
+        const auto nf    = m_plan.get_fdmt_nsamps();
+        const auto& offs = m_plan.get_row_offsets();
+        const float* src = m_fdmt_out.data();
+        float* dst       = dmt.data() + (k * nfine * nout);
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
         for (SizeType r = 0; r < nfine; ++r) {
             std::copy_n(src + (r * nf) + offs[r], nout, dst + (r * nout));

@@ -87,10 +87,10 @@ void BM_cfdmt_cuda_execute(benchmark::State& state) {
     const auto cfg = guppi_config(static_cast<SizeType>(state.range(1)));
     const plans::CohFDMTPlan plan(cfg);
     const auto engine = algorithms::detail::make_cfdmt_gpu(
-        plan, {.exec          = bench_gpu_exec(),
-               .coherent_path = state.range(0) == 0
-                                    ? CohFDMTCoherentPath::kFused
-                                    : CohFDMTCoherentPath::kCuFFT});
+        plan,
+        {.exec          = bench_gpu_exec(),
+         .coherent_path = state.range(0) == 0 ? CohFDMTCoherentPath::kFused
+                                              : CohFDMTCoherentPath::kCuFFT});
     const thrust::device_vector<uint8_t> d_in(plan.get_input_size(0), 3);
     thrust::device_vector<float> d_out(plan.get_dmt_size());
     const DeviceSpan<const uint8_t> din(thrust::raw_pointer_cast(d_in.data()),
@@ -105,10 +105,9 @@ void BM_cfdmt_cuda_execute(benchmark::State& state) {
 void BM_cfdmt_cuda_stage_unpack(benchmark::State& state) {
     const plans::CohFDMTPlan plan(
         guppi_config(static_cast<SizeType>(state.range(1))));
-    utils::BasebandUnpackerCUDA unpacker(plan.get_format(),
-                                         plan.get_subband_groups(),
-                                         plan.get_nbin(), plan.get_nfft(),
-                                         plan.get_noverlap());
+    utils::BasebandUnpackerCUDA unpacker(
+        plan.get_format(), plan.get_subband_groups(), plan.get_nbin(),
+        plan.get_nfft(), plan.get_noverlap());
     const thrust::device_vector<uint8_t> d_in(unpacker.input_size(0), 3);
     thrust::device_vector<ComplexTypeGPU> d_out(unpacker.output_size());
     const cuda::std::span<const uint8_t> group(
@@ -125,9 +124,8 @@ void BM_cfdmt_cuda_stage_forward_fft(benchmark::State& state) {
     const plans::CohFDMTPlan plan(
         guppi_config(static_cast<SizeType>(state.range(1))));
     const auto nsub = plan.get_nsub();
-    const auto per  = state.range(0) == 0
-                          ? nsub
-                          : static_cast<SizeType>(state.range(0));
+    const auto per =
+        state.range(0) == 0 ? nsub : static_cast<SizeType>(state.range(0));
     const auto rows = SizeType{2} * plan.get_nfft() * plan.get_nbin();
     const utils::CUFFTManager fwd(utils::FFTKind::kC2CForward, plan.get_nbin(),
                                   per * 2 * plan.get_nfft(), 0);
@@ -175,7 +173,8 @@ void BM_cfdmt_cuda_stage_coherent_fused(benchmark::State& state) {
     thrust::device_vector<float> wf(nchans * nf);
 
     const auto f2 = [](const thrust::device_vector<ComplexTypeGPU>& v) {
-        return reinterpret_cast<const float2*>(thrust::raw_pointer_cast(v.data()));
+        return reinterpret_cast<const float2*>(
+            thrust::raw_pointer_cast(v.data()));
     };
     cfdmt_gpu::FusedArgs a{};
     a.spec      = f2(spec);
@@ -209,9 +208,8 @@ void BM_cfdmt_cuda_stage_coherent_fused(benchmark::State& state) {
     BENCH_GPU_TRY(cudaFuncSetAttribute(
         reinterpret_cast<const void*>(kernel),
         cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem)));
-    run_timed(state, [&] {
-        kernel<<<grid, cfdmt_gpu::kFusedThreads, smem>>>(a);
-    });
+    run_timed(state,
+              [&] { kernel<<<grid, cfdmt_gpu::kFusedThreads, smem>>>(a); });
     // Traffic: each channel's bins of its window blocks (both pols) in,
     // the aligned window out.
     const double bytes =
@@ -248,9 +246,8 @@ void BM_cfdmt_cuda_stage_coherent_fused(benchmark::State& state) {
                                       thrust::raw_pointer_cast(src.data()),
                                       src.size(), cudaMemcpyDeviceToDevice));
     });
-    const double t_kernel = seconds([&] {
-        kernel<<<grid, cfdmt_gpu::kFusedThreads, smem>>>(a);
-    });
+    const double t_kernel =
+        seconds([&] { kernel<<<grid, cfdmt_gpu::kFusedThreads, smem>>>(a); });
     state.counters["copy_bytes_per_s"] = bytes / t_copy;
     state.counters["roofline"]         = t_copy / t_kernel;
     state.counters["mbin"]             = static_cast<double>(mbin);
@@ -260,9 +257,8 @@ void BM_cfdmt_cuda_stage_coherent_fused(benchmark::State& state) {
 void BM_cfdmt_cuda_stage_fdmt_per_trial(benchmark::State& state) {
     const plans::CohFDMTPlan plan(
         guppi_config(static_cast<SizeType>(state.range(1))));
-    algorithms::FDMT fdmt(plan.get_f_min(), plan.get_f_max(),
-                          plan.get_nchans(), plan.get_fdmt_nsamps(),
-                          plan.get_tsamp(),
+    algorithms::FDMT fdmt(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
+                          plan.get_fdmt_nsamps(), plan.get_tsamp(),
                           static_cast<IndexType>(plan.get_fine_dt_max()),
                           -static_cast<IndexType>(plan.get_fine_dt_max()),
                           plan.get_config().dt_step, true, "valid",

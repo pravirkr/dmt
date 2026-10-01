@@ -469,7 +469,8 @@ public:
     /// @brief Number of subbands (all groups)
     [[nodiscard]] SizeType get_nsub() const noexcept;
     /// @brief Subbands per input group (sums to get_nsub())
-    [[nodiscard]] const std::vector<SizeType>& get_subband_groups() const noexcept;
+    [[nodiscard]] const std::vector<SizeType>&
+    get_subband_groups() const noexcept;
     /// @brief Total bandwidth in MHz (nsub * bw_sub)
     [[nodiscard]] float get_bw() const noexcept;
     /// @brief Bottom edge of the band in MHz
@@ -573,7 +574,8 @@ public:
     [[nodiscard]] const std::vector<float>& get_channel_taper() const noexcept;
     /// @brief Correlation coefficient of detected noise at lags 0..max_lag
     /// (1 at lag 0) within a channel
-    [[nodiscard]] std::vector<double> get_lag_correlation(SizeType max_lag) const;
+    [[nodiscard]] std::vector<double>
+    get_lag_correlation(SizeType max_lag) const;
     /**
      * @brief Output noise variance of every row after a boxcar of
      * @p boxcar_width samples, for Gaussian noise with normalize = true.

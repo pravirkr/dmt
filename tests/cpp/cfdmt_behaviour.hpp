@@ -28,7 +28,6 @@ namespace dmt::test::cfdmt {
 using algorithms::CohFDMT;
 using plans::CohFDMTPlan;
 
-
 // Low-frequency, multi-subband config: several coarse trials over a 1
 // pc/cc range, small enough for sub-second tests (16 subbands x 1 MHz at
 // 392-408 MHz, t_p = 4 us -> 64 channels, 5 coarse trials).
@@ -56,14 +55,14 @@ inline float scale_for(const std::vector<ComplexType>& v) {
 }
 
 inline std::vector<float> run(const CohFDMT& search,
-                       const std::vector<ComplexType>& v,
-                       SizeType nsamps_total,
-                       SizeType t_begin,
-                       float scale) {
+                              const std::vector<ComplexType>& v,
+                              SizeType nsamps_total,
+                              SizeType t_begin,
+                              float scale) {
     const auto& plan = search.get_plan();
-    const auto bytes = utils::pack_baseband(
-        v, plan.get_nsub(), nsamps_total, plan.get_format(), scale, 0, 0,
-        t_begin, plan.get_block_nsamps());
+    const auto bytes = utils::pack_baseband(v, plan.get_nsub(), nsamps_total,
+                                            plan.get_format(), scale, 0, 0,
+                                            t_begin, plan.get_block_nsamps());
     std::vector<float> dmt(search.get_dmt_size());
     search.execute<uint8_t>(std::span<const uint8_t>(bytes), dmt);
     return dmt;
@@ -84,8 +83,8 @@ inline Peak find_peak(const std::vector<float>& dmt, SizeType nout) {
 // Detected energy of a noise-free stream (normalize = false units): each
 // channel keeps mean(|H|^2) / n_p of its subband's energy.
 inline double detected_energy(const CohFDMTPlan& plan,
-                       const std::vector<ComplexType>& v,
-                       float scale) {
+                              const std::vector<ComplexType>& v,
+                              float scale) {
     const auto& taper = plan.get_channel_taper();
     double w2         = 0.0;
     for (const float w : taper) {
@@ -103,17 +102,17 @@ inline double detected_energy(const CohFDMTPlan& plan,
 // Stream holding one pulse whose arrival time at f_ref lands on output
 // sample j0 of the block starting at raw sample s0.
 inline std::vector<ComplexType> pulse_stream(const CohFDMTPlan& plan,
-                                      SizeType nsamps_total,
-                                      double dm,
-                                      double j0,
-                                      SizeType s0 = 0) {
+                                             SizeType nsamps_total,
+                                             double dm,
+                                             double j0,
+                                             SizeType s0 = 0) {
     const double t_ref = (static_cast<double>(s0) * plan.get_tbin()) +
                          plan.get_output_time_offset() +
                          (j0 * static_cast<double>(plan.get_tsamp()));
-    const utils::BasebandPulse pulse{
-        .dm        = dm,
-        .t_arrival = t_ref - disp(dm, plan.get_f_ref()),
-        .fluence   = 1.0E6};
+    const utils::BasebandPulse pulse{.dm = dm,
+                                     .t_arrival =
+                                         t_ref - disp(dm, plan.get_f_ref()),
+                                     .fluence = 1.0E6};
     return utils::simulate_baseband(plan.get_f_center(), plan.get_bw_sub(),
                                     plan.get_nsub(), nsamps_total,
                                     std::span(&pulse, 1), 0.0F, 42, 4);
@@ -130,16 +129,15 @@ inline SizeType nearest_row(const CohFDMTPlan& plan, double dm) {
     return best;
 }
 
-
 // CohFDMT recovers an injected dispersed impulse.
 inline void check_impulse_recovery(const Exec& exec) {
-    auto cfg       = small_config();
-    cfg.normalize  = false;
+    auto cfg      = small_config();
+    cfg.normalize = false;
     const CohFDMT search(cfg, exec);
-    const auto& plan = search.get_plan();
-    const auto nout  = plan.get_output_nsamps();
-    const auto n     = plan.get_block_nsamps();
-    const auto& coh  = plan.get_dm_grid_coh();
+    const auto& plan  = search.get_plan();
+    const auto nout   = plan.get_output_nsamps();
+    const auto n      = plan.get_block_nsamps();
+    const auto& coh   = plan.get_dm_grid_coh();
     const double half = plan.get_dm_step_coh() / 2.0;
 
     struct Case {
@@ -150,21 +148,21 @@ inline void check_impulse_recovery(const Exec& exec) {
     const auto third = std::floor(static_cast<double>(nout) / 3.0);
     const auto mid   = std::floor(static_cast<double>(nout) / 2.0);
     const std::array<Case, 6> cases{
-        Case{coh[2], mid, 0.7},                              // trial centre
-        Case{coh[1] + (0.98 * half), 40.0, 0.7},             // window edge
-        Case{coh[0] - (0.98 * half), 3.0, 0.7},              // dm_min edge
-        Case{coh.back() + (0.98 * half),                     // dm_max edge,
-             static_cast<double>(nout) - 4.0, 0.7},          // block end
-        Case{coh[3] - (0.5 * half), third, 0.7},             // negative dt
-        Case{coh[2] + (0.3 * half), third + 0.5, 0.45}};     // between samples
+        Case{coh[2], mid, 0.7},                          // trial centre
+        Case{coh[1] + (0.98 * half), 40.0, 0.7},         // window edge
+        Case{coh[0] - (0.98 * half), 3.0, 0.7},          // dm_min edge
+        Case{coh.back() + (0.98 * half),                 // dm_max edge,
+             static_cast<double>(nout) - 4.0, 0.7},      // block end
+        Case{coh[3] - (0.5 * half), third, 0.7},         // negative dt
+        Case{coh[2] + (0.3 * half), third + 0.5, 0.45}}; // between samples
     for (const auto& cs : cases) {
         CAPTURE(cs.dm, cs.j0);
-        const auto v     = pulse_stream(plan, n, cs.dm, cs.j0);
-        const float sc   = scale_for(v);
-        const auto dmt   = run(search, v, n, 0, sc);
-        const auto peak  = find_peak(dmt, nout);
-        const auto want  = nearest_row(plan, cs.dm);
-        const double e   = detected_energy(plan, v, sc);
+        const auto v    = pulse_stream(plan, n, cs.dm, cs.j0);
+        const float sc  = scale_for(v);
+        const auto dmt  = run(search, v, n, 0, sc);
+        const auto peak = find_peak(dmt, nout);
+        const auto want = nearest_row(plan, cs.dm);
+        const double e  = detected_energy(plan, v, sc);
         const double fine_step =
             plan.get_dm_grid_final()[1] - plan.get_dm_grid_final()[0];
         CAPTURE(peak.row, want, peak.t, peak.value / e);
@@ -181,11 +179,12 @@ inline void check_position_independence(const Exec& exec) {
     auto cfg      = small_config();
     cfg.normalize = false;
     const CohFDMT search(cfg, exec);
-    const auto& plan  = search.get_plan();
-    const auto nout   = plan.get_output_nsamps();
-    const auto n      = plan.get_block_nsamps();
-    const auto lc     = plan.get_mbin() - (2 * plan.get_noverlap() / plan.get_n_p());
-    const double dm   = plan.get_dm_grid_coh()[2] + 0.1 * plan.get_dm_step_coh();
+    const auto& plan = search.get_plan();
+    const auto nout  = plan.get_output_nsamps();
+    const auto n     = plan.get_block_nsamps();
+    const auto lc =
+        plan.get_mbin() - (2 * plan.get_noverlap() / plan.get_n_p());
+    const double dm = plan.get_dm_grid_coh()[2] + 0.1 * plan.get_dm_step_coh();
     std::vector<float> peaks;
     // Shifts by whole FFT blocks keep the pulse's phase relative to the
     // block grid: identical response wherever it sits in the valid window.
@@ -206,10 +205,10 @@ inline void check_skipback_tiling(const Exec& exec) {
     auto cfg      = small_config();
     cfg.normalize = false;
     const CohFDMT small(cfg, exec);
-    const auto& ps     = small.get_plan();
-    const SizeType nb  = 3;
-    const auto stride  = ps.get_stride_nsamps();
-    const auto total   = ps.get_block_nsamps() + ((nb - 1) * stride);
+    const auto& ps       = small.get_plan();
+    const SizeType nb    = 3;
+    const auto stride    = ps.get_stride_nsamps();
+    const auto total     = ps.get_block_nsamps() + ((nb - 1) * stride);
     auto big_cfg         = cfg;
     big_cfg.block_nsamps = total;
     const CohFDMT big(big_cfg, exec);
@@ -224,11 +223,13 @@ inline void check_skipback_tiling(const Exec& exec) {
     const double t_ref =
         ps.get_output_time_offset() +
         (static_cast<double>(nout) * static_cast<double>(ps.get_tsamp()));
-    const utils::BasebandPulse pulse{
-        .dm = dm, .t_arrival = t_ref - disp(dm, ps.get_f_ref()), .fluence = 1e5};
-    const auto v = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub,
-                                            total, std::span(&pulse, 1), 8.0F,
-                                            3, 4);
+    const utils::BasebandPulse pulse{.dm = dm,
+                                     .t_arrival =
+                                         t_ref - disp(dm, ps.get_f_ref()),
+                                     .fluence = 1e5};
+    const auto v =
+        utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub, total,
+                                 std::span(&pulse, 1), 8.0F, 3, 4);
     const auto whole = run(big, v, total, 0, 1.0F);
     const auto ndm   = ps.get_ndm();
     std::vector<float> tiled(ndm * nb * nout);
@@ -271,10 +272,10 @@ inline void check_noise_statistics(const Exec& exec) {
     const auto& plan = search.get_plan();
     const auto nout  = plan.get_output_nsamps();
     const auto n     = plan.get_block_nsamps();
-    const auto v     = utils::simulate_baseband(
-        cfg.f_center, cfg.bw_sub, cfg.nsub, n, {}, 16.0F, 7, 4);
-    const auto dmt   = run(search, v, n, 0, 1.0F);
-    const auto ndm   = plan.get_ndm();
+    const auto v = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub,
+                                            n, {}, 16.0F, 7, 4);
+    const auto dmt = run(search, v, n, 0, 1.0F);
+    const auto ndm = plan.get_ndm();
     for (const SizeType w : {SizeType{1}, SizeType{16}}) {
         const auto grid = plan.get_effective_variance_grid(w);
         double ratio    = 0.0;
@@ -293,10 +294,9 @@ inline void check_noise_statistics(const Exec& exec) {
                     box[t + 1 - w] = acc;
                 }
             }
-            const double m =
-                std::accumulate(box.begin(), box.end(), 0.0) /
-                static_cast<double>(box.size());
-            double var = 0.0;
+            const double m = std::accumulate(box.begin(), box.end(), 0.0) /
+                             static_cast<double>(box.size());
+            double var     = 0.0;
             for (const double x : box) {
                 var += (x - m) * (x - m);
             }
@@ -317,12 +317,12 @@ inline void check_noise_statistics(const Exec& exec) {
 inline void check_layout_independence(const Exec& exec) {
     auto cfg = small_config();
     const CohFDMTPlan plan(cfg);
-    const auto n     = plan.get_block_nsamps();
-    const double dm  = plan.get_dm_grid_coh()[1];
-    const auto v     = pulse_stream(plan, n, dm, 100.0);
-    auto noisy       = utils::simulate_baseband(cfg.f_center, cfg.bw_sub,
-                                                cfg.nsub, n, {}, 5.0F, 9, 4);
-    const float sc   = scale_for(v) * 0.5F;
+    const auto n    = plan.get_block_nsamps();
+    const double dm = plan.get_dm_grid_coh()[1];
+    const auto v    = pulse_stream(plan, n, dm, 100.0);
+    auto noisy = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub, n,
+                                          {}, 5.0F, 9, 4);
+    const float sc = scale_for(v) * 0.5F;
     for (SizeType i = 0; i < v.size(); ++i) {
         noisy[i] += v[i] * sc;
     }
@@ -333,7 +333,7 @@ inline void check_layout_independence(const Exec& exec) {
     SECTION("orders PRITF and TFPRI, offset-binary uint8") {
         for (const auto* order : {"PRITF", "TFPRI"}) {
             for (const bool is_signed : {true, false}) {
-                auto c = cfg;
+                auto c             = cfg;
                 c.format.order     = order;
                 c.format.is_signed = is_signed;
                 const CohFDMT s(c, exec);
@@ -346,10 +346,10 @@ inline void check_layout_independence(const Exec& exec) {
         auto c           = cfg;
         c.subband_groups = {6, 10};
         const CohFDMT s(c, exec);
-        const auto g0 = utils::pack_baseband(noisy, cfg.nsub, n, cfg.format,
-                                             1.0F, 0, 6);
-        const auto g1 = utils::pack_baseband(noisy, cfg.nsub, n, cfg.format,
-                                             1.0F, 6, 10);
+        const auto g0 =
+            utils::pack_baseband(noisy, cfg.nsub, n, cfg.format, 1.0F, 0, 6);
+        const auto g1 =
+            utils::pack_baseband(noisy, cfg.nsub, n, cfg.format, 1.0F, 6, 10);
         const std::array<std::span<const uint8_t>, 2> groups{
             std::span<const uint8_t>(g0), std::span<const uint8_t>(g1)};
         std::vector<float> out(s.get_dmt_size());
@@ -358,8 +358,8 @@ inline void check_layout_independence(const Exec& exec) {
         CHECK(out == reference);
     }
     SECTION("a second engine (one thread on the CPU) gives the same result") {
-        const CohFDMT s(cfg, exec.backend == Backend::kCPU ? Exec::cpu(1)
-                                                           : exec);
+        const CohFDMT s(cfg,
+                        exec.backend == Backend::kCPU ? Exec::cpu(1) : exec);
         CHECK(run(s, noisy, n, 0, 1.0F) == reference);
     }
 }
@@ -375,11 +375,12 @@ inline void check_4bit_dt_step(const Exec& exec) {
     CHECK(plan.get_ndm_fine() == (2 * plan.get_fine_dt_max() / 4) + 1);
     const auto nout = plan.get_output_nsamps();
     const auto n    = plan.get_block_nsamps();
-    const double dm = plan.get_dm_grid_coh()[2] + (0.3 * plan.get_dm_step_coh());
-    const auto v    = pulse_stream(plan, n, dm, 200.0);
-    const float sc  = scale_for(v) * 0.07F; // peak ~7 counts
-    const auto dmt  = run(search, v, n, 0, sc);
-    const auto pk   = find_peak(dmt, nout);
+    const double dm =
+        plan.get_dm_grid_coh()[2] + (0.3 * plan.get_dm_step_coh());
+    const auto v   = pulse_stream(plan, n, dm, 200.0);
+    const float sc = scale_for(v) * 0.07F; // peak ~7 counts
+    const auto dmt = run(search, v, n, 0, sc);
+    const auto pk  = find_peak(dmt, nout);
     const double fine_step =
         plan.get_dm_grid_final()[1] - plan.get_dm_grid_final()[0];
     CHECK(std::abs(plan.get_dm_grid_final()[pk.row] - dm) <= fine_step);
@@ -393,12 +394,12 @@ inline void check_validation(const Exec& exec) {
     std::vector<float> out(search.get_dmt_size());
     std::vector<float> small_out(search.get_dmt_size() - 1);
     std::vector<uint8_t> small_in(search.get_input_size() - 4);
-    CHECK_THROWS_AS(search.execute<uint8_t>(std::span<const uint8_t>(in),
-                                            small_out),
-                    std::invalid_argument);
-    CHECK_THROWS_AS(search.execute<uint8_t>(std::span<const uint8_t>(small_in),
-                                            out),
-                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        search.execute<uint8_t>(std::span<const uint8_t>(in), small_out),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        search.execute<uint8_t>(std::span<const uint8_t>(small_in), out),
+        std::invalid_argument);
     CHECK_NOTHROW(search.execute<uint8_t>(std::span<const uint8_t>(in), out));
     CHECK(search.get_memory_usage().total() > 0);
     CHECK(search.get_buffer_size() == search.get_dmt_size());
@@ -424,10 +425,10 @@ inline void check_filter_leakage(const Exec& exec) {
         .t_arrival = pt.get_output_time_offset() +
                      (60.0 * static_cast<double>(pt.get_tsamp())) -
                      disp(dm, pt.get_f_ref()),
-        .fluence = 1.0E5};
-    const auto v = utils::simulate_baseband(tight.f_center, tight.bw_sub,
-                                            tight.nsub, total,
-                                            std::span(&pulse, 1), 8.0F, 11, 4);
+        .fluence   = 1.0E5};
+    const auto v =
+        utils::simulate_baseband(tight.f_center, tight.bw_sub, tight.nsub,
+                                 total, std::span(&pulse, 1), 8.0F, 11, 4);
     const CohFDMT st(tight, exec);
     const CohFDMT sl(loose, exec);
     const auto ot = run(st, v, total, 0, 1.0F);
@@ -458,8 +459,8 @@ inline void check_concurrent_calls(const Exec& exec) {
     const CohFDMT search(cfg, exec);
     const auto& plan = search.get_plan();
     const auto n     = plan.get_block_nsamps();
-    const auto v     = utils::simulate_baseband(cfg.f_center, cfg.bw_sub,
-                                                cfg.nsub, n, {}, 8.0F, 21, 4);
+    const auto v = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub,
+                                            n, {}, 8.0F, 21, 4);
     const auto bytes = utils::pack_baseband(v, cfg.nsub, n, cfg.format, 1.0F);
     std::vector<float> want(search.get_dmt_size());
     search.execute<uint8_t>(std::span<const uint8_t>(bytes), want);

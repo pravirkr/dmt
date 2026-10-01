@@ -27,7 +27,8 @@ inline uint64_t fixed_turns(double x) noexcept {
 
 /// Signed turn in [-1/2, 1/2) of a 0.64 fixed-point phase.
 inline float turn_of(uint64_t s) noexcept {
-    return static_cast<float>(static_cast<int64_t>(s)) * 5.42101086242752217e-20F;
+    return static_cast<float>(static_cast<int64_t>(s)) *
+           5.42101086242752217e-20F;
 }
 
 struct ChirpPhases {
@@ -48,11 +49,10 @@ inline ChirpPhases make_chirp_phases(const plans::CohFDMTPlan& plan) {
     const double f_min   = plan.get_f_min();
     const double bw_chan = static_cast<double>(plan.get_bw_sub()) /
                            static_cast<double>(plan.get_n_p());
-    const double bw_bin =
-        static_cast<double>(plan.get_bw_sub()) /
-        static_cast<double>(plan.get_nbin());
-    const double step = plan.get_dm_step_coh();
-    const double d0   = static_cast<double>(plan.get_dm_min()) + (0.5 * step);
+    const double bw_bin  = static_cast<double>(plan.get_bw_sub()) /
+                           static_cast<double>(plan.get_nbin());
+    const double step    = plan.get_dm_step_coh();
+    const double d0 = static_cast<double>(plan.get_dm_min()) + (0.5 * step);
     ChirpPhases ph;
     ph.base.resize(nchans * mbin);
     ph.inc.resize(nchans * mbin);

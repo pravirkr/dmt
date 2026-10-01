@@ -111,23 +111,45 @@ def rtf_figure(points: list[Point], contexts: dict, theme: dict) -> plt.Figure:
     for ax, (sweep, xlabel, key) in zip(axes.flat, SWEEPS):
         for s in series:
             pts = sorted(
-                (p for p in points if (p.machine, p.backend) == s and p.sweep == sweep
-                 and p.times),
+                (
+                    p
+                    for p in points
+                    if (p.machine, p.backend) == s and p.sweep == sweep and p.times
+                ),
                 key=lambda p: p.params[key],
             )
             if not pts:
                 continue
-            xs = list(range(len(pts))) if key == "block" else [p.params[key] for p in pts]
+            xs = (
+                list(range(len(pts)))
+                if key == "block"
+                else [p.params[key] for p in pts]
+            )
             ys = [p.rtf for p in pts]
-            ax.plot(xs, ys, color=colours[s], marker=markers[s], lw=2, ms=8,
-                    markeredgecolor=theme["surface"], markeredgewidth=2,
-                    label=series_label(*s, contexts))
-            ax.annotate(f"{ys[-1]:.2g}×", (xs[-1], ys[-1]), xytext=(6, 0),
-                        textcoords="offset points", va="center", fontsize=8,
-                        color=theme["ink2"])
+            ax.plot(
+                xs,
+                ys,
+                color=colours[s],
+                marker=markers[s],
+                lw=2,
+                ms=8,
+                markeredgecolor=theme["surface"],
+                markeredgewidth=2,
+                label=series_label(*s, contexts),
+            )
+            ax.annotate(
+                f"{ys[-1]:.2g}×",
+                (xs[-1], ys[-1]),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=8,
+                color=theme["ink2"],
+            )
             if key == "block":
-                ax.set_xticks(xs, [str(p.params[key]) if p.params[key] else "auto"
-                                   for p in pts])
+                ax.set_xticks(
+                    xs, [str(p.params[key]) if p.params[key] else "auto" for p in pts]
+                )
         ax.axhline(1.0, color=theme["muted"], lw=1, ls="--")
         ax.set_yscale("log")
         plain = mpl.ticker.FuncFormatter(lambda v, _: f"{v:g}")
@@ -151,13 +173,28 @@ def rtf_figure(points: list[Point], contexts: dict, theme: dict) -> plt.Figure:
         for h, lab in zip(*ax.get_legend_handles_labels(), strict=True):
             legend.setdefault(lab, h)
     handles, labels = list(legend.values()), list(legend.keys())
-    fig.legend(handles, labels, loc="outside lower center", ncols=min(3, len(labels)),
-               frameon=False, fontsize=8.5)
-    fig.suptitle("CohFDMT: baseband searched per second of compute", fontweight="bold",
-                 color=theme["ink"])
-    fig.text(0.5, 0.955, "GUPPI node: 64 × 2.93 MHz at 1.31-1.50 GHz, int8, t_p 10 µs, "
-             "DM 50-60 (reference); above the dashed line is faster than real time",
-             ha="center", fontsize=8.5, color=theme["ink2"])
+    fig.legend(
+        handles,
+        labels,
+        loc="outside lower center",
+        ncols=min(3, len(labels)),
+        frameon=False,
+        fontsize=8.5,
+    )
+    fig.suptitle(
+        "CohFDMT: baseband searched per second of compute",
+        fontweight="bold",
+        color=theme["ink"],
+    )
+    fig.text(
+        0.5,
+        0.955,
+        "GUPPI node: 64 × 2.93 MHz at 1.31-1.50 GHz, int8, t_p 10 µs, "
+        "DM 50-60 (reference); above the dashed line is faster than real time",
+        ha="center",
+        fontsize=8.5,
+        color=theme["ink2"],
+    )
     return fig
 
 
@@ -178,11 +215,16 @@ def summary_md(points: list[Point], contexts: dict) -> str:
     skipped = [p for p in points if p.skipped]
     if skipped:
         lines += ["", "Skipped points:"]
-        lines += [f"- {p.machine} {p.backend} {p.sweep} {p.params}: {p.skipped}"
-                  for p in skipped]
+        lines += [
+            f"- {p.machine} {p.backend} {p.sweep} {p.params}: {p.skipped}"
+            for p in skipped
+        ]
     versions = sorted({c.get("dmt_version", "?") for c in contexts.values()})
-    lines += ["", f"dmt version(s): {', '.join(versions)}; FFTW planner: "
-              f"{', '.join(sorted({c.get('fftw_planner', '?') for c in contexts.values()}))}."]
+    lines += [
+        "",
+        f"dmt version(s): {', '.join(versions)}; FFTW planner: "
+        f"{', '.join(sorted({c.get('fftw_planner', '?') for c in contexts.values()}))}.",
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -203,7 +245,9 @@ def main() -> None:
         fig.savefig(out / "cfdmt_rtf.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
     (out_root / "cfdmt_summary.md").write_text(summary_md(points, contexts))
-    print(f"wrote cfdmt_rtf.png x {len(THEMES)} themes and cfdmt_summary.md to {out_root}")
+    print(
+        f"wrote cfdmt_rtf.png x {len(THEMES)} themes and cfdmt_summary.md to {out_root}"
+    )
 
 
 if __name__ == "__main__":

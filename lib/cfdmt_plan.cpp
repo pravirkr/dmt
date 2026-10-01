@@ -113,8 +113,8 @@ double window_autocorr(IndexType s, IndexType w, IndexType tau) {
     for (IndexType u = -(s - 1); u <= s - 1; ++u) {
         const auto tw = w - std::abs(tau - u);
         if (tw > 0) {
-            acc += static_cast<double>(s - std::abs(u)) *
-                   static_cast<double>(tw);
+            acc +=
+                static_cast<double>(s - std::abs(u)) * static_cast<double>(tw);
         }
     }
     return acc;
@@ -148,15 +148,14 @@ public:
     SizeType msamp() const noexcept { return m_msamp; }
     SizeType nout() const noexcept { return m_nout; }
     double output_time_offset() const noexcept {
-        return static_cast<double>(m_noverlap + (m_max_delay * m_n_p)) *
-               m_tbin;
+        return static_cast<double>(m_noverlap + (m_max_delay * m_n_p)) * m_tbin;
     }
     const std::vector<SizeType>& groups() const noexcept { return m_groups; }
     SizeType input_size(SizeType igroup) const {
         if (igroup >= m_groups.size()) {
-            throw std::out_of_range(std::format(
-                "CohFDMTPlan: group {} out of range [0, {})", igroup,
-                m_groups.size()));
+            throw std::out_of_range(
+                std::format("CohFDMTPlan: group {} out of range [0, {})",
+                            igroup, m_groups.size()));
         }
         return utils::baseband_block_bytes(m_cfg.format, m_block_nsamps,
                                            m_groups[igroup]);
@@ -190,7 +189,9 @@ public:
         return m_row_offsets;
     }
     float intra_channel_smear() const noexcept { return m_intra_smear; }
-    SizeType dmt_size() const noexcept { return m_dm_grid_final.size() * m_nout; }
+    SizeType dmt_size() const noexcept {
+        return m_dm_grid_final.size() * m_nout;
+    }
     const std::vector<float>& taper() const noexcept { return m_taper; }
     const FDMTPlan& fdmt_plan() const noexcept { return *m_fdmt_plan; }
 
@@ -298,21 +299,21 @@ public:
         const auto mib = [](SizeType bytes) {
             return static_cast<double>(bytes) / (1024.0 * 1024.0);
         };
-        const auto mem = memory_estimate();
+        const auto mem  = memory_estimate();
         std::string out = "*** CohFDMT Plan Summary ***\n";
         out += std::format(
             "Band: {:.4f}-{:.4f} MHz, {} subbands x {:.6f} MHz ({} group(s)), "
             "tbin {:.4g} s\n",
             m_f_min, m_f_max, m_cfg.nsub, m_cfg.bw_sub, m_groups.size(),
             m_tbin);
-        out += std::format("Input: {} order, {}-bit {}, {:.1f} MiB per block\n",
-                           m_cfg.format.order, m_cfg.format.nbits,
-                           m_cfg.format.nbits == 2
-                               ? "levels"
-                               : (m_cfg.format.is_signed ? "signed"
-                                                         : "offset-binary"),
-                           mib(utils::baseband_block_bytes(
-                               m_cfg.format, m_block_nsamps, m_cfg.nsub)));
+        out += std::format(
+            "Input: {} order, {}-bit {}, {:.1f} MiB per block\n",
+            m_cfg.format.order, m_cfg.format.nbits,
+            m_cfg.format.nbits == 2
+                ? "levels"
+                : (m_cfg.format.is_signed ? "signed" : "offset-binary"),
+            mib(utils::baseband_block_bytes(m_cfg.format, m_block_nsamps,
+                                            m_cfg.nsub)));
         out += std::format(
             "Channels: n_p={} per subband, {} total of {:.6f} MHz, tsamp "
             "{:.4g} s (t_p requested {:.4g} s)\n",
@@ -384,7 +385,7 @@ private:
     }
 
     void validate() {
-        const auto& c = m_cfg;
+        const auto& c     = m_cfg;
         const auto finite = [](double v) { return utils::is_finite_bits(v); };
         if (c.nsub == 0) {
             throw std::invalid_argument("CohFDMT: nsub must be > 0");
@@ -392,8 +393,8 @@ private:
         if (!finite(c.bw_sub) || c.bw_sub <= 0.0F) {
             throw std::invalid_argument("CohFDMT: bw_sub must be positive");
         }
-        const double bw = static_cast<double>(c.bw_sub) *
-                          static_cast<double>(c.nsub);
+        const double bw =
+            static_cast<double>(c.bw_sub) * static_cast<double>(c.nsub);
         if (!finite(c.f_center) || c.f_center - (bw / 2.0) <= 0.0) {
             throw std::invalid_argument(std::format(
                 "CohFDMT: f_center={} MHz leaves the band below 0 MHz "
@@ -405,9 +406,9 @@ private:
         }
         if (!finite(c.dm_min) || !finite(c.dm_max) || c.dm_min < 0.0F ||
             c.dm_max < c.dm_min) {
-            throw std::invalid_argument(std::format(
-                "CohFDMT: need 0 <= dm_min <= dm_max, got [{}, {}]", c.dm_min,
-                c.dm_max));
+            throw std::invalid_argument(
+                std::format("CohFDMT: need 0 <= dm_min <= dm_max, got [{}, {}]",
+                            c.dm_min, c.dm_max));
         }
         if (!finite(c.smear_tol) || c.smear_tol <= 0.0F) {
             throw std::invalid_argument("CohFDMT: smear_tol must be positive");
@@ -464,21 +465,20 @@ private:
                         : SizeType{1};
         const double step = range / static_cast<double>(ncoh);
         m_dm_step_coh     = static_cast<float>(step);
-        m_intra_smear =
-            static_cast<float>(smear_per_dm * (step / 2.0) / tsamp);
+        m_intra_smear = static_cast<float>(smear_per_dm * (step / 2.0) / tsamp);
         m_dm_grid_coh.resize(ncoh);
         for (SizeType k = 0; k < ncoh; ++k) {
-            m_dm_grid_coh[k] = static_cast<float>(
-                static_cast<double>(c.dm_min) +
-                ((static_cast<double>(k) + 0.5) * step));
+            m_dm_grid_coh[k] =
+                static_cast<float>(static_cast<double>(c.dm_min) +
+                                   ((static_cast<double>(k) + 0.5) * step));
         }
 
         // Fine FDMT: dt in [-Delta, Delta] covers each window's half-width.
         const double dt_exact = disp_delay(step / 2.0, f_min, f_max) / tsamp;
         const auto dt_step    = static_cast<double>(c.dt_step);
         m_fine_dt_max         = std::max<SizeType>(
-            c.dt_step, static_cast<SizeType>(std::ceil(dt_exact / dt_step)) *
-                           c.dt_step);
+            c.dt_step,
+            static_cast<SizeType>(std::ceil(dt_exact / dt_step)) * c.dt_step);
 
         // Inter-channel shifts at every coarse trial, relative to the centre
         // of the lowest channel.
@@ -488,20 +488,19 @@ private:
             for (SizeType ch = 0; ch < m_nchans; ++ch) {
                 const double f_c =
                     f_min + ((static_cast<double>(ch) + 0.5) * bw_chan);
-                m_shifts[(k * m_nchans) + ch] = static_cast<IndexType>(
-                    std::nearbyint(disp_delay(static_cast<double>(
-                                                  m_dm_grid_coh[k]),
-                                              f_ref, f_c) /
-                                   tsamp));
+                m_shifts[(k * m_nchans) + ch] =
+                    static_cast<IndexType>(std::nearbyint(
+                        disp_delay(static_cast<double>(m_dm_grid_coh[k]), f_ref,
+                                   f_c) /
+                        tsamp));
             }
         }
         // The FDMT window starts m_fdmt_margin samples before any valid
         // output reads (box-smearing lookback of the bottom channel plus tree
         // rounding), so its streaming history never reaches a cropped
         // output: no reset between coarse trials is needed.
-        const double smear_frac =
-            disp_delay(1.0, f_min, f_min + bw_chan) /
-            disp_delay(1.0, f_min, f_max);
+        const double smear_frac = disp_delay(1.0, f_min, f_min + bw_chan) /
+                                  disp_delay(1.0, f_min, f_max);
         m_fdmt_margin = static_cast<SizeType>(std::ceil(
                             static_cast<double>(m_fine_dt_max) * smear_frac)) +
                         4;
@@ -510,16 +509,16 @@ private:
         const auto top_last  = m_shifts[(ncoh * m_nchans) - 1];
         // Earliest sample any row reads is D before the output sample; the
         // latest is E after it (negative residual rows on the first trial).
-        m_max_delay = static_cast<SizeType>(top_last + delta + 1);
-        const auto lead =
-            static_cast<SizeType>(std::max<IndexType>(0, delta - top_first) + 2);
+        m_max_delay     = static_cast<SizeType>(top_last + delta + 1);
+        const auto lead = static_cast<SizeType>(
+            std::max<IndexType>(0, delta - top_first) + 2);
 
         // Coherent filter margin: the chirp response of the bottom channel at
         // the largest coarse DM (its lower edge is the longer side) plus the
         // channel filter's ringing.
-        const double tau_lo = disp_delay(
-            static_cast<double>(m_dm_grid_coh.back()), f_ref - (bw_chan / 2.0),
-            f_ref);
+        const double tau_lo =
+            disp_delay(static_cast<double>(m_dm_grid_coh.back()),
+                       f_ref - (bw_chan / 2.0), f_ref);
         const SizeType ring =
             taper_ringing_length(static_cast<double>(c.filter_leakage));
         m_noverlap = ceil_to(static_cast<SizeType>(std::ceil(tau_lo / m_tbin)) +
@@ -534,17 +533,17 @@ private:
 
         // Fine FDMT over the aligned window [D - Delta - margin,
         // D + nout + Delta).
-        m_fdmt_plan = std::make_unique<FDMTPlan>(
-            m_f_min, m_f_max, m_nchans, fdmt_nsamps(), m_tsamp, delta, -delta,
-            c.dt_step, "valid");
+        m_fdmt_plan = std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_nchans,
+                                                 fdmt_nsamps(), m_tsamp, delta,
+                                                 -delta, c.dt_step, "valid");
         const auto dt_grid = m_fdmt_plan->get_dt_grid_final();
         m_row_offsets.resize(dt_grid.size());
         for (SizeType r = 0; r < dt_grid.size(); ++r) {
             // Negative-dt rows are referenced to the top channel by the
             // FDMT; shift them back to the bottom-channel reference.
-            m_row_offsets[r] = m_fine_dt_max + m_fdmt_margin +
-                               static_cast<SizeType>(std::max<IndexType>(
-                                   0, -dt_grid[r]));
+            m_row_offsets[r] =
+                m_fine_dt_max + m_fdmt_margin +
+                static_cast<SizeType>(std::max<IndexType>(0, -dt_grid[r]));
         }
         const auto fine_dms = m_fdmt_plan->get_dm_grid_final();
         m_dm_grid_final.resize(ncoh * fine_dms.size());
@@ -581,10 +580,10 @@ private:
                 if (m <= (2 * novc) + 1) {
                     continue;
                 }
-                const double useful =
-                    1.0 - (2.0 * static_cast<double>(novc) /
-                           static_cast<double>(m));
-                double cost = (std::log2(static_cast<double>(m)) + 3.0) / useful;
+                const double useful = 1.0 - (2.0 * static_cast<double>(novc) /
+                                             static_cast<double>(m));
+                double cost =
+                    (std::log2(static_cast<double>(m)) + 3.0) / useful;
                 if (m > 8192) {
                     cost *= 1.25;
                 }
@@ -622,8 +621,8 @@ private:
             const SizeType nfft_cap =
                 kAutoSpectrumBytes /
                 (c.nsub * m_nbin * 2 * sizeof(ComplexType));
-            m_nfft = std::max(nfft_min,
-                              std::min((target + guard + lc - 1) / lc, nfft_cap));
+            m_nfft = std::max(
+                nfft_min, std::min((target + guard + lc - 1) / lc, nfft_cap));
         }
         m_msamp = m_nfft * lc;
         if (m_msamp < guard + lc) {
@@ -759,9 +758,7 @@ float CohFDMTPlan::get_intra_channel_smear() const noexcept {
 SizeType CohFDMTPlan::get_dmt_ndms() const noexcept {
     return m_impl->dm_grid_final().size();
 }
-SizeType CohFDMTPlan::get_dmt_nsamps() const noexcept {
-    return m_impl->nout();
-}
+SizeType CohFDMTPlan::get_dmt_nsamps() const noexcept { return m_impl->nout(); }
 SizeType CohFDMTPlan::get_dmt_size() const noexcept {
     return m_impl->dmt_size();
 }

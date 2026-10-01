@@ -161,25 +161,22 @@ template void CohFDMT::execute<int8_t>(std::span<const int8_t>,
                                        std::span<float>) const;
 template void CohFDMT::execute<uint8_t>(std::span<const uint8_t>,
                                         std::span<float>) const;
+template void CohFDMT::execute<int8_t>(std::span<const std::span<const int8_t>>,
+                                       std::span<float>) const;
 template void
-CohFDMT::execute<int8_t>(std::span<const std::span<const int8_t>>,
-                         std::span<float>) const;
-template void
-CohFDMT::execute<uint8_t>(std::span<const std::span<const uint8_t>>,
-                          std::span<float>) const;
+    CohFDMT::execute<uint8_t>(std::span<const std::span<const uint8_t>>,
+                              std::span<float>) const;
 template void CohFDMT::execute<int8_t>(DeviceSpan<const int8_t>,
                                        DeviceSpan<float>,
                                        Stream) const;
 template void CohFDMT::execute<uint8_t>(DeviceSpan<const uint8_t>,
                                         DeviceSpan<float>,
                                         Stream) const;
+template void CohFDMT::execute<int8_t>(
+    std::span<const DeviceSpan<const int8_t>>, DeviceSpan<float>, Stream) const;
 template void
-CohFDMT::execute<int8_t>(std::span<const DeviceSpan<const int8_t>>,
-                         DeviceSpan<float>,
-                         Stream) const;
-template void
-CohFDMT::execute<uint8_t>(std::span<const DeviceSpan<const uint8_t>>,
-                          DeviceSpan<float>,
-                          Stream) const;
+    CohFDMT::execute<uint8_t>(std::span<const DeviceSpan<const uint8_t>>,
+                              DeviceSpan<float>,
+                              Stream) const;
 
 } // namespace dmt::algorithms

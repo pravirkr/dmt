@@ -17,8 +17,8 @@ namespace {
 // data[e] (8-bit) or a field of data[e / per_byte].
 struct SubbandDesc {
     const uint8_t* data;
-    uint64_t base;   // subband offset (elements)
-    uint64_t pol;    // element strides
+    uint64_t base; // subband offset (elements)
+    uint64_t pol;  // element strides
     uint64_t ri;
     uint64_t time;
 };
@@ -51,14 +51,13 @@ __global__ void unpack_kernel(const SubbandDesc* __restrict__ desc,
                               uint64_t step,
                               float2* __restrict__ out) {
     const uint64_t total = nsub * nfft * nbin;
-    for (uint64_t idx = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                        threadIdx.x;
-         idx < total;
-         idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
-        const uint64_t i   = idx % nbin;
-        const uint64_t row = (idx / nbin) + (sub_begin * nfft); // s * nfft + j
-        const uint64_t j   = row % nfft;
-        const uint64_t s   = row / nfft;
+    for (uint64_t idx =
+             (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+         idx < total; idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+        const uint64_t i    = idx % nbin;
+        const uint64_t row  = (idx / nbin) + (sub_begin * nfft); // s * nfft + j
+        const uint64_t j    = row % nfft;
+        const uint64_t s    = row / nfft;
         const SubbandDesc d = desc[s];
         const uint64_t e0   = d.base + (((j * step) + i) * d.time);
         const uint64_t e1   = e0 + d.pol;
@@ -177,15 +176,14 @@ public:
             return;
         }
         gpu_utils::set_device(m_device_id);
-        const auto nsub  = sub_end - sub_begin;
-        const auto total = static_cast<int64_t>(nsub * m_nfft * m_nbin);
+        const auto nsub       = sub_end - sub_begin;
+        const auto total      = static_cast<int64_t>(nsub * m_nfft * m_nbin);
         const unsigned blocks = static_cast<unsigned>(std::min<int64_t>(
             (total + fourier_gpu::kBlock - 1) / fourier_gpu::kBlock,
             int64_t{1} << 20));
         unpack_kernel<<<blocks, fourier_gpu::kBlock, 0, stream>>>(
-            m_desc.data(), m_lut.data(),
-            static_cast<unsigned>(m_format.nbits), m_format.is_signed,
-            sub_begin, nsub, m_nfft, m_nbin, m_step,
+            m_desc.data(), m_lut.data(), static_cast<unsigned>(m_format.nbits),
+            m_format.is_signed, sub_begin, nsub, m_nfft, m_nbin, m_step,
             reinterpret_cast<float2*>(out.data()));
         gpu_utils::check_last_gpu_error("BasebandUnpackerCUDA: unpack kernel");
     }

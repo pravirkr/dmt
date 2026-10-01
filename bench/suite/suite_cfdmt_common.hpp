@@ -28,22 +28,21 @@
 
 namespace dmt::bench_suite::cfdmt {
 
-inline constexpr float kFCenter      = 1406.25F;
-inline constexpr float kBwSub        = 1500.0F / 512.0F;
-inline constexpr SizeType kNsub      = 64;
-inline constexpr float kDmMin        = 50.0F;
-inline constexpr SizeType kDtStep    = 16;
-inline constexpr SizeType kTpRef     = 10; // us
-inline constexpr SizeType kNbitsRef  = 8;
+inline constexpr float kFCenter       = 1406.25F;
+inline constexpr float kBwSub         = 1500.0F / 512.0F;
+inline constexpr SizeType kNsub       = 64;
+inline constexpr float kDmMin         = 50.0F;
+inline constexpr SizeType kDtStep     = 16;
+inline constexpr SizeType kTpRef      = 10; // us
+inline constexpr SizeType kNbitsRef   = 8;
 inline constexpr SizeType kDmWidthRef = 10;
 
 inline const std::vector<SizeType> kTpSweep      = {5, 10, 20, 40};
 inline const std::vector<SizeType> kNbitsSweep   = {2, 4, 8};
 inline const std::vector<SizeType> kDmWidthSweep = {10, 50, 200};
 // Multiples of a GUPPI block (2^19 samples per subband); 0 = automatic.
-inline const std::vector<SizeType> kBlockSweep = {0, SizeType{1} << 19,
-                                                  SizeType{1} << 20,
-                                                  SizeType{1} << 21};
+inline const std::vector<SizeType> kBlockSweep = {
+    0, SizeType{1} << 19, SizeType{1} << 20, SizeType{1} << 21};
 
 enum class Sweep { kRef, kTp, kNbits, kDmWidth, kBlock };
 
@@ -97,7 +96,7 @@ inline CohFDMTConfig make_config(const Point& p) {
             .dm_max       = kDmMin + static_cast<float>(p.dm_width),
             .block_nsamps = p.block,
             .dt_step      = kDtStep,
-            .format = BasebandFormat{.order = "FTPRI", .nbits = p.nbits}};
+            .format       = BasebandFormat{.order = "FTPRI", .nbits = p.nbits}};
 }
 
 inline std::string name(std::string_view backend, const Point& p) {
@@ -118,12 +117,12 @@ inline void set_counters(benchmark::State& state,
     state.counters["efficiency"] =
         static_cast<double>(plan.get_stride_nsamps()) /
         static_cast<double>(plan.get_block_nsamps());
-    state.counters["ndm"]      = static_cast<double>(plan.get_ndm());
-    state.counters["ndm_coh"]  = static_cast<double>(plan.get_ndm_coh());
-    state.counters["nchans"]   = static_cast<double>(plan.get_nchans());
-    state.counters["block_s"]  = static_cast<double>(plan.get_block_nsamps()) *
-                                plan.get_tbin();
-    state.counters["mem_mib"]  =
+    state.counters["ndm"]     = static_cast<double>(plan.get_ndm());
+    state.counters["ndm_coh"] = static_cast<double>(plan.get_ndm_coh());
+    state.counters["nchans"]  = static_cast<double>(plan.get_nchans());
+    state.counters["block_s"] =
+        static_cast<double>(plan.get_block_nsamps()) * plan.get_tbin();
+    state.counters["mem_mib"] =
         static_cast<double>(plan.get_memory_estimate().total()) /
         (1024.0 * 1024.0);
     state.counters["nthreads"] = static_cast<double>(nthreads);
@@ -131,8 +130,7 @@ inline void set_counters(benchmark::State& state,
 
 inline double estimate_bytes(const plans::CohFDMTPlan& plan) {
     const auto m = plan.get_memory_estimate();
-    return static_cast<double>(m.total() + m.output +
-                               plan.get_input_size(0));
+    return static_cast<double>(m.total() + m.output + plan.get_input_size(0));
 }
 
 } // namespace dmt::bench_suite::cfdmt

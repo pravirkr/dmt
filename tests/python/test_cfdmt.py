@@ -129,7 +129,9 @@ class TestExecute:
         out = coh.execute(dmtlib.pack_baseband(v, plan.format, 1.0))
         ratio = out.var(axis=1) / plan.get_effective_variance_grid()
         assert ratio.mean() == pytest.approx(1.0, abs=0.02)
-        assert abs(out.mean()) < 0.05 * np.sqrt(plan.get_effective_variance_grid().mean())
+        assert abs(out.mean()) < 0.05 * np.sqrt(
+            plan.get_effective_variance_grid().mean()
+        )
 
     def test_skipback_blocks_tile_one_long_block(self) -> None:
         cfg = small_config(normalize=False)
@@ -139,14 +141,16 @@ class TestExecute:
         total = p.block_nsamps + (nb - 1) * p.stride_nsamps
         big = CohFDMT(small_config(normalize=False, block_nsamps=total), 4)
         assert big.plan.output_nsamps == nb * p.output_nsamps
-        v = dmtlib.simulate_baseband(
-            p.f_center, p.bw_sub, p.nsub, total, [], 8.0, 5, 4
-        )
+        v = dmtlib.simulate_baseband(p.f_center, p.bw_sub, p.nsub, total, [], 8.0, 5, 4)
         whole = big.execute(dmtlib.pack_baseband(v, p.format, 1.0))
         parts = [
             small.execute(
                 dmtlib.pack_baseband(
-                    v, p.format, 1.0, t_begin=b * p.stride_nsamps, t_count=p.block_nsamps
+                    v,
+                    p.format,
+                    1.0,
+                    t_begin=b * p.stride_nsamps,
+                    t_count=p.block_nsamps,
                 )
             )
             for b in range(nb)

@@ -58,8 +58,8 @@ cudaStream_t to_cuda(Stream stream) {
 }
 
 unsigned grid_for(uint64_t n) {
-    return static_cast<unsigned>(std::clamp<uint64_t>(
-        (n + kBlock - 1) / kBlock, 1, uint64_t{1} << 20));
+    return static_cast<unsigned>(
+        std::clamp<uint64_t>((n + kBlock - 1) / kBlock, 1, uint64_t{1} << 20));
 }
 
 // Front-end chunk size as a share of the device L2: unpack, the forward
@@ -89,8 +89,8 @@ __global__ void channel_power_kernel(const float2* __restrict__ spec,
     float acc0           = 0.0F;
     float acc1           = 0.0F;
     for (uint64_t b = threadIdx.x; b < mbin; b += blockDim.x) {
-        uint64_t idx = off + b;
-        idx          = idx >= nbin ? idx - nbin : idx;
+        uint64_t idx   = off + b;
+        idx            = idx >= nbin ? idx - nbin : idx;
         const float w2 = taper[b] * taper[b];
         const float2 x = row0[idx];
         const float2 y = row1[idx];
@@ -138,7 +138,7 @@ __global__ void channel_stats_kernel(const float* __restrict__ power,
     m1 /= static_cast<double>(nfft);
     const double sigma = sqrt((m0 * m0) + (m1 * m1));
     mean[c]            = static_cast<float>(m0 + m1);
-    inv_sigma[c] = sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 0.0F;
+    inv_sigma[c]       = sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 0.0F;
 }
 
 // Channel c's window of channel samples [m_lo, m_hi) and first FFT block.
@@ -148,17 +148,14 @@ struct Window {
     int64_t j_first;
 };
 
-__device__ __forceinline__ Window channel_window(int64_t a,
-                                                 int64_t nf,
-                                                 int64_t msamp,
-                                                 int64_t shift,
-                                                 int64_t lc) {
+__device__ __forceinline__ Window channel_window(
+    int64_t a, int64_t nf, int64_t msamp, int64_t shift, int64_t lc) {
     Window w{};
     const int64_t lo = a - shift;
     const int64_t hi = a + nf - shift;
     w.m_lo           = lo > 0 ? lo : 0;
     w.m_hi           = hi < msamp ? hi : msamp;
-    w.j_first = w.m_lo / lc;
+    w.j_first        = w.m_lo / lc;
     return w;
 }
 
@@ -180,8 +177,8 @@ __global__ void gather_chirp_kernel(const float2* __restrict__ spec,
                                     int64_t msamp,
                                     int64_t lc,
                                     float2* __restrict__ work) {
-    const uint64_t b  = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                        threadIdx.x;
+    const uint64_t b =
+        (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const uint64_t cc = blockIdx.y; // channel within the chunk
     const uint64_t c  = c0 + cc;
     if (b >= mbin) {
@@ -232,8 +229,8 @@ __global__ void detect_kernel(const float2* __restrict__ work,
                               int64_t msamp,
                               int64_t lc,
                               float* __restrict__ waterfall) {
-    const uint64_t u  = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                        threadIdx.x;
+    const uint64_t u =
+        (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const uint64_t cc = blockIdx.y;
     const uint64_t c  = c0 + cc;
     if (u >= static_cast<uint64_t>(nf) || c >= nchans) {
@@ -265,10 +262,9 @@ __global__ void crop_kernel(const float* __restrict__ fdmt_out,
                             uint64_t nout,
                             float* __restrict__ out) {
     const uint64_t total = nfine * nout;
-    for (uint64_t idx = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                        threadIdx.x;
-         idx < total;
-         idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+    for (uint64_t idx =
+             (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+         idx < total; idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
         const uint64_t r = idx / nout;
         const uint64_t t = idx % nout;
         out[idx]         = fdmt_out[(r * nf) + offsets[r] + t];
@@ -393,12 +389,12 @@ public:
     memory_usage() const noexcept override {
         const auto fdmt_mem = m_fdmt.get_memory_usage();
         SizeType workspace  = (m_work.capacity() * sizeof(ComplexTypeGPU)) +
-                             (m_chirp.capacity() * sizeof(ComplexTypeGPU)) +
-                             (m_twiddle.capacity() * sizeof(ComplexTypeGPU)) +
-                             ((m_base.capacity() + m_inc.capacity()) *
-                              sizeof(unsigned long long)) +
-                             (m_power.capacity() * sizeof(float)) +
-                             (m_shifts.capacity() * sizeof(int64_t));
+                              (m_chirp.capacity() * sizeof(ComplexTypeGPU)) +
+                              (m_twiddle.capacity() * sizeof(ComplexTypeGPU)) +
+                              ((m_base.capacity() + m_inc.capacity()) *
+                               sizeof(unsigned long long)) +
+                              (m_power.capacity() * sizeof(float)) +
+                              (m_shifts.capacity() * sizeof(int64_t));
         for (const auto& f : m_fwd) {
             workspace += f->workspace_bytes();
         }
@@ -412,8 +408,8 @@ public:
 
         return {.spectrum  = m_spec.capacity() * sizeof(ComplexTypeGPU),
                 .waterfall = m_waterfall.capacity() * sizeof(float),
-                .fdmt      = fdmt_mem.total() +
-                        (m_fdmt_out.capacity() * sizeof(float)),
+                .fdmt =
+                    fdmt_mem.total() + (m_fdmt_out.capacity() * sizeof(float)),
                 .workspace = workspace + input,
                 .output    = m_out.capacity() * sizeof(float)};
     }
@@ -448,8 +444,8 @@ private:
     SizeType m_nwin{};
     SizeType m_chunk{};
 
-    DevBuf<ComplexTypeGPU> m_spec; // (sub, ifft, pol, nbin)
-    DevBuf<ComplexTypeGPU> m_work; // cuFFT path: (chan, block, pol, mbin)
+    DevBuf<ComplexTypeGPU> m_spec;    // (sub, ifft, pol, nbin)
+    DevBuf<ComplexTypeGPU> m_work;    // cuFFT path: (chan, block, pol, mbin)
     DevBuf<ComplexTypeGPU> m_chirp;   // (nchans, mbin) of the current trial
     DevBuf<ComplexTypeGPU> m_twiddle; // fused path: (mbin / 2)
     DevBuf<float> m_power;
@@ -462,7 +458,7 @@ private:
     DevBuf<uint64_t> m_offsets;
     DevBuf<float> m_waterfall;
     DevBuf<float> m_fdmt_out;
-    DevBuf<float> m_out; // host entry point only
+    DevBuf<float> m_out;                // host entry point only
     std::vector<DevBuf<uint8_t>> m_raw; // host entry point only
 
     gpu_host::ChunkedStager m_host; // compute stream + result download
@@ -492,7 +488,7 @@ private:
         const auto nbin   = m_plan.get_nbin();
         const auto mbin   = m_plan.get_mbin();
         const auto n_p    = m_plan.get_n_p();
-        m_nwin = ((m_plan.get_fdmt_nsamps() + lc() - 1) / lc()) + 1;
+        m_nwin            = ((m_plan.get_fdmt_nsamps() + lc() - 1) / lc()) + 1;
 
         // Front-end chunks of equal size (plus a remainder).
         int l2 = 0;
@@ -507,9 +503,8 @@ private:
             1, nsub);
         for (SizeType s0 = 0; s0 < nsub; s0 += per) {
             const SizeType n = std::min(per, nsub - s0);
-            if (m_fwd.empty() || m_chunks.back().sub_end -
-                                         m_chunks.back().sub_begin !=
-                                     n) {
+            if (m_fwd.empty() ||
+                m_chunks.back().sub_end - m_chunks.back().sub_begin != n) {
                 m_fwd.push_back(std::make_unique<utils::CUFFTManager>(
                     utils::FFTKind::kC2CForward, nbin, n * nfft * 2,
                     m_device_id));
@@ -518,9 +513,9 @@ private:
         }
         for (const auto g : m_plan.get_subband_groups()) {
             static_cast<void>(g);
-            m_f_outer.push_back(utils::parse_baseband_order(
-                                    m_plan.get_format().order)[0] ==
-                                utils::BasebandAxis::kFreq);
+            m_f_outer.push_back(
+                utils::parse_baseband_order(m_plan.get_format().order)[0] ==
+                utils::BasebandAxis::kFreq);
         }
 
         m_spec.reserve(m_unpacker.output_size());
@@ -584,13 +579,11 @@ private:
                            log2n <= cfdmt_gpu::kFusedMaxLog2;
         int optin        = 0;
         gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(&optin,
-                                   cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                                   m_device_id),
+            cudaDeviceGetAttribute(
+                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
             "CohFDMT: device attribute query failed");
-        const bool fits =
-            shape && cfdmt_gpu::fused_smem_bytes(log2n) <=
-                         static_cast<uint64_t>(optin);
+        const bool fits = shape && cfdmt_gpu::fused_smem_bytes(log2n) <=
+                                       static_cast<uint64_t>(optin);
         if (path == CohFDMTCoherentPath::kCuFFT ||
             (path == CohFDMTCoherentPath::kAuto && !fits)) {
             return false;
@@ -614,8 +607,8 @@ private:
         for (SizeType k = 0; k < mbin / 2; ++k) {
             const double ang = 2.0 * std::numbers::pi * static_cast<double>(k) /
                                static_cast<double>(mbin);
-            tw[k] = {static_cast<float>(std::cos(ang)),
-                     static_cast<float>(std::sin(ang))};
+            tw[k]            = {static_cast<float>(std::cos(ang)),
+                                static_cast<float>(std::sin(ang))};
         }
         m_twiddle.upload(tw);
 
@@ -627,13 +620,13 @@ private:
             cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount,
                                    m_device_id),
             "CohFDMT: device attribute query failed");
-        gpu_utils::check_gpu_call(
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &resident, m_fused, cfdmt_gpu::kFusedThreads,
-                static_cast<SizeType>(m_fused_smem)),
-            "CohFDMT: occupancy query failed");
-        const auto round = static_cast<uint64_t>(
-            cfdmt_gpu::fused_round_blocks(log2n));
+        gpu_utils::check_gpu_call(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                                      &resident, m_fused,
+                                      cfdmt_gpu::kFusedThreads,
+                                      static_cast<SizeType>(m_fused_smem)),
+                                  "CohFDMT: occupancy query failed");
+        const auto round =
+            static_cast<uint64_t>(cfdmt_gpu::fused_round_blocks(log2n));
         const uint64_t target =
             4 * static_cast<uint64_t>(std::max(1, nsm * resident));
         const uint64_t tasks = m_plan.get_nchans() * m_nwin;
@@ -647,17 +640,16 @@ private:
     }
 
     void init_cufft_path(SizeType work_bytes) {
-        const auto nchans = m_plan.get_nchans();
-        const auto mbin   = m_plan.get_mbin();
-        const SizeType per_chan =
-            m_nwin * 2 * mbin * sizeof(ComplexTypeGPU);
+        const auto nchans       = m_plan.get_nchans();
+        const auto mbin         = m_plan.get_mbin();
+        const SizeType per_chan = m_nwin * 2 * mbin * sizeof(ComplexTypeGPU);
         if (work_bytes == 0) {
             std::size_t free_bytes  = 0;
             std::size_t total_bytes = 0;
             gpu_utils::check_gpu_call(cudaMemGetInfo(&free_bytes, &total_bytes),
                                       "CohFDMT: memory query failed");
-            work_bytes = static_cast<SizeType>(
-                kWorkShare * static_cast<double>(free_bytes));
+            work_bytes = static_cast<SizeType>(kWorkShare *
+                                               static_cast<double>(free_bytes));
         }
         // Channels per chunk: the grid's y extent (<= kMaxGridY) and the
         // work buffer budget.
@@ -672,8 +664,8 @@ private:
 
     // Bytes of subbands [s0, s1) of group g when its subbands are
     // contiguous (frequency is the outermost axis).
-    [[nodiscard]] std::pair<SizeType, SizeType>
-    group_bytes(SizeType s0, SizeType s1) const {
+    [[nodiscard]] std::pair<SizeType, SizeType> group_bytes(SizeType s0,
+                                                            SizeType s1) const {
         const auto per_sub = utils::baseband_block_bytes(
             m_plan.get_format(), m_plan.get_block_nsamps(), 1);
         return {s0 * per_sub, (s1 - s0) * per_sub};
@@ -703,8 +695,8 @@ private:
                 } else {
                     uploaded[g] = true; // whole group with its first chunk
                 }
-                segs.push_back({m_raw[g].data() + off,
-                                h_groups[g].data() + off, bytes});
+                segs.push_back(
+                    {m_raw[g].data() + off, h_groups[g].data() + off, bytes});
                 seg_chunk.push_back(ic);
             }
         }
@@ -751,7 +743,7 @@ private:
             upload_plan(h_groups, segs, seg_chunk);
             // The copies reuse m_raw: order them after earlier device work.
             m_fence.order(m_copy_stream);
-            SizeType next = 0; // next chunk to enqueue
+            SizeType next           = 0; // next chunk to enqueue
             const auto enqueue_upto = [&](SizeType last) {
                 for (; next <= last; ++next) {
                     gpu_utils::check_gpu_call(
@@ -809,8 +801,8 @@ private:
         args.nf        = static_cast<int64_t>(m_plan.get_fdmt_nsamps());
         args.msamp     = static_cast<int64_t>(m_plan.get_msamp());
         args.norm      = m_plan.get_config().normalize;
-        m_fused<<<static_cast<unsigned>(m_fused_ctas),
-                  cfdmt_gpu::kFusedThreads, m_fused_smem, stream>>>(args);
+        m_fused<<<static_cast<unsigned>(m_fused_ctas), cfdmt_gpu::kFusedThreads,
+                  m_fused_smem, stream>>>(args);
     }
 
     void coherent_cufft(SizeType k, cudaStream_t stream) {
@@ -823,8 +815,8 @@ private:
         const auto l      = static_cast<int64_t>(lc());
         const auto nf     = static_cast<int64_t>(m_plan.get_fdmt_nsamps());
         const auto msamp  = static_cast<int64_t>(m_plan.get_msamp());
-        const auto a      = static_cast<int64_t>(m_plan.get_fdmt_window_start());
-        const bool norm   = m_plan.get_config().normalize;
+        const auto a    = static_cast<int64_t>(m_plan.get_fdmt_window_start());
+        const bool norm = m_plan.get_config().normalize;
         const int64_t* shifts = m_shifts.data() + (k * nchans);
         auto* work            = reinterpret_cast<float2*>(m_work.data());
         const cuda::std::span<ComplexTypeGPU> work_span(
@@ -839,8 +831,8 @@ private:
                 nchans, n_p, nfft, nbin, mbin, m_nwin, a, nf, msamp, l, work);
             m_inv->execute(work_span, stream);
             const dim3 g_detect(
-                static_cast<unsigned>(
-                    (static_cast<uint64_t>(nf) + kBlock - 1) / kBlock),
+                static_cast<unsigned>((static_cast<uint64_t>(nf) + kBlock - 1) /
+                                      kBlock),
                 static_cast<unsigned>(std::min(m_chunk, nchans - c0)));
             detect_kernel<<<g_detect, kBlock, 0, stream>>>(
                 work, shifts, m_mean.data(), m_inv_sigma.data(), norm, c0,
@@ -861,11 +853,11 @@ private:
 
         front_end(d_groups, h_groups, stream);
         for (SizeType k = 0; k < m_plan.get_ndm_coh(); ++k) {
-            cfdmt_gpu::chirp_kernel<<<grid_for(nchans * mbin), kBlock, 0,
-                                      stream>>>(
-                m_base.data(), m_inc.data(), m_taper.data(),
-                static_cast<unsigned long long>(k), nchans, mbin,
-                reinterpret_cast<float2*>(m_chirp.data()));
+            cfdmt_gpu::
+                chirp_kernel<<<grid_for(nchans * mbin), kBlock, 0, stream>>>(
+                    m_base.data(), m_inc.data(), m_taper.data(),
+                    static_cast<unsigned long long>(k), nchans, mbin,
+                    reinterpret_cast<float2*>(m_chirp.data()));
             if (m_fused != nullptr) {
                 coherent_fused(k, stream);
             } else {

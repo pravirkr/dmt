@@ -40,9 +40,7 @@ __host__ __device__ constexpr uint32_t fused_pad(uint32_t p) {
 
 /// FFT blocks a thread block holds at once for length 2^log2n.
 __host__ __device__ constexpr int fused_round_blocks(int log2n) {
-    return (1 << log2n) >= kFusedRoundPoints
-               ? 1
-               : kFusedRoundPoints >> log2n;
+    return (1 << log2n) >= kFusedRoundPoints ? 1 : kFusedRoundPoints >> log2n;
 }
 
 /// Dynamic shared memory (bytes) of the fused kernel for length 2^log2n.
@@ -53,13 +51,13 @@ __host__ __device__ constexpr uint64_t fused_smem_bytes(int log2n) {
 }
 
 struct FusedArgs {
-    const float2* spec;      // (sub, ifft, pol, nbin) forward spectrum
-    const float2* chirp;     // (nchans, mbin): taper / nbin x exp(i phase)
-    const float2* twiddle;   // (mbin / 2): exp(+2 pi i k / mbin)
-    const int64_t* shifts;   // (nchans) delay of this trial (tsamp)
-    const float* mean;       // (nchans)
-    const float* inv_sigma;  // (nchans)
-    float* waterfall;        // (nchans, nf)
+    const float2* spec;     // (sub, ifft, pol, nbin) forward spectrum
+    const float2* chirp;    // (nchans, mbin): taper / nbin x exp(i phase)
+    const float2* twiddle;  // (mbin / 2): exp(+2 pi i k / mbin)
+    const int64_t* shifts;  // (nchans) delay of this trial (tsamp)
+    const float* mean;      // (nchans)
+    const float* inv_sigma; // (nchans)
+    float* waterfall;       // (nchans, nf)
     uint64_t nchans;
     uint64_t n_p;
     uint64_t nfft;
@@ -110,16 +108,16 @@ __global__ void __launch_bounds__(kFusedThreads)
     constexpr uint32_t kS     = fused_pad(kN); // slots per FFT block
     constexpr uint32_t kQuart = kN / 4;
     extern __shared__ float2 smem[];
-    float2* s0 = smem;           // pol 0: kB blocks of kS slots
+    float2* s0 = smem;             // pol 0: kB blocks of kS slots
     float2* s1 = smem + (kB * kS); // pol 1
 
-    const uint64_t c = blockIdx.x / p.ngroups;
-    const uint64_t g = blockIdx.x % p.ngroups;
-    const int64_t s  = p.shifts[c];
-    const int64_t lo = p.a - s; // channel sample at aligned window start
+    const uint64_t c   = blockIdx.x / p.ngroups;
+    const uint64_t g   = blockIdx.x % p.ngroups;
+    const int64_t s    = p.shifts[c];
+    const int64_t lo   = p.a - s; // channel sample at aligned window start
     const int64_t m_lo = lo > 0 ? lo : 0;
     const int64_t m_hi = (lo + p.nf) < p.msamp ? (lo + p.nf) : p.msamp;
-    float* row = p.waterfall + (c * static_cast<uint64_t>(p.nf));
+    float* row         = p.waterfall + (c * static_cast<uint64_t>(p.nf));
 
     if (g == 0) {
         // Window samples outside the block are zero.
@@ -161,11 +159,10 @@ __global__ void __launch_bounds__(kFusedThreads)
             const uint32_t qb = idx >> Log2N;
             const uint32_t b  = idx & (kN - 1U);
             const auto j      = static_cast<uint64_t>(j_first + q0 + qb);
-            const float2* x =
-                p.spec + (((isub * p.nfft) + j) * 2 * p.nbin);
-            uint64_t bin = off + b;
-            bin          = bin >= p.nbin ? bin - p.nbin : bin;
-            const float2 h = __ldg(chirp + b);
+            const float2* x   = p.spec + (((isub * p.nfft) + j) * 2 * p.nbin);
+            uint64_t bin      = off + b;
+            bin               = bin >= p.nbin ? bin - p.nbin : bin;
+            const float2 h    = __ldg(chirp + b);
             s0[(qb * kS) + fused_pad(b)] = fourier_gpu::cmul(__ldg(x + bin), h);
             s1[(qb * kS) + fused_pad(b)] =
                 fourier_gpu::cmul(__ldg(x + p.nbin + bin), h);
@@ -218,9 +215,9 @@ __global__ void __launch_bounds__(kFusedThreads)
                 float2* pols[2]   = {s0 + (qb * kS), s1 + (qb * kS)};
 #pragma unroll
                 for (int pol = 0; pol < 2; ++pol) {
-                    float2* x = pols[pol];
-                    float2 a  = x[fused_pad(i0)];
-                    float2 b  = x[fused_pad(i0 + 1)];
+                    float2* x            = pols[pol];
+                    float2 a             = x[fused_pad(i0)];
+                    float2 b             = x[fused_pad(i0 + 1)];
                     x[fused_pad(i0)]     = detail::cadd(a, b);
                     x[fused_pad(i0 + 1)] = detail::csub(a, b);
                 }
@@ -255,17 +252,16 @@ namespace {
 /// chirp[c, b] = taper[b] * exp(i 2 pi frac(base[c, b] + k inc[c, b])):
 /// the trial's exact fixed-point phases (lib/dmt/cfdmt_common.hpp).
 __global__ void chirp_kernel(const unsigned long long* __restrict__ base,
-                                    const unsigned long long* __restrict__ inc,
-                                    const float* __restrict__ taper,
-                                    unsigned long long k,
-                                    uint64_t nchans,
-                                    uint64_t mbin,
-                                    float2* __restrict__ chirp) {
+                             const unsigned long long* __restrict__ inc,
+                             const float* __restrict__ taper,
+                             unsigned long long k,
+                             uint64_t nchans,
+                             uint64_t mbin,
+                             float2* __restrict__ chirp) {
     const uint64_t total = nchans * mbin;
-    for (uint64_t idx = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                        threadIdx.x;
-         idx < total;
-         idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+    for (uint64_t idx =
+             (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+         idx < total; idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
         const unsigned long long ph = base[idx] + (k * inc[idx]);
         float sn                    = 0.0F;
         float cs                    = 0.0F;

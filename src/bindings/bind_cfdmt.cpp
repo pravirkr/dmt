@@ -30,8 +30,8 @@ using ByteArray = py::array_t<uint8_t, py::array::c_style>;
 
 // A C-contiguous 1-byte array (uint8 or int8, any shape) viewed as bytes.
 std::span<const uint8_t> byte_view(const py::array& arr) {
-    if (arr.itemsize() != 1 || (arr.dtype().kind() != 'u' &&
-                                arr.dtype().kind() != 'i')) {
+    if (arr.itemsize() != 1 ||
+        (arr.dtype().kind() != 'u' && arr.dtype().kind() != 'i')) {
         throw py::type_error(
             "CohFDMT.execute: baseband blocks must be uint8 or int8 arrays "
             "(the config's BasebandFormat decides the decoding)");
@@ -93,10 +93,10 @@ py::object coh_execute(const CohFDMT& coh,
         coh.execute<uint8_t>(std::span<const std::span<const uint8_t>>(groups),
                              std::span<float>(buf.mutable_data(), buf.size()));
     }
-    const auto& plan  = coh.get_plan();
-    const auto ndm    = static_cast<py::ssize_t>(plan.get_ndm());
-    const auto nout   = static_cast<py::ssize_t>(plan.get_output_nsamps());
-    const auto fsize  = static_cast<py::ssize_t>(sizeof(float));
+    const auto& plan = coh.get_plan();
+    const auto ndm   = static_cast<py::ssize_t>(plan.get_ndm());
+    const auto nout  = static_cast<py::ssize_t>(plan.get_output_nsamps());
+    const auto fsize = static_cast<py::ssize_t>(sizeof(float));
     return py::array_t<float>({ndm, nout}, {nout * fsize, fsize}, buf.data(),
                               buf);
 }
@@ -225,10 +225,10 @@ void bind_cfdmt(py::module_& mod) {
             Subbands per input group (e.g. per GUPPI node file); must sum
             to ``nsub``. Empty (default) = one group.
         )doc")
-        .def(py::init([](float f_center, float bw_sub, SizeType nsub,
-                         float t_p, float dm_min, float dm_max,
-                         SizeType block_nsamps, SizeType nbin, float smear_tol,
-                         float filter_leakage, SizeType dt_step, bool normalize,
+        .def(py::init([](float f_center, float bw_sub, SizeType nsub, float t_p,
+                         float dm_min, float dm_max, SizeType block_nsamps,
+                         SizeType nbin, float smear_tol, float filter_leakage,
+                         SizeType dt_step, bool normalize,
                          const BasebandFormat& format,
                          std::vector<SizeType> subband_groups) {
                  return CohFDMTConfig{.f_center       = f_center,
@@ -244,14 +244,14 @@ void bind_cfdmt(py::module_& mod) {
                                       .dt_step        = dt_step,
                                       .normalize      = normalize,
                                       .format         = format,
-                                      .subband_groups = std::move(
-                                          subband_groups)};
+                                      .subband_groups =
+                                          std::move(subband_groups)};
              }),
              "f_center"_a, "bw_sub"_a, "nsub"_a, "t_p"_a, "dm_min"_a,
              "dm_max"_a, py::kw_only(), "block_nsamps"_a = 0, "nbin"_a = 0,
              "smear_tol"_a = 1.0F, "filter_leakage"_a = 1.0E-4F,
              "dt_step"_a = 1, "normalize"_a = true,
-             "format"_a = BasebandFormat{},
+             "format"_a         = BasebandFormat{},
              "subband_groups"_a = std::vector<SizeType>{})
         .def_readwrite("f_center", &CohFDMTConfig::f_center)
         .def_readwrite("bw_sub", &CohFDMTConfig::bw_sub)
@@ -322,7 +322,7 @@ void bind_cfdmt(py::module_& mod) {
             "memory_usage",
             [](const CohFDMT& coh) {
                 const auto m = coh.get_memory_usage();
-                return py::dict("spectrum"_a = m.spectrum,
+                return py::dict("spectrum"_a  = m.spectrum,
                                 "waterfall"_a = m.waterfall, "fdmt"_a = m.fdmt,
                                 "workspace"_a = m.workspace,
                                 "output"_a = m.output, "total"_a = m.total());
@@ -353,8 +353,8 @@ void bind_cfdmt(py::module_& mod) {
     mod.def(
         "simulate_baseband",
         [](float f_center, float bw_sub, SizeType nsub, SizeType nsamps,
-           const std::vector<std::array<double, 4>>& pulses,
-           float noise_sigma, uint64_t seed, int nthreads) {
+           const std::vector<std::array<double, 4>>& pulses, float noise_sigma,
+           uint64_t seed, int nthreads) {
             std::vector<utils::BasebandPulse> ps;
             for (const auto& p : pulses) {
                 ps.push_back({.dm        = p[0],
@@ -365,15 +365,15 @@ void bind_cfdmt(py::module_& mod) {
             std::vector<ComplexType> v;
             {
                 const py::gil_scoped_release release;
-                v = utils::simulate_baseband(f_center, bw_sub, nsub, nsamps,
-                                             ps, noise_sigma, seed, nthreads);
+                v = utils::simulate_baseband(f_center, bw_sub, nsub, nsamps, ps,
+                                             noise_sigma, seed, nthreads);
             }
             auto arr = as_pyarray(std::move(v));
             return arr.reshape({py::ssize_t{2}, static_cast<py::ssize_t>(nsub),
                                 static_cast<py::ssize_t>(nsamps)});
         },
         "f_center"_a, "bw_sub"_a, "nsub"_a, "nsamps"_a,
-        "pulses"_a = std::vector<std::array<double, 4>>{},
+        "pulses"_a      = std::vector<std::array<double, 4>>{},
         "noise_sigma"_a = 0.0F, "seed"_a = 42, "nthreads"_a = 1,
         R"doc(
         Simulate complex dual-polarisation baseband with dispersed pulses.
@@ -407,8 +407,8 @@ void bind_cfdmt(py::module_& mod) {
 
     mod.def(
         "pack_baseband",
-        [](const py::array_t<std::complex<float>, py::array::c_style |
-                                                      py::array::forcecast>&
+        [](const py::array_t<std::complex<float>,
+                             py::array::c_style | py::array::forcecast>&
                voltages,
            const BasebandFormat& format, float scale, SizeType sub_begin,
            SizeType sub_count, SizeType t_begin, SizeType t_count) {

@@ -28,9 +28,8 @@ constexpr SizeType kStep     = kNbin - (2 * kNoverlap);
 constexpr SizeType kNsamps   = (kNfft * kStep) + (2 * kNoverlap);
 
 // Random integer-valued voltages representable exactly by @p format.
-std::vector<ComplexType> random_voltages(const BasebandFormat& format,
-                                         SizeType nsub,
-                                         uint32_t seed) {
+std::vector<ComplexType>
+random_voltages(const BasebandFormat& format, SizeType nsub, uint32_t seed) {
     std::mt19937 rng(seed);
     std::vector<ComplexType> v(2 * nsub * kNsamps);
     const auto draw = [&]() -> float {
@@ -76,19 +75,18 @@ void check_blocks(const std::vector<ComplexType>& v,
 TEST_CASE("BasebandUnpackerCPU round-trips every order and bit width",
           "[unpacker][cpu]") {
     const std::array<std::string, 24> orders = {
-        "PRITF", "PRIFT", "PTRIF", "PTFRI", "PFRIT", "PFTRI",
-        "RIPTF", "RIPFT", "RITPF", "RITFP", "RIFPT", "RIFTP",
-        "TPRIF", "TPFRI", "TRIPF", "TRIFP", "TFPRI", "TFRIP",
-        "FPRIT", "FPTRI", "FRIPT", "FRITP", "FTPRI", "FTRIP"};
+        "PRITF", "PRIFT", "PTRIF", "PTFRI", "PFRIT", "PFTRI", "RIPTF", "RIPFT",
+        "RITPF", "RITFP", "RIFPT", "RIFTP", "TPRIF", "TPFRI", "TRIPF", "TRIFP",
+        "TFPRI", "TFRIP", "FPRIT", "FPTRI", "FRIPT", "FRITP", "FTPRI", "FTRIP"};
     const auto order = GENERATE_COPY(from_range(orders));
     struct Enc {
         SizeType nbits;
         bool is_signed;
         bool msb_first;
     };
-    const auto enc = GENERATE(Enc{8, true, true}, Enc{8, false, true},
-                              Enc{4, true, true}, Enc{4, false, false},
-                              Enc{2, true, false}, Enc{2, true, true});
+    const auto enc =
+        GENERATE(Enc{8, true, true}, Enc{8, false, true}, Enc{4, true, true},
+                 Enc{4, false, false}, Enc{2, true, false}, Enc{2, true, true});
     const BasebandFormat format{.order     = order,
                                 .nbits     = enc.nbits,
                                 .is_signed = enc.is_signed,
@@ -98,8 +96,8 @@ TEST_CASE("BasebandUnpackerCPU round-trips every order and bit width",
     const auto v     = random_voltages(format, nsub, 7);
     const auto bytes = utils::pack_baseband(v, nsub, kNsamps, format, 1.0F);
     const std::vector<SizeType> groups{nsub};
-    const BasebandUnpackerCPU unpacker(format, groups, kNbin, kNfft,
-                                       kNoverlap, 2);
+    const BasebandUnpackerCPU unpacker(format, groups, kNbin, kNfft, kNoverlap,
+                                       2);
     REQUIRE(unpacker.block_nsamps() == kNsamps);
     REQUIRE(bytes.size() == unpacker.input_size(0));
     std::vector<ComplexType> out(unpacker.output_size());
@@ -150,22 +148,21 @@ TEST_CASE("BasebandUnpackerCPU decodes hand-built GUPPI and LOFAR bytes",
     SECTION("GUPPI FTPRI 4-bit: real in the high nibble") {
         std::vector<ComplexType> v4(v.size());
         for (SizeType i = 0; i < v.size(); ++i) {
-            v4[i] = {static_cast<float>((static_cast<int>(v[i].real()) & 7) -
-                                        4),
-                     static_cast<float>((static_cast<int>(v[i].imag()) & 7) -
-                                        3)};
+            v4[i] = {
+                static_cast<float>((static_cast<int>(v[i].real()) & 7) - 4),
+                static_cast<float>((static_cast<int>(v[i].imag()) & 7) - 3)};
         }
         std::vector<uint8_t> raw(2 * nsub * kNsamps);
         for (SizeType s = 0; s < nsub; ++s) {
             for (SizeType t = 0; t < kNsamps; ++t) {
                 for (SizeType p = 0; p < 2; ++p) {
-                    const auto x  = v4[(((p * nsub) + s) * kNsamps) + t];
-                    const auto re = static_cast<unsigned>(
-                                        static_cast<int>(x.real())) &
-                                    0xFU;
-                    const auto im = static_cast<unsigned>(
-                                        static_cast<int>(x.imag())) &
-                                    0xFU;
+                    const auto x = v4[(((p * nsub) + s) * kNsamps) + t];
+                    const auto re =
+                        static_cast<unsigned>(static_cast<int>(x.real())) &
+                        0xFU;
+                    const auto im =
+                        static_cast<unsigned>(static_cast<int>(x.imag())) &
+                        0xFU;
                     raw[(s * kNsamps * 2) + (t * 2) + p] =
                         static_cast<uint8_t>((re << 4U) | im);
                 }
@@ -192,8 +189,8 @@ TEST_CASE("BasebandUnpackerCPU decodes hand-built GUPPI and LOFAR bytes",
             }
         }
         const BasebandUnpackerCPU unpacker(
-            BasebandFormat{.order = "PRITF", .is_signed = false}, groups,
-            kNbin, kNfft, kNoverlap);
+            BasebandFormat{.order = "PRITF", .is_signed = false}, groups, kNbin,
+            kNfft, kNoverlap);
         std::vector<ComplexType> out(unpacker.output_size());
         const std::span<const uint8_t> in(raw);
         unpacker.execute(std::span(&in, 1), out);
@@ -231,13 +228,11 @@ TEST_CASE("BasebandUnpackerCPU validation", "[unpacker][cpu]") {
                     std::invalid_argument);
     CHECK_THROWS_AS(utils::parse_baseband_order("PRXTF"),
                     std::invalid_argument);
-    CHECK_THROWS_AS(
-        BasebandUnpackerCPU(BasebandFormat{.nbits = 3}, groups, kNbin, kNfft,
-                            kNoverlap),
-        std::invalid_argument);
-    CHECK_THROWS_AS(
-        BasebandUnpackerCPU(BasebandFormat{}, groups, 16, kNfft, 8),
-        std::invalid_argument);
+    CHECK_THROWS_AS(BasebandUnpackerCPU(BasebandFormat{.nbits = 3}, groups,
+                                        kNbin, kNfft, kNoverlap),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(BasebandUnpackerCPU(BasebandFormat{}, groups, 16, kNfft, 8),
+                    std::invalid_argument);
     const BasebandUnpackerCPU unpacker(BasebandFormat{}, groups, kNbin, kNfft,
                                        kNoverlap);
     std::vector<uint8_t> bad(unpacker.input_size(0) - 1);

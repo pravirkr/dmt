@@ -11,10 +11,10 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "cfdmt_behaviour.hpp"
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/utils/simulate.hpp"
-#include "cfdmt_behaviour.hpp"
 
 namespace dmt {
 
@@ -33,16 +33,16 @@ TEST_CASE("CohFDMTPlan geometry and exact coarse grid", "[cfdmt][cpu]") {
     REQUIRE(plan.get_ndm_coh() > 1);
 
     SECTION("coarse windows tile [dm_min, dm_max]") {
-        const auto& coh  = plan.get_dm_grid_coh();
-        const auto step  = plan.get_dm_step_coh();
+        const auto& coh = plan.get_dm_grid_coh();
+        const auto step = plan.get_dm_step_coh();
         CHECK(coh.front() - (step / 2) == Catch::Approx(10.0F));
         CHECK(coh.back() + (step / 2) == Catch::Approx(11.0F));
         for (SizeType k = 1; k < coh.size(); ++k) {
             CHECK(coh[k] - coh[k - 1] == Catch::Approx(step));
         }
         // No gaps between consecutive trials' fine rows.
-        const auto nfine = plan.get_ndm_fine();
-        const auto& fin  = plan.get_dm_grid_final();
+        const auto nfine      = plan.get_ndm_fine();
+        const auto& fin       = plan.get_dm_grid_final();
         const float fine_step = fin[1] - fin[0];
         for (SizeType k = 1; k < coh.size(); ++k) {
             CHECK(fin[(k * nfine) - 1] >= fin[k * nfine] - fine_step);
@@ -61,13 +61,13 @@ TEST_CASE("CohFDMTPlan geometry and exact coarse grid", "[cfdmt][cpu]") {
             worst = std::max(worst, smear);
         }
         CHECK(worst <= 1.0 + 1.0E-4);
-        CHECK(worst == Catch::Approx(plan.get_intra_channel_smear()).epsilon(1e-3));
+        CHECK(worst ==
+              Catch::Approx(plan.get_intra_channel_smear()).epsilon(1e-3));
         // The grid is as coarse as the criterion allows: one trial fewer
         // would exceed it.
-        const double wider =
-            (plan.get_dm_max() - plan.get_dm_min()) /
-            static_cast<double>(plan.get_ndm_coh() - 1) / 2.0;
-        const double lo = plan.get_f_min();
+        const double wider = (plan.get_dm_max() - plan.get_dm_min()) /
+                             static_cast<double>(plan.get_ndm_coh() - 1) / 2.0;
+        const double lo    = plan.get_f_min();
         CHECK((disp(wider, lo) - disp(wider, lo + plan.get_bw_chan())) /
                   plan.get_tsamp() >
               1.0);
@@ -85,10 +85,9 @@ TEST_CASE("CohFDMTPlan geometry and exact coarse grid", "[cfdmt][cpu]") {
         CHECK(plan.get_stride_nsamps() == plan.get_output_nsamps() * n_p);
         CHECK(plan.get_output_nsamps() % lc == 0);
         CHECK(plan.get_output_nsamps() > 0);
-        CHECK(plan.get_msamp() >= plan.get_output_nsamps() +
-                                      plan.get_max_delay());
-        CHECK(plan.get_dmt_size() ==
-              plan.get_ndm() * plan.get_output_nsamps());
+        CHECK(plan.get_msamp() >=
+              plan.get_output_nsamps() + plan.get_max_delay());
+        CHECK(plan.get_dmt_size() == plan.get_ndm() * plan.get_output_nsamps());
         CHECK(plan.get_input_size() == 4 * plan.get_block_nsamps() * 16);
     }
 
@@ -114,18 +113,19 @@ TEST_CASE("CohFDMTPlan multi-subband grid is ~nsub/2 coarser than the "
           "single-band rule",
           "[cfdmt][cpu]") {
     // GUPPI node: 64 x 2.9296875 MHz at 1.4 GHz, t_p = 10 us, DM 50-60.
-    const CohFDMTConfig cfg{.f_center = 1406.25F,
-                            .bw_sub   = 1500.0F / 512.0F,
-                            .nsub     = 64,
-                            .t_p      = 10.0E-6F,
-                            .dm_min   = 0.0F,
-                            .dm_max   = 500.0F,
+    const CohFDMTConfig cfg{.f_center     = 1406.25F,
+                            .bw_sub       = 1500.0F / 512.0F,
+                            .nsub         = 64,
+                            .t_p          = 10.0E-6F,
+                            .dm_min       = 0.0F,
+                            .dm_max       = 500.0F,
                             .block_nsamps = 0};
     const CohFDMTPlan plan(cfg);
     // Old rule: ceil(delay * tbin / (2 t_p^2)) with the subband tbin.
-    const double delay = disp(500.0, plan.get_f_min()) -
-                         disp(500.0, plan.get_f_max());
-    const double old = std::ceil(delay * plan.get_tbin() / (2.0 * 1.0E-5 * 1.0E-5));
+    const double delay =
+        disp(500.0, plan.get_f_min()) - disp(500.0, plan.get_f_max());
+    const double old =
+        std::ceil(delay * plan.get_tbin() / (2.0 * 1.0E-5 * 1.0E-5));
     INFO("old " << old << " new " << plan.get_ndm_coh());
     CHECK(old / static_cast<double>(plan.get_ndm_coh()) > 64.0 / 4.0);
     CHECK(plan.get_intra_channel_smear() <= 1.0F);

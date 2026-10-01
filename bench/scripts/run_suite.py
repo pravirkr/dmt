@@ -195,7 +195,9 @@ def main() -> None:
         "DMT_FFTW_WISDOM": wisdom,
     }
 
-    prefix, stem = ("cfdmt", "suite_cfdmt") if args.suite == "cfdmt" else ("suite", "suite")
+    prefix, stem = (
+        ("cfdmt", "suite_cfdmt") if args.suite == "cfdmt" else ("suite", "suite")
+    )
     runs = []
     if args.cpu:
         runs.append(("cpu", rf"^{prefix}/.*/cpu[0-9]+/"))
@@ -212,8 +214,7 @@ def main() -> None:
             run_env = {
                 k: v
                 for k, v in env.items()
-                if k not in ("OMP_PROC_BIND", "OMP_PLACES")
-                or k in os.environ
+                if k not in ("OMP_PROC_BIND", "OMP_PLACES") or k in os.environ
             }
         cmd = [
             str(binary),

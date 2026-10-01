@@ -50,8 +50,8 @@ std::vector<uint8_t> random_block(SizeType n) {
 void set_counters(benchmark::State& state,
                   const plans::CohFDMTPlan& plan,
                   double work_per_iter = 1.0) {
-    const double data_s = static_cast<double>(plan.get_stride_nsamps()) *
-                          plan.get_tbin() * work_per_iter;
+    const double data_s   = static_cast<double>(plan.get_stride_nsamps()) *
+                            plan.get_tbin() * work_per_iter;
     state.counters["rtf"] = benchmark::Counter(
         data_s, benchmark::Counter::kIsIterationInvariantRate);
     state.counters["ndm"]     = static_cast<double>(plan.get_ndm());
@@ -79,8 +79,7 @@ static void BM_cfdmt_stage_unpack(benchmark::State& state) {
     const plans::CohFDMTPlan plan(guppi_config(state));
     const utils::BasebandUnpackerCPU unpacker(
         plan.get_format(), plan.get_subband_groups(), plan.get_nbin(),
-        plan.get_nfft(), plan.get_noverlap(),
-        static_cast<int>(state.range(0)));
+        plan.get_nfft(), plan.get_noverlap(), static_cast<int>(state.range(0)));
     const auto in = random_block(unpacker.input_size(0));
     utils::FFTVector<ComplexType> out(unpacker.output_size());
     const std::span<const uint8_t> group(in);
@@ -94,10 +93,10 @@ static void BM_cfdmt_stage_unpack(benchmark::State& state) {
 
 static void BM_cfdmt_stage_forward_fft(benchmark::State& state) {
     const plans::CohFDMTPlan plan(guppi_config(state));
-    const utils::FFTWManager fwd(
-        utils::FFTKind::kC2CForward, plan.get_nbin(),
-        SizeType{2} * plan.get_nfft() * plan.get_nsub(),
-        static_cast<int>(state.range(0)));
+    const utils::FFTWManager fwd(utils::FFTKind::kC2CForward, plan.get_nbin(),
+                                 SizeType{2} * plan.get_nfft() *
+                                     plan.get_nsub(),
+                                 static_cast<int>(state.range(0)));
     utils::FFTVector<ComplexType> data(SizeType{2} * plan.get_nfft() *
                                            plan.get_nsub() * plan.get_nbin(),
                                        ComplexType{1.0F, 0.5F});
@@ -110,9 +109,8 @@ static void BM_cfdmt_stage_forward_fft(benchmark::State& state) {
 // Fine FDMT of one coarse trial (reset + execute), times ndm_coh per block.
 static void BM_cfdmt_stage_fdmt_per_trial(benchmark::State& state) {
     const plans::CohFDMTPlan plan(guppi_config(state));
-    algorithms::FDMT fdmt(plan.get_f_min(), plan.get_f_max(),
-                          plan.get_nchans(), plan.get_fdmt_nsamps(),
-                          plan.get_tsamp(),
+    algorithms::FDMT fdmt(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
+                          plan.get_fdmt_nsamps(), plan.get_tsamp(),
                           static_cast<IndexType>(plan.get_fine_dt_max()),
                           -static_cast<IndexType>(plan.get_fine_dt_max()),
                           plan.get_config().dt_step, true, "valid",
@@ -139,9 +137,8 @@ static void BM_cfdmt_stage_inverse_fft_roofline(benchmark::State& state) {
     const auto nthr  = static_cast<int>(state.range(0));
     const auto batch = SizeType{64};
     const utils::FFTWRowPlan inv(utils::FFTKind::kC2CBackward, mbin, batch);
-    utils::FFTVector<ComplexType> data(static_cast<SizeType>(nthr) * batch *
-                                           mbin,
-                                       ComplexType{1.0F, 0.5F});
+    utils::FFTVector<ComplexType> data(
+        static_cast<SizeType>(nthr) * batch * mbin, ComplexType{1.0F, 0.5F});
     const auto nbatch = (rows + batch - 1) / batch;
     for (auto _ : state) {
 #pragma omp parallel for num_threads(nthr) schedule(static)
