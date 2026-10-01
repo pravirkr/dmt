@@ -52,6 +52,12 @@ namespace dmt::algorithms {
  * Runs on the backend chosen by the `Exec` constructor argument. Host memory
  * works on every backend; device memory (`DeviceSpan`) on GPU backends only,
  * asynchronous on the given Stream.
+ *
+ * **Threads and streams.** One instance owns one set of working buffers:
+ * concurrent execute() calls from several threads are serialised, and
+ * device calls on different streams are ordered by the engine (each waits
+ * for the previous call's device work). Use one instance per thread or
+ * stream to run blocks concurrently.
  */
 class CohFDMT {
 public:

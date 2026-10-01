@@ -76,6 +76,13 @@ class TestPlan:
         np.testing.assert_allclose(plan.get_effective_sigma_grid() ** 2, var, rtol=1e-6)
         assert plan.get_lag_correlation(2)[0] == pytest.approx(1.0)
 
+    def test_filter_leakage_sets_the_overlap(self) -> None:
+        tight = CohFDMTPlan(small_config(filter_leakage=1e-6))
+        default = CohFDMTPlan(small_config())
+        assert small_config().filter_leakage == pytest.approx(1e-4)
+        assert default.noverlap < tight.noverlap
+        assert default.noverlap % default.n_p == 0
+
     @pytest.mark.parametrize(
         "kw",
         [
@@ -85,6 +92,8 @@ class TestPlan:
             {"format": BasebandFormat(nbits=16)},
             {"subband_groups": [4, 4]},
             {"block_nsamps": 1000},
+            {"filter_leakage": 0.0},
+            {"filter_leakage": 1.0},
         ],
     )
     def test_invalid_configs_raise(self, kw: dict) -> None:

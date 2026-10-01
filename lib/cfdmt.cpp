@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <utility>
 #include <vector>
@@ -62,6 +63,10 @@ public:
     plans::CohFDMTPlan m_plan;
     detail::CohFDMTEngineConfig m_cfg;
     std::unique_ptr<detail::CohFDMTEngine> m_engine;
+    // execute() is const but runs on the engine's buffers: calls from
+    // several threads take turns (device calls only while they enqueue;
+    // the engine orders their device work across streams).
+    mutable std::mutex m_mutex;
 };
 
 CohFDMT::CohFDMT(const CohFDMTConfig& config, Exec exec)
@@ -108,6 +113,7 @@ template <IntegralDataType DataType>
 void CohFDMT::execute(std::span<const DataType> data_in,
                       std::span<float> dmt) const {
     const std::span<const uint8_t> group = as_bytes_view(data_in);
+    const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(std::span(&group, 1), dmt);
 }
 template <IntegralDataType DataType>
@@ -118,6 +124,7 @@ void CohFDMT::execute(std::span<const std::span<const DataType>> groups,
     for (const auto& g : groups) {
         bytes.push_back(as_bytes_view(g));
     }
+    const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(bytes, dmt);
 }
 template <IntegralDataType DataType>
@@ -129,6 +136,7 @@ void CohFDMT::execute(DeviceSpan<const DataType> d_data_in,
     detail::check_device(d_dmt.device, backend(), m_impl->m_cfg.exec.device,
                          "CohFDMT::execute");
     const DeviceSpan<const uint8_t> group = as_bytes_view(d_data_in);
+    const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(std::span(&group, 1), d_dmt, stream);
 }
 template <IntegralDataType DataType>
@@ -144,6 +152,7 @@ void CohFDMT::execute(std::span<const DeviceSpan<const DataType>> d_groups,
     }
     detail::check_device(d_dmt.device, backend(), m_impl->m_cfg.exec.device,
                          "CohFDMT::execute");
+    const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(bytes, d_dmt, stream);
 }
 

@@ -51,6 +51,7 @@ dmt::algorithms::CohFDMT search(cfg, dmt::Exec::cpu(8));
 | `block_nsamps` | Raw samples per subband you read per block (0 = automatic, see below). |
 | `nbin` | Forward FFT length (0 = automatic). |
 | `smear_tol` | Largest residual intra-channel smearing, in output samples (default 1). |
+| `filter_leakage` | Share of the channel filter's impulse-response energy allowed past each FFT block's overlap (default `1e-4`). It sets the filter's part of `plan.noverlap`. |
 | `dt_step` | Stride between fine delay trials (default 1). |
 | `normalize` | Normalise every channel to zero mean and unit variance (default on). |
 | `format` | Input layout and encoding (below). |
@@ -103,7 +104,10 @@ for s0 in range(0, nsamps_file - plan.block_nsamps + 1, plan.stride_nsamps):
   `input_size(g)`). The array may have any shape, as long as it is
   C-contiguous and its bytes are in the configured `order`.
 - `execute(out=...)` reuses a result buffer.
-- The engine is not re-entrant: use one instance per thread or stream.
+- One instance owns one set of working buffers. Calls from several threads
+  take turns. On the GPU, device-memory calls on different streams are
+  ordered, each after the previous call's device work. To process blocks
+  concurrently, use one instance per thread or stream.
 
 **Choosing the block length.** Each block pays once for the forward transform
 of the whole block, sweep included. After that, every coarse trial only
@@ -120,6 +124,16 @@ most when there are few coarse trials, and memory grows with the block:
 `plan.memory_estimate()` and `search.memory_usage()` give the actual numbers.
 The automatic choice aims for four times as many valid samples as the sweep costs,
 within 1 GiB of spectrum.
+
+**Overlap.** Each FFT block keeps `plan.noverlap` raw samples per side for the
+coherent filter. That margin is the channel's chirp response at `dm_max` plus
+the ringing of the channel filter. The ringing part is sized so that at most
+`filter_leakage` of the filter's impulse-response energy falls outside it.
+The default of `1e-4` leaves an amplitude tail of about 1%, below 8-bit
+quantisation noise. Against `1e-6` it changes the output by about `2e-4` of the
+peak. In the GUPPI reference search it cuts the margin from 1470 to 540 samples
+per side, and the automatic `nbin` then picks 256-bin channel transforms
+instead of 1024-bin ones.
 
 ## The DM grid
 
@@ -176,8 +190,27 @@ With `normalize=False` the output is raw detected power. Row `i` then sums
   several coarse trials, the per-trial inverse FFTs and the fine FDMT dominate.
   Both run at the speed of FFTW and the FDMT; the chirp, detection and
   alignment are fused into the per-channel inverse-FFT pass.
-- On the GPU, every stage runs on one stream. The host-array `execute()`
-  includes the PCIe transfers of the block and the result.
+- On the GPU, the block's front end (unpack, forward cuFFT, channel powers)
+  runs in chunks of subbands sized to a quarter of the L2 cache. Each chunk's
+  passes then stay on chip, which made long multi-pass transforms (30720
+  points) 1.7× faster on an L40S. The chunks also pace the host-array upload.
+- The GPU coherent stage is one fused kernel per coarse trial: gather times
+  chirp, an in-shared-memory inverse FFT, detection, normalisation and the
+  delay-aligned write. It reads the spectrum once and writes the waterfall once.
+  This covers power-of-two channel transforms of 16–4096 bins (`plan.mbin`),
+  which is what the automatic `nbin` gives. It runs at about the speed of a
+  device-to-device copy of the same bytes (0.86 ms per trial in the GUPPI
+  reference search on an L40S). Other lengths fall back to batched cuFFT
+  through a work buffer, about 4.7× slower for this stage. The output matches
+  the CPU engine to 1e-4 relative.
+- With many coarse trials, the fine FDMT becomes the largest GPU cost per
+  trial: 4.7 ms per trial for DM 50–250, against 1.2 ms for the coherent
+  stage.
+- The host-array `execute()` on the GPU uploads the block chunk by chunk on a
+  copy stream. The front end of each chunk starts as soon as its bytes have
+  landed, and the result comes back through pinned staging. It is bound by the
+  host-to-device copy: about 130 MB per block in the GUPPI reference search.
+  Pass device arrays (`DeviceSpan`, C++) to keep the input on the GPU.
 
 See [Benchmarks](../benchmarks.md#coherent-hybrid-search-cohfdmt) for
 measured throughput.

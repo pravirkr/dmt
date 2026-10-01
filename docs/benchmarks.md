@@ -381,8 +381,23 @@ How to read it:
   and the FDMT. The chirp, detection, normalisation and channel alignment are
   fused into the per-channel inverse-transform pass, and the unpack and the
   channel statistics into the forward pass.
-  `dmt_bench --benchmark_filter=cfdmt` prints the stage timings and the FFTW
-  roofline of the inverse transforms.
+  `dmt_bench --benchmark_filter=cfdmt_(execute|stage)` prints the stage
+  timings and the FFTW roofline of the inverse transforms.
+- **On the GPU.**
+  - The front end runs in L2-sized chunks of subbands.
+  - Each coarse trial's coherent stage is one fused kernel: gather times chirp,
+    inverse FFT in shared memory, detection, alignment.
+  - With several coarse trials, the fine FDMT is the largest per-trial cost
+    (DM 50–250: 4.7 ms per trial, against 1.2 ms for the coherent stage).
+  - The `host arrays` series include the PCIe upload of the block (about
+    130 MB for 8-bit input), overlapped chunk by chunk with the front end.
+    They are bound by that copy.
+  - `dmt_bench --benchmark_filter=cfdmt_cuda` compares the fused and cuFFT
+    coherent stages, and reports the fused kernel's speed against a
+    device-to-device copy (`roofline`).
+- **CPU series.** The M1 CPU series predate the trimmed filter margin
+  (`filter_leakage` 1e-4, which shortens the overlap). Rerun them for current
+  numbers.
 
 ```{include} ../bench/results/plots/cfdmt_summary.md
 ```

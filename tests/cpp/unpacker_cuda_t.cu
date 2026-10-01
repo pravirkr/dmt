@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <random>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,45 @@ TEST_CASE("BasebandUnpackerCUDA matches BasebandUnpackerCPU",
     for (SizeType i = 0; i < want.size(); ++i) {
         if (got[i].real() != want[i].real() ||
             got[i].imag() != want[i].imag()) {
+            FAIL("mismatch at element " << i);
+        }
+    }
+}
+
+TEST_CASE("BasebandUnpackerCUDA subband ranges equal one full unpack",
+          "[unpacker][gpu]") {
+    const SizeType nbin = 64, nfft = 3, noverlap = 8, nsub = 5;
+    const SizeType nsamps = (nfft * (nbin - (2 * noverlap))) + (2 * noverlap);
+    const BasebandFormat format{.order = "PRITF", .nbits = 4};
+    std::mt19937 rng(5);
+    std::vector<ComplexType> v(2 * nsub * nsamps);
+    for (auto& x : v) {
+        x = {static_cast<float>(static_cast<int>(rng() % 15) - 7),
+             static_cast<float>(static_cast<int>(rng() % 15) - 7)};
+    }
+    const auto g = utils::pack_baseband(v, nsub, nsamps, format, 1.0F);
+    const std::vector<SizeType> groups{nsub};
+    BasebandUnpackerCUDA gpu(format, groups, nbin, nfft, noverlap);
+    thrust::device_vector<uint8_t> d(g.begin(), g.end());
+    const cuda::std::span<const uint8_t> dg(thrust::raw_pointer_cast(d.data()),
+                                            d.size());
+    thrust::device_vector<ComplexTypeGPU> whole(gpu.output_size());
+    thrust::device_vector<ComplexTypeGPU> parts(gpu.output_size());
+    gpu.execute(std::span(&dg, 1),
+                cuda::std::span<ComplexTypeGPU>(
+                    thrust::raw_pointer_cast(whole.data()), whole.size()));
+    const cuda::std::span<ComplexTypeGPU> out(
+        thrust::raw_pointer_cast(parts.data()), parts.size());
+    gpu.prepare(std::span(&dg, 1));
+    gpu.unpack(out, 3, 5);
+    gpu.unpack(out, 0, 1);
+    gpu.unpack(out, 1, 3);
+    gpu.unpack(out, 2, 2); // empty range
+    CHECK_THROWS_AS(gpu.unpack(out, 4, 6), std::invalid_argument);
+    const thrust::host_vector<ComplexTypeGPU> a = whole;
+    const thrust::host_vector<ComplexTypeGPU> b = parts;
+    for (SizeType i = 0; i < a.size(); ++i) {
+        if (a[i].real() != b[i].real() || a[i].imag() != b[i].imag()) {
             FAIL("mismatch at element " << i);
         }
     }

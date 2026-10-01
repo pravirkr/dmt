@@ -16,12 +16,13 @@ set(BENCH_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cpu_b.cpp
 )
 
-# GPU benchmark sources (CUDA source, built for CUDA or HIP): same three
-# algorithms.
+# GPU benchmark sources (CUDA source, built for CUDA or HIP): the same
+# algorithms, plus CohFDMT.
 if(DMT_GPU_BACKEND)
   set(BENCH_SOURCES_CUDA
       ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cuda_b.cu
       ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cuda_b.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cuda_b.cu
   )
   list(APPEND BENCH_SOURCES ${BENCH_SOURCES_CUDA})
 

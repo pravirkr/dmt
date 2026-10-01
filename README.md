@@ -171,6 +171,11 @@ input. The Fourier-domain engines add exact fractional delays with sub-sample
 precision: **FDMT-FFT** trails FDMT by only 1.2–1.4× on the Xeon and L40S
 (5.5 ms on GPU), while **DDMT-FFT (NUFFT)** is 2–4.5× faster than brute-force DDMT.
 
+**CohFDMT** (coherent hybrid search of baseband voltages) takes one GUPPI node
+(64 × 2.93 MHz at 1.31–1.50 GHz, int8, t_p = 10 µs, DM 50–60). It runs 48×
+faster than real time on the L40S with device-resident data, 13.5× with host
+arrays (bound by the PCIe upload), and 1.6× on 8 M1 Pro threads.
+
 All sweeps, per-machine numbers and the operation-count comparison are on the
 [Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page.
 [`bench/README.md`](bench/README.md) shows how to reproduce them.

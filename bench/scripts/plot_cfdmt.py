@@ -144,7 +144,13 @@ def rtf_figure(points: list[Point], contexts: dict, theme: dict) -> plt.Figure:
             ticks = sorted({p.params[key] for p in points if p.sweep == sweep})
             ax.set_xticks(ticks, [str(t) for t in ticks])
             ax.minorticks_off()
-    handles, labels = axes.flat[0].get_legend_handles_labels()
+    # Every series once, from whichever panel has it (the host-array series
+    # only run in some sweeps).
+    legend: dict[str, object] = {}
+    for ax in axes.flat:
+        for h, lab in zip(*ax.get_legend_handles_labels(), strict=True):
+            legend.setdefault(lab, h)
+    handles, labels = list(legend.values()), list(legend.keys())
     fig.legend(handles, labels, loc="outside lower center", ncols=min(3, len(labels)),
                frameon=False, fontsize=8.5)
     fig.suptitle("CohFDMT: baseband searched per second of compute", fontweight="bold",

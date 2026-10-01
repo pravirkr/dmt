@@ -39,12 +39,11 @@ std::vector<float> make_channel_taper(SizeType mbin) {
 }
 
 // Half-length (channel samples) of the channel filter's impulse response
-// holding all but 1e-6 of its energy. Independent of mbin for mbin >> 1, so
-// it is measured once on a reference length.
-SizeType taper_ringing_length() {
-    constexpr SizeType kRef   = 1024;
-    constexpr double kLeakage = 1.0E-6;
-    const auto taper          = make_channel_taper(kRef);
+// holding all but @p leakage of its energy. Independent of mbin for mbin >>
+// 1, so it is measured on a reference length.
+SizeType taper_ringing_length(double leakage) {
+    constexpr SizeType kRef = 1024;
+    const auto taper        = make_channel_taper(kRef);
     std::vector<double> energy((kRef / 2) + 1, 0.0);
     double total = 0.0;
     for (SizeType t = 0; t <= kRef / 2; ++t) {
@@ -64,7 +63,7 @@ SizeType taper_ringing_length() {
     double tail = total;
     for (SizeType t = 0; t <= kRef / 2; ++t) {
         tail -= energy[t];
-        if (tail < kLeakage * total) {
+        if (tail < leakage * total) {
             return t + 1;
         }
     }
@@ -416,6 +415,11 @@ private:
         if (c.dt_step == 0) {
             throw std::invalid_argument("CohFDMT: dt_step must be > 0");
         }
+        if (!finite(c.filter_leakage) || c.filter_leakage <= 0.0F ||
+            c.filter_leakage >= 1.0F) {
+            throw std::invalid_argument(
+                "CohFDMT: filter_leakage must be in (0, 1)");
+        }
         utils::validate_baseband_format(c.format);
         m_groups = c.subband_groups.empty() ? std::vector<SizeType>{c.nsub}
                                             : c.subband_groups;
@@ -516,7 +520,8 @@ private:
         const double tau_lo = disp_delay(
             static_cast<double>(m_dm_grid_coh.back()), f_ref - (bw_chan / 2.0),
             f_ref);
-        const SizeType ring = taper_ringing_length();
+        const SizeType ring =
+            taper_ringing_length(static_cast<double>(c.filter_leakage));
         m_noverlap = ceil_to(static_cast<SizeType>(std::ceil(tau_lo / m_tbin)) +
                                  (ring * m_n_p),
                              m_n_p);

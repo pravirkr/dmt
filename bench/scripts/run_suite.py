@@ -204,6 +204,17 @@ def main() -> None:
     for kind, pattern in runs:
         regex = pattern + (f".*{args.filter}" if args.filter else "")
         out = out_dir / f"{stem}_{kind}.json"
+        run_env = env
+        if kind != "cpu":
+            # Thread binding is for the CPU runs. On a GPU run it pins the
+            # host thread that stages the *_host copies to a single core,
+            # which on a busy machine halves their speed or worse.
+            run_env = {
+                k: v
+                for k, v in env.items()
+                if k not in ("OMP_PROC_BIND", "OMP_PLACES")
+                or k in os.environ
+            }
         cmd = [
             str(binary),
             f"--benchmark_filter={regex}",
@@ -215,7 +226,7 @@ def main() -> None:
         ]
         print(f"[{kind}] {binary.name} -> {out.relative_to(REPO)}", flush=True)
         start = time.monotonic()
-        subprocess.run(cmd, check=True, env=env, cwd=REPO)  # noqa: S603
+        subprocess.run(cmd, check=True, env=run_env, cwd=REPO)  # noqa: S603
         print(f"[{kind}] done in {(time.monotonic() - start) / 60:.1f} min")
     script = "plot_cfdmt.py" if args.suite == "cfdmt" else "plot_suite.py"
     print(f"Next: python bench/scripts/{script}")

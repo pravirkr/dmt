@@ -32,15 +32,78 @@ def test_fdmt_fft_gpu_matches_cpu(gpu_backend: str) -> None:
     )
 
 
+def _coh_block(cfg: dmtlib.CohFDMTConfig, seed: int) -> np.ndarray:
+    """Noise plus a dispersed pulse, quantised into cfg's format."""
+    plan = dmtlib.CohFDMTPlan(cfg)
+    dm = plan.dm_grid_coh[min(2, plan.ndm_coh - 1)]
+    t_inf = plan.output_time_offset + 100 * plan.tsamp - dm / 2.41e-4 / plan.f_ref**2
+    v = dmtlib.simulate_baseband(
+        plan.f_center,
+        plan.bw_sub,
+        plan.nsub,
+        plan.block_nsamps,
+        [(dm, t_inf, 1.0e6, 0.0)],
+        4.0,
+        seed,
+        4,
+    )
+    return dmtlib.pack_baseband(v, cfg.format, 1.0)
+
+
+def _assert_coh_close(got: np.ndarray, want: np.ndarray) -> None:
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-4 * np.abs(want).max())
+
+
 def test_coh_fdmt_gpu_matches_cpu(gpu_backend: str) -> None:
     cfg = dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0)
     cpu = CohFDMT(cfg, 4)
     gpu = on(gpu_backend, CohFDMT, cfg)
+    assert gpu.backend == gpu_backend
     rng = np.random.default_rng(2)
     data = rng.normal(0.0, 8.0, size=cpu.input_size()).astype(np.int8)
     want = cpu.execute(data)
     got = gpu.execute(data)
-    np.testing.assert_allclose(got, want, rtol=0, atol=1e-4 * np.abs(want).max())
+    _assert_coh_close(got, want)
+    # out= reuse and a repeated (stateless) call.
+    buf = np.empty(gpu.dmt_size, dtype=np.float32)
+    again = gpu.execute(data, out=buf)
+    assert np.shares_memory(again, buf)
+    np.testing.assert_array_equal(again, got)
+
+
+@pytest.mark.parametrize("order", ["FTPRI", "PRITF", "TFPRI"])
+@pytest.mark.parametrize("nbits", [8, 4, 2])
+@pytest.mark.parametrize(("normalize", "dt_step"), [(True, 1), (False, 4)])
+def test_coh_fdmt_gpu_formats_match_cpu(
+    order: str, nbits: int, normalize: bool, dt_step: int, gpu_backend: str
+) -> None:
+    cfg = dmtlib.CohFDMTConfig(
+        400.0,
+        1.0,
+        16,
+        4.0e-6,
+        10.0,
+        11.0,
+        normalize=normalize,
+        dt_step=dt_step,
+        format=dmtlib.BasebandFormat(order, nbits=nbits),
+    )
+    data = _coh_block(cfg, nbits)
+    _assert_coh_close(
+        on(gpu_backend, CohFDMT, cfg).execute(data), CohFDMT(cfg, 4).execute(data)
+    )
+
+
+def test_coh_fdmt_gpu_subband_groups_match_cpu(gpu_backend: str) -> None:
+    base = dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 13.0)
+    grouped = dmtlib.CohFDMTConfig(
+        400.0, 1.0, 16, 4.0e-6, 10.0, 13.0, subband_groups=[6, 10]
+    )
+    data = _coh_block(base, 3)
+    split = CohFDMT(grouped, 1).input_size(0)
+    groups = [data[:split], data[split:]]
+    want = CohFDMT(base, 4).execute(data)
+    _assert_coh_close(on(gpu_backend, CohFDMT, grouped).execute(groups), want)
 
 
 @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])

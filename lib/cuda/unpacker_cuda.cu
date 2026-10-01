@@ -38,11 +38,13 @@ __device__ __forceinline__ float decode(const uint8_t* data,
                static_cast<unsigned>(e % per)];
 }
 
-// One thread per (subband, FFT block, sample): both polarisations.
+// One thread per (subband, FFT block, sample) of subbands [sub_begin,
+// sub_begin + nsub): both polarisations.
 __global__ void unpack_kernel(const SubbandDesc* __restrict__ desc,
                               const float* __restrict__ lut,
                               unsigned nbits,
                               bool is_signed,
+                              uint64_t sub_begin,
                               uint64_t nsub,
                               uint64_t nfft,
                               uint64_t nbin,
@@ -54,7 +56,7 @@ __global__ void unpack_kernel(const SubbandDesc* __restrict__ desc,
          idx < total;
          idx += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
         const uint64_t i   = idx % nbin;
-        const uint64_t row = idx / nbin; // s * nfft + j
+        const uint64_t row = (idx / nbin) + (sub_begin * nfft); // s * nfft + j
         const uint64_t j   = row % nfft;
         const uint64_t s   = row / nfft;
         const SubbandDesc d = desc[s];
@@ -120,6 +122,12 @@ public:
     void execute(std::span<const cuda::std::span<const uint8_t>> groups,
                  cuda::std::span<ComplexTypeGPU> out,
                  cudaStream_t stream) {
+        prepare(groups, stream);
+        unpack(out, 0, m_nsub, stream);
+    }
+
+    void prepare(std::span<const cuda::std::span<const uint8_t>> groups,
+                 cudaStream_t stream) {
         if (groups.size() != m_groups.size()) {
             throw std::invalid_argument(
                 std::format("CohFDMT: expected {} input group(s), got {}",
@@ -141,11 +149,6 @@ public:
                                     .time = st.time};
             }
         }
-        if (out.size() != output_size()) {
-            throw std::invalid_argument(std::format(
-                "BasebandUnpackerCUDA: output has {} elements, expected {}",
-                out.size(), output_size()));
-        }
         gpu_utils::set_device(m_device_id);
         // The descriptors hold this call's pointers; the (pageable) copy is
         // staged by the runtime before cudaMemcpyAsync returns.
@@ -154,14 +157,36 @@ public:
                             m_nsub * sizeof(SubbandDesc),
                             cudaMemcpyHostToDevice, stream),
             "BasebandUnpackerCUDA: descriptor upload failed");
-        const auto total = static_cast<int64_t>(output_size() / 2);
+    }
+
+    void unpack(cuda::std::span<ComplexTypeGPU> out,
+                SizeType sub_begin,
+                SizeType sub_end,
+                cudaStream_t stream) {
+        if (out.size() != output_size()) {
+            throw std::invalid_argument(std::format(
+                "BasebandUnpackerCUDA: output has {} elements, expected {}",
+                out.size(), output_size()));
+        }
+        if (sub_begin > sub_end || sub_end > m_nsub) {
+            throw std::invalid_argument(std::format(
+                "BasebandUnpackerCUDA: subband range [{}, {}) out of [0, {})",
+                sub_begin, sub_end, m_nsub));
+        }
+        if (sub_begin == sub_end) {
+            return;
+        }
+        gpu_utils::set_device(m_device_id);
+        const auto nsub  = sub_end - sub_begin;
+        const auto total = static_cast<int64_t>(nsub * m_nfft * m_nbin);
         const unsigned blocks = static_cast<unsigned>(std::min<int64_t>(
             (total + fourier_gpu::kBlock - 1) / fourier_gpu::kBlock,
             int64_t{1} << 20));
         unpack_kernel<<<blocks, fourier_gpu::kBlock, 0, stream>>>(
             m_desc.data(), m_lut.data(),
-            static_cast<unsigned>(m_format.nbits), m_format.is_signed, m_nsub,
-            m_nfft, m_nbin, m_step, reinterpret_cast<float2*>(out.data()));
+            static_cast<unsigned>(m_format.nbits), m_format.is_signed,
+            sub_begin, nsub, m_nfft, m_nbin, m_step,
+            reinterpret_cast<float2*>(out.data()));
         gpu_utils::check_last_gpu_error("BasebandUnpackerCUDA: unpack kernel");
     }
 
@@ -208,6 +233,17 @@ void BasebandUnpackerCUDA::execute(
     cuda::std::span<ComplexTypeGPU> out,
     cudaStream_t stream) {
     m_impl->execute(groups, out, stream);
+}
+void BasebandUnpackerCUDA::prepare(
+    std::span<const cuda::std::span<const uint8_t>> groups,
+    cudaStream_t stream) {
+    m_impl->prepare(groups, stream);
+}
+void BasebandUnpackerCUDA::unpack(cuda::std::span<ComplexTypeGPU> out,
+                                  SizeType sub_begin,
+                                  SizeType sub_end,
+                                  cudaStream_t stream) {
+    m_impl->unpack(out, sub_begin, sub_end, stream);
 }
 
 } // namespace dmt::utils

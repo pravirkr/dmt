@@ -90,6 +90,12 @@ struct CohFDMTConfig {
     /// Largest intra-channel dispersion smearing left by the coarse
     /// coherent grid, in output samples (tsamp). 1 matches Zackay & Ofek.
     float smear_tol{1.0F};
+    /// Share of the channel filter's impulse-response energy allowed past
+    /// the overlap kept on each side of every FFT block (0 < x < 1). It
+    /// sets the filter's part of get_noverlap(): smaller is closer to an
+    /// ideal filter and costs longer overlaps. 1e-4 leaves a ~1% amplitude
+    /// tail, below 8-bit quantisation noise.
+    float filter_leakage{1.0E-4F};
     /// Stride between fine FDMT delay trials; > 1 trades DM resolution for
     /// fewer output rows (for pulses wider than dt_step samples).
     SizeType dt_step{1};
@@ -100,7 +106,7 @@ struct CohFDMTConfig {
     BasebandFormat format{};
     /// Subbands per input group (e.g. one group per GUPPI node file), in
     /// ascending frequency; must sum to nsub. Empty = one group.
-    std::vector<SizeType> subband_groups;
+    std::vector<SizeType> subband_groups{};
 };
 
 } // namespace dmt

@@ -50,6 +50,19 @@ public:
                  cuda::std::span<ComplexTypeGPU> out,
                  cudaStream_t stream = nullptr);
 
+    /**
+     * @brief execute() in two steps, so the unpack can follow a chunked
+     * upload: prepare() validates @p groups and enqueues their descriptors
+     * on @p stream; unpack() then decodes subbands [sub_begin, sub_end) of
+     * the prepared groups into their rows of @p out.
+     */
+    void prepare(std::span<const cuda::std::span<const uint8_t>> groups,
+                 cudaStream_t stream = nullptr);
+    void unpack(cuda::std::span<ComplexTypeGPU> out,
+                SizeType sub_begin,
+                SizeType sub_end,
+                cudaStream_t stream = nullptr);
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;

@@ -210,6 +210,10 @@ void bind_cfdmt(py::module_& mod) {
         smear_tol : float, optional
             Largest residual intra-channel smearing, in output samples
             (default 1, the Zackay & Ofek criterion).
+        filter_leakage : float, optional
+            Share of the channel filter's impulse-response energy allowed
+            past each FFT block's overlap (default 1e-4). Smaller values
+            lengthen the overlap.
         dt_step : int, optional
             Stride between fine delay trials (default 1).
         normalize : bool, optional
@@ -224,7 +228,7 @@ void bind_cfdmt(py::module_& mod) {
         .def(py::init([](float f_center, float bw_sub, SizeType nsub,
                          float t_p, float dm_min, float dm_max,
                          SizeType block_nsamps, SizeType nbin, float smear_tol,
-                         SizeType dt_step, bool normalize,
+                         float filter_leakage, SizeType dt_step, bool normalize,
                          const BasebandFormat& format,
                          std::vector<SizeType> subband_groups) {
                  return CohFDMTConfig{.f_center       = f_center,
@@ -236,6 +240,7 @@ void bind_cfdmt(py::module_& mod) {
                                       .block_nsamps   = block_nsamps,
                                       .nbin           = nbin,
                                       .smear_tol      = smear_tol,
+                                      .filter_leakage = filter_leakage,
                                       .dt_step        = dt_step,
                                       .normalize      = normalize,
                                       .format         = format,
@@ -244,7 +249,8 @@ void bind_cfdmt(py::module_& mod) {
              }),
              "f_center"_a, "bw_sub"_a, "nsub"_a, "t_p"_a, "dm_min"_a,
              "dm_max"_a, py::kw_only(), "block_nsamps"_a = 0, "nbin"_a = 0,
-             "smear_tol"_a = 1.0F, "dt_step"_a = 1, "normalize"_a = true,
+             "smear_tol"_a = 1.0F, "filter_leakage"_a = 1.0E-4F,
+             "dt_step"_a = 1, "normalize"_a = true,
              "format"_a = BasebandFormat{},
              "subband_groups"_a = std::vector<SizeType>{})
         .def_readwrite("f_center", &CohFDMTConfig::f_center)
@@ -256,6 +262,7 @@ void bind_cfdmt(py::module_& mod) {
         .def_readwrite("block_nsamps", &CohFDMTConfig::block_nsamps)
         .def_readwrite("nbin", &CohFDMTConfig::nbin)
         .def_readwrite("smear_tol", &CohFDMTConfig::smear_tol)
+        .def_readwrite("filter_leakage", &CohFDMTConfig::filter_leakage)
         .def_readwrite("dt_step", &CohFDMTConfig::dt_step)
         .def_readwrite("normalize", &CohFDMTConfig::normalize)
         .def_readwrite("format", &CohFDMTConfig::format)

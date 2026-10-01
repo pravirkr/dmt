@@ -386,8 +386,19 @@ make_fdmt_fft_gpu(const plans::FDMTPlan& plan, const FDMTFFTEngineConfig& cfg);
 // CohFDMT
 // ---------------------------------------------------------------------------
 
+/// GPU coherent-stage implementation (internal; tests and benchmarks pin
+/// one, the facade always uses kAuto).
+enum class CohFDMTCoherentPath : uint8_t {
+    kAuto,  ///< fused when the channel FFT length allows, else cuFFT
+    kFused, ///< fused shared-memory kernel (throws if unsupported)
+    kCuFFT, ///< gather -> batched cuFFT -> detect through a work buffer
+};
+
 struct CohFDMTEngineConfig {
     Exec exec{};
+    CohFDMTCoherentPath coherent_path{CohFDMTCoherentPath::kAuto};
+    /// cuFFT path work-buffer budget in bytes (0 = sized from free memory).
+    SizeType work_bytes{0};
 };
 
 // Stateless: one self-contained block per execute(), one input span per
