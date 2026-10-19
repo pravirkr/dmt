@@ -6,6 +6,7 @@ except metadata.PackageNotFoundError:
     __version__ = "0.7.0"
 
 from . import libdmt as _libdmt
+from . import sensitivity
 from .grid import (
     calculate_snr_loss,
     generate_optimal_dm_grid,
@@ -94,6 +95,7 @@ __all__ = [
     "get_log_level",
     "import_fft_wisdom",
     "pack_baseband",
+    "sensitivity",
     "set_fft_planner",
     "set_log_level",
     "simulate_baseband",

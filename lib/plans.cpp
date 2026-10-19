@@ -16,6 +16,7 @@
 
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
+#include "dmt/fdmt_box_weights.hpp"
 #include "dmt/modes.hpp"
 
 namespace dmt::plans {
@@ -438,24 +439,54 @@ public:
     /**
      * @brief variance of a boxcar matched filter of
      * width @p w convolved with one channel's own intra-channel smearing
-     * kernel of width `smearing_row[c] + 1` samples, summed over channels.
+     * kernel of width L_c = `smearing_row[c] + 1` samples, weighted by the
+     * channel's box-mean weight round(2^b / L_c) * 2^-b and summed over
+     * channels: sum_c weight_c^2 * V(L_c, w), with V the trapezoid
+     * sum of squares of the box (x) boxcar kernel.
      *
      * When there is no smearing at all (every `smearing_row[c] == 0`), each
-     * term collapses to `w` exactly, so this is a strict superset of the
-     * `use_box_smearing = false` fast path (`nchans * w`) rather than a
-     * separate special case of it.
+     * weight is exactly 1 and each term collapses to `w`, so this is a strict
+     * superset of the `use_box_smearing = false` fast path (`nchans * w`)
+     * rather than a separate special case of it.
      */
     float variance_from_smearing_row(const float* smearing_row,
                                      float w) const noexcept {
-        float total_var = 0.0F;
+        // Each channel's level-0 box of L samples carries the box-mean
+        // weight round(2^b / L) * 2^-b (see get_box_fraction_bits()).
+        const auto bits  = get_box_fraction_bits();
+        const double inv = std::ldexp(1.0, -static_cast<int>(bits));
+        double total_var = 0.0;
         for (SizeType c = 0; c < m_nchans; ++c) {
-            const float smearing_len = smearing_row[c] + 1.0F;
-            const float h            = std::max(smearing_len, w);
-            const float l            = std::min(smearing_len, w);
-            total_var += ((h - l + 1.0F) * (l * l)) +
-                         ((((2.0F * l) - 1.0F) * l * (l - 1.0F)) / 3.0F);
+            const auto box_len = static_cast<SizeType>(smearing_row[c]) + 1;
+            const double weight =
+                static_cast<double>(
+                    algorithms::detail::box_weight(box_len, bits)) *
+                inv;
+            const auto smearing_len = static_cast<double>(box_len);
+            const double h          = std::max(smearing_len, double{w});
+            const double l          = std::min(smearing_len, double{w});
+            total_var += weight * weight *
+                         (((h - l + 1.0) * (l * l)) +
+                          ((((2.0 * l) - 1.0) * l * (l - 1.0)) / 3.0));
         }
-        return total_var;
+        return static_cast<float>(total_var);
+    }
+    SizeType get_box_fraction_bits() const noexcept {
+        return algorithms::detail::box_fraction_bits(
+            m_container.state_shape[0].dt_max);
+    }
+    SizeType get_box_mean_bits() const noexcept {
+        return algorithms::detail::box_mean_bits(
+            m_container.state_shape[0].dt_max + 1);
+    }
+    std::vector<uint32_t> get_box_weights() const {
+        const auto bits    = get_box_fraction_bits();
+        const auto box_max = m_container.state_shape[0].dt_max + 1;
+        std::vector<uint32_t> weights(box_max);
+        for (SizeType len = 1; len <= box_max; ++len) {
+            weights[len - 1] = algorithms::detail::box_weight(len, bits);
+        }
+        return weights;
     }
     float get_effective_variance(SizeType dm_idx,
                                  SizeType boxcar_width,
@@ -528,11 +559,8 @@ public:
         return m_container.get_buffer_size();
     }
     SizeType get_history_size() const noexcept {
-        const auto abs_dt_max = static_cast<SizeType>(
-            std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
-        return m_nchans * abs_dt_max;
-    }
-    SizeType get_history_init_size() const noexcept {
+        // Level 0 reads at most dt0_max samples before a block: the raw
+        // input history of every channel.
         return m_nchans * m_container.state_shape[0].dt_max;
     }
     SizeType get_tree_history_size() const noexcept {
@@ -635,13 +663,15 @@ public:
             state_shape[0].nchans * state_shape[0].nsamps;
         const auto dmt_size     = get_dmt_size();
         const auto history_size = get_history_size();
-        const auto buffer_size  = 2 * m_buffer_size;
+        const auto tree_size    = get_tree_history_size();
+        const auto buffer_size  = m_buffer_size;
         const auto niters       = state_shape.size() - 1;
 
         const auto waterfall_size_mb =
             size_in_mb(waterfall_size, sizeof(float));
         const auto dmt_size_mb     = size_in_mb(dmt_size, sizeof(float));
         const auto history_size_mb = size_in_mb(history_size, sizeof(float));
+        const auto tree_size_mb    = size_in_mb(tree_size, sizeof(float));
         const auto buffer_size_mb  = size_in_mb(buffer_size, sizeof(float));
         const auto plan_use_mb = size_in_mb(m_container.get_memory_usage(), 1);
 
@@ -653,10 +683,10 @@ public:
                         waterfall_size_mb, state_shape[niters].ncoords,
                         state_shape[niters].nsamps, dmt_size_mb),
             std::format("Plan Memory Usage: {:.1f} MB", plan_use_mb),
-            std::format("Plan Buffer Size: ({}; {:.1f} MB ), History Size: "
-                        "({}; {:.1f} MB )",
+            std::format("Largest Level: ({}; {:.1f} MB ), History: level-0 "
+                        "({}; {:.1f} MB ), tree ({}; {:.1f} MB )",
                         buffer_size, buffer_size_mb, history_size,
-                        history_size_mb),
+                        history_size_mb, tree_size, tree_size_mb),
             std::format("Plan Details: {}", FDMTShape::header_fmt()),
         };
         std::string out;
@@ -1521,6 +1551,15 @@ std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
 std::vector<float> FDMTPlan::get_smearing_grid_final() const noexcept {
     return m_impl->get_smearing_grid_final();
 }
+SizeType FDMTPlan::get_box_fraction_bits() const noexcept {
+    return m_impl->get_box_fraction_bits();
+}
+std::vector<uint32_t> FDMTPlan::get_box_weights() const {
+    return m_impl->get_box_weights();
+}
+SizeType FDMTPlan::get_box_mean_bits() const noexcept {
+    return m_impl->get_box_mean_bits();
+}
 std::vector<IndexType> FDMTPlan::trace_dm(SizeType dm_idx) const {
     return m_impl->trace_dm(dm_idx);
 }
@@ -1560,9 +1599,7 @@ SizeType FDMTPlan::get_buffer_size() const noexcept {
 SizeType FDMTPlan::get_history_size() const noexcept {
     return m_impl->get_history_size();
 }
-SizeType FDMTPlan::get_history_init_size() const noexcept {
-    return m_impl->get_history_init_size();
-}
+
 SizeType FDMTPlan::get_tree_history_size() const noexcept {
     return m_impl->get_tree_history_size();
 }

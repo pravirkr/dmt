@@ -114,14 +114,25 @@ void bind_fdmt(py::module_& mod) {
         fuse_levels : int or None, optional
             Performance parameter (most users keep the default): ``execute``
             fuses level-0 initialisation with the first ``fuse_levels`` tree
-            merges (cache-resident channel groups on the CPU, shared-memory
-            tiles on a GPU). 0 = original level-by-level path; ``None``
+            merges (cache-resident channel groups on the CPU, walked in time
+            tiles in ``mode='valid'``; shared-memory tiles on a GPU). 0 =
+            original level-by-level path; ``None``
             (default) picks the depth from the plan (and ``nthreads`` on the
             CPU). Bit-identical output.
         int_tree : bool, optional
             Performance parameter: packed input stores tree levels as
             uint8/uint16 where the exact bound allows (default True). Set
             False to inspect every level of a packed stepper run.
+        chunk_nsamps : int or None, optional
+            Memory parameter (``mode='valid'`` only): ``execute`` runs each
+            block in chunks of this many samples, so the tree state is two
+            levels of ``rows x chunk`` instead of ``rows x nsamps`` (tens of
+            GB at high DM for a block of a few hundred MB). Bit-identical
+            output for any chunk; each chunk costs a little cross-block
+            history traffic. ``None`` (default) picks the longest power of
+            two >= 2048 whose state fits 2 GiB, capped at ``nsamps`` (see
+            :attr:`chunk_nsamps`); other values are rounded up to a multiple
+            of 64. The stepper needs ``chunk_nsamps >= nsamps``.
         backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``). See
             :func:`available_backends` for the backends in this build; any
@@ -150,17 +161,20 @@ void bind_fdmt(py::module_& mod) {
                          bool use_box_smearing, std::string_view mode,
                          int nthreads, SizeType nbeams,
                          std::optional<SizeType> fuse_levels, bool int_tree,
-                         std::string_view backend, int device) {
+                         std::string_view backend, int device,
+                         std::optional<SizeType> chunk_nsamps) {
                  return FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                              dt_min, dt_step, use_box_smearing, mode,
                              make_exec(backend, nthreads, device), nbeams,
-                             fuse_levels.value_or(kFDMTAutoFuse), int_tree);
+                             fuse_levels.value_or(kFDMTAutoFuse), int_tree,
+                             chunk_nsamps.value_or(0));
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
              "use_box_smearing"_a = true, "mode"_a = "valid", "nthreads"_a = 1,
              "nbeams"_a = 1, "fuse_levels"_a = py::none(), "int_tree"_a = true,
-             py::kw_only(), "backend"_a = "cpu", "device"_a = 0)
+             py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
+             "chunk_nsamps"_a = py::none())
         .def(
             py::init([](float f_min, float f_max, SizeType nchans,
                         SizeType nsamps, float tsamp, const py::object& dt_grid,
@@ -168,19 +182,21 @@ void bind_fdmt(py::module_& mod) {
                         const py::object& dm_arr, bool use_box_smearing,
                         std::string_view mode, int nthreads, SizeType nbeams,
                         std::optional<SizeType> fuse_levels, bool int_tree,
-                        std::string_view backend, int device) {
+                        std::string_view backend, int device,
+                        std::optional<SizeType> chunk_nsamps) {
                 const auto [type, obj] =
                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                const auto fuse = fuse_levels.value_or(kFDMTAutoFuse);
-                const auto exec = make_exec(backend, nthreads, device);
+                const auto fuse  = fuse_levels.value_or(kFDMTAutoFuse);
+                const auto exec  = make_exec(backend, nthreads, device);
+                const auto chunk = chunk_nsamps.value_or(0);
                 if (type == CustomGridType::kDt) {
                     return FDMT(f_min, f_max, nchans, nsamps, tsamp,
                                 extract_dt_grid(obj), use_box_smearing, mode,
-                                exec, nbeams, fuse, int_tree);
+                                exec, nbeams, fuse, int_tree, chunk);
                 }
                 return FDMT(f_min, f_max, nchans, nsamps, tsamp,
                             extract_dm_grid(obj), use_box_smearing, mode, exec,
-                            nbeams, fuse, int_tree);
+                            nbeams, fuse, int_tree, chunk);
             }),
             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
@@ -189,7 +205,8 @@ void bind_fdmt(py::module_& mod) {
             py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
             py::arg("nthreads") = 1, py::arg("nbeams") = 1,
             py::arg("fuse_levels") = py::none(), py::arg("int_tree") = true,
-            py::arg("backend") = "cpu", py::arg("device") = 0)
+            py::arg("backend") = "cpu", py::arg("device") = 0,
+            py::arg("chunk_nsamps") = py::none())
         .def_property_readonly(
             "plan", &FDMT::get_plan,
             "Get the FDMTPlan object containing transform details.")
@@ -209,6 +226,10 @@ void bind_fdmt(py::module_& mod) {
             "automatic default for this plan and backend.")
         .def_property_readonly("int_tree", &FDMT::get_int_tree,
                                "Whether packed input uses the integer tree.")
+        .def_property_readonly(
+            "chunk_nsamps", &FDMT::get_chunk_nsamps,
+            "Chunk length execute() runs each block in (= nsamps: whole "
+            "blocks); resolves the automatic default for this plan.")
         .def_property_readonly(
             "memory_usage", &FDMT::get_memory_usage,
             "FDMTMemoryUsage: bytes allocated at construction (host memory on "
@@ -396,25 +417,24 @@ void bind_fdmt(py::module_& mod) {
                 row_bytes)``; each row holds ``nsamps`` unsigned samples of
                 ``nbits`` bits, LSB-first for ``nbits < 8`` (same convention
                 as :class:`DDMT`), ``row_bytes = ceil(nsamps*nbits/8)``.
-                The result is identical to float input with the same values.
+                The result equals float input with the same values, except
+                that with box smearing every level-0 box mean is rounded to a
+                few fractional bits (see :attr:`FDMTPlan.box_mean_bits`).
             nbits : int
                 Packed sample width: 1, 2, 4, 8 or 16.
             out : numpy.ndarray, optional
                 Writeable C-contiguous float32 buffer of at least
-                ``nbeams * plan.buffer_size`` elements, reused instead of
+                ``nbeams * plan.dmt_size`` elements, reused instead of
                 allocating a new one per call (e.g.
-                ``np.empty(fdmt.nbeams * fdmt.plan.buffer_size, np.float32)``).
+                ``np.empty(fdmt.nbeams * fdmt.plan.dmt_size, np.float32)``).
 
             Returns
             -------
             numpy.ndarray
                 float32 view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
-                n_times)``; ``n_times`` is ``plan.dmt_nsamps``. It is a
-                zero-copy view into the output buffer, which also holds each
-                beam's scratch tail (``plan.buffer_size`` floats per beam in
-                total), so a retained result keeps that whole buffer alive;
-                call ``.copy()`` to keep only the transform. With ``out``, the
-                next call overwrites the returned view.
+                n_times)`` of the output buffer; ``n_times`` is
+                ``plan.dmt_nsamps``. With ``out``, the next call overwrites
+                the returned view.
 
             Notes
             -----
@@ -447,7 +467,7 @@ void bind_fdmt(py::module_& mod) {
             py::arg("dmt") = py::none(),
             "Reset and initialize the stepper with a packed low-bit waterfall "
             "(see execute(waterfall_packed, nbits)) and optional dmt buffer "
-            "of at least nbeams * plan.buffer_size floats.")
+            "of at least nbeams * plan.dmt_size floats.")
         .def(
             "reset",
             [](py::object self, const py::array& waterfall_obj,
@@ -479,7 +499,7 @@ void bind_fdmt(py::module_& mod) {
             py::arg("waterfall"), py::arg("dmt") = py::none(),
             R"doc(
             Reset and initialize the stepper with waterfall and optional dmt
-            buffer (at least ``nbeams * plan.buffer_size`` floats).
+            buffer (at least ``nbeams * plan.dmt_size`` floats).
 
             In ``mode='valid'`` a block must be finalized before the next
             ``reset``/``execute`` (else RuntimeError); :meth:`reset_history`
@@ -542,7 +562,7 @@ void bind_fdmt(py::module_& mod) {
                 }
                 return py::array_t<float>(
                     {fdmt.get_nbeams(), ndms, nsamps},
-                    {plan.get_buffer_size() * fsize, nsamps * fsize, fsize},
+                    {plan.get_dmt_size() * fsize, nsamps * fsize, fsize},
                     dmt.data(), self);
             },
             "Advance to the root and return the transform, (n_delays, "

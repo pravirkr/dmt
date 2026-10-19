@@ -56,7 +56,7 @@ inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
  */
 struct FDMTMemoryUsage {
     SizeType plan;      ///< Plan tables (coordinate DAG, sub-band grids)
-    SizeType state;     ///< Internal ping-pong tree state
+    SizeType state;     ///< Internal tree state (two levels of a chunk)
     SizeType history;   ///< "valid"-mode streaming history
     SizeType workspace; ///< CPU: per-thread fusion/unpack scratch;
                         ///< GPU: fused-kernel index tables, plus the
@@ -81,9 +81,9 @@ struct FDMTMemoryUsage {
  * In short:
  * - Input: float32 (nbeams, nchans, nsamps), or packed unsigned 1/2/4/8/16-bit
  *   samples (see the packed execute()).
- * - Output: always float32. Pass nbeams * plan.get_buffer_size() floats; each
- *   beam's leading plan.get_dmt_size() values are the (ndms, dmt_nsamps)
- *   result, and the rest is ping-pong scratch.
+ * - Output: always float32, (nbeams, ndms, dmt_nsamps): pass at least
+ *   nbeams * plan.get_dmt_size() floats. The engine owns all its working
+ *   state; the output buffer is only written.
  * - Construct once per plan: the constructor allocates everything, and
  *   execute() allocates nothing. In mode "valid", call execute() on
  *   contiguous, non-overlapping blocks to get a contiguous output stream.
@@ -132,7 +132,7 @@ public:
      * per-coordinate execution -- at nbeams=1 this is the same code path and
      * layout as before this parameter existed. `waterfall`/`dmt` become
      * beam-major: shape (nbeams, nchans, nsamps) / (nbeams, ndms, nsamps)
-     * flattened, beam b at offset b*nchans*nsamps / b*get_buffer_size().
+     * flattened, beam b at offset b*nchans*nsamps / b*get_dmt_size().
      * @param fuse_levels Performance parameter (most users keep the
      * default): execute() fuses level-0 initialisation with the first
      * `fuse_levels` tree merges, so the intermediate levels of a group of
@@ -141,9 +141,15 @@ public:
      * clamped. The stepper (reset()/advance()) always runs level by level.
      * kFDMTAutoFuse (default) picks a depth from the plan alone, with no
      * hardware detection (see get_fuse_levels()):
-     * - CPU: groups live in a per-thread, cache-resident scratch buffer; the
-     *   deepest depth whose two scratch buffers fit in
-     *   max(36 MiB / nthreads, 5 MiB) per thread.
+     * - CPU, mode "valid": each thread walks one group through the chunk in
+     *   time tiles of 512 or 256 samples, with the group's levels in two
+     *   per-thread scratch buffers of a tile and its fused merges' tree
+     *   history in cache; the deepest depth (then the longer tile) whose
+     *   mean per-group working set is at most 1.75 MiB, with at least two
+     *   groups per thread. summary() reports the tile.
+     * - CPU, modes "full" and "roll": each group runs the whole block level
+     *   by level in two per-thread scratch buffers; the deepest depth whose
+     *   two buffers fit in max(36 MiB / nthreads, 8 MiB) per thread.
      * - GPU: one thread block per (channel group, time tile) with the
      *   intermediate levels in shared memory; the deepest depth whose tile of
      *   >= 256 samples fits the portable 48 KiB of shared memory with a
@@ -155,6 +161,16 @@ public:
      * float (exact; default true). Integer levels cannot be inspected through
      * the stepper's view_* methods; pass false to inspect every level of a
      * packed stepper run. Ignored for float input.
+     * @param chunk_nsamps Memory parameter (mode "valid" only): execute()
+     * runs each block in chunks of this many samples, so the tree state is
+     * two levels of rows x chunk instead of rows x nsamps -- at high DM tens
+     * of GB for a block whose input and output are a few hundred MB.
+     * Bit-identical output for any chunk (valid mode is overlap-save inside
+     * the tree); each chunk costs a little cross-block history traffic (a
+     * few per cent at a few thousand samples). 0 (default) = automatic: the
+     * longest power of two >= 2048 whose state fits 2 GiB, capped at nsamps
+     * (see get_chunk_nsamps()); other values are rounded up to a multiple of
+     * 64. The stepper (reset()/advance()) needs chunk >= nsamps.
      *
      * All working memory is allocated here (see get_memory_usage()); execute()
      * performs no allocation.
@@ -172,7 +188,8 @@ public:
          Exec exec             = {},
          SizeType nbeams       = 1,
          SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true);
+         bool int_tree         = true,
+         SizeType chunk_nsamps = 0);
 
     /**
      * @brief Constructs an FDMT instance with a custom delay trial grid.
@@ -180,7 +197,8 @@ public:
      * @param dt_grid Explicit list of delay trials in samples (e.g. from
      * generate_optimal_dt_grid).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
-     * exec, nbeams, fuse_levels, int_tree See the first constructor.
+     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps See the first
+     * constructor.
      */
     FDMT(float f_min,
          float f_max,
@@ -193,7 +211,8 @@ public:
          Exec exec             = {},
          SizeType nbeams       = 1,
          SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true);
+         bool int_tree         = true,
+         SizeType chunk_nsamps = 0);
 
     /**
      * @brief Constructs an FDMT instance with a custom physical DM trial
@@ -202,7 +221,8 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
      * non-uniform spacing and negative DMs).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
-     * exec, nbeams, fuse_levels, int_tree See the first constructor.
+     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps See the first
+     * constructor.
      */
     FDMT(float f_min,
          float f_max,
@@ -215,7 +235,8 @@ public:
          Exec exec             = {},
          SizeType nbeams       = 1,
          SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true);
+         bool int_tree         = true,
+         SizeType chunk_nsamps = 0);
 
     ~FDMT();
     FDMT(FDMT&&) noexcept;
@@ -251,12 +272,9 @@ public:
      * @param waterfall Input waterfall data, beam-major flat
      * (nbeams*nchans*nsamps); nbeams=1 (the default) is just (nchans,
      * nsamps).
-     * @param dmt Output DM-time array, beam-major flat
-     * (nbeams*get_buffer_size()). Only the leading plan.get_dmt_size()
-     * values of each beam are the transform; the rest of each beam's slice
-     * is ping-pong scratch whose contents depend on the execution path
-     * (e.g. the fusion depth) and are unspecified. A GPU backend writes only
-     * the leading values and leaves the scratch tail untouched.
+     * @param dmt Output DM-time array, beam-major flat (nbeams, ndms,
+     * dmt_nsamps): at least nbeams*plan.get_dmt_size() floats. Only those
+     * leading values are written.
      */
     void execute(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -268,15 +286,17 @@ public:
      * LSB-first within a byte for nbits < 8 (same convention as DDMT),
      * little-endian for 16, padded to a whole byte: layout (nbeams, nchans,
      * ceil(nsamps * nbits / 8)) bytes. There is no 32-bit integer input;
-     * use the float overload for 32-bit float data. The output is float32
-     * and identical to execute() on the same values converted to float,
-     * laid out as for the float overload (only the leading get_dmt_size()
-     * values per beam are the result). On a GPU backend only the packed
-     * bytes are copied to the device.
+     * use the float overload for 32-bit float data. The output is float32,
+     * laid out as for the float overload. It equals execute() on the same
+     * values converted to float, except that with box smearing each level-0
+     * box mean is rounded to a few fractional bits (see
+     * FDMTPlan::get_box_mean_bits(): at most 2^-(f + 1) per channel), which
+     * keeps the integer tree narrow. On a GPU backend only the packed bytes
+     * are copied to the device.
      *
      * @param waterfall_packed Packed input, beam-major flat.
      * @param nbits Sample width: 1, 2, 4, 8 or 16.
-     * @param dmt Output DM-time array (size >= nbeams*get_buffer_size()).
+     * @param dmt Output DM-time array (size >= nbeams*get_dmt_size()).
      * @throws std::invalid_argument for another nbits or a size mismatch.
      */
     void execute(std::span<const uint8_t> waterfall_packed,
@@ -288,9 +308,8 @@ public:
      *
      * @param d_waterfall Input waterfall data (device memory), laid out as
      * for the host overload.
-     * @param d_dmt Output DM-time array (device memory). Only the leading
-     * plan.get_dmt_size() values of each beam are the transform; the
-     * remainder is unspecified scratch.
+     * @param d_dmt Output DM-time array (device memory), laid out as for the
+     * host overload (size >= nbeams*get_dmt_size()).
      * @param stream Queue to run on (default: the backend's default stream).
      *
      * @note Work is submitted asynchronously to @p stream. Synchronize it
@@ -337,6 +356,13 @@ public:
     [[nodiscard]] bool get_int_tree() const noexcept;
 
     /**
+     * @brief Chunk length execute() runs each block in: the `chunk_nsamps`
+     * constructor argument (rounded up to a multiple of 64), or the
+     * automatic choice, capped at nsamps (= nsamps: not chunked).
+     */
+    [[nodiscard]] SizeType get_chunk_nsamps() const noexcept;
+
+    /**
      * @brief Memory allocated at construction (host bytes on the CPU
      * backend, device bytes on a GPU backend), plus the output buffer size
      * each execute() call needs.
@@ -355,17 +381,14 @@ public:
     // =========================================================================
 
     /**
-     * @brief Resets and initializes the stepper with a new waterfall block and
-     * caller-provided dmt buffer for zero-allocation ping-pong storage (Level
-     * 0), both in host memory.
+     * @brief Resets and initializes the stepper (level 0) with a new
+     * waterfall block and the caller's dmt buffer, both in host memory.
      *
      * @param waterfall Input waterfall data, beam-major flat
      * (nbeams*nchans*nsamps).
-     * @param dmt Output DM-time array (size >= nbeams*plan.get_buffer_size()).
-     *            Receives the final transform at finalize(). On the CPU
-     *            backend it is also one of the two ping-pong scratch buffers;
-     *            a GPU backend steps in device staging buffers instead and
-     *            writes only each beam's leading get_dmt_size() values.
+     * @param dmt Output DM-time array (size >= nbeams*plan.get_dmt_size()).
+     *            Receives the root level, i.e. the final transform, at
+     *            finalize().
      *
      * @note When nbeams() > 1, the stepper inspection methods
      * (view_level_data/view_subband_data/view_subband) only expose beam 0's
@@ -377,8 +400,10 @@ public:
      * the next reset()/execute(): stopping early would skip the upper
      * levels' cross-block history update, so this throws std::logic_error
      * instead. reset_history() abandons the unfinished block and the stream.
-     * The stepper always runs level by level (never fused).
-     * @throws std::logic_error if a "valid"-mode block is still unfinished.
+     * The stepper always runs level by level (never fused), on whole
+     * blocks: it needs get_chunk_nsamps() == nsamps.
+     * @throws std::logic_error if a "valid"-mode block is still unfinished,
+     * or if the engine runs blocks in chunks.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -465,9 +490,8 @@ public:
     [[nodiscard]] FDMTSubbandView view_subband(SizeType subband_idx) const;
 
     /**
-     * @brief Zero-copy device view of the whole state buffer at the current
-     * level (GPU backends): beams are get_buffer_size() apart, and the view
-     * covers through the last beam's valid elements.
+     * @brief Zero-copy device view of beam 0's state at the current level
+     * (GPU backends), laid out as for view_level_data().
      * @throws std::invalid_argument on the CPU backend.
      */
     [[nodiscard]] DeviceSpan<const float> view_level_data_device() const;

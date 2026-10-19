@@ -71,7 +71,13 @@ class TestPlan:
         var = plan.get_effective_variance_grid()
         var16 = plan.get_effective_variance_grid(16)
         assert var.shape == (plan.ndm,)
-        assert np.all(var >= plan.nchans)
+        # Box means weight each channel's box of L samples by ~1/L: the
+        # white-noise floor sum_c w_c**2 L_c lies between nchans/L_max and
+        # nchans; the DC gain sum_c w_c L_c is ~nchans.
+        assert np.all(var > 0)
+        assert np.all(var <= plan.nchans * 1.01)
+        cnt = plan.get_cumulative_count_grid()
+        np.testing.assert_allclose(cnt, plan.nchans, rtol=1 / 8)
         assert np.all(var16 > 16 * var)
         np.testing.assert_allclose(plan.get_effective_sigma_grid() ** 2, var, rtol=1e-6)
         assert plan.get_lag_correlation(2)[0] == pytest.approx(1.0)

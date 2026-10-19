@@ -135,15 +135,13 @@ TEST_CASE("FDMTFFT GPU integer mode reproduces FDMT",
         FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 64, 0, 1, true, mode,
                     test::gpu_exec(), 1, false);
         const auto n = fdmt.get_plan().get_dmt_size();
-        std::vector<float> a(fdmt.get_plan().get_buffer_size());
+        std::vector<float> a(n); // compact output: dmt_size suffices
         std::vector<float> b(n);
         for (unsigned blk = 0; blk < 3; ++blk) {
             const auto wf = noise(nch * ns, 50 + blk);
             fdmt.execute(wf, a);
             gpu.execute(wf, b);
-            a.resize(n);
             CHECK(max_rel(b, a) < 1e-5);
-            a.resize(fdmt.get_plan().get_buffer_size());
         }
     }
 }

@@ -679,8 +679,9 @@ TEST_CASE("FDMT use_box_smearing=false with coarse channelization",
 TEST_CASE("FDMT add_frb_track / trace_dm exact recovery", "[fdmt_cpu][cpu]") {
     // For every injected channel, add_frb_track places a unit impulse at
     // exactly the sample trace_dm computes; running FDMT on that waterfall
-    // must reproduce a value of exactly nchans (all channels combining
-    // constructively, no partial/rounding loss) at (dm_idx, toffset).
+    // must reproduce exactly the sum of the channels' level-0 weights (all
+    // channels combining constructively, no partial/rounding loss) at
+    // (dm_idx, toffset): nchans without box smearing, sum_c w(L_c) 2^-b with.
     const float f_min      = 1000.0F;
     const float f_max      = 1500.0F;
     const SizeType nsamps  = 512;
@@ -721,7 +722,8 @@ TEST_CASE("FDMT add_frb_track / trace_dm exact recovery", "[fdmt_cpu][cpu]") {
 
                 const auto dmt_nsamps = plan.get_dmt_nsamps();
                 const auto value      = dmt[(dm_idx * dmt_nsamps) + toffset];
-                CHECK(value == Catch::Approx(static_cast<float>(cfg.nchans)));
+                CHECK(value == Catch::Approx(test::frb_track_gain(
+                                   plan, dm_idx, use_box_smearing)));
             }
         }
     }
@@ -1411,7 +1413,8 @@ TEST_CASE("FDMT nbeams>1 produces independent per-beam results",
             FDMT fdmt_multi(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
                             1, true, mode, Exec::cpu(1), nbeams);
             CHECK(fdmt_multi.get_nbeams() == nbeams);
-            const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
+            // Output beams are dmt_size apart (compact output).
+            const auto buffer_size = fdmt_multi.get_plan().get_dmt_size();
             std::vector<float> dmt_multi(nbeams * buffer_size, 0.0F);
             fdmt_multi.execute(waterfall_multi, dmt_multi);
 
@@ -1466,7 +1469,8 @@ TEST_CASE("FDMT nbeams>1 valid-mode streaming keeps per-beam history "
 
     FDMT fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
                     true, "valid", Exec::cpu(1), nbeams);
-    const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
+    // Output beams are dmt_size apart (compact output).
+    const auto buffer_size = fdmt_multi.get_plan().get_dmt_size();
 
     std::vector<FDMT> fdmt_singles;
     fdmt_singles.reserve(nbeams);

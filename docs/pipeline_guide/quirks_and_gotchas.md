@@ -57,48 +57,58 @@ dmt = fdmt.execute(np.ascontiguousarray(sub_waterfall))
 ---
 
 (output-buffers)=
-## 4. Output Buffers: `buffer_size` vs `dmt_size`
+## 4. Output Buffers: `dmt_size`
 
-An FDMT engine ping-pongs its tree levels between one internal buffer and
-**your output buffer**. The output buffer must therefore hold the largest
-tree level, not just the result:
+The output buffer holds exactly the transform. The engine owns all its
+working state (the tree levels and the streaming history), so your buffer is
+only written, never used as scratch:
 
-| symbol | C++ | Python | meaning |
-| :--- | :--- | :--- | :--- |
-| $B$ | `plan.get_buffer_size()` | `plan.buffer_size` | floats per beam you allocate |
-| $D$ | `plan.get_dmt_size()` | `plan.dmt_size` | floats per beam that are the result, $N_{\text{DM}} \times N_{\text{times}}$ |
+| C++ | Python | meaning |
+| :--- | :--- | :--- |
+| `plan.get_dmt_size()` | `plan.dmt_size` | floats per beam, $N_{\text{DM}} \times N_{\text{times}}$ |
 
-- Each beam's first $D$ floats hold the $(N_{\text{DM}}, N_{\text{times}})$
-  transform, row-major. The remaining $B - D$ are scratch with unspecified
-  contents, which can differ between fusion depths or backends.
-- Beam $b$ starts at offset $b \cdot B$, so the buffer is
-  `nbeams * get_buffer_size()` floats.
-- **Reuse:** allocate one $B$-sized buffer per stream and pass it to every
+- The buffer is `nbeams * get_dmt_size()` floats, laid out
+  $(N_{\text{beams}}, N_{\text{DM}}, N_{\text{times}})$ row-major. Beam $b$
+  starts at offset $b \cdot$ `get_dmt_size()`.
+- A larger buffer is accepted; only the leading `nbeams * get_dmt_size()`
+  floats are written.
+- **Reuse:** allocate one buffer per stream and pass it to every
   `execute()`. The engine allocates nothing per call. Copy out (or consume)
-  the first $D$ values before the next call overwrites them.
+  the result before the next call overwrites it.
 
 ```cpp
 const auto& plan = fdmt.get_plan();
-std::vector<float> buf(fdmt.get_nbeams() * plan.get_buffer_size());
+std::vector<float> buf(fdmt.get_nbeams() * plan.get_dmt_size());
 fdmt.execute(waterfall, buf);                          // every block
 std::span<const float> beam0(buf.data(), plan.get_dmt_size()); // (ndms, nsamps)
 ```
 
 In Python, `execute()` returns an `(n_dm, n_times)` (or `(nbeams, n_dm,
-n_times)`) **zero-copy view** of the first $D$ floats per beam. The view's
-base is the whole $B$-sized buffer, so:
+n_times)`) **zero-copy view** of the output buffer:
 
-- Pass `out=` to reuse one buffer and avoid a fresh allocation and page-fault
-  pass per call. This is ~10% faster for large blocks:
+- Pass `out=` (at least `nbeams * plan.dmt_size` float32 values) to reuse one
+  buffer and avoid a fresh allocation and page-fault pass per call. This is
+  ~10% faster for large blocks:
 
   ```python
-  out = np.empty(fdmt.nbeams * fdmt.plan.buffer_size, dtype=np.float32)
+  out = np.empty(fdmt.nbeams * fdmt.plan.dmt_size, dtype=np.float32)
   for block in stream:
       dmt = fdmt.execute(block, out=out)   # overwritten by the next call
   ```
 
-- Without `out=`, every returned array keeps its whole $B$-sized buffer
-  alive. Use `dmt.copy()` if you keep many blocks.
+- Without `out=`, every call allocates a new array of exactly the result's
+  size. With `out=`, `.copy()` the views you keep.
+
+```{note}
+Earlier versions ping-ponged the tree levels through the caller's buffer, so
+it had to hold `plan.get_buffer_size()` floats per beam (Python
+`plan.buffer_size`) with a scratch tail, and beams were `buffer_size` apart.
+Code that still allocates `buffer_size` works, since a larger buffer is
+accepted, but the beams are now `dmt_size` apart. `get_buffer_size()` is now
+only the largest tree level of one block of `nsamps`, useful as a size
+estimate; what the engine actually allocates is in `memory_usage` /
+`get_memory_usage()`.
+```
 
 ---
 
@@ -124,6 +134,11 @@ dmt = fdmt.finalize()              # finish to the root
   so they allow restarting.
 - The stepper always runs **level by level** (it never fuses), so every
   level can be inspected. Only `execute()` uses `fuse_levels`.
+- The stepper runs **whole blocks**: it needs `fdmt.chunk_nsamps == nsamps`
+  (C++: `get_chunk_nsamps()`) and raises otherwise. The automatic chunk is
+  shorter than the block for large plans in `mode="valid"`, so construct a
+  stepping engine with `chunk_nsamps=nsamps` (see
+  {ref}`Chunked execution <chunked-execution>`).
 - Views are **zero-copy** on the CPU and are overwritten as later levels are
   computed; copy what you keep. On CUDA from Python, views are host copies.
 - With packed input and `int_tree=True` (the default), integer-stored levels

@@ -54,9 +54,9 @@ void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
     if (skip_if_over_budget(state, Algo::kFDMT, plan, p)) {
         return;
     }
-    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
+    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
               "valid", Exec::cpu(nthreads));
-    std::vector<float> dmt(plan.get_buffer_size());
+    std::vector<float> dmt(plan.get_dmt_size());
     if (p.nbits == 32) {
         const auto wf = make_float_input(kNchans * p.nsamps);
         fdmt.execute(wf, dmt); // warm-up
@@ -83,8 +83,8 @@ void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     try {
-        FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
-                     true, "valid", Exec::cpu(nthreads), 1, kFrac);
+        FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
+                     "valid", Exec::cpu(nthreads), 1, kFrac);
         const auto wf = make_float_input(kNchans * p.nsamps);
         std::vector<float> dmt(plan.get_dmt_size());
         fdmt.execute(wf, dmt);
@@ -106,17 +106,18 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
     if (skip_if_over_budget(state, kAlgo, plan, p)) {
         return;
     }
-    const auto dms = plan.get_dm_grid_final();
+    const auto dms = dm_grid(p);
     Engine ddmt(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
                 Exec::cpu(nthreads), p.nbits);
     const auto ndms = dms.size();
-    // The first (cold) call returns nsamps - max_delay samples; warm calls
+    // Cold calls return fewer samples until the history is full; warm calls
     // return nsamps.
-    const auto n_cold = ddmt.get_output_nsamps(p.nsamps);
     if (p.nbits == 32) {
         const auto wf = make_float_input(kNchans * p.nsamps);
         std::vector<float> dmt(ndms * p.nsamps);
-        ddmt.execute(wf, std::span<float>(dmt).first(ndms * n_cold));
+        warm_up_stream(ddmt, p.nsamps, [&](SizeType n) {
+            ddmt.execute(wf, std::span<float>(dmt).first(ndms * n));
+        });
         for (auto _ : state) {
             ddmt.execute(wf, dmt);
             benchmark::DoNotOptimize(dmt.data());
@@ -124,8 +125,9 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
     } else {
         const auto wf = make_packed_input(packed_bytes(p.nsamps, p.nbits));
         std::vector<int32_t> dmt(ndms * p.nsamps);
-        ddmt.execute(wf, p.nsamps,
-                     std::span<int32_t>(dmt).first(ndms * n_cold));
+        warm_up_stream(ddmt, p.nsamps, [&](SizeType n) {
+            ddmt.execute(wf, p.nsamps, std::span<int32_t>(dmt).first(ndms * n));
+        });
         for (auto _ : state) {
             ddmt.execute(wf, p.nsamps, dmt);
             benchmark::DoNotOptimize(dmt.data());
@@ -146,16 +148,17 @@ void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     try {
-        const auto dms = plan.get_dm_grid_final();
+        const auto dms = dm_grid(p);
         DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
                     Exec::cpu(nthreads), p.nbits, {}, 1,
                     DDMTFFTOptions{.method = kMethod});
-        const auto ndms   = dms.size();
-        const auto n_cold = eng.get_output_nsamps(p.nsamps);
+        const auto ndms = dms.size();
         std::vector<float> dmt(ndms * p.nsamps);
         if (p.nbits == 32) {
             const auto wf = make_float_input(kNchans * p.nsamps);
-            eng.execute(wf, std::span<float>(dmt).first(ndms * n_cold));
+            warm_up_stream(eng, p.nsamps, [&](SizeType n) {
+                eng.execute(wf, std::span<float>(dmt).first(ndms * n));
+            });
             for (auto _ : state) {
                 eng.execute(wf, dmt);
                 benchmark::DoNotOptimize(dmt.data());
@@ -163,8 +166,10 @@ void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
         } else {
             // Packed rows are unpacked straight into the transform rows.
             const auto wf = make_packed_input(packed_bytes(p.nsamps, p.nbits));
-            eng.execute(wf, p.nsamps,
-                        std::span<float>(dmt).first(ndms * n_cold));
+            warm_up_stream(eng, p.nsamps, [&](SizeType n) {
+                eng.execute(wf, p.nsamps,
+                            std::span<float>(dmt).first(ndms * n));
+            });
             for (auto _ : state) {
                 eng.execute(wf, p.nsamps, dmt);
                 benchmark::DoNotOptimize(dmt.data());
@@ -197,7 +202,7 @@ void register_cpu() {
         auto* bm          = add(bench_name(Algo::kDDMT, cpu_label(t), p),
                                 bench_ddmt<DDMT, Algo::kDDMT>, p, t);
         const double adds = static_cast<double>(kNchans) *
-                            static_cast<double>(p.dt_max + 1) *
+                            static_cast<double>(dm_grid(p).size()) *
                             static_cast<double>(p.nsamps);
         if (adds > kSingleRepetitionAdds) {
             bm->Repetitions(1);
@@ -209,8 +214,10 @@ void register_cpu() {
             for (const int t : threads) {
                 add(bench_name(Algo::kFDMT, cpu_label(t), p), bench_fdmt, p, t);
             }
-            add(bench_name(Algo::kFDMTFFT, cpu_label(multi), p),
-                bench_fdmt_fft<false>, p, multi);
+            if (is_reference(p)) { // verification mode, not plotted
+                add(bench_name(Algo::kFDMTFFT, cpu_label(multi), p),
+                    bench_fdmt_fft<false>, p, multi);
+            }
             add(bench_name(Algo::kFDMTFFTFrac, cpu_label(multi), p),
                 bench_fdmt_fft<true>, p, multi);
             add_ddmt(p, multi);
@@ -218,16 +225,12 @@ void register_cpu() {
                 bench_ddmt<SDMT, Algo::kSDMT>, p, multi);
             add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p),
                 bench_ddmt_fft<DDMTFFTMethod::kNUFFT>, p, multi);
-            // Exact brute-force FDD is compute-bound like DDMT: one
-            // repetition of its long points is stable.
-            auto* brute =
+            // Exact brute-force FDD (a reference, not plotted) is
+            // compute-bound like DDMT: one repetition is stable.
+            if (is_reference(p)) {
                 add(bench_name(Algo::kDDMTFFTBrute, cpu_label(multi), p),
-                    bench_ddmt_fft<DDMTFFTMethod::kBrute>, p, multi);
-            if (static_cast<double>(kNchans) *
-                    static_cast<double>(p.dt_max + 1) *
-                    static_cast<double>(p.nsamps) >
-                kSingleRepetitionAdds / 4) {
-                brute->Repetitions(1);
+                    bench_ddmt_fft<DDMTFFTMethod::kBrute>, p, multi)
+                    ->Repetitions(1);
             }
         }
     }

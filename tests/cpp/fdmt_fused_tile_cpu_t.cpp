@@ -1,13 +1,16 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 #include <cstdint>
 #include <random>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/fdmt_chunk.hpp"
 #include "dmt/fdmt_fused_tile.hpp"
 #include "dmt/modes.hpp"
 
@@ -67,23 +70,56 @@ Waterfall random_ints(SizeType nchans, SizeType nsamps, unsigned seed) {
     return wf;
 }
 
+// Box means of `fplan` as the tile reads them (fdmt_box_weights.hpp): dyadic
+// float weights, the packed rounding recipes on the scale 2^-F, and 2^-F.
+struct BoxTables {
+    std::vector<float> box_w;
+    std::vector<detail::FDMTBoxRound> box_round;
+    float int_unit{1.0F};
+
+    [[nodiscard]] detail::FDMTBoxMeans means(bool smear) const {
+        return {.w_f32     = box_w.data(),
+                .round     = box_round.data(),
+                .unit      = smear ? int_unit : 1.0F,
+                .round_u64 = 0};
+    }
+};
+
+BoxTables box_tables(const plans::FDMTPlan& fplan) {
+    BoxTables t;
+    const float w_unit =
+        std::ldexp(1.0F, -static_cast<int>(fplan.get_box_fraction_bits()));
+    const auto scale_f = fplan.get_box_mean_bits();
+    SizeType len       = 1;
+    for (const auto w : fplan.get_box_weights()) {
+        t.box_w.push_back(static_cast<float>(w) * w_unit);
+        t.box_round.push_back(detail::box_round(len++, scale_f));
+    }
+    t.int_unit = std::ldexp(1.0F, -static_cast<int>(scale_f));
+    return t;
+}
+
 // Runs every (group, tile) of the fused levels 0..fuse on the host and
-// returns level `fuse` as float. `thist_out` receives the fused levels'
+// returns level `fuse` as float, in canonical units (integer level-F
+// storage is rescaled by 2^-b). `thist_out` receives the fused levels'
 // tree-history slots (valid mode).
 template <FDMTMode Mode, bool Smear, typename TOut>
 std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
                              const detail::FDMTFusedTilePlan& plan,
+                             const BoxTables& box,
                              int tile,
                              const Waterfall& wf,
                              bool packed,
                              const float* hist0,
                              const float* thist_in,
                              float* thist_out) {
-    const auto nsamps       = static_cast<int>(pc.state_shape[0].nsamps);
-    const auto dt_max_final = static_cast<int>(pc.state_shape.back().dt_max);
-    const auto args         = detail::make_fused_tile_args(
-        plan, tile, dt_max_final, plan.group_info.data(), plan.coords.data(),
-        plan.dt_grid0.data(), plan.ndt0.data(), plan.coord_offset0.data());
+    const auto nsamps    = static_cast<int>(pc.state_shape[0].nsamps);
+    const auto hist_len  = static_cast<int>(pc.state_shape[0].dt_max);
+    const float int_unit = Smear ? box.int_unit : 1.0F;
+    const auto args      = detail::make_fused_tile_args(
+        plan, tile, hist_len, plan.group_info.data(), plan.coords.data(),
+        plan.dt_grid0.data(), plan.ndt0.data(), plan.coord_offset0.data(),
+        box.means(Smear));
     const auto [cap_a, cap_b] = plan.smem_floats(tile);
     constexpr SizeType kGuard = 64;
     constexpr float kSentinel = -12345.0F;
@@ -115,7 +151,13 @@ std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
             }
         }
     }
-    return {out.begin(), out.end()};
+    std::vector<float> level(out.size());
+    for (SizeType i = 0; i < out.size(); ++i) {
+        level[i] = std::is_integral_v<TOut>
+                       ? static_cast<float>(out[i]) * int_unit
+                       : static_cast<float>(out[i]);
+    }
+    return level;
 }
 
 template <typename TOut>
@@ -123,6 +165,7 @@ std::vector<float> run_tiles_dispatch(FDMTMode mode,
                                       bool smear,
                                       const plans::FDMTPlanContainer& pc,
                                       const detail::FDMTFusedTilePlan& plan,
+                                      const BoxTables& box,
                                       int tile,
                                       const Waterfall& wf,
                                       bool packed,
@@ -130,7 +173,7 @@ std::vector<float> run_tiles_dispatch(FDMTMode mode,
                                       const float* thist_in,
                                       float* thist_out) {
     const auto go = [&]<FDMTMode Mode, bool S>() {
-        return run_tiles<Mode, S, TOut>(pc, plan, tile, wf, packed, hist0,
+        return run_tiles<Mode, S, TOut>(pc, plan, box, tile, wf, packed, hist0,
                                         thist_in, thist_out);
     };
     if (mode == FDMTMode::kFull) {
@@ -150,6 +193,19 @@ std::vector<float>
 reference_level(FDMT& ref, const std::vector<float>& block, SizeType fuse) {
     std::vector<float> dmt(ref.get_plan().get_buffer_size());
     ref.reset(block, dmt);
+    ref.advance(fuse);
+    const auto view = ref.view_level_data();
+    std::vector<float> level(view.begin(), view.end());
+    ref.finalize();
+    return level;
+}
+
+// The same for packed 2-bit input (the rounded box means of packed input).
+std::vector<float> reference_level_packed(FDMT& ref,
+                                          const std::vector<uint8_t>& block,
+                                          SizeType fuse) {
+    std::vector<float> dmt(ref.get_plan().get_buffer_size());
+    ref.reset(std::span<const uint8_t>(block), 2, dmt);
     ref.advance(fuse);
     const auto view = ref.view_level_data();
     std::vector<float> level(view.begin(), view.end());
@@ -203,6 +259,9 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
                      ++fuse) {
                     ref.reset_history(); // first block of a stream
                     const auto expected = reference_level(ref, wf.values, fuse);
+                    ref.reset_history();
+                    const auto expected_pk =
+                        reference_level_packed(ref, wf.packed, fuse);
                     const auto plan =
                         detail::build_fused_tile_plan(pc, niters, fuse);
                     for (const int tile : {32, 96, 1024}) {
@@ -217,18 +276,27 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
                             std::vector<float> thist_in(
                                 ref.get_plan().get_tree_history_size(), 0.0F);
                             std::vector<float> thist_out(thist_in.size(), 0.0F);
+                            const auto box = box_tables(ref.get_plan());
                             REQUIRE_THAT(run_tiles_dispatch<float>(
                                              parse_fdmt_mode(mode), smear, pc,
-                                             plan, tile, wf, false,
+                                             plan, box, tile, wf, false,
                                              hist0.data(), thist_in.data(),
                                              thist_out.data()),
                                          Catch::Matchers::Equals(expected));
-                            // Packed input, integer level-F storage.
+                            // Packed input (rounded box means), integer
+                            // and float level-F storage.
                             REQUIRE_THAT(run_tiles_dispatch<uint16_t>(
                                              parse_fdmt_mode(mode), smear, pc,
-                                             plan, tile, wf, true, hist0.data(),
-                                             thist_in.data(), thist_out.data()),
-                                         Catch::Matchers::Equals(expected));
+                                             plan, box, tile, wf, true,
+                                             hist0.data(), thist_in.data(),
+                                             thist_out.data()),
+                                         Catch::Matchers::Equals(expected_pk));
+                            REQUIRE_THAT(run_tiles_dispatch<float>(
+                                             parse_fdmt_mode(mode), smear, pc,
+                                             plan, box, tile, wf, true,
+                                             hist0.data(), thist_in.data(),
+                                             thist_out.data()),
+                                         Catch::Matchers::Equals(expected_pk));
                         }
                     }
                 }
@@ -255,7 +323,6 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                     const auto plan    = detail::build_fused_tile_plan(
                         pc, plan_h.get_niters(), fuse);
                     const auto h0_size = plan_h.get_history_size();
-                    const auto hi_size = plan_h.get_history_init_size();
                     const auto slots   = fused_history_slots(pc, fuse);
                     REQUIRE(!slots.empty());
                     std::vector<float> before(ref.history_state_size());
@@ -267,12 +334,11 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                         const auto expected =
                             reference_level(ref, wf.values, fuse);
                         ref.save_history(after);
-                        const float* hist0 = before.data();
-                        const float* tree_in =
-                            before.data() + h0_size + hi_size;
+                        const float* hist0   = before.data();
+                        const float* tree_in = before.data() + h0_size;
                         std::vector<float> tree_after(
                             after.begin() +
-                                static_cast<std::ptrdiff_t>(h0_size + hi_size),
+                                static_cast<std::ptrdiff_t>(h0_size),
                             after.end());
                         // Finite sentinel (release builds use -ffast-math,
                         // which folds NaN checks away); never a sum of
@@ -287,8 +353,9 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                         for (const int tile : {3, 7, 32}) {
                             std::vector<float> tree_out = tree_template;
                             const auto got = run_tiles_dispatch<float>(
-                                FDMTMode::kValid, smear, pc, plan, tile, wf,
-                                false, hist0, tree_in, tree_out.data());
+                                FDMTMode::kValid, smear, pc, plan,
+                                box_tables(plan_h), tile, wf, false, hist0,
+                                tree_in, tree_out.data());
                             REQUIRE_THAT(got,
                                          Catch::Matchers::Equals(expected));
                             REQUIRE_THAT(tree_out,
@@ -322,6 +389,98 @@ TEST_CASE("CUDA fused tile plan sizing", "[fdmt_fused_tile][cpu]") {
         if (tile > 0) {
             const auto [ta, tb] = plan.smem_floats(tile);
             REQUIRE((ta + tb) * sizeof(float) <= 48 * 1024);
+        }
+    }
+}
+
+} // namespace dmt
+
+namespace dmt {
+
+TEST_CASE("CUDA fused tile chunked streaming (host emulation)",
+          "[fdmt_fused_tile][cpu][chunk]") {
+    // The GPU engine's chunked execution with every level fused (fuse =
+    // niters): tables from the plan re-laid out for chunk rows, each chunk's
+    // input and root output strided by the block length, the GPU's
+    // double-buffered level-0 and tree histories swapped per chunk. Must
+    // equal the CPU engine's chunked stream bit for bit.
+    const SizeType nchans = 16;
+    const SizeType nsamps = 500;
+    for (const SizeType chunk : {64, 128, 448}) {
+        for (const bool smear : {true, false}) {
+            DYNAMIC_SECTION("chunk=" << chunk << " smear=" << smear) {
+                FDMT cpu(kFMin, kFMax, nchans, nsamps, kTsamp, 160, -20, 1,
+                         smear, "valid", Exec::cpu(1), 1, 0, false, chunk);
+                const auto& fplan = cpu.get_plan();
+                const auto niters = fplan.get_niters();
+                const auto c      = cpu.get_chunk_nsamps();
+                const auto pc     = detail::fdmt_relayout_container(
+                    fplan.get_container(), niters, c);
+                const auto plan =
+                    detail::build_fused_tile_plan(pc, niters, niters);
+                const auto box      = box_tables(fplan);
+                const int tile      = 32;
+                const auto hist_len = static_cast<int>(
+                    fplan.get_container().state_shape[0].dt_max);
+                std::vector<float> h0_a(fplan.get_history_size(), 0.0F);
+                std::vector<float> h0_b(h0_a.size(), 0.0F);
+                std::vector<float> th_a(fplan.get_tree_history_size(), 0.0F);
+                std::vector<float> th_b(th_a.size(), 0.0F);
+                const auto [cap_a, cap_b] = plan.smem_floats(tile);
+                std::vector<float> smem(cap_a + cap_b);
+                for (unsigned blk = 0; blk < 3; ++blk) {
+                    const auto wf = random_ints(nchans, nsamps, 90 + blk);
+                    std::vector<float> want(fplan.get_dmt_size());
+                    cpu.execute(wf.values, want);
+                    std::vector<float> got(want.size(), -1.0F);
+                    for (SizeType t0 = 0; t0 < nsamps; t0 += c) {
+                        const auto r = std::min(c, nsamps - t0);
+                        auto args    = detail::make_fused_tile_args(
+                            plan, tile, hist_len, plan.group_info.data(),
+                            plan.coords.data(), plan.dt_grid0.data(),
+                            plan.ndt0.data(), plan.coord_offset0.data(),
+                            box.means(smear));
+                        args.active = static_cast<int>(r);
+                        const detail::FDMTInputF32 in{
+                            .data   = wf.values.data() + t0,
+                            .nsamps = static_cast<int>(nsamps)};
+                        const int ntiles =
+                            static_cast<int>((r + tile - 1) / tile);
+                        for (int g = 0; g < plan.ngroups; ++g) {
+                            for (int t = 0; t < ntiles; ++t) {
+                                const auto run = [&]<bool S>() {
+                                    detail::fdmt_fused_tile<FDMTMode::kValid,
+                                                            S>(
+                                        HostBlock{}, in, 0, got.data() + t0,
+                                        args, t, g, smem.data(), h0_a.data(),
+                                        th_a.data(), th_b.data());
+                                };
+                                if (smear) {
+                                    run.template operator()<true>();
+                                } else {
+                                    run.template operator()<false>();
+                                }
+                            }
+                        }
+                        // Level-0 history: the last hist_len raw samples
+                        // (kernel_advance_history_window), then swap.
+                        for (SizeType ch = 0; ch < nchans; ++ch) {
+                            for (int k = 0; k < hist_len; ++k) {
+                                const auto from =
+                                    static_cast<std::ptrdiff_t>(r) - hist_len +
+                                    k;
+                                h0_b[(ch * hist_len) + k] =
+                                    from >= 0
+                                        ? wf.values[(ch * nsamps) + t0 + from]
+                                        : h0_a[(ch * hist_len) + k + r];
+                            }
+                        }
+                        std::swap(h0_a, h0_b);
+                        std::swap(th_a, th_b);
+                    }
+                    REQUIRE_THAT(got, Catch::Matchers::Equals(want));
+                }
+            }
         }
     }
 }

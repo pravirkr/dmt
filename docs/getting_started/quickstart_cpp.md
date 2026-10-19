@@ -33,15 +33,14 @@ int main() {
     std::cout << plan.get_dmt_ndms() << " DM trials x "
               << plan.get_dmt_nsamps() << " samples per block\n";
 
-    // Input (nchans, nsamps) row-major. The output buffer is
-    // get_buffer_size() floats; the result is its first get_dmt_size().
+    // Input (nchans, nsamps) row-major; output (ndms, dmt_nsamps) row-major,
+    // exactly get_dmt_size() floats.
     std::vector<float> waterfall(nchans * nsamps, 0.0F);
-    std::vector<float> dmt_buf(plan.get_buffer_size());
+    std::vector<float> dmt_buf(plan.get_dmt_size());
 
     // Per block, contiguous in time ("valid" mode keeps the history):
     fdmt.execute(waterfall, dmt_buf);
-    std::span<const float> result(dmt_buf.data(), plan.get_dmt_size());
-    // result[i_dm * plan.get_dmt_nsamps() + t]; DM values: plan.get_dm_grid_final()
+    // dmt_buf[i_dm * plan.get_dmt_nsamps() + t]; DM values: plan.get_dm_grid_final()
     return 0;
 }
 ```
@@ -53,13 +52,15 @@ int main() {
 | input | overload | notes |
 | :--- | :--- | :--- |
 | float32 | `execute(std::span<const float>, std::span<float>)` | `(nbeams, nchans, nsamps)` row-major |
-| packed unsigned 1/2/4/8/16-bit | `execute(std::span<const uint8_t>, nbits, std::span<float>)` | each channel row is `ceil(nsamps * nbits / 8)` bytes, samples LSB-first within a byte; the output is identical to the float path on the same values |
+| packed unsigned 1/2/4/8/16-bit | `execute(std::span<const uint8_t>, nbits, std::span<float>)` | each channel row is `ceil(nsamps * nbits / 8)` bytes, samples LSB-first within a byte; the output equals the float path on the same values, up to the rounding of the level-0 box means with box smearing (see [Performance](../pipeline_guide/performance.md)) |
 
-- The **output is always float32**. Allocate `nbeams * plan.get_buffer_size()`
-  floats. Each beam's first `plan.get_dmt_size()` floats are the
-  `(ndms, dmt_nsamps)` result, and beam `b` starts at `b * get_buffer_size()`.
-  The rest is scratch. See {ref}`Output Buffers <output-buffers>`
-  for why.
+- The **output is always float32**, laid out `(nbeams, ndms, dmt_nsamps)`:
+  allocate `nbeams * plan.get_dmt_size()` floats; beam `b` starts at
+  `b * get_dmt_size()`. The engine keeps all its working state internally and
+  only writes the output. See {ref}`Output Buffers <output-buffers>`.
+- With `use_box_smearing=true` (the default) each channel contributes the
+  *mean* of its level-0 box, so the output is in box-mean units. See
+  {ref}`Box means <box-mean>`.
 - Packed input is the fastest path for ≤ 8-bit data (up to ~2.7× on 8 CPU
   threads; see [Performance](../pipeline_guide/performance.md)). Never convert
   it to float first.
@@ -71,7 +72,11 @@ int main() {
 - Invalid sizes, `nbits` values or configurations throw
   `std::invalid_argument`; misuse of the stepper throws `std::logic_error`.
 - `execute()` allocates nothing. `get_memory_usage()` reports what the
-  constructor allocated.
+  constructor allocated. In `"valid"` mode the tree runs in chunks of
+  `get_chunk_nsamps()` samples (the trailing `chunk_nsamps` constructor
+  argument, `0` = automatic), which bounds the state at high DM without
+  changing the output; see
+  {ref}`Chunked execution <chunked-execution>`.
 
 ```cpp
 // 2-bit samples, 4 per byte, LSB-first
@@ -98,7 +103,9 @@ fdmt.finalize();                         // root; result in dmt_buf as above
 
 In `"valid"` mode every block must be finalized before the next
 `reset()`/`execute()` (else `std::logic_error`). The stepper never fuses
-levels. See {ref}`Stepper Rules <stepper-rules>`.
+levels, and runs whole blocks: it needs `get_chunk_nsamps() == nsamps`
+(construct with `chunk_nsamps = nsamps`), else `std::logic_error`. See
+{ref}`Stepper Rules <stepper-rules>`.
 
 ---
 
@@ -115,16 +122,16 @@ levels. See {ref}`Stepper Rules <stepper-rules>`.
   work on every backend (a GPU stages them and blocks). Device memory goes
   through `dmt::DeviceSpan` plus an optional `dmt::Stream` (a `cudaStream_t`
   converts to it); the device path is asynchronous, and its output buffer is
-  also `nbeams * get_buffer_size()` floats of device memory. The public
+  also `nbeams * get_dmt_size()` floats of device memory. The public
   headers include no CUDA header, so a CPU-only and a CUDA build of `dmt`
   expose the same declarations.
 
 ```cpp
 dmt::algorithms::FDMT gpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,
                           true, "valid", dmt::Exec::cuda(/*device=*/0));
-// d_wf: nchans * nsamps floats, d_dmt: get_buffer_size() floats, on the device
+// d_wf: nchans * nsamps floats, d_dmt: get_dmt_size() floats, on the device
 gpu.execute(dmt::DeviceSpan<const float>(d_wf, nchans * nsamps),
-            dmt::DeviceSpan<float>(d_dmt, gpu.get_plan().get_buffer_size()),
+            dmt::DeviceSpan<float>(d_dmt, gpu.get_plan().get_dmt_size()),
             stream);
 cudaStreamSynchronize(stream);
 ```

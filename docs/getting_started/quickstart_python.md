@@ -59,7 +59,7 @@ fdmt = FDMT(
 )
 
 # Reuse one output buffer for every block (no per-call allocation)
-out = np.empty(fdmt.nbeams * fdmt.plan.buffer_size, dtype=np.float32)
+out = np.empty(fdmt.nbeams * fdmt.plan.dmt_size, dtype=np.float32)
 
 # Successive blocks, contiguous and non-overlapping in time
 for block_id in range(10):
@@ -84,16 +84,25 @@ join seamlessly into one continuous DM-time stream. Call
 - The result is always float32 with shape `(n_dm, n_times)` or
   `(nbeams, n_dm, n_times)`. `n_dm = plan.dmt_ndms` (DM values:
   `fdmt.dm_grid_final`) and `n_times = plan.dmt_nsamps`.
-- The returned array is a zero-copy view whose base is the engine-sized
-  output buffer (`plan.buffer_size` floats per beam). Pass `out=` to reuse
-  one buffer, or `.copy()` results you keep. See
-  {ref}`Output Buffers <output-buffers>`.
+- The returned array is a zero-copy view of an output buffer of exactly
+  `nbeams * plan.dmt_size` floats (or of `out=`, which needs at least that
+  many). Pass `out=` to reuse one buffer, and `.copy()` the results you keep
+  from it. See {ref}`Output Buffers <output-buffers>`.
+- With `use_box_smearing=True` (the default) each channel contributes the
+  *mean* of its level-0 box (the matched filter for intra-channel smearing),
+  so the output is in box-mean units. Divide by
+  `fdmt.get_effective_sigma_grid()` for S/N; see
+  [Noise Calibration](../pipeline_guide/noise_calibration.md).
 - Misuse fails loudly: wrong sizes or `nbits` raise `ValueError`, a
   `uint8` array without `nbits` raises `TypeError`, and starting a new
   `valid`-mode block before finishing a stepped one raises `RuntimeError`.
 - To inspect intermediate sub-bands, use the stepper (`reset`, `advance`,
-  `advance_until_remaining`, `view_subband`, `finalize`); see
-  {ref}`Stepper Rules <stepper-rules>`.
+  `advance_until_remaining`, `view_subband`, `finalize`) on an engine built
+  with `chunk_nsamps=nsamps`; see {ref}`Stepper Rules <stepper-rules>`.
+- In `mode="valid"`, `execute()` runs the tree in chunks of
+  `fdmt.chunk_nsamps` samples (keyword `chunk_nsamps=None`, automatic), which
+  bounds its memory at high DM without changing the output; see
+  {ref}`Chunked execution <chunked-execution>`.
 - On a GPU, pass `backend="cuda"` (and `device=` for another GPU); the
   arguments and the `execute`/stepper calls on NumPy arrays are the same.
   `dmtlib.available_backends()` lists the backends in your build, e.g.
@@ -156,8 +165,10 @@ print("Batch output shape:", batch_output.shape)
 ## 5. Packed Low-Bit Input
 
 Low-bit digitiser output can be passed packed (LSB-first within each byte,
-rows padded to a whole byte); the result is identical to passing the same
-values as float, and 1- to 4-bit input runs ~1.8-2.7x faster on 8 CPU threads:
+rows padded to a whole byte), and 1- to 4-bit input runs ~1.8-2.7x faster on
+8 CPU threads. The result equals passing the same values as float, except
+that with box smearing each level-0 box mean is rounded to a few fractional
+bits (`plan.box_mean_bits`; S/N loss ≤ 0.5%):
 
 ```python
 nbits = 2

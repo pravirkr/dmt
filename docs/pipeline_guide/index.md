@@ -18,10 +18,10 @@ quirks_and_gotchas
 
 ## Guide Topics
 
-- [Streaming & Overlap-Save History](streaming_and_history.md): How `dmt` preserves 100% of dispersed signals across block boundaries without edge artifacts.
+- [Streaming & Overlap-Save History](streaming_and_history.md): How `dmt` preserves 100% of dispersed signals across block boundaries without edge artifacts; block size vs. chunk.
 - [Multi-Beam Batching](multibeam.md): Processing several tied-array beams with one shared plan, on the CPU and the GPU.
-- [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree), packed low-bit input, threads and block size, and which optimizations were measured and rejected.
+- [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree, chunked execution), packed low-bit input, threads, block size and memory, and which optimizations were measured and rejected.
 - [Fourier-Domain Variants](fourier_variants.md): FDMT-FFT and DDMT-FFT, when to use them, exact fractional delays, NUFFT / piecewise NUFFT / brute force, the piecewise-uniform Levin grid, block length, guard and FFT planner settings.
 - [Coherent Hybrid Search](coherent_hybrid.md): CohFDMT on recorded baseband: input formats (GUPPI, LOFAR, PSRDADA), stateless block processing with a file-pointer stride, the exact multi-subband DM grid, exact noise statistics and memory.
-- [Noise Calibration & SNR Scaling](noise_calibration.md): Converting raw integrated flux into true statistical Signal-to-Noise Ratio ($\text{SNR}$).
-- [Quirks & Gotchas](quirks_and_gotchas.md): Output lengths per mode, output buffers (`buffer_size` vs `dmt_size`), stepper rules, array contiguity and logging.
+- [Noise Calibration & SNR Scaling](noise_calibration.md): Converting raw integrated flux into true statistical Signal-to-Noise Ratio ($\text{SNR}$), and the FDMT's box means (`use_box_smearing`).
+- [Quirks & Gotchas](quirks_and_gotchas.md): Output lengths per mode, output buffers (`dmt_size`), stepper rules, array contiguity and logging.

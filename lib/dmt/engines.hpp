@@ -60,6 +60,7 @@ struct FDMTEngineConfig {
     SizeType fuse_levels{algorithms::kFDMTAutoFuse};
     bool int_tree{true};
     Exec exec{};
+    SizeType chunk_nsamps{0}; ///< 0: automatic (see fdmt_chunk.hpp)
 };
 
 class FDMTEngine {
@@ -121,7 +122,8 @@ public:
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
 
-    [[nodiscard]] virtual SizeType get_fuse_levels() const noexcept = 0;
+    [[nodiscard]] virtual SizeType get_fuse_levels() const noexcept  = 0;
+    [[nodiscard]] virtual SizeType get_chunk_nsamps() const noexcept = 0;
     [[nodiscard]] virtual algorithms::FDMTMemoryUsage
     get_memory_usage() const noexcept                 = 0;
     [[nodiscard]] virtual std::string summary() const = 0;

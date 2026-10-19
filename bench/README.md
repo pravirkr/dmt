@@ -9,24 +9,27 @@ Three benchmark executables are built with `-DDMT_BUILD_BENCHMARKS=ON`:
 | `dmt_bench_mem` | `bench/*_mem_b.cpp` | Peak heap / RSS per engine |
 
 `bench/scripts/` holds the Python drivers: `run_suite.py` and `plot_suite.py`
-for the published suite, and analysis scripts (`fdmt_cache_benchmark.py`,
-`fdmt_operations_costs.py`, `fdmt_sensitivity.py`).
+for the published suite, and developer analysis scripts
+(`fdmt_cache_benchmark.py`, `fdmt_operations_costs.py`).
 
 ## The published suite
 
-Fixed data: **4096 channels, 704–1216 MHz, 81.92 µs sampling, `valid` mode,
-box smearing on**. Three sweeps, each through the reference point
-(16,384 samples × 2,049 DM trials):
+Fixed data, the configuration of every published result (benchmarks,
+paper): the CryoPAF incoherent search at Parkes, **1024 channels,
+704–1216 MHz, 512 µs sampling, DM 0–2000 on the piecewise-uniform Levin grid
+(tolerance 1.1, 2501 trials), `valid` mode, box smearing on**. Three sweeps,
+each through the reference point (32,768 samples = 16.8 s × DM 0–2000):
 
-- **nsamps**: 4K, 8K, 16K, 32K, 64K samples per block, at 2049 DM trials.
-- **ndms**: 256, 512, 1K, 2K, 4K DM trials (via `dt_max`), at 16K samples.
+- **nsamps**: 8K, 16K, 32K, 64K samples per block, at DM 0–2000.
+- **ndms**: DM 0–125, 0–250, 0–500, 0–1000 and 0–2000, each on its own
+  piecewise Levin grid, at 32K samples.
 - **nbits**: 1, 2, 4, 8, 16-bit packed and float32 input, at the reference point.
 
-DDMT and SDMT are given the FDMT plan's DM grid, so all
-algorithms compute the same trials. The backends are:
+Every engine is given the same DM grid (the FDMT engines round it to integer
+delays and keep every trial; DDMT-FFT runs one NUFFT per uniform segment), so
+all algorithms compute the same trials. The backends are:
 
-- CPU with 1 and 8 threads. FDMT-FFT, DDMT and SDMT run at 8 threads only; DDMT at
-  1 thread takes ~25 s per call.
+- CPU with 1 and 8 threads. FDMT-FFT, DDMT and SDMT run at 8 threads only.
 - CUDA with device-resident data (`cuda`).
 - CUDA with host arrays including PCIe (`cuda_host`), for FDMT, FDMT-FFT
   and DDMT-FFT throughput in the nbits sweep. These rows include host-side
@@ -35,6 +38,15 @@ algorithms compute the same trials. The backends are:
 
 Points whose estimated memory exceeds the budget are skipped and listed in
 the summary.
+
+**A second configuration, `cryopaf4k`** (`--config cryopaf4k`): the same band
+and sampling with **4096 channels, DM 0–1000, Levin tolerance 1.05 (5183
+trials)**, dm_max swept over 125–1000. It is the regime the FDMT is built for.
+Brute force needs about 150× more operations than the FDMT here, against 14×
+for `cryopaf`: fewer channels and a sparser grid shrink the FDMT's advantage,
+whose cost is set by the delay range in samples, not by the number of
+trials. Its results go to `bench/results/cryopaf4k/<machine>/`, and its plots
+to `bench/results/cryopaf4k/plots/`.
 
 The Fourier-domain engines (FDMT-FFT, DDMT-FFT) are FFT-bound, so the suite
 plans their FFTs with `FFTW_MEASURE` (`run_suite.py --fftw-planner`, default
@@ -56,6 +68,7 @@ cmake --build build -j --target dmt_bench_suite
 python bench/scripts/run_suite.py --machine m1-pro --label "Apple M1 Pro"
 python bench/scripts/run_suite.py --machine xeon-6348h --label "Xeon Gold 6348H"
 python bench/scripts/run_suite.py --machine l40s --no-cpu   # GPU box: CUDA only
+python bench/scripts/run_suite.py --machine m1-pro --config cryopaf4k  # 4096 channels
 
 # 3. Commit the JSON
 git add bench/results/<machine>/ && git commit -m "bench: <machine> results"
@@ -67,6 +80,7 @@ installed, for the theory plot):
 ```bash
 pip install -e ".[bench]"      # matplotlib + numpy
 python bench/scripts/plot_suite.py
+python bench/scripts/plot_suite.py --config cryopaf4k
 git add bench/results/plots && git commit -m "bench: update plots"
 ```
 

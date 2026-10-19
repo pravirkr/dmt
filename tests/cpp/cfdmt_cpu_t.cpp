@@ -96,9 +96,27 @@ TEST_CASE("CohFDMTPlan geometry and exact coarse grid", "[cfdmt][cpu]") {
         const auto var16 = plan.get_effective_variance_grid(16);
         const auto cnt   = plan.get_cumulative_count_grid();
         REQUIRE(var.size() == plan.get_ndm());
+        // Box means: every channel's box of L samples is weighted by
+        // ~1/L (fdmt_box_weights.hpp), so the white-noise floor of a row is
+        // sum_c w_c^2 L_c ~ sum_c 1/L_c and its DC gain sum_c w_c L_c ~
+        // nchans (within the weights' 1/8 rounding).
+        const auto& fplan   = plan.get_fdmt_plan();
+        const auto nchans   = plan.get_nchans();
+        const auto nfine    = fplan.get_dmt_ndms();
+        const auto smearing = fplan.get_smearing_grid_final();
         for (SizeType i = 0; i < var.size(); ++i) {
-            CHECK(var[i] >= static_cast<float>(plan.get_nchans()));
-            CHECK(cnt[i] >= static_cast<float>(plan.get_nchans()));
+            double floor = 0.0;
+            for (SizeType c = 0; c < nchans; ++c) {
+                const auto len = static_cast<SizeType>(std::lround(
+                                     smearing[((i % nfine) * nchans) + c])) +
+                                 1;
+                const double w = test::box_mean_weight(fplan, len);
+                floor += w * w * static_cast<double>(len);
+            }
+            // Positive lag correlation: at least the white-noise floor.
+            CHECK(var[i] >= 0.999 * floor);
+            CHECK(std::abs(cnt[i] - static_cast<float>(nchans)) <=
+                  static_cast<float>(nchans) / 8.0F);
             // Positive lag correlation: more than 16x the w=1 variance.
             CHECK(var16[i] > 16.0F * var[i]);
         }

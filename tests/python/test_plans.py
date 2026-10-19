@@ -206,11 +206,19 @@ class TestPlans:
         var_dt0 = plan.get_effective_variance(32, 1, use_box_smearing=True)
         assert var_dt0 == pytest.approx(float(nchans))
 
-        # Across all DMs, variance >= nchans for W=1
+        # Box means: channel c's box of L_c samples is weighted by w_c ~ 1/L_c
+        # (plan.box_weights), so for W=1 the variance is sum_c w_c**2 L_c <=
+        # nchans (equality without smearing).
+        smearing = np.asarray(plan.smearing_grid_final).reshape(ndms, nchans)
+        length = np.abs(smearing).astype(np.int64) + 1
+        weights = (
+            np.asarray(plan.box_weights)[length - 1] * 2.0**-plan.box_fraction_bits
+        )
         for i in range(ndms):
-            assert plan.get_effective_variance(i, 1, use_box_smearing=True) >= float(
-                nchans
-            )
+            var_w1 = plan.get_effective_variance(i, 1, use_box_smearing=True)
+            expected = float(np.sum(weights[i] ** 2 * length[i]))
+            assert var_w1 == pytest.approx(expected, rel=1e-6)
+            assert var_w1 <= nchans * (1 + 1e-6)
             var_w4 = plan.get_effective_variance(i, 4, use_box_smearing=True)
             assert 0 < var_w4 <= float(nchans * 4 * 4)
 

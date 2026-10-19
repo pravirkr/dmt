@@ -70,15 +70,21 @@ dmt::algorithms::FDMT fdmt(
 
 const auto& plan = fdmt.get_plan();
 std::vector<float> batch_input(nbeams * nchans * nsamps);
-std::vector<float> batch_output(nbeams * plan.get_buffer_size());
+std::vector<float> batch_output(nbeams * plan.get_dmt_size());
 
 fdmt.execute(
     std::span<const float>(batch_input.data(), batch_input.size()),
     std::span<float>(batch_output.data(), batch_output.size())
 );
 
-// Beam b's (ndms, dmt_nsamps) result: the first get_dmt_size() floats at
-// offset b * get_buffer_size() (the rest of each slice is scratch).
-std::span<const float> beam3(batch_output.data() + 3 * plan.get_buffer_size(),
+// Output (nbeams, ndms, dmt_nsamps): beam b's result is the get_dmt_size()
+// floats at offset b * get_dmt_size().
+std::span<const float> beam3(batch_output.data() + 3 * plan.get_dmt_size(),
                              plan.get_dmt_size());
 ```
+
+The output buffer is exactly the transform; the engine keeps its tree state
+and history internally (see {ref}`Output Buffers <output-buffers>`). The tree
+state scales with `nbeams`, so the automatic `chunk_nsamps` (valid mode) is
+chosen for all beams together and may be shorter than for one beam (see
+{ref}`Chunked execution <chunked-execution>`).

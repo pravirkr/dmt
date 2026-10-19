@@ -49,9 +49,33 @@ recomputation of overlap samples.
 4. **Block size is free.** `nsamps` may even be smaller than $\Delta t_{\max}$;
    the per-node history then spans several blocks. Choose it for latency and
    throughput (see [Performance](performance.md)).
-5. **Stepper.** A stepped block must be finalized before the next one; stopping
+5. **Block size vs. chunk.** The block (`nsamps`) is what one `execute()`
+   consumes and returns. Inside it, the engine runs the tree in chunks of
+   `chunk_nsamps` samples, so its state is two levels of rows × chunk rather
+   than rows × `nsamps`. The same overlap-save history joins the chunks, so
+   the output is bit-identical for any chunk; each chunk costs a little extra
+   history traffic. By default the chunk is the longest power of two ≥ 2048
+   whose state fits 2 GiB (capped at `nsamps`), so a long block at high DM
+   needs no more memory than a short one. For example (M1 Pro, 8 threads,
+   the benchmark configuration of 1024 channels at 512 µs, DM 0–2000, with
+   32 768-sample blocks), a whole-block tree peaks at 6.2 GiB and takes 376 ms
+   per block; the automatic chunk of 8192 takes 358 ms at 2.2 GiB. See
+   {ref}`Chunked execution <chunked-execution>`.
+6. **Stepper.** A stepped block must be finalized before the next one; stopping
    early raises instead of silently corrupting the history (see
-   {ref}`stepper rules <stepper-rules>`).
+   {ref}`stepper rules <stepper-rules>`). The stepper runs whole blocks, so
+   construct a stepping engine with `chunk_nsamps=nsamps`.
+
+The history has two parts, both per beam:
+
+- **Level-0 input history** (`plan.history_size`, C++ `get_history_size()`):
+  the last `dt0_max` samples of every channel (`dt0_max` is the largest
+  level-0 delay), `nchans × dt0_max` floats: only what level 0 reads from
+  before the block. (`get_history_init_size()` was removed.)
+- **Tree history** (`plan.tree_history_size`): the last `delay` samples of
+  each merge node's head input. On the CPU it is a ring buffer, so a block
+  moves $O(\min(\text{delay}, N_{\text{samps}}))$ samples per node instead of
+  $O(\text{delay})$; on a GPU it is double-buffered.
 
 `mode="full"` and `mode="roll"` keep no history; each block is independent.
 
@@ -126,8 +150,10 @@ fdmt.save_history(std::span<float>(beam0_state));
 fdmt.load_history(std::span<const float>(beam0_state));
 ```
 
-The saved state is only the small history (`history_state_size()` floats),
-not the engine's working buffers, so one engine can serve many streams of the
+The saved state is only the small history (`history_state_size()` floats;
+on the CPU the level-0 input history, then the tree history with each node's
+slot in FIFO order, oldest sample first, whatever the ring position), not the engine's
+working buffers, so one engine can serve many streams of the
 same plan geometry. (`CohFDMT` does not need it: it is stateless across
 blocks, see [Coherent Hybrid Search](coherent_hybrid.md).) On a GPU backend the history lives in device memory;
 the `DeviceSpan` overloads (C++ only) are asynchronous on the given stream,

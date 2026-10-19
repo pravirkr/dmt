@@ -95,12 +95,13 @@ std::vector<uint8_t> pack_rows(const std::vector<uint32_t>& v,
     return out;
 }
 
-// Each beam's leading get_dmt_size() values (the rest is scratch).
+// Each beam's get_dmt_size() values (beams are dmt_size apart: compact
+// output).
 std::vector<float> dmt_result(const FDMT& f, const std::vector<float>& buf) {
     const auto& plan = f.get_plan();
     std::vector<float> out;
     for (SizeType b = 0; b < f.get_nbeams(); ++b) {
-        const auto* p = buf.data() + (b * plan.get_buffer_size());
+        const auto* p = buf.data() + (b * plan.get_dmt_size());
         out.insert(out.end(), p, p + plan.get_dmt_size());
     }
     return out;
@@ -146,8 +147,7 @@ TEST_CASE("parity: FDMT on every GPU backend matches the CPU bitwise",
                                              int_tree);
                                     REQUIRE(gpu.backend() == backend);
                                     const auto n =
-                                        nbeams *
-                                        cpu.get_plan().get_buffer_size();
+                                        nbeams * cpu.get_plan().get_dmt_size();
                                     const auto max_val =
                                         nbits == 0
                                             ? 7U
@@ -203,7 +203,7 @@ TEST_CASE("parity: FDMT GPU float input matches the CPU closely",
                  "valid", Exec::cpu(1));
         FDMT gpu(1000.0F, 1500.0F, kNchans, kNsamps, 0.001F, kDtMax, 0, 1, true,
                  "valid", exec_of(backend));
-        std::vector<float> out_cpu(cpu.get_plan().get_buffer_size());
+        std::vector<float> out_cpu(cpu.get_plan().get_dmt_size());
         std::vector<float> out_gpu(out_cpu.size());
         cpu.execute(wf, out_cpu);
         gpu.execute(wf, out_gpu);
@@ -224,7 +224,7 @@ TEST_CASE("parity: FDMT GPU host stepper and history match the CPU",
                      true, "valid", Exec::cpu(1), 1, 0, false);
             FDMT gpu(1000.0F, 1500.0F, kNchans, kNsamps, 0.001F, kDtMax, 0, 1,
                      true, "valid", exec_of(backend), 1, 0, false);
-            const auto n   = cpu.get_plan().get_buffer_size();
+            const auto n   = cpu.get_plan().get_dmt_size();
             const auto wf0 = as_floats(random_ints(kNchans * kNsamps, 5, 1));
             const auto wf1 = as_floats(random_ints(kNchans * kNsamps, 5, 2));
             const auto wf2 = as_floats(random_ints(kNchans * kNsamps, 5, 3));

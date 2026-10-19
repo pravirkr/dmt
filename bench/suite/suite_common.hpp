@@ -1,16 +1,20 @@
 #pragma once
 
-// Published benchmark suite (dmt_bench_suite): one fixed data configuration
-// shared by every algorithm and backend, so FDMT, FDMT-FFT (integer and
-// fractional merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force)
-// land
-// on the same plots. Only the block length (nsamps), the number of DM trials
-// (via dt_max) and the input bit width are swept. See bench/README.md.
+// Published benchmark suite (dmt_bench_suite): one data configuration shared
+// by every algorithm and backend, so FDMT, FDMT-FFT (integer and fractional
+// merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force) land on the
+// same plots. The default configuration is the CryoPAF incoherent search at
+// Parkes, the configuration of every published result (the sensitivity
+// study: dmtlib.sensitivity.CRYOPAF); DMT_BENCH_CONFIG=cryopaf4k selects its
+// 4096-channel twin (dmtlib.sensitivity.CRYOPAF_4K). Only the block length
+// (nsamps), the DM range (dm_max, hence the number of trials) and the input
+// bit width are swept. See bench/README.md.
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,20 +26,82 @@
 
 namespace dmt::bench_suite {
 
-// Fixed configuration: 4096 channels over 704-1216 MHz at 81.92 us.
-inline constexpr float kFMin      = 704.0F;
-inline constexpr float kFMax      = 1216.0F;
-inline constexpr float kTsamp     = 8.192e-5F;
-inline constexpr SizeType kNchans = 4096;
+// Two configurations, selected with DMT_BENCH_CONFIG (run_suite.py
+// --config), both 704-1216 MHz at 512 us on the piecewise-uniform Levin grid
+// from DM 0 (every engine gets the same grid; the FDMT engines round it to
+// integer delays, and DDMT-FFT runs one NUFFT per uniform segment):
+// - "cryopaf" (default, the published one): 1024 channels, DM 0-2000, Levin
+//   tolerance 1.1 (2501 trials). Few channels and a sparse grid: the
+//   regime least favourable to the FDMT (~14x fewer operations than brute
+//   force).
+// - "cryopaf4k": 4096 channels, DM 0-1000, Levin tolerance 1.05 (5183
+//   trials). Fine channels and a dense grid (~150x fewer FDMT operations).
+// The benchmark names do not carry the configuration; run_suite.py writes
+// each one to its own results tree.
+struct SuiteConfig {
+    std::string_view name;
+    float f_min;
+    float f_max;
+    float tsamp;
+    SizeType nchans;
+    float levin_tol;
+    // Reference point every sweep passes through.
+    SizeType nsamps_ref;
+    float dm_max_ref;
+    std::vector<SizeType> nsamps_sweep;
+    std::vector<float> dm_max_sweep;
+};
 
-// Reference point every sweep passes through.
-inline constexpr SizeType kNsampsRef = 16384;
-inline constexpr IndexType kDtMaxRef = 2048; // 2049 DM trials
+inline const SuiteConfig& suite_config() {
+    static const SuiteConfig cfg = [] {
+        // 32768 samples (16.8 s) is 1.5x the 21 762-sample delay at DM 2000
+        // (cryopaf) and 3x the 10 877-sample delay at DM 1000 (cryopaf4k).
+        SuiteConfig cryopaf{"cryopaf",
+                            704.0F,
+                            1216.0F,
+                            5.12e-4F,
+                            1024,
+                            1.1F,
+                            32768,
+                            2000.0F,
+                            {8192, 16384, 32768, 65536},
+                            {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
+        SuiteConfig cryopaf4k{"cryopaf4k",
+                              704.0F,
+                              1216.0F,
+                              5.12e-4F,
+                              4096,
+                              1.05F,
+                              32768,
+                              1000.0F,
+                              {8192, 16384, 32768, 65536},
+                              {125.0F, 250.0F, 500.0F, 1000.0F}};
+        const char* env = std::getenv("DMT_BENCH_CONFIG"); // NOLINT
+        const std::string_view sel =
+            (env != nullptr && *env != '\0') ? env : "cryopaf";
+        if (sel == "cryopaf") {
+            return cryopaf;
+        }
+        if (sel == "cryopaf4k") {
+            return cryopaf4k;
+        }
+        throw std::invalid_argument(std::format(
+            "DMT_BENCH_CONFIG={}: expected cryopaf or cryopaf4k", sel));
+    }();
+    return cfg;
+}
 
-inline const std::vector<SizeType> kNsampsSweep = {4096, 8192, 16384, 32768,
-                                                   65536};
-inline const std::vector<IndexType> kDtMaxSweep = {256, 512, 1024, 2048, 4096};
-inline const std::vector<SizeType> kNbitsSweep  = {1, 2, 4, 8, 16, 32};
+// Shorthands for the active configuration.
+inline const float kFMin                         = suite_config().f_min;
+inline const float kFMax                         = suite_config().f_max;
+inline const float kTsamp                        = suite_config().tsamp;
+inline const SizeType kNchans                    = suite_config().nchans;
+inline const float kLevinTol                     = suite_config().levin_tol;
+inline const SizeType kNsampsRef                 = suite_config().nsamps_ref;
+inline const float kDmMaxRef                     = suite_config().dm_max_ref;
+inline const std::vector<SizeType>& kNsampsSweep = suite_config().nsamps_sweep;
+inline const std::vector<float>& kDmMaxSweep     = suite_config().dm_max_sweep;
+inline const std::vector<SizeType> kNbitsSweep   = {1, 2, 4, 8, 16, 32};
 
 enum class Sweep { kNsamps, kNdms, kNbits };
 enum class Algo {
@@ -51,7 +117,7 @@ enum class Algo {
 struct Point {
     Sweep sweep;
     SizeType nsamps;
-    IndexType dt_max;
+    float dm_max;
     SizeType nbits;
 };
 
@@ -93,21 +159,29 @@ inline std::vector<Point> sweep_points(Sweep sweep) {
     switch (sweep) {
     case Sweep::kNsamps:
         for (const auto n : kNsampsSweep) {
-            points.push_back({sweep, n, kDtMaxRef, 32});
+            points.push_back({sweep, n, kDmMaxRef, 32});
         }
         break;
     case Sweep::kNdms:
-        for (const auto dt : kDtMaxSweep) {
-            points.push_back({sweep, kNsampsRef, dt, 32});
+        for (const auto dm : kDmMaxSweep) {
+            points.push_back({sweep, kNsampsRef, dm, 32});
         }
         break;
     case Sweep::kNbits:
         for (const auto b : kNbitsSweep) {
-            points.push_back({sweep, kNsampsRef, kDtMaxRef, b});
+            points.push_back({sweep, kNsampsRef, kDmMaxRef, b});
         }
         break;
     }
     return points;
+}
+
+/// The reference point (both sweeps through it, float32 input): where the
+/// verification-only engines (FDMT-FFT with integer delays, brute-force
+/// DDMT-FFT) are timed.
+inline bool is_reference(const Point& p) {
+    return p.sweep == Sweep::kNdms && p.nsamps == kNsampsRef &&
+           p.dm_max == kDmMaxRef && p.nbits == 32;
 }
 
 /// CPU thread counts: DMT_BENCH_THREADS="1,8" (the default).
@@ -139,21 +213,28 @@ inline int cpu_threads_max() {
 
 /**
  * Benchmark name, parsed by bench/scripts/plot_suite.py:
- * "suite/<sweep>/<algo>/<backend>/nsamps:<n>/dtmax:<dt>/nbits:<b>".
+ * "suite/<sweep>/<algo>/<backend>/nsamps:<n>/dmmax:<dm>/nbits:<b>".
  * backend is "cpu<threads>", "cuda" (device-resident) or "cuda_host"
  * (host arrays, including PCIe transfers).
  */
 inline std::string
 bench_name(Algo algo, std::string_view backend, const Point& p) {
-    return std::format("suite/{}/{}/{}/nsamps:{}/dtmax:{}/nbits:{}",
+    return std::format("suite/{}/{}/{}/nsamps:{}/dmmax:{:g}/nbits:{}",
                        sweep_name(p.sweep), algo_name(algo), backend, p.nsamps,
-                       p.dt_max, p.nbits);
+                       p.dm_max, p.nbits);
 }
 
-/// The FDMT plan of a point; its final DM grid is given to DDMT too, so all
-/// three algorithms compute the identical trial set.
+/// The DM grid of a point: the piecewise-uniform Levin grid from 0 to
+/// dm_max (pulse width one sample), given to every engine.
+inline std::vector<float> dm_grid(const Point& p) {
+    return plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, p.dm_max, kTsamp, kTsamp, kFMin, kFMax, kNchans, kLevinTol);
+}
+
+/// The FDMT plan of a point (its grid rounds dm_grid() to integer delays,
+/// keeping every trial: the grid steps are at least 3 samples).
 inline plans::FDMTPlan make_plan(const Point& p) {
-    return {kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, "valid"};
+    return {kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), "valid"};
 }
 
 /// Memory budget in bytes: DMT_BENCH_MAX_GB (set by run_suite.py; 16 GB if
@@ -173,9 +254,11 @@ estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
         ((p.nbits == 32) ? 4.0 : static_cast<double>(p.nbits) / 8.0);
     const double b = static_cast<double>(plan.get_buffer_size()) * 4.0;
     const double d = static_cast<double>(plan.get_dmt_size()) * 4.0;
+    // The FDMT runs blocks in chunks whose two state halves fit 2 GiB.
+    constexpr double kChunkStateBudget = 2.0 * 1024.0 * 1024.0 * 1024.0;
     switch (algo) {
-    case Algo::kFDMT: // caller buffer + internal ping-pong half
-        return input + (2.0 * b);
+    case Algo::kFDMT: // output + the engine's two state halves
+        return input + d + std::min(2.0 * b, kChunkStateBudget);
     case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
     case Algo::kFDMTFFTFrac:
     case Algo::kDDMTFFT:
@@ -185,7 +268,9 @@ estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
                 static_cast<double>(kNchans + plan.get_dmt_ndms()));
     case Algo::kDDMT: // output + one block of history per channel
     case Algo::kSDMT:
-        return input + d + (static_cast<double>(kNchans) * 4.0 * p.dt_max);
+        return input + d +
+               (static_cast<double>(kNchans) * 4.0 *
+                static_cast<double>(plan.get_dt_max()));
     }
     return 0.0;
 }
@@ -198,6 +283,7 @@ inline void set_counters(benchmark::State& state,
     state.counters["nsamps"]   = static_cast<double>(p.nsamps);
     state.counters["ndms"]     = static_cast<double>(plan.get_dmt_ndms());
     state.counters["nchans"]   = static_cast<double>(kNchans);
+    state.counters["dm_max"]   = static_cast<double>(p.dm_max);
     state.counters["nbits"]    = static_cast<double>(p.nbits);
     state.counters["nthreads"] = static_cast<double>(nthreads);
     state.counters["block_s"]  = static_cast<double>(p.nsamps) * kTsamp;
@@ -214,6 +300,21 @@ inline void set_ddmt_rate(benchmark::State& state,
                                static_cast<double>(plan.get_dmt_ndms()) *
                                static_cast<double>(p.nsamps),
                            benchmark::Counter::kIsIterationInvariantRate);
+}
+
+/// Warm-up of a streaming direct engine (DDMT, SDMT, DDMT-FFT): runs
+/// `run(n)` -- one block into an output of n samples per trial -- until a
+/// call returns the whole block. Blocks shorter than the largest delay need
+/// several calls before the history is full.
+template <typename Engine, typename Run>
+void warm_up_stream(const Engine& engine, SizeType nsamps, Run&& run) {
+    for (int call = 0; call < 1024; ++call) {
+        const SizeType n = engine.get_output_nsamps(nsamps);
+        run(n);
+        if (n == nsamps) {
+            return;
+        }
+    }
 }
 
 /// Deterministic input: float samples in [0, 1) or packed random bytes.

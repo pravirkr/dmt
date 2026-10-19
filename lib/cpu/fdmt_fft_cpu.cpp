@@ -373,6 +373,7 @@ private:
     SizeType m_nbeams;
     int m_nthreads;
     bool m_use_box_smearing;
+    std::vector<float> m_box_wf; // level-0 box-mean weights by |dt|
     FDMTMode m_mode;
     bool m_frac;                 // exact merge delays
     std::vector<uint8_t> m_kill; // per channel, 1 = keep (empty: all)
@@ -445,11 +446,22 @@ private:
         m_ndms             = m_plan->get_dmt_ndms();
         m_max_s            = m_plan->get_max_shift();
         m_dt0_max          = plan_c.state_shape[0].dt_max;
-        m_geom             = fdmt_fft::make_geometry(*m_plan, m_mode, m_frac,
-                                                     m_use_box_smearing);
-        m_overlap_len      = m_geom.overlap;
-        m_nsamps_out       = m_plan->get_dmt_nsamps();
-        m_single_skip      = m_geom.skip;
+        // Level-0 box-mean weights w(s + 1) * 2^-b by |dt| = s, the FDMT's
+        // own (fdmt_box_weights.hpp), so both transforms agree.
+        {
+            const auto weights = m_plan->get_box_weights();
+            const float unit   = std::ldexp(
+                1.0F, -static_cast<int>(m_plan->get_box_fraction_bits()));
+            m_box_wf.resize(weights.size());
+            for (SizeType i = 0; i < weights.size(); ++i) {
+                m_box_wf[i] = static_cast<float>(weights[i]) * unit;
+            }
+        }
+        m_geom        = fdmt_fft::make_geometry(*m_plan, m_mode, m_frac,
+                                                m_use_box_smearing);
+        m_overlap_len = m_geom.overlap;
+        m_nsamps_out  = m_plan->get_dmt_nsamps();
+        m_single_skip = m_geom.skip;
         if (m_mode == FDMTMode::kValid && m_nsamps_out != m_nsamps) {
             throw std::logic_error("FDMTFFT: valid mode expects nsamps output");
         }
@@ -886,9 +898,11 @@ private:
         for (SizeType s = 0; s <= m_dt0_max; ++s) {
             const float* qs = q + (s * kTileFl);
             float* out      = w.w0.data() + (s * kTileFl);
+            // Box smearing: the box sum times its box-mean weight.
+            const float scale = norm * m_box_wf[s];
             for (SizeType j = 0; j < kTileFl; ++j) {
                 acc[j] += qs[j];
-                out[j] = (m_use_box_smearing ? acc[j] : qs[j]) * norm;
+                out[j] = m_use_box_smearing ? acc[j] * scale : qs[j] * norm;
             }
         }
     }
@@ -1153,9 +1167,10 @@ private:
             }
             const ComplexType* spec =
                 &m_step_spectra[node.chan * g.bins_stride];
-            ComplexType* out = state + (static_cast<SizeType>(i) * g.n_bins);
+            ComplexType* out  = state + (static_cast<SizeType>(i) * g.n_bins);
+            const float scale = m_use_box_smearing ? norm * m_box_wf[s] : norm;
             for (SizeType k = 0; k < g.n_bins; ++k) {
-                out[k] = spec[k] * win[k] * norm;
+                out[k] = spec[k] * win[k] * scale;
             }
         }
     }

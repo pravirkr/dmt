@@ -168,7 +168,9 @@ For Gaussian noise the output then has zero mean, and row `i` has variance
 `plan.get_effective_variance_grid(w)[i]` after a boxcar of `w` samples. That
 value is exact, not an estimate:
 
-- it includes the FDMT's box smearing;
+- it includes the FDMT's box smearing, with the fine FDMT's box-mean weights
+  (each channel contributes the weighted mean of its level-0 box; see
+  {ref}`box means <box-mean>`);
 - it includes the small correlation between neighbouring samples of a channel
   that the channel filter introduces (`plan.get_lag_correlation`: about 0.4%
   per lag, which adds a few percent for long boxcars).
@@ -178,8 +180,10 @@ calibration run on noise or on an array of ones. The statistics are
 per-block, so a very bright pulse slightly raises its own block's mean power;
 use blocks much longer than the pulses you search for.
 
-With `normalize=False` the output is raw detected power. Row `i` then sums
-`plan.get_cumulative_count_grid()[i]` channel samples.
+With `normalize=False` the output is raw detected power in box-mean units.
+`plan.get_cumulative_count_grid()[i]` is row `i`'s DC gain, the output for a
+unit constant input: $\sum_c w_c L_c$ over channels, box-mean weight times
+box length, about `nchans` (no longer the number of channel samples summed).
 
 ## Performance notes
 

@@ -26,7 +26,7 @@ TEST_CASE("parity: FDMT (gpu) execute and stepper match CPU",
     FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
     FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, 0, 1,
              true, "valid", test::gpu_exec());
-    const auto n = cpu.get_plan().get_buffer_size();
+    const auto n = cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_gpu(n, 0.0F);
     cpu.execute(waterfall, dmt_cpu);
@@ -99,15 +99,17 @@ TEST_CASE("parity: FDMT (gpu) add_frb_track recovery matches CPU",
     const auto& plan = cpu.get_plan();
     std::vector<float> waterfall(nchans * nsamps, 0.0F);
     algorithms::add_frb_track(waterfall, plan, 8, 1.0F, 40, 1);
-    const auto n = plan.get_buffer_size();
+    const auto n = plan.get_dmt_size();
     std::vector<float> dmt_cpu(n, 0.0F);
     std::vector<float> dmt_gpu(n, 0.0F);
     cpu.execute(waterfall, dmt_cpu);
     gpu.execute(waterfall, dmt_gpu);
     test::require_approx(dmt_gpu, dmt_cpu, plan.get_dmt_size());
     const auto ns = plan.get_dmt_nsamps();
-    CHECK(dmt_cpu[(8 * ns) + 40] == Catch::Approx(static_cast<float>(nchans)));
-    CHECK(dmt_gpu[(8 * ns) + 40] == Catch::Approx(static_cast<float>(nchans)));
+    // Box smearing (default): the sum of the channels' box-mean weights.
+    const auto gain = test::frb_track_gain(plan, 8, true);
+    CHECK(dmt_cpu[(8 * ns) + 40] == Catch::Approx(gain));
+    CHECK(dmt_gpu[(8 * ns) + 40] == Catch::Approx(gain));
 }
 
 TEST_CASE("parity: FDMT (gpu) valid-mode second block matches CPU",
@@ -117,7 +119,7 @@ TEST_CASE("parity: FDMT (gpu) valid-mode second block matches CPU",
     FDMT cpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16);
     FDMT gpu(test::kFMin, test::kFMax, nchans, nsamps, test::kTsamp, 16, 0, 1,
              true, "valid", test::gpu_exec());
-    const auto n = cpu.get_plan().get_buffer_size();
+    const auto n = cpu.get_plan().get_dmt_size();
     auto block1  = test::sequential_waterfall(nchans, nsamps, 17, 1);
     auto block2  = test::sequential_waterfall(nchans, nsamps, 13, 3);
     std::vector<float> cpu1(n, 0.0F);

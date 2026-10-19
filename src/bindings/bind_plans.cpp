@@ -282,10 +282,49 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("dmt_size", &FDMTPlan::get_dmt_size)
         .def_property_readonly("buffer_size", &FDMTPlan::get_buffer_size)
         .def_property_readonly("history_size", &FDMTPlan::get_history_size)
-        .def_property_readonly("history_init_size",
-                               &FDMTPlan::get_history_init_size)
         .def_property_readonly("tree_history_size",
                                &FDMTPlan::get_tree_history_size)
+        .def_property_readonly("box_fraction_bits",
+                               &FDMTPlan::get_box_fraction_bits,
+                               R"doc(
+            Common scale ``B`` of the level-0 box-mean weights
+            (``use_box_smearing=True``): ``B = ceil(log2(L_max)) + 2``, with
+            ``L_max`` the widest level-0 box. See :attr:`box_weights`.
+            )doc")
+        .def_property_readonly(
+            "box_weights",
+            [](const FDMTPlan& plan) {
+                return as_pyarray(plan.get_box_weights());
+            },
+            R"doc(
+            Integer box-mean weights for box lengths ``L = 1 .. L_max``
+            (entry ``L - 1``), on the common scale ``2**-B``
+            (``B = box_fraction_bits``).
+
+            With box smearing each level-0 box of ``L`` samples is averaged:
+            its sum times ``box_weights[L - 1] * 2**-B = round(2**b / L) * 2**-b`` with
+            ``b = ceil(log2(L)) + 2``: within 1/8 of ``1/L``, so every channel
+            contributes its box *mean*, the matched filter for its
+            intra-channel smearing (under 0.15% of S/N from the exact mean).
+            The weight depends on ``L`` alone, and the integer form keeps
+            ``int_tree`` exact.
+            )doc")
+        .def_property_readonly("box_mean_bits", &FDMTPlan::get_box_mean_bits,
+                               R"doc(
+            Common fixed-point scale ``F`` of the rounded box means of packed
+            low-bit input (``use_box_smearing=True``).
+
+            Packed input holds exact integers, and its level-0 box means are
+            kept as integers: the dyadic mean of a box of ``L`` samples (see
+            :attr:`box_weights`) is rounded half up to ``f(L)`` fractional
+            bits, the smallest ``f`` with ``3 * 4**f >= 50 * L``, and stored in
+            units of ``2**-F``, ``F = f(L_max)``. The rounding noise is at most
+            2% of the box-mean noise for input with ``sigma >= 0.5`` LSB (S/N
+            loss <= 0.5%), and the integer tree (``int_tree``) stays narrow.
+            Packed results are bit-identical with ``int_tree`` on and off, and
+            within ``2**-(f + 1)`` per channel of float input with the same
+            values. Float input (and FDMT-FFT) uses the exact dyadic mean.
+            )doc")
         .def("summary", &FDMTPlan::summary, "prefix"_a = "",
              "Human-readable summary of the plan (dimensions, memory, "
              "per-level shapes); each line starts with ``prefix``.");
@@ -393,7 +432,9 @@ void bind_plans(py::module_& mod) {
             [](const CohFDMTPlan& plan) {
                 return as_pyarray(plan.get_cumulative_count_grid());
             },
-            "Channel samples summed into every row (box smearing included).")
+            "DC gain of every row: the output for a unit constant input, the "
+            "sum over channels of box-mean weight times box length (about "
+            "``nchans``).")
         .def(
             "get_lag_correlation",
             [](const CohFDMTPlan& plan, SizeType max_lag) {

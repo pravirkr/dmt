@@ -3,17 +3,22 @@
 #include <catch2/matchers/catch_matchers_all.hpp>
 
 #include <cstddef>
+#include <cstdint>
+#include <random>
 #include <span>
+#include <stdexcept>
 #include <thrust/device_vector.h>
 #include <vector>
 #include "dmt/gpu_compat.cuh"
 
 #include "dmt/algorithms/fdmt.hpp"
+#include "dmt/bit_pack_utils.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
 
 using algorithms::FDMT;
+using algorithms::kFDMTAutoFuse;
 
 TEST_CASE("FDMT Constructor and getter methods", "[fdmt_gpu][gpu]") {
 
@@ -39,7 +44,7 @@ TEST_CASE("FDMT execute method (on device)", "[fdmt_gpu][gpu]") {
                    "valid", test::gpu_exec());
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt(dmt_size, 0.0F);
     thrust::device_vector<float> dmt_d = dmt;
     REQUIRE_NOTHROW(fdmt_cpu.execute(waterfall, dmt));
@@ -61,7 +66,7 @@ TEST_CASE("FDMT execute method (on host)", "[fdmt_gpu][gpu]") {
     FDMT fdmt_cuda(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0, 1, true,
                    "valid", test::gpu_exec());
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt(dmt_size, 0.0F);
     std::vector<float> dmt_h(dmt_size, 0.0F);
     REQUIRE_NOTHROW(fdmt_cpu.execute(waterfall, dmt));
@@ -84,19 +89,21 @@ TEST_CASE("FDMT host-memory execute matches device execute (large, "
                       "valid", test::gpu_exec(), nbeams);
             FDMT dev(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 256, 0, 1, true,
                      "valid", test::gpu_exec(), nbeams);
-            const auto buf      = host.get_plan().get_buffer_size();
+            // Output beams are dmt_size apart (compact output); the host
+            // buffer is larger to check the tail beyond the result.
             const auto dsz      = host.get_plan().get_dmt_size();
+            const SizeType tail = 1024;
             const auto in_bytes = nbits == 32
                                       ? nbeams * nchans * nsamps * sizeof(float)
                                       : nbeams * nchans * nsamps / 8;
-            thrust::device_vector<float> d_out(nbeams * buf);
+            thrust::device_vector<float> d_out(nbeams * dsz);
             for (int call = 0; call < 2; ++call) {
                 std::vector<uint8_t> in(in_bytes);
                 for (SizeType i = 0; i < in.size(); ++i) {
                     in[i] =
                         static_cast<uint8_t>((i * 2654435761U) >> 13) & 0x3F;
                 }
-                std::vector<float> h_out(nbeams * buf, -1.0F);
+                std::vector<float> h_out((nbeams * dsz) + tail, -1.0F);
                 const thrust::device_vector<uint8_t> d_in(in.begin(), in.end());
                 if (nbits == 32) {
                     const std::span<const float> fin(
@@ -124,13 +131,14 @@ TEST_CASE("FDMT host-memory execute matches device execute (large, "
                 std::vector<float> expected(d_out.size());
                 thrust::copy(d_out.begin(), d_out.end(), expected.begin());
                 for (SizeType b = 0; b < nbeams; ++b) {
-                    const auto first = h_out.begin() + (b * buf);
+                    const auto first = h_out.begin() + (b * dsz);
                     REQUIRE(std::equal(first, first + dsz,
-                                       expected.begin() + (b * buf)));
-                    // The scratch tail beyond the result is left untouched.
-                    REQUIRE(std::all_of(first + dsz, first + buf,
-                                        [](float v) { return v == -1.0F; }));
+                                       expected.begin() + (b * dsz)));
                 }
+                // The tail beyond the (nbeams * dmt_size) result is left
+                // untouched.
+                REQUIRE(std::all_of(h_out.begin() + (nbeams * dsz), h_out.end(),
+                                    [](float v) { return v == -1.0F; }));
             }
         }
     }
@@ -145,7 +153,7 @@ TEST_CASE("FDMT stepper: bit-exact equivalence with single-shot execute on "
     FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_ref(dmt_size, 0.0F);
     fdmt_cpu.execute(waterfall, dmt_ref);
 
@@ -178,7 +186,7 @@ TEST_CASE("FDMT stepper: 1 level remaining (2 subbands) on device",
     FDMT fdmt_cpu(1000.0F, 1500.0F, 500, 1024, 0.001F, 512, 0);
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
     std::vector<float> dmt_ref(dmt_size, 0.0F);
     fdmt_cpu.execute(waterfall, dmt_ref);
 
@@ -219,7 +227,7 @@ TEST_CASE("FDMT stepper: 2 levels remaining (4 subbands) on device",
                    "valid", test::gpu_exec());
     std::vector<float> waterfall(static_cast<size_t>(500 * 1024), 1.0F);
     thrust::device_vector<float> waterfall_d = waterfall;
-    const size_t dmt_size = fdmt_cuda.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cuda.get_plan().get_dmt_size();
     thrust::device_vector<float> dmt_d(dmt_size, 0.0F);
 
     auto d_wf_span = DeviceSpan<const float>(
@@ -247,7 +255,7 @@ TEST_CASE("FDMT valid-mode stepper must finish a block before the next",
     FDMT fdmt_cuda(1000.0F, 1500.0F, 64, 256, 0.001F, 64, 0, 1, true, "valid",
                    test::gpu_exec());
     thrust::device_vector<float> waterfall_d(64 * 256, 1.0F);
-    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_buffer_size());
+    thrust::device_vector<float> dmt_d(fdmt_cuda.get_plan().get_dmt_size());
     const auto d_wf = DeviceSpan<const float>(
         thrust::raw_pointer_cast(waterfall_d.data()), waterfall_d.size());
     const auto d_dmt =
@@ -283,7 +291,7 @@ TEST_CASE("FDMT valid mode parity between CPU and CUDA",
 
     std::vector<float> wf1(16 * 1024, 1.0F);
     std::vector<float> wf2(16 * 1024, 2.0F);
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
 
     std::vector<float> dmt_cpu1(dmt_size, 0.0F);
     std::vector<float> dmt_cuda1(dmt_size, 0.0F);
@@ -312,7 +320,7 @@ TEST_CASE("FDMT roll mode parity between CPU and CUDA",
     for (size_t i = 0; i < wf.size(); ++i) {
         wf[i] = static_cast<float>((i % 13) + 1);
     }
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
 
     std::vector<float> dmt_cpu(dmt_size, 0.0F);
     std::vector<float> dmt_cuda(dmt_size, 0.0F);
@@ -344,11 +352,11 @@ TEST_CASE("FDMT odd channels and padding safety on device", "[fdmt_gpu][gpu]") {
                 waterfall[i] = static_cast<float>((i % 7) + 1);
             }
 
-            std::vector<float> dmt_ref(plan.get_buffer_size(), 0.0F);
+            std::vector<float> dmt_ref(plan.get_dmt_size(), 0.0F);
             fdmt_cpu.execute(waterfall, dmt_ref);
 
             thrust::device_vector<float> waterfall_d = waterfall;
-            thrust::device_vector<float> dmt_d(plan.get_buffer_size(), -42.0F);
+            thrust::device_vector<float> dmt_d(plan.get_dmt_size(), -42.0F);
             auto d_wf_span = DeviceSpan<const float>(
                 thrust::raw_pointer_cast(waterfall_d.data()),
                 waterfall_d.size());
@@ -361,7 +369,7 @@ TEST_CASE("FDMT odd channels and padding safety on device", "[fdmt_gpu][gpu]") {
             }
             fdmt_cuda.finalize();
 
-            std::vector<float> dmt_h(plan.get_buffer_size(), 0.0F);
+            std::vector<float> dmt_h(plan.get_dmt_size(), 0.0F);
             thrust::copy(dmt_d.begin(), dmt_d.end(), dmt_h.begin());
 
             const auto dmt_size = plan.get_dmt_size();
@@ -381,7 +389,7 @@ TEST_CASE("FDMT no box smearing parity between CPU and CUDA",
     for (size_t i = 0; i < wf.size(); ++i) {
         wf[i] = static_cast<float>((i % 19) + 1);
     }
-    const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+    const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
 
     std::vector<float> dmt_cpu(dmt_size, 0.0F);
     std::vector<float> dmt_cuda(dmt_size, 0.0F);
@@ -418,7 +426,7 @@ TEST_CASE("FDMT negative and symmetric dispersion parity between CPU and CUDA",
             for (size_t i = 0; i < wf.size(); ++i) {
                 wf[i] = static_cast<float>((i % 23) + 1);
             }
-            const size_t dmt_size = fdmt_cpu.get_plan().get_buffer_size();
+            const size_t dmt_size = fdmt_cpu.get_plan().get_dmt_size();
             std::vector<float> dmt_cpu(dmt_size, 0.0F);
             std::vector<float> dmt_cuda(dmt_size, 0.0F);
             fdmt_cpu.execute(wf, dmt_cpu);
@@ -450,7 +458,7 @@ TEST_CASE("FDMT add_frb_track pulse recovery parity between CPU and CUDA",
     algorithms::add_frb_track(waterfall, plan, /*dm_idx=*/16, 1.0F,
                               static_cast<IndexType>(toffset), 1);
 
-    const size_t dmt_size = plan.get_buffer_size();
+    const size_t dmt_size = plan.get_dmt_size();
     std::vector<float> dmt_cpu(dmt_size, 0.0F);
     std::vector<float> dmt_cuda(dmt_size, 0.0F);
     fdmt_cpu.execute(waterfall, dmt_cpu);
@@ -459,8 +467,10 @@ TEST_CASE("FDMT add_frb_track pulse recovery parity between CPU and CUDA",
     const auto dmt_nsamps = plan.get_dmt_nsamps();
     const auto value_cpu  = dmt_cpu[(16 * dmt_nsamps) + toffset];
     const auto value_cuda = dmt_cuda[(16 * dmt_nsamps) + toffset];
-    CHECK(value_cpu == Catch::Approx(static_cast<float>(nchans)));
-    CHECK(value_cuda == Catch::Approx(static_cast<float>(nchans)));
+    // Box smearing (default): the sum of the channels' box-mean weights.
+    const auto gain = test::frb_track_gain(plan, 16, true);
+    CHECK(value_cpu == Catch::Approx(gain));
+    CHECK(value_cuda == Catch::Approx(gain));
 }
 
 TEST_CASE("FDMT get_effective_variance parity between CPU and CUDA",
@@ -498,7 +508,7 @@ TEST_CASE("FDMT valid-mode tree-history streaming parity between CPU and CUDA",
     for (size_t i = 0; i < waterfall.size(); ++i) {
         waterfall[i] = static_cast<float>((i % 23) + 1);
     }
-    std::vector<float> dmt_full(fdmt_full.get_plan().get_buffer_size(), 0.0F);
+    std::vector<float> dmt_full(fdmt_full.get_plan().get_dmt_size(), 0.0F);
     fdmt_full.execute(waterfall, dmt_full);
     const auto full_nsamps = fdmt_full.get_plan().get_dmt_nsamps();
 
@@ -518,9 +528,9 @@ TEST_CASE("FDMT valid-mode tree-history streaming parity between CPU and CUDA",
                         block_size, block.data() + (c * block_size));
         }
         std::vector<float> dmt_block_cpu(
-            fdmt_cpu_valid.get_plan().get_buffer_size(), 0.0F);
+            fdmt_cpu_valid.get_plan().get_dmt_size(), 0.0F);
         std::vector<float> dmt_block_cuda(
-            fdmt_cuda_valid.get_plan().get_buffer_size(), 0.0F);
+            fdmt_cuda_valid.get_plan().get_dmt_size(), 0.0F);
         fdmt_cpu_valid.execute(block, dmt_block_cpu);
         fdmt_cuda_valid.execute(block, dmt_block_cuda);
         for (size_t d = 0; d < ndms; ++d) {
@@ -568,21 +578,18 @@ TEST_CASE("FDMT reset_history() on CUDA matches a fresh instance",
 
     FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1, true,
               "valid", test::gpu_exec());
-    std::vector<float> dmt1(fdmt.get_plan().get_buffer_size(), 0.0F);
-    std::vector<float> dmt2_with_history(fdmt.get_plan().get_buffer_size(),
-                                         0.0F);
+    std::vector<float> dmt1(fdmt.get_plan().get_dmt_size(), 0.0F);
+    std::vector<float> dmt2_with_history(fdmt.get_plan().get_dmt_size(), 0.0F);
     fdmt.execute(block1, dmt1);
     fdmt.execute(block2, dmt2_with_history);
 
     fdmt.reset_history();
-    std::vector<float> dmt2_after_reset(fdmt.get_plan().get_buffer_size(),
-                                        0.0F);
+    std::vector<float> dmt2_after_reset(fdmt.get_plan().get_dmt_size(), 0.0F);
     fdmt.execute(block2, dmt2_after_reset);
 
     FDMT fdmt_fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
                     true, "valid", test::gpu_exec());
-    std::vector<float> dmt2_fresh(fdmt_fresh.get_plan().get_buffer_size(),
-                                  0.0F);
+    std::vector<float> dmt2_fresh(fdmt_fresh.get_plan().get_dmt_size(), 0.0F);
     fdmt_fresh.execute(block2, dmt2_fresh);
 
     REQUIRE_THAT(dmt2_after_reset,
@@ -627,7 +634,7 @@ TEST_CASE("FDMT add_frb_track recovery across a valid-mode block boundary "
             std::copy_n(waterfall.data() + (c * total) + (b * block_size),
                         block_size, block.data() + (c * block_size));
         }
-        std::vector<float> dmt_block(fdmt_valid.get_plan().get_buffer_size(),
+        std::vector<float> dmt_block(fdmt_valid.get_plan().get_dmt_size(),
                                      0.0F);
         fdmt_valid.execute(block, dmt_block);
         for (size_t d = 0; d < ndms; ++d) {
@@ -667,8 +674,8 @@ TEST_CASE("FDMT valid-mode tree-history streaming parity with CPU in "
     const auto& plan = fdmt_cpu.get_plan();
     const auto ndms  = plan.get_dmt_ndms();
     std::vector<float> block(nchans * block_size);
-    std::vector<float> dmt_cpu_block(plan.get_buffer_size(), 0.0F);
-    std::vector<float> dmt_cuda_block(plan.get_buffer_size(), 0.0F);
+    std::vector<float> dmt_cpu_block(plan.get_dmt_size(), 0.0F);
+    std::vector<float> dmt_cuda_block(plan.get_dmt_size(), 0.0F);
 
     for (SizeType b = 0; b < n_blocks; ++b) {
         for (SizeType c = 0; c < nchans; ++c) {
@@ -706,7 +713,8 @@ TEST_CASE("FDMT FDMT nbeams>1 multi-beam execution parity with single-beam",
                     true, "full", test::gpu_exec(), nbeams);
     CHECK(fdmt_multi.get_nbeams() == nbeams);
 
-    const auto buf_size = fdmt_multi.get_plan().get_buffer_size();
+    // Output beams are dmt_size apart (compact output).
+    const auto buf_size = fdmt_multi.get_plan().get_dmt_size();
     std::vector<float> multi_dmt(nbeams * buf_size, 0.0F);
     fdmt_multi.execute(multi_wf, multi_dmt);
 
@@ -745,7 +753,7 @@ TEST_CASE("FDMT sparse and custom dt_grid parity with CPU",
                       "full");
         FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, 32, 4, 4, false,
                        "full", test::gpu_exec());
-        const auto n = fdmt_cpu.get_plan().get_buffer_size();
+        const auto n = fdmt_cpu.get_plan().get_dmt_size();
         std::vector<float> dmt_cpu(n, 0.0F);
         std::vector<float> dmt_cuda(n, 0.0F);
         fdmt_cpu.execute(waterfall, dmt_cpu);
@@ -762,7 +770,7 @@ TEST_CASE("FDMT sparse and custom dt_grid parity with CPU",
         FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dts, false, "full");
         FDMT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dts, false, "full",
                        test::gpu_exec());
-        const auto n = fdmt_cpu.get_plan().get_buffer_size();
+        const auto n = fdmt_cpu.get_plan().get_dmt_size();
         std::vector<float> dmt_cpu(n, 0.0F);
         std::vector<float> dmt_cuda(n, 0.0F);
         fdmt_cpu.execute(waterfall, dmt_cpu);
@@ -791,16 +799,15 @@ TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
             nchans, block_size * n_blocks, 23, 1 + s);
         FDMT dedicated(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min,
                        1, false, "valid", test::gpu_exec());
-        expected[s].assign(dedicated.get_plan().get_buffer_size() * n_blocks,
+        expected[s].assign(dedicated.get_plan().get_dmt_size() * n_blocks,
                            0.0F);
         for (SizeType b = 0; b < n_blocks; ++b) {
             std::span<const float> block(stream_data[s].data() +
                                              (b * nchans * block_size),
                                          nchans * block_size);
-            std::span<float> out(
-                expected[s].data() +
-                    (b * dedicated.get_plan().get_buffer_size()),
-                dedicated.get_plan().get_buffer_size());
+            std::span<float> out(expected[s].data() +
+                                     (b * dedicated.get_plan().get_dmt_size()),
+                                 dedicated.get_plan().get_dmt_size());
             dedicated.execute(block, out);
         }
     }
@@ -811,7 +818,7 @@ TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
     REQUIRE(hist_size > 0);
     std::vector<thrust::device_vector<float>> histories(
         n_streams, thrust::device_vector<float>(hist_size, 0.0F));
-    const auto buf_size = shared.get_plan().get_buffer_size();
+    const auto buf_size = shared.get_plan().get_dmt_size();
     std::vector<std::vector<float>> actual(
         n_streams, std::vector<float>(buf_size * n_blocks, 0.0F));
 
@@ -856,7 +863,8 @@ TEST_CASE("FDMT nbeams>1 valid-mode streaming keeps per-beam history isolated",
 
     FDMT fdmt_multi(f_min, f_max, nchans, block_size, tsamp, dt_max, dt_min, 1,
                     true, "valid", test::gpu_exec(), nbeams);
-    const auto buffer_size = fdmt_multi.get_plan().get_buffer_size();
+    // Output beams are dmt_size apart (compact output).
+    const auto buffer_size = fdmt_multi.get_plan().get_dmt_size();
 
     std::vector<FDMT> fdmt_singles;
     fdmt_singles.reserve(nbeams);
@@ -900,6 +908,95 @@ TEST_CASE("FDMT nbeams>1 valid-mode streaming keeps per-beam history isolated",
                 dmt_single, 1e-3);
         }
     }
+}
+
+TEST_CASE("FDMT (gpu) chunked execution matches whole blocks",
+          "[fdmt_gpu][gpu][chunk]") {
+    // Chunked execution (chunk_nsamps, mode "valid"): a block of nsamps runs
+    // as chunks through the engine's own state (remainder chunks included),
+    // which must give exactly the whole-block output over several streamed
+    // blocks, for float and packed input -- and the CPU engine's output.
+    // Integer-valued input keeps every sum exact (as in the parity tests), so
+    // GPU vs CPU is bit-exact too.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const SizeType nchans  = 64;
+    const SizeType nsamps  = 1000;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 300; // delays longer than the chunks
+    const IndexType dt_min = 0;
+    const SizeType nbeams  = 2;
+    const auto make        = [&](Exec exec, SizeType fuse, SizeType chunk) {
+        return FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, 1,
+                    true, "valid", exec, nbeams, fuse, true, chunk);
+    };
+    // nbits 0: float input; else packed rows of `nbits`.
+    const auto run = [&](FDMT& fdmt, const std::vector<uint32_t>& ints,
+                         SizeType nbits) {
+        std::vector<float> dmt(nbeams * fdmt.get_plan().get_dmt_size(), -9.0F);
+        if (nbits == 0) {
+            const std::vector<float> wf(ints.begin(), ints.end());
+            fdmt.execute(std::span<const float>(wf), std::span<float>(dmt));
+            return dmt;
+        }
+        REQUIRE(nbits == 2);
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
+        std::vector<uint8_t> packed(nbeams * nchans * row_bytes, 0);
+        for (SizeType r = 0; r < nbeams * nchans; ++r) {
+            for (SizeType t = 0; t < nsamps; ++t) {
+                bit_pack_utils::write_packed_sample<2>(
+                    packed.data() + (r * row_bytes), t, ints[(r * nsamps) + t]);
+            }
+        }
+        fdmt.execute(std::span<const uint8_t>(packed), nbits,
+                     std::span<float>(dmt));
+        return dmt;
+    };
+
+    for (const SizeType nbits : {SizeType{0}, SizeType{2}}) {
+        for (const SizeType chunk : {SizeType{64}, SizeType{128}}) {
+            for (const SizeType fuse : {SizeType{0}, kFDMTAutoFuse}) {
+                DYNAMIC_SECTION("nbits=" << nbits << " chunk=" << chunk
+                                         << " fuse=" << fuse) {
+                    auto whole   = make(test::gpu_exec(), fuse, nsamps);
+                    auto chunked = make(test::gpu_exec(), fuse, chunk);
+                    auto cpu     = make(Exec::cpu(2), fuse, nsamps);
+                    REQUIRE(whole.get_chunk_nsamps() == nsamps);
+                    REQUIRE(chunked.get_chunk_nsamps() == chunk);
+                    const uint32_t max_val = nbits == 0 ? 7U : 3U;
+                    std::mt19937 gen(31 + static_cast<unsigned>(chunk + fuse));
+                    std::uniform_int_distribution<uint32_t> dis(0, max_val);
+                    for (unsigned blk = 0; blk < 3; ++blk) {
+                        std::vector<uint32_t> ints(nbeams * nchans * nsamps);
+                        for (auto& v : ints) {
+                            v = dis(gen);
+                        }
+                        INFO("block " << blk);
+                        const auto got      = run(chunked, ints, nbits);
+                        const auto expected = run(whole, ints, nbits);
+                        REQUIRE_THAT(got, Catch::Matchers::Equals(expected));
+                        test::require_exact(got, run(cpu, ints, nbits),
+                                            nbeams *
+                                                cpu.get_plan().get_dmt_size());
+                    }
+                    // Same stream state, in the saved (FIFO) layout.
+                    std::vector<float> h_whole(whole.history_state_size());
+                    std::vector<float> h_chunked(chunked.history_state_size());
+                    whole.save_history(std::span<float>(h_whole));
+                    chunked.save_history(std::span<float>(h_chunked));
+                    REQUIRE_THAT(h_chunked, Catch::Matchers::Equals(h_whole));
+                }
+            }
+        }
+    }
+
+    // The stepper runs whole blocks only.
+    auto chunked = make(test::gpu_exec(), 0, 128);
+    const std::vector<float> wf(nbeams * nchans * nsamps, 1.0F);
+    std::vector<float> dmt(nbeams * chunked.get_plan().get_dmt_size());
+    REQUIRE_THROWS_AS(
+        chunked.reset(std::span<const float>(wf), std::span<float>(dmt)),
+        std::logic_error);
 }
 
 } // namespace dmt

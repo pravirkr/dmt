@@ -53,6 +53,13 @@ real amount, at no extra cost:
   It exists only for equivalence tests: rounding the shifts gives up what the
   Fourier domain is for.
 
+With box smearing, `FDMTFFT` weights each level-0 box by the same dyadic
+box-mean weight as the FDMT's float path (`plan.box_weights`; see
+{ref}`box means <box-mean>`), so both transforms are in box-mean units. It
+never rounds the means: level 0 is formed in the Fourier domain, for float
+and packed input alike, whereas the time-domain FDMT rounds them for packed
+input.
+
 A fractional shift is band-limited (periodic sinc) interpolation, so every
 output needs context on both sides. Both engines keep `guard` samples (64)
 of look-behind *and* look-ahead, so a stream of blocks gives the same result

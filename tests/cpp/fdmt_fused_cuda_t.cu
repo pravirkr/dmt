@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -17,7 +18,9 @@
 // FDMT level fusion (the fuse_levels constructor parameter). The fused
 // kernel does the same float additions as the level-by-level kernels, so fused
 // vs unfused on the GPU is bit-exact for any input; against FDMT the input
-// is integer-valued, which keeps every sum exact under fast-math.
+// is integer-valued, which keeps every sum exact under fast-math. Packed
+// input with box smearing rounds the box means (fdmt_box_weights.hpp), so
+// its reference is the CPU engine on the same packed input.
 
 namespace dmt {
 
@@ -67,24 +70,24 @@ Packed2 random_2bit(SizeType nrows, SizeType nsamps, unsigned seed) {
 
 template <typename Fdmt>
 std::vector<float> run(Fdmt& fdmt, const std::vector<float>& wf) {
-    std::vector<float> dmt(
-        fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(),
+                           -777.0F);
     fdmt.execute(std::span<const float>(wf), std::span<float>(dmt));
     return dmt;
 }
 
 template <typename Fdmt>
 std::vector<float> run_2bit(Fdmt& fdmt, const std::vector<uint8_t>& wf) {
-    std::vector<float> dmt(
-        fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(),
+                           -777.0F);
     fdmt.execute(std::span<const uint8_t>(wf), 2, std::span<float>(dmt));
     return dmt;
 }
 
-// Leading dmt_size values of every beam, concatenated.
+// Leading dmt_size values of every beam (dmt_size apart), concatenated.
 template <typename Fdmt>
 std::vector<float> beams(const Fdmt& fdmt, const std::vector<float>& dmt) {
-    const auto stride = fdmt.get_plan().get_buffer_size();
+    const auto stride = fdmt.get_plan().get_dmt_size();
     const auto n      = fdmt.get_plan().get_dmt_size();
     std::vector<float> out;
     for (SizeType b = 0; b < fdmt.get_nbeams(); ++b) {
@@ -152,9 +155,25 @@ TEST_CASE("FDMT fused packed int tree matches FDMT", "[fdmt_gpu][gpu]") {
                 const SizeType nchans = 256;
                 const SizeType nsamps = 300;
                 const auto wf         = random_2bit(nchans, nsamps, 5);
+                // Packed reference: the CPU float tree on the same packed
+                // input (bit-exact); float input within the rounding bound
+                // with box smearing, exactly without (separate engines: a
+                // valid-mode execute() continues the stream).
                 FDMT cpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
                          smearing, mode, Exec::cpu(1), 1, kUnfused, kFloatTree);
-                const auto expected = beams(cpu, run(cpu, wf.values));
+                FDMT cpu_f32(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
+                             smearing, mode, Exec::cpu(1), 1, kUnfused,
+                             kFloatTree);
+                const auto expected = beams(cpu, run_2bit(cpu, wf.packed));
+                const auto expected_f32 =
+                    beams(cpu_f32, run(cpu_f32, wf.values));
+                if (smearing) {
+                    test::require_packed_near(expected, expected_f32,
+                                              cpu.get_plan(), 1);
+                } else {
+                    REQUIRE_THAT(expected,
+                                 Catch::Matchers::Equals(expected_f32));
+                }
                 for (const SizeType fuse :
                      {SizeType{2}, SizeType{4}, kFDMTAutoFuse}) {
                     FDMT gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
@@ -198,8 +217,8 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                     const auto got = beams(gpu, run_2bit(gpu, wf.packed));
                     gpu.save_history(hist_out);
                     cudaDeviceSynchronize();
-                    REQUIRE_THAT(got, Catch::Matchers::Equals(
-                                          beams(cpu, run(cpu, wf.values))));
+                    REQUIRE_THAT(got, Catch::Matchers::Equals(beams(
+                                          cpu, run_2bit(cpu, wf.packed))));
                 }
             }
         }
@@ -223,10 +242,22 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
     CHECK(deep.get_fuse_levels() >= 1);
     CHECK(deep.get_fuse_levels() <= 8);
 
+    // The state is two halves of the largest level below the root (the
+    // root goes straight to the output, which is exactly dmt_size); the
+    // level-0 and tree histories are double-buffered.
     const auto mem  = automatic.get_memory_usage();
     const auto& pln = automatic.get_plan();
-    CHECK(mem.state == pln.get_buffer_size() * sizeof(float));
-    CHECK(mem.output == pln.get_buffer_size() * sizeof(float));
+    REQUIRE(automatic.get_chunk_nsamps() == pln.get_nsamps());
+    SizeType largest = 0;
+    for (SizeType l = 0; l < pln.get_niters(); ++l) {
+        largest =
+            std::max(largest, pln.get_container().state_shape[l].nelements);
+    }
+    CHECK(mem.state == 2 * largest * sizeof(float));
+    CHECK(mem.history ==
+          2 * (pln.get_history_size() + pln.get_tree_history_size()) *
+              sizeof(float));
+    CHECK(mem.output == pln.get_dmt_size() * sizeof(float));
     CHECK(mem.plan > 0);
     CHECK(mem.workspace > 0);                         // fused tables
     CHECK(make(0).get_memory_usage().workspace == 0); // no fusion
@@ -238,7 +269,7 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
                test::gpu_exec(), 1, 3);
     const auto wf = random_floats(nchans * nsamps, 3);
     thrust::device_vector<float> d_wf(wf.begin(), wf.end());
-    thrust::device_vector<float> d_dmt(small.get_plan().get_buffer_size());
+    thrust::device_vector<float> d_dmt(small.get_plan().get_dmt_size());
     small.reset(DeviceSpan<const float>(thrust::raw_pointer_cast(d_wf.data()),
                                         d_wf.size()),
                 DeviceSpan<float>(thrust::raw_pointer_cast(d_dmt.data()),

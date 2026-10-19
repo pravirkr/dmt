@@ -19,8 +19,11 @@
 // FDMT packed low-bit input and narrow-integer tree (the int_tree
 // constructor parameter, on by default). Integer-valued input keeps every
 // partial sum an exact integer below 2^24, which stays exact under any float
-// reassociation (Release builds use fast-math), so all comparisons here are
-// bit-exact -- including CUDA vs CPU.
+// reassociation (Release builds use fast-math), so packed comparisons here
+// are bit-exact -- including CUDA vs CPU. With box smearing, packed input
+// rounds each box mean to a few fractional bits (fdmt_box_weights.hpp), so
+// it matches float input with the same values only within that rounding
+// (exactly without box smearing).
 
 namespace dmt {
 
@@ -75,8 +78,8 @@ random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
 
 template <typename Fdmt>
 std::vector<float> run_float(Fdmt& fdmt, const std::vector<float>& wf) {
-    std::vector<float> dmt(
-        fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(),
+                           -777.0F);
     fdmt.execute(std::span<const float>(wf), std::span<float>(dmt));
     return dmt;
 }
@@ -84,14 +87,14 @@ std::vector<float> run_float(Fdmt& fdmt, const std::vector<float>& wf) {
 template <typename Fdmt>
 std::vector<float>
 run_packed(Fdmt& fdmt, const std::vector<uint8_t>& wf, SizeType nbits) {
-    std::vector<float> dmt(
-        fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(),
+                           -777.0F);
     fdmt.execute(std::span<const uint8_t>(wf), nbits, std::span<float>(dmt));
     return dmt;
 }
 
 // Leading `n` values of beam `beam`, beams `stride` elements apart (both
-// backends use stride = get_buffer_size()).
+// backends use stride = get_dmt_size(): compact output).
 std::vector<float> beam_slice(const std::vector<float>& dmt,
                               SizeType stride,
                               SizeType beam,
@@ -133,9 +136,14 @@ TEST_CASE("FDMT packed input matches float input and FDMT", "[fdmt_gpu][gpu]") {
                                      test::gpu_exec(), 1, kFDMTAutoFuse,
                                      int_tree);
                             const auto got = run_packed(gpu, wf.packed, nbits);
-                            REQUIRE_THAT(beam_slice(got, 0, 0, n),
-                                         Catch::Matchers::Equals(
-                                             beam_slice(expected, 0, 0, n)));
+                            if (smearing) {
+                                test::require_packed_near(got, expected,
+                                                          gpu.get_plan(), 1);
+                            } else {
+                                REQUIRE_THAT(beam_slice(got, 0, 0, n),
+                                             Catch::Matchers::Equals(beam_slice(
+                                                 expected, 0, 0, n)));
+                            }
 
                             FDMT cpu(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                      c.dt_max, c.dt_min, 1, smearing, mode,
@@ -191,7 +199,7 @@ TEST_CASE("FDMT packed multi-beam matches per-beam execution",
     const auto got        = run_packed(multi, wf.packed, nbits);
     const auto& plan      = multi.get_plan();
     const auto n          = plan.get_dmt_size();
-    const auto gpu_stride = plan.get_buffer_size(); // documented layout
+    const auto gpu_stride = plan.get_dmt_size(); // compact output layout
     const auto row_bytes  = bit_pack_utils::packed_row_bytes(nsamps, nbits);
     for (SizeType b = 0; b < nbeams; ++b) {
         std::vector<uint8_t> one(
@@ -220,7 +228,7 @@ TEST_CASE("FDMT packed device-memory execute and stepper", "[fdmt_gpu][gpu]") {
     FDMT gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
              test::gpu_exec());
     thrust::device_vector<uint8_t> wf_d(wf.packed.begin(), wf.packed.end());
-    thrust::device_vector<float> dmt_d(gpu.get_plan().get_buffer_size(), 0.0F);
+    thrust::device_vector<float> dmt_d(gpu.get_plan().get_dmt_size(), 0.0F);
     const DeviceSpan<const uint8_t> wf_span(
         thrust::raw_pointer_cast(wf_d.data()), wf_d.size());
     const DeviceSpan<float> dmt_span(thrust::raw_pointer_cast(dmt_d.data()),
@@ -252,16 +260,16 @@ TEST_CASE("FDMT packed device-memory execute and stepper", "[fdmt_gpu][gpu]") {
 
 TEST_CASE("FDMT rejects per-beam extents beyond 32-bit indexing",
           "[fdmt_gpu][gpu]") {
-    // The device plan holds per-beam offsets as int32. This block's state
-    // buffer is ~5e10 elements per beam, so construction must fail cleanly
-    // (before any device allocation) instead of wrapping indices.
+    // The device plan holds per-beam offsets as int32. This block's output
+    // (and waterfall) is ~2e10 elements per beam -- the tree state is
+    // auto-chunked -- so construction must fail cleanly (before any device
+    // allocation) instead of wrapping indices.
     const float f_min = 704.0F;
     const float f_max = 1216.0F;
     const float tsamp = 0.00008192F;
     const auto nsamps = SizeType{1} << 23;
     const auto plan_sz =
-        plans::FDMTPlan(f_min, f_max, 4096, nsamps, tsamp, 2048)
-            .get_buffer_size();
+        plans::FDMTPlan(f_min, f_max, 4096, nsamps, tsamp, 2048).get_dmt_size();
     REQUIRE(plan_sz > static_cast<SizeType>(INT32_MAX));
     REQUIRE_THROWS_AS(FDMT(f_min, f_max, 4096, nsamps, tsamp, 2048, 0, 1, true,
                            "valid", test::gpu_exec()),

@@ -151,13 +151,15 @@ __global__ void kernel_update_history(const void* __restrict__ src,
     }
 }
 
-// Level-0 windows W0[s][k] = (box ? sum_{u <= s} W^(u k) : W^(s k)) / N.
+// Level-0 windows W0[s][k] = (box ? box_wf[s] * sum_{u <= s} W^(u k) :
+// W^(s k)) / N, box_wf[s] the box-mean weight of a box of s + 1 samples
+// (fdmt_box_weights.hpp).
 __global__ void
 kernel_level0_windows(const unsigned long long* __restrict__ sfx,
                       float2* __restrict__ w0,
                       int dt0_max,
                       int nb,
-                      int box,
+                      const float* __restrict__ box_wf,
                       float norm) {
     const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (k >= nb) {
@@ -168,8 +170,9 @@ kernel_level0_windows(const unsigned long long* __restrict__ sfx,
         const float2 w = phasor(sfx[s], static_cast<unsigned>(k));
         acc.x += w.x;
         acc.y += w.y;
-        const float2 v                         = box != 0 ? acc : w;
-        w0[(static_cast<int64_t>(s) * nb) + k] = {v.x * norm, v.y * norm};
+        const float2 v    = box_wf != nullptr ? acc : w;
+        const float scale = box_wf != nullptr ? norm * box_wf[s] : norm;
+        w0[(static_cast<int64_t>(s) * nb) + k] = {v.x * scale, v.y * scale};
     }
 }
 
@@ -1023,11 +1026,24 @@ private:
         }
         DevBuf<unsigned long long> s0_d;
         s0_d.upload(s0);
+        // Box-mean weights w(s + 1) * 2^-b, the FDMT's own.
+        DevBuf<float> box_wf_d;
+        if (m_use_box_smearing) {
+            const auto weights = m_plan->get_box_weights();
+            const float unit   = std::ldexp(
+                1.0F, -static_cast<int>(m_plan->get_box_fraction_bits()));
+            std::vector<float> box_wf(m_dag.dt0_max + 1);
+            for (SizeType s = 0; s <= m_dag.dt0_max; ++s) {
+                box_wf[s] = static_cast<float>(weights[s]) * unit;
+            }
+            box_wf_d.upload(box_wf);
+        }
         g->w0.reserve((m_dag.dt0_max + 1) * g->nb);
         kernel_level0_windows<<<blocks_for(static_cast<int64_t>(g->nb)),
                                 kBlock>>>(
             s0_d.data(), g->w0.data(), static_cast<int>(m_dag.dt0_max),
-            static_cast<int>(g->nb), m_use_box_smearing ? 1 : 0,
+            static_cast<int>(g->nb),
+            m_use_box_smearing ? box_wf_d.data() : nullptr,
             1.0F / static_cast<float>(n));
         gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
                                   "FDMTFFT (cuda): level-0 windows");
