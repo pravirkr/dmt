@@ -13,6 +13,7 @@ set(TARGET_BENCHMARKS_MEM ${PROJECT_NAME}_bench_mem)
 set(BENCH_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cpu_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cpu_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_boxcar_cpu_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cpu_b.cpp
 )
 

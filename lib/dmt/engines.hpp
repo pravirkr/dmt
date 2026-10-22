@@ -20,6 +20,7 @@
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/fdmt_search.hpp"
 
 namespace dmt::algorithms::detail {
 
@@ -60,7 +61,10 @@ struct FDMTEngineConfig {
     SizeType fuse_levels{algorithms::kFDMTAutoFuse};
     bool int_tree{true};
     Exec exec{};
-    SizeType chunk_nsamps{0}; ///< 0: automatic (see fdmt_chunk.hpp)
+    SizeType chunk_nsamps{0};           ///< 0: automatic (see fdmt_chunk.hpp)
+    SizeType max_fuse_levels{SIZE_MAX}; ///< Private search boundary.
+    SizeType search_nbits{
+        32}; ///< Exact dyadic integer search; ordinary FDMT unchanged.
 };
 
 class FDMTEngine {
@@ -71,6 +75,27 @@ public:
     FDMTEngine& operator=(const FDMTEngine&) = delete;
     FDMTEngine(FDMTEngine&&)                 = delete;
     FDMTEngine& operator=(FDMTEngine&&)      = delete;
+
+    // Search consumes chunks without allocating a root output plane.
+    virtual void execute_search(std::span<const float>, FDMTSearchSink&) {
+        throw_no_device_memory("FDMT search host execution", backend());
+    }
+    virtual void
+    execute_search(DeviceSpan<const float>, FDMTSearchSink&, Stream) {
+        throw_no_device_memory("FDMT search device execution", backend());
+    }
+
+    virtual void
+    execute_search(std::span<const uint8_t>, SizeType, FDMTSearchSink&) {
+        throw_no_device_memory("FDMT packed search host execution", backend());
+    }
+    virtual void execute_search(DeviceSpan<const uint8_t>,
+                                SizeType,
+                                FDMTSearchSink&,
+                                Stream) {
+        throw_no_device_memory("FDMT packed search device execution",
+                               backend());
+    }
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,
@@ -119,6 +144,7 @@ public:
     [[nodiscard]] virtual SizeType num_subbands() const                     = 0;
     [[nodiscard]] virtual bool is_finished() const noexcept                 = 0;
 
+    virtual void reset_search_history(Stream) { reset_history(); }
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
 

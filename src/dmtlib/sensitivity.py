@@ -48,11 +48,12 @@ ceil(log2(L_c)) + 2`` (the plan's ``box_weights``): within 1/8 of
 ``1 / L_c``, the matched filter for intra-channel smearing. The FDMT without
 box smearing (:data:`VARIANTS`) is measured as well.
 
-:data:`CRYOPAF` is the configuration of every published result: the CryoPAF
-search at Parkes, 1024 channels over 704-1216 MHz at 512 us, DM 0-2000 on the
-piecewise-uniform Levin grid (tolerance 1.1) that every engine shares.
-:data:`CRYOPAF_4K` is its 4096-channel twin (DM 0-1000, tolerance 1.05), the
-regime that favours the FDMT; :data:`CONFIGS` holds both by name.
+:data:`CRYOPAF` is the 512-channel CryoPAF benchmark over 704-1216 MHz at
+512 us, DM 0-2000, with Levin tolerance 1.1. :data:`CRYOPAF_LBAND` is the
+1152-channel L-band streaming target. :data:`PARKES_UWL` covers 704-4032 MHz
+with 6656 channels at 64 us. :data:`CONFIGS` holds these presets by name.
+Previously published CryoPAF results used 1024 channels; they retain their
+original metadata and are not measurements of the updated preset.
 """
 
 from __future__ import annotations
@@ -399,6 +400,11 @@ class SearchConfig:
         Threads per engine (default 1).
     name : str, optional
         Label stored with the results.
+    nsamps_ref : int, optional
+        Reference streaming block length (default 32768). Sensitivity
+        measurements may choose their own injection window length.
+    subband_levels : int, optional
+        FDMTBoxcar search depth below the root (default 0: full band only).
     """
 
     f_min: float
@@ -411,6 +417,8 @@ class SearchConfig:
     levin_pulse_width: float = 0.0
     nthreads: int = 1
     name: str = "custom"
+    nsamps_ref: int = 32768
+    subband_levels: int = 0
 
     def __post_init__(self) -> None:
         if not 0 <= self.dm_min < self.dm_max:
@@ -453,24 +461,31 @@ class SearchConfig:
 
 
 CRYOPAF = SearchConfig(
-    704.0, 1216.0, 1024, 512e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
+    704.0, 1216.0, 512, 512e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
     name="cryopaf",
 )  # fmt: skip
-"""The configuration of every published result: the CryoPAF incoherent search
-at Parkes (1024 channels over 704-1216 MHz at 512 us, DM 0-2000, Levin
-tolerance 1.1). Use ``dataclasses.replace(CRYOPAF, nthreads=8)`` to change
-the thread count."""
+"""CryoPAF benchmark: 512 channels over 704-1216 MHz at 512 us, DM 0-2000,
+Levin tolerance 1.1. Archived published measurements used 1024 channels.
+Use ``dataclasses.replace(CRYOPAF, nthreads=8)`` to change the thread count."""
 
-CRYOPAF_4K = SearchConfig(
-    704.0, 1216.0, 4096, 512e-6, dm_min=0.0, dm_max=1000.0, levin_tol=1.05,
-    name="cryopaf4k",
+CRYOPAF_LBAND = SearchConfig(
+    1100.0, 1714.0, 1152, 455.6e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
+    name="cryopaf_lband", nsamps_ref=32768, subband_levels=1,
 )  # fmt: skip
-"""The 4096-channel twin of :data:`CRYOPAF` (same band and sampling, DM
-0-1000, Levin tolerance 1.05: 5183 trials). Finer channels and a denser grid
-than CRYOPAF: the regime the FDMT is built for (about 150x fewer operations
-than brute force, against 14x for CRYOPAF)."""
+"""L-band real-time search target: 14.9291-second blocks, searching the two
+last-level subbands and then the full band. The DM-2000 band sweep is
+4.03365 seconds (8853.49 samples); streaming valid mode also permits shorter
+blocks. The current tree's final two subbands have 1024 and 128 channels."""
 
-CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_4K)}
+PARKES_UWL = SearchConfig(
+    704.0, 4032.0, 6656, 64e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
+    name="parkes_uwl", nsamps_ref=32768,
+)  # fmt: skip
+"""Ultra-wideband benchmark with 2.097152-second streaming blocks. At DM
+2000 the dispersion sweep spans several blocks; histories must be warmed
+before steady-state timing. Full-band search is the default."""
+
+CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_LBAND, PARKES_UWL)}
 """The named configurations, by ``SearchConfig.name``."""
 
 

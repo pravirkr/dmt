@@ -6,8 +6,8 @@ history memory and the process peak RSS. Every chunk length gives the same
 output bit for bit (checked against the automatic choice); only memory and
 time change.
 
-The configuration is the frozen one of every published result
-(``dmtlib.sensitivity.CRYOPAF``: 1024 channels over 704-1216 MHz at 512 us,
+The configuration is the current CryoPAF preset
+(``dmtlib.sensitivity.CRYOPAF``: 512 channels over 704-1216 MHz at 512 us,
 DM 0-2000 on the piecewise-uniform Levin grid of tolerance 1.1), with the
 benchmark suite's 32768-sample blocks.
 
@@ -27,14 +27,22 @@ import resource
 import subprocess
 import sys
 import time
+from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-sys.meta_path = [
-    f for f in sys.meta_path if "ScikitBuildRedirectingFinder" not in type(f).__name__
-]
+# Prefer a compatible in-tree build. Otherwise retain the editable loader,
+# which locates the extension built for this Python interpreter.
+if any(
+    (REPO / "src/dmtlib" / f"libdmt{suffix}").is_file() for suffix in EXTENSION_SUFFIXES
+):
+    sys.meta_path = [
+        f
+        for f in sys.meta_path
+        if "ScikitBuildRedirectingFinder" not in type(f).__name__
+    ]
 sys.path.insert(0, str(REPO / "src"))
 
 import dmtlib  # noqa: E402

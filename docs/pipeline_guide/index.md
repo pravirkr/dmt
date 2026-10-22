@@ -7,6 +7,7 @@ This guide covers real-world telescope pipeline engineering: continuous data str
 
 streaming_and_history
 multibeam
+fdmt_boxcar
 performance
 fourier_variants
 coherent_hybrid
@@ -20,6 +21,7 @@ quirks_and_gotchas
 
 - [Streaming & Overlap-Save History](streaming_and_history.md): How `dmt` preserves 100% of dispersed signals across block boundaries without edge artifacts; block size vs. chunk.
 - [Multi-Beam Batching](multibeam.md): Processing several tied-array beams with one shared plan, on the CPU and the GPU.
+- [Fused FDMT and Boxcar Search](fdmt_boxcar.md): Normalized-waterfall detection, streaming peaks, subbands, CPU/GPU APIs and analytical noise assumptions.
 - [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree, chunked execution), packed low-bit input, threads, block size and memory, and which optimizations were measured and rejected.
 - [Fourier-Domain Variants](fourier_variants.md): FDMT-FFT and DDMT-FFT, when to use them, exact fractional delays, NUFFT / piecewise NUFFT / brute force, the piecewise-uniform Levin grid, block length, guard and FFT planner settings.
 - [Coherent Hybrid Search](coherent_hybrid.md): CohFDMT on recorded baseband: input formats (GUPPI, LOFAR, PSRDADA), stateless block processing with a file-pointer stride, the exact multi-subband DM grid, exact noise statistics and memory.

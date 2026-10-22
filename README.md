@@ -19,6 +19,12 @@
 
 **`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, **FDMT-FFT** and **DDMT-FFT** (NUFFT-accelerated).
 
+For normalized waterfalls whose FDMT output is only used for detection,
+[`FDMTBoxcar`](docs/pipeline_guide/fdmt_boxcar.md) fuses the final FDMT merge
+with analytical boxcar search and returns candidates without a full-band
+DM–time output plane. It supports streaming peaks, subbands, and CPU/GPU APIs.
+
+
 | Dispersed Waterfall Input $I(\nu, t)$ | Dedispersed DM-Time Plane $DMT(\text{DM}, t)$ |
 | :---: | :---: |
 | ![Waterfall image](docs/_static/waterfall.png) | ![DMT transform](docs/_static/dmt.png) |

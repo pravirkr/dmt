@@ -45,25 +45,38 @@ if TYPE_CHECKING:
 REPO = Path(__file__).resolve().parents[2]
 TIMES = "\N{MULTIPLICATION SIGN}"
 
-# Suite configurations (bench/suite/suite_common.hpp), both 704-1216 MHz at
-# 512 us, DM 0-dm_max on the piecewise-uniform Levin grid: "cryopaf" (the
-# published one, 1024 channels, tolerance 1.1) and "cryopaf4k" (4096
-# channels, tolerance 1.05, results under bench/results/cryopaf4k/). main()
-# installs the selected one in the module constants below.
+# Suite configurations (bench/suite/suite_common.hpp). main() installs the
+# selected geometry and trial-grid reference in the module constants below.
 CONFIGS: dict[str, dict[str, Any]] = {
     "cryopaf": {
-        "NCHANS": 1024,
+        "F_MIN": 704.0,
+        "F_MAX": 1216.0,
+        "TSAMP": 5.12e-4,
+        "NCHANS": 512,
         "LEVIN_TOL": 1.1,
         "DM_MAX_REF": 2000.0,
-        "NDMS_REF": 2501,
+        "NDMS_REF": 1545,
         "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
     },
-    "cryopaf4k": {
-        "NCHANS": 4096,
-        "LEVIN_TOL": 1.05,
-        "DM_MAX_REF": 1000.0,
-        "NDMS_REF": 5183,
-        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0],
+    "cryopaf_lband": {
+        "F_MIN": 1100.0,
+        "F_MAX": 1714.0,
+        "TSAMP": 455.6e-6,
+        "NCHANS": 1152,
+        "LEVIN_TOL": 1.1,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 1941,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
+    },
+    "parkes_uwl": {
+        "F_MIN": 704.0,
+        "F_MAX": 4032.0,
+        "TSAMP": 64e-6,
+        "NCHANS": 6656,
+        "LEVIN_TOL": 1.1,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 12941,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
     },
 }
 F_MIN, F_MAX, TSAMP = 704.0, 1216.0, 5.12e-4
@@ -191,6 +204,27 @@ _CONTEXT_KEYS = (
 )
 
 
+def validate_geometry(path: Path, benchmark: dict[str, Any]) -> None:
+    """Reject mismatched or mixed geometries before labeling a result."""
+    geometry = {
+        "nchans": NCHANS,
+        "f_min": F_MIN,
+        "f_max": F_MAX,
+        "tsamp": TSAMP,
+        "levin_tol": LEVIN_TOL,
+    }
+    for field_name, expected in geometry.items():
+        if field_name in benchmark and not np.isclose(
+            benchmark[field_name], expected, rtol=1e-6, atol=0
+        ):
+            msg = (
+                f"{path}: {field_name}={benchmark[field_name]} does not match "
+                f"selected preset ({expected}); rerun the suite for this preset. "
+                "Archived results and plots retain their original geometry."
+            )
+            raise ValueError(msg)
+
+
 def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:  # noqa: C901
     """Parse every suite JSON; names carry the point, errors mark skips."""
     results: dict[tuple[str, str, str, str, int, float, int], Result] = {}
@@ -215,6 +249,7 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:  # noqa:
                 continue
             if parts[0] != "suite":
                 continue
+            validate_geometry(path, b)
             kv = dict(p.split(":", 1) for p in parts[4:7])
             algo = SUITE_ALGOS.get(parts[2], parts[2])
             if algo is None:
@@ -597,7 +632,7 @@ def ops_figure(theme: Theme) -> Figure:
     """Theoretical operation count vs DM trials and vs channels."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.5, 3.8), sharey=True)
     by_dms = [ops_model(dm, NCHANS) for dm in DM_MAX_SWEEP]
-    chans = [256, 512, 1024, 2048, 4096]
+    chans = sorted({256, 512, 1024, 2048, 4096, NCHANS})
     by_chans = [ops_model(DM_MAX_REF, c) for c in chans]
     labels = {
         "FDMT": "FDMT",
@@ -853,8 +888,8 @@ def main() -> None:
         "--config",
         default="cryopaf",
         choices=sorted(CONFIGS),
-        help="suite configuration (default cryopaf); cryopaf4k reads and writes "
-        "under bench/results/cryopaf4k/ unless --results is given",
+        help="suite configuration (default cryopaf); other presets read and write "
+        "under bench/results/<config>/ unless --results is given",
     )
     ap.add_argument(
         "--results", help="results root (default: bench/results[/<config>])"
@@ -866,7 +901,10 @@ def main() -> None:
     if args.config != "cryopaf":
         default /= args.config
     results_dir = Path(args.results) if args.results else default
-    results, machines = load(results_dir)
+    try:
+        results, machines = load(results_dir)
+    except ValueError as exc:
+        ap.error(str(exc))
     if not results:
         sys.exit(f"no suite results under {results_dir}/*/suite_*.json")
     out_root = results_dir / "plots"

@@ -1,5 +1,12 @@
 # Performance Tuning
 
+The measurements below retain their original geometries: published CryoPAF
+runs used 1024 channels, and the archived fine-channel case used 4096.
+The current benchmark presets are CryoPAF with 512 channels, CryoPAF L-band,
+and Parkes UWL; see [the benchmark configurations](../../bench/README.md).
+Re-run benchmarks before comparing current presets with these historical
+numbers.
+
 The FDMT engine (`FDMT`, on the CPU and CUDA backends) is tuned out of the box. Its two
 *performance parameters*, the constructor arguments `fuse_levels` and
 `int_tree`, default to the fastest settings measured, and neither changes the
@@ -168,7 +175,7 @@ reports the tile.
 | configuration (704–1216 MHz, 512 µs, piecewise Levin grid) | trials | FDMT rows per sample | brute force / FDMT operations |
 | :--- | ---: | ---: | ---: |
 | 1024 channels, DM 0–2000, tolerance 1.1 (`cryopaf`) | 2501 | 178k | 14× |
-| 4096 channels, DM 0–1000, tolerance 1.05 (`cryopaf4k`) | 5183 | 141k | 151× |
+| 4096 channels, DM 0–1000, tolerance 1.05 (archived fine-channel case) | 5183 | 141k | 151× |
 | 4096 channels, 81.92 µs, dense dt grid 0–2048 (old suite) | 2049 | 35k | 241× |
 
 The FDMT's cost is set by the delay range in samples, about
@@ -186,9 +193,9 @@ fusion with plain stores:
 | `cryopaf` | float32 | 685 ms | 485 ms | 1.41× |
 | `cryopaf` | 2-bit | 329 ms | 280 ms | 1.18× |
 | `cryopaf` | 8-bit | 586 ms | 457 ms | 1.28× |
-| `cryopaf4k` | float32 | 493 ms | 346 ms | 1.42× |
-| `cryopaf4k` | 2-bit | 252 ms | 232 ms | 1.09× |
-| `cryopaf4k` | 8-bit | 421 ms | 325 ms | 1.30× |
+| archived 4096-channel case | float32 | 493 ms | 346 ms | 1.42× |
+| archived 4096-channel case | 2-bit | 252 ms | 232 ms | 1.09× |
+| archived 4096-channel case | 8-bit | 421 ms | 325 ms | 1.30× |
 | 4096 ch, 81.92 µs, dt 2048, $N = 16384$ | float32 | 52.2 ms | 37.2 ms | 1.40× |
 
 With 16 threads on one socket, `cryopaf` float runs in 357 ms (617 ms

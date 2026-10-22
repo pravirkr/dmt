@@ -114,7 +114,7 @@ DMT_HD inline void fdmt_init_column(int dt_first,
                                     GetSample&& get_sample,
                                     WriteRow&& write_row,
                                     BoxMean&& box_mean) {
-    const auto write_matches = [&](int s, float val) {
+    const auto write_matches = [&](int s, auto val) {
         if (s >= dt_first && s <= dt_last) {
             write_row(s - dt_first, val);
         }

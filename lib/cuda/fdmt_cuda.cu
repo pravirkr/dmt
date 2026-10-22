@@ -110,11 +110,18 @@ kernel_init_fdmt(const Input waterfall,
     // TOut (int_tree, exact within the type's plan bound) or times 2^-F. The
     // column helper is shared with the fused kernel, so both agree bit for
     // bit.
-    const auto put = [&](int i_dt, float val) {
+    const auto put = [&](int i_dt, auto val) {
         state[buffer_offset + (static_cast<int64_t>(i_dt) * row_stride) +
               isamp] = static_cast<TOut>(val);
     };
-    if constexpr (detail::kFDMTPackedInput<Input>) {
+    if constexpr (detail::kFDMTPackedInput<Input> &&
+                  std::is_same_v<TOut, uint64_t>) {
+        detail::fdmt_init_column<UseBoxSmearing, uint64_t>(
+            dt_first, dt_last, isamp, get_sample, put,
+            [&](int s, uint64_t sum) {
+                return detail::box_round_apply<uint64_t>(sum, box.round[s]);
+            });
+    } else if constexpr (detail::kFDMTPackedInput<Input>) {
         detail::fdmt_init_column<UseBoxSmearing, uint32_t>(
             dt_first, dt_last, isamp, get_sample, put,
             [&](int s, uint32_t sum) {
@@ -178,13 +185,16 @@ inline constexpr int kMaxGridY = 65535;
  * by kIterThreads, so every load and store stays coalesced); the
  * coordinate's table entries are read once per thread.
  */
-template <FDMTMode Mode, typename TIn = float, typename TOut = float>
+template <FDMTMode Mode,
+          typename TIn   = float,
+          typename TOut  = float,
+          typename THist = float>
 __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
     const TIn* __restrict__ state_in,
     TOut* __restrict__ state_out,
     const plans::FDMTCoordDPtrs coords_sum,
     const plans::FDMTCoordDPtrs coords_copy,
-    const float* __restrict__ hist_in,
+    const THist* __restrict__ hist_in,
     int nsamps,
     int ncoords_sum_cur,
     int ncoords_copy_cur,
@@ -210,8 +220,10 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
             return static_cast<TOut>(v);
         }
     };
-    const auto from_hist = [int_unit](float h) -> TOut {
-        if constexpr (std::is_integral_v<TOut>) {
+    const auto from_hist = [int_unit](THist h) -> TOut {
+        if constexpr (std::is_integral_v<THist>) {
+            return static_cast<TOut>(h);
+        } else if constexpr (std::is_integral_v<TOut>) {
             return static_cast<TOut>(h * (1.0F / int_unit));
         } else {
             return h;
@@ -241,7 +253,7 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
                                 coords_sum.tail_buf_offset[i_coord];
             const TIn* head   = state_in + (i_beam * in_state_nelements) +
                                 coords_sum.head_buf_offset[i_coord];
-            const float* hist = hist_in != nullptr
+            const THist* hist = hist_in != nullptr
                                     ? hist_in + (i_beam * tree_hist_size) +
                                           coords_sum.hist_offset[i_coord]
                                     : nullptr;
@@ -306,20 +318,28 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
  * @brief Advances tree-level cross-block FIFO history on GPU.
  * Supports arbitrary block sizes and offsets.
  */
-template <typename TIn = float>
+template <typename TIn = float, typename THist = float>
 __global__ void
 kernel_advance_tree_history(const TIn* __restrict__ state_in,
                             const plans::FDMTCoordDPtrs coords_sum,
-                            const float* __restrict__ hist_in,
-                            float* __restrict__ hist_out,
+                            const THist* __restrict__ hist_in,
+                            THist* __restrict__ hist_out,
                             int ncoords_sum_cur,
                             int in_state_nelements,
                             int tree_hist_size,
                             float int_unit,
                             int active) {
     const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    // History is canonical: integer state is rescaled by int_unit (exact).
-    const float unit = std::is_integral_v<TIn> ? int_unit : 1.0F;
+    // Existing FDMT keeps canonical float history; packed search keeps
+    // exact integer history without a conversion through float.
+    const float unit      = std::is_integral_v<TIn> ? int_unit : 1.0F;
+    const auto to_history = [unit](TIn value) -> THist {
+        if constexpr (std::is_integral_v<THist>) {
+            return static_cast<THist>(value);
+        } else {
+            return static_cast<float>(value) * unit;
+        }
+    };
     // 64-bit: beam-strided offsets (i_beam * per-beam size) exceed
     // int32 for large blocks with several beams.
     const auto i_beam = static_cast<int64_t>(blockIdx.z);
@@ -340,20 +360,16 @@ kernel_advance_tree_history(const TIn* __restrict__ state_in,
             (i_beam * in_state_nelements) + coords_sum.head_buf_offset[i_coord];
 
         if (nsamps_head >= offset) {
-            hist_out[hist_off + k] =
-                static_cast<float>(
-                    state_in[head_idx_base + (nsamps_head - offset + k)]) *
-                unit;
+            hist_out[hist_off + k] = to_history(
+                state_in[head_idx_base + (nsamps_head - offset + k)]);
         } else {
             if (k < offset - nsamps_head) {
                 hist_out[hist_off + k] =
                     (hist_in != nullptr) ? hist_in[hist_off + k + nsamps_head]
-                                         : 0.0F;
+                                         : THist{0};
             } else {
-                hist_out[hist_off + k] =
-                    static_cast<float>(state_in[head_idx_base +
-                                                (k - (offset - nsamps_head))]) *
-                    unit;
+                hist_out[hist_off + k] = to_history(
+                    state_in[head_idx_base + (k - (offset - nsamps_head))]);
             }
         }
     } // i_coord
@@ -441,9 +457,186 @@ public:
             throw std::invalid_argument(
                 "FDMT (cuda): nbeams must be at least 1");
         }
-        m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                            cfg.chunk_nsamps);
-        init_device_structures(cfg.fuse_levels);
+        m_search_nbits    = cfg.search_nbits;
+        m_chunk           = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
+                                                      cfg.chunk_nsamps);
+        m_search_max_fuse = cfg.max_fuse_levels;
+        if (m_search_nbits != 32 && cfg.chunk_nsamps == 0) {
+            m_chunk = std::min(m_plan.get_nsamps(),
+                               std::max<SizeType>(64, m_chunk / 2));
+        }
+        init_device_structures(m_search_nbits == 32 ? cfg.fuse_levels : 0);
+    }
+
+    void execute_search(DeviceSpan<const float> waterfall,
+                        detail::FDMTSearchSink& sink,
+                        Stream queue) override {
+        check_inputs(waterfall.size(), m_nbeams * m_plan.get_dmt_size());
+        const SizeType root = m_plan.get_niters();
+        if (m_mode != FDMTMode::kValid || get_fuse_levels() >= root) {
+            throw std::logic_error(
+                "FDMT search requires valid mode and a separate root");
+        }
+        const auto stream = to_cuda(queue);
+        const detail::FDMTInputF32 input{waterfall.data(),
+                                         static_cast<int>(m_plan.get_nsamps())};
+        for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
+            start(chunk_input(input, t0), m_float_levels, nullptr,
+                  std::min(m_chunk, m_plan.get_nsamps() - t0), stream, true);
+            const auto consume = [&](SizeType l, SizeType source) {
+                sink.consume(
+                    l, {
+                           .state = reinterpret_cast<const float*>(
+                               m_levels_d[source].base),
+                           .history    = m_hist_in_ptr,
+                           .row_stride = m_chunk,
+                           .beam_stride =
+                               static_cast<SizeType>(level_beam_stride(source)),
+                           .history_stride = m_plan.get_tree_history_size(),
+                           .nsamps         = m_active,
+                           .sample_begin   = m_search_position,
+                           .history_ring   = false,
+                           .stream         = queue,
+                       });
+            };
+            consume(m_current_level, m_current_level);
+            while (m_current_level + 1 < root) {
+                execute_iter_device(m_current_level + 1, stream);
+                ++m_current_level;
+                consume(m_current_level, m_current_level);
+            }
+            consume(root, root - 1);
+            advance_tree_history<float>(
+                reinterpret_cast<const float*>(m_levels_d[root - 1].base), root,
+                stream);
+            m_current_level  = root;
+            m_is_initialized = false;
+            m_search_position += m_active;
+        }
+        m_device_work.mark(stream);
+    }
+
+    void execute_search(DeviceSpan<const uint8_t> waterfall,
+                        SizeType nbits,
+                        detail::FDMTSearchSink& sink,
+                        Stream queue) override {
+        if (nbits == 32 || nbits != m_search_nbits) {
+            throw std::invalid_argument(
+                "FDMT integer search: input bit depth mismatch");
+        }
+        check_packed_inputs(waterfall.size(), nbits,
+                            m_nbeams * m_plan.get_dmt_size());
+        gpu_utils::set_device(m_device_id);
+        const auto stream   = to_cuda(queue);
+        const SizeType root = m_plan.get_niters();
+        const FDMTInputPacked full{
+            .data      = waterfall.data(),
+            .row_bytes = static_cast<int>(
+                bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits)),
+            .nbits = static_cast<int>(nbits)};
+        for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
+            m_active      = std::min(m_chunk, m_plan.get_nsamps() - t0);
+            auto* hist_in = thrust::raw_pointer_cast((m_tree_history_parity
+                                                          ? m_integer_history_b
+                                                          : m_integer_history_a)
+                                                         .data());
+            auto* hist_out = thrust::raw_pointer_cast(
+                (m_tree_history_parity ? m_integer_history_a
+                                       : m_integer_history_b)
+                    .data());
+            m_level0_hist_in_ptr = thrust::raw_pointer_cast(
+                (m_tree_history_parity ? m_history_b_d : m_history_a_d).data());
+            m_level0_hist_out_ptr = thrust::raw_pointer_cast(
+                (m_tree_history_parity ? m_history_a_d : m_history_b_d).data());
+            m_tree_history_parity = !m_tree_history_parity;
+            auto* state           = reinterpret_cast<uint64_t*>(
+                thrust::raw_pointer_cast(m_state_internal_d.data()));
+            const auto level_ptr = [&](SizeType l) {
+                return state + (l % 2) * m_nbeams * m_half_elems;
+            };
+            initialise_device<FDMTInputPacked, uint64_t>(chunk_input(full, t0),
+                                                         level_ptr(0), stream);
+            for (SizeType l = 0; l <= root; ++l) {
+                const auto& shape = m_plan.get_container().state_shape[l];
+                auto sums         = m_plan_d.coordinates_sum.get_raw_ptrs();
+                auto copies       = m_plan_d.coordinates_copy.get_raw_ptrs();
+                sums.update_offsets(m_coords_sum_offsets[l]);
+                copies.update_offsets(m_coords_copy_offsets[l]);
+                if (l > 0 && l < root) {
+                    const int count = static_cast<int>(
+                        std::max(shape.ncoords_sum, shape.ncoords_copy));
+                    const dim3 block(kIterThreads);
+                    const dim3 grid(
+                        (m_active + kIterThreads * kIterSampsPerTh - 1) /
+                            (kIterThreads * kIterSampsPerTh),
+                        std::min(count, kMaxGridY), m_nbeams);
+                    gpu_utils::check_kernel_launch_params(grid, block);
+                    kernel_execute_iter<FDMTMode::kValid, uint64_t, uint64_t,
+                                        uint64_t><<<grid, block, 0, stream>>>(
+                        level_ptr(l - 1), level_ptr(l), sums, copies, hist_in,
+                        static_cast<int>(m_active),
+                        static_cast<int>(shape.ncoords_sum),
+                        static_cast<int>(shape.ncoords_copy),
+                        static_cast<int>(m_half_elems),
+                        static_cast<int>(m_half_elems),
+                        static_cast<int>(m_plan.get_tree_history_size()), 1.0F,
+                        static_cast<int>(m_active));
+                }
+                sink.consume(
+                    l, {.row_stride      = m_chunk,
+                        .beam_stride     = m_half_elems,
+                        .history_stride  = m_plan.get_tree_history_size(),
+                        .nsamps          = m_active,
+                        .sample_begin    = m_search_position,
+                        .stream          = queue,
+                        .integer_state   = level_ptr(l == root ? root - 1 : l),
+                        .integer_history = hist_in});
+                if (l > 0 && shape.ncoords_sum > 0 && shape.dt_max > 0) {
+                    const dim3 block(256);
+                    const dim3 grid(
+                        (shape.dt_max + 255) / 256,
+                        std::min(static_cast<int>(shape.ncoords_sum),
+                                 kMaxGridY),
+                        m_nbeams);
+                    gpu_utils::check_kernel_launch_params(grid, block);
+                    kernel_advance_tree_history<uint64_t, uint64_t>
+                        <<<grid, block, 0, stream>>>(
+                            level_ptr(l - 1), sums, hist_in, hist_out,
+                            static_cast<int>(shape.ncoords_sum),
+                            static_cast<int>(m_half_elems),
+                            static_cast<int>(m_plan.get_tree_history_size()),
+                            1.0F, static_cast<int>(m_active));
+                }
+                gpu_utils::check_last_gpu_error(
+                    "FDMT integer search launch failed");
+            }
+            m_search_position += m_active;
+        }
+        m_device_work.mark(stream);
+    }
+
+    void reset_search_history(Stream queue) override {
+        gpu_utils::set_device(m_device_id);
+        const auto stream = to_cuda(queue);
+        for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_history_a_d,
+                        &m_tree_history_b_d}) {
+            if (!v->empty()) {
+                gpu_utils::check_gpu_call(
+                    cudaMemsetAsync(thrust::raw_pointer_cast(v->data()), 0,
+                                    v->size() * sizeof(float), stream));
+            }
+        }
+        for (auto* v : {&m_integer_history_a, &m_integer_history_b}) {
+            if (!v->empty()) {
+                gpu_utils::check_gpu_call(
+                    cudaMemsetAsync(thrust::raw_pointer_cast(v->data()), 0,
+                                    v->size() * sizeof(uint64_t), stream));
+            }
+        }
+        m_tree_history_parity = false;
+        m_is_initialized      = false;
+        m_search_position     = 0;
+        m_device_work.mark(stream);
     }
 
     // Allocates every device buffer and resolves the fusion depth: nothing is
@@ -469,7 +662,8 @@ public:
         gpu_utils::set_device(m_device_id);
         // The two state halves: level l < niters lives in half l % 2; the
         // root is written straight into the caller's dmt buffer.
-        m_state_internal_d.resize(2 * m_nbeams * m_half_elems, 0.0F);
+        m_state_internal_d.resize(
+            (m_search_nbits == 32 ? 2 : 4) * m_nbeams * m_half_elems, 0.0F);
         if (m_mode == FDMTMode::kValid) {
             const auto hist_size = m_nbeams * m_plan.get_history_size();
             m_history_a_d.resize(hist_size, 0.0F);
@@ -479,8 +673,13 @@ public:
             // why one buffer isn't safe here the way it is on the CPU.
             const auto tree_hist_size =
                 m_nbeams * m_plan.get_tree_history_size();
-            m_tree_history_a_d.resize(tree_hist_size, 0.0F);
-            m_tree_history_b_d.resize(tree_hist_size, 0.0F);
+            if (m_search_nbits == 32) {
+                m_tree_history_a_d.resize(tree_hist_size, 0.0F);
+                m_tree_history_b_d.resize(tree_hist_size, 0.0F);
+            } else {
+                m_integer_history_a.resize(tree_hist_size, 0);
+                m_integer_history_b.resize(tree_hist_size, 0);
+            }
         }
         plans::transfer_fdmt_plan_to_device(pc, m_plan_d);
         if (m_use_box_smearing) {
@@ -496,7 +695,12 @@ public:
             std::vector<detail::FDMTBoxRound> box_round(box_max);
             for (SizeType s = 0; s < box_max; ++s) {
                 box_w[s]     = static_cast<float>(weights[s]) * w_unit;
-                box_round[s] = detail::box_round(s + 1, scale_f);
+                box_round[s] = m_search_nbits == 32
+                                   ? detail::box_round(s + 1, scale_f)
+                                   : detail::FDMTBoxRound{.mul    = weights[s],
+                                                          .add    = 0,
+                                                          .rshift = 0,
+                                                          .lshift = 0};
             }
             m_box_w_d     = box_w;
             m_box_round_d = box_round;
@@ -814,11 +1018,14 @@ public:
                           sizeof(int);
         }
         return {
-            .plan    = plan_bytes,
-            .state   = m_state_internal_d.size() * sizeof(float),
-            .history = (m_history_a_d.size() + m_history_b_d.size() +
-                        m_tree_history_a_d.size() + m_tree_history_b_d.size()) *
-                       sizeof(float),
+            .plan  = plan_bytes,
+            .state = m_state_internal_d.size() * sizeof(float),
+            .history =
+                (m_history_a_d.size() + m_history_b_d.size() +
+                 m_tree_history_a_d.size() + m_tree_history_b_d.size()) *
+                    sizeof(float) +
+                (m_integer_history_a.size() + m_integer_history_b.size()) *
+                    sizeof(uint64_t),
             // Fused tables, plus the host-execute() staging once allocated.
             .workspace = fused_bytes +
                          (m_stage_wf_f32_d.size() * sizeof(float)) +
@@ -985,6 +1192,7 @@ public:
     /// execute()/reset() call starts as if this were a brand-new instance.
     /// Mirrors the CPU engine's reset_history().
     void reset_history() noexcept override {
+        m_search_position = 0;
         gpu_utils::set_device(m_device_id);
         if (!m_history_a_d.empty()) {
             m_history_a_d.assign(m_history_a_d.size(), 0.0F);
@@ -1219,6 +1427,11 @@ private:
     std::vector<Elem> m_float_levels;
     std::array<std::vector<Elem>, 17> m_int_levels; // indexed by nbits
 
+    SizeType m_search_max_fuse{SIZE_MAX};
+    uint64_t m_search_position{0};
+    SizeType m_search_nbits{32};
+    thrust::device_vector<uint64_t> m_integer_history_a, m_integer_history_b;
+
     // Level fusion (fuse_levels): the resolved depth's
     // device tables and launch geometry; empty when execute() is unfused.
     struct FusedLevelsD {
@@ -1439,9 +1652,9 @@ private:
     void configure_fusion(const plans::FDMTPlanContainer& pc,
                           SizeType requested) {
         m_fused.reset();
-        const SizeType niters = m_plan.get_niters();
-        const SizeType deepest =
-            std::min<SizeType>(niters, detail::kMaxFusedLevels);
+        const SizeType niters  = m_plan.get_niters();
+        const SizeType deepest = std::min(
+            {niters, SizeType{detail::kMaxFusedLevels}, m_search_max_fuse});
         if (requested == 0 || deepest == 0) {
             return;
         }
@@ -1731,24 +1944,33 @@ private:
                     in_state_nelements, out_state_nelements, tree_hist_size,
                     m_int_unit, active);
 
-            if (m_hist_out_ptr != nullptr && ncoords_sum_cur > 0) {
-                const auto max_offset = static_cast<int>(shape.dt_max);
-                if (max_offset > 0) {
-                    const dim3 block_thist = dim3(256, 1);
-                    const dim3 grid_thist =
-                        dim3((max_offset + block_thist.x - 1) / block_thist.x,
-                             std::min(ncoords_sum_cur, kMaxGridY), m_nbeams);
-                    kernel_advance_tree_history<TIn>
-                        <<<grid_thist, block_thist, 0, stream>>>(
-                            in_ptr, coords_sum_cur, m_hist_in_ptr,
-                            m_hist_out_ptr, ncoords_sum_cur, in_state_nelements,
-                            tree_hist_size, m_int_unit, active);
-                    gpu_utils::check_last_gpu_error(
-                        "kernel_advance_tree_history launch failed");
-                }
-            }
+            advance_tree_history<TIn>(in_ptr, next_level, stream);
         }
         gpu_utils::check_last_gpu_error("kernel_execute_iter launch failed");
+    }
+
+    template <typename TIn>
+    void advance_tree_history(const TIn* in_ptr,
+                              SizeType level,
+                              cudaStream_t stream) {
+        const auto& shape    = m_plan.get_container().state_shape[level];
+        const int count      = static_cast<int>(shape.ncoords_sum);
+        const int max_offset = static_cast<int>(shape.dt_max);
+        if (m_hist_out_ptr == nullptr || count == 0 || max_offset == 0) {
+            return;
+        }
+        auto coords = m_plan_d.coordinates_sum.get_raw_ptrs();
+        coords.update_offsets(m_coords_sum_offsets[level]);
+        const dim3 block(256, 1);
+        const dim3 grid((max_offset + block.x - 1) / block.x,
+                        std::min(count, kMaxGridY), m_nbeams);
+        kernel_advance_tree_history<TIn><<<grid, block, 0, stream>>>(
+            in_ptr, coords, m_hist_in_ptr, m_hist_out_ptr, count,
+            level_beam_stride(level - 1),
+            static_cast<int>(m_plan.get_tree_history_size()), m_int_unit,
+            static_cast<int>(m_active));
+        gpu_utils::check_last_gpu_error(
+            "kernel_advance_tree_history launch failed");
     }
 
     template <FDMTMode Mode, bool Smear, typename Input, typename TOut>

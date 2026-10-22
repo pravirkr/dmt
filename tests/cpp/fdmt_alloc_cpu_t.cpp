@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "dmt/algorithms/fdmt.hpp"
+#include "dmt/algorithms/fdmt_boxcar.hpp"
 #include "dmt/bit_pack_utils.hpp"
 
 // FDMT allocates all working memory in its constructor: execute() and the
@@ -115,4 +116,44 @@ TEST_CASE("FDMT execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
     }
 }
 
+} // namespace dmt
+
+namespace dmt {
+TEST_CASE("FDMTBoxcar warmed execution and flush do not allocate",
+          "[boxcar][cpu]") {
+    plans::FDMTPlan plan(700, 1200, 7, 256, 0.001F, 48, -32);
+    BoxcarConfig cfg;
+    cfg.max_boxcar     = 31;
+    cfg.wtsp           = 1;
+    cfg.subband_levels = 2;
+    cfg.detect_thresh  = 1;
+    cfg.max_candidates = 7;
+    algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
+                                  algorithms::kFDMTAutoFuse, 64);
+    std::vector<float> input(7 * 256, 3.0F);
+    (void)search.execute(input);
+    CHECK(count_allocations([&] { (void)search.execute(input); }) == 0);
+    CHECK(count_allocations([&] { (void)search.flush(); }) == 0);
+    CHECK(count_allocations([&] { search.reset_history(); }) == 0);
+}
+} // namespace dmt
+
+namespace dmt {
+TEST_CASE("Packed FDMTBoxcar warmed execution does not allocate",
+          "[boxcar][packed][cpu]") {
+    plans::FDMTPlan plan(700, 1200, 7, 139, 0.001F, 97, -73);
+    BoxcarConfig cfg;
+    cfg.input_nbits    = 8;
+    cfg.input_mean     = 127;
+    cfg.noise_sigma    = 2;
+    cfg.subband_levels = 2;
+    cfg.max_boxcar     = 4096;
+    algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
+                                  algorithms::kFDMTAutoFuse, 64);
+    std::vector<uint8_t> input(7 * 139, 130);
+    (void)search.execute(input);
+    CHECK(count_allocations([&] { (void)search.execute(input); }) == 0);
+    CHECK(count_allocations([&] { (void)search.flush(); }) == 0);
+    CHECK(count_allocations([&] { search.reset_history(); }) == 0);
+}
 } // namespace dmt

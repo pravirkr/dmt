@@ -14,6 +14,7 @@ pybind11_add_module(
   dmt_python.cpp
   bindings/bind_plans.cpp
   bindings/bind_fdmt.cpp
+  bindings/bind_fdmt_boxcar.cpp
   bindings/bind_cfdmt.cpp
   bindings/bind_ddmt.cpp
   bindings/bind_ddmt_fft.cpp

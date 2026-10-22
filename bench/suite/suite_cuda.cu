@@ -52,7 +52,7 @@ bool skip_if_over_device_budget(benchmark::State& state,
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     BENCH_GPU_TRY(cudaMemGetInfo(&free_bytes, &total_bytes));
-    const double need   = estimate_bytes(algo, plan, p);
+    const double need   = estimate_bytes(algo, plan, p, true);
     const double budget = 0.9 * static_cast<double>(free_bytes);
     if (need > budget) {
         state.SkipWithError(

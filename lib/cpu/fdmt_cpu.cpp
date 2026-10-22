@@ -1221,9 +1221,15 @@ public:
         if (m_nbeams == 0) {
             throw std::invalid_argument("FDMT: nbeams must be at least 1");
         }
-        m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                            cfg.chunk_nsamps);
-        allocate_working_memory(cfg.fuse_levels);
+        m_search_nbits = cfg.search_nbits;
+        m_chunk        = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
+                                                   cfg.chunk_nsamps);
+        if (m_search_nbits != 32 && cfg.chunk_nsamps == 0) {
+            m_chunk = std::min(m_plan.get_nsamps(),
+                               std::max<SizeType>(64, m_chunk / 2));
+        }
+        allocate_working_memory(cfg.fuse_levels,
+                                m_search_nbits == 32 ? cfg.max_fuse_levels : 0);
     }
 
     ~FDMTCpuEngine() override                      = default;
@@ -1242,6 +1248,158 @@ public:
                  std::span<float> dmt) override {
         const auto input = packed_input(waterfall_packed, nbits);
         run_block(input, packed_levels(nbits), dmt);
+    }
+
+    void execute_search(std::span<const float> waterfall,
+                        detail::FDMTSearchSink& sink) override {
+        const auto input = float_input(waterfall);
+        check_previous_block_finished();
+        m_is_initialized    = false;
+        const SizeType root = m_plan.get_niters();
+        if (m_mode != FDMTMode::kValid || m_fuse_levels >= root) {
+            throw std::logic_error(
+                "FDMT search requires valid mode and a separate root");
+        }
+        for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
+            start_chunk(input, m_float_levels, {}, t0,
+                        std::min(m_chunk, m_plan.get_nsamps() - t0));
+            SizeType level = m_fuse_levels;
+            if (level > 0) {
+                initialise_fused(level);
+            } else {
+                initialise();
+            }
+            const auto consume = [&](SizeType l, SizeType source) {
+                sink.consume(
+                    l, {
+                           .state      = level_ptr<float>(source, 0),
+                           .history    = m_tree_history.data(),
+                           .row_stride = m_row_len[source],
+                           .beam_stride =
+                               m_levels[source].beam_stride / sizeof(float),
+                           .history_stride = m_plan.get_tree_history_size(),
+                           .nsamps         = m_active,
+                           .sample_begin   = m_stream_pos,
+                           .history_ring   = true,
+                       });
+            };
+            consume(level, level);
+            for (++level; level < root; ++level) {
+                execute_iter(level);
+                consume(level, level);
+            }
+            consume(root, root - 1);
+            // Every root coordinate owns its history slot. Save only the
+            // trailing min(delay, chunk) input samples, after all readers.
+            for (SizeType b = 0; b < m_nbeams; ++b) {
+                const float* state = level_ptr<float>(root - 1, b);
+                float* hist =
+                    m_tree_history.data() + b * m_plan.get_tree_history_size();
+                for (const auto& op : m_ops[root]) {
+                    if (op.head == SIZE_MAX || op.delay == 0) {
+                        continue;
+                    }
+                    const SizeType keep = std::min(op.delay, m_active);
+                    for (SizeType t = m_active - keep; t < m_active; ++t) {
+                        hist[op.hist + (m_stream_pos + t) % op.delay] =
+                            state[op.head + t];
+                    }
+                }
+            }
+            end_chunk();
+        }
+    }
+
+    void execute_search(std::span<const uint8_t> waterfall,
+                        SizeType nbits,
+                        detail::FDMTSearchSink& sink) override {
+        if (nbits != m_search_nbits || nbits == 32) {
+            throw std::invalid_argument(
+                "FDMT integer search: input bit depth mismatch");
+        }
+        const auto input    = packed_input(waterfall, nbits);
+        const SizeType root = m_plan.get_niters();
+        const SizeType half = m_nbeams * m_half_elems * sizeof(uint64_t);
+        for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
+            m_input    = input;
+            m_input.t0 = t0;
+            m_active   = std::min(m_chunk, m_plan.get_nsamps() - t0);
+            for (SizeType l = 0; l < root; ++l) {
+                m_levels[l] = {
+                    .base = m_state_internal.data() + (l % 2) * half,
+                    .type = Elem::kF32, // private path uses level_ptr<uint64_t>
+                    .beam_stride = m_half_elems * sizeof(uint64_t)};
+            }
+            const auto& grids = m_plan.get_container().grids[0];
+            for (SizeType b = 0; b < m_nbeams; ++b) {
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+                for (SizeType c = 0; c < grids.size(); ++c) {
+                    init_channel<uint64_t>(beam_input(b),
+                                           level_ptr<uint64_t>(0, b) +
+                                               grids[c].coord_offset *
+                                                   m_row_len[0],
+                                           c, b, fdmt_thread_id());
+                }
+            }
+            for (SizeType l = 0; l <= root; ++l) {
+                if (l > 0 && l < root) {
+                    for (SizeType b = 0; b < m_nbeams; ++b) {
+                        const auto* in   = level_ptr<uint64_t>(l - 1, b);
+                        auto* out        = level_ptr<uint64_t>(l, b);
+                        const auto* hist = m_integer_history.data() +
+                                           b * m_plan.get_tree_history_size();
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+                        for (SizeType k = 0; k < m_ops[l].size(); ++k) {
+                            const auto& op = m_ops[l][k];
+                            for (SizeType t = 0; t < m_active; ++t) {
+                                uint64_t value = in[op.tail + t];
+                                if (op.head != SIZE_MAX) {
+                                    value += t >= op.delay
+                                                 ? in[op.head + t - op.delay]
+                                                 : hist[op.hist +
+                                                        (m_stream_pos + t) %
+                                                            op.delay];
+                                }
+                                out[op.out + t] = value;
+                            }
+                        }
+                    }
+                }
+                const SizeType source = l == root ? root - 1 : l;
+                sink.consume(l,
+                             {.row_stride      = m_row_len[source],
+                              .beam_stride     = m_half_elems,
+                              .history_stride  = m_plan.get_tree_history_size(),
+                              .nsamps          = m_active,
+                              .sample_begin    = m_stream_pos,
+                              .history_ring    = true,
+                              .integer_state   = level_ptr<uint64_t>(source, 0),
+                              .integer_history = m_integer_history.data()});
+                // Advance only after the sink and the merge have read the
+                // old history. Each coordinate owns a disjoint ring.
+                if (l > 0) {
+                    for (SizeType b = 0; b < m_nbeams; ++b) {
+                        const auto* in = level_ptr<uint64_t>(l - 1, b);
+                        auto* hist     = m_integer_history.data() +
+                                         b * m_plan.get_tree_history_size();
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+                        for (SizeType k = 0; k < m_ops[l].size(); ++k) {
+                            const auto& op = m_ops[l][k];
+                            if (op.head == SIZE_MAX || op.delay == 0) {
+                                continue;
+                            }
+                            const SizeType keep = std::min(op.delay, m_active);
+                            for (SizeType t = m_active - keep; t < m_active;
+                                 ++t) {
+                                hist[op.hist + (m_stream_pos + t) % op.delay] =
+                                    in[op.head + t];
+                            }
+                        }
+                    }
+                }
+            }
+            m_stream_pos += m_active;
+        }
     }
 
     void reset(std::span<const float> waterfall,
@@ -1291,7 +1449,8 @@ public:
             .plan      = m_plan.get_container().get_memory_usage() +
                          (m_ops_elems * sizeof(FDMTMergeOp)),
             .state     = m_state_internal.size(),
-            .history   = history_state_size() * sizeof(float),
+            .history   = history_state_size() * sizeof(float) +
+                         m_integer_history.size() * sizeof(uint64_t),
             .workspace = m_workspace.size(),
             .output    = m_nbeams * m_plan.get_dmt_size() * sizeof(float),
         };
@@ -1401,6 +1560,7 @@ public:
     void reset_history() noexcept override {
         std::ranges::fill(m_history, 0.0F);
         std::ranges::fill(m_tree_history, 0.0F);
+        std::ranges::fill(m_integer_history, uint64_t{0});
         m_stream_pos = 0;
         // Abandons any unfinished stepper block along with its stream.
         m_is_initialized = false;
@@ -1490,6 +1650,8 @@ private:
     std::vector<float> m_history;
     FDMTLargeArray<float> m_tree_history;
     SizeType m_stream_pos{0};
+    SizeType m_search_nbits{32};
+    FDMTLargeArray<uint64_t> m_integer_history;
 
     // Level-0 box means (use_box_smearing; see fdmt_box_weights.hpp): dyadic
     // float weights, the packed-input rounding recipes on the common scale
@@ -1645,8 +1807,9 @@ private:
             };
         }
         m_levels[niters] = {
-            .base        = reinterpret_cast<std::byte*>(dmt.data() + t0),
-            .type        = Elem::kF32,
+            .base = reinterpret_cast<std::byte*>(dmt.empty() ? nullptr
+                                                             : dmt.data() + t0),
+            .type = Elem::kF32,
             .beam_stride = m_plan.get_dmt_size() * sizeof(float),
         };
     }
@@ -1759,15 +1922,23 @@ private:
      * type tables, the box means and the per-thread workspace (see
      * FDMTWorkspace). Nothing is allocated after this.
      */
-    void allocate_working_memory(SizeType fuse_levels) {
+    void allocate_working_memory(SizeType fuse_levels,
+                                 SizeType max_fuse_levels) {
         const SizeType niters = m_plan.get_niters();
         build_merge_ops();
-        m_state_internal.assign(2 * m_nbeams * m_half_elems * sizeof(float),
-                                m_nthreads);
+        m_state_internal.assign(
+            2 * m_nbeams * m_half_elems *
+                (m_search_nbits == 32 ? sizeof(float) : sizeof(uint64_t)),
+            m_nthreads);
         if (m_mode == FDMTMode::kValid) {
             m_history.assign(m_nbeams * m_plan.get_history_size(), 0.0F);
-            m_tree_history.assign(m_nbeams * m_plan.get_tree_history_size(),
-                                  m_nthreads);
+            if (m_search_nbits == 32) {
+                m_tree_history.assign(m_nbeams * m_plan.get_tree_history_size(),
+                                      m_nthreads);
+            } else {
+                m_integer_history.assign(
+                    m_nbeams * m_plan.get_tree_history_size(), m_nthreads);
+            }
         }
         if (m_use_box_smearing) {
             const auto weights = m_plan.get_box_weights();
@@ -1780,7 +1951,12 @@ private:
             m_box_round.resize(box_max);
             for (SizeType s = 0; s < box_max; ++s) {
                 m_box_w_f32[s] = static_cast<float>(weights[s]) * w_unit;
-                m_box_round[s] = detail::box_round(s + 1, scale_f);
+                m_box_round[s] = m_search_nbits == 32
+                                     ? detail::box_round(s + 1, scale_f)
+                                     : detail::FDMTBoxRound{.mul = weights[s],
+                                                            .add = 0,
+                                                            .rshift = 0,
+                                                            .lshift = 0};
             }
             for (const SizeType nbits : {1, 2, 4, 8, 16}) {
                 const auto largest = detail::box_round_max(
@@ -1789,6 +1965,9 @@ private:
                                            : (largest <= 0xFFFF)     ? 2
                                            : (largest <= 0xFFFFFFFF) ? 4
                                                                      : 8;
+            }
+            if (m_search_nbits != 32) {
+                m_box_round_bytes[m_search_nbits] = 8;
             }
             m_box_weights = {.w_f32 = m_box_w_f32.data(),
                              .round = m_box_round.data(),
@@ -1807,7 +1986,11 @@ private:
             m_fuse_levels = std::min(fuse_levels, niters);
         }
 
-        m_ws.row_bytes = round_up_64(m_row_len[0] * sizeof(float));
+        m_fuse_levels = std::min(m_fuse_levels, max_fuse_levels);
+
+        m_ws.row_bytes = round_up_64(m_row_len[0] * (m_search_nbits == 32
+                                                         ? sizeof(float)
+                                                         : sizeof(uint64_t)));
         m_fuse_tile    = (m_mode == FDMTMode::kValid && m_fuse_levels > 0)
                              ? fuse_tile_for(m_fuse_levels)
                              : 0;

@@ -9,11 +9,10 @@ data, and writes
     bench/results/sensitivity/cryopaf.npz   (arrays)
     bench/results/sensitivity/cryopaf.json  (metadata)
 
-for the frozen configuration ``dmtlib.sensitivity.CRYOPAF`` (1024 channels
-over 704-1216 MHz at 512 us, DM 0-2000 on the piecewise-uniform Levin grid
-of tolerance 1.1, the grid of the benchmark suite); ``--config cryopaf4k``
-runs its 4096-channel twin ``CRYOPAF_4K`` (DM 0-1000, tolerance 1.05) into
-``cryopaf4k.{npz,json}``.
+for ``dmtlib.sensitivity.CRYOPAF`` (512 channels over 704-1216 MHz at
+512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband`` and
+``--config parkes_uwl`` select the other presets and write their named
+``{npz,json}`` outputs. Archived CryoPAF results used 1024 channels.
 
 which plot_sensitivity.py turns into figures. A unit-variance noise
 realisation, the same for every engine, calibrates each engine's threshold at
@@ -23,7 +22,7 @@ seeds), so they are not kept per machine.
 
     python bench/scripts/run_sensitivity.py
     python bench/scripts/run_sensitivity.py --n-dm 8 --out /tmp/check   # quick
-    python bench/scripts/run_sensitivity.py --config cryopaf4k
+    python bench/scripts/run_sensitivity.py --config parkes_uwl
 """
 
 from __future__ import annotations
@@ -36,15 +35,22 @@ import re
 import subprocess
 import sys
 import time
+from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-# Prefer the in-tree extension over a (possibly stale) installed dmtlib.
-sys.meta_path = [
-    f for f in sys.meta_path if "ScikitBuildRedirectingFinder" not in type(f).__name__
-]
+# Prefer a compatible in-tree build. Otherwise retain the editable loader,
+# which locates the extension built for this Python interpreter.
+if any(
+    (REPO / "src/dmtlib" / f"libdmt{suffix}").is_file() for suffix in EXTENSION_SUFFIXES
+):
+    sys.meta_path = [
+        f
+        for f in sys.meta_path
+        if "ScikitBuildRedirectingFinder" not in type(f).__name__
+    ]
 sys.path.insert(0, str(REPO / "src"))
 
 import dmtlib  # noqa: E402

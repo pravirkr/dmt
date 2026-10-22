@@ -3,12 +3,9 @@
 // Published benchmark suite (dmt_bench_suite): one data configuration shared
 // by every algorithm and backend, so FDMT, FDMT-FFT (integer and fractional
 // merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force) land on the
-// same plots. The default configuration is the CryoPAF incoherent search at
-// Parkes, the configuration of every published result (the sensitivity
-// study: dmtlib.sensitivity.CRYOPAF); DMT_BENCH_CONFIG=cryopaf4k selects its
-// 4096-channel twin (dmtlib.sensitivity.CRYOPAF_4K). Only the block length
-// (nsamps), the DM range (dm_max, hence the number of trials) and the input
-// bit width are swept. See bench/README.md.
+// same plots. DMT_BENCH_CONFIG selects cryopaf (512 channels),
+// cryopaf_lband (1152 channels) or parkes_uwl (6656 channels). Only block
+// length, DM range and input bit width are swept. See bench/README.md.
 
 #include <algorithm>
 #include <cstdint>
@@ -26,16 +23,16 @@
 
 namespace dmt::bench_suite {
 
-// Two configurations, selected with DMT_BENCH_CONFIG (run_suite.py
-// --config), both 704-1216 MHz at 512 us on the piecewise-uniform Levin grid
+// Configurations selected with DMT_BENCH_CONFIG (run_suite.py --config),
+// all on the piecewise-uniform Levin grid
 // from DM 0 (every engine gets the same grid; the FDMT engines round it to
 // integer delays, and DDMT-FFT runs one NUFFT per uniform segment):
-// - "cryopaf" (default, the published one): 1024 channels, DM 0-2000, Levin
-//   tolerance 1.1 (2501 trials). Few channels and a sparse grid: the
-//   regime least favourable to the FDMT (~14x fewer operations than brute
-//   force).
-// - "cryopaf4k": 4096 channels, DM 0-1000, Levin tolerance 1.05 (5183
-//   trials). Fine channels and a dense grid (~150x fewer FDMT operations).
+// - "cryopaf" (default): 512 channels over 704-1216 MHz at 512 us,
+//   DM 0-2000, tolerance 1.1. Archived published runs used 1024 channels.
+// - "cryopaf_lband": 1152 channels over 1100-1714 MHz at 455.6 us,
+//   DM 0-2000, tolerance 1.1, with one search subband level.
+// - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us,
+//   DM 0-2000, tolerance 1.1. The dispersion sweep spans multiple blocks.
 // The benchmark names do not carry the configuration; run_suite.py writes
 // each one to its own results tree.
 struct SuiteConfig {
@@ -50,43 +47,63 @@ struct SuiteConfig {
     float dm_max_ref;
     std::vector<SizeType> nsamps_sweep;
     std::vector<float> dm_max_sweep;
+    /// FDMTBoxcar search depth; transform-only runs are unchanged.
+    SizeType subband_levels{0};
 };
 
 inline const SuiteConfig& suite_config() {
     static const SuiteConfig cfg = [] {
-        // 32768 samples (16.8 s) is 1.5x the 21 762-sample delay at DM 2000
-        // (cryopaf) and 3x the 10 877-sample delay at DM 1000 (cryopaf4k).
+        // Reference blocks retain 32768 samples for all presets.
         SuiteConfig cryopaf{"cryopaf",
                             704.0F,
                             1216.0F,
                             5.12e-4F,
-                            1024,
+                            512,
                             1.1F,
                             32768,
                             2000.0F,
                             {8192, 16384, 32768, 65536},
                             {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
-        SuiteConfig cryopaf4k{"cryopaf4k",
-                              704.0F,
-                              1216.0F,
-                              5.12e-4F,
-                              4096,
-                              1.05F,
-                              32768,
-                              1000.0F,
-                              {8192, 16384, 32768, 65536},
-                              {125.0F, 250.0F, 500.0F, 1000.0F}};
+        // DM 2000 sweeps 4.03365 s (8853.49 samples); the covering
+        // Levin grid ends at DM 2005.36 (8877 rounded delay samples).
+        // The 32768-sample reference block spans 14.9291 seconds.
+        SuiteConfig cryopaf_lband{"cryopaf_lband",
+                                  1100.0F,
+                                  1714.0F,
+                                  455.6e-6F,
+                                  1152,
+                                  1.1F,
+                                  32768,
+                                  2000.0F,
+                                  {8192, 16384, 32768, 65536},
+                                  {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F},
+                                  1};
+        SuiteConfig parkes_uwl{"parkes_uwl",
+                               704.0F,
+                               4032.0F,
+                               64e-6F,
+                               6656,
+                               1.1F,
+                               32768,
+                               2000.0F,
+                               {8192, 16384, 32768, 65536},
+                               {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
         const char* env = std::getenv("DMT_BENCH_CONFIG"); // NOLINT
         const std::string_view sel =
             (env != nullptr && *env != '\0') ? env : "cryopaf";
         if (sel == "cryopaf") {
             return cryopaf;
         }
-        if (sel == "cryopaf4k") {
-            return cryopaf4k;
+        if (sel == "parkes_uwl") {
+            return parkes_uwl;
         }
-        throw std::invalid_argument(std::format(
-            "DMT_BENCH_CONFIG={}: expected cryopaf or cryopaf4k", sel));
+        if (sel == "cryopaf_lband") {
+            return cryopaf_lband;
+        }
+        throw std::invalid_argument(
+            std::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband "
+                        "or parkes_uwl",
+                        sel));
     }();
     return cfg;
 }
@@ -247,8 +264,10 @@ inline double memory_budget_bytes() {
 
 /// Estimated working-set bytes of one engine at point `p` (input, output and
 /// the engine's own buffers), used only for the skip decision.
-inline double
-estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
+inline double estimate_bytes(Algo algo,
+                             const plans::FDMTPlan& plan,
+                             const Point& p,
+                             bool device = false) {
     const double input =
         static_cast<double>(kNchans * p.nsamps) *
         ((p.nbits == 32) ? 4.0 : static_cast<double>(p.nbits) / 8.0);
@@ -258,7 +277,11 @@ estimate_bytes(Algo algo, const plans::FDMTPlan& plan, const Point& p) {
     constexpr double kChunkStateBudget = 2.0 * 1024.0 * 1024.0 * 1024.0;
     switch (algo) {
     case Algo::kFDMT: // output + the engine's two state halves
-        return input + d + std::min(2.0 * b, kChunkStateBudget);
+        return input + d + std::min(2.0 * b, kChunkStateBudget) +
+               static_cast<double>(plan.get_history_size() +
+                                   plan.get_tree_history_size()) *
+                   sizeof(float) * (device ? 2.0 : 1.0) +
+               static_cast<double>(plan.get_container().get_memory_usage());
     case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
     case Algo::kFDMTFFTFrac:
     case Algo::kDDMTFFT:
@@ -280,13 +303,17 @@ inline void set_counters(benchmark::State& state,
                          const plans::FDMTPlan& plan,
                          const Point& p,
                          int nthreads) {
-    state.counters["nsamps"]   = static_cast<double>(p.nsamps);
-    state.counters["ndms"]     = static_cast<double>(plan.get_dmt_ndms());
-    state.counters["nchans"]   = static_cast<double>(kNchans);
-    state.counters["dm_max"]   = static_cast<double>(p.dm_max);
-    state.counters["nbits"]    = static_cast<double>(p.nbits);
-    state.counters["nthreads"] = static_cast<double>(nthreads);
-    state.counters["block_s"]  = static_cast<double>(p.nsamps) * kTsamp;
+    state.counters["nsamps"]    = static_cast<double>(p.nsamps);
+    state.counters["ndms"]      = static_cast<double>(plan.get_dmt_ndms());
+    state.counters["nchans"]    = static_cast<double>(kNchans);
+    state.counters["f_min"]     = kFMin;
+    state.counters["f_max"]     = kFMax;
+    state.counters["tsamp"]     = kTsamp;
+    state.counters["levin_tol"] = kLevinTol;
+    state.counters["dm_max"]    = static_cast<double>(p.dm_max);
+    state.counters["nbits"]     = static_cast<double>(p.nbits);
+    state.counters["nthreads"]  = static_cast<double>(nthreads);
+    state.counters["block_s"]   = static_cast<double>(p.nsamps) * kTsamp;
 }
 
 /// DDMT throughput in delay-and-sum additions per second (nchans x ndm per

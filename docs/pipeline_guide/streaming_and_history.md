@@ -57,7 +57,7 @@ recomputation of overlap samples.
    history traffic. By default the chunk is the longest power of two ≥ 2048
    whose state fits 2 GiB (capped at `nsamps`), so a long block at high DM
    needs no more memory than a short one. For example (M1 Pro, 8 threads,
-   the benchmark configuration of 1024 channels at 512 µs, DM 0–2000, with
+   the archived benchmark configuration of 1024 channels at 512 µs, DM 0–2000, with
    32 768-sample blocks), a whole-block tree peaks at 6.2 GiB and takes 376 ms
    per block; the automatic chunk of 8192 takes 358 ms at 2.2 GiB. See
    {ref}`Chunked execution <chunked-execution>`.

@@ -17,6 +17,7 @@
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_variance.hpp"
 #include "dmt/modes.hpp"
 
 namespace dmt::plans {
@@ -462,12 +463,8 @@ public:
                 static_cast<double>(
                     algorithms::detail::box_weight(box_len, bits)) *
                 inv;
-            const auto smearing_len = static_cast<double>(box_len);
-            const double h          = std::max(smearing_len, double{w});
-            const double l          = std::min(smearing_len, double{w});
-            total_var += weight * weight *
-                         (((h - l + 1.0) * (l * l)) +
-                          ((((2.0 * l) - 1.0) * l * (l - 1.0)) / 3.0));
+            total_var +=
+                algorithms::detail::fdmt_box_variance(box_len, w, weight);
         }
         return static_cast<float>(total_var);
     }

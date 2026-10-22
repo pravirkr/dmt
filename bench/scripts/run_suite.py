@@ -6,11 +6,11 @@ One command per machine; the JSON it writes is what plot_suite.py reads:
     python bench/scripts/run_suite.py --machine xeon-6348h --build-dir build
     python bench/scripts/run_suite.py --machine l40s --no-cpu      # GPU box
     python bench/scripts/run_suite.py --machine m1-pro --suite cfdmt
-    python bench/scripts/run_suite.py --machine m1-pro --config cryopaf4k
+    python bench/scripts/run_suite.py --machine m1-pro --config parkes_uwl
 
 Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
-(``--config cryopaf4k``, the 4096-channel configuration:
-``bench/results/cryopaf4k/<machine>/``)
+(``--config parkes_uwl``, the 6656-channel ultra-wideband configuration:
+``bench/results/parkes_uwl/<machine>/``)
 (``--suite cfdmt``: ``suite_cfdmt_cpu.json`` / ``suite_cfdmt_<gpu>.json``, the
 CohFDMT baseband search, which has its own configuration and plots)
 (``gpu`` is ``cuda`` or ``hip``, whichever the build has)
@@ -149,10 +149,11 @@ def main() -> None:
     ap.add_argument(
         "--config",
         default="cryopaf",
-        choices=["cryopaf", "cryopaf4k"],
+        choices=["cryopaf", "cryopaf_lband", "parkes_uwl"],
         help="data configuration of --suite main (bench/suite/suite_common.hpp): "
-        "cryopaf (1024 channels, DM 0-2000, the published one) or cryopaf4k "
-        "(4096 channels, DM 0-1000, written to bench/results/cryopaf4k/)",
+        "cryopaf (512 channels, 704-1216 MHz at 512 us), cryopaf_lband "
+        "(1152 channels, 1100-1714 MHz at 455.6 us), or parkes_uwl "
+        "(6656 channels, 704-4032 MHz at 64 us); all DM 0-2000, Levin tolerance 1.1",
     )
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")
