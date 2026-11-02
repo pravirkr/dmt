@@ -39,4 +39,5 @@
 #include "algorithms/fdmt_fft.hpp" // IWYU pragma: export
 #include "algorithms/sdmt.hpp"     // IWYU pragma: export
 
-#include "algorithms/fdmt_boxcar.hpp" // IWYU pragma: export
+#include "algorithms/fdmt_boxcar.hpp"     // IWYU pragma: export
+#include "algorithms/fdmt_fft_boxcar.hpp" // IWYU pragma: export

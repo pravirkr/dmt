@@ -35,8 +35,10 @@ void fdmt_boxcar_cpu(benchmark::State& state, bool fused) {
     cfg.fuse_levels     = 0;
     cfg.chunk_nsamps    = plan.get_nsamps();
     cfg.max_fuse_levels = 0;
-    auto scorer =
-        algorithms::detail::make_fdmt_boxcar_cpu(plan, config, planes, cfg);
+    auto scorer         = algorithms::detail::make_fdmt_boxcar_cpu(
+        plan, config, planes, cfg,
+        algorithms::detail::make_boxcar_driver(
+            algorithms::detail::make_fdmt_cpu(plan, cfg)));
     std::vector<float> waterfall(plan.get_nchans() * plan.get_nsamps());
     std::mt19937 random(42);
     std::normal_distribution<float> noise;
@@ -113,17 +115,18 @@ namespace {
 
 void bench_fdmt_boxcar_stream(benchmark::State& state,
                               int threads,
+                              float wtsp,
                               bool packed = false) {
     const auto& cfg = suite_config();
     const Point point{Sweep::kNdms, cfg.nsamps_ref, cfg.dm_max_ref,
                       packed ? SizeType{8} : SizeType{32}};
     auto plan = make_plan(point);
-    const BoxcarConfig boxcar(4096, 2.0F, 6.0F, packed ? 12.0F : 1.0F,
-                              PeakFindingMode::kContiguousPeakPerWidth,
-                              cfg.subband_levels, 131072, 4096, true,
-                              packed ? 8 : 32, packed ? 127.0F : 0.0F);
-    // Keep public search defaults: widths 1..4096, spacing 2, threshold 6,
+    // The GPU benchmark's width sets (boxcars up to 100 ms), threshold 6,
     // per-width peaks. Input preparation and construction are not timed.
+    const BoxcarConfig boxcar(
+        max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
+        PeakFindingMode::kContiguousPeakPerWidth, cfg.subband_levels, 131072,
+        4096, true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
     const auto input_size = cfg.nchans * cfg.nsamps_ref;
     double rows           = 0;
     for (SizeType level = plan.get_niters() - cfg.subband_levels;
@@ -208,25 +211,19 @@ void bench_fdmt_boxcar_stream(benchmark::State& state,
 }
 
 [[maybe_unused]] const bool kStreamRegistered = [] {
-    if (suite_config().name == "cryopaf_lband" ||
-        suite_config().name == "parkes_uwl") {
+    for (const float wtsp : wtsp_sweep()) {
         for (const auto threads : cpu_threads()) {
-            benchmark::RegisterBenchmark(
-                std::format("BM_fdmt_boxcar_stream/{}/cpu{}",
-                            suite_config().name, threads),
-                [threads](benchmark::State& state) {
-                    bench_fdmt_boxcar_stream(state, threads);
-                })
-                ->UseRealTime()
-                ->Unit(benchmark::kMillisecond);
-            benchmark::RegisterBenchmark(
-                std::format("BM_fdmt_boxcar_stream/{}/uint8/cpu{}",
-                            suite_config().name, threads),
-                [threads](benchmark::State& state) {
-                    bench_fdmt_boxcar_stream(state, threads, true);
-                })
-                ->UseRealTime()
-                ->Unit(benchmark::kMillisecond);
+            for (const bool packed : {false, true}) {
+                benchmark::RegisterBenchmark(
+                    std::format("BM_fdmt_boxcar_stream/{}/{}wtsp:{:g}/cpu{}",
+                                suite_config().name, packed ? "uint8/" : "",
+                                wtsp, threads),
+                    [threads, wtsp, packed](benchmark::State& state) {
+                        bench_fdmt_boxcar_stream(state, threads, wtsp, packed);
+                    })
+                    ->UseRealTime()
+                    ->Unit(benchmark::kMillisecond);
+            }
         }
     }
     return true;

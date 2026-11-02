@@ -1888,13 +1888,13 @@ private:
     // Automatic fusion depth (kFDMTAutoFuse): the deepest depth whose two
     // per-thread scratch buffers fit max(kFuseBudgetTotal / nthreads,
     // kFuseBudgetPerThread) -- a rule on the plan and thread count only, no
-    // hardware detection. Fitted on an M1 Pro and a Xeon Gold 6348H (4096
-    // channels, dt_max 2048, 4K-64K samples, 1-8 threads): within 5% of the
-    // best fixed depth except 4K-sample blocks on the Xeon (6-8.5%). The
-    // per-thread floor of 8 MB keeps the same choices there and lets a
+    // hardware detection. Fitted on an ARM64 (NEON) laptop and a Xeon Gold
+    // 6348H (4096 channels, dt_max 2048, 4K-64K samples, 1-8 threads): within
+    // 5% of the best fixed depth except 4K-sample blocks on the Xeon (6-8.5%).
+    // The per-thread floor of 8 MB keeps the same choices there and lets a
     // high-DM plan (1024 channels at 512 us, DM 2000: ~22 rows per channel,
     // 2-8K-sample chunks) fuse at 8 threads, within 1% of its best depth
-    // on the M1 Pro, where 5 MB fell back to no fusion (+18%).
+    // on the ARM64 laptop, where 5 MB fell back to no fusion (+18%).
     static constexpr SizeType kFuseBudgetTotal     = SizeType{36} << 20;
     static constexpr SizeType kFuseBudgetPerThread = SizeType{8} << 20;
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <random>
 #include <span>
 #include <tuple>
@@ -11,6 +12,8 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
+#include "dmt/algorithms/fdmt_fft.hpp"
+#include "dmt/algorithms/fdmt_fft_boxcar.hpp"
 
 namespace boxcar_test {
 using namespace dmt;
@@ -31,8 +34,16 @@ inline void compare(std::vector<RawCandidate> actual,
     sort(actual);
     sort(expected);
     REQUIRE(actual.size() == expected.size());
+    const auto show = [](const RawCandidate& c) {
+        return std::format("beam {} level {} band {} dm {} filter {} [{}, {}] "
+                           "peak {} snr {}",
+                           c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
+                           c.filter_idx, c.begin_sample, c.end_sample,
+                           c.peak_sample, c.snr);
+    };
     for (SizeType i = 0; i < actual.size(); ++i) {
-        INFO("candidate " << i);
+        INFO("candidate " << i << "\n  actual   " << show(actual[i])
+                          << "\n  expected " << show(expected[i]));
         REQUIRE(key(actual[i]) == key(expected[i]));
         CHECK(actual[i].width == expected[i].width);
         CHECK(actual[i].chan_begin == expected[i].chan_begin);
@@ -44,6 +55,64 @@ inline void compare(std::vector<RawCandidate> actual,
                    Catch::Matchers::WithinRel(expected[i].snr, 2e-5F));
     }
 }
+// For rows that are not exact in float (FDMT-FFT): float rounding may move
+// a point across the threshold, so run edges may differ and whole runs may
+// appear or vanish, but only at S/N within `rtol` of the threshold; and
+// plateau ties (equal S/N at several samples) may pick another peak sample.
+// Runs are matched by (beam, plane, DM, filter) and overlapping extents.
+inline void compare_near_threshold(std::vector<RawCandidate> actual,
+                                   std::vector<RawCandidate> expected,
+                                   float threshold,
+                                   float rtol = 1e-4F) {
+    const auto row = [](const RawCandidate& c) {
+        return std::tuple(c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
+                          c.filter_idx);
+    };
+    const auto order = [&](const auto& a, const auto& b) {
+        return std::tuple(row(a), a.begin_sample) <
+               std::tuple(row(b), b.begin_sample);
+    };
+    std::sort(actual.begin(), actual.end(), order);
+    std::sort(expected.begin(), expected.end(), order);
+    const auto marginal = [&](const RawCandidate& c) {
+        return std::abs(c.snr / threshold - 1.0F) < rtol;
+    };
+    const auto overlap = [&](const RawCandidate& a, const RawCandidate& b) {
+        return row(a) == row(b) && a.begin_sample <= b.end_sample &&
+               b.begin_sample <= a.end_sample;
+    };
+    SizeType i = 0, j = 0, moved = 0;
+    while (i < actual.size() || j < expected.size()) {
+        if (i < actual.size() && j < expected.size() &&
+            overlap(actual[i], expected[j])) {
+            INFO("run " << actual[i].begin_sample << ".."
+                        << actual[i].end_sample << " vs "
+                        << expected[j].begin_sample << ".."
+                        << expected[j].end_sample);
+            CHECK_THAT(actual[i].snr,
+                       Catch::Matchers::WithinRel(expected[j].snr, 2e-5F));
+            moved += actual[i].begin_sample != expected[j].begin_sample ||
+                     actual[i].end_sample != expected[j].end_sample ||
+                     actual[i].peak_sample != expected[j].peak_sample;
+            ++i;
+            ++j;
+        } else if (j == expected.size() ||
+                   (i < actual.size() && order(actual[i], expected[j]))) {
+            INFO("extra run at " << actual[i].peak_sample << " snr "
+                                 << actual[i].snr);
+            CHECK(marginal(actual[i]));
+            ++i;
+        } else {
+            INFO("missing run at " << expected[j].peak_sample << " snr "
+                                   << expected[j].snr);
+            CHECK(marginal(expected[j]));
+            ++j;
+        }
+    }
+    // Rounding moves are rare: at most one run in a hundred.
+    CHECK(moved * 100 <= expected.size() + 100);
+}
+
 inline void append(std::vector<RawCandidate>& to, CandidateResultView view) {
     REQUIRE_FALSE(view.overflowed());
     REQUIRE(view.candidates.size() == view.emitted_count);
@@ -79,46 +148,12 @@ waterfalls(const plans::FDMTPlan& plan, SizeType beams, SizeType blocks) {
     return input;
 }
 
-// Materialize existing FDMT's actual intermediate planes, then evaluate
-// windows by direct float64 summation. No new scorer/prefix helpers used.
+// Direct float64 windows over each plane row's stream (rows in plane, then
+// DM order), with the same peak bookkeeping as the engines.
 inline std::vector<RawCandidate>
-reference(const plans::FDMTPlan& plan,
-          const BoxcarConfig& config,
-          bool smear,
-          SizeType beams,
-          const std::vector<std::vector<float>>& input) {
-    FDMTBoxcar metadata(plan, config, smear, Exec::cpu(), beams);
-    const auto planes = metadata.get_search_plans();
-    std::vector<std::vector<float>> rows;
-    SizeType nrows = 0;
-    for (const auto& p : planes) {
-        nrows += beams * p.dm_grid.size();
-    }
-    rows.resize(nrows);
-    FDMT fdmt(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
-              plan.get_nsamps(), plan.get_tsamp(), plan.get_dt_grid_final(),
-              smear, "valid", Exec::cpu(), beams, 0, false, plan.get_nsamps());
-    std::vector<float> output(beams * plan.get_dmt_size());
-    for (const auto& block : input) {
-        fdmt.reset(block, output);
-        SizeType index = 0;
-        for (const auto& p : planes) {
-            fdmt.advance_until_remaining(p.subband_level);
-            const auto level = fdmt.view_level_data();
-            const auto& pc   = plan.get_container();
-            // Public level view is the first beam; the stepper's internal
-            // halves include padding. Run separate references per beam.
-            REQUIRE(beams == 1);
-            for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
-                const SizeType offset =
-                    (p.coord_offset + d) * pc.state_shape[p.level].nsamps;
-                rows[index].insert(rows[index].end(), level.begin() + offset,
-                                   level.begin() + offset + plan.get_nsamps());
-                ++index;
-            }
-        }
-        fdmt.finalize();
-    }
+direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
+               const std::vector<std::vector<float>>& rows,
+               const BoxcarConfig& config) {
     std::vector<RawCandidate> expected;
     SizeType row_idx = 0;
     for (const auto& p : planes) {
@@ -207,6 +242,49 @@ reference(const plans::FDMTPlan& plan,
     return expected;
 }
 
+// Materialize existing FDMT's actual intermediate planes, then evaluate
+// windows by direct float64 summation. No new scorer/prefix helpers used.
+inline std::vector<RawCandidate>
+reference(const plans::FDMTPlan& plan,
+          const BoxcarConfig& config,
+          bool smear,
+          SizeType beams,
+          const std::vector<std::vector<float>>& input) {
+    FDMTBoxcar metadata(plan, config, smear, Exec::cpu(), beams);
+    const auto planes = metadata.get_search_plans();
+    std::vector<std::vector<float>> rows;
+    SizeType nrows = 0;
+    for (const auto& p : planes) {
+        nrows += beams * p.dm_grid.size();
+    }
+    rows.resize(nrows);
+    FDMT fdmt(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
+              plan.get_nsamps(), plan.get_tsamp(), plan.get_dt_grid_final(),
+              smear, "valid", Exec::cpu(), beams, 0, false, plan.get_nsamps());
+    std::vector<float> output(beams * plan.get_dmt_size());
+    for (const auto& block : input) {
+        fdmt.reset(block, output);
+        SizeType index = 0;
+        for (const auto& p : planes) {
+            fdmt.advance_until_remaining(p.subband_level);
+            const auto level = fdmt.view_level_data();
+            const auto& pc   = plan.get_container();
+            // Public level view is the first beam; the stepper's internal
+            // halves include padding. Run separate references per beam.
+            REQUIRE(beams == 1);
+            for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
+                const SizeType offset =
+                    (p.coord_offset + d) * pc.state_shape[p.level].nsamps;
+                rows[index].insert(rows[index].end(), level.begin() + offset,
+                                   level.begin() + offset + plan.get_nsamps());
+                ++index;
+            }
+        }
+        fdmt.finalize();
+    }
+    return direct_windows(planes, rows, config);
+}
+
 inline std::vector<RawCandidate>
 batched_reference(const plans::FDMTPlan& plan,
                   const BoxcarConfig& config,
@@ -228,5 +306,44 @@ batched_reference(const plans::FDMTPlan& plan,
         expected.insert(expected.end(), candidates.begin(), candidates.end());
     }
     return expected;
+}
+
+// FDMT-FFT rows from the existing transform (one beam), moved to input-stream
+// coordinates (output sample j of the stream is input sample j - latency),
+// then direct windows with FDMTFFTBoxcar's planes.
+inline std::vector<RawCandidate>
+fft_reference(const plans::FDMTPlan& plan,
+              const BoxcarConfig& config,
+              bool smear,
+              bool frac,
+              std::span<const uint8_t> kill,
+              Exec exec,
+              const std::vector<std::vector<float>>& input) {
+    using algorithms::FDMTFFT;
+    using algorithms::FDMTFFTBoxcar;
+    FDMTFFTBoxcar metadata(plan, config, smear, Exec::cpu(), 1, frac, kill);
+    const auto planes = metadata.get_search_plans();
+    REQUIRE(planes.size() == 1);
+    FDMTFFT fft(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
+                plan.get_nsamps(), plan.get_tsamp(), plan.get_dt_grid_final(),
+                smear, "valid", exec, 1, frac, kill);
+    const SizeType latency = fft.get_output_latency();
+    REQUIRE(latency == metadata.get_output_latency());
+    const SizeType ndm = planes.front().dm_grid.size();
+    std::vector<std::vector<float>> rows(ndm);
+    std::vector<float> output(plan.get_dmt_size());
+    for (const auto& block : input) {
+        fft.execute(block, output);
+        for (SizeType d = 0; d < ndm; ++d) {
+            const auto* row = output.data() + d * plan.get_nsamps();
+            rows[d].insert(rows[d].end(), row, row + plan.get_nsamps());
+        }
+    }
+    for (auto& row : rows) {
+        row.erase(row.begin(),
+                  row.begin() + static_cast<std::ptrdiff_t>(
+                                    std::min(latency, row.size())));
+    }
+    return direct_windows(planes, rows, config);
 }
 } // namespace boxcar_test

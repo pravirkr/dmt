@@ -118,7 +118,10 @@ void bind_fdmt(py::module_& mod) {
             tiles in ``mode='valid'``; shared-memory tiles on a GPU). 0 =
             original level-by-level path; ``None``
             (default) picks the depth from the plan (and ``nthreads`` on the
-            CPU). Bit-identical output.
+            CPU). Bit-identical output, except that on a GPU in
+            ``mode='valid'`` with float input and many delays per channel the
+            default computes the lowest and highest levels directly, equal to
+            the tree within float rounding (exactly for integer-valued input).
         int_tree : bool, optional
             Performance parameter: packed input stores tree levels as
             uint8/uint16 where the exact bound allows (default True). Set
@@ -130,9 +133,10 @@ void bind_fdmt(py::module_& mod) {
             GB at high DM for a block of a few hundred MB). Bit-identical
             output for any chunk; each chunk costs a little cross-block
             history traffic. ``None`` (default) picks the longest power of
-            two >= 2048 whose state fits 2 GiB, capped at ``nsamps`` (see
-            :attr:`chunk_nsamps`); other values are rounded up to a multiple
-            of 64. The stepper needs ``chunk_nsamps >= nsamps``.
+            two >= 2048 whose state fits 2 GiB, capped at ``nsamps`` (GPU:
+            the longest power of two >= 256 whose state fits the device L2,
+            when one does; see :attr:`chunk_nsamps`); other values are
+            rounded up to a multiple of 64. The stepper needs ``chunk_nsamps >= nsamps``.
         backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``). See
             :func:`available_backends` for the backends in this build; any

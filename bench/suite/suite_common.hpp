@@ -8,6 +8,7 @@
 // length, DM range and input bit width are swept. See bench/README.md.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -28,11 +29,12 @@ namespace dmt::bench_suite {
 // from DM 0 (every engine gets the same grid; the FDMT engines round it to
 // integer delays, and DDMT-FFT runs one NUFFT per uniform segment):
 // - "cryopaf" (default): 512 channels over 704-1216 MHz at 512 us,
-//   DM 0-2000, tolerance 1.1. Archived published runs used 1024 channels.
+//   DM 0-2000, tolerance 1.1.
 // - "cryopaf_lband": 1152 channels over 1100-1714 MHz at 455.6 us,
 //   DM 0-2000, tolerance 1.1, with one search subband level.
 // - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us,
-//   DM 0-2000, tolerance 1.1. The dispersion sweep spans multiple blocks.
+//   DM 0-2000, tolerance 1.6 (4749 trials; 1.1 would need 12941). The
+//   dispersion sweep spans multiple blocks.
 // The benchmark names do not carry the configuration; run_suite.py writes
 // each one to its own results tree.
 struct SuiteConfig {
@@ -83,7 +85,7 @@ inline const SuiteConfig& suite_config() {
                                4032.0F,
                                64e-6F,
                                6656,
-                               1.1F,
+                               1.6F,
                                32768,
                                2000.0F,
                                {8192, 16384, 32768, 65536},
@@ -367,6 +369,18 @@ inline std::vector<uint8_t> make_packed_input(SizeType nbytes) {
 
 inline SizeType packed_bytes(SizeType nsamps, SizeType nbits) {
     return kNchans * (((nsamps * nbits) + 7) / 8);
+}
+
+/// Candidate-search benchmarks: boxcars up to 100 ms (floor(0.1 s / tsamp)
+/// samples), at two width spacings per preset (every width and ~1.5x
+/// spacing at coarse sampling; 1.5x and 2x for UWL's 64 us).
+inline SizeType max_boxcar_100ms() {
+    return static_cast<SizeType>(std::floor(0.1 / kTsamp));
+}
+
+inline std::vector<float> wtsp_sweep() {
+    return suite_config().name == "parkes_uwl" ? std::vector<float>{1.5F, 2.0F}
+                                               : std::vector<float>{1.0F, 1.5F};
 }
 
 } // namespace dmt::bench_suite

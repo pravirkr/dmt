@@ -55,11 +55,12 @@ recomputation of overlap samples.
    than rows × `nsamps`. The same overlap-save history joins the chunks, so
    the output is bit-identical for any chunk; each chunk costs a little extra
    history traffic. By default the chunk is the longest power of two ≥ 2048
-   whose state fits 2 GiB (capped at `nsamps`), so a long block at high DM
-   needs no more memory than a short one. For example (M1 Pro, 8 threads,
-   the archived benchmark configuration of 1024 channels at 512 µs, DM 0–2000, with
-   32 768-sample blocks), a whole-block tree peaks at 6.2 GiB and takes 376 ms
-   per block; the automatic chunk of 8192 takes 358 ms at 2.2 GiB. See
+   whose state fits 2 GiB (capped at `nsamps`; on a GPU, shorter when that
+   lets the state stay in L2), so a long block at high DM needs no more
+   memory than a short one. For example, for the `cryopaf`
+   preset (512 channels at 512 µs, DM 0–2000) with 32 768-sample blocks, a
+   whole-block tree state is 5.5 GiB and the automatic chunk of 8192 holds
+   1.4 GiB, for the same output. See
    {ref}`Chunked execution <chunked-execution>`.
 6. **Stepper.** A stepped block must be finalized before the next one; stopping
    early raises instead of silently corrupting the history (see
@@ -159,5 +160,16 @@ blocks, see [Coherent Hybrid Search](coherent_hybrid.md).) On a GPU backend the 
 the `DeviceSpan` overloads (C++ only) are asynchronous on the given stream,
 and the host overloads copy synchronously. A saved history belongs to the
 backend that wrote it (the layout differs between backends).
+
+On a GPU, an engine that computes its lowest and highest levels directly
+(the automatic setting with many delays per channel, see
+[Performance Tuning](performance.md#direct-levels-cuda-many-delays-per-channel))
+keeps extra state the saved format does not hold: a running-sum window of each
+channel and a ring of each level-4 row. After `load_history()` it runs the
+plain tree, with the same output, until that state has refilled: up to the
+longest delay any trial applies to a level-4 row (about 21 000 samples for
+`cryopaf`). An engine multiplexing many streams therefore spends the start of
+each block on the slower path; give each stream its own engine (or use
+`nbeams`) where that matters.
 For beams that are processed together, `nbeams` is usually simpler (see
 [Multi-Beam Batching](multibeam.md)).

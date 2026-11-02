@@ -4,21 +4,31 @@
 
 | results | CPU | GPU | RAM | CPU threads | dmt |
 | :--- | :--- | :--- | ---: | :--- | :--- |
-| `m1-pro` | Apple M1 Pro | — | 32 GB | 1 8 | 0.7.0 |
+| `l40s` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | — | 0.7.0 |
+| `xeon-6348h` | Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz | — | 755 GB | 1 8 | 0.7.0 |
 
-**Reference point**: 32768 samples × 2501 DM trials (DM 0-2000, 16.8 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
+**Reference point**: 32768 samples × 1545 DM trials (DM 0-2000, 16.8 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Apple M1 Pro · 1 thr | 985 ms | — | — | — | — | — | — | — | 17× |
-| Apple M1 Pro · 8 thr | 356 ms | 902 ms | 842 ms | 749 ms | 269 ms | 2.4× | 2.1× | 2.5× | 47× |
+| Xeon Gold 6348H · 1 thr | 2.57 s | — | — | — | — | — | — | — | 7× |
+| Xeon Gold 6348H · 8 thr | 370 ms | 759 ms | 190 ms | 215 ms | 136 ms | 0.5× | 0.6× | 2.0× | 45× |
+| NVIDIA L40S | 23 ms | 25.3 ms | 33.5 ms | 33.3 ms | 14.8 ms | 1.5× | 1.4× | 1.1× | 729× |
 
-**Real-time factor by input width** (data seconds per compute second, 32768 samples × 2501 DM trials):
+**Real-time factor by input width** (data seconds per compute second, 32768 samples × 1545 DM trials):
 
 | platform | engine | 1-bit | 2-bit | 4-bit | 8-bit | 16-bit | float32 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Apple M1 Pro | FDMT, 1 thread | 33.6× | 32.0× | 26.9× | 19.3× | 17.1× | 17.0× |
-| Apple M1 Pro | FDMT, 8 threads | 91.2× | 78.6× | 64.5× | 53.0× | 47.7× | 47.0× |
-| Apple M1 Pro | DDMT, 8 threads | 58.2× | 53.5× | 42.5× | 60.8× | 30.8× | 20.3× |
-| Apple M1 Pro | SDMT, 8 threads | 66.0× | 59.9× | 49.6× | 68.4× | 39.4× | 21.4× |
-| Apple M1 Pro | DDMT-FFT, 8 threads | 57.8× | 62.2× | 63.7× | 66.0× | 66.6× | 49.0× |
+| Xeon Gold 6348H | FDMT, 1 thread | 14.4× | 14.1× | 12.1× | 6.7× | 6.5× | 6.5× |
+| Xeon Gold 6348H | FDMT, 8 threads | 79.2× | 78.0× | 68.9× | 46.2× | 44.8× | 45.3× |
+| Xeon Gold 6348H | DDMT, 8 threads | 198.6× | 170.9× | 195.5× | 194.9× | 120.6× | 87.4× |
+| Xeon Gold 6348H | SDMT, 8 threads | 198.5× | 172.3× | 193.6× | 197.4× | 99.1× | 76.4× |
+| Xeon Gold 6348H | DDMT-FFT, 8 threads | 124.7× | 124.2× | 123.8× | 124.2× | 123.9× | 123.5× |
+| NVIDIA L40S | FDMT, device-resident | 632.2× | 621.5× | 617.7× | 499.2× | 444.2× | 728.9× |
+| NVIDIA L40S | DDMT, device-resident | 572.8× | 556.5× | 536.6× | 606.2× | 560.3× | 508.1× |
+| NVIDIA L40S | SDMT, device-resident | 572.3× | 557.7× | 536.4× | 601.9× | 561.6× | 508.9× |
+| NVIDIA L40S | FDMT-FFT, device-resident | 670.5× | 666.6× | 666.9× | 662.7× | 664.3× | 666.2× |
+| NVIDIA L40S | DDMT-FFT, device-resident | 1123.1× | 1122.7× | 1122.4× | 1121.2× | 1117.9× | 1130.4× |
+| NVIDIA L40S | FDMT, host arrays (incl. PCIe) | 440.4× | 433.6× | 437.0× | 366.0× | 331.3× | 441.2× |
+| NVIDIA L40S | FDMT-FFT, host arrays (incl. PCIe) | 462.5× | 460.2× | 455.5× | 453.9× | 440.9× | 413.2× |
+| NVIDIA L40S | DDMT-FFT, host arrays (incl. PCIe) | 632.0× | 632.0× | 627.6× | 617.5× | 581.5× | 553.7× |

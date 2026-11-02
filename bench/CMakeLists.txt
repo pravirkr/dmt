@@ -23,7 +23,7 @@ if(DMT_GPU_BACKEND)
   set(BENCH_SOURCES_CUDA
       ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cuda_b.cu
       ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cuda_b.cu
-      ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cuda_b.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_boxcar_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cuda_b.cu
   )
   list(APPEND BENCH_SOURCES ${BENCH_SOURCES_CUDA})
 

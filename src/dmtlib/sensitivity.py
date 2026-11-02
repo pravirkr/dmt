@@ -51,9 +51,8 @@ box smearing (:data:`VARIANTS`) is measured as well.
 :data:`CRYOPAF` is the 512-channel CryoPAF benchmark over 704-1216 MHz at
 512 us, DM 0-2000, with Levin tolerance 1.1. :data:`CRYOPAF_LBAND` is the
 1152-channel L-band streaming target. :data:`PARKES_UWL` covers 704-4032 MHz
-with 6656 channels at 64 us. :data:`CONFIGS` holds these presets by name.
-Previously published CryoPAF results used 1024 channels; they retain their
-original metadata and are not measurements of the updated preset.
+with 6656 channels at 64 us and Levin tolerance 1.6. :data:`CONFIGS` holds
+these presets by name.
 """
 
 from __future__ import annotations
@@ -465,7 +464,7 @@ CRYOPAF = SearchConfig(
     name="cryopaf",
 )  # fmt: skip
 """CryoPAF benchmark: 512 channels over 704-1216 MHz at 512 us, DM 0-2000,
-Levin tolerance 1.1. Archived published measurements used 1024 channels.
+Levin tolerance 1.1.
 Use ``dataclasses.replace(CRYOPAF, nthreads=8)`` to change the thread count."""
 
 CRYOPAF_LBAND = SearchConfig(
@@ -478,12 +477,13 @@ last-level subbands and then the full band. The DM-2000 band sweep is
 blocks. The current tree's final two subbands have 1024 and 128 channels."""
 
 PARKES_UWL = SearchConfig(
-    704.0, 4032.0, 6656, 64e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
+    704.0, 4032.0, 6656, 64e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.6,
     name="parkes_uwl", nsamps_ref=32768,
 )  # fmt: skip
-"""Ultra-wideband benchmark with 2.097152-second streaming blocks. At DM
-2000 the dispersion sweep spans several blocks; histories must be warmed
-before steady-state timing. Full-band search is the default."""
+"""Ultra-wideband benchmark with 2.097152-second streaming blocks. Levin
+tolerance 1.6 keeps the grid under 5000 trials (4749; tolerance 1.1 would
+need 12941). At DM 2000 the dispersion sweep spans several blocks; histories
+must be warmed before steady-state timing. Full-band search is the default."""
 
 CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_LBAND, PARKES_UWL)}
 """The named configurations, by ``SearchConfig.name``."""

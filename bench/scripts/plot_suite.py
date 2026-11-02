@@ -73,9 +73,9 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "F_MAX": 4032.0,
         "TSAMP": 64e-6,
         "NCHANS": 6656,
-        "LEVIN_TOL": 1.1,
+        "LEVIN_TOL": 1.6,
         "DM_MAX_REF": 2000.0,
-        "NDMS_REF": 12941,
+        "NDMS_REF": 4749,
         "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
     },
 }
@@ -219,8 +219,7 @@ def validate_geometry(path: Path, benchmark: dict[str, Any]) -> None:
         ):
             msg = (
                 f"{path}: {field_name}={benchmark[field_name]} does not match "
-                f"selected preset ({expected}); rerun the suite for this preset. "
-                "Archived results and plots retain their original geometry."
+                f"selected preset ({expected}); rerun the suite for this preset."
             )
             raise ValueError(msg)
 
@@ -354,17 +353,62 @@ def fmt_factor(v: float, _pos: int | None = None) -> str:
     return f"{v:g}{TIMES}"
 
 
+LABEL_GAP_PT = 9.0  # minimum vertical spacing of end labels (points)
+
+
 def end_label(ax: Axes, x: float, y: float, text: str) -> None:
-    """Label a line at its last point, in ink rather than the series colour."""
-    ax.annotate(
-        text,
-        (x, y),
-        xytext=(4, 0),
-        textcoords="offset points",
-        va="center",
-        fontsize=8,
-        color=mpl.rcParams["axes.labelcolor"],
-    )
+    """Queue a label for a line's last point (placed by place_end_labels)."""
+    pending = ax.__dict__.setdefault("_dmt_end_labels", [])
+    pending.append((x, y, text))
+
+
+def place_end_labels(fig: Figure) -> None:
+    """Draw the queued end labels, in ink rather than the series colour,
+    spread apart vertically where lines end close together (a short leader
+    joins a moved label to its point)."""
+    fig.canvas.draw()  # final limits for the data-to-display transform
+    pt_per_px = 72.0 / fig.dpi
+    for i, ax in enumerate(fig.axes):
+        # Earlier panels on top: a label overhanging into the next panel's
+        # margin is not hidden under its background.
+        ax.set_zorder(len(fig.axes) - i)
+        pending = ax.__dict__.pop("_dmt_end_labels", [])
+        if not pending:
+            continue
+        # Points from the bottom, then push each label up past its neighbour.
+        items = sorted(
+            (
+                (ax.transData.transform((x, y))[1] * pt_per_px, x, y, t)
+                for x, y, t in pending
+            ),
+        )
+        placed: list[float] = []
+        for want, *_ in items:
+            placed.append(want if not placed else max(want, placed[-1] + LABEL_GAP_PT))
+        # Centre the stack on the points it labels.
+        shift = (sum(p for p, *_ in items) - sum(placed)) / len(placed)
+        for (want, x, y, text), pos in zip(items, placed, strict=True):
+            dy = pos + shift - want
+            ax.annotate(
+                text,
+                (x, y),
+                xytext=(6, dy),
+                textcoords="offset points",
+                va="center",
+                fontsize=8,
+                color=mpl.rcParams["axes.labelcolor"],
+                arrowprops=(
+                    {
+                        "arrowstyle": "-",
+                        "lw": 0.5,
+                        "color": "0.6",
+                        "shrinkA": 0,
+                        "shrinkB": 2,
+                    }
+                    if abs(dy) > 1.0
+                    else None
+                ),
+            )
 
 
 def plot_line(
@@ -548,7 +592,7 @@ def runtime_figure(
         pow2_axis(ax, xticks, xlabel)
         ax.set_yscale("log")
         ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(fmt_seconds))
-        ax.margins(x=0.25)
+        ax.margins(x=0.35)
     axes[0].set_ylabel("time per block (median)")
     finish(fig, axes, theme, title, subtitle, variant_label="1 thread")
     return fig
@@ -944,6 +988,7 @@ def main() -> None:
             except ImportError:
                 print("dmtlib not importable; skipping ops_theory (use --no-ops)")
         for fname, fig in figs.items():
+            place_end_labels(fig)
             fig.savefig(out / f"{fname}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
     (out_root / "summary.md").write_text(summary_md(results, machines))

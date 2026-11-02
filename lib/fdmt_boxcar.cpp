@@ -40,16 +40,21 @@ public:
             .max_fuse_levels =
                 std::min(this->plan.get_niters() - 1,
                          this->plan.get_niters() - config.subband_levels),
-            .search_nbits = config.input_nbits,
+            .search_upper_levels = config.subband_levels > 0,
+            .search_nbits        = config.input_nbits,
         };
         if (exec.backend == Backend::kCPU) {
-            engine =
-                detail::make_fdmt_boxcar_cpu(this->plan, config, planes, cfg);
+            engine = detail::make_fdmt_boxcar_cpu(
+                this->plan, config, planes, cfg,
+                detail::make_boxcar_driver(
+                    detail::make_fdmt_cpu(this->plan, cfg)));
         }
 #ifdef DMT_ENABLE_GPU
         else if (exec.backend == detail::kGPUBackend) {
-            engine =
-                detail::make_fdmt_boxcar_gpu(this->plan, config, planes, cfg);
+            engine = detail::make_fdmt_boxcar_gpu(
+                this->plan, config, planes, cfg,
+                detail::make_boxcar_driver(
+                    detail::make_fdmt_gpu(this->plan, cfg)));
         }
 #endif
         else {

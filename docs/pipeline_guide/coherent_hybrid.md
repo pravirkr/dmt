@@ -189,7 +189,8 @@ box length, about `nchans` (no longer the number of channel samples summed).
 
 - FFTW planning matters for the non-power-of-two forward transforms. Use
   `dmtlib.set_fft_planner("measure")` together with a wisdom file (see
-  [Fourier-Domain Variants](fourier_variants.md)); it gave about 30% on an M1.
+  [Fourier-Domain Variants](fourier_variants.md)); it gave about 30% in our
+  CPU measurements.
 - On the CPU, a single-coarse-trial search is bound by the forward FFT. With
   several coarse trials, the per-trial inverse FFTs and the fine FDMT dominate.
   Both run at the speed of FFTW and the FDMT; the chirp, detection and

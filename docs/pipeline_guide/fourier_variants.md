@@ -156,13 +156,13 @@ than 60%.
 
 ## FFT planning
 
-CPU transforms use FFTW. The engines are FFT-bound (on the M1 about half of
-`FDMTFFT`'s time is FFTW), so the plan quality matters:
+CPU transforms use FFTW. The engines are FFT-bound (about half of
+`FDMTFFT`'s CPU time is FFTW), so the plan quality matters:
 
 - The default `FFTW_ESTIMATE` plans are instant.
-- `FFTW_MEASURE` plans are 1.3–1.5x faster on the M1 for the non-power-of-two
-  lengths the engines use (for example 18432 = 2^11 · 9), but take about 2 s
-  per transform length to make.
+- `FFTW_MEASURE` plans are 1.3–1.5x faster for the non-power-of-two lengths
+  the engines use (for example 18432 = 2^11 · 9), but take about 2 s per
+  transform length to make.
 
 For long-running pipelines, measure once per machine and keep the wisdom:
 
@@ -201,16 +201,18 @@ bounded, and the transform length no longer grows with the block.
 
 ## Performance
 
-At the benchmark reference point (4096 channels, 16K samples, 2049 trials;
-CPUs with 8 threads and FFTW MEASURE plans, the GPU with device-resident data;
-see the [benchmarks](../benchmarks.md) for the sweeps):
+At the benchmark reference points (32K-sample blocks, DM 0–2000 on a Levin
+grid; the Xeon with 8 threads and FFTW MEASURE plans, the GPU with
+device-resident data; see the [benchmarks](../benchmarks.md) for the sweeps):
 
-| Engine | Apple M1 Pro | Xeon Gold 6348H | NVIDIA L40S | Delays |
-| :--- | ---: | ---: | ---: | :--- |
-| FDMT | 25.5 ms | 53 ms | 4.8 ms | rounded tree |
-| FDMT-FFT (fractional delays, the default) | 83 ms | 77 ms | 5.5 ms | least-squares tree |
-| FDMT-FFT, `fractional_delays=False` (equivalence tests) | 57 ms | 58 ms | 5.0 ms | rounded tree (FDMT-identical) |
-| SDMT | 206 ms | 170 ms | 8.5 ms | rounded per channel |
-| DDMT | 851 ms | 573 ms | 21 ms | rounded per channel |
-| DDMT-FFT, NUFFT | 111 ms | 127 ms | 10.7 ms | exact per channel |
-| DDMT-FFT, brute force | 3.33 s | 1.35 s | 39 ms | exact per channel |
+`cryopaf`: 512 channels, 1545 trials; `cryopaf_lband`: 1152 channels, 1941
+trials.
+
+| Engine | Xeon, `cryopaf` | Xeon, `cryopaf_lband` | L40S, `cryopaf` | L40S, `cryopaf_lband` | Delays |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| FDMT | 370 ms | 225 ms | 23.0 ms | 11.8 ms | rounded tree |
+| FDMT-FFT (fractional delays, the default) | 759 ms | 329 ms | 25.3 ms | 17.1 ms | least-squares tree |
+| SDMT | 215 ms | 317 ms | 33.3 ms | 9.7 ms | rounded per channel |
+| DDMT | 190 ms | 392 ms | 33.5 ms | 34.4 ms | rounded per channel |
+| DDMT-FFT, NUFFT | 136 ms | 170 ms | 14.8 ms | 17.3 ms | exact per channel |
+| DDMT-FFT, brute force | 398 ms | 856 ms | 15.0 ms | 27.4 ms | exact per channel |

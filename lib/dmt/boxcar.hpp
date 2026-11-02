@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
@@ -8,8 +10,15 @@
 
 namespace dmt::algorithms::detail {
 
-[[nodiscard]] std::vector<plans::BoxcarPlanePlan> make_boxcar_plans(
-    const plans::FDMTPlan& plan, const BoxcarConfig& config, bool smear);
+/// Search planes of `plan`. Channels with kill_mask[c] == 0 are excluded
+/// from the noise model (empty: keep all); `extra_warmup` is added to every
+/// row's cold support (FDMT-FFT's interpolation guard).
+[[nodiscard]] std::vector<plans::BoxcarPlanePlan>
+make_boxcar_plans(const plans::FDMTPlan& plan,
+                  const BoxcarConfig& config,
+                  bool smear,
+                  std::span<const uint8_t> kill_mask = {},
+                  uint64_t extra_warmup              = 0);
 
 /// Per-plane row description, shared by CPU and device root sample readers.
 struct BoxcarRow {
@@ -46,7 +55,8 @@ DMT_HD inline float boxcar_sample(const FDMTSearchInput& input,
     } else {
         const SizeType slot =
             input.history_ring ? (input.sample_begin + t) % row.delay : t;
-        head = input.history[beam * input.history_stride + row.hist + slot];
+        head = input.history[beam * input.history_stride + row.hist -
+                             input.history_base + slot];
     }
     return tail + head;
 }
@@ -115,9 +125,10 @@ DMT_HD inline uint64_t boxcar_integer_sample(const FDMTSearchInput& input,
                               ? (input.sample_begin + t) % row.delay
                               : t;
     const uint64_t head =
-        t >= row.delay ? state[row.head * input.row_stride + t - row.delay]
-                       : input.integer_history[beam * input.history_stride +
-                                               row.hist + slot];
+        t >= row.delay
+            ? state[row.head * input.row_stride + t - row.delay]
+            : input.integer_history[beam * input.history_stride + row.hist -
+                                    input.history_base + slot];
     return tail + head;
 }
 
@@ -158,6 +169,37 @@ DMT_HD void boxcar_integer_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
+/// The transform feeding a boxcar engine: FDMT (merged root rows) or
+/// FDMT-FFT (materialized root rows per overlap-save segment).
+class BoxcarDriver {
+public:
+    BoxcarDriver()                               = default;
+    virtual ~BoxcarDriver()                      = default;
+    BoxcarDriver(const BoxcarDriver&)            = delete;
+    BoxcarDriver& operator=(const BoxcarDriver&) = delete;
+    BoxcarDriver(BoxcarDriver&&)                 = delete;
+    BoxcarDriver& operator=(BoxcarDriver&&)      = delete;
+
+    virtual void search(std::span<const float>, FDMTSearchSink&)          = 0;
+    virtual void search(DeviceSpan<const float>, FDMTSearchSink&, Stream) = 0;
+    virtual void search(std::span<const uint8_t>, SizeType, FDMTSearchSink&) {
+        throw std::invalid_argument("boxcar search: packed input unsupported");
+    }
+    virtual void
+    search(DeviceSpan<const uint8_t>, SizeType, FDMTSearchSink&, Stream) {
+        throw std::invalid_argument("boxcar search: packed input unsupported");
+    }
+    virtual void reset(Stream)                                    = 0;
+    [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
+    [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
+    [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
+};
+
+[[nodiscard]] std::unique_ptr<BoxcarDriver>
+make_boxcar_driver(std::unique_ptr<FDMTEngine> fdmt);
+[[nodiscard]] std::unique_ptr<BoxcarDriver>
+make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
+
 class FDMTBoxcarEngine : public FDMTSearchSink {
 public:
     virtual CandidateResultView execute(std::span<const float>)   = 0;
@@ -175,15 +217,18 @@ public:
     virtual SizeType fuse_levels() const noexcept                 = 0;
 };
 
+/// The boxcar engines own `driver`, which calls them back per chunk.
 std::unique_ptr<FDMTBoxcarEngine>
 make_fdmt_boxcar_cpu(const plans::FDMTPlan&,
                      const BoxcarConfig&,
                      const std::vector<plans::BoxcarPlanePlan>&,
-                     const FDMTEngineConfig&);
+                     const FDMTEngineConfig&,
+                     std::unique_ptr<BoxcarDriver> driver);
 std::unique_ptr<FDMTBoxcarEngine>
 make_fdmt_boxcar_gpu(const plans::FDMTPlan&,
                      const BoxcarConfig&,
                      const std::vector<plans::BoxcarPlanePlan>&,
-                     const FDMTEngineConfig&);
+                     const FDMTEngineConfig&,
+                     std::unique_ptr<BoxcarDriver> driver);
 
 } // namespace dmt::algorithms::detail

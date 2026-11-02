@@ -17,6 +17,7 @@ namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 using algorithms::FDMTBoxcar;
 using algorithms::FDMTBoxcarMemoryUsage;
+using algorithms::FDMTFFTBoxcar;
 
 namespace {
 struct BoxcarResult {
@@ -227,5 +228,99 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_property_readonly("memory_usage", &FDMTBoxcar::get_memory_usage)
         .def("summary", &FDMTBoxcar::summary)
         .def("__repr__", &FDMTBoxcar::summary);
+    py::class_<FDMTFFTBoxcar>(mod, "FDMTFFTBoxcar", R"doc(
+        Streaming valid-mode FDMT-FFT and analytical boxcar detection.
+
+        The Fourier-domain counterpart of FDMTBoxcar, with the same config,
+        result and candidate fields, for contiguous float32 input of shape
+        (channels, samples) or (beams, channels, samples). Each overlap-save
+        segment's DM rows are searched straight from the inverse transform;
+        no DM-time plane is allocated. Full-band search only (subband_levels
+        0). With fractional delays (the default) the search lags the input
+        by output_latency samples; candidate sample indices are input-stream
+        indices, comparable with FDMTBoxcar's. Channels with kill_mask 0 read
+        as zero and are excluded from the noise model.
+        )doc")
+        .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
+                         int nthreads, SizeType nbeams, bool frac,
+                         std::optional<std::vector<uint8_t>> kill,
+                         std::string_view backend, int device) {
+                 const auto mask = kill.value_or(std::vector<uint8_t>{});
+                 return FDMTFFTBoxcar(std::move(plan), config, smear,
+                                      make_exec(backend, nthreads, device),
+                                      nbeams, frac, mask);
+             }),
+             "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
+             "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
+             "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
+             "device"_a = 0)
+        .def(
+            "execute",
+            [](FDMTFFTBoxcar& search, const py::array& input) {
+                const auto& plan  = search.get_plan();
+                const auto nchans = static_cast<py::ssize_t>(plan.get_nchans());
+                const auto nsamps = static_cast<py::ssize_t>(plan.get_nsamps());
+                if (!input.dtype().is(py::dtype::of<float>()) ||
+                    (input.flags() & py::array::c_style) == 0 ||
+                    !((input.ndim() == 2 && search.get_nbeams() == 1 &&
+                       input.shape(0) == nchans && input.shape(1) == nsamps) ||
+                      (input.ndim() == 3 &&
+                       input.shape(0) ==
+                           static_cast<py::ssize_t>(search.get_nbeams()) &&
+                       input.shape(1) == nchans && input.shape(2) == nsamps))) {
+                    throw std::invalid_argument(
+                        "FDMTFFTBoxcar: expected contiguous float32 of shape "
+                        "(channels, samples) or (beams, channels, samples)");
+                }
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.execute(
+                        std::span(static_cast<const float*>(input.data()),
+                                  static_cast<SizeType>(input.size())));
+                }
+                return own_result(view);
+            },
+            "waterfall"_a)
+        .def("flush",
+             [](FDMTFFTBoxcar& search) {
+                 CandidateResultView view;
+                 {
+                     py::gil_scoped_release release;
+                     view = search.flush();
+                 }
+                 return own_result(view);
+             })
+        .def("reset_history",
+             [](FDMTFFTBoxcar& search) {
+                 py::gil_scoped_release release;
+                 search.reset_history();
+             })
+        .def_property_readonly("plan", &FDMTFFTBoxcar::get_plan,
+                               py::return_value_policy::reference_internal)
+        .def_property_readonly(
+            "config",
+            [](const FDMTFFTBoxcar& search) { return search.get_config(); })
+        .def_property_readonly("search_plans",
+                               [](const FDMTFFTBoxcar& search) {
+                                   const auto planes =
+                                       search.get_search_plans();
+                                   return std::vector<plans::BoxcarPlanePlan>(
+                                       planes.begin(), planes.end());
+                               })
+        .def_property_readonly("nbeams", &FDMTFFTBoxcar::get_nbeams)
+        .def_property_readonly("chunk_nsamps", &FDMTFFTBoxcar::get_chunk_nsamps)
+        .def_property_readonly("output_latency",
+                               &FDMTFFTBoxcar::get_output_latency)
+        .def_property_readonly("nthreads", &FDMTFFTBoxcar::nthreads)
+        .def_property_readonly("device", &FDMTFFTBoxcar::device)
+        .def_property_readonly("backend",
+                               [](const FDMTFFTBoxcar& search) {
+                                   return std::string(
+                                       to_string(search.backend()));
+                               })
+        .def_property_readonly("memory_usage", &FDMTFFTBoxcar::get_memory_usage)
+        .def("summary", &FDMTFFTBoxcar::summary)
+        .def("__repr__", &FDMTFFTBoxcar::summary);
 }
 } // namespace dmt

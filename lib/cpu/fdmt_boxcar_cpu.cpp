@@ -9,6 +9,7 @@
 #include <span>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <omp.h>
@@ -25,7 +26,8 @@ public:
     FDMTBoxcarCpuEngine(const plans::FDMTPlan& plan,
                         const BoxcarConfig& config,
                         const std::vector<plans::BoxcarPlanePlan>& planes,
-                        const FDMTEngineConfig& cfg)
+                        const FDMTEngineConfig& cfg,
+                        std::unique_ptr<BoxcarDriver> driver)
         : m_plan(plan),
           m_config(config),
           m_planes(planes),
@@ -38,7 +40,7 @@ public:
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1),
-          m_fdmt(make_fdmt_cpu(plan, cfg)) {
+          m_driver(std::move(driver)) {
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count) {
             throw std::invalid_argument("FDMTBoxcar: history size overflow");
@@ -89,7 +91,7 @@ public:
                 "FDMTBoxcar: stream sample index overflow");
         }
         begin_result(m_plan.get_nsamps());
-        m_fdmt->execute_search(waterfall, *this);
+        m_driver->search(waterfall, *this);
         m_position += m_plan.get_nsamps();
         return view();
     }
@@ -111,7 +113,7 @@ public:
                 "FDMTBoxcar: stream sample index overflow");
         }
         begin_result(m_plan.get_nsamps());
-        m_fdmt->execute_search(waterfall, m_config.input_nbits, *this);
+        m_driver->search(waterfall, m_config.input_nbits, *this);
         m_position += m_plan.get_nsamps();
         return view();
     }
@@ -140,7 +142,7 @@ public:
         return view();
     }
     void reset_history(Stream) override {
-        m_fdmt->reset_history();
+        m_driver->reset({});
         std::ranges::fill(m_carry, 0.0F);
         std::ranges::fill(m_integer_carry, uint64_t{0});
         std::ranges::fill(m_peaks, BoxcarPeak{});
@@ -153,12 +155,15 @@ public:
             if (m_planes[p].level != level) {
                 continue;
             }
-            const auto& plane   = m_planes[p];
-            const SizeType ndm  = plane.dm_grid.size();
-            const SizeType base = m_offsets[p];
+            const auto& plane    = m_planes[p];
+            const SizeType ndm   = plane.dm_grid.size();
+            const SizeType base  = m_offsets[p];
+            const SizeType first = input.beam_begin;
+            const SizeType beams =
+                std::min(input.beam_count, m_beams - input.beam_begin);
 #pragma omp parallel for num_threads(m_threads) schedule(static)
-            for (SizeType task = 0; task < m_beams * ndm; ++task) {
-                const SizeType beam    = task / ndm;
+            for (SizeType task = 0; task < beams * ndm; ++task) {
+                const SizeType beam    = first + task / ndm;
                 const SizeType d       = task % ndm;
                 const SizeType row_idx = base + d;
                 if (m_config.input_nbits == 32) {
@@ -171,7 +176,7 @@ public:
     }
 
     FDMTBoxcarMemoryUsage memory_usage() const noexcept override {
-        const auto fdmt     = m_fdmt->get_memory_usage();
+        const auto fdmt     = m_driver->memory();
         SizeType plan_bytes = m_rows.size() * sizeof(BoxcarRow) +
                               m_offsets.size() * sizeof(SizeType);
         for (const auto& p : m_planes) {
@@ -200,10 +205,10 @@ public:
                 .candidates = m_candidates.size() * sizeof(RawCandidate)};
     }
     SizeType chunk_nsamps() const noexcept override {
-        return m_fdmt->get_chunk_nsamps();
+        return m_driver->chunk_nsamps();
     }
     SizeType fuse_levels() const noexcept override {
-        return m_fdmt->get_fuse_levels();
+        return m_driver->fuse_levels();
     }
 
 private:
@@ -276,109 +281,172 @@ private:
             prefix = m_prefix.data() + tid * (m_width + kTile + 1);
             carry  = m_carry.data() + index * m_width;
         }
-        float* best           = m_best.data() + tid * kTile;
-        uint32_t* best_filter = m_best_filter.data() + tid * kTile;
-
         auto* peaks          = m_peaks.data() + index * m_peak_count;
         const auto& row      = m_rows[row_idx];
         const bool root      = plane.level == m_plan.get_niters();
-        const auto emit_peak = [&](const BoxcarPeak& peak) {
-            emit(row_idx, beam, peak);
+        const auto sample_at = [&](SizeType t) {
+            if constexpr (std::is_integral_v<T>) {
+                return boxcar_integer_sample(input, row, beam, t, root);
+            } else {
+                return boxcar_sample(input, row, beam, t, root);
+            }
         };
-        for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
-            const SizeType n        = std::min(kTile, input.nsamps - t0);
-            const uint64_t start    = input.sample_begin + t0;
-            const SizeType lookback = m_width - 1;
-            prefix[0]               = 0;
+        // prefix[j] for j <= lookback holds the max_width - 1 samples before
+        // the tile (from the carry once per call, then slid along), and
+        // prefix[lookback + t + 1] the tile's running sums.
+        const SizeType lookback = m_width - 1;
+        {
+            const uint64_t first = input.sample_begin;
+            prefix[0]            = 0;
             for (SizeType j = 0; j < lookback; ++j) {
                 const SizeType back = lookback - j;
                 const T x =
-                    start >= back ? carry[(start - back) % m_width] : T{0};
+                    first >= back ? carry[(first - back) % m_width] : T{0};
                 prefix[j + 1] = prefix[j] + x;
             }
+        }
+        // Open runs force the bookkeeping until they close.
+        const auto any_open = [&] {
+            if (m_config.peak_mode == PeakFindingMode::kAllAboveThreshold) {
+                return false;
+            }
+            return std::any_of(peaks, peaks + m_peak_count,
+                               [](const BoxcarPeak& p) { return p.open; });
+        };
+        bool open = any_open();
+        for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
+            const SizeType n     = std::min(kTile, input.nsamps - t0);
+            const uint64_t start = input.sample_begin + t0;
             for (SizeType t = 0; t < n; ++t) {
-                const T x = [&] {
+                prefix[lookback + t + 1] =
+                    prefix[lookback + t] + sample_at(t0 + t);
+            }
+            // Rare-event check: any width over its threshold in this tile.
+            // Without it (and no open run) every peak mode is unchanged.
+            const bool cold =
+                m_config.skip_cold_prefix && start + 1 < row.warmup + m_width;
+            bool hit = false;
+            for (SizeType f = 0; f < m_filters && !hit; ++f) {
+                const SizeType width = plane.widths[f];
+                const Prefix* lo     = prefix + lookback + 1 - width;
+                const Prefix* hi     = prefix + lookback + 1;
+                const auto threshold = [&] {
                     if constexpr (std::is_integral_v<T>) {
-                        return boxcar_integer_sample(input, row, beam, t0 + t,
-                                                     root);
+                        return plane.integer_thresh_lut[dm * m_filters + f];
                     } else {
-                        return boxcar_sample(input, row, beam, t0 + t, root);
+                        return static_cast<Prefix>(
+                            plane.raw_thresh_lut[dm * m_filters + f]);
                     }
                 }();
-                prefix[lookback + t + 1]     = prefix[lookback + t] + x;
-                carry[(start + t) % m_width] = x;
-                best[t]                      = -1.0F;
-                best_filter[t]               = 0;
-            }
-            for (SizeType f = 0; f < m_filters; ++f) {
-                const SizeType width = plane.widths[f];
-                const float threshold =
-                    plane.raw_thresh_lut[dm * m_filters + f];
-                const float inv_sigma = plane.inv_sigma_lut[dm * m_filters + f];
+                const uint64_t first_valid = row.warmup + width - 1;
+#pragma omp simd reduction(|| : hit)
                 for (SizeType t = 0; t < n; ++t) {
-                    const uint64_t sample = start + t;
-                    const Prefix sum      = prefix[lookback + t + 1] -
-                                            prefix[lookback + t + 1 - width];
-                    const bool valid      = !m_config.skip_cold_prefix ||
-                                            sample >= row.warmup + width - 1;
-                    bool above;
-                    float snr = 0;
-                    if constexpr (std::is_integral_v<T>) {
-                        above =
-                            valid &&
+                    hit = hit || (hi[t] - lo[t] >= threshold &&
+                                  (!cold || start + t >= first_valid));
+                }
+            }
+            if (hit || open) {
+                score_tile<T>(plane, dm, row, beam, prefix, lookback, start, n,
+                              peaks, row_idx);
+                open = any_open();
+            }
+            // Slide the last lookback prefixes in front of the next tile.
+            std::copy(prefix + n, prefix + n + lookback + 1, prefix);
+        }
+        // Carry the last max_width - 1 samples (at most) to the next call.
+        const SizeType keep = std::min(input.nsamps, lookback);
+        for (SizeType t = input.nsamps - keep; t < input.nsamps; ++t) {
+            carry[(input.sample_begin + t) % m_width] = sample_at(t);
+        }
+    }
+
+    // Exact run bookkeeping of one tile whose running sums are in
+    // prefix[lookback + 1 .. lookback + n].
+    template <typename T, typename Prefix>
+    void score_tile(const plans::BoxcarPlanePlan& plane,
+                    SizeType dm,
+                    const BoxcarRow& row,
+                    SizeType beam,
+                    const Prefix* prefix,
+                    SizeType lookback,
+                    uint64_t start,
+                    SizeType n,
+                    BoxcarPeak* peaks,
+                    SizeType row_idx) {
+        const SizeType tid    = static_cast<SizeType>(omp_get_thread_num());
+        float* best           = m_best.data() + tid * kTile;
+        uint32_t* best_filter = m_best_filter.data() + tid * kTile;
+        const auto emit_peak  = [&](const BoxcarPeak& peak) {
+            emit(row_idx, beam, peak);
+        };
+        for (SizeType t = 0; t < n; ++t) {
+            best[t]        = -1.0F;
+            best_filter[t] = 0;
+        }
+        for (SizeType f = 0; f < m_filters; ++f) {
+            const SizeType width  = plane.widths[f];
+            const float threshold = plane.raw_thresh_lut[dm * m_filters + f];
+            const float inv_sigma = plane.inv_sigma_lut[dm * m_filters + f];
+            for (SizeType t = 0; t < n; ++t) {
+                const uint64_t sample = start + t;
+                const Prefix sum =
+                    prefix[lookback + t + 1] - prefix[lookback + t + 1 - width];
+                const bool valid = !m_config.skip_cold_prefix ||
+                                   sample >= row.warmup + width - 1;
+                bool above;
+                float snr = 0;
+                if constexpr (std::is_integral_v<T>) {
+                    above = valid &&
                             sum >= plane.integer_thresh_lut[dm * m_filters + f];
-                        if (above &&
-                            m_config.peak_mode ==
-                                PeakFindingMode::kContiguousPeakAcrossWidths) {
-                            snr = static_cast<float>(
-                                (static_cast<double>(sum) -
-                                 plane.integer_mean_lut[dm * m_filters + f]) *
-                                (inv_sigma * m_integer_unit));
-                        }
-                    } else {
-                        above = valid && sum >= threshold;
-                        snr =
-                            above ? static_cast<float>(sum * inv_sigma) : 0.0F;
+                    if (above &&
+                        m_config.peak_mode ==
+                            PeakFindingMode::kContiguousPeakAcrossWidths) {
+                        snr = static_cast<float>(
+                            (static_cast<double>(sum) -
+                             plane.integer_mean_lut[dm * m_filters + f]) *
+                            (inv_sigma * m_integer_unit));
                     }
-                    if (m_config.peak_mode ==
-                        PeakFindingMode::kContiguousPeakAcrossWidths) {
-                        if (above && snr > best[t]) {
-                            best[t]        = snr;
-                            best_filter[t] = static_cast<uint32_t>(f);
-                        }
-                    } else if (m_config.peak_mode ==
-                               PeakFindingMode::kAllAboveThreshold) {
-                        if (above) {
-                            BoxcarPeak peak{sample,
-                                            sample,
-                                            sample,
-                                            snr,
-                                            static_cast<uint32_t>(f),
-                                            true};
-                            if constexpr (std::is_integral_v<T>) {
-                                peak.raw_sum = sum;
-                            }
-                            emit_peak(peak);
-                        }
-                    } else {
+                } else {
+                    above = valid && sum >= threshold;
+                    snr   = above ? static_cast<float>(sum * inv_sigma) : 0.0F;
+                }
+                if (m_config.peak_mode ==
+                    PeakFindingMode::kContiguousPeakAcrossWidths) {
+                    if (above && snr > best[t]) {
+                        best[t]        = snr;
+                        best_filter[t] = static_cast<uint32_t>(f);
+                    }
+                } else if (m_config.peak_mode ==
+                           PeakFindingMode::kAllAboveThreshold) {
+                    if (above) {
+                        BoxcarPeak peak{sample,
+                                        sample,
+                                        sample,
+                                        snr,
+                                        static_cast<uint32_t>(f),
+                                        true};
                         if constexpr (std::is_integral_v<T>) {
-                            boxcar_integer_peak_step(
-                                peaks[f], above, sum, sample,
-                                static_cast<uint32_t>(f), emit_peak);
-                        } else {
-                            boxcar_peak_step(peaks[f], above, snr, sample,
-                                             static_cast<uint32_t>(f),
-                                             emit_peak);
+                            peak.raw_sum = sum;
                         }
+                        emit_peak(peak);
+                    }
+                } else {
+                    if constexpr (std::is_integral_v<T>) {
+                        boxcar_integer_peak_step(peaks[f], above, sum, sample,
+                                                 static_cast<uint32_t>(f),
+                                                 emit_peak);
+                    } else {
+                        boxcar_peak_step(peaks[f], above, snr, sample,
+                                         static_cast<uint32_t>(f), emit_peak);
                     }
                 }
             }
-            if (m_config.peak_mode ==
-                PeakFindingMode::kContiguousPeakAcrossWidths) {
-                for (SizeType t = 0; t < n; ++t) {
-                    boxcar_peak_step(peaks[0], best[t] >= 0, best[t], start + t,
-                                     best_filter[t], emit_peak);
-                }
+        }
+        if (m_config.peak_mode ==
+            PeakFindingMode::kContiguousPeakAcrossWidths) {
+            for (SizeType t = 0; t < n; ++t) {
+                boxcar_peak_step(peaks[0], best[t] >= 0, best[t], start + t,
+                                 best_filter[t], emit_peak);
             }
         }
     }
@@ -392,7 +460,7 @@ private:
     SizeType m_width;
     SizeType m_filters;
     SizeType m_peak_count;
-    std::unique_ptr<FDMTEngine> m_fdmt;
+    std::unique_ptr<BoxcarDriver> m_driver;
     std::vector<SizeType> m_offsets;
     std::vector<float> m_carry;
     std::vector<BoxcarPeak> m_peaks;
@@ -417,8 +485,10 @@ std::unique_ptr<FDMTBoxcarEngine>
 make_fdmt_boxcar_cpu(const plans::FDMTPlan& plan,
                      const BoxcarConfig& config,
                      const std::vector<plans::BoxcarPlanePlan>& planes,
-                     const FDMTEngineConfig& cfg) {
-    return std::make_unique<FDMTBoxcarCpuEngine>(plan, config, planes, cfg);
+                     const FDMTEngineConfig& cfg,
+                     std::unique_ptr<BoxcarDriver> driver) {
+    return std::make_unique<FDMTBoxcarCpuEngine>(plan, config, planes, cfg,
+                                                 std::move(driver));
 }
 
 } // namespace dmt::algorithms::detail

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -45,8 +46,12 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
 
 namespace dmt::algorithms::detail {
 
-std::vector<plans::BoxcarPlanePlan> make_boxcar_plans(
-    const plans::FDMTPlan& plan, const BoxcarConfig& config, bool smear) {
+std::vector<plans::BoxcarPlanePlan>
+make_boxcar_plans(const plans::FDMTPlan& plan,
+                  const BoxcarConfig& config,
+                  bool smear,
+                  std::span<const uint8_t> kill_mask,
+                  uint64_t extra_warmup) {
     const auto finite = [](float x) {
         const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
         return (bits & 0x7F800000U) != 0x7F800000U;
@@ -58,11 +63,12 @@ std::vector<plans::BoxcarPlanePlan> make_boxcar_plans(
         config.max_candidates == 0 ||
         static_cast<unsigned>(config.peak_mode) >
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
-        plan.get_nchans() > UINT32_MAX) {
+        plan.get_nchans() > UINT32_MAX ||
+        (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(
             "FDMTBoxcar: invalid configuration (requires valid mode, positive "
             "finite threshold/sigma and capacity, subband_levels 0..2 within "
-            "tree)");
+            "tree, kill mask of nchans entries)");
     }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||
@@ -155,7 +161,10 @@ std::vector<plans::BoxcarPlanePlan> make_boxcar_plans(
                     if (level == 0) {
                         const auto dt    = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
                         const SizeType s = static_cast<SizeType>(std::abs(dt));
-                        lengths.push_back(smear ? s + 1 : 1);
+                        // A killed channel adds no noise (it reads as zero).
+                        if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
+                            lengths.push_back(smear ? s + 1 : 1);
+                        }
                         support = std::max(support, shift + s);
                     } else {
                         self(self, level - 1,
@@ -171,7 +180,7 @@ std::vector<plans::BoxcarPlanePlan> make_boxcar_plans(
                     }
                 };
                 trace(trace, l, grid.coord_offset + d, 0);
-                out.warmup_samples[d] = support;
+                out.warmup_samples[d] = support + extra_warmup;
                 const double f0       = out.f_low_mhz;
                 const double f1       = out.f_high_mhz;
                 const double delay_per_dm =
@@ -193,6 +202,18 @@ std::vector<plans::BoxcarPlanePlan> make_boxcar_plans(
                                   : 1.0;
                         variance += fdmt_box_variance(len, widths[f], weight);
                         mean_weight += len * weight;
+                    }
+                    if (variance == 0) {
+                        // Every channel of the row is killed: never detect.
+                        out.inv_sigma_lut[d * widths.size() + f] = 0;
+                        out.raw_thresh_lut[d * widths.size() + f] =
+                            std::numeric_limits<float>::max();
+                        if (packed) {
+                            out.integer_mean_lut[d * widths.size() + f] = 0;
+                            out.integer_thresh_lut[d * widths.size() + f] =
+                                UINT64_MAX;
+                        }
+                        continue;
                     }
                     const double sigma =
                         config.noise_sigma * std::sqrt(variance);

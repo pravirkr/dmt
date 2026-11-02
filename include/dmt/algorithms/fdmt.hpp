@@ -156,6 +156,13 @@ public:
      *   level-0 halo of at most half a tile. An explicit depth is also
      *   clamped to 8 and reduced until a tile fits the device's opt-in shared
      *   memory.
+     * - GPU, mode "valid", float input, when that tile depth stays below 3
+     *   (many delays per channel): levels 0..3 are computed directly from
+     *   per-channel running sums, and the trials are summed directly from
+     *   level 4 when nothing reads the levels in between (see
+     *   docs/pipeline_guide/performance.md). Output then equals the tree
+     *   within float rounding (exactly for integer-valued input); the
+     *   explicit depths and every other path stay bit-identical.
      * @param int_tree Performance parameter: for packed low-bit input, store
      * tree levels whose exact value bound fits as uint8/uint16 instead of
      * float (exact; default true). Integer levels cannot be inspected through
@@ -169,8 +176,9 @@ public:
      * the tree); each chunk costs a little cross-block history traffic (a
      * few per cent at a few thousand samples). 0 (default) = automatic: the
      * longest power of two >= 2048 whose state fits 2 GiB, capped at nsamps
-     * (see get_chunk_nsamps()); other values are rounded up to a multiple of
-     * 64. The stepper (reset()/advance()) needs chunk >= nsamps.
+     * (GPU: the longest power of two >= 256 whose state fits the device L2,
+     * when one does; see get_chunk_nsamps()); other values are rounded up to
+     * a multiple of 64. The stepper (reset()/advance()) needs chunk >= nsamps.
      *
      * All working memory is allocated here (see get_memory_usage()); execute()
      * performs no allocation.

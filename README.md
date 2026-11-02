@@ -153,9 +153,10 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 
 ## 📊 Benchmarks
 
-Measured on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads) and
-an NVIDIA L40S, all with dmt 0.7.0. The data are 4096 channels (704–1216 MHz,
-81.92 µs) in 16K-sample blocks (1.34 s), processed as a stream.
+Measured on an Intel Xeon Gold 6348H (8 threads) and an NVIDIA L40S with dmt
+0.7.0. The `cryopaf` preset is 512 channels (704–1216 MHz,
+512 µs) in 32K-sample blocks (16.8 s), DM 0–2000 on a Levin grid of up to 1545
+trials, processed as a stream.
 
 - **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT,
   SDMT (exact DDMT sums with shared partial sums) and DDMT-FFT (NUFFT-accelerated) on the same DM grid. The grey line is real time.
@@ -167,15 +168,20 @@ an NVIDIA L40S, all with dmt 0.7.0. The data are 4096 channels (704–1216 MHz,
   <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
 </picture>
 
-At 2049 DM trials, FDMT is 11× faster than brute-force DDMT on the Xeon
-and 33× on the M1 Pro, and 3–8× faster than SDMT,
-which runs 6–8× faster than real time on both CPUs. On the L40S, FDMT is 4.5×
-faster than DDMT (whose DM-tiled kernels run 63–95× faster than real time) and
-1.8× faster than SDMT (159–179× real time). FDMT runs 25–53× faster than real
-time on 8 CPU threads and 282× on the L40S, rising to 615× with packed 1-bit
-input. The Fourier-domain engines add exact fractional delays with sub-sample
-precision: **FDMT-FFT** trails FDMT by only 1.2–1.4× on the Xeon and L40S
-(5.5 ms on GPU), while **DDMT-FFT (NUFFT)** is 2–4.5× faster than brute-force DDMT.
+Every engine runs faster than real time on both machines. At 1545 trials
+FDMT takes 370 ms per 16.8 s block on the Xeon (45× real time) and 23 ms on
+the L40S (729×), 1.45× faster than brute-force DDMT there; DDMT-FFT (NUFFT,
+exact per-channel delays) is the fastest engine on both, at 136 ms and 15 ms. On the L-band preset (1152 channels, 1941
+trials) FDMT runs at 66× real time on the Xeon, 1.7× faster than DDMT there,
+and at 1263× on the L40S, where SDMT reaches 1547×. Few channels and long
+dispersion sweeps make these presets memory-bound for a plain FDMT, while
+brute-force kernels reuse each input window from cache or shared memory: on
+`cryopaf` DDMT is 2× faster than FDMT on the Xeon. On the GPU, FDMT computes
+its lowest and highest levels directly from running sums instead.
+
+**FDMTBoxcar** (fused FDMT + boxcar candidate search, no DM–time plane) adds
+little to the transform on the GPU: 24.0 ms with 12 widths up to 100 ms on `cryopaf`,
+against 22.9 ms for FDMT writing its plane.
 
 **CohFDMT** (coherent hybrid search of baseband voltages) takes one GUPPI node
 (64 × 2.93 MHz at 1.31–1.50 GHz, int8, t_p = 10 µs, DM 50–60).

@@ -1,12 +1,15 @@
 #include "dmt/boxcar.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <thrust/device_vector.h>
@@ -20,23 +23,30 @@
 namespace dmt::algorithms::detail {
 namespace {
 
-constexpr int kThreads = 128;
+constexpr int kThreads = 256;
 constexpr int kItems   = 4;
 constexpr int kTile    = kThreads * kItems;
-constexpr int kRing    = 8192; // max width + one tile + boundary, rounded up.
+constexpr int kWarp    = 32; // Logical warp; a 64-wide wavefront holds two.
+constexpr int kWarps   = kThreads / kWarp;
+// Width and threshold tables are staged in shared memory up to this count;
+// longer tables are read through the cache.
+constexpr SizeType kSharedFilters = 512;
 
+// Fixed part of the block's shared memory. The dynamic part follows it:
+// the prefix ring (a power of two of at least max_width + kTile entries),
+// then optionally the thresholds and widths of the row.
 template <typename T> struct BoxcarShared {
-    // 4609 uint64 boundaries leave space for run summaries within 48 KiB.
-    // Float keeps the original power-of-two ring and scan arithmetic.
-    static constexpr int ring =
-        std::is_integral_v<T> ? 4096 + kTile + 1 : kRing;
-    using Scan = std::conditional_t<std::is_integral_v<T>, uint64_t, double>;
-    T prefix[ring];
-    Scan scan[kThreads];
     BoxcarRunSummary runs[kThreads];
+    T warp_totals[kWarps];
 };
-static_assert(sizeof(BoxcarShared<float>) <= 48 * 1024);
-static_assert(sizeof(BoxcarShared<uint64_t>) <= 48 * 1024);
+
+template <typename T> DMT_D T shfl_up(T value, int delta) {
+#if defined(DMT_ENABLE_HIP)
+    return __shfl_up(value, delta, kWarp);
+#else
+    return __shfl_up_sync(0xFFFFFFFFU, value, delta);
+#endif
+}
 
 DMT_D uint64_t increment(uint64_t* count) {
     return atomicAdd(reinterpret_cast<unsigned long long*>(count), 1ULL);
@@ -83,37 +93,99 @@ struct CandidateWriter {
     }
 };
 
-// Ordered block prefix of each thread's four consecutive input samples.
-// Double scan intermediates bound rounding in the prefix construction; the
-// shared ring remains float32 and is rebased after every scoring tile.
+// Ordered block prefix of each thread's four consecutive input samples,
+// written to ring[position + 1 .. position + kTile]: a warp shuffle scan
+// and one scan of the warp totals. The ring is rebased after every tile, so
+// float32 prefixes stay near the magnitude of one tile and the lookback.
 template <typename T>
 DMT_D void prefix_tile(BoxcarShared<T>& shared,
+                       T* ring,
+                       uint32_t mask,
                        const T (&x)[kItems],
-                       SizeType position,
+                       uint32_t position,
                        T base) {
-    const int tid = static_cast<int>(threadIdx.x);
-    using Scan    = typename BoxcarShared<T>::Scan;
-    Scan total    = 0;
+    const int tid  = static_cast<int>(threadIdx.x);
+    const int lane = tid % kWarp;
+    const int warp = tid / kWarp;
+    T total        = 0;
     for (int j = 0; j < kItems; ++j) {
         total += x[j];
     }
-    shared.scan[tid] = total;
-    __syncthreads();
-    for (int offset = 1; offset < kThreads; offset *= 2) {
-        const Scan left = tid >= offset ? shared.scan[tid - offset] : 0;
-        __syncthreads();
-        total += left;
-        shared.scan[tid] = total;
-        __syncthreads();
+    T inclusive = total;
+    for (int offset = 1; offset < kWarp; offset *= 2) {
+        const T left = shfl_up(inclusive, offset);
+        if (lane >= offset) {
+            inclusive += left;
+        }
     }
-    Scan running = base + (tid > 0 ? shared.scan[tid - 1] : Scan{0});
+    if (lane == kWarp - 1) {
+        shared.warp_totals[warp] = inclusive;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        T w = lane < kWarps ? shared.warp_totals[lane] : T{0};
+        for (int offset = 1; offset < kWarps; offset *= 2) {
+            const T left = shfl_up(w, offset);
+            if (lane >= offset) {
+                w += left;
+            }
+        }
+        if (lane < kWarps) {
+            shared.warp_totals[lane] = w;
+        }
+    }
+    __syncthreads();
+    T running = base + (inclusive - total) +
+                (warp > 0 ? shared.warp_totals[warp - 1] : T{0});
     for (int j = 0; j < kItems; ++j) {
         running += x[j];
-        shared
-            .prefix[(position + tid * kItems + j + 1) % BoxcarShared<T>::ring] =
-            static_cast<T>(running);
+        ring[(position + tid * kItems + j + 1) & mask] = running;
     }
     __syncthreads();
+}
+
+// Whether any sample of the tile crosses any width's threshold. Threads
+// take samples in a striped order, so ring reads are conflict-free. The
+// run bookkeeping runs only for tiles where this (or an open run) holds;
+// otherwise every peak mode leaves its state unchanged.
+template <typename T, bool kFull, bool kCold>
+DMT_D bool detect_tile(const T* ring,
+                       uint32_t mask,
+                       uint32_t position,
+                       int n,
+                       const uint32_t* widths,
+                       const T* thresholds,
+                       SizeType nfilters,
+                       uint64_t start,
+                       uint64_t warmup) {
+    const int tid       = static_cast<int>(threadIdx.x);
+    const uint32_t base = position + 1 + static_cast<uint32_t>(tid);
+    T current[kItems];
+    for (int k = 0; k < kItems; ++k) {
+        current[k] = ring[(base + k * kThreads) & mask];
+    }
+    for (SizeType f = 0; f < nfilters; ++f) {
+        const uint32_t width = widths[f];
+        const T threshold    = thresholds[f];
+        bool hit             = false;
+        for (int k = 0; k < kItems; ++k) {
+            const int s = k * kThreads + tid;
+            if (!kFull && s >= n) {
+                break;
+            }
+            const T sum =
+                current[k] - ring[(base + k * kThreads - width) & mask];
+            bool h = sum >= threshold;
+            if constexpr (kCold) {
+                h = h && start + s >= warmup + width - 1;
+            }
+            hit = hit || h;
+        }
+        if (hit) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Scan trailing-run summaries to give each worker the state of every
@@ -183,35 +255,39 @@ DMT_D void reduce_runs(BoxcarShared<T>& shared,
 }
 
 template <typename T>
-__global__ void kernel_fdmt_boxcar(FDMTSearchInput input,
-                                   const BoxcarRow* rows,
-                                   SizeType row_base,
-                                   SizeType ndm,
-                                   SizeType total_rows,
-                                   const uint32_t* widths,
-                                   SizeType nfilters,
-                                   SizeType max_width,
-                                   const float* thresholds,
-                                   const float* inv_sigma,
-                                   T* carry_all,
-                                   BoxcarPeak* peaks_all,
-                                   SizeType peak_count,
-                                   RawCandidate* candidates,
-                                   CandidateCounts* counts,
-                                   uint64_t* slots,
-                                   uint64_t* per_dm_all,
-                                   SizeType capacity,
-                                   SizeType dm_cap,
-                                   PeakFindingMode mode,
-                                   bool skip_cold,
-                                   bool root,
-                                   const uint64_t* integer_thresholds,
-                                   const double* means,
-                                   double unit) {
+__global__ void __launch_bounds__(kThreads, 4)
+    kernel_fdmt_boxcar(FDMTSearchInput input,
+                       const BoxcarRow* rows,
+                       SizeType row_base,
+                       SizeType ndm,
+                       SizeType total_rows,
+                       const uint32_t* widths,
+                       SizeType nfilters,
+                       SizeType max_width,
+                       const float* thresholds,
+                       const float* inv_sigma,
+                       T* carry_all,
+                       BoxcarPeak* peaks_all,
+                       SizeType peak_count,
+                       RawCandidate* candidates,
+                       CandidateCounts* counts,
+                       uint64_t* slots,
+                       uint64_t* per_dm_all,
+                       SizeType capacity,
+                       SizeType dm_cap,
+                       PeakFindingMode mode,
+                       bool skip_cold,
+                       bool root,
+                       const uint64_t* integer_thresholds,
+                       const double* means,
+                       double unit,
+                       uint32_t mask,
+                       bool shared_tables) {
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared             = *reinterpret_cast<BoxcarShared<T>*>(storage);
+    T* ring                  = reinterpret_cast<T*>(storage + sizeof(shared));
     const SizeType task      = blockIdx.x;
-    const SizeType beam      = task / ndm;
+    const SizeType beam      = input.beam_begin + task / ndm;
     const SizeType d         = task % ndm;
     const SizeType row_index = row_base + d;
     const SizeType index     = beam * total_rows + row_index;
@@ -222,38 +298,67 @@ __global__ void kernel_fdmt_boxcar(FDMTSearchInput input,
     prototype.beam_idx       = static_cast<uint32_t>(beam);
     CandidateWriter writer{candidates, counts,    slots,    per_dm_all + index,
                            widths,     prototype, capacity, dm_cap};
-    writer.means   = means ? means + row_index * nfilters : nullptr;
-    writer.scales  = inv_sigma + row_index * nfilters;
-    writer.unit    = unit;
-    writer.integer = std::is_integral_v<T> &&
-                     mode != PeakFindingMode::kContiguousPeakAcrossWidths;
-    const int tid  = static_cast<int>(threadIdx.x);
-    const SizeType lookback = max_width - 1;
+    writer.means        = means ? means + row_index * nfilters : nullptr;
+    writer.scales       = inv_sigma + row_index * nfilters;
+    writer.unit         = unit;
+    writer.integer      = std::is_integral_v<T> &&
+                          mode != PeakFindingMode::kContiguousPeakAcrossWidths;
+    const int tid       = static_cast<int>(threadIdx.x);
+    const auto lookback = static_cast<uint32_t>(max_width - 1);
+    // Row tables: raw thresholds in the units of the prefix ring.
+    const T* thr_row = [&] {
+        if constexpr (std::is_integral_v<T>) {
+            return integer_thresholds + row_index * nfilters;
+        } else {
+            return thresholds + row_index * nfilters;
+        }
+    }();
+    const uint32_t* wtab = widths;
+    const T* ttab        = thr_row;
+    if (shared_tables) {
+        T* s_thr       = ring + mask + 1;
+        auto* s_widths = reinterpret_cast<uint32_t*>(s_thr + nfilters);
+        for (SizeType f = tid; f < nfilters; f += kThreads) {
+            s_thr[f]    = thr_row[f];
+            s_widths[f] = widths[f];
+        }
+        wtab = s_widths;
+        ttab = s_thr;
+    }
+    // Open runs force the bookkeeping path until they close.
+    const auto any_open = [&] {
+        bool open = false;
+        if (mode != PeakFindingMode::kAllAboveThreshold) {
+            for (SizeType f = tid; f < peak_count; f += kThreads) {
+                open = open || peaks[f].open;
+            }
+        }
+        return __syncthreads_or(open) != 0;
+    };
+    bool open = any_open();
     if (tid == 0) {
-        shared.prefix[0] = 0;
+        ring[0] = 0;
     }
     __syncthreads();
     // Bootstrap only the short raw carry, never an entire DM-time row.
-    for (SizeType p = 0; p < lookback; p += kTile) {
-        const T base = shared.prefix[p % BoxcarShared<T>::ring];
+    for (uint32_t p = 0; p < lookback; p += kTile) {
+        const T base = ring[p & mask];
         T x[kItems];
         for (int j = 0; j < kItems; ++j) {
-            const SizeType t    = p + tid * kItems + j;
-            const SizeType back = t < lookback ? lookback - t : 0;
+            const uint32_t t    = p + tid * kItems + j;
+            const uint32_t back = t < lookback ? lookback - t : 0;
             x[j] = t < lookback && input.sample_begin >= back
                        ? carry[(input.sample_begin - back) % max_width]
                        : T{0};
         }
-        prefix_tile(shared, x, p, base);
+        prefix_tile(shared, ring, mask, x, p, base);
     }
     for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
         const int n = static_cast<int>(
             input.nsamps - t0 < kTile ? input.nsamps - t0 : kTile);
-        const SizeType position = lookback + t0;
-        const T base = shared.prefix[position % BoxcarShared<T>::ring];
+        const auto position = static_cast<uint32_t>(lookback + t0);
+        const T base        = ring[position & mask];
         T x[kItems];
-        float best[kItems];
-        uint32_t best_filter[kItems];
         for (int j = 0; j < kItems; ++j) {
             const SizeType local = tid * kItems + j;
             x[j]                 = 0;
@@ -265,95 +370,107 @@ __global__ void kernel_fdmt_boxcar(FDMTSearchInput input,
                     x[j] = boxcar_sample(input, row, beam, t0 + local, root);
                 }
             }
-            best[j]        = -1.0F;
-            best_filter[j] = 0;
         }
-        prefix_tile(shared, x, position, base);
-        T current[kItems];
-        uint64_t raw_sums[kItems]{};
-        for (int j = 0; j < kItems; ++j) {
-            current[j] = shared.prefix[(position + tid * kItems + j + 1) %
-                                       BoxcarShared<T>::ring];
+        prefix_tile(shared, ring, mask, x, position, base);
+        const uint64_t start = input.sample_begin + t0;
+        // Tiles past the warm-up of every width skip the per-width check.
+        const bool cold = skip_cold && start + 1 < row.warmup + max_width;
+        bool hit;
+        if (n == kTile) {
+            hit = cold ? detect_tile<T, true, true>(ring, mask, position, n,
+                                                    wtab, ttab, nfilters, start,
+                                                    row.warmup)
+                       : detect_tile<T, true, false>(ring, mask, position, n,
+                                                     wtab, ttab, nfilters,
+                                                     start, row.warmup);
+        } else {
+            hit = cold ? detect_tile<T, false, true>(ring, mask, position, n,
+                                                     wtab, ttab, nfilters,
+                                                     start, row.warmup)
+                       : detect_tile<T, false, false>(ring, mask, position, n,
+                                                      wtab, ttab, nfilters,
+                                                      start, row.warmup);
         }
-        // Width tables live in global read-only storage and are traversed
-        // without a fixed 32-filter array or a filter-dependent launch size.
-        for (SizeType f = 0; f < nfilters; ++f) {
-            bool above[kItems];
-            float snr[kItems];
-            uint32_t filters[kItems];
-            const SizeType width  = widths[f];
-            const float threshold = thresholds[(row_base + d) * nfilters + f];
-            const float scale     = inv_sigma[(row_base + d) * nfilters + f];
+        if (__syncthreads_or(hit || open) != 0) {
+            // Rare path: exact run bookkeeping in each thread's four
+            // consecutive samples.
+            float best[kItems];
+            uint32_t best_filter[kItems];
+            T current[kItems];
+            uint64_t raw_sums[kItems]{};
             for (int j = 0; j < kItems; ++j) {
-                const SizeType local  = tid * kItems + j;
-                const uint64_t sample = input.sample_begin + t0 + local;
-                const SizeType p      = position + local + 1;
-                const T sum =
-                    current[j] -
-                    shared.prefix[(p - width) % BoxcarShared<T>::ring];
-                above[j] =
-                    local < static_cast<SizeType>(n) &&
-                    (!skip_cold || sample >= row.warmup + width - 1) && [&] {
-                        if constexpr (std::is_integral_v<T>) {
-                            return sum >=
-                                   integer_thresholds[row_index * nfilters + f];
-                        } else {
-                            return sum >= threshold;
-                        }
-                    }();
-                snr[j] = 0;
-                if constexpr (std::is_integral_v<T>) {
-                    raw_sums[j] = sum;
-                    if (above[j] &&
-                        mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
-                        snr[j] = static_cast<float>(
-                            (static_cast<double>(sum) -
-                             means[row_index * nfilters + f]) *
-                            (scale * unit));
-                    }
-                } else {
-                    snr[j] = above[j] ? sum * scale : 0.0F;
-                }
-                filters[j] = static_cast<uint32_t>(f);
-                if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
-                    if (above[j] && snr[j] > best[j]) {
-                        best[j]        = snr[j];
-                        best_filter[j] = filters[j];
-                    }
-                } else if (mode == PeakFindingMode::kAllAboveThreshold &&
-                           above[j]) {
-                    BoxcarPeak peak{sample, sample,     sample,
-                                    snr[j], filters[j], true};
+                current[j]     = ring[(position + tid * kItems + j + 1) & mask];
+                best[j]        = -1.0F;
+                best_filter[j] = 0;
+            }
+            for (SizeType f = 0; f < nfilters; ++f) {
+                bool above[kItems];
+                float snr[kItems];
+                uint32_t filters[kItems];
+                const uint32_t width = wtab[f];
+                const T threshold    = ttab[f];
+                const float scale    = inv_sigma[row_index * nfilters + f];
+                for (int j = 0; j < kItems; ++j) {
+                    const uint32_t local  = tid * kItems + j;
+                    const uint64_t sample = start + local;
+                    const T sum = current[j] -
+                                  ring[(position + local + 1 - width) & mask];
+                    above[j] =
+                        local < static_cast<uint32_t>(n) &&
+                        (!skip_cold || sample >= row.warmup + width - 1) &&
+                        sum >= threshold;
+                    snr[j] = 0;
                     if constexpr (std::is_integral_v<T>) {
-                        peak.raw_sum = sum;
+                        raw_sums[j] = sum;
+                        if (above[j] &&
+                            mode ==
+                                PeakFindingMode::kContiguousPeakAcrossWidths) {
+                            snr[j] = static_cast<float>(
+                                (static_cast<double>(sum) -
+                                 means[row_index * nfilters + f]) *
+                                (scale * unit));
+                        }
+                    } else {
+                        snr[j] = above[j] ? sum * scale : 0.0F;
                     }
-                    writer(peak);
+                    filters[j] = static_cast<uint32_t>(f);
+                    if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
+                        if (above[j] && snr[j] > best[j]) {
+                            best[j]        = snr[j];
+                            best_filter[j] = filters[j];
+                        }
+                    } else if (mode == PeakFindingMode::kAllAboveThreshold &&
+                               above[j]) {
+                        BoxcarPeak peak{sample, sample,     sample,
+                                        snr[j], filters[j], true};
+                        if constexpr (std::is_integral_v<T>) {
+                            peak.raw_sum = sum;
+                        }
+                        writer(peak);
+                    }
+                }
+                if (mode == PeakFindingMode::kContiguousPeakPerWidth) {
+                    reduce_runs(shared, above, snr, filters, start, n,
+                                peaks + f, writer, raw_sums,
+                                std::is_integral_v<T>);
                 }
             }
-            if (mode == PeakFindingMode::kContiguousPeakPerWidth) {
-                reduce_runs(shared, above, snr, filters,
-                            input.sample_begin + t0, n, peaks + f, writer,
-                            raw_sums, std::is_integral_v<T>);
+            if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
+                bool above[kItems];
+                for (int j = 0; j < kItems; ++j) {
+                    above[j] = best[j] >= 0;
+                }
+                reduce_runs(shared, above, best, best_filter, start, n, peaks,
+                            writer, raw_sums, false);
             }
+            open = any_open();
         }
-        if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
-            bool above[kItems];
-            for (int j = 0; j < kItems; ++j) {
-                above[j] = best[j] >= 0;
-            }
-            reduce_runs(shared, above, best, best_filter,
-                        input.sample_begin + t0, n, peaks, writer, raw_sums,
-                        false);
-        }
-        __syncthreads();
         // Recenter the retained prefix boundaries after all scorers finish.
-        const SizeType end = position + n;
-        const T origin =
-            shared.prefix[(end - lookback) % BoxcarShared<T>::ring];
+        const uint32_t end = position + n;
+        const T origin     = ring[(end - lookback) & mask];
         __syncthreads();
-        for (SizeType j = tid; j <= lookback; j += kThreads) {
-            shared.prefix[(end - lookback + j) % BoxcarShared<T>::ring] -=
-                origin;
+        for (uint32_t j = tid; j <= lookback; j += kThreads) {
+            ring[(end - lookback + j) & mask] -= origin;
         }
         __syncthreads();
     }
@@ -420,7 +537,8 @@ public:
     FDMTBoxcarCudaEngine(const plans::FDMTPlan& plan,
                          const BoxcarConfig& config,
                          const std::vector<plans::BoxcarPlanePlan>& planes,
-                         const FDMTEngineConfig& cfg)
+                         const FDMTEngineConfig& cfg,
+                         std::unique_ptr<BoxcarDriver> driver)
         : m_plan(plan),
           m_config(config),
           m_planes(planes),
@@ -440,7 +558,7 @@ public:
             throw std::invalid_argument(
                 "FDMTBoxcar: GPU search extent exceeds limits");
         }
-        m_fdmt = make_fdmt_gpu(plan, cfg);
+        m_driver = std::move(driver);
         std::vector<float> thresholds, scales;
         m_offsets.push_back(0);
         for (const auto& p : planes) {
@@ -462,8 +580,10 @@ public:
                 : 1.0;
         if (config.input_nbits == 32) {
             m_carry_d.resize(tasks * m_width, 0);
+            configure_shared<float>();
         } else {
             m_integer_carry.resize(tasks * m_width, 0);
+            configure_shared<uint64_t>();
         }
         std::vector<double> means;
         std::vector<uint64_t> cutoffs;
@@ -515,7 +635,7 @@ public:
         }
         validate_input(waterfall.size());
         begin_result(m_plan.get_nsamps(), queue);
-        m_fdmt->execute_search(waterfall, *this, queue);
+        m_driver->search(waterfall, *this, queue);
         m_position += m_plan.get_nsamps();
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
@@ -540,7 +660,7 @@ public:
                                       Stream queue) override {
         validate_packed(waterfall.size());
         begin_result(m_plan.get_nsamps(), queue);
-        m_fdmt->execute_search(waterfall, m_config.input_nbits, *this, queue);
+        m_driver->search(waterfall, m_config.input_nbits, *this, queue);
         m_position += m_plan.get_nsamps();
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
@@ -592,7 +712,7 @@ public:
     void reset_history(Stream queue) override {
         gpu_utils::set_device(m_device);
         const auto stream = static_cast<cudaStream_t>(queue.native);
-        m_fdmt->reset_search_history(queue);
+        m_driver->reset(queue);
         gpu_utils::check_gpu_call(cudaMemsetAsync(
             raw(m_carry_d), 0, m_carry_d.size() * sizeof(float), stream));
         gpu_utils::check_gpu_call(cudaMemsetAsync(
@@ -612,7 +732,9 @@ public:
             if (plane.level != level) {
                 continue;
             }
-            const dim3 grid(plane.dm_grid.size() * m_beams);
+            const SizeType beams =
+                std::min(input.beam_count, m_beams - input.beam_begin);
+            const dim3 grid(plane.dm_grid.size() * beams);
             const dim3 block(kThreads);
             gpu_utils::check_kernel_launch_params(grid, block);
             if (m_config.input_nbits == 32) {
@@ -625,7 +747,7 @@ public:
         }
     }
     FDMTBoxcarMemoryUsage memory_usage() const noexcept override {
-        const auto fdmt    = m_fdmt->get_memory_usage();
+        const auto fdmt    = m_driver->memory();
         SizeType host_plan = m_rows.size() * sizeof(BoxcarRow) +
                              m_offsets.size() * sizeof(SizeType);
         for (const auto& p : m_planes) {
@@ -657,10 +779,10 @@ public:
                 m_input_d.size() * sizeof(float) + m_packed_input.size()};
     }
     SizeType chunk_nsamps() const noexcept override {
-        return m_fdmt->get_chunk_nsamps();
+        return m_driver->chunk_nsamps();
     }
     SizeType fuse_levels() const noexcept override {
-        return m_fdmt->get_fuse_levels();
+        return m_driver->fuse_levels();
     }
 
 private:
@@ -671,7 +793,7 @@ private:
                       dim3 block,
                       T* carry) {
         kernel_fdmt_boxcar<T>
-            <<<grid, block, sizeof(BoxcarShared<T>),
+            <<<grid, block, m_smem,
                static_cast<cudaStream_t>(input.stream.native)>>>(
                 input, raw(m_rows_d), m_offsets[p], m_planes[p].dm_grid.size(),
                 m_rows.size(), raw(m_widths_d), m_filters, m_width,
@@ -681,8 +803,44 @@ private:
                 m_config.max_cands_per_dm, m_config.peak_mode,
                 m_config.skip_cold_prefix,
                 m_planes[p].level == m_plan.get_niters(),
-                raw(m_integer_thresholds), raw(m_integer_means),
-                m_integer_unit);
+                raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
+                m_mask, m_shared_tables);
+    }
+    // Ring of at least max_width + kTile prefixes (a power of two), plus the
+    // row's thresholds and widths when they fit.
+    template <typename T> void configure_shared() {
+        const SizeType ring   = std::bit_ceil(m_width + kTile);
+        const SizeType fixed  = sizeof(BoxcarShared<T>) + ring * sizeof(T);
+        const SizeType tables = m_filters * (sizeof(T) + sizeof(uint32_t));
+        int optin             = 0;
+        gpu_utils::check_gpu_call(
+            cudaDeviceGetAttribute(
+                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
+            "FDMTBoxcar: shared memory limit");
+        const auto limit = static_cast<SizeType>(optin);
+        m_mask           = static_cast<uint32_t>(ring - 1);
+        m_shared_tables =
+            m_filters <= kSharedFilters && fixed + tables <= limit;
+        m_smem = fixed + (m_shared_tables ? tables : 0);
+        if (m_smem > limit) {
+            throw std::invalid_argument(std::format(
+                "FDMTBoxcar: max_boxcar {} needs {} B of shared memory per "
+                "block; the device allows {} B",
+                m_width, m_smem, limit));
+        }
+        gpu_utils::check_gpu_call(
+            cudaFuncSetAttribute(kernel_fdmt_boxcar<T>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(m_smem)),
+            "FDMTBoxcar: shared-memory opt-in");
+#if !defined(DMT_ENABLE_HIP)
+        // Several resident rows per SM need the shared-memory carveout.
+        gpu_utils::check_gpu_call(
+            cudaFuncSetAttribute(kernel_fdmt_boxcar<T>,
+                                 cudaFuncAttributePreferredSharedMemoryCarveout,
+                                 cudaSharedmemCarveoutMaxShared),
+            "FDMTBoxcar: shared-memory carveout");
+#endif
     }
     void validate_packed(SizeType size) const {
         if (m_config.input_nbits == 32 ||
@@ -735,7 +893,7 @@ private:
     SizeType m_width;
     SizeType m_filters;
     SizeType m_peak_count;
-    std::unique_ptr<FDMTEngine> m_fdmt;
+    std::unique_ptr<BoxcarDriver> m_driver;
     std::vector<SizeType> m_offsets;
     thrust::device_vector<BoxcarRow> m_rows_d;
     thrust::device_vector<uint32_t> m_widths_d;
@@ -745,6 +903,9 @@ private:
     thrust::device_vector<double> m_integer_means;
     thrust::device_vector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
+    uint32_t m_mask       = 0;
+    bool m_shared_tables  = false;
+    SizeType m_smem       = 0;
     thrust::device_vector<BoxcarPeak> m_peaks_d;
     thrust::device_vector<uint64_t> m_per_dm_d, m_slots_d;
     thrust::device_vector<CandidateCounts> m_counts_d;
@@ -762,7 +923,9 @@ std::unique_ptr<FDMTBoxcarEngine>
 make_fdmt_boxcar_gpu(const plans::FDMTPlan& plan,
                      const BoxcarConfig& config,
                      const std::vector<plans::BoxcarPlanePlan>& planes,
-                     const FDMTEngineConfig& cfg) {
-    return std::make_unique<FDMTBoxcarCudaEngine>(plan, config, planes, cfg);
+                     const FDMTEngineConfig& cfg,
+                     std::unique_ptr<BoxcarDriver> driver) {
+    return std::make_unique<FDMTBoxcarCudaEngine>(plan, config, planes, cfg,
+                                                  std::move(driver));
 }
 } // namespace dmt::algorithms::detail

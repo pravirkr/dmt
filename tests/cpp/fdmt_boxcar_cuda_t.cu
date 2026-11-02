@@ -62,7 +62,7 @@ TEST_CASE("FDMTBoxcar GPU host and device APIs match direct reference",
                 CHECK(search.copy_result(Stream{stream}).candidates.empty());
                 CHECK_THROWS_AS(
                     search.execute(DeviceSpan<const float>(
-                        ptr, device_input.size(), {Backend::kCPU, -1})),
+                        ptr, device_input.size(), {Backend::kCPU, 0})),
                     std::invalid_argument);
                 CHECK_THROWS_AS(
                     search.execute(DeviceSpan<const float>(

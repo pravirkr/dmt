@@ -12,7 +12,7 @@ data, and writes
 for ``dmtlib.sensitivity.CRYOPAF`` (512 channels over 704-1216 MHz at
 512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband`` and
 ``--config parkes_uwl`` select the other presets and write their named
-``{npz,json}`` outputs. Archived CryoPAF results used 1024 channels.
+``{npz,json}`` outputs.
 
 which plot_sensitivity.py turns into figures. A unit-variance noise
 realisation, the same for every engine, calibrates each engine's threshold at

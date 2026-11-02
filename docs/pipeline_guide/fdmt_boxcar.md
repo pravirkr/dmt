@@ -1,9 +1,19 @@
 # Fused FDMT and boxcar search
 
-`FDMTBoxcar` searches normalized waterfalls and returns raw detections, without
-materializing the full-band DM–time output. Use it when that output would only
-be consumed by boxcar search. Existing `FDMT` and other algorithms retain their
-interfaces and behavior.
+`FDMTBoxcar` and `FDMTFFTBoxcar` search normalized waterfalls and return raw
+detections, without materializing the DM–time output. Use them when that
+output would only be consumed by a boxcar search: the dedispersed rows are
+scored while they are still on chip or in cache, instead of being written to
+memory and read back by a separate search pass. Existing `FDMT`, `FDMTFFT` and
+the other algorithms keep their interfaces and behavior.
+
+| | `FDMTBoxcar` | `FDMTFFTBoxcar` |
+| :--- | :--- | :--- |
+| Transform | time-domain FDMT tree (integer delays) | Fourier-domain FDMT tree (fractional delays by default) |
+| Fused into the search | the root merge (root rows are never stored) | each overlap-save segment's inverse transform |
+| Input | float32, or packed 1/2/4/8/16-bit | float32 |
+| Subband search | `subband_levels` 0–2 | full band only |
+| Latency | none | `output_latency` samples (64 with fractional delays) |
 
 ## Input and statistical contract
 
@@ -62,11 +72,10 @@ different widths have different baselines and noise scales.
 
 Accumulator bounds are checked at construction, including prefix workspace.
 The root merge is fused into scoring. Lower-level fusion is currently disabled
-for packed searches, and wide state/history can cost more memory than float32;
-this version makes no packed-throughput improvement claim. GPU integer scoring
-uses less than 48 KiB shared memory per block and needs no opt-in shared-memory
-limit. GPU compilation and runtime parity still require validation on a GPU
-machine.
+for packed searches, and the uint64 tree state and history cost more memory
+and bandwidth than float32, and the packed search does not use the GPU's
+direct levels yet: on the L40S it runs at about 3–4.5× the float32 time on
+the cryopaf presets, almost all of it in the uint64 FDMT merges.
 
 ## Python
 
@@ -188,17 +197,32 @@ workspace remain allocated; fusion does not mean zero scratch memory.
 storage and lazily allocated input staging. It excludes caller input and
 Python's owned output copies.
 
-CPU scoring uses tile-local double prefixes. GPU scoring uses a rebased
-float prefix ring with double scan intermediates and ordered parallel run
-summaries. Candidate semantics match across backends; S/N is compared with
-tolerances, not promised bit-identical. Arithmetic near an exact threshold
-or near-equal peak can affect selection.
+Both backends score a row tile by tile from running prefix sums, and run the
+peak bookkeeping only for tiles that need it. A cheap pass first checks every
+width of the tile against its threshold. When no window crosses and no
+excursion is open, every peak mode leaves its state unchanged, so the tile is
+done; on noise that is nearly every tile, and the cost per window is one
+prefix difference and one comparison.
+
+- CPU: double prefixes (uint64 for packed input), slid from tile to tile;
+  the carried samples are read once per call and written once at its end.
+- GPU: one thread block per (beam, DM) row. The prefix of each 1024-sample
+  tile is a warp-shuffle scan into a float32 ring in shared memory (a power of
+  two of at least `max_boxcar + 1024` entries), rebased after every tile so
+  values stay near the magnitude of one tile. Width and threshold tables are
+  staged in shared memory. Tiles with a crossing or an open excursion run the
+  exact ordered run summaries.
+
+Candidate semantics match across backends; S/N is compared with tolerances,
+not promised bit-identical. Arithmetic near an exact threshold or near-equal
+peak can affect selection.
 
 ## Validation and performance
 
-CPU tests compare against materialized FDMT and independent direct float64
-window sums, impulse-response energy, Gaussian noise, streaming boundaries,
-overflow and allocation checks. GPU tests are tagged `[gpu][boxcar]`.
+CPU tests compare against materialized FDMT (or FDMT-FFT) and independent
+direct float64 window sums, impulse-response energy, Gaussian noise, streaming
+boundaries, overflow and allocation checks. GPU tests are tagged
+`[gpu][boxcar]`.
 
 ```bash
 cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -210,26 +234,72 @@ compute-sanitizer --tool racecheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]
 compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
 ```
 
-The new CUDA implementation has not been compiled or run on the development
-Mac; GPU execution and performance require validation on a GPU machine.
-
-Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`, then run:
+Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The streaming benchmarks run
+at the reference point of a suite configuration (`DMT_BENCH_CONFIG`:
+`cryopaf`, `cryopaf_lband` or `parkes_uwl`) with widths up to 100 ms
+(`max_boxcar = floor(0.1 s / tsamp)`):
 
 ```bash
-build/bench/dmt_bench --benchmark_filter='^BM_fdmt_boxcar_(fused|separate)/' \
-  --benchmark_min_time=0.2s
+# GPU: transform alone, transform + separate search, FDMTBoxcar (float32,
+# uint8, host arrays) and FDMT-FFT / FDMTFFTBoxcar
+DMT_BENCH_CONFIG=cryopaf build/bench/dmt_bench \
+  --benchmark_filter='^BM_fdmt_boxcar_cuda/'
+# CPU
+DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
+  --benchmark_filter='^BM_fdmt_boxcar_stream/'
 ```
 
-These noise-only CPU benchmarks use the same scorer in both paths and disable
-lower-tree fusion to isolate root fusion. They cover 32/4096 maximum widths,
-full-band/subband searching, and 1/4 threads. `working_bytes` is the algorithm
-allocation estimate, not process RSS. Root allocation and traffic savings
-are reliable; speedup depends on the plan, width count, backend and candidate
-rate. Further fusion of subband searching with subsequent merges is deferred.
+On noise, with 32768-sample blocks and float32 input (L40S device-resident;
+Intel Xeon Gold 6348H with 8 threads):
 
-A local Apple M1 Pro Release comparison (128 channels, 4096 samples, delays 0–256,
-maximum width 32, one beam/thread, full band only, lower fusion disabled;
-three repetitions of at least 0.5 seconds) measured median times of 13.06 ms
-fused and 13.02 ms separated. Reported working memory was 21.96 MiB and
-25.97 MiB respectively. This sample shows the expected 4.02 MiB root-plane
-saving, with no measurable CPU speedup. It does not predict GPU performance.
+| preset, machine | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
+| :--- | ---: | ---: | ---: |
+| `cryopaf` (1545 trials), L40S | 22.9 ms | 24.0 ms (12 widths) | 28.6 ms (195 widths) |
+| `cryopaf_lband` (1941 trials), L40S | 11.9 ms | 12.6 ms (13 widths) | 16.7 ms (219 widths) |
+| `cryopaf`, Xeon | 370 ms | 592 ms | 1.75 s |
+| `cryopaf_lband`, Xeon | 225 ms | 464 ms | 2.42 s |
+
+On the GPU the root merge the search saves costs about as much as scoring a
+dozen widths, so the search adds ~5%. On the CPU the scorer is a separate
+pass over each chunk's root rows whose cost grows with the number of widths
+(1.6–2× the transform at a dozen widths), still well faster than real time on
+8 threads. `working_bytes` is the algorithm allocation estimate, not process
+RSS.
+
+## FDMTFFTBoxcar
+
+```python
+from dmtlib import FDMTPlan, FDMTFFTBoxcar, BoxcarConfig
+
+plan = FDMTPlan(704.0, 1216.0, 512, 32768, 512e-6, dm_arr=dm_trials)
+search = FDMTFFTBoxcar(plan, BoxcarConfig(max_boxcar=195, wtsp=1.5),
+                       backend="cuda")
+for block in blocks:
+    consume(search.execute(block).candidates)
+consume(search.flush().candidates)
+```
+
+`FDMTFFTBoxcar` takes the same `BoxcarConfig`, returns the same candidates and
+result views, and has the same streaming, flush and overflow rules. It runs
+`FDMTFFT` in valid mode and hands the DM rows of each overlap-save segment to
+the scorer straight from the inverse transform: on the GPU the scorer reads
+the cuFFT output buffer in place of the copy into a DM–time plane, and on the
+CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
+
+- **Noise model.** A merge's shift, integer or fractional, is an all-pass
+  operation: it leaves each channel's noise spectrum unchanged. A row's boxcar
+  variance therefore depends only on its channels' level-0 boxes, as for
+  `FDMTBoxcar`, and the same analytical sigma applies. Channels with
+  `kill_mask[c] = 0` read as zero and are left out of it.
+- **Latency.** With fractional delays the transform needs
+  `fdmt_fft::kFractionalGuard` (64) samples of look-ahead, so a block searches
+  input samples `[block_start - 64, block_end - 64)`. Candidate sample indices
+  are input-stream indices, comparable with `FDMTBoxcar`'s; `output_latency`
+  reports the lag (0 with `fractional_delays=False`). Cold windows also wait
+  for the interpolation guard behind each row's support.
+- **Streaming.** With fractional delays, overlap-save blocks differ from one
+  long call by the truncation of the interpolation kernel (FDMTFFT: below
+  0.5% of the row peak), so a near-threshold point can move between blocked
+  and unblocked runs; with integer delays they agree to float rounding.
+- **Limits.** Float32 input only and `subband_levels=0`: subband rows exist
+  only in the Fourier domain and would each need an extra inverse transform.

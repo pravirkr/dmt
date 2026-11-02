@@ -75,8 +75,9 @@ using fft_cpu::Source;
 using utils::FFTVector;
 
 // Bins per tile: one AVX-512 register (two AVX2, four NEON) per component
-// and one 128-byte cache line (Apple) per tree node. 8, 16 and 32 measure
-// the same for integer delays on the M1 (the tree is not the bottleneck);
+// and one 128-byte cache line (ARM64) per tree node. 8, 16 and 32 measure
+// the same for integer delays on an ARM64 (NEON) machine (the tree is not
+// the bottleneck);
 // wider tiles amortise the per-merge phasor set-up of fractional delays.
 constexpr int kTile        = 16;
 constexpr SizeType kTileFl = 2 * kTile;
@@ -227,6 +228,72 @@ public:
         start_stepper(float_source(waterfall), dmt);
     }
 
+    // One beam's segment of DM rows at a time goes to the sink, which scores
+    // it while the rows are still warm; no DM-time plane is written.
+    void execute_search(std::span<const float> waterfall,
+                        detail::FDMTSearchSink& sink) override {
+        if (m_mode != FDMTMode::kValid) {
+            throw std::logic_error("FDMTFFT: search requires valid mode");
+        }
+        if (waterfall.size() != m_nbeams * m_nchans * m_nsamps) {
+            throw std::invalid_argument(std::format(
+                "FDMTFFT::execute_search: expected {} samples, got {}",
+                m_nbeams * m_nchans * m_nsamps, waterfall.size()));
+        }
+        const auto src     = float_source(waterfall);
+        const auto latency = m_geom.latency;
+        m_search_rows.resize(m_ndms * m_seg_hop);
+        for (SizeType b = 0; b < m_nbeams; ++b) {
+            for (SizeType seg = 0; seg < m_nseg; ++seg) {
+                const auto o0  = seg * m_seg_hop;
+                const auto cnt = std::min(m_seg_hop, m_nsamps_out - o0);
+                const auto pos = m_search_pos + o0;
+                const auto drop =
+                    pos < latency ? std::min(cnt, latency - pos) : SizeType{0};
+                if (drop == cnt) {
+                    continue; // all before stream sample 0
+                }
+                forward(src, b, seg);
+                run_tiles();
+                inverse_rows(drop, cnt - drop);
+                const detail::FDMTSearchInput input{
+                    .state             = m_search_rows.data(),
+                    .row_stride        = m_seg_hop,
+                    .beam_stride       = 0,
+                    .nsamps            = cnt - drop,
+                    .sample_begin      = pos + drop - latency,
+                    .materialized_root = true,
+                    .beam_begin        = b,
+                    .beam_count        = 1,
+                };
+                sink.consume(m_plan->get_niters(), input);
+            }
+            update_overlap(src, b);
+        }
+        m_search_pos += m_nsamps;
+    }
+    void reset_search_history(Stream /*stream*/) override { reset_history(); }
+    [[nodiscard]] SizeType segment_nsamps() const noexcept override {
+        return m_seg_hop;
+    }
+    [[nodiscard]] FDMTMemoryUsage memory_usage() const noexcept override {
+        SizeType work = m_search_rows.size() * sizeof(float);
+        for (const auto& w : m_ws) {
+            work += (w.time.size() + w.q.size() + w.w0.size() + w.buf_a.size() +
+                     w.buf_b.size() + w.s0.size() + w.s1.size() + w.p.size()) *
+                        sizeof(float) +
+                    (w.cplx.size() + w.batch.size() + w.anchor.size()) *
+                        sizeof(ComplexType);
+        }
+        return {.plan  = (m_r_table.size() + m_frac_r.size()) * sizeof(float) +
+                         m_frac_s.size() * sizeof(double),
+                .state = m_spectra.size() * sizeof(float) +
+                         m_out_spec.size() * sizeof(ComplexType),
+                .history   = m_overlap.size() * sizeof(float),
+                .workspace = work,
+                .output    = 0};
+    }
+
     void reset(std::span<const uint8_t> packed,
                SizeType nbits,
                std::span<float> dmt) override {
@@ -332,6 +399,7 @@ public:
 
     void reset_history() noexcept override {
         std::ranges::fill(m_overlap, 0.0F);
+        m_search_pos = 0;
     }
 
     [[nodiscard]] SizeType history_state_size() const noexcept override {
@@ -390,6 +458,8 @@ private:
     SizeType m_max_coords{};
     SizeType m_overlap_len{};
     SizeType m_nsamps_out{};
+    uint64_t m_search_pos{};          // execute_search(): stream position
+    std::vector<float> m_search_rows; // execute_search(): one segment
     // Single-transform geometry (the plan's FFT length): the window is the
     // mode's window, output sample o is transform sample m_single_skip + o.
     SizeType m_single_skip{};
@@ -1041,6 +1111,21 @@ private:
 
     // DM rows of m_out_spec -> time domain; segment `seg` fills output
     // samples [seg * hop, min((seg + 1) * hop, nsamps_out)).
+    // execute_search(): rows of `cnt` samples from output sample `drop` of
+    // the segment into m_search_rows (row stride m_seg_hop).
+    void inverse_rows(SizeType drop, SizeType cnt) {
+        const auto& g   = *m_geo;
+        const auto ndms = static_cast<std::int64_t>(m_ndms);
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+        for (std::int64_t di = 0; di < ndms; ++di) {
+            const auto dm = static_cast<SizeType>(di);
+            float* row    = ws().time.data();
+            g.c2r->c2r(&m_out_spec[dm * g.bins_stride], row);
+            std::copy_n(row + m_seg_skip + drop, cnt,
+                        m_search_rows.data() + (dm * m_seg_hop));
+        }
+    }
+
     void inverse(float* dmt_ptr, SizeType seg) {
         const auto& g   = *m_geo;
         const auto o0   = seg * m_seg_hop;

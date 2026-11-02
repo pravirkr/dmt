@@ -14,14 +14,17 @@ for the published suite, and developer analysis scripts
 
 ## The published suite
 
-The current presets share DM 0–2000, a piecewise-uniform Levin grid with
-`tolerance=1.1`, valid mode and box smearing:
+The presets share DM 0–2000, a piecewise-uniform Levin grid, valid mode and
+box smearing:
 
-| preset | band (MHz) | channels | sample interval | DM trials | reference block |
-| :--- | :--- | ---: | ---: | ---: | ---: |
-| `cryopaf` (default) | 704–1216 | 512 | 512 µs | 1545 | 32768 samples (16.777216 s) |
-| `cryopaf_lband` | 1100–1714 | 1152 | 455.6 µs | 1941 | 32768 samples (14.9291008 s) |
-| `parkes_uwl` | 704–4032 | 6656 | 64 µs | 12941 | 32768 samples (2.097152 s) |
+| preset | band (MHz) | channels | sample interval | Levin tolerance | DM trials | reference block |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| `cryopaf` (default) | 704–1216 | 512 | 512 µs | 1.1 | 1545 | 32768 samples (16.777216 s) |
+| `cryopaf_lband` | 1100–1714 | 1152 | 455.6 µs | 1.1 | 1941 | 32768 samples (14.9291008 s) |
+| `parkes_uwl` | 704–4032 | 6656 | 64 µs | 1.6 | 4749 | 32768 samples (2.097152 s) |
+
+UWL uses tolerance 1.6 to keep its grid under 5000 trials (1.1 would need
+12941 and 23.7 GiB of FDMT tree history, against 9.8 GiB now).
 
 CryoPAF emphasizes the sparse-grid, lower-channel regime; L-band is the
 pipeline target, including one subband search level; UWL stresses wide
@@ -36,13 +39,6 @@ Each preset runs three sweeps through its reference point:
 - **nsamps**: 8K, 16K, 32K, 64K samples per block, at DM 0–2000.
 - **ndms**: DM 0–125, 0–250, 0–500, 0–1000 and 0–2000, at 32K samples.
 - **nbits**: 1, 2, 4, 8, 16-bit packed and float32 input.
-
-Archived published CryoPAF measurements and existing figures used **1024
-channels and 2501 trials**. Their numbers are historical, not measurements
-of the updated 512-channel preset. Rerun the suite to generate current
-results; the plot loader rejects a conflicting recorded geometry. The old
-4096-channel preset is no longer selectable. Archived measurements are not
-rewritten.
 
 Every engine is given the same DM grid (the FDMT engines round it to integer
 delays and keep every trial; DDMT-FFT runs one NUFFT per uniform segment), so
@@ -60,13 +56,40 @@ the summary.
 
 Non-default results and plots go under `bench/results/<config>/`; the
 default uses `bench/results/`. FDMT memory preflight includes streaming
-histories and host plan tables, with doubled history storage on GPUs.
+histories and host plan tables, with doubled history storage on GPUs (an
+upper bound: the GPU now keeps the tree history above the fused levels in one
+in-place ring).
 
-FDMTBoxcar streaming benchmarks are in `dmt_bench`, selected with
-`DMT_BENCH_CONFIG=cryopaf_lband` or `parkes_uwl` and
-`--benchmark_filter='^BM_fdmt_boxcar_stream/'`. They include float32 and
-packed uint8 inputs, search warm histories, and report candidate counts,
-working memory, and real-time factor.
+**UWL is deferred.** On the L40S the float32 search needs 15–16 GB (uint8:
+26 GB) and FDMT-FFT cannot run at all (its shortest overlap-save segment is
+510k samples). Real-time use must fit in under 10 GB, so no UWL results are
+published until a lower-memory design (recomputing levels instead of storing
+history) exists; the preset stays for development.
+
+The fused search benchmarks (`FDMTBoxcar`, `FDMTFFTBoxcar`) are in `dmt_bench`,
+at the reference point of the preset selected with `DMT_BENCH_CONFIG`, with
+boxcar widths up to 100 ms (`max_boxcar = floor(0.1 s / tsamp)`) at two width
+spacings per preset (1.0 and 1.5 for CryoPAF, 1.5 and 2.0 for UWL):
+
+- GPU, `--benchmark_filter='^BM_fdmt_boxcar_cuda/'`: the transforms alone
+  (FDMT and FDMT-FFT writing the DM–time plane), FDMT followed by a separate
+  search of that plane, `FDMTBoxcar` (float32, packed uint8 and host arrays)
+  and `FDMTFFTBoxcar`.
+- CPU, `--benchmark_filter='^BM_fdmt_boxcar_stream/'`: `FDMTBoxcar` on float32
+  and packed uint8 input at the same width sets, on 1 and 8 threads.
+
+They warm the search histories first and report the real-time factor,
+working memory, candidates per block and the chunk length.
+`DMT_BENCH_CHUNK` overrides the automatic FDMT chunk length. Results are kept
+as `bench/results/[<config>/]<machine>/boxcar_{cuda,cpu}.json` (Google
+Benchmark JSON, written with `--benchmark_out`), for example:
+
+```bash
+DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
+  --benchmark_filter='^BM_fdmt_boxcar_cuda/' --benchmark_repetitions=3 \
+  --benchmark_out=bench/results/cryopaf_lband/l40s/boxcar_cuda.json \
+  --benchmark_out_format=json
+```
 
 The Fourier-domain engines (FDMT-FFT, DDMT-FFT) are FFT-bound, so the suite
 plans their FFTs with `FFTW_MEASURE` (`run_suite.py --fftw-planner`, default
@@ -77,18 +100,22 @@ the timed region).
 
 ### Running it on a machine
 
-On **each** machine (the Apple M1 Pro, the Intel Xeon, the GPU box):
+On **each** machine (the Intel Xeon for the CPU results, the L40S box for the
+GPU results), for each preset:
 
 ```bash
 # 1. Release build with benchmarks (on the GPU box, CUDA is detected automatically)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDMT_BUILD_BENCHMARKS=ON
 cmake --build build -j --target dmt_bench_suite
 
-# 2. Run the suite (writes bench/results/<machine>/suite_{cpu,cuda}.json)
-python bench/scripts/run_suite.py --machine m1-pro --label "Apple M1 Pro"
-python bench/scripts/run_suite.py --machine xeon-6348h --label "Xeon Gold 6348H"
-python bench/scripts/run_suite.py --machine l40s --no-cpu   # GPU box: CUDA only
-python bench/scripts/run_suite.py --machine m1-pro --config parkes_uwl  # 6656 channels
+# 2. Run the suite: bench/results/<machine>/suite_{cpu,cuda}.json for
+#    cryopaf, bench/results/<config>/<machine>/ for the other presets
+for config in cryopaf cryopaf_lband; do      # parkes_uwl: deferred, see above
+  python bench/scripts/run_suite.py --machine xeon-6348h \
+      --label "Xeon Gold 6348H" --no-gpu --config $config     # CPU box
+  python bench/scripts/run_suite.py --machine l40s --label "NVIDIA L40S" \
+      --no-cpu --config $config                               # GPU box
+done
 
 # 3. Commit the JSON
 git add bench/results/<machine>/ && git commit -m "bench: <machine> results"
@@ -100,14 +127,15 @@ installed, for the theory plot):
 ```bash
 pip install -e ".[bench]"      # matplotlib + numpy
 python bench/scripts/plot_suite.py
-python bench/scripts/plot_suite.py --config parkes_uwl
+python bench/scripts/plot_suite.py --config cryopaf_lband
 git add bench/results/plots && git commit -m "bench: update plots"
 ```
 
 `plot_suite.py` writes light and dark PNGs to `bench/results/plots/{light,dark}/`
 and a numbers table to `bench/results/plots/summary.md`. The README and the
 docs Benchmarks page reference those files directly, so nothing else needs
-editing. A full run takes about 8 minutes on the M1 Pro; brute-force DDMT is most of that. `--quick` (1 repetition, short runs) is for smoke tests only.
+editing. Brute-force DDMT takes most of a CPU run. `--quick` (1 repetition,
+short runs) is for smoke tests only.
 
 ### Getting comparable numbers
 
