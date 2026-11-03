@@ -187,10 +187,3 @@ now (see the C++ API reference).
    :members:
    :undoc-members:
 ```
-
-## Sensitivity analysis (`dmtlib.sensitivity`)
-
-```{eval-rst}
-.. automodule:: dmtlib.sensitivity
-   :members:
-```

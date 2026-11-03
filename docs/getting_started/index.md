@@ -29,7 +29,7 @@ waterfall = generate_frb(
 # Dedisperse with FDMT
 dmt, plan = compute_fdmt(
     waterfall, f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
-    tsamp=1e-3, dt_max=180, mode="valid"
+    tsamp=1e-3, dt_max=256, mode="valid"
 )
 
 # Find the peak in the DM-time plane
