@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <bit>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -1339,6 +1341,16 @@ TEST_CASE("FDMT rejects incompatible configurations", "[fdmt_cpu][cpu]") {
     SECTION("nbeams == 0") {
         CHECK_THROWS_AS(FDMT(1000.0F, 1500.0F, 32, 128, 0.001F, 32, 0, 1, true,
                              "valid", Exec::cpu(1), /*nbeams=*/0),
+                        std::invalid_argument);
+    }
+    SECTION("negative frequency band") {
+        CHECK_THROWS_AS(FDMT(-1500.0F, -1000.0F, 32, 128, 0.001F, 32),
+                        std::invalid_argument);
+    }
+    SECTION("non-finite sample time") {
+        CHECK_THROWS_AS(FDMT(1000.0F, 1500.0F, 32, 128,
+                             std::bit_cast<float>(std::uint32_t{0x7FC00000}),
+                             32),
                         std::invalid_argument);
     }
 }

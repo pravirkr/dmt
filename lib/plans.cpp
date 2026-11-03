@@ -719,6 +719,16 @@ private:
     SizeType m_fft_size{};
 
     void validate_inputs() const {
+        if (!utils::is_finite_bits(m_f_min) ||
+            !utils::is_finite_bits(m_f_max) ||
+            !utils::is_finite_bits(m_tsamp)) {
+            throw std::invalid_argument(
+                "FDMT: f_min, f_max and tsamp must be finite");
+        }
+        if (!(m_f_min > 0.0F)) {
+            throw std::invalid_argument(
+                std::format("FDMT: f_min={} must be positive", m_f_min));
+        }
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument(std::format(
                 "FDMT: f_min={} must be less than f_max={}", m_f_min, m_f_max));
@@ -1338,13 +1348,22 @@ public:
     [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept {
         return m_container.kill_mask;
     }
+    void seal() noexcept { m_sealed = true; }
     void set_kill_mask(std::span<const uint8_t> kill_mask) {
+        if (m_sealed) {
+            throw std::invalid_argument(
+                "DDMTPlan: kill_mask cannot be changed after the plan is "
+                "bound to an engine");
+        }
         if (kill_mask.size() != m_nchans) {
             throw std::invalid_argument(
                 std::format("DDMT: kill_mask size={} must equal nchans={}",
                             kill_mask.size(), m_nchans));
         }
-        m_container.kill_mask.assign(kill_mask.begin(), kill_mask.end());
+        m_container.kill_mask.resize(kill_mask.size());
+        for (SizeType i = 0; i < kill_mask.size(); ++i) {
+            m_container.kill_mask[i] = kill_mask[i] == 0 ? 0 : 1;
+        }
     }
     [[nodiscard]] float get_effective_variance() const noexcept {
         return static_cast<float>(count_active_chans());
@@ -1370,6 +1389,13 @@ private:
     std::vector<uint8_t> m_kill_mask;
 
     DDMTPlanContainer m_container;
+    bool m_sealed{false};
+
+    static void canonicalize_mask(std::vector<uint8_t>& mask) {
+        for (auto& value : mask) {
+            value = value == 0 ? uint8_t{0} : uint8_t{1};
+        }
+    }
 
     [[nodiscard]] SizeType count_active_chans() const noexcept {
         return static_cast<SizeType>(
@@ -1377,6 +1403,16 @@ private:
     }
 
     void validate_inputs() const {
+        if (!utils::is_finite_bits(m_f_min) ||
+            !utils::is_finite_bits(m_f_max) ||
+            !utils::is_finite_bits(m_tsamp)) {
+            throw std::invalid_argument(
+                "DDMT: f_min, f_max and tsamp must be finite");
+        }
+        if (!(m_f_min > 0.0F)) {
+            throw std::invalid_argument(
+                std::format("DDMT: f_min={} must be positive", m_f_min));
+        }
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument("f_min must be less than f_max");
         }
@@ -1388,6 +1424,12 @@ private:
         }
         if (m_dm_arr.empty()) {
             throw std::invalid_argument("dm_arr must not be empty");
+        }
+        for (const float dm : m_dm_arr) {
+            if (!utils::is_finite_bits(dm) || !(dm >= 0.0F)) {
+                throw std::invalid_argument(
+                    "DDMT: DM trials must be finite and >= 0");
+            }
         }
         if (m_nbits != 1 && m_nbits != 2 && m_nbits != 4 && m_nbits != 8 &&
             m_nbits != 16 && m_nbits != 32) {
@@ -1422,6 +1464,7 @@ private:
         m_container.kill_mask = m_kill_mask.empty()
                                     ? std::vector<uint8_t>(m_nchans, 1)
                                     : m_kill_mask;
+        canonicalize_mask(m_container.kill_mask);
         const auto df = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
         m_container.delay_table = utils::generate_delay_table(
             m_dm_arr, m_nchans, m_f_min, df, m_tsamp);
@@ -1432,13 +1475,27 @@ private:
 
     static std::vector<float>
     generate_dm_arr(float dm_max, float dm_step, float dm_min) {
+        if (!utils::is_finite_bits(dm_min) || !utils::is_finite_bits(dm_max) ||
+            !utils::is_finite_bits(dm_step)) {
+            throw std::invalid_argument(
+                "DDMT: dm_min, dm_max and dm_step must be finite");
+        }
         if (dm_step <= 0.0F || dm_min > dm_max) {
             return {};
         }
 
-        // Number of steps: floor((max - min) / step) + 1
-        const auto count =
-            static_cast<SizeType>(std::floor((dm_max - dm_min) / dm_step)) + 1;
+        // Number of steps: floor((max - min) / step) + 1. The span is
+        // computed in double so a non-finite or overflowing count is rejected
+        // before it is cast to SizeType.
+        const double steps = std::floor(
+            (static_cast<double>(dm_max) - static_cast<double>(dm_min)) /
+            static_cast<double>(dm_step));
+        if (!(steps >= 0.0) ||
+            steps >=
+                static_cast<double>(std::numeric_limits<SizeType>::max())) {
+            throw std::invalid_argument("DDMT: DM grid is too large");
+        }
+        const auto count = static_cast<SizeType>(steps) + 1;
 
         std::vector<float> dm_arr;
         dm_arr.reserve(count);
@@ -1721,6 +1778,7 @@ std::string DDMTPlan::summary() const {
 void DDMTPlan::set_kill_mask(std::span<const uint8_t> kill_mask) {
     m_impl->set_kill_mask(kill_mask);
 }
+void DDMTPlan::seal() noexcept { m_impl->seal(); }
 float DDMTPlan::get_effective_variance() const noexcept {
     return m_impl->get_effective_variance();
 }

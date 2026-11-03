@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -8,6 +9,7 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/fdmt_chunk.hpp"
 
 #include <catch2/matchers/catch_matchers_all.hpp>
 
@@ -223,6 +225,24 @@ TEST_CASE("FDMT chunk length rules", "[fdmt_cpu][cpu][chunk]") {
     // The output buffer needs only dmt_size.
     std::vector<float> small(chunked.fdmt.get_plan().get_dmt_size() - 1);
     REQUIRE_THROWS_AS(chunked.fdmt.execute(wf, small), std::invalid_argument);
+}
+
+TEST_CASE("FDMT chunk sizing does not wrap", "[fdmt_cpu][cpu][chunk]") {
+    using algorithms::detail::fdmt_cache_chunk;
+    using algorithms::detail::fdmt_chunk_nsamps;
+    using algorithms::detail::kFDMTMinChunk;
+    plans::FDMTPlan plan(kFMin, kFMax, 32, 4096, kTsamp, 50);
+    CHECK_THROWS_AS(
+        fdmt_chunk_nsamps(plan, FDMTMode::kValid, 1,
+                          std::numeric_limits<SizeType>::max() - 10),
+        std::invalid_argument);
+
+    const auto huge_beams = std::numeric_limits<SizeType>::max() / 2;
+    const auto chunk = fdmt_chunk_nsamps(plan, FDMTMode::kValid, huge_beams, 0);
+    CHECK(chunk == std::min(kFDMTMinChunk, plan.get_nsamps()));
+    CHECK(chunk != 0);
+    CHECK(fdmt_cache_chunk(plan, huge_beams, sizeof(float),
+                           SizeType{2} << 30) == 0);
 }
 
 } // namespace dmt

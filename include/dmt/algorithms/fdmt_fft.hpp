@@ -152,6 +152,9 @@ public:
 
     /// @brief Read-only reference to underlying FDMT plan
     [[nodiscard]] const plans::FDMTPlan& get_plan() const noexcept;
+    /// @brief Engine-owned buffers, in bytes. Excludes the caller's input
+    /// and DM-time output.
+    [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
     /// @brief Number of beams processed together
     [[nodiscard]] SizeType get_nbeams() const noexcept;
     /// @brief Backend this instance runs on.

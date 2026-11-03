@@ -201,6 +201,9 @@ FDMTFFT& FDMTFFT::operator=(FDMTFFT&& other) noexcept = default;
 const plans::FDMTPlan& FDMTFFT::get_plan() const noexcept {
     return m_impl->m_plan;
 }
+FDMTMemoryUsage FDMTFFT::get_memory_usage() const noexcept {
+    return m_impl->m_engine->memory_usage();
+}
 SizeType FDMTFFT::get_nbeams() const noexcept { return m_impl->m_cfg.nbeams; }
 Backend FDMTFFT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int FDMTFFT::nthreads() const noexcept {

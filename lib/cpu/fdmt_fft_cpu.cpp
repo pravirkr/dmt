@@ -249,7 +249,9 @@ public:
                 const auto cnt = std::min(m_seg_hop, m_nsamps_out - o0);
                 const auto pos = m_search_pos + o0;
                 const auto drop =
-                    pos < latency ? std::min(cnt, latency - pos) : SizeType{0};
+                    pos < latency
+                        ? std::min(cnt, static_cast<SizeType>(latency - pos))
+                        : SizeType{0};
                 if (drop == cnt) {
                     continue; // all before stream sample 0
                 }

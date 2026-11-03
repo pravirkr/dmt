@@ -21,7 +21,8 @@ Input is finite, contiguous float32 in `(nbeams, nchans, nsamps)` order, with
 channels ordered from low to high frequency. Python also accepts
 `(nchans, nsamps)` for one beam. Supply non-overlapping consecutive blocks.
 Only valid-mode plans are supported. Delay grids may be regular, signed, or
-custom; physical DM grids are preserved at the root.
+custom. A physical DM grid is snapped to integer band delays; the DM values
+the plan reports are reconstructed from those delays.
 
 Prepare the waterfall upstream: remove the baseline and normalize to zero
 mean and a known common per-channel noise standard deviation (`noise_sigma`,

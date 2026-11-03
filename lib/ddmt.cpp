@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -33,6 +35,14 @@ make_ddmt_engine(const plans::DDMTPlan& plan,
     detail::throw_unavailable(shared_sums ? "SDMT" : "DDMT", cfg.exec.backend);
 }
 
+SizeType require_nbeams(SizeType nbeams, bool shared_sums) {
+    if (nbeams == 0) {
+        throw std::invalid_argument(std::format("{}: nbeams must be >= 1",
+                                                shared_sums ? "SDMT" : "DDMT"));
+    }
+    return nbeams;
+}
+
 } // namespace
 
 class DDMT::Impl {
@@ -42,8 +52,12 @@ public:
          SizeType nbeams,
          bool shared_sums = false)
         : m_plan(std::move(plan)),
-          m_cfg{.nbeams = nbeams, .exec = exec},
-          m_engine(make_ddmt_engine(m_plan, m_cfg, shared_sums)) {}
+          m_cfg{.nbeams = require_nbeams(nbeams, shared_sums), .exec = exec},
+          m_engine(make_ddmt_engine(m_plan, m_cfg, shared_sums)) {
+        // The engine has already cached the mask. Later writes through the
+        // aliased Python plan must fail instead of desynchronising variance.
+        m_plan.seal();
+    }
 
     // The engine holds a reference to m_plan; declaration order matters.
     plans::DDMTPlan m_plan;

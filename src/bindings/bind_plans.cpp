@@ -523,11 +523,8 @@ void bind_plans(py::module_& mod) {
              "dm_step"_a, "dm_min"_a = 0.0F, "nbits"_a = 32)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr, SizeType nbits) {
-                 return DDMTPlan(
-                     f_min, f_max, nchans, tsamp,
-                     std::vector<float>(dm_arr.data(),
-                                        dm_arr.data() + dm_arr.size()),
-                     nbits);
+                 const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
+                 return DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
              "nbits"_a = 32)
@@ -589,10 +586,13 @@ void bind_plans(py::module_& mod) {
             [](const DDMTPlan& plan) {
                 return as_pyarray(plan.get_kill_mask());
             },
-            [](DDMTPlan& plan, const py::array_t<uint8_t>& mask) {
-                plan.set_kill_mask(
-                    std::span<const uint8_t>(mask.data(), mask.size()));
-            })
+            [](DDMTPlan& plan, const py::array& mask) {
+                const auto bytes = copy_native_1d<uint8_t>(mask, "kill_mask");
+                plan.set_kill_mask(bytes);
+            },
+            "Per-channel uint8 mask. 0 drops the channel; any nonzero value "
+            "is kept and stored as 1. A plan owned by an engine rejects "
+            "changes. Non-contiguous views are read in logical order.")
         .def_property_readonly("effective_variance",
                                &DDMTPlan::get_effective_variance)
         .def_property_readonly("effective_sigma",

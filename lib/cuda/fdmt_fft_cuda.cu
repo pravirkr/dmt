@@ -1361,9 +1361,10 @@ private:
             const auto cnt     = std::min(m_seg.hop, m_nsamps_out - o0);
             const auto latency = m_geom.latency;
             const auto pos     = m_search_pos + o0;
-            const auto drop    = sink != nullptr && pos < latency
-                                     ? std::min(cnt, latency - pos)
-                                     : SizeType{0};
+            const auto drop =
+                sink != nullptr && pos < latency
+                    ? std::min(cnt, static_cast<SizeType>(latency - pos))
+                    : SizeType{0};
             if (drop == cnt) {
                 continue; // search: all before stream sample 0
             }

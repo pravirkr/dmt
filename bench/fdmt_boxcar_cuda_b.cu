@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <stdexcept>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -34,6 +35,29 @@ namespace {
 
 using algorithms::FDMT;
 using algorithms::FDMTBoxcar;
+
+// The separate benchmark scores a plane the FDMT has already written. The
+// scorer's driver would be a second, unused transform engine.
+class MaterializedRootDriver final : public algorithms::detail::BoxcarDriver {
+public:
+    void search(std::span<const float>,
+                algorithms::detail::FDMTSearchSink&) override {
+        throw std::logic_error(
+            "separate bench scores a materialized DM-time plane");
+    }
+    void search(DeviceSpan<const float>,
+                algorithms::detail::FDMTSearchSink&,
+                Stream) override {
+        throw std::logic_error(
+            "separate bench scores a materialized DM-time plane");
+    }
+    void reset(Stream) override {}
+    [[nodiscard]] algorithms::FDMTMemoryUsage memory() const noexcept override {
+        return {};
+    }
+    [[nodiscard]] SizeType chunk_nsamps() const noexcept override { return 0; }
+    [[nodiscard]] SizeType fuse_levels() const noexcept override { return 0; }
+};
 
 template <typename T> DeviceSpan<T> dspan(thrust::device_vector<T>& v) {
     return {thrust::raw_pointer_cast(v.data()), v.size()};
@@ -144,9 +168,7 @@ void bench_separate(benchmark::State& state, float wtsp) {
     cfg.fuse_levels     = 0;
     cfg.max_fuse_levels = 0;
     auto scorer         = algorithms::detail::make_fdmt_boxcar_gpu(
-        plan, config, planes, cfg,
-        algorithms::detail::make_boxcar_driver(
-            algorithms::detail::make_fdmt_gpu(plan, cfg)));
+        plan, config, planes, cfg, std::make_unique<MaterializedRootDriver>());
     const auto wf = make_noise(kNchans * kNsampsRef);
     thrust::device_vector<float> dmt(plan.get_dmt_size());
     uint64_t position = 0;
@@ -172,9 +194,10 @@ void bench_separate(benchmark::State& state, float wtsp) {
         const GPUEventTimer timer{state};
         run();
     }
-    const auto mem = fdmt.get_memory_usage();
+    const auto transform = fdmt.get_memory_usage().total();
+    const auto score     = scorer->memory_usage().total();
     common_counters(state, plan,
-                    mem.total() + dmt.size() * sizeof(float) +
+                    transform + score + dmt.size() * sizeof(float) +
                         wf.size() * sizeof(float),
                     planes.front().widths.size());
 }
@@ -193,7 +216,9 @@ void bench_fft_transform(benchmark::State& state) {
         fft.execute(dspan_c(wf), dspan(dmt));
     }
     common_counters(state, plan,
-                    dmt.size() * sizeof(float) + wf.size() * sizeof(float), 0);
+                    fft.get_memory_usage().total() +
+                        dmt.size() * sizeof(float) + wf.size() * sizeof(float),
+                    0);
 }
 
 void bench_fft_fused(benchmark::State& state, float wtsp) {
@@ -217,7 +242,9 @@ void bench_fft_fused(benchmark::State& state, float wtsp) {
     }
     const auto emitted = search.copy_result(Stream{stream}).emitted_count;
     BENCH_GPU_TRY(cudaStreamDestroy(stream));
-    common_counters(state, search.get_plan(), search.get_memory_usage().total(),
+    common_counters(state, search.get_plan(),
+                    search.get_memory_usage().total() +
+                        wf.size() * sizeof(float),
                     search.get_search_plans().front().widths.size());
     state.counters["chunk_nsamps"] =
         static_cast<double>(search.get_chunk_nsamps());
@@ -279,7 +306,11 @@ void bench_fused(benchmark::State& state,
     }
     BENCH_GPU_TRY(cudaStreamDestroy(stream));
     const auto mem = search.get_memory_usage();
-    common_counters(state, search.get_plan(), mem.total(),
+    const SizeType input_bytes =
+        api == Api::kHost
+            ? (packed ? host_wf8.size() : host_wf.size() * sizeof(float))
+            : (packed ? wf8.size() : wf.size() * sizeof(float));
+    common_counters(state, search.get_plan(), mem.total() + input_bytes,
                     search.get_search_plans().front().widths.size());
     state.counters["input_nbits"]    = packed ? 8 : 32;
     state.counters["subband_levels"] = static_cast<double>(subband_levels);

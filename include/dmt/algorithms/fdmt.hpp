@@ -75,8 +75,11 @@ struct FDMTMemoryUsage {
  *
  * Runs on the backend chosen by the last constructor argument (`Exec`):
  * CPU cores with OpenMP, or a GPU. Supports both single-shot transformation
- * and stepped execution for intermediate sub-band inspection. Every backend
- * produces bit-identical output for the same plan.
+ * and stepped execution for intermediate sub-band inspection. Packed paths,
+ * integer-valued input, explicit fusion depths and the CPU tree are
+ * bit-identical for the same plan. Automatic GPU direct levels agree with
+ * that tree within float rounding (see fuse_levels) and are not bit-identical
+ * across chunks.
  *
  * In short:
  * - Input: float32 (nbeams, nchans, nsamps), or packed unsigned 1/2/4/8/16-bit
@@ -136,9 +139,11 @@ public:
      * @param fuse_levels Performance parameter (most users keep the
      * default): execute() fuses level-0 initialisation with the first
      * `fuse_levels` tree merges, so the intermediate levels of a group of
-     * 2^fuse_levels channels stay in fast memory. Bit-identical output.
+     * 2^fuse_levels channels stay in fast memory.
      * 0 = the level-by-level path; values above the plan's merge levels are
      * clamped. The stepper (reset()/advance()) always runs level by level.
+     * Output is bit-identical, except for the automatic GPU direct levels
+     * described below.
      * kFDMTAutoFuse (default) picks a depth from the plan alone, with no
      * hardware detection (see get_fuse_levels()):
      * - CPU, mode "valid": each thread walks one group through the chunk in
@@ -172,9 +177,16 @@ public:
      * runs each block in chunks of this many samples, so the tree state is
      * two levels of rows x chunk instead of rows x nsamps -- at high DM tens
      * of GB for a block whose input and output are a few hundred MB.
-     * Bit-identical output for any chunk (valid mode is overlap-save inside
-     * the tree); each chunk costs a little cross-block history traffic (a
-     * few per cent at a few thousand samples). 0 (default) = automatic: the
+     * Packed paths, integer-valued input, explicit fusion depths and the CPU
+     * tree are bit-identical for any chunk (valid mode is overlap-save inside
+     * the tree). Automatic GPU direct levels (float input, valid mode, many
+     * delays per channel) agree within float rounding across chunks and are
+     * not bit-identical. Fractional-delay FDMTFFT has a separate segmentation
+     * and guard error. Candidate lists are threshold-aware: a small numerical
+     * difference can split or join an excursion, and parallel overflow does
+     * not promise the same survivor order. Each chunk costs a little
+     * cross-block history traffic (a few per cent at a few thousand samples).
+     * 0 (default) = automatic: the
      * longest power of two >= 2048 whose state fits 2 GiB, capped at nsamps
      * (GPU: the longest power of two >= 256 whose state fits the device L2,
      * when one does; see get_chunk_nsamps()); other values are rounded up to

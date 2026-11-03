@@ -30,11 +30,10 @@ using namespace pybind11::literals; // NOLINT
 namespace {
 
 std::vector<uint8_t> mask_vec(const std::optional<py::array_t<uint8_t>>& m) {
-    std::vector<uint8_t> v;
-    if (m.has_value()) {
-        v.assign(m->data(), m->data() + m->size());
+    if (!m.has_value()) {
+        return {};
     }
-    return v;
+    return copy_native_1d<uint8_t>(*m, "kill_mask");
 }
 
 DDMTFFTOptions
@@ -146,12 +145,12 @@ void bind_ddmt_fft(py::module_& mod) {
                          SizeType nbeams, std::string_view method,
                          double tolerance, SizeType guard,
                          std::string_view backend, int device) {
-                 return DDMTFFT(
-                     f_min, f_max, nchans, tsamp,
-                     std::span<const float>(dm_arr.data(), dm_arr.size()),
-                     make_exec(backend, nthreads, device), nbits,
-                     mask_vec(kill_mask), nbeams,
-                     make_options(method, tolerance, guard));
+                 const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
+                 return DDMTFFT(f_min, f_max, nchans, tsamp,
+                                std::span<const float>(dms.data(), dms.size()),
+                                make_exec(backend, nthreads, device), nbits,
+                                mask_vec(kill_mask), nbeams,
+                                make_options(method, tolerance, guard));
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
              "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),

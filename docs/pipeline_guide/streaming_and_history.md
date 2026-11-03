@@ -52,8 +52,11 @@ recomputation of overlap samples.
 5. **Block size vs. chunk.** The block (`nsamps`) is what one `execute()`
    consumes and returns. Inside it, the engine runs the tree in chunks of
    `chunk_nsamps` samples, so its state is two levels of rows × chunk rather
-   than rows × `nsamps`. The same overlap-save history joins the chunks, so
-   the output is bit-identical for any chunk; each chunk costs a little extra
+   than rows × `nsamps`. The same overlap-save history joins the chunks.
+   Packed paths, integer-valued input, explicit fusion depths and the CPU
+   tree are bit-identical for any chunk. Automatic GPU direct levels agree
+   within float rounding and are not bit-identical across chunks. Each chunk
+   costs a little extra
    history traffic. By default the chunk is the longest power of two ≥ 2048
    whose state fits 2 GiB (capped at `nsamps`; on a GPU, shorter when that
    lets the state stay in L2), so a long block at high DM needs no more

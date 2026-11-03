@@ -6,6 +6,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -104,6 +105,27 @@ inline std::vector<float> extract_dm_grid(const py::object& obj) {
         throw py::value_error("dm_grid must be a list, tuple, or 1D array");
     }
     return result;
+}
+
+/// Copy a 1-D NumPy array of native `T`. A non-contiguous or negative-stride
+/// view is copied in logical order; a wrong rank or dtype is rejected.
+/// `forcecast` is intentionally absent so a float mask cannot become bytes.
+template <typename T>
+inline std::vector<T> copy_native_1d(const py::handle& src,
+                                     std::string_view what) {
+    auto arr = py::array_t<T, py::array::c_style>::ensure(src);
+    if (!arr) {
+        const char* dtype = std::is_same_v<T, float> ? "float32" : "uint8";
+        throw py::type_error(
+            std::format("{} must be a 1-D {} array", what, dtype));
+    }
+    if (arr.ndim() != 1) {
+        throw py::value_error(std::format("{} must be a 1-D array", what));
+    }
+    if (arr.size() == 0) {
+        return {};
+    }
+    return std::vector<T>(arr.data(), arr.data() + arr.size());
 }
 
 enum class CustomGridType { kDt, kDm };

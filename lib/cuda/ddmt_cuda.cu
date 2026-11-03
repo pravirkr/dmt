@@ -275,7 +275,13 @@ public:
                  Stream stream) override {
         check_float("execute(device float)");
         gpu_utils::set_device(m_device_id);
-        const auto rows   = m_nbeams * m_plan.get_nchans();
+        const auto rows = m_nbeams * m_plan.get_nchans();
+        if (rows == 0 || d_waterfall.size() % rows != 0) {
+            throw std::invalid_argument(std::format(
+                "{}: waterfall size {} is not a multiple of "
+                "nbeams * nchans = {}",
+                m_shared_sums ? "SDMT" : "DDMT", d_waterfall.size(), rows));
+        }
         const auto nsamps = d_waterfall.size() / rows;
         check_size(d_dmt.size(), out_size(nsamps), "execute (output)");
         const auto s = to_cuda(stream);
@@ -340,7 +346,13 @@ public:
                  std::span<float> dmt) override {
         check_float("execute(float)");
         gpu_utils::set_device(m_device_id);
-        const auto rows   = m_nbeams * m_plan.get_nchans();
+        const auto rows = m_nbeams * m_plan.get_nchans();
+        if (rows == 0 || waterfall.size() % rows != 0) {
+            throw std::invalid_argument(std::format(
+                "{}: waterfall size {} is not a multiple of "
+                "nbeams * nchans = {}",
+                m_shared_sums ? "SDMT" : "DDMT", waterfall.size(), rows));
+        }
         const auto nsamps = waterfall.size() / rows;
         check_size(dmt.size(), out_size(nsamps), "execute (output)");
         run_host<32>(

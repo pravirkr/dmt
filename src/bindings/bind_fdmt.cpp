@@ -33,11 +33,10 @@ namespace {
 
 std::vector<uint8_t>
 fft_kill_mask(const std::optional<py::array_t<uint8_t>>& m) {
-    std::vector<uint8_t> v;
-    if (m.has_value()) {
-        v.assign(m->data(), m->data() + m->size());
+    if (!m.has_value()) {
+        return {};
     }
-    return v;
+    return copy_native_1d<uint8_t>(*m, "kill_mask");
 }
 
 // FDMTFFT output for an input of `ndim` dimensions.
@@ -118,10 +117,12 @@ void bind_fdmt(py::module_& mod) {
             tiles in ``mode='valid'``; shared-memory tiles on a GPU). 0 =
             original level-by-level path; ``None``
             (default) picks the depth from the plan (and ``nthreads`` on the
-            CPU). Bit-identical output, except that on a GPU in
-            ``mode='valid'`` with float input and many delays per channel the
-            default computes the lowest and highest levels directly, equal to
-            the tree within float rounding (exactly for integer-valued input).
+            CPU). Packed paths, integer-valued input, explicit fusion depths
+            and the CPU tree are bit-identical. On a GPU in ``mode='valid'``
+            with float input and many delays per channel the default computes
+            the lowest and highest levels directly, equal to the tree within
+            float rounding (exactly for integer-valued input) and not
+            bit-identical across chunks.
         int_tree : bool, optional
             Performance parameter: packed input stores tree levels as
             uint8/uint16 where the exact bound allows (default True). Set
@@ -130,8 +131,11 @@ void bind_fdmt(py::module_& mod) {
             Memory parameter (``mode='valid'`` only): ``execute`` runs each
             block in chunks of this many samples, so the tree state is two
             levels of ``rows x chunk`` instead of ``rows x nsamps`` (tens of
-            GB at high DM for a block of a few hundred MB). Bit-identical
-            output for any chunk; each chunk costs a little cross-block
+            GB at high DM for a block of a few hundred MB). Packed paths,
+            integer-valued input, explicit fusion depths and the CPU tree are
+            bit-identical for any chunk. Automatic GPU direct levels agree
+            within float rounding and are not bit-identical across chunks.
+            Each chunk costs a little cross-block
             history traffic. ``None`` (default) picks the longest power of
             two >= 2048 whose state fits 2 GiB, capped at ``nsamps`` (GPU:
             the longest power of two >= 256 whose state fits the device L2,
@@ -148,8 +152,9 @@ void bind_fdmt(py::module_& mod) {
 
         Input and output are NumPy (host) arrays on every backend; a GPU
         backend copies the input to the device and the result back, and
-        blocks until it is on the host. Every backend gives bit-identical
-        results.
+        blocks until it is on the host. Packed paths, integer-valued input,
+        explicit fusion depths and the CPU tree are bit-identical. Automatic
+        GPU direct levels agree within float rounding.
 
         All working memory is allocated by the constructor (see
         :attr:`memory_usage`); ``execute`` allocates only its output array,

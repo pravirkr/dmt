@@ -330,5 +330,6 @@ tmp_files/
 # results & plots
 bench/results/sensitivity/
 bench/results/plots/*sensitivity*
+paper/
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,linux,windows,c++,python,cmake,visualstudiocode

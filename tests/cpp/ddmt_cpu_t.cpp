@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -251,6 +252,68 @@ TEST_CASE("DDMTPlan effective variance tracks active channel count",
     kill_mask[1] = 0;
     plan.set_kill_mask(kill_mask);
     CHECK(plan.get_effective_variance() == Catch::Approx(nchans - 2));
+}
+
+TEST_CASE("DDMTPlan stores nonzero mask bytes as live channels",
+          "[ddmt][cpu]") {
+    DDMTPlan plan(1000.0F, 1500.0F, 4, 0.001F, 10.0F, 5.0F);
+    plan.set_kill_mask(std::vector<uint8_t>{2, 2, 0, 255});
+    REQUIRE_THAT(plan.get_kill_mask(),
+                 Catch::Matchers::Equals(std::vector<uint8_t>{1, 1, 0, 1}));
+    CHECK(plan.get_effective_variance() == Catch::Approx(3.0F));
+}
+
+TEST_CASE("DDMTPlan rejects a band or DM the delay table cannot represent",
+          "[ddmt][cpu]") {
+    const float f_min     = 1000.0F;
+    const float f_max     = 1500.0F;
+    const SizeType nchans = 8;
+    const float tsamp     = 0.001F;
+    // Bit patterns, not numeric_limits: Release builds use -ffast-math, which
+    // treats a written infinity as undefined and may delete the check.
+    const auto nan = std::bit_cast<float>(std::uint32_t{0x7FC00000});
+    const auto inf = std::bit_cast<float>(std::uint32_t{0x7F800000});
+
+    CHECK_THROWS_AS(DDMTPlan(-1500.0F, -1000.0F, nchans, tsamp, 10.0F, 5.0F),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(DDMTPlan(nan, f_max, nchans, tsamp, 10.0F, 5.0F),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        DDMTPlan(f_min, f_max, nchans, tsamp, std::vector<float>{nan}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        DDMTPlan(f_min, f_max, nchans, tsamp, std::vector<float>{-1.0F}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        DDMTPlan(f_min, f_max, nchans, tsamp, std::vector<float>{inf}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        DDMTPlan(f_min, f_max, nchans, tsamp, std::vector<float>{1.0e20F}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(DDMT(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F,
+                         Exec::cpu(1), 32, {}, 0),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(SDMT(f_min, f_max, nchans, tsamp, 10.0F, 5.0F, 0.0F,
+                         Exec::cpu(1), 32, {}, 0),
+                    std::invalid_argument);
+}
+
+TEST_CASE("A bound DDMT plan keeps the mask it was built with", "[ddmt][cpu]") {
+    const SizeType nchans = 4;
+    DDMTPlan plan(1000.0F, 1500.0F, nchans, 0.001F, 10.0F, 5.0F);
+    DDMT engine(plan, Exec::cpu(1), 1);
+
+    plan.set_kill_mask(std::vector<uint8_t>{0, 1, 1, 1});
+    CHECK(plan.get_effective_variance() == Catch::Approx(3.0F));
+    CHECK(engine.get_plan().get_effective_variance() == Catch::Approx(4.0F));
+
+    DDMTPlan sealed = engine.get_plan();
+    CHECK_THROWS_AS(sealed.set_kill_mask(std::vector<uint8_t>(nchans, 0)),
+                    std::invalid_argument);
+
+    std::vector<float> waterfall(nchans * 64 + 1, 1.0F);
+    std::vector<float> out(1, 0.0F);
+    CHECK_THROWS_AS(engine.execute(waterfall, out), std::invalid_argument);
 }
 
 TEST_CASE("DDMT streaming reproduces a monolithic call", "[ddmt][cpu]") {

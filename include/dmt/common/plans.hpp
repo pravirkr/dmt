@@ -679,8 +679,8 @@ public:
      * @param dm_min Minimum trial DM in pc/cm^3 (default: 0).
      * @param nbits Precision per sample: 32 (float), or 1, 2, 4, 8, 16 (packed
      * integers).
-     * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=mask
-     * out).
+     * @param kill_mask Optional per-channel mask (size nchans). 0 drops the
+     * channel; any nonzero value is kept and stored as 1.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -760,7 +760,8 @@ public:
     /// @brief Bit precision per input sample (32 => float, 1/2/4/8/16 => packed
     /// integer)
     [[nodiscard]] SizeType get_nbits() const noexcept;
-    /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans
+    /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans.
+    /// Nonzero input values are stored as 1.
     [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept;
     /// @brief Human-readable summary: band, channels, DM trials and range,
     /// maximum delay, input width and masked channels.
@@ -768,11 +769,19 @@ public:
 
     /**
      * @brief Replaces the channel kill mask without recomputing the delay
-     * table.
+     * table. Any nonzero entry is stored as 1.
      * @param kill_mask New per-channel mask (size must equal nchans).
-     * @throws std::invalid_argument if kill_mask.size() != nchans.
+     * @throws std::invalid_argument if the plan is sealed, or if
+     * kill_mask.size() != nchans.
      */
     void set_kill_mask(std::span<const uint8_t> kill_mask);
+
+    /**
+     * @brief Freeze the kill mask. DDMT, SDMT and DDMTFFT call this on the
+     * copy they own, after reading the mask into their execution tables.
+     * The caller's own plan object is a different instance and stays mutable.
+     */
+    void seal() noexcept;
 
     /// @brief Theoretical noise variance for a DM trial (shared by all trials)
     [[nodiscard]] float get_effective_variance() const noexcept;

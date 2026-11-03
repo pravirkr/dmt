@@ -105,7 +105,11 @@ computes the ends of the tree directly instead:
 Integer-valued input gives the tree's values exactly. Float input agrees with
 the tree within rounding (a few 10⁻⁷ relative), so these engines are no longer
 bit-identical with `fuse_levels=0` or across `chunk_nsamps`; explicit fusion
-depths still are. The streaming history keeps the CPU engine's format: the
+depths still are. Fractional-delay FDMTFFT adds a separate guard and
+segmentation error, distinct from this tree contract. Candidate agreement is
+threshold-aware: a small numerical difference can split or join an excursion,
+and a saturated parallel buffer does not promise the same survivor order.
+The streaming history keeps the CPU engine's format: the
 skipped levels' tree histories are rebuilt from the running-sum window and
 the rings when `save_history()` (or a stepper block) needs them, and after
 `load_history()` the tree runs until the window and the rings have refilled.
@@ -155,7 +159,7 @@ and 64K samples):
 - **At 2–8 threads:** it is within 3% of the best depth, except 4096 samples
   (6–8.5%).
 
-Defaults and automatic budgets are explicitly targeted at **Intel x86 HPC server architectures (Xeon/EPYC)**—the production environment for radio astronomy pipelines. The default memory budget of $\max(36\,\text{MiB} / n_\text{threads}, 8\,\text{MiB})$ is sized for standard ~32–36 MiB L3 cache slices on server sockets with typical 1–8 thread allocations per pipeline instance. Pass an explicit `fuse_levels` if a sweep on your specific hardware (`BM_fdmt_fused`, see [Reproducing](#6-reproducing-the-numbers)) finds a better depth.
+Defaults and automatic budgets are explicitly targeted at **Intel x86 HPC server architectures (Xeon/EPYC)**—the production environment for radio astronomy pipelines. Modes `"full"` and `"roll"` use a whole-block budget of $\max(36\,\text{MiB} / n_\text{threads}, 8\,\text{MiB})$, sized for standard ~32–36 MiB L3 cache slices on server sockets with typical 1–8 thread allocations per pipeline instance. Valid mode's automatic budget is 1.75 MiB per group, described below. Pass an explicit `fuse_levels` if a sweep on your specific hardware (`BM_fdmt_fused`, see [Reproducing](#6-reproducing-the-numbers)) finds a better depth.
 
 The table and the budget above are for the whole-block fused path, which
 modes `"full"` and `"roll"` still use.
@@ -173,8 +177,9 @@ through the chunk in **time tiles** of 512 or 256 samples:
 - The group's rings therefore stay cache-resident while the thread walks the
   chunk, and only level $F$ goes to main memory, written with streaming
   stores.
-- Valid mode is independent of the block length, so the output is
-  bit-identical to the unfused path.
+- On the CPU, valid mode is independent of the block length, so the output is
+  bit-identical to the unfused path. Automatic GPU direct levels are the
+  exception described above.
 
 The automatic depth is the deepest $F$ (then the longer tile) whose mean
 per-group working set is at most 1.75 MiB: two scratch tiles plus the rings,
@@ -354,8 +359,10 @@ In `mode="valid"`, `execute()` runs each block in chunks of `chunk_nsamps`
 samples. The tree state is then two levels of rows × chunk instead of rows ×
 `nsamps`. That matters at high DM: the plan has up to ~10⁵ level-0 rows, and
 the state of a whole block would be tens of GB while the block's input and
-output are a few hundred MB. Valid mode is overlap-save inside the tree, so
-the output is **bit-identical for any chunk**. Each chunk costs a little extra
+output are a few hundred MB. Valid mode is overlap-save inside the tree.
+Packed paths, integer-valued input, explicit fusion depths and the CPU tree
+are **bit-identical for any chunk**. Automatic GPU direct levels agree within
+float rounding and are not bit-identical across chunks. Each chunk costs a little extra
 cross-block history traffic, a few per cent at a few thousand samples.
 
 - **Default** (`chunk_nsamps=None` in Python, `0` in C++): the longest power
