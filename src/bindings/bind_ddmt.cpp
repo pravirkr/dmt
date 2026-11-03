@@ -100,7 +100,14 @@ void bind_ddmt(py::module_& mod) {
         Parameters
         ----------
         f_min, f_max : float
-            Band edges in MHz.
+            Band edges in MHz. Channel ``c`` is centred at
+            ``f_min + (c + 0.5) * df``, ``df = (f_max - f_min) / nchans``, and
+            is delayed from that centre frequency. Output sample ``t`` is the
+            arrival time at the centre of the highest-frequency channel,
+            ``f_max - df / 2`` (``plan.f_ref``; SIGPROC's ``fch1`` for a
+            descending band). With a SIGPROC header (``fch1`` a channel
+            centre, ``foff < 0``): ``f_max = fch1 - foff / 2``,
+            ``f_min = f_max + nchans * foff``.
         nchans : int
             Number of frequency channels.
         tsamp : float

@@ -1,10 +1,6 @@
-# Python API Reference
+# Python API reference
 
-Documentation for the Python bindings and utilities provided by `dmtlib`.
-
----
-
-## Algorithms & Compute Engines
+## Engines
 
 ```{eval-rst}
 .. autoclass:: dmtlib.FDMT
@@ -56,8 +52,8 @@ Documentation for the Python bindings and utilities provided by `dmtlib`.
 
 Every engine runs on the backend given by its keyword-only `backend=`
 argument (`"cpu"` by default; `"cuda"` or `"hip"` when that backend is in the
-build), with `nthreads` for the CPU and `device` for a GPU. `available_backends()` lists the backends in
-the installed build; asking for any other raises `ValueError`. Inputs and
+build), with `nthreads` for the CPU and `device` for a GPU.
+`available_backends()` lists the backends in the installed build; asking for any other raises `ValueError`. Inputs and
 outputs are NumPy arrays on every backend: a GPU backend copies the input to
 the device and the result back, and blocks until it is on the host. The
 stepper's `view_*` methods return host views of the current level (a host
@@ -68,7 +64,7 @@ now (see the C++ API reference).
 .. autofunction:: dmtlib.available_backends
 ```
 
-## Execution Plans & Geometry
+## Plans and geometry
 
 ```{eval-rst}
 .. autoclass:: dmtlib.FDMTPlan
@@ -89,9 +85,60 @@ now (see the C++ API reference).
 .. autoclass:: dmtlib.FDMTComplexity
    :members:
    :undoc-members:
+
+.. autoclass:: dmtlib.LevinConfig
+   :members:
+   :undoc-members:
 ```
 
-## Convenience Functions
+## Plain time series
+
+```{eval-rst}
+.. autofunction:: dmtlib.dedisperse
+
+.. autoclass:: dmtlib.Dedispersed
+   :members:
+
+.. autofunction:: dmtlib.dispersion_delay
+```
+
+## Candidate search
+
+```{eval-rst}
+.. autoclass:: dmtlib.FDMTBoxcar
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: dmtlib.FDMTFFTBoxcar
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: dmtlib.BoxcarConfig
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.BoxcarPlanePlan
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.BoxcarResult
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.PeakFindingMode
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.FDMTBoxcarMemoryUsage
+   :members:
+   :undoc-members:
+
+.. autofunction:: dmtlib.generate_box_width_trials
+```
+
+## Convenience functions
 
 ```{eval-rst}
 .. autofunction:: dmtlib.compute_fdmt
@@ -101,7 +148,7 @@ now (see the C++ API reference).
 .. autofunction:: dmtlib.add_frb_track
 ```
 
-## FFT Planner (CPU)
+## FFT planner (CPU)
 
 ```{eval-rst}
 .. autoclass:: dmtlib.FFTPlanner
@@ -125,7 +172,7 @@ now (see the C++ API reference).
 .. autofunction:: dmtlib.get_log_level
 ```
 
-## Simulation Utilities (`dmtlib.simulate`)
+## Simulation utilities (`dmtlib.simulate`)
 
 ```{eval-rst}
 .. automodule:: dmtlib.simulate
@@ -133,10 +180,17 @@ now (see the C++ API reference).
    :undoc-members:
 ```
 
-## Grid Utilities (`dmtlib.grid`)
+## Grid utilities (`dmtlib.grid`)
 
 ```{eval-rst}
 .. automodule:: dmtlib.grid
    :members:
    :undoc-members:
+```
+
+## Sensitivity analysis (`dmtlib.sensitivity`)
+
+```{eval-rst}
+.. automodule:: dmtlib.sensitivity
+   :members:
 ```

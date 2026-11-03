@@ -6,14 +6,15 @@
   <img class="dmt-hero-mark only-dark" src="_static/logo/dmt-mark-dark.svg" alt="">
   <div class="dmt-hero-body">
   <p class="dmt-hero-lede">
-    High-performance radio astronomy dedispersion algorithms.
-    Written in modern <strong>C++20</strong> with <strong>OpenMP</strong> and <strong>CUDA</strong> acceleration,
-    exposed with seamless, zero-copy <strong>Python</strong> bindings.
+    Fast dedispersion for radio astronomy: FDMT, direct and Fourier-domain
+    transforms in one library. A <strong>C++20</strong> core that runs on CPUs
+    (<strong>OpenMP</strong>, SIMD) and GPUs (<strong>CUDA</strong>, <strong>HIP</strong>),
+    with <strong>Python</strong> bindings that work on NumPy arrays without copies.
   </p>
   <div>
     <span class="dmt-badge dmt-badge-blue">C++20</span>
     <span class="dmt-badge dmt-badge-purple">Python 3.12+</span>
-    <span class="dmt-badge dmt-badge-green">CUDA Accelerated</span>
+    <span class="dmt-badge dmt-badge-green">CUDA &amp; HIP</span>
     <span class="dmt-badge dmt-badge-blue">Zero-Copy NumPy</span>
     <span class="dmt-badge dmt-badge-purple">Real-Time Streaming</span>
   </div>
@@ -31,37 +32,37 @@
 :::{grid-item-card} 🚀 Algorithm Suite
 :class-card: sd-shadow-sm
 
-- **FDMT & FDMT-FFT**: Time and frequency-domain Fast Dispersion Measure Transforms.
-- **DDMT & SDMT**: Brute-force and subband-shared dedispersion with DM-tiled loops.
-- **CohFDMT**: Hybrid coherent + FDMT baseband search with exact physical grid scaling.
-- **Low-Bit Input**: Native packed 1, 2, 4, 8, 16-bit integer and float32 support.
+- **FDMT & FDMT-FFT**: the fast tree, in time or Fourier domain.
+- **DDMT, SDMT & DDMT-FFT**: direct delay-and-sum, exact or fractional.
+- **CohFDMT**: coherent baseband dedispersion, then FDMT.
+- **FDMTBoxcar**: FDMT fused with a boxcar candidate search.
 :::
 
 :::{grid-item-card} ⚡ Hardware Acceleration
 :class-card: sd-shadow-sm
 
-- **SIMD & Multi-Threading**: Vectorized C++20 with OpenMP, AVX2, AVX-512, and ARM NEON.
-- **Native GPU Kernels**: Custom CUDA kernels for FDMT, DDMT, SDMT, and fused CohFDMT.
-- **Roofline Efficiency**: Register-resident partial sums and L2-chunked streaming passes.
-- **Zero-Copy Host Staging**: Asynchronous pinned memory transfers and overlapped PCIe streaming.
+- **CPU**: OpenMP threads, AVX2, AVX-512 and ARM NEON.
+- **GPU**: CUDA and HIP kernels for every engine.
+- **Low-bit input**: packed 1–16 bit samples, read directly.
+- **Transfers**: pinned memory, copies overlapped with compute.
 :::
 
 :::{grid-item-card} 📡 Pipeline Integration
 :class-card: sd-shadow-sm
 
-- **Streaming & Block**: Stateless overlap-save history tiling and memory-free block modes.
-- **Multi-Beam Batching**: Batch execution across dozens of tied-array telescope beams.
-- **Sparse DM Grids**: Non-linear trial spacing and stepper API for subband inspection.
-- **Theoretical Variance**: Exact noise variance tracking.
+- **Streaming**: blocks join bit-exactly, cut anywhere.
+- **Multi-beam**: many beams through one plan per call.
+- **DM grids**: custom, sparse and negative DM trials.
+- **Noise**: exact sigma of every DM trial, from the plan.
 :::
 
 :::{grid-item-card} 🐍 Python & C++ Parity
 :class-card: sd-shadow-sm
 
-- **Production C++20 Core**: Low-latency header/library architecture with clean RAII interfaces.
-- **Zero-Copy NumPy Bindings**: Direct memory sharing via `dmtlib` matching native C++ speed.
-- **Thorough Test Suite**: Catch2 assertions, Python pytest suite, and bit-exact checks.
-- **Rich Documentation**: Interactive Jupyter tutorials, production pipeline guides, and benchmarks.
+- **C++20 core**: RAII plans and engines, memory allocated up front.
+- **`dmtlib`**: the same engines on NumPy arrays, without copies.
+- **Tested**: Catch2 and pytest, bit-exact CPU/GPU checks.
+- **Documented**: tutorials, pipeline guides, benchmarks.
 :::
 
 ::::
@@ -77,31 +78,37 @@
 :link: getting_started/index
 :link-type: doc
 
-Install `dmt` from source or wheels, configure CMake, and run your first dedispersion pipeline in 5 lines of Python or C++.
+Install the Python package or the C++ library, and dedisperse your first waterfall in a few lines.
 :::
 
-:::{grid-item-card} 🛠️ Pipeline Guide & Quirks
+:::{grid-item-card} 🛠️ Pipeline Guide
 :link: pipeline_guide/index
 :link-type: doc
 
-Learn production telescope integration recipes: overlap-save history, multi-beam batching, noise normalization, and gotchas to avoid.
+Putting `dmt` in a pipeline: streaming history, noise normalisation, periodicity searches, multi-beam batching, and the quirks to know about.
 :::
 
 :::{grid-item-card} 📓 Interactive Tutorials
 :link: tutorials/index
 :link-type: doc
 
-Hands-on Jupyter notebooks covering filterbanks, tree stepping, sparse grids, low-bit quantization, and baseband coherent search.
+Notebooks from dispersion basics to the FDMT tree, DM grids, FDMT versus DDMT, baseband search, streaming and noise statistics.
 :::
 
 :::{grid-item-card} 📊 Benchmarks
 :link: benchmarks
 :link-type: doc
 
-FDMT, FDMT-FFT and brute-force DDMT on CPUs and a GPU, on one fixed 4096-channel configuration: runtime, real-time throughput by input bit width, and operation counts.
+Every engine on a Xeon server and an L40S GPU, for two survey presets: time per block, real-time throughput by input bit width, and operation counts.
 :::
 
 ::::
+
+```{tip}
+Want a plain dedispersed time series, for example for a periodicity search?
+Start with {doc}`pipeline_guide/periodicity`: it shows the settings that keep
+the noise white and the one-call `dmtlib.dedisperse` helper.
+```
 
 ---
 
@@ -128,19 +135,19 @@ api/index
 
 ## Algorithm References
 
-`dmt` implements and optimizes several dedispersion algorithms based on the radio astronomy literature:
+The algorithms in `dmt` come from the following papers:
 
 | Algorithm | Method & Description | Literature References |
 | :--- | :--- | :--- |
 | **FDMT** | Fast Dispersion Measure Transform ($O(N_t N_f \log_2 N_f)$) | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
 | **DDMT** | Direct Dedispersion (brute-force delay-and-sum, DM-tiled GPU & CPU) | Barsdell, B. R. et al. (2012), *MNRAS*, 422(1), 379–392. [doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x); AstroAccelerate (Dimoudi et al. 2018) |
-| **SDMT** | Subband-shared Dedispersion (exact prefix tree / trie partial-sum sharing) | Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825)) |
-| **CFDMT** | Coherent Baseband Dedispersion + Incoherent FDMT | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
-| **FDMT-FFT** | Frequency-Domain Phase-Shift Dedispersion (chirp phase rotation) | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
+| **SDMT** | Subband-shared direct dedispersion (exact partial sums shared between DMs) | Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825)) |
+| **CohFDMT** | Coherent dedispersion within channels, then incoherent FDMT | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
+| **FDMT-FFT** | The FDMT tree in the Fourier domain, with fractional (phase-ramp) delays | Zackay, B. & Ofek, E. O. (2017), *The Astrophysical Journal*, 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373) |
 
 ### Citation
 
-If you use `dmt` in your astronomical research or telescope processing pipelines, please cite:
+If `dmt` is useful in your research or pipeline, please cite:
 
 1. **Zackay, B. & Ofek, E. O. (2017)**. *An Accurate and Efficient Algorithm for Detection of Radio Bursts with an Unknown Dispersion Measure, for Single-Dish Telescopes and Interferometers*. [The Astrophysical Journal](https://doi.org/10.3847/1538-4357/835/1/11), 835(1), 11. [arXiv:1411.5373](https://arxiv.org/abs/1411.5373)
 2. **Kumar, P. & Zackay, B. (2026)**. *dmt: Fast Dispersion Measure Transform Library*. GitHub: [https://github.com/pravirkr/dmt](https://github.com/pravirkr/dmt)

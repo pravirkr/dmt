@@ -7,6 +7,7 @@ except metadata.PackageNotFoundError:
 
 from . import libdmt as _libdmt
 from . import sensitivity
+from .dedisperse import Dedispersed, dedisperse, dispersion_delay
 from .grid import (
     calculate_snr_loss,
     generate_optimal_dm_grid,
@@ -88,6 +89,7 @@ __all__ = [
     "CohFDMTConfig",
     "CohFDMTPlan",
     "DDMTPlan",
+    "Dedispersed",
     "FDMTBoxcar",
     "FDMTBoxcarMemoryUsage",
     "FDMTComplexity",
@@ -102,6 +104,8 @@ __all__ = [
     "calculate_snr_loss",
     "compute_fdmt",
     "compute_fdmt_fft",
+    "dedisperse",
+    "dispersion_delay",
     "export_fft_wisdom",
     "forget_fft_wisdom",
     "generate_box_width_trials",

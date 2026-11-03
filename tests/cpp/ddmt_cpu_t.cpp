@@ -78,15 +78,18 @@ TEST_CASE("DDMTPlan delay table is non-negative and non-increasing per DM",
     }
 
     // Independently computed expected delay (samples) for the highest DM at
-    // the first (lowest-frequency) channel, referenced to the *last
-    // channel's* frequency (not the band edge f_max): delay =
-    // round(kDispConst/tsamp * dm * (1/f_min^2 - 1/f_last_chan^2)).
+    // the first (lowest-frequency) channel: delays use channel centres and
+    // are referenced to the last channel's centre (not the band edge
+    // f_max): delay = round(kDispConst/tsamp * dm * (1/f_first^2 -
+    // 1/f_last^2)), f_first = f_min + df/2, f_last = f_max - df/2.
     const auto df       = (f_max - f_min) / static_cast<float>(nchans);
-    const auto f_last   = f_min + (static_cast<float>(nchans - 1) * df);
+    const auto f_first  = f_min + (0.5F * df);
+    const auto f_last   = f_max - (0.5F * df);
     const auto dm_max   = dm_arr.back();
     const auto expected = static_cast<SizeType>(std::nearbyint(
         kDispConst / tsamp *
-        ((1.0F / (f_min * f_min)) - (1.0F / (f_last * f_last))) * dm_max));
+        ((1.0F / (f_first * f_first)) - (1.0F / (f_last * f_last))) * dm_max));
+    CHECK(plan.get_f_ref() == f_last);
     const auto front_of_last_row = delay_table[(dm_arr.size() - 1) * nchans];
     CHECK(front_of_last_row == expected);
     CHECK(front_of_last_row > 0);

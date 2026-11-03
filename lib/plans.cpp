@@ -202,6 +202,7 @@ public:
 
     float get_f_min() const noexcept { return m_f_min; }
     float get_f_max() const noexcept { return m_f_max; }
+    float get_f_ref() const noexcept { return m_f_min; }
     SizeType get_nchans() const noexcept { return m_nchans; }
     SizeType get_nsamps() const noexcept { return m_nsamps; }
     float get_tsamp() const noexcept { return m_tsamp; }
@@ -382,6 +383,16 @@ public:
      * `fdmt_init_subband`'s doc comment in fdmt.cpp), so the running target
      * is reduced by `|dt|` once more at the leaf itself.
      */
+    SizeType get_startup_samples() const {
+        IndexType lag = 0;
+        for (SizeType i_dm = 0; i_dm < get_dmt_ndms(); ++i_dm) {
+            for (const auto shift : trace_dm(i_dm)) {
+                lag = std::max(lag, -shift);
+            }
+        }
+        return static_cast<SizeType>(lag);
+    }
+
     std::vector<IndexType> trace_dm(SizeType dm_idx) const {
         std::vector<IndexType> shifts(m_nchans, 0);
         if (m_niters == 0 || m_nchans == 0) {
@@ -1331,6 +1342,10 @@ public:
 
     float get_f_min() const noexcept { return m_f_min; }
     float get_f_max() const noexcept { return m_f_max; }
+    float get_f_ref() const noexcept {
+        return m_f_max -
+               (0.5F * (m_f_max - m_f_min) / static_cast<float>(m_nchans));
+    }
     SizeType get_nchans() const noexcept { return m_nchans; }
     float get_tsamp() const noexcept { return m_tsamp; }
     std::vector<float> get_dm_arr() const noexcept { return m_dm_arr; }
@@ -1465,12 +1480,14 @@ private:
                                     ? std::vector<uint8_t>(m_nchans, 1)
                                     : m_kill_mask;
         canonicalize_mask(m_container.kill_mask);
-        const auto df = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
-        m_container.delay_table = utils::generate_delay_table(
-            m_dm_arr, m_nchans, m_f_min, df, m_tsamp);
+        // Channel c is centred at f_min + (c + 1/2) df; delays are relative
+        // to the centre of the highest-frequency channel (get_f_ref()).
+        const auto df   = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
+        const auto fch1 = m_f_min + (0.5F * df);
+        m_container.delay_table =
+            utils::generate_delay_table(m_dm_arr, m_nchans, fch1, df, m_tsamp);
         m_container.fractional_delay_table =
-            utils::generate_fractional_delay_table(m_nchans, m_f_min, df,
-                                                   m_tsamp);
+            utils::generate_fractional_delay_table(m_nchans, fch1, df, m_tsamp);
     }
 
     static std::vector<float>
@@ -1555,6 +1572,7 @@ FDMTPlan& FDMTPlan::operator=(const FDMTPlan& other) {
 }
 float FDMTPlan::get_f_min() const noexcept { return m_impl->get_f_min(); }
 float FDMTPlan::get_f_max() const noexcept { return m_impl->get_f_max(); }
+float FDMTPlan::get_f_ref() const noexcept { return m_impl->get_f_ref(); }
 SizeType FDMTPlan::get_nchans() const noexcept { return m_impl->get_nchans(); }
 SizeType FDMTPlan::get_nsamps() const noexcept { return m_impl->get_nsamps(); }
 float FDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
@@ -1616,6 +1634,9 @@ SizeType FDMTPlan::get_box_mean_bits() const noexcept {
 }
 std::vector<IndexType> FDMTPlan::trace_dm(SizeType dm_idx) const {
     return m_impl->trace_dm(dm_idx);
+}
+SizeType FDMTPlan::get_startup_samples() const {
+    return m_impl->get_startup_samples();
 }
 float FDMTPlan::get_effective_variance(SizeType dm_idx,
                                        SizeType boxcar_width,
@@ -1736,6 +1757,7 @@ DDMTPlan& DDMTPlan::operator=(const DDMTPlan& other) {
 }
 float DDMTPlan::get_f_min() const noexcept { return m_impl->get_f_min(); }
 float DDMTPlan::get_f_max() const noexcept { return m_impl->get_f_max(); }
+float DDMTPlan::get_f_ref() const noexcept { return m_impl->get_f_ref(); }
 SizeType DDMTPlan::get_nchans() const noexcept { return m_impl->get_nchans(); }
 float DDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
 std::vector<float> DDMTPlan::get_dm_arr() const noexcept {
@@ -1768,10 +1790,12 @@ std::string DDMTPlan::summary() const {
     return std::format(
         "*** DDMT Plan Summary ***\n"
         "Band: {} - {} MHz, {} channels ({} masked), tsamp {} s\n"
+        "Delays from channel centres, reference {} MHz (top channel "
+        "centre)\n"
         "DM trials: {} over [{}, {}] pc cm^-3, max delay {} samples\n"
         "Input: {}\n",
         get_f_min(), get_f_max(), get_nchans(), n_masked, get_tsamp(),
-        dms.size(), dm_lo, dm_hi, max_delay,
+        get_f_ref(), dms.size(), dm_lo, dm_hi, max_delay,
         get_nbits() == 32 ? std::string("float32")
                           : std::format("packed {}-bit", get_nbits()));
 }

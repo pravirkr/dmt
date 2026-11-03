@@ -615,7 +615,6 @@ def throughput_figure(
         else:
             lines = [
                 ("FDMT", kind, False),
-                ("FDMT", f"{kind}_host", True),
                 ("DDMT", kind, False),
                 ("SDMT", kind, False),
                 ("FDMT-FFT", kind, False),
@@ -648,7 +647,7 @@ def throughput_figure(
         "Real-time factor vs input sample width",
         f"{NCHANS} channels, {NSAMPS_REF} samples {TIMES} {NDMS_REF} DM trials;"
         f" above 1{TIMES} keeps up with the telescope",
-        variant_label="1 thread (CPU) / host arrays incl. PCIe (GPU)",
+        variant_label="1 thread (CPU)",
     )
     return fig
 
@@ -875,16 +874,9 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
     for r in results:
         if r.sweep == "nbits" and r.times:
             by[(r.machine, r.backend, r.algo)][r.nbits] = r.rtf
-    engines = {
-        "cuda": "device-resident",
-        "cuda_host": "host arrays (incl. PCIe)",
-        "hip": "device-resident",
-        "hip_host": "host arrays (incl. PCIe)",
-    }
+    engines = {"cuda": "device-resident", "hip": "device-resident"}
     for mname, kind in platforms(results):
-        backends = (
-            cpu_backends(results, mname) if kind == "cpu" else [kind, f"{kind}_host"]
-        )
+        backends = cpu_backends(results, mname) if kind == "cpu" else [kind]
         for b in backends:
             for a in ("FDMT", "DDMT", "SDMT", "FDMT-FFT", "DDMT-FFT"):
                 row = by.get((mname, b, a))
@@ -949,6 +941,9 @@ def main() -> None:
         results, machines = load(results_dir)
     except ValueError as exc:
         ap.error(str(exc))
+    # GPU timings are device-resident (no host<->device copies); the suite's
+    # host-array series are not plotted.
+    results = [r for r in results if not r.backend.endswith("_host")]
     if not results:
         sys.exit(f"no suite results under {results_dir}/*/suite_*.json")
     out_root = results_dir / "plots"

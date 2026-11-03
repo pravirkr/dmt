@@ -4,8 +4,8 @@
 detections, without materializing the DM–time output. Use them when that
 output would only be consumed by a boxcar search: the dedispersed rows are
 scored while they are still on chip or in cache, instead of being written to
-memory and read back by a separate search pass. Existing `FDMT`, `FDMTFFT` and
-the other algorithms keep their interfaces and behavior.
+memory and read back by a separate search pass. `FDMT`, `FDMTFFT` and the
+other algorithms are unchanged.
 
 | | `FDMTBoxcar` | `FDMTFFTBoxcar` |
 | :--- | :--- | :--- |
@@ -24,18 +24,20 @@ Only valid-mode plans are supported. Delay grids may be regular, signed, or
 custom. A physical DM grid is snapped to integer band delays; the DM values
 the plan reports are reconstructed from those delays.
 
+```{warning}
 Prepare the waterfall upstream: remove the baseline and normalize to zero
 mean and a known common per-channel noise standard deviation (`noise_sigma`,
 default 1). Analytical S/N assumes independent channel/time input noise before
 the FDMT's modeled filtering. Normalization alone does not establish this
 independence. Channel masking, common-mode subtraction, temporal filtering and
 residual correlations can change the variance and require upstream calibration.
-The search does not estimate a baseline or RMS from dedispersed rows.
+**The search does not estimate a baseline or RMS** from dedispersed rows.
+```
 
 Sigma accounts for the actual FDMT leaf box means and temporal covariance,
-including each subband's tree lineage. Existing
+including each subband's tree lineage.
 `FDMTPlan.get_effective_sigma_grid(width)` already gives sigma for the raw
-full-band sum: **do not multiply it by the number of channels**.
+full-band sum, so **do not multiply it by the number of channels**.
 
 ## Packed integer input
 
@@ -53,32 +55,41 @@ The mean may be fractional. These must be common calibrated statistics across
 channels; the engine does not estimate them. Float32 remains the default
 (`input_nbits=32`, `input_mean=0`). A constructed engine has a fixed input type.
 
-Packed arrays use `uint8` bytes, including for 16-bit samples. Each channel
-row occupies `ceil(nsamps * input_nbits / 8)` bytes, independently padded;
-sub-byte samples are LSB-first and 16-bit samples are little-endian. Native
-little-endian contiguous `uint16` arrays can be passed as `.view(np.uint8)`.
-The C++ overloads accept `std::span<const uint8_t>` or
-`DeviceSpan<const uint8_t>` with the same layout on CPU and GPU backends.
+- **Layout.** Packed arrays use `uint8` bytes, including for 16-bit samples.
+  Each channel row occupies `ceil(nsamps * input_nbits / 8)` bytes,
+  independently padded; sub-byte samples are LSB-first and 16-bit samples are
+  little-endian. Native little-endian contiguous `uint16` arrays can be passed
+  as `.view(np.uint8)`.
+- **C++.** The C++ overloads accept `std::span<const uint8_t>` or
+  `DeviceSpan<const uint8_t>` with the same layout on CPU and GPU backends.
+
+:::{dropdown} Integer arithmetic and thresholds
+:icon: info
 
 The packed search keeps exact dyadic FDMT weights, sums, merge histories and
 boxcar prefixes in uint64. It does not add the level-0 rounding used by the
-existing packed `FDMT` API. This preserves a linear expected baseline and
+packed `FDMT` API. This preserves a linear expected baseline and
 avoids a distribution-dependent rounding bias when only input mean and sigma
 are known. Its numerical reference is float-input FDMT on centered codes,
-subject to float precision. Existing packed FDMT behavior is unchanged.
+subject to float precision. The packed `FDMT` itself is unchanged.
 Thresholds include the expected baseline and are rounded up to inclusive
 integer cutoffs. Per-width peak comparisons remain integer until emission;
 across-width reduction evaluates normalized S/N at threshold crossings because
 different widths have different baselines and noise scales.
+:::
 
 Accumulator bounds are checked at construction, including prefix workspace.
-The root merge is fused into scoring. Lower-level fusion is currently disabled
-for packed searches, and the uint64 tree state and history cost more memory
-and bandwidth than float32, and the packed search does not use the GPU's
-direct levels yet: on the L40S it runs at about 3–4.5× the float32 time on
-the cryopaf presets, almost all of it in the uint64 FDMT merges.
+The root merge is fused into scoring, but lower-level fusion is currently
+disabled for packed searches. The uint64 tree state and history cost more
+memory and bandwidth than float32, and the packed search does not use the
+GPU's direct levels yet. On the L40S it runs at about 3–4.5× the float32 time
+on the cryopaf presets, almost all of it in the uint64 FDMT merges.
 
-## Python
+## Running a search
+
+::::{tab-set}
+:::{tab-item} Python
+:sync: python
 
 ```python
 from dmtlib import FDMTPlan, FDMTBoxcar, BoxcarConfig, PeakFindingMode
@@ -101,17 +112,9 @@ for block in blocks:
         report_drops(result.dropped_global, result.dropped_per_dm)
 consume(search.flush().candidates)
 ```
-
-The C++ and Python constructors accept the search settings directly; the
-fields remain editable before constructing the search. Validation occurs
-when `FDMTBoxcar` combines the settings with its plan.
-
-Choose `backend="cuda", device=0` in a CUDA build. Python GPU calls stage
-input and block until candidates are available on the host. No full root
-plane is copied to the host. `config` and `search_plans` properties return
-copies; modifying them does not reconfigure the constructed engine.
-
-## C++ and device pipelines
+:::
+:::{tab-item} C++
+:sync: cpp
 
 ```cpp
 #include <dmt/dmt.hpp>
@@ -123,18 +126,35 @@ auto result = search.execute(waterfall); // std::span<const float>
 // Consume result.candidates before the next result-changing operation.
 auto last = search.flush();
 ```
+:::
+::::
+
+The C++ and Python `BoxcarConfig` constructors accept the search settings
+directly, and the fields stay editable until you construct the search. They
+are validated when `FDMTBoxcar` combines them with its plan.
+
+Choose `backend="cuda", device=0` in a CUDA build. Python GPU calls stage
+input and block until candidates are available on the host. No full root
+plane is copied to the host. `config` and `search_plans` properties return
+copies; modifying them does not reconfigure the constructed engine.
+
+## C++ and device pipelines
 
 On GPU backends, `execute(DeviceSpan<const float>, Stream)` and
 `flush_device(Stream)` return asynchronous device views. The candidate span
 has capacity `max_candidates`, not the emitted length. Its one-element
 `counts` span contains `CandidateCounts`; consume the first `emitted_count`
 candidates after stream completion. `copy_result(stream)` waits and returns a
-host view of the latest result. Device and host views are engine-owned and
-invalidated by subsequent result-changing operations. Python arrays own copies.
+host view of the latest result.
+
+```{warning}
+Device and host views are engine-owned and invalidated by subsequent
+result-changing operations. Python arrays own copies.
+```
 
 Order operations on one stream. Synchronize before changing streams on an
 instance; instances are not safe for concurrent calls. CPU device calls reject
-the operation. Host execute/flush calls block; GPU reset_history() is ordered
+the operation. Host execute/flush calls block; GPU `reset_history()` is ordered
 asynchronously on its supplied stream. GPU input staging is allocated lazily and
 reused. Warm CPU execution and flush allocate no working memory.
 
@@ -146,11 +166,15 @@ Widths start at 1; each next width is
 integer. Widths 1–4096 are supported on both backends, without a 32-filter cap.
 Every trial is searched at the original time resolution.
 
-- `CONTIGUOUS_PEAK_PER_WIDTH`: one peak per contiguous threshold excursion
-  of each DM/width response.
-- `CONTIGUOUS_PEAK_ACROSS_WIDTHS`: take the highest normalized S/N across
-  widths at each endpoint, then reduce contiguous excursions.
-- `ALL_ABOVE_THRESHOLD`: emit every above-threshold DM/width/endpoint.
+`CONTIGUOUS_PEAK_PER_WIDTH`
+: One peak per contiguous threshold excursion of each DM/width response.
+
+`CONTIGUOUS_PEAK_ACROSS_WIDTHS`
+: Take the highest normalized S/N across widths at each endpoint, then reduce
+  contiguous excursions.
+
+`ALL_ABOVE_THRESHOLD`
+: Emit every above-threshold DM/width/endpoint.
 
 Threshold comparisons use `>=`. Equal peaks select the earliest endpoint,
 then narrower width. The code performs no gap bridging, across-DM clustering,
@@ -163,15 +187,19 @@ the filter at endpoint `t` covers `[t-W+1, t]`; its center is
 of all input windows in the excursion. Across-width excursions retain the
 winning peak's width.
 
-Cold windows are skipped by default until their complete FDMT dependency
-support and boxcar lookback are available. This can span multiple blocks.
-`skip_cold_prefix=False` searches the zero-padded cold response using the
-stationary sigma table. Raw sample carry and pending peaks survive internal
-chunks and input-block boundaries. A returned peak may therefore refer to an
-earlier block. Call `flush()` once at end of stream to emit remaining peaks;
-repeated flushes return no further candidates. Flush adds no padded samples
-and permits subsequent input to continue, with excursions split at that flush.
-`reset_history()` discards all histories and pending peaks and restarts sample 0.
+- **Cold windows.** They are skipped by default until their complete FDMT
+  dependency support and boxcar lookback are available. This can span
+  multiple blocks. `skip_cold_prefix=False` searches the zero-padded cold
+  response using the stationary sigma table.
+- **Block boundaries.** Raw sample carry and pending peaks survive internal
+  chunks and input-block boundaries. A returned peak may therefore refer to an
+  earlier block.
+- **Flush.** Call `flush()` once at end of stream to emit remaining peaks;
+  repeated flushes return no further candidates. Flush adds no padded samples
+  and permits subsequent input to continue, with excursions split at that
+  flush.
+- **Reset.** `reset_history()` discards all histories and pending peaks and
+  restarts sample 0.
 
 ## Subbands, overflow and memory
 
@@ -198,6 +226,9 @@ workspace remain allocated; fusion does not mean zero scratch memory.
 storage and lazily allocated input staging. It excludes caller input and
 Python's owned output copies.
 
+:::{dropdown} How the scorer works on CPU and GPU
+:icon: info
+
 Both backends score a row tile by tile from running prefix sums, and run the
 peak bookkeeping only for tiles that need it. A cheap pass first checks every
 width of the tile against its threshold. When no window crosses and no
@@ -213,10 +244,13 @@ prefix difference and one comparison.
   values stay near the magnitude of one tile. Width and threshold tables are
   staged in shared memory. Tiles with a crossing or an open excursion run the
   exact ordered run summaries.
+:::
 
+```{note}
 Candidate semantics match across backends; S/N is compared with tolerances,
 not promised bit-identical. Arithmetic near an exact threshold or near-equal
 peak can affect selection.
+```
 
 ## Validation and performance
 
@@ -224,6 +258,9 @@ CPU tests compare against materialized FDMT (or FDMT-FFT) and independent
 direct float64 window sums, impulse-response energy, Gaussian noise, streaming
 boundaries, overflow and allocation checks. GPU tests are tagged
 `[gpu][boxcar]`.
+
+:::{dropdown} Building and running the GPU tests
+:icon: info
 
 ```bash
 cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -234,6 +271,7 @@ compute-sanitizer --tool memcheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
 compute-sanitizer --tool racecheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
 compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
 ```
+:::
 
 Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The streaming benchmarks run
 at the reference point of a suite configuration (`DMT_BENCH_CONFIG`:
@@ -304,3 +342,9 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   and unblocked runs; with integer delays they agree to float rounding.
 - **Limits.** Float32 input only and `subband_levels=0`: subband rows exist
   only in the Fourier domain and would each need an extra inverse transform.
+
+```{seealso}
+- [Noise calibration](noise_calibration.md): the exact per-trial sigma.
+- [Benchmarks: candidate search](../benchmarks.md#candidate-search).
+- [Streaming and history](streaming_and_history.md).
+```

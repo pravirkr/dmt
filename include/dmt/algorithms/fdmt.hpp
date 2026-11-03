@@ -101,20 +101,29 @@ public:
     /**
      * @brief Constructs an FDMT object.
      *
-     * @param f_min Frequency of the lowest channel (MHz).
-     * @param f_max Frequency of the highest channel (MHz).
+     * @param f_min Bottom edge of the band (MHz); also the reference
+     * frequency of output times (FDMTPlan::get_f_ref()).
+     * @param f_max Top edge of the band (MHz).
      * @param nchans Number of frequency channels.
      * @param nsamps Number of time samples per incoming block.
      * @param tsamp Sampling time (s).
      * @param dt_max Maximum delay trial (in samples).
      * @param dt_min Minimum delay trial (in samples, default: 0).
      * @param dt_step Stride between delay trials (default: 1).
-     * @param use_box_smearing Whether to account for intra-channel smearing
-     * using boxcar summation (default: true).
+     * @param use_box_smearing true (default): each channel contributes the
+     * mean of its level-0 box (|dt|+1 samples, upper- to lower-edge
+     * arrival), a matched filter for intra-channel smearing that also
+     * low-pass filters (colours) the noise. false: the channel's upper-edge
+     * sample only, so white input gives white output (as DDMT), for
+     * periodicity / power-spectrum searches.
      * @param mode Mode of the FDMT transform. Available modes are:
-     * - "full": Full FDMT transform of every sample in the input waterfall.
-     * - "valid": Valid FDMT transform for samples upto dt_max. Every merge
-     *   node that needs one keeps a small cross-block history slot (see
+     * - "full": Full FDMT transform of every sample in the input waterfall
+     *   (nsamps + dt_max outputs).
+     * - "valid": nsamps outputs per block. The first
+     *   FDMTPlan::get_startup_samples() outputs after construction or
+     *   reset_history() are partial sums over zero-filled history (they are
+     *   written, so discard or mask them); later blocks are complete. Every
+     * merge node that needs one keeps a small cross-block history slot (see
      *   FDMTCoord::hist_offset), so repeated calls to execute() (or the
      *   reset()/advance()/finalize() stepper) on consecutive, non-overlapping
      *   blocks reproduce monolithic full-mode execution bit-exactly for
@@ -157,8 +166,9 @@ public:
      *   two buffers fit in max(36 MiB / nthreads, 8 MiB) per thread.
      * - GPU: one thread block per (channel group, time tile) with the
      *   intermediate levels in shared memory; the deepest depth whose tile of
-     *   >= 256 samples fits the portable 48 KiB of shared memory with a
-     *   level-0 halo of at most half a tile. An explicit depth is also
+     *   >= 128 samples fits a quarter of the SM's shared memory (four
+     *   resident blocks, at most 48 KiB) with a level-0 halo of at most half
+     *   a tile. An explicit depth is also
      *   clamped to 8 and reduced until a tile fits the device's opt-in shared
      *   memory.
      * - GPU, mode "valid", float input, when that tile depth stays below 3

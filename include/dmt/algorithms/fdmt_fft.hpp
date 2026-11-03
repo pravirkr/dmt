@@ -171,6 +171,13 @@ public:
     /// else 0. Output sample o of a block is stream time
     /// block_start - latency + o.
     [[nodiscard]] SizeType get_output_latency() const noexcept;
+    /// @brief Leading outputs after construction or reset_history() whose
+    /// input history is incomplete (zero-filled), in "valid" and "full"
+    /// modes: the transform support behind an output plus
+    /// get_output_latency(). They are written; discard or mask them. With
+    /// fractional delays this exceeds the plan's get_startup_samples() by
+    /// the band-limited interpolation guard on both sides.
+    [[nodiscard]] SizeType get_startup_samples() const noexcept;
     /// @brief Valid mode: a block length (samples per call) for which at
     /// least 80% of every transform is output (each transform also carries
     /// the overlap history); the plan's nsamps in the other modes.

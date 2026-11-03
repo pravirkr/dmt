@@ -1,112 +1,115 @@
-# Noise Calibration & SNR Scaling
+# Noise calibration
 
-Evaluating candidate statistical significance requires dividing integrated flux by the true background noise standard deviation to obtain standard Gaussian **Signal-to-Noise Ratio ($\text{SNR}$)** units.
+To turn an FDMT output into a signal-to-noise ratio you divide by the noise
+standard deviation of that DM trial. With the default box smearing that
+sigma is **different for every trial**. A single global sigma over-reports
+candidates at low DM and loses sensitivity at high DM. `dmt` computes the
+exact sigma of every trial from the plan, so you never have to estimate it
+from the data.
 
-However, in FDMT, the output noise variance is **not constant across DM trials**. This guide explains why and shows how to calibrate the transform plane using DMT's analytical variance engine.
+## Where the variation comes from
 
----
+Take white Gaussian input with unit variance per channel.
 
-## 1. Why Output Noise Varies with DM
+- **Without box smearing** (`use_box_smearing=False`), each output sample is
+  the sum of one sample per channel, so every trial has variance
+  $N_\text{chans}$, whatever the DM. The tree shares partial sums between
+  neighbouring DM trials. That correlates *different* trials with each other,
+  but it does not change the variance of any one trial.
+- **With box smearing** (the default), each channel contributes the mean of a
+  box of $L_c$ samples, where $L_c$ grows with DM and toward low frequencies
+  (see {ref}`box means <box-mean>` below). A mean of $L_c$ samples has
+  variance of about $1/L_c$, so the total variance falls with DM.
+- **A boxcar** of $W$ samples, used to search for wider pulses, adds the
+  overlap between the boxcar and each channel's box.
 
-Assume the input waterfall has zero-mean Gaussian radiometer noise with variance $\sigma_0^2 = 1.0$ per channel:
+## The exact sigma
 
-1. **Trial $\text{DM} = 0$**: Integrates samples along a straight vertical column ($N_{\text{chans}}$ independent channels). The theoretical variance is simply:
-   $$\text{Var}(\text{DM}=0) = N_{\text{chans}} \cdot \sigma_0^2$$
-2. **High DM Trials**: Sum along tilted trajectories. Because the tree combines overlapping subbands, intermediate subband sums share noise samples across adjacent delay branches, introducing noise correlation.
-3. **Box smearing**: With `use_box_smearing=True` (the default) each channel contributes the weighted mean of its level-0 box of $L_c$ samples (see {ref}`box means <box-mean>`), so channels with more intra-channel smearing average more samples and carry less noise.
-4. **Boxcar Convolutions**: Searching for pulses wider than 1 sample (e.g. boxcar filters of width $W \in \{2, 4, 8, 16\}$ samples) adds further time-domain correlation.
+```python
+fdmt.get_effective_variance(dm_idx, boxcar_width=1)   # one trial
+fdmt.get_effective_sigma(dm_idx, boxcar_width=1)      # its square root
+fdmt.get_effective_sigma_grid(boxcar_width=1)         # all trials, shape (n_dm,)
+```
 
-Evaluating candidates using a single global noise estimate $\sigma$ results in severe false alarm rates at low DMs or systematic sensitivity loss at high DMs.
-
----
-
-## 2. Analytical Noise Tracking in DMT
-
-Rather than wasting compute power estimating empirical variances across noisy output buffers, `dmt` computes the **exact theoretical noise propagation** directly from the plan geometry:
-
-- `fdmt.get_effective_variance(dm_idx, boxcar_width=1)`: Returns theoretical output variance $\text{Var}(\text{DM}_k, W)$.
-- `fdmt.get_effective_sigma(dm_idx, boxcar_width=1)`: Returns $\sigma_{\text{eff}} = \sqrt{\text{Var}}$.
-- `fdmt.get_effective_sigma_grid(boxcar_width=1)`: Returns a 1D NumPy array of shape $(N_{\text{DM}},)$ containing $\sigma_{\text{eff}}$ for all DM trials.
-
-For unit-variance white input, the variance of trial $k$ after a boxcar of
-$W$ samples is
+The same methods are on `FDMTPlan`. Pass `use_box_smearing` if you query the
+plan directly. For unit-variance white input the variance of trial $k$ after a
+boxcar of $W$ samples is
 
 $$\text{Var}(\text{DM}_k, W) = \sum_c w_c^2\, V(L_c, W), \qquad
 V(L, W) = (h - l + 1)\, l^2 + \frac{(2l - 1)\, l\, (l - 1)}{3},$$
 
-with $L_c$ the level-0 box length of channel $c$ on that trial's path,
+where $L_c$ is the level-0 box length of channel $c$ on that trial's path,
 $w_c$ its box-mean weight, $h = \max(L_c, W)$ and $l = \min(L_c, W)$. $V$ is
 the sum of the squared weights of a box of $L_c$ samples convolved with a
-boxcar of $W$; for $L_c = 1$ it is $W$, and without box smearing the
-variance is $N_{\text{chans}} W$. The `get_effective_variance*` methods (also
-on `FDMTPlan`) include the weights.
+boxcar of $W$. For $L_c = 1$ it is $W$, so without box smearing the variance
+is $N_\text{chans} W$.
 
-(box-mean)=
-## 3. Box means (`use_box_smearing`)
-
-A level-0 row with delay $|dt| = s$ covers a box of $L = s + 1$ samples of a
-channel. The matched filter for a channel smeared over $L$ samples is the box
-**mean**, which weights every channel's contribution in proportion to its
-S/N. With `use_box_smearing=True` the FDMT therefore averages each level-0
-box: the sum of its $L$ samples times a weight $w(L) \approx 1/L$:
-
-- **Float input:** the dyadic weight $w(L) = \mathrm{round}(2^b / L)\, 2^{-b}$
-  with $b = \lceil \log_2 L \rceil + 2$, within 1/8 of $1/L$ (under 0.15% of
-  S/N against the exact mean). It depends on $L$ alone. `plan.box_weights`
-  lists the integer weights on the common scale $2^{-B}$, $B$ =
-  `plan.box_fraction_bits` (C++ `get_box_weights()`,
-  `get_box_fraction_bits()`).
-- **Packed low-bit input:** the same mean rounded half up to $f(L)$
-  fractional bits, the smallest $f$ with $3 \cdot 4^f \ge 50 L$, on the common
-  fixed-point scale $2^{-F}$, $F$ = `plan.box_mean_bits`. The rounding noise is
-  at most 2% of the box-mean noise for input with $\sigma \ge 0.5$ LSB (S/N
-  loss ≤ 0.5%), and it keeps the integer tree (`int_tree`) narrow. Packed
-  results are bit-identical with `int_tree` on and off and across backends,
-  and differ from float input with the same values by at most
-  $\sum_c 2^{-(f(L_c)+1)}$. The variance formula above does not include this
-  small rounding noise. Without box smearing packed and float input agree
-  exactly.
-
-Consequences:
-
-- **Output units.** The output is in box-mean units: a pulse that fills each
-  channel's box at amplitude $a_c$ per sample gives about $\sum_c a_c$
-  (roughly $N_{\text{chans}}$ times its mean amplitude). A constant input of 1
-  gives $\sum_c w_c L_c \approx
-  N_{\text{chans}}$ on every trial.
-- **S/N.** Divide by `get_effective_sigma_grid()` as below; the weights are
-  already in it.
-- `FDMTFFT` uses the same dyadic float weights (no rounding: its level 0 is
-  formed in the Fourier domain), and the fine FDMT of `CohFDMT` uses box means
-  too (see [Coherent Hybrid Search](coherent_hybrid.md)).
-
----
-
-## 4. Calibrating to True SNR Units
+Normalising a block then looks like this:
 
 ```python
 import numpy as np
 from dmtlib import FDMT
 
-fdmt = FDMT(
-    f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
-    tsamp=1e-3, dt_max=150, mode="valid"
-)
+fdmt = FDMT(f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
+            tsamp=1e-3, dt_max=150)
 
-# Dedisperse block
-dmt_matrix = fdmt.execute(waterfall) # shape: (n_dm, n_times)
+dmt_plane = fdmt.execute(waterfall)                  # (n_dm, n_times)
+sigma = fdmt.get_effective_sigma_grid(boxcar_width=1)
+snr = dmt_plane / sigma[:, None]
 
-# Query exact theoretical sigma grid
-sigma_grid = fdmt.get_effective_sigma_grid(boxcar_width=1) # shape: (n_dm,)
-
-# Normalize DMT plane to true Gaussian SNR units:
-# (sigma_grid is broadcast along the time axis)
-snr_map = dmt_matrix / sigma_grid[:, np.newaxis]
-
-# Detect significant candidates (e.g. SNR > 8 sigma)
-candidates = np.argwhere(snr_map > 8.0)
-for dm_idx, t_idx in candidates:
-    peak_snr = snr_map[dm_idx, t_idx]
-    dm_val = fdmt.plan.dm_grid_final[dm_idx]
-    print(f"Candidate detected at DM = {dm_val:.2f} pc cm^-3, time = {t_idx}: SNR = {peak_snr:.2f} sigma")
+for dm_idx, t_idx in np.argwhere(snr > 8.0):
+    print(f"DM {fdmt.dm_grid_final[dm_idx]:.2f}, sample {t_idx}, "
+          f"S/N {snr[dm_idx, t_idx]:.1f}")
 ```
+
+```{warning}
+The sigma assumes independent channels with **zero mean and equal, unit
+variance**. Subtract each channel's mean and divide by its standard deviation
+first, or work out the scale for your own channel variances. On raw data the
+S/N values are meaningless.
+```
+
+(box-mean)=
+## Box means
+
+A level-0 row with delay $|dt| = s$ covers $L = s + 1$ samples of a channel,
+the samples between the arrival times at its upper and lower edges. For a
+pulse smeared across those $L$ samples, the matched filter is the **box
+mean**. With `use_box_smearing=True` FDMT therefore sums the $L$ samples and
+multiplies by a weight $w(L) \approx 1/L$.
+
+- **Output units.** A pulse that fills each channel's box at amplitude $a_c$
+  gives about $\sum_c a_c$. A constant input of 1 gives
+  $\sum_c w_c L_c \approx N_\text{chans}$ on every trial.
+- **Other engines.** `FDMTFFT` uses the same float weights. The fine FDMT
+  inside `CohFDMT` uses box means too.
+- **Noise colour.** Box means correlate neighbouring output samples, so the
+  noise power spectrum falls toward Nyquist, with ripples that depend on DM.
+  The sigma above is still correct for time-domain S/N, but no single number
+  makes the spectrum flat.
+
+```{tip}
+For a periodicity or power-spectrum search, use `use_box_smearing=False`. The
+output is then white and has the same distribution as DDMT's. See
+[periodicity searches](periodicity.md).
+```
+
+:::{dropdown} How the weights are rounded
+:icon: info
+
+- **Float input.** The weight is dyadic,
+  $w(L) = \mathrm{round}(2^b / L)\, 2^{-b}$ with $b = \lceil \log_2 L \rceil + 2$.
+  It is within 1/8 of $1/L$, which costs under 0.15% of S/N against the exact
+  mean. `plan.box_weights` lists the integer weights on the common scale
+  $2^{-B}$, with $B$ = `plan.box_fraction_bits`.
+- **Packed low-bit input.** The mean is rounded half up to $f(L)$ fractional
+  bits, the smallest $f$ with $3 \cdot 4^f \ge 50 L$, on the scale $2^{-F}$
+  with $F$ = `plan.box_mean_bits`. That keeps the integer tree narrow. The
+  rounding noise is at most 2% of the box-mean noise for input with
+  $\sigma \ge 0.5$ LSB (at most 0.5% S/N loss); the variance formula above
+  leaves it out.
+- **Agreement.** Packed results are bit-identical with `int_tree` on or off
+  and across backends. They differ from float input with the same values by
+  at most $\sum_c 2^{-(f(L_c)+1)}$. Without box smearing, packed and float
+  input agree exactly.
+:::

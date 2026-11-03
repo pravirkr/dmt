@@ -19,12 +19,6 @@
 
 **`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, **FDMT-FFT** and **DDMT-FFT** (NUFFT-accelerated).
 
-For normalized waterfalls whose FDMT output is only used for detection,
-[`FDMTBoxcar`](docs/pipeline_guide/fdmt_boxcar.md) fuses the final FDMT merge
-with analytical boxcar search and returns candidates without a full-band
-DM–time output plane. It supports streaming peaks, subbands, and CPU/GPU APIs.
-
-
 | Dispersed Waterfall Input $I(\nu, t)$ | Dedispersed DM-Time Plane $DMT(\text{DM}, t)$ |
 | :---: | :---: |
 | ![Waterfall image](docs/_static/waterfall.png) | ![DMT transform](docs/_static/dmt.png) |
@@ -176,12 +170,7 @@ trials) FDMT runs at 66× real time on the Xeon, 1.7× faster than DDMT there,
 and at 1263× on the L40S, where SDMT reaches 1547×. Few channels and long
 dispersion sweeps make these presets memory-bound for a plain FDMT, while
 brute-force kernels reuse each input window from cache or shared memory: on
-`cryopaf` DDMT is 2× faster than FDMT on the Xeon. On the GPU, FDMT computes
-its lowest and highest levels directly from running sums instead.
-
-**FDMTBoxcar** (fused FDMT + boxcar candidate search, no DM–time plane) adds
-little to the transform on the GPU: 24.0 ms with 12 widths up to 100 ms on `cryopaf`,
-against 22.9 ms for FDMT writing its plane.
+`cryopaf` DDMT is 2× faster than FDMT on the Xeon.
 
 **CohFDMT** (coherent hybrid search of baseband voltages) takes one GUPPI node
 (64 × 2.93 MHz at 1.31–1.50 GHz, int8, t_p = 10 µs, DM 50–60).

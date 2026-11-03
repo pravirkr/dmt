@@ -234,6 +234,8 @@ def main() -> None:
     args = ap.parse_args()
     results_dir = Path(args.results)
     points, contexts = load(results_dir)
+    # GPU timings are device-resident; the host-array series are not plotted.
+    points = [p for p in points if not p.backend.endswith("_host")]
     if not points:
         sys.exit(f"no CohFDMT results under {results_dir}/*/suite_cfdmt_*.json")
     out_root = results_dir / "plots"

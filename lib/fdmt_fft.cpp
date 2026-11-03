@@ -218,6 +218,11 @@ bool FDMTFFT::fractional_delays() const noexcept {
 SizeType FDMTFFT::get_output_latency() const noexcept {
     return m_impl->m_geom.latency;
 }
+SizeType FDMTFFT::get_startup_samples() const noexcept {
+    // Output o is stream time o - latency and reads `support` samples
+    // behind it; zero-filled history covers it until o >= support + latency.
+    return m_impl->m_geom.support + m_impl->m_geom.latency;
+}
 SizeType FDMTFFT::get_suggested_nsamps() const noexcept {
     return m_impl->suggested_nsamps();
 }

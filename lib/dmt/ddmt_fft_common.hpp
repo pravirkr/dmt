@@ -73,12 +73,14 @@ struct DelayModel {
         const double f_min = plan.get_f_min();
         const double df    = (static_cast<double>(plan.get_f_max()) - f_min) /
                              static_cast<double>(nchans);
-        const double f_ref = f_min + (df * static_cast<double>(nchans - 1));
+        // Channel centres, relative to the top channel's centre: the
+        // DDMTPlan delay tables' convention (DDMTPlan::get_f_ref()).
+        const double f_ref = f_min + (df * (static_cast<double>(nchans) - 0.5));
         const double k     = static_cast<double>(kDispConst) /
                              static_cast<double>(plan.get_tsamp());
         rate.resize(nchans);
         for (SizeType c = 0; c < nchans; ++c) {
-            const double f = f_min + (df * static_cast<double>(c));
+            const double f = f_min + (df * (static_cast<double>(c) + 0.5));
             rate[c]        = k * ((1.0 / (f * f)) - (1.0 / (f_ref * f_ref)));
         }
         for (SizeType c = 0; c < nchans; ++c) {

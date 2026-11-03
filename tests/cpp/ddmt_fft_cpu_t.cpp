@@ -59,11 +59,12 @@ DDMTFFTOptions opts(DDMTFFTMethod m, SizeType guard = 16, double tol = 1e-6) {
     return DDMTFFTOptions{.method = m, .tolerance = tol, .guard = guard};
 }
 
-// Exact delay (samples) of trial dm in channel c, as DDMTFFT defines it.
+// Exact delay (samples) of trial dm in channel c, as DDMTFFT defines it:
+// from the channel's centre, relative to the top channel's centre.
 double tau_of(double dm, SizeType c, SizeType nchans) {
     const double df = (static_cast<double>(kFhi) - kFlo) / nchans;
-    const double f  = kFlo + (df * static_cast<double>(c));
-    const double fr = kFlo + (df * static_cast<double>(nchans - 1));
+    const double f  = kFlo + (df * (static_cast<double>(c) + 0.5));
+    const double fr = kFlo + (df * (static_cast<double>(nchans) - 0.5));
     const double k  = static_cast<double>(kDispConst) / kTs;
     return dm * k * ((1.0 / (f * f)) - (1.0 / (fr * fr)));
 }

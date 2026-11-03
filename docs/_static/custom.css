@@ -118,3 +118,38 @@ table.dataframe td, table.table td {
     margin-top: 1.5rem;
     border-radius: 0 6px 6px 0;
 }
+
+/* Section rhythm: a hairline under each h2 so long guide pages scan easily. */
+.bd-article h2 {
+    margin-top: 2.4rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--pst-color-border);
+}
+
+/* "In short" box at the top of guide pages. */
+.admonition.dmt-summary {
+    border-left: 4px solid var(--pst-color-primary);
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.05) 0%, rgba(124, 58, 237, 0.06) 100%);
+    box-shadow: none;
+}
+
+.admonition.dmt-summary > .admonition-title {
+    background: transparent;
+    color: var(--pst-color-primary);
+    font-weight: 700;
+}
+
+.admonition.dmt-summary > .admonition-title::after {
+    content: "\f0eb";
+    color: var(--pst-color-primary);
+}
+
+/* Cards: a gentle lift on hover for linked cards. */
+.sd-card.sd-card-hover:hover,
+a.sd-stretched-link:hover ~ * {
+    transform: translateY(-2px);
+}
+
+.sd-card {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}

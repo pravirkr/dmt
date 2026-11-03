@@ -1,24 +1,27 @@
-# Multi-Beam Batching
+# Multi-beam batching
 
-Modern radio interferometers (such as MeerKAT, CHIME, ASKAP, and SKA) generate dozens to thousands of simultaneous tied-array or synthesized beams to survey wide fields of view.
+Interferometers such as MeerKAT, CHIME, ASKAP and SKA form dozens to
+thousands of tied-array or synthesized beams at once. `dmt` engines can take
+all of them in one call, on the CPU and the GPU: one engine, one plan,
+`nbeams` beams per call.
 
-`dmt` supports native **Multi-Beam Batching** on the CPU and the GPU: one engine, one plan, `nbeams` beams per call.
+## Why batch across beams
 
----
+Compared with one engine per beam, or a loop of single-beam calls:
 
-## 1. Why Batch Across Beams?
+- **One plan.** The plan (coordinate DAG, subband offsets, tree indices) is built once and
+  shared by all beams. Only the state and history buffers scale with
+  `nbeams`.
+- **CUDA.** On CUDA, every beam of a level runs in the same kernel launch (beams are a
+  grid dimension), so even small blocks keep the GPU busy.
+- **CPU.** On the CPU, one thread pool serves all beams. Beams are processed one after
+  another, each spread over all `nthreads` threads with the same fused,
+  vectorized kernels as a single beam.
 
-Instead of instantiating $N_{\text{beams}}$ separate engine objects or looping over single-beam calls, batching provides major advantages:
+## Python
 
-1. **Amortized Plan Overhead**: The plan (coordinate DAG, subband offsets, tree indices) is built once and shared by all beams; only the state and history buffers scale with `nbeams`.
-2. **GPU Occupancy**: On CUDA, every beam of a level runs in the same kernel launch (beams are a grid dimension), so even small blocks keep the GPU busy.
-3. **One Engine, One Thread Pool**: On the CPU, beams are processed one after another, each spread over all `nthreads` threads with the same (fused, vectorized) kernels as a single beam.
-
----
-
-## 2. Using Multi-Beam Batching in Python
-
-Set `nbeams > 1` in the engine constructor. The engine expects 3D inputs and produces 3D outputs:
+Set `nbeams > 1` in the engine constructor. The engine then takes 3D input
+and returns 3D output:
 
 ```python
 import numpy as np
@@ -28,7 +31,7 @@ nbeams = 16
 nchans = 256
 nsamps = 1024
 
-# Instantiate multi-beam engine
+# Multi-beam engine
 fdmt = FDMT(
     f_min=1200.0,
     f_max=1600.0,
@@ -50,9 +53,7 @@ print(f"Batch waterfall input: {batch_waterfall.shape}")
 print(f"Batch DMT output:      {batch_dmt.shape}")
 ```
 
----
-
-## 3. Using Multi-Beam Batching in C++
+## C++
 
 ```cpp
 #include <dmt/dmt.hpp>
@@ -84,7 +85,16 @@ std::span<const float> beam3(batch_output.data() + 3 * plan.get_dmt_size(),
 ```
 
 The output buffer is exactly the transform; the engine keeps its tree state
-and history internally (see {ref}`Output Buffers <output-buffers>`). The tree
-state scales with `nbeams`, so the automatic `chunk_nsamps` (valid mode) is
-chosen for all beams together and may be shorter than for one beam (see
-{ref}`Chunked execution <chunked-execution>`).
+and history internally (see {ref}`output buffers <output-buffers>`).
+
+```{note}
+The tree state scales with `nbeams`, so the automatic `chunk_nsamps` (valid
+mode) is chosen for all beams together and may be shorter than for one beam
+(the chunk is set by the plan's memory budget).
+```
+
+```{seealso}
+- {ref}`Output buffers <output-buffers>`: layout and reuse of the output buffer.
+- [Streaming and history](streaming_and_history.md): history kept per beam, and
+  `save_history` / `load_history` for beams served in turn.
+```

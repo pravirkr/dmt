@@ -1,20 +1,24 @@
-# Performance Tuning
+# Performance tuning
 
 The tuning measurements below come from the developer microbenchmarks
 (`dmt_bench`), each at the fixed geometry stated with it. The cross-algorithm
 numbers for the benchmark presets (CryoPAF, CryoPAF L-band and Parkes UWL)
 are on the [Benchmarks](../benchmarks.md) page; see also
-[the benchmark configurations](../../bench/README.md).
+[the benchmark configurations](https://github.com/pravirkr/dmt/blob/main/bench/README.md).
 
-The FDMT engine (`FDMT`, on the CPU and CUDA backends) is tuned out of the box. Its two
-*performance parameters*, the constructor arguments `fuse_levels` and
-`int_tree`, default to the fastest settings measured, and neither changes the
-result by a single bit. The *memory parameter* `chunk_nsamps`, the last
-constructor argument, bounds the tree state of large plans, also without
-changing the result. Most users never set any of them. This page explains what
-they do, what you control yourself (input format, threads, block size), how
-memory is allocated, and why some optimizations that look promising were
-measured and rejected.
+The FDMT engine (`FDMT`, on the CPU and CUDA backends) needs no tuning by
+default. Its two *performance parameters*, the constructor arguments
+`fuse_levels` and `int_tree`, default to the fastest settings measured, and
+neither changes the result by a single bit (the automatic GPU direct levels,
+described below, are the one exception). The *memory parameter*
+`chunk_nsamps`, the last constructor argument, bounds the tree state of large plans, also without
+changing the result. You will rarely need to set any of them. This page
+explains what they do, what you control yourself (input format, threads,
+block size) and how memory is allocated.
+
+::::{tab-set}
+:::{tab-item} Python
+:sync: python
 
 ```python
 fdmt = FDMT(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048, nthreads=1)
@@ -24,6 +28,9 @@ fdmt = FDMT(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048,
 fdmt.chunk_nsamps         # chunk length chosen for this plan (chunk_nsamps=None)
 print(fdmt.memory_usage)  # bytes allocated at construction
 ```
+:::
+:::{tab-item} C++
+:sync: cpp
 
 ```cpp
 // ..., exec, nbeams, fuse_levels = kFDMTAutoFuse, int_tree = true,
@@ -32,33 +39,31 @@ dmt::algorithms::FDMT fdmt(704.0F, 1216.0F, 4096, 16384, 8.192e-5F, 2048,
                            0, 1, true, "valid", dmt::Exec::cpu(1), 1,
                            dmt::algorithms::kFDMTAutoFuse, true, 0);
 ```
+:::
+::::
 
----
-
-## 1. Where the time goes
+## Where the time goes
 
 Every FDMT tree level is one pass of the same loop over rows of the state:
 
 $$\text{out}[t] = \text{tail}[t] + \text{head}[t - d]$$
 
 That is two loads and one store per output sample, for one addition. There is
-no arithmetic to optimize: **the transform is memory-bandwidth bound**, and
-the merge loop already runs at the bandwidth limit: an unfused merge level
+no arithmetic to optimize: the transform is memory-bandwidth bound, and
+the merge loop already runs at the bandwidth limit. An unfused merge level
 moves its three streams at over 90% of the bandwidth that a bare
 `c[i] = a[i] + b[i]` achieves on the same machine, and on the L40S the
 level-by-level kernels run at about 90% of the DRAM bandwidth.
 
 Two consequences follow:
 
-- The **early levels dominate** (levels 0–3 are ~45% of the time), because
+- The early levels dominate (levels 0–3 are ~45% of the time), because
   they have the most rows.
-- The only way to go faster is to **move fewer bytes**. The two defaults below
-  do exactly that. One keeps the early levels on-chip (level fusion); the
+- The only way to go faster is to move fewer bytes. The two defaults below
+  do that: one keeps the early levels on-chip (level fusion); the
   other stores them in fewer bytes (the integer tree).
 
----
-
-## 2. Level fusion (`fuse_levels`)
+## Level fusion (`fuse_levels`)
 
 Level-$F$ sub-band $g$ depends only on the $2^F$ input channels below it. With
 fusion, `execute()` processes one such channel group at a time. It builds the
@@ -69,7 +74,8 @@ DRAM.
 - **CPU:** each thread works on one group in a cache-resident scratch buffer
   holding full rows. The automatic depth (the default) is the deepest $F$
   whose two scratch buffers fit in $\max(36\,\text{MiB} / n_\text{threads},
-  5\,\text{MiB})$ per thread. The scratch size follows from the plan
+  8\,\text{MiB})$ per thread (modes `"full"` and `"roll"`; valid mode uses
+  time tiles, below). The scratch size follows from the plan
   (rows per channel group × `nsamps`), so the rule uses only the plan and
   the thread count, with no hardware detection. On 1 thread with 4096
   channels and `dt_max=2048`, this gives depths 9 / 7 / 5 at 4K / 16K / 64K
@@ -122,25 +128,33 @@ L40S, 32 768-sample blocks, transform only:
 | `cryopaf_lband` | 16.1 ms | 14.6 ms | 11.9 ms |
 
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)
-always runs level by level, so every level stays inspectable. Read the depth
-actually used with `fdmt.fuse_levels` (Python) or `get_fuse_levels()` (C++).
-An explicit depth is clamped to the plan's merge levels (and, on CUDA, reduced
-until it fits shared memory); `fuse_levels` / `get_fuse_levels()` report the
-depth actually used.
+always runs level by level, so every level stays inspectable. An explicit
+depth is clamped to the plan's merge levels (and, on CUDA, reduced until it
+fits shared memory). Read the depth actually used with `fdmt.fuse_levels`
+(Python) or `get_fuse_levels()` (C++).
 
-### Hybrid tree traversal: vertical depth-first meets horizontal breadth-first
+### Fusion in practice
 
-Conceptually, the FDMT tree can be traversed in two classical ways:
+:::{dropdown} Why not depth-first?
+:icon: info
 
-1. **Horizontal Breadth-First (BFS):** The standard FDMT algorithm traverses the entire band level by level across all channels. While highly parallel and regular, it is cache-unfriendly: every level writes hundreds of megabytes to DRAM and reads them back.
-2. **Top-Down Recursive Depth-First (DFS):** Computing a final DM trial by recursively descending to its leaf channels is often proposed as cache-friendly. In practice, pure recursion is deeply flawed for FDMT: because FDMT is a Directed Acyclic Graph (DAG) with overlapping sub-band delay paths, pure recursion either causes exponential redundant calculations or requires dynamic memoization tables that destroy vectorization and fail on GPUs. Furthermore, near the top of the tree, sub-bands span thousands of channels and exceed cache capacity anyway.
+The standard FDMT walks the tree breadth-first, level by level across the
+whole band. That is regular and parallel, but every level writes hundreds of
+megabytes to DRAM and reads them back. Computing each DM trial by recursing
+down to its leaf channels looks cache-friendly, but the FDMT is a DAG with
+overlapping sub-band delay paths: pure recursion either repeats work
+exponentially or needs memoization tables that break vectorization and do not
+map to GPUs. Near the top of the tree the sub-bands span thousands of channels
+and exceed the cache anyway.
 
-Level fusion implements the **best of both worlds**:
-
-- **First $F$ stages (Vertical truncated DFS):** The early channels form strictly disjoint binary sub-trees of size $2^F$ (e.g., 8 or 16 channels). For each sub-tree, all merges from level 0 up to level $F$ are evaluated vertically on-chip inside cache/shared memory. Intermediate levels $0 \dots F-1$ never touch DRAM. Because the early levels dominate data volume (representing ~45–50% of the entire transform's memory traffic), this eliminates the vast majority of memory bus round-trips.
-- **Remaining stages (Horizontal BFS):** Once level $F$ is reached, the sub-trees begin merging across wider frequency spans. Here, the engine transitions back to flat, breadth-first global ping-pong merges in memory.
-
-This hybrid structure requires **zero recursion, zero dynamic allocation, and zero redundant computation**: it executes as flat, predictable loops perfectly suited for SIMD vectorization and GPU thread blocks.
+Level fusion splits the difference. The first $F$ levels form disjoint binary
+sub-trees of $2^F$ channels (for example 8 or 16), each merged depth-first
+on-chip, so levels $0 \dots F-1$ never touch DRAM. These early levels carry
+~45–50% of the transform's memory traffic. Above level $F$ the engine returns
+to breadth-first merges in memory. Both parts are flat loops, with no
+recursion, dynamic allocation or redundant computation, so they vectorize
+and map onto GPU thread blocks.
+:::
 
 Measured on the CPU (float input, valid mode, box smearing, 4096 channels,
 `dt_max=2048`):
@@ -153,13 +167,23 @@ Measured on the CPU (float input, valid mode, box smearing, 4096 channels,
 | Xeon Gold 6348H | 65 536 | 1 | 1584 ms | 1185 ms | 1.34× |
 | Xeon Gold 6348H | 65 536 | 8 | 307.3 ms | 244.4 ms | 1.26× |
 
+:::{dropdown} How the automatic rule was fitted
+:icon: info
+
 The rule was fitted to fixed-depth sweeps (1, 2, 4 and 8 threads; 4K, 16K
 and 64K samples):
-- **1 thread:** it picks the best measured depth at 16K and 64K.
-- **At 2–8 threads:** it is within 3% of the best depth, except 4096 samples
-  (6–8.5%).
 
-Defaults and automatic budgets are explicitly targeted at **Intel x86 HPC server architectures (Xeon/EPYC)**—the production environment for radio astronomy pipelines. Modes `"full"` and `"roll"` use a whole-block budget of $\max(36\,\text{MiB} / n_\text{threads}, 8\,\text{MiB})$, sized for standard ~32–36 MiB L3 cache slices on server sockets with typical 1–8 thread allocations per pipeline instance. Valid mode's automatic budget is 1.75 MiB per group, described below. Pass an explicit `fuse_levels` if a sweep on your specific hardware (`BM_fdmt_fused`, see [Reproducing](#6-reproducing-the-numbers)) finds a better depth.
+- **1 thread:** it picks the best measured depth at 16K and 64K.
+- **2–8 threads:** it is within 3% of the best depth, except 4096 samples
+  (6–8.5%).
+:::
+
+The defaults are sized for x86 server CPUs (Xeon/EPYC): the whole-block
+budget of $\max(36\,\text{MiB} / n_\text{threads}, 8\,\text{MiB})$ assumes
+an L3 of ~32–36 MiB per socket and 1–8 threads per pipeline instance. Valid
+mode's automatic budget is 1.75 MiB per group, described below. Pass an
+explicit `fuse_levels` if a sweep on your hardware (`BM_fdmt_fused`, see
+[Reproducing](#reproducing-the-numbers)) finds a better depth.
 
 The table and the budget above are for the whole-block fused path, which
 modes `"full"` and `"roll"` still use.
@@ -167,8 +191,10 @@ modes `"full"` and `"roll"` still use.
 **Valid mode: time-tiled fusion.** At high DM the fused groups no longer fit
 in cache. For the `cryopaf` preset (512 channels at 512 µs, DM 0–2000) the
 plan has about 40 rows per input channel at every level from 0 to 4, and a
-whole-chunk level of one 16-channel group is several MB. Mode `"valid"` therefore walks each group
-through the chunk in **time tiles** of 512 or 256 samples:
+whole-chunk level of one 16-channel group is several MB. Mode `"valid"`
+therefore walks each group through the chunk in time tiles of 512 or 256
+samples:
+
 - Each thread holds one tile of the group's fused levels in two scratch
   buffers.
 - A merge whose delay exceeds the tile takes its head samples from its
@@ -178,8 +204,7 @@ through the chunk in **time tiles** of 512 or 256 samples:
   chunk, and only level $F$ goes to main memory, written with streaming
   stores.
 - On the CPU, valid mode is independent of the block length, so the output is
-  bit-identical to the unfused path. Automatic GPU direct levels are the
-  exception described above.
+  bit-identical to the unfused path (automatic GPU direct levels excepted).
 
 The automatic depth is the deepest $F$ (then the longer tile) whose mean
 per-group working set is at most 1.75 MiB: two scratch tiles plus the rings,
@@ -187,6 +212,7 @@ in float. It also requires at least two groups per thread. `summary()`
 reports the tile.
 
 **Why the FDMT is memory-bound, and why the regime matters.**
+
 - A merge is one addition per 12 bytes moved: two float reads and one write,
   or 16 bytes with the write-allocate read.
 - An unfused level is far larger than any cache, so it streams through DRAM
@@ -231,14 +257,18 @@ On CUDA (L40S, device-resident, 4096 channels, `dt_max=2048`, valid mode):
 already made the early levels small. Deeper tiles also cost more there: at
 depth 4 the tile shrinks to 160 samples, and 1-bit input becomes 18% *slower*
 than at depth 3 (float gains 3%). Depth 3 is within 3% of the best for every
-input. Smaller tiles at four resident blocks per SM beat larger tiles at two:
+input.
+
+:::{dropdown} Tile size against resident blocks
+:icon: info
+
+Smaller tiles at four resident blocks per SM beat larger tiles at two:
 the fused kernel is bound by load latency and instruction issue, not by the
 halo it recomputes (48 KiB / 384-sample tiles gave 5.17 ms, 24 KiB / 192
 samples 4.91 ms, float, before the 0.5.0 level-kernel change).
+:::
 
----
-
-## 3. Packed low-bit input and the integer tree (`int_tree`)
+## Packed low-bit input and the integer tree (`int_tree`)
 
 Digitisers typically deliver 1-, 2-, 4-, 8- or 16-bit samples. Both engines
 accept them packed, with no float copy of the waterfall ever made:
@@ -269,6 +299,10 @@ bounds stay far below $2^{24}$, and the integer-to-float conversion is an
 exact power-of-two scaling, so the result is bit-identical to the float tree
 on the same packed input (`int_tree=False`).
 
+::::{tab-set}
+:::{tab-item} Python
+:sync: python
+
 ```python
 import numpy as np
 from dmtlib import FDMT
@@ -281,6 +315,9 @@ packed = np.random.randint(0, 256, size=(nchans, nsamps * nbits // 8),
                            dtype=np.uint8)
 dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
 ```
+:::
+:::{tab-item} C++
+:sync: cpp
 
 ```cpp
 #include "dmt/algorithms/fdmt.hpp"
@@ -291,6 +328,8 @@ std::vector<float> dmt(fdmt.get_plan().get_dmt_size());
 // packed: nchans rows of ceil(nsamps * nbits / 8) bytes
 fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
 ```
+:::
+::::
 
 On the CUDA backend, `execute(packed, nbits)` behaves the same way, and the
 host overload copies only the packed bytes over PCIe.
@@ -306,13 +345,13 @@ fusion, `int_tree` on; 4096 channels, `dt_max=2048`, 16 384 samples):
 | 8-bit | 1.36× | 1.19× |
 | 16-bit | 1.00× | 1.01× |
 
-Packed input without the integer tree runs no faster than float input: the
-gain comes from the narrow tree state. At 16 bits nearly every level stays
+Packed input without the integer tree runs no faster than float input: **the
+gain comes from the narrow tree state**. At 16 bits nearly every level stays
 float, so the per-channel unpack becomes a small net cost; pass 16-bit data
 as float if you already have it in that form. Against the original
 level-by-level float path, the default configuration with 1-bit input is
-**3.9× faster on the Xeon** (76.4 → 19.5 ms, 8 threads) and **3.3× on the
-L40S** (7.33 → 2.20 ms, dmt 0.5.0).
+3.9× faster on the Xeon (76.4 → 19.5 ms, 8 threads) and 3.3× on the
+L40S (7.33 → 2.20 ms, dmt 0.5.0).
 
 ```{note}
 Integer tree levels cannot be viewed through the stepper's `view_*` methods,
@@ -320,9 +359,7 @@ which throw at such a level. To inspect every level of a packed stepper run,
 construct the engine with `int_tree=False`.
 ```
 
----
-
-## 4. Threads, block size and construction
+## Threads, block size and construction
 
 - **Threads** (`nthreads`, CPU): scaling is good up to the point where the
   memory bus saturates. On the Xeon, 8 threads give 5.4× over 1 thread.
@@ -330,27 +367,34 @@ construct the engine with `int_tree=False`.
   result independent of the block size, so choose it for latency and
   throughput. Throughput is best between a few thousand and ~16K samples,
   where the fused channel groups stay cache-resident. At 65 536 samples the
-  fused per-sample cost rises somewhat, while the unfused cost is flat. In valid mode the tree state does not grow with the
-  block beyond the chunk length (see
+  fused per-sample cost rises somewhat, while the unfused cost is flat. In
+  valid mode the tree state does not grow with the block beyond the chunk
+  length (see
   {ref}`below <chunked-execution>`).
 - **Construction and memory:** the constructor computes the plan and
   allocates *all* working memory: the tree state (two levels of one chunk),
-  the streaming history, and the per-thread fusion/unpack scratch (on CUDA: device state, history,
-  the plan and the fused-kernel tables; ~155 ms on an L40S host). `execute()`
+  the streaming history, and the per-thread fusion/unpack scratch (on CUDA:
+  device state, history, the plan and the fused-kernel tables; ~155 ms on an
+  L40S host). `execute()`
   then allocates nothing (on the CPU a test enforces this), so a streaming
   pipeline constructs once and calls `execute()` block after block.
   `fdmt.memory_usage` (Python) / `get_memory_usage()` (C++) reports the
   bytes per category and the output buffer each call needs
   (`nbeams * plan.dmt_size` floats; the engine never uses it as scratch);
-  `fdmt.summary()` prints the same breakdown together with the plan. To multiplex several streams on
-  one engine, use `save_history()` / `load_history()` rather than building
-  one engine per stream. On a GPU backend, the host-memory `execute()` overloads
+  `fdmt.summary()` prints the same breakdown together with the plan. To
+  multiplex several streams on one engine, use `save_history()` /
+  `load_history()` rather than building one engine per stream. On a GPU
+  backend, the host-memory `execute()` overloads
   stage the input and output on the device in buffers allocated on the first
-  host call and reused afterwards. In Python, pass `out=` to `execute()` to
-  reuse the output array too; otherwise every call allocates and page-faults
-  a new one (~10% of the runtime at 16K samples).
+  host call and reused afterwards.
 - **Multiple beams:** `nbeams > 1` shares one plan across beams. See
-  [Multi-Beam Batching](multibeam.md).
+  [Multi-beam batching](multibeam.md).
+
+```{tip}
+In Python, pass `out=` to `execute()` to reuse the output array too;
+otherwise every call allocates and page-faults a new one (~10% of the
+runtime at 16K samples).
+```
 
 (chunked-execution)=
 ### Chunked execution (`chunk_nsamps`)
@@ -361,9 +405,9 @@ samples. The tree state is then two levels of rows × chunk instead of rows ×
 the state of a whole block would be tens of GB while the block's input and
 output are a few hundred MB. Valid mode is overlap-save inside the tree.
 Packed paths, integer-valued input, explicit fusion depths and the CPU tree
-are **bit-identical for any chunk**. Automatic GPU direct levels agree within
-float rounding and are not bit-identical across chunks. Each chunk costs a little extra
-cross-block history traffic, a few per cent at a few thousand samples.
+are bit-identical for any chunk; automatic GPU direct levels agree only within
+float rounding (see above). Each chunk costs a little extra cross-block
+history traffic, a few per cent at a few thousand samples.
 
 - **Default** (`chunk_nsamps=None` in Python, `0` in C++): the longest power
   of two ≥ 2048 whose two state halves (all beams) fit 2 GiB, capped at
@@ -377,11 +421,11 @@ cross-block history traffic, a few per cent at a few thousand samples.
 - **Explicit** values are rounded up to a multiple of 64 and capped at
   `nsamps`. Pass a longer chunk if memory allows, or a shorter one to save
   more.
-- `"full"` and `"roll"` always run whole blocks; a shorter `chunk_nsamps`
+- **Full and roll modes:** `"full"` and `"roll"` always run whole blocks; a shorter `chunk_nsamps`
   raises `ValueError` there.
-- The stepper (`reset()` / `advance()` / `view_*`) needs whole blocks:
+- **Stepper:** the stepper (`reset()` / `advance()` / `view_*`) needs whole blocks:
   construct a stepping engine with `chunk_nsamps=nsamps`. See
-  {ref}`Stepper Rules <stepper-rules>`.
+  {ref}`stepper rules <stepper-rules>`.
 
 Engine memory for the `cryopaf` preset (512 channels, 704–1216 MHz, 512 µs,
 DM 0–2000 in 1545 trials) with 32 768-sample blocks (16.8 s), CPU with 8
@@ -401,7 +445,7 @@ The output is identical in every row, and the time per block changes little
 the block length (and with the DM range, through the rows of the first
 levels); the chunked state does not.
 
-## 5. Summary of the performance parameters
+## Summary of the performance parameters
 
 | constructor argument | default | applies to | effect |
 | :--- | :--- | :--- | :--- |
@@ -412,9 +456,7 @@ levels); the chunked state does not.
 Pass `fuse_levels=0, int_tree=False` to get the original level-by-level float
 path, for example to compare against or to benchmark.
 
----
-
-## 6. Reproducing the numbers
+## Reproducing the numbers
 
 Build with benchmarks (`-DDMT_BUILD_BENCHMARKS=ON`, Release), then run from
 the build directory (the Python script from the repository root):

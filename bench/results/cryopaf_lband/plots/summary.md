@@ -29,6 +29,3 @@
 | NVIDIA L40S | SDMT, device-resident | 764.0× | 751.9× | 738.0× | 765.7× | 1664.2× | 1547.1× |
 | NVIDIA L40S | FDMT-FFT, device-resident | 886.5× | 885.5× | 884.6× | 883.0× | 880.8× | 873.0× |
 | NVIDIA L40S | DDMT-FFT, device-resident | 849.0× | 849.6× | 849.1× | 848.1× | 845.4× | 861.2× |
-| NVIDIA L40S | FDMT, host arrays (incl. PCIe) | 635.6× | 619.9× | 546.8× | 529.7× | 484.1× | 447.3× |
-| NVIDIA L40S | FDMT-FFT, host arrays (incl. PCIe) | 498.8× | 490.5× | 481.6× | 471.7× | 431.0× | 380.4× |
-| NVIDIA L40S | DDMT-FFT, host arrays (incl. PCIe) | 493.9× | 470.9× | 470.5× | 453.1× | 435.7× | 379.0× |

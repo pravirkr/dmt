@@ -87,8 +87,12 @@ void bind_fdmt(py::module_& mod) {
         Incoherent Fast Dispersion Measure Transform.
 
         Transforms a frequency–time waterfall into a DM/delay–time plane.
-        ``mode='valid'`` keeps a streaming history so consecutive blocks
-        join without a wrap artefact.
+        Output sample ``t`` is the arrival time at ``f_min`` (:attr:`plan`
+        ``.f_ref``, the band's bottom edge). ``mode='valid'`` keeps a
+        streaming history so consecutive blocks join without a wrap
+        artefact; after construction or :meth:`reset_history` the first
+        :attr:`startup_samples` outputs are partial sums over zero-filled
+        history.
 
         Parameters
         ----------
@@ -103,9 +107,20 @@ void bind_fdmt(py::module_& mod) {
         dt_min, dt_step : int, optional
             Delay-grid range and stride.
         use_box_smearing : bool, optional
-            Account for intra-channel smearing in the tree.
+            Default ``True``: each channel contributes the mean of its level-0
+            box, the ``|dt|+1`` samples between its upper- and lower-edge
+            arrival times. That is a matched filter for intra-channel
+            dispersion smearing (best for single-pulse searches), and also a
+            per-channel low-pass filter of the *noise*: the output noise is
+            coloured (correlated in time, suppressed toward Nyquist), and a
+            single sigma cannot whiten its power spectrum. ``False`` takes the
+            channel's upper-edge sample only: white input gives white output
+            with variance ``nchans``, identical in distribution to DDMT, as
+            periodicity / power-spectrum searches need.
         mode : {'valid', 'full', 'roll'}, optional
-            Output time alignment.
+            ``'valid'`` (default): ``nsamps`` outputs per block, streaming
+            history kept across calls (bit-exact with one long call).
+            ``'full'``: ``nsamps + dt_max`` outputs. ``'roll'``: circular.
         nthreads : int, optional
             OpenMP threads on the CPU backend (default 1).
         nbeams : int, optional
@@ -219,6 +234,15 @@ void bind_fdmt(py::module_& mod) {
         .def_property_readonly(
             "plan", &FDMT::get_plan,
             "Get the FDMTPlan object containing transform details.")
+        .def_property_readonly(
+            "startup_samples",
+            [](const FDMT& fdmt) {
+                return fdmt.get_plan().get_startup_samples();
+            },
+            "Leading outputs after construction or reset_history() whose "
+            "input history is incomplete (zero-filled partial sums). Blocks "
+            "keep nsamps outputs, so these are written: discard or mask "
+            "them. Later blocks have complete support.")
         .def_property_readonly(
             "backend",
             [](const FDMT& fdmt) {
@@ -647,9 +671,20 @@ void bind_fdmt(py::module_& mod) {
         dt_min, dt_step : int, optional
             Delay-grid range and stride.
         use_box_smearing : bool, optional
-            Account for intra-channel smearing.
+            Default ``True``: each channel contributes the mean of its level-0
+            box, the ``|dt|+1`` samples between its upper- and lower-edge
+            arrival times. That is a matched filter for intra-channel
+            dispersion smearing (best for single-pulse searches), and also a
+            per-channel low-pass filter of the *noise*: the output noise is
+            coloured (correlated in time, suppressed toward Nyquist), and a
+            single sigma cannot whiten its power spectrum. ``False`` takes the
+            channel's upper-edge sample only: white input gives white output
+            with variance ``nchans``, identical in distribution to DDMT, as
+            periodicity / power-spectrum searches need. Level 0 is the same as
+            :class:`FDMT`'s.
         mode : {'valid', 'full', 'roll'}, optional
-            Output time alignment.
+            Output time alignment, as for :class:`FDMT`. After a cold start
+            the first :attr:`startup_samples` outputs are incomplete.
         nthreads : int, optional
             OpenMP / FFTW threads.
         nbeams : int, optional
@@ -750,6 +785,12 @@ void bind_fdmt(py::module_& mod) {
             "suggested_nsamps", &FDMTFFT::get_suggested_nsamps,
             "Valid mode: block length keeping >= 80% of every transform as "
             "output (else the plan's nsamps).")
+        .def_property_readonly(
+            "startup_samples", &FDMTFFT::get_startup_samples,
+            "Leading outputs after construction or reset_history() whose "
+            "input history is incomplete (zero-filled), including the "
+            "fractional-delay guard and output latency. Discard or mask "
+            "them.")
         .def_property_readonly("plan", &FDMTFFT::get_plan)
         .def_property_readonly("nbeams", &FDMTFFT::get_nbeams)
         .def_property_readonly("dt_grid_final",

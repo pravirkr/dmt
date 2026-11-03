@@ -152,6 +152,15 @@ void bind_plans(py::module_& mod) {
             py::arg("mode") = "valid")
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
+        .def_property_readonly(
+            "f_ref", &FDMTPlan::get_f_ref,
+            "Reference frequency of output times (MHz): f_min, the band's "
+            "bottom edge.")
+        .def_property_readonly(
+            "startup_samples", &FDMTPlan::get_startup_samples,
+            "Leading outputs after a cold start (construction or "
+            "reset_history) whose input history is incomplete (zero-filled). "
+            "They are written; discard or mask them.")
         .def_property_readonly("nchans", &FDMTPlan::get_nchans)
         .def_property_readonly("nsamps", &FDMTPlan::get_nsamps)
         .def_property_readonly("tsamp", &FDMTPlan::get_tsamp)
@@ -567,6 +576,11 @@ void bind_plans(py::module_& mod) {
             )doc")
         .def_property_readonly("f_min", &DDMTPlan::get_f_min)
         .def_property_readonly("f_max", &DDMTPlan::get_f_max)
+        .def_property_readonly(
+            "f_ref", &DDMTPlan::get_f_ref,
+            "Reference frequency of output times (MHz): the centre of the "
+            "highest-frequency channel, f_max - df/2. Channel delays use "
+            "channel centres.")
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp)
         .def_property_readonly("nbits", &DDMTPlan::get_nbits)

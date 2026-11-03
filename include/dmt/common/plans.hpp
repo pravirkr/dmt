@@ -214,6 +214,11 @@ public:
     [[nodiscard]] float get_f_min() const noexcept;
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
+    /// @brief Reference frequency of output times in MHz: f_min, the bottom
+    /// edge of the band. Output sample t is the arrival time at f_min.
+    /// (DDMT instead references the centre of its highest channel; see
+    /// DDMTPlan::get_f_ref().)
+    [[nodiscard]] float get_f_ref() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;
     /// @brief Number of time samples per block
@@ -288,6 +293,24 @@ public:
      * @throws std::out_of_range if dm_idx is invalid.
      */
     [[nodiscard]] std::vector<IndexType> trace_dm(SizeType dm_idx) const;
+
+    /**
+     * @brief Leading output samples with incomplete input support after a
+     * cold start.
+     *
+     * Output sample t of trial d reads channel c from input sample
+     * t + trace_dm(d)[c] onwards (a single sample without box smearing, the
+     * channel's level-0 box with it), so it needs input back to
+     * t - max_c(-trace_dm(d)[c]). In "valid" and "full" modes the first block
+     * after construction or reset_history() replaces the missing history
+     * with zeros: its first get_startup_samples() outputs are partial sums
+     * over fewer channels. They are written (blocks keep nsamps outputs, so
+     * streaming stays bit-exact), so discard or mask them. Later blocks have
+     * complete support. This is the maximum over all trials, at least as
+     * large as the per-trial need, and usually max(|dt_min|, |dt_max|).
+     * Computed on demand in O(ndms * nchans).
+     */
+    [[nodiscard]] SizeType get_startup_samples() const;
 
     /**
      * @brief Computes theoretical noise variance for a DM trial and boxcar
@@ -663,7 +686,11 @@ struct LevinConfig {
  *
  * Precomputes per-channel delay tables, fractional delays, and channel kill
  * masks for brute-force delay-and-sum dedispersion on float or packed-integer
- * filterbanks.
+ * filterbanks. f_min and f_max are the band edges; channel c is centred at
+ * f_min + (c + 1/2) df with df = (f_max - f_min) / nchans, and each channel
+ * is delayed from its centre frequency relative to get_f_ref(), the centre
+ * of the highest-frequency channel. (FDMT instead references f_min, the
+ * bottom edge of the band; see FDMTPlan::get_f_ref().)
  */
 class DDMTPlan {
 public:
@@ -743,6 +770,11 @@ public:
     [[nodiscard]] float get_f_min() const noexcept;
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
+    /// @brief Reference frequency of output times in MHz: the centre of the
+    /// highest-frequency channel, f_max - df/2 (SIGPROC's fch1 for a
+    /// descending band). Output sample t is the arrival time at this
+    /// frequency; every channel is delayed from its own centre frequency.
+    [[nodiscard]] float get_f_ref() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;
     /// @brief Time sample interval in seconds
