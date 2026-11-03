@@ -17,6 +17,8 @@ build:
     pre_build:
       # Doxygen warnings (missing CUDA/spdlog headers) must not abort the
       # Sphinx build. conf.py also runs Doxygen when this step is skipped.
+      # Doxygen 1.9 (Ubuntu 24.04) does not create a nested OUTPUT_DIRECTORY.
+      - mkdir -p docs/_build/doxygen
       - cd docs && doxygen Doxyfile || echo "doxygen failed; continuing without C++ XML"
 
 sphinx:

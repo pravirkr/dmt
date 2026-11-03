@@ -4,7 +4,7 @@ All notable changes to `dmt` are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-11-03
 
 The first release since 0.2.0. It rebuilds `dmt` as a family of
 dedispersion engines that share plans, DM grids and conventions, each running
@@ -67,5 +67,5 @@ their changes are included here.
 
 - FDMT on the CPU (`FDMTCPU`) and GPU (`FDMTGPU`) with Python bindings.
 
-[0.7.0]: https://github.com/pravirkr/dmt/compare/v0.2.0...HEAD
+[0.7.0]: https://github.com/pravirkr/dmt/compare/v0.2.0...v0.7.0
 [0.2.0]: https://github.com/pravirkr/dmt/releases/tag/v0.2.0

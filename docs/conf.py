@@ -342,6 +342,8 @@ def _run_doxygen() -> None:
         return
     try:
         print(f"Running doxygen from {DOCS_DIR}...")
+        # Doxygen before 1.10 does not create a nested OUTPUT_DIRECTORY.
+        (DOCS_DIR / "_build" / "doxygen").mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["doxygen", "Doxyfile"],
             cwd=str(DOCS_DIR),
