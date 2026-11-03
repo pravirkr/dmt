@@ -1,4 +1,4 @@
-# Fourier-Domain Variants
+# Fourier-domain variants
 
 `dmt` has two dedispersion engines that work in the Fourier domain, where a
 time shift is a phase ramp, $x(t-\tau) \leftrightarrow
@@ -15,9 +15,13 @@ time shift is a phase ramp, $x(t-\tau) \leftrightarrow
 | Stepper / level views | yes | no |
 | Backends | CPU, CUDA/HIP (same results to float rounding) | CPU, CUDA/HIP (same results to float rounding) |
 
-Both use the same conventions as the time-domain engines: channel `c` at
-`f_min + c * df`, delays referenced to the highest channel, the same DM
-constant, and time at native resolution.
+Each follows the conventions of its time-domain counterpart: the same DM
+constant, time at native resolution, and the same reference frequency
+(`plan.f_ref`). `FDMTFFT`, like FDMT, references `f_min`, the bottom edge of
+the band. `DDMTFFT`, like DDMT and SDMT, delays each channel from its centre,
+`f_min + (c + 1/2) df`, relative to the centre of the top channel,
+`f_max - df/2` (see [periodicity searches](periodicity.md) for what the
+reference means for output times).
 
 The Fourier engines transform to complex float spectra. Low-bit input does
 not make them any faster algorithmically; it only reduces the input bytes read
@@ -44,14 +48,20 @@ real amount, at no extra cost:
 
 - `DDMTFFT` delays every channel by its exact $\tau_{d,c} = \mathrm{DM}_d\,
   r_c$.
-- `FDMTFFT` (fractional delays are its default and its nature) replaces each
-  merge's rounded shift with
-  the least-squares shift that aligns the mean timing of the head sub-band's
+- `FDMTFFT` (fractional delays are its default) replaces each merge's
+  rounded shift with the least-squares shift that aligns the mean timing of the head sub-band's
   channels with the tail's at the node's DM.
 - `FDMTFFT(fractional_delays=False)` rounds every merge shift exactly as the
   time-domain FDMT does and reproduces its output through the Fourier domain.
   It exists only for equivalence tests: rounding the shifts gives up what the
   Fourier domain is for.
+
+With box smearing, `FDMTFFT` weights each level-0 box by the same dyadic
+box-mean weight as the FDMT's float path (`plan.box_weights`; see
+{ref}`box means <box-mean>`), so both transforms are in box-mean units. It
+never rounds the means: level 0 is formed in the Fourier domain, for float
+and packed input alike, whereas the time-domain FDMT rounds them for packed
+input.
 
 A fractional shift is band-limited (periodic sinc) interpolation, so every
 output needs context on both sides. Both engines keep `guard` samples (64)
@@ -61,10 +71,16 @@ of the per-sample noise):
 
 - `DDMTFFT`: `get_max_delay()` is `ceil(max tau) + guard`; the look-ahead is
   part of its streaming model (`get_output_nsamps()`).
-- `FDMTFFT` in valid mode (fractional delays, the default): the output lags the input
-  by the guard, `get_output_latency()` (Python `output_latency`) = 64. Output
+- `FDMTFFT` in valid mode (fractional delays, the default): the output lags
+  the input by the guard, `get_output_latency()` (Python `output_latency`) = 64. Output
   sample `o` of a block is stream time `block_start - 64 + o`. Full and roll
   mode, and the integer equivalence mode, have no latency.
+
+```{warning}
+After a cold start the first `startup_samples` outputs of `FDMTFFT` in valid
+mode (support, guard and latency together) are partial sums over zero-filled
+history; drop or mask them.
+```
 
 ## DDMTFFT: NUFFT, piecewise NUFFT or brute force
 
@@ -98,14 +114,20 @@ uniform runs and `DDMTFFT` would fall back to brute force. For fast
 Fourier-domain dedispersion over a wide DM range, use the DDplan-style
 **piecewise-uniform Levin grid**:
 
-- the DM range is split where the Levin step doubles;
-- each segment is uniformly spaced at the smallest Levin step inside it, so it
-  is never coarser than the Levin grid (at least its sensitivity);
-- each segment holds at least 32 trials (short segments are refined).
+- **Segments.** The DM range is split where the Levin step doubles.
+- **Spacing.** Each segment is uniformly spaced at the smallest Levin step
+  inside it, so it is never coarser than the Levin grid (at least its
+  sensitivity).
+- **Length.** Each segment holds at least 32 trials (short segments are
+  refined).
 
 It has typically 1.2–1.4x the Levin trials, and `DDMTFFT` runs one NUFFT per
 segment. With 4–6 segments the cost is still far below brute force, because the
 NUFFT cost per run hardly depends on its trial count.
+
+::::{tab-set}
+:::{tab-item} Python
+:sync: python
 
 ```python
 import dmtlib
@@ -122,15 +144,21 @@ dms = dmtlib.DDMTPlan.generate_levin_dm_grid_piecewise(
 eng = dmtlib.DDMTFFT(1200.0, 1600.0, 1024, 6.4e-5, dms)
 # grid.generate_optimal_dm_grid(..., method="levin_piecewise") is the same.
 ```
+:::
+:::{tab-item} C++
+:sync: cpp
 
-In C++: `plans::LevinConfig{..., .piecewise_uniform = true}` or
-`plans::DDMTPlan::generate_levin_dm_grid_piecewise(...)`. Any DDplan-style
-grid you build yourself (uniform segments of at least 32 trials) is detected
-the same way.
+Use `plans::LevinConfig{..., .piecewise_uniform = true}` or
+`plans::DDMTPlan::generate_levin_dm_grid_piecewise(...)`.
+:::
+::::
+
+Any DDplan-style grid you build yourself (uniform segments of at least 32
+trials) is detected the same way.
 
 ## Block length
 
-Every Fourier-domain call transforms the new block **plus** its context: the
+Every Fourier-domain call transforms the new block plus its context: the
 overlap history of `FDMTFFT` in valid mode, `get_max_delay() + guard` for
 `DDMTFFT`. A block much shorter than the context spends most of every FFT on
 it, which the time-domain engines never pay:
@@ -149,15 +177,21 @@ than 60%.
 
 ## FFT planning
 
-CPU transforms use FFTW. The engines are FFT-bound (on the M1 about half of
-`FDMTFFT`'s time is FFTW), so the plan quality matters:
+CPU transforms use FFTW. The engines are FFT-bound (about half of
+`FDMTFFT`'s CPU time is FFTW), so the plan quality matters:
 
-- The default `FFTW_ESTIMATE` plans are instant.
-- `FFTW_MEASURE` plans are 1.3–1.5x faster on the M1 for the non-power-of-two
-  lengths the engines use (for example 18432 = 2^11 · 9), but take about 2 s
-  per transform length to make.
+- **`FFTW_ESTIMATE`** (the default) plans are instant.
+- **`FFTW_MEASURE`** plans are 1.3–1.5x faster for the non-power-of-two lengths
+  the engines use (for example 18432 = 2^11 · 9), but take about 2 s per
+  transform length to make.
 
-For long-running pipelines, measure once per machine and keep the wisdom:
+```{tip}
+For long-running pipelines, measure once per machine and keep the wisdom.
+```
+
+::::{tab-set}
+:::{tab-item} Python
+:sync: python
 
 ```python
 import dmtlib
@@ -165,17 +199,26 @@ dmtlib.set_fft_planner(dmtlib.FFTPlanner.MEASURE)   # plans created from now on
 eng = dmtlib.DDMTFFT(...)                           # slower to construct
 dmtlib.export_fft_wisdom("dmt.wisdom")              # later runs: import_fft_wisdom
 ```
+:::
+:::{tab-item} C++
+:sync: cpp
 
-Or, without code changes, from the environment:
+The controls are `dmt::fft::set_planner`, `import_wisdom` and
+`export_wisdom` (`dmt/common/fft_config.hpp`).
+:::
+:::{tab-item} Environment
+
+Without code changes:
 
 ```bash
 export DMT_FFTW_PLANNER=measure          # estimate | measure | patient | exhaustive
 export DMT_FFTW_WISDOM=$HOME/.dmt.wisdom # imported before the first plan,
                                          # rewritten after every measured plan
 ```
+:::
+::::
 
-In C++ the controls are `dmt::fft::set_planner`, `import_wisdom` and
-`export_wisdom` (`dmt/common/fft_config.hpp`). The benchmark suite runs with
+The benchmark suite runs with
 `DMT_FFTW_PLANNER=measure` and a per-machine wisdom file
 (`run_suite.py --fftw-planner`).
 
@@ -186,24 +229,26 @@ transforms still work, but the wisdom functions are no-ops (they return
 `False`). Import `dmtlib` first to bind to FFTW.
 ```
 
+:::{dropdown} Transform lengths and overlap-save segments
+:icon: info
+
 Transform lengths are always FFTW-friendly (even, with only the prime factors
 2, 3, 5 and 7). `FDMTFFT` in valid and full mode transforms long blocks in
 overlap-save segments whose length is chosen from FFTW's own cost estimate.
 The result is the same linear convolution as one long transform. Memory stays
 bounded, and the transform length no longer grows with the block.
+:::
 
 ## Performance
 
-At the benchmark reference point (4096 channels, 16K samples, 2049 trials;
-CPUs with 8 threads and FFTW MEASURE plans, the GPU with device-resident data;
-see the [benchmarks](../benchmarks.md) for the sweeps):
+The [benchmarks](../benchmarks.md) plot both engines against FDMT, DDMT and
+SDMT across DM range, block length and input width. In short: on the CPU,
+`DDMT-FFT` with the NUFFT is the fastest engine at high DM, and `FDMT-FFT`
+costs up to about twice FDMT, since it is FFT-bound. On the GPU both stay
+within a small factor of FDMT.
 
-| Engine | Apple M1 Pro | Xeon Gold 6348H | NVIDIA L40S | Delays |
-| :--- | ---: | ---: | ---: | :--- |
-| FDMT | 25.5 ms | 53 ms | 4.8 ms | rounded tree |
-| FDMT-FFT (fractional delays, the default) | 83 ms | 77 ms | 5.5 ms | least-squares tree |
-| FDMT-FFT, `fractional_delays=False` (equivalence tests) | 57 ms | 58 ms | 5.0 ms | rounded tree (FDMT-identical) |
-| SDMT | 206 ms | 170 ms | 8.5 ms | rounded per channel |
-| DDMT | 851 ms | 573 ms | 21 ms | rounded per channel |
-| DDMT-FFT, NUFFT | 111 ms | 127 ms | 10.7 ms | exact per channel |
-| DDMT-FFT, brute force | 3.33 s | 1.35 s | 39 ms | exact per channel |
+```{seealso}
+- [Benchmarks](../benchmarks.md).
+- [Periodicity searches](periodicity.md).
+- {ref}`Box means <box-mean>`.
+```

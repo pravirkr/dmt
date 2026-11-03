@@ -8,6 +8,7 @@
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "test_helpers.hpp"
 
 namespace dmt {
 
@@ -434,11 +435,21 @@ TEST_CASE("FDMTPlan negative and symmetric dispersion", "[dmt_plans][cpu]") {
         CHECK(plan.get_effective_variance(32, 1, true) ==
               Catch::Approx(static_cast<float>(nchans)));
 
-        // For W = 1 across any DM: each channel has smearing s_i >= 0, so Var
-        // >= nchans
+        // For W = 1 across any DM: channel c contributes its box-mean weight
+        // squared times its box length L_c, so Var = sum_c w_c^2 L_c ~
+        // sum_c 1 / L_c <= nchans.
+        const auto smearing = plan.get_smearing_grid_final();
         for (size_t dm_idx = 0; dm_idx < plan.get_dmt_ndms(); dm_idx += 10) {
-            CHECK(plan.get_effective_variance(dm_idx, 1, true) >=
-                  static_cast<float>(nchans));
+            double expected = 0.0;
+            for (SizeType c = 0; c < nchans; ++c) {
+                const auto len =
+                    static_cast<SizeType>(smearing[(dm_idx * nchans) + c]) + 1;
+                const double w = test::box_mean_weight(plan, len);
+                expected += w * w * static_cast<double>(len);
+            }
+            CHECK(plan.get_effective_variance(dm_idx, 1, true) ==
+                  Catch::Approx(expected).epsilon(1e-6));
+            CHECK(expected <= static_cast<double>(nchans));
         }
 
         // For W = 4: Variance should be positive and <= nchans * W^2

@@ -22,6 +22,7 @@
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/utils/simulate.hpp"
+#include "test_helpers.hpp"
 
 namespace dmt::test::cfdmt {
 
@@ -129,6 +130,25 @@ inline SizeType nearest_row(const CohFDMTPlan& plan, double dm) {
     return best;
 }
 
+// Mean box-mean weight of the channels of CohFDMT row `row` (its fine FDMT
+// row runs with box smearing, see fdmt_box_weights.hpp): the row's response,
+// per unit of detected energy, to a pulse spread evenly over the channels
+// and inside every channel's level-0 box.
+inline double row_box_gain(const CohFDMTPlan& plan, SizeType row) {
+    const auto& fplan   = plan.get_fdmt_plan();
+    const auto nchans   = fplan.get_nchans();
+    const auto fine     = row % fplan.get_dmt_ndms();
+    const auto smearing = fplan.get_smearing_grid_final();
+    double gain         = 0.0;
+    for (SizeType c = 0; c < nchans; ++c) {
+        const auto len =
+            static_cast<SizeType>(std::lround(smearing[(fine * nchans) + c])) +
+            1;
+        gain += test::box_mean_weight(fplan, len);
+    }
+    return gain / static_cast<double>(nchans);
+}
+
 // CohFDMT recovers an injected dispersed impulse.
 inline void check_impulse_recovery(const Exec& exec) {
     auto cfg      = small_config();
@@ -162,7 +182,9 @@ inline void check_impulse_recovery(const Exec& exec) {
         const auto dmt  = run(search, v, n, 0, sc);
         const auto peak = find_peak(dmt, nout);
         const auto want = nearest_row(plan, cs.dm);
-        const double e  = detected_energy(plan, v, sc);
+        // Detected energy, as the row weights it (box means).
+        const double e_all = detected_energy(plan, v, sc);
+        const double e     = e_all * row_box_gain(plan, want);
         const double fine_step =
             plan.get_dm_grid_final()[1] - plan.get_dm_grid_final()[0];
         CAPTURE(peak.row, want, peak.t, peak.value / e);
@@ -170,7 +192,7 @@ inline void check_impulse_recovery(const Exec& exec) {
               1.5 * fine_step);
         CHECK(std::abs(static_cast<double>(peak.t) - cs.j0) <= 1.0);
         CHECK(peak.value >= cs.min_frac * e);
-        CHECK(peak.value <= 1.05 * e);
+        CHECK(peak.value <= 1.05 * e_all); // box weights are <= 1
     }
 }
 
@@ -308,7 +330,11 @@ inline void check_noise_statistics(const Exec& exec) {
         INFO("w=" << w << " mean(measured / predicted variance) = " << ratio
                   << ", mean(row mean / sigma) = "
                   << mean_sum / static_cast<double>(ndm));
-        CHECK(ratio == Catch::Approx(1.0).epsilon(0.02));
+        // One noise realisation: w = 1 agrees within 0.3%. The w = 16
+        // boxcars are strongly correlated (and so are neighbouring rows), so
+        // one block scatters by about +-2% over seeds (0.98-1.02, mean 0.99,
+        // with box sums and box means alike).
+        CHECK(ratio == Catch::Approx(1.0).epsilon(w == 1 ? 0.01 : 0.03));
         CHECK(std::abs(mean_sum / static_cast<double>(ndm)) < 0.05);
     }
 }

@@ -20,6 +20,7 @@
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/fdmt_search.hpp"
 
 namespace dmt::algorithms::detail {
 
@@ -60,6 +61,13 @@ struct FDMTEngineConfig {
     SizeType fuse_levels{algorithms::kFDMTAutoFuse};
     bool int_tree{true};
     Exec exec{};
+    SizeType chunk_nsamps{0};           ///< 0: automatic (see fdmt_chunk.hpp)
+    SizeType max_fuse_levels{SIZE_MAX}; ///< Private search boundary.
+    /// The search reads levels below the root (subband search), so they must
+    /// be materialised (no direct top, see fdmt_direct.hpp).
+    bool search_upper_levels{false};
+    SizeType search_nbits{
+        32}; ///< Exact dyadic integer search; ordinary FDMT unchanged.
 };
 
 class FDMTEngine {
@@ -70,6 +78,27 @@ public:
     FDMTEngine& operator=(const FDMTEngine&) = delete;
     FDMTEngine(FDMTEngine&&)                 = delete;
     FDMTEngine& operator=(FDMTEngine&&)      = delete;
+
+    // Search consumes chunks without allocating a root output plane.
+    virtual void execute_search(std::span<const float>, FDMTSearchSink&) {
+        throw_no_device_memory("FDMT search host execution", backend());
+    }
+    virtual void
+    execute_search(DeviceSpan<const float>, FDMTSearchSink&, Stream) {
+        throw_no_device_memory("FDMT search device execution", backend());
+    }
+
+    virtual void
+    execute_search(std::span<const uint8_t>, SizeType, FDMTSearchSink&) {
+        throw_no_device_memory("FDMT packed search host execution", backend());
+    }
+    virtual void execute_search(DeviceSpan<const uint8_t>,
+                                SizeType,
+                                FDMTSearchSink&,
+                                Stream) {
+        throw_no_device_memory("FDMT packed search device execution",
+                               backend());
+    }
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,
@@ -118,10 +147,12 @@ public:
     [[nodiscard]] virtual SizeType num_subbands() const                     = 0;
     [[nodiscard]] virtual bool is_finished() const noexcept                 = 0;
 
+    virtual void reset_search_history(Stream) { reset_history(); }
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
 
-    [[nodiscard]] virtual SizeType get_fuse_levels() const noexcept = 0;
+    [[nodiscard]] virtual SizeType get_fuse_levels() const noexcept  = 0;
+    [[nodiscard]] virtual SizeType get_chunk_nsamps() const noexcept = 0;
     [[nodiscard]] virtual algorithms::FDMTMemoryUsage
     get_memory_usage() const noexcept                 = 0;
     [[nodiscard]] virtual std::string summary() const = 0;
@@ -317,6 +348,27 @@ public:
     FDMTFFTEngine& operator=(const FDMTFFTEngine&) = delete;
     FDMTFFTEngine(FDMTFFTEngine&&)                 = delete;
     FDMTFFTEngine& operator=(FDMTFFTEngine&&)      = delete;
+
+    // Valid-mode search: each overlap-save segment hands its DM rows to
+    // `sink` (level niters, materialized) instead of writing a DM-time plane.
+    // Rows are in input-stream sample coordinates: output sample o of a
+    // block is stream sample block_start - latency + o, and the first
+    // `latency` output samples of a stream (before sample 0) are dropped.
+    virtual void execute_search(std::span<const float>, FDMTSearchSink&) {
+        throw_no_device_memory("FDMTFFT search host execution", backend());
+    }
+    virtual void
+    execute_search(DeviceSpan<const float>, FDMTSearchSink&, Stream) {
+        throw_no_device_memory("FDMTFFT search device execution", backend());
+    }
+    /// Clears the overlap history and restarts the search stream at 0.
+    virtual void reset_search_history(Stream) { reset_history(); }
+    /// Engine-owned buffers (output: the caller's DM-time plane).
+    [[nodiscard]] virtual FDMTMemoryUsage memory_usage() const noexcept {
+        return {};
+    }
+    /// Output samples per overlap-save segment (the search chunk).
+    [[nodiscard]] virtual SizeType segment_nsamps() const noexcept { return 0; }
 
     // Host memory: every backend. Packed input is (nbeams, nchans,
     // row bytes) at `nbits` (LSB first), or with `time_major` (nbeams,

@@ -58,9 +58,10 @@ DMT_BUILD_PYTHON = "ON"
 DMT_BUILD_TESTING = "OFF"
 DMT_BUILD_DOCS = "OFF"
 DMT_BUILD_BENCHMARKS = "OFF"
-DMT_GPU = "AUTO"
+# cibuildwheel exports these; unset keeps the local native / auto-GPU build.
+DMT_GPU = { env = "DMT_GPU", default = "AUTO" }
 DMT_USE_SYSTEM_DEPS = "OFF"
-DMT_ENABLE_NATIVE_ARCH = "ON"
+DMT_ENABLE_NATIVE_ARCH = { env = "DMT_ENABLE_NATIVE_ARCH", default = "ON" }
 DMT_ENABLE_COVERAGE = "OFF"
 DMT_ENABLE_IPO = "OFF"
 BUILD_SHARED_LIBS = "OFF"

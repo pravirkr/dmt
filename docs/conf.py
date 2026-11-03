@@ -74,6 +74,10 @@ exclude_patterns = [
     "logo-src",
     # Written by conf.py and included from api/cpp_api.md. Not a standalone page.
     "api/_breathe_body.rst",
+    # Kept in the repository but not published yet.
+    "pipeline_guide/fdmt_boxcar.md",
+    "pipeline_guide/coherent_hybrid.md",
+    "pipeline_guide/performance.md",
 ]
 # "any" turns ordinary RST backticks into cross-references and fails the
 # build whenever a name is not in the domain index. Leave the default role
@@ -125,7 +129,10 @@ autodoc_default_options = {
     "undoc-members": False,
     "show-inheritance": True,
 }
-suppress_warnings = ["autosummary.import_cycle"]
+# Breathe declares the `dmt` namespace once per `doxygenfile` that opens it
+# (backend.hpp, fft_config.hpp, types.hpp), which Sphinx reports as duplicate
+# `cpp:type:: dmt` declarations. The namespace is not a type; nothing is lost.
+suppress_warnings = ["autosummary.import_cycle", "duplicate_declaration.cpp"]
 
 
 # -- Numpydoc

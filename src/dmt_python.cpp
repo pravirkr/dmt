@@ -37,6 +37,7 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         )doc");
     dmt::bind_plans(mod);
     dmt::bind_fdmt(mod);
+    dmt::bind_fdmt_boxcar(mod);
     dmt::bind_cfdmt(mod);
     dmt::bind_ddmt(mod);
     dmt::bind_ddmt_fft(mod);

@@ -227,7 +227,7 @@ def test_fdmt_gpu_execute_out_buffer(gpu_backend: str) -> None:
     waterfall = rng.standard_normal((2, 16, 64), dtype=np.float32)
     gpu = on(gpu_backend, FDMT, 1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
     cpu = FDMT(1000.0, 1500.0, 16, 64, 0.001, 8, nbeams=2)
-    out = np.empty(2 * gpu.plan.buffer_size, dtype=np.float32)
+    out = np.empty(2 * gpu.plan.dmt_size, dtype=np.float32)
     got = gpu.execute(waterfall, out=out)
     assert np.shares_memory(got, out)
     np.testing.assert_allclose(got, cpu.execute(waterfall), rtol=2e-3, atol=2e-3)

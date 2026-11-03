@@ -151,13 +151,15 @@ __global__ void kernel_update_history(const void* __restrict__ src,
     }
 }
 
-// Level-0 windows W0[s][k] = (box ? sum_{u <= s} W^(u k) : W^(s k)) / N.
+// Level-0 windows W0[s][k] = (box ? box_wf[s] * sum_{u <= s} W^(u k) :
+// W^(s k)) / N, box_wf[s] the box-mean weight of a box of s + 1 samples
+// (fdmt_box_weights.hpp).
 __global__ void
 kernel_level0_windows(const unsigned long long* __restrict__ sfx,
                       float2* __restrict__ w0,
                       int dt0_max,
                       int nb,
-                      int box,
+                      const float* __restrict__ box_wf,
                       float norm) {
     const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (k >= nb) {
@@ -168,8 +170,9 @@ kernel_level0_windows(const unsigned long long* __restrict__ sfx,
         const float2 w = phasor(sfx[s], static_cast<unsigned>(k));
         acc.x += w.x;
         acc.y += w.y;
-        const float2 v                         = box != 0 ? acc : w;
-        w0[(static_cast<int64_t>(s) * nb) + k] = {v.x * norm, v.y * norm};
+        const float2 v    = box_wf != nullptr ? acc : w;
+        const float scale = box_wf != nullptr ? norm * box_wf[s] : norm;
+        w0[(static_cast<int64_t>(s) * nb) + k] = {v.x * scale, v.y * scale};
     }
 }
 
@@ -490,6 +493,60 @@ public:
         m_device_work.mark(s);
     }
 
+    void execute_search(DeviceSpan<const float> d_waterfall,
+                        detail::FDMTSearchSink& sink,
+                        Stream stream) override {
+        gpu_utils::set_device(m_device_id);
+        if (m_mode != FDMTMode::kValid) {
+            throw std::logic_error("FDMTFFT: search requires valid mode");
+        }
+        if (d_waterfall.size() != m_nbeams * m_nchans * m_nsamps) {
+            throw std::invalid_argument(std::format(
+                "FDMTFFT::execute_search: expected {} samples, got {}",
+                m_nbeams * m_nchans * m_nsamps, d_waterfall.size()));
+        }
+        const auto s = to_cuda(stream);
+        m_device_work.order(s);
+        run(Input{.data = d_waterfall.data(), .row_len = m_nsamps, .nbits = 32},
+            nullptr, s, &sink);
+        m_device_work.mark(s);
+    }
+
+    void reset_search_history(Stream stream) override {
+        gpu_utils::set_device(m_device_id);
+        const auto s = to_cuda(stream);
+        m_device_work.order(s);
+        if (m_hist_len > 0) {
+            gpu_utils::check_gpu_call(
+                cudaMemsetAsync(m_hist[m_hist_cur].data(), 0,
+                                history_state_size() * sizeof(float), s),
+                "FDMTFFT: reset search history");
+        }
+        m_search_pos = 0;
+        m_device_work.mark(s);
+    }
+
+    [[nodiscard]] SizeType segment_nsamps() const noexcept override {
+        return m_seg.hop;
+    }
+
+    [[nodiscard]] FDMTMemoryUsage memory_usage() const noexcept override {
+        return {
+            .plan  = (m_l0_chan.capacity() + m_l0_shift.capacity()) *
+                     sizeof(uint32_t),
+            .state = (m_spec.capacity() + m_mid[0].capacity() +
+                      m_mid[1].capacity() + m_out_spec.capacity()) *
+                     sizeof(float2),
+            .history =
+                (m_hist[0].capacity() + m_hist[1].capacity()) * sizeof(float),
+            .workspace =
+                (m_win.capacity() + m_in_d.capacity() + m_out_d.capacity()) *
+                    sizeof(float) +
+                m_packed_d.capacity(),
+            .output = 0,
+        };
+    }
+
     void execute(DeviceSpan<const uint8_t> d_packed,
                  SizeType nbits,
                  DeviceSpan<float> d_dmt,
@@ -713,6 +770,7 @@ public:
     // ---- history ----
 
     void reset_history() noexcept override {
+        m_search_pos = 0;
         try {
             gpu_utils::set_device(m_device_id);
             m_device_work.wait();
@@ -826,6 +884,8 @@ private:
     DevBuf<float2> m_spec;     // [beam][chan][nb]
     DevBuf<float2> m_mid[2];   // inner stage boundaries [beam][rows][nb]
     DevBuf<float2> m_out_spec; // [beam][ndm][nb]
+
+    uint64_t m_search_pos{0}; // execute_search(): stream position
 
     // History [beam][chan][m_hist_len] (valid mode), double-buffered.
     SizeType m_hist_len{0};
@@ -1023,11 +1083,24 @@ private:
         }
         DevBuf<unsigned long long> s0_d;
         s0_d.upload(s0);
+        // Box-mean weights w(s + 1) * 2^-b, the FDMT's own.
+        DevBuf<float> box_wf_d;
+        if (m_use_box_smearing) {
+            const auto weights = m_plan->get_box_weights();
+            const float unit   = std::ldexp(
+                1.0F, -static_cast<int>(m_plan->get_box_fraction_bits()));
+            std::vector<float> box_wf(m_dag.dt0_max + 1);
+            for (SizeType s = 0; s <= m_dag.dt0_max; ++s) {
+                box_wf[s] = static_cast<float>(weights[s]) * unit;
+            }
+            box_wf_d.upload(box_wf);
+        }
         g->w0.reserve((m_dag.dt0_max + 1) * g->nb);
         kernel_level0_windows<<<blocks_for(static_cast<int64_t>(g->nb)),
                                 kBlock>>>(
             s0_d.data(), g->w0.data(), static_cast<int>(m_dag.dt0_max),
-            static_cast<int>(g->nb), m_use_box_smearing ? 1 : 0,
+            static_cast<int>(g->nb),
+            m_use_box_smearing ? box_wf_d.data() : nullptr,
             1.0F / static_cast<float>(n));
         gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
                                   "FDMTFFT (cuda): level-0 windows");
@@ -1222,20 +1295,29 @@ private:
                  SizeType o0,
                  SizeType cnt,
                  cudaStream_t s) const {
+        inverse_rows(g, out_spec, time, s);
         const auto rows = static_cast<int64_t>(m_nbeams * m_ndms);
-        fourier_gpu::hermitian_edges(out_spec, static_cast<SizeType>(rows),
-                                     g.nb, g.n_bins, g.n_fft, s);
-        g.c2r->execute(
-            cuda::std::span<float>(time, static_cast<SizeType>(rows) * g.n_fft),
-            cuda::std::span<ComplexTypeGPU>(
-                reinterpret_cast<ComplexTypeGPU*>(out_spec),
-                static_cast<SizeType>(rows) * g.nb),
-            s);
         const dim3 grid(blocks_for(static_cast<int64_t>(cnt)), grid_y(rows));
         kernel_trim<<<grid, kBlock, 0, s>>>(
             time, dst, rows, static_cast<int64_t>(g.n_fft),
             static_cast<int64_t>(m_nsamps_out), static_cast<int64_t>(o0),
             static_cast<int64_t>(cnt), static_cast<int64_t>(skip));
+    }
+
+    // out_spec rows (nbeams * ndms, dist nb; overwritten) -> time rows
+    // (dist n_fft).
+    void inverse_rows(const Geo& g,
+                      float2* out_spec,
+                      float* time,
+                      cudaStream_t s) const {
+        const auto rows = m_nbeams * m_ndms;
+        fourier_gpu::hermitian_edges(out_spec, rows, g.nb, g.n_bins, g.n_fft,
+                                     s);
+        g.c2r->execute(
+            cuda::std::span<float>(time, rows * g.n_fft),
+            cuda::std::span<ComplexTypeGPU>(
+                reinterpret_cast<ComplexTypeGPU*>(out_spec), rows * g.nb),
+            s);
     }
 
     // Channel spectra of one segment: R2C into `spec`, or (half) the
@@ -1264,12 +1346,28 @@ private:
             s);
     }
 
-    void run(const Input& in, float* dmt, cudaStream_t s) {
+    // With `sink` (execute_search), each segment's DM rows are handed to it
+    // straight from the C2R output, in input-stream sample coordinates,
+    // instead of being trimmed into `dmt`.
+    void run(const Input& in,
+             float* dmt,
+             cudaStream_t s,
+             detail::FDMTSearchSink* sink = nullptr) {
         const auto& g   = *m_geo;
         const auto& sts = m_stages.stages;
         const bool half = g.half != nullptr;
         for (SizeType seg = 0; seg < m_seg.nseg; ++seg) {
-            const auto o0 = seg * m_seg.hop;
+            const auto o0      = seg * m_seg.hop;
+            const auto cnt     = std::min(m_seg.hop, m_nsamps_out - o0);
+            const auto latency = m_geom.latency;
+            const auto pos     = m_search_pos + o0;
+            const auto drop =
+                sink != nullptr && pos < latency
+                    ? std::min(cnt, static_cast<SizeType>(latency - pos))
+                    : SizeType{0};
+            if (drop == cnt) {
+                continue; // search: all before stream sample 0
+            }
             forward(in, g, m_win.data(), m_spec.data(), o0, m_seg.zeros, s,
                     half);
             for (SizeType i = 0; i < sts.size(); ++i) {
@@ -1287,8 +1385,25 @@ private:
                 launch_stage(m_stages, sts[i], g, src, dst, in_beam, out_beam,
                              first, s, first && half);
             }
-            inverse(g, m_out_spec.data(), m_win.data(), dmt, m_seg.skip, o0,
-                    std::min(m_seg.hop, m_nsamps_out - o0), s);
+            if (sink == nullptr) {
+                inverse(g, m_out_spec.data(), m_win.data(), dmt, m_seg.skip, o0,
+                        cnt, s);
+                continue;
+            }
+            inverse_rows(g, m_out_spec.data(), m_win.data(), s);
+            const detail::FDMTSearchInput input{
+                .state             = m_win.data() + m_seg.skip + drop,
+                .row_stride        = g.n_fft,
+                .beam_stride       = m_ndms * g.n_fft,
+                .nsamps            = cnt - drop,
+                .sample_begin      = pos + drop - latency,
+                .materialized_root = true,
+                .stream            = Stream{s},
+            };
+            sink->consume(m_plan->get_niters(), input);
+        }
+        if (sink != nullptr) {
+            m_search_pos += m_nsamps;
         }
         update_history(in, s);
         gpu_utils::check_last_gpu_error("FDMTFFT (cuda): execute");

@@ -52,7 +52,7 @@ bool skip_if_over_device_budget(benchmark::State& state,
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     BENCH_GPU_TRY(cudaMemGetInfo(&free_bytes, &total_bytes));
-    const double need   = estimate_bytes(algo, plan, p);
+    const double need   = estimate_bytes(algo, plan, p, true);
     const double budget = 0.9 * static_cast<double>(free_bytes);
     if (need > budget) {
         state.SkipWithError(
@@ -69,9 +69,9 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
     if (skip_if_over_device_budget(state, Algo::kFDMT, plan, p)) {
         return;
     }
-    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
+    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
               "valid", bench_gpu_exec());
-    thrust::device_vector<float> dmt(plan.get_buffer_size());
+    thrust::device_vector<float> dmt(plan.get_dmt_size());
     if (p.nbits == 32) {
         const auto host = make_float_input(kNchans * p.nsamps);
         const thrust::device_vector<float> wf(host.begin(), host.end());
@@ -101,9 +101,9 @@ void bench_fdmt_cuda_host(benchmark::State& state, Point p) {
     if (skip_if_over_device_budget(state, Algo::kFDMT, plan, p)) {
         return;
     }
-    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1, true,
+    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
               "valid", bench_gpu_exec());
-    std::vector<float> dmt(plan.get_buffer_size());
+    std::vector<float> dmt(plan.get_dmt_size());
     if (p.nbits == 32) {
         const auto wf = make_float_input(kNchans * p.nsamps);
         fdmt.execute(wf, dmt); // warm-up, also allocates the staging
@@ -132,8 +132,8 @@ void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
         return;
     }
     try {
-        FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, p.dt_max, 0, 1,
-                     true, "valid", bench_gpu_exec(), 1, kFrac);
+        FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
+                     "valid", bench_gpu_exec(), 1, kFrac);
         const auto run = [&](const auto& call) {
             call(); // warm-up (history, plans, staging)
             BENCH_GPU_TRY(cudaDeviceSynchronize());
@@ -183,16 +183,17 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
     if (skip_if_over_device_budget(state, kAlgo, plan, p)) {
         return;
     }
-    const auto dms = plan.get_dm_grid_final();
+    const auto dms = dm_grid(p);
     Engine ddmt(kFMin, kFMax, kNchans, kTsamp, dms, bench_gpu_exec(), p.nbits);
-    const auto ndms   = dms.size();
-    const auto n_cold = ddmt.get_output_nsamps(p.nsamps);
+    const auto ndms = dms.size();
     if (p.nbits == 32) {
         const auto host = make_float_input(kNchans * p.nsamps);
         const thrust::device_vector<float> wf(host.begin(), host.end());
         thrust::device_vector<float> dmt(ndms * p.nsamps);
-        ddmt.execute(dspan_c(wf),
-                     DeviceSpan<float>(dspan(dmt).data(), ndms * n_cold));
+        warm_up_stream(ddmt, p.nsamps, [&](SizeType n) {
+            ddmt.execute(dspan_c(wf),
+                         DeviceSpan<float>(dspan(dmt).data(), ndms * n));
+        });
         BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
             const GPUEventTimer timer{state};
@@ -202,8 +203,10 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
         const auto host = make_packed_input(packed_bytes(p.nsamps, p.nbits));
         const thrust::device_vector<uint8_t> wf(host.begin(), host.end());
         thrust::device_vector<int32_t> dmt(ndms * p.nsamps);
-        ddmt.execute(dspan_c(wf), p.nsamps,
-                     DeviceSpan<int32_t>(dspan(dmt).data(), ndms * n_cold));
+        warm_up_stream(ddmt, p.nsamps, [&](SizeType n) {
+            ddmt.execute(dspan_c(wf), p.nsamps,
+                         DeviceSpan<int32_t>(dspan(dmt).data(), ndms * n));
+        });
         BENCH_GPU_TRY(cudaDeviceSynchronize());
         for (auto _ : state) {
             const GPUEventTimer timer{state};
@@ -225,16 +228,15 @@ void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
         return;
     }
     try {
-        const auto dms = plan.get_dm_grid_final();
+        const auto dms = dm_grid(p);
         DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
                     bench_gpu_exec(), p.nbits, {}, 1,
                     DDMTFFTOptions{.method = kMethod});
         const auto ndms   = dms.size();
-        const auto n_cold = ndms * eng.get_output_nsamps(p.nsamps);
         const auto n_warm = ndms * p.nsamps;
-        // The first (cold) call fills the history and has fewer outputs.
+        // Cold calls fill the history and have fewer outputs.
         const auto run = [&](const auto& call) {
-            call(n_cold);
+            warm_up_stream(eng, p.nsamps, [&](SizeType n) { call(ndms * n); });
             BENCH_GPU_TRY(cudaDeviceSynchronize());
             for (auto _ : state) {
                 const GPUEventTimer timer{state};
@@ -294,14 +296,18 @@ void register_cuda() {
     for (const auto sweep : {Sweep::kNsamps, Sweep::kNdms}) {
         for (const auto& p : sweep_points(sweep)) {
             add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
-            add(bench_name(Algo::kFDMTFFT, DMT_GPU_NAME, p),
-                bench_fdmt_fft_cuda<false, false>, p);
+            if (is_reference(p)) { // verification mode, not plotted
+                add(bench_name(Algo::kFDMTFFT, DMT_GPU_NAME, p),
+                    bench_fdmt_fft_cuda<false, false>, p);
+            }
             add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
                 bench_fdmt_fft_cuda<true, false>, p);
             add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
                 bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
-            add(bench_name(Algo::kDDMTFFTBrute, DMT_GPU_NAME, p),
-                bench_ddmt_fft_cuda<DDMTFFTMethod::kBrute, false>, p);
+            if (is_reference(p)) { // exact reference, not plotted
+                add(bench_name(Algo::kDDMTFFTBrute, DMT_GPU_NAME, p),
+                    bench_ddmt_fft_cuda<DDMTFFTMethod::kBrute, false>, p);
+            }
             add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
                 bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
             add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),

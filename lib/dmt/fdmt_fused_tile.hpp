@@ -6,11 +6,13 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/fdmt_box_weights.hpp"
 
 // Level fusion for the CUDA backend (FDMTExecConfig::fuse_levels): level-0
 // initialisation plus the first F tree merges of one channel group, over one
@@ -95,15 +97,24 @@ struct FDMTInputPacked {
  * magnitude s is computed once and written to the +s / -s rows present.
  * `get_sample(tt)` returns the input at absolute sample tt <= t (history,
  * wrap or zero padding for tt < 0 is the caller's business);
- * `write_row(i_dt, value)` stores row i_dt's value at t.
+ * `write_row(i_dt, value)` stores row i_dt's value at t. With box smearing
+ * the box sum of |dt| = s, accumulated in TAcc (float, or uint32_t for the
+ * exact integers of packed input), is written as `box_mean(s, sum)`, its box
+ * mean in the destination's units (fdmt_box_weights.hpp); the running sum
+ * itself stays unscaled.
  */
-template <bool UseBoxSmearing, typename GetSample, typename WriteRow>
+template <bool UseBoxSmearing,
+          typename TAcc,
+          typename GetSample,
+          typename WriteRow,
+          typename BoxMean>
 DMT_HD inline void fdmt_init_column(int dt_first,
                                     int dt_last,
                                     int t,
                                     GetSample&& get_sample,
-                                    WriteRow&& write_row) {
-    const auto write_matches = [&](int s, float val) {
+                                    WriteRow&& write_row,
+                                    BoxMean&& box_mean) {
+    const auto write_matches = [&](int s, auto val) {
         if (s >= dt_first && s <= dt_last) {
             write_row(s - dt_first, val);
         }
@@ -121,23 +132,24 @@ DMT_HD inline void fdmt_init_column(int dt_first,
         (dt_last >= 0) ? 0 : (abs_first < abs_last ? abs_first : abs_last);
     const int s_hi = abs_first > abs_last ? abs_first : abs_last;
     if constexpr (UseBoxSmearing) {
-        float prev_val;
+        TAcc prev_val;
         if (s_lo == 0) {
-            prev_val = get_sample(t);
+            prev_val = static_cast<TAcc>(get_sample(t));
         } else {
-            float sum = 0.0F;
+            TAcc sum = 0;
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #pragma unroll 4
 #endif
             for (int d = 0; d <= s_lo; ++d) {
-                sum += get_sample(t - d);
+                sum += static_cast<TAcc>(get_sample(t - d));
             }
             prev_val = sum;
         }
-        write_matches(s_lo, prev_val);
+        write_matches(s_lo, box_mean(s_lo, prev_val));
         for (int s = s_lo + 1; s <= s_hi; ++s) {
-            const float cur_val = prev_val + get_sample(t - s);
-            write_matches(s, cur_val);
+            const TAcc cur_val =
+                prev_val + static_cast<TAcc>(get_sample(t - s));
+            write_matches(s, box_mean(s, cur_val));
             prev_val = cur_val;
         }
     } else {
@@ -146,6 +158,39 @@ DMT_HD inline void fdmt_init_column(int dt_first,
         }
     }
 }
+
+/**
+ * @brief The level-0 box means of one engine (fdmt_box_weights.hpp), by |dt|
+ * = s: dyadic float weights `w_f32` for float input; for packed input the
+ * integer rounding recipes on the common scale 2^-F (`unit` = 2^-F), with
+ * 64-bit products when `round_u64`.
+ */
+struct FDMTBoxMeans {
+    const float* w_f32;
+    const FDMTBoxRound* round;
+    float unit;
+    int round_u64;
+
+    /// Box mean of float-input box sum `sum`.
+    [[nodiscard]] DMT_HD float of_float(int s, float sum) const {
+        return sum * w_f32[s];
+    }
+    /// Rounded box mean of packed-input box sum `sum`: in integer units
+    /// (exact as float) when `int_units`, else times 2^-F.
+    [[nodiscard]] DMT_HD float
+    of_packed(int s, uint32_t sum, bool int_units) const {
+        const auto& r = round[s];
+        const float v =
+            round_u64 != 0
+                ? static_cast<float>(box_round_apply<uint64_t>(sum, r))
+                : static_cast<float>(box_round_apply<uint32_t>(sum, r));
+        return int_units ? v : v * unit;
+    }
+};
+
+/// Whether level-0 input type Input is packed low-bit (exact integers).
+template <typename Input> inline constexpr bool kFDMTPackedInput    = false;
+template <> inline constexpr bool kFDMTPackedInput<FDMTInputPacked> = true;
 
 /**
  * @brief Kernel arguments of one fusion depth (plain data + device pointers).
@@ -163,12 +208,18 @@ struct FDMTFusedTileArgs {
     static constexpr int kLevelInfo   = 4;
     static constexpr int kCoordInfo   = 4;
 
-    int fuse;         ///< F (>= 1)
-    int tile_nsamps;  ///< T: level-F samples per tile
-    int cap_a;        ///< shared floats of buffer A (buffer B follows)
-    int nsubs;        ///< level-0 channels
-    int dt_max_final; ///< level-0 history stride per channel (valid mode)
+    int fuse;        ///< F (>= 1)
+    int tile_nsamps; ///< T: level-F samples per tile
+    int cap_a;       ///< shared floats of buffer A (buffer B follows)
+    int nsubs;       ///< level-0 channels
+    int hist_len;    ///< level-0 history per channel: last dt0_max samples
+    /// Box smearing: the level-0 box means; box.unit is also the value 2^-F
+    /// of one integer state unit (1 without box smearing).
+    FDMTBoxMeans box;
     int level_nsamps[kMaxFusedLevels + 1]; ///< L_l, samples per row
+    /// Valid-mode chunk: samples of this chunk in every row (rows keep their
+    /// stride L_l); 0 = each level's whole row L_l.
+    int active;
     int coords_offset[kMaxFusedLevels + 1];
     const int* group_info;
     const int* coords;
@@ -206,17 +257,20 @@ template <FDMTMode Mode> struct FDMTFusedMergeRow {
     const float* head; // of the head row, shifted by the delay; or nullptr
     int d;
     const float* thist; // valid-mode tree history of the coordinate
+    float hist_scale;   // canonical history -> tile units
 
     DMT_HD FDMTFusedMergeRow(const float* in,
                              int w_in,
                              int lo_in,
                              const int* coord,
-                             const float* thist_in)
+                             const float* thist_in,
+                             float hist_scale_in)
         : tail(in + (coord[0] * w_in) - lo_in),
           head(coord[1] < 0 ? nullptr
                             : in + (coord[1] * w_in) - lo_in - coord[2]),
           d(coord[2]),
-          thist(thist_in != nullptr ? thist_in + coord[3] : nullptr) {}
+          thist(thist_in != nullptr ? thist_in + coord[3] : nullptr),
+          hist_scale(hist_scale_in) {}
 
     [[nodiscard]] DMT_HD float cell(int t) const {
         const float tail_val = tail[t];
@@ -228,7 +282,7 @@ template <FDMTMode Mode> struct FDMTFusedMergeRow {
             if (t >= d) {
                 head_val = head[t];
             } else {
-                head_val = (thist != nullptr) ? thist[t] : 0.0F;
+                head_val = (thist != nullptr) ? thist[t] * hist_scale : 0.0F;
             }
         } else {
             // kFull: cells outside [0, L_in) are zero; kRoll: unwrapped.
@@ -243,7 +297,8 @@ template <FDMTMode Mode> struct FDMTFusedMergeRow {
  * FIFO update as kernel_advance_tree_history), from level l-1 in `in`. Each
  * history sample taken from the block is written by the tile whose output
  * range [t0, t0 + T) contains it; samples shifted from the previous history
- * (blocks shorter than the delay) by tile 0.
+ * (blocks shorter than the delay) by tile 0. The history is in canonical
+ * units: tile values are scaled by `to_canonical`.
  */
 template <typename Block>
 DMT_HD inline void fdmt_fused_tree_history(const Block& blk,
@@ -258,7 +313,8 @@ DMT_HD inline void fdmt_fused_tree_history(const Block& blk,
                                            int t0,
                                            int t_end,
                                            const float* thist_in,
-                                           float* thist_out) {
+                                           float* thist_out,
+                                           float to_canonical) {
     if (thist_out == nullptr || max_delay <= 0) {
         return;
     }
@@ -278,7 +334,7 @@ DMT_HD inline void fdmt_fused_tree_history(const Block& blk,
                 if (p < t0 || p >= t_end) {
                     return;
                 }
-                val = in[(head * w_in) + (p - lo_in)];
+                val = in[(head * w_in) + (p - lo_in)] * to_canonical;
             } else {
                 if (tile != 0) {
                     return;
@@ -307,6 +363,10 @@ DMT_HD inline void fdmt_fused_tree_history(const Block& blk,
  * @param hist0   This beam's level-0 input history (valid mode) or nullptr.
  * @param thist_in / thist_out This beam's tree history, previous / next block
  *                (valid mode) or nullptr.
+ *
+ * Shared memory holds levels 0..F-1 in level F's units: integer units
+ * (exact integers, see fdmt_box_weights.hpp) when TOut is an integer type,
+ * canonical box-mean units otherwise. The tree history is canonical.
  */
 template <FDMTMode Mode,
           bool UseBoxSmearing,
@@ -341,20 +401,29 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
     float* buf_a      = smem;
     float* buf_b      = smem + a.cap_a;
     const auto buf    = [&](int l) { return (l % 2 == 0) ? buf_a : buf_b; };
+    // Value of one tile unit in canonical units: integer level-F storage
+    // keeps integer units 2^-F (packed input only).
+    constexpr bool kIntUnits = std::is_integral_v<TOut>;
+    const float tile_unit    = kIntUnits ? a.box.unit : 1.0F;
+    const float hist_scale   = 1.0F / tile_unit;
+
+    // Samples of level l computed this call (rows keep their stride L_l).
+    const auto range = [&](int l) {
+        return a.active > 0 ? a.active : a.level_nsamps[l];
+    };
 
     // Phase 1: stage the group's input window [lo_0 - S, t_end) as float in
     // buffer B (free until level 1 is written).
-    const int l0      = a.level_nsamps[0];
+    const int l0      = range(0);
     const int x_lo    = lo(0) - s_halo;
     const int x_width = t_end - x_lo;
     float* x          = buf_b;
     blk.for_each_row(nch, x_width, [&](int c) {
         const int64_t row = row_base + ch0 + c;
         float* xr         = x + (c * x_width);
-        const float* h0 =
-            (hist0 != nullptr)
-                ? hist0 + ((ch0 + c) * a.dt_max_final) + a.dt_max_final
-                : nullptr;
+        const float* h0   = (hist0 != nullptr)
+                                ? hist0 + ((ch0 + c) * a.hist_len) + a.hist_len
+                                : nullptr;
         return [=, &input, &a](int j) {
             const int tt = x_lo + j;
             float v      = 0.0F;
@@ -365,7 +434,7 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
                 if (tt >= 0 && tt < l0) {
                     v = input.load(row, tt);
                 } else if (Mode == FDMTMode::kValid && tt < 0 &&
-                           tt >= -a.dt_max_final && h0 != nullptr) {
+                           tt >= -a.hist_len && h0 != nullptr) {
                     v = h0[tt];
                 }
             }
@@ -395,9 +464,21 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
                     }
                     return;
                 }
-                fdmt_init_column<UseBoxSmearing>(
-                    dt_lo, dt_hi, t, [&](int tt) { return xc[tt]; },
-                    [&](int i_dt, float v) { dr[(i_dt * w0) + j] = v; });
+                const auto get = [&](int tt) { return xc[tt]; };
+                const auto put = [&](int i_dt, float v) {
+                    dr[(i_dt * w0) + j] = v;
+                };
+                if constexpr (kFDMTPackedInput<Input>) {
+                    fdmt_init_column<UseBoxSmearing, uint32_t>(
+                        dt_lo, dt_hi, t, get, put, [&](int s, uint32_t sum) {
+                            return a.box.of_packed(s, sum, kIntUnits);
+                        });
+                } else {
+                    fdmt_init_column<UseBoxSmearing, float>(
+                        dt_lo, dt_hi, t, get, put, [&](int s, float sum) {
+                            return a.box.of_float(s, sum);
+                        });
+                }
             };
         });
         blk.sync();
@@ -411,11 +492,11 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
         const int lo_in  = lo(l - 1);
         const int w_out  = width(l);
         const int lo_out = lo(l);
-        const int n_l    = a.level_nsamps[l];
+        const int n_l    = range(l);
         const int* cl    = a.coords + (kCI * (a.coords_offset[l] + row0(l)));
         blk.for_each_row(nrows(l), w_out, [&](int r) {
             const FDMTFusedMergeRow<Mode> m(in, w_in, lo_in, cl + (kCI * r),
-                                            thist_in);
+                                            thist_in, hist_scale);
             float* dr = dst + (r * w_out);
             return [=](int j) {
                 const int t = lo_out + j;
@@ -424,25 +505,26 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
         });
         if constexpr (Mode == FDMTMode::kValid) {
             fdmt_fused_tree_history(blk, in, w_in, lo_in, cl, nrows(l),
-                                    lvl[(kLI * l) + 3], a.level_nsamps[l - 1],
-                                    tile, t0, t_end, thist_in, thist_out);
+                                    lvl[(kLI * l) + 3], range(l - 1), tile, t0,
+                                    t_end, thist_in, thist_out, tile_unit);
         }
         blk.sync();
     }
 
     // Phase 4: level F straight to its state buffer.
     {
-        const float* in = buf(fuse - 1);
-        const int w_in  = width(fuse - 1);
-        const int lo_in = lo(fuse - 1);
-        const int n_f   = a.level_nsamps[fuse];
-        const int tn    = a.tile_nsamps;
-        const int first = row0(fuse);
-        const int* cl   = a.coords + (kCI * (a.coords_offset[fuse] + first));
+        const float* in    = buf(fuse - 1);
+        const int w_in     = width(fuse - 1);
+        const int lo_in    = lo(fuse - 1);
+        const int n_f      = range(fuse);
+        const int stride_f = a.level_nsamps[fuse];
+        const int tn       = a.tile_nsamps;
+        const int first    = row0(fuse);
+        const int* cl      = a.coords + (kCI * (a.coords_offset[fuse] + first));
         blk.for_each_row(nrows(fuse), tn, [&](int r) {
             const FDMTFusedMergeRow<Mode> m(in, w_in, lo_in, cl + (kCI * r),
-                                            thist_in);
-            TOut* orow = out + (static_cast<int64_t>(first + r) * n_f);
+                                            thist_in, hist_scale);
+            TOut* orow = out + (static_cast<int64_t>(first + r) * stride_f);
             return [=](int j) {
                 const int t = t0 + j;
                 if (t < n_f) {
@@ -451,9 +533,10 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
             };
         });
         if constexpr (Mode == FDMTMode::kValid) {
-            fdmt_fused_tree_history(
-                blk, in, w_in, lo_in, cl, nrows(fuse), lvl[(kLI * fuse) + 3],
-                a.level_nsamps[fuse - 1], tile, t0, t_end, thist_in, thist_out);
+            fdmt_fused_tree_history(blk, in, w_in, lo_in, cl, nrows(fuse),
+                                    lvl[(kLI * fuse) + 3], range(fuse - 1),
+                                    tile, t0, t_end, thist_in, thist_out,
+                                    tile_unit);
         }
     }
 }
@@ -650,20 +733,25 @@ inline FDMTFusedTilePlan build_fused_tile_plan(
 
 /// @brief Kernel arguments for `plan` with tile width `tile`, pointing at
 /// the given (device or host) copies of the plan's tables.
+/// `box`: see FDMTFusedTileArgs (its tables are unused without box
+/// smearing).
 inline FDMTFusedTileArgs make_fused_tile_args(const FDMTFusedTilePlan& plan,
                                               int tile,
-                                              int dt_max_final,
+                                              int hist_len,
                                               const int* group_info,
                                               const int* coords,
                                               const int* dt_grid0,
                                               const int* ndt0,
-                                              const int* coord_offset0) {
+                                              const int* coord_offset0,
+                                              const FDMTBoxMeans& box) {
     FDMTFusedTileArgs a{};
-    a.fuse         = plan.fuse;
-    a.tile_nsamps  = tile;
-    a.cap_a        = static_cast<int>(plan.smem_floats(tile).first);
-    a.nsubs        = static_cast<int>(plan.ndt0.size());
-    a.dt_max_final = dt_max_final;
+    a.fuse        = plan.fuse;
+    a.tile_nsamps = tile;
+    a.cap_a       = static_cast<int>(plan.smem_floats(tile).first);
+    a.nsubs       = static_cast<int>(plan.ndt0.size());
+    a.hist_len    = hist_len;
+    a.box         = box;
+    a.active      = 0;
     for (int l = 0; l <= kMaxFusedLevels; ++l) {
         a.level_nsamps[l]  = plan.level_nsamps[l];
         a.coords_offset[l] = plan.coords_offset[l];

@@ -396,7 +396,13 @@ public:
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
         check_float("execute(float)");
-        const auto rows   = m_nbeams * m_plan.get_nchans();
+        const auto rows = m_nbeams * m_plan.get_nchans();
+        if (rows == 0 || waterfall.size() % rows != 0) {
+            throw std::invalid_argument(
+                std::format("{}: waterfall size {} is not a multiple of "
+                            "nbeams * nchans = {}",
+                            Algo::kName, waterfall.size(), rows));
+        }
         const auto nsamps = waterfall.size() / rows;
         check_size(dmt.size(), out_size(nsamps), "execute (output)");
         core<32>(reinterpret_cast<const uint8_t*>(waterfall.data()),

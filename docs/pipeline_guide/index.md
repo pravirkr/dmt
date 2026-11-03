@@ -1,27 +1,64 @@
-# Pipeline Integration Guide
+# Pipeline Guide
 
-This guide covers real-world telescope pipeline engineering: continuous data streams, overlap-save history, multi-beam batching, exact noise calibration, and known quirks.
+These pages cover what you need once `dmt` sits inside a real pipeline rather
+than a notebook. Read the first three if you are building a streaming search.
+Read *Periodicity searches* if you want a plain dedispersed time series.
+
+::::{grid} 1 2 2 2
+:gutter: 3
+
+:::{grid-item-card} Streaming and history
+:link: streaming_and_history
+:link-type: doc
+
+How consecutive blocks join without losing a dispersed pulse, what happens at the start of a stream, and block size versus chunk size.
+:::
+
+:::{grid-item-card} Noise calibration
+:link: noise_calibration
+:link-type: doc
+
+Why FDMT noise varies with DM, how to get the exact sigma of every trial, and what `use_box_smearing` does to the noise.
+:::
+
+:::{grid-item-card} Quirks and gotchas
+:link: quirks_and_gotchas
+:link-type: doc
+
+Output lengths per mode, output buffers, stepper rules, array layout, logging.
+:::
+
+:::{grid-item-card} Periodicity searches
+:link: periodicity
+:link-type: doc
+
+White output, the cold start, each engine's time reference, `dmtlib.dedisperse`, and which engine keeps signal at high spin frequencies.
+:::
+
+:::{grid-item-card} Multi-beam batching
+:link: multibeam
+:link-type: doc
+
+Several beams through one plan, on CPU and GPU.
+:::
+
+:::{grid-item-card} Fourier-domain variants
+:link: fourier_variants
+:link-type: doc
+
+FDMT-FFT and DDMT-FFT, fractional delays, NUFFT options and FFT settings.
+:::
+
+::::
 
 ```{toctree}
 :maxdepth: 1
+:hidden:
 
 streaming_and_history
-multibeam
-performance
-fourier_variants
-coherent_hybrid
 noise_calibration
 quirks_and_gotchas
+periodicity
+multibeam
+fourier_variants
 ```
-
----
-
-## Guide Topics
-
-- [Streaming & Overlap-Save History](streaming_and_history.md): How `dmt` preserves 100% of dispersed signals across block boundaries without edge artifacts.
-- [Multi-Beam Batching](multibeam.md): Processing several tied-array beams with one shared plan, on the CPU and the GPU.
-- [Performance Tuning](performance.md): What the FDMT execution defaults do (level fusion, narrow-integer tree), packed low-bit input, threads and block size, and which optimizations were measured and rejected.
-- [Fourier-Domain Variants](fourier_variants.md): FDMT-FFT and DDMT-FFT, when to use them, exact fractional delays, NUFFT / piecewise NUFFT / brute force, the piecewise-uniform Levin grid, block length, guard and FFT planner settings.
-- [Coherent Hybrid Search](coherent_hybrid.md): CohFDMT on recorded baseband: input formats (GUPPI, LOFAR, PSRDADA), stateless block processing with a file-pointer stride, the exact multi-subband DM grid, exact noise statistics and memory.
-- [Noise Calibration & SNR Scaling](noise_calibration.md): Converting raw integrated flux into true statistical Signal-to-Noise Ratio ($\text{SNR}$).
-- [Quirks & Gotchas](quirks_and_gotchas.md): Output lengths per mode, output buffers (`buffer_size` vs `dmt_size`), stepper rules, array contiguity and logging.

@@ -46,7 +46,8 @@ public:
          SizeType nbeams,
          SizeType fuse_levels,
          bool int_tree,
-         Exec exec)
+         Exec exec,
+         SizeType chunk_nsamps)
         : m_plan(std::move(plan)),
           m_cfg{
               .use_box_smearing = use_box_smearing,
@@ -55,6 +56,7 @@ public:
               .fuse_levels      = fuse_levels,
               .int_tree         = int_tree,
               .exec             = exec,
+              .chunk_nsamps     = chunk_nsamps,
           },
           m_engine(make_fdmt_engine(m_plan, m_cfg)) {}
 
@@ -96,7 +98,8 @@ FDMT::FDMT(float f_min,
            Exec exec,
            SizeType nbeams,
            SizeType fuse_levels,
-           bool int_tree)
+           bool int_tree,
+           SizeType chunk_nsamps)
     : m_impl(std::make_unique<Impl>(plans::FDMTPlan(f_min,
                                                     f_max,
                                                     nchans,
@@ -111,7 +114,8 @@ FDMT::FDMT(float f_min,
                                     nbeams,
                                     fuse_levels,
                                     int_tree,
-                                    exec)) {}
+                                    exec,
+                                    chunk_nsamps)) {}
 
 FDMT::FDMT(float f_min,
            float f_max,
@@ -124,7 +128,8 @@ FDMT::FDMT(float f_min,
            Exec exec,
            SizeType nbeams,
            SizeType fuse_levels,
-           bool int_tree)
+           bool int_tree,
+           SizeType chunk_nsamps)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
           use_box_smearing,
@@ -132,7 +137,8 @@ FDMT::FDMT(float f_min,
           nbeams,
           fuse_levels,
           int_tree,
-          exec)) {}
+          exec,
+          chunk_nsamps)) {}
 
 FDMT::FDMT(float f_min,
            float f_max,
@@ -145,7 +151,8 @@ FDMT::FDMT(float f_min,
            Exec exec,
            SizeType nbeams,
            SizeType fuse_levels,
-           bool int_tree)
+           bool int_tree,
+           SizeType chunk_nsamps)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
           use_box_smearing,
@@ -153,7 +160,8 @@ FDMT::FDMT(float f_min,
           nbeams,
           fuse_levels,
           int_tree,
-          exec)) {}
+          exec,
+          chunk_nsamps)) {}
 
 FDMT::~FDMT()                                = default;
 FDMT::FDMT(FDMT&& other) noexcept            = default;
@@ -197,6 +205,9 @@ void FDMT::execute(DeviceSpan<const uint8_t> d_waterfall_packed,
 
 SizeType FDMT::get_fuse_levels() const noexcept {
     return m_impl->m_engine->get_fuse_levels();
+}
+SizeType FDMT::get_chunk_nsamps() const noexcept {
+    return m_impl->m_engine->get_chunk_nsamps();
 }
 bool FDMT::get_int_tree() const noexcept { return m_impl->m_cfg.int_tree; }
 FDMTMemoryUsage FDMT::get_memory_usage() const noexcept {
@@ -313,23 +324,13 @@ void FDMT::load_history(DeviceSpan<const float> in, Stream stream) {
 
 namespace {
 
-// Runs one block and compacts each beam's leading get_dmt_size() samples
-// (discarding the buffer_size-sized scratch tail) into a contiguous
-// (nbeams, dmt_size) result.
+// Runs one block into a contiguous (nbeams, dmt_size) result.
 std::tuple<std::vector<float>, plans::FDMTPlan>
 run_compute_fdmt(FDMT& fdmt, std::span<const float> waterfall) {
     const plans::FDMTPlan& fdmt_plan = fdmt.get_plan();
-    const auto nbeams                = fdmt.get_nbeams();
-    const auto buffer_size           = fdmt_plan.get_buffer_size();
-    std::vector<float> dmt(nbeams * buffer_size, 0.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt_plan.get_dmt_size(), 0.0F);
     fdmt.execute(waterfall, dmt);
-    const auto dmt_size = fdmt_plan.get_dmt_size();
-    std::vector<float> dmt_out(nbeams * dmt_size);
-    for (SizeType b = 0; b < nbeams; ++b) {
-        std::copy_n(dmt.data() + (b * buffer_size), dmt_size,
-                    dmt_out.data() + (b * dmt_size));
-    }
-    return std::make_tuple(std::move(dmt_out), fdmt_plan);
+    return std::make_tuple(std::move(dmt), fdmt_plan);
 }
 
 } // namespace

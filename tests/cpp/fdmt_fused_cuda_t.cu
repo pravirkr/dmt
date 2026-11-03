@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -17,7 +19,9 @@
 // FDMT level fusion (the fuse_levels constructor parameter). The fused
 // kernel does the same float additions as the level-by-level kernels, so fused
 // vs unfused on the GPU is bit-exact for any input; against FDMT the input
-// is integer-valued, which keeps every sum exact under fast-math.
+// is integer-valued, which keeps every sum exact under fast-math. Packed
+// input with box smearing rounds the box means (fdmt_box_weights.hpp), so
+// its reference is the CPU engine on the same packed input.
 
 namespace dmt {
 
@@ -67,24 +71,24 @@ Packed2 random_2bit(SizeType nrows, SizeType nsamps, unsigned seed) {
 
 template <typename Fdmt>
 std::vector<float> run(Fdmt& fdmt, const std::vector<float>& wf) {
-    std::vector<float> dmt(
-        fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(),
+                           -777.0F);
     fdmt.execute(std::span<const float>(wf), std::span<float>(dmt));
     return dmt;
 }
 
 template <typename Fdmt>
 std::vector<float> run_2bit(Fdmt& fdmt, const std::vector<uint8_t>& wf) {
-    std::vector<float> dmt(
-        fdmt.get_nbeams() * fdmt.get_plan().get_buffer_size(), -777.0F);
+    std::vector<float> dmt(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(),
+                           -777.0F);
     fdmt.execute(std::span<const uint8_t>(wf), 2, std::span<float>(dmt));
     return dmt;
 }
 
-// Leading dmt_size values of every beam, concatenated.
+// Leading dmt_size values of every beam (dmt_size apart), concatenated.
 template <typename Fdmt>
 std::vector<float> beams(const Fdmt& fdmt, const std::vector<float>& dmt) {
-    const auto stride = fdmt.get_plan().get_buffer_size();
+    const auto stride = fdmt.get_plan().get_dmt_size();
     const auto n      = fdmt.get_plan().get_dmt_size();
     std::vector<float> out;
     for (SizeType b = 0; b < fdmt.get_nbeams(); ++b) {
@@ -136,8 +140,22 @@ TEST_CASE("FDMT fused levels are bit-exact with the unfused kernels",
                                  test::gpu_exec(), 2, fuse);
                         INFO("fuse=" << fuse
                                      << " effective=" << gpu.get_fuse_levels());
-                        REQUIRE_THAT(beams(gpu, run(gpu, wf)),
-                                     Catch::Matchers::Equals(expected));
+                        const auto got = beams(gpu, run(gpu, wf));
+                        if (fuse == kFDMTAutoFuse && mode == "valid") {
+                            // Automatic fusion may compute the low levels
+                            // directly from running sums (fdmt_direct.hpp):
+                            // equal within float rounding.
+                            float scale = 0.0F;
+                            for (const float v : expected) {
+                                scale = std::max(scale, std::abs(v));
+                            }
+                            REQUIRE_THAT(
+                                got, Catch::Matchers::Approx(expected).margin(
+                                         1e-5 * scale));
+                        } else {
+                            REQUIRE_THAT(got,
+                                         Catch::Matchers::Equals(expected));
+                        }
                     }
                 }
             }
@@ -152,9 +170,25 @@ TEST_CASE("FDMT fused packed int tree matches FDMT", "[fdmt_gpu][gpu]") {
                 const SizeType nchans = 256;
                 const SizeType nsamps = 300;
                 const auto wf         = random_2bit(nchans, nsamps, 5);
+                // Packed reference: the CPU float tree on the same packed
+                // input (bit-exact); float input within the rounding bound
+                // with box smearing, exactly without (separate engines: a
+                // valid-mode execute() continues the stream).
                 FDMT cpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
                          smearing, mode, Exec::cpu(1), 1, kUnfused, kFloatTree);
-                const auto expected = beams(cpu, run(cpu, wf.values));
+                FDMT cpu_f32(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
+                             smearing, mode, Exec::cpu(1), 1, kUnfused,
+                             kFloatTree);
+                const auto expected = beams(cpu, run_2bit(cpu, wf.packed));
+                const auto expected_f32 =
+                    beams(cpu_f32, run(cpu_f32, wf.values));
+                if (smearing) {
+                    test::require_packed_near(expected, expected_f32,
+                                              cpu.get_plan(), 1);
+                } else {
+                    REQUIRE_THAT(expected,
+                                 Catch::Matchers::Equals(expected_f32));
+                }
                 for (const SizeType fuse :
                      {SizeType{2}, SizeType{4}, kFDMTAutoFuse}) {
                     FDMT gpu(kFMin, kFMax, nchans, nsamps, kTsamp, 64, 0, 1,
@@ -198,8 +232,91 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                     const auto got = beams(gpu, run_2bit(gpu, wf.packed));
                     gpu.save_history(hist_out);
                     cudaDeviceSynchronize();
-                    REQUIRE_THAT(got, Catch::Matchers::Equals(
-                                          beams(cpu, run(cpu, wf.values))));
+                    REQUIRE_THAT(got, Catch::Matchers::Equals(beams(
+                                          cpu, run_2bit(cpu, wf.packed))));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMT direct low levels stream exactly like the tree",
+          "[fdmt_gpu][gpu]") {
+    // Many delays per channel: the tile fusion stops short of depth 3, so
+    // automatic fusion computes levels 0..3 from running sums
+    // (fdmt_direct.hpp). Integer-valued input keeps every sum exact, so the
+    // stream must equal the CPU tree bit for bit -- across direct chunks,
+    // tree chunks of an unfused engine and the stepper, handed over through
+    // save_history()/load_history() (which rebuilds the levels' histories,
+    // and after which the window refills).
+    const SizeType nchans  = 64;
+    const SizeType nbeams  = 2;
+    const IndexType dt_max = 1200;
+    for (const SizeType block : {SizeType{1500}, SizeType{300}}) {
+        for (const SizeType chunk : {SizeType{0}, SizeType{256}}) {
+            DYNAMIC_SECTION("block=" << block << " chunk=" << chunk) {
+                const auto make = [&](Exec exec, SizeType fuse, SizeType c) {
+                    return FDMT(kFMin, kFMax, nchans, block, kTsamp, dt_max, 0,
+                                1, true, "valid", exec, nbeams, fuse,
+                                kFloatTree, c);
+                };
+                FDMT cpu     = make(Exec::cpu(2), kUnfused, 0);
+                FDMT direct  = make(test::gpu_exec(), kFDMTAutoFuse, chunk);
+                FDMT tree    = make(test::gpu_exec(), kUnfused, chunk);
+                FDMT stepper = make(test::gpu_exec(), kFDMTAutoFuse, block);
+                REQUIRE(make(test::gpu_exec(), 3, chunk).get_fuse_levels() < 3);
+                REQUIRE(direct.get_fuse_levels() == 3);
+                thrust::device_vector<float> hist(direct.history_state_size(),
+                                                  0.0F);
+                const DeviceSpan<float> hist_out(
+                    thrust::raw_pointer_cast(hist.data()), hist.size());
+                const DeviceSpan<const float> hist_in(
+                    thrust::raw_pointer_cast(hist.data()), hist.size());
+                std::mt19937 gen(7 + static_cast<unsigned>(block + chunk));
+                std::uniform_int_distribution<int> dis(0, 7);
+                for (SizeType b = 0; b < 12; ++b) {
+                    INFO("block " << b);
+                    std::vector<float> wf(nbeams * nchans * block);
+                    for (auto& v : wf) {
+                        v = static_cast<float>(dis(gen));
+                    }
+                    const auto expected = beams(cpu, run(cpu, wf));
+                    std::vector<float> got;
+                    if (b % 4 == 3) {
+                        tree.load_history(hist_in);
+                        got = beams(tree, run(tree, wf));
+                        tree.save_history(hist_out);
+                    } else if (b % 6 == 5) {
+                        // The stepper runs the tree on the direct engine's
+                        // own (rebuilt) histories.
+                        stepper.load_history(hist_in);
+                        thrust::device_vector<float> d_wf(wf.begin(), wf.end());
+                        thrust::device_vector<float> d_dmt(
+                            nbeams * stepper.get_plan().get_dmt_size());
+                        stepper.reset(
+                            DeviceSpan<const float>(
+                                thrust::raw_pointer_cast(d_wf.data()),
+                                d_wf.size()),
+                            DeviceSpan<float>(
+                                thrust::raw_pointer_cast(d_dmt.data()),
+                                d_dmt.size()));
+                        stepper.advance_until_remaining(0);
+                        stepper.finalize();
+                        std::vector<float> h(d_dmt.size());
+                        thrust::copy(d_dmt.begin(), d_dmt.end(), h.begin());
+                        got = beams(stepper, h);
+                        stepper.save_history(hist_out);
+                    } else {
+                        // Consecutive direct blocks run from the engine's
+                        // own state; reload only after another engine ran.
+                        if (b % 4 == 0 || b % 6 == 0) {
+                            direct.load_history(hist_in);
+                        }
+                        got = beams(direct, run(direct, wf));
+                        direct.save_history(hist_out);
+                    }
+                    cudaDeviceSynchronize();
+                    REQUIRE_THAT(got, Catch::Matchers::Equals(expected));
                 }
             }
         }
@@ -223,10 +340,29 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
     CHECK(deep.get_fuse_levels() >= 1);
     CHECK(deep.get_fuse_levels() <= 8);
 
+    // The state is two halves of the largest level below the root (the
+    // root goes straight to the output, which is exactly dmt_size). The
+    // level-0 history and the fused levels' tree history are double-buffered
+    // FIFOs; the levels above share one in-place ring.
     const auto mem  = automatic.get_memory_usage();
     const auto& pln = automatic.get_plan();
-    CHECK(mem.state == pln.get_buffer_size() * sizeof(float));
-    CHECK(mem.output == pln.get_buffer_size() * sizeof(float));
+    REQUIRE(automatic.get_chunk_nsamps() == pln.get_nsamps());
+    SizeType largest = 0;
+    for (SizeType l = 0; l < pln.get_niters(); ++l) {
+        largest =
+            std::max(largest, pln.get_container().state_shape[l].nelements);
+    }
+    CHECK(mem.state == 2 * largest * sizeof(float));
+    SizeType fused_tree = 0;
+    for (SizeType l = 1; l <= automatic.get_fuse_levels(); ++l) {
+        for (const auto& c : pln.get_container().coordinates_sum[l]) {
+            fused_tree += c.delay;
+        }
+    }
+    CHECK(mem.history == (2 * pln.get_history_size() + fused_tree +
+                          pln.get_tree_history_size()) *
+                             sizeof(float));
+    CHECK(mem.output == pln.get_dmt_size() * sizeof(float));
     CHECK(mem.plan > 0);
     CHECK(mem.workspace > 0);                         // fused tables
     CHECK(make(0).get_memory_usage().workspace == 0); // no fusion
@@ -238,7 +374,7 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
                test::gpu_exec(), 1, 3);
     const auto wf = random_floats(nchans * nsamps, 3);
     thrust::device_vector<float> d_wf(wf.begin(), wf.end());
-    thrust::device_vector<float> d_dmt(small.get_plan().get_buffer_size());
+    thrust::device_vector<float> d_dmt(small.get_plan().get_dmt_size());
     small.reset(DeviceSpan<const float>(thrust::raw_pointer_cast(d_wf.data()),
                                         d_wf.size()),
                 DeviceSpan<float>(thrust::raw_pointer_cast(d_dmt.data()),

@@ -16,6 +16,8 @@
 
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
+#include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_variance.hpp"
 #include "dmt/modes.hpp"
 
 namespace dmt::plans {
@@ -200,6 +202,7 @@ public:
 
     float get_f_min() const noexcept { return m_f_min; }
     float get_f_max() const noexcept { return m_f_max; }
+    float get_f_ref() const noexcept { return m_f_min; }
     SizeType get_nchans() const noexcept { return m_nchans; }
     SizeType get_nsamps() const noexcept { return m_nsamps; }
     float get_tsamp() const noexcept { return m_tsamp; }
@@ -380,6 +383,16 @@ public:
      * `fdmt_init_subband`'s doc comment in fdmt.cpp), so the running target
      * is reduced by `|dt|` once more at the leaf itself.
      */
+    SizeType get_startup_samples() const {
+        IndexType lag = 0;
+        for (SizeType i_dm = 0; i_dm < get_dmt_ndms(); ++i_dm) {
+            for (const auto shift : trace_dm(i_dm)) {
+                lag = std::max(lag, -shift);
+            }
+        }
+        return static_cast<SizeType>(lag);
+    }
+
     std::vector<IndexType> trace_dm(SizeType dm_idx) const {
         std::vector<IndexType> shifts(m_nchans, 0);
         if (m_niters == 0 || m_nchans == 0) {
@@ -438,24 +451,50 @@ public:
     /**
      * @brief variance of a boxcar matched filter of
      * width @p w convolved with one channel's own intra-channel smearing
-     * kernel of width `smearing_row[c] + 1` samples, summed over channels.
+     * kernel of width L_c = `smearing_row[c] + 1` samples, weighted by the
+     * channel's box-mean weight round(2^b / L_c) * 2^-b and summed over
+     * channels: sum_c weight_c^2 * V(L_c, w), with V the trapezoid
+     * sum of squares of the box (x) boxcar kernel.
      *
      * When there is no smearing at all (every `smearing_row[c] == 0`), each
-     * term collapses to `w` exactly, so this is a strict superset of the
-     * `use_box_smearing = false` fast path (`nchans * w`) rather than a
-     * separate special case of it.
+     * weight is exactly 1 and each term collapses to `w`, so this is a strict
+     * superset of the `use_box_smearing = false` fast path (`nchans * w`)
+     * rather than a separate special case of it.
      */
     float variance_from_smearing_row(const float* smearing_row,
                                      float w) const noexcept {
-        float total_var = 0.0F;
+        // Each channel's level-0 box of L samples carries the box-mean
+        // weight round(2^b / L) * 2^-b (see get_box_fraction_bits()).
+        const auto bits  = get_box_fraction_bits();
+        const double inv = std::ldexp(1.0, -static_cast<int>(bits));
+        double total_var = 0.0;
         for (SizeType c = 0; c < m_nchans; ++c) {
-            const float smearing_len = smearing_row[c] + 1.0F;
-            const float h            = std::max(smearing_len, w);
-            const float l            = std::min(smearing_len, w);
-            total_var += ((h - l + 1.0F) * (l * l)) +
-                         ((((2.0F * l) - 1.0F) * l * (l - 1.0F)) / 3.0F);
+            const auto box_len = static_cast<SizeType>(smearing_row[c]) + 1;
+            const double weight =
+                static_cast<double>(
+                    algorithms::detail::box_weight(box_len, bits)) *
+                inv;
+            total_var +=
+                algorithms::detail::fdmt_box_variance(box_len, w, weight);
         }
-        return total_var;
+        return static_cast<float>(total_var);
+    }
+    SizeType get_box_fraction_bits() const noexcept {
+        return algorithms::detail::box_fraction_bits(
+            m_container.state_shape[0].dt_max);
+    }
+    SizeType get_box_mean_bits() const noexcept {
+        return algorithms::detail::box_mean_bits(
+            m_container.state_shape[0].dt_max + 1);
+    }
+    std::vector<uint32_t> get_box_weights() const {
+        const auto bits    = get_box_fraction_bits();
+        const auto box_max = m_container.state_shape[0].dt_max + 1;
+        std::vector<uint32_t> weights(box_max);
+        for (SizeType len = 1; len <= box_max; ++len) {
+            weights[len - 1] = algorithms::detail::box_weight(len, bits);
+        }
+        return weights;
     }
     float get_effective_variance(SizeType dm_idx,
                                  SizeType boxcar_width,
@@ -528,11 +567,8 @@ public:
         return m_container.get_buffer_size();
     }
     SizeType get_history_size() const noexcept {
-        const auto abs_dt_max = static_cast<SizeType>(
-            std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
-        return m_nchans * abs_dt_max;
-    }
-    SizeType get_history_init_size() const noexcept {
+        // Level 0 reads at most dt0_max samples before a block: the raw
+        // input history of every channel.
         return m_nchans * m_container.state_shape[0].dt_max;
     }
     SizeType get_tree_history_size() const noexcept {
@@ -635,13 +671,15 @@ public:
             state_shape[0].nchans * state_shape[0].nsamps;
         const auto dmt_size     = get_dmt_size();
         const auto history_size = get_history_size();
-        const auto buffer_size  = 2 * m_buffer_size;
+        const auto tree_size    = get_tree_history_size();
+        const auto buffer_size  = m_buffer_size;
         const auto niters       = state_shape.size() - 1;
 
         const auto waterfall_size_mb =
             size_in_mb(waterfall_size, sizeof(float));
         const auto dmt_size_mb     = size_in_mb(dmt_size, sizeof(float));
         const auto history_size_mb = size_in_mb(history_size, sizeof(float));
+        const auto tree_size_mb    = size_in_mb(tree_size, sizeof(float));
         const auto buffer_size_mb  = size_in_mb(buffer_size, sizeof(float));
         const auto plan_use_mb = size_in_mb(m_container.get_memory_usage(), 1);
 
@@ -653,10 +691,10 @@ public:
                         waterfall_size_mb, state_shape[niters].ncoords,
                         state_shape[niters].nsamps, dmt_size_mb),
             std::format("Plan Memory Usage: {:.1f} MB", plan_use_mb),
-            std::format("Plan Buffer Size: ({}; {:.1f} MB ), History Size: "
-                        "({}; {:.1f} MB )",
+            std::format("Largest Level: ({}; {:.1f} MB ), History: level-0 "
+                        "({}; {:.1f} MB ), tree ({}; {:.1f} MB )",
                         buffer_size, buffer_size_mb, history_size,
-                        history_size_mb),
+                        history_size_mb, tree_size, tree_size_mb),
             std::format("Plan Details: {}", FDMTShape::header_fmt()),
         };
         std::string out;
@@ -692,6 +730,16 @@ private:
     SizeType m_fft_size{};
 
     void validate_inputs() const {
+        if (!utils::is_finite_bits(m_f_min) ||
+            !utils::is_finite_bits(m_f_max) ||
+            !utils::is_finite_bits(m_tsamp)) {
+            throw std::invalid_argument(
+                "FDMT: f_min, f_max and tsamp must be finite");
+        }
+        if (!(m_f_min > 0.0F)) {
+            throw std::invalid_argument(
+                std::format("FDMT: f_min={} must be positive", m_f_min));
+        }
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument(std::format(
                 "FDMT: f_min={} must be less than f_max={}", m_f_min, m_f_max));
@@ -1294,6 +1342,10 @@ public:
 
     float get_f_min() const noexcept { return m_f_min; }
     float get_f_max() const noexcept { return m_f_max; }
+    float get_f_ref() const noexcept {
+        return m_f_max -
+               (0.5F * (m_f_max - m_f_min) / static_cast<float>(m_nchans));
+    }
     SizeType get_nchans() const noexcept { return m_nchans; }
     float get_tsamp() const noexcept { return m_tsamp; }
     std::vector<float> get_dm_arr() const noexcept { return m_dm_arr; }
@@ -1311,13 +1363,22 @@ public:
     [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept {
         return m_container.kill_mask;
     }
+    void seal() noexcept { m_sealed = true; }
     void set_kill_mask(std::span<const uint8_t> kill_mask) {
+        if (m_sealed) {
+            throw std::invalid_argument(
+                "DDMTPlan: kill_mask cannot be changed after the plan is "
+                "bound to an engine");
+        }
         if (kill_mask.size() != m_nchans) {
             throw std::invalid_argument(
                 std::format("DDMT: kill_mask size={} must equal nchans={}",
                             kill_mask.size(), m_nchans));
         }
-        m_container.kill_mask.assign(kill_mask.begin(), kill_mask.end());
+        m_container.kill_mask.resize(kill_mask.size());
+        for (SizeType i = 0; i < kill_mask.size(); ++i) {
+            m_container.kill_mask[i] = kill_mask[i] == 0 ? 0 : 1;
+        }
     }
     [[nodiscard]] float get_effective_variance() const noexcept {
         return static_cast<float>(count_active_chans());
@@ -1343,6 +1404,13 @@ private:
     std::vector<uint8_t> m_kill_mask;
 
     DDMTPlanContainer m_container;
+    bool m_sealed{false};
+
+    static void canonicalize_mask(std::vector<uint8_t>& mask) {
+        for (auto& value : mask) {
+            value = value == 0 ? uint8_t{0} : uint8_t{1};
+        }
+    }
 
     [[nodiscard]] SizeType count_active_chans() const noexcept {
         return static_cast<SizeType>(
@@ -1350,6 +1418,16 @@ private:
     }
 
     void validate_inputs() const {
+        if (!utils::is_finite_bits(m_f_min) ||
+            !utils::is_finite_bits(m_f_max) ||
+            !utils::is_finite_bits(m_tsamp)) {
+            throw std::invalid_argument(
+                "DDMT: f_min, f_max and tsamp must be finite");
+        }
+        if (!(m_f_min > 0.0F)) {
+            throw std::invalid_argument(
+                std::format("DDMT: f_min={} must be positive", m_f_min));
+        }
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument("f_min must be less than f_max");
         }
@@ -1361,6 +1439,12 @@ private:
         }
         if (m_dm_arr.empty()) {
             throw std::invalid_argument("dm_arr must not be empty");
+        }
+        for (const float dm : m_dm_arr) {
+            if (!utils::is_finite_bits(dm) || !(dm >= 0.0F)) {
+                throw std::invalid_argument(
+                    "DDMT: DM trials must be finite and >= 0");
+            }
         }
         if (m_nbits != 1 && m_nbits != 2 && m_nbits != 4 && m_nbits != 8 &&
             m_nbits != 16 && m_nbits != 32) {
@@ -1395,23 +1479,40 @@ private:
         m_container.kill_mask = m_kill_mask.empty()
                                     ? std::vector<uint8_t>(m_nchans, 1)
                                     : m_kill_mask;
-        const auto df = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
-        m_container.delay_table = utils::generate_delay_table(
-            m_dm_arr, m_nchans, m_f_min, df, m_tsamp);
+        canonicalize_mask(m_container.kill_mask);
+        // Channel c is centred at f_min + (c + 1/2) df; delays are relative
+        // to the centre of the highest-frequency channel (get_f_ref()).
+        const auto df   = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
+        const auto fch1 = m_f_min + (0.5F * df);
+        m_container.delay_table =
+            utils::generate_delay_table(m_dm_arr, m_nchans, fch1, df, m_tsamp);
         m_container.fractional_delay_table =
-            utils::generate_fractional_delay_table(m_nchans, m_f_min, df,
-                                                   m_tsamp);
+            utils::generate_fractional_delay_table(m_nchans, fch1, df, m_tsamp);
     }
 
     static std::vector<float>
     generate_dm_arr(float dm_max, float dm_step, float dm_min) {
+        if (!utils::is_finite_bits(dm_min) || !utils::is_finite_bits(dm_max) ||
+            !utils::is_finite_bits(dm_step)) {
+            throw std::invalid_argument(
+                "DDMT: dm_min, dm_max and dm_step must be finite");
+        }
         if (dm_step <= 0.0F || dm_min > dm_max) {
             return {};
         }
 
-        // Number of steps: floor((max - min) / step) + 1
-        const auto count =
-            static_cast<SizeType>(std::floor((dm_max - dm_min) / dm_step)) + 1;
+        // Number of steps: floor((max - min) / step) + 1. The span is
+        // computed in double so a non-finite or overflowing count is rejected
+        // before it is cast to SizeType.
+        const double steps = std::floor(
+            (static_cast<double>(dm_max) - static_cast<double>(dm_min)) /
+            static_cast<double>(dm_step));
+        if (!(steps >= 0.0) ||
+            steps >=
+                static_cast<double>(std::numeric_limits<SizeType>::max())) {
+            throw std::invalid_argument("DDMT: DM grid is too large");
+        }
+        const auto count = static_cast<SizeType>(steps) + 1;
 
         std::vector<float> dm_arr;
         dm_arr.reserve(count);
@@ -1471,6 +1572,7 @@ FDMTPlan& FDMTPlan::operator=(const FDMTPlan& other) {
 }
 float FDMTPlan::get_f_min() const noexcept { return m_impl->get_f_min(); }
 float FDMTPlan::get_f_max() const noexcept { return m_impl->get_f_max(); }
+float FDMTPlan::get_f_ref() const noexcept { return m_impl->get_f_ref(); }
 SizeType FDMTPlan::get_nchans() const noexcept { return m_impl->get_nchans(); }
 SizeType FDMTPlan::get_nsamps() const noexcept { return m_impl->get_nsamps(); }
 float FDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
@@ -1521,8 +1623,20 @@ std::vector<float> FDMTPlan::get_dm_grid_final() const noexcept {
 std::vector<float> FDMTPlan::get_smearing_grid_final() const noexcept {
     return m_impl->get_smearing_grid_final();
 }
+SizeType FDMTPlan::get_box_fraction_bits() const noexcept {
+    return m_impl->get_box_fraction_bits();
+}
+std::vector<uint32_t> FDMTPlan::get_box_weights() const {
+    return m_impl->get_box_weights();
+}
+SizeType FDMTPlan::get_box_mean_bits() const noexcept {
+    return m_impl->get_box_mean_bits();
+}
 std::vector<IndexType> FDMTPlan::trace_dm(SizeType dm_idx) const {
     return m_impl->trace_dm(dm_idx);
+}
+SizeType FDMTPlan::get_startup_samples() const {
+    return m_impl->get_startup_samples();
 }
 float FDMTPlan::get_effective_variance(SizeType dm_idx,
                                        SizeType boxcar_width,
@@ -1560,9 +1674,7 @@ SizeType FDMTPlan::get_buffer_size() const noexcept {
 SizeType FDMTPlan::get_history_size() const noexcept {
     return m_impl->get_history_size();
 }
-SizeType FDMTPlan::get_history_init_size() const noexcept {
-    return m_impl->get_history_init_size();
-}
+
 SizeType FDMTPlan::get_tree_history_size() const noexcept {
     return m_impl->get_tree_history_size();
 }
@@ -1645,6 +1757,7 @@ DDMTPlan& DDMTPlan::operator=(const DDMTPlan& other) {
 }
 float DDMTPlan::get_f_min() const noexcept { return m_impl->get_f_min(); }
 float DDMTPlan::get_f_max() const noexcept { return m_impl->get_f_max(); }
+float DDMTPlan::get_f_ref() const noexcept { return m_impl->get_f_ref(); }
 SizeType DDMTPlan::get_nchans() const noexcept { return m_impl->get_nchans(); }
 float DDMTPlan::get_tsamp() const noexcept { return m_impl->get_tsamp(); }
 std::vector<float> DDMTPlan::get_dm_arr() const noexcept {
@@ -1677,16 +1790,19 @@ std::string DDMTPlan::summary() const {
     return std::format(
         "*** DDMT Plan Summary ***\n"
         "Band: {} - {} MHz, {} channels ({} masked), tsamp {} s\n"
+        "Delays from channel centres, reference {} MHz (top channel "
+        "centre)\n"
         "DM trials: {} over [{}, {}] pc cm^-3, max delay {} samples\n"
         "Input: {}\n",
         get_f_min(), get_f_max(), get_nchans(), n_masked, get_tsamp(),
-        dms.size(), dm_lo, dm_hi, max_delay,
+        get_f_ref(), dms.size(), dm_lo, dm_hi, max_delay,
         get_nbits() == 32 ? std::string("float32")
                           : std::format("packed {}-bit", get_nbits()));
 }
 void DDMTPlan::set_kill_mask(std::span<const uint8_t> kill_mask) {
     m_impl->set_kill_mask(kill_mask);
 }
+void DDMTPlan::seal() noexcept { m_impl->seal(); }
 float DDMTPlan::get_effective_variance() const noexcept {
     return m_impl->get_effective_variance();
 }

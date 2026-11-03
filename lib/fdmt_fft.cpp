@@ -201,6 +201,9 @@ FDMTFFT& FDMTFFT::operator=(FDMTFFT&& other) noexcept = default;
 const plans::FDMTPlan& FDMTFFT::get_plan() const noexcept {
     return m_impl->m_plan;
 }
+FDMTMemoryUsage FDMTFFT::get_memory_usage() const noexcept {
+    return m_impl->m_engine->memory_usage();
+}
 SizeType FDMTFFT::get_nbeams() const noexcept { return m_impl->m_cfg.nbeams; }
 Backend FDMTFFT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int FDMTFFT::nthreads() const noexcept {
@@ -214,6 +217,11 @@ bool FDMTFFT::fractional_delays() const noexcept {
 }
 SizeType FDMTFFT::get_output_latency() const noexcept {
     return m_impl->m_geom.latency;
+}
+SizeType FDMTFFT::get_startup_samples() const noexcept {
+    // Output o is stream time o - latency and reads `support` samples
+    // behind it; zero-filled history covers it until o >= support + latency.
+    return m_impl->m_geom.support + m_impl->m_geom.latency;
 }
 SizeType FDMTFFT::get_suggested_nsamps() const noexcept {
     return m_impl->suggested_nsamps();

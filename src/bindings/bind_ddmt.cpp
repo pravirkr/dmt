@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <format>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -32,11 +33,10 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
                         SizeType nbits,
                         std::optional<py::array_t<uint8_t>> kill_mask,
                         SizeType nbeams, std::string_view backend, int device) {
-                std::vector<uint8_t> km_vec;
-                if (kill_mask.has_value()) {
-                    km_vec.assign(kill_mask->data(),
-                                  kill_mask->data() + kill_mask->size());
-                }
+                const auto km_vec =
+                    kill_mask.has_value()
+                        ? copy_native_1d<uint8_t>(*kill_mask, "kill_mask")
+                        : std::vector<uint8_t>{};
                 return T(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min,
                          make_exec(backend, nthreads, device), nbits, km_vec,
                          nbeams);
@@ -51,13 +51,13 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
                         SizeType nbits,
                         std::optional<py::array_t<uint8_t>> kill_mask,
                         SizeType nbeams, std::string_view backend, int device) {
-                std::vector<uint8_t> km_vec;
-                if (kill_mask.has_value()) {
-                    km_vec.assign(kill_mask->data(),
-                                  kill_mask->data() + kill_mask->size());
-                }
+                const auto km_vec =
+                    kill_mask.has_value()
+                        ? copy_native_1d<uint8_t>(*kill_mask, "kill_mask")
+                        : std::vector<uint8_t>{};
+                const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
                 return T(f_min, f_max, nchans, tsamp,
-                         std::span<const float>(dm_arr.data(), dm_arr.size()),
+                         std::span<const float>(dms.data(), dms.size()),
                          make_exec(backend, nthreads, device), nbits, km_vec,
                          nbeams);
             }),
@@ -69,11 +69,10 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
                         const LevinConfig& levin, int nthreads, SizeType nbits,
                         std::optional<py::array_t<uint8_t>> kill_mask,
                         SizeType nbeams, std::string_view backend, int device) {
-                std::vector<uint8_t> km_vec;
-                if (kill_mask.has_value()) {
-                    km_vec.assign(kill_mask->data(),
-                                  kill_mask->data() + kill_mask->size());
-                }
+                const auto km_vec =
+                    kill_mask.has_value()
+                        ? copy_native_1d<uint8_t>(*kill_mask, "kill_mask")
+                        : std::vector<uint8_t>{};
                 return T(f_min, f_max, nchans, tsamp, levin,
                          make_exec(backend, nthreads, device), nbits, km_vec,
                          nbeams);
@@ -101,7 +100,14 @@ void bind_ddmt(py::module_& mod) {
         Parameters
         ----------
         f_min, f_max : float
-            Band edges in MHz.
+            Band edges in MHz. Channel ``c`` is centred at
+            ``f_min + (c + 0.5) * df``, ``df = (f_max - f_min) / nchans``, and
+            is delayed from that centre frequency. Output sample ``t`` is the
+            arrival time at the centre of the highest-frequency channel,
+            ``f_max - df / 2`` (``plan.f_ref``; SIGPROC's ``fch1`` for a
+            descending band). With a SIGPROC header (``fch1`` a channel
+            centre, ``foff < 0``): ``f_max = fch1 - foff / 2``,
+            ``f_min = f_max + nchans * foff``.
         nchans : int
             Number of frequency channels.
         tsamp : float
@@ -121,7 +127,9 @@ void bind_ddmt(py::module_& mod) {
         nbits : int, optional
             Bit precision per sample (32 for float, or 1, 2, 4, 8, 16 for packed integer).
         kill_mask : numpy.ndarray, optional
-            Per-channel mask (uint8 array, 1 = keep, 0 = mask out).
+            Per-channel uint8 mask (1 = keep, 0 = drop). Any other nonzero
+            value is kept and stored as 1. A non-contiguous view is read in
+            logical order.
         nbeams : int, optional
             Number of independent beams batched through this instance
             (default 1). At nbeams > 1, execute()/execute_time_major() take
@@ -165,11 +173,34 @@ void bind_ddmt(py::module_& mod) {
                 const auto nbeams =
                     ndim == 3 ? static_cast<SizeType>(shape[0]) : 1;
                 const auto nsamps_in = static_cast<SizeType>(shape[ndim - 1]);
+                const auto nchans    = plan.get_nchans();
                 if (nbeams != ddmt.get_nbeams()) {
                     throw std::invalid_argument(std::format(
                         "DDMT.execute: waterfall has {} beam(s), but "
                         "this instance was configured for {}",
                         nbeams, ddmt.get_nbeams()));
+                }
+                if (static_cast<SizeType>(shape[ndim - 2]) != nchans) {
+                    throw std::invalid_argument(std::format(
+                        "DDMT.execute: waterfall has {} channels, but "
+                        "this instance was configured for {}",
+                        shape[ndim - 2], nchans));
+                }
+                const auto checked_mul = [](SizeType a, SizeType b) {
+                    if (b != 0 &&
+                        a > std::numeric_limits<SizeType>::max() / b) {
+                        throw std::invalid_argument(
+                            "DDMT.execute: waterfall shape is too large");
+                    }
+                    return a * b;
+                };
+                const auto expect =
+                    checked_mul(checked_mul(nbeams, nchans), nsamps_in);
+                if (static_cast<SizeType>(waterfall.size()) != expect) {
+                    throw std::invalid_argument(std::format(
+                        "DDMT.execute: waterfall has {} elements, expected "
+                        "nbeams * nchans * nsamps = {}",
+                        waterfall.size(), expect));
                 }
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps_in);
                 const auto dm_count   = plan.get_container().dm_arr.size();

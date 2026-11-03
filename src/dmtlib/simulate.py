@@ -27,8 +27,8 @@ except ImportError:
         return decorator
 
 
-# Dispersion constant (MHz^2 * s / (pc cm^-3)) - Lorimer & Kramer (2005)
-DM_CONSTANT = 4.148808e3
+# Dispersion constant (MHz^2 * s / (pc cm^-3)), the same as the C++ kDispConst.
+DM_CONSTANT = 1 / 2.41e-4  # TEMPO2, Manchester & Taylor (1972)
 
 
 def get_dmdelays(

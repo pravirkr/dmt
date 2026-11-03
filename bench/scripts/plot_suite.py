@@ -45,11 +45,48 @@ if TYPE_CHECKING:
 REPO = Path(__file__).resolve().parents[2]
 TIMES = "\N{MULTIPLICATION SIGN}"
 
-# Fixed suite configuration (bench/suite/suite_common.hpp).
-NCHANS, F_MIN, F_MAX, TSAMP = 4096, 704.0, 1216.0, 8.192e-5
-NSAMPS_REF, NDMS_REF = 16384, 2049
-NSAMPS_TICKS = [4096, 8192, 16384, 32768, 65536]
-NDMS_TICKS = [257, 513, 1025, 2049, 4097]
+# Suite configurations (bench/suite/suite_common.hpp). main() installs the
+# selected geometry and trial-grid reference in the module constants below.
+CONFIGS: dict[str, dict[str, Any]] = {
+    "cryopaf": {
+        "F_MIN": 704.0,
+        "F_MAX": 1216.0,
+        "TSAMP": 5.12e-4,
+        "NCHANS": 512,
+        "LEVIN_TOL": 1.1,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 1545,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
+    },
+    "cryopaf_lband": {
+        "F_MIN": 1100.0,
+        "F_MAX": 1714.0,
+        "TSAMP": 455.6e-6,
+        "NCHANS": 1152,
+        "LEVIN_TOL": 1.1,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 1941,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
+    },
+    "parkes_uwl": {
+        "F_MIN": 704.0,
+        "F_MAX": 4032.0,
+        "TSAMP": 64e-6,
+        "NCHANS": 6656,
+        "LEVIN_TOL": 1.6,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 4749,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
+    },
+}
+F_MIN, F_MAX, TSAMP = 704.0, 1216.0, 5.12e-4
+NSAMPS_REF = 32768
+NSAMPS_TICKS = [8192, 16384, 32768, 65536]
+NCHANS: int = CONFIGS["cryopaf"]["NCHANS"]
+LEVIN_TOL: float = CONFIGS["cryopaf"]["LEVIN_TOL"]
+DM_MAX_REF: float = CONFIGS["cryopaf"]["DM_MAX_REF"]
+NDMS_REF: int = CONFIGS["cryopaf"]["NDMS_REF"]
+DM_MAX_SWEEP: list[float] = CONFIGS["cryopaf"]["DM_MAX_SWEEP"]
 NBITS = [1, 2, 4, 8, 16, 32]
 NBITS_LABELS = [f"{b}-bit" if b < 32 else "float32" for b in NBITS]
 
@@ -119,14 +156,11 @@ class Result:
     algo: str
     backend: str  # cpu<N>, cuda, cuda_host, hip, hip_host
     nsamps: int
-    dt_max: int
+    dm_max: float
     nbits: int
     times: list[float] = field(default_factory=list)  # seconds per block
     skipped: str = ""
-
-    @property
-    def ndms(self) -> int:
-        return self.dt_max + 1
+    ndms: int = 0  # trials of the point's grid (benchmark counter)
 
     @property
     def time(self) -> float:
@@ -170,14 +204,38 @@ _CONTEXT_KEYS = (
 )
 
 
-def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:
+def validate_geometry(path: Path, benchmark: dict[str, Any]) -> None:
+    """Reject mismatched or mixed geometries before labeling a result."""
+    geometry = {
+        "nchans": NCHANS,
+        "f_min": F_MIN,
+        "f_max": F_MAX,
+        "tsamp": TSAMP,
+        "levin_tol": LEVIN_TOL,
+    }
+    for field_name, expected in geometry.items():
+        if field_name in benchmark and not np.isclose(
+            benchmark[field_name], expected, rtol=1e-6, atol=0
+        ):
+            msg = (
+                f"{path}: {field_name}={benchmark[field_name]} does not match "
+                f"selected preset ({expected}); rerun the suite for this preset."
+            )
+            raise ValueError(msg)
+
+
+def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:  # noqa: C901
     """Parse every suite JSON; names carry the point, errors mark skips."""
-    results: dict[tuple[str, str, str, str, int, int, int], Result] = {}
+    results: dict[tuple[str, str, str, str, int, float, int], Result] = {}
     machines: dict[str, Machine] = {}
     for path in sorted(results_dir.glob("*/suite_*.json")):
         if path.name.startswith("suite_cfdmt_"):
             continue  # CohFDMT has its own plots (plot_cfdmt.py)
         data = json.loads(path.read_text())
+        names = [b["name"] for b in data.get("benchmarks", [])]
+        if names and not any("/dmmax:" in n for n in names):
+            print(f"warning: skipping {path} (an older suite configuration; rerun it)")
+            continue
         mname = path.parent.name
         mach = machines.setdefault(mname, Machine(mname))
         ctx = data.get("context", {})
@@ -190,6 +248,7 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:
                 continue
             if parts[0] != "suite":
                 continue
+            validate_geometry(path, b)
             kv = dict(p.split(":", 1) for p in parts[4:7])
             algo = SUITE_ALGOS.get(parts[2], parts[2])
             if algo is None:
@@ -200,7 +259,7 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:
                 algo,
                 parts[3],
                 int(kv["nsamps"]),
-                int(kv["dtmax"]),
+                float(kv["dmmax"]),
                 int(kv["nbits"]),
             )
             res = results.setdefault(key, Result(*key))
@@ -209,6 +268,7 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:
                 res.skipped = b.get("error_message", "skipped")
                 continue
             res.times.append(b["real_time"] * _UNIT[b.get("time_unit", "ns")])
+            res.ndms = int(b.get("ndms", res.ndms))
     versions = {m.context.get("dmt_version") for m in machines.values()} - {None}
     if len(versions) > 1:
         print(f"warning: results come from different dmt versions: {sorted(versions)}")
@@ -258,17 +318,26 @@ def style(theme: Theme) -> None:
 def pow2_axis(
     ax: Axes, values: Sequence[int], label: str, ticklabels: list[str] | None = None
 ) -> None:
-    """Log2 x axis with ticks at `values`, labelled 256, 512, 1K, ..."""
+    """Log2 x axis with ticks at `values`.
+
+    Multiples of 1024 are labelled 8K, 16K, ...; other values as they are.
+    """
 
     def short(v: int) -> str:
-        p2 = 1 << round(np.log2(v))  # DM counts are 2^k + 1
-        return f"{p2 // 1024}K" if p2 >= 1024 else str(p2)
+        if v >= 1024 and v % 1024 == 0:
+            return f"{v // 1024}K"
+        return str(v)
 
     ax.set_xscale("log", base=2)
     ax.set_xticks(values)
     ax.set_xticklabels(ticklabels or [short(int(v)) for v in values])
     ax.minorticks_off()
     ax.set_xlabel(label)
+
+
+def ndms_ticks(results: list[Result]) -> list[int]:
+    """Trial counts of the DM-range sweep (from the measured points)."""
+    return sorted({r.ndms for r in results if r.sweep == "ndms" and r.ndms})
 
 
 def fmt_seconds(y: float, _pos: int | None = None) -> str:
@@ -284,17 +353,62 @@ def fmt_factor(v: float, _pos: int | None = None) -> str:
     return f"{v:g}{TIMES}"
 
 
+LABEL_GAP_PT = 9.0  # minimum vertical spacing of end labels (points)
+
+
 def end_label(ax: Axes, x: float, y: float, text: str) -> None:
-    """Label a line at its last point, in ink rather than the series colour."""
-    ax.annotate(
-        text,
-        (x, y),
-        xytext=(4, 0),
-        textcoords="offset points",
-        va="center",
-        fontsize=8,
-        color=mpl.rcParams["axes.labelcolor"],
-    )
+    """Queue a label for a line's last point (placed by place_end_labels)."""
+    pending = ax.__dict__.setdefault("_dmt_end_labels", [])
+    pending.append((x, y, text))
+
+
+def place_end_labels(fig: Figure) -> None:
+    """Draw the queued end labels, in ink rather than the series colour,
+    spread apart vertically where lines end close together (a short leader
+    joins a moved label to its point)."""
+    fig.canvas.draw()  # final limits for the data-to-display transform
+    pt_per_px = 72.0 / fig.dpi
+    for i, ax in enumerate(fig.axes):
+        # Earlier panels on top: a label overhanging into the next panel's
+        # margin is not hidden under its background.
+        ax.set_zorder(len(fig.axes) - i)
+        pending = ax.__dict__.pop("_dmt_end_labels", [])
+        if not pending:
+            continue
+        # Points from the bottom, then push each label up past its neighbour.
+        items = sorted(
+            (
+                (ax.transData.transform((x, y))[1] * pt_per_px, x, y, t)
+                for x, y, t in pending
+            ),
+        )
+        placed: list[float] = []
+        for want, *_ in items:
+            placed.append(want if not placed else max(want, placed[-1] + LABEL_GAP_PT))
+        # Centre the stack on the points it labels.
+        shift = (sum(p for p, *_ in items) - sum(placed)) / len(placed)
+        for (want, x, y, text), pos in zip(items, placed, strict=True):
+            dy = pos + shift - want
+            ax.annotate(
+                text,
+                (x, y),
+                xytext=(6, dy),
+                textcoords="offset points",
+                va="center",
+                fontsize=8,
+                color=mpl.rcParams["axes.labelcolor"],
+                arrowprops=(
+                    {
+                        "arrowstyle": "-",
+                        "lw": 0.5,
+                        "color": "0.6",
+                        "shrinkA": 0,
+                        "shrinkB": 2,
+                    }
+                    if abs(dy) > 1.0
+                    else None
+                ),
+            )
 
 
 def plot_line(
@@ -447,7 +561,7 @@ def runtime_figure(
 ) -> Figure:
     """Time per block along one sweep; one panel per CPU/GPU platform."""
     xkey = "nsamps" if sweep == "nsamps" else "ndms"
-    xticks = NSAMPS_TICKS if sweep == "nsamps" else NDMS_TICKS
+    xticks = NSAMPS_TICKS if sweep == "nsamps" else ndms_ticks(results)
     panels = platforms(results)
     fig, axes = new_panels(len(panels))
     for ax, (mname, kind) in zip(axes, panels, strict=False):
@@ -478,7 +592,7 @@ def runtime_figure(
         pow2_axis(ax, xticks, xlabel)
         ax.set_yscale("log")
         ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(fmt_seconds))
-        ax.margins(x=0.25)
+        ax.margins(x=0.35)
     axes[0].set_ylabel("time per block (median)")
     finish(fig, axes, theme, title, subtitle, variant_label="1 thread")
     return fig
@@ -501,7 +615,6 @@ def throughput_figure(
         else:
             lines = [
                 ("FDMT", kind, False),
-                ("FDMT", f"{kind}_host", True),
                 ("DDMT", kind, False),
                 ("SDMT", kind, False),
                 ("FDMT-FFT", kind, False),
@@ -534,18 +647,21 @@ def throughput_figure(
         "Real-time factor vs input sample width",
         f"{NCHANS} channels, {NSAMPS_REF} samples {TIMES} {NDMS_REF} DM trials;"
         f" above 1{TIMES} keeps up with the telescope",
-        variant_label="1 thread (CPU) / host arrays incl. PCIe (GPU)",
+        variant_label="1 thread (CPU)",
     )
     return fig
 
 
-def ops_model(dt_max: int, nchans: int, nsamps: int = NSAMPS_REF) -> dict[str, float]:
+def ops_model(dm_max: float, nchans: int, nsamps: int = NSAMPS_REF) -> dict[str, float]:
     """Operations per output time sample (summed over DM trials)."""
-    from dmtlib import FDMTPlan  # noqa: PLC0415 - optional dependency
+    from dmtlib import DDMTPlan, FDMTPlan  # noqa: PLC0415 - optional dependency
 
-    plan = FDMTPlan(F_MIN, F_MAX, nchans, nsamps, TSAMP, dt_max)
+    grid = DDMTPlan.generate_levin_dm_grid_piecewise(
+        0.0, dm_max, TSAMP, TSAMP, F_MIN, F_MAX, nchans, LEVIN_TOL
+    )
+    plan = FDMTPlan(F_MIN, F_MAX, nchans, nsamps, TSAMP, dm_grid=np.asarray(grid))
     ndms = plan.dmt_ndms
-    nfft = nsamps + 2 * dt_max  # valid-mode FFT length (model)
+    nfft = nsamps + 2 * plan.dt_max  # valid-mode FFT length (model)
     nodes = float(sum(plan.nodes_by_iteration))
     return {
         "ndms": float(ndms),
@@ -558,9 +674,9 @@ def ops_model(dt_max: int, nchans: int, nsamps: int = NSAMPS_REF) -> dict[str, f
 def ops_figure(theme: Theme) -> Figure:
     """Theoretical operation count vs DM trials and vs channels."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.5, 3.8), sharey=True)
-    by_dms = [ops_model(dt, NCHANS) for dt in (128, 256, 512, 1024, 2048, 4096, 8192)]
-    chans = [256, 512, 1024, 2048, 4096, 8192, 16384]
-    by_chans = [ops_model(NDMS_REF - 1, c) for c in chans]
+    by_dms = [ops_model(dm, NCHANS) for dm in DM_MAX_SWEEP]
+    chans = sorted({256, 512, 1024, 2048, 4096, NCHANS})
+    by_chans = [ops_model(DM_MAX_REF, c) for c in chans]
     labels = {
         "FDMT": "FDMT",
         "FDMT-FFT": "FDMT-FFT (model)",
@@ -570,15 +686,15 @@ def ops_figure(theme: Theme) -> Figure:
         (ax1, [int(r["ndms"]) for r in by_dms], by_dms, "number of DM trials"),
         (ax2, chans, by_chans, "number of channels"),
     ):
-        for algo in labels:  # SDMT's count depends on the DM grid: no model
+        for algo, label in labels.items():  # SDMT's count depends on the grid
             ys = [r[algo] for r in rows]
-            plot_line(ax, theme, xs, ys, algo=algo, label=labels[algo])
-            end_label(ax, xs[-1], ys[-1], labels[algo])
+            plot_line(ax, theme, xs, ys, algo=algo, label=label)
+            end_label(ax, xs[-1], ys[-1], label)
         pow2_axis(ax, xs, xlabel)
         ax.set_yscale("log")
         ax.margins(x=0.3)
-    ax1.set_title(f"{NCHANS} channels, vary DM trials")
-    ax2.set_title(f"{NDMS_REF} DM trials, vary channels")
+    ax1.set_title(f"{NCHANS} channels, DM 0-{DM_MAX_SWEEP[0]:g} to 0-{DM_MAX_REF:g}")
+    ax2.set_title(f"DM 0-{DM_MAX_REF:g}, vary channels")
     ax1.set_ylabel("operations per output time sample")
     finish(
         fig,
@@ -629,20 +745,21 @@ def highlight_figure(
             )
             end_label(ax2, x[-1], y[-1], plat)
     ax1.axhline(NSAMPS_REF * TSAMP, color=theme["muted"], lw=1.0)
+    ticks = ndms_ticks(results)
     ax1.annotate(
         "real time",
-        (NDMS_TICKS[-1], NSAMPS_REF * TSAMP),
+        (ticks[-1] if ticks else NDMS_REF, NSAMPS_REF * TSAMP),
         xytext=(0, 3),
         textcoords="offset points",
         fontsize=8,
         color=theme["muted"],
         ha="right",
     )
-    pow2_axis(ax1, NDMS_TICKS, "number of DM trials")
+    pow2_axis(ax1, ticks, "number of DM trials")
     ax1.set_yscale("log")
     ax1.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(fmt_seconds))
     ax1.set_ylabel(f"time per {NSAMPS_REF // 1024}K-sample block")
-    ax1.set_title(f"{NCHANS} channels, {NSAMPS_REF * TSAMP:.2f} s blocks")
+    ax1.set_title(f"{NCHANS} channels, {NSAMPS_REF * TSAMP:.1f} s blocks")
     ax2.axhline(1.0, color=theme["muted"], lw=1.0)
     ax2.set_xticks(range(len(NBITS)))
     ax2.set_xticklabels(NBITS_LABELS)
@@ -699,7 +816,8 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
         "",
         (
             f"**Reference point**: {NSAMPS_REF} samples {TIMES} {NDMS_REF} DM "
-            f"trials ({NSAMPS_REF * TSAMP:.2f} s of data), float32 input, median "
+            f"trials (DM 0-{DM_MAX_REF:g}, {NSAMPS_REF * TSAMP:.1f} s of data), "
+            "float32 input, median "
             "time per block. FDMT-FFT and DDMT-FFT use fractional delays "
             "(DDMT-FFT: NUFFT over the DM axis)."
         ),
@@ -715,7 +833,7 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
     ref = {
         (r.machine, r.backend, r.algo): r
         for r in results
-        if r.sweep == "ndms" and r.ndms == NDMS_REF and r.times
+        if r.sweep == "ndms" and r.dm_max == DM_MAX_REF and r.times
     }
     for mname, kind in platforms(results):
         backends = cpu_backends(results, mname) if kind == "cpu" else [kind]
@@ -756,16 +874,9 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
     for r in results:
         if r.sweep == "nbits" and r.times:
             by[(r.machine, r.backend, r.algo)][r.nbits] = r.rtf
-    engines = {
-        "cuda": "device-resident",
-        "cuda_host": "host arrays (incl. PCIe)",
-        "hip": "device-resident",
-        "hip_host": "host arrays (incl. PCIe)",
-    }
+    engines = {"cuda": "device-resident", "hip": "device-resident"}
     for mname, kind in platforms(results):
-        backends = (
-            cpu_backends(results, mname) if kind == "cpu" else [kind, f"{kind}_host"]
-        )
+        backends = cpu_backends(results, mname) if kind == "cpu" else [kind]
         for b in backends:
             for a in ("FDMT", "DDMT", "SDMT", "FDMT-FFT", "DDMT-FFT"):
                 row = by.get((mname, b, a))
@@ -784,14 +895,14 @@ def _nbits_table(results: list[Result], machines: dict[str, Machine]) -> list[st
 def _skipped_list(results: list[Result]) -> list[str]:
     skipped = sorted(
         (r for r in results if r.skipped and not r.times),
-        key=lambda r: (r.machine, r.sweep, r.algo, r.nsamps, r.dt_max),
+        key=lambda r: (r.machine, r.sweep, r.algo, r.nsamps, r.dm_max),
     )
     if not skipped:
         return []
     out = ["", "**Skipped points** (over the memory budget):", ""]
     out += [
         f"- `{r.machine}` {r.algo} {r.backend}, {r.nsamps} samples {TIMES} "
-        f"{r.ndms} DMs: {r.skipped}"
+        f"DM 0-{r.dm_max:g}: {r.skipped}"
         for r in skipped
     ]
     return out
@@ -809,11 +920,30 @@ def summary_md(results: list[Result], machines: dict[str, Machine]) -> str:
 # --------------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser(description="Plot the dmt benchmark suite.")
-    ap.add_argument("--results", default=str(REPO / "bench" / "results"))
+    ap.add_argument(
+        "--config",
+        default="cryopaf",
+        choices=sorted(CONFIGS),
+        help="suite configuration (default cryopaf); other presets read and write "
+        "under bench/results/<config>/ unless --results is given",
+    )
+    ap.add_argument(
+        "--results", help="results root (default: bench/results[/<config>])"
+    )
     ap.add_argument("--no-ops", action="store_true", help="skip the dmtlib ops plot")
     args = ap.parse_args()
-    results_dir = Path(args.results)
-    results, machines = load(results_dir)
+    globals().update(CONFIGS[args.config])
+    default = REPO / "bench" / "results"
+    if args.config != "cryopaf":
+        default /= args.config
+    results_dir = Path(args.results) if args.results else default
+    try:
+        results, machines = load(results_dir)
+    except ValueError as exc:
+        ap.error(str(exc))
+    # GPU timings are device-resident (no host<->device copies); the suite's
+    # host-array series are not plotted.
+    results = [r for r in results if not r.backend.endswith("_host")]
     if not results:
         sys.exit(f"no suite results under {results_dir}/*/suite_*.json")
     out_root = results_dir / "plots"
@@ -830,7 +960,8 @@ def main() -> None:
                 sweep="nsamps",
                 xlabel="samples per block",
                 title="Time per block vs block length",
-                subtitle=f"{NCHANS} channels, {NDMS_REF} DM trials, float32; {rt_note}",
+                subtitle=f"{NCHANS} channels, {NDMS_REF} DM trials "
+                f"(DM 0-{DM_MAX_REF:g}), float32; {rt_note}",
             ),
             "runtime_vs_ndms": runtime_figure(
                 results,
@@ -840,7 +971,8 @@ def main() -> None:
                 xlabel="number of DM trials",
                 title="Time per block vs number of DM trials",
                 subtitle=f"{NCHANS} channels, {NSAMPS_REF} samples "
-                f"({NSAMPS_REF * TSAMP:.2f} s), float32; {rt_note}",
+                f"({NSAMPS_REF * TSAMP:.1f} s), DM 0-{DM_MAX_SWEEP[0]:g} to "
+                f"0-{DM_MAX_REF:g}, float32; {rt_note}",
             ),
             "throughput_nbits": throughput_figure(results, machines, theme),
             "readme_highlight": highlight_figure(results, machines, theme),
@@ -851,6 +983,7 @@ def main() -> None:
             except ImportError:
                 print("dmtlib not importable; skipping ops_theory (use --no-ops)")
         for fname, fig in figs.items():
+            place_end_labels(fig)
             fig.savefig(out / f"{fname}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
     (out_root / "summary.md").write_text(summary_md(results, machines))

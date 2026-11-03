@@ -1,13 +1,16 @@
 """Run the published dmt benchmark suite on this machine.
 
-One command per machine; the JSON it writes is what plot_suite.py reads:
+One command per machine and preset; the JSON it writes is what plot_suite.py
+reads:
 
-    python bench/scripts/run_suite.py --machine m1-pro
-    python bench/scripts/run_suite.py --machine xeon-6348h --build-dir build
+    python bench/scripts/run_suite.py --machine xeon-6348h --no-gpu
     python bench/scripts/run_suite.py --machine l40s --no-cpu      # GPU box
-    python bench/scripts/run_suite.py --machine m1-pro --suite cfdmt
+    python bench/scripts/run_suite.py --machine l40s --no-cpu --config parkes_uwl
+    python bench/scripts/run_suite.py --machine xeon-6348h --suite cfdmt
 
 Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
+for the default ``cryopaf`` preset, and ``bench/results/<config>/<machine>/``
+for ``--config cryopaf_lband`` or ``parkes_uwl``
 (``--suite cfdmt``: ``suite_cfdmt_cpu.json`` / ``suite_cfdmt_<gpu>.json``, the
 CohFDMT baseband search, which has its own configuration and plots)
 (``gpu`` is ``cuda`` or ``hip``, whichever the build has)
@@ -18,6 +21,7 @@ See bench/README.md for the full workflow.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -29,6 +33,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BINARY = "dmt_bench_suite"
+
+
+def compact_benchmark_json(path: Path) -> None:
+    """Drop pretty-printing so suite JSON stays under pre-commit size limits."""
+    data = json.loads(path.read_text())
+    path.write_text(json.dumps(data, separators=(",", ":")) + "\n")
 
 
 def _run(cmd: list[str]) -> str:
@@ -114,9 +124,17 @@ def context_arg(ctx: dict[str, str]) -> str:
     return ",".join(f"{k}={v}" for k, v in clean.items())
 
 
+def results_root(suite: str, config: str) -> Path:
+    """bench/results, or bench/results/<config> for a non-default config."""
+    root = REPO / "bench" / "results"
+    return root / config if suite == "main" and config != "cryopaf" else root
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--machine", required=True, help="results folder name, e.g. m1-pro")
+    ap.add_argument(
+        "--machine", required=True, help="results folder name, e.g. xeon-6348h"
+    )
     ap.add_argument("--label", help="display name in plots (default: CPU/GPU model)")
     ap.add_argument("--build-dir", help="CMake build directory (default: auto)")
     ap.add_argument("--threads", default="1,8", help="CPU thread counts (default 1,8)")
@@ -136,6 +154,16 @@ def main() -> None:
         choices=["main", "cfdmt"],
         help="main: the filterbank algorithms (FDMT, DDMT, ...); cfdmt: the "
         "CohFDMT baseband search",
+    )
+    ap.add_argument(
+        "--config",
+        default="cryopaf",
+        choices=["cryopaf", "cryopaf_lband", "parkes_uwl"],
+        help="data configuration of --suite main (bench/suite/suite_common.hpp): "
+        "cryopaf (512 channels, 704-1216 MHz at 512 us), cryopaf_lband "
+        "(1152 channels, 1100-1714 MHz at 455.6 us), or parkes_uwl "
+        "(6656 channels, 704-4032 MHz at 64 us); all DM 0-2000, Levin tolerance "
+        "1.1 (UWL: 1.6)",
     )
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")
@@ -166,7 +194,7 @@ def main() -> None:
     if run_gpu and not gpu_kind:
         sys.exit("the suite binary has no GPU benchmarks (no GPU build or no GPU)")
 
-    out_dir = REPO / "bench" / "results" / args.machine
+    out_dir = results_root(args.suite, args.config) / args.machine
     out_dir.mkdir(parents=True, exist_ok=True)
     gpu = gpu_model(gpu_kind) if run_gpu else ""
     ctx = {
@@ -179,6 +207,7 @@ def main() -> None:
         "build_type": btype,
         "threads": args.threads.replace(",", " "),
         "fftw_planner": args.fftw_planner,
+        "config": args.config if args.suite == "main" else "-",
     }
     wisdom = args.fftw_wisdom or str(
         binary.parent.parent / f"fftw_{args.machine}.wisdom"
@@ -193,6 +222,7 @@ def main() -> None:
         # engine construction, outside the timed region).
         "DMT_FFTW_PLANNER": args.fftw_planner,
         "DMT_FFTW_WISDOM": wisdom,
+        "DMT_BENCH_CONFIG": args.config,
     }
 
     prefix, stem = (
@@ -220,7 +250,7 @@ def main() -> None:
             str(binary),
             f"--benchmark_filter={regex}",
             f"--benchmark_repetitions={1 if args.quick else 3}",
-            f"--benchmark_min_time={'0.05s' if args.quick else '0.5s'}",
+            f"--benchmark_min_time={'0.05s' if args.quick else '0.2s'}",
             f"--benchmark_out={out}",
             "--benchmark_out_format=json",
             f"--benchmark_context={context_arg(ctx)}",
@@ -228,9 +258,11 @@ def main() -> None:
         print(f"[{kind}] {binary.name} -> {out.relative_to(REPO)}", flush=True)
         start = time.monotonic()
         subprocess.run(cmd, check=True, env=run_env, cwd=REPO)  # noqa: S603
+        compact_benchmark_json(out)
         print(f"[{kind}] done in {(time.monotonic() - start) / 60:.1f} min")
     script = "plot_cfdmt.py" if args.suite == "cfdmt" else "plot_suite.py"
-    print(f"Next: python bench/scripts/{script}")
+    extra = f" --config {args.config}" if args.suite == "main" else ""
+    print(f"Next: python bench/scripts/{script}{extra}")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+#include "dmt/fdmt_box_weights.hpp"
 
 // Narrow-integer FDMT tree state (the `int_tree` constructor parameter),
 // shared by the CPU and CUDA backends so both pick identical per-level
@@ -23,15 +24,16 @@ enum class FDMTLevelType : uint8_t { kU8 = 0, kU16 = 1, kF32 = 2 };
  * @brief Per-level storage types for packed `nbits` input with int_tree.
  *
  * The exact max value of every coordinate is propagated through the plan's
- * DAG (level 0: maxval * box width; then bound(tail) + bound(head)), and a
- * level is stored as uint8/uint16 only if its largest bound fits. All bounds
- * stay far below 2^24, so the integer sums equal the float path bit-for-bit.
- * The root level is always float (it is the output), and the first float
- * level is moved one level earlier when needed so that, with the float
- * levels ping-ponging between the output buffer (levels with niters - l
- * even) and the internal buffer, the first float level lands in the output
- * buffer -- never on top of the integer ping-pong halves, which live inside
- * the internal buffer.
+ * DAG (level 0: with box smearing the rounded box mean of maxval samples in
+ * units of 2^-F, see fdmt_box_weights.hpp, else maxval; then bound(tail) +
+ * bound(head)), and a level is stored as uint8/uint16 only if its largest
+ * bound fits. Integer levels hold exact integers; the int -> float
+ * conversion scales by 2^-F, which commutes with float rounding, so the
+ * integer path equals the float path (int_tree off, same packed input)
+ * bit-for-bit.
+ * The root level is always float (it is the output). The engines keep
+ * every level below the root in one of two state halves, alternating, so
+ * any mix of storage types is laid out safely.
  */
 inline std::vector<FDMTLevelType> int_tree_level_types(
     const plans::FDMTPlan& plan, bool use_box_smearing, SizeType nbits) {
@@ -50,14 +52,18 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     };
 
     std::vector<FDMTLevelType> types(niters + 1, FDMTLevelType::kF32);
+    const SizeType scale_f = box_mean_bits(pc.state_shape[0].dt_max + 1);
     std::vector<double> prev(pc.state_shape[0].ncoords, 0.0);
     for (const auto& grid : pc.grids[0]) {
         for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {
-            const auto width =
+            const auto len =
+                static_cast<SizeType>(std::abs(grid.dt_grid[i_dt])) + 1;
+            const auto box_max = static_cast<uint64_t>(maxval) * len;
+            prev[grid.coord_offset + i_dt] =
                 use_box_smearing
-                    ? static_cast<double>(std::abs(grid.dt_grid[i_dt]) + 1)
-                    : 1.0;
-            prev[grid.coord_offset + i_dt] = maxval * width;
+                    ? static_cast<double>(box_round_apply<uint64_t>(
+                          box_max, box_round(len, scale_f)))
+                    : maxval;
         }
     }
     types[0] = type_for(*std::ranges::max_element(prev));
@@ -74,12 +80,7 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
             std::max(types[l - 1], type_for(*std::ranges::max_element(cur)));
         prev.swap(cur);
     }
-    types[niters]        = FDMTLevelType::kF32;
-    const auto first_f32 = static_cast<SizeType>(
-        std::ranges::find(types, FDMTLevelType::kF32) - types.begin());
-    if (first_f32 > 0 && (niters - first_f32) % 2 == 1) {
-        types[first_f32 - 1] = FDMTLevelType::kF32;
-    }
+    types[niters] = FDMTLevelType::kF32;
     return types;
 }
 

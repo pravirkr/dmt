@@ -10,20 +10,39 @@
 [![Documentation Status](https://readthedocs.org/projects/dmt/badge/?version=latest)](https://dmt.readthedocs.io/en/latest/?badge=latest)
 [![GitHub CI](https://github.com/pravirkr/dmt/actions/workflows/ci.yml/badge.svg)](https://github.com/pravirkr/dmt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/pravirkr/dmt/graph/badge.svg?token=17BGN5IIM9)](https://codecov.io/gh/pravirkr/dmt)
-[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://pyproject.toml)
+[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue)](include/dmt)
 [![CUDA](https://img.shields.io/badge/CUDA-12.6%2B-green)](https://developer.nvidia.com/cuda-zone)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
-**`dmt`** is a high-performance C++20 and Python library for radio astronomy dedispersion transforms. Engineered for real-time transient detection pipelines (FRBs, pulsars, and fast transients), it implements the complete family of dedispersion algorithms: **FDMT**, **DDMT**, **SDMT**, **CFDMT**, **FDMT-FFT** and **DDMT-FFT** (NUFFT-accelerated).
+**`dmt`** is a high-performance C++20 library with Python bindings for dedispersing radio data. It provides the fast tree transforms **FDMT** and **FDMT-FFT**, direct dedispersion with **DDMT**, **SDMT** and **DDMT-FFT**, and **CohFDMT**, a coherent search of baseband voltages. Every engine runs on CPUs and on NVIDIA and AMD GPUs, streams block by block, and reports the exact noise of every DM trial.
 
-| Dispersed Waterfall Input $I(\nu, t)$ | Dedispersed DM-Time Plane $DMT(\text{DM}, t)$ |
+**[Documentation](https://dmt.readthedocs.io)** ·
+[Getting started](https://dmt.readthedocs.io/en/latest/getting_started/index.html) ·
+[Tutorials](https://dmt.readthedocs.io/en/latest/tutorials/index.html) ·
+[Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html)
+
+| Dispersed waterfall $I(\nu, t)$ | DM–time plane after FDMT |
 | :---: | :---: |
 | ![Waterfall image](docs/_static/waterfall.png) | ![DMT transform](docs/_static/dmt.png) |
 
----
+## ✨ Highlights
+
+- **One interface, many engines.** Tree, direct and Fourier-domain
+  dedispersion share the same plans, DM grids and conventions, so you can
+  swap engines and compare them on the same data.
+- **CPU and GPU.** OpenMP and SIMD (AVX2, AVX-512, NEON) on the CPU; CUDA and
+  HIP on the GPU, with the same results to float rounding.
+- **Built for streaming.** Blocks join exactly through an internal history,
+  and several beams can share one plan per call.
+- **Low-bit input.** Packed 1–16 bit samples are read directly, without
+  converting to float first.
+- **Calibrated noise.** Every plan gives the exact sigma of each DM trial,
+  so S/N needs no calibration run.
+- **Plain time series too.** `dmtlib.dedisperse` returns white-noise
+  dedispersed time series for periodicity searches.
 
 ## ⚡ Quickstart
 
@@ -34,193 +53,148 @@ import numpy as np
 from dmtlib import compute_fdmt
 from dmtlib.simulate import generate_frb
 
-# 1. Simulate an FRB in a 256-channel filterbank.
-# generate_frb returns one float32 waterfall of shape (nchans, nsamps).
+# A dispersed burst (DM 150) in a 256-channel, 1 ms filterbank.
 waterfall = generate_frb(
-    f_min=1200.0,
-    f_max=1600.0,
-    nchans=256,
-    nsamps=1024,
-    tsamp=1e-3,
-    dm=150.0,
-    amp=3.0,
-    offset=200,
-    noise_rms=1.0,
+    f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024, tsamp=1e-3,
+    dm=150.0, amp=3.0, offset=200, noise_rms=1.0,
 )
 
-# 2. Dedisperse with the Fast Dispersion Measure Transform
+# Dedisperse over delays of 0-256 samples across the band (DM 0-203).
 dmt, plan = compute_fdmt(
-    waterfall,
-    f_min=1200.0,
-    f_max=1600.0,
-    nchans=256,
-    nsamps=1024,
-    tsamp=1e-3,
-    dt_max=180,
-    mode="valid",
+    waterfall, f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
+    tsamp=1e-3, dt_max=256, mode="valid",
 )
 
-# 3. Locate the candidate in the DM-time plane
 dmt_plane = dmt.reshape(plan.dmt_ndms, plan.dmt_nsamps)
-peak_dm_idx, peak_time = np.unravel_index(np.argmax(dmt_plane), dmt_plane.shape)
-print(
-    f"Detected FRB at DM = {plan.dm_grid_final[peak_dm_idx]:.2f} pc cm^-3, sample = {peak_time}"
-)
+i_dm, t = np.unravel_index(np.argmax(dmt_plane), dmt_plane.shape)
+print(f"Burst at DM {plan.dm_grid_final[i_dm]:.1f} pc cm^-3, sample {t}")
 ```
 
-### C++20
+For a dedispersed time series to Fourier transform, one call keeps the noise
+white and drops the startup samples
+([periodicity guide](https://dmt.readthedocs.io/en/latest/pipeline_guide/periodicity.html)):
+
+```python
+import dmtlib
+
+dms = np.arange(0.0, 200.0, 1.0)
+r = dmtlib.dedisperse(waterfall, 1200.0, 1600.0, 1e-3, dms, engine="fdmt_fft")
+r.data  # (n_dm, n_out) time series; r.dms, r.f_ref, r.arrival_times()
+```
+
+### C++
 
 ```cpp
-#include <iostream>
-#include <vector>
-#include <span>
 #include <dmt/dmt.hpp>
+
+#include <iostream>
+#include <span>
+#include <vector>
 
 int main() {
     dmt::algorithms::FDMT fdmt(
-        /*f_min=*/1200.0f, /*f_max=*/1600.0f, /*nchans=*/256, /*nsamps=*/1024,
-        /*tsamp=*/1e-3f, /*dt_max=*/128, /*dt_min=*/0, /*dt_step=*/1,
+        /*f_min=*/1200.0F, /*f_max=*/1600.0F, /*nchans=*/256, /*nsamps=*/1024,
+        /*tsamp=*/1e-3F, /*dt_max=*/256, /*dt_min=*/0, /*dt_step=*/1,
         /*use_box_smearing=*/true, /*mode=*/"valid",
-        dmt::Exec::cpu(/*nthreads=*/4)  // or Exec::cuda(0), Exec::hip(0)
+        dmt::Exec::cpu(/*nthreads=*/4)  // or dmt::Exec::cuda(0), dmt::Exec::hip(0)
     );
 
     const auto& plan = fdmt.get_plan();
-    std::vector<float> waterfall(256 * 1024, 0.0f);
-    std::vector<float> dmt_out(plan.get_buffer_size(), 0.0f);
+    std::vector<float> waterfall(256 * 1024, 0.0F);
+    std::vector<float> dmt_out(plan.get_dmt_size());  // (ndms, dmt_nsamps), row-major
 
-    fdmt.execute(
-        std::span<const float>(waterfall.data(), waterfall.size()),
-        std::span<float>(dmt_out.data(), dmt_out.size())
-    );
-
-    // Result: the first plan.get_dmt_size() floats, (ndms, dmt_nsamps)
-    // row-major; the rest of the buffer is scratch.
-    std::cout << "Dedispersed " << plan.get_dmt_ndms() << " DM trials!\n";
-    return 0;
+    fdmt.execute(std::span<const float>(waterfall), std::span<float>(dmt_out));
+    std::cout << "Dedispersed " << plan.get_dmt_ndms() << " DM trials\n";
 }
 ```
 
----
-
 ## 📦 Installation
-
-### Python Package
-
-From source using `uv` (recommended) or `pip`:
 
 ```bash
 git clone https://github.com/pravirkr/dmt.git
 cd dmt
-
-# Install with development and documentation dependencies
-pip install -e ".[develop,docs,tests]"
-
-# Or with uv
-uv sync --extra docs --extra tests
+pip install .          # or: uv pip install .
 ```
 
-The GPU backend is picked up automatically (`DMT_GPU=AUTO`: CUDA, else
-ROCm/HIP); to require one:
+The build picks up a GPU toolchain if it finds one (CUDA first, then ROCm).
+To require one, pass `CMAKE_ARGS="-DDMT_GPU=CUDA"` (or `HIP`).
+
+As a C++ library:
 
 ```bash
-CMAKE_ARGS="-DDMT_GPU=CUDA" pip install .   # or -DDMT_GPU=HIP
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cmake --install build
 ```
-
-### C++ Library (CMake)
-
-```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DDMT_BUILD_TESTING=ON
-cmake --build . -j
-ctest --output-on-failure
-sudo cmake --install .
-```
-
-Link in your project's `CMakeLists.txt`:
 
 ```cmake
 find_package(dmt REQUIRED)
 target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 ```
 
----
+Requirements, CMake options and development installs are in the
+[installation guide](https://dmt.readthedocs.io/en/latest/getting_started/installation.html).
 
 ## 📊 Benchmarks
 
-Measured on an Apple M1 Pro and an Intel Xeon Gold 6348H (both 8 threads) and
-an NVIDIA L40S, all with dmt 0.7.0. The data are 4096 channels (704–1216 MHz,
-81.92 µs) in 16K-sample blocks (1.34 s), processed as a stream.
-
-- **Left:** time per block for FDMT, FFT-based FDMT, brute-force DDMT,
-  SDMT (exact DDMT sums with shared partial sums) and DDMT-FFT (NUFFT-accelerated) on the same DM grid. The grey line is real time.
-- **Right:** how many times faster than real time FDMT runs, by input bit
-  width.
+Measured with dmt 0.7.0 on an Intel Xeon Gold 6348H (8 threads) and an
+NVIDIA L40S (device-resident data). The `cryopaf` preset is 512 channels at
+704–1216 MHz and 512 µs, processed as a stream of 16.8 s blocks, with up to
+1545 DM trials from 0 to 2000 pc cm⁻³.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/dark/readme_highlight.png">
   <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
 </picture>
 
-At 2049 DM trials, FDMT is 11× faster than brute-force DDMT on the Xeon
-and 33× on the M1 Pro, and 3–8× faster than SDMT,
-which runs 6–8× faster than real time on both CPUs. On the L40S, FDMT is 4.5×
-faster than DDMT (whose DM-tiled kernels run 63–95× faster than real time) and
-1.8× faster than SDMT (159–179× real time). FDMT runs 25–53× faster than real
-time on 8 CPU threads and 282× on the L40S, rising to 615× with packed 1-bit
-input. The Fourier-domain engines add exact fractional delays with sub-sample
-precision: **FDMT-FFT** trails FDMT by only 1.2–1.4× on the Xeon and L40S
-(5.5 ms on GPU), while **DDMT-FFT (NUFFT)** is 2–4.5× faster than brute-force DDMT.
-
-**CohFDMT** (coherent hybrid search of baseband voltages) takes one GUPPI node
-(64 × 2.93 MHz at 1.31–1.50 GHz, int8, t_p = 10 µs, DM 50–60).
-
-All sweeps, per-machine numbers and the operation-count comparison are on the
-[Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page.
+Every engine runs faster than real time on both machines: FDMT at 45× real
+time on the Xeon and 729× on the L40S, and DDMT-FFT, the fastest engine on
+this preset, at 124× and 1130×. Sweeps over DM range, block length and input
+width, a second L-band preset, and CohFDMT are on the
+[Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page;
 [`bench/README.md`](bench/README.md) shows how to reproduce them.
 
----
+## 📜 Citing
 
-## 📜 Citations & Algorithm References
-
-If you use `dmt` in your research, please cite the library and the foundational FDMT paper:
+If you use `dmt` in your research, please cite the library and the FDMT paper:
 
 ```bibtex
-@ARTICLE{2017ApJ...835...11Z,
-       author = {{Zackay}, Barak and {Ofek}, Eran O.},
-        title = "{An Accurate and Efficient Algorithm for Detection of Radio Bursts with an Unknown Dispersion Measure, for Single-dish Telescopes and Interferometers}",
-      journal = {\apj},
-     keywords = {methods: data analysis, methods: statistical, Astrophysics - Instrumentation and Methods for Astrophysics},
-         year = 2017,
-        month = jan,
-       volume = {835},
-       number = {1},
-          eid = {11},
-        pages = {11},
-          doi = {10.3847/1538-4357/835/1/11},
-archivePrefix = {arXiv},
-       eprint = {1411.5373},
- primaryClass = {astro-ph.IM},
-       adsurl = {https://ui.adsabs.harvard.edu/abs/2017ApJ...835...11Z},
-      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
-}
-
-
-
 @software{kumar2026dmt,
   author = {Kumar, Pravir and Zackay, Barak},
-  title = {{dmt: Fast Dispersion Measure Transform Library}},
-  url = {https://github.com/pravirkr/dmt},
-  year = {2026}
+  title  = {{dmt: Fast Dispersion Measure Transform Library}},
+  url    = {https://github.com/pravirkr/dmt},
+  year   = {2026}
+}
+
+@ARTICLE{2017ApJ...835...11Z,
+  author  = {{Zackay}, Barak and {Ofek}, Eran O.},
+  title   = "{An Accurate and Efficient Algorithm for Detection of Radio Bursts
+             with an Unknown Dispersion Measure, for Single-dish Telescopes and
+             Interferometers}",
+  journal = {\apj},
+  year    = 2017,
+  volume  = {835},
+  number  = {1},
+  eid     = {11},
+  pages   = {11},
+  doi     = {10.3847/1538-4357/835/1/11},
+  eprint  = {1411.5373},
+  adsurl  = {https://ui.adsabs.harvard.edu/abs/2017ApJ...835...11Z}
 }
 ```
 
-The algorithms implemented in `dmt` build upon foundational literature and open-source frameworks:
+The algorithms build on:
 
-- **FDMT, FDMT-FFT, CFDMT:** Zackay & Ofek (2017), *ApJ*, 835, 11 ([arXiv:1411.5373](https://arxiv.org/abs/1411.5373))
-- **DDMT-FFT (FDD):** Bassa et al. (2022), *A&A*, 657, A46 (Fourier-domain dedispersion); NUFFT kernel: Barnett, Magland & af Klinteberg (2019), *SIAM J. Sci. Comput.*, 41, C479
-- **DDMT:** Barsdell et al. (2012), *MNRAS*, 422, 379 ([doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x))
-- **SDMT:** Naidu et al. (2024), AT-RASC 2024 ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825))
+- **FDMT, FDMT-FFT, CohFDMT:** Zackay & Ofek (2017), *ApJ*, 835, 11
+  ([arXiv:1411.5373](https://arxiv.org/abs/1411.5373))
+- **DDMT:** Barsdell et al. (2012), *MNRAS*, 422, 379
+  ([doi:10.1111/j.1365-2966.2012.20622.x](https://doi.org/10.1111/j.1365-2966.2012.20622.x))
+- **SDMT:** Naidu et al. (2024), AT-RASC 2024
+  ([doi:10.46620/ursiatrasc24/hbrq1825](http://dx.doi.org/10.46620/ursiatrasc24/hbrq1825))
+- **DDMT-FFT:** Bassa et al. (2022), *A&A*, 657, A46 (Fourier-domain
+  dedispersion); NUFFT kernel from Barnett, Magland & af Klinteberg (2019),
+  *SIAM J. Sci. Comput.*, 41, C479
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).

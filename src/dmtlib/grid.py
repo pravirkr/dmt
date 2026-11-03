@@ -43,8 +43,7 @@ import numpy as np
 
 from .libdmt import DDMTPlan
 
-# Dispersion constant (MHz^2 * s / (pc * cm^-3)) - Lorimer & Kramer (2005)
-DM_CONSTANT = 4.148808e3
+DM_CONSTANT = 1 / 2.41e-4  # TEMPO2, Manchester&Taylor (1972)
 
 
 def _generate_positive_dm_grid(

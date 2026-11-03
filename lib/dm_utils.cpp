@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <format>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -81,8 +82,20 @@ std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
             const auto a = 1.F / (fch1 + (static_cast<float>(ichan) * foff));
             const auto delay =
                 kDispConst / tsamp * ((a * a) - (b * b)) * dm_arr[idm];
+            const float rounded = std::nearbyint(delay);
+            // nearbyint of a non-finite or out-of-range delay is not a safe
+            // conversion to SizeType (the cast of NaN/Inf is undefined).
+            const double as_double = static_cast<double>(rounded);
+            if (!is_finite_bits(as_double) || !(rounded >= 0.0F) ||
+                as_double >=
+                    std::ldexp(1.0, std::numeric_limits<SizeType>::digits)) {
+                throw std::invalid_argument(std::format(
+                    "DDMT: dispersion delay {} samples is not a representable "
+                    "non-negative size (dm={}, channel={})",
+                    delay, dm_arr[idm], ichan));
+            }
             delay_table[(idm * nchans) + ichan] =
-                static_cast<SizeType>(std::nearbyint(delay));
+                static_cast<SizeType>(rounded);
         }
     }
     return delay_table;

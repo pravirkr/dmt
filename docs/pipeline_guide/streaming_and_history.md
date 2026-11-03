@@ -1,137 +1,161 @@
-# Streaming & Overlap-Save History
+# Streaming and history
 
-Telescopes such as CHIME, FAST, MeerKAT, and ASKAP stream continuous gigabytes of data per second. Real-time pipelines must process incoming data in discrete time blocks (e.g. $N_{\text{samps}} = 1024$ or $2048$ samples per block) without losing dispersed signals that span across block boundaries.
+A real-time pipeline gets data in blocks of, say, 1024 or 32 768 samples. A
+dispersed pulse near the end of one block has its low-frequency part in the
+next. If you dedisperse each block on its own, that pulse is cut in two.
+`dmt` engines avoid this by keeping a short history between calls, so a
+stream can be cut into blocks anywhere.
 
----
+## FDMT in `mode="valid"`
 
-## 1. The Block Boundary Challenge
+The history lives inside the tree, not on the raw input. Every merge node with
+a delay keeps the last `delay` samples of its input from the previous block.
+This is overlap-save applied node by node: streaming reproduces one long
+transform bit for bit, for every DM trial, and no overlap samples are
+recomputed.
 
-A dispersed transient arriving near the end of Block $k$ has its high-frequency component in Block $k$, while its dispersed low-frequency tail extends into Block $k+1$.
+What that means in practice:
 
-If data blocks are dedispersed independently:
-- **Boundary Loss**: Up to $50\% - 100\%$ of the pulse energy is truncated at block boundaries.
-- **Edge Artifacts**: Spurious peaks appear at the edges of the output matrix.
-- **Missed Detections**: High-DM candidates that span multiple blocks are systematically lost.
+- **Construct once, call once per block.** Each `execute()` (or stepper
+  `reset()`) consumes one block and returns exactly `nsamps` outputs
+  (`plan.dmt_nsamps`).
+- **Pass contiguous, non-overlapping blocks.** The outputs are then
+  contiguous too, and concatenating them equals a full-mode transform of the
+  whole stream. Don't overlap blocks yourself; the history already supplies
+  the past.
+- **The first block starts cold.** After construction or `reset_history()`
+  the history is zero. The first `startup_samples` outputs
+  (`fdmt.startup_samples`, C++ `plan.get_startup_samples()`) are partial sums
+  over the channels whose data has arrived. Usually that is
+  $\max(|\Delta t_{\min}|, |\Delta t_{\max}|)$, a little more for FDMT-FFT
+  because of its interpolation guard. These samples are written, not
+  withheld, so mask or drop them. With real, nonzero-mean data they form a
+  ramp that grows with DM and puts a lot of power at low Fourier frequencies
+  (see [periodicity searches](periodicity.md)).
+- **Any block size works.** `nsamps` can be smaller than $\Delta t_{\max}$; the
+  history then spans several blocks. Choose it for latency and throughput.
+- **Blocks and chunks are different things.** A block (`nsamps`) is what one
+  `execute()` consumes and returns. Inside a block the engine runs the tree in
+  chunks of `chunk_nsamps` samples, so its working state is two levels of
+  rows × chunk rather than rows × `nsamps`, and the same overlap-save history
+  joins the chunks. Some paths give bit-identical output for any chunk:
+  packed input, integer-valued input, explicit fusion depths, and the CPU
+  tree. Automatic GPU direct levels agree within float rounding. By default
+  the chunk is the longest power of two ≥ 2048 whose state fits in 2 GiB,
+  capped at `nsamps`, and shorter on a GPU when that keeps the state in L2.
+  For example, for the `cryopaf` preset (512 channels at 512 µs, DM 0–2000)
+  with 32 768-sample blocks, a whole-block tree state is 5.5 GiB; the
+  automatic 8192-sample chunk needs 1.4 GiB and gives the same output.
+- **Finish a stepped block before starting the next.** Stopping early raises
+  rather than silently corrupting the history (see
+  {ref}`stepper rules <stepper-rules>`). The stepper runs whole blocks, so
+  construct a stepping engine with `chunk_nsamps=nsamps`.
 
----
-
-## 2. DMT's Overlap-Save Mechanism
-
-In `mode="valid"`, `FDMT` and `DDMT` (on every backend) maintain **internal state history buffers**:
-
+```{warning}
+Call `reset_history()` when the stream breaks (a new observation, dropped
+data), and **never between consecutive blocks**.
 ```
-Block 0:  [─────── Waterfall Data Block 0 ───────]
-                                           \ Tail / ──> [Save to History Buffer]
-                                                       │
-Block 1:  [Saved History] + [── Waterfall Data Block 1 ──]
-                                           \ Tail / ──> [Update History Buffer]
+
+:::{dropdown} What the history holds
+:icon: info
+
+The history has two parts, both kept per beam:
+
+- **Level-0 input history** (`plan.history_size`, C++ `get_history_size()`):
+  the last `dt0_max` samples of every channel, where `dt0_max` is the largest
+  level-0 delay. That is `nchans × dt0_max` floats, only what level 0 reads
+  from before the block.
+- **Tree history** (`plan.tree_history_size`): the last `delay` samples of each
+  merge node's head input. On the CPU it is a ring buffer, so a block moves
+  $O(\min(\text{delay}, N_\text{samps}))$ samples per node instead of
+  $O(\text{delay})$. On a GPU it is double-buffered.
+:::
+
+```{note}
+`mode="full"` and `mode="roll"` keep no history; each block stands alone.
 ```
 
-### How It Works
+## DDMT
 
-The history is kept inside the tree, not on the raw input: every merge node
-with a delay keeps the last `delay` samples of its input from the previous
-block. That is overlap-save applied per node, so streaming reproduces a single
-monolithic transform **bit-exactly for every DM trial**, with no redundant
-recomputation of overlap samples.
+`DDMT` (and `SDMT`, `DDMT-FFT`) always streams. Its history is the raw input
+tail: the last $\Delta t_{\max}$ samples of every beam and channel, prepended
+to the next block. Unlike FDMT it withholds what it cannot compute yet:
+`get_output_nsamps(n)` is `n - max_delay` on a cold start and `n` once the
+stream is warm. Concatenating the outputs of consecutive blocks equals one
+call on the whole stream, bit for bit.
 
-1. **Construct once, call per block.** Every `execute()` (or stepper
-   `reset()`) consumes one block and returns exactly $N_{\text{samps}}$
-   output samples (`plan.dmt_nsamps`).
-2. **Blocks must be contiguous and non-overlapping in time.** Then the output
-   blocks are contiguous too: concatenating them equals one full-mode transform
-   of the whole stream. Do not overlap blocks yourself; the history already
-   supplies the past samples.
-3. **Cold start.** After construction or `reset_history()`, the history is
-   zero, so the first $\Delta t_{\max}$ samples of the first block are partial
-   sums. Call `reset_history()` whenever the stream breaks (a new observation,
-   dropped data).
-4. **Block size is free.** `nsamps` may even be smaller than $\Delta t_{\max}$;
-   the per-node history then spans several blocks. Choose it for latency and
-   throughput (see [Performance](performance.md)).
-5. **Stepper.** A stepped block must be finalized before the next one; stopping
-   early raises instead of silently corrupting the history (see
-   {ref}`stepper rules <stepper-rules>`).
-
-`mode="full"` and `mode="roll"` keep no history; each block is independent.
-
-### DDMT
-
-`DDMT` always streams. Its history is the raw input tail: the last
-$\Delta t_{\max}$ samples of every (beam, channel) row, prepended to the next
-block. `get_output_nsamps(n)` is `n - max_delay` on a cold start and `n` once
-the stream is warm, and concatenating the outputs of consecutive blocks equals
-one call on the whole stream, bit for bit.
-
-- Every `execute()` overload shares this one history: float and packed input,
+- **One history for every overload.** Every `execute()` overload shares this one history: float and packed input,
   channel-major and time-major (`execute_time_major`), host and device memory.
-  They may be mixed within a stream; call `reset_history()` to start a new one.
-- On a GPU backend the history stays on the device. Device-memory calls are
-  then a single asynchronous launch sequence on the given stream, with no
-  host synchronisation; host-memory calls stream the block through the device
-  in chunks of `gulp_size` samples (`set_gulp_size()`), overlapping copies and
+  You can mix them within a stream. Call `reset_history()` to start a new one.
+- **On a GPU** the history stays on the device. Device-memory calls are then one
+  asynchronous launch sequence on the given stream, with no host
+  synchronisation. Host-memory calls stream the block through the device in
+  chunks of `gulp_size` samples (`set_gulp_size()`), overlapping copies and
   kernels.
 
----
+## Several streams through one engine: `save_history` / `load_history`
 
-## 3. Time-Division Multiplexing (`save_history` / `load_history`)
+If one thread serves several beams in turn (block *k* of beam 0, block *k* of
+beam 1, block *k+1* of beam 0, ...), save and restore each beam's history
+around its call:
 
-In multi-beam systems, a single compute thread may process multiple beams in a round-robin schedule:
-- Cycle 1: Process Block $k$ of Beam 0.
-- Cycle 2: Process Block $k$ of Beam 1.
-- Cycle 3: Process Block $k+1$ of Beam 0.
-
-To prevent Beam 1 from overwriting the streaming state of Beam 0, use the History State API:
+::::{tab-set}
+:::{tab-item} Python
+:sync: python
 
 ```python
 from dmtlib import FDMT
 
-fdmt = FDMT(
-    f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
-    tsamp=1e-3, dt_max=100, mode="valid"
-)
+fdmt = FDMT(f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
+            tsamp=1e-3, dt_max=100)
+histories = {}
 
-# Allocate storage for per-beam history states
-beam_histories = {
-    "beam_0": None,
-    "beam_1": None,
-}
-
-def process_beam_block(beam_id, waterfall_block):
-    # 1. Restore this beam's history state (if already warmed up)
-    if beam_histories[beam_id] is not None:
-        fdmt.load_history(beam_histories[beam_id])
+def process(beam_id, block):
+    if beam_id in histories:
+        fdmt.load_history(histories[beam_id])
     else:
         fdmt.reset_history()
-
-    # 2. Execute transform on this block
-    dmt_plane = fdmt.execute(waterfall_block)
-
-    # 3. Save updated history state for this beam
-    beam_histories[beam_id] = fdmt.save_history()
-
-    return dmt_plane
+    out = fdmt.execute(block)
+    histories[beam_id] = fdmt.save_history()
+    return out
 ```
+:::
+:::{tab-item} C++
+:sync: cpp
 
-### C++ Equivalent:
 ```cpp
-// Query required state buffer size in floats
-const size_t state_size = fdmt.history_state_size();
-std::vector<float> beam0_state(state_size);
-
-// Save state
-fdmt.save_history(std::span<float>(beam0_state));
-
-// Restore state
-fdmt.load_history(std::span<const float>(beam0_state));
+std::vector<float> beam0(fdmt.history_state_size());
+fdmt.save_history(std::span<float>(beam0));
+fdmt.load_history(std::span<const float>(beam0));
 ```
+:::
+::::
 
 The saved state is only the small history (`history_state_size()` floats),
-not the engine's working buffers, so one engine can serve many streams of the
-same plan geometry. (`CohFDMT` does not need it: it is stateless across
-blocks, see [Coherent Hybrid Search](coherent_hybrid.md).) On a GPU backend the history lives in device memory;
-the `DeviceSpan` overloads (C++ only) are asynchronous on the given stream,
+not the engine's working buffers, so one engine can serve many streams with
+the same plan. On the CPU it holds the level-0 input history, then the tree
+history, each node's slot oldest sample first. On a GPU it lives in device
+memory. The C++ `DeviceSpan` overloads are asynchronous on the given stream,
 and the host overloads copy synchronously. A saved history belongs to the
-backend that wrote it (the layout differs between backends).
-For beams that are processed together, `nbeams` is usually simpler (see
-[Multi-Beam Batching](multibeam.md)).
+backend that wrote it, because the layouts differ. `CohFDMT` needs none of
+this: it is stateless across blocks.
+
+:::{dropdown} GPU caveat: direct levels after `load_history()`
+:icon: info
+
+One GPU caveat applies. With many delays per channel, a GPU engine computes
+its lowest and highest levels directly by default.
+That keeps extra state the saved format does not hold: a running-sum window
+per channel and a ring per level-4 row. After `load_history()` the engine
+runs the plain tree, with the same output, until that state has refilled.
+That takes up to the longest delay any trial applies to a level-4 row, about
+21 000 samples for `cryopaf`. An engine shared by many streams therefore
+spends the start of each block on the slower path. Where that matters, give
+each stream its own engine. For beams processed together, `nbeams` is
+simpler (see [multi-beam batching](multibeam.md)).
+:::
+
+```{seealso}
+- [Periodicity searches](periodicity.md): what the startup ramp does to a power spectrum.
+- [Multi-beam batching](multibeam.md): several beams through one engine.
+```

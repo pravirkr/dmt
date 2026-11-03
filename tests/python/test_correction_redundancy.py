@@ -94,6 +94,14 @@ def _fdmt_iteration(
     return out
 
 
+def _box_mean_weights(ndt: int) -> np.ndarray:
+    """dmt's level-0 box-mean weights round(2**b / L) * 2**-b, b =
+    ceil(log2 L) + 2, for boxes of L = 1 .. ndt samples."""
+    length = np.arange(1, ndt + 1, dtype=np.float64)
+    b = np.ceil(np.log2(length)) + 2
+    return np.floor((2.0**b + np.floor(length / 2)) / length) * 2.0**-b
+
+
 def reference_fdmt(
     waterfall: np.ndarray,
     f_min: float,
@@ -105,13 +113,15 @@ def reference_fdmt(
     absolute channel-edge frequencies by the algorithm itself -- exactly as
     the classic implementation always assumed, whether or not the caller's
     actual values really are edges (that potential mismatch is the
-    experiment `test_correction_never_improves_recovery` runs).
+    experiment `test_correction_never_improves_recovery` runs). Level 0 is
+    the box mean with dmt's dyadic weights.
     """
     nchans, nsamps = waterfall.shape
     if nchans & (nchans - 1) != 0:
         raise ValueError("reference_fdmt requires a power-of-2 channel count")
     n_iters = int(np.log2(nchans))
     state = _fdmt_initialization(waterfall, f_min, f_max, max_dt)
+    state = state * _box_mean_weights(state.shape[1])[None, :, None]
     for iteration_num in range(1, n_iters + 1):
         state = _fdmt_iteration(
             state, max_dt, nchans, f_min, f_max, iteration_num, correction
@@ -130,6 +140,20 @@ NCHANS = 64
 DT_MAX = 64
 NSAMPS = 4 * DT_MAX
 CHAN_WIDTH = (TRUE_F_MAX - TRUE_F_MIN) / NCHANS
+
+
+def _row_sigma(execute_fn, nreal: int = 60, seed: int = 0) -> np.ndarray:
+    """Noise sigma of every output row of `execute_fn`, measured on white
+    unit-variance noise (samples past DT_MAX, where every box is full).
+    The correction changes the level-0 box lengths and so each trial's
+    noise: recovery must be compared in S/N, not in amplitude.
+    """
+    rng = np.random.default_rng(seed)
+    rows = [
+        execute_fn(rng.standard_normal((NCHANS, NSAMPS)))[:, DT_MAX:]
+        for _ in range(nreal)
+    ]
+    return np.concatenate(rows, axis=1).std(axis=1)
 
 
 def _algorithm_inputs(convention: str) -> tuple[float, float]:
@@ -183,6 +207,8 @@ class TestCorrectionRedundancy:
             ) -> np.ndarray:
                 return reference_fdmt(wf, f_min_a, f_max_a, DT_MAX, correction=True)
 
+            sigma_no_corr = _row_sigma(execute_no_correction)
+            sigma_with_corr = _row_sigma(execute_with_correction)
             frac_no_corr = sweep_recovery(
                 execute_no_correction,
                 dt_values,
@@ -191,6 +217,7 @@ class TestCorrectionRedundancy:
                 NSAMPS,
                 TRUE_F_MIN,
                 TRUE_F_MAX,
+                sigma_fn=sigma_no_corr.__getitem__,
             )
             frac_with_corr = sweep_recovery(
                 execute_with_correction,
@@ -200,13 +227,14 @@ class TestCorrectionRedundancy:
                 NSAMPS,
                 TRUE_F_MIN,
                 TRUE_F_MAX,
+                sigma_fn=sigma_with_corr.__getitem__,
             )
 
             # A small positive tolerance, not a strict <=, since this is a
             # statistical (mean-over-a-grid) comparison, not a per-point
             # exact one.
             assert frac_with_corr.mean() <= frac_no_corr.mean() + 0.02, (
-                f"correction unexpectedly improved mean recovery under "
+                f"correction unexpectedly improved mean S/N recovery under "
                 f"convention={convention!r}: "
                 f"{frac_with_corr.mean():.4f} > {frac_no_corr.mean():.4f}"
             )

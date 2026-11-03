@@ -465,3 +465,52 @@ class TestSDMT:
                 self.DMS,
                 backend=missing[0],
             )
+
+
+def test_strided_dm_grid_and_kill_mask_follow_logical_order() -> None:
+    f_min, f_max, tsamp = 1000.0, 1500.0, 0.001
+    raw = np.array([0.0, 100.0, 1.0, 101.0], dtype=np.float32)
+    plan = DDMTPlan(f_min, f_max, 4, tsamp, raw[::2])
+    np.testing.assert_allclose(plan.dm_arr, [0.0, 1.0])
+
+    reversed_grid = np.array([0.0, 5.0, 10.0], dtype=np.float32)[::-1]
+    reversed_plan = DDMTPlan(f_min, f_max, 4, tsamp, reversed_grid)
+    np.testing.assert_allclose(reversed_plan.dm_arr, [10.0, 5.0, 0.0])
+
+    mask = np.array([0, 9, 2, 9, 0, 9, 255, 9], dtype=np.uint8)[::2]
+    plan.kill_mask = mask
+    np.testing.assert_array_equal(plan.kill_mask, [0, 1, 0, 1])
+    assert plan.effective_variance == pytest.approx(2.0)
+
+
+def test_bound_plan_rejects_mask_changes_and_bad_inputs() -> None:
+    nchans, nsamps = 4, 32
+    engine = DDMT(1000.0, 1500.0, nchans, 0.001, 10.0, 5.0, 0.0)
+    waterfall = np.ones((nchans, nsamps), dtype=np.float32)
+    before = engine.execute(waterfall)
+    with pytest.raises(ValueError, match="bound"):
+        engine.plan.kill_mask = np.zeros(nchans, dtype=np.uint8)
+    engine.reset_history()
+    np.testing.assert_allclose(engine.execute(waterfall), before)
+
+    standalone = DDMTPlan(1000.0, 1500.0, nchans, 0.001, 10.0, 5.0)
+    standalone.kill_mask = np.array([2, 2, 2, 2], dtype=np.uint8)
+    np.testing.assert_array_equal(standalone.kill_mask, [1, 1, 1, 1])
+    assert standalone.effective_variance == pytest.approx(nchans)
+
+    with pytest.raises(ValueError):
+        DDMTPlan(-1500.0, -1000.0, nchans, 0.001, 10.0, 5.0)
+    with pytest.raises(ValueError):
+        DDMTPlan(
+            1000.0,
+            1500.0,
+            nchans,
+            0.001,
+            np.array([np.nan], dtype=np.float32),
+        )
+    with pytest.raises(ValueError):
+        DDMTPlan(1000.0, 1500.0, nchans, 0.001, np.array([-1.0], dtype=np.float32))
+    with pytest.raises(ValueError):
+        DDMT(1000.0, 1500.0, nchans, 0.001, 10.0, 5.0, nbeams=0)
+    with pytest.raises(ValueError, match="channels"):
+        engine.execute(np.ones((nchans - 1, nsamps), dtype=np.float32))

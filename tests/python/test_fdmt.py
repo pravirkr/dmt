@@ -4,6 +4,18 @@ import pytest
 from dmtlib import libdmt
 
 
+def frb_track_gain(plan: libdmt.FDMTPlan, dm_idx: int, use_box_smearing: bool) -> float:
+    """FDMT output of add_frb_track's unit impulses: each channel adds its
+    level-0 box-mean weight (``plan.box_weights``), or 1 without smearing."""
+    nchans = plan.nchans
+    if not use_box_smearing:
+        return float(nchans)
+    smearing = np.asarray(plan.smearing_grid_final).reshape(-1, nchans)[dm_idx]
+    length = np.abs(smearing).astype(np.int64) + 1
+    table = np.asarray(plan.box_weights, dtype=np.float64)
+    return float(np.sum(table[length - 1]) * 2.0**-plan.box_fraction_bits)
+
+
 class TestFDMT:
     def test_initialise_ones(self) -> None:
         nchans = 500
@@ -594,8 +606,9 @@ class TestFDMT:
     ) -> None:
         # add_frb_track places a unit impulse in every channel at exactly
         # the sample trace_dm computes; running FDMT on that waterfall must
-        # reproduce a value of exactly nchans (all channels combining
-        # constructively, no partial/rounding loss) at (dm_idx, toffset).
+        # reproduce exactly the sum of the channels' level-0 weights (all
+        # channels combining constructively, no partial/rounding loss) at
+        # (dm_idx, toffset): nchans without box smearing.
         f_min, f_max = 1000.0, 1500.0
         nsamples, tsamp, toffset = 512, 0.001, 150
 
@@ -617,7 +630,9 @@ class TestFDMT:
             use_box_smearing=use_box_smearing,
         )
         dmt = fdmt.execute(waterfall)
-        assert dmt[dm_idx, toffset] == pytest.approx(float(nchans))
+        assert dmt[dm_idx, toffset] == pytest.approx(
+            frb_track_gain(fdmt.plan, dm_idx, use_box_smearing)
+        )
 
     def test_add_frb_track_width(self) -> None:
         # A width-N boxcar dedisperses to a width-N plateau at the target
@@ -1130,7 +1145,14 @@ class TestFDMTPerformanceParams:
         assert self._make(fuse_levels=99).fuse_levels == fdmt.plan.niters
         mem = self._make(fuse_levels=3).memory_usage
         assert mem.total == mem.plan + mem.state + mem.history + mem.workspace
-        assert mem.state == fdmt.plan.buffer_size * 4
+        # Two state halves of the largest level below the root; the root goes
+        # straight to the output, which needs exactly dmt_size floats.
+        shapes = fdmt.plan.state_shapes
+        largest = max(
+            int(shapes[level]["nelements"]) for level in range(fdmt.plan.niters)
+        )
+        assert mem.state == 2 * largest * 4
+        assert mem.output == fdmt.plan.dmt_size * 4
         assert mem.workspace > ref.memory_usage.workspace
         assert "workspace=" in repr(mem)
 
@@ -1150,16 +1172,43 @@ class TestFDMTPerformanceParams:
 
     @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
     @pytest.mark.parametrize("int_tree", [False, True])
-    def test_packed_matches_float(self, nbits: int, int_tree: bool) -> None:
+    @pytest.mark.parametrize("dt_max", [40, 600])
+    def test_packed_matches_float(
+        self, nbits: int, int_tree: bool, dt_max: int
+    ) -> None:
+        # Packed input rounds every level-0 box mean of L samples to f(L)
+        # fractional bits (plan.box_mean_bits documents the rule): within
+        # sum_c 2**-(f(L_c) + 1) of float input with the same values, and
+        # bit-identical with int_tree on or off (dt_max=600 makes boxes long
+        # enough to round).
         rng = np.random.default_rng(nbits)
         values = rng.integers(
             0, 2**nbits, size=(self.nchans, self.nsamps), dtype=np.uint32
         )
         packed = _pack_lsb_first(values, nbits)
         assert packed.shape == (self.nchans, (self.nsamps * nbits + 7) // 8)
-        ref = self._make_ref().execute(values.astype(np.float32))
-        fdmt = self._make(int_tree=int_tree)
-        np.testing.assert_array_equal(fdmt.execute(packed, nbits), ref)
+
+        def make(**perf: object) -> libdmt.FDMT:
+            return libdmt.FDMT(
+                1000.0, 1500.0, self.nchans, self.nsamps, 0.001, dt_max, **perf
+            )
+
+        ref = make(fuse_levels=0, int_tree=False)
+        expected = np.array(ref.execute(values.astype(np.float32)))
+        ref.reset_history()
+        expected_pk = np.array(ref.execute(packed, nbits))
+        got = np.array(make(int_tree=int_tree).execute(packed, nbits))
+        np.testing.assert_array_equal(got, expected_pk)
+
+        plan = ref.plan
+        smearing = np.asarray(plan.smearing_grid_final).reshape(-1, self.nchans)
+        length = np.abs(smearing).astype(np.int64) + 1
+        f = np.zeros_like(length)
+        while np.any(3 * 4**f < 50 * length):
+            f += (3 * 4**f < 50 * length).astype(np.int64)
+        bound = np.sum(2.0 ** -(f + 1.0), axis=1)[:, None]
+        assert np.all(np.abs(got - expected) <= bound + 1e-5 * np.abs(expected) + 1e-6)
+        assert plan.box_mean_bits == int(f.max())
 
     def test_uint8_without_nbits_is_rejected(self) -> None:
         fdmt = self._make()
@@ -1207,21 +1256,21 @@ class TestFDMTUsageContract:
         wf = rng.standard_normal((self.nchans, self.nsamps), dtype=np.float32)
         ref = self._make().execute(wf)
         fdmt = self._make()
-        out = np.empty(fdmt.plan.buffer_size, dtype=np.float32)
+        out = np.empty(fdmt.plan.dmt_size, dtype=np.float32)
         got = fdmt.execute(wf, out=out)
         np.testing.assert_array_equal(got, ref)
         assert got.base is out or np.shares_memory(got, out)
         with pytest.raises(ValueError):
-            fdmt.execute(wf, out=np.empty(fdmt.plan.buffer_size - 1, np.float32))
+            fdmt.execute(wf, out=np.empty(fdmt.plan.dmt_size - 1, np.float32))
         with pytest.raises(TypeError):
-            fdmt.execute(wf, out=np.empty(fdmt.plan.buffer_size, np.float64))
+            fdmt.execute(wf, out=np.empty(fdmt.plan.dmt_size, np.float64))
 
     def test_batched_result_is_a_strided_view(self) -> None:
         nbeams = 3
         rng = np.random.default_rng(4)
         wf = rng.standard_normal((nbeams, self.nchans, self.nsamps), dtype=np.float32)
         fdmt = self._make(nbeams=nbeams)
-        out = np.empty(nbeams * fdmt.plan.buffer_size, dtype=np.float32)
+        out = np.empty(nbeams * fdmt.plan.dmt_size, dtype=np.float32)
         got = fdmt.execute(wf, out=out)
         assert got.shape == (nbeams, fdmt.plan.dmt_ndms, fdmt.plan.dmt_nsamps)
         assert np.shares_memory(got, out)

@@ -42,8 +42,9 @@ struct FDMTCoordDPtrs {
     const int* tail_nsamps;
     const int* head_buf_offset;
     const int* head_nsamps;
-    const int* hist_offset; // valid-mode cross-block tree history slot
-                            // (coordinates_sum only)
+    // Valid-mode cross-block tree history slot (coordinates_sum only):
+    // unsigned, so one beam's tree history may hold up to 2^32 - 1 elements.
+    const uint32_t* hist_offset;
 
     __host__ __device__ void update_offsets(int offset_value) {
         nsamps += offset_value;
@@ -65,7 +66,7 @@ struct FDMTCoordD {
     DeviceVector<int> tail_nsamps;
     DeviceVector<int> head_buf_offset;
     DeviceVector<int> head_nsamps;
-    DeviceVector<int> hist_offset;
+    DeviceVector<uint32_t> hist_offset;
 
     __host__ FDMTCoordDPtrs get_raw_ptrs() const {
         return {
@@ -99,7 +100,8 @@ __host__ inline void
 transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
                      FDMTCoordD& device_coords) {
     std::vector<int> nsamps, buf_offset, i_coord_tail, i_coord_head, offset,
-        tail_buf_offset, tail_nsamps, head_buf_offset, head_nsamps, hist_offset;
+        tail_buf_offset, tail_nsamps, head_buf_offset, head_nsamps;
+    std::vector<uint32_t> hist_offset;
 
     // Calculate total size for efficient allocation
     size_t total_size = 0;
@@ -131,7 +133,7 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
             tail_nsamps.emplace_back(coord.tail_nsamps);
             head_buf_offset.emplace_back(coord.head_buf_offset);
             head_nsamps.emplace_back(coord.head_nsamps);
-            hist_offset.emplace_back(static_cast<int>(coord.hist_offset));
+            hist_offset.emplace_back(static_cast<uint32_t>(coord.hist_offset));
         }
     }
 

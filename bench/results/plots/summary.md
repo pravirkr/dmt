@@ -5,38 +5,27 @@
 | results | CPU | GPU | RAM | CPU threads | dmt |
 | :--- | :--- | :--- | ---: | :--- | :--- |
 | `l40s` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | — | 0.7.0 |
-| `m1-pro` | Apple M1 Pro | — | 32 GB | 1 8 | 0.7.0 |
 | `xeon-6348h` | Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz | — | 755 GB | 1 8 | 0.7.0 |
 
-**Reference point**: 16384 samples × 2049 DM trials (1.34 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
+**Reference point**: 32768 samples × 1545 DM trials (DM 0-2000, 16.8 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Apple M1 Pro · 1 thr | 80.1 ms | — | — | — | — | — | — | — | 17× |
-| Apple M1 Pro · 8 thr | 25.5 ms | 83.4 ms | 851 ms | 206 ms | 111 ms | 33× | 8.1× | 3.3× | 53× |
-| Xeon Gold 6348H · 1 thr | 420 ms | — | — | — | — | — | — | — | 3× |
-| Xeon Gold 6348H · 8 thr | 71.9 ms | 124 ms | 734 ms | 221 ms | 172 ms | 10× | 3.1× | 1.7× | 19× |
-| NVIDIA L40S | 4.75 ms | 5.54 ms | 21.3 ms | 8.5 ms | 10.7 ms | 4.5× | 1.8× | 1.2× | 282× |
+| Xeon Gold 6348H · 1 thr | 2.57 s | — | — | — | — | — | — | — | 7× |
+| Xeon Gold 6348H · 8 thr | 370 ms | 759 ms | 190 ms | 215 ms | 136 ms | 0.5× | 0.6× | 2.0× | 45× |
+| NVIDIA L40S | 23 ms | 25.3 ms | 33.5 ms | 33.3 ms | 14.8 ms | 1.5× | 1.4× | 1.1× | 729× |
 
-**Real-time factor by input width** (data seconds per compute second, 16384 samples × 2049 DM trials):
+**Real-time factor by input width** (data seconds per compute second, 32768 samples × 1545 DM trials):
 
 | platform | engine | 1-bit | 2-bit | 4-bit | 8-bit | 16-bit | float32 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Apple M1 Pro | FDMT, 1 thread | 39.7× | 37.0× | 31.5× | 23.5× | 15.5× | 16.2× |
-| Apple M1 Pro | FDMT, 8 threads | 110.6× | 99.8× | 90.1× | 65.7× | 50.6× | 53.3× |
-| Apple M1 Pro | DDMT, 8 threads | 3.3× | 2.9× | 3.1× | 3.1× | 1.6× | 1.6× |
-| Apple M1 Pro | SDMT, 8 threads | 12.8× | 11.9× | 10.1× | 11.1× | 6.8× | 6.7× |
-| Apple M1 Pro | DDMT-FFT, 8 threads | 10.7× | 10.8× | 11.8× | 12.3× | 12.1× | 12.1× |
-| Xeon Gold 6348H | FDMT, 1 thread | 10.1× | 11.0× | 9.2× | 5.4× | 3.2× | 3.2× |
-| Xeon Gold 6348H | FDMT, 8 threads | 47.6× | 44.5× | 37.4× | 24.5× | 16.6× | 18.4× |
-| Xeon Gold 6348H | DDMT, 8 threads | 3.4× | 3.0× | 3.1× | 2.9× | 2.0× | 1.8× |
-| Xeon Gold 6348H | SDMT, 8 threads | 16.0× | 14.5× | 14.4× | 12.7× | 7.3× | 6.0× |
-| Xeon Gold 6348H | DDMT-FFT, 8 threads | 8.8× | 8.1× | 8.1× | 8.8× | 8.6× | 5.1× |
-| NVIDIA L40S | FDMT, device-resident | 615.0× | 569.5× | 491.4× | 335.7× | 284.7× | 280.8× |
-| NVIDIA L40S | DDMT, device-resident | 94.8× | 93.9× | 92.4× | 92.2× | 69.7× | 63.5× |
-| NVIDIA L40S | SDMT, device-resident | 165.3× | 165.4× | 165.6× | 178.8× | 169.2× | 159.2× |
-| NVIDIA L40S | FDMT-FFT, device-resident | 265.3× | 263.8× | 264.0× | 261.0× | 253.0× | 240.3× |
-| NVIDIA L40S | DDMT-FFT, device-resident | 121.1× | 121.0× | 120.8× | 120.6× | 118.8× | 126.0× |
-| NVIDIA L40S | FDMT, host arrays (incl. PCIe) | 69.3× | 65.8× | 57.9× | 49.1× | 37.1× | 30.6× |
-| NVIDIA L40S | FDMT-FFT, host arrays (incl. PCIe) | 59.7× | 54.7× | 55.7× | 51.6× | 40.2× | 26.3× |
-| NVIDIA L40S | DDMT-FFT, host arrays (incl. PCIe) | 46.5× | 44.5× | 43.6× | 35.5× | 33.5× | 25.7× |
+| Xeon Gold 6348H | FDMT, 1 thread | 14.4× | 14.1× | 12.1× | 6.7× | 6.5× | 6.5× |
+| Xeon Gold 6348H | FDMT, 8 threads | 79.2× | 78.0× | 68.9× | 46.2× | 44.8× | 45.3× |
+| Xeon Gold 6348H | DDMT, 8 threads | 198.6× | 170.9× | 195.5× | 194.9× | 120.6× | 87.4× |
+| Xeon Gold 6348H | SDMT, 8 threads | 198.5× | 172.3× | 193.6× | 197.4× | 99.1× | 76.4× |
+| Xeon Gold 6348H | DDMT-FFT, 8 threads | 124.7× | 124.2× | 123.8× | 124.2× | 123.9× | 123.5× |
+| NVIDIA L40S | FDMT, device-resident | 632.2× | 621.5× | 617.7× | 499.2× | 444.2× | 728.9× |
+| NVIDIA L40S | DDMT, device-resident | 572.8× | 556.5× | 536.6× | 606.2× | 560.3× | 508.1× |
+| NVIDIA L40S | SDMT, device-resident | 572.3× | 557.7× | 536.4× | 601.9× | 561.6× | 508.9× |
+| NVIDIA L40S | FDMT-FFT, device-resident | 670.5× | 666.6× | 666.9× | 662.7× | 664.3× | 666.2× |
+| NVIDIA L40S | DDMT-FFT, device-resident | 1123.1× | 1122.7× | 1122.4× | 1121.2× | 1117.9× | 1130.4× |

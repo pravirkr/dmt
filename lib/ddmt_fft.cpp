@@ -73,6 +73,13 @@ make_engine(const plans::DDMTPlan& plan,
     detail::throw_unavailable("DDMTFFT", cfg.exec.backend);
 }
 
+SizeType require_nbeams(SizeType nbeams) {
+    if (nbeams == 0) {
+        throw std::invalid_argument("DDMTFFT: nbeams must be >= 1");
+    }
+    return nbeams;
+}
+
 } // namespace
 
 class DDMTFFT::Impl {
@@ -82,13 +89,11 @@ public:
          SizeType nbeams,
          DDMTFFTOptions options)
         : m_plan(std::move(plan)),
-          m_cfg{.nbeams  = nbeams,
+          m_cfg{.nbeams  = require_nbeams(nbeams),
                 .exec    = exec,
                 .options = resolve_options(m_plan, options)},
           m_engine(make_engine(m_plan, m_cfg)) {
-        if (nbeams == 0) {
-            throw std::invalid_argument("DDMTFFT: nbeams must be >= 1");
-        }
+        m_plan.seal();
     }
 
     // The engine holds a reference to m_plan; declaration order matters.

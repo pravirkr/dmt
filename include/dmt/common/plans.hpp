@@ -214,6 +214,11 @@ public:
     [[nodiscard]] float get_f_min() const noexcept;
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
+    /// @brief Reference frequency of output times in MHz: f_min, the bottom
+    /// edge of the band. Output sample t is the arrival time at f_min.
+    /// (DDMT instead references the centre of its highest channel; see
+    /// DDMTPlan::get_f_ref().)
+    [[nodiscard]] float get_f_ref() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;
     /// @brief Number of time samples per block
@@ -246,6 +251,35 @@ public:
     [[nodiscard]] std::vector<float> get_smearing_grid_final() const noexcept;
 
     /**
+     * @brief Common scale B of the level-0 box-mean weights
+     * (use_box_smearing = true): B = ceil(log2(L_max)) + 2, where L_max is
+     * the widest level-0 box (largest |dt| + 1).
+     *
+     * A level-0 box of L samples is averaged: its sum times the weight
+     * round(2^b(L) / L) * 2^-b(L), b(L) = ceil(log2 L) + 2: within 1/8 of
+     * 1/L, so each channel contributes its box *mean* (under 0.15% of S/N
+     * from the exact mean). The weight depends on L alone. Integer tree
+     * state (int_tree) holds it on the common scale 2^-B.
+     */
+    [[nodiscard]] SizeType get_box_fraction_bits() const noexcept;
+
+    /**
+     * @brief Integer box weights on the common scale 2^-B for L = 1 ..
+     * L_max (entry L - 1), B = get_box_fraction_bits(): the effective weight
+     * of a level-0 box of L samples is get_box_weights()[L - 1] * 2^-B.
+     */
+    [[nodiscard]] std::vector<uint32_t> get_box_weights() const;
+
+    /**
+     * @brief Common fixed-point scale F of the rounded box means of packed
+     * low-bit input (use_box_smearing = true): each level-0 box mean of L
+     * samples is rounded to f(L) fractional bits, the smallest f with
+     * 3 * 4^f >= 50 L (rounding noise <= 2% of the box-mean noise for input
+     * with sigma >= 0.5 LSB), and stored in units of 2^-F, F = f(L_max).
+     */
+    [[nodiscard]] SizeType get_box_mean_bits() const noexcept;
+
+    /**
      * @brief Decompiles a final DM trial's tree lineage into per-channel time
      * shifts.
      *
@@ -259,6 +293,24 @@ public:
      * @throws std::out_of_range if dm_idx is invalid.
      */
     [[nodiscard]] std::vector<IndexType> trace_dm(SizeType dm_idx) const;
+
+    /**
+     * @brief Leading output samples with incomplete input support after a
+     * cold start.
+     *
+     * Output sample t of trial d reads channel c from input sample
+     * t + trace_dm(d)[c] onwards (a single sample without box smearing, the
+     * channel's level-0 box with it), so it needs input back to
+     * t - max_c(-trace_dm(d)[c]). In "valid" and "full" modes the first block
+     * after construction or reset_history() replaces the missing history
+     * with zeros: its first get_startup_samples() outputs are partial sums
+     * over fewer channels. They are written (blocks keep nsamps outputs, so
+     * streaming stays bit-exact), so discard or mask them. Later blocks have
+     * complete support. This is the maximum over all trials, at least as
+     * large as the per-trial need, and usually max(|dt_min|, |dt_max|).
+     * Computed on demand in O(ndms * nchans).
+     */
+    [[nodiscard]] SizeType get_startup_samples() const;
 
     /**
      * @brief Computes theoretical noise variance for a DM trial and boxcar
@@ -319,13 +371,14 @@ public:
     /// @brief Total elements in the final DMT output buffer (get_dmt_ndms() *
     /// get_dmt_nsamps())
     [[nodiscard]] SizeType get_dmt_size() const noexcept;
-    /// @brief Scratch buffer size in floats needed for internal ping-pong state
-    /// buffers
+    /// @brief Floats of the largest tree level for one block of nsamps
+    /// (state_shape nelements). The engines keep two levels of their chunk
+    /// length (see FDMT::get_memory_usage()); the output needs only
+    /// get_dmt_size().
     [[nodiscard]] SizeType get_buffer_size() const noexcept;
-    /// @brief Overlap-save history size in floats
+    /// @brief Level-0 raw input history in floats (mode="valid"): the last
+    /// dt0_max samples of every channel, nchans * state_shape[0].dt_max
     [[nodiscard]] SizeType get_history_size() const noexcept;
-    /// @brief Boxcar smearing initialization history size in floats
-    [[nodiscard]] SizeType get_history_init_size() const noexcept;
     /// @brief Cross-block tree streaming history buffer size in floats
     /// (mode="valid")
     [[nodiscard]] SizeType get_tree_history_size() const noexcept;
@@ -581,15 +634,19 @@ public:
      * @p boxcar_width samples, for Gaussian noise with normalize = true.
      *
      * Each channel contributes a (box smearing * boxcar) window of unit-
-     * variance samples whose lag correlation (get_lag_correlation()) comes
-     * from the channel taper; both are included exactly.
+     * variance samples, weighted by its box-mean weight (see
+     * FDMTPlan::get_box_fraction_bits()), whose lag correlation
+     * (get_lag_correlation()) comes from the channel taper; all are included
+     * exactly.
      */
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width = 1) const;
     /// @brief sqrt of get_effective_variance_grid()
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1) const;
-    /// @brief Channel samples summed into every row (box smearing included)
+    /// @brief DC gain of every row: the output for a unit constant input,
+    /// i.e. sum over channels of box-mean weight x box length (about nchans;
+    /// see FDMTPlan::get_box_fraction_bits())
     [[nodiscard]] std::vector<float> get_cumulative_count_grid() const;
 
     /// @brief Fine FDMT plan shared by all coarse trials
@@ -629,7 +686,11 @@ struct LevinConfig {
  *
  * Precomputes per-channel delay tables, fractional delays, and channel kill
  * masks for brute-force delay-and-sum dedispersion on float or packed-integer
- * filterbanks.
+ * filterbanks. f_min and f_max are the band edges; channel c is centred at
+ * f_min + (c + 1/2) df with df = (f_max - f_min) / nchans, and each channel
+ * is delayed from its centre frequency relative to get_f_ref(), the centre
+ * of the highest-frequency channel. (FDMT instead references f_min, the
+ * bottom edge of the band; see FDMTPlan::get_f_ref().)
  */
 class DDMTPlan {
 public:
@@ -645,8 +706,8 @@ public:
      * @param dm_min Minimum trial DM in pc/cm^3 (default: 0).
      * @param nbits Precision per sample: 32 (float), or 1, 2, 4, 8, 16 (packed
      * integers).
-     * @param kill_mask Optional per-channel mask (size nchans, 1=keep, 0=mask
-     * out).
+     * @param kill_mask Optional per-channel mask (size nchans). 0 drops the
+     * channel; any nonzero value is kept and stored as 1.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -709,6 +770,11 @@ public:
     [[nodiscard]] float get_f_min() const noexcept;
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
+    /// @brief Reference frequency of output times in MHz: the centre of the
+    /// highest-frequency channel, f_max - df/2 (SIGPROC's fch1 for a
+    /// descending band). Output sample t is the arrival time at this
+    /// frequency; every channel is delayed from its own centre frequency.
+    [[nodiscard]] float get_f_ref() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;
     /// @brief Time sample interval in seconds
@@ -726,7 +792,8 @@ public:
     /// @brief Bit precision per input sample (32 => float, 1/2/4/8/16 => packed
     /// integer)
     [[nodiscard]] SizeType get_nbits() const noexcept;
-    /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans
+    /// @brief Channel kill mask (1 = keep, 0 = masked out); size == nchans.
+    /// Nonzero input values are stored as 1.
     [[nodiscard]] std::vector<uint8_t> get_kill_mask() const noexcept;
     /// @brief Human-readable summary: band, channels, DM trials and range,
     /// maximum delay, input width and masked channels.
@@ -734,11 +801,19 @@ public:
 
     /**
      * @brief Replaces the channel kill mask without recomputing the delay
-     * table.
+     * table. Any nonzero entry is stored as 1.
      * @param kill_mask New per-channel mask (size must equal nchans).
-     * @throws std::invalid_argument if kill_mask.size() != nchans.
+     * @throws std::invalid_argument if the plan is sealed, or if
+     * kill_mask.size() != nchans.
      */
     void set_kill_mask(std::span<const uint8_t> kill_mask);
+
+    /**
+     * @brief Freeze the kill mask. DDMT, SDMT and DDMTFFT call this on the
+     * copy they own, after reading the mask into their execution tables.
+     * The caller's own plan object is a different instance and stays mutable.
+     */
+    void seal() noexcept;
 
     /// @brief Theoretical noise variance for a DM trial (shared by all trials)
     [[nodiscard]] float get_effective_variance() const noexcept;

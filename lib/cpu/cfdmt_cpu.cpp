@@ -240,7 +240,6 @@ private:
     void coherent_trial(SizeType k) {
         const auto nchans = m_plan.get_nchans();
         const auto n_p    = m_plan.get_n_p();
-        const auto nsub   = m_plan.get_nsub();
         const auto nfft   = m_plan.get_nfft();
         const auto nbin   = m_plan.get_nbin();
         const auto mbin   = m_plan.get_mbin();

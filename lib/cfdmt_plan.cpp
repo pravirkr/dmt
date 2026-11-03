@@ -17,6 +17,7 @@
 #include "dmt/common/baseband.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/dm_utils.hpp"
+#include "dmt/fdmt_box_weights.hpp"
 
 namespace dmt::plans {
 
@@ -256,13 +257,16 @@ public:
                 const auto s = static_cast<IndexType>(
                                    std::lround(smearing[(i * m_nchans) + c])) +
                                1;
-                var += channel_var(s);
+                const double weight = box_weight(s);
+                var += weight * weight * channel_var(s);
             }
             fine[i] = static_cast<float>(var);
         }
         return tile_fine(fine);
     }
 
+    // DC gain of every row: the output for a unit constant input, sum over
+    // channels of box weight x box length (~ nchans with box means).
     std::vector<float> count_grid() const {
         const auto smearing = m_fdmt_plan->get_smearing_grid_final();
         const auto nfine    = ndm_fine();
@@ -270,11 +274,23 @@ public:
         for (SizeType i = 0; i < nfine; ++i) {
             double count = 0.0;
             for (SizeType c = 0; c < m_nchans; ++c) {
-                count += std::round(smearing[(i * m_nchans) + c]) + 1.0;
+                const auto s = static_cast<IndexType>(
+                                   std::lround(smearing[(i * m_nchans) + c])) +
+                               1;
+                count += box_weight(s) * static_cast<double>(s);
             }
             fine[i] = static_cast<float>(count);
         }
         return tile_fine(fine);
+    }
+
+    // Effective level-0 weight round(2^b / L) * 2^-b of the fine FDMT's box
+    // of L samples (the FDMT runs with box smearing; fdmt_box_weights.hpp).
+    double box_weight(IndexType box_len) const {
+        const auto bits = m_fdmt_plan->get_box_fraction_bits();
+        return std::ldexp(static_cast<double>(algorithms::detail::box_weight(
+                              static_cast<SizeType>(box_len), bits)),
+                          -static_cast<int>(bits));
     }
 
     CohFDMTMemoryUsage memory_estimate() const noexcept {
