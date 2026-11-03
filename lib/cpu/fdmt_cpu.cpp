@@ -1041,13 +1041,16 @@ void fdmt_init_subband_box(const TS* __restrict__ wf_sub,
         }
     }
     for (; s <= s_hi; ++s) {
-        const auto [out, copy] = rows_for(s);
+        // Not a structured binding: clang 16-18 cannot capture one in a
+        // lambda when compiling with OpenMP.
+        const auto rows = rows_for(s);
+        auto* const out = rows.first;
         fdmt_with_scale(scale_at(s), [&](const auto& scale) {
             fdmt_init_box_extend<Mode>(wf_sub, hist_sub, acc, out, s, scale,
                                        hist_len, nsamps, s < s_hi);
         });
-        if (copy != nullptr) {
-            std::copy_n(out, nsamps, copy);
+        if (rows.second != nullptr) {
+            std::copy_n(out, nsamps, rows.second);
         }
     }
 }
