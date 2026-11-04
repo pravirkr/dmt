@@ -412,6 +412,9 @@ struct Geo {
 
 class FDMTFFTCudaEngine final : public detail::FDMTFFTEngine {
 public:
+    // Keep the host-span overload visible next to the device one below.
+    using detail::FDMTFFTEngine::execute_search;
+
     FDMTFFTCudaEngine(const plans::FDMTPlan& plan,
                       const detail::FDMTFFTEngineConfig& cfg)
         : m_nchans(plan.get_nchans()),

@@ -41,6 +41,8 @@ using algorithms::FDMTBoxcar;
 // scorer's driver would be a second, unused transform engine.
 class MaterializedRootDriver final : public algorithms::detail::BoxcarDriver {
 public:
+    using algorithms::detail::BoxcarDriver::search; // the packed overloads
+
     void search(std::span<const float>,
                 algorithms::detail::FDMTSearchSink&) override {
         throw std::logic_error(

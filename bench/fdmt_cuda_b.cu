@@ -38,6 +38,8 @@ using plans::FDMTPlan;
 
 class FDMTCUDAFixture : public benchmark::Fixture {
 public:
+    using benchmark::Fixture::SetUp; // the non-const State& overload
+
     void SetUp(const ::benchmark::State& state) override {
         f_min       = 704.0F;
         f_max       = 1216.0F;

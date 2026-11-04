@@ -527,6 +527,9 @@ cudaStream_t to_cuda(Stream stream) {
 
 class FDMTCudaEngine final : public detail::FDMTEngine {
 public:
+    // Keep the host-span overloads visible next to the device ones below.
+    using detail::FDMTEngine::execute_search;
+
     FDMTCudaEngine(const plans::FDMTPlan& plan,
                    const detail::FDMTEngineConfig& cfg)
         : m_device_id(cfg.exec.device),

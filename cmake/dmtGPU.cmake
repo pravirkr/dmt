@@ -133,12 +133,17 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
 
   set(DMT_GPU_OPTIONS ${PROJECT_NAME}_gpu_options)
   add_library(${DMT_GPU_OPTIONS} INTERFACE)
+  # --expt-relaxed-constexpr makes every constexpr function callable on the
+  # device, so nvcc flags fmt's host-only long double formatting in each .cu
+  # file (#20208-D "'long double' is treated as 'double' in device code").
+  # dmt's device code has no long double; silence that one diagnostic.
   target_compile_options(
     ${DMT_GPU_OPTIONS}
     INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:
               -Wno-pedantic
               --expt-extended-lambda
               --expt-relaxed-constexpr
+              --diag-suppress=20208
               -Xcompiler=-Wall,-Wextra
               $<$<CONFIG:Debug>:-G;-g;-O0>
               $<$<CONFIG:Release>:-O3;-use_fast_math;-DNDEBUG>

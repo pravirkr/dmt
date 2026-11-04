@@ -913,7 +913,10 @@ void fdmt_init_box_extend_block(const TS* __restrict__ wf_sub,
 #pragma omp simd
         for (SizeType i = head; i < nsamps; ++i) {
             TAcc a = acc[i];
-#pragma unroll
+            // `#pragma GCC unroll` is understood by GCC and Clang alike (the
+            // count must be a literal for GCC < 14).
+            static_assert(kK == 4, "update the unroll count below");
+#pragma GCC unroll 4
             for (SizeType k = 0; k < kK; ++k) {
                 a       = fdmt_init_add<TAcc>(a, x[i - k]);
                 o[k][i] = sk[k](a);
