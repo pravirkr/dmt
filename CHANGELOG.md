@@ -21,20 +21,25 @@ All notable changes to `dmt` are listed here. The format follows
 - `FDMTPlan.get_subband_variance_grid(level, subband, boxcar_width,
   use_box_smearing)` and `get_subband_sigma_grid(...)`: the noise of every
   row of any tree or staggered subband, for S/N on stepper views.
+  `FDMTFFT.get_subband_variance_grid(level, subband, boxcar_width)` and
+  `get_subband_sigma_grid(...)` give the same with the engine's box
+  smearing and kill mask.
+- Every `FDMTPlan` variance and sigma method takes an optional kill mask
+  (C++: a trailing `std::span<const uint8_t>`; Python: keyword-only
+  `kill_mask=`) and leaves killed channels out.
 - `FDMTCoordGrid` (Python `FDMTSubDTGrid`) gains `chan_begin`, `chan_end`,
   `i_sub_tail`, `i_sub_head` and `staggered`; `FDMTShape` gains `nstaggered`;
   `FDMTPlan.get_subband_depth()` and `get_max_fuse_levels()`.
 - **`f_ref` for DDMT, SDMT and DDMT-FFT** (plans and engines, C++ and
   Python, and `dmtlib.dedisperse`): the reference frequency of the output
-  times, any positive value or infinity, default `f_min`. `f_max`, the top
-  channel's centre (SIGPROC's `fch1`, the 0.7.0 convention) or infinity give
-  PRESTO/SIGPROC-style series: output sample `t` is input sample `t` at that
-  frequency for every DM, and the incomplete samples are at the end. Only
-  the delay table changes.
+  times, either `f_min` (default) or `f_max`. Passing `f_max` gives
+  PRESTO/SIGPROC-style series: output sample `t` is input sample `t` at `f_max`
+  for every DM, and the incomplete samples are at the end. Only the delay
+  table changes. Any other value raises `std::invalid_argument`
+  (`ValueError` in Python). The FDMT engines stay referenced to `f_min`.
 - `DDMTPlan.get_time_offset()` (Python `plan.time_offset`): output sample
   `k` of DDMT, SDMT and DDMT-FFT is the `f_ref` arrival at input sample
-  `k + time_offset` (0 when `f_ref` is at or above the top channel's
-  centre).
+  `k + time_offset` (0 when `f_ref == f_max`).
 - `dmtlib.sigproc_band(fch1, foff, nchans)` and `dmtlib.to_ascending()`:
   band edges from a SIGPROC header and the flip to ascending channel order.
   The getting-started guides and README document the channel order.
@@ -60,7 +65,11 @@ All notable changes to `dmt` are listed here. The format follows
 - **Breaking:** every engine refers output times to `f_min`, the bottom band
   edge, by default (`plan.f_ref == f_min`), as FDMT always has: the
   last-arriving edge, when a pulse is complete, is the natural trigger time.
-  Pass `f_ref=f_max - df/2` to DDMT, SDMT or DDMT-FFT for the 0.7.0 times.
+  Pass `f_ref=f_max` to DDMT, SDMT or DDMT-FFT for top-of-band reference times.
+  The 0.7.0 reference of those engines, the top channel's centre
+  (`f_max - df/2`), is no longer available: with `f_ref=f_max` a pulse is
+  timed earlier than in 0.7.0 by `K DM ((f_max - df/2)^-2 - f_max^-2)`, about
+  half the top channel's dispersion sweep.
   - DDMT, SDMT and DDMT-FFT (were the top channel's centre, `f_max - df/2`)
     still sample each channel at its centre. Their delay table is now
     `time_offset + delay`, with `delay` each channel centre's delay behind
@@ -79,6 +88,25 @@ All notable changes to `dmt` are listed here. The format follows
     `(fch1, foff, tsamp)`; `generate_delay_offset` is new.
 - Rows are always ascending in frequency (row 0 lowest); descending data
   must be flipped before it reaches dmt (see `dmtlib.sigproc_band`).
+- **Breaking (Python):** every `kill_mask` argument, and the
+  `DDMTPlan.kill_mask` setter, takes a 1-D bool or integer array or sequence
+  of any integer dtype, and any nonzero value keeps the channel. Float,
+  complex, object and string masks raise `TypeError`; they used to be cast to
+  uint8, so a 0.5 killed its channel. Integer values are tested before any
+  narrowing, so 256 no longer wraps to 0 and kills the channel.
+
+### Fixed
+
+- `FDMTFFT.get_effective_variance`/`get_effective_sigma` and their grids
+  ignored the kill mask. Killed channels are now left out, as in
+  `FDMTFFTBoxcar`; the engine passes its mask to the plan's methods.
+- `FDMTFFTBoxcar` held back detections until killed channels had warmed up.
+  The warmup now counts only active channels, so killing the top of the band
+  shortens it.
+- `FDMTPlan` rejects NaN or infinite `dm_grid` values and DMs whose delay
+  does not fit in 32 bits; `generate_levin_dm_grid` rejects non-finite
+  parameters. The NaN and infinity checks read the bit pattern through a
+  `volatile`, so `-ffast-math` Release builds cannot optimise them away.
 
 ## [0.7.0] - 2026-11-03
 

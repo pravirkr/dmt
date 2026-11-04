@@ -32,7 +32,11 @@ fdmt.get_effective_sigma_grid(boxcar_width=1)         # all trials, shape (n_dm,
 ```
 
 The same methods are on `FDMTPlan`. Pass `use_box_smearing` if you query the
-plan directly. For unit-variance white input the variance of trial $k$ after a
+plan directly, and `kill_mask=` if the engine had one: killed channels read as
+zero, so they are left out of the sum. `FDMTFFT` applies its own mask, and its
+`get_subband_sigma_grid(level, subband, boxcar_width)` gives the sigma of
+each stepper subband view (`FDMTPlan.get_subband_sigma_grid` with the mask).
+For unit-variance white input the variance of trial $k$ after a
 boxcar of $W$ samples is
 
 $$\text{Var}(\text{DM}_k, W) = \sum_c w_c^2\, V(L_c, W), \qquad

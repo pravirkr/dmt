@@ -317,6 +317,15 @@ public:
     /// @brief Theoretical noise sigma grid across all DM trials
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1) const;
+    /// @brief Noise variance of every row of one stepper subband view (merge
+    /// @p level, subband index @p subband), with this engine's box smearing
+    /// and kill mask: FDMTPlan::get_subband_variance_grid().
+    [[nodiscard]] std::vector<float> get_subband_variance_grid(
+        SizeType level, SizeType subband, SizeType boxcar_width = 1) const;
+    /// @brief sqrt of get_subband_variance_grid(): divide a view's rows by
+    /// it for S/N.
+    [[nodiscard]] std::vector<float> get_subband_sigma_grid(
+        SizeType level, SizeType subband, SizeType boxcar_width = 1) const;
 
     /// @brief Resets cross-block streaming history to cold start
     void reset_history() noexcept;

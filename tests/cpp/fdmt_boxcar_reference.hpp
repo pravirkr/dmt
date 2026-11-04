@@ -48,6 +48,7 @@ inline void compare(std::vector<RawCandidate> actual,
         CHECK(actual[i].width == expected[i].width);
         CHECK(actual[i].chan_begin == expected[i].chan_begin);
         CHECK(actual[i].chan_end == expected[i].chan_end);
+        CHECK(actual[i].staggered == expected[i].staggered);
         CHECK(actual[i].dm == expected[i].dm);
         CHECK(actual[i].f_low_mhz == expected[i].f_low_mhz);
         CHECK(actual[i].f_high_mhz == expected[i].f_high_mhz);
@@ -173,6 +174,7 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
                 c.subband_idx   = p.subband_idx;
                 c.chan_begin    = p.chan_begin;
                 c.chan_end      = p.chan_end;
+                c.staggered     = p.staggered;
                 c.f_low_mhz     = p.f_low_mhz;
                 c.f_high_mhz    = p.f_high_mhz;
                 return c;

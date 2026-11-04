@@ -105,13 +105,13 @@ struct FDMTPlanContainer {
 /** @brief Precomputed DDMT delay tables and channel masks. */
 struct DDMTPlanContainer {
     std::vector<float> dm_arr; ///< DM trials (pc/cm^3), length ndm
-    /// Row-major delays (ndm x nchans): time_offset minus the lag of each
-    /// channel centre behind f_min, so out[k] = sum_c in_c[k + delay] is the
-    /// sum for f_min arrival at input sample k + time_offset.
+    /// Row-major delays (ndm x nchans): time_offset plus the delay of each
+    /// channel centre behind f_ref, so out[k] = sum_c in_c[k + delay] is the
+    /// sum for f_ref arrival at input sample k + time_offset.
     std::vector<SizeType> delay_table;
     std::vector<float> fractional_delay_table; ///< d(delay)/d(DM) per channel
-                                               ///< (<= 0)
-    SizeType time_offset{0};        ///< ceil of the largest lag behind f_min
+                                               ///< relative to f_ref
+    SizeType time_offset{0};        ///< ceil of the largest lag behind f_ref
     std::vector<uint8_t> kill_mask; ///< Channel mask: 1=active, 0=RFI masked
     SizeType nchans;                ///< Number of frequency channels
     SizeType nbits = 32;            ///< Bits per sample (32, 16, 8, 4, 2, 1)
@@ -356,17 +356,27 @@ public:
     /**
      * @brief Computes theoretical noise variance for a DM trial and boxcar
      * width.
+     *
+     * Every variance method takes an optional per-channel @p kill_mask
+     * (empty, or nchans entries; 0 = killed). Killed channels read as zero,
+     * so they add no noise and are left out of the sum; pass the engine's
+     * mask (FDMTFFT, FDMTFFTBoxcar) to get the noise of a masked transform.
+     *
      * @param dm_idx DM trial index.
      * @param boxcar_width Downsampling / boxcar filter width in time samples
      * (default: 1).
      * @param use_box_smearing Whether intra-channel boxcar smearing was applied
      * in the tree.
+     * @param kill_mask Optional channel mask (empty: every channel active).
      * @return Theoretical noise variance for unit input Gaussian noise.
+     * @throws std::invalid_argument if @p kill_mask is neither empty nor
+     * nchans long.
      */
     [[nodiscard]] float
     get_effective_variance(SizeType dm_idx,
                            SizeType boxcar_width,
-                           bool use_box_smearing = true) const;
+                           bool use_box_smearing              = true,
+                           std::span<const uint8_t> kill_mask = {}) const;
 
     /**
      * @brief Computes theoretical noise standard deviation for a DM trial and
@@ -374,22 +384,27 @@ public:
      * @param dm_idx DM trial index.
      * @param boxcar_width Boxcar filter width in samples.
      * @param use_box_smearing Whether boxcar smearing was enabled.
+     * @param kill_mask Optional channel mask (see get_effective_variance()).
      * @return Theoretical noise standard deviation (sqrt of effective
      * variance).
      */
-    [[nodiscard]] float get_effective_sigma(SizeType dm_idx,
-                                            SizeType boxcar_width,
-                                            bool use_box_smearing = true) const;
+    [[nodiscard]] float
+    get_effective_sigma(SizeType dm_idx,
+                        SizeType boxcar_width,
+                        bool use_box_smearing              = true,
+                        std::span<const uint8_t> kill_mask = {}) const;
 
     /**
      * @brief Evaluates theoretical noise variance across all DM trials.
      * @param boxcar_width Boxcar filter width in samples.
      * @param use_box_smearing Whether boxcar smearing was enabled.
+     * @param kill_mask Optional channel mask (see get_effective_variance()).
      * @return Vector of length ndm containing noise variance profile.
      */
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width,
-                                bool use_box_smearing = true) const;
+                                bool use_box_smearing              = true,
+                                std::span<const uint8_t> kill_mask = {}) const;
 
     /**
      * @brief Evaluates theoretical noise sigma profile across all DM trials.
@@ -399,11 +414,13 @@ public:
      *
      * @param boxcar_width Boxcar filter width in samples.
      * @param use_box_smearing Whether boxcar smearing was enabled.
+     * @param kill_mask Optional channel mask (see get_effective_variance()).
      * @return Vector of length ndm containing noise standard deviations.
      */
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width,
-                             bool use_box_smearing = true) const;
+                             bool use_box_smearing              = true,
+                             std::span<const uint8_t> kill_mask = {}) const;
 
     /**
      * @brief Noise variance of every row of one subband: tree subband or
@@ -411,29 +428,34 @@ public:
      * FDMT::view_subband() and the container's grids[level] index them).
      *
      * The subband analogue of get_effective_variance_grid(): unit Gaussian
-     * input, the subband's channels only, each with its level-0 box-mean
-     * weight. Divide a stepper view's rows by get_subband_sigma_grid() for
-     * S/N. The root (level get_niters(), subband 0) equals
-     * get_effective_variance_grid(). O(ndt * width) per call.
+     * input, the subband's active channels only, each with its level-0
+     * box-mean weight. Divide a stepper view's rows by
+     * get_subband_sigma_grid() for S/N. The root (level get_niters(),
+     * subband 0) equals get_effective_variance_grid(). O(ndt * width) per
+     * call.
      *
      * @param level Merge level, 0 (channels) to get_niters() (root).
      * @param subband Index into grids[level] (tree subbands, then
      * staggered).
      * @param boxcar_width Boxcar filter width in samples (default 1).
      * @param use_box_smearing Whether the tree applied box smearing.
+     * @param kill_mask Optional channel mask (see get_effective_variance()).
      * @throws std::out_of_range for a bad level or subband.
+     * @throws std::invalid_argument for a bad @p kill_mask size.
      */
     [[nodiscard]] std::vector<float>
     get_subband_variance_grid(SizeType level,
                               SizeType subband,
-                              SizeType boxcar_width = 1,
-                              bool use_box_smearing = true) const;
+                              SizeType boxcar_width              = 1,
+                              bool use_box_smearing              = true,
+                              std::span<const uint8_t> kill_mask = {}) const;
     /// @brief sqrt of get_subband_variance_grid().
     [[nodiscard]] std::vector<float>
     get_subband_sigma_grid(SizeType level,
                            SizeType subband,
-                           SizeType boxcar_width = 1,
-                           bool use_box_smearing = true) const;
+                           SizeType boxcar_width              = 1,
+                           bool use_box_smearing              = true,
+                           std::span<const uint8_t> kill_mask = {}) const;
 
     /// @brief Number of DM trials in the final transform
     [[nodiscard]] SizeType get_dmt_ndms() const noexcept;
@@ -762,7 +784,7 @@ struct LevinConfig {
  * f_min + (c + 1/2) df with df = (f_max - f_min) / nchans, and each channel
  * is sampled at its centre frequency. Output times refer to f_ref
  * (get_f_ref(), get_time_offset()): by default the bottom band edge f_min,
- * as for FDMT and CohFDMT, or any frequency the caller chooses.
+ * as for FDMT and CohFDMT, or the top band edge f_max.
  */
 class DDMTPlan {
 public:
@@ -781,10 +803,9 @@ public:
      * @param kill_mask Optional per-channel mask (size nchans). 0 drops the
      * channel; any nonzero value is kept and stored as 1.
      * @param f_ref Reference frequency of output times in MHz (default:
-     * f_min, the bottom band edge). Any positive value, or +infinity, e.g.
-     * f_max (top band edge) or f_max - df/2 (SIGPROC's fch1 for a
-     * descending band). The engines are agnostic: only the delay table
-     * and get_time_offset() change.
+     * f_min, the bottom band edge). Must be either f_min or f_max (the top
+     * band edge). The engines are agnostic: only the delay table and
+     * get_time_offset() change.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -851,16 +872,16 @@ public:
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
     /// @brief Reference frequency of output times in MHz: the constructor's
-    /// f_ref, by default the bottom band edge f_min (as for FDMT); may be
-    /// +infinity. Every channel is sampled at its own centre frequency
+    /// f_ref, by default the bottom band edge f_min (as for FDMT), or f_max.
+    /// Every channel is sampled at its own centre frequency
     /// f_min + (c + 1/2) df.
     [[nodiscard]] float get_f_ref() const noexcept;
     /// @brief Input-sample offset of the output times: output sample k (from
     /// the start of the stream) is the sum for a signal arriving at
     /// get_f_ref() at input sample k + get_time_offset(). It is how far the
     /// earliest channel centre arrives ahead of f_ref over the DM trials,
-    /// rounded up: 0 when f_ref is at or above the top channel's centre
-    /// (independent of the kill mask). DDMT, SDMT and DDMTFFT share it.
+    /// rounded up: 0 when f_ref == f_max (independent of the kill mask).
+    /// DDMT, SDMT and DDMTFFT share it.
     [[nodiscard]] SizeType get_time_offset() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;

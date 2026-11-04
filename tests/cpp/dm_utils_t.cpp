@@ -141,38 +141,43 @@ TEST_CASE("get_dmconv and delay tables", "[fdmt_utils][cpu][internal]") {
         CHECK_THROWS_AS(
             utils::generate_delay_table(dm_arr, nchans, f_min, df, tsamp, -1.0),
             std::invalid_argument);
-        CHECK_THROWS_AS(utils::generate_delay_table(
-                            dm_arr, nchans, f_min, df, tsamp,
-                            std::numeric_limits<double>::quiet_NaN()),
+        const auto nan_d = std::bit_cast<double>(0x7FF8000000000000ULL);
+        const auto inf_d = std::bit_cast<double>(0x7FF0000000000000ULL);
+        CHECK_THROWS_AS(utils::generate_delay_table(dm_arr, nchans, f_min, df,
+                                                    tsamp, nan_d),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(utils::generate_delay_table(dm_arr, nchans, f_min, df,
+                                                    tsamp, inf_d),
                         std::invalid_argument);
     }
 
-    SECTION("f_ref at or above the top channel needs no offset") {
+    SECTION("f_ref at f_max needs no offset") {
         const std::vector<float> dm_arr = {0.0F, 10.0F};
-        const float df          = (f_max - f_min) / static_cast<float>(nchans);
-        const auto inf          = std::numeric_limits<double>::infinity();
-        const double top_centre = f_max - (0.5 * df);
-        for (const double f_ref :
-             {static_cast<double>(f_max), top_centre, inf}) {
-            CAPTURE(f_ref);
-            CHECK(utils::generate_delay_offset(dm_arr, nchans, f_min, df, tsamp,
-                                               f_ref) == 0);
-            const auto table = utils::generate_delay_table(
-                dm_arr, nchans, f_min, df, tsamp, f_ref);
-            // Delays grow toward the bottom channel; at the top channel's
-            // centre the top channel has none.
-            CHECK(table[nchans] > table.back());
-            if (f_ref == top_centre) {
-                CHECK(table.back() == 0);
-            }
-        }
-        // Infinite frequency: delay K dm f_c^-2 / tsamp.
+        const float df    = (f_max - f_min) / static_cast<float>(nchans);
+        const double fref = static_cast<double>(f_max);
+        CHECK(utils::generate_delay_offset(dm_arr, nchans, f_min, df, tsamp,
+                                           fref) == 0);
         const auto table =
-            utils::generate_delay_table(dm_arr, nchans, f_min, df, tsamp, inf);
-        const double f0 = f_min + (0.5 * df);
-        CHECK(table[nchans] ==
-              static_cast<SizeType>(std::nearbyint(
-                  kDispConst * 10.0 / (f0 * f0) / static_cast<double>(tsamp))));
+            utils::generate_delay_table(dm_arr, nchans, f_min, df, tsamp, fref);
+        // Delays grow toward the bottom channel.
+        CHECK(table[nchans] > table.back());
+    }
+
+    SECTION("generate_levin_dm_grid rejects non-finite parameters") {
+        const auto nan_f = std::bit_cast<float>(0x7FC00000U);
+        const auto inf_f = std::bit_cast<float>(0x7F800000U);
+        CHECK_THROWS_AS(utils::generate_levin_dm_grid(0.0F, 100.0F, tsamp,
+                                                      inf_f, f_min, f_max,
+                                                      nchans, 1.25F),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(utils::generate_levin_dm_grid(0.0F, inf_f, tsamp,
+                                                      0.001F, f_min, f_max,
+                                                      nchans, 1.25F),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(utils::generate_levin_dm_grid(nan_f, 100.0F, tsamp,
+                                                      0.001F, f_min, f_max,
+                                                      nchans, 1.25F),
+                        std::invalid_argument);
     }
 }
 

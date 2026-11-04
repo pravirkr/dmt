@@ -514,3 +514,53 @@ def test_bound_plan_rejects_mask_changes_and_bad_inputs() -> None:
         DDMT(1000.0, 1500.0, nchans, 0.001, 10.0, 5.0, nbeams=0)
     with pytest.raises(ValueError, match="channels"):
         engine.execute(np.ones((nchans - 1, nsamps), dtype=np.float32))
+    with pytest.raises(TypeError, match="bool or integer"):
+        DDMT(
+            1000.0,
+            1500.0,
+            nchans,
+            0.001,
+            10.0,
+            5.0,
+            0.0,
+            kill_mask=np.array([1.0, 0.5, 0.0, 1.0], dtype=np.float32),
+        )
+
+
+def test_kill_mask_takes_bool_and_any_integer_dtype() -> None:
+    args = (1000.0, 1500.0, 4, 0.001, 10.0, 5.0, 0.0)
+    # Nonzero keeps a channel. The test runs before any narrowing to uint8,
+    # so 256 and -1 cannot wrap around to 0 (a killed channel).
+    for mask in (
+        np.array([1, 0, 1, 1]),  # int64, NumPy's default integer dtype
+        np.array([1, 0, 1, 1], dtype=np.int32),
+        np.array([1, 0, 2**40, 1], dtype=np.uint64),
+        np.array([1, 0, 256, -1]),
+        np.array([True, False, True, True]),
+        np.array([9, 9, 0, 0, 9, 9, 9, 9], dtype=np.uint8)[1::2],
+        [1, 0, 300, 1],
+        (True, False, True, True),
+    ):
+        engine = DDMT(*args, kill_mask=mask)
+        np.testing.assert_array_equal(engine.plan.kill_mask, [1, 0, 1, 1])
+    assert DDMT(*args, kill_mask=[]).plan.effective_variance == pytest.approx(4.0)
+
+    plan = DDMTPlan(*args[:-1])
+    plan.kill_mask = np.array([0, 1, 0, 7])
+    np.testing.assert_array_equal(plan.kill_mask, [0, 1, 0, 1])
+    for bad in (
+        np.array([1.0, 0.0, 1.0, 1.0]),
+        [1.0, 0.0, 1.0, 1.0],
+        [1, 0, 0.5, 1],
+        np.array([1, 0, 1, 1], dtype=np.complex64),
+        np.array([1, 0, 1, 1], dtype=object),
+        "1011",
+    ):
+        with pytest.raises(TypeError, match="bool or integer"):
+            DDMT(*args, kill_mask=bad)
+        with pytest.raises(TypeError, match="bool or integer"):
+            plan.kill_mask = bad
+    with pytest.raises(TypeError, match="bool or integer"):
+        plan.kill_mask = None
+    with pytest.raises(ValueError, match="1-D"):
+        DDMT(*args, kill_mask=np.ones((2, 2), dtype=np.uint8))

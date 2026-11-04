@@ -117,16 +117,15 @@ def test_dedisperse_rejects_bad_input() -> None:
 def ref_delays(dm: float, f_ref: float) -> np.ndarray:
     """Channel-centre delays (samples) behind ``f_ref`` (negative above it)."""
     centres = F_MIN + DF * (np.arange(NCHANS) + 0.5)
-    inv_ref = 0.0 if np.isinf(f_ref) else f_ref**-2
-    return DM_CONSTANT * dm * (centres**-2 - inv_ref) / TSAMP
+    return DM_CONSTANT * dm * (centres**-2 - f_ref**-2) / TSAMP
 
 
-F_REFS = [F_MIN, F_MAX, F_MAX - DF / 2, 600.0, np.inf]
+F_REFS = [F_MIN, F_MAX]
 
 
 @pytest.mark.parametrize("cls", [DDMT, SDMT, DDMTFFT])
 @pytest.mark.parametrize("f_ref", F_REFS)
-def test_direct_engines_take_any_reference(cls: type, f_ref: float) -> None:
+def test_direct_engines_take_band_edge_references(cls: type, f_ref: float) -> None:
     dm, s, nsamps = 37.3, 3000, 6144
     delays = ref_delays(dm, f_ref)
     t = np.arange(nsamps)
@@ -138,7 +137,7 @@ def test_direct_engines_take_any_reference(cls: type, f_ref: float) -> None:
     engine = cls(F_MIN, F_MAX, NCHANS, TSAMP, np.array([dm], np.float32), f_ref=f_ref)
     assert engine.plan.f_ref == pytest.approx(f_ref)
     offset = engine.plan.time_offset
-    if f_ref >= F_MAX - DF / 2:
+    if f_ref == F_MAX:
         assert offset == 0
     y = np.asarray(engine.execute(x)).ravel()
     assert y.argmax() == s - offset
@@ -150,21 +149,20 @@ def test_dedisperse_top_reference_starts_at_sample_zero() -> None:
     dt = float(dispersion_delay(dm, F_MIN, F_MAX)) / TSAMP
     wf, _ = generate_pure_frb(nchans, nsamps, F_MIN, F_MAX, dt=dt, pulse_toa=toa)
     truth = toa * TSAMP - float(dispersion_delay(dm, F_MIN, np.inf))
-    for f_ref in (F_MAX, np.inf):
-        for engine in ("ddmt", "sdmt", "ddmt_fft"):
-            r = dedisperse(wf, F_MIN, F_MAX, TSAMP, [dm], engine=engine, f_ref=f_ref)
-            assert r.start == 0
-            assert r.f_ref == f_ref
-            y = r.data[0]
-            top = np.flatnonzero(y >= y.max() - 1e-3 * abs(y.max()))
-            t_inf = np.interp(top.mean(), np.arange(y.size), r.arrival_times()[0])
-            assert abs(t_inf - truth) <= 1.5 * TSAMP, (engine, f_ref)
+    for engine in ("ddmt", "sdmt", "ddmt_fft"):
+        r = dedisperse(wf, F_MIN, F_MAX, TSAMP, [dm], engine=engine, f_ref=F_MAX)
+        assert r.start == 0
+        assert r.f_ref == F_MAX
+        y = r.data[0]
+        top = np.flatnonzero(y >= y.max() - 1e-3 * abs(y.max()))
+        t_inf = np.interp(top.mean(), np.arange(y.size), r.arrival_times()[0])
+        assert abs(t_inf - truth) <= 1.5 * TSAMP, engine
     with pytest.raises(ValueError, match="refers times to f_min"):
         dedisperse(wf, F_MIN, F_MAX, TSAMP, [dm], engine="fdmt", f_ref=F_MAX)
 
 
 def test_bad_reference_is_rejected() -> None:
-    for bad in (0.0, -5.0, np.nan):
+    for bad in (0.0, -5.0, 600.0, F_MAX - DF / 2, np.inf, np.nan):
         with pytest.raises(ValueError, match="f_ref"):
             DDMTPlan(
                 F_MIN, F_MAX, NCHANS, TSAMP, np.array([1.0], np.float32), f_ref=bad

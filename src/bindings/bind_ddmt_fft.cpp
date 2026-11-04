@@ -29,11 +29,8 @@ using namespace pybind11::literals; // NOLINT
 
 namespace {
 
-std::vector<uint8_t> mask_vec(const std::optional<py::array_t<uint8_t>>& m) {
-    if (!m.has_value()) {
-        return {};
-    }
-    return copy_native_1d<uint8_t>(*m, "kill_mask");
+std::vector<uint8_t> mask_vec(const py::object& m) {
+    return extract_kill_mask(m);
 }
 
 DDMTFFTOptions
@@ -101,8 +98,8 @@ void bind_ddmt_fft(py::module_& mod) {
             OpenMP threads (CPU).
         nbits : int, optional
             Input precision: 32 (float) or 1, 2, 4, 8, 16 (packed).
-        kill_mask : numpy.ndarray, optional
-            Per-channel mask (1 = keep, 0 = drop).
+        kill_mask : array_like, optional
+            Per-channel mask (1 = keep, 0 = drop), as for :class:`DDMT`.
         nbeams : int, optional
             Beams per call.
         method : {'auto', 'brute', 'nufft'}, optional
@@ -124,8 +121,7 @@ void bind_ddmt_fft(py::module_& mod) {
         )doc");
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                         float dm_max, float dm_step, float dm_min, int nthreads,
-                        SizeType nbits,
-                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbits, const py::object& kill_mask,
                         SizeType nbeams, std::string_view method,
                         double tolerance, SizeType guard,
                         std::string_view backend, int device,
@@ -142,8 +138,7 @@ void bind_ddmt_fft(py::module_& mod) {
             "backend"_a = "cpu", "device"_a = 0, "f_ref"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr, int nthreads,
-                         SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
+                         SizeType nbits, const py::object& kill_mask,
                          SizeType nbeams, std::string_view method,
                          double tolerance, SizeType guard,
                          std::string_view backend, int device,
@@ -162,10 +157,9 @@ void bind_ddmt_fft(py::module_& mod) {
              "device"_a = 0, "f_ref"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const LevinConfig& levin, int nthreads, SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
-                         SizeType nbeams, std::string_view method,
-                         double tolerance, SizeType guard,
-                         std::string_view backend, int device,
+                         const py::object& kill_mask, SizeType nbeams,
+                         std::string_view method, double tolerance,
+                         SizeType guard, std::string_view backend, int device,
                          std::optional<float> f_ref) {
                  return DDMTFFT(f_min, f_max, nchans, tsamp, levin,
                                 make_exec(backend, nthreads, device), nbits,

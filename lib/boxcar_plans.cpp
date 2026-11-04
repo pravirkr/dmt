@@ -153,11 +153,12 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     if (level == 0) {
                         const auto dt    = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
                         const SizeType s = static_cast<SizeType>(std::abs(dt));
-                        // A killed channel adds no noise (it reads as zero).
+                        // A killed channel adds no noise or signal (it reads as
+                        // zero).
                         if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
                             lengths.push_back(smear ? s + 1 : 1);
+                            support = std::max(support, shift + s);
                         }
-                        support = std::max(support, shift + s);
                     } else {
                         self(self, level - 1,
                              c.tail_buf_offset /

@@ -84,11 +84,10 @@ struct DelayModel {
                              static_cast<double>(nchans);
         // Channel centres, relative to the plan's reference frequency: the
         // DDMTPlan delay tables' convention (DDMTPlan::get_f_ref()).
-        const double f_ref = plan.get_f_ref();
-        const double inv_ref =
-            utils::is_pos_inf_bits(f_ref) ? 0.0 : 1.0 / (f_ref * f_ref);
-        const double k = static_cast<double>(kDispConst) /
-                         static_cast<double>(plan.get_tsamp());
+        const double f_ref   = plan.get_f_ref();
+        const double inv_ref = 1.0 / (f_ref * f_ref);
+        const double k       = static_cast<double>(kDispConst) /
+                               static_cast<double>(plan.get_tsamp());
         rate.resize(nchans);
         for (SizeType c = 0; c < nchans; ++c) {
             const double f = f_min + (df * (static_cast<double>(c) + 0.5));

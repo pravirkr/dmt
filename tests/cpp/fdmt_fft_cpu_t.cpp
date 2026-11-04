@@ -760,4 +760,64 @@ TEST_CASE("FDMTFFT fractional delays halve the path misalignment",
     CHECK(rms_frac < 0.7 * rms_int);
 }
 
+TEST_CASE("FDMTFFT effective variance and sigma respect kill_mask",
+          "[fdmt_fft_cpu][cpu]") {
+    const float f_min   = 1000.0F;
+    const float f_max   = 1500.0F;
+    const size_t nchans = 16;
+    const size_t nsamps = 256;
+    const float tsamp   = 0.001F;
+    const size_t dt_max = 16;
+    std::vector<uint8_t> mask(nchans, 1);
+    for (size_t c = 0; c < nchans; c += 2) {
+        mask[c] = 0; // Half the channels killed
+    }
+    FDMTFFT full_eng(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, false,
+                     "valid", Exec::cpu(1), 1, true, mask);
+    // Without box smearing, each active channel has unit weight at W=1, so
+    // variance equals the number of active channels (8).
+    CHECK(full_eng.get_effective_variance(0, 1) == Approx(8.0F));
+    CHECK(full_eng.get_effective_sigma(0, 1) == Approx(std::sqrt(8.0F)));
+    const auto var_grid = full_eng.get_effective_variance_grid(1);
+    const auto sig_grid = full_eng.get_effective_sigma_grid(1);
+    REQUIRE(var_grid.size() == full_eng.get_plan().get_dmt_ndms());
+    REQUIRE(sig_grid.size() == var_grid.size());
+    for (size_t d = 0; d < var_grid.size(); ++d) {
+        CHECK(var_grid[d] == Approx(full_eng.get_effective_variance(d, 1)));
+        CHECK(sig_grid[d] == Approx(full_eng.get_effective_sigma(d, 1)));
+    }
+
+    // Every engine method is the plan's, with the engine's smearing and
+    // mask, at the root and on every stepper subband (fdmt_subband_t checks
+    // the plan's masked values against impulse responses).
+    const plans::FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0,
+                               1, "valid", 2);
+    for (const bool smear : {true, false}) {
+        CAPTURE(smear);
+        FDMTFFT eng(plan, smear, Exec::cpu(1), 1, true, mask);
+        const auto niters = plan.get_niters();
+        CHECK(eng.get_effective_variance_grid(3) ==
+              plan.get_effective_variance_grid(3, smear, mask));
+        CHECK(eng.get_effective_sigma_grid(3) ==
+              plan.get_effective_sigma_grid(3, smear, mask));
+        CHECK(eng.get_subband_variance_grid(niters, 0, 3) ==
+              plan.get_effective_variance_grid(3, smear, mask));
+        // Masking only removes noise.
+        const auto unmasked = plan.get_effective_variance_grid(3, smear);
+        const auto masked   = eng.get_effective_variance_grid(3);
+        for (size_t d = 0; d < masked.size(); ++d) {
+            CHECK(masked[d] < unmasked[d]);
+        }
+        const auto& pc = plan.get_container();
+        for (SizeType l = 0; l <= niters; ++l) {
+            for (SizeType s = 0; s < pc.grids[l].size(); ++s) {
+                CHECK(eng.get_subband_variance_grid(l, s, 2) ==
+                      plan.get_subband_variance_grid(l, s, 2, smear, mask));
+                CHECK(eng.get_subband_sigma_grid(l, s, 2) ==
+                      plan.get_subband_sigma_grid(l, s, 2, smear, mask));
+            }
+        }
+    }
+}
+
 } // namespace dmt

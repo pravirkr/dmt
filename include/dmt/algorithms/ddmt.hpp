@@ -33,9 +33,9 @@ namespace dmt::algorithms {
  * the sum for a signal arriving at plan.get_f_ref() at input sample k +
  * plan.get_time_offset(); each channel is sampled at its own centre
  * frequency. f_ref defaults to the bottom band edge f_min (real-time
- * triggering, FDMT's reference); pass f_max, the top channel's centre or
- * +infinity for offline series whose sample 0 is the file's first sample
- * (time_offset 0). Channels are ascending in frequency (row 0 = f_min).
+ * triggering, FDMT's reference); pass f_max (the top band edge) for offline
+ * series whose sample 0 is the file's first sample (time_offset 0). Channels
+ * are ascending in frequency (row 0 = f_min).
  *
  * Every trial sums every active channel directly: the cost is
  * nchans x ndm additions per output sample on every backend. SDMT computes

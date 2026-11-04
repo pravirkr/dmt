@@ -120,9 +120,8 @@ Every engine takes rows in **ascending** frequency: row 0 is the lowest
 channel. `f_min` and `f_max` are the band **edges** (not channel centres):
 channel `c` covers `[f_min + c * df, f_min + (c + 1) * df)` with
 `df = (f_max - f_min) / nchans`. Output times refer to `f_min` by default
-(`plan.f_ref`); DDMT, SDMT and DDMT-FFT take any `f_ref=` (for example
-`f_max` for PRESTO-style series that start at the file's first sample). The
-sign of a header's channel offset does not enter
+(`plan.f_ref`); DDMT, SDMT and DDMT-FFT also accept `f_ref=f_max` (for
+PRESTO-style series that start at the file's first sample). The sign of a header's channel offset does not enter
 the API: flip descending data before it reaches dmt.
 
 SIGPROC filterbanks give `fch1`, the centre of the first channel, and `foff`,

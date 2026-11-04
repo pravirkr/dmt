@@ -18,7 +18,7 @@ time shift is a phase ramp, $x(t-\tau) \leftrightarrow
 Each follows the conventions of its time-domain counterpart: the same DM
 constant, time at native resolution, and the same reference frequency
 (`plan.f_ref`: `f_min`, the bottom edge of the band, by default; `DDMTFFT`,
-like DDMT and SDMT, takes any `f_ref`).
+like DDMT and SDMT, also accepts `f_ref = f_max`).
 `DDMTFFT`, like DDMT and SDMT, samples each channel at its centre,
 `f_min + (c + 1/2) df`, and starts its output `plan.time_offset` samples into
 the stream (see [periodicity searches](periodicity.md) for what the reference

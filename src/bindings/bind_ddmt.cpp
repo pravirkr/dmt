@@ -30,14 +30,10 @@ using namespace pybind11::literals; // NOLINT
 template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                         float dm_max, float dm_step, float dm_min, int nthreads,
-                        SizeType nbits,
-                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbits, const py::object& kill_mask,
                         SizeType nbeams, std::string_view backend, int device,
                         std::optional<float> f_ref) {
-                const auto km_vec =
-                    kill_mask.has_value()
-                        ? copy_native_1d<uint8_t>(*kill_mask, "kill_mask")
-                        : std::vector<uint8_t>{};
+                const auto km_vec = extract_kill_mask(kill_mask);
                 return T(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min,
                          make_exec(backend, nthreads, device), nbits, km_vec,
                          nbeams, f_ref);
@@ -48,15 +44,11 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
             "backend"_a = "cpu", "device"_a = 0, "f_ref"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr, int nthreads,
-                         SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
+                         SizeType nbits, const py::object& kill_mask,
                          SizeType nbeams, std::string_view backend, int device,
                          std::optional<float> f_ref) {
-                 const auto km_vec =
-                     kill_mask.has_value()
-                         ? copy_native_1d<uint8_t>(*kill_mask, "kill_mask")
-                         : std::vector<uint8_t>{};
-                 const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
+                 const auto km_vec = extract_kill_mask(kill_mask);
+                 const auto dms    = copy_native_1d<float>(dm_arr, "dm_arr");
                  return T(f_min, f_max, nchans, tsamp,
                           std::span<const float>(dms.data(), dms.size()),
                           make_exec(backend, nthreads, device), nbits, km_vec,
@@ -68,13 +60,10 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
              "f_ref"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const LevinConfig& levin, int nthreads, SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
-                         SizeType nbeams, std::string_view backend, int device,
+                         const py::object& kill_mask, SizeType nbeams,
+                         std::string_view backend, int device,
                          std::optional<float> f_ref) {
-                 const auto km_vec =
-                     kill_mask.has_value()
-                         ? copy_native_1d<uint8_t>(*kill_mask, "kill_mask")
-                         : std::vector<uint8_t>{};
+                 const auto km_vec = extract_kill_mask(kill_mask);
                  return T(f_min, f_max, nchans, tsamp, levin,
                           make_exec(backend, nthreads, device), nbits, km_vec,
                           nbeams, f_ref);
@@ -129,9 +118,10 @@ void bind_ddmt(py::module_& mod) {
             Number of OpenMP worker threads (default 1).
         nbits : int, optional
             Bit precision per sample (32 for float, or 1, 2, 4, 8, 16 for packed integer).
-        kill_mask : numpy.ndarray, optional
-            Per-channel uint8 mask (1 = keep, 0 = drop). Any other nonzero
-            value is kept and stored as 1. A non-contiguous view is read in
+        kill_mask : array_like, optional
+            Per-channel mask of bool or any integer dtype (1 = keep,
+            0 = drop). Any other nonzero value is kept and stored as 1;
+            floats raise ``TypeError``. A non-contiguous view is read in
             logical order.
         nbeams : int, optional
             Number of independent beams batched through this instance
@@ -147,12 +137,13 @@ void bind_ddmt(py::module_& mod) {
         f_ref : float, optional
             Keyword-only. Reference frequency of the output times in MHz
             (default ``None``: ``f_min``, the bottom band edge, as for FDMT;
-            best for real-time triggering). Any positive value or
-            ``numpy.inf``: ``f_max``, the top channel's centre
-            ``f_max - df / 2`` (SIGPROC/PRESTO's convention) or ``inf`` give
-            ``plan.time_offset == 0``, so output sample ``t`` refers to input
-            sample ``t`` and the incomplete samples are at the end. Only the
-            delay table changes; speed and history are the same.
+            best for real-time triggering) or ``f_max``, the top band edge;
+            any other value raises ``ValueError``. ``f_max`` gives
+            ``plan.time_offset == 0`` (the SIGPROC/PRESTO convention of
+            series that start at the file's first sample), so output sample
+            ``t`` refers to input sample ``t`` and the incomplete samples are
+            at the end. Only the delay table changes; speed and history are
+            the same.
 
         Input and output are NumPy (host) arrays on every backend; a GPU
         backend pipelines the host transfers and blocks until the result is

@@ -247,10 +247,18 @@ void bind_plans(py::module_& mod) {
                 Integer shifts of length ``nchans``, relative to the
                 unshifted reference channel. Used by :func:`add_frb_track`.
             )doc")
-        .def("get_effective_variance", &FDMTPlan::get_effective_variance,
-             py::arg("dm_idx"), py::arg("boxcar_width") = 1,
-             py::arg("use_box_smearing") = true,
-             R"doc(
+        .def(
+            "get_effective_variance",
+            [](const FDMTPlan& plan, SizeType dm_idx, SizeType boxcar_width,
+               bool use_box_smearing, const py::object& kill_mask) {
+                return plan.get_effective_variance(
+                    dm_idx, boxcar_width, use_box_smearing,
+                    extract_kill_mask(kill_mask));
+            },
+            py::arg("dm_idx"), py::arg("boxcar_width") = 1,
+            py::arg("use_box_smearing") = true, py::kw_only(),
+            py::arg("kill_mask")        = py::none(),
+            R"doc(
              Effective noise variance for one DM trial after a boxcar of width W.
 
              Parameters
@@ -261,6 +269,10 @@ void bind_plans(py::module_& mod) {
                  Boxcar width in samples (default 1).
              use_box_smearing : bool, optional
                  Include intra-channel smearing in the variance.
+             kill_mask : array_like, optional
+                 Keyword-only. Per-channel mask as given to the engine
+                 (nonzero = keep, 0 = killed). Killed channels read as zero
+                 and add no noise. Default ``None``: every channel.
 
              Returns
              -------
@@ -268,51 +280,76 @@ void bind_plans(py::module_& mod) {
                  Variance of the FDMT output at that trial, for unit-variance
                  input noise.
              )doc")
-        .def("get_effective_sigma", &FDMTPlan::get_effective_sigma,
-             py::arg("dm_idx"), py::arg("boxcar_width") = 1,
-             py::arg("use_box_smearing") = true)
+        .def(
+            "get_effective_sigma",
+            [](const FDMTPlan& plan, SizeType dm_idx, SizeType boxcar_width,
+               bool use_box_smearing, const py::object& kill_mask) {
+                return plan.get_effective_sigma(dm_idx, boxcar_width,
+                                                use_box_smearing,
+                                                extract_kill_mask(kill_mask));
+            },
+            py::arg("dm_idx"), py::arg("boxcar_width") = 1,
+            py::arg("use_box_smearing") = true, py::kw_only(),
+            py::arg("kill_mask")        = py::none(),
+            "Square root of :meth:`get_effective_variance`.")
         .def(
             "get_effective_variance_grid",
             [](const FDMTPlan& plan, SizeType boxcar_width,
-               bool use_box_smearing) {
+               bool use_box_smearing, const py::object& kill_mask) {
                 return as_pyarray(plan.get_effective_variance_grid(
-                    boxcar_width, use_box_smearing));
+                    boxcar_width, use_box_smearing,
+                    extract_kill_mask(kill_mask)));
             },
-            py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+            py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true,
+            py::kw_only(), py::arg("kill_mask") = py::none(),
+            "Noise variance of every DM trial; ``kill_mask`` as for "
+            ":meth:`get_effective_variance`.")
         .def(
             "get_effective_sigma_grid",
             [](const FDMTPlan& plan, SizeType boxcar_width,
-               bool use_box_smearing) {
+               bool use_box_smearing, const py::object& kill_mask) {
                 return as_pyarray(plan.get_effective_sigma_grid(
-                    boxcar_width, use_box_smearing));
+                    boxcar_width, use_box_smearing,
+                    extract_kill_mask(kill_mask)));
             },
-            py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+            py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true,
+            py::kw_only(), py::arg("kill_mask") = py::none(),
+            "Square root of :meth:`get_effective_variance_grid`.")
         .def(
             "get_subband_variance_grid",
             [](const FDMTPlan& plan, SizeType level, SizeType subband,
-               SizeType boxcar_width, bool use_box_smearing) {
+               SizeType boxcar_width, bool use_box_smearing,
+               const py::object& kill_mask) {
                 return as_pyarray(plan.get_subband_variance_grid(
-                    level, subband, boxcar_width, use_box_smearing));
+                    level, subband, boxcar_width, use_box_smearing,
+                    extract_kill_mask(kill_mask)));
             },
             py::arg("level"), py::arg("subband"), py::arg("boxcar_width") = 1,
-            py::arg("use_box_smearing") = true,
+            py::arg("use_box_smearing") = true, py::kw_only(),
+            py::arg("kill_mask")        = py::none(),
             R"doc(
             Noise variance of every row of one subband (unit Gaussian input).
 
             ``level`` and ``subband`` index ``plan.container.dt_grids`` and
             ``FDMT.view_subband()``: tree subbands first, then staggered ones.
             The root (``level=plan.niters, subband=0``) equals
-            :meth:`get_effective_variance_grid`.
+            :meth:`get_effective_variance_grid`. ``kill_mask`` (keyword-only)
+            leaves killed channels out, as for
+            :meth:`get_effective_variance`; ``FDMTFFT.get_subband_sigma_grid``
+            applies the engine's own mask.
             )doc")
         .def(
             "get_subband_sigma_grid",
             [](const FDMTPlan& plan, SizeType level, SizeType subband,
-               SizeType boxcar_width, bool use_box_smearing) {
+               SizeType boxcar_width, bool use_box_smearing,
+               const py::object& kill_mask) {
                 return as_pyarray(plan.get_subband_sigma_grid(
-                    level, subband, boxcar_width, use_box_smearing));
+                    level, subband, boxcar_width, use_box_smearing,
+                    extract_kill_mask(kill_mask)));
             },
             py::arg("level"), py::arg("subband"), py::arg("boxcar_width") = 1,
-            py::arg("use_box_smearing") = true,
+            py::arg("use_box_smearing") = true, py::kw_only(),
+            py::arg("kill_mask")        = py::none(),
             "Square root of :meth:`get_subband_variance_grid`: divide a "
             "stepper subband view's rows by it for S/N.")
         .def("get_complexity", &FDMTPlan::get_complexity,
@@ -659,15 +696,15 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly(
             "f_ref", &DDMTPlan::get_f_ref,
             "Reference frequency of output times (MHz): the constructor's "
-            "f_ref, by default f_min (the bottom band edge, as for FDMT); may "
-            "be inf. Channels are sampled at their centres.")
+            "f_ref: f_min (the default, the bottom band edge, as for FDMT) or "
+            "f_max (the top band edge). Channels are sampled at their "
+            "centres.")
         .def_property_readonly(
             "time_offset", &DDMTPlan::get_time_offset,
             "Input-sample offset of the output times: output sample k (from "
             "the start of the stream) is the sum for f_ref arrival at input "
-            "sample k + time_offset; 0 when f_ref is at or above the top "
-            "channel's centre. Shared by DDMT, SDMT and DDMTFFT; independent "
-            "of the kill mask.")
+            "sample k + time_offset; 0 when f_ref == f_max. Shared by DDMT, "
+            "SDMT and DDMTFFT; independent of the kill mask.")
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp)
         .def_property_readonly("nbits", &DDMTPlan::get_nbits)
@@ -690,12 +727,16 @@ void bind_plans(py::module_& mod) {
             [](const DDMTPlan& plan) {
                 return as_pyarray(plan.get_kill_mask());
             },
-            [](DDMTPlan& plan, const py::array& mask) {
-                const auto bytes = copy_native_1d<uint8_t>(mask, "kill_mask");
-                plan.set_kill_mask(bytes);
+            [](DDMTPlan& plan, const py::object& mask) {
+                if (mask.is_none()) {
+                    throw py::type_error(
+                        "kill_mask must be a 1-D bool or integer array");
+                }
+                plan.set_kill_mask(extract_kill_mask(mask));
             },
-            "Per-channel uint8 mask. 0 drops the channel; any nonzero value "
-            "is kept and stored as 1. A plan owned by an engine rejects "
+            "Per-channel mask (bool or any integer dtype; stored as uint8). "
+            "0 drops the channel; any nonzero value is kept and stored as 1. "
+            "Floats raise TypeError. A plan owned by an engine rejects "
             "changes. Non-contiguous views are read in logical order.")
         .def_property_readonly("effective_variance",
                                &DDMTPlan::get_effective_variance)

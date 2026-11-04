@@ -35,25 +35,16 @@ public:
                 SIZE_MAX / this->plan.get_nchans() / this->plan.get_nsamps()) {
             throw std::invalid_argument("FDMTFFTBoxcar: invalid nbeams");
         }
-        planes = detail::make_boxcar_plans(this->plan, config, smear, kill);
         // Band-limited (fractional) shifts need context beyond the integer
         // tree's support: hold detections until the FFT support is warm.
         const auto geom =
             fdmt_fft::make_geometry(this->plan, FDMTMode::kValid, frac, smear);
-        latency          = geom.latency;
-        uint64_t integer = 0;
-        for (const auto& p : planes) {
-            for (const auto w : p.warmup_samples) {
-                integer = std::max(integer, w);
-            }
-        }
-        const uint64_t extra = std::max<uint64_t>(
+        latency                = geom.latency;
+        const uint64_t integer = this->plan.get_fft_support();
+        const uint64_t extra   = std::max<uint64_t>(
             geom.guard, geom.support > integer ? geom.support - integer : 0);
-        for (auto& p : planes) {
-            for (auto& w : p.warmup_samples) {
-                w += extra;
-            }
-        }
+        planes =
+            detail::make_boxcar_plans(this->plan, config, smear, kill, extra);
         const detail::FDMTFFTEngineConfig fft_cfg{
             .use_box_smearing  = smear,
             .mode              = FDMTMode::kValid,

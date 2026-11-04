@@ -352,6 +352,19 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans][cpu]") {
                                  std::vector<float>{0.0F, 0.0F}),
                         std::invalid_argument);
 
+        // Non-finite or out-of-range dm_grid
+        const auto nan_f = std::bit_cast<float>(0x7FC00000U);
+        const auto inf_f = std::bit_cast<float>(0x7F800000U);
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{nan_f, 10.0F}),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{inf_f, 10.0F}),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{1.0e20F}),
+                        std::invalid_argument);
+
         // Negative DM is valid and constructs successfully
         CHECK_NOTHROW(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
                                std::vector<float>{-5.0F, 10.0F}));

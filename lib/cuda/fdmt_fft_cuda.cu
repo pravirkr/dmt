@@ -737,6 +737,9 @@ public:
             .f_start     = dev.f_start,
             .f_end       = dev.f_end,
             .dt_grid     = dev.dt_grid,
+            .chan_begin  = dev.chan_begin,
+            .chan_end    = dev.chan_end,
+            .staggered   = dev.staggered,
         };
     }
 

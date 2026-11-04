@@ -587,12 +587,10 @@ TEST_CASE("DDMTFFT honours the plan's reference frequency",
     const double s_ref    = 900.4; // f_ref arrival, samples
     const double df       = (static_cast<double>(kFhi) - kFlo) / nchans;
     const double k        = static_cast<double>(kDispConst) / kTs;
-    for (const float f_ref :
-         {kFlo, kFhi, static_cast<float>(kFhi - (df / 2)), 1.5F * kFlo,
-          std::numeric_limits<float>::infinity()}) {
+    for (const float f_ref : {kFlo, kFhi}) {
         CAPTURE(f_ref);
         const double fr      = f_ref;
-        const double inv_ref = std::isinf(fr) ? 0.0 : 1.0 / (fr * fr);
+        const double inv_ref = 1.0 / (fr * fr);
         std::vector<float> wf(nchans * nsamps, 0.0F);
         for (SizeType c = 0; c < nchans; ++c) {
             const double f = kFlo + (df * (static_cast<double>(c) + 0.5));

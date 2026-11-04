@@ -67,23 +67,23 @@ SizeType find_nearest_sorted_idx(std::span<const IndexType> arr_sorted,
 namespace {
 
 // Validated band of channel centres f_min + (c + 1/2) df, c < nchans, and
-// reference frequency (positive, or +inf).
+// reference frequency (finite and positive).
 void check_band(
     SizeType nchans, float f_min, float df, float tsamp, double f_ref) {
     if (nchans == 0) {
         throw std::invalid_argument("nchans must be greater than 0");
     }
-    if (!(tsamp > 0.0F) || !is_finite_bits(tsamp)) {
+    if (!is_finite_bits(tsamp) || !(tsamp > 0.0F)) {
         throw std::invalid_argument("tsamp must be greater than 0");
     }
-    if (!(f_min > 0.0F) || !(df > 0.0F) || !is_finite_bits(f_min) ||
-        !is_finite_bits(df)) {
+    if (!is_finite_bits(f_min) || !is_finite_bits(df) || !(f_min > 0.0F) ||
+        !(df > 0.0F)) {
         throw std::invalid_argument(
             "Frequencies must be positive and ascending (f_min > 0, df > 0)");
     }
-    if (!is_valid_f_ref(f_ref)) {
+    if (!is_finite_bits(f_ref) || !(f_ref > 0.0)) {
         throw std::invalid_argument(
-            std::format("f_ref={} MHz must be positive (or infinite)", f_ref));
+            std::format("f_ref={} MHz must be finite and positive", f_ref));
     }
 }
 
@@ -94,7 +94,7 @@ double
 delay_rate(SizeType c, float f_min, float df, float tsamp, double f_ref) {
     const double f = static_cast<double>(f_min) +
                      (static_cast<double>(df) * (static_cast<double>(c) + 0.5));
-    const double inv_ref = is_pos_inf_bits(f_ref) ? 0.0 : 1.0 / (f_ref * f_ref);
+    const double inv_ref = 1.0 / (f_ref * f_ref);
     return static_cast<double>(kDispConst) / static_cast<double>(tsamp) *
            ((1.0 / (f * f)) - inv_ref);
 }
@@ -190,6 +190,12 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
                                           float f_max,
                                           SizeType nchans,
                                           float tol) {
+    if (!is_finite_bits(dm_start) || !is_finite_bits(dm_end) ||
+        !is_finite_bits(tsamp) || !is_finite_bits(pulse_width) ||
+        !is_finite_bits(f_min) || !is_finite_bits(f_max) ||
+        !is_finite_bits(tol)) {
+        throw std::invalid_argument("Levin DM grid parameters must be finite");
+    }
     if (dm_start < 0.0F || dm_end < dm_start) {
         throw std::invalid_argument(std::format(
             "Invalid DM range[{}, {}]: require 0 <= dm_start <= dm_end",

@@ -117,14 +117,14 @@ TEST_CASE("DDMT output sample k is f_ref arrival at input k + time_offset",
     const SizeType nsamps        = 3072;
     const std::vector<float> dms = {0.0F, 30.0F, 60.0F};
     const double df        = (static_cast<double>(f_max) - f_min) / nchans;
-    const auto inf         = std::numeric_limits<float>::infinity();
+    const auto nan_f       = std::bit_cast<float>(0x7FC00000U);
+    const auto inf_f       = std::bit_cast<float>(0x7F800000U);
     const float top_centre = f_max - static_cast<float>(df / 2);
     for (const std::optional<float> f_ref :
-         {std::optional<float>{}, std::optional<float>{f_max},
-          std::optional<float>{top_centre}, std::optional<float>{1300.0F},
-          std::optional<float>{inf}}) {
+         {std::optional<float>{}, std::optional<float>{f_min},
+          std::optional<float>{f_max}}) {
         const double fr      = f_ref.value_or(f_min);
-        const double inv_ref = std::isinf(fr) ? 0.0 : 1.0 / (fr * fr);
+        const double inv_ref = 1.0 / (fr * fr);
         for (const bool sdmt : {false, true}) {
             DYNAMIC_SECTION("f_ref=" << fr << " sdmt=" << sdmt) {
                 std::unique_ptr<DDMT> eng;
@@ -140,9 +140,8 @@ TEST_CASE("DDMT output sample k is f_ref arrival at input k + time_offset",
                 const auto& plan  = eng->get_plan();
                 const auto offset = plan.get_time_offset();
                 CHECK(plan.get_f_ref() == static_cast<float>(fr));
-                // At or above the top channel's centre nothing arrives
-                // before f_ref.
-                if (fr >= top_centre) {
+                // At f_max nothing arrives before f_ref.
+                if (fr == static_cast<double>(f_max)) {
                     CHECK(offset == 0);
                 } else {
                     CHECK(offset > 0);
@@ -177,18 +176,13 @@ TEST_CASE("DDMT output sample k is f_ref arrival at input k + time_offset",
             }
         }
     }
-    // The top channel's centre reproduces the 0.7.0 convention: the top
-    // channel has no delay.
-    const DDMTPlan top(f_min, f_max, nchans, tsamp, dms, 32, {}, top_centre);
-    for (SizeType idm = 0; idm < dms.size(); ++idm) {
-        CHECK(top.get_container().delay_table[(idm * nchans) + nchans - 1] ==
-              0);
+    // Only f_min and f_max are valid reference frequencies.
+    for (const float bad_ref :
+         {0.0F, -10.0F, top_centre, 1300.0F, nan_f, inf_f}) {
+        CHECK_THROWS_AS(
+            DDMTPlan(f_min, f_max, nchans, tsamp, dms, 32, {}, bad_ref),
+            std::invalid_argument);
     }
-    CHECK_THROWS_AS(DDMTPlan(f_min, f_max, nchans, tsamp, dms, 32, {}, 0.0F),
-                    std::invalid_argument);
-    CHECK_THROWS_AS(
-        DDMTPlan(f_min, f_max, nchans, tsamp, dms, 32, {}, std::nanf("")),
-        std::invalid_argument);
 }
 
 TEST_CASE("DDMT execute recovers a zero-DM ones waterfall", "[ddmt][cpu]") {

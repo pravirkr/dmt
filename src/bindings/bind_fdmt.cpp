@@ -31,12 +31,8 @@ using namespace pybind11::literals; // NOLINT
 
 namespace {
 
-std::vector<uint8_t>
-fft_kill_mask(const std::optional<py::array_t<uint8_t>>& m) {
-    if (!m.has_value()) {
-        return {};
-    }
-    return copy_native_1d<uint8_t>(*m, "kill_mask");
+std::vector<uint8_t> fft_kill_mask(const py::object& m) {
+    return extract_kill_mask(m);
 }
 
 // FDMTFFT output for an input of `ndim` dimensions.
@@ -722,33 +718,33 @@ void bind_fdmt(py::module_& mod) {
             then lags the input by 64 samples (:attr:`output_latency`).
             ``False`` rounds the shifts like :class:`FDMT` and exists only for
             equivalence tests against FDMT.
-        kill_mask : numpy.ndarray, optional
-            Keyword-only. Per-channel uint8 mask (1 = keep, 0 = kill);
-            killed channels read as zero.
+        kill_mask : array_like, optional
+            Keyword-only. Per-channel mask of bool or any integer dtype
+            (nonzero = keep, 0 = kill; floats raise ``TypeError``); killed
+            channels read as zero.
 
         See also
         --------
         FDMT, compute_fdmt_fft
         )doc")
-        .def(
-            py::init([](float f_min, float f_max, SizeType nchans,
-                        SizeType nsamps, float tsamp, IndexType dt_max,
-                        IndexType dt_min, SizeType dt_step,
-                        bool use_box_smearing, std::string_view mode,
-                        int nthreads, SizeType nbeams, std::string_view backend,
-                        int device, bool fractional_delays,
-                        const std::optional<py::array_t<uint8_t>>& kill_mask) {
-                const auto mask = fft_kill_mask(kill_mask);
-                return FDMTFFT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
-                               dt_min, dt_step, use_box_smearing, mode,
-                               make_exec(backend, nthreads, device), nbeams,
-                               fractional_delays, mask);
-            }),
-            "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a, "dt_max"_a,
-            "dt_min"_a = 0, "dt_step"_a = 1, "use_box_smearing"_a = true,
-            "mode"_a = "valid", "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
-            "backend"_a = "cpu", "device"_a = 0, "fractional_delays"_a = true,
-            "kill_mask"_a = py::none())
+        .def(py::init([](float f_min, float f_max, SizeType nchans,
+                         SizeType nsamps, float tsamp, IndexType dt_max,
+                         IndexType dt_min, SizeType dt_step,
+                         bool use_box_smearing, std::string_view mode,
+                         int nthreads, SizeType nbeams,
+                         std::string_view backend, int device,
+                         bool fractional_delays, const py::object& kill_mask) {
+                 const auto mask = fft_kill_mask(kill_mask);
+                 return FDMTFFT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                                dt_min, dt_step, use_box_smearing, mode,
+                                make_exec(backend, nthreads, device), nbeams,
+                                fractional_delays, mask);
+             }),
+             "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
+             "use_box_smearing"_a = true, "mode"_a = "valid", "nthreads"_a = 1,
+             "nbeams"_a = 1, py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
+             "fractional_delays"_a = true, "kill_mask"_a = py::none())
         .def(
             py::init([](float f_min, float f_max, SizeType nchans,
                         SizeType nsamps, float tsamp, const py::object& dt_grid,
@@ -756,8 +752,7 @@ void bind_fdmt(py::module_& mod) {
                         const py::object& dm_arr, bool use_box_smearing,
                         std::string_view mode, int nthreads, SizeType nbeams,
                         std::string_view backend, int device,
-                        bool fractional_delays,
-                        const std::optional<py::array_t<uint8_t>>& kill_mask) {
+                        bool fractional_delays, const py::object& kill_mask) {
                 const auto [type, obj] =
                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                 const auto exec = make_exec(backend, nthreads, device);
@@ -785,8 +780,7 @@ void bind_fdmt(py::module_& mod) {
         .def(py::init([](const FDMTPlan& plan, bool use_box_smearing,
                          int nthreads, SizeType nbeams,
                          std::string_view backend, int device,
-                         bool fractional_delays,
-                         const std::optional<py::array_t<uint8_t>>& kill_mask) {
+                         bool fractional_delays, const py::object& kill_mask) {
                  const auto mask = fft_kill_mask(kill_mask);
                  return std::make_unique<FDMTFFT>(
                      plan, use_box_smearing,
@@ -863,6 +857,27 @@ void bind_fdmt(py::module_& mod) {
                 return as_pyarray(fdmt.get_effective_sigma_grid(boxcar_width));
             },
             py::arg("boxcar_width") = 1)
+        .def(
+            "get_subband_variance_grid",
+            [](const FDMTFFT& fdmt, SizeType level, SizeType subband,
+               SizeType boxcar_width) {
+                return as_pyarray(fdmt.get_subband_variance_grid(level, subband,
+                                                                 boxcar_width));
+            },
+            py::arg("level"), py::arg("subband"), py::arg("boxcar_width") = 1,
+            "Noise variance of every row of stepper subband ``subband`` at "
+            "merge ``level``, with this engine's box smearing and kill mask "
+            "(:meth:`FDMTPlan.get_subband_variance_grid`).")
+        .def(
+            "get_subband_sigma_grid",
+            [](const FDMTFFT& fdmt, SizeType level, SizeType subband,
+               SizeType boxcar_width) {
+                return as_pyarray(
+                    fdmt.get_subband_sigma_grid(level, subband, boxcar_width));
+            },
+            py::arg("level"), py::arg("subband"), py::arg("boxcar_width") = 1,
+            "Square root of :meth:`get_subband_variance_grid`: divide a "
+            "subband view's rows by it for S/N.")
         .def(
             "execute",
             [](FDMTFFT& fdmt,

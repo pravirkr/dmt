@@ -341,25 +341,40 @@ bool FDMTFFT::is_finished() const noexcept {
     return m_impl->m_engine->is_finished();
 }
 
+// Noise of the engine's own transform: its box smearing and kill mask.
 float FDMTFFT::get_effective_variance(SizeType dm_idx,
                                       SizeType boxcar_width) const {
-    return m_impl->m_plan.get_effective_variance(
-        dm_idx, boxcar_width, m_impl->m_cfg.use_box_smearing);
+    return m_impl->m_plan.get_effective_variance(dm_idx, boxcar_width,
+                                                 m_impl->m_cfg.use_box_smearing,
+                                                 m_impl->m_cfg.kill_mask);
 }
 float FDMTFFT::get_effective_sigma(SizeType dm_idx,
                                    SizeType boxcar_width) const {
     return m_impl->m_plan.get_effective_sigma(dm_idx, boxcar_width,
-                                              m_impl->m_cfg.use_box_smearing);
+                                              m_impl->m_cfg.use_box_smearing,
+                                              m_impl->m_cfg.kill_mask);
 }
 std::vector<float>
 FDMTFFT::get_effective_variance_grid(SizeType boxcar_width) const {
     return m_impl->m_plan.get_effective_variance_grid(
-        boxcar_width, m_impl->m_cfg.use_box_smearing);
+        boxcar_width, m_impl->m_cfg.use_box_smearing, m_impl->m_cfg.kill_mask);
 }
 std::vector<float>
 FDMTFFT::get_effective_sigma_grid(SizeType boxcar_width) const {
     return m_impl->m_plan.get_effective_sigma_grid(
-        boxcar_width, m_impl->m_cfg.use_box_smearing);
+        boxcar_width, m_impl->m_cfg.use_box_smearing, m_impl->m_cfg.kill_mask);
+}
+std::vector<float> FDMTFFT::get_subband_variance_grid(
+    SizeType level, SizeType subband, SizeType boxcar_width) const {
+    return m_impl->m_plan.get_subband_variance_grid(
+        level, subband, boxcar_width, m_impl->m_cfg.use_box_smearing,
+        m_impl->m_cfg.kill_mask);
+}
+std::vector<float> FDMTFFT::get_subband_sigma_grid(
+    SizeType level, SizeType subband, SizeType boxcar_width) const {
+    return m_impl->m_plan.get_subband_sigma_grid(level, subband, boxcar_width,
+                                                 m_impl->m_cfg.use_box_smearing,
+                                                 m_impl->m_cfg.kill_mask);
 }
 
 void FDMTFFT::reset_history() noexcept { m_impl->m_engine->reset_history(); }

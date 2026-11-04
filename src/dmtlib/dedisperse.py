@@ -11,9 +11,9 @@ edge (:attr:`Dedispersed.f_ref`): ``data[:, i]`` is the sum for a signal
 arriving at ``f_ref`` at input sample ``start + i``. ``start`` differs between
 engines (FDMT's skipped startup, the DDMT family's ``plan.time_offset``), so
 align results from different engines by ``start``, not by column. The direct
-engines take any ``f_ref``: ``f_max``, the top channel's centre or
-``numpy.inf`` give ``start == 0``, so sample 0 is the file's first sample at
-that frequency (the convention of SIGPROC and PRESTO time series).
+engines also accept ``f_ref=f_max`` (the top band edge), which gives
+``start == 0`` so sample 0 is the file's first sample at ``f_max`` (the
+convention of SIGPROC and PRESTO time series).
 :meth:`Dedispersed.arrival_times` converts the times to any frequency
 (infinite frequency by default).
 """
@@ -132,8 +132,8 @@ def dedisperse(
         more signal at high Fourier frequencies.
     f_ref : float, optional
         Reference frequency of the output times (MHz), default ``f_min``.
-        DDMT, SDMT and DDMT-FFT accept any positive value or ``numpy.inf``;
-        the FDMT engines only ``f_min``.
+        DDMT, SDMT and DDMT-FFT accept ``f_min`` or ``f_max``; the FDMT
+        engines only ``f_min``.
     use_box_smearing : bool
         FDMT engines only. ``False`` (the default here, unlike the engine
         classes) keeps white input white, for periodicity searches. ``True``

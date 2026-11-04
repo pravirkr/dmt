@@ -177,6 +177,13 @@ public:
         if (dm_grid.empty()) {
             throw std::invalid_argument("FDMT: dm_grid must not be empty");
         }
+        for (const auto dm : dm_grid) {
+            if (!utils::is_finite_bits(dm)) {
+                throw std::invalid_argument(
+                    "FDMT: dm_grid values must be finite");
+            }
+        }
+        validate_band();
         auto dm_sorted = dm_grid;
         std::ranges::sort(dm_sorted);
         const auto [dm_first, dm_last] = std::ranges::unique(dm_sorted);
@@ -185,8 +192,17 @@ public:
         const float dm_conv = utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
         m_dt_grid_target.reserve(dm_sorted.size());
         for (const auto dm : dm_sorted) {
-            m_dt_grid_target.push_back(
-                static_cast<IndexType>(std::nearbyint(dm / dm_conv)));
+            const double scaled = std::nearbyint(static_cast<double>(dm) /
+                                                 static_cast<double>(dm_conv));
+            if (!utils::is_finite_bits(scaled) ||
+                scaled < static_cast<double>(
+                             std::numeric_limits<std::int32_t>::min()) ||
+                scaled > static_cast<double>(
+                             std::numeric_limits<std::int32_t>::max())) {
+                throw std::invalid_argument(
+                    "FDMT: dm_grid delay trial exceeds representable range");
+            }
+            m_dt_grid_target.push_back(static_cast<IndexType>(scaled));
         }
         std::ranges::sort(m_dt_grid_target);
         const auto [first, last] = std::ranges::unique(m_dt_grid_target);
@@ -469,14 +485,20 @@ public:
      * superset of the `use_box_smearing = false` fast path (`nchans * w`)
      * rather than a separate special case of it.
      */
-    float variance_from_smearing_row(const float* smearing_row,
-                                     float w) const noexcept {
+    float variance_from_smearing_row(
+        const float* smearing_row,
+        float w,
+        std::span<const uint8_t> kill_mask) const noexcept {
         // Each channel's level-0 box of L samples carries the box-mean
         // weight round(2^b / L) * 2^-b (see get_box_fraction_bits()).
+        // Killed channels read as zero and add nothing.
         const auto bits  = get_box_fraction_bits();
         const double inv = std::ldexp(1.0, -static_cast<int>(bits));
         double total_var = 0.0;
         for (SizeType c = 0; c < m_nchans; ++c) {
+            if (!is_active(kill_mask, c)) {
+                continue;
+            }
             const auto box_len = static_cast<SizeType>(smearing_row[c]) + 1;
             const double weight =
                 static_cast<double>(
@@ -504,9 +526,32 @@ public:
         }
         return weights;
     }
+    static bool is_active(std::span<const uint8_t> kill_mask,
+                          SizeType c) noexcept {
+        return kill_mask.empty() || kill_mask[c] != 0;
+    }
+    void check_kill_mask(std::span<const uint8_t> kill_mask) const {
+        if (!kill_mask.empty() && kill_mask.size() != m_nchans) {
+            throw std::invalid_argument(
+                std::format("FDMTPlan: kill_mask size={} must be 0 or "
+                            "nchans={}",
+                            kill_mask.size(), m_nchans));
+        }
+    }
+    // Active channels in [begin, end).
+    static SizeType count_active(std::span<const uint8_t> kill_mask,
+                                 SizeType begin,
+                                 SizeType end) noexcept {
+        SizeType n = 0;
+        for (SizeType c = begin; c < end; ++c) {
+            n += is_active(kill_mask, c) ? 1 : 0;
+        }
+        return n;
+    }
     float get_effective_variance(SizeType dm_idx,
                                  SizeType boxcar_width,
-                                 bool use_box_smearing) const {
+                                 bool use_box_smearing,
+                                 std::span<const uint8_t> kill_mask) const {
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
@@ -516,30 +561,37 @@ public:
                                     " out of range [0, " +
                                     std::to_string(ndms) + ")");
         }
+        check_kill_mask(kill_mask);
         const float w = static_cast<float>(boxcar_width);
         if (!use_box_smearing) {
-            return static_cast<float>(m_nchans) * w;
+            return static_cast<float>(count_active(kill_mask, 0, m_nchans)) * w;
         }
         const auto smearing_grid = get_smearing_grid_final();
-        return variance_from_smearing_row(&smearing_grid[dm_idx * m_nchans], w);
+        return variance_from_smearing_row(&smearing_grid[dm_idx * m_nchans], w,
+                                          kill_mask);
     }
     float get_effective_sigma(SizeType dm_idx,
                               SizeType boxcar_width,
-                              bool use_box_smearing) const {
-        return std::sqrt(
-            get_effective_variance(dm_idx, boxcar_width, use_box_smearing));
+                              bool use_box_smearing,
+                              std::span<const uint8_t> kill_mask) const {
+        return std::sqrt(get_effective_variance(dm_idx, boxcar_width,
+                                                use_box_smearing, kill_mask));
     }
     std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width,
-                                bool use_box_smearing) const {
+                                bool use_box_smearing,
+                                std::span<const uint8_t> kill_mask) const {
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
+        check_kill_mask(kill_mask);
         const auto ndms = get_dmt_ndms();
         std::vector<float> grid(ndms, 0.0F);
         const auto w = static_cast<float>(boxcar_width);
         if (!use_box_smearing) {
-            std::ranges::fill(grid, static_cast<float>(m_nchans) * w);
+            std::ranges::fill(
+                grid,
+                static_cast<float>(count_active(kill_mask, 0, m_nchans)) * w);
             return grid;
         }
         // Compute the O(ndms * nchans) smearing-grid tree trace exactly
@@ -549,26 +601,32 @@ public:
         // this O(ndms^2 * nchans) for no reason.
         const auto smearing_grid = get_smearing_grid_final();
         for (SizeType i = 0; i < ndms; ++i) {
-            grid[i] =
-                variance_from_smearing_row(&smearing_grid[i * m_nchans], w);
+            grid[i] = variance_from_smearing_row(&smearing_grid[i * m_nchans],
+                                                 w, kill_mask);
         }
         return grid;
     }
-    std::vector<float> get_effective_sigma_grid(SizeType boxcar_width,
-                                                bool use_box_smearing) const {
-        auto grid = get_effective_variance_grid(boxcar_width, use_box_smearing);
+    std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width,
+                             bool use_box_smearing,
+                             std::span<const uint8_t> kill_mask) const {
+        auto grid = get_effective_variance_grid(boxcar_width, use_box_smearing,
+                                                kill_mask);
         for (auto& v : grid) {
             v = std::sqrt(v);
         }
         return grid;
     }
-    std::vector<float> get_subband_variance_grid(SizeType level,
-                                                 SizeType subband,
-                                                 SizeType boxcar_width,
-                                                 bool use_box_smearing) const {
+    std::vector<float>
+    get_subband_variance_grid(SizeType level,
+                              SizeType subband,
+                              SizeType boxcar_width,
+                              bool use_box_smearing,
+                              std::span<const uint8_t> kill_mask) const {
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
+        check_kill_mask(kill_mask);
         if (level > m_niters) {
             throw std::out_of_range(std::format(
                 "FDMTPlan: level {} out of range [0, {}]", level, m_niters));
@@ -584,8 +642,9 @@ public:
         const auto w  = static_cast<float>(boxcar_width);
         std::vector<float> out(g.ndt, 0.0F);
         if (!use_box_smearing) {
-            std::ranges::fill(
-                out, static_cast<float>(g.chan_end - g.chan_begin) * w);
+            std::ranges::fill(out, static_cast<float>(count_active(
+                                       kill_mask, g.chan_begin, g.chan_end)) *
+                                       w);
             return out;
         }
         // The level-0 box of every channel a row reaches (all of the
@@ -613,6 +672,9 @@ public:
             }
             double total = 0.0;
             for (SizeType ch = g.chan_begin; ch < g.chan_end; ++ch) {
+                if (!is_active(kill_mask, ch)) {
+                    continue;
+                }
                 const auto box_len = static_cast<SizeType>(smear[ch]) + 1;
                 const double weight =
                     static_cast<double>(
@@ -801,7 +863,7 @@ private:
     SizeType m_fft_support{};
     SizeType m_fft_size{};
 
-    void validate_inputs() const {
+    void validate_band() const {
         if (!utils::is_finite_bits(m_f_min) ||
             !utils::is_finite_bits(m_f_max) ||
             !utils::is_finite_bits(m_tsamp)) {
@@ -827,6 +889,15 @@ private:
         if (m_tsamp <= 0) {
             throw std::invalid_argument(
                 std::format("FDMT: tsamp={} must be greater than 0", m_tsamp));
+        }
+    }
+
+    void validate_inputs() const {
+        validate_band();
+        if (m_dt_min < std::numeric_limits<std::int32_t>::min() ||
+            m_dt_max > std::numeric_limits<std::int32_t>::max()) {
+            throw std::invalid_argument(
+                "FDMT: delay trial exceeds representable range");
         }
         if (m_is_custom_grid) {
             if (m_dt_grid_target.empty()) {
@@ -1570,9 +1641,11 @@ private:
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument("f_min must be less than f_max");
         }
-        if (!utils::is_valid_f_ref(m_f_ref)) {
+        if (!utils::is_finite_bits(m_f_ref) ||
+            (m_f_ref != m_f_min && m_f_ref != m_f_max)) {
             throw std::invalid_argument(std::format(
-                "DDMT: f_ref={} MHz must be positive or +inf", m_f_ref));
+                "DDMT: f_ref={} MHz must be either f_min={} or f_max={}",
+                m_f_ref, m_f_min, m_f_max));
         }
         if (m_tsamp <= 0) {
             throw std::invalid_argument("tsamp must be greater than 0");
@@ -1804,42 +1877,52 @@ std::vector<float>
 FDMTPlan::get_subband_variance_grid(SizeType level,
                                     SizeType subband,
                                     SizeType boxcar_width,
-                                    bool use_box_smearing) const {
+                                    bool use_box_smearing,
+                                    std::span<const uint8_t> kill_mask) const {
     return m_impl->get_subband_variance_grid(level, subband, boxcar_width,
-                                             use_box_smearing);
+                                             use_box_smearing, kill_mask);
 }
 std::vector<float>
 FDMTPlan::get_subband_sigma_grid(SizeType level,
                                  SizeType subband,
                                  SizeType boxcar_width,
-                                 bool use_box_smearing) const {
+                                 bool use_box_smearing,
+                                 std::span<const uint8_t> kill_mask) const {
     auto grid = get_subband_variance_grid(level, subband, boxcar_width,
-                                          use_box_smearing);
+                                          use_box_smearing, kill_mask);
     for (auto& v : grid) {
         v = std::sqrt(v);
     }
     return grid;
 }
-float FDMTPlan::get_effective_variance(SizeType dm_idx,
-                                       SizeType boxcar_width,
-                                       bool use_box_smearing) const {
+float FDMTPlan::get_effective_variance(
+    SizeType dm_idx,
+    SizeType boxcar_width,
+    bool use_box_smearing,
+    std::span<const uint8_t> kill_mask) const {
     return m_impl->get_effective_variance(dm_idx, boxcar_width,
-                                          use_box_smearing);
+                                          use_box_smearing, kill_mask);
 }
 float FDMTPlan::get_effective_sigma(SizeType dm_idx,
                                     SizeType boxcar_width,
-                                    bool use_box_smearing) const {
-    return m_impl->get_effective_sigma(dm_idx, boxcar_width, use_box_smearing);
+                                    bool use_box_smearing,
+                                    std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_effective_sigma(dm_idx, boxcar_width, use_box_smearing,
+                                       kill_mask);
 }
-std::vector<float>
-FDMTPlan::get_effective_variance_grid(SizeType boxcar_width,
-                                      bool use_box_smearing) const {
-    return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing);
+std::vector<float> FDMTPlan::get_effective_variance_grid(
+    SizeType boxcar_width,
+    bool use_box_smearing,
+    std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing,
+                                               kill_mask);
 }
 std::vector<float>
 FDMTPlan::get_effective_sigma_grid(SizeType boxcar_width,
-                                   bool use_box_smearing) const {
-    return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing);
+                                   bool use_box_smearing,
+                                   std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing,
+                                            kill_mask);
 }
 SizeType FDMTPlan::get_dmt_ndms() const noexcept {
     return m_impl->get_dmt_ndms();

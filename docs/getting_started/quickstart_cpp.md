@@ -57,7 +57,7 @@ int main() {
 - **Channel order.** Rows are ascending in frequency (row 0 is the lowest
   channel), and `f_min`/`f_max` are band edges, not channel centres. Output
   times refer to `f_min` by default (`plan.get_f_ref()`; DDMT, SDMT and
-  DDMTFFT take any `f_ref` as their last constructor argument). Flip SIGPROC
+  DDMTFFT also accept `f_ref = f_max` as their last constructor argument). Flip SIGPROC
   data (`foff < 0`, highest channel first) before it reaches dmt:
   `f_min = min(fch1, fch1 + (nchans - 1) * foff) - |foff| / 2`,
   `f_max = f_min + nchans * |foff|`.

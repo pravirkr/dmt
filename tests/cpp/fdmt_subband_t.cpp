@@ -2,9 +2,11 @@
 #include <cmath>
 #include <cstdint>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "dmt/algorithms/fdmt.hpp"
@@ -22,6 +24,7 @@ namespace {
 
 using algorithms::FDMT;
 using algorithms::FDMTFFT;
+using Catch::Approx;
 using plans::FDMTCoordGrid;
 using plans::FDMTPlan;
 
@@ -422,6 +425,123 @@ TEST_CASE("FDMT subband depth is validated", "[fdmt][subband][cpu]") {
     const FDMTPlan none(700.0F, 1200.0F, 5, 16, 0.001F, 8);
     CHECK(none.get_subband_depth() == 0);
     CHECK(none.get_max_fuse_levels() == none.get_niters());
+}
+
+TEST_CASE("FDMTPlan masked subband variance is the energy of the active "
+          "channels",
+          "[fdmt][subband][cpu]") {
+    // Unit white noise through a linear map has variance sum(h^2). A row's
+    // boxcar variance is therefore the sum, over the channels it reads, of
+    // the energy of that channel's impulse response convolved with the
+    // boxcar. A killed channel reads as zero, so the masked variance must
+    // be the same sum over the active channels only.
+    const SizeType nchans = 24;
+    const SizeType nsamps = 160;
+    const SizeType t0     = 8;
+    const FDMTPlan probe(800.0F, 1400.0F, nchans, nsamps, 0.001F, 40);
+    const FDMTPlan plan(800.0F, 1400.0F, nchans, nsamps, 0.001F, 40, 0, 1,
+                        "valid", probe.get_niters() - 1);
+    const auto& pc    = plan.get_container();
+    const auto niters = plan.get_niters();
+    std::vector<uint8_t> kill(nchans, 1);
+    for (const SizeType c : {0, 5, 6, 13, 23}) { // both edges and interior
+        kill[c] = 0;
+    }
+    const std::vector<uint8_t> none;
+    for (const bool smear : {true, false}) {
+        DYNAMIC_SECTION("smear=" << smear) {
+            // resp[c][level][subband]: that view's rows for an impulse in
+            // channel c at sample t0.
+            std::vector<std::vector<std::vector<std::vector<float>>>> resp(
+                nchans);
+            std::vector<std::vector<SizeType>> view_nsamps(niters + 1);
+            for (SizeType c = 0; c < nchans; ++c) {
+                std::vector<float> input(nchans * nsamps, 0.0F);
+                input[(c * nsamps) + t0] = 1.0F;
+                FDMT fdmt(plan, smear, Exec::cpu(1), 1, 0, false, nsamps);
+                std::vector<float> output(plan.get_dmt_size());
+                fdmt.reset(input, output);
+                resp[c].resize(niters + 1);
+                for (SizeType l = 0;; ++l) {
+                    for (SizeType s = 0; s < fdmt.num_subbands(); ++s) {
+                        const auto view = fdmt.view_subband(s);
+                        resp[c][l].emplace_back(view.data.begin(),
+                                                view.data.end());
+                        if (c == 0) {
+                            view_nsamps[l].push_back(view.nsamps);
+                        }
+                    }
+                    if (fdmt.is_finished()) {
+                        break;
+                    }
+                    fdmt.advance();
+                }
+            }
+            // Energy of y convolved with a boxcar of w samples.
+            const auto energy = [](std::span<const float> y, SizeType w) {
+                double e = 0;
+                for (SizeType t = 0; t + 1 < y.size() + w; ++t) {
+                    double v = 0;
+                    for (SizeType k = 0; k < w && k <= t; ++k) {
+                        if (t - k < y.size()) {
+                            v += y[t - k];
+                        }
+                    }
+                    e += v * v;
+                }
+                return e;
+            };
+            for (const SizeType w : {SizeType{1}, SizeType{3}, SizeType{8}}) {
+                for (SizeType l = 0; l <= niters; ++l) {
+                    for (SizeType s = 0; s < pc.grids[l].size(); ++s) {
+                        const auto& g     = pc.grids[l][s];
+                        const auto masked = plan.get_subband_variance_grid(
+                            l, s, w, smear, kill);
+                        const auto full =
+                            plan.get_subband_variance_grid(l, s, w, smear);
+                        REQUIRE(masked.size() == g.ndt);
+                        const auto n = view_nsamps[l][s];
+                        for (SizeType d = 0; d < g.ndt; ++d) {
+                            double want_masked = 0;
+                            double want_full   = 0;
+                            for (SizeType c = 0; c < nchans; ++c) {
+                                const std::span<const float> row(
+                                    resp[c][l][s].data() + (d * n), n);
+                                const double e = energy(row, w);
+                                want_full += e;
+                                want_masked += kill[c] != 0 ? e : 0.0;
+                            }
+                            CAPTURE(w, l, s, d);
+                            CHECK(
+                                masked[d] ==
+                                Approx(want_masked).epsilon(1e-5).margin(1e-6));
+                            CHECK(full[d] ==
+                                  Approx(want_full).epsilon(1e-5).margin(1e-6));
+                        }
+                    }
+                }
+                // The root is the effective variance grid, mask included.
+                CHECK(
+                    plan.get_subband_variance_grid(niters, 0, w, smear, kill) ==
+                    plan.get_effective_variance_grid(w, smear, kill));
+                const auto grid =
+                    plan.get_effective_variance_grid(w, smear, kill);
+                for (SizeType d = 0; d < grid.size(); ++d) {
+                    CHECK(plan.get_effective_variance(d, w, smear, kill) ==
+                          grid[d]);
+                    CHECK(plan.get_effective_sigma(d, w, smear, kill) ==
+                          Approx(std::sqrt(grid[d])));
+                }
+            }
+        }
+    }
+    const std::vector<uint8_t> wrong(nchans - 1, 1);
+    CHECK_THROWS_AS(plan.get_effective_variance_grid(1, true, wrong),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(plan.get_subband_variance_grid(niters, 0, 1, true, wrong),
+                    std::invalid_argument);
+    CHECK(plan.get_effective_variance_grid(1, true, none) ==
+          plan.get_effective_variance_grid(1, true));
 }
 
 } // namespace dmt

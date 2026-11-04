@@ -80,7 +80,8 @@ SizeType find_nearest_sorted_idx(std::span<const IndexType> arr_sorted,
  * @param f_min Bottom band edge (MHz).
  * @param df Channel width (MHz), > 0.
  * @param tsamp Sampling time (s).
- * @param f_ref Reference frequency (MHz), > 0; may be +inf.
+ * @param f_ref Reference frequency (MHz), finite and > 0 (DDMTPlan allows
+ *        only f_min or f_max).
  */
 SizeType generate_delay_offset(std::span<const float> dm_arr,
                                SizeType nchans,
@@ -102,7 +103,8 @@ SizeType generate_delay_offset(std::span<const float> dm_arr,
  * @param f_min Bottom band edge (MHz).
  * @param df Channel width (MHz), > 0.
  * @param tsamp Sampling time (s).
- * @param f_ref Reference frequency (MHz), > 0; may be +inf.
+ * @param f_ref Reference frequency (MHz), finite and > 0 (DDMTPlan allows
+ *        only f_min or f_max).
  */
 std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
                                            SizeType nchans,
@@ -123,7 +125,8 @@ std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
  * @param f_min Bottom band edge (MHz).
  * @param df Channel width (MHz), > 0.
  * @param tsamp Sampling time (s).
- * @param f_ref Reference frequency (MHz), > 0; may be +inf.
+ * @param f_ref Reference frequency (MHz), finite and > 0 (DDMTPlan allows
+ *        only f_min or f_max).
  */
 std::vector<float> generate_fractional_delay_table(
     SizeType nchans, float f_min, float df, float tsamp, double f_ref);
@@ -182,24 +185,20 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
                                                     SizeType min_run = 32);
 
 /**
- * @brief True if @p v is finite, tested on the bit pattern. Release builds
- * use -ffast-math, under which std::isfinite and NaN comparisons may be
- * folded away; validation of user input must not depend on them.
+ * @brief True if @p v is finite, tested on the bit pattern through a volatile
+ * read. Release builds use -ffast-math, under which std::isfinite, NaN/Inf
+ * comparisons, and non-volatile bit_cast checks may be folded away.
  */
-[[nodiscard]] constexpr bool is_finite_bits(double v) noexcept {
-    constexpr std::uint64_t kExp = 0x7FF0000000000000ULL;
-    return (std::bit_cast<std::uint64_t>(v) & kExp) != kExp;
+[[nodiscard]] inline bool is_finite_bits(double v) noexcept {
+    const volatile std::uint64_t bits = std::bit_cast<std::uint64_t>(v);
+    constexpr std::uint64_t kExp      = 0x7FF0000000000000ULL;
+    return (bits & kExp) != kExp;
 }
 
-/// @brief True if @p v is +infinity, tested on the bit pattern (see
-/// is_finite_bits()).
-[[nodiscard]] constexpr bool is_pos_inf_bits(double v) noexcept {
-    return std::bit_cast<std::uint64_t>(v) == 0x7FF0000000000000ULL;
-}
-
-/// @brief Valid dispersion reference frequency: finite and > 0, or +inf.
-[[nodiscard]] constexpr bool is_valid_f_ref(double v) noexcept {
-    return is_pos_inf_bits(v) || (is_finite_bits(v) && v > 0.0);
+[[nodiscard]] inline bool is_finite_bits(float v) noexcept {
+    const volatile std::uint32_t bits = std::bit_cast<std::uint32_t>(v);
+    constexpr std::uint32_t kExp      = 0x7F800000U;
+    return (bits & kExp) != kExp;
 }
 
 /**

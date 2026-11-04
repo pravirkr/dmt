@@ -250,9 +250,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
-                         std::optional<std::vector<uint8_t>> kill,
-                         std::string_view backend, int device) {
-                 const auto mask = kill.value_or(std::vector<uint8_t>{});
+                         const py::object& kill, std::string_view backend,
+                         int device) {
+                 const auto mask = extract_kill_mask(kill);
                  return FDMTFFTBoxcar(std::move(plan), config, smear,
                                       make_exec(backend, nthreads, device),
                                       nbeams, frac, mask);

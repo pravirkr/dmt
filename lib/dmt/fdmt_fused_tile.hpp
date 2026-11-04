@@ -426,6 +426,7 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
                                 ? hist0 + ((ch0 + c) * a.hist_len) + a.hist_len
                                 : nullptr;
         return [=, &input, &a](int j) {
+            (void)a;
             const int tt = x_lo + j;
             float v      = 0.0F;
             if constexpr (Mode == FDMTMode::kRoll) {
