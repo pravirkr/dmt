@@ -82,6 +82,12 @@ r = dmtlib.dedisperse(waterfall, 1200.0, 1600.0, 1e-3, dms, engine="fdmt_fft")
 r.data  # (n_dm, n_out) time series; r.dms, r.f_ref, r.arrival_times()
 ```
 
+Waterfalls are `(nchans, nsamps)` in **ascending** frequency (row 0 is the
+lowest channel) with `f_min`/`f_max` the band edges. Output times refer to
+`f_min` by default; DDMT, SDMT and DDMT-FFT also accept `f_ref=f_max` (for
+time series that start at the file's first sample). For SIGPROC data (`foff < 0`), use
+`dmtlib.sigproc_band(fch1, foff, nchans)` and `dmtlib.to_ascending()`.
+
 ### C++
 
 ```cpp

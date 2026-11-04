@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -27,6 +28,14 @@ namespace dmt::algorithms {
  * Supports 32-bit float waterfalls as well as packed low-bit integers (1, 2, 4,
  * 8, 16 bits), per-channel kill masks for RFI mitigation, multi-beam batching,
  * and overlap-save streaming.
+ *
+ * Time reference: output sample k (counted from the start of the stream) is
+ * the sum for a signal arriving at plan.get_f_ref() at input sample k +
+ * plan.get_time_offset(); each channel is sampled at its own centre
+ * frequency. f_ref defaults to the bottom band edge f_min (real-time
+ * triggering, FDMT's reference); pass f_max (the top band edge) for offline
+ * series whose sample 0 is the file's first sample (time_offset 0). Channels
+ * are ascending in frequency (row 0 = f_min).
  *
  * Every trial sums every active channel directly: the cost is
  * nchans x ndm additions per output sample on every backend. SDMT computes
@@ -59,6 +68,8 @@ public:
      * 0=exclude from sum).
      * @param nbeams Number of independent beams batched through one instance
      * (default: 1).
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min); see plans::DDMTPlan. The same for every constructor.
      */
     DDMT(float f_min,
          float f_max,
@@ -70,7 +81,8 @@ public:
          Exec exec                          = {},
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {},
-         SizeType nbeams                    = 1);
+         SizeType nbeams                    = 1,
+         std::optional<float> f_ref         = std::nullopt);
 
     /**
      * @brief Constructs a DDMT engine with an explicit DM trial array.
@@ -93,7 +105,8 @@ public:
          Exec exec                          = {},
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {},
-         SizeType nbeams                    = 1);
+         SizeType nbeams                    = 1,
+         std::optional<float> f_ref         = std::nullopt);
 
     /**
      * @brief Constructs a DDMT engine with an optimal Lina Levin DM grid.
@@ -117,7 +130,8 @@ public:
          Exec exec                          = {},
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {},
-         SizeType nbeams                    = 1);
+         SizeType nbeams                    = 1,
+         std::optional<float> f_ref         = std::nullopt);
 
     /**
      * @brief Constructs a DDMT engine directly from a pre-configured
@@ -225,7 +239,8 @@ public:
      * @brief Computes output sample count for an incoming chunk of
      * input_nsamps.
      *
-     * On cold start: returns input_nsamps - max_delay.
+     * On cold start: returns input_nsamps - max_delay, with max_delay the
+     * largest delay_table entry (get_time_offset() minus the smallest lag).
      * Once stream is warm: returns input_nsamps.
      *
      * @param input_nsamps Incoming chunk size in samples.

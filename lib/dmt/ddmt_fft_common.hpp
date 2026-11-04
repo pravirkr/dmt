@@ -35,9 +35,14 @@ struct UniformRun {
 /**
  * @brief Exact fractional-delay model of one plan.
  *
- * Delay of trial d in channel c, in samples: tau = dm[d] * rate[c], the
- * same dispersion law and channel frequencies (f_min + c * df, referenced to
- * the highest channel) as DDMTPlan's tables, evaluated in double.
+ * Delay of trial d in channel c, in samples: offset + tau with tau = dm[d] *
+ * rate[c] and rate[c] = K (f_c^-2 - f_ref^-2) / tsamp (negative above
+ * f_ref), the same dispersion law, channel centres (f_min + (c + 1/2) df)
+ * and reference DDMTPlan::get_f_ref() as DDMTPlan's tables, evaluated in
+ * double. The engines sum with the linear part tau (what the NUFFT needs)
+ * and apply the constant offset (DDMTPlan::get_time_offset(), >= -min tau)
+ * by reading their output that many samples later in each transform
+ * (out_start()).
  *
  * The DM grid is split into maximal uniformly spaced runs (a linear grid is
  * one run; a DDplan-style piecewise-uniform grid, e.g. from
@@ -54,9 +59,10 @@ struct DelayModel {
     bool uniform{false};               // one run covers the whole grid
     double dm0{0.0};                   // uniform: first trial
     double ddm{0.0};                   // uniform: spacing
-    double max_tau{0.0};               // samples
+    double max_tau{0.0};               // samples: largest |tau|
+    SizeType offset{0};                // DDMTPlan::get_time_offset()
     SizeType guard{0};
-    SizeType max_delay{0}; // ceil(max tau) + guard (look-ahead)
+    SizeType max_delay{0}; // offset + ceil(max tau, >= 0) + guard
 
     [[nodiscard]] double tau(SizeType d, SizeType c) const noexcept {
         return dm[d] * rate[c];
@@ -65,6 +71,9 @@ struct DelayModel {
     [[nodiscard]] SizeType context() const noexcept {
         return guard + max_delay;
     }
+    /// Transform sample of a segment's first output: the guard plus the
+    /// constant delay offset.
+    [[nodiscard]] SizeType out_start() const noexcept { return guard + offset; }
 
     DelayModel(const plans::DDMTPlan& plan, SizeType guard_samples)
         : guard(guard_samples) {
@@ -73,15 +82,16 @@ struct DelayModel {
         const double f_min = plan.get_f_min();
         const double df    = (static_cast<double>(plan.get_f_max()) - f_min) /
                              static_cast<double>(nchans);
-        // Channel centres, relative to the top channel's centre: the
+        // Channel centres, relative to the plan's reference frequency: the
         // DDMTPlan delay tables' convention (DDMTPlan::get_f_ref()).
-        const double f_ref = f_min + (df * (static_cast<double>(nchans) - 0.5));
-        const double k     = static_cast<double>(kDispConst) /
-                             static_cast<double>(plan.get_tsamp());
+        const double f_ref   = plan.get_f_ref();
+        const double inv_ref = 1.0 / (f_ref * f_ref);
+        const double k       = static_cast<double>(kDispConst) /
+                               static_cast<double>(plan.get_tsamp());
         rate.resize(nchans);
         for (SizeType c = 0; c < nchans; ++c) {
             const double f = f_min + (df * (static_cast<double>(c) + 0.5));
-            rate[c]        = k * ((1.0 / (f * f)) - (1.0 / (f_ref * f_ref)));
+            rate[c]        = k * ((1.0 / (f * f)) - inv_ref);
         }
         for (SizeType c = 0; c < nchans; ++c) {
             if (pc.kill_mask.empty() || pc.kill_mask[c] != 0) {
@@ -100,12 +110,16 @@ struct DelayModel {
         for (const auto v : dm) {
             max_dm = std::max(max_dm, v);
         }
-        double max_rate = 0.0;
+        double max_pos = 0.0; // largest delay (look-ahead)
+        double max_neg = 0.0; // largest advance (covered by offset)
         for (const auto c : active) {
-            max_rate = std::max(max_rate, rate[c]);
+            max_pos = std::max(max_pos, rate[c]);
+            max_neg = std::max(max_neg, -rate[c]);
         }
-        max_tau   = max_dm * max_rate;
-        max_delay = static_cast<SizeType>(std::ceil(max_tau)) + guard;
+        max_tau = max_dm * std::max(max_pos, max_neg);
+        offset  = pc.time_offset;
+        max_delay =
+            offset + static_cast<SizeType>(std::ceil(max_dm * max_pos)) + guard;
     }
 
     /// @brief Runs summed by the NUFFT: at least kMinNufftRun trials, or the

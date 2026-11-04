@@ -11,7 +11,8 @@ using namespace boxcar_test;
 TEST_CASE("FDMTBoxcar GPU host and device APIs match direct reference",
           "[gpu][parity][boxcar]") {
     const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
-                               std::vector<IndexType>{-73, -12, 0, 4, 97});
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
     const auto input = waterfalls(plan, 2, 3);
     for (const bool smear : {true, false}) {
         for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
@@ -21,7 +22,6 @@ TEST_CASE("FDMTBoxcar GPU host and device APIs match direct reference",
             cfg.max_boxcar       = 37;
             cfg.wtsp             = 1;
             cfg.detect_thresh    = 2.7F;
-            cfg.subband_levels   = 2;
             cfg.peak_mode        = mode;
             cfg.max_candidates   = 500000;
             cfg.max_cands_per_dm = 0;
@@ -77,13 +77,12 @@ TEST_CASE("FDMTBoxcar GPU host and device APIs match direct reference",
 TEST_CASE("FDMTBoxcar GPU supports width 4096 and bounded overflow",
           "[gpu][parity][boxcar]") {
     plans::FDMTPlan plan(700, 1200, 3, 1047, 0.001F,
-                         std::vector<IndexType>{-5, 0, 7});
+                         std::vector<IndexType>{-5, 0, 7}, "valid", 1);
     const auto input = waterfalls(plan, 1, 5);
     BoxcarConfig cfg;
     cfg.max_boxcar       = 4096;
     cfg.wtsp             = 2;
     cfg.detect_thresh    = 4;
-    cfg.subband_levels   = 1;
     cfg.max_cands_per_dm = 0;
     const auto expected  = reference(plan, cfg, true, 1, input);
     FDMTBoxcar search(plan, cfg, true, {algorithms::detail::kGPUBackend, 1, 0},
@@ -134,7 +133,8 @@ TEST_CASE("FDMTBoxcar GPU accepts all 4096 integer width trials",
 TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",
           "[gpu][parity][boxcar][packed]") {
     const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
-                               std::vector<IndexType>{-73, -12, 0, 4, 97});
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
     constexpr SizeType beams = 2;
     for (const SizeType bits : {1, 2, 4, 8, 16}) {
         const SizeType bytes = (plan.get_nsamps() * bits + 7) / 8;
@@ -161,7 +161,6 @@ TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",
                                                    (maxval + 2.0F) / 12.0F);
                     cfg.max_boxcar     = 4096;
                     cfg.detect_thresh  = 2.713F;
-                    cfg.subband_levels = 2;
                     cfg.peak_mode      = mode;
                     cfg.max_candidates = 500000;
                     cfg.max_cands_per_dm = 0;

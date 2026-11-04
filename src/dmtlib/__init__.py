@@ -49,6 +49,7 @@ from .libdmt import (
     set_fft_planner,
     simulate_baseband,
 )
+from .sigproc import Band, sigproc_band, to_ascending
 
 _LOG_LEVELS = {"off": 0, "debug": 1}
 
@@ -81,6 +82,7 @@ __all__ = [
     "FDMT",
     "FDMTFFT",
     "SDMT",
+    "Band",
     "BasebandFormat",
     "BoxcarConfig",
     "BoxcarPlanePlan",
@@ -118,5 +120,7 @@ __all__ = [
     "sensitivity",
     "set_fft_planner",
     "set_log_level",
+    "sigproc_band",
     "simulate_baseband",
+    "to_ascending",
 ]

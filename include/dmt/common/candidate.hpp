@@ -16,6 +16,7 @@ enum class PeakFindingMode : uint8_t {
 };
 
 /// Analytical search of independent input noise of known common mean/sigma.
+/// The subband search depth is the plan's (FDMTPlan subband_depth).
 struct BoxcarConfig {
     BoxcarConfig() = default;
     /// Settings only; FDMTBoxcar validates them together with its plan.
@@ -25,7 +26,6 @@ struct BoxcarConfig {
         float detect_thresh       = 6.0F,
         float noise_sigma         = 1.0F,
         PeakFindingMode peak_mode = PeakFindingMode::kContiguousPeakPerWidth,
-        SizeType subband_levels   = 0,
         SizeType max_candidates   = 131072,
         SizeType max_cands_per_dm = 4096,
         bool skip_cold_prefix     = true,
@@ -36,7 +36,6 @@ struct BoxcarConfig {
           detect_thresh(detect_thresh),
           noise_sigma(noise_sigma),
           peak_mode(peak_mode),
-          subband_levels(subband_levels),
           max_candidates(max_candidates),
           max_cands_per_dm(max_cands_per_dm),
           skip_cold_prefix(skip_cold_prefix),
@@ -48,7 +47,6 @@ struct BoxcarConfig {
     float detect_thresh       = 6.0F;
     float noise_sigma         = 1.0F;
     PeakFindingMode peak_mode = PeakFindingMode::kContiguousPeakPerWidth;
-    SizeType subband_levels   = 0;
     SizeType max_candidates   = 131072;
     SizeType max_cands_per_dm = 4096; ///< Per plane/beam/DM/call; 0 disables.
     bool skip_cold_prefix     = true;
@@ -61,7 +59,10 @@ struct BoxcarConfig {
  *
  * Sample indices are absolute stream indices of trailing-window endpoints;
  * begin/end delimit an inclusive contiguous excursion. Channel extents are
- * half-open in FDMT input order (low frequency first). A carried peak can
+ * half-open in FDMT input order (low frequency first); subband_level is the
+ * search depth (0: full band) and subband_idx the subband's index at that
+ * level, staggered subbands following the 2^depth tree subbands. A carried
+ * peak can
  * refer to a previous execute() block. Parallel output order is unspecified.
  */
 struct RawCandidate {
@@ -80,6 +81,7 @@ struct RawCandidate {
     uint32_t chan_end      = 0;
     float f_low_mhz        = 0.0F;
     float f_high_mhz       = 0.0F;
+    uint32_t staggered     = 0; ///< 1: overlap subband straddling a boundary
 };
 
 /// Counters describe closed excursions (or individual points in all mode).

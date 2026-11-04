@@ -29,11 +29,8 @@ using namespace pybind11::literals; // NOLINT
 
 namespace {
 
-std::vector<uint8_t> mask_vec(const std::optional<py::array_t<uint8_t>>& m) {
-    if (!m.has_value()) {
-        return {};
-    }
-    return copy_native_1d<uint8_t>(*m, "kill_mask");
+std::vector<uint8_t> mask_vec(const py::object& m) {
+    return extract_kill_mask(m);
 }
 
 DDMTFFTOptions
@@ -101,8 +98,8 @@ void bind_ddmt_fft(py::module_& mod) {
             OpenMP threads (CPU).
         nbits : int, optional
             Input precision: 32 (float) or 1, 2, 4, 8, 16 (packed).
-        kill_mask : numpy.ndarray, optional
-            Per-channel mask (1 = keep, 0 = drop).
+        kill_mask : array_like, optional
+            Per-channel mask (1 = keep, 0 = drop), as for :class:`DDMT`.
         nbeams : int, optional
             Beams per call.
         method : {'auto', 'brute', 'nufft'}, optional
@@ -117,62 +114,63 @@ void bind_ddmt_fft(py::module_& mod) {
             Keyword-only. NUFFT relative accuracy (default 1e-6).
         guard : int, optional
             Keyword-only. Interpolation context kept around every segment
-            (default 64); get_max_delay() = ceil(max delay) + guard.
-        backend, device
+            (default 64); ``max_delay`` is ``plan.time_offset`` plus the
+            largest positive delay (rounded up) plus ``guard``.
+        backend, device, f_ref
             Keyword-only, as for :class:`DDMT`.
         )doc");
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                         float dm_max, float dm_step, float dm_min, int nthreads,
-                        SizeType nbits,
-                        std::optional<py::array_t<uint8_t>> kill_mask,
+                        SizeType nbits, const py::object& kill_mask,
                         SizeType nbeams, std::string_view method,
                         double tolerance, SizeType guard,
-                        std::string_view backend, int device) {
+                        std::string_view backend, int device,
+                        std::optional<float> f_ref) {
                 return DDMTFFT(f_min, f_max, nchans, tsamp, dm_max, dm_step,
                                dm_min, make_exec(backend, nthreads, device),
                                nbits, mask_vec(kill_mask), nbeams,
-                               make_options(method, tolerance, guard));
+                               make_options(method, tolerance, guard), f_ref);
             }),
             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
             "dm_step"_a, "dm_min"_a = 0.0F, "nthreads"_a = 1, "nbits"_a = 32,
             "kill_mask"_a = py::none(), "nbeams"_a = 1, py::kw_only(),
             "method"_a = "auto", "tolerance"_a = 1e-6, "guard"_a = 64,
-            "backend"_a = "cpu", "device"_a = 0)
+            "backend"_a = "cpu", "device"_a = 0, "f_ref"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr, int nthreads,
-                         SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
+                         SizeType nbits, const py::object& kill_mask,
                          SizeType nbeams, std::string_view method,
                          double tolerance, SizeType guard,
-                         std::string_view backend, int device) {
+                         std::string_view backend, int device,
+                         std::optional<float> f_ref) {
                  const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
                  return DDMTFFT(f_min, f_max, nchans, tsamp,
                                 std::span<const float>(dms.data(), dms.size()),
                                 make_exec(backend, nthreads, device), nbits,
                                 mask_vec(kill_mask), nbeams,
-                                make_options(method, tolerance, guard));
+                                make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
              "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
              "nbeams"_a = 1, py::kw_only(), "method"_a = "auto",
              "tolerance"_a = 1e-6, "guard"_a = 64, "backend"_a = "cpu",
-             "device"_a = 0)
+             "device"_a = 0, "f_ref"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const LevinConfig& levin, int nthreads, SizeType nbits,
-                         std::optional<py::array_t<uint8_t>> kill_mask,
-                         SizeType nbeams, std::string_view method,
-                         double tolerance, SizeType guard,
-                         std::string_view backend, int device) {
+                         const py::object& kill_mask, SizeType nbeams,
+                         std::string_view method, double tolerance,
+                         SizeType guard, std::string_view backend, int device,
+                         std::optional<float> f_ref) {
                  return DDMTFFT(f_min, f_max, nchans, tsamp, levin,
                                 make_exec(backend, nthreads, device), nbits,
                                 mask_vec(kill_mask), nbeams,
-                                make_options(method, tolerance, guard));
+                                make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
              "nthreads"_a = 1, "nbits"_a = 32, "kill_mask"_a = py::none(),
              "nbeams"_a = 1, py::kw_only(), "method"_a = "auto",
              "tolerance"_a = 1e-6, "guard"_a = 64, "backend"_a = "cpu",
-             "device"_a = 0)
+             "device"_a = 0, "f_ref"_a = py::none())
         .def(py::init([](const DDMTPlan& plan, int nthreads, SizeType nbeams,
                          std::string_view method, double tolerance,
                          SizeType guard, std::string_view backend, int device) {

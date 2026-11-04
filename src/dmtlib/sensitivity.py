@@ -402,8 +402,10 @@ class SearchConfig:
     nsamps_ref : int, optional
         Reference streaming block length (default 32768). Sensitivity
         measurements may choose their own injection window length.
-    subband_levels : int, optional
-        FDMTBoxcar search depth below the root (default 0: full band only).
+    subband_depth : int, optional
+        Subband search depth of the FDMT plan (default 0: full band only);
+        depth ``k`` searches ``2**k`` equal subbands and the ``2**k - 1``
+        staggered ones between them.
     """
 
     f_min: float
@@ -417,7 +419,7 @@ class SearchConfig:
     nthreads: int = 1
     name: str = "custom"
     nsamps_ref: int = 32768
-    subband_levels: int = 0
+    subband_depth: int = 0
 
     def __post_init__(self) -> None:
         if not 0 <= self.dm_min < self.dm_max:
@@ -469,12 +471,12 @@ Use ``dataclasses.replace(CRYOPAF, nthreads=8)`` to change the thread count."""
 
 CRYOPAF_LBAND = SearchConfig(
     1100.0, 1714.0, 1152, 455.6e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
-    name="cryopaf_lband", nsamps_ref=32768, subband_levels=1,
+    name="cryopaf_lband", nsamps_ref=32768, subband_depth=1,
 )  # fmt: skip
-"""L-band real-time search target: 14.9291-second blocks, searching the two
-last-level subbands and then the full band. The DM-2000 band sweep is
-4.03365 seconds (8853.49 samples); streaming valid mode also permits shorter
-blocks. The current tree's final two subbands have 1024 and 128 channels."""
+"""L-band real-time search target: 14.9291-second blocks, searching the full
+band, its two 576-channel halves and the staggered central half. The DM-2000
+band sweep is 4.03365 seconds (8853.49 samples); streaming valid mode also
+permits shorter blocks."""
 
 PARKES_UWL = SearchConfig(
     704.0, 4032.0, 6656, 64e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.6,

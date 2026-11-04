@@ -113,6 +113,30 @@ join into one continuous DM-time stream. Call
   `dmtlib.available_backends()` lists the backends in your build, e.g.
   `['cpu', 'cuda']`.
 
+(channel-order)=
+### Channel order and band edges
+
+Every engine takes rows in **ascending** frequency: row 0 is the lowest
+channel. `f_min` and `f_max` are the band **edges** (not channel centres):
+channel `c` covers `[f_min + c * df, f_min + (c + 1) * df)` with
+`df = (f_max - f_min) / nchans`. Output times refer to `f_min` by default
+(`plan.f_ref`); DDMT, SDMT and DDMT-FFT also accept `f_ref=f_max` (for
+PRESTO-style series that start at the file's first sample). The sign of a header's channel offset does not enter
+the API: flip descending data before it reaches dmt.
+
+SIGPROC filterbanks give `fch1`, the centre of the first channel, and `foff`,
+usually negative (highest channel first). `dmtlib.sigproc_band` converts the
+header and `dmtlib.to_ascending` flips the data when needed:
+
+```python
+band = dmtlib.sigproc_band(hdr["fch1"], hdr["foff"], hdr["nchans"])
+wf = np.ascontiguousarray(dmtlib.to_ascending(data, band))  # (nchans, nsamps)
+fdmt = dmtlib.FDMT(band.f_min, band.f_max, band.nchans, nsamps, tsamp, dt_max)
+```
+
+A band fed in the wrong order dedisperses with the sweep reversed and finds
+nothing at positive DM.
+
 ---
 
 ## Custom and sparse trial grids

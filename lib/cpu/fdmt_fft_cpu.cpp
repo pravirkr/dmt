@@ -24,6 +24,7 @@
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_fft_common.hpp"
 #include "dmt/fdmt_fft_tree.hpp"
+#include "dmt/fdmt_tree.hpp"
 #include "dmt/fft.hpp"
 #include "dmt/logging.hpp"
 #include "dmt/modes.hpp"
@@ -346,11 +347,11 @@ public:
         require_stepper();
         materialize_view();
         const auto& plan_c = m_plan->get_container();
-        const auto& shape  = plan_c.state_shape[m_current_level];
-        if (subband_idx >= shape.nchans) {
+        const auto nsubs   = plan_c.grids[m_current_level].size();
+        if (subband_idx >= nsubs) {
             throw std::out_of_range(std::format(
                 "FDMTFFT: Subband index {} out of range ({} subbands)",
-                subband_idx, shape.nchans));
+                subband_idx, nsubs));
         }
         const auto& grid    = plan_c.grids[m_current_level][subband_idx];
         const auto nsamps_v = view_nsamps();
@@ -365,6 +366,9 @@ public:
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
                                                       grid.dt_grid.size()),
+            .chan_begin  = grid.chan_begin,
+            .chan_end    = grid.chan_end,
+            .staggered   = grid.staggered,
         };
     }
 
@@ -376,7 +380,7 @@ public:
     }
     [[nodiscard]] SizeType num_subbands() const override {
         require_stepper();
-        return m_plan->get_container().state_shape[m_current_level].nchans;
+        return m_plan->get_container().grids[m_current_level].size();
     }
     [[nodiscard]] bool is_finished() const noexcept override {
         return m_is_initialized && (m_current_level >= total_levels() - 1);
@@ -686,9 +690,9 @@ private:
         SizeType worst     = 0;
         for (SizeType g = 0; g < shapes[f].nchans; ++g) {
             for (SizeType l = 1; l < f; ++l) {
-                const auto lo = node_base(l, g << (f - l));
-                const auto hi = node_base(l, (g + 1) << (f - l));
-                worst         = std::max(worst, hi - lo);
+                const auto [lo, hi] =
+                    detail::fdmt_group_coords(m_plan->get_container(), f, g, l);
+                worst = std::max(worst, hi - lo);
             }
         }
         return worst;
@@ -701,7 +705,12 @@ private:
         // while the group slices stay L1-sized.
         SizeType best_f     = 1;
         SizeType best_upper = std::numeric_limits<SizeType>::max();
-        for (SizeType f = 1; f <= niters; ++f) {
+        // Staggered subbands cross groups: group below the lowest of them.
+        // Level 1 is always allowed: at the group level and at level 0 nodes
+        // are global, so a staggered merge of two channels needs no group.
+        const SizeType deepest =
+            std::max<SizeType>(1, m_plan->get_max_fuse_levels());
+        for (SizeType f = 1; f <= deepest; ++f) {
             if (f > 1 && slice_for(f) > kMaxSlice) {
                 break;
             }
@@ -721,14 +730,16 @@ private:
         const auto ngroups = plan_c.state_shape[m_fuse].nchans;
         m_groups.assign(ngroups, std::vector<LevelOps>(m_fuse));
         for (SizeType l = 1; l <= m_fuse; ++l) {
-            const auto shift  = m_fuse - l;
             const auto& grids = plan_c.grids[l];
             // Owning group of each level-l node.
             std::vector<std::uint32_t> group_of(plan_c.state_shape[l].ncoords);
-            for (SizeType sub = 0; sub < grids.size(); ++sub) {
-                for (SizeType i = 0; i < grids[sub].ndt; ++i) {
-                    group_of[grids[sub].coord_offset + i] =
-                        to_u32(sub >> shift);
+            for (SizeType g = 0; g < ngroups; ++g) {
+                const auto [first, last] =
+                    detail::fdmt_group_subbands(plan_c, m_fuse, g, l);
+                for (SizeType sub = first; sub < last; ++sub) {
+                    for (SizeType i = 0; i < grids[sub].ndt; ++i) {
+                        group_of[grids[sub].coord_offset + i] = to_u32(g);
+                    }
                 }
             }
             const auto local = [&](SizeType level, SizeType node,
@@ -736,7 +747,9 @@ private:
                 if (level == 0 || level == m_fuse) {
                     return to_u32(node); // level-0 node / global level-F node
                 }
-                const auto lo = node_base(level, g << (m_fuse - level));
+                const auto lo = node_base(
+                    level, detail::fdmt_group_subbands(plan_c, m_fuse, g, level)
+                               .first);
                 if (node < lo || node - lo >= m_slice_max) {
                     throw std::logic_error("FDMTFFT: node outside its group");
                 }

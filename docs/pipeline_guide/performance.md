@@ -105,8 +105,9 @@ computes the ends of the tree directly instead:
   accumulated delays. Every level-4 row keeps a ring of its last samples (as
   many as the largest delay any trial applies to it), read for the samples
   before the chunk. Levels 5 to the root are skipped. This needs the root to
-  be the only level read, so a subband search (`BoxcarConfig.subband_levels`)
-  keeps the tree above level 3.
+  be the only level read, so a subband search (plan `subband_depth`) keeps
+  the tree above level 3, and fusion stops below the lowest level holding
+  staggered subbands.
 
 Integer-valued input gives the tree's values exactly. Float input agrees with
 the tree within rounding (a few 10⁻⁷ relative), so these engines are no longer

@@ -1,6 +1,8 @@
 #include "dmt/common/plans.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <format>
@@ -69,8 +71,6 @@ FDMTPlanContainer::FDMTPlanContainer(SizeType niters) {
     coordinates_sum.resize(niters + 1);
     coordinates_copy.resize(niters + 1);
     dt_grid_sub_top.resize(niters + 1);
-    df_top.resize(niters + 1);
-    df_bot.resize(niters + 1);
 }
 
 SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
@@ -85,8 +85,6 @@ SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
     for (const auto& dt_grid : dt_grid_sub_top) {
         mem_use += dt_grid.size() * sizeof(SizeType);
     }
-    mem_use += df_top.size() * sizeof(float);
-    mem_use += df_bot.size() * sizeof(float);
     return mem_use;
 }
 
@@ -108,7 +106,8 @@ public:
          IndexType dt_max,
          IndexType dt_min,
          SizeType dt_step,
-         std::string_view mode)
+         std::string_view mode,
+         SizeType subband_depth)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -117,7 +116,8 @@ public:
           m_dt_max(dt_max),
           m_dt_min(dt_min),
           m_dt_step(dt_step),
-          m_mode(parse_fdmt_mode(mode)) {
+          m_mode(parse_fdmt_mode(mode)),
+          m_subband_depth(subband_depth) {
         validate_inputs();
         configure_plan();
     }
@@ -128,7 +128,8 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<IndexType>& dt_grid,
-         std::string_view mode)
+         std::string_view mode,
+         SizeType subband_depth)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -138,6 +139,7 @@ public:
           m_dt_min(0),
           m_dt_step(0),
           m_mode(parse_fdmt_mode(mode)),
+          m_subband_depth(subband_depth),
           m_is_custom_grid(true),
           m_dt_grid_target(dt_grid) {
         if (m_dt_grid_target.empty()) {
@@ -159,7 +161,8 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<float>& dm_grid,
-         std::string_view mode)
+         std::string_view mode,
+         SizeType subband_depth)
         : m_f_min(f_min),
           m_f_max(f_max),
           m_nchans(nchans),
@@ -169,10 +172,18 @@ public:
           m_dt_min(0),
           m_dt_step(0),
           m_mode(parse_fdmt_mode(mode)),
+          m_subband_depth(subband_depth),
           m_is_custom_grid(true) {
         if (dm_grid.empty()) {
             throw std::invalid_argument("FDMT: dm_grid must not be empty");
         }
+        for (const auto dm : dm_grid) {
+            if (!utils::is_finite_bits(dm)) {
+                throw std::invalid_argument(
+                    "FDMT: dm_grid values must be finite");
+            }
+        }
+        validate_band();
         auto dm_sorted = dm_grid;
         std::ranges::sort(dm_sorted);
         const auto [dm_first, dm_last] = std::ranges::unique(dm_sorted);
@@ -181,8 +192,17 @@ public:
         const float dm_conv = utils::get_dmconv(m_f_min, m_f_max, m_tsamp);
         m_dt_grid_target.reserve(dm_sorted.size());
         for (const auto dm : dm_sorted) {
-            m_dt_grid_target.push_back(
-                static_cast<IndexType>(std::nearbyint(dm / dm_conv)));
+            const double scaled = std::nearbyint(static_cast<double>(dm) /
+                                                 static_cast<double>(dm_conv));
+            if (!utils::is_finite_bits(scaled) ||
+                scaled < static_cast<double>(
+                             std::numeric_limits<std::int32_t>::min()) ||
+                scaled > static_cast<double>(
+                             std::numeric_limits<std::int32_t>::max())) {
+                throw std::invalid_argument(
+                    "FDMT: dm_grid delay trial exceeds representable range");
+            }
+            m_dt_grid_target.push_back(static_cast<IndexType>(scaled));
         }
         std::ranges::sort(m_dt_grid_target);
         const auto [first, last] = std::ranges::unique(m_dt_grid_target);
@@ -215,6 +235,10 @@ public:
     bool is_custom_grid() const noexcept { return m_is_custom_grid; }
     float get_df() const noexcept { return m_df; }
     SizeType get_niters() const noexcept { return m_niters; }
+    SizeType get_subband_depth() const noexcept { return m_subband_depth; }
+    SizeType get_max_fuse_levels() const noexcept {
+        return m_subband_depth == 0 ? m_niters : m_niters - m_subband_depth - 1;
+    }
     const FDMTPlanContainer& get_container() const noexcept {
         return m_container;
     }
@@ -461,14 +485,20 @@ public:
      * superset of the `use_box_smearing = false` fast path (`nchans * w`)
      * rather than a separate special case of it.
      */
-    float variance_from_smearing_row(const float* smearing_row,
-                                     float w) const noexcept {
+    float variance_from_smearing_row(
+        const float* smearing_row,
+        float w,
+        std::span<const uint8_t> kill_mask) const noexcept {
         // Each channel's level-0 box of L samples carries the box-mean
         // weight round(2^b / L) * 2^-b (see get_box_fraction_bits()).
+        // Killed channels read as zero and add nothing.
         const auto bits  = get_box_fraction_bits();
         const double inv = std::ldexp(1.0, -static_cast<int>(bits));
         double total_var = 0.0;
         for (SizeType c = 0; c < m_nchans; ++c) {
+            if (!is_active(kill_mask, c)) {
+                continue;
+            }
             const auto box_len = static_cast<SizeType>(smearing_row[c]) + 1;
             const double weight =
                 static_cast<double>(
@@ -496,9 +526,32 @@ public:
         }
         return weights;
     }
+    static bool is_active(std::span<const uint8_t> kill_mask,
+                          SizeType c) noexcept {
+        return kill_mask.empty() || kill_mask[c] != 0;
+    }
+    void check_kill_mask(std::span<const uint8_t> kill_mask) const {
+        if (!kill_mask.empty() && kill_mask.size() != m_nchans) {
+            throw std::invalid_argument(
+                std::format("FDMTPlan: kill_mask size={} must be 0 or "
+                            "nchans={}",
+                            kill_mask.size(), m_nchans));
+        }
+    }
+    // Active channels in [begin, end).
+    static SizeType count_active(std::span<const uint8_t> kill_mask,
+                                 SizeType begin,
+                                 SizeType end) noexcept {
+        SizeType n = 0;
+        for (SizeType c = begin; c < end; ++c) {
+            n += is_active(kill_mask, c) ? 1 : 0;
+        }
+        return n;
+    }
     float get_effective_variance(SizeType dm_idx,
                                  SizeType boxcar_width,
-                                 bool use_box_smearing) const {
+                                 bool use_box_smearing,
+                                 std::span<const uint8_t> kill_mask) const {
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
@@ -508,30 +561,37 @@ public:
                                     " out of range [0, " +
                                     std::to_string(ndms) + ")");
         }
+        check_kill_mask(kill_mask);
         const float w = static_cast<float>(boxcar_width);
         if (!use_box_smearing) {
-            return static_cast<float>(m_nchans) * w;
+            return static_cast<float>(count_active(kill_mask, 0, m_nchans)) * w;
         }
         const auto smearing_grid = get_smearing_grid_final();
-        return variance_from_smearing_row(&smearing_grid[dm_idx * m_nchans], w);
+        return variance_from_smearing_row(&smearing_grid[dm_idx * m_nchans], w,
+                                          kill_mask);
     }
     float get_effective_sigma(SizeType dm_idx,
                               SizeType boxcar_width,
-                              bool use_box_smearing) const {
-        return std::sqrt(
-            get_effective_variance(dm_idx, boxcar_width, use_box_smearing));
+                              bool use_box_smearing,
+                              std::span<const uint8_t> kill_mask) const {
+        return std::sqrt(get_effective_variance(dm_idx, boxcar_width,
+                                                use_box_smearing, kill_mask));
     }
     std::vector<float>
     get_effective_variance_grid(SizeType boxcar_width,
-                                bool use_box_smearing) const {
+                                bool use_box_smearing,
+                                std::span<const uint8_t> kill_mask) const {
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
+        check_kill_mask(kill_mask);
         const auto ndms = get_dmt_ndms();
         std::vector<float> grid(ndms, 0.0F);
         const auto w = static_cast<float>(boxcar_width);
         if (!use_box_smearing) {
-            std::ranges::fill(grid, static_cast<float>(m_nchans) * w);
+            std::ranges::fill(
+                grid,
+                static_cast<float>(count_active(kill_mask, 0, m_nchans)) * w);
             return grid;
         }
         // Compute the O(ndms * nchans) smearing-grid tree trace exactly
@@ -541,18 +601,91 @@ public:
         // this O(ndms^2 * nchans) for no reason.
         const auto smearing_grid = get_smearing_grid_final();
         for (SizeType i = 0; i < ndms; ++i) {
-            grid[i] =
-                variance_from_smearing_row(&smearing_grid[i * m_nchans], w);
+            grid[i] = variance_from_smearing_row(&smearing_grid[i * m_nchans],
+                                                 w, kill_mask);
         }
         return grid;
     }
-    std::vector<float> get_effective_sigma_grid(SizeType boxcar_width,
-                                                bool use_box_smearing) const {
-        auto grid = get_effective_variance_grid(boxcar_width, use_box_smearing);
+    std::vector<float>
+    get_effective_sigma_grid(SizeType boxcar_width,
+                             bool use_box_smearing,
+                             std::span<const uint8_t> kill_mask) const {
+        auto grid = get_effective_variance_grid(boxcar_width, use_box_smearing,
+                                                kill_mask);
         for (auto& v : grid) {
             v = std::sqrt(v);
         }
         return grid;
+    }
+    std::vector<float>
+    get_subband_variance_grid(SizeType level,
+                              SizeType subband,
+                              SizeType boxcar_width,
+                              bool use_box_smearing,
+                              std::span<const uint8_t> kill_mask) const {
+        if (boxcar_width == 0) {
+            throw std::invalid_argument("boxcar_width must be greater than 0");
+        }
+        check_kill_mask(kill_mask);
+        if (level > m_niters) {
+            throw std::out_of_range(std::format(
+                "FDMTPlan: level {} out of range [0, {}]", level, m_niters));
+        }
+        const auto& grids = m_container.grids[level];
+        if (subband >= grids.size()) {
+            throw std::out_of_range(
+                std::format("FDMTPlan: subband {} out of range [0, {}) at "
+                            "level {}",
+                            subband, grids.size(), level));
+        }
+        const auto& g = grids[subband];
+        const auto w  = static_cast<float>(boxcar_width);
+        std::vector<float> out(g.ndt, 0.0F);
+        if (!use_box_smearing) {
+            std::ranges::fill(out, static_cast<float>(count_active(
+                                       kill_mask, g.chan_begin, g.chan_end)) *
+                                       w);
+            return out;
+        }
+        // The level-0 box of every channel a row reaches (all of the
+        // subband's channels, once each), as in get_smearing_grid_final().
+        std::vector<float> smear(m_nchans, 0.0F);
+        const auto trace = [&](auto& self, SizeType l, SizeType idx) -> void {
+            const auto& c = m_container.coordinates[l][idx];
+            if (l == 0) {
+                smear[c.i_sub] = std::abs(static_cast<float>(
+                    m_container.grids[0][c.i_sub].dt_grid[c.i_dt]));
+                return;
+            }
+            self(self, l - 1, c.i_coord_tail);
+            if (c.i_coord_head != SIZE_MAX) {
+                self(self, l - 1, c.i_coord_head);
+            }
+        };
+        const auto bits  = get_box_fraction_bits();
+        const double inv = std::ldexp(1.0, -static_cast<int>(bits));
+        for (SizeType d = 0; d < g.ndt; ++d) {
+            if (level == 0) {
+                smear[subband] = std::abs(static_cast<float>(g.dt_grid[d]));
+            } else {
+                trace(trace, level, g.coord_offset + d);
+            }
+            double total = 0.0;
+            for (SizeType ch = g.chan_begin; ch < g.chan_end; ++ch) {
+                if (!is_active(kill_mask, ch)) {
+                    continue;
+                }
+                const auto box_len = static_cast<SizeType>(smear[ch]) + 1;
+                const double weight =
+                    static_cast<double>(
+                        algorithms::detail::box_weight(box_len, bits)) *
+                    inv;
+                total +=
+                    algorithms::detail::fdmt_box_variance(box_len, w, weight);
+            }
+            out[d] = static_cast<float>(total);
+        }
+        return out;
     }
     SizeType get_dmt_ndms() const noexcept {
         return m_container.state_shape[m_niters].ncoords;
@@ -719,6 +852,7 @@ private:
     IndexType m_dt_min;
     SizeType m_dt_step;
     FDMTMode m_mode;
+    SizeType m_subband_depth{0};
     bool m_is_custom_grid{false};
     std::vector<IndexType> m_dt_grid_target;
 
@@ -729,7 +863,7 @@ private:
     SizeType m_fft_support{};
     SizeType m_fft_size{};
 
-    void validate_inputs() const {
+    void validate_band() const {
         if (!utils::is_finite_bits(m_f_min) ||
             !utils::is_finite_bits(m_f_max) ||
             !utils::is_finite_bits(m_tsamp)) {
@@ -755,6 +889,15 @@ private:
         if (m_tsamp <= 0) {
             throw std::invalid_argument(
                 std::format("FDMT: tsamp={} must be greater than 0", m_tsamp));
+        }
+    }
+
+    void validate_inputs() const {
+        validate_band();
+        if (m_dt_min < std::numeric_limits<std::int32_t>::min() ||
+            m_dt_max > std::numeric_limits<std::int32_t>::max()) {
+            throw std::invalid_argument(
+                "FDMT: delay trial exceeds representable range");
         }
         if (m_is_custom_grid) {
             if (m_dt_grid_target.empty()) {
@@ -794,73 +937,144 @@ private:
         }
     }
 
-    std::vector<std::vector<std::vector<IndexType>>>
-    determine_active_grids(const std::vector<SizeType>& nchans_level) const {
+    /// One subband of the merge tree at one level (see FDMTCoordGrid).
+    struct TreeNode {
+        SizeType chan_begin;
+        SizeType chan_end;
+        SizeType tail;
+        SizeType head;
+        bool staggered;
+    };
+
+    /// The merge tree, level 0 (channels) to m_niters (the band). The band
+    /// is halved top-down, the lower child taking the extra channel of an
+    /// odd count; a single channel above level 0 is copied. Depths
+    /// 1..m_subband_depth gain the staggered merges of adjacent subbands of
+    /// different parents, after the tree subbands of their level.
+    std::vector<std::vector<TreeNode>> build_tree() const {
+        std::vector<std::vector<TreeNode>> tree(m_niters + 1);
+        tree[m_niters].push_back({0, m_nchans, SIZE_MAX, SIZE_MAX, false});
+        for (SizeType l = m_niters; l >= 1; --l) {
+            auto& cur  = tree[l];
+            auto& prev = tree[l - 1];
+            for (auto& node : cur) {
+                const auto width = node.chan_end - node.chan_begin;
+                node.tail        = prev.size();
+                if (width >= 2) {
+                    const auto mid = node.chan_begin + ((width + 1) / 2);
+                    node.head      = prev.size() + 1;
+                    prev.push_back(
+                        {node.chan_begin, mid, SIZE_MAX, SIZE_MAX, false});
+                    prev.push_back(
+                        {mid, node.chan_end, SIZE_MAX, SIZE_MAX, false});
+                } else {
+                    node.head = SIZE_MAX;
+                    prev.push_back({node.chan_begin, node.chan_end, SIZE_MAX,
+                                    SIZE_MAX, false});
+                }
+            }
+            const auto depth = m_niters - l;
+            if (depth >= 1 && depth <= m_subband_depth) {
+                const auto nregular = cur.size();
+                for (SizeType i = 0; i + 1 < nregular; ++i) {
+                    const auto tail =
+                        cur[i].head == SIZE_MAX ? cur[i].tail : cur[i].head;
+                    const auto head = cur[i + 1].tail;
+                    cur.push_back({prev[tail].chan_begin, prev[head].chan_end,
+                                   tail, head, true});
+                }
+            }
+        }
+        return tree;
+    }
+
+    float chan_freq(SizeType chan) const noexcept {
+        return (m_df * static_cast<float>(chan)) + m_f_min;
+    }
+
+    /// Lower edge, split and upper edge (MHz) of a merge or copy node.
+    std::array<float, 3> node_freqs(const TreeNode& node,
+                                    const std::vector<TreeNode>& prev) const {
+        const float f_start = chan_freq(node.chan_begin);
+        const auto& tail    = prev[node.tail];
+        const float f_mid =
+            f_start +
+            (m_df * static_cast<float>(tail.chan_end - tail.chan_begin));
+        const float f_end =
+            f_start +
+            (m_df * static_cast<float>(node.chan_end - node.chan_begin));
+        return {f_start, f_mid, f_end};
+    }
+
+    std::vector<std::vector<std::vector<IndexType>>> determine_active_grids(
+        const std::vector<std::vector<TreeNode>>& tree) const {
         std::vector<std::vector<std::vector<IndexType>>> active_dts(m_niters +
                                                                     1);
         for (SizeType l = 0; l <= m_niters; ++l) {
-            active_dts[l].resize(nchans_level[l]);
+            active_dts[l].resize(tree[l].size());
         }
 
         // Target sparse grid at root level (m_niters, subband 0)
+        auto& root = active_dts[m_niters][0];
         if (m_is_custom_grid) {
-            active_dts[m_niters][0] = m_dt_grid_target;
+            root = m_dt_grid_target;
         } else {
             for (IndexType dt = m_dt_min; dt <= m_dt_max;
                  dt += static_cast<IndexType>(m_dt_step)) {
-                active_dts[m_niters][0].push_back(dt);
+                root.push_back(dt);
+            }
+        }
+        // A staggered subband searches the root's DM trials scaled to its
+        // own delay span.
+        for (SizeType l = 1; l < m_niters; ++l) {
+            for (SizeType i_sub = 0; i_sub < tree[l].size(); ++i_sub) {
+                const auto& node = tree[l][i_sub];
+                if (!node.staggered) {
+                    continue;
+                }
+                const float phi =
+                    utils::cff(chan_freq(node.chan_begin),
+                               chan_freq(node.chan_end), m_f_min, m_f_max);
+                auto& dts = active_dts[l][i_sub];
+                for (const auto dt : root) {
+                    dts.push_back(static_cast<IndexType>(
+                        std::nearbyint(static_cast<float>(dt) * phi)));
+                }
+                std::ranges::sort(dts);
+                const auto [first, last] = std::ranges::unique(dts);
+                dts.erase(first, last);
             }
         }
 
         // Top-down traversal from root to level 1
         for (SizeType l = m_niters; l >= 1; --l) {
-            const auto nchans_cur  = nchans_level[l];
-            const auto nchans_prev = nchans_level[l - 1];
-            const bool do_copy     = (nchans_prev % 2 == 1);
-            const float df_top     = m_container.df_top[l];
-            const float df_bot     = m_container.df_bot[l];
-
-            for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
+            const auto& prev = tree[l - 1];
+            for (SizeType i_sub = 0; i_sub < tree[l].size(); ++i_sub) {
+                const auto& node    = tree[l][i_sub];
                 const auto& cur_dts = active_dts[l][i_sub];
                 if (cur_dts.empty()) {
                     continue;
                 }
-
-                const auto f_start =
-                    (df_bot * static_cast<float>(i_sub)) + m_f_min;
-                float f_end = 0.0F;
-                float f_mid = 0.0F;
-                if (i_sub == nchans_cur - 1) {
-                    if (do_copy) {
-                        f_end = f_start + (df_top * 2);
-                        f_mid = f_start + df_top;
-                    } else {
-                        f_end = f_start + df_top;
-                        f_mid = f_start + (df_bot / 2);
-                    }
-                } else {
-                    f_end = f_start + df_bot;
-                    f_mid = f_start + (df_bot / 2);
+                if (node.head == SIZE_MAX) {
+                    auto& tail_dts = active_dts[l - 1][node.tail];
+                    tail_dts.insert(tail_dts.end(), cur_dts.begin(),
+                                    cur_dts.end());
+                    continue;
                 }
+                const auto [f_start, f_mid, f_end] = node_freqs(node, prev);
                 const float tail_phi =
                     utils::cff(f_start, f_mid, f_start, f_end);
-
                 for (const auto dt : cur_dts) {
-                    if (i_sub == nchans_cur - 1 && do_copy) {
-                        active_dts[l - 1][2 * i_sub].push_back(dt);
-                    } else {
-                        const auto dt_tail = static_cast<IndexType>(
-                            std::nearbyint(static_cast<float>(dt) * tail_phi));
-                        const auto dt_head = dt - dt_tail;
-                        active_dts[l - 1][2 * i_sub].push_back(dt_tail);
-                        active_dts[l - 1][(2 * i_sub) + 1].push_back(dt_head);
-                    }
+                    const auto dt_tail = static_cast<IndexType>(
+                        std::nearbyint(static_cast<float>(dt) * tail_phi));
+                    const auto dt_head = dt - dt_tail;
+                    active_dts[l - 1][node.tail].push_back(dt_tail);
+                    active_dts[l - 1][node.head].push_back(dt_head);
                 }
             }
 
             // Deduplicate and sort active_dts[l - 1]
-            for (SizeType i_sub = 0; i_sub < nchans_prev; ++i_sub) {
-                auto& vec = active_dts[l - 1][i_sub];
+            for (auto& vec : active_dts[l - 1]) {
                 std::ranges::sort(vec);
                 const auto [first, last] = std::ranges::unique(vec);
                 vec.erase(first, last);
@@ -871,34 +1085,26 @@ private:
     }
 
     void configure_plan() {
-        m_df        = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
-        m_niters    = static_cast<SizeType>(std::ceil(std::log2(m_nchans)));
+        m_df     = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
+        m_niters = static_cast<SizeType>(std::bit_width(m_nchans - 1));
+        if (m_subband_depth > 0 && m_subband_depth >= m_niters) {
+            throw std::invalid_argument(std::format(
+                "FDMT: subband_depth={} must be less than niters={}",
+                m_subband_depth, m_niters));
+        }
         m_container = FDMTPlanContainer(m_niters);
 
-        // Step 1: Compute hierarchy structure and frequency bandwidths
-        std::vector<SizeType> nchans_level(m_niters + 1);
-        nchans_level[0]       = m_nchans;
-        m_container.df_top[0] = m_df;
-        m_container.df_bot[0] = m_df;
-        for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
-            const auto nchans_prev = nchans_level[i_iter - 1];
-            nchans_level[i_iter]   = (nchans_prev / 2) + (nchans_prev % 2);
-            const bool do_copy     = (nchans_prev % 2 == 1);
-            m_container.df_top[i_iter] =
-                do_copy ? m_container.df_top[i_iter - 1]
-                        : m_container.df_top[i_iter - 1] +
-                              m_container.df_bot[i_iter - 1];
-            m_container.df_bot[i_iter] = m_container.df_bot[i_iter - 1] * 2;
-        }
+        // Step 1: the merge tree (channel extents and children per level)
+        const auto tree = build_tree();
 
         // Step 2: Top-down reachability traversal to identify active (i_sub,
         // dt) nodes
-        auto active_dts = determine_active_grids(nchans_level);
+        auto active_dts = determine_active_grids(tree);
 
         // Step 3: Populate grids and coordinates bottom-up using active sets
         make_plan_iter0(active_dts[0]);
         for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
-            make_plan(i_iter, active_dts[i_iter]);
+            make_plan(i_iter, tree, active_dts[i_iter]);
         }
 
         // Step 4: Assign tree history offsets for valid-mode cross-block
@@ -919,9 +1125,10 @@ private:
         m_buffer_size = m_container.get_buffer_size();
         m_fft_support = compute_fft_support();
         m_fft_size    = compute_fft_size();
-        logging::debug(
-            "FDMTPlan: df={}, dt_max={}, dt_min={}, dt_step={}, niters={}",
-            m_df, m_dt_max, m_dt_min, m_dt_step, m_niters);
+        logging::debug("FDMTPlan: df={}, dt_max={}, dt_min={}, dt_step={}, "
+                       "niters={}, subband_depth={}",
+                       m_df, m_dt_max, m_dt_min, m_dt_step, m_niters,
+                       m_subband_depth);
     }
 
     void
@@ -980,6 +1187,8 @@ private:
                 .coord_offset = ncoords,
                 .f_start      = f_start,
                 .f_end        = f_end,
+                .chan_begin   = i_sub,
+                .chan_end     = i_sub + 1,
             };
             ncoords += ndt_sub;
         }
@@ -989,6 +1198,7 @@ private:
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
         m_container.state_shape[i_iter] = {
             .nchans       = m_nchans,
+            .nstaggered   = 0,
             .ndt_min      = ndt_min_it->ndt,
             .ndt_max      = ndt_max_it->ndt,
             .ncoords      = ncoords,
@@ -1003,13 +1213,11 @@ private:
     }
 
     void make_plan(SizeType i_iter,
+                   const std::vector<std::vector<TreeNode>>& tree,
                    const std::vector<std::vector<IndexType>>& active_level) {
         if (i_iter < 1 || i_iter > m_niters) {
             throw std::invalid_argument("Invalid iteration number");
         }
-        // const auto& df_bot_prev = m_container.df_bot[i_iter - 1];
-        // const auto& df_top_prev = m_container.df_top[i_iter - 1];
-        const auto& nchans_prev = m_container.state_shape[i_iter - 1].nchans;
         const auto& nsamps_prev = m_container.state_shape[i_iter - 1].nsamps;
         const auto& grids_prev  = m_container.grids[i_iter - 1];
         const auto& coords_prev = m_container.coordinates[i_iter - 1];
@@ -1017,14 +1225,15 @@ private:
         auto& coords_sum_cur    = m_container.coordinates_sum[i_iter];
         auto& coords_copy_cur   = m_container.coordinates_copy[i_iter];
 
-        const SizeType nchans_cur = (nchans_prev / 2) + (nchans_prev % 2);
-        const bool do_copy        = (nchans_prev % 2 == 1);
-        const float df_top        = m_container.df_top[i_iter];
-        const float df_bot        = m_container.df_bot[i_iter];
+        const auto& nodes         = tree[i_iter];
+        const SizeType nsubs_cur  = nodes.size();
+        const SizeType nstaggered = static_cast<SizeType>(
+            std::ranges::count_if(nodes, &TreeNode::staggered));
+        const SizeType nchans_cur = nsubs_cur - nstaggered;
 
         // Determine max absolute dt trial at this iteration
         SizeType dt_max_iter = 0;
-        for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
+        for (SizeType i_sub = 0; i_sub < nsubs_cur; ++i_sub) {
             if (!active_level[i_sub].empty()) {
                 const auto abs_front = static_cast<SizeType>(
                     std::abs(active_level[i_sub].front()));
@@ -1052,26 +1261,14 @@ private:
 
         SizeType buf_offset = 0;
         SizeType ncoords    = 0;
-        m_container.grids[i_iter].resize(nchans_cur);
+        m_container.grids[i_iter].resize(nsubs_cur);
 
-        for (SizeType i_sub = 0; i_sub < nchans_cur; ++i_sub) {
-            const auto& grids_tail = grids_prev[2 * i_sub];
-            const auto f_start = (df_bot * static_cast<float>(i_sub)) + m_f_min;
-            float f_end        = 0.0F;
-            float f_mid        = 0.0F;
-
-            if (i_sub == nchans_cur - 1) {
-                if (do_copy) {
-                    f_end = f_start + (df_top * 2);
-                    f_mid = f_start + df_top;
-                } else {
-                    f_end = f_start + df_top;
-                    f_mid = f_start + (df_bot / 2);
-                }
-            } else {
-                f_end = f_start + df_bot;
-                f_mid = f_start + (df_bot / 2);
-            }
+        for (SizeType i_sub = 0; i_sub < nsubs_cur; ++i_sub) {
+            const auto& node       = nodes[i_sub];
+            const bool is_copy     = node.head == SIZE_MAX;
+            const auto& grids_tail = grids_prev[node.tail];
+            const auto [f_start, f_mid, f_end] =
+                node_freqs(node, tree[i_iter - 1]);
 
             const auto& dt_sub   = active_level[i_sub];
             const auto ndt_sub   = dt_sub.size();
@@ -1079,7 +1276,7 @@ private:
 
             for (SizeType i_dt = 0; i_dt < ndt_sub; ++i_dt) {
                 const IndexType dt = dt_sub[i_dt];
-                if (i_sub == nchans_cur - 1 && do_copy) {
+                if (is_copy) {
                     const auto i_dt_tail =
                         utils::find_nearest_sorted_idx(grids_tail.dt_grid, dt);
                     const auto i_coord_tail =
@@ -1101,7 +1298,7 @@ private:
                     coords_cur.emplace_back(coord_cur);
                     coords_copy_cur.emplace_back(coord_cur);
                 } else {
-                    const auto& grids_head = grids_prev[(2 * i_sub) + 1];
+                    const auto& grids_head = grids_prev[node.head];
                     const auto dt_tail     = static_cast<IndexType>(
                         std::nearbyint(static_cast<float>(dt) * tail_phi));
                     const auto dt_head = dt - dt_tail;
@@ -1229,6 +1426,11 @@ private:
                 .coord_offset = ncoords,
                 .f_start      = f_start,
                 .f_end        = f_end,
+                .chan_begin   = node.chan_begin,
+                .chan_end     = node.chan_end,
+                .i_sub_tail   = node.tail,
+                .i_sub_head   = node.head,
+                .staggered    = node.staggered,
             };
             ncoords += ndt_sub;
         }
@@ -1240,6 +1442,7 @@ private:
             [](const auto& a, const auto& b) { return a.ndt < b.ndt; });
         m_container.state_shape[i_iter] = {
             .nchans       = nchans_cur,
+            .nstaggered   = nstaggered,
             .ndt_min      = ndt_min_it->ndt,
             .ndt_max      = ndt_max_it->ndt,
             .ncoords      = ncoords,
@@ -1250,7 +1453,7 @@ private:
             .dt_max       = dt_max_iter,
         };
         m_container.dt_grid_sub_top[i_iter] =
-            m_container.grids[i_iter].back().dt_grid;
+            m_container.grids[i_iter][nchans_cur - 1].dt_grid;
     }
 };
 
@@ -1264,9 +1467,11 @@ public:
          float dm_step,
          float dm_min                       = 0.0F,
          SizeType nbits                     = 32,
-         std::span<const uint8_t> kill_mask = {})
+         std::span<const uint8_t> kill_mask = {},
+         std::optional<float> f_ref         = std::nullopt)
         : m_f_min(f_min),
           m_f_max(f_max),
+          m_f_ref(f_ref.value_or(f_min)),
           m_nchans(nchans),
           m_tsamp(tsamp),
           m_dm_arr(generate_dm_arr(dm_max, dm_step, dm_min)),
@@ -1284,9 +1489,11 @@ public:
          float tsamp,
          std::span<const float> dm_arr,
          SizeType nbits                     = 32,
-         std::span<const uint8_t> kill_mask = {})
+         std::span<const uint8_t> kill_mask = {},
+         std::optional<float> f_ref         = std::nullopt)
         : m_f_min(f_min),
           m_f_max(f_max),
+          m_f_ref(f_ref.value_or(f_min)),
           m_nchans(nchans),
           m_tsamp(tsamp),
           m_dm_arr(dm_arr.begin(), dm_arr.end()),
@@ -1303,9 +1510,11 @@ public:
          float tsamp,
          const LevinConfig& levin,
          SizeType nbits                     = 32,
-         std::span<const uint8_t> kill_mask = {})
+         std::span<const uint8_t> kill_mask = {},
+         std::optional<float> f_ref         = std::nullopt)
         : m_f_min(f_min),
           m_f_max(f_max),
+          m_f_ref(f_ref.value_or(f_min)),
           m_nchans(nchans),
           m_tsamp(tsamp),
           m_dm_arr(
@@ -1342,9 +1551,9 @@ public:
 
     float get_f_min() const noexcept { return m_f_min; }
     float get_f_max() const noexcept { return m_f_max; }
-    float get_f_ref() const noexcept {
-        return m_f_max -
-               (0.5F * (m_f_max - m_f_min) / static_cast<float>(m_nchans));
+    float get_f_ref() const noexcept { return m_f_ref; }
+    SizeType get_time_offset() const noexcept {
+        return m_container.time_offset;
     }
     SizeType get_nchans() const noexcept { return m_nchans; }
     float get_tsamp() const noexcept { return m_tsamp; }
@@ -1397,6 +1606,7 @@ public:
 private:
     float m_f_min;
     float m_f_max;
+    float m_f_ref;
     SizeType m_nchans;
     float m_tsamp;
     std::vector<float> m_dm_arr;
@@ -1430,6 +1640,12 @@ private:
         }
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument("f_min must be less than f_max");
+        }
+        if (!utils::is_finite_bits(m_f_ref) ||
+            (m_f_ref != m_f_min && m_f_ref != m_f_max)) {
+            throw std::invalid_argument(std::format(
+                "DDMT: f_ref={} MHz must be either f_min={} or f_max={}",
+                m_f_ref, m_f_min, m_f_max));
         }
         if (m_tsamp <= 0) {
             throw std::invalid_argument("tsamp must be greater than 0");
@@ -1480,14 +1696,17 @@ private:
                                     ? std::vector<uint8_t>(m_nchans, 1)
                                     : m_kill_mask;
         canonicalize_mask(m_container.kill_mask);
-        // Channel c is centred at f_min + (c + 1/2) df; delays are relative
-        // to the centre of the highest-frequency channel (get_f_ref()).
-        const auto df   = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
-        const auto fch1 = m_f_min + (0.5F * df);
-        m_container.delay_table =
-            utils::generate_delay_table(m_dm_arr, m_nchans, fch1, df, m_tsamp);
+        // Channel c is centred at f_min + (c + 1/2) df; output times refer
+        // to f_ref (get_f_ref(), get_time_offset()).
+        const auto df    = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
+        const auto f_ref = static_cast<double>(m_f_ref);
+        m_container.time_offset = utils::generate_delay_offset(
+            m_dm_arr, m_nchans, m_f_min, df, m_tsamp, f_ref);
+        m_container.delay_table = utils::generate_delay_table(
+            m_dm_arr, m_nchans, m_f_min, df, m_tsamp, f_ref);
         m_container.fractional_delay_table =
-            utils::generate_fractional_delay_table(m_nchans, fch1, df, m_tsamp);
+            utils::generate_fractional_delay_table(m_nchans, m_f_min, df,
+                                                   m_tsamp, f_ref);
     }
 
     static std::vector<float>
@@ -1534,19 +1753,28 @@ FDMTPlan::FDMTPlan(float f_min,
                    IndexType dt_max,
                    IndexType dt_min,
                    SizeType dt_step,
-                   std::string_view mode)
-    : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step, mode)) {
-}
+                   std::string_view mode,
+                   SizeType subband_depth)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dt_max,
+                                    dt_min,
+                                    dt_step,
+                                    mode,
+                                    subband_depth)) {}
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
                    SizeType nchans,
                    SizeType nsamps,
                    float tsamp,
                    const std::vector<IndexType>& dt_grid,
-                   std::string_view mode)
+                   std::string_view mode,
+                   SizeType subband_depth)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode)) {}
+          f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, subband_depth)) {}
 
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
@@ -1554,9 +1782,10 @@ FDMTPlan::FDMTPlan(float f_min,
                    SizeType nsamps,
                    float tsamp,
                    const std::vector<float>& dm_grid,
-                   std::string_view mode)
+                   std::string_view mode,
+                   SizeType subband_depth)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode)) {}
+          f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, subband_depth)) {}
 
 FDMTPlan::~FDMTPlan()                              = default;
 FDMTPlan::FDMTPlan(FDMTPlan&&) noexcept            = default;
@@ -1589,6 +1818,12 @@ bool FDMTPlan::is_custom_grid() const noexcept {
 }
 float FDMTPlan::get_df() const noexcept { return m_impl->get_df(); }
 SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
+SizeType FDMTPlan::get_subband_depth() const noexcept {
+    return m_impl->get_subband_depth();
+}
+SizeType FDMTPlan::get_max_fuse_levels() const noexcept {
+    return m_impl->get_max_fuse_levels();
+}
 const FDMTPlanContainer& FDMTPlan::get_container() const noexcept {
     return m_impl->get_container();
 }
@@ -1638,26 +1873,56 @@ std::vector<IndexType> FDMTPlan::trace_dm(SizeType dm_idx) const {
 SizeType FDMTPlan::get_startup_samples() const {
     return m_impl->get_startup_samples();
 }
-float FDMTPlan::get_effective_variance(SizeType dm_idx,
-                                       SizeType boxcar_width,
-                                       bool use_box_smearing) const {
+std::vector<float>
+FDMTPlan::get_subband_variance_grid(SizeType level,
+                                    SizeType subband,
+                                    SizeType boxcar_width,
+                                    bool use_box_smearing,
+                                    std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_subband_variance_grid(level, subband, boxcar_width,
+                                             use_box_smearing, kill_mask);
+}
+std::vector<float>
+FDMTPlan::get_subband_sigma_grid(SizeType level,
+                                 SizeType subband,
+                                 SizeType boxcar_width,
+                                 bool use_box_smearing,
+                                 std::span<const uint8_t> kill_mask) const {
+    auto grid = get_subband_variance_grid(level, subband, boxcar_width,
+                                          use_box_smearing, kill_mask);
+    for (auto& v : grid) {
+        v = std::sqrt(v);
+    }
+    return grid;
+}
+float FDMTPlan::get_effective_variance(
+    SizeType dm_idx,
+    SizeType boxcar_width,
+    bool use_box_smearing,
+    std::span<const uint8_t> kill_mask) const {
     return m_impl->get_effective_variance(dm_idx, boxcar_width,
-                                          use_box_smearing);
+                                          use_box_smearing, kill_mask);
 }
 float FDMTPlan::get_effective_sigma(SizeType dm_idx,
                                     SizeType boxcar_width,
-                                    bool use_box_smearing) const {
-    return m_impl->get_effective_sigma(dm_idx, boxcar_width, use_box_smearing);
+                                    bool use_box_smearing,
+                                    std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_effective_sigma(dm_idx, boxcar_width, use_box_smearing,
+                                       kill_mask);
 }
-std::vector<float>
-FDMTPlan::get_effective_variance_grid(SizeType boxcar_width,
-                                      bool use_box_smearing) const {
-    return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing);
+std::vector<float> FDMTPlan::get_effective_variance_grid(
+    SizeType boxcar_width,
+    bool use_box_smearing,
+    std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_effective_variance_grid(boxcar_width, use_box_smearing,
+                                               kill_mask);
 }
 std::vector<float>
 FDMTPlan::get_effective_sigma_grid(SizeType boxcar_width,
-                                   bool use_box_smearing) const {
-    return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing);
+                                   bool use_box_smearing,
+                                   std::span<const uint8_t> kill_mask) const {
+    return m_impl->get_effective_sigma_grid(boxcar_width, use_box_smearing,
+                                            kill_mask);
 }
 SizeType FDMTPlan::get_dmt_ndms() const noexcept {
     return m_impl->get_dmt_ndms();
@@ -1712,7 +1977,8 @@ DDMTPlan::DDMTPlan(float f_min,
                    float dm_step,
                    float dm_min,
                    SizeType nbits,
-                   std::span<const uint8_t> kill_mask)
+                   std::span<const uint8_t> kill_mask,
+                   std::optional<float> f_ref)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -1721,7 +1987,8 @@ DDMTPlan::DDMTPlan(float f_min,
                                     dm_step,
                                     dm_min,
                                     nbits,
-                                    kill_mask)) {}
+                                    kill_mask,
+                                    f_ref)) {}
 
 DDMTPlan::DDMTPlan(float f_min,
                    float f_max,
@@ -1729,9 +1996,10 @@ DDMTPlan::DDMTPlan(float f_min,
                    float tsamp,
                    std::span<const float> dm_arr,
                    SizeType nbits,
-                   std::span<const uint8_t> kill_mask)
+                   std::span<const uint8_t> kill_mask,
+                   std::optional<float> f_ref)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask)) {}
+          f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask, f_ref)) {}
 
 DDMTPlan::DDMTPlan(float f_min,
                    float f_max,
@@ -1739,9 +2007,10 @@ DDMTPlan::DDMTPlan(float f_min,
                    float tsamp,
                    const LevinConfig& levin,
                    SizeType nbits,
-                   std::span<const uint8_t> kill_mask)
+                   std::span<const uint8_t> kill_mask,
+                   std::optional<float> f_ref)
     : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, tsamp, levin, nbits, kill_mask)) {}
+          f_min, f_max, nchans, tsamp, levin, nbits, kill_mask, f_ref)) {}
 
 DDMTPlan::~DDMTPlan()                              = default;
 DDMTPlan::DDMTPlan(DDMTPlan&&) noexcept            = default;
@@ -1769,6 +2038,9 @@ const DDMTPlanContainer& DDMTPlan::get_container() const noexcept {
 std::vector<float> DDMTPlan::get_dm_grid() const noexcept {
     return m_impl->get_dm_grid();
 }
+SizeType DDMTPlan::get_time_offset() const noexcept {
+    return m_impl->get_time_offset();
+}
 std::vector<float> DDMTPlan::get_fractional_delay_table() const noexcept {
     return m_impl->get_fractional_delay_table();
 }
@@ -1790,12 +2062,12 @@ std::string DDMTPlan::summary() const {
     return std::format(
         "*** DDMT Plan Summary ***\n"
         "Band: {} - {} MHz, {} channels ({} masked), tsamp {} s\n"
-        "Delays from channel centres, reference {} MHz (top channel "
-        "centre)\n"
+        "Delays from channel centres, reference f_ref {} MHz, "
+        "time offset {} samples\n"
         "DM trials: {} over [{}, {}] pc cm^-3, max delay {} samples\n"
         "Input: {}\n",
         get_f_min(), get_f_max(), get_nchans(), n_masked, get_tsamp(),
-        get_f_ref(), dms.size(), dm_lo, dm_hi, max_delay,
+        get_f_ref(), get_time_offset(), dms.size(), dm_lo, dm_hi, max_delay,
         get_nbits() == 32 ? std::string("float32")
                           : std::format("packed {}-bit", get_nbits()));
 }

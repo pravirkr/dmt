@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -126,6 +127,42 @@ inline std::vector<T> copy_native_1d(const py::handle& src,
         return {};
     }
     return std::vector<T>(arr.data(), arr.data() + arr.size());
+}
+
+/// Per-channel kill mask from None (no mask), or a 1-D bool or integer array
+/// or sequence of any integer dtype. Nonzero keeps the channel (stored as 1)
+/// and 0 drops it; the value is tested before any narrowing, so 256 or -1
+/// cannot wrap to 0. Floats are rejected rather than truncated.
+inline std::vector<uint8_t> extract_kill_mask(const py::object& obj) {
+    if (obj.is_none()) {
+        return {};
+    }
+    const auto arr = py::array::ensure(obj);
+    if (!arr) {
+        throw py::type_error("kill_mask must be a 1-D bool or integer array");
+    }
+    if (arr.ndim() == 1 && arr.size() == 0) {
+        return {}; // An empty list is float64 to NumPy; treat it as no mask.
+    }
+    const char kind = arr.dtype().kind();
+    if (kind != 'b' && kind != 'i' && kind != 'u') {
+        throw py::type_error(std::format(
+            "kill_mask must be a 1-D bool or integer array (e.g. uint8 0/1), "
+            "got dtype {}",
+            py::str(arr.dtype()).cast<std::string>()));
+    }
+    if (arr.ndim() != 1) {
+        throw py::value_error(std::format(
+            "kill_mask must be a 1-D array, got {} dimensions", arr.ndim()));
+    }
+    // Nonzero -> true, then the bool -> uint8 cast gives 0/1.
+    const auto keep =
+        py::array_t<uint8_t, py::array::c_style | py::array::forcecast>::ensure(
+            arr.attr("astype")(py::dtype::of<bool>()));
+    if (!keep) {
+        throw py::type_error("kill_mask could not be converted to uint8");
+    }
+    return std::vector<uint8_t>(keep.data(), keep.data() + keep.size());
 }
 
 enum class CustomGridType { kDt, kDm };

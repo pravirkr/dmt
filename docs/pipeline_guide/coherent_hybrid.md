@@ -110,8 +110,8 @@ for s0 in range(0, nsamps_file - plan.block_nsamps + 1, plan.stride_nsamps):
 ```
 
 - **Output axes.** `out[i, j]` is DM `plan.dm_grid_final[i]` at arrival time
-  `t0 + j · plan.tsamp` at frequency `plan.f_ref` (the centre of the lowest
-  channel), for every row.
+  `t0 + j · plan.tsamp` at frequency `plan.f_ref` (`f_min`, the bottom edge of
+  the band, the default of every engine), for every row.
 - **Input size.** The byte size of a block is `search.input_size()` (per group:
   `input_size(g)`). The array may have any shape, as long as it is
   C-contiguous and its bytes are in the configured `order`.

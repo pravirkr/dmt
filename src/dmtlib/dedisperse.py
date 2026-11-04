@@ -6,15 +6,16 @@ time reference. :func:`dedisperse` wraps them for the common offline case: one
 waterfall in, only fully supported output samples out, labelled with the
 effective DMs and an explicit time reference.
 
-Time references differ between engine families (see :attr:`Dedispersed.f_ref`):
-
-- FDMT, FDMT-FFT: output sample ``t`` is the arrival time at ``f_min``, the
-  band's bottom edge.
-- DDMT, SDMT, DDMT-FFT: output sample ``t`` is the arrival time at the centre
-  of the highest-frequency channel, ``f_max - df / 2``.
-
-:meth:`Dedispersed.arrival_times` converts either to any frequency (infinite
-frequency by default), so results from different engines can be compared.
+By default every engine refers output times to ``f_min``, the band's bottom
+edge (:attr:`Dedispersed.f_ref`): ``data[:, i]`` is the sum for a signal
+arriving at ``f_ref`` at input sample ``start + i``. ``start`` differs between
+engines (FDMT's skipped startup, the DDMT family's ``plan.time_offset``), so
+align results from different engines by ``start``, not by column. The direct
+engines also accept ``f_ref=f_max`` (the top band edge), which gives
+``start == 0`` so sample 0 is the file's first sample at ``f_max`` (the
+convention of SIGPROC and PRESTO time series).
+:meth:`Dedispersed.arrival_times` converts the times to any frequency
+(infinite frequency by default).
 """
 
 from __future__ import annotations
@@ -35,17 +36,22 @@ _TREE = {"fdmt": FDMT, "fdmt_fft": FDMTFFT}
 
 def dispersion_delay(
     dm: float | np.ndarray,
-    f_lo: float,
-    f_hi: float,
+    f_lo: float | np.ndarray,
+    f_hi: float | np.ndarray,
 ) -> float | np.ndarray:
     """Dispersion delay in seconds of ``f_lo`` behind ``f_hi`` (MHz).
 
     Uses the library's constant (``1 / 2.41e-4`` s MHz^2 cm^3 / pc, the
     TEMPO2 convention). ``f_hi = np.inf`` gives the delay from infinite
-    frequency.
+    frequency. Arguments broadcast.
     """
-    inv_hi = 0.0 if np.isinf(f_hi) else 1.0 / f_hi**2
-    return DM_CONSTANT * np.asarray(dm, dtype=np.float64) * (1.0 / f_lo**2 - inv_hi)
+    f_lo = np.asarray(f_lo, dtype=np.float64)
+    f_hi = np.asarray(f_hi, dtype=np.float64)
+    inv_hi = np.where(
+        np.isinf(f_hi), 0.0, 1.0 / np.where(np.isinf(f_hi), 1.0, f_hi) ** 2
+    )
+    out = DM_CONSTANT * np.asarray(dm, dtype=np.float64) * (1.0 / f_lo**2 - inv_hi)
+    return out if out.ndim else float(out)
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ def dedisperse(
     dms: np.ndarray,
     *,
     engine: Engine = "fdmt",
+    f_ref: float | None = None,
     use_box_smearing: bool = False,
     nthreads: int = 1,
     backend: str = "cpu",
@@ -110,8 +117,9 @@ def dedisperse(
     Parameters
     ----------
     waterfall : numpy.ndarray
-        ``(nchans, nsamps)`` float32, ascending frequency, band edges
-        ``f_min``/``f_max``.
+        ``(nchans, nsamps)`` float32, ascending frequency (row 0 lowest),
+        band edges ``f_min``/``f_max``. For a SIGPROC header use
+        :func:`dmtlib.sigproc_band` and :func:`dmtlib.to_ascending`.
     f_min, f_max : float
         Band edges (MHz), not channel centres.
     tsamp : float
@@ -122,6 +130,10 @@ def dedisperse(
         Transform. ``'fdmt'`` is fastest; ``'fdmt_fft'`` (fractional tree
         delays) and ``'ddmt_fft'`` (exact fractional channel delays) keep
         more signal at high Fourier frequencies.
+    f_ref : float, optional
+        Reference frequency of the output times (MHz), default ``f_min``.
+        DDMT, SDMT and DDMT-FFT accept ``f_min`` or ``f_max``; the FDMT
+        engines only ``f_min``.
     use_box_smearing : bool
         FDMT engines only. ``False`` (the default here, unlike the engine
         classes) keeps white input white, for periodicity searches. ``True``
@@ -143,6 +155,12 @@ def dedisperse(
     dm_req = np.atleast_1d(np.asarray(dms, dtype=np.float32))
     kw = {"nthreads": nthreads, "backend": backend}
     if engine in _TREE:
+        if f_ref is not None and f_ref != f_min:
+            msg = (
+                f"{engine} refers times to f_min; for another f_ref use a direct "
+                "engine ('ddmt', 'sdmt', 'ddmt_fft') or Dedispersed.arrival_times()"
+            )
+            raise ValueError(msg)
         eng = _TREE[engine](
             f_min,
             f_max,
@@ -175,7 +193,7 @@ def dedisperse(
         if use_box_smearing:
             msg = f"{engine} has no box smearing; use use_box_smearing=False"
             raise ValueError(msg)
-        eng = _DIRECT[engine](f_min, f_max, nchans, tsamp, dm_req, **kw)
+        eng = _DIRECT[engine](f_min, f_max, nchans, tsamp, dm_req, f_ref=f_ref, **kw)
         out = np.asarray(eng.execute(wf)).reshape(dm_req.size, -1)
         if out.shape[-1] == 0:
             msg = f"{engine}: {nsamps} samples do not cover the maximum delay"
@@ -184,7 +202,7 @@ def dedisperse(
             data=out,
             dms=dm_req.astype(np.float64),
             f_ref=float(eng.plan.f_ref),
-            start=0,
+            start=int(eng.plan.time_offset),
             tsamp=tsamp,
             engine=engine,
         )

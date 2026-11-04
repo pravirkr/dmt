@@ -160,6 +160,18 @@ class TestPlans:
                 dm_arr=[10.0, 20.0],
             )
 
+        # 7. Non-finite DM grid entries and Levin parameters must raise ValueError
+        for bad_dm in (np.nan, np.inf, -np.inf, 1e35):
+            with pytest.raises(ValueError):
+                libdmt.FDMTPlan(
+                    1000.0, 1500.0, nchans, nsamples, 0.001, dm_grid=[10.0, bad_dm]
+                )
+        for bad_val in (np.nan, np.inf, -np.inf):
+            with pytest.raises(ValueError):
+                libdmt.DDMTPlan.generate_levin_dm_grid(
+                    bad_val, 100.0, 0.001, 0.001, 1000.0, 1500.0, 64, 1.15
+                )
+
     def test_effective_variance_and_sigma(self) -> None:
         nchans = 64
         nsamples = 512

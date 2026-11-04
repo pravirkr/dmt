@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -113,22 +114,70 @@ TEST_CASE("get_dmconv and delay tables", "[fdmt_utils][cpu][internal]") {
               Catch::Approx(2.0F * conv));
     }
 
-    SECTION("generate_delay_table is ndm * nchans and zero at DM 0") {
+    SECTION("generate_delay_table is ndm * nchans, offset at DM 0") {
         const std::vector<float> dm_arr = {0.0F, 10.0F};
-        const float foff =
-            -(f_max - f_min) / static_cast<float>(nchans); // descending freq
-        const auto table =
-            utils::generate_delay_table(dm_arr, nchans, f_max, foff, tsamp);
+        const float df    = (f_max - f_min) / static_cast<float>(nchans);
+        const auto offset = utils::generate_delay_offset(dm_arr, nchans, f_min,
+                                                         df, tsamp, f_min);
+        const auto table  = utils::generate_delay_table(dm_arr, nchans, f_min,
+                                                        df, tsamp, f_min);
         REQUIRE(table.size() == dm_arr.size() * nchans);
-        REQUIRE_THAT(std::vector<SizeType>(
-                         table.begin(),
-                         table.begin() + static_cast<std::ptrdiff_t>(nchans)),
-                     Catch::Matchers::Equals(std::vector<SizeType>(nchans, 0)));
-        // fch1 = f_max here (descending freq), so it is already the
-        // highest-frequency (reference, zero-delay) channel; delay grows
-        // toward the last (lowest-frequency) channel of the DM=10 row.
-        CHECK(table.back() > 0);
-        CHECK(table[nchans] == 0);
+        CHECK(offset > 0);
+        // DM 0: no lag, every channel at the offset.
+        REQUIRE_THAT(
+            std::vector<SizeType>(table.begin(),
+                                  table.begin() +
+                                      static_cast<std::ptrdiff_t>(nchans)),
+            Catch::Matchers::Equals(std::vector<SizeType>(nchans, offset)));
+        // The top channel of the largest DM lags f_min the most (offset is
+        // its lag rounded up); the bottom channel the least.
+        CHECK(table.back() <= 1);
+        CHECK(table[nchans] > table.back());
+        CHECK(table[nchans] <= offset);
+        // Descending or non-positive bands are rejected.
+        CHECK_THROWS_AS(utils::generate_delay_table(dm_arr, nchans, f_max, -df,
+                                                    tsamp, f_min),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(
+            utils::generate_delay_table(dm_arr, nchans, f_min, df, tsamp, -1.0),
+            std::invalid_argument);
+        const auto nan_d = std::bit_cast<double>(0x7FF8000000000000ULL);
+        const auto inf_d = std::bit_cast<double>(0x7FF0000000000000ULL);
+        CHECK_THROWS_AS(utils::generate_delay_table(dm_arr, nchans, f_min, df,
+                                                    tsamp, nan_d),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(utils::generate_delay_table(dm_arr, nchans, f_min, df,
+                                                    tsamp, inf_d),
+                        std::invalid_argument);
+    }
+
+    SECTION("f_ref at f_max needs no offset") {
+        const std::vector<float> dm_arr = {0.0F, 10.0F};
+        const float df    = (f_max - f_min) / static_cast<float>(nchans);
+        const double fref = static_cast<double>(f_max);
+        CHECK(utils::generate_delay_offset(dm_arr, nchans, f_min, df, tsamp,
+                                           fref) == 0);
+        const auto table =
+            utils::generate_delay_table(dm_arr, nchans, f_min, df, tsamp, fref);
+        // Delays grow toward the bottom channel.
+        CHECK(table[nchans] > table.back());
+    }
+
+    SECTION("generate_levin_dm_grid rejects non-finite parameters") {
+        const auto nan_f = std::bit_cast<float>(0x7FC00000U);
+        const auto inf_f = std::bit_cast<float>(0x7F800000U);
+        CHECK_THROWS_AS(utils::generate_levin_dm_grid(0.0F, 100.0F, tsamp,
+                                                      inf_f, f_min, f_max,
+                                                      nchans, 1.25F),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(utils::generate_levin_dm_grid(0.0F, inf_f, tsamp,
+                                                      0.001F, f_min, f_max,
+                                                      nchans, 1.25F),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(utils::generate_levin_dm_grid(nan_f, 100.0F, tsamp,
+                                                      0.001F, f_min, f_max,
+                                                      nchans, 1.25F),
+                        std::invalid_argument);
     }
 }
 

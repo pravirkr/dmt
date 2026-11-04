@@ -68,18 +68,35 @@ Never call `reset_history()` between consecutive blocks of one observation.
 
 ## Know where each engine's time zero is
 
-| Engine | Output sample `t` is the arrival time at | Sample taken from each channel |
-| --- | --- | --- |
-| FDMT, FDMT-FFT, FDMTBoxcar | `f_min`, the bottom edge of the band | the box from upper to lower edge, or with `use_box_smearing=False` the upper-edge sample |
-| DDMT, SDMT, DDMT-FFT | the centre of the top channel, `f_max - df/2` | the sample at the channel centre's delay |
-| CohFDMT | the centre of the bottom channel | the coherently dedispersed channel |
+By default every engine refers output times to `f_min`, the bottom edge of
+the band (`plan.f_ref`). The time of the band's last-arriving edge is when a
+pulse is complete, which is what a real-time trigger wants. The engines
+differ in which sample they take from each channel and in where output
+sample 0 sits:
 
-Every plan reports its reference as `plan.f_ref`.
+| Engine | Output sample `t` is the `f_ref` arrival at input sample | Sample taken from each channel |
+| --- | --- | --- |
+| FDMT, FDMT-FFT, FDMTBoxcar (`f_ref = f_min`) | `t` (FDMT-FFT valid mode: `t - output_latency`) | the box from upper to lower edge, or with `use_box_smearing=False` the upper-edge sample |
+| DDMT, SDMT, DDMT-FFT (`f_ref = f_min` or `f_max`) | `t + plan.time_offset` (from the start of the stream) | the sample at the channel centre's delay |
+| CohFDMT (`f_ref = f_min`) | `t0 + t * tsamp` (seconds, `t0` per block) | the coherently dedispersed channel, shifted from its centre |
+
+`plan.time_offset` of the DDMT family is how far the earliest channel centre
+arrives ahead of `f_ref` over the plan's DM trials, rounded up. With the
+default `f_min` it follows the plan's largest DM, so align the outputs of two
+DDMT plans with different DM grids by their offsets, not by index.
+
+**Offline pulsar searches.** SIGPROC and PRESTO time series start at the
+file's first sample at the top of the band. Pass `f_ref=f_max` to DDMT,
+SDMT, DDMT-FFT or `dedisperse()`: then `plan.time_offset == 0`, output sample
+`t` is input sample `t` at `f_max` for every DM, the file's `tstart`
+is the epoch of every row, and the incomplete samples are at the end. The
+engines only read a different delay table; speed and history are the same.
 
 ```{note}
-`f_min` and `f_max` are always band edges, never channel centres. From a
-SIGPROC header, where `fch1` is the centre of the first channel and `foff` is
-negative: `f_max = fch1 - foff/2` and `f_min = f_max + nchans * foff`.
+`f_min` and `f_max` are always band edges, never channel centres, and rows
+are always ascending in frequency (row 0 is the lowest channel). See
+{ref}`channel order <channel-order>` for
+SIGPROC headers.
 ```
 
 To compare times between engines, refer them to one frequency with
@@ -98,6 +115,9 @@ manage:
 ```python
 r = dmtlib.dedisperse(waterfall, f_min, f_max, tsamp, dms,
                       engine="fdmt")   # or "fdmt_fft", "ddmt", "sdmt", "ddmt_fft"
+# Direct engines only: r.start == 0, sample 0 = the first input sample at f_max
+r = dmtlib.dedisperse(waterfall, f_min, f_max, tsamp, dms, engine="ddmt",
+                      f_ref=f_max)
 r.data             # (n_dm, n_out), complete samples only
 r.dms              # effective DMs (FDMT snaps to its delay grid)
 r.f_ref, r.start   # r.data[:, i] arrives at f_ref at input sample r.start + i

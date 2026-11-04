@@ -25,6 +25,9 @@ struct FDMTSubbandView {
     float f_start;               ///< Start frequency of this sub-band (MHz)
     float f_end;                 ///< End frequency of this sub-band (MHz)
     std::span<const IndexType> dt_grid; ///< Delay trials in samples
+    SizeType chan_begin;                ///< First input channel
+    SizeType chan_end;                  ///< One past the last input channel
+    bool staggered; ///< Overlap subband straddling a tree boundary
 };
 
 /**
@@ -40,6 +43,9 @@ struct FDMTSubbandDeviceView {
     float f_start;                ///< Start frequency of this sub-band (MHz)
     float f_end;                  ///< End frequency of this sub-band (MHz)
     std::span<const IndexType> dt_grid; ///< Delay trials in samples
+    SizeType chan_begin;                ///< First input channel
+    SizeType chan_end;                  ///< One past the last input channel
+    bool staggered; ///< Overlap subband straddling a tree boundary
 };
 
 /**
@@ -267,6 +273,23 @@ public:
          SizeType fuse_levels  = kFDMTAutoFuse,
          bool int_tree         = true,
          SizeType chunk_nsamps = 0);
+
+    /**
+     * @brief Constructs an FDMT instance from a prepared plan, e.g. one with
+     * a subband search depth (plans::FDMTPlan subband_depth), whose
+     * staggered subbands the stepper then exposes. The mode is the plan's.
+     *
+     * @param plan The plan, copied into the instance.
+     * @param use_box_smearing, exec, nbeams, fuse_levels, int_tree,
+     * chunk_nsamps See the first constructor.
+     */
+    explicit FDMT(plans::FDMTPlan plan,
+                  bool use_box_smearing = true,
+                  Exec exec             = {},
+                  SizeType nbeams       = 1,
+                  SizeType fuse_levels  = kFDMTAutoFuse,
+                  bool int_tree         = true,
+                  SizeType chunk_nsamps = 0);
 
     ~FDMT();
     FDMT(FDMT&&) noexcept;
@@ -552,7 +575,12 @@ public:
     [[nodiscard]] SizeType remaining_levels() const noexcept;
 
     /**
-     * @brief Number of active sub-bands at the current level.
+     * @brief Number of sub-bands at the current level: the tree sub-bands
+     * in ascending frequency, then (for a plan with subband_depth > 0, at
+     * levels niters - subband_depth .. niters - 1) the staggered sub-bands
+     * that straddle their boundaries (FDMTSubbandView::staggered). With
+     * remaining_levels() == k this is 2^k tree sub-bands (fewer near the
+     * channel level of a non-power-of-two band) and 2^k - 1 staggered ones.
      */
     [[nodiscard]] SizeType num_subbands() const;
 

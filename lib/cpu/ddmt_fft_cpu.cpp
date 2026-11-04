@@ -779,12 +779,12 @@ private:
         }
     }
 
-    // DM rows -> time; keep transform samples [guard, guard + cnt) as output
-    // samples [p0, p0 + cnt) of this call.
+    // DM rows -> time; keep transform samples [out_start, out_start + cnt)
+    // as output samples [p0, p0 + cnt) of this call.
     void inverse(
         Geometry& g, float* out, SizeType n_out, SizeType p0, SizeType cnt) {
         const auto ndm = static_cast<std::int64_t>(m_ndm);
-        const auto g0  = m_model.guard;
+        const auto g0  = m_model.out_start();
 #pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (std::int64_t di = 0; di < ndm; ++di) {
             const auto d = static_cast<SizeType>(di);

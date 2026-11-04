@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -52,8 +53,7 @@ TEST_CASE("DDMTPlan construction and getters", "[ddmt][cpu]") {
     }
 }
 
-TEST_CASE("DDMTPlan delay table is non-negative and non-increasing per DM",
-          "[ddmt][cpu]") {
+TEST_CASE("DDMTPlan delay table refers times to f_min", "[ddmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
     const SizeType nchans = 16;
@@ -62,37 +62,127 @@ TEST_CASE("DDMTPlan delay table is non-negative and non-increasing per DM",
     DDMTPlan plan(f_min, f_max, nchans, tsamp, 20.0F, 5.0F, 0.0F);
     const auto& delay_table = plan.get_container().delay_table;
     const auto dm_arr       = plan.get_dm_arr();
+    CHECK(plan.get_f_ref() == f_min);
 
-    // Delay is referenced to the highest-frequency (last, first-arriving)
-    // channel: execute_dedisp() reads d_in[i_samp + delay], which only looks
-    // forward, so every channel must have delay >= 0, decreasing to exactly
-    // 0 at the last (highest-frequency) channel.
+    // Channel c is centred at f_min + (c + 1/2) df and lags f_min by
+    // K dm (f_min^-2 - f_c^-2) / tsamp; the table holds offset - lag, with
+    // offset the ceiling of the largest lag (top channel, largest DM).
+    const double df = (static_cast<double>(f_max) - f_min) / nchans;
+    const auto lag  = [&](double dm, SizeType c) {
+        const double f = f_min + (df * (static_cast<double>(c) + 0.5));
+        return kDispConst / static_cast<double>(tsamp) * dm *
+               ((1.0 / (static_cast<double>(f_min) * f_min)) - (1.0 / (f * f)));
+    };
+    const auto offset = plan.get_time_offset();
+    CHECK(offset ==
+          static_cast<SizeType>(std::ceil(lag(dm_arr.back(), nchans - 1))));
+    CHECK(offset > 0);
     for (SizeType idm = 0; idm < dm_arr.size(); ++idm) {
-        SizeType prev = std::numeric_limits<SizeType>::max();
-        for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-            const auto delay = delay_table[(idm * nchans) + ichan];
-            CHECK(delay <= prev);
+        SizeType prev = 0;
+        for (SizeType c = 0; c < nchans; ++c) {
+            const auto delay = delay_table[(idm * nchans) + c];
+            // Higher channels lag f_min more: their delay is smaller.
+            if (c > 0) {
+                CHECK(delay <= prev);
+            }
             prev = delay;
+            CHECK(delay == offset - static_cast<SizeType>(
+                                        std::nearbyint(lag(dm_arr[idm], c))));
         }
-        CHECK(delay_table[(idm * nchans) + nchans - 1] == 0);
     }
+    // DM 0: every channel at the offset.
+    for (SizeType c = 0; c < nchans; ++c) {
+        CHECK(delay_table[c] == offset);
+    }
+    // The fractional table is d(delay)/d(DM) <= 0.
+    const auto frac = plan.get_fractional_delay_table();
+    for (SizeType c = 0; c < nchans; ++c) {
+        CHECK(frac[c] <= 0.0F);
+        CHECK(-static_cast<double>(frac[c]) ==
+              Catch::Approx(lag(1.0, c)).epsilon(1e-5));
+    }
+    // The kill mask does not move the time reference.
+    DDMTPlan masked(
+        f_min, f_max, nchans, tsamp, 20.0F, 5.0F, 0.0F, 32,
+        std::vector<uint8_t>{0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0});
+    CHECK(masked.get_time_offset() == offset);
+}
 
-    // Independently computed expected delay (samples) for the highest DM at
-    // the first (lowest-frequency) channel: delays use channel centres and
-    // are referenced to the last channel's centre (not the band edge
-    // f_max): delay = round(kDispConst/tsamp * dm * (1/f_first^2 -
-    // 1/f_last^2)), f_first = f_min + df/2, f_last = f_max - df/2.
-    const auto df       = (f_max - f_min) / static_cast<float>(nchans);
-    const auto f_first  = f_min + (0.5F * df);
-    const auto f_last   = f_max - (0.5F * df);
-    const auto dm_max   = dm_arr.back();
-    const auto expected = static_cast<SizeType>(std::nearbyint(
-        kDispConst / tsamp *
-        ((1.0F / (f_first * f_first)) - (1.0F / (f_last * f_last))) * dm_max));
-    CHECK(plan.get_f_ref() == f_last);
-    const auto front_of_last_row = delay_table[(dm_arr.size() - 1) * nchans];
-    CHECK(front_of_last_row == expected);
-    CHECK(front_of_last_row > 0);
+TEST_CASE("DDMT output sample k is f_ref arrival at input k + time_offset",
+          "[ddmt][cpu]") {
+    const float f_min            = 1100.0F;
+    const float f_max            = 1500.0F;
+    const SizeType nchans        = 32;
+    const float tsamp            = 0.001F;
+    const SizeType nsamps        = 3072;
+    const std::vector<float> dms = {0.0F, 30.0F, 60.0F};
+    const double df        = (static_cast<double>(f_max) - f_min) / nchans;
+    const auto nan_f       = std::bit_cast<float>(0x7FC00000U);
+    const auto inf_f       = std::bit_cast<float>(0x7F800000U);
+    const float top_centre = f_max - static_cast<float>(df / 2);
+    for (const std::optional<float> f_ref :
+         {std::optional<float>{}, std::optional<float>{f_min},
+          std::optional<float>{f_max}}) {
+        const double fr      = f_ref.value_or(f_min);
+        const double inv_ref = 1.0 / (fr * fr);
+        for (const bool sdmt : {false, true}) {
+            DYNAMIC_SECTION("f_ref=" << fr << " sdmt=" << sdmt) {
+                std::unique_ptr<DDMT> eng;
+                if (sdmt) {
+                    eng = std::make_unique<SDMT>(
+                        f_min, f_max, nchans, tsamp, dms, Exec::cpu(2), 32,
+                        std::span<const uint8_t>{}, 1, f_ref);
+                } else {
+                    eng = std::make_unique<DDMT>(
+                        f_min, f_max, nchans, tsamp, dms, Exec::cpu(2), 32,
+                        std::span<const uint8_t>{}, 1, f_ref);
+                }
+                const auto& plan  = eng->get_plan();
+                const auto offset = plan.get_time_offset();
+                CHECK(plan.get_f_ref() == static_cast<float>(fr));
+                // At f_max nothing arrives before f_ref.
+                if (fr == static_cast<double>(f_max)) {
+                    CHECK(offset == 0);
+                } else {
+                    CHECK(offset > 0);
+                }
+                const auto n_out = eng->get_output_nsamps(nsamps);
+                for (SizeType idm = 0; idm < dms.size(); ++idm) {
+                    // A one-sample pulse arriving at f_ref at sample s.
+                    const SizeType s = 1500;
+                    std::vector<float> wf(nchans * nsamps, 0.0F);
+                    for (SizeType c = 0; c < nchans; ++c) {
+                        const double f =
+                            f_min + (df * (static_cast<double>(c) + 0.5));
+                        const double delay =
+                            kDispConst / static_cast<double>(tsamp) * dms[idm] *
+                            ((1.0 / (f * f)) - inv_ref);
+                        const auto at =
+                            static_cast<int64_t>(s) +
+                            static_cast<int64_t>(std::nearbyint(delay));
+                        REQUIRE(at >= 0);
+                        REQUIRE(at < static_cast<int64_t>(nsamps));
+                        wf[(c * nsamps) + static_cast<SizeType>(at)] = 1.0F;
+                    }
+                    eng->reset_history();
+                    std::vector<float> out(dms.size() * n_out);
+                    eng->execute(wf, out);
+                    REQUIRE(s >= offset);
+                    REQUIRE(s - offset < n_out);
+                    INFO("dm " << dms[idm]);
+                    CHECK(out[(idm * n_out) + s - offset] ==
+                          static_cast<float>(nchans));
+                }
+            }
+        }
+    }
+    // Only f_min and f_max are valid reference frequencies.
+    for (const float bad_ref :
+         {0.0F, -10.0F, top_centre, 1300.0F, nan_f, inf_f}) {
+        CHECK_THROWS_AS(
+            DDMTPlan(f_min, f_max, nchans, tsamp, dms, 32, {}, bad_ref),
+            std::invalid_argument);
+    }
 }
 
 TEST_CASE("DDMT execute recovers a zero-DM ones waterfall", "[ddmt][cpu]") {

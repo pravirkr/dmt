@@ -12,46 +12,51 @@ from dmtlib import (
     dedisperse,
     dispersion_delay,
 )
+from dmtlib.grid import DM_CONSTANT
 from dmtlib.simulate import generate_pure_frb
 
 F_MIN, F_MAX, NCHANS, TSAMP = 400.0, 800.0, 64, 0.001
 DF = (F_MAX - F_MIN) / NCHANS
 
 
-def centre_delays(dm: float) -> np.ndarray:
-    """Independent channel-centre delays (samples) behind the top channel."""
+def centre_lags(dm: float) -> np.ndarray:
+    """Independent channel-centre lags (samples) behind the bottom edge f_min."""
     centres = F_MIN + DF * (np.arange(NCHANS) + 0.5)
-    return dispersion_delay(dm, centres, F_MAX - DF / 2) / TSAMP
+    return dispersion_delay(dm, F_MIN, centres) / TSAMP
 
 
 @pytest.mark.parametrize("cls", [DDMT, SDMT])
 @pytest.mark.parametrize("dm", [37.3, 112.0])
 def test_direct_engines_use_channel_centres(cls: type, dm: float) -> None:
-    delays = np.rint(centre_delays(dm)).astype(int)
-    t0, nsamps = 300, 4096
+    lags = np.rint(centre_lags(dm)).astype(int)
+    s, nsamps = 3000, 4096  # f_min arrival sample
     x = np.zeros((NCHANS, nsamps), dtype=np.float32)
-    x[np.arange(NCHANS), t0 + delays] = 1
+    x[np.arange(NCHANS), s - lags] = 1
     engine = cls(F_MIN, F_MAX, NCHANS, TSAMP, np.array([dm], dtype=np.float32))
     y = np.asarray(engine.execute(x)).ravel()
-    assert engine.plan.f_ref == pytest.approx(F_MAX - DF / 2)
-    assert y.argmax() == t0
-    assert y[t0] == NCHANS
+    assert engine.plan.f_ref == F_MIN
+    offset = engine.plan.time_offset
+    assert offset == int(np.ceil(centre_lags(dm)[-1]))
+    assert y.argmax() == s - offset
+    assert y[s - offset] == NCHANS
 
 
 def test_ddmt_fft_fractional_delays_use_channel_centres() -> None:
     dm = 37.3
     plan = DDMTPlan(F_MIN, F_MAX, NCHANS, TSAMP, np.array([dm], dtype=np.float32))
     rate = np.asarray(plan.fractional_delay_table)
-    np.testing.assert_allclose(rate * dm, centre_delays(dm), rtol=1e-5, atol=1e-3)
-    delays = centre_delays(dm)
-    t0, nsamps = 300, 4096
+    np.testing.assert_allclose(-rate * dm, centre_lags(dm), rtol=1e-5, atol=1e-3)
+    lags = centre_lags(dm)
+    s, nsamps = 3000, 4096
     t = np.arange(nsamps)
-    # A band-limited (sinc) impulse at the exact fractional delay.
-    x = np.sinc(t[None, :] - (t0 + delays[:, None])).astype(np.float32)
+    # A band-limited (sinc) impulse at the exact fractional lag.
+    x = np.sinc(t[None, :] - (s - lags[:, None])).astype(np.float32)
     engine = DDMTFFT(F_MIN, F_MAX, NCHANS, TSAMP, np.array([dm], dtype=np.float32))
     y = np.asarray(engine.execute(x)).ravel()
-    assert y.argmax() == t0
-    assert y[t0] == pytest.approx(NCHANS, rel=2e-2)
+    offset = engine.plan.time_offset
+    assert engine.plan.f_ref == F_MIN
+    assert y.argmax() == s - offset
+    assert y[s - offset] == pytest.approx(NCHANS, rel=2e-2)
 
 
 def test_fdmt_references_band_bottom_edge() -> None:
@@ -79,6 +84,7 @@ def test_dedisperse_engines_agree_on_infinite_frequency_toa() -> None:
         top = np.flatnonzero(y >= y.max() - 1e-3 * abs(y.max()))
         t_inf = np.interp(top.mean(), np.arange(y.size), r.arrival_times()[0])
         assert abs(t_inf - truth) <= 1.5 * TSAMP, engine
+        assert r.f_ref == F_MIN, engine
         np.testing.assert_allclose(
             r.arrival_times(r.f_ref)[0], (r.start + np.arange(r.data.shape[1])) * TSAMP
         )
@@ -106,3 +112,58 @@ def test_dedisperse_rejects_bad_input() -> None:
         dedisperse(wf, F_MIN, F_MAX, TSAMP, [1.0], engine="nope")
     with pytest.raises(ValueError, match="nchans, nsamps"):
         dedisperse(wf[0], F_MIN, F_MAX, TSAMP, [1.0])
+
+
+def ref_delays(dm: float, f_ref: float) -> np.ndarray:
+    """Channel-centre delays (samples) behind ``f_ref`` (negative above it)."""
+    centres = F_MIN + DF * (np.arange(NCHANS) + 0.5)
+    return DM_CONSTANT * dm * (centres**-2 - f_ref**-2) / TSAMP
+
+
+F_REFS = [F_MIN, F_MAX]
+
+
+@pytest.mark.parametrize("cls", [DDMT, SDMT, DDMTFFT])
+@pytest.mark.parametrize("f_ref", F_REFS)
+def test_direct_engines_take_band_edge_references(cls: type, f_ref: float) -> None:
+    dm, s, nsamps = 37.3, 3000, 6144
+    delays = ref_delays(dm, f_ref)
+    t = np.arange(nsamps)
+    if cls is DDMTFFT:
+        x = np.sinc(t[None, :] - (s + delays[:, None])).astype(np.float32)
+    else:
+        x = np.zeros((NCHANS, nsamps), dtype=np.float32)
+        x[np.arange(NCHANS), s + np.rint(delays).astype(int)] = 1
+    engine = cls(F_MIN, F_MAX, NCHANS, TSAMP, np.array([dm], np.float32), f_ref=f_ref)
+    assert engine.plan.f_ref == pytest.approx(f_ref)
+    offset = engine.plan.time_offset
+    if f_ref == F_MAX:
+        assert offset == 0
+    y = np.asarray(engine.execute(x)).ravel()
+    assert y.argmax() == s - offset
+    assert y[s - offset] == pytest.approx(NCHANS, rel=2e-2)
+
+
+def test_dedisperse_top_reference_starts_at_sample_zero() -> None:
+    nchans, nsamps, dm, toa = 256, 8192, 60.0, 5000.0
+    dt = float(dispersion_delay(dm, F_MIN, F_MAX)) / TSAMP
+    wf, _ = generate_pure_frb(nchans, nsamps, F_MIN, F_MAX, dt=dt, pulse_toa=toa)
+    truth = toa * TSAMP - float(dispersion_delay(dm, F_MIN, np.inf))
+    for engine in ("ddmt", "sdmt", "ddmt_fft"):
+        r = dedisperse(wf, F_MIN, F_MAX, TSAMP, [dm], engine=engine, f_ref=F_MAX)
+        assert r.start == 0
+        assert r.f_ref == F_MAX
+        y = r.data[0]
+        top = np.flatnonzero(y >= y.max() - 1e-3 * abs(y.max()))
+        t_inf = np.interp(top.mean(), np.arange(y.size), r.arrival_times()[0])
+        assert abs(t_inf - truth) <= 1.5 * TSAMP, engine
+    with pytest.raises(ValueError, match="refers times to f_min"):
+        dedisperse(wf, F_MIN, F_MAX, TSAMP, [dm], engine="fdmt", f_ref=F_MAX)
+
+
+def test_bad_reference_is_rejected() -> None:
+    for bad in (0.0, -5.0, 600.0, F_MAX - DF / 2, np.inf, np.nan):
+        with pytest.raises(ValueError, match="f_ref"):
+            DDMTPlan(
+                F_MIN, F_MAX, NCHANS, TSAMP, np.array([1.0], np.float32), f_ref=bad
+            )

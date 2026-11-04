@@ -37,10 +37,12 @@ public:
             .int_tree         = false,
             .exec             = exec,
             .chunk_nsamps     = chunk,
-            .max_fuse_levels =
-                std::min(this->plan.get_niters() - 1,
-                         this->plan.get_niters() - config.subband_levels),
-            .search_upper_levels = config.subband_levels > 0,
+            // The searched levels are materialised; the engines also keep
+            // fusion below the plan's staggered subbands.
+            .max_fuse_levels     = std::min(this->plan.get_niters() - 1,
+                                            this->plan.get_niters() -
+                                                this->plan.get_subband_depth()),
+            .search_upper_levels = this->plan.get_subband_depth() > 0,
             .search_nbits        = config.input_nbits,
         };
         if (exec.backend == Backend::kCPU) {

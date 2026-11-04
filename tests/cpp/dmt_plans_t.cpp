@@ -37,8 +37,7 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans][cpu]") {
 
     SECTION("Container properties") {
         const auto& container = plan.get_container();
-        CHECK(container.df_top.size() == 10);
-        CHECK(container.df_bot.size() == 10);
+        CHECK(container.grids.size() == 10);
         CHECK(container.dt_grid_sub_top.size() == 10);
         CHECK(container.state_shape.size() == 10);
     }
@@ -69,10 +68,17 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans][cpu]") {
     SECTION("Internal calculations") {
         const auto& container = plan.get_container();
 
-        CHECK(std::ranges::is_sorted(container.df_top));
-        CHECK(std::ranges::is_sorted(container.df_bot));
-        for (SizeType i = 0; i < container.df_top.size(); ++i) {
-            CHECK(container.df_top[i] <= container.df_bot[i]);
+        // Each subband spans its children's channels, edge to edge.
+        for (SizeType l = 1; l < container.grids.size(); ++l) {
+            for (const auto& g : container.grids[l]) {
+                const auto& lo = container.grids[l - 1][g.i_sub_tail];
+                CHECK(lo.chan_begin == g.chan_begin);
+                CHECK(g.f_start == lo.f_start);
+                if (g.i_sub_head != SIZE_MAX) {
+                    CHECK(container.grids[l - 1][g.i_sub_head].chan_end ==
+                          g.chan_end);
+                }
+            }
         }
 
         // Check the values of state_shape
@@ -344,6 +350,19 @@ TEST_CASE("FDMTPlan arbitrary dt_grid and dm_grid", "[dmt_plans][cpu]") {
         // All-zero dm_grid
         CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
                                  std::vector<float>{0.0F, 0.0F}),
+                        std::invalid_argument);
+
+        // Non-finite or out-of-range dm_grid
+        const auto nan_f = std::bit_cast<float>(0x7FC00000U);
+        const auto inf_f = std::bit_cast<float>(0x7F800000U);
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{nan_f, 10.0F}),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{inf_f, 10.0F}),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 std::vector<float>{1.0e20F}),
                         std::invalid_argument);
 
         // Negative DM is valid and constructs successfully

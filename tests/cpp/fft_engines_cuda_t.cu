@@ -225,6 +225,9 @@ TEST_CASE("FDMTFFT GPU stepper and level views match the CPU",
                     const auto sb = gpu.view_subband(0);
                     CHECK(sa.ndt == sb.ndt);
                     CHECK(sa.nsamps == sb.nsamps);
+                    CHECK(sa.chan_begin == sb.chan_begin);
+                    CHECK(sa.chan_end == sb.chan_end);
+                    CHECK(sa.staggered == sb.staggered);
                     cpu.advance();
                     gpu.advance();
                 }

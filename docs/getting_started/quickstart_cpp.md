@@ -54,6 +54,13 @@ int main() {
 | float32 | `execute(std::span<const float>, std::span<float>)` | `(nbeams, nchans, nsamps)` row-major |
 | packed unsigned 1/2/4/8/16-bit | `execute(std::span<const uint8_t>, nbits, std::span<float>)` | each channel row is `ceil(nsamps * nbits / 8)` bytes, samples LSB-first within a byte; the output equals the float path on the same values, up to the rounding of the level-0 box means with box smearing (see {ref}`box means <box-mean>`) |
 
+- **Channel order.** Rows are ascending in frequency (row 0 is the lowest
+  channel), and `f_min`/`f_max` are band edges, not channel centres. Output
+  times refer to `f_min` by default (`plan.get_f_ref()`; DDMT, SDMT and
+  DDMTFFT also accept `f_ref = f_max` as their last constructor argument). Flip SIGPROC
+  data (`foff < 0`, highest channel first) before it reaches dmt:
+  `f_min = min(fch1, fch1 + (nchans - 1) * foff) - |foff| / 2`,
+  `f_max = f_min + nchans * |foff|`.
 - **Output layout.** The output is always float32, laid out `(nbeams, ndms, dmt_nsamps)`:
   allocate `nbeams * plan.get_dmt_size()` floats; beam `b` starts at
   `b * get_dmt_size()`. The engine keeps all its working state internally and
@@ -94,10 +101,15 @@ fdmt.reset(waterfall, dmt_buf);          // consumes one block; level 0
 fdmt.advance_until_remaining(2);         // 4 sub-bands left
 for (size_t s = 0; s < fdmt.num_subbands(); ++s) {
     const auto sub = fdmt.view_subband(s);   // zero-copy: data, ndt, nsamps,
-                                             // f_start, f_end, dt_grid
+                                             // f_start, f_end, dt_grid,
+                                             // chan_begin, chan_end, staggered
 }
 fdmt.finalize();                         // root; result in dmt_buf as above
 ```
+
+Build the engine from a plan with `subband_depth` to also get the staggered
+sub-bands that straddle the tree boundaries (`2^k - 1` of them with `k` levels
+remaining): `FDMT fdmt(plans::FDMTPlan(..., "valid", 2));`.
 
 ```{note}
 In `"valid"` mode every block must be finalized before the next

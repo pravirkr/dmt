@@ -263,8 +263,14 @@ class TestTrialRunner:
         dm = float(dms[25])
         ddmt = sens.TrialRunner("DDMT", CFG, dm, nsamps)
         one = ddmt.run(x)
-        n = min(one.size, d_out.shape[1])  # output length follows the max delay
-        np.testing.assert_allclose(one[:n], d_out[25, :n], rtol=1e-6, atol=1e-5)
+        # Output k is f_min arrival at input k + plan.time_offset, which
+        # follows each plan's largest DM: align the two on input time.
+        shift = full_ddmt.plan.time_offset - ddmt.plan.time_offset
+        assert shift >= 0
+        n = min(one.size - shift, d_out.shape[1])
+        np.testing.assert_allclose(
+            one[shift : shift + n], d_out[25, :n], rtol=1e-6, atol=1e-5
+        )
 
     def test_every_engine_integrates_the_same_dm(self) -> None:
         for dm in sens.select_trials(CFG, 4, seed=1):

@@ -167,13 +167,18 @@ inline void check_impulse_recovery(const Exec& exec) {
     };
     const auto third = std::floor(static_cast<double>(nout) / 3.0);
     const auto mid   = std::floor(static_cast<double>(nout) / 2.0);
+    // The peak sample's share depends on where the channels' arrivals fall
+    // between samples: times refer to f_min while channels are sampled at
+    // their centres, so an f_min arrival on the grid (j0 integer) leaves
+    // them at a DM-dependent sub-sample phase. Across phases the share
+    // ranges about 0.5-0.85; 0.6 holds for these.
     const std::array<Case, 6> cases{
-        Case{coh[2], mid, 0.7},                          // trial centre
-        Case{coh[1] + (0.98 * half), 40.0, 0.7},         // window edge
-        Case{coh[0] - (0.98 * half), 3.0, 0.7},          // dm_min edge
+        Case{coh[2], mid, 0.6},                          // trial centre
+        Case{coh[1] + (0.98 * half), 40.0, 0.6},         // window edge
+        Case{coh[0] - (0.98 * half), 3.0, 0.6},          // dm_min edge
         Case{coh.back() + (0.98 * half),                 // dm_max edge,
-             static_cast<double>(nout) - 4.0, 0.7},      // block end
-        Case{coh[3] - (0.5 * half), third, 0.7},         // negative dt
+             static_cast<double>(nout) - 4.0, 0.6},      // block end
+        Case{coh[3] - (0.5 * half), third, 0.6},         // negative dt
         Case{coh[2] + (0.3 * half), third + 0.5, 0.45}}; // between samples
     for (const auto& cs : cases) {
         CAPTURE(cs.dm, cs.j0);

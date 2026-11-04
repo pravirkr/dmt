@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -57,7 +58,10 @@ struct DDMTFFTOptions {
  * fractional delays.
  *
  * Every channel is shifted by its exact (non-integer) dispersion delay
- * @f$ \tau_{d,c} = \mathrm{DM}_d \, r_c @f$ as a phase ramp,
+ * @f$ M + \tau_{d,c} @f$, @f$ \tau_{d,c} = \mathrm{DM}_d \, r_c @f$,
+ * @f$ r_c = K (f_c^{-2} - f_\mathrm{ref}^{-2}) / t_\mathrm{samp} @f$
+ * (f_ref = plan.get_f_ref(), f_min by default) and @f$ M @f$ =
+ * plan.get_time_offset(), as a phase ramp,
  * @f[
  * \widetilde{y}_d[k] = \sum_c \widetilde{x}_c[k]\,
  * e^{+2\pi i k \tau_{d,c} / N},
@@ -68,8 +72,10 @@ struct DDMTFFTOptions {
  *
  * Built on the same plan and streaming model as DDMT: every execute()
  * dedisperses the retained history followed by the new block, output sample
- * t of trial d being @f$ y_d(t) = \sum_c x_c(t + \tau_{d,c}) @f$. The
- * effective maximum delay is ceil(max tau) + guard (get_max_delay()):
+ * t of trial d being @f$ y_d(t) = \sum_c x_c(t + M + \tau_{d,c}) @f$: the
+ * sum for f_ref arrival at input sample t + M, the same time reference as
+ * DDMT and SDMT. The effective maximum delay is M + ceil(max tau) + guard
+ * (get_max_delay(); max tau > 0 only for channels below f_ref):
  * get_output_nsamps() is input_nsamps - get_max_delay() on the first block
  * and input_nsamps once warm. The stream is taken as zero before its first
  * sample. Internally blocks are transformed in overlap-save segments.
@@ -93,7 +99,8 @@ public:
             SizeType nbits                     = 32,
             std::span<const uint8_t> kill_mask = {},
             SizeType nbeams                    = 1,
-            DDMTFFTOptions options             = {});
+            DDMTFFTOptions options             = {},
+            std::optional<float> f_ref         = std::nullopt);
 
     /// @brief Explicit DM trials in pc/cm^3.
     DDMTFFT(float f_min,
@@ -105,7 +112,8 @@ public:
             SizeType nbits                     = 32,
             std::span<const uint8_t> kill_mask = {},
             SizeType nbeams                    = 1,
-            DDMTFFTOptions options             = {});
+            DDMTFFTOptions options             = {},
+            std::optional<float> f_ref         = std::nullopt);
 
     /// @brief Lina Levin DM grid.
     DDMTFFT(float f_min,
@@ -117,7 +125,8 @@ public:
             SizeType nbits                     = 32,
             std::span<const uint8_t> kill_mask = {},
             SizeType nbeams                    = 1,
-            DDMTFFTOptions options             = {});
+            DDMTFFTOptions options             = {},
+            std::optional<float> f_ref         = std::nullopt);
 
     /// @brief From a pre-configured DDMTPlan.
     explicit DDMTFFT(const plans::DDMTPlan& plan,
@@ -147,7 +156,8 @@ public:
     /// "piecewise_nufft" (one NUFFT per uniform run of the grid, trials
     /// outside such runs by brute force) or "brute".
     [[nodiscard]] std::string_view method_used() const noexcept;
-    /// @brief Effective maximum delay in samples: ceil(max tau) + guard.
+    /// @brief Effective maximum delay in samples: plan.get_time_offset() +
+    /// ceil(largest positive delay) + guard.
     [[nodiscard]] SizeType get_max_delay() const noexcept;
     /// @brief A block length (input samples per call) for which at least 80%
     /// of every transform is output: each call transforms the block plus

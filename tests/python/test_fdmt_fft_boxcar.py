@@ -128,11 +128,20 @@ def test_streamed_blocks_match_one_long_block(frac: bool, rtol: float) -> None:
 
 def test_contract_and_validation() -> None:
     plan = FDMTPlan(1100, 1500, 8, 256, 0.001, dt_grid=[0, 5, 9])
+    subbands = FDMTPlan(1100, 1500, 8, 256, 0.001, dt_grid=[0, 5, 9], subband_depth=1)
     with pytest.raises(ValueError, match="subband"):
-        FDMTFFTBoxcar(plan, BoxcarConfig(8, subband_levels=1))
+        FDMTFFTBoxcar(subbands, BoxcarConfig(8))
     with pytest.raises(ValueError, match="packed"):
         FDMTFFTBoxcar(plan, BoxcarConfig(8, input_nbits=8, input_mean=1))
     search = FDMTFFTBoxcar(plan, BoxcarConfig(8), kill_mask=[1, 1, 0, 1, 1, 1, 1, 1])
+    as_array = FDMTFFTBoxcar(
+        plan, BoxcarConfig(8), kill_mask=np.array([1, 1, 0, 1, 1, 1, 1, 1])
+    )
+    assert as_array.search_plans[0].warmup_samples == (
+        search.search_plans[0].warmup_samples
+    )
+    with pytest.raises(TypeError, match="bool or integer"):
+        FDMTFFTBoxcar(plan, BoxcarConfig(8), kill_mask=np.ones(8, dtype=np.float32))
     with pytest.raises(ValueError, match="float32"):
         search.execute(np.zeros((8, 256), dtype=np.float64))
     assert search.memory_usage.total > 0

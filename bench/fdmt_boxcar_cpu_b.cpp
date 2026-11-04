@@ -18,16 +18,16 @@ namespace {
 void fdmt_boxcar_cpu(benchmark::State& state, bool fused) {
     using algorithms::FDMT;
     using algorithms::FDMTBoxcar;
-    plans::FDMTPlan plan(700, 1200, 128, 4096, 0.001F, 256);
+    const auto depth = static_cast<SizeType>(state.range(1));
+    plans::FDMTPlan plan(700, 1200, 128, 4096, 0.001F, 256, 0, 1, "valid",
+                         depth);
     BoxcarConfig config(static_cast<SizeType>(state.range(0)), 2.0F, 8.0F, 1.0F,
-                        PeakFindingMode::kContiguousPeakPerWidth,
-                        static_cast<SizeType>(state.range(1)));
+                        PeakFindingMode::kContiguousPeakPerWidth);
     config.max_cands_per_dm = 0;
     const int threads       = static_cast<int>(state.range(2));
     const auto exec         = Exec::cpu(threads);
     FDMTBoxcar search(plan, config, true, exec, 1, 0, plan.get_nsamps());
-    FDMT fdmt(700, 1200, 128, 4096, 0.001F, 256, 0, 1, true, "valid", exec, 1,
-              0, false, plan.get_nsamps());
+    FDMT fdmt(plan, true, exec, 1, 0, false, plan.get_nsamps());
     const auto planes =
         algorithms::detail::make_boxcar_plans(plan, config, true);
     algorithms::detail::FDMTEngineConfig cfg;
@@ -57,7 +57,7 @@ void fdmt_boxcar_cpu(benchmark::State& state, bool fused) {
             }
         } else {
             fdmt.reset(waterfall, output);
-            for (SizeType level = plan.get_niters() - config.subband_levels;
+            for (SizeType level = plan.get_niters() - depth;
                  level <= plan.get_niters(); ++level) {
                 fdmt.advance_until_remaining(plan.get_niters() - level);
                 const auto data = fdmt.view_level_data();
@@ -83,8 +83,7 @@ void fdmt_boxcar_cpu(benchmark::State& state, bool fused) {
     }
     state.counters["nwidths"] =
         static_cast<double>(planes.front().widths.size());
-    state.counters["subband_levels"] =
-        static_cast<double>(config.subband_levels);
+    state.counters["subband_depth"] = static_cast<double>(depth);
     const auto memory               = search.get_memory_usage();
     state.counters["working_bytes"] = static_cast<double>(
         memory.total() + (fused ? 0 : output.size() * sizeof(float)));
@@ -120,16 +119,16 @@ void bench_fdmt_boxcar_stream(benchmark::State& state,
     const auto& cfg = suite_config();
     const Point point{Sweep::kNdms, cfg.nsamps_ref, cfg.dm_max_ref,
                       packed ? SizeType{8} : SizeType{32}};
-    auto plan = make_plan(point);
+    auto plan = make_plan(point, cfg.subband_depth);
     // The GPU benchmark's width sets (boxcars up to 100 ms), threshold 6,
     // per-width peaks. Input preparation and construction are not timed.
     const BoxcarConfig boxcar(
         max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
-        PeakFindingMode::kContiguousPeakPerWidth, cfg.subband_levels, 131072,
-        4096, true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
+        PeakFindingMode::kContiguousPeakPerWidth, 131072, 4096, true,
+        packed ? 8 : 32, packed ? 127.0F : 0.0F);
     const auto input_size = cfg.nchans * cfg.nsamps_ref;
     double rows           = 0;
-    for (SizeType level = plan.get_niters() - cfg.subband_levels;
+    for (SizeType level = plan.get_niters() - cfg.subband_depth;
          level <= plan.get_niters(); ++level) {
         rows += static_cast<double>(
             plan.get_container().state_shape[level].ncoords);
@@ -199,7 +198,7 @@ void bench_fdmt_boxcar_stream(benchmark::State& state,
     state.counters["max_boxcar"] = static_cast<double>(boxcar.max_boxcar);
     state.counters["nwidths"] =
         static_cast<double>(search.get_search_plans().front().widths.size());
-    state.counters["subband_levels"] = static_cast<double>(cfg.subband_levels);
+    state.counters["subband_depth"] = static_cast<double>(cfg.subband_depth);
     state.counters["chunk_nsamps"] =
         static_cast<double>(search.get_chunk_nsamps());
     state.counters["fuse_levels"] =

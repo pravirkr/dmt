@@ -56,19 +56,17 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
         const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
         return (bits & 0x7F800000U) != 0x7F800000U;
     };
-    if (plan.get_mode() != "valid" || config.subband_levels > 2 ||
-        config.subband_levels > plan.get_niters() ||
-        !finite(config.detect_thresh) || config.detect_thresh <= 0 ||
-        !finite(config.noise_sigma) || config.noise_sigma <= 0 ||
-        config.max_candidates == 0 ||
+    if (plan.get_mode() != "valid" || !finite(config.detect_thresh) ||
+        config.detect_thresh <= 0 || !finite(config.noise_sigma) ||
+        config.noise_sigma <= 0 || config.max_candidates == 0 ||
         static_cast<unsigned>(config.peak_mode) >
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
         plan.get_nchans() > UINT32_MAX ||
         (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(
             "FDMTBoxcar: invalid configuration (requires valid mode, positive "
-            "finite threshold/sigma and capacity, subband_levels 0..2 within "
-            "tree, kill mask of nchans entries)");
+            "finite threshold/sigma and capacity, kill mask of nchans "
+            "entries)");
     }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||
@@ -102,31 +100,25 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
     }
     const auto widths =
         plans::generate_box_width_trials(config.max_boxcar, config.wtsp);
-    const auto& pc      = plan.get_container();
-    const SizeType root = plan.get_niters();
-    const auto root_dm  = plan.get_dm_grid_final();
-    std::vector<std::vector<std::pair<SizeType, SizeType>>> extents(root + 1);
-    for (SizeType c = 0; c < plan.get_nchans(); ++c) {
-        extents[0].emplace_back(c, c + 1);
-    }
-    for (SizeType l = 1; l <= root; ++l) {
-        const auto& prev = extents[l - 1];
-        for (SizeType c = 0; c < prev.size(); c += 2) {
-            extents[l].emplace_back(
-                prev[c].first, prev[std::min(c + 1, prev.size() - 1)].second);
-        }
-    }
+    const auto& pc       = plan.get_container();
+    const SizeType root  = plan.get_niters();
+    const SizeType depth = plan.get_subband_depth();
+    const auto root_dm   = plan.get_dm_grid_final();
     const double unit =
         std::ldexp(1.0, -static_cast<int>(plan.get_box_fraction_bits()));
     std::vector<plans::BoxcarPlanePlan> planes;
-    for (SizeType l = root - config.subband_levels; l <= root; ++l) {
+    // Every subband of the searched levels: the tree subbands and, below
+    // the root, the staggered ones that straddle their boundaries.
+    for (SizeType l = root - depth; l <= root; ++l) {
         for (SizeType band = 0; band < pc.grids[l].size(); ++band) {
-            const auto& grid        = pc.grids[l][band];
-            const auto [begin, end] = extents[l][band];
+            const auto& grid = pc.grids[l][band];
+            const auto begin = grid.chan_begin;
+            const auto end   = grid.chan_end;
             plans::BoxcarPlanePlan out;
             out.level         = l;
             out.subband_level = static_cast<uint32_t>(root - l);
             out.subband_idx   = static_cast<uint32_t>(band);
+            out.staggered     = grid.staggered;
             out.chan_begin    = static_cast<uint32_t>(begin);
             out.chan_end      = static_cast<uint32_t>(end);
             out.f_low_mhz =
@@ -161,11 +153,12 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     if (level == 0) {
                         const auto dt    = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
                         const SizeType s = static_cast<SizeType>(std::abs(dt));
-                        // A killed channel adds no noise (it reads as zero).
+                        // A killed channel adds no noise or signal (it reads as
+                        // zero).
                         if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
                             lengths.push_back(smear ? s + 1 : 1);
+                            support = std::max(support, shift + s);
                         }
-                        support = std::max(support, shift + s);
                     } else {
                         self(self, level - 1,
                              c.tail_buf_offset /
@@ -270,6 +263,7 @@ make_boxcar_rows(const plans::FDMTPlan& plan,
             row.candidate.dm_idx        = static_cast<uint32_t>(d);
             row.candidate.subband_level = plane.subband_level;
             row.candidate.subband_idx   = plane.subband_idx;
+            row.candidate.staggered     = plane.staggered ? 1U : 0U;
             row.candidate.chan_begin    = plane.chan_begin;
             row.candidate.chan_end      = plane.chan_end;
             row.candidate.f_low_mhz     = plane.f_low_mhz;

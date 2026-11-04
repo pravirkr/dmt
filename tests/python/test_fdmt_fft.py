@@ -364,6 +364,67 @@ class TestFDMTFFTInputs:
         )
         with pytest.raises(ValueError):
             FDMTFFT(*self.args, kill_mask=np.ones(3, dtype=np.uint8))
+        with pytest.raises(TypeError, match="bool or integer"):
+            FDMTFFT(*self.args, kill_mask=np.ones(64, dtype=np.float32))
+        # NumPy's default int64 (and bool) masks act like the uint8 one.
+        for same in (mask.astype(np.int64), mask.astype(bool)):
+            np.testing.assert_allclose(
+                FDMTFFT(*self.args, kill_mask=same).execute(waterfall),
+                FDMTFFT(*self.args).execute(zeroed),
+                atol=1e-5,
+            )
+
+        masked_nosmear = FDMTFFT(*self.args, use_box_smearing=False, kill_mask=mask)
+        assert masked_nosmear.get_effective_variance(0, 1) == pytest.approx(61.0)
+        assert masked_nosmear.get_effective_sigma(0, 1) == pytest.approx(np.sqrt(61.0))
+        np.testing.assert_allclose(
+            masked_nosmear.get_effective_variance_grid(2), 61.0 * 2.0
+        )
+
+        masked_smear = FDMTFFT(*self.args, use_box_smearing=True, kill_mask=mask)
+        unmasked_smear = FDMTFFT(*self.args, use_box_smearing=True)
+        assert masked_smear.get_effective_variance(
+            0, 1
+        ) < unmasked_smear.get_effective_variance(0, 1)
+        np.testing.assert_allclose(
+            masked_smear.get_effective_sigma_grid(1),
+            np.sqrt(masked_smear.get_effective_variance_grid(1)),
+            rtol=1e-6,
+        )
+
+    @pytest.mark.parametrize("smear", [True, False])
+    def test_kill_mask_noise_matches_the_plan(self, smear: bool) -> None:
+        mask = np.ones(64, dtype=np.uint8)
+        mask[[0, 9, 63]] = 0
+        engine = FDMTFFT(*self.args, use_box_smearing=smear, kill_mask=mask)
+        plan = engine.plan
+        np.testing.assert_array_equal(
+            engine.get_effective_variance_grid(3),
+            plan.get_effective_variance_grid(3, smear, kill_mask=mask),
+        )
+        assert engine.get_effective_sigma(5, 2) == plan.get_effective_sigma(
+            5, 2, smear, kill_mask=mask
+        )
+        # Any accepted mask form gives the same noise.
+        np.testing.assert_array_equal(
+            plan.get_effective_variance_grid(3, smear, kill_mask=mask.astype(bool)),
+            plan.get_effective_variance_grid(3, smear, kill_mask=list(mask)),
+        )
+        with pytest.raises(ValueError, match="kill_mask"):
+            plan.get_effective_variance_grid(1, kill_mask=np.ones(3, np.uint8))
+
+        # Stepper subband views: the engine's subband sigma carries its mask.
+        sub = libdmt.FDMTPlan(1100.0, 1500.0, 64, 512, 0.001, 48, subband_depth=2)
+        stepper = FDMTFFT(sub, use_box_smearing=smear, kill_mask=mask)
+        for level in range(sub.niters + 1):
+            for band in range(len(sub.container.dt_grids[level])):
+                np.testing.assert_array_equal(
+                    stepper.get_subband_sigma_grid(level, band, 2),
+                    sub.get_subband_sigma_grid(level, band, 2, smear, kill_mask=mask),
+                )
+        # Level 0 holds the channels: a killed channel has no noise.
+        assert np.all(stepper.get_subband_variance_grid(0, 0) == 0)
+        assert np.all(stepper.get_subband_variance_grid(0, 1) > 0)
 
     def test_history_round_trip(self) -> None:
         rng = np.random.default_rng(2)

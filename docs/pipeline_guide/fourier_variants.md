@@ -17,11 +17,12 @@ time shift is a phase ramp, $x(t-\tau) \leftrightarrow
 
 Each follows the conventions of its time-domain counterpart: the same DM
 constant, time at native resolution, and the same reference frequency
-(`plan.f_ref`). `FDMTFFT`, like FDMT, references `f_min`, the bottom edge of
-the band. `DDMTFFT`, like DDMT and SDMT, delays each channel from its centre,
-`f_min + (c + 1/2) df`, relative to the centre of the top channel,
-`f_max - df/2` (see [periodicity searches](periodicity.md) for what the
-reference means for output times).
+(`plan.f_ref`: `f_min`, the bottom edge of the band, by default; `DDMTFFT`,
+like DDMT and SDMT, also accepts `f_ref = f_max`).
+`DDMTFFT`, like DDMT and SDMT, samples each channel at its centre,
+`f_min + (c + 1/2) df`, and starts its output `plan.time_offset` samples into
+the stream (see [periodicity searches](periodicity.md) for what the reference
+means for output times).
 
 The Fourier engines transform to complex float spectra. Low-bit input does
 not make them any faster algorithmically; it only reduces the input bytes read

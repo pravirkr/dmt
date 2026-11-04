@@ -48,6 +48,7 @@ inline void compare(std::vector<RawCandidate> actual,
         CHECK(actual[i].width == expected[i].width);
         CHECK(actual[i].chan_begin == expected[i].chan_begin);
         CHECK(actual[i].chan_end == expected[i].chan_end);
+        CHECK(actual[i].staggered == expected[i].staggered);
         CHECK(actual[i].dm == expected[i].dm);
         CHECK(actual[i].f_low_mhz == expected[i].f_low_mhz);
         CHECK(actual[i].f_high_mhz == expected[i].f_high_mhz);
@@ -173,6 +174,7 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
                 c.subband_idx   = p.subband_idx;
                 c.chan_begin    = p.chan_begin;
                 c.chan_end      = p.chan_end;
+                c.staggered     = p.staggered;
                 c.f_low_mhz     = p.f_low_mhz;
                 c.f_high_mhz    = p.f_high_mhz;
                 return c;
@@ -258,9 +260,7 @@ reference(const plans::FDMTPlan& plan,
         nrows += beams * p.dm_grid.size();
     }
     rows.resize(nrows);
-    FDMT fdmt(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
-              plan.get_nsamps(), plan.get_tsamp(), plan.get_dt_grid_final(),
-              smear, "valid", Exec::cpu(), beams, 0, false, plan.get_nsamps());
+    FDMT fdmt(plan, smear, Exec::cpu(), beams, 0, false, plan.get_nsamps());
     std::vector<float> output(beams * plan.get_dmt_size());
     for (const auto& block : input) {
         fdmt.reset(block, output);

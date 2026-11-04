@@ -539,11 +539,14 @@ public:
             throw std::invalid_argument(
                 "FDMT (cuda): nbeams must be at least 1");
         }
-        m_search_nbits    = cfg.search_nbits;
-        m_chunk           = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                                      cfg.chunk_nsamps);
-        m_search_max_fuse = cfg.max_fuse_levels;
-        m_search_upper    = cfg.search_upper_levels;
+        m_search_nbits = cfg.search_nbits;
+        m_chunk        = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
+                                                   cfg.chunk_nsamps);
+        // Staggered subbands cross fused-group boundaries: fuse (and compute
+        // direct levels) only below them.
+        m_search_max_fuse =
+            std::min(cfg.max_fuse_levels, m_plan.get_max_fuse_levels());
+        m_search_upper = cfg.search_upper_levels;
         // Automatic chunk: L2-resident state when it fits, else the budget
         // rule (halved for the packed search's uint64 state).
         const SizeType elem =
@@ -1247,6 +1250,9 @@ public:
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
                                                       grid.dt_grid.size()),
+            .chan_begin  = grid.chan_begin,
+            .chan_end    = grid.chan_end,
+            .staggered   = grid.staggered,
         };
     }
 
@@ -1271,6 +1277,9 @@ public:
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
                                                       grid.dt_grid.size()),
+            .chan_begin  = grid.chan_begin,
+            .chan_end    = grid.chan_end,
+            .staggered   = grid.staggered,
         };
     }
 

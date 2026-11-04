@@ -144,6 +144,22 @@ public:
             bool fractional_delays             = true,
             std::span<const uint8_t> kill_mask = {});
 
+    /**
+     * @brief Constructs an FDMTFFT engine from a prepared plan, e.g. one
+     * with a subband search depth (plans::FDMTPlan subband_depth), whose
+     * staggered subbands the stepper then exposes. The mode is the plan's.
+     *
+     * @param plan The plan, copied into the instance.
+     * @param use_box_smearing, exec, nbeams, fractional_delays, kill_mask
+     * See the first constructor.
+     */
+    explicit FDMTFFT(plans::FDMTPlan plan,
+                     bool use_box_smearing              = true,
+                     Exec exec                          = {},
+                     SizeType nbeams                    = 1,
+                     bool fractional_delays             = true,
+                     std::span<const uint8_t> kill_mask = {});
+
     ~FDMTFFT();
     FDMTFFT(FDMTFFT&&) noexcept;
     FDMTFFT& operator=(FDMTFFT&&) noexcept;
@@ -301,6 +317,15 @@ public:
     /// @brief Theoretical noise sigma grid across all DM trials
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width = 1) const;
+    /// @brief Noise variance of every row of one stepper subband view (merge
+    /// @p level, subband index @p subband), with this engine's box smearing
+    /// and kill mask: FDMTPlan::get_subband_variance_grid().
+    [[nodiscard]] std::vector<float> get_subband_variance_grid(
+        SizeType level, SizeType subband, SizeType boxcar_width = 1) const;
+    /// @brief sqrt of get_subband_variance_grid(): divide a view's rows by
+    /// it for S/N.
+    [[nodiscard]] std::vector<float> get_subband_sigma_grid(
+        SizeType level, SizeType subband, SizeType boxcar_width = 1) const;
 
     /// @brief Resets cross-block streaming history to cold start
     void reset_history() noexcept;

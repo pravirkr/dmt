@@ -30,6 +30,7 @@
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_chunk.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/fdmt_tree.hpp"
 #include "dmt/modes.hpp"
 
 namespace dmt::algorithms {
@@ -1505,13 +1506,12 @@ public:
             throw std::logic_error(
                 "FDMT: Stepper is not initialized. Call reset() first.");
         }
-        const auto& plan_c      = m_plan.get_container();
-        const auto& state_shape = plan_c.state_shape[m_current_level];
-        if (subband_idx >= state_shape.nchans) {
+        const auto& plan_c = m_plan.get_container();
+        if (subband_idx >= plan_c.grids[m_current_level].size()) {
             throw std::out_of_range(std::format(
                 "FDMT: Subband index {} out of range (current level has {} "
                 "subbands)",
-                subband_idx, state_shape.nchans));
+                subband_idx, plan_c.grids[m_current_level].size()));
         }
         const auto& grid  = plan_c.grids[m_current_level][subband_idx];
         const auto len    = m_row_len[m_current_level];
@@ -1526,6 +1526,9 @@ public:
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
                                                       grid.dt_grid.size()),
+            .chan_begin  = grid.chan_begin,
+            .chan_end    = grid.chan_end,
+            .staggered   = grid.staggered,
         };
     }
 
@@ -1542,7 +1545,7 @@ public:
             throw std::logic_error(
                 "FDMT: Stepper is not initialized. Call reset() first.");
         }
-        return m_plan.get_container().state_shape[m_current_level].nchans;
+        return m_plan.get_container().grids[m_current_level].size();
     }
 
     [[nodiscard]] bool is_finished() const noexcept override {
@@ -1989,7 +1992,8 @@ private:
             m_fuse_levels = std::min(fuse_levels, niters);
         }
 
-        m_fuse_levels = std::min(m_fuse_levels, max_fuse_levels);
+        m_fuse_levels = std::min(
+            {m_fuse_levels, max_fuse_levels, m_plan.get_max_fuse_levels()});
 
         m_ws.row_bytes = round_up_64(m_row_len[0] * (m_search_nbits == 32
                                                          ? sizeof(float)
@@ -2193,18 +2197,11 @@ private:
     // ---------------------------------------------------------------------
 
     // Coordinate range [begin, end) of level `l` owned by fused group `g`:
-    // the level-l sub-bands descending from level-F sub-band g, i.e.
-    // [g * 2^(F-l), (g+1) * 2^(F-l)) clipped to the level's sub-band count
-    // (odd counts end in a single-child copy sub-band, which still descends
-    // from sub-band floor(j / 2)).
+    // the level-l sub-bands descending from level-F sub-band g (see
+    // fdmt_tree.hpp).
     [[nodiscard]] std::pair<SizeType, SizeType>
     fused_coord_range(SizeType l, SizeType g, SizeType fuse) const noexcept {
-        const auto& grids    = m_plan.get_container().grids[l];
-        const SizeType width = SizeType{1} << (fuse - l);
-        const SizeType first = g * width;
-        const SizeType last  = std::min(first + width, grids.size()) - 1;
-        return {grids[first].coord_offset,
-                grids[last].coord_offset + grids[last].ndt};
+        return detail::fdmt_group_coords(m_plan.get_container(), fuse, g, l);
     }
 
     // Merges level-l coordinates [c_begin, c_end) of one fused group. `in`
@@ -2390,7 +2387,6 @@ private:
         }
         const auto& pc              = m_plan.get_container();
         const SizeType ngroups      = pc.state_shape[fuse].nchans;
-        const SizeType nchans       = pc.state_shape[0].nchans;
         const auto tree_hist_stride = m_plan.get_tree_history_size();
 
         for (SizeType b = 0; b < m_nbeams; ++b) {
@@ -2408,9 +2404,10 @@ private:
                 // those at the top, so hand them out dynamically.
 #pragma omp for schedule(dynamic)
                 for (SizeType g = 0; g < ngroups; ++g) {
-                    const SizeType ch_begin = g << fuse;
-                    const SizeType ch_end =
-                        std::min(ch_begin + (SizeType{1} << fuse), nchans);
+                    const auto channels =
+                        detail::fdmt_group_channels(pc, fuse, g);
+                    const SizeType ch_begin = channels.first;
+                    const SizeType ch_end   = channels.second;
                     const SizeType c0b = fused_coord_range(0, g, fuse).first;
                     std::byte* cur     = buf_a;
                     std::byte* nxt     = buf_b;
@@ -2549,7 +2546,6 @@ private:
     void initialise_fused_tiled(SizeType fuse) {
         const auto& pc              = m_plan.get_container();
         const SizeType ngroups      = pc.state_shape[fuse].nchans;
-        const SizeType nchans       = pc.state_shape[0].nchans;
         const auto tree_hist_stride = m_plan.get_tree_history_size();
         const auto& grids0          = pc.grids[0];
         const SizeType tile         = m_fuse_tile;
@@ -2564,9 +2560,10 @@ private:
                 const SizeType tid = fdmt_thread_id();
 #pragma omp for schedule(dynamic) nowait
                 for (SizeType g = 0; g < ngroups; ++g) {
-                    const SizeType ch_begin = g << fuse;
-                    const SizeType ch_end =
-                        std::min(ch_begin + (SizeType{1} << fuse), nchans);
+                    const auto channels =
+                        detail::fdmt_group_channels(pc, fuse, g);
+                    const SizeType ch_begin = channels.first;
+                    const SizeType ch_end   = channels.second;
                     const SizeType c0b = fused_coord_range(0, g, fuse).first;
                     for (SizeType ts = 0; ts < n_active; ts += tile) {
                         const SizeType n  = std::min(tile, n_active - ts);

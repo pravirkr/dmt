@@ -1,5 +1,7 @@
 #include "fdmt_boxcar_reference.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <random>
 #include <vector>
@@ -163,10 +165,12 @@ TEST_CASE("FDMTFFTBoxcar analytical scaling predicts Gaussian noise",
 TEST_CASE("FDMTFFTBoxcar validates its configuration", "[boxcar][cpu]") {
     const plans::FDMTPlan plan(700, 1200, 4, 256, 0.001F,
                                std::vector<IndexType>{0, 5, 9});
+    const plans::FDMTPlan subband_plan(
+        700, 1200, 4, 256, 0.001F, std::vector<IndexType>{0, 5, 9}, "valid", 1);
     BoxcarConfig subbands;
-    subbands.max_boxcar     = 8;
-    subbands.subband_levels = 1;
-    CHECK_THROWS_AS(FDMTFFTBoxcar(plan, subbands), std::invalid_argument);
+    subbands.max_boxcar = 8;
+    CHECK_THROWS_AS(FDMTFFTBoxcar(subband_plan, subbands),
+                    std::invalid_argument);
     BoxcarConfig packed;
     packed.max_boxcar  = 8;
     packed.input_nbits = 8;
@@ -182,4 +186,114 @@ TEST_CASE("FDMTFFTBoxcar validates its configuration", "[boxcar][cpu]") {
     CHECK(search.get_memory_usage().total() > 0);
     CHECK(search.get_chunk_nsamps() > 0);
     CHECK_FALSE(search.summary().empty());
+}
+
+TEST_CASE("FDMTFFTBoxcar warmup_samples excludes killed edge channels",
+          "[boxcar][cpu]") {
+    const plans::FDMTPlan plan(700.0F, 1200.0F, 16, 256, 0.001F, 32, 0, 1,
+                               "valid");
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 8;
+
+    FDMTFFTBoxcar unmasked(plan, cfg, true, Exec::cpu(), 1, true, {});
+    // Kill the upper half of channels (highest frequencies, which carry the
+    // largest lookback shift relative to f_min).
+    std::vector<uint8_t> kill_mask(16, 1);
+    for (size_t c = 8; c < 16; ++c) {
+        kill_mask[c] = 0;
+    }
+    FDMTFFTBoxcar masked(plan, cfg, true, Exec::cpu(), 1, true, kill_mask);
+
+    REQUIRE(unmasked.get_search_plans().size() == 1);
+    REQUIRE(masked.get_search_plans().size() == 1);
+    CHECK(masked.get_search_plans()[0].warmup_samples.back() <
+          unmasked.get_search_plans()[0].warmup_samples.back());
+}
+
+TEST_CASE("FDMTFFTBoxcar warmup is each masked row's exact cold support",
+          "[boxcar][cpu]") {
+    // A cold stream (zero history) and the same stream after real data must
+    // agree on every row from warmup_samples[d] on, and differ one sample
+    // earlier: the warmup is safe and no longer than needed. Integer shifts
+    // (no fractional guard) make the support exact. Positive input keeps
+    // the contributions at the first unsupported sample from cancelling.
+    const SizeType nchans = 16;
+    const SizeType nsamps = 256;
+    const plans::FDMTPlan plan(700.0F, 1200.0F, nchans, nsamps, 0.001F, 32, 0,
+                               1, "valid");
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 8;
+    std::mt19937 random(5);
+    std::uniform_real_distribution<float> value(1.0F, 2.0F);
+    const auto blocks = [&](SizeType n) {
+        std::vector<std::vector<float>> out(
+            n, std::vector<float>(nchans * nsamps));
+        for (auto& block : out) {
+            for (auto& x : block) {
+                x = value(random);
+            }
+        }
+        return out;
+    };
+    const auto prefix = blocks(2);
+    const auto stream = blocks(3);
+
+    std::vector<uint8_t> top(nchans, 1);
+    std::vector<uint8_t> bottom(nchans, 1);
+    std::vector<uint8_t> scattered(nchans, 1);
+    for (SizeType c = 0; c < nchans / 2; ++c) {
+        bottom[c]             = 0;
+        top[c + (nchans / 2)] = 0;
+    }
+    for (const SizeType c : {3, 9, 15}) {
+        scattered[c] = 0;
+    }
+    const std::vector<std::vector<uint8_t>> masks{{}, top, bottom, scattered};
+    for (SizeType m = 0; m < masks.size(); ++m) {
+        const auto& mask = masks[m];
+        for (const bool smear : {true, false}) {
+            CAPTURE(m, smear);
+            FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, false, mask);
+            REQUIRE(search.get_output_latency() == 0);
+            const auto warmup =
+                search.get_search_plans().front().warmup_samples;
+            const auto rows = [&](bool warm) {
+                FDMTFFT fft(plan, smear, Exec::cpu(), 1, false, mask);
+                std::vector<float> output(plan.get_dmt_size());
+                if (warm) {
+                    for (const auto& block : prefix) {
+                        fft.execute(block, output);
+                    }
+                }
+                std::vector<std::vector<float>> out(plan.get_dmt_ndms());
+                for (const auto& block : stream) {
+                    fft.execute(block, output);
+                    for (SizeType d = 0; d < out.size(); ++d) {
+                        const auto* row = output.data() + (d * nsamps);
+                        out[d].insert(out[d].end(), row, row + nsamps);
+                    }
+                }
+                return out;
+            };
+            const auto cold = rows(false);
+            const auto hot  = rows(true);
+            REQUIRE(warmup.size() == cold.size());
+            for (SizeType d = 0; d < cold.size(); ++d) {
+                CAPTURE(d, warmup[d]);
+                REQUIRE(warmup[d] < cold[d].size());
+                float scale = 1e-30F;
+                for (const auto v : hot[d]) {
+                    scale = std::max(scale, std::abs(v));
+                }
+                const float tol = 1e-4F * scale;
+                for (SizeType t = warmup[d]; t < cold[d].size(); ++t) {
+                    REQUIRE(std::abs(cold[d][t] - hot[d][t]) <= tol);
+                }
+                if (warmup[d] > 0) {
+                    const auto t = warmup[d] - 1;
+                    CHECK(std::abs(cold[d][t] - hot[d][t]) > 10.0F * tol);
+                }
+            }
+        }
+    }
 }
