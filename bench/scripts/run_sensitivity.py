@@ -10,8 +10,9 @@ data, and writes
     bench/results/sensitivity/cryopaf.json  (metadata)
 
 for ``dmtlib.sensitivity.CRYOPAF`` (512 channels over 704-1216 MHz at
-512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband`` and
-``--config parkes_uwl`` select the other presets and write their named
+512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband``,
+``--config parkes_uwl`` and ``--config meerkat_lband`` select the other
+presets and write their named
 ``{npz,json}`` outputs.
 
 which plot_sensitivity.py turns into figures. A unit-variance noise

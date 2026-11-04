@@ -26,5 +26,19 @@ target_include_directories(
 target_link_libraries(
   ${DMT_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
 )
+# pybind11's include directory comes first on the module's command line (a
+# system pybind11 brings /opt/homebrew/include or /usr/include), where another
+# fmt may live. Put the CPM fmt ahead of it so one fmt version reaches every
+# object of the module (see bench/CMakeLists.txt).
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.25)
+  set(_dmt_fmt_first SYSTEM BEFORE)
+else()
+  set(_dmt_fmt_first BEFORE) # -I rather than -isystem before 3.25
+endif()
+target_include_directories(
+  ${DMT_PYMODULE_NAME} ${_dmt_fmt_first}
+  PRIVATE $<TARGET_PROPERTY:fmt::fmt-header-only,INTERFACE_INCLUDE_DIRECTORIES>
+)
+unset(_dmt_fmt_first)
 dmt_enable_coverage(${DMT_PYMODULE_NAME})
 install(TARGETS ${DMT_PYMODULE_NAME} DESTINATION ${DMT_PYTHON_LIBRARY_NAME})

@@ -302,7 +302,7 @@ compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]
 
 Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The streaming benchmarks run
 at the reference point of a suite configuration (`DMT_BENCH_CONFIG`:
-`cryopaf`, `cryopaf_lband` or `parkes_uwl`) with widths up to 100 ms
+`cryopaf`, `cryopaf_lband`, `parkes_uwl` or `meerkat_lband`) with widths up to 100 ms
 (`max_boxcar = floor(0.1 s / tsamp)`):
 
 ```bash

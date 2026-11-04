@@ -78,6 +78,16 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "NDMS_REF": 4749,
         "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
     },
+    "meerkat_lband": {
+        "F_MIN": 856.0,
+        "F_MAX": 1712.0,
+        "TSAMP": 612.48e-6,
+        "NCHANS": 4096,
+        "LEVIN_TOL": 1.1,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 4057,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
+    },
 }
 F_MIN, F_MAX, TSAMP = 704.0, 1216.0, 5.12e-4
 NSAMPS_REF = 32768

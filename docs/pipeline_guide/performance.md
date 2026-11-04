@@ -228,6 +228,7 @@ reports the tile.
 | `cryopaf`: 512 channels, 704–1216 MHz, 512 µs, tolerance 1.1 | 1545 | 138k | 5.7× |
 | `cryopaf_lband`: 1152 channels, 1100–1714 MHz, 455.6 µs, tolerance 1.1 | 1941 | 88k | 25.5× |
 | `parkes_uwl`: 6656 channels, 704–4032 MHz, 64 µs, tolerance 1.6 | 4749 | 1864k | 17.0× |
+| `meerkat_lband`: 4096 channels, 856–1712 MHz, 612.48 µs, tolerance 1.1 | 4057 | 165k | 100.9× |
 
 The FDMT's cost is set by the delay range in samples, about
 $\log_2 N_\text{chan}$ levels of $\Delta t_\text{max}$ rows. The brute-force

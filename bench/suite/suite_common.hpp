@@ -4,7 +4,8 @@
 // by every algorithm and backend, so FDMT, FDMT-FFT (integer and fractional
 // merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force) land on the
 // same plots. DMT_BENCH_CONFIG selects cryopaf (512 channels),
-// cryopaf_lband (1152 channels) or parkes_uwl (6656 channels). Only block
+// cryopaf_lband (1152 channels), parkes_uwl (6656 channels) or
+// meerkat_lband (4096 channels). Only block
 // length, DM range and input bit width are swept. See bench/README.md.
 
 #include <algorithm>
@@ -35,6 +36,11 @@ namespace dmt::bench_suite {
 // - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us,
 //   DM 0-2000, tolerance 1.6 (4749 trials; 1.1 would need 12941). The
 //   dispersion sweep spans multiple blocks.
+// - "meerkat_lband": 4096 channels over 856-1712 MHz at 612.48 us (the
+//   MeerTRAP / TRAPUM filterbank mode, downsampled by two in time),
+//   DM 0-2000, tolerance 1.1: 12 tree levels on a 4057-trial grid, uniform
+//   at 3.28 delay samples to DM 1836 and 6.56 beyond, 101x fewer
+//   operations than brute force.
 // The benchmark names do not carry the configuration; run_suite.py writes
 // each one to its own results tree.
 struct SuiteConfig {
@@ -91,6 +97,19 @@ inline const SuiteConfig& suite_config() {
                                2000.0F,
                                {8192, 16384, 32768, 65536},
                                {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
+        // DM 2000 sweeps 8.49428 s (13868.67 samples); the covering Levin
+        // grid ends at DM 2001.10. The 32768-sample reference block spans
+        // 20.06974 seconds.
+        SuiteConfig meerkat_lband{"meerkat_lband",
+                                  856.0F,
+                                  1712.0F,
+                                  612.48e-6F,
+                                  4096,
+                                  1.1F,
+                                  32768,
+                                  2000.0F,
+                                  {8192, 16384, 32768, 65536},
+                                  {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
         const char* env = std::getenv("DMT_BENCH_CONFIG"); // NOLINT
         const std::string_view sel =
             (env != nullptr && *env != '\0') ? env : "cryopaf";
@@ -103,9 +122,12 @@ inline const SuiteConfig& suite_config() {
         if (sel == "cryopaf_lband") {
             return cryopaf_lband;
         }
+        if (sel == "meerkat_lband") {
+            return meerkat_lband;
+        }
         throw std::invalid_argument(
-            fmt::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband "
-                        "or parkes_uwl",
+            fmt::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband, "
+                        "parkes_uwl or meerkat_lband",
                         sel));
     }();
     return cfg;

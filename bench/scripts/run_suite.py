@@ -10,7 +10,7 @@ reads:
 
 Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
 for the default ``cryopaf`` preset, and ``bench/results/<config>/<machine>/``
-for ``--config cryopaf_lband`` or ``parkes_uwl``
+for ``--config cryopaf_lband``, ``parkes_uwl`` or ``meerkat_lband``
 (``--suite cfdmt``: ``suite_cfdmt_cpu.json`` / ``suite_cfdmt_<gpu>.json``, the
 CohFDMT baseband search, which has its own configuration and plots)
 (``gpu`` is ``cuda`` or ``hip``, whichever the build has)
@@ -158,12 +158,13 @@ def main() -> None:
     ap.add_argument(
         "--config",
         default="cryopaf",
-        choices=["cryopaf", "cryopaf_lband", "parkes_uwl"],
+        choices=["cryopaf", "cryopaf_lband", "parkes_uwl", "meerkat_lband"],
         help="data configuration of --suite main (bench/suite/suite_common.hpp): "
         "cryopaf (512 channels, 704-1216 MHz at 512 us), cryopaf_lband "
-        "(1152 channels, 1100-1714 MHz at 455.6 us), or parkes_uwl "
-        "(6656 channels, 704-4032 MHz at 64 us); all DM 0-2000, Levin tolerance "
-        "1.1 (UWL: 1.6)",
+        "(1152 channels, 1100-1714 MHz at 455.6 us), parkes_uwl "
+        "(6656 channels, 704-4032 MHz at 64 us) or meerkat_lband (4096 "
+        "channels, 856-1712 MHz at 612.48 us); all DM 0-2000, Levin "
+        "tolerance 1.1 (UWL: 1.6)",
     )
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")

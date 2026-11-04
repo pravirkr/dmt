@@ -51,8 +51,10 @@ box smearing (:data:`VARIANTS`) is measured as well.
 :data:`CRYOPAF` is the 512-channel CryoPAF benchmark over 704-1216 MHz at
 512 us, DM 0-2000, with Levin tolerance 1.1. :data:`CRYOPAF_LBAND` is the
 1152-channel L-band streaming target. :data:`PARKES_UWL` covers 704-4032 MHz
-with 6656 channels at 64 us and Levin tolerance 1.6. :data:`CONFIGS` holds
-these presets by name.
+with 6656 channels at 64 us and Levin tolerance 1.6. :data:`MEERKAT_LBAND`
+is the 4096-channel MeerTRAP filterbank mode over 856-1712 MHz at 612.48 us
+(306.24 us downsampled by two).
+:data:`CONFIGS` holds these presets by name.
 """
 
 from __future__ import annotations
@@ -487,7 +489,18 @@ tolerance 1.6 keeps the grid under 5000 trials (4749; tolerance 1.1 would
 need 12941). At DM 2000 the dispersion sweep spans several blocks; histories
 must be warmed before steady-state timing. Full-band search is the default."""
 
-CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_LBAND, PARKES_UWL)}
+MEERKAT_LBAND = SearchConfig(
+    856.0, 1712.0, 4096, 612.48e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
+    name="meerkat_lband", nsamps_ref=32768,
+)  # fmt: skip
+"""MeerKAT L-band benchmark: the 4096-channel MeerTRAP / TRAPUM filterbank
+mode over 856-1712 MHz, downsampled by two to 612.48 us, DM 0-2000, Levin
+tolerance 1.1, in 20.0697446-second blocks. The grid has 4057 trials in two
+uniform segments (3.28 delay samples per trial to DM 1836, 6.56 beyond), and
+the 12-level tree needs 101x fewer operations than brute force. The DM-2000
+band sweep is 8.49428 seconds (13868.67 samples)."""
+
+CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_LBAND, PARKES_UWL, MEERKAT_LBAND)}
 """The named configurations, by ``SearchConfig.name``."""
 
 

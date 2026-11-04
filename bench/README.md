@@ -22,6 +22,7 @@ box smearing:
 | `cryopaf` (default) | 704–1216 | 512 | 512 µs | 1.1 | 1545 | 32768 samples (16.777216 s) |
 | `cryopaf_lband` | 1100–1714 | 1152 | 455.6 µs | 1.1 | 1941 | 32768 samples (14.9291008 s) |
 | `parkes_uwl` | 704–4032 | 6656 | 64 µs | 1.6 | 4749 | 32768 samples (2.097152 s) |
+| `meerkat_lband` | 856–1712 | 4096 | 612.48 µs | 1.1 | 4057 | 32768 samples (20.0697446 s) |
 
 UWL uses tolerance 1.6 to keep its grid under 5000 trials (1.1 would need
 12941 and 23.7 GiB of FDMT tree history, against 9.8 GiB now).
@@ -32,7 +33,17 @@ fractional bandwidth, non-power-of-two channel counts, fine time sampling,
 and long streaming histories. At DM 2000 the UWL sweep is **16.233853 s**
 (about **253654 samples**), much longer than its reference block. Valid
 streaming permits this; histories must be warmed before steady-state timing.
-Full-band search is the default for CryoPAF and UWL.
+Full-band search is the default for CryoPAF, UWL and MeerKAT L-band.
+
+MeerKAT L-band is the 4096-channel MeerTRAP / TRAPUM filterbank mode
+(306.24 µs) downsampled by two in time, the regime the FDMT is built for:
+12 tree levels, and 209 kHz channels at 612.48 µs keep the tolerance-1.1
+Levin grid at its densest step (3.28 delay samples per trial) to DM 1836
+and at twice that beyond, 4057 trials over a DM 2000 sweep of
+**8.49428 s** (13869 samples). The tree needs 101× fewer operations than
+brute force (5.7× on CryoPAF, 25.5× on CryoPAF L-band; see the performance
+guide). At the reference point the FDMT needs about 3.3 GB and the Fourier
+engines about 6 GB.
 
 Each preset runs three sweeps through its reference point:
 
@@ -110,7 +121,7 @@ cmake --build build -j --target dmt_bench_suite
 
 # 2. Run the suite: bench/results/<machine>/suite_{cpu,cuda}.json for
 #    cryopaf, bench/results/<config>/<machine>/ for the other presets
-for config in cryopaf cryopaf_lband; do      # parkes_uwl: deferred, see above
+for config in cryopaf cryopaf_lband meerkat_lband; do   # parkes_uwl: deferred, see above
   python bench/scripts/run_suite.py --machine xeon-6348h \
       --label "Xeon Gold 6348H" --no-gpu --config $config     # CPU box
   python bench/scripts/run_suite.py --machine l40s --label "NVIDIA L40S" \

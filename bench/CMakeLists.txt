@@ -15,6 +15,7 @@ set(BENCH_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cpu_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_boxcar_cpu_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cpu_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_skew_cpu_b.cpp
 )
 
 # GPU benchmark sources (CUDA source, built for CUDA or HIP): the same
@@ -44,12 +45,15 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
   target_include_directories(${TARGET_BENCHMARKS} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
+# DMT_COMPILE_OPTIONS (the CPM fmt) before the benchmark package: a system fmt
+# next to it (Homebrew's /opt/homebrew/include) would otherwise be found first
+# and mix two fmt versions into one binary, which garbles formatted floats.
 target_link_libraries(
   ${TARGET_BENCHMARKS}
   PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          ${DMT_COMPILE_OPTIONS}
           benchmark::benchmark_main
           OpenMP::OpenMP_CXX
-          ${DMT_COMPILE_OPTIONS}
 )
 
 target_compile_definitions(${TARGET_BENCHMARKS} PRIVATE ${DMT_BACKEND_DEFINITIONS})
@@ -73,6 +77,7 @@ set(BENCH_SOURCES_MEM
     ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_mem_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_mem_b.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_mem_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_skew_mem_b.cpp
 )
 
 add_executable(${TARGET_BENCHMARKS_MEM} ${BENCH_SOURCES_MEM})
@@ -84,9 +89,9 @@ target_include_directories(
 target_link_libraries(
   ${TARGET_BENCHMARKS_MEM}
   PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          ${DMT_COMPILE_OPTIONS}
           benchmark::benchmark
           OpenMP::OpenMP_CXX
-          ${DMT_COMPILE_OPTIONS}
 )
 
 # Published benchmark suite (bench/suite): one fixed configuration shared by
@@ -121,8 +126,8 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
   target_include_directories(${TARGET_BENCHMARKS_SUITE} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 target_link_libraries(
-  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
-                                     ${DMT_COMPILE_OPTIONS}
+  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
+                                     benchmark::benchmark_main
 )
 if(DMT_GPU_BACKEND)
   target_link_libraries(${TARGET_BENCHMARKS_SUITE} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})
