@@ -112,6 +112,19 @@ jobs:
       - name: Run C++ unit tests
         run: ctest --preset ci --parallel "$(nproc)"
 
+      # The installed package must work for downstream find_package(dmt) users
+      # (dmtConfig.cmake, dmt::dmt, the static FFTW/OpenMP chain). One entry is
+      # enough: it does not depend on the compiler.
+      - name: Install and build a downstream consumer
+        if: matrix.compiler.cc == 'gcc-14'
+        env:
+          CXX: ${{ matrix.compiler.cpp }}
+        run: |
+          cmake --install build-ci --prefix "$RUNNER_TEMP/dmt"
+          cmake -S tests/consumer -B build-consumer -G Ninja -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/dmt"
+          cmake --build build-consumer
+          ./build-consumer/dmt_consumer
+
   # Python: uv install + pytest (supported user path).
   python-tests:
     name: "Python (${{ matrix.os }})"

@@ -41,6 +41,20 @@ sudo apt install -y build-essential cmake ninja-build libfftw3-dev libomp-dev
 brew install cmake ninja fftw libomp
 ```
 :::
+:::{tab-item} conda (no root)
+:sync: conda
+
+For clusters and other machines without root access, or with a system
+compiler older than GCC 11, `environment.yml` provides the compiler, FFTW,
+CMake and Python from conda-forge:
+
+```bash
+conda env create -f environment.yml   # or mamba / micromamba
+conda activate dmt
+```
+
+Then install from the clone as below (`pip install .`).
+:::
 ::::
 
 ## Python package

@@ -30,6 +30,8 @@ dependencies = ["numpy"]
 Homepage = "https://github.com/pravirkr/dmt"
 Documentation = "https://dmt.readthedocs.io"
 Repository = "https://github.com/pravirkr/dmt"
+Issues = "https://github.com/pravirkr/dmt/issues"
+Changelog = "https://github.com/pravirkr/dmt/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 tests = ["pytest", "pytest-cov", "pytest-randomly", "pytest-sugar"]
@@ -77,9 +79,18 @@ test-extras = "tests"
 test-command = "python -m pytest {project}/tests/python -v"
 test-skip = "pp* *-musllinux* *-manylinux_i686"
 
+# Wheels are CPU-only and must run on machines other than the builder: no
+# -march=native, pinned CPM deps, and DMT_GPU=OFF (AUTO would link CUDA into
+# the wheel whenever the build image has nvcc). GPU users build from source.
 [tool.cibuildwheel.linux]
-# Wheels must run on machines other than the builder — no -march=native, pinned CPM deps.
-environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_GPU = "AUTO" }
+environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_GPU = "OFF" }
+
+# The SIMD kernels are chosen at compile time: x86-64-v3 keeps the AVX2 paths
+# (Haswell / Zen and newer). aarch64 and macOS arm64 always have NEON.
+[[tool.cibuildwheel.overrides]]
+select = "*-manylinux_x86_64"
+inherit.environment = "append"
+environment = { DMT_CPU_ARCH = "x86-64-v3" }
 
 [tool.cibuildwheel.macos]
 environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_GPU = "OFF" }

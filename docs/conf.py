@@ -4,6 +4,7 @@ import datetime
 import importlib
 import inspect
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,7 +40,13 @@ project = "dmt"
 author = "Pravir Kumar"
 year = datetime.datetime.now(tz=datetime.UTC).date().year
 copyright = f"{year}, {author}"  # noqa: A001
-release = getattr(dmtlib, "__version__", None) or "0.7.0"
+# The version lives in one place, CMakeLists.txt project(VERSION), which the
+# wheel metadata also reads (pyproject [tool.scikit-build.metadata.version]).
+_cmake_version = re.search(
+    r"project\([^)]*VERSION\s+([0-9][^\s)]+)",
+    (PROJECT_ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+)
+release = _cmake_version.group(1) if _cmake_version else "unknown"
 version = release
 master_doc = "index"
 repo_url = "https://github.com/pravirkr/dmt"
