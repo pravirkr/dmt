@@ -114,7 +114,7 @@ target_compile_options(
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
   INTERFACE
-    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:-O0;-g>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:$<IF:$<BOOL:${DMT_ENABLE_COVERAGE}>,-O0,-O1>;-g>>
     $<${_dmt_not_hip}:$<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>>
     $<${_dmt_not_hip}:$<$<AND:$<CONFIG:Release>,$<BOOL:${DMT_ENABLE_NATIVE_ARCH}>>:-march=native>>
     $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>>

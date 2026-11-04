@@ -1,9 +1,11 @@
 name: GitHub CI
 
 # Two tiers:
-#   • PR (every commit): correctness gates — must pass before merge.
-#   • main push (after merge): coverage + clang-tidy — reporting & static analysis.
-#   • workflow_dispatch: full suite (both tiers).
+#   • Tier 1, correctness gates: every PR commit and every push to main. The
+#     main runs also save the ccache entries that PRs restore.
+#   • Tier 2, main push (after merge): coverage + clang-tidy — reporting &
+#     static analysis.
+#   • workflow_dispatch: full suite (both tiers). pre-commit runs on PRs only.
 on:
   push:
     branches: [main]
@@ -11,9 +13,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A new push cancels a pull request's older run; every commit on main keeps
+# its run (and its coverage upload).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -24,7 +28,7 @@ env:
 
 jobs:
   # =============================================================================
-  # Tier 1 — run on every pull_request commit (and workflow_dispatch)
+  # Tier 1 — run on every pull_request commit, push to main, workflow_dispatch
   # =============================================================================
 
   pre-commit:
@@ -44,7 +48,6 @@ jobs:
   # C++ correctness (Release). CMake builds library + bindings; ctest only.
   cpp-tests:
     name: "C++ tests (${{ matrix.compiler.cc }})"
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -75,6 +78,9 @@ jobs:
         with:
           key: cpp-tests-${{ matrix.compiler.cc }}
           max-size: 500M
+          # PRs restore main's entry but never save their own: per-PR entries
+          # fill the 10 GB cache store and evict the CPM caches.
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Cache CPM sources
         uses: actions/cache@v6
@@ -105,12 +111,11 @@ jobs:
         run: cmake --build build -j "$(nproc)"
 
       - name: Run C++ unit tests
-        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+        run: ctest --test-dir build/tests/cpp --output-on-failure --parallel "$(nproc)" -LE gpu
 
   # Python: uv install + pytest (supported user path).
   python-tests:
     name: "Python (${{ matrix.os }})"
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -147,6 +152,9 @@ jobs:
         with:
           key: python-${{ matrix.os }}
           max-size: 500M
+          # PRs restore main's entry but never save their own: per-PR entries
+          # fill the 10 GB cache store and evict the CPM caches.
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6
@@ -167,12 +175,12 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Test with pytest
-        run: uv run pytest tests/python
+        run: uv run pytest --durations=15 tests/python
 
-  # ASan + UBSan (C++ tests only; no Python bindings).
+  # ASan + UBSan (C++ tests only; no Python bindings). Debug builds use -O1
+  # (CMakeLists.txt), what the sanitizers are designed for.
   sanitizers:
-    name: Sanitizers (ASan+UBSan, gcc-13, Debug)
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    name: Sanitizers (ASan+UBSan, gcc-13, Debug -O1)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -182,9 +190,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build \
+            build-essential cmake ninja-build ccache \
             gcc-13 g++-13 \
             libfftw3-dev libomp-dev catch2 git
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: sanitizers-gcc-13
+          max-size: 500M
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Cache CPM sources
         uses: actions/cache@v6
@@ -202,6 +217,8 @@ jobs:
           LDFLAGS: -fsanitize=address,undefined
         run: >
           cmake -B build -G Ninja
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_BUILD_TYPE=Debug
           -DDMT_BUILD_DOCS=OFF
           -DDMT_BUILD_PYTHON=OFF
@@ -216,7 +233,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+        run: ctest --test-dir build/tests/cpp --output-on-failure --parallel "$(nproc)" -LE gpu
 
   # =============================================================================
   # Tier 2 — run on push to main (post-merge) and workflow_dispatch
@@ -227,7 +244,7 @@ jobs:
     name: clang-tidy
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -266,8 +283,14 @@ jobs:
           -DDMT_ENABLE_NATIVE_ARCH=OFF
           -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
 
+      # Only dmt's own library and binding sources. The compile database also
+      # lists the CPM-built fmt/spdlog sources (8 of ~64 TUs), and the Catch2
+      # test files mostly produce macro noise (bugprone-chained-comparison
+      # from CHECK(a < b)); together they pushed the job past its timeout.
       - name: Run clang-tidy
-        run: run-clang-tidy-18 -p build
+        run: >
+          run-clang-tidy-18 -p build -quiet -j "$(nproc)"
+          "^${GITHUB_WORKSPACE}/(lib|src)/"
 
   # C++ coverage (gcc-13, Debug). gcov upload to Codecov on main only.
   cpp-coverage:
@@ -291,6 +314,9 @@ jobs:
         with:
           key: cpp-coverage-gcc-13
           max-size: 500M
+          # PRs restore main's entry but never save their own: per-PR entries
+          # fill the 10 GB cache store and evict the CPM caches.
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Cache CPM sources
         uses: actions/cache@v6
@@ -320,7 +346,7 @@ jobs:
         run: cmake --build build -j "$(nproc)"
 
       - name: Run C++ unit tests (instrumented)
-        run: ctest --test-dir build/tests/cpp --output-on-failure -LE gpu
+        run: ctest --test-dir build/tests/cpp --output-on-failure --parallel "$(nproc)" -LE gpu
 
       - name: Generate coverage report
         run: |
@@ -365,6 +391,9 @@ jobs:
         with:
           key: python-coverage-ubuntu
           max-size: 500M
+          # PRs restore main's entry but never save their own: per-PR entries
+          # fill the 10 GB cache store and evict the CPM caches.
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6

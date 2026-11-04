@@ -415,9 +415,15 @@ public:
     // Pads -> periodic grid, FFT, deconvolution of the wanted modes.
     void finish(ComplexType* ext, std::span<ComplexType> f) const {
         ComplexType* grid = ext + kPad;
+        // Pad cell l sits at grid index nf + l (right) or l - kPad (left).
+        // Grids shorter than the pad (nf < kPad: a few modes, e.g. m = 1) need
+        // both indices reduced modulo nf; nf - kPad + l would wrap the
+        // unsigned offset (UB). (l + nf - kPad % nf) % nf == (l - kPad) mod nf.
+        // Sources (pads) and targets ([0, nf)) never overlap.
+        const SizeType left_shift = m_nf - (kPad % m_nf);
         for (SizeType l = 0; l < kPad; ++l) {
-            grid[l] += grid[m_nf + l];       // right overflow
-            grid[m_nf - kPad + l] += ext[l]; // left overflow
+            grid[l % m_nf] += grid[m_nf + l];        // right overflow
+            grid[(l + left_shift) % m_nf] += ext[l]; // left overflow
         }
         m_fft->c2c(grid);
         const auto half = static_cast<SizeType>(m_half);
