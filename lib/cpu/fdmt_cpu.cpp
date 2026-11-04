@@ -2404,8 +2404,10 @@ private:
                 // those at the top, so hand them out dynamically.
 #pragma omp for schedule(dynamic)
                 for (SizeType g = 0; g < ngroups; ++g) {
-                    const auto [ch_begin, ch_end] =
+                    const auto channels =
                         detail::fdmt_group_channels(pc, fuse, g);
+                    const SizeType ch_begin = channels.first;
+                    const SizeType ch_end   = channels.second;
                     const SizeType c0b = fused_coord_range(0, g, fuse).first;
                     std::byte* cur     = buf_a;
                     std::byte* nxt     = buf_b;
@@ -2558,8 +2560,10 @@ private:
                 const SizeType tid = fdmt_thread_id();
 #pragma omp for schedule(dynamic) nowait
                 for (SizeType g = 0; g < ngroups; ++g) {
-                    const auto [ch_begin, ch_end] =
+                    const auto channels =
                         detail::fdmt_group_channels(pc, fuse, g);
+                    const SizeType ch_begin = channels.first;
+                    const SizeType ch_end   = channels.second;
                     const SizeType c0b = fused_coord_range(0, g, fuse).first;
                     for (SizeType ts = 0; ts < n_active; ts += tile) {
                         const SizeType n  = std::min(tile, n_active - ts);
