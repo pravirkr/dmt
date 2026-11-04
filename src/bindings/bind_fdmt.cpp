@@ -231,6 +231,23 @@ void bind_fdmt(py::module_& mod) {
             py::arg("fuse_levels") = py::none(), py::arg("int_tree") = true,
             py::arg("backend") = "cpu", py::arg("device") = 0,
             py::arg("chunk_nsamps") = py::none())
+        .def(py::init([](const FDMTPlan& plan, bool use_box_smearing,
+                         int nthreads, SizeType nbeams,
+                         std::optional<SizeType> fuse_levels, bool int_tree,
+                         std::string_view backend, int device,
+                         std::optional<SizeType> chunk_nsamps) {
+                 return FDMT(plan, use_box_smearing,
+                             make_exec(backend, nthreads, device), nbeams,
+                             fuse_levels.value_or(kFDMTAutoFuse), int_tree,
+                             chunk_nsamps.value_or(0));
+             }),
+             "plan"_a, py::kw_only(), "use_box_smearing"_a = true,
+             "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
+             "int_tree"_a = true, "backend"_a = "cpu", "device"_a = 0,
+             "chunk_nsamps"_a = py::none(),
+             "Build from a prepared :class:`FDMTPlan` (its mode and, for "
+             "``subband_depth > 0``, its staggered subbands, which the "
+             "stepper's ``num_subbands``/``view_subband`` then include).")
         .def_property_readonly(
             "plan", &FDMT::get_plan,
             "Get the FDMTPlan object containing transform details.")
@@ -765,6 +782,24 @@ void bind_fdmt(py::module_& mod) {
             py::arg("backend") = "cpu", py::arg("device") = 0,
             py::arg("fractional_delays") = true,
             py::arg("kill_mask")         = py::none())
+        .def(py::init([](const FDMTPlan& plan, bool use_box_smearing,
+                         int nthreads, SizeType nbeams,
+                         std::string_view backend, int device,
+                         bool fractional_delays,
+                         const std::optional<py::array_t<uint8_t>>& kill_mask) {
+                 const auto mask = fft_kill_mask(kill_mask);
+                 return std::make_unique<FDMTFFT>(
+                     plan, use_box_smearing,
+                     make_exec(backend, nthreads, device), nbeams,
+                     fractional_delays, mask);
+             }),
+             "plan"_a, py::kw_only(), "use_box_smearing"_a = true,
+             "nthreads"_a = 1, "nbeams"_a = 1, "backend"_a = "cpu",
+             "device"_a = 0, "fractional_delays"_a = true,
+             "kill_mask"_a = py::none(),
+             "Build from a prepared :class:`FDMTPlan` (its mode and, for "
+             "``subband_depth > 0``, its staggered subbands, which the "
+             "stepper's ``num_subbands``/``view_subband`` then include).")
         .def_property_readonly(
             "backend",
             [](const FDMTFFT& fdmt) {

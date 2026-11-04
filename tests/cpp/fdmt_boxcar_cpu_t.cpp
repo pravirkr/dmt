@@ -29,7 +29,8 @@ TEST_CASE("Boxcar width generation and validation", "[boxcar][cpu]") {
 TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
           "[boxcar][cpu]") {
     const plans::FDMTPlan plan(700, 1200, 7, 311, 0.001F,
-                               std::vector<IndexType>{-73, -12, 0, 4, 97});
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
     const auto input = waterfalls(plan, 2, 4);
     for (const bool smear : {true, false}) {
         for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
@@ -41,7 +42,6 @@ TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
                 cfg.max_boxcar       = 37;
                 cfg.wtsp             = 1.5F;
                 cfg.detect_thresh    = 2.7F;
-                cfg.subband_levels   = 2;
                 cfg.peak_mode        = mode;
                 cfg.max_candidates   = 500000;
                 cfg.max_cands_per_dm = 0;
@@ -81,12 +81,11 @@ TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
 TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
           "[boxcar][cpu]") {
     plans::FDMTPlan plan(700, 1200, 5, 128, 0.001F,
-                         std::vector<IndexType>{-90, 0, 7, 100});
+                         std::vector<IndexType>{-90, 0, 7, 100}, "valid", 2);
     for (const bool smear : {true, false}) {
         BoxcarConfig cfg;
-        cfg.max_boxcar     = 32;
-        cfg.subband_levels = 2;
-        cfg.noise_sigma    = 2.5F;
+        cfg.max_boxcar  = 32;
+        cfg.noise_sigma = 2.5F;
         FDMTBoxcar search(plan, cfg, smear);
         const auto& root = search.get_search_plans().back();
         for (SizeType f = 0; f < root.widths.size(); ++f) {
@@ -102,7 +101,7 @@ TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
         // are evaluated independently; each input channel is independent.
         const SizeType samples = 512;
         plans::FDMTPlan impulse_plan(700, 1200, 5, samples, 0.001F,
-                                     plan.get_dt_grid_final());
+                                     plan.get_dt_grid_final(), "valid", 2);
         FDMTBoxcar impulse_meta(impulse_plan, cfg, smear);
         const auto planes = impulse_meta.get_search_plans();
         std::vector<std::vector<double>> energy;
@@ -112,8 +111,7 @@ TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
             last_support.emplace_back(p.dm_grid.size(), 0);
         }
         for (SizeType channel = 0; channel < 5; ++channel) {
-            FDMT fdmt(700, 1200, 5, samples, 0.001F, plan.get_dt_grid_final(),
-                      smear, "valid", {}, 1, 0, false, samples);
+            FDMT fdmt(impulse_plan, smear, {}, 1, 0, false, samples);
             std::vector<float> input(5 * samples);
             input[channel * samples + 128] = 1;
             std::vector<float> output(impulse_plan.get_dmt_size());
@@ -182,10 +180,11 @@ TEST_CASE("FDMTBoxcar validates contracts and bounds overflow",
     CHECK_THROWS_AS(search.flush_device(), std::invalid_argument);
     CHECK_THROWS_AS(search.reset_history(Stream{reinterpret_cast<void*>(1)}),
                     std::invalid_argument);
-    cfg.subband_levels = 2;
-    CHECK_THROWS_AS(FDMTBoxcar(plan, cfg), std::invalid_argument);
-    cfg.subband_levels = 0;
-    cfg.noise_sigma    = std::bit_cast<float>(uint32_t{0x7FC00000U});
+    // Two channels have one merge: no level below the root to search.
+    CHECK_THROWS_AS(
+        plans::FDMTPlan(700, 1200, 2, 16, 0.001F, 1, 0, 1, "valid", 1),
+        std::invalid_argument);
+    cfg.noise_sigma = std::bit_cast<float>(uint32_t{0x7FC00000U});
     CHECK_THROWS_AS(FDMTBoxcar(plan, cfg), std::invalid_argument);
     plans::FDMTPlan full(700, 1200, 2, 16, 0.001F, 1, 0, 1, "full");
     CHECK_THROWS_AS(FDMTBoxcar(full), std::invalid_argument);
@@ -289,7 +288,7 @@ TEST_CASE("Boxcar run summaries compose across worker and tile boundaries",
 TEST_CASE("FDMTBoxcar scores whole blocks over multiple prefix tiles",
           "[boxcar][cpu]") {
     plans::FDMTPlan plan(700, 1200, 3, 2203, 0.001F,
-                         std::vector<IndexType>{-7, 0, 9});
+                         std::vector<IndexType>{-7, 0, 9}, "valid", 1);
     const auto input = waterfalls(plan, 1, 3);
     for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
                             PeakFindingMode::kContiguousPeakAcrossWidths,
@@ -297,7 +296,6 @@ TEST_CASE("FDMTBoxcar scores whole blocks over multiple prefix tiles",
         BoxcarConfig cfg;
         cfg.max_boxcar       = 64;
         cfg.detect_thresh    = 2.7F;
-        cfg.subband_levels   = 1;
         cfg.peak_mode        = mode;
         cfg.max_cands_per_dm = 0;
         FDMTBoxcar search(plan, cfg, true, Exec::cpu(2), 1, 0,
@@ -315,13 +313,11 @@ TEST_CASE("FDMTBoxcar analytical scaling predicts Gaussian noise",
           "[boxcar][cpu]") {
     const SizeType samples = 32768;
     plans::FDMTPlan plan(700, 1200, 4, samples, 0.001F,
-                         std::vector<IndexType>{-20, 0, 19});
+                         std::vector<IndexType>{-20, 0, 19}, "valid", 1);
     BoxcarConfig cfg;
-    cfg.max_boxcar     = 7;
-    cfg.subband_levels = 2;
+    cfg.max_boxcar = 7;
     FDMTBoxcar search(plan, cfg);
-    FDMT fdmt(700, 1200, 4, samples, 0.001F, plan.get_dt_grid_final(), true,
-              "valid", {}, 1, 0, false, samples);
+    FDMT fdmt(plan, true, {}, 1, 0, false, samples);
     std::mt19937 random(32);
     std::normal_distribution<float> noise;
     std::vector<float> input(4 * samples), output(plan.get_dmt_size());
@@ -373,11 +369,10 @@ TEST_CASE("FDMTBoxcar physical DM metadata and configuration are preserved",
 
 TEST_CASE("FDMTBoxcar detects a band-limited pulse in its matching subband",
           "[boxcar][cpu]") {
-    plans::FDMTPlan plan(700, 1200, 8, 64, 0.001F, 4);
+    plans::FDMTPlan plan(700, 1200, 8, 64, 0.001F, 4, 0, 1, "valid", 2);
     BoxcarConfig cfg;
-    cfg.max_boxcar     = 1;
-    cfg.subband_levels = 2;
-    cfg.detect_thresh  = 3;
+    cfg.max_boxcar    = 1;
+    cfg.detect_thresh = 3;
     FDMTBoxcar search(plan, cfg);
     std::vector<float> input(8 * 64);
     input[32] = input[64 + 32] = 3;
@@ -398,17 +393,46 @@ TEST_CASE("FDMTBoxcar detects a band-limited pulse in its matching subband",
         }
     }
     CHECK(quarter);
-    plans::FDMTPlan odd(700, 1200, 7, 64, 0.001F, 4);
+
+    // Channels 3 and 4 straddle the quarter (and half) boundary at 4: only
+    // the staggered quarter [3, 5) holds the whole pulse.
+    std::vector<float> straddle(8 * 64);
+    straddle[(3 * 64) + 32] = straddle[(4 * 64) + 32] = 3;
+    search.reset_history();
+    const auto across        = search.execute(straddle);
+    const RawCandidate* best = nullptr;
+    for (const auto& candidate : across.candidates) {
+        if (candidate.dm_idx == 0 &&
+            (best == nullptr || candidate.snr > best->snr)) {
+            best = &candidate;
+        }
+    }
+    REQUIRE(best != nullptr);
+    CHECK(best->staggered == 1);
+    CHECK(best->subband_level == 2);
+    CHECK(best->subband_idx == 5);
+    CHECK(best->chan_begin == 3);
+    CHECK(best->chan_end == 5);
+    CHECK(best->peak_sample == 32);
+    CHECK_THAT(best->snr,
+               Catch::Matchers::WithinRel(6.0F / std::sqrt(2.0F), 1e-6F));
+
+    // Seven channels: quarters [0,2) [2,4) [4,6) [6,7), staggered quarters
+    // [1,3) [3,5) [5,7); halves [0,4) [4,7), staggered half [2,6); root.
+    plans::FDMTPlan odd(700, 1200, 7, 64, 0.001F, 4, 0, 1, "valid", 2);
     FDMTBoxcar odd_search(odd, cfg);
     const auto planes = odd_search.get_search_plans();
-    REQUIRE(planes.size() == 7);
-    CHECK(planes[3].chan_begin == 6);
-    CHECK(planes[3].chan_end == 7);
+    REQUIRE(planes.size() == 11);
+    const std::vector<std::array<uint32_t, 3>> extents{
+        {0, 2, 0}, {2, 4, 0}, {4, 6, 0}, {6, 7, 0}, {1, 3, 1}, {3, 5, 1},
+        {5, 7, 1}, {0, 4, 0}, {4, 7, 0}, {2, 6, 1}, {0, 7, 0}};
+    for (SizeType p = 0; p < planes.size(); ++p) {
+        INFO("plane " << p);
+        CHECK(planes[p].chan_begin == extents[p][0]);
+        CHECK(planes[p].chan_end == extents[p][1]);
+        CHECK(planes[p].staggered == (extents[p][2] == 1));
+    }
     CHECK(planes[3].f_high_mhz == odd.get_f_max());
-    CHECK(planes[4].chan_begin == 0);
-    CHECK(planes[4].chan_end == 4);
-    CHECK(planes[5].chan_begin == 4);
-    CHECK(planes[5].chan_end == 7);
 }
 
 TEST_CASE("FDMTBoxcar root reader agrees for CPU rings and GPU FIFOs",
@@ -459,7 +483,8 @@ TEST_CASE("FDMTBoxcar root reader agrees for CPU rings and GPU FIFOs",
 TEST_CASE("Packed FDMTBoxcar agrees with centered float reference",
           "[boxcar][packed][cpu]") {
     const plans::FDMTPlan plan(700, 1200, 7, 139, 0.001F,
-                               std::vector<IndexType>{-73, -12, 0, 4, 97});
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
     constexpr SizeType beams  = 2;
     constexpr SizeType blocks = 4;
     for (const SizeType bits : {1, 2, 4, 8, 16}) {
@@ -500,7 +525,6 @@ TEST_CASE("Packed FDMTBoxcar agrees with centered float reference",
                     cfg.wtsp             = 1.5F;
                     cfg.detect_thresh    = 2.713F;
                     cfg.noise_sigma      = sigma;
-                    cfg.subband_levels   = 2;
                     cfg.peak_mode        = mode;
                     cfg.max_candidates   = 200000;
                     cfg.max_cands_per_dm = 0;
@@ -535,13 +559,12 @@ TEST_CASE("Packed FDMTBoxcar agrees with centered float reference",
 
 TEST_CASE("Packed FDMTBoxcar mean and input validation",
           "[boxcar][packed][cpu]") {
-    const plans::FDMTPlan plan(700, 1200, 7, 17, 0.001F, 97);
+    const plans::FDMTPlan plan(700, 1200, 7, 17, 0.001F, 97, 0, 1, "valid", 2);
     BoxcarConfig cfg;
-    cfg.input_nbits    = 8;
-    cfg.input_mean     = 127;
-    cfg.noise_sigma    = 3;
-    cfg.max_boxcar     = 4096;
-    cfg.subband_levels = 2;
+    cfg.input_nbits = 8;
+    cfg.input_mean  = 127;
+    cfg.noise_sigma = 3;
+    cfg.max_boxcar  = 4096;
     FDMTBoxcar search(plan, cfg, true, Exec::cpu(2));
     std::vector<uint8_t> input(plan.get_nchans() * plan.get_nsamps(), 127);
     for (int i = 0; i < 260; ++i) {
@@ -571,8 +594,8 @@ TEST_CASE("Packed FDMTBoxcar wide windows exceed uint32 safely",
     const plans::FDMTPlan plan(700, 1200, 7, 257, 0.001F,
                                std::vector<IndexType>{0, 1});
     const BoxcarConfig cfg(4096, 2.0F, 0.1F, 1.0F,
-                           PeakFindingMode::kAllAboveThreshold, 0, 10000, 0,
-                           true, 16, 65534.0F);
+                           PeakFindingMode::kAllAboveThreshold, 10000, 0, true,
+                           16, 65534.0F);
     FDMTBoxcar search(plan, cfg, true, Exec::cpu(2), 1, 0, 64);
     std::vector<uint8_t> input(7 * 257 * 2, 255);
     bool found = false;

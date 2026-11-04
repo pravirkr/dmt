@@ -41,7 +41,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
     PYBIND11_NUMPY_DTYPE(RawCandidate, peak_sample, begin_sample, end_sample,
                          snr, dm, dm_idx, filter_idx, width, beam_idx,
                          subband_level, subband_idx, chan_begin, chan_end,
-                         f_low_mhz, f_high_mhz);
+                         f_low_mhz, f_high_mhz, staggered);
     py::enum_<PeakFindingMode>(mod, "PeakFindingMode")
         .value("CONTIGUOUS_PEAK_PER_WIDTH",
                PeakFindingMode::kContiguousPeakPerWidth)
@@ -50,13 +50,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .value("ALL_ABOVE_THRESHOLD", PeakFindingMode::kAllAboveThreshold);
     py::class_<BoxcarConfig>(mod, "BoxcarConfig")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, SizeType, bool, SizeType, float>(),
+                      SizeType, bool, SizeType, float>(),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
-             "subband_levels"_a = 0, "max_candidates"_a = 131072,
-             "max_cands_per_dm"_a = 4096, "skip_cold_prefix"_a = true,
-             "input_nbits"_a = 32, "input_mean"_a = 0.0F)
+             "max_candidates"_a = 131072, "max_cands_per_dm"_a = 4096,
+             "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
+             "input_mean"_a = 0.0F)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -64,7 +64,6 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readwrite("input_nbits", &BoxcarConfig::input_nbits)
         .def_readwrite("input_mean", &BoxcarConfig::input_mean)
         .def_readwrite("peak_mode", &BoxcarConfig::peak_mode)
-        .def_readwrite("subband_levels", &BoxcarConfig::subband_levels)
         .def_readwrite("max_candidates", &BoxcarConfig::max_candidates)
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)
         .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix);
@@ -91,6 +90,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("level", &plans::BoxcarPlanePlan::level)
         .def_readonly("subband_level", &plans::BoxcarPlanePlan::subband_level)
         .def_readonly("subband_idx", &plans::BoxcarPlanePlan::subband_idx)
+        .def_readonly("staggered", &plans::BoxcarPlanePlan::staggered)
         .def_readonly("chan_begin", &plans::BoxcarPlanePlan::chan_begin)
         .def_readonly("chan_end", &plans::BoxcarPlanePlan::chan_end)
         .def_readonly("f_low_mhz", &plans::BoxcarPlanePlan::f_low_mhz)
@@ -129,6 +129,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
         peaks cross blocks; call flush() at end of stream. Sample indices
         are absolute trailing-window endpoints, not filter centers.
         Host calls on GPU backends block and return candidates only.
+
+        Subband search follows the plan: with ``FDMTPlan(...,
+        subband_depth=d)`` every depth ``k = 0..d`` is searched, i.e. its
+        ``2**k`` equal subbands and the ``2**k - 1`` staggered subbands of
+        the same width centred on their boundaries. Candidates carry
+        ``subband_level`` (the depth), ``subband_idx``, the channel extent
+        and ``staggered``.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,
@@ -235,8 +242,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         result and candidate fields, for contiguous float32 input of shape
         (channels, samples) or (beams, channels, samples). Each overlap-save
         segment's DM rows are searched straight from the inverse transform;
-        no DM-time plane is allocated. Full-band search only (subband_levels
-        0). With fractional delays (the default) the search lags the input
+        no DM-time plane is allocated. Full-band search only (plan
+        subband_depth 0). With fractional delays (the default) the search lags the input
         by output_latency samples; candidate sample indices are input-stream
         indices, comparable with FDMTBoxcar's. Channels with kill_mask 0 read
         as zero and are excluded from the noise model.

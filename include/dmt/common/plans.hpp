@@ -7,6 +7,7 @@
  */
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -19,7 +20,8 @@ namespace dmt::plans {
 
 /** @brief FDMT state-buffer shape at one tree iteration level. */
 struct FDMTShape {
-    SizeType nchans;       ///< Frequency subbands at this level
+    SizeType nchans;       ///< Tree subbands at this level (merged upward)
+    SizeType nstaggered;   ///< Staggered subbands, after the tree subbands
     SizeType ndt_min;      ///< Min delay trials (highest-frequency subband)
     SizeType ndt_max;      ///< Max delay trials (lowest-frequency subband)
     SizeType ncoords;      ///< Active coordinates (nchans * sum of ndt)
@@ -58,13 +60,29 @@ struct FDMTCoord {
     SizeType hist_offset{0};  ///< Overlap-save history offset (mode="valid")
 };
 
-/** @brief Subband delay grid and MHz edges for one FDMT iteration. */
+/**
+ * @brief Subband delay grid, channel extent and children for one FDMT level.
+ *
+ * The tree halves the band top-down: a subband of c channels has children
+ * of ceil(c/2) (lower) and floor(c/2) (upper) channels, so the subbands at
+ * any depth differ in width by at most one channel. A single-channel subband
+ * above level 0 is a copy of its only child. A staggered subband (plan
+ * subband_depth > 0) merges two adjacent subbands of the level below that
+ * have different parents: it straddles a tree boundary, overlapping half of
+ * each neighbour. Staggered subbands follow the tree subbands of their level
+ * and are never merged further.
+ */
 struct FDMTCoordGrid {
     std::vector<IndexType> dt_grid; ///< Delay trials in sample units
     SizeType ndt;                   ///< Number of delay trials
     SizeType coord_offset;          ///< Offset into the global coordinate list
     float f_start;                  ///< Subband lower edge frequency (MHz)
     float f_end;                    ///< Subband upper edge frequency (MHz)
+    SizeType chan_begin{0};         ///< First input channel
+    SizeType chan_end{0};           ///< One past the last input channel
+    SizeType i_sub_tail{SIZE_MAX};  ///< Lower child at the previous level
+    SizeType i_sub_head{SIZE_MAX};  ///< Upper child (SIZE_MAX: copy)
+    bool staggered{false};          ///< Overlap subband, not merged further
 };
 
 /** @brief Precomputed FDMT execution graph and memory layout. */
@@ -75,8 +93,6 @@ struct FDMTPlanContainer {
     std::vector<std::vector<FDMTCoord>> coordinates_sum;  ///< Add ops per iter
     std::vector<std::vector<FDMTCoord>> coordinates_copy; ///< Copy ops per iter
     std::vector<std::vector<IndexType>> dt_grid_sub_top;  ///< Scratch dt grids
-    std::vector<float> df_top;     ///< Channel bandwidths (top half)
-    std::vector<float> df_bot;     ///< Channel bandwidths (bottom half)
     SizeType tree_history_size{0}; ///< Floats needed for streaming tree history
 
     FDMTPlanContainer() = default;
@@ -88,9 +104,14 @@ struct FDMTPlanContainer {
 
 /** @brief Precomputed DDMT delay tables and channel masks. */
 struct DDMTPlanContainer {
-    std::vector<float> dm_arr;         ///< DM trials (pc/cm^3), length ndm
-    std::vector<SizeType> delay_table; ///< Row-major delays (ndm x nchans)
+    std::vector<float> dm_arr; ///< DM trials (pc/cm^3), length ndm
+    /// Row-major delays (ndm x nchans): time_offset minus the lag of each
+    /// channel centre behind f_min, so out[k] = sum_c in_c[k + delay] is the
+    /// sum for f_min arrival at input sample k + time_offset.
+    std::vector<SizeType> delay_table;
     std::vector<float> fractional_delay_table; ///< d(delay)/d(DM) per channel
+                                               ///< (<= 0)
+    SizeType time_offset{0};        ///< ceil of the largest lag behind f_min
     std::vector<uint8_t> kill_mask; ///< Channel mask: 1=active, 0=RFI masked
     SizeType nchans;                ///< Number of frequency channels
     SizeType nbits = 32;            ///< Bits per sample (32, 16, 8, 4, 2, 1)
@@ -132,7 +153,8 @@ public:
      *
      * @param f_min Bottom edge frequency of the band in MHz.
      * @param f_max Top edge frequency of the band in MHz.
-     * @param nchans Number of frequency channels. Must be a power of two.
+     * @param nchans Number of frequency channels (any count >= 2; the tree
+     * halves the band top-down, see FDMTCoordGrid).
      * @param nsamps Number of time samples per processing block.
      * @param tsamp Sampling interval in seconds.
      * @param dt_max Maximum dispersive delay trial in samples across the full
@@ -142,6 +164,14 @@ public:
      * @param dt_step Stride between delay trials (default: 1).
      * @param mode Output time alignment mode: "valid" (overlap-save streaming
      * history), "full" (zero-padded), or "roll" (cyclic) (default: "valid").
+     * @param subband_depth Depth of the subband search the plan supports
+     * (default: 0, full band only). Depth d adds, at each depth k = 1..d
+     * (level niters - k), the 2^k - 1 staggered subbands that straddle the
+     * boundaries between that depth's 2^k tree subbands, so a subband search
+     * of depth d sees, at each depth k, 2^k equal subbands and 2^k - 1
+     * overlapping ones. Must be at most niters - 1. It serves the stepper and
+     * FDMTBoxcar; FDMT::execute() still computes the staggered merges (about
+     * one merge level of extra work) and then discards them.
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -149,9 +179,10 @@ public:
              SizeType nsamps,
              float tsamp,
              IndexType dt_max,
-             IndexType dt_min      = 0,
-             SizeType dt_step      = 1,
-             std::string_view mode = "valid");
+             IndexType dt_min       = 0,
+             SizeType dt_step       = 1,
+             std::string_view mode  = "valid",
+             SizeType subband_depth = 0);
 
     /**
      * @brief Constructs an FDMT plan with a custom delay trial grid.
@@ -162,12 +193,13 @@ public:
      *
      * @param f_min Bottom edge frequency in MHz.
      * @param f_max Top edge frequency in MHz.
-     * @param nchans Number of channels (must be a power of two).
+     * @param nchans Number of channels (any count >= 2).
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
      * @param dt_grid Explicit list of delay trials in samples (e.g. from
      * generate_optimal_dt_grid).
      * @param mode Transform mode: "valid", "full", or "roll".
+     * @param subband_depth Subband search depth (see the first constructor).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -175,7 +207,8 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<IndexType>& dt_grid,
-             std::string_view mode = "valid");
+             std::string_view mode  = "valid",
+             SizeType subband_depth = 0);
 
     /**
      * @brief Constructs an FDMT plan with a custom physical DM trial grid.
@@ -187,12 +220,13 @@ public:
      *
      * @param f_min Bottom edge frequency in MHz.
      * @param f_max Top edge frequency in MHz.
-     * @param nchans Number of channels (must be a power of two).
+     * @param nchans Number of channels (any count >= 2).
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
      * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
      * non-uniform spacing and negative DMs).
      * @param mode Transform mode: "valid", "full", or "roll".
+     * @param subband_depth Subband search depth (see the first constructor).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -200,7 +234,8 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<float>& dm_grid,
-             std::string_view mode = "valid");
+             std::string_view mode  = "valid",
+             SizeType subband_depth = 0);
 
     // --- Rule of five: PIMPL ---
     ~FDMTPlan();
@@ -215,9 +250,8 @@ public:
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
     /// @brief Reference frequency of output times in MHz: f_min, the bottom
-    /// edge of the band. Output sample t is the arrival time at f_min.
-    /// (DDMT instead references the centre of its highest channel; see
-    /// DDMTPlan::get_f_ref().)
+    /// edge of the band. Output sample t is the arrival time at f_min. All
+    /// dmt engines share this reference.
     [[nodiscard]] float get_f_ref() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;
@@ -237,8 +271,15 @@ public:
     [[nodiscard]] bool is_custom_grid() const noexcept;
     /// @brief Channel frequency resolution in MHz: (f_max - f_min) / nchans
     [[nodiscard]] float get_df() const noexcept;
-    /// @brief Number of tree iterations: log2(nchans)
+    /// @brief Number of tree iterations: ceil(log2(nchans))
     [[nodiscard]] SizeType get_niters() const noexcept;
+    /// @brief Subband search depth: staggered subbands exist at levels
+    /// niters - subband_depth .. niters - 1 (0: none)
+    [[nodiscard]] SizeType get_subband_depth() const noexcept;
+    /// @brief Deepest level an engine may compute in fused channel groups:
+    /// niters without staggered subbands, else one below the lowest level
+    /// that holds them (a staggered merge crosses group boundaries).
+    [[nodiscard]] SizeType get_max_fuse_levels() const noexcept;
     /// @brief Read-only reference to precomputed coordinate graphs and shapes
     [[nodiscard]] const FDMTPlanContainer& get_container() const noexcept;
 
@@ -363,6 +404,36 @@ public:
     [[nodiscard]] std::vector<float>
     get_effective_sigma_grid(SizeType boxcar_width,
                              bool use_box_smearing = true) const;
+
+    /**
+     * @brief Noise variance of every row of one subband: tree subband or
+     * staggered subband @p subband of merge level @p level (as
+     * FDMT::view_subband() and the container's grids[level] index them).
+     *
+     * The subband analogue of get_effective_variance_grid(): unit Gaussian
+     * input, the subband's channels only, each with its level-0 box-mean
+     * weight. Divide a stepper view's rows by get_subband_sigma_grid() for
+     * S/N. The root (level get_niters(), subband 0) equals
+     * get_effective_variance_grid(). O(ndt * width) per call.
+     *
+     * @param level Merge level, 0 (channels) to get_niters() (root).
+     * @param subband Index into grids[level] (tree subbands, then
+     * staggered).
+     * @param boxcar_width Boxcar filter width in samples (default 1).
+     * @param use_box_smearing Whether the tree applied box smearing.
+     * @throws std::out_of_range for a bad level or subband.
+     */
+    [[nodiscard]] std::vector<float>
+    get_subband_variance_grid(SizeType level,
+                              SizeType subband,
+                              SizeType boxcar_width = 1,
+                              bool use_box_smearing = true) const;
+    /// @brief sqrt of get_subband_variance_grid().
+    [[nodiscard]] std::vector<float>
+    get_subband_sigma_grid(SizeType level,
+                           SizeType subband,
+                           SizeType boxcar_width = 1,
+                           bool use_box_smearing = true) const;
 
     /// @brief Number of DM trials in the final transform
     [[nodiscard]] SizeType get_dmt_ndms() const noexcept;
@@ -491,8 +562,8 @@ struct CohFDMTMemoryUsage {
  * get_overlap_nsamps(), the dispersion sweep plus the coherent filter
  * margins), so the get_output_nsamps() valid output samples of consecutive
  * blocks tile the time axis. Output sample j of a block starting at raw
- * sample s0 is the arrival time at get_f_ref() (the centre of the lowest
- * channel) t = (s0 * tbin) + get_output_time_offset() + j * tsamp, for every
+ * sample s0 is the arrival time at get_f_ref() (f_min, the bottom band
+ * edge) t = (s0 * tbin) + get_output_time_offset() + j * tsamp, for every
  * DM row.
  */
 class CohFDMTPlan {
@@ -546,8 +617,9 @@ public:
     [[nodiscard]] float get_bw_chan() const noexcept;
     /// @brief Output (detected) sampling interval in seconds (n_p * tbin)
     [[nodiscard]] float get_tsamp() const noexcept;
-    /// @brief Reference frequency of output times: centre of the lowest
-    /// channel, MHz
+    /// @brief Reference frequency of output times in MHz: f_min, the bottom
+    /// band edge, as for every dmt engine. Channels are shifted from their
+    /// centres.
     [[nodiscard]] float get_f_ref() const noexcept;
 
     // --- FFT geometry ---
@@ -688,9 +760,9 @@ struct LevinConfig {
  * masks for brute-force delay-and-sum dedispersion on float or packed-integer
  * filterbanks. f_min and f_max are the band edges; channel c is centred at
  * f_min + (c + 1/2) df with df = (f_max - f_min) / nchans, and each channel
- * is delayed from its centre frequency relative to get_f_ref(), the centre
- * of the highest-frequency channel. (FDMT instead references f_min, the
- * bottom edge of the band; see FDMTPlan::get_f_ref().)
+ * is sampled at its centre frequency. Output times refer to f_ref
+ * (get_f_ref(), get_time_offset()): by default the bottom band edge f_min,
+ * as for FDMT and CohFDMT, or any frequency the caller chooses.
  */
 class DDMTPlan {
 public:
@@ -708,6 +780,11 @@ public:
      * integers).
      * @param kill_mask Optional per-channel mask (size nchans). 0 drops the
      * channel; any nonzero value is kept and stored as 1.
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min, the bottom band edge). Any positive value, or +infinity, e.g.
+     * f_max (top band edge) or f_max - df/2 (SIGPROC's fch1 for a
+     * descending band). The engines are agnostic: only the delay table
+     * and get_time_offset() change.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -717,7 +794,8 @@ public:
              float dm_step,
              float dm_min                       = 0.0F,
              SizeType nbits                     = 32,
-             std::span<const uint8_t> kill_mask = {});
+             std::span<const uint8_t> kill_mask = {},
+             std::optional<float> f_ref         = std::nullopt);
 
     /**
      * @brief Constructs a DDMT plan with an explicit list of DM trials.
@@ -736,7 +814,8 @@ public:
              float tsamp,
              std::span<const float> dm_arr,
              SizeType nbits                     = 32,
-             std::span<const uint8_t> kill_mask = {});
+             std::span<const uint8_t> kill_mask = {},
+             std::optional<float> f_ref         = std::nullopt);
 
     /**
      * @brief Constructs a DDMT plan with an optimal Lina Levin DM grid.
@@ -756,7 +835,8 @@ public:
              float tsamp,
              const LevinConfig& levin,
              SizeType nbits                     = 32,
-             std::span<const uint8_t> kill_mask = {});
+             std::span<const uint8_t> kill_mask = {},
+             std::optional<float> f_ref         = std::nullopt);
 
     // --- Rule of five: PIMPL ---
     ~DDMTPlan();
@@ -770,11 +850,18 @@ public:
     [[nodiscard]] float get_f_min() const noexcept;
     /// @brief Maximum frequency in MHz
     [[nodiscard]] float get_f_max() const noexcept;
-    /// @brief Reference frequency of output times in MHz: the centre of the
-    /// highest-frequency channel, f_max - df/2 (SIGPROC's fch1 for a
-    /// descending band). Output sample t is the arrival time at this
-    /// frequency; every channel is delayed from its own centre frequency.
+    /// @brief Reference frequency of output times in MHz: the constructor's
+    /// f_ref, by default the bottom band edge f_min (as for FDMT); may be
+    /// +infinity. Every channel is sampled at its own centre frequency
+    /// f_min + (c + 1/2) df.
     [[nodiscard]] float get_f_ref() const noexcept;
+    /// @brief Input-sample offset of the output times: output sample k (from
+    /// the start of the stream) is the sum for a signal arriving at
+    /// get_f_ref() at input sample k + get_time_offset(). It is how far the
+    /// earliest channel centre arrives ahead of f_ref over the DM trials,
+    /// rounded up: 0 when f_ref is at or above the top channel's centre
+    /// (independent of the kill mask). DDMT, SDMT and DDMTFFT share it.
+    [[nodiscard]] SizeType get_time_offset() const noexcept;
     /// @brief Number of frequency channels
     [[nodiscard]] SizeType get_nchans() const noexcept;
     /// @brief Time sample interval in seconds
@@ -785,8 +872,9 @@ public:
     [[nodiscard]] const DDMTPlanContainer& get_container() const noexcept;
     /// @brief DM grid in pc/cm^3
     [[nodiscard]] std::vector<float> get_dm_grid() const noexcept;
-    /// @brief Per-channel fractional delay rate array (size nchans) in bins /
-    /// (pc cm^-3)
+    /// @brief Per-channel delay rate d(delay)/d(DM) (size nchans) in bins /
+    /// (pc cm^-3): K (f_c^-2 - f_ref^-2) / tsamp, negative for channels
+    /// above f_ref.
     [[nodiscard]] std::vector<float>
     get_fractional_delay_table() const noexcept;
     /// @brief Bit precision per input sample (32 => float, 1/2/4/8/16 => packed

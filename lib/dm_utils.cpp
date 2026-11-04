@@ -64,63 +64,120 @@ SizeType find_nearest_sorted_idx(std::span<const IndexType> arr_sorted,
     return find_nearest_sorted_idx_impl(arr_sorted, val);
 }
 
+namespace {
+
+// Validated band of channel centres f_min + (c + 1/2) df, c < nchans, and
+// reference frequency (positive, or +inf).
+void check_band(
+    SizeType nchans, float f_min, float df, float tsamp, double f_ref) {
+    if (nchans == 0) {
+        throw std::invalid_argument("nchans must be greater than 0");
+    }
+    if (!(tsamp > 0.0F) || !is_finite_bits(tsamp)) {
+        throw std::invalid_argument("tsamp must be greater than 0");
+    }
+    if (!(f_min > 0.0F) || !(df > 0.0F) || !is_finite_bits(f_min) ||
+        !is_finite_bits(df)) {
+        throw std::invalid_argument(
+            "Frequencies must be positive and ascending (f_min > 0, df > 0)");
+    }
+    if (!is_valid_f_ref(f_ref)) {
+        throw std::invalid_argument(
+            std::format("f_ref={} MHz must be positive (or infinite)", f_ref));
+    }
+}
+
+// Delay of channel c's centre behind f_ref, samples per pc cm^-3:
+// K (f_c^-2 - f_ref^-2) / tsamp, in double. Negative for channels above
+// f_ref.
+double
+delay_rate(SizeType c, float f_min, float df, float tsamp, double f_ref) {
+    const double f = static_cast<double>(f_min) +
+                     (static_cast<double>(df) * (static_cast<double>(c) + 0.5));
+    const double inv_ref = is_pos_inf_bits(f_ref) ? 0.0 : 1.0 / (f_ref * f_ref);
+    return static_cast<double>(kDispConst) / static_cast<double>(tsamp) *
+           ((1.0 / (f * f)) - inv_ref);
+}
+
+void check_dms(std::span<const float> dm_arr) {
+    for (const float dm : dm_arr) {
+        if (!is_finite_bits(dm) || !(dm >= 0.0F)) {
+            throw std::invalid_argument(
+                std::format("DDMT: DM trial {} must be finite and >= 0", dm));
+        }
+    }
+}
+
+void check_size(double samples, double dm) {
+    if (!is_finite_bits(samples) || !(samples >= 0.0) ||
+        samples >= std::ldexp(1.0, std::numeric_limits<SizeType>::digits)) {
+        throw std::invalid_argument(std::format(
+            "DDMT: dispersion delay {} samples is not a representable "
+            "non-negative size (dm={})",
+            samples, dm));
+    }
+}
+
+} // namespace
+
+SizeType generate_delay_offset(std::span<const float> dm_arr,
+                               SizeType nchans,
+                               float f_min,
+                               float df,
+                               float tsamp,
+                               double f_ref) {
+    check_band(nchans, f_min, df, tsamp, f_ref);
+    check_dms(dm_arr);
+    if (dm_arr.empty()) {
+        return 0;
+    }
+    const auto [lo, hi] = std::ranges::minmax(dm_arr);
+    // The most negative delay: channels above f_ref at the largest DM (the
+    // top channel's rate is the smallest), else none.
+    const double rate = delay_rate(nchans - 1, f_min, df, tsamp, f_ref);
+    const double most_negative = rate < 0.0 ? static_cast<double>(hi) * rate
+                                            : static_cast<double>(lo) * rate;
+    const double offset        = std::ceil(std::max(0.0, -most_negative));
+    check_size(offset, hi);
+    return static_cast<SizeType>(offset);
+}
+
 std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
                                            SizeType nchans,
-                                           float fch1,
-                                           float foff,
-                                           float tsamp) {
+                                           float f_min,
+                                           float df,
+                                           float tsamp,
+                                           double f_ref) {
+    const auto offset =
+        generate_delay_offset(dm_arr, nchans, f_min, df, tsamp, f_ref);
     const auto ndm = dm_arr.size();
+    std::vector<double> rate(nchans);
+    for (SizeType c = 0; c < nchans; ++c) {
+        rate[c] = delay_rate(c, f_min, df, tsamp, f_ref);
+    }
     std::vector<SizeType> delay_table(nchans * ndm);
-    // Reference the highest-frequency channel, the first one to arrive, so
-    // every other (lower-frequency, later-arriving) channel gets a
-    // non-negative additive delay.
-    const auto f_last = fch1 + (static_cast<float>(nchans - 1) * foff);
-    const auto f_ref  = std::max(fch1, f_last);
-    const auto b      = 1.F / f_ref;
     for (SizeType idm = 0; idm < ndm; ++idm) {
-        for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-            const auto a = 1.F / (fch1 + (static_cast<float>(ichan) * foff));
-            const auto delay =
-                kDispConst / tsamp * ((a * a) - (b * b)) * dm_arr[idm];
-            const float rounded = std::nearbyint(delay);
-            // nearbyint of a non-finite or out-of-range delay is not a safe
-            // conversion to SizeType (the cast of NaN/Inf is undefined).
-            const double as_double = static_cast<double>(rounded);
-            if (!is_finite_bits(as_double) || !(rounded >= 0.0F) ||
-                as_double >=
-                    std::ldexp(1.0, std::numeric_limits<SizeType>::digits)) {
-                throw std::invalid_argument(std::format(
-                    "DDMT: dispersion delay {} samples is not a representable "
-                    "non-negative size (dm={}, channel={})",
-                    delay, dm_arr[idm], ichan));
-            }
-            delay_table[(idm * nchans) + ichan] =
-                static_cast<SizeType>(rounded);
+        const auto dm = static_cast<double>(dm_arr[idm]);
+        for (SizeType c = 0; c < nchans; ++c) {
+            // A channel's sample for f_ref arrival time t is t + delay; the
+            // table holds offset + delay, >= 0 because offset is the
+            // ceiling of the most negative delay.
+            const double total =
+                static_cast<double>(offset) + std::nearbyint(dm * rate[c]);
+            check_size(total, dm);
+            delay_table[(idm * nchans) + c] = static_cast<SizeType>(total);
         }
     }
     return delay_table;
 }
 
-std::vector<float> generate_fractional_delay_table(SizeType nchans,
-                                                   float fch1,
-                                                   float foff,
-                                                   float tsamp) {
-    if (nchans == 0) {
-        throw std::invalid_argument("nchans must be greater than 0");
-    }
-    if (tsamp <= 0.0F) {
-        throw std::invalid_argument("tsamp must be greater than 0");
-    }
+std::vector<float> generate_fractional_delay_table(
+    SizeType nchans, float f_min, float df, float tsamp, double f_ref) {
+    check_band(nchans, f_min, df, tsamp, f_ref);
     std::vector<float> frac_delays(nchans);
-    const auto f_last = fch1 + (static_cast<float>(nchans - 1) * foff);
-    const auto f_ref  = std::max(fch1, f_last);
-    if (f_ref <= 0.0F || std::min(fch1, f_last) <= 0.0F) {
-        throw std::invalid_argument("Frequencies must be positive");
-    }
-    const auto b = 1.F / f_ref;
-    for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-        const auto a       = 1.F / (fch1 + (static_cast<float>(ichan) * foff));
-        frac_delays[ichan] = (kDispConst / tsamp) * ((a * a) - (b * b));
+    for (SizeType c = 0; c < nchans; ++c) {
+        frac_delays[c] =
+            static_cast<float>(delay_rate(c, f_min, df, tsamp, f_ref));
     }
     return frac_delays;
 }

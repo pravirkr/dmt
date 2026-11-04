@@ -163,10 +163,12 @@ TEST_CASE("FDMTFFTBoxcar analytical scaling predicts Gaussian noise",
 TEST_CASE("FDMTFFTBoxcar validates its configuration", "[boxcar][cpu]") {
     const plans::FDMTPlan plan(700, 1200, 4, 256, 0.001F,
                                std::vector<IndexType>{0, 5, 9});
+    const plans::FDMTPlan subband_plan(
+        700, 1200, 4, 256, 0.001F, std::vector<IndexType>{0, 5, 9}, "valid", 1);
     BoxcarConfig subbands;
-    subbands.max_boxcar     = 8;
-    subbands.subband_levels = 1;
-    CHECK_THROWS_AS(FDMTFFTBoxcar(plan, subbands), std::invalid_argument);
+    subbands.max_boxcar = 8;
+    CHECK_THROWS_AS(FDMTFFTBoxcar(subband_plan, subbands),
+                    std::invalid_argument);
     BoxcarConfig packed;
     packed.max_boxcar  = 8;
     packed.input_nbits = 8;

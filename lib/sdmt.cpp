@@ -19,7 +19,8 @@ SDMT::SDMT(float f_min,
            Exec exec,
            SizeType nbits,
            std::span<const uint8_t> kill_mask,
-           SizeType nbeams)
+           SizeType nbeams,
+           std::optional<float> f_ref)
     : DDMT(plans::DDMTPlan(f_min,
                            f_max,
                            nchans,
@@ -28,7 +29,8 @@ SDMT::SDMT(float f_min,
                            dm_step,
                            dm_min,
                            nbits,
-                           kill_mask),
+                           kill_mask,
+                           f_ref),
            exec,
            nbeams,
            EngineKind::kSharedSums) {}
@@ -41,9 +43,10 @@ SDMT::SDMT(float f_min,
            Exec exec,
            SizeType nbits,
            std::span<const uint8_t> kill_mask,
-           SizeType nbeams)
+           SizeType nbeams,
+           std::optional<float> f_ref)
     : DDMT(plans::DDMTPlan(
-               f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask),
+               f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask, f_ref),
            exec,
            nbeams,
            EngineKind::kSharedSums) {}
@@ -56,12 +59,13 @@ SDMT::SDMT(float f_min,
            Exec exec,
            SizeType nbits,
            std::span<const uint8_t> kill_mask,
-           SizeType nbeams)
-    : DDMT(
-          plans::DDMTPlan(f_min, f_max, nchans, tsamp, levin, nbits, kill_mask),
-          exec,
-          nbeams,
-          EngineKind::kSharedSums) {}
+           SizeType nbeams,
+           std::optional<float> f_ref)
+    : DDMT(plans::DDMTPlan(
+               f_min, f_max, nchans, tsamp, levin, nbits, kill_mask, f_ref),
+           exec,
+           nbeams,
+           EngineKind::kSharedSums) {}
 
 SDMT::SDMT(const plans::DDMTPlan& plan, Exec exec, SizeType nbeams)
     : DDMT(plan, exec, nbeams, EngineKind::kSharedSums) {}

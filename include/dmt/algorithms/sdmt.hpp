@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "dmt/algorithms/ddmt.hpp"
@@ -51,7 +52,8 @@ public:
          Exec exec                          = {},
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {},
-         SizeType nbeams                    = 1);
+         SizeType nbeams                    = 1,
+         std::optional<float> f_ref         = std::nullopt);
 
     /// @brief Explicit DM trial array; see the matching DDMT constructor.
     SDMT(float f_min,
@@ -62,7 +64,8 @@ public:
          Exec exec                          = {},
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {},
-         SizeType nbeams                    = 1);
+         SizeType nbeams                    = 1,
+         std::optional<float> f_ref         = std::nullopt);
 
     /// @brief Lina Levin DM grid; see the matching DDMT constructor.
     SDMT(float f_min,
@@ -73,7 +76,8 @@ public:
          Exec exec                          = {},
          SizeType nbits                     = 32,
          std::span<const uint8_t> kill_mask = {},
-         SizeType nbeams                    = 1);
+         SizeType nbeams                    = 1,
+         std::optional<float> f_ref         = std::nullopt);
 
     /// @brief From a pre-configured DDMTPlan.
     explicit SDMT(const plans::DDMTPlan& plan,

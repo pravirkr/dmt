@@ -4,6 +4,82 @@ All notable changes to `dmt` are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
+  depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
+  boundaries between that depth's `2**k` tree subbands. Each costs one extra
+  merge of two existing nodes. `FDMTBoxcar` searches every tree and staggered
+  subband to depth `d`; candidates gain a `staggered` field. A narrowband
+  burst on a subband boundary is no longer split between aligned subbands.
+- `FDMT(plan, ...)`: build an engine from a prepared plan. The stepper's
+  `num_subbands()`/`view_subband()` include the staggered subbands, and
+  subband views gain `chan_begin`, `chan_end` and `staggered`.
+- `FDMTFFT(plan, ...)`, likewise: its stepper exposes the staggered subbands.
+- `FDMTPlan.get_subband_variance_grid(level, subband, boxcar_width,
+  use_box_smearing)` and `get_subband_sigma_grid(...)`: the noise of every
+  row of any tree or staggered subband, for S/N on stepper views.
+- `FDMTCoordGrid` (Python `FDMTSubDTGrid`) gains `chan_begin`, `chan_end`,
+  `i_sub_tail`, `i_sub_head` and `staggered`; `FDMTShape` gains `nstaggered`;
+  `FDMTPlan.get_subband_depth()` and `get_max_fuse_levels()`.
+- **`f_ref` for DDMT, SDMT and DDMT-FFT** (plans and engines, C++ and
+  Python, and `dmtlib.dedisperse`): the reference frequency of the output
+  times, any positive value or infinity, default `f_min`. `f_max`, the top
+  channel's centre (SIGPROC's `fch1`, the 0.7.0 convention) or infinity give
+  PRESTO/SIGPROC-style series: output sample `t` is input sample `t` at that
+  frequency for every DM, and the incomplete samples are at the end. Only
+  the delay table changes.
+- `DDMTPlan.get_time_offset()` (Python `plan.time_offset`): output sample
+  `k` of DDMT, SDMT and DDMT-FFT is the `f_ref` arrival at input sample
+  `k + time_offset` (0 when `f_ref` is at or above the top channel's
+  centre).
+- `dmtlib.sigproc_band(fch1, foff, nchans)` and `dmtlib.to_ascending()`:
+  band edges from a SIGPROC header and the flip to ascending channel order.
+  The getting-started guides and README document the channel order.
+- `dmtlib.dispersion_delay` broadcasts over array frequencies.
+
+### Changed
+
+- **Breaking:** the FDMT tree halves the band top-down, the lower half taking
+  the extra channel of an odd count, so subbands at any depth differ in width
+  by at most one channel (1152 channels: 576, 288, ..., 9 at depths 1 to 7).
+  Previously neighbours were paired bottom-up and an odd subband was carried
+  up, leaving the root split 1024 + 128. Power-of-two channel counts give the
+  same tree and bit-identical outputs; other counts give different (slightly
+  more accurate) outputs and subband indices.
+- **Breaking:** `BoxcarConfig.subband_levels` is removed; the search depth is
+  the plan's `subband_depth`, now any depth below the root (was 0 to 2). The
+  positional `BoxcarConfig` constructor loses that argument.
+- **Breaking:** `FDMTPlanContainer.df_top`/`df_bot` are removed; each
+  subband's channel extent is in its grid.
+- Level fusion (CPU, GPU tiles, FDMT-FFT on the CPU) forms channel groups
+  from the tree; fusion and the GPU direct levels stay below the lowest level
+  holding staggered subbands.
+- **Breaking:** every engine refers output times to `f_min`, the bottom band
+  edge, by default (`plan.f_ref == f_min`), as FDMT always has: the
+  last-arriving edge, when a pulse is complete, is the natural trigger time.
+  Pass `f_ref=f_max - df/2` to DDMT, SDMT or DDMT-FFT for the 0.7.0 times.
+  - DDMT, SDMT and DDMT-FFT (were the top channel's centre, `f_max - df/2`)
+    still sample each channel at its centre. Their delay table is now
+    `time_offset + delay`, with `delay` each channel centre's delay behind
+    `f_ref` (negative above it); at the default `f_min` entries shrink with
+    DM and `fractional_delay_table` (`d(delay)/d(DM)`) is `<= 0`. Output sample `k` is the `f_min` arrival at input
+    sample `k + plan.time_offset`, an offset that follows the plan's largest
+    DM: align plans with different DM grids by it. `dmtlib.dedisperse`
+    reports it as `start`. History, output counts and performance are
+    essentially unchanged (the history grows by about half a channel's
+    sweep).
+  - CohFDMT (was the bottom channel's centre) shifts channels by their
+    centre's lag behind `f_min`, matching its fine FDMT stage.
+    `output_time_offset` keeps its meaning at the new reference.
+  - `utils::generate_delay_table`/`generate_fractional_delay_table` take
+    `(f_min, df, tsamp, f_ref)` of an ascending band instead of
+    `(fch1, foff, tsamp)`; `generate_delay_offset` is new.
+- Rows are always ascending in frequency (row 0 lowest); descending data
+  must be flipped before it reaches dmt (see `dmtlib.sigproc_band`).
+
 ## [0.7.0] - 2026-11-03
 
 The first release since 0.2.0. It rebuilds `dmt` as a family of

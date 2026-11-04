@@ -82,7 +82,9 @@ tail: the last $\Delta t_{\max}$ samples of every beam and channel, prepended
 to the next block. Unlike FDMT it withholds what it cannot compute yet:
 `get_output_nsamps(n)` is `n - max_delay` on a cold start and `n` once the
 stream is warm. Concatenating the outputs of consecutive blocks equals one
-call on the whole stream, bit for bit.
+call on the whole stream, bit for bit. Output sample `k` of the stream is the
+sum for a pulse arriving at `plan.f_ref` (default `f_min`) at input sample
+`k + plan.time_offset`.
 
 - **One history for every overload.** Every `execute()` overload shares this one history: float and packed input,
   channel-major and time-major (`execute_time_major`), host and device memory.

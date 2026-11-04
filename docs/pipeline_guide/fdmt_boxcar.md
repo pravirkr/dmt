@@ -12,7 +12,7 @@ other algorithms are unchanged.
 | Transform | time-domain FDMT tree (integer delays) | Fourier-domain FDMT tree (fractional delays by default) |
 | Fused into the search | the root merge (root rows are never stored) | each overlap-save segment's inverse transform |
 | Input | float32, or packed 1/2/4/8/16-bit | float32 |
-| Subband search | `subband_levels` 0–2 | full band only |
+| Subband search | plan `subband_depth` (any depth below the root), with staggered subbands | full band only |
 | Latency | none | `output_latency` samples (64 with fractional delays) |
 
 ## Input and statistical contract
@@ -94,12 +94,11 @@ on the cryopaf presets, almost all of it in the uint64 FDMT merges.
 ```python
 from dmtlib import FDMTPlan, FDMTBoxcar, BoxcarConfig, PeakFindingMode
 
-plan = FDMTPlan(700.0, 1200.0, 256, 4096, 0.001, 512)
+plan = FDMTPlan(700.0, 1200.0, 256, 4096, 0.001, 512, subband_depth=2)
 config = BoxcarConfig(
     max_boxcar=256,
     wtsp=1.5,
     detect_thresh=6.0,
-    subband_levels=2,
     peak_mode=PeakFindingMode.CONTIGUOUS_PEAK_PER_WIDTH,
 )
 search = FDMTBoxcar(plan, config, nthreads=4)
@@ -203,12 +202,40 @@ winning peak's width.
 
 ## Subbands, overflow and memory
 
-`subband_levels=0` searches the full band; 1 also searches the preceding level;
-2 also searches the level before that. On a balanced tree these are halves
-and quarters; odd channel counts follow the actual tree, including copy
-nodes. Requests deeper than the tree are rejected. Candidate channel extents
-are half-open input indices, and frequency extents are physical observed
-edges. All selected planes share the candidate buffer.
+The search depth is the plan's `subband_depth` (default 0: full band only).
+Depth `k` searches the `2**k` equal subbands the FDMT tree already computes,
+plus the `2**k - 1` **staggered** subbands of the same width centred on their
+boundaries:
+
+| `subband_depth` | Subbands searched (1152 channels) |
+| :--- | :--- |
+| 0 | full band |
+| 1 | + 2 halves (576 channels) + the central half [288, 864) |
+| 2 | + 4 quarters (288) + 3 staggered quarters [144, 432), [432, 720), [720, 1008) |
+| 3 | + 8 eighths (144) + 7 staggered eighths |
+
+A staggered subband is one extra merge of two adjacent subbands from the next
+level down that have different parents, so it costs about one merge level's
+work, not a separate dedispersion. Without it, a narrowband burst sitting on
+a boundary is split between two aligned subbands and is caught at best by the
+level above. For example, a 200-channel burst anywhere in a 1152-channel band
+recovers at worst 0.42 of its matched S/N with aligned subbands to depth 2,
+and 0.72 with the staggered ones added; to depth 3 with staggered subbands
+the worst case is 0.83.
+
+The tree halves the band top-down, so the subbands at any depth differ by at
+most one channel (exactly equal when the depth divides the channel count:
+1152 channels stay equal down to 9-channel subbands). `subband_depth` must be
+below `plan.niters`. Each row's sigma follows its own channels and tree
+lineage. Candidates carry `subband_level` (the depth), `subband_idx` (tree
+subbands first, then staggered ones), `staggered`, half-open input channel
+extents and physical frequency edges. All planes share the candidate buffer.
+Overlapping subbands detect the same burst more than once; group candidates
+downstream (for example by time and DM, keeping the highest S/N).
+
+On the CPU and GPU the lower tree is still fused into channel groups, but
+only below the lowest level that holds staggered subbands
+(`plan.max_fuse_levels`), since a staggered merge crosses group boundaries.
 
 Counters reset per execute/flush call. `total_detected` counts closed
 excursions (or points in all mode), including dropped candidates. A
@@ -340,7 +367,7 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   long call by the truncation of the interpolation kernel (FDMTFFT: below
   0.5% of the row peak), so a near-threshold point can move between blocked
   and unblocked runs; with integer delays they agree to float rounding.
-- **Limits.** Float32 input only and `subband_levels=0`: subband rows exist
+- **Limits.** Float32 input only and plan `subband_depth=0`: subband rows exist
   only in the Fourier domain and would each need an extra inverse transform.
 
 ```{seealso}

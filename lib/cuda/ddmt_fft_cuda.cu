@@ -386,7 +386,7 @@ __global__ void kernel_trim(const float* __restrict__ time,
                             float* __restrict__ out,
                             int64_t ndm,
                             int64_t n_fft,
-                            int64_t guard,
+                            int64_t start,
                             int64_t n_out,
                             int64_t p0,
                             int64_t cnt) {
@@ -396,7 +396,7 @@ __global__ void kernel_trim(const float* __restrict__ time,
         return;
     }
     for (int64_t d = blockIdx.y; d < ndm; d += gridDim.y) {
-        out[(d * n_out) + p0 + i] = time[(d * n_fft) + guard + i];
+        out[(d * n_out) + p0 + i] = time[(d * n_fft) + start + i];
     }
 }
 
@@ -1145,7 +1145,8 @@ private:
                          grid_y(static_cast<int64_t>(m_ndm)));
         kernel_trim<<<tgrid, kBlock, 0, st>>>(
             m_rows_d.data(), out, static_cast<int64_t>(m_ndm),
-            static_cast<int64_t>(g.n_fft), static_cast<int64_t>(m_model.guard),
+            static_cast<int64_t>(g.n_fft),
+            static_cast<int64_t>(m_model.out_start()),
             static_cast<int64_t>(n_out), static_cast<int64_t>(p0),
             static_cast<int64_t>(cnt));
     }

@@ -13,7 +13,6 @@ def config(
         max_boxcar=17,
         wtsp=1.5,
         detect_thresh=2,
-        subband_levels=2,
         max_cands_per_dm=0,
         peak_mode=mode,
     )
@@ -42,8 +41,10 @@ def test_streamed_matches_monolithic(mode: PeakFindingMode) -> None:
     data = rng.standard_normal((2, 7, samples * blocks), dtype=np.float32)
     data[:, :3, samples - 5 : samples + 9] += 5
     grid = [-73, -12, 0, 4, 97]
-    small = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid)
-    large = FDMTPlan(700, 1200, 7, samples * blocks, 0.001, dt_grid=grid)
+    small = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid, subband_depth=2)
+    large = FDMTPlan(
+        700, 1200, 7, samples * blocks, 0.001, dt_grid=grid, subband_depth=2
+    )
     streamed = FDMTBoxcar(small, config(mode), nthreads=2, nbeams=2, chunk_nsamps=64)
     whole = FDMTBoxcar(large, config(mode), nbeams=2)
     parts = []
@@ -76,11 +77,15 @@ def test_streamed_matches_monolithic(mode: PeakFindingMode) -> None:
     assert streamed.chunk_nsamps == 64
     assert streamed.memory_usage.total > 0
     assert "no root" in streamed.summary()
-    assert len(streamed.search_plans) == 7
+    # Depth 2 over 7 channels: 4 quarters + 3 staggered, 2 halves + 1, root.
+    plans = streamed.search_plans
+    assert len(plans) == 11
+    assert [p.staggered for p in plans].count(True) == 4
+    assert np.any(actual["staggered"] == 1)
 
 
 def test_validation_and_owned_results() -> None:
-    plan = FDMTPlan(700, 1200, 4, 32, 0.001, 10)
+    plan = FDMTPlan(700, 1200, 4, 32, 0.001, 10, subband_depth=1)
     cfg = config(PeakFindingMode.ALL_ABOVE_THRESHOLD)
     cfg.max_candidates = 2
     cfg.max_cands_per_dm = 3
@@ -116,7 +121,9 @@ def test_validation_and_owned_results() -> None:
 @pytest.mark.parametrize("mode", list(PeakFindingMode.__members__.values()))
 def test_gpu_matches_cpu(gpu_backend: str, mode: PeakFindingMode) -> None:
     rng = np.random.default_rng(81)
-    plan = FDMTPlan(700, 1200, 7, 733, 0.001, dt_grid=[-73, -12, 0, 4, 97])
+    plan = FDMTPlan(
+        700, 1200, 7, 733, 0.001, dt_grid=[-73, -12, 0, 4, 97], subband_depth=2
+    )
     cpu = FDMTBoxcar(plan, config(mode), chunk_nsamps=64)
     gpu = FDMTBoxcar(plan, config(mode), chunk_nsamps=64, backend=gpu_backend)
     wanted = []
@@ -160,7 +167,7 @@ def test_packed_streaming_and_centered_reference(
     cfg.noise_sigma = np.sqrt(maximum * (maximum + 2) / 12)
     cfg.detect_thresh = 2.713
     grid = [-73, -12, 0, 4, 97]
-    plan = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid)
+    plan = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid, subband_depth=2)
     packed = FDMTBoxcar(plan, cfg, nbeams=2, nthreads=2, chunk_nsamps=64)
     cfg.input_nbits = 32
     cfg.input_mean = 0

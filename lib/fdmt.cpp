@@ -163,6 +163,21 @@ FDMT::FDMT(float f_min,
           exec,
           chunk_nsamps)) {}
 
+FDMT::FDMT(plans::FDMTPlan plan,
+           bool use_box_smearing,
+           Exec exec,
+           SizeType nbeams,
+           SizeType fuse_levels,
+           bool int_tree,
+           SizeType chunk_nsamps)
+    // Read the mode (a string literal) before the plan is moved.
+    : m_impl([&] {
+          const auto mode = plan.get_mode();
+          return std::make_unique<Impl>(std::move(plan), use_box_smearing, mode,
+                                        nbeams, fuse_levels, int_tree, exec,
+                                        chunk_nsamps);
+      }()) {}
+
 FDMT::~FDMT()                                = default;
 FDMT::FDMT(FDMT&& other) noexcept            = default;
 FDMT& FDMT::operator=(FDMT&& other) noexcept = default;

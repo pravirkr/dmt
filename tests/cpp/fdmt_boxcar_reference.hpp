@@ -258,9 +258,7 @@ reference(const plans::FDMTPlan& plan,
         nrows += beams * p.dm_grid.size();
     }
     rows.resize(nrows);
-    FDMT fdmt(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
-              plan.get_nsamps(), plan.get_tsamp(), plan.get_dt_grid_final(),
-              smear, "valid", Exec::cpu(), beams, 0, false, plan.get_nsamps());
+    FDMT fdmt(plan, smear, Exec::cpu(), beams, 0, false, plan.get_nsamps());
     std::vector<float> output(beams * plan.get_dmt_size());
     for (const auto& block : input) {
         fdmt.reset(block, output);

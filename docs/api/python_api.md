@@ -102,6 +102,17 @@ now (see the C++ API reference).
 .. autofunction:: dmtlib.dispersion_delay
 ```
 
+## Channel order
+
+```{eval-rst}
+.. autofunction:: dmtlib.sigproc_band
+
+.. autofunction:: dmtlib.to_ascending
+
+.. autoclass:: dmtlib.Band
+   :members:
+```
+
 ## Candidate search
 
 ```{eval-rst}

@@ -121,11 +121,10 @@ TEST_CASE("FDMT execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
 namespace dmt {
 TEST_CASE("FDMTBoxcar warmed execution and flush do not allocate",
           "[boxcar][cpu]") {
-    plans::FDMTPlan plan(700, 1200, 7, 256, 0.001F, 48, -32);
+    plans::FDMTPlan plan(700, 1200, 7, 256, 0.001F, 48, -32, 1, "valid", 2);
     BoxcarConfig cfg;
     cfg.max_boxcar     = 31;
     cfg.wtsp           = 1;
-    cfg.subband_levels = 2;
     cfg.detect_thresh  = 1;
     cfg.max_candidates = 7;
     algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
@@ -141,13 +140,12 @@ TEST_CASE("FDMTBoxcar warmed execution and flush do not allocate",
 namespace dmt {
 TEST_CASE("Packed FDMTBoxcar warmed execution does not allocate",
           "[boxcar][packed][cpu]") {
-    plans::FDMTPlan plan(700, 1200, 7, 139, 0.001F, 97, -73);
+    plans::FDMTPlan plan(700, 1200, 7, 139, 0.001F, 97, -73, 1, "valid", 2);
     BoxcarConfig cfg;
-    cfg.input_nbits    = 8;
-    cfg.input_mean     = 127;
-    cfg.noise_sigma    = 2;
-    cfg.subband_levels = 2;
-    cfg.max_boxcar     = 4096;
+    cfg.input_nbits = 8;
+    cfg.input_mean  = 127;
+    cfg.noise_sigma = 2;
+    cfg.max_boxcar  = 4096;
     algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
                                   algorithms::kFDMTAutoFuse, 64);
     std::vector<uint8_t> input(7 * 139, 130);

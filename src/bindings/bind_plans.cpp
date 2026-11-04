@@ -27,8 +27,9 @@ namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 
 void bind_plans(py::module_& mod) {
-    PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, ndt_min, ndt_max, ncoords,
-                         ncoords_sum, ncoords_copy, nsamps, nelements, dt_max);
+    PYBIND11_NUMPY_DTYPE(FDMTShape, nchans, nstaggered, ndt_min, ndt_max,
+                         ncoords, ncoords_sum, ncoords_copy, nsamps, nelements,
+                         dt_max);
     PYBIND11_NUMPY_DTYPE(FDMTCoord, i_sub, i_dt, nsamps, buf_offset,
                          i_coord_tail, i_coord_head, delay, tail_buf_offset,
                          tail_nsamps, head_buf_offset, head_nsamps,
@@ -50,7 +51,24 @@ void bind_plans(py::module_& mod) {
         .def_readonly("ndt", &FDMTCoordGrid::ndt)
         .def_readonly("grid_offset", &FDMTCoordGrid::coord_offset)
         .def_readonly("f_start", &FDMTCoordGrid::f_start)
-        .def_readonly("f_end", &FDMTCoordGrid::f_end);
+        .def_readonly("f_end", &FDMTCoordGrid::f_end)
+        .def_readonly("chan_begin", &FDMTCoordGrid::chan_begin)
+        .def_readonly("chan_end", &FDMTCoordGrid::chan_end)
+        .def_property_readonly("i_sub_tail",
+                               [](const FDMTCoordGrid& g) -> py::object {
+                                   if (g.i_sub_tail == SIZE_MAX) {
+                                       return py::none();
+                                   }
+                                   return py::int_(g.i_sub_tail);
+                               })
+        .def_property_readonly("i_sub_head",
+                               [](const FDMTCoordGrid& g) -> py::object {
+                                   if (g.i_sub_head == SIZE_MAX) {
+                                       return py::none();
+                                   }
+                                   return py::int_(g.i_sub_head);
+                               })
+        .def_readonly("staggered", &FDMTCoordGrid::staggered);
     py::class_<FDMTSubbandView>(mod, "FDMTSubbandView")
         .def_property_readonly(
             "data",
@@ -66,12 +84,13 @@ void bind_plans(py::module_& mod) {
         .def_readonly("nsamps", &FDMTSubbandView::nsamps)
         .def_readonly("f_start", &FDMTSubbandView::f_start)
         .def_readonly("f_end", &FDMTSubbandView::f_end)
+        .def_readonly("chan_begin", &FDMTSubbandView::chan_begin)
+        .def_readonly("chan_end", &FDMTSubbandView::chan_end)
+        .def_readonly("staggered", &FDMTSubbandView::staggered)
         .def_property_readonly("dt_grid", [](const FDMTSubbandView& v) {
             return std::vector<IndexType>(v.dt_grid.begin(), v.dt_grid.end());
         });
     py::class_<FDMTPlanContainer>(mod, "FDMTPlanContainer")
-        .def_readonly("df_top", &FDMTPlanContainer::df_top)
-        .def_readonly("df_bot", &FDMTPlanContainer::df_bot)
         .def_property_readonly("state_shape",
                                [](const FDMTPlanContainer& plan_c) {
                                    return as_pyarray_ref(plan_c.state_shape);
@@ -119,6 +138,17 @@ void bind_plans(py::module_& mod) {
             Spacing of the regular delay grid (default 1).
         mode : {'valid', 'full', 'roll'}, optional
             Output time alignment. ``valid`` is streaming-safe.
+        subband_depth : int, optional
+            Subband search depth (default 0, full band only). Depth ``d``
+            adds, at each depth ``k = 1..d``, the ``2**k - 1`` staggered
+            subbands that straddle the boundaries between that depth's
+            ``2**k`` tree subbands. At most ``niters - 1``. Engines built
+            from the plan (``FDMT(plan)``, ``FDMTFFT(plan)``,
+            :class:`FDMTBoxcar`) compute these merges on every block:
+            ``execute()`` pays for them and then discards them (only the
+            stepper's ``view_subband`` and :class:`FDMTBoxcar` read them),
+            and they cap level fusion at ``max_fuse_levels``. Use depth 0
+            for plain dedispersion.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
 
@@ -126,30 +156,35 @@ void bind_plans(py::module_& mod) {
         -----
         Custom grids are keyword-only so a float DM array is not mistaken
         for ``dt_max``. Unsorted or duplicate trials are sorted and uniqued.
+        The tree halves the band top-down, so subbands at any depth differ in
+        width by at most one channel (any ``nchans >= 2``).
+        :meth:`get_subband_sigma_grid` gives the noise sigma of every row of
+        any tree or staggered subband, for S/N on stepper views.
         )doc")
         .def(py::init<float, float, SizeType, SizeType, float, IndexType,
-                      IndexType, SizeType, std::string_view>(),
+                      IndexType, SizeType, std::string_view, SizeType>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid")
-        .def(
-            py::init([](float f_min, float f_max, SizeType nchans,
-                        SizeType nsamps, float tsamp, const py::object& dt_grid,
-                        const py::object& dt_arr, const py::object& dm_grid,
-                        const py::object& dm_arr, std::string_view mode) {
-                const auto [type, obj] =
-                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                if (type == CustomGridType::kDt) {
-                    return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                    extract_dt_grid(obj), mode);
-                }
-                return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                extract_dm_grid(obj), mode);
-            }),
-            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
-            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
-            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-            py::arg("mode") = "valid")
+             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
+             "subband_depth"_a = 0)
+        .def(py::init([](float f_min, float f_max, SizeType nchans,
+                         SizeType nsamps, float tsamp,
+                         const py::object& dt_grid, const py::object& dt_arr,
+                         const py::object& dm_grid, const py::object& dm_arr,
+                         std::string_view mode, SizeType subband_depth) {
+                 const auto [type, obj] =
+                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                 if (type == CustomGridType::kDt) {
+                     return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                     extract_dt_grid(obj), mode, subband_depth);
+                 }
+                 return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                 extract_dm_grid(obj), mode, subband_depth);
+             }),
+             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+             py::arg("mode") = "valid", py::arg("subband_depth") = 0)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly(
@@ -171,6 +206,9 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("is_custom_grid", &FDMTPlan::is_custom_grid)
         .def_property_readonly("df", &FDMTPlan::get_df)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
+        .def_property_readonly("subband_depth", &FDMTPlan::get_subband_depth)
+        .def_property_readonly("max_fuse_levels",
+                               &FDMTPlan::get_max_fuse_levels)
         .def_property_readonly("container", &FDMTPlan::get_container)
         .def_property_readonly(
             "dt_grid_final",
@@ -249,6 +287,34 @@ void bind_plans(py::module_& mod) {
                     boxcar_width, use_box_smearing));
             },
             py::arg("boxcar_width") = 1, py::arg("use_box_smearing") = true)
+        .def(
+            "get_subband_variance_grid",
+            [](const FDMTPlan& plan, SizeType level, SizeType subband,
+               SizeType boxcar_width, bool use_box_smearing) {
+                return as_pyarray(plan.get_subband_variance_grid(
+                    level, subband, boxcar_width, use_box_smearing));
+            },
+            py::arg("level"), py::arg("subband"), py::arg("boxcar_width") = 1,
+            py::arg("use_box_smearing") = true,
+            R"doc(
+            Noise variance of every row of one subband (unit Gaussian input).
+
+            ``level`` and ``subband`` index ``plan.container.dt_grids`` and
+            ``FDMT.view_subband()``: tree subbands first, then staggered ones.
+            The root (``level=plan.niters, subband=0``) equals
+            :meth:`get_effective_variance_grid`.
+            )doc")
+        .def(
+            "get_subband_sigma_grid",
+            [](const FDMTPlan& plan, SizeType level, SizeType subband,
+               SizeType boxcar_width, bool use_box_smearing) {
+                return as_pyarray(plan.get_subband_sigma_grid(
+                    level, subband, boxcar_width, use_box_smearing));
+            },
+            py::arg("level"), py::arg("subband"), py::arg("boxcar_width") = 1,
+            py::arg("use_box_smearing") = true,
+            "Square root of :meth:`get_subband_variance_grid`: divide a "
+            "stepper subband view's rows by it for S/N.")
         .def("get_complexity", &FDMTPlan::get_complexity,
              py::arg("use_box_smearing") = true)
         .def_property_readonly(
@@ -525,22 +591,36 @@ void bind_plans(py::module_& mod) {
             Explicit DM trial list.
         levin : LevinConfig, optional
             Lina Levin optimal grid configuration.
+        f_ref : float, optional
+            Keyword-only. Reference frequency of the output times in MHz
+            (default ``None``: ``f_min``); see :class:`DDMT`.
         )doc")
-        .def(py::init<float, float, SizeType, float, float, float, float,
-                      SizeType>(),
-             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
-             "dm_step"_a, "dm_min"_a = 0.0F, "nbits"_a = 32)
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
-                         const py::array_t<float>& dm_arr, SizeType nbits) {
+                         float dm_max, float dm_step, float dm_min,
+                         SizeType nbits, std::optional<float> f_ref) {
+                 return DDMTPlan(f_min, f_max, nchans, tsamp, dm_max, dm_step,
+                                 dm_min, nbits, {}, f_ref);
+             }),
+             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
+             "dm_step"_a, "dm_min"_a = 0.0F, "nbits"_a = 32, py::kw_only(),
+             "f_ref"_a = py::none())
+        .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                         const py::array_t<float>& dm_arr, SizeType nbits,
+                         std::optional<float> f_ref) {
                  const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
-                 return DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits);
+                 return DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits, {},
+                                 f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
-             "nbits"_a = 32)
-        .def(py::init<float, float, SizeType, float, const LevinConfig&,
-                      SizeType>(),
+             "nbits"_a = 32, py::kw_only(), "f_ref"_a = py::none())
+        .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
+                         const LevinConfig& levin, SizeType nbits,
+                         std::optional<float> f_ref) {
+                 return DDMTPlan(f_min, f_max, nchans, tsamp, levin, nbits, {},
+                                 f_ref);
+             }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
-             "nbits"_a = 32)
+             "nbits"_a = 32, py::kw_only(), "f_ref"_a = py::none())
         .def("summary", &DDMTPlan::summary,
              "Human-readable summary of the DDMT plan.")
         .def_static(
@@ -578,9 +658,16 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("f_max", &DDMTPlan::get_f_max)
         .def_property_readonly(
             "f_ref", &DDMTPlan::get_f_ref,
-            "Reference frequency of output times (MHz): the centre of the "
-            "highest-frequency channel, f_max - df/2. Channel delays use "
-            "channel centres.")
+            "Reference frequency of output times (MHz): the constructor's "
+            "f_ref, by default f_min (the bottom band edge, as for FDMT); may "
+            "be inf. Channels are sampled at their centres.")
+        .def_property_readonly(
+            "time_offset", &DDMTPlan::get_time_offset,
+            "Input-sample offset of the output times: output sample k (from "
+            "the start of the stream) is the sum for f_ref arrival at input "
+            "sample k + time_offset; 0 when f_ref is at or above the top "
+            "channel's centre. Shared by DDMT, SDMT and DDMTFFT; independent "
+            "of the kill mask.")
         .def_property_readonly("nchans", &DDMTPlan::get_nchans)
         .def_property_readonly("tsamp", &DDMTPlan::get_tsamp)
         .def_property_readonly("nbits", &DDMTPlan::get_nbits)
@@ -590,11 +677,14 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly(
             "dm_grid",
             [](const DDMTPlan& plan) { return as_pyarray(plan.get_dm_grid()); })
-        .def_property_readonly("fractional_delay_table",
-                               [](const DDMTPlan& plan) {
-                                   return as_pyarray(
-                                       plan.get_fractional_delay_table());
-                               })
+        .def_property_readonly(
+            "fractional_delay_table",
+            [](const DDMTPlan& plan) {
+                return as_pyarray(plan.get_fractional_delay_table());
+            },
+            "Per-channel d(delay)/d(DM) in samples per pc cm^-3: "
+            "K (f_c^-2 - f_ref^-2) / tsamp, negative above f_ref. The "
+            "integer delay of trial dm is time_offset + round(dm * rate).")
         .def_property(
             "kill_mask",
             [](const DDMTPlan& plan) {

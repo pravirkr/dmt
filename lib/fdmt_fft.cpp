@@ -194,6 +194,20 @@ FDMTFFT::FDMTFFT(float f_min,
           fractional_delays,
           kill_mask)) {}
 
+FDMTFFT::FDMTFFT(plans::FDMTPlan plan,
+                 bool use_box_smearing,
+                 Exec exec,
+                 SizeType nbeams,
+                 bool fractional_delays,
+                 std::span<const uint8_t> kill_mask)
+    // Read the mode (a string literal) before the plan is moved.
+    : m_impl([&] {
+          const auto mode = plan.get_mode();
+          return std::make_unique<Impl>(std::move(plan), use_box_smearing, mode,
+                                        exec, nbeams, fractional_delays,
+                                        kill_mask);
+      }()) {}
+
 FDMTFFT::~FDMTFFT()                                   = default;
 FDMTFFT::FDMTFFT(FDMTFFT&& other) noexcept            = default;
 FDMTFFT& FDMTFFT::operator=(FDMTFFT&& other) noexcept = default;

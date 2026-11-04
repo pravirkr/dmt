@@ -15,7 +15,8 @@ generate_box_width_trials(SizeType max_width, float wtsp);
 struct BoxcarPlanePlan {
     SizeType level         = 0; ///< Tree level (0 is channel initialization).
     uint32_t subband_level = 0; ///< Remaining merges; 0 is full band.
-    uint32_t subband_idx   = 0;
+    uint32_t subband_idx   = 0; ///< Tree subbands, then staggered ones.
+    bool staggered         = false;
     uint32_t chan_begin    = 0;
     uint32_t chan_end      = 0;
     float f_low_mhz        = 0.0F;

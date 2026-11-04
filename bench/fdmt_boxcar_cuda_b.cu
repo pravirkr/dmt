@@ -90,11 +90,10 @@ make_packed(const thrust::device_vector<float>& x) {
     return v;
 }
 
-BoxcarConfig make_config(float wtsp, SizeType subband_levels, bool packed) {
+BoxcarConfig make_config(float wtsp, bool packed) {
     return BoxcarConfig(max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
-                        PeakFindingMode::kContiguousPeakPerWidth,
-                        subband_levels, 1U << 20U, 0, true, packed ? 8 : 32,
-                        packed ? 127.0F : 0.0F);
+                        PeakFindingMode::kContiguousPeakPerWidth, 1U << 20U, 0,
+                        true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
 }
 
 /// DMT_BENCH_CHUNK overrides the automatic FDMT chunk length (tuning).
@@ -158,7 +157,7 @@ void bench_transform(benchmark::State& state) {
 // FDMT into the plane, then the same GPU scorer over the materialised root.
 void bench_separate(benchmark::State& state, float wtsp) {
     const auto plan   = make_plan(ref_point());
-    const auto config = make_config(wtsp, 0, false);
+    const auto config = make_config(wtsp, false);
     FDMT fdmt(kFMin, kFMax, kNchans, kNsampsRef, kTsamp, dm_grid(ref_point()),
               true, "valid", bench_gpu_exec());
     const auto planes =
@@ -223,7 +222,7 @@ void bench_fft_transform(benchmark::State& state) {
 
 void bench_fft_fused(benchmark::State& state, float wtsp) {
     auto plan         = make_plan(ref_point());
-    const auto config = make_config(wtsp, 0, false);
+    const auto config = make_config(wtsp, false);
     algorithms::FDMTFFTBoxcar search(std::move(plan), config, true,
                                      bench_gpu_exec());
     const auto wf = make_noise(kNchans * kNsampsRef);
@@ -255,11 +254,11 @@ enum class Api { kDevice, kHost };
 
 void bench_fused(benchmark::State& state,
                  float wtsp,
-                 SizeType subband_levels,
+                 SizeType subband_depth,
                  bool packed,
                  Api api) {
-    auto plan         = make_plan(ref_point());
-    const auto config = make_config(wtsp, subband_levels, packed);
+    auto plan         = make_plan(ref_point(), subband_depth);
+    const auto config = make_config(wtsp, packed);
     FDMTBoxcar search(std::move(plan), config, true, bench_gpu_exec(), 1,
                       algorithms::kFDMTAutoFuse, bench_chunk());
     const auto wf = make_noise(kNchans * kNsampsRef);
@@ -312,8 +311,8 @@ void bench_fused(benchmark::State& state,
             : (packed ? wf8.size() : wf.size() * sizeof(float));
     common_counters(state, search.get_plan(), mem.total() + input_bytes,
                     search.get_search_plans().front().widths.size());
-    state.counters["input_nbits"]    = packed ? 8 : 32;
-    state.counters["subband_levels"] = static_cast<double>(subband_levels);
+    state.counters["input_nbits"]   = packed ? 8 : 32;
+    state.counters["subband_depth"] = static_cast<double>(subband_depth);
     state.counters["chunk_nsamps"] =
         static_cast<double>(search.get_chunk_nsamps());
     state.counters["fuse_levels"] =
@@ -349,8 +348,8 @@ void bench_fused(benchmark::State& state,
         reg(std::format("BM_fdmt_boxcar_cuda/{}/separate/wtsp:{:g}", cfg, wtsp),
             [wtsp](benchmark::State& s) { bench_separate(s, wtsp); });
         std::vector<SizeType> depths{0};
-        if (suite_config().subband_levels != 0) {
-            depths.push_back(suite_config().subband_levels);
+        if (suite_config().subband_depth != 0) {
+            depths.push_back(suite_config().subband_depth);
         }
         for (const auto sb : depths) {
             reg(std::format("BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}", cfg,

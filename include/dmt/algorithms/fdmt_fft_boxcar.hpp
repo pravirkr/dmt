@@ -20,7 +20,7 @@ namespace dmt::algorithms {
  * searched straight from the inverse transform, so no DM-time plane is
  * allocated. Input is float32 (nbeams, nchans, nsamps), low frequency first,
  * normalized to zero mean and known common noise sigma; packed input and
- * subband search (config.subband_levels > 0) are not supported.
+ * subband search (plan subband_depth > 0) are not supported.
  *
  * The analytical S/N is FDMTBoxcar's: a merge's shift, integer or
  * fractional, is an all-pass operation that leaves each channel's noise

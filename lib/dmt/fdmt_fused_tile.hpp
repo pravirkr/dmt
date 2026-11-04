@@ -13,6 +13,7 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_tree.hpp"
 
 // Level fusion for the CUDA backend (FDMTExecConfig::fuse_levels): level-0
 // initialisation plus the first F tree merges of one channel group, over one
@@ -619,10 +620,9 @@ inline FDMTFusedTilePlan build_fused_tile_plan(
         return static_cast<int>(v);
     };
     FDMTFusedTilePlan p;
-    const auto f     = static_cast<int>(fuse);
-    p.fuse           = f;
-    p.ngroups        = to_int(pc.state_shape[fuse].nchans);
-    const auto nsubs = pc.state_shape[0].nchans;
+    const auto f = static_cast<int>(fuse);
+    p.fuse       = f;
+    p.ngroups    = to_int(pc.state_shape[fuse].nchans);
     for (SizeType l = 0; l <= fuse; ++l) {
         p.level_nsamps[l] = to_int(pc.state_shape[l].nsamps);
     }
@@ -638,16 +638,9 @@ inline FDMTFusedTilePlan build_fused_tile_plan(
     }
 
     // Group-local coordinate range of level l for group g: the level-l
-    // sub-bands [g * 2^(F-l), (g+1) * 2^(F-l)), clipped (odd counts end in a
-    // single-child copy sub-band that still descends from floor(j / 2)).
+    // sub-bands descending from level-F sub-band g (see fdmt_tree.hpp).
     const auto range = [&](SizeType l, SizeType g) {
-        const auto& grids    = pc.grids[l];
-        const SizeType w     = SizeType{1} << (fuse - l);
-        const SizeType first = g * w;
-        const SizeType last  = std::min(first + w, grids.size()) - 1;
-        return std::pair<SizeType, SizeType>{grids[first].coord_offset,
-                                             grids[last].coord_offset +
-                                                 grids[last].ndt};
+        return fdmt_group_coords(pc, fuse, g, l);
     };
 
     // Coordinate tables: sum coordinates carry the history slot, which is
@@ -698,10 +691,8 @@ inline FDMTFusedTilePlan build_fused_tile_plan(
     }
 
     for (SizeType g = 0; g < static_cast<SizeType>(p.ngroups); ++g) {
-        const SizeType ch_begin = g << fuse;
-        const SizeType ch_end =
-            std::min(ch_begin + (SizeType{1} << fuse), nsubs);
-        int s_halo = 0;
+        const auto [ch_begin, ch_end] = fdmt_group_channels(pc, fuse, g);
+        int s_halo                    = 0;
         for (SizeType c = ch_begin; c < ch_end; ++c) {
             const auto& dts = grids0[c].dt_grid;
             s_halo = std::max({s_halo, static_cast<int>(std::abs(dts.front())),

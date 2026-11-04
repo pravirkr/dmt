@@ -703,7 +703,7 @@ public:
     }
     [[nodiscard]] SizeType num_subbands() const override {
         require_stepper();
-        return m_plan->get_container().state_shape[m_level].nchans;
+        return m_plan->get_container().grids[m_level].size();
     }
     [[nodiscard]] bool is_finished() const noexcept override {
         return m_initialized && (m_level >= total_levels() - 1);
@@ -745,11 +745,11 @@ public:
         require_stepper();
         materialize_view();
         const auto& plan_c = m_plan->get_container();
-        const auto& shape  = plan_c.state_shape[m_level];
-        if (subband_idx >= shape.nchans) {
+        const auto nsubs   = plan_c.grids[m_level].size();
+        if (subband_idx >= nsubs) {
             throw std::out_of_range(std::format(
                 "FDMTFFT: Subband index {} out of range ({} subbands)",
-                subband_idx, shape.nchans));
+                subband_idx, nsubs));
         }
         const auto& grid    = plan_c.grids[m_level][subband_idx];
         const auto nsamps_v = view_nsamps();
@@ -764,6 +764,9 @@ public:
             .f_end       = grid.f_end,
             .dt_grid     = std::span<const IndexType>(grid.dt_grid.data(),
                                                       grid.dt_grid.size()),
+            .chan_begin  = grid.chan_begin,
+            .chan_end    = grid.chan_end,
+            .staggered   = grid.staggered,
         };
     }
 

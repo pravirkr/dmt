@@ -104,8 +104,10 @@ inline FractionalDelays fractional_delays(const plans::FDMTPlan& plan,
             double shift   = static_cast<double>(c.delay);
             double dk      = 0.0; // g-distance tail edge -> head edge
             if (dt > 0) {
-                const double fs   = gp.f_start;
-                const double fmid = pc.grids[l - 1][2 * c.i_sub].f_end;
+                const double fs = gp.f_start;
+                // The tail child's upper edge (the tree is not positional:
+                // see plans::FDMTCoordGrid).
+                const double fmid = pc.grids[l - 1][gp.i_sub_tail].f_end;
                 const double dmg =
                     static_cast<double>(dt) / (g(fs) - g(gp.f_end));
                 dk              = g(fs) - g(fmid);

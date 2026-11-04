@@ -144,6 +144,22 @@ public:
             bool fractional_delays             = true,
             std::span<const uint8_t> kill_mask = {});
 
+    /**
+     * @brief Constructs an FDMTFFT engine from a prepared plan, e.g. one
+     * with a subband search depth (plans::FDMTPlan subband_depth), whose
+     * staggered subbands the stepper then exposes. The mode is the plan's.
+     *
+     * @param plan The plan, copied into the instance.
+     * @param use_box_smearing, exec, nbeams, fractional_delays, kill_mask
+     * See the first constructor.
+     */
+    explicit FDMTFFT(plans::FDMTPlan plan,
+                     bool use_box_smearing              = true,
+                     Exec exec                          = {},
+                     SizeType nbeams                    = 1,
+                     bool fractional_delays             = true,
+                     std::span<const uint8_t> kill_mask = {});
+
     ~FDMTFFT();
     FDMTFFT(FDMTFFT&&) noexcept;
     FDMTFFT& operator=(FDMTFFT&&) noexcept;

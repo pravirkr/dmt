@@ -36,6 +36,14 @@ struct FDMTBoxcarMemoryUsage {
  * and noise_sigma in code units, and execute byte spans. Packed rows follow
  * FDMT byte order with independent row padding; 32 denotes float32 input.
  *
+ * Subband search: a plan built with subband_depth d is searched at depths
+ * 0..d. Depth k covers 2^k equal tree subbands and the 2^k - 1 staggered
+ * subbands of the same width centred on their boundaries, so a narrowband
+ * burst anywhere in the band falls mostly inside one searched subband
+ * (d = 1: full band, two halves and the central half). Every subband row
+ * has its own analytical noise model; candidates carry the subband's depth,
+ * index, channel extent and staggered flag.
+ *
  * Consecutive non-overlapping blocks form one stream. Root samples are
  * merged directly into the search without a DM-time output plane. Pending
  * contiguous excursions cross blocks; flush() emits them at end of stream.

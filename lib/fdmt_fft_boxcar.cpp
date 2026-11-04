@@ -25,10 +25,10 @@ public:
           config(config),
           exec(exec),
           beams(beams) {
-        if (config.subband_levels != 0 || config.input_nbits != 32) {
+        if (this->plan.get_subband_depth() != 0 || config.input_nbits != 32) {
             throw std::invalid_argument(
                 "FDMTFFTBoxcar: subband search and packed input are not "
-                "supported (subband_levels 0, input_nbits 32)");
+                "supported (plan subband_depth 0, input_nbits 32)");
         }
         if (beams == 0 || beams > UINT32_MAX ||
             beams >

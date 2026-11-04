@@ -49,8 +49,9 @@ struct SuiteConfig {
     float dm_max_ref;
     std::vector<SizeType> nsamps_sweep;
     std::vector<float> dm_max_sweep;
-    /// FDMTBoxcar search depth; transform-only runs are unchanged.
-    SizeType subband_levels{0};
+    /// FDMTBoxcar search depth (plan subband_depth); transform-only runs
+    /// are unchanged.
+    SizeType subband_depth{0};
 };
 
 inline const SuiteConfig& suite_config() {
@@ -252,8 +253,9 @@ inline std::vector<float> dm_grid(const Point& p) {
 
 /// The FDMT plan of a point (its grid rounds dm_grid() to integer delays,
 /// keeping every trial: the grid steps are at least 3 samples).
-inline plans::FDMTPlan make_plan(const Point& p) {
-    return {kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), "valid"};
+inline plans::FDMTPlan make_plan(const Point& p, SizeType subband_depth = 0) {
+    return {kFMin,  kFMax,      kNchans, p.nsamps,
+            kTsamp, dm_grid(p), "valid", subband_depth};
 }
 
 /// Memory budget in bytes: DMT_BENCH_MAX_GB (set by run_suite.py; 16 GB if

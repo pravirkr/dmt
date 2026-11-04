@@ -37,8 +37,7 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans][cpu]") {
 
     SECTION("Container properties") {
         const auto& container = plan.get_container();
-        CHECK(container.df_top.size() == 10);
-        CHECK(container.df_bot.size() == 10);
+        CHECK(container.grids.size() == 10);
         CHECK(container.dt_grid_sub_top.size() == 10);
         CHECK(container.state_shape.size() == 10);
     }
@@ -69,10 +68,17 @@ TEST_CASE("FDMTPlan basic", "[dmt_plans][cpu]") {
     SECTION("Internal calculations") {
         const auto& container = plan.get_container();
 
-        CHECK(std::ranges::is_sorted(container.df_top));
-        CHECK(std::ranges::is_sorted(container.df_bot));
-        for (SizeType i = 0; i < container.df_top.size(); ++i) {
-            CHECK(container.df_top[i] <= container.df_bot[i]);
+        // Each subband spans its children's channels, edge to edge.
+        for (SizeType l = 1; l < container.grids.size(); ++l) {
+            for (const auto& g : container.grids[l]) {
+                const auto& lo = container.grids[l - 1][g.i_sub_tail];
+                CHECK(lo.chan_begin == g.chan_begin);
+                CHECK(g.f_start == lo.f_start);
+                if (g.i_sub_head != SIZE_MAX) {
+                    CHECK(container.grids[l - 1][g.i_sub_head].chan_end ==
+                          g.chan_end);
+                }
+            }
         }
 
         // Check the values of state_shape

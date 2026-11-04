@@ -81,7 +81,8 @@ DDMT::DDMT(float f_min,
            Exec exec,
            SizeType nbits,
            std::span<const uint8_t> kill_mask,
-           SizeType nbeams)
+           SizeType nbeams,
+           std::optional<float> f_ref)
     : m_impl(std::make_unique<Impl>(plans::DDMTPlan(f_min,
                                                     f_max,
                                                     nchans,
@@ -90,7 +91,8 @@ DDMT::DDMT(float f_min,
                                                     dm_step,
                                                     dm_min,
                                                     nbits,
-                                                    kill_mask),
+                                                    kill_mask,
+                                                    f_ref),
                                     exec,
                                     nbeams)) {}
 
@@ -102,10 +104,11 @@ DDMT::DDMT(float f_min,
            Exec exec,
            SizeType nbits,
            std::span<const uint8_t> kill_mask,
-           SizeType nbeams)
+           SizeType nbeams,
+           std::optional<float> f_ref)
     : m_impl(std::make_unique<Impl>(
           plans::DDMTPlan(
-              f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask),
+              f_min, f_max, nchans, tsamp, dm_arr, nbits, kill_mask, f_ref),
           exec,
           nbeams)) {}
 
@@ -117,9 +120,11 @@ DDMT::DDMT(float f_min,
            Exec exec,
            SizeType nbits,
            std::span<const uint8_t> kill_mask,
-           SizeType nbeams)
+           SizeType nbeams,
+           std::optional<float> f_ref)
     : m_impl(std::make_unique<Impl>(
-          plans::DDMTPlan(f_min, f_max, nchans, tsamp, levin, nbits, kill_mask),
+          plans::DDMTPlan(
+              f_min, f_max, nchans, tsamp, levin, nbits, kill_mask, f_ref),
           exec,
           nbeams)) {}
 

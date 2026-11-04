@@ -1304,3 +1304,68 @@ class TestFDMTUsageContract:
         fdmt.advance_until_remaining(2)
         fdmt.reset(wf)
         fdmt.finalize()
+
+
+def test_plan_constructor_exposes_staggered_subbands() -> None:
+    nchans, nsamps = 12, 64
+    plan = libdmt.FDMTPlan(1000.0, 1500.0, nchans, nsamps, 0.001, 20, subband_depth=1)
+    assert plan.subband_depth == 1
+    assert plan.max_fuse_levels == plan.niters - 2
+    fdmt = libdmt.FDMT(plan)
+    assert fdmt.plan.subband_depth == 1
+    rng = np.random.default_rng(3)
+    wf = rng.integers(0, 8, (nchans, nsamps)).astype(np.float32)
+    fdmt.reset(wf)
+    fdmt.advance_until_remaining(1)
+    # Two halves of 6 channels, then the staggered central half [3, 9).
+    assert fdmt.num_subbands == 3
+    views = [fdmt.view_subband(s) for s in range(3)]
+    assert [(v.chan_begin, v.chan_end, v.staggered) for v in views] == [
+        (0, 6, False),
+        (6, 12, False),
+        (3, 9, True),
+    ]
+    dmt = fdmt.finalize()
+    reference = libdmt.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 20)
+    np.testing.assert_array_equal(dmt, reference.execute(wf))
+
+
+def test_fdmt_fft_plan_constructor_exposes_staggered_subbands() -> None:
+    nchans, nsamps = 12, 64
+    plan = libdmt.FDMTPlan(1000.0, 1500.0, nchans, nsamps, 0.001, 20, subband_depth=1)
+    fft = libdmt.FDMTFFT(plan, use_box_smearing=False, fractional_delays=False)
+    assert fft.plan.subband_depth == 1
+    rng = np.random.default_rng(4)
+    wf = rng.integers(0, 8, (nchans, nsamps)).astype(np.float32)
+    fft.reset(wf)
+    fft.advance_until_remaining(1)
+    assert fft.num_subbands == 3
+    views = [fft.view_subband(s) for s in range(3)]
+    assert [(v.chan_begin, v.chan_end, v.staggered) for v in views] == [
+        (0, 6, False),
+        (6, 12, False),
+        (3, 9, True),
+    ]
+    # Rounded delays: the same nodes as the time-domain stepper.
+    ref = libdmt.FDMT(plan, use_box_smearing=False)
+    ref.reset(wf)
+    ref.advance_until_remaining(1)
+    for s in range(3):
+        np.testing.assert_allclose(
+            np.asarray(views[s].data), np.asarray(ref.view_subband(s).data), atol=1e-3
+        )
+
+
+def test_subband_sigma_grid() -> None:
+    plan = libdmt.FDMTPlan(1000.0, 1500.0, 12, 64, 0.001, 20, subband_depth=1)
+    root = plan.niters
+    np.testing.assert_array_equal(
+        plan.get_subband_sigma_grid(root, 0, boxcar_width=2),
+        plan.get_effective_sigma_grid(2),
+    )
+    # Staggered subband [3, 9) of six channels, no smearing: sqrt(6 * w).
+    level = root - 1
+    stag = plan.get_subband_sigma_grid(level, 2, boxcar_width=2, use_box_smearing=False)
+    np.testing.assert_allclose(stag, np.sqrt(12.0))
+    with pytest.raises(IndexError):
+        plan.get_subband_sigma_grid(level, 3)

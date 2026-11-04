@@ -139,7 +139,7 @@ public:
     SizeType nchans() const noexcept { return m_nchans; }
     float bw_chan() const noexcept { return m_bw_chan; }
     float tsamp() const noexcept { return m_tsamp; }
-    float f_ref() const noexcept { return m_f_min + (m_bw_chan / 2.0F); }
+    float f_ref() const noexcept { return m_f_min; }
     SizeType nbin() const noexcept { return m_nbin; }
     SizeType mbin() const noexcept { return m_mbin; }
     SizeType noverlap() const noexcept { return m_noverlap; }
@@ -496,9 +496,10 @@ private:
             c.dt_step,
             static_cast<SizeType>(std::ceil(dt_exact / dt_step)) * c.dt_step);
 
-        // Inter-channel shifts at every coarse trial, relative to the centre
-        // of the lowest channel.
-        const double f_ref = f_min + (bw_chan / 2.0);
+        // Inter-channel shifts at every coarse trial: each channel centre's
+        // lag behind the bottom band edge f_min (f_ref()), the reference the
+        // fine FDMT stage uses too.
+        const double f_ref = f_min;
         m_shifts.resize(ncoh * m_nchans);
         for (SizeType k = 0; k < ncoh; ++k) {
             for (SizeType ch = 0; ch < m_nchans; ++ch) {
@@ -532,9 +533,9 @@ private:
         // Coherent filter margin: the chirp response of the bottom channel at
         // the largest coarse DM (its lower edge is the longer side) plus the
         // channel filter's ringing.
-        const double tau_lo =
-            disp_delay(static_cast<double>(m_dm_grid_coh.back()),
-                       f_ref - (bw_chan / 2.0), f_ref);
+        const double f_bot_centre = f_min + (bw_chan / 2.0);
+        const double tau_lo       = disp_delay(
+            static_cast<double>(m_dm_grid_coh.back()), f_min, f_bot_centre);
         const SizeType ring =
             taper_ringing_length(static_cast<double>(c.filter_leakage));
         m_noverlap = ceil_to(static_cast<SizeType>(std::ceil(tau_lo / m_tbin)) +

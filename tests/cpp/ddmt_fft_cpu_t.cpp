@@ -5,6 +5,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <random>
 #include <span>
@@ -59,14 +60,20 @@ DDMTFFTOptions opts(DDMTFFTMethod m, SizeType guard = 16, double tol = 1e-6) {
     return DDMTFFTOptions{.method = m, .tolerance = tol, .guard = guard};
 }
 
-// Exact delay (samples) of trial dm in channel c, as DDMTFFT defines it:
-// from the channel's centre, relative to the top channel's centre.
-double tau_of(double dm, SizeType c, SizeType nchans) {
+// Exact lag (samples) of channel c's centre behind the bottom band edge
+// f_min for trial dm.
+double lag_of(double dm, SizeType c, SizeType nchans) {
     const double df = (static_cast<double>(kFhi) - kFlo) / nchans;
     const double f  = kFlo + (df * (static_cast<double>(c) + 0.5));
-    const double fr = kFlo + (df * (static_cast<double>(nchans) - 0.5));
+    const double fr = kFlo;
     const double k  = static_cast<double>(kDispConst) / kTs;
-    return dm * k * ((1.0 / (f * f)) - (1.0 / (fr * fr)));
+    return dm * k * ((1.0 / (fr * fr)) - (1.0 / (f * f)));
+}
+
+// Exact delay (samples) of trial dm in channel c, as DDMTFFT defines it:
+// the plan's time offset minus the channel's lag behind f_min.
+double tau_of(double dm, SizeType c, SizeType nchans, SizeType offset) {
+    return static_cast<double>(offset) - lag_of(dm, c, nchans);
 }
 
 // Double-precision single-transform reference of one cold-start call: the
@@ -109,7 +116,8 @@ std::vector<float> reference_single(const std::vector<float>& wf,
     for (SizeType d = 0; d < dms.size(); ++d) {
         std::fill(y.begin(), y.end(), C{});
         for (SizeType c = 0; c < nchans; ++c) {
-            const double tau = tau_of(dms[d], c, nchans);
+            const double tau =
+                tau_of(dms[d], c, nchans, eng.get_plan().get_time_offset());
             for (SizeType k = 0; k < nb; ++k) {
                 const double ph = 2.0 * std::numbers::pi * tau *
                                   static_cast<double>(k) /
@@ -140,8 +148,11 @@ TEST_CASE("DDMTFFT options, delays and streaming sizes",
     DDMTFFT lin(kFlo, kFhi, kNc, kTs, 40.0F, 0.5F, 0.0F, Exec::cpu(1));
     CHECK(lin.get_options().method == DDMTFFTMethod::kNUFFT);
     CHECK(lin.get_options().guard == 64);
-    const double tmax = tau_of(40.0, 0, kNc);
-    CHECK(lin.get_max_delay() == static_cast<SizeType>(std::ceil(tmax)) + 64);
+    const auto offset =
+        static_cast<SizeType>(std::ceil(lag_of(40.0, kNc - 1, kNc)));
+    CHECK(lin.get_plan().get_time_offset() == offset);
+    CHECK(lin.get_plan().get_f_ref() == kFlo);
+    CHECK(lin.get_max_delay() == offset + 64);
     const auto d = lin.get_max_delay();
     CHECK(lin.get_output_nsamps(d + 10) == 10);
     CHECK(lin.get_output_nsamps(d) == 0);
@@ -533,9 +544,11 @@ TEST_CASE("DDMTFFT recovers fractional-delay pulses better than DDMT",
     const double dm_true  = 17.3;
     const double t0       = 300.3;
     const double width    = 1.0; // samples (Gaussian sigma; ~band-limited)
+    // f_min arrival at t_ref; channel c arrives its lag earlier.
+    const double t_ref = t0 + lag_of(dm_true, nchans - 1, nchans);
     std::vector<float> wf(nchans * nsamps, 0.0F);
     for (SizeType c = 0; c < nchans; ++c) {
-        const double tc = t0 + tau_of(dm_true, c, nchans);
+        const double tc = t_ref - lag_of(dm_true, c, nchans);
         for (SizeType t = 0; t < nsamps; ++t) {
             const double z       = (static_cast<double>(t) - tc) / width;
             wf[(c * nsamps) + t] = static_cast<float>(std::exp(-0.5 * z * z));
@@ -557,6 +570,53 @@ TEST_CASE("DDMTFFT recovers fractional-delay pulses better than DDMT",
     CAPTURE(pa, pb, ideal);
     CHECK(pa > pb);
     CHECK(pa > 0.97 * ideal);
+    // Both engines put the peak at f_min arrival minus the shared offset.
+    const auto offset = static_cast<double>(fdd.get_plan().get_time_offset());
+    CHECK(offset == static_cast<double>(ddmt.get_plan().get_time_offset()));
+    const auto peak_a = std::ranges::max_element(a) - a.begin();
+    const auto peak_b = std::ranges::max_element(b) - b.begin();
+    CHECK(std::abs(static_cast<double>(peak_a) - (t_ref - offset)) <= 0.5);
+    CHECK(std::abs(static_cast<double>(peak_b) - (t_ref - offset)) <= 1.0);
+}
+
+TEST_CASE("DDMTFFT honours the plan's reference frequency",
+          "[ddmt_fft_cpu][cpu]") {
+    const SizeType nchans = 64;
+    const SizeType nsamps = 2048;
+    const double dm_true  = 17.3;
+    const double s_ref    = 900.4; // f_ref arrival, samples
+    const double df       = (static_cast<double>(kFhi) - kFlo) / nchans;
+    const double k        = static_cast<double>(kDispConst) / kTs;
+    for (const float f_ref :
+         {kFlo, kFhi, static_cast<float>(kFhi - (df / 2)), 1.5F * kFlo,
+          std::numeric_limits<float>::infinity()}) {
+        CAPTURE(f_ref);
+        const double fr      = f_ref;
+        const double inv_ref = std::isinf(fr) ? 0.0 : 1.0 / (fr * fr);
+        std::vector<float> wf(nchans * nsamps, 0.0F);
+        for (SizeType c = 0; c < nchans; ++c) {
+            const double f = kFlo + (df * (static_cast<double>(c) + 0.5));
+            const double tc =
+                s_ref + (dm_true * k * ((1.0 / (f * f)) - inv_ref));
+            for (SizeType t = 0; t < nsamps; ++t) {
+                const double z = static_cast<double>(t) - tc;
+                wf[(c * nsamps) + t] =
+                    static_cast<float>(std::exp(-0.5 * z * z));
+            }
+        }
+        const std::vector<float> dms = {static_cast<float>(dm_true)};
+        DDMTFFT fdd(kFlo, kFhi, nchans, kTs, dms, Exec::cpu(2), 32, {}, 1,
+                    opts(DDMTFFTMethod::kBrute, 32), f_ref);
+        CHECK(fdd.get_plan().get_f_ref() == f_ref);
+        std::vector<float> a(fdd.get_output_nsamps(nsamps));
+        fdd.execute(wf, a);
+        const auto offset =
+            static_cast<double>(fdd.get_plan().get_time_offset());
+        const auto peak = std::ranges::max_element(a) - a.begin();
+        CHECK(std::abs(static_cast<double>(peak) - (s_ref - offset)) <= 0.5);
+        CHECK(*std::ranges::max_element(a) >
+              0.97 * nchans * std::exp(-0.5 * 0.4 * 0.4));
+    }
 }
 
 TEST_CASE("NUFFT type 1 matches the direct sum", "[ddmt_fft_cpu][cpu]") {

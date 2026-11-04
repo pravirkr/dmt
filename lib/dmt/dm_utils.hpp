@@ -66,38 +66,67 @@ SizeType find_nearest_sorted_idx(std::span<const IndexType> arr_sorted,
                                  IndexType val);
 
 /**
- * @brief Generate a delay table for brute-force dedispersion.
+ * @brief Time offset of the brute-force delay tables referenced to @p f_ref:
+ * the most negative dispersion delay of any channel centre behind f_ref over
+ * the DM trials (channels above f_ref arrive early), negated and rounded
+ * up; 0 when no channel lies above f_ref.
  *
- * @param dm_arr DM values (in pc cm^-3).
+ * Channel c is centred at f_min + (c + 1/2) df (ascending band). Output
+ * sample k of a delay-table engine is the arrival time at f_ref of input
+ * sample k + offset.
+ *
+ * @param dm_arr DM values (pc cm^-3), finite and >= 0.
  * @param nchans Number of channels.
- * @param fch1 First channel (center) frequency (MHz).
- * @param foff Channel (center) frequency offset (MHz).
+ * @param f_min Bottom band edge (MHz).
+ * @param df Channel width (MHz), > 0.
  * @param tsamp Sampling time (s).
- * @return Delay table (in bins) for brute-force dedispersion.
+ * @param f_ref Reference frequency (MHz), > 0; may be +inf.
+ */
+SizeType generate_delay_offset(std::span<const float> dm_arr,
+                               SizeType nchans,
+                               float f_min,
+                               float df,
+                               float tsamp,
+                               double f_ref);
+
+/**
+ * @brief Delay table for brute-force dedispersion, referenced to @p f_ref.
+ *
+ * Row-major (ndm x nchans): entry (d, c) = offset + round(dm[d] * K
+ * (f_c^-2 - f_ref^-2) / tsamp) with offset = generate_delay_offset(), so
+ * out[k] = sum_c in_c[k + delay(d, c)] is the sum for f_ref arrival at input
+ * sample k + offset. Entries are >= 0.
+ *
+ * @param dm_arr DM values (pc cm^-3).
+ * @param nchans Number of channels.
+ * @param f_min Bottom band edge (MHz).
+ * @param df Channel width (MHz), > 0.
+ * @param tsamp Sampling time (s).
+ * @param f_ref Reference frequency (MHz), > 0; may be +inf.
  */
 std::vector<SizeType> generate_delay_table(std::span<const float> dm_arr,
                                            SizeType nchans,
-                                           float fch1,
-                                           float foff,
-                                           float tsamp);
+                                           float f_min,
+                                           float df,
+                                           float tsamp,
+                                           double f_ref);
 
 /**
- * @brief Generate a fractional delay table (one float per channel) in bins/(pc
- * cm^-3).
+ * @brief Per-channel derivative of the delay table with respect to DM, in
+ * bins / (pc cm^-3): K (f_c^-2 - f_ref^-2) / tsamp, with channel c centred
+ * at f_min + (c + 1/2) df. Negative for channels above f_ref.
  *
- * For channel ichan, delay = std::nearbyint(dm *
- * fractional_delay_table[ichan]).
+ * delay(d, c) = offset + nearbyint(dm[d] * fractional_delay_table[c]) (up to
+ * the float rounding of the rate).
  *
  * @param nchans Number of channels.
- * @param fch1 First channel frequency (MHz).
- * @param foff Channel frequency offset (MHz).
+ * @param f_min Bottom band edge (MHz).
+ * @param df Channel width (MHz), > 0.
  * @param tsamp Sampling time (s).
- * @return Per-channel fractional delay array (size == nchans).
+ * @param f_ref Reference frequency (MHz), > 0; may be +inf.
  */
-std::vector<float> generate_fractional_delay_table(SizeType nchans,
-                                                   float fch1,
-                                                   float foff,
-                                                   float tsamp);
+std::vector<float> generate_fractional_delay_table(
+    SizeType nchans, float f_min, float df, float tsamp, double f_ref);
 
 /**
  * @brief Generate an optimal DM trial grid using Lina Levin's pulse-broadening
@@ -160,6 +189,17 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
 [[nodiscard]] constexpr bool is_finite_bits(double v) noexcept {
     constexpr std::uint64_t kExp = 0x7FF0000000000000ULL;
     return (std::bit_cast<std::uint64_t>(v) & kExp) != kExp;
+}
+
+/// @brief True if @p v is +infinity, tested on the bit pattern (see
+/// is_finite_bits()).
+[[nodiscard]] constexpr bool is_pos_inf_bits(double v) noexcept {
+    return std::bit_cast<std::uint64_t>(v) == 0x7FF0000000000000ULL;
+}
+
+/// @brief Valid dispersion reference frequency: finite and > 0, or +inf.
+[[nodiscard]] constexpr bool is_valid_f_ref(double v) noexcept {
+    return is_pos_inf_bits(v) || (is_finite_bits(v) && v > 0.0);
 }
 
 /**

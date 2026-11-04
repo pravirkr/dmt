@@ -103,12 +103,20 @@ The stepper exposes intermediate sub-band levels, e.g. to stop 1–2 levels
 before the root for a sub-band search:
 
 ```python
+plan = FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_max, subband_depth=2)
+fdmt = FDMT(plan)                  # the stepper sees the staggered subbands
 fdmt.reset(block)                  # consumes one input block (level 0)
-fdmt.advance_until_remaining(2)    # 4 sub-bands left
+fdmt.advance_until_remaining(2)    # 4 sub-bands + 3 staggered
 for s in range(fdmt.num_subbands):
-    sub = fdmt.view_subband(s)     # data, ndt, nsamps, f_start, f_end, dt_grid
+    sub = fdmt.view_subband(s)     # data, ndt, nsamps, f_start, f_end,
+                                   # dt_grid, chan_begin, chan_end, staggered
 dmt = fdmt.finalize()              # finish to the root
 ```
+
+The tree halves the band top-down, so with `k` levels remaining there are
+`2**k` sub-bands of equal width (to within one channel), in ascending
+frequency, followed by the `2**k - 1` staggered ones when the plan's
+`subband_depth >= k`.
 
 - **Finish each block.** In `mode="valid"`, finalize every block before the next
   `reset()`/`execute()`. Levels a block never computed would skip their
