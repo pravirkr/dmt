@@ -11,10 +11,11 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "cfdmt_behaviour.hpp"
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/utils/simulate.hpp"
+
+#include "cfdmt_behaviour.hpp"
 
 namespace dmt {
 

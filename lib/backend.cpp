@@ -3,14 +3,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <format>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/engines.hpp"
 
 namespace dmt {
@@ -33,7 +35,7 @@ Backend parse_backend(std::string_view name) {
             return b;
         }
     }
-    throw std::invalid_argument(std::format(
+    throw std::invalid_argument(fmt::format(
         "Unknown backend '{}'. Expected 'cpu', 'cuda' or 'hip'", name));
 }
 
@@ -56,7 +58,7 @@ namespace dmt::algorithms::detail {
 
 void throw_no_device_memory(std::string_view what, Backend backend) {
     throw std::invalid_argument(
-        std::format("{}: device memory is not supported by the {} backend; "
+        fmt::format("{}: device memory is not supported by the {} backend; "
                     "pass host memory (std::span) instead",
                     what, to_string(backend)));
 }
@@ -68,7 +70,7 @@ void throw_unavailable(std::string_view algorithm, Backend backend) {
         names += to_string(b);
     }
     throw std::invalid_argument(
-        std::format("{}: backend '{}' is not available in this build "
+        fmt::format("{}: backend '{}' is not available in this build "
                     "(available: {})",
                     algorithm, to_string(backend), names));
 }
@@ -81,7 +83,7 @@ void check_device(const Device& view,
         return;
     }
     if (view.backend != backend || view.id != device) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "{}: memory is on {}:{} but this instance runs on {}:{}", what,
             to_string(view.backend), view.id, to_string(backend), device));
     }

@@ -1,12 +1,14 @@
+#include "dmt/fft_cuda.cuh"
+
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+
 #include "dmt/gpu_compat.cuh"
 
-#include "dmt/fft_cuda.cuh"
 #include "test_helpers.hpp"
 
 namespace dmt {

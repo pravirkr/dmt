@@ -1,5 +1,3 @@
-#include "dmt/boxcar.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -15,6 +13,7 @@
 #include <omp.h>
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/boxcar.hpp"
 
 namespace dmt::algorithms::detail {
 namespace {
@@ -227,19 +226,19 @@ private:
                 m_result_samples};
     }
     void emit(SizeType row, SizeType beam, const BoxcarPeak& peak) {
-        std::atomic_ref(m_counts.total_detected)
-            .fetch_add(1, std::memory_order_relaxed);
+#pragma omp atomic
+        ++m_counts.total_detected;
         auto& count = m_per_dm[beam * m_rows.size() + row];
         if (m_config.max_cands_per_dm != 0 &&
             count++ >= m_config.max_cands_per_dm) {
-            std::atomic_ref(m_counts.dropped_per_dm)
-                .fetch_add(1, std::memory_order_relaxed);
+#pragma omp atomic
+            ++m_counts.dropped_per_dm;
             return;
         }
         const auto slot = m_next_slot.fetch_add(1, std::memory_order_relaxed);
         if (slot >= m_candidates.size()) {
-            std::atomic_ref(m_counts.dropped_global)
-                .fetch_add(1, std::memory_order_relaxed);
+#pragma omp atomic
+            ++m_counts.dropped_global;
             return;
         }
         auto candidate         = m_rows[row].candidate;
@@ -259,8 +258,8 @@ private:
         candidate.filter_idx = peak.filter;
         candidate.width      = m_planes.front().widths[peak.filter];
         m_candidates[slot]   = candidate;
-        std::atomic_ref(m_counts.emitted_count)
-            .fetch_add(1, std::memory_order_relaxed);
+#pragma omp atomic
+        ++m_counts.emitted_count;
     }
     template <typename T>
     void score(const plans::BoxcarPlanePlan& plane,

@@ -14,16 +14,17 @@
 // with backend "cpu<threads>", "cuda"/"hip" (device-resident) or
 // "cuda_host"/"hip_host" (host arrays, PCIe included); block 0 = automatic.
 
-#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
 
 #include "dmt/common/baseband.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "suite_common.hpp"
 
 namespace dmt::bench_suite::cfdmt {
@@ -100,7 +101,7 @@ inline CohFDMTConfig make_config(const Point& p) {
 }
 
 inline std::string name(std::string_view backend, const Point& p) {
-    return std::format("cfdmt/{}/{}/tp:{}/nbits:{}/dmw:{}/block:{}",
+    return fmt::format("cfdmt/{}/{}/tp:{}/nbits:{}/dmw:{}/block:{}",
                        sweep_name(p.sweep), backend, p.tp_us, p.nbits,
                        p.dm_width, p.block);
 }

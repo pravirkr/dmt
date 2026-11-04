@@ -3,10 +3,12 @@
 
 #include <benchmark/benchmark.h>
 
-#include "bench_mem_utils.hpp"
 #include "dmt/algorithms/ddmt.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
+
+#include "bench_mem_utils.hpp"
 
 namespace dmt {
 using algorithms::DDMT;

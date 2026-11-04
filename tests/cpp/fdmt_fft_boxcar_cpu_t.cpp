@@ -1,5 +1,3 @@
-#include "fdmt_boxcar_reference.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -7,6 +5,8 @@
 #include <vector>
 
 #include "dmt/engines.hpp"
+
+#include "fdmt_boxcar_reference.hpp"
 
 using namespace boxcar_test;
 using algorithms::FDMTFFT;

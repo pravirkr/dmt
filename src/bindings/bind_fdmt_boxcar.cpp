@@ -1,5 +1,3 @@
-#include "bindings/bind.hpp"
-
 #include <algorithm>
 #include <cstring>
 #include <optional>
@@ -10,6 +8,8 @@
 #include <pybind11/stl.h>
 
 #include "dmt/dmt.hpp"
+
+#include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {

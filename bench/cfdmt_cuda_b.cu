@@ -2,19 +2,19 @@
 #include <span>
 #include <vector>
 
-#include <thrust/device_vector.h>
-#include "dmt/gpu_compat.cuh"
-
 #include <benchmark/benchmark.h>
-
-#include "bench_gpu_utils.cuh"
+#include <thrust/device_vector.h>
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/cfdmt_fused_gpu.cuh"
 #include "dmt/engines.hpp"
 #include "dmt/fft_cuda.cuh"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/unpacker_cuda.cuh"
+
+#include "bench_gpu_utils.cuh"
 
 // CohFDMT GPU benchmarks: the device twin of cfdmt_cpu_b.cpp. Reference
 // search: one GUPPI node (64 x 2.9296875 MHz at 1312.5-1500 MHz, int8

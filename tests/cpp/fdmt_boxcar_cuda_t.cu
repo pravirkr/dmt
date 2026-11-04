@@ -1,10 +1,10 @@
-#include "fdmt_boxcar_reference.hpp"
-
 #include <thrust/device_vector.h>
-#include "dmt/gpu_compat.cuh"
 
 #include "dmt/engines.hpp"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
+
+#include "fdmt_boxcar_reference.hpp"
 
 using namespace boxcar_test;
 

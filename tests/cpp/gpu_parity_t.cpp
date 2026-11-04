@@ -10,8 +10,10 @@
 
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/backend.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
+
 #include "test_helpers.hpp"
 
 // The GPU backend of this build (CUDA or HIP) against the CPU,

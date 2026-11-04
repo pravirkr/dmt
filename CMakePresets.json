@@ -1,0 +1,146 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "cacheVariables": {
+        "DMT_BUILD_TESTING": "ON",
+        "DMT_BUILD_DOCS": "OFF"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "description": "Default: GPU if found (DMT_GPU=AUTO), tests, Python, -march=native; build/",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DMT_GPU": "AUTO",
+        "DMT_BUILD_PYTHON": "ON"
+      }
+    },
+    {
+      "name": "cuda",
+      "displayName": "CUDA",
+      "description": "Release with CUDA required, benchmarks; build-cuda/",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-cuda",
+      "cacheVariables": {
+        "DMT_GPU": "CUDA",
+        "DMT_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "hip",
+      "displayName": "HIP",
+      "description": "Release with HIP (ROCm) required, benchmarks; build-hip/",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-hip",
+      "cacheVariables": {
+        "DMT_GPU": "HIP",
+        "DMT_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "portable",
+      "displayName": "Portable",
+      "description": "Release for other x86-64 machines (containers, cluster installs): x86-64-v3 (AVX2), CUDA SASS 75-90 + PTX, no GPU needed at configure; build-portable/",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-portable",
+      "cacheVariables": {
+        "DMT_ENABLE_NATIVE_ARCH": "OFF",
+        "DMT_CPU_ARCH": "x86-64-v3",
+        "DMT_CUDA_ARCHITECTURES": "75-real;80-real;86-real;89-real;90",
+        "DMT_GPU_CHECK_DEVICE": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASan",
+      "description": "ASan/UBSan, Debug (-O1), CPU only, no Python; build-asan/",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DMT_GPU": "OFF",
+        "DMT_BUILD_PYTHON": "OFF",
+        "DMT_ENABLE_NATIVE_ARCH": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage",
+      "description": "gcov instrumentation, Debug (-O0), CPU only, no Python; build-coverage/",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DMT_GPU": "OFF",
+        "DMT_BUILD_PYTHON": "OFF",
+        "DMT_ENABLE_NATIVE_ARCH": "OFF",
+        "DMT_ENABLE_COVERAGE": "ON"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI",
+      "description": "Portable Release, CPU only, tests and Python bindings; build-ci/",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DMT_GPU": "OFF",
+        "DMT_BUILD_PYTHON": "ON",
+        "DMT_ENABLE_NATIVE_ARCH": "OFF"
+      }
+    },
+    {
+      "name": "ci-tidy",
+      "displayName": "CI tidy",
+      "description": "Static analysis: Debug compile database, CPU only, Python; build-ci-tidy/",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DMT_GPU": "OFF",
+        "DMT_BUILD_PYTHON": "ON",
+        "DMT_ENABLE_NATIVE_ARCH": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "cuda", "configurePreset": "cuda" },
+    { "name": "hip", "configurePreset": "hip" },
+    { "name": "portable", "configurePreset": "portable" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "coverage", "configurePreset": "coverage" },
+    { "name": "ci", "configurePreset": "ci" },
+    { "name": "ci-tidy", "configurePreset": "ci-tidy" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "cpu-only",
+      "hidden": true,
+      "inherits": "base",
+      "filter": { "exclude": { "label": "^gpu$" } }
+    },
+    { "name": "release", "inherits": "base", "configurePreset": "release" },
+    { "name": "cuda", "inherits": "base", "configurePreset": "cuda" },
+    { "name": "hip", "inherits": "base", "configurePreset": "hip" },
+    { "name": "portable", "inherits": "base", "configurePreset": "portable" },
+    { "name": "asan", "inherits": "cpu-only", "configurePreset": "asan" },
+    { "name": "coverage", "inherits": "cpu-only", "configurePreset": "coverage" },
+    { "name": "ci", "inherits": "cpu-only", "configurePreset": "ci" }
+  ]
+}

@@ -9,22 +9,19 @@ project(
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Compiler version requirements
+# Compiler version requirements: the system compilers of Ubuntu 22.04,
+# Debian 12 and RHEL 9 (GCC 11+), and Clang 17+. dmt needs only C++20 language
+# features and library parts that libstdc++ 11 ships; string formatting uses
+# fmt (libstdc++ < 13 has no <format>).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
-    message(
-      FATAL_ERROR
-        "GCC 13.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
-    )
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11.0)
+    message(FATAL_ERROR "GCC >= 11 is required. Found: ${CMAKE_CXX_COMPILER_VERSION}")
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
-    message(
-      FATAL_ERROR
-        "Clang 18.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
-    )
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17.0)
+    message(FATAL_ERROR "Clang >= 17 is required. Found: ${CMAKE_CXX_COMPILER_VERSION}")
   endif()
-else()
+elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
   message(
     WARNING
       "Compiler '${CMAKE_CXX_COMPILER_ID}' is not officially tested. Proceed at your own risk."
@@ -46,6 +43,14 @@ option(DMT_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(DMT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(DMT_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(DMT_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
+# A fixed CPU target instead of native, for binaries that run on other machines
+# (containers, shared cluster installs, login vs compute nodes). The SIMD
+# kernels are chosen at compile time: x86-64-v3 keeps AVX2/FMA (Haswell, 2013+),
+# x86-64-v4 adds AVX-512, x86-64-v2 drops to SSE4.2.
+set(DMT_CPU_ARCH
+    ""
+    CACHE STRING "Release -march value (e.g. x86-64-v3, x86-64-v4); overrides native when set"
+)
 option(DMT_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundled dependencies" OFF)
 # BUILD_SHARED_LIBS is a standard CMake option (ON = shared dmt, OFF = static dmt).
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
@@ -99,6 +104,24 @@ endif()
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 include(GNUInstallDirs)
 
+# Release CPU target: DMT_CPU_ARCH, else native, else the compiler default.
+if(DMT_CPU_ARCH)
+  set(DMT_MARCH_FLAG "-march=${DMT_CPU_ARCH}")
+  include(CheckCXXCompilerFlag)
+  # One cached result per value, so changing DMT_CPU_ARCH re-runs the check.
+  string(MAKE_C_IDENTIFIER "DMT_HAS_MARCH_${DMT_CPU_ARCH}" _dmt_march_ok)
+  check_cxx_compiler_flag(${DMT_MARCH_FLAG} ${_dmt_march_ok})
+  if(NOT ${_dmt_march_ok})
+    message(FATAL_ERROR "DMT_CPU_ARCH=${DMT_CPU_ARCH}: ${CMAKE_CXX_COMPILER_ID} rejects "
+                        "${DMT_MARCH_FLAG} (x86-64-v* values need an x86-64 compiler).")
+  endif()
+elseif(DMT_ENABLE_NATIVE_ARCH)
+  set(DMT_MARCH_FLAG "-march=native")
+else()
+  set(DMT_MARCH_FLAG "")
+endif()
+message(STATUS "CPU target (Release): ${DMT_MARCH_FLAG}")
+
 # Compiler flags (Interface target to hold global compile options)
 set(DMT_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
@@ -114,9 +137,9 @@ target_compile_options(
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
   INTERFACE
-    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:-O0;-g>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:$<IF:$<BOOL:${DMT_ENABLE_COVERAGE}>,-O0,-O1>;-g>>
     $<${_dmt_not_hip}:$<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>>
-    $<${_dmt_not_hip}:$<$<AND:$<CONFIG:Release>,$<BOOL:${DMT_ENABLE_NATIVE_ARCH}>>:-march=native>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Release>:${DMT_MARCH_FLAG}>>
     $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>>
     $<${_dmt_not_hip}:$<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>>
 )

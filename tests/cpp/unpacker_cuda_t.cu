@@ -1,3 +1,5 @@
+#include "dmt/unpacker_cuda.cuh"
+
 #include <array>
 #include <cstdint>
 #include <random>
@@ -10,11 +12,12 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
-#include "dmt/gpu_compat.cuh"
 
-#include "dmt/unpacker.hpp"
-#include "dmt/unpacker_cuda.cuh"
 #include "dmt/utils/simulate.hpp"
+
+#include "dmt/gpu_compat.cuh"
+#include "dmt/unpacker.hpp"
+
 #include "test_helpers.hpp"
 
 namespace dmt {

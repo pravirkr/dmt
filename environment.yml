@@ -1,0 +1,26 @@
+# Build environment for machines without root access or with an old system
+# toolchain (e.g. HPC login nodes): a C++20 compiler, FFTW, CMake and Python,
+# all from conda-forge.
+#
+#   conda env create -f environment.yml     # or: mamba / micromamba
+#   conda activate dmt
+#   pip install .                           # CPU; GPU builds: see the docs
+name: dmt
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12        # the version CI tests
+  - compilers          # GCC on Linux, clang on macOS
+  - llvm-openmp        # OpenMP runtime for clang (macOS); unused by GCC
+  - cmake>=3.21
+  - ninja
+  - fftw
+  - pkg-config         # so CMake finds this FFTW, not a system or Homebrew one
+  - numpy
+  - pip
+  # CUDA build: uncomment and pick the toolkit your driver supports (>= 12.2),
+  # then: pip install . -Ccmake.define.DMT_GPU=CUDA
+  # - cuda-version=12.4
+  # - cuda-nvcc
+  # - cuda-cudart-dev
+  # - libcufft-dev

@@ -5,7 +5,6 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -15,11 +14,13 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <omp.h>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_fft_common.hpp"
@@ -196,7 +197,7 @@ public:
         const auto samp_bytes =
             bit_pack_utils::packed_row_bytes(m_nchans, nbits);
         if (packed.size() != m_nbeams * m_nsamps * samp_bytes) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::execute_time_major: expected {} bytes, got {}",
                 m_nbeams * m_nsamps * samp_bytes, packed.size()));
         }
@@ -237,7 +238,7 @@ public:
             throw std::logic_error("FDMTFFT: search requires valid mode");
         }
         if (waterfall.size() != m_nbeams * m_nchans * m_nsamps) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::execute_search: expected {} samples, got {}",
                 m_nbeams * m_nchans * m_nsamps, waterfall.size()));
         }
@@ -349,7 +350,7 @@ public:
         const auto& plan_c = m_plan->get_container();
         const auto nsubs   = plan_c.grids[m_current_level].size();
         if (subband_idx >= nsubs) {
-            throw std::out_of_range(std::format(
+            throw std::out_of_range(fmt::format(
                 "FDMTFFT: Subband index {} out of range ({} subbands)",
                 subband_idx, nsubs));
         }
@@ -786,12 +787,12 @@ private:
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (in_size != total_in) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: expected waterfall size {}, got {}",
+                fmt::format("FDMTFFT::{}: expected waterfall size {}, got {}",
                             what, total_in, in_size));
         }
         if (dmt.size() < total_out) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: dmt buffer size {} must be >= {}",
+                fmt::format("FDMTFFT::{}: dmt buffer size {} must be >= {}",
                             what, dmt.size(), total_out));
         }
     }
@@ -799,7 +800,7 @@ private:
     static void check_nbits(SizeType nbits, std::string_view what) {
         if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
             nbits != 16) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::{}: nbits must be 1, 2, 4, 8 or 16, got {}", what,
                 nbits));
         }
@@ -808,7 +809,7 @@ private:
     void check_history(SizeType size, std::string_view what) const {
         if (size != m_overlap.size()) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: expected {} floats, got {}", what,
+                fmt::format("FDMTFFT::{}: expected {} floats, got {}", what,
                             m_overlap.size(), size));
         }
     }
@@ -824,7 +825,7 @@ private:
         const auto row_bytes =
             bit_pack_utils::packed_row_bytes(m_nsamps, nbits);
         if (packed.size() != m_nbeams * m_nchans * row_bytes) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::{}: expected {} packed bytes, got {}", what,
                 m_nbeams * m_nchans * row_bytes, packed.size()));
         }

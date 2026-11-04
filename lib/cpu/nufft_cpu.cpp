@@ -4,13 +4,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <limits>
 #include <memory>
 #include <numbers>
 #include <span>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -133,7 +134,7 @@ public:
         }
         if (!utils::is_finite_bits(tol) || tol < 1.0E-7 || tol > 1.0E-2) {
             throw std::invalid_argument(
-                std::format("NUFFT: tolerance {} outside [1e-7, 1e-2]", tol));
+                fmt::format("NUFFT: tolerance {} outside [1e-7, 1e-2]", tol));
         }
         // Width and shape for upsampling 2 (Barnett et al. 2019).
         m_w = std::clamp(static_cast<int>(std::ceil(-std::log10(tol))) + 1, 2,
@@ -415,9 +416,15 @@ public:
     // Pads -> periodic grid, FFT, deconvolution of the wanted modes.
     void finish(ComplexType* ext, std::span<ComplexType> f) const {
         ComplexType* grid = ext + kPad;
+        // Pad cell l sits at grid index nf + l (right) or l - kPad (left).
+        // Grids shorter than the pad (nf < kPad: a few modes, e.g. m = 1) need
+        // both indices reduced modulo nf; nf - kPad + l would wrap the
+        // unsigned offset (UB). (l + nf - kPad % nf) % nf == (l - kPad) mod nf.
+        // Sources (pads) and targets ([0, nf)) never overlap.
+        const SizeType left_shift = m_nf - (kPad % m_nf);
         for (SizeType l = 0; l < kPad; ++l) {
-            grid[l] += grid[m_nf + l];       // right overflow
-            grid[m_nf - kPad + l] += ext[l]; // left overflow
+            grid[l % m_nf] += grid[m_nf + l];        // right overflow
+            grid[(l + left_shift) % m_nf] += ext[l]; // left overflow
         }
         m_fft->c2c(grid);
         const auto half = static_cast<SizeType>(m_half);

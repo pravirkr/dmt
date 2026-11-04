@@ -1,8 +1,9 @@
 #pragma once
 
-#include <format>
 #include <stdexcept>
 #include <string_view>
+
+#include <fmt/format.h>
 
 #include "dmt/common/types.hpp"
 
@@ -18,7 +19,7 @@ namespace dmt {
     if (mode == "valid") {
         return FDMTMode::kValid;
     }
-    throw std::invalid_argument(std::format(
+    throw std::invalid_argument(fmt::format(
         "Invalid mode '{}'. Expected 'full', 'roll', or 'valid'", mode));
 }
 

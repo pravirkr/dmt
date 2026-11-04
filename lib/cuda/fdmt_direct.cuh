@@ -2,9 +2,8 @@
 
 #include <cstdint>
 
-#include "dmt/gpu_compat.cuh"
-
 #include "dmt/fdmt_direct.hpp"
+#include "dmt/gpu_compat.cuh"
 
 // Device side of the direct low levels (see fdmt_direct.hpp). Per chunk:
 // kernel_direct_prefix writes every channel's running sum over the input

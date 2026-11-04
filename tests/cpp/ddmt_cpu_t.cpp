@@ -16,9 +16,10 @@
 
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/sdmt.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/utils/simulate.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 
 namespace dmt {
 

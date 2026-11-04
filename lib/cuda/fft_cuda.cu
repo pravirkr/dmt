@@ -1,17 +1,17 @@
 #include "dmt/fft_cuda.cuh"
 
 #include <algorithm>
-#include <format>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
-#include "dmt/gpu_compat.cuh"
-
-#include "dmt/logging.hpp"
+#include <fmt/format.h>
 
 #include "dmt/common/types.hpp"
+
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
+#include "dmt/logging.hpp"
 
 namespace dmt::utils {
 
@@ -20,7 +20,7 @@ namespace {
 int to_cufft_int(SizeType value, const char* what) {
     if (value > static_cast<SizeType>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument(
-            std::format("CUFFTManager: {} exceeds cuFFT int limit", what));
+            fmt::format("CUFFTManager: {} exceeds cuFFT int limit", what));
     }
     return static_cast<int>(value);
 }
@@ -30,7 +30,7 @@ void check_extent(SizeType count, SizeType stride, const char* what) {
         stride == 0 || count <= (std::numeric_limits<SizeType>::max() / stride);
     if (!fits) {
         throw std::invalid_argument(
-            std::format("CUFFTManager: {} * batch overflows SizeType", what));
+            fmt::format("CUFFTManager: {} * batch overflows SizeType", what));
     }
 }
 
@@ -115,7 +115,7 @@ public:
         const SizeType expected = extent(m_freq_dist, m_freq_stride, m_length);
         if (data.size() < expected) {
             throw std::invalid_argument(
-                std::format("CUFFTManager: complex span size {} != {}",
+                fmt::format("CUFFTManager: complex span size {} != {}",
                             data.size(), expected));
         }
         gpu_utils::set_device(m_device_id);
@@ -140,7 +140,7 @@ public:
         const SizeType n_complex =
             extent(m_freq_dist, m_freq_stride, m_n_complex);
         if (real.size() < n_real || freq.size() < n_complex) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "CUFFTManager: span sizes real={} freq={} != {} and {}",
                 real.size(), freq.size(), n_real, n_complex));
         }

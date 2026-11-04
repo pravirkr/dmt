@@ -3,17 +3,18 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <vector>
 
+#include <fmt/format.h>
 #include <omp.h>
 
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/cfdmt_common.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/cfdmt_common.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fft.hpp"
 #include "dmt/simd_math.hpp"
@@ -88,7 +89,7 @@ public:
     void execute(std::span<const std::span<const uint8_t>> groups,
                  std::span<float> dmt) override {
         if (dmt.size() < m_plan.get_dmt_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "CohFDMT: dmt buffer too small. Expected at least {} "
                 "(get_dmt_size()), got {}",
                 m_plan.get_dmt_size(), dmt.size()));

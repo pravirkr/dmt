@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <map>
 #include <memory>
 #include <span>
@@ -13,15 +12,17 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <omp.h>
 
 #if defined(__AVX512F__)
 #include <immintrin.h>
 #endif
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/ddmt_fft_common.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fft.hpp"
@@ -173,7 +174,7 @@ public:
 
     void save_history(std::span<float> out) const override {
         if (m_hist_len != m_ctx) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "DDMTFFT::save_history: stream is not fully warmed up yet "
                 "({} of {} history samples/channel)",
                 m_hist_len, m_ctx));
@@ -194,7 +195,7 @@ public:
         check_float("execute(float)");
         const auto rows = m_nbeams * m_nchans;
         if (waterfall.size() % rows != 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMTFFT::execute: waterfall size {} is not a multiple of "
                 "nbeams * nchans = {}",
                 waterfall.size(), rows));
@@ -304,7 +305,7 @@ private:
 
     void check_float(std::string_view what) const {
         if (m_plan.get_nbits() != 32) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMTFFT::{}: plan nbits={} != 32; use the packed overload",
                 what, m_plan.get_nbits()));
         }
@@ -313,7 +314,7 @@ private:
         if (!bit_pack_utils::detail::is_packed_nbits(
                 static_cast<unsigned>(m_plan.get_nbits()))) {
             throw std::invalid_argument(
-                std::format("DDMTFFT::{}: plan nbits={} is not a packed width "
+                fmt::format("DDMTFFT::{}: plan nbits={} is not a packed width "
                             "(1,2,4,8,16); use the float overload",
                             what, m_plan.get_nbits()));
         }
@@ -322,7 +323,7 @@ private:
     check_size(SizeType got, SizeType expected, std::string_view what) {
         if (got != expected) {
             throw std::invalid_argument(
-                std::format("DDMTFFT: {} buffer size mismatch: expected {}, "
+                fmt::format("DDMTFFT: {} buffer size mismatch: expected {}, "
                             "got {}",
                             what, expected, got));
         }

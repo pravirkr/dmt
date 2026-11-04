@@ -1,13 +1,11 @@
-#include "bindings/bind.hpp"
-
 #include <algorithm>
-#include <format>
 #include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
 
+#include <fmt/format.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -15,6 +13,8 @@
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/sdmt.hpp"
 #include "dmt/common/plans.hpp"
+
+#include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -178,13 +178,13 @@ void bind_ddmt(py::module_& mod) {
                 const auto nsamps_in = static_cast<SizeType>(shape[ndim - 1]);
                 const auto nchans    = plan.get_nchans();
                 if (nbeams != ddmt.get_nbeams()) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "DDMT.execute: waterfall has {} beam(s), but "
                         "this instance was configured for {}",
                         nbeams, ddmt.get_nbeams()));
                 }
                 if (static_cast<SizeType>(shape[ndim - 2]) != nchans) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "DDMT.execute: waterfall has {} channels, but "
                         "this instance was configured for {}",
                         shape[ndim - 2], nchans));
@@ -200,7 +200,7 @@ void bind_ddmt(py::module_& mod) {
                 const auto expect =
                     checked_mul(checked_mul(nbeams, nchans), nsamps_in);
                 if (static_cast<SizeType>(waterfall.size()) != expect) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "DDMT.execute: waterfall has {} elements, expected "
                         "nbeams * nchans * nsamps = {}",
                         waterfall.size(), expect));
@@ -359,7 +359,7 @@ void bind_ddmt(py::module_& mod) {
                 if (nbits == 32) {
                     if (hist_obj.dtype().kind() != 'f' ||
                         hist_obj.itemsize() != 4) {
-                        throw std::invalid_argument(std::format(
+                        throw std::invalid_argument(fmt::format(
                             "DDMT.load_history: plan nbits=32 expects a "
                             "float32 array, got dtype '{}'",
                             std::string(py::str(hist_obj.dtype()))));
@@ -371,7 +371,7 @@ void bind_ddmt(py::module_& mod) {
                 } else {
                     if (hist_obj.dtype().kind() != 'u' ||
                         hist_obj.itemsize() != 1) {
-                        throw std::invalid_argument(std::format(
+                        throw std::invalid_argument(fmt::format(
                             "DDMT.load_history: plan nbits={} expects a "
                             "uint8 array, got dtype '{}'",
                             nbits, std::string(py::str(hist_obj.dtype()))));

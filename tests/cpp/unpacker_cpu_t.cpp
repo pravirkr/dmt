@@ -10,10 +10,11 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/generators/catch_generators_range.hpp>
 
-#include "dmt/baseband_layout.hpp"
 #include "dmt/common/baseband.hpp"
-#include "dmt/unpacker.hpp"
 #include "dmt/utils/simulate.hpp"
+
+#include "dmt/baseband_layout.hpp"
+#include "dmt/unpacker.hpp"
 
 namespace dmt {
 

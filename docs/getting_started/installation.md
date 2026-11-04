@@ -8,19 +8,20 @@ with CMake `find_package(dmt)`, or both.
 Hardware:
 
 - CPU: x86_64 with AVX2/AVX-512, or Apple Silicon (ARM64 with NEON).
-- GPU (optional): an NVIDIA GPU with compute capability 7.0+ (CUDA), or an
-  AMD GPU supported by ROCm (HIP).
+- GPU (optional): an NVIDIA GPU with compute capability 7.0+ (7.5+ with
+  CUDA 13), or an AMD GPU supported by ROCm (HIP).
 
 Compilers and dependencies:
 
-- A C++20 compiler: GCC 13+ or Clang 15+.
-- CMake 3.18+ and Ninja or Make.
+- A C++20 compiler: GCC 11+ (the system compiler of Ubuntu 22.04, Debian 12
+  and RHEL 9) or Clang 17+.
+- CMake 3.18+ (3.21+ for the presets and HIP) and Ninja or Make.
 - Python 3.12 or newer.
 - System libraries:
   - `libfftw3-dev` (FFTW 3.3+)
   - OpenMP runtime (`libomp` on macOS, included with GCC on Linux)
   - Optional GPU toolchain (one per build; every algorithm runs on it):
-    - CUDA Toolkit 12.6+ (NVIDIA)
+    - CUDA Toolkit 12.2+ (NVIDIA); a 12.x build runs on driver R525 or newer
     - ROCm 6.2+ with hipFFT and rocThrust, and CMake 3.21+ (AMD, via HIP);
       libhipcxx is used when installed
 
@@ -39,6 +40,20 @@ sudo apt install -y build-essential cmake ninja-build libfftw3-dev libomp-dev
 ```bash
 brew install cmake ninja fftw libomp
 ```
+:::
+:::{tab-item} conda (no root)
+:sync: conda
+
+For clusters and other machines without root access, or with a system
+compiler older than GCC 11, `environment.yml` provides the compiler, FFTW,
+CMake and Python from conda-forge:
+
+```bash
+conda env create -f environment.yml   # or mamba / micromamba
+conda activate dmt
+```
+
+Then install from the clone as below (`pip install .`).
 :::
 ::::
 
@@ -157,6 +172,17 @@ ctest --output-on-failure
 cmake --install .
 ```
 
+### With CMake presets
+
+`CMakePresets.json` (CMake 3.21+) names the common configurations. Each one
+configures, builds and tests in its own directory:
+
+```bash
+cmake --preset release            # or cuda, hip, portable, asan, ...
+cmake --build --preset release
+ctest --preset release
+```
+
 ### Using `find_package(dmt)`
 
 Once installed, link `dmt::dmt` in your `CMakeLists.txt`:
@@ -223,6 +249,7 @@ PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
 | `DMT_CUDA_ARCHITECTURES` | `native` | CUDA architectures, e.g. `80` or `86;90` (passed to `CMAKE_CUDA_ARCHITECTURES`) |
 | `DMT_HIP_ARCHITECTURES` | `gfx90a;gfx942` | AMD architectures (passed to `CMAKE_HIP_ARCHITECTURES`), e.g. `gfx1100` for RDNA3 |
 | `DMT_ENABLE_NATIVE_ARCH`| `ON` | `-march=native` in Release builds. Turn `OFF` for binaries or wheels that must run on other CPUs |
+| `DMT_CPU_ARCH` | (empty) | Fixed Release `-march` value that overrides native, e.g. `x86-64-v3` (AVX2), `x86-64-v4` (AVX-512) |
 | `DMT_ENABLE_IPO` | `OFF` | Link-time optimization in Release builds |
 | `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt, spdlog) |
 | `DMT_ENABLE_COVERAGE` | `OFF` | Coverage instrumentation |
@@ -230,7 +257,11 @@ PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
 
 ```{warning}
 `DMT_ENABLE_NATIVE_ARCH` is `ON` by default, so Release builds use
-`-march=native`. Turn it `OFF` for binaries or wheels that must run on other
-CPUs. On build-only machines without a GPU, also set
+`-march=native`. For binaries that must run on other CPUs (containers, shared
+cluster installs, a login node that differs from the compute nodes), set
+`DMT_CPU_ARCH` instead, or use the `portable` preset. The SIMD kernels are
+chosen at compile time, so `DMT_ENABLE_NATIVE_ARCH=OFF` without `DMT_CPU_ARCH`
+builds for the baseline CPU (SSE2 on x86-64) and leaves out the AVX2 and
+AVX-512 paths. On build-only machines without a GPU, also set
 `DMT_GPU_CHECK_DEVICE=OFF` when you require `DMT_GPU=CUDA` or `HIP`.
 ```

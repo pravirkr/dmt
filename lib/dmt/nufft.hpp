@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "dmt/common/types.hpp"
+
 #include "dmt/fft.hpp"
 
 namespace dmt::nufft {
@@ -101,7 +102,10 @@ private:
  * @brief Fine-grid position of a point x (turns): first touched cell l0 (in
  * [-w/2, nf)) and the kernel offset u in [-1, 1]. Vectorisable.
  */
+// The guard keeps GCC quiet in the .cu files (compiled without -fopenmp).
+#if defined(_OPENMP)
 #pragma omp declare simd uniform(loc)
+#endif
 inline void
 locate(double x, Type1Plan::Locator loc, std::int32_t& l0, float& u) noexcept {
     const double g  = (x - std::floor(x)) * loc.nf; // [0, nf)

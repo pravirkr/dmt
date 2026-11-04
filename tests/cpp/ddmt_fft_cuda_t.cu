@@ -1,17 +1,18 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <random>
 #include <span>
 #include <vector>
-#include "dmt/gpu_compat.cuh"
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
 #include <thrust/device_vector.h>
 
 #include "dmt/algorithms/ddmt_fft.hpp"
+
+#include "dmt/gpu_compat.cuh"
+
 #include "test_helpers.hpp"
 
 namespace dmt {

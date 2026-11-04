@@ -12,7 +12,7 @@
 [![codecov](https://codecov.io/gh/pravirkr/dmt/graph/badge.svg?token=17BGN5IIM9)](https://codecov.io/gh/pravirkr/dmt)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue)](include/dmt)
-[![CUDA](https://img.shields.io/badge/CUDA-12.6%2B-green)](https://developer.nvidia.com/cuda-zone)
+[![CUDA](https://img.shields.io/badge/CUDA-12.2%2B-green)](https://developer.nvidia.com/cuda-zone)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>

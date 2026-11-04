@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <sys/resource.h>
 
 #include <benchmark/benchmark.h>
+#include <sys/resource.h>
 
 namespace dmt::bench {
 

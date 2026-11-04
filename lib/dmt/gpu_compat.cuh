@@ -26,6 +26,7 @@
 #include <cuda/std/span>
 #else
 #include <span>
+
 #include <thrust/complex.h>
 namespace cuda::std {
 using ::std::span;

@@ -8,13 +8,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <format>
 #include <new>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 
+#include <fmt/format.h>
 #include <omp.h>
 
 #if defined(__linux__)
@@ -24,8 +24,9 @@
 #include <immintrin.h>
 #endif
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_chunk.hpp"
@@ -912,7 +913,10 @@ void fdmt_init_box_extend_block(const TS* __restrict__ wf_sub,
 #pragma omp simd
         for (SizeType i = head; i < nsamps; ++i) {
             TAcc a = acc[i];
-#pragma unroll
+            // `#pragma GCC unroll` is understood by GCC and Clang alike (the
+            // count must be a literal for GCC < 14).
+            static_assert(kK == 4, "update the unroll count below");
+#pragma GCC unroll 4
             for (SizeType k = 0; k < kK; ++k) {
                 a       = fdmt_init_add<TAcc>(a, x[i - k]);
                 o[k][i] = sk[k](a);
@@ -1431,16 +1435,16 @@ public:
         const auto mib = [](SizeType b) {
             return static_cast<double>(b) / 1048576.0;
         };
-        const auto summary = std::format(
+        const auto summary = fmt::format(
             "*** FDMT (cpu) ***\n"
             "Mode: {}, {}, nbeams {}, chunk {} of {} samples, fuse_levels "
             "{}{}, int_tree {}\n"
             "Host memory: plan {:.1f} MiB, state {:.1f} MiB, history {:.1f} "
             "MiB, workspace {:.1f} MiB (total {:.1f} MiB); output buffer "
             "{:.1f} MiB per execute()\n",
-            fdmt_mode_to_string(m_mode), std::format("{} threads", m_nthreads),
+            fdmt_mode_to_string(m_mode), fmt::format("{} threads", m_nthreads),
             m_nbeams, m_chunk, m_plan.get_nsamps(), m_fuse_levels,
-            (m_fuse_tile > 0) ? std::format(" (time tiles of {})", m_fuse_tile)
+            (m_fuse_tile > 0) ? fmt::format(" (time tiles of {})", m_fuse_tile)
                               : std::string{},
             m_int_tree ? "on" : "off", mib(mem.plan), mib(mem.state),
             mib(mem.history), mib(mem.workspace), mib(mem.total()),
@@ -1508,7 +1512,7 @@ public:
         }
         const auto& plan_c = m_plan.get_container();
         if (subband_idx >= plan_c.grids[m_current_level].size()) {
-            throw std::out_of_range(std::format(
+            throw std::out_of_range(fmt::format(
                 "FDMT: Subband index {} out of range (current level has {} "
                 "subbands)",
                 subband_idx, plan_c.grids[m_current_level].size()));
@@ -1582,7 +1586,7 @@ public:
     void save_history(std::span<float> out) const override {
         if (out.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("FDMT::save_history: Invalid output size. "
+                fmt::format("FDMT::save_history: Invalid output size. "
                             "Expected {}, got {}",
                             history_state_size(), out.size()));
         }
@@ -1600,7 +1604,7 @@ public:
     void load_history(std::span<const float> in) override {
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(
-                std::format("FDMT::load_history: Invalid input size. "
+                fmt::format("FDMT::load_history: Invalid input size. "
                             "Expected {}, got {}",
                             history_state_size(), in.size()));
         }
@@ -1713,7 +1717,7 @@ private:
 
     [[nodiscard]] const float* current_level_f32() const {
         if (m_levels[m_current_level].type != Elem::kF32) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMT: level {} is stored as an integer type "
                 "(int_tree); construct with int_tree=false to inspect "
                 "intermediate levels.",
@@ -1730,7 +1734,7 @@ private:
         const auto nchans = m_plan.get_nchans();
         const auto nsamps = m_plan.get_nsamps();
         if (waterfall.size() != m_nbeams * nchans * nsamps) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: Invalid size of waterfall. Expected {}, got {}",
                 m_nbeams * nchans * nsamps, waterfall.size()));
         }
@@ -1742,14 +1746,14 @@ private:
                                          SizeType nbits) {
         if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
             nbits != 16) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: nbits={} must be one of 1, 2, 4, 8, 16", nbits));
         }
         const auto nchans    = m_plan.get_nchans();
         const auto nsamps    = m_plan.get_nsamps();
         const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         if (packed.size() != m_nbeams * nchans * row_bytes) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: Invalid size of packed waterfall (nbits={}). "
                 "Expected {} bytes, got {}",
                 nbits, m_nbeams * nchans * row_bytes, packed.size()));
@@ -1769,7 +1773,7 @@ private:
     void check_dmt_size(std::span<float> dmt) const {
         const auto need = m_nbeams * m_plan.get_dmt_size();
         if (dmt.size() < need) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: Invalid size of dmt. Expected at least {} (nbeams * "
                 "plan.get_dmt_size()), got {}",
                 need, dmt.size()));
@@ -1781,7 +1785,7 @@ private:
     // block's cross-block history update and silently corrupt the stream.
     void check_previous_block_finished() const {
         if (m_mode == FDMTMode::kValid && m_is_initialized && !is_finished()) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMT: the previous block's stepper run stopped at level "
                 "{} of {}. In mode='valid' every block must be finalized "
                 "before the next reset()/execute(), or its cross-block "
@@ -1865,7 +1869,7 @@ private:
                        const std::vector<Elem>& types,
                        std::span<float> dmt) {
         if (m_chunk < m_plan.get_nsamps()) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMT: the stepper runs whole blocks, but this engine "
                 "executes blocks of {} samples in chunks of {} "
                 "(chunk_nsamps); construct with chunk_nsamps >= nsamps to "

@@ -1,10 +1,7 @@
-#include "dmt/boxcar.hpp"
-
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -12,13 +9,14 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
-#include "dmt/gpu_compat.cuh"
-
-#include "dmt/boxcar_runs.hpp"
-#include "dmt/gpu_utils.cuh"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/boxcar.hpp"
+#include "dmt/boxcar_runs.hpp"
+#include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_utils.cuh"
 
 namespace dmt::algorithms::detail {
 namespace {
@@ -823,7 +821,7 @@ private:
             m_filters <= kSharedFilters && fixed + tables <= limit;
         m_smem = fixed + (m_shared_tables ? tables : 0);
         if (m_smem > limit) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: max_boxcar {} needs {} B of shared memory per "
                 "block; the device allows {} B",
                 m_width, m_smem, limit));

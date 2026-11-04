@@ -1,3 +1,5 @@
+#include "dmt/utils/simulate.hpp"
+
 #include <algorithm>
 #include <numeric>
 #include <ranges>
@@ -7,7 +9,6 @@
 #include <catch2/matchers/catch_matchers_all.hpp>
 
 #include "dmt/dmt.hpp"
-#include "dmt/utils/simulate.hpp"
 
 namespace dmt {
 

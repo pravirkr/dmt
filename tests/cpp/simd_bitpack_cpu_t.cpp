@@ -1,12 +1,12 @@
-#include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <random>
 #include <vector>
 
-#include "dmt/bit_pack_utils.hpp"
-
+#include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
+
+#include "dmt/bit_pack_utils.hpp"
 
 // Kernel-level checks for the FDMT low-bit unpack helper against its scalar
 // reference definition, across every remainder length (the vectorized

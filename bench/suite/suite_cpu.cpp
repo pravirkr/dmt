@@ -5,13 +5,13 @@
 // outside the timed loop, and each iteration is one execute() of one block
 // into a preallocated output.
 
-#include <format>
 #include <new>
 #include <span>
 #include <string>
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
 
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/ddmt_fft.hpp"
@@ -41,7 +41,7 @@ bool skip_if_over_budget(benchmark::State& state,
     const double budget = memory_budget_bytes();
     if (need > budget) {
         state.SkipWithError(
-            std::format("skipped: needs ~{:.1f} GB, over the {:.1f} GB budget "
+            fmt::format("skipped: needs ~{:.1f} GB, over the {:.1f} GB budget "
                         "(DMT_BENCH_MAX_GB)",
                         need / 1.0737e9, budget / 1.0737e9));
         return true;
@@ -189,7 +189,7 @@ constexpr double kSingleRepetitionAdds = 5.0e10;
 void register_cpu() {
     const auto threads   = cpu_threads();
     const int multi      = cpu_threads_max();
-    const auto cpu_label = [](int t) { return std::format("cpu{}", t); };
+    const auto cpu_label = [](int t) { return fmt::format("cpu{}", t); };
     const auto add = [](const std::string& name, auto fn, Point p, int t) {
         return benchmark::RegisterBenchmark(
                    name, [fn, p, t](benchmark::State& s) { fn(s, p, t); })

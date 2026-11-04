@@ -5,7 +5,6 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <numbers>
 #include <ranges>
@@ -14,12 +13,14 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/logging.hpp"
+#include <fmt/format.h>
 
 #include "dmt/common/types.hpp"
+
 #include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
+#include "dmt/logging.hpp"
 #include "dmt/modes.hpp"
 
 namespace dmt::plans {
@@ -30,12 +31,12 @@ constexpr std::string_view FDMTShape::header_fmt() {
 }
 
 std::string FDMTShape::to_string() const {
-    return std::format("{:5d} ({:5d}x[{:5d}..{:5d}]) x {:6d}, {:10d}", ncoords,
+    return fmt::format("{:5d} ({:5d}x[{:5d}..{:5d}]) x {:6d}, {:10d}", ncoords,
                        nchans, ndt_min, ndt_max, nsamps, nelements);
 }
 
 std::string FDMTComplexity::to_string() const {
-    std::string result = std::format(
+    std::string result = fmt::format(
         "FDMT Complexity:\n"
         "  Output DM trials (N_dt)      : {}\n"
         "  Input channels   (N_chans)   : {}\n"
@@ -533,7 +534,7 @@ public:
     void check_kill_mask(std::span<const uint8_t> kill_mask) const {
         if (!kill_mask.empty() && kill_mask.size() != m_nchans) {
             throw std::invalid_argument(
-                std::format("FDMTPlan: kill_mask size={} must be 0 or "
+                fmt::format("FDMTPlan: kill_mask size={} must be 0 or "
                             "nchans={}",
                             kill_mask.size(), m_nchans));
         }
@@ -628,13 +629,13 @@ public:
         }
         check_kill_mask(kill_mask);
         if (level > m_niters) {
-            throw std::out_of_range(std::format(
+            throw std::out_of_range(fmt::format(
                 "FDMTPlan: level {} out of range [0, {}]", level, m_niters));
         }
         const auto& grids = m_container.grids[level];
         if (subband >= grids.size()) {
             throw std::out_of_range(
-                std::format("FDMTPlan: subband {} out of range [0, {}) at "
+                fmt::format("FDMTPlan: subband {} out of range [0, {}) at "
                             "level {}",
                             subband, grids.size(), level));
         }
@@ -817,28 +818,28 @@ public:
         const auto plan_use_mb = size_in_mb(m_container.get_memory_usage(), 1);
 
         std::array<std::string, 5> lines = {
-            std::format("*** FDMT Plan Summary ***"),
-            std::format("Input: Waterfall Size: ({} x {}; {:.1f} MB ), DMT "
+            fmt::format("*** FDMT Plan Summary ***"),
+            fmt::format("Input: Waterfall Size: ({} x {}; {:.1f} MB ), DMT "
                         "Size: ({} x {}; {:.1f} MB )",
                         state_shape[0].nchans, state_shape[0].nsamps,
                         waterfall_size_mb, state_shape[niters].ncoords,
                         state_shape[niters].nsamps, dmt_size_mb),
-            std::format("Plan Memory Usage: {:.1f} MB", plan_use_mb),
-            std::format("Largest Level: ({}; {:.1f} MB ), History: level-0 "
+            fmt::format("Plan Memory Usage: {:.1f} MB", plan_use_mb),
+            fmt::format("Largest Level: ({}; {:.1f} MB ), History: level-0 "
                         "({}; {:.1f} MB ), tree ({}; {:.1f} MB )",
                         buffer_size, buffer_size_mb, history_size,
                         history_size_mb, tree_size, tree_size_mb),
-            std::format("Plan Details: {}", FDMTShape::header_fmt()),
+            fmt::format("Plan Details: {}", FDMTShape::header_fmt()),
         };
         std::string out;
         for (const auto& line : lines) {
-            out += std::format("{}{}\n", prefix, line);
+            out += fmt::format("{}{}\n", prefix, line);
         }
         for (SizeType i_iter = 0; i_iter < niters + 1; ++i_iter) {
-            out += std::format("{}Iteration {:2d}: {}\n", prefix, i_iter,
+            out += fmt::format("{}Iteration {:2d}: {}\n", prefix, i_iter,
                                state_shape[i_iter].to_string());
         }
-        out += std::format("{}{:*>80}\n", prefix, "");
+        out += fmt::format("{}{:*>80}\n", prefix, "");
         return out;
     }
 
@@ -872,23 +873,23 @@ private:
         }
         if (!(m_f_min > 0.0F)) {
             throw std::invalid_argument(
-                std::format("FDMT: f_min={} must be positive", m_f_min));
+                fmt::format("FDMT: f_min={} must be positive", m_f_min));
         }
         if (m_f_min >= m_f_max) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: f_min={} must be less than f_max={}", m_f_min, m_f_max));
         }
         if (m_nchans < 2) {
             throw std::invalid_argument(
-                std::format("FDMT: nchans={} must be at least 2", m_nchans));
+                fmt::format("FDMT: nchans={} must be at least 2", m_nchans));
         }
         if (m_nsamps == 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: nsamps={} must be greater than 0", m_nsamps));
         }
         if (m_tsamp <= 0) {
             throw std::invalid_argument(
-                std::format("FDMT: tsamp={} must be greater than 0", m_tsamp));
+                fmt::format("FDMT: tsamp={} must be greater than 0", m_tsamp));
         }
     }
 
@@ -921,16 +922,16 @@ private:
             }
             if (m_dt_min >= m_dt_max) {
                 throw std::invalid_argument(
-                    std::format("FDMT: dt_min={} must be less than dt_max={}",
+                    fmt::format("FDMT: dt_min={} must be less than dt_max={}",
                                 m_dt_min, m_dt_max));
             }
             if (m_dt_step == 0) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "FDMT: dt_step={} must be greater than 0", m_dt_step));
             }
             if (std::cmp_greater(m_dt_step, m_dt_max - m_dt_min)) {
                 throw std::invalid_argument(
-                    std::format("FDMT: dt_step={} cannot be greater than "
+                    fmt::format("FDMT: dt_step={} cannot be greater than "
                                 "(dt_max - dt_min)={}",
                                 m_dt_step, m_dt_max - m_dt_min));
             }
@@ -1088,7 +1089,7 @@ private:
         m_df     = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
         m_niters = static_cast<SizeType>(std::bit_width(m_nchans - 1));
         if (m_subband_depth > 0 && m_subband_depth >= m_niters) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: subband_depth={} must be less than niters={}",
                 m_subband_depth, m_niters));
         }
@@ -1247,7 +1248,7 @@ private:
             std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
         if (dt_max_iter > abs_dt_max) {
             throw std::runtime_error(
-                std::format("dt_max_iter={} is greater than abs_dt_max={}",
+                fmt::format("dt_max_iter={} is greater than abs_dt_max={}",
                             dt_max_iter, abs_dt_max));
         }
         // Note: mode="valid" intentionally allows dt_max_iter > m_nsamps
@@ -1314,7 +1315,7 @@ private:
                     // per-sample hot path.
                     if ((dt >= 0 && (dt_tail < 0 || dt_tail > dt)) ||
                         (dt < 0 && (dt_tail > 0 || dt_tail < dt))) {
-                        throw std::runtime_error(std::format(
+                        throw std::runtime_error(fmt::format(
                             "Invalid dt_tail (sign/magnitude mismatch with "
                             "dt): dt_tail={}, dt={}",
                             dt_tail, dt));
@@ -1397,7 +1398,7 @@ private:
                     if (m_mode != FDMTMode::kValid &&
                         delay_shift >= nsamps_prev) {
                         throw std::runtime_error(
-                            std::format("DM delay is greater than input size: "
+                            fmt::format("DM delay is greater than input size: "
                                         "delay_shift={}, nsamps_prev={}",
                                         delay_shift, nsamps_prev));
                     }
@@ -1581,7 +1582,7 @@ public:
         }
         if (kill_mask.size() != m_nchans) {
             throw std::invalid_argument(
-                std::format("DDMT: kill_mask size={} must equal nchans={}",
+                fmt::format("DDMT: kill_mask size={} must equal nchans={}",
                             kill_mask.size(), m_nchans));
         }
         m_container.kill_mask.resize(kill_mask.size());
@@ -1636,14 +1637,14 @@ private:
         }
         if (!(m_f_min > 0.0F)) {
             throw std::invalid_argument(
-                std::format("DDMT: f_min={} must be positive", m_f_min));
+                fmt::format("DDMT: f_min={} must be positive", m_f_min));
         }
         if (m_f_min >= m_f_max) {
             throw std::invalid_argument("f_min must be less than f_max");
         }
         if (!utils::is_finite_bits(m_f_ref) ||
             (m_f_ref != m_f_min && m_f_ref != m_f_max)) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMT: f_ref={} MHz must be either f_min={} or f_max={}",
                 m_f_ref, m_f_min, m_f_max));
         }
@@ -1664,12 +1665,12 @@ private:
         }
         if (m_nbits != 1 && m_nbits != 2 && m_nbits != 4 && m_nbits != 8 &&
             m_nbits != 16 && m_nbits != 32) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMT: nbits={} must be one of 1, 2, 4, 8, 16, 32", m_nbits));
         }
         if (!m_kill_mask.empty() && m_kill_mask.size() != m_nchans) {
             throw std::invalid_argument(
-                std::format("DDMT: kill_mask size={} must equal nchans={}",
+                fmt::format("DDMT: kill_mask size={} must equal nchans={}",
                             m_kill_mask.size(), m_nchans));
         }
         if (m_nbits < 32) {
@@ -1681,7 +1682,7 @@ private:
             const auto max_sum = max_val * static_cast<double>(m_nchans);
             if (max_sum >
                 static_cast<double>(std::numeric_limits<int32_t>::max())) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "DDMT: nbits={} with nchans={} can overflow the "
                     "int32_t accumulator (worst-case sum {})",
                     m_nbits, m_nchans, max_sum));
@@ -2059,7 +2060,7 @@ std::string DDMTPlan::summary() const {
     const auto [dm_lo, dm_hi] =
         dms.empty() ? std::pair{0.0F, 0.0F}
                     : std::pair{std::ranges::min(dms), std::ranges::max(dms)};
-    return std::format(
+    return fmt::format(
         "*** DDMT Plan Summary ***\n"
         "Band: {} - {} MHz, {} channels ({} masked), tsamp {} s\n"
         "Delays from channel centres, reference f_ref {} MHz, "
@@ -2069,7 +2070,7 @@ std::string DDMTPlan::summary() const {
         get_f_min(), get_f_max(), get_nchans(), n_masked, get_tsamp(),
         get_f_ref(), get_time_offset(), dms.size(), dm_lo, dm_hi, max_delay,
         get_nbits() == 32 ? std::string("float32")
-                          : std::format("packed {}-bit", get_nbits()));
+                          : fmt::format("packed {}-bit", get_nbits()));
 }
 void DDMTPlan::set_kill_mask(std::span<const uint8_t> kill_mask) {
     m_impl->set_kill_mask(kill_mask);

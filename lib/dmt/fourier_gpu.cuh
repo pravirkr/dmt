@@ -15,10 +15,10 @@
 #include <cstdint>
 #include <span>
 
-#include "dmt/gpu_compat.cuh"
+#include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
-#include "dmt/common/types.hpp"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 
 namespace dmt::fourier_gpu {

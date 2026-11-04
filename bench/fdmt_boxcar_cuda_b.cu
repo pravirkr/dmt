@@ -1,23 +1,24 @@
-#include <thrust/device_vector.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/random.h>
-#include "dmt/gpu_compat.cuh"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <exception>
-#include <format>
 #include <stdexcept>
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
+#include <thrust/device_vector.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/random.h>
 
-#include "bench_gpu_utils.cuh"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/algorithms/fdmt_fft_boxcar.hpp"
+
 #include "dmt/boxcar.hpp"
+#include "dmt/gpu_compat.cuh"
+
+#include "bench_gpu_utils.cuh"
 #include "suite/suite_common.hpp"
 
 // Streaming FDMTBoxcar on the GPU at the reference point of the selected
@@ -40,6 +41,8 @@ using algorithms::FDMTBoxcar;
 // scorer's driver would be a second, unused transform engine.
 class MaterializedRootDriver final : public algorithms::detail::BoxcarDriver {
 public:
+    using algorithms::detail::BoxcarDriver::search; // the packed overloads
+
     void search(std::span<const float>,
                 algorithms::detail::FDMTSearchSink&) override {
         throw std::logic_error(
@@ -337,33 +340,33 @@ void bench_fused(benchmark::State& state,
             ->Unit(benchmark::kMillisecond)
             ->MinWarmUpTime(0.2);
     };
-    reg(std::format("BM_fdmt_boxcar_cuda/{}/transform", cfg),
+    reg(fmt::format("BM_fdmt_boxcar_cuda/{}/transform", cfg),
         [](benchmark::State& s) { bench_transform(s); });
-    reg(std::format("BM_fdmt_boxcar_cuda/{}/fft_transform", cfg),
+    reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fft_transform", cfg),
         [](benchmark::State& s) { bench_fft_transform(s); });
     for (const float wtsp : wtsp_sweep()) {
-        reg(std::format("BM_fdmt_boxcar_cuda/{}/fft_fused/wtsp:{:g}", cfg,
+        reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fft_fused/wtsp:{:g}", cfg,
                         wtsp),
             [wtsp](benchmark::State& s) { bench_fft_fused(s, wtsp); });
-        reg(std::format("BM_fdmt_boxcar_cuda/{}/separate/wtsp:{:g}", cfg, wtsp),
+        reg(fmt::format("BM_fdmt_boxcar_cuda/{}/separate/wtsp:{:g}", cfg, wtsp),
             [wtsp](benchmark::State& s) { bench_separate(s, wtsp); });
         std::vector<SizeType> depths{0};
         if (suite_config().subband_depth != 0) {
             depths.push_back(suite_config().subband_depth);
         }
         for (const auto sb : depths) {
-            reg(std::format("BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}", cfg,
+            reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}", cfg,
                             wtsp, sb),
                 [wtsp, sb](benchmark::State& s) {
                     bench_fused(s, wtsp, sb, false, Api::kDevice);
                 });
-            reg(std::format(
+            reg(fmt::format(
                     "BM_fdmt_boxcar_cuda/{}/fused_uint8/wtsp:{:g}/sb:{}", cfg,
                     wtsp, sb),
                 [wtsp, sb](benchmark::State& s) {
                     bench_fused(s, wtsp, sb, true, Api::kDevice);
                 });
-            reg(std::format("BM_fdmt_boxcar_cuda/{}/fused_host/wtsp:{:g}/sb:{}",
+            reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused_host/wtsp:{:g}/sb:{}",
                             cfg, wtsp, sb),
                 [wtsp, sb](benchmark::State& s) {
                     bench_fused(s, wtsp, sb, false, Api::kHost);

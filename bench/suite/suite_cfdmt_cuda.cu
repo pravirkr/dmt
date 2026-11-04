@@ -5,16 +5,16 @@
 
 #include <chrono>
 #include <cstdint>
-#include <format>
 #include <span>
 #include <vector>
 
-#include <thrust/device_vector.h>
-#include "dmt/gpu_compat.cuh"
-
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
+#include <thrust/device_vector.h>
 
 #include "dmt/algorithms/cfdmt.hpp"
+
+#include "dmt/gpu_compat.cuh"
 
 #include "bench_gpu_utils.cuh"
 #include "suite_cfdmt_common.hpp"
@@ -31,7 +31,7 @@ bool over_device_budget(benchmark::State& state,
     const double budget = 0.9 * static_cast<double>(free_bytes);
     if (need > budget) {
         state.SkipWithError(
-            std::format("skipped: needs ~{:.1f} GB of device memory, {:.1f} "
+            fmt::format("skipped: needs ~{:.1f} GB of device memory, {:.1f} "
                         "GB free",
                         need / 1.0737e9, budget / 1.0737e9));
         return true;

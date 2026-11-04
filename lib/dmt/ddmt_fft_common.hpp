@@ -7,15 +7,17 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/dm_utils.hpp"
 
 namespace dmt::algorithms::ddmt_fft {
@@ -218,7 +220,7 @@ inline DDMTFFTMethod resolve_method(DDMTFFTMethod requested,
         any = any || model.nufft_run(r, explicit_nufft);
     }
     if (explicit_nufft && !any) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "DDMTFFT: method 'nufft' needs a uniformly spaced DM grid or "
             "uniform runs of at least {} trials (see "
             "DDMTPlan::generate_levin_dm_grid_piecewise)",

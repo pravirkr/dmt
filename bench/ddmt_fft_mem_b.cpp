@@ -4,8 +4,9 @@
 
 #include <benchmark/benchmark.h>
 
-#include "bench_mem_utils.hpp"
 #include "dmt/algorithms/ddmt_fft.hpp"
+
+#include "bench_mem_utils.hpp"
 
 namespace dmt {
 using algorithms::DDMTFFT;

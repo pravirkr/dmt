@@ -13,12 +13,14 @@
 #include <catch2/matchers/catch_matchers_all.hpp>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+
+#include "dmt/algorithms/cfdmt.hpp"
+#include "dmt/utils/simulate.hpp"
+
+#include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
 
 #include "cfdmt_behaviour.hpp"
-#include "dmt/algorithms/cfdmt.hpp"
-#include "dmt/engines.hpp"
-#include "dmt/utils/simulate.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {

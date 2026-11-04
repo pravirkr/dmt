@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -11,9 +10,12 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/dm_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_fft_common.hpp"
@@ -28,7 +30,7 @@ std::vector<uint8_t> checked_kill_mask(std::span<const uint8_t> mask,
                                        SizeType nchans) {
     if (!mask.empty() && mask.size() != nchans) {
         throw std::invalid_argument(
-            std::format("FDMTFFT: kill_mask has {} entries, expected nchans = "
+            fmt::format("FDMTFFT: kill_mask has {} entries, expected nchans = "
                         "{}",
                         mask.size(), nchans));
     }
@@ -108,7 +110,7 @@ public:
 
     void check_stream(Stream stream, std::string_view what) const {
         if (on_cpu() && stream.native != nullptr) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::{}: a stream was given, but the cpu backend has "
                 "none",
                 what));

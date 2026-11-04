@@ -1,13 +1,13 @@
+#include <benchmark/benchmark.h>
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
-#include "dmt/gpu_compat.cuh"
-
-#include <benchmark/benchmark.h>
-
-#include "bench_gpu_utils.cuh"
 
 #include "dmt/algorithms/fdmt_fft.hpp"
+
+#include "dmt/gpu_compat.cuh"
+
+#include "bench_gpu_utils.cuh"
 
 namespace {
 

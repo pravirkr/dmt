@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -9,12 +8,15 @@
 #include <string>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
-#include "test_helpers.hpp"
 
-#include <catch2/matchers/catch_matchers_all.hpp>
+#include "test_helpers.hpp"
 
 // Performance parameters (fuse_levels / int_tree), construction-time memory,
 // and packed low-bit input. Every variant must be bit-identical to the

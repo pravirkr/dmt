@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -12,9 +11,12 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/engines.hpp"
 #include "dmt/modes.hpp"
 
@@ -72,7 +74,7 @@ public:
     // The CPU stepper has no queue: a stream there is a caller mistake.
     void check_stream(Stream stream, std::string_view what) const {
         if (on_cpu() && stream.native != nullptr) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT::{}: a stream was given, but the cpu backend has none",
                 what));
         }
@@ -416,7 +418,7 @@ void add_frb_track(std::span<float> waterfall,
     const auto nchans = plan.get_nchans();
     const auto nsamps = plan.get_nsamps();
     if (waterfall.size() != nchans * nsamps) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "add_frb_track: Invalid size of waterfall. Expected {}, got {}",
             nchans * nsamps, waterfall.size()));
     }
@@ -427,7 +429,7 @@ void add_frb_track(std::span<float> waterfall,
         const auto start = toffset + shifts[c];
         const auto end   = start + static_cast<IndexType>(width);
         if (start < 0 || end > static_cast<IndexType>(nsamps)) {
-            throw std::out_of_range(std::format(
+            throw std::out_of_range(fmt::format(
                 "add_frb_track: injected pulse for channel {} falls outside "
                 "the waterfall (start={}, end={}, nsamps={}); choose a "
                 "smaller |toffset| or a dm_idx with less total delay",

@@ -5,11 +5,13 @@
 
 #include <benchmark/benchmark.h>
 
-#include "cpu/ddmt_cpu_kernels.hpp"
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/sdmt.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
+
+#include "cpu/ddmt_cpu_kernels.hpp"
 
 namespace dmt {
 using algorithms::DDMT;

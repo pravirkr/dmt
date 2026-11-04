@@ -1,19 +1,19 @@
-#include <thrust/device_vector.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/random.h>
-#include "dmt/gpu_compat.cuh"
-
 #include <cstdint>
 #include <random>
 #include <span>
 #include <vector>
 
 #include <benchmark/benchmark.h>
-
-#include "bench_gpu_utils.cuh"
+#include <thrust/device_vector.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/random.h>
 
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/gpu_compat.cuh"
+
+#include "bench_gpu_utils.cuh"
 
 namespace {
 template <typename T>
@@ -38,6 +38,8 @@ using plans::FDMTPlan;
 
 class FDMTCUDAFixture : public benchmark::Fixture {
 public:
+    using benchmark::Fixture::SetUp; // the non-const State& overload
+
     void SetUp(const ::benchmark::State& state) override {
         f_min       = 704.0F;
         f_max       = 1216.0F;

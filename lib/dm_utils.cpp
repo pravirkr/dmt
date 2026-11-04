@@ -4,10 +4,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
-#include <format>
 #include <limits>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 namespace dmt::utils {
 
@@ -83,7 +84,7 @@ void check_band(
     }
     if (!is_finite_bits(f_ref) || !(f_ref > 0.0)) {
         throw std::invalid_argument(
-            std::format("f_ref={} MHz must be finite and positive", f_ref));
+            fmt::format("f_ref={} MHz must be finite and positive", f_ref));
     }
 }
 
@@ -103,7 +104,7 @@ void check_dms(std::span<const float> dm_arr) {
     for (const float dm : dm_arr) {
         if (!is_finite_bits(dm) || !(dm >= 0.0F)) {
             throw std::invalid_argument(
-                std::format("DDMT: DM trial {} must be finite and >= 0", dm));
+                fmt::format("DDMT: DM trial {} must be finite and >= 0", dm));
         }
     }
 }
@@ -111,7 +112,7 @@ void check_dms(std::span<const float> dm_arr) {
 void check_size(double samples, double dm) {
     if (!is_finite_bits(samples) || !(samples >= 0.0) ||
         samples >= std::ldexp(1.0, std::numeric_limits<SizeType>::digits)) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "DDMT: dispersion delay {} samples is not a representable "
             "non-negative size (dm={})",
             samples, dm));
@@ -197,28 +198,28 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
         throw std::invalid_argument("Levin DM grid parameters must be finite");
     }
     if (dm_start < 0.0F || dm_end < dm_start) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "Invalid DM range[{}, {}]: require 0 <= dm_start <= dm_end",
             dm_start, dm_end));
     }
     if (tsamp <= 0.0F || pulse_width < 0.0F) {
         throw std::invalid_argument(
-            std::format("Invalid tsamp[{}] or pulse_width[{}]: require tsamp > "
+            fmt::format("Invalid tsamp[{}] or pulse_width[{}]: require tsamp > "
                         "0 and pulse_width >= 0",
                         tsamp, pulse_width));
     }
     if (f_min <= 0.0F || f_max <= f_min) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "Invalid f_min[{}], f_max[{}]: require 0 < f_min < f_max", f_min,
             f_max));
     }
     if (nchans == 0) {
         throw std::invalid_argument(
-            std::format("Invalid nchans[{}]: require nchans > 0", nchans));
+            fmt::format("Invalid nchans[{}]: require nchans > 0", nchans));
     }
     if (tol <= 1.0F) {
         throw std::invalid_argument(
-            std::format("Invalid tol[{}]: require tol > 1.0", tol));
+            fmt::format("Invalid tol[{}]: require tol > 1.0", tol));
     }
 
     if (dm_start == dm_end) {
@@ -249,12 +250,12 @@ std::vector<float> generate_levin_dm_grid(float dm_start,
         const double k     = c + (tol2 * a2 * prev2);
         const double disc  = (-a2 * b2 * prev2) + ((a2 + b2) * k);
         if (disc <= 0.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "Numerical collapse in generate_levin_dm_grid at DM={}", prev));
         }
         const double next_dm = ((b2 * prev) + std::sqrt(disc)) * denom_inv;
         if (next_dm <= prev) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "Zero step size encountered in generate_levin_dm_grid at DM={}",
                 prev));
         }

@@ -5,10 +5,11 @@
 
 #include <array>
 #include <cstdint>
-#include <format>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
+#include <fmt/format.h>
 
 #include "dmt/common/baseband.hpp"
 #include "dmt/common/types.hpp"
@@ -53,7 +54,7 @@ parse_baseband_order(std::string_view order) {
         axes[n++] = ax;
     }
     if (n != 4) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "BasebandFormat: invalid order '{}'; expected a permutation of "
             "the tokens P, RI, T and F (e.g. 'FTPRI', 'PRITF', 'TFPRI')",
             order));
@@ -64,7 +65,7 @@ parse_baseband_order(std::string_view order) {
 inline void validate_baseband_format(const BasebandFormat& format) {
     static_cast<void>(parse_baseband_order(format.order));
     if (format.nbits != 2 && format.nbits != 4 && format.nbits != 8) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "BasebandFormat: nbits={} unsupported (2, 4 or 8)", format.nbits));
     }
 }

@@ -1,10 +1,12 @@
+#include "dmt/common/logging.hpp"
+
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/common/logging.hpp"
 #include "dmt/common/plans.hpp"
+
 #include "dmt/logging.hpp"
 
 namespace dmt {

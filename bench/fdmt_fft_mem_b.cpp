@@ -5,8 +5,9 @@
 
 #include <benchmark/benchmark.h>
 
-#include "bench_mem_utils.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
+
+#include "bench_mem_utils.hpp"
 
 namespace {
 

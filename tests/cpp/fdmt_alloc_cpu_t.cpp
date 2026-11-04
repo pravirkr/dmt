@@ -1,5 +1,4 @@
 #include <atomic>
-#include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -8,8 +7,11 @@
 #include <string>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_boxcar.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
 
 // FDMT allocates all working memory in its constructor: execute() and the

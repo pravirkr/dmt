@@ -8,11 +8,33 @@ AlignConsecutiveAssignments:
   Enabled: true
 BinPackParameters: false
 DerivePointerAlignment: false
+# Never reflow clang-tidy suppressions: a wrapped NOLINTNEXTLINE silently
+# stops applying to the intended line.
+CommentPragmas: '^ (IWYU pragma:|NOLINT)'
+# Include order (same convention as loki). Each group is its own block,
+# separated by a blank line and sorted alphabetically:
+#   0. the file's own header ("main" include, matched by IncludeIsMainRegex:
+#      dmt/algorithms/fdmt.hpp for fdmt.cpp, fdmt_cpu.cpp, fdmt_cuda.cu)
+#   1. C++ standard library        <vector>, <cstdint>
+#   2. system and third-party      <omp.h>, <fmt/format.h>, <cuda_runtime.h>
+#   3. dmt public headers          "dmt/algorithms/...", "dmt/common/...",
+#                                  "dmt/utils/...", "dmt/dmt.hpp" (include/)
+#   4. dmt private headers         "dmt/..." (lib/dmt/)
+#   5. other local headers         "bind.hpp", "test_helpers.hpp"
+IncludeBlocks: Regroup
+IncludeIsMainRegex: "(_cpu|_cuda|_t)?$"
+IncludeIsMainSourceRegex: '(\.cu)$'
 IncludeCategories:
-  - Regex: '^<.*'              # System and third-party headers
+  - Regex: '^<[a-z0-9_]+>$'
     Priority: 1
-  - Regex: '^".*"'            # Project headers
+  - Regex: '^<.*>$'
     Priority: 2
+  - Regex: '^"dmt/((algorithms|common|utils)/.*|dmt\.hpp)"$'
+    Priority: 3
+  - Regex: '^"dmt/'
+    Priority: 4
+  - Regex: '^".*"'
+    Priority: 5
 PackConstructorInitializers: CurrentLine
 PointerAlignment: Left
 SortIncludes: CaseSensitive

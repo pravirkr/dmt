@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <limits>
 #include <random>
@@ -7,11 +6,13 @@
 #include <stdexcept>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_chunk.hpp"
-
-#include <catch2/matchers/catch_matchers_all.hpp>
 
 // Chunked execution (chunk_nsamps, mode "valid"): a block of nsamps runs as
 // chunks of the given length through the engine's own state, which must give

@@ -251,7 +251,7 @@ inline Plan build_plan(std::span<const int> delays,
             sp.n1_0        = static_cast<int>(p.nodes.size());
             for (auto& n : t1) {
                 const int len = bt + (n.hi - n.lo);
-                int s[4];
+                int s[4]{};
                 for (int k = 0; k < n.nsrc; ++k) {
                     s[k] = waddr[n.src[k]] + n.lo + n.off[k] - wbase[n.src[k]];
                 }
@@ -283,7 +283,7 @@ inline Plan build_plan(std::span<const int> delays,
             sp.n2_0          = static_cast<int>(p.nodes.size());
             for (auto& n : t2) {
                 const int len = bt + (n.hi - n.lo);
-                int s[4];
+                int s[4]{};
                 for (int g = 0; g < n.nsrc; ++g) {
                     const auto& c = t1[n.src[g]];
                     // N1 element at tau = lo2 + i + o_g.
