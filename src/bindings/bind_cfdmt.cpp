@@ -1,21 +1,21 @@
-#include "bindings/bind.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <format>
 #include <optional>
 #include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include "dmt/dmt.hpp"
 #include "dmt/utils/simulate.hpp"
+
+#include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -59,7 +59,7 @@ output_buffer(const CohFDMT& coh, const std::optional<py::array>& out) {
     }
     if (static_cast<SizeType>(arr.size()) < needed) {
         throw std::invalid_argument(
-            std::format("CohFDMT.execute: out has {} elements, needs at least "
+            fmt::format("CohFDMT.execute: out has {} elements, needs at least "
                         "dmt_size = {}",
                         arr.size(), needed));
     }
@@ -179,7 +179,7 @@ void bind_cfdmt(py::module_& mod) {
         .def_readwrite("msb_first", &BasebandFormat::msb_first)
         .def_readwrite("levels_2bit", &BasebandFormat::levels_2bit)
         .def("__repr__", [](const BasebandFormat& f) {
-            return std::format(
+            return fmt::format(
                 "BasebandFormat(order='{}', nbits={}, is_signed={}, "
                 "msb_first={})",
                 f.order, f.nbits, f.is_signed ? "True" : "False",

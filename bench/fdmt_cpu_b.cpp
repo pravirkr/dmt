@@ -6,8 +6,9 @@
 #include <benchmark/benchmark.h>
 
 #include "dmt/algorithms/fdmt.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 
 namespace dmt {
 using algorithms::FDMT;

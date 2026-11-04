@@ -1,6 +1,6 @@
 # C++ quickstart
 
-`dmt` is written in C++20 (`std::span`, concepts, `<format>`). This page shows
+`dmt` is written in C++20 (`std::span`, concepts, ranges). This page shows
 how to construct an `FDMT`, run it block by block, feed it packed low-bit
 data, use the stepper, and link `dmt` into your own CMake project.
 

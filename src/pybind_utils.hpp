@@ -1,6 +1,5 @@
 #pragma once
 
-#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -118,10 +118,10 @@ inline std::vector<T> copy_native_1d(const py::handle& src,
     if (!arr) {
         const char* dtype = std::is_same_v<T, float> ? "float32" : "uint8";
         throw py::type_error(
-            std::format("{} must be a 1-D {} array", what, dtype));
+            fmt::format("{} must be a 1-D {} array", what, dtype));
     }
     if (arr.ndim() != 1) {
-        throw py::value_error(std::format("{} must be a 1-D array", what));
+        throw py::value_error(fmt::format("{} must be a 1-D array", what));
     }
     if (arr.size() == 0) {
         return {};
@@ -146,13 +146,13 @@ inline std::vector<uint8_t> extract_kill_mask(const py::object& obj) {
     }
     const char kind = arr.dtype().kind();
     if (kind != 'b' && kind != 'i' && kind != 'u') {
-        throw py::type_error(std::format(
+        throw py::type_error(fmt::format(
             "kill_mask must be a 1-D bool or integer array (e.g. uint8 0/1), "
             "got dtype {}",
             py::str(arr.dtype()).cast<std::string>()));
     }
     if (arr.ndim() != 1) {
-        throw py::value_error(std::format(
+        throw py::value_error(fmt::format(
             "kill_mask must be a 1-D array, got {} dimensions", arr.ndim()));
     }
     // Nonzero -> true, then the bool -> uint8 cast gives 0/1.
@@ -209,12 +209,12 @@ fdmt_output_buffer(const Engine& fdmt,
     const auto& arr = *out;
     if (arr.dtype().kind() != 'f' || arr.itemsize() != 4 ||
         (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
-        throw py::type_error(std::format("{}.execute: out must be a writeable, "
+        throw py::type_error(fmt::format("{}.execute: out must be a writeable, "
                                          "C-contiguous float32 array",
                                          name));
     }
     if (static_cast<SizeType>(arr.size()) < needed) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "{}.execute: out has {} elements, needs at least nbeams * "
             "plan.dmt_size = {}",
             name, arr.size(), needed));
@@ -243,7 +243,7 @@ py::object fdmt_execute_to_array(const Engine& fdmt,
     const auto fsize    = static_cast<py::ssize_t>(sizeof(float));
     if (!batched && nbeams != 1) {
         throw std::invalid_argument(
-            std::format("{}: Invalid size of waterfall. Expected {}, got {}",
+            fmt::format("{}: Invalid size of waterfall. Expected {}, got {}",
                         name, expected_size, input_size));
     }
     auto buf = fdmt_output_buffer(fdmt, name, out);

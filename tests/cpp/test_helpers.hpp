@@ -8,10 +8,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
 
-#include "dmt/common/types.hpp"
-
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
+#include "dmt/common/types.hpp"
+
 #include "dmt/fdmt_box_weights.hpp"
 
 #ifdef DMT_ENABLE_GPU

@@ -1,13 +1,14 @@
 #pragma once
 
-#include <format>
 #include <string_view>
 #include <utility>
+
+#include <fmt/format.h>
 
 #include "dmt/common/logging.hpp"
 
 // Internal logging front end: construction-time debug messages only.
-// Formatting uses std::format and happens only when debug logging is on;
+// Formatting uses fmt::format and happens only when debug logging is on;
 // spdlog is confined to lib/logging.cpp, so no other translation unit (and
 // nothing downstream) sees it.
 
@@ -20,9 +21,9 @@ namespace dmt::logging {
 void emit(std::string_view message) noexcept;
 
 template <typename... Args>
-void debug(std::format_string<Args...> fmt, Args&&... args) {
+void debug(fmt::format_string<Args...> fmt, Args&&... args) {
     if (enabled()) {
-        emit(std::format(fmt, std::forward<Args>(args)...));
+        emit(fmt::format(fmt, std::forward<Args>(args)...));
     }
 }
 

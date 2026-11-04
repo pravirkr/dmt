@@ -7,6 +7,7 @@
 #include <benchmark/benchmark.h>
 
 #include "dmt/algorithms/cfdmt.hpp"
+
 #include "suite_cfdmt_common.hpp"
 
 namespace dmt::bench_suite::cfdmt {
@@ -33,7 +34,7 @@ void register_cpu() {
     for (const auto& p : points()) {
         for (const int t : cpu_threads()) {
             benchmark::RegisterBenchmark(
-                name(std::format("cpu{}", t), p),
+                name(fmt::format("cpu{}", t), p),
                 [p, t](benchmark::State& s) { bench_cpu(s, p, t); })
                 ->UseRealTime()
                 ->Unit(benchmark::kMillisecond);

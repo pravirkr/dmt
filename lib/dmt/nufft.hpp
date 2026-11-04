@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "dmt/common/types.hpp"
+
 #include "dmt/fft.hpp"
 
 namespace dmt::nufft {

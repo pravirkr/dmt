@@ -1,19 +1,20 @@
+#include "dmt/utils/simulate.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <format>
 #include <numbers>
 #include <random>
 #include <stdexcept>
 #include <utility>
 
-#include "dmt/utils/simulate.hpp"
-
-#include "dmt/baseband_layout.hpp"
-#include "dmt/fft.hpp"
+#include <fmt/format.h>
 
 #include "dmt/common/types.hpp"
+
+#include "dmt/baseband_layout.hpp"
 #include "dmt/dm_utils.hpp"
+#include "dmt/fft.hpp"
 
 namespace dmt::utils {
 std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
@@ -177,7 +178,7 @@ std::vector<uint8_t> pack_baseband(std::span<const ComplexType> voltages,
     validate_baseband_format(format);
     if (voltages.size() != 2 * nsub * nsamps) {
         throw std::invalid_argument(
-            std::format("pack_baseband: expected {} voltages, got {}",
+            fmt::format("pack_baseband: expected {} voltages, got {}",
                         2 * nsub * nsamps, voltages.size()));
     }
     if (sub_count == 0) {

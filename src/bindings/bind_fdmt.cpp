@@ -1,7 +1,4 @@
-#include "bindings/bind.hpp"
-
 #include <algorithm>
-#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,12 +8,15 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <pybind11/numpy.h>
 #include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include "dmt/dmt.hpp"
+
+#include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -72,7 +72,7 @@ void bind_fdmt(py::module_& mod) {
         .def_readonly("output", &FDMTMemoryUsage::output)
         .def_property_readonly("total", &FDMTMemoryUsage::total)
         .def("__repr__", [](const FDMTMemoryUsage& m) {
-            return std::format(
+            return fmt::format(
                 "FDMTMemoryUsage(plan={}, state={}, history={}, workspace={}, "
                 "total={}, output={})",
                 m.plan, m.state, m.history, m.workspace, m.total(), m.output);
@@ -652,7 +652,7 @@ void bind_fdmt(py::module_& mod) {
                 if (static_cast<SizeType>(hist.size()) !=
                     fdmt.history_state_size()) {
                     throw std::invalid_argument(
-                        std::format("FDMT.load_history: expected buffer of "
+                        fmt::format("FDMT.load_history: expected buffer of "
                                     "size {}, got {}",
                                     fdmt.history_state_size(), hist.size()));
                 }
@@ -944,7 +944,7 @@ void bind_fdmt(py::module_& mod) {
 
                 if (waterfall.ndim() == 2) {
                     if (nbeams != 1) {
-                        throw std::invalid_argument(std::format(
+                        throw std::invalid_argument(fmt::format(
                             "FDMTFFT: Invalid size of waterfall. Expected "
                             "{}, "
                             "got {}",
@@ -961,7 +961,7 @@ void bind_fdmt(py::module_& mod) {
                 }
                 if (waterfall.ndim() == 3) {
                     if (static_cast<SizeType>(waterfall.shape(0)) != nbeams) {
-                        throw std::invalid_argument(std::format(
+                        throw std::invalid_argument(fmt::format(
                             "FDMTFFT: Invalid size of waterfall. Expected "
                             "{}, "
                             "got {}",

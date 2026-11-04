@@ -3,20 +3,21 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
-#include "dmt/gpu_compat.cuh"
+
+#include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
-#include "dmt/common/types.hpp"
 #include "dmt/ddmt_kernel.cuh"
 #include "dmt/engines.hpp"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/logging.hpp"
@@ -149,7 +150,7 @@ template <typename F> void dispatch_nbits(SizeType nbits, F&& f) {
         break;
     default:
         throw std::invalid_argument(
-            std::format("DDMT (gpu): unsupported nbits={}", nbits));
+            fmt::format("DDMT (gpu): unsupported nbits={}", nbits));
     }
 }
 
@@ -277,7 +278,7 @@ public:
         gpu_utils::set_device(m_device_id);
         const auto rows = m_nbeams * m_plan.get_nchans();
         if (rows == 0 || d_waterfall.size() % rows != 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "{}: waterfall size {} is not a multiple of "
                 "nbeams * nchans = {}",
                 m_shared_sums ? "SDMT" : "DDMT", d_waterfall.size(), rows));
@@ -348,7 +349,7 @@ public:
         gpu_utils::set_device(m_device_id);
         const auto rows = m_nbeams * m_plan.get_nchans();
         if (rows == 0 || waterfall.size() % rows != 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "{}: waterfall size {} is not a multiple of "
                 "nbeams * nchans = {}",
                 m_shared_sums ? "SDMT" : "DDMT", waterfall.size(), rows));
@@ -505,7 +506,7 @@ private:
 
     void check_float(std::string_view what) const {
         if (m_plan.get_nbits() != 32) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMT::{}: plan nbits={} != 32; use the packed-integer "
                 "overload instead",
                 what, m_plan.get_nbits()));
@@ -513,7 +514,7 @@ private:
     }
     void check_packed(std::string_view what) const {
         if (!is_packed_width(m_plan.get_nbits())) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMT::{}: plan nbits={} is not a supported packed width "
                 "(1,2,4,8,16); use the float overload for nbits==32",
                 what, m_plan.get_nbits()));
@@ -522,7 +523,7 @@ private:
     void check_warm() const {
         if (m_history_len != m_max_delay) {
             throw std::logic_error(
-                std::format("DDMT::save_history: stream is not fully "
+                fmt::format("DDMT::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             m_history_len, m_max_delay));
         }
@@ -531,7 +532,7 @@ private:
     check_size(SizeType got, SizeType expected, std::string_view what) {
         if (got != expected) {
             throw std::invalid_argument(
-                std::format("DDMT (gpu): {} buffer size mismatch: expected "
+                fmt::format("DDMT (gpu): {} buffer size mismatch: expected "
                             "{}, got {}",
                             what, expected, got));
         }

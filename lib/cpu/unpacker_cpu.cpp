@@ -1,9 +1,10 @@
 #include "dmt/unpacker.hpp"
 
 #include <algorithm>
-#include <format>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "dmt/baseband_layout.hpp"
 
@@ -38,7 +39,7 @@ public:
           m_nthreads(std::max(1, nthreads)),
           m_table(make_decode_table(format)) {
         if (m_groups.empty() || nbin <= 2 * noverlap || nfft == 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "BasebandUnpackerCPU: invalid geometry (groups={}, nbin={}, "
                 "noverlap={}, nfft={})",
                 m_groups.size(), nbin, noverlap, nfft));
@@ -68,12 +69,12 @@ public:
     void validate(std::span<const std::span<const uint8_t>> groups) const {
         if (groups.size() != m_groups.size()) {
             throw std::invalid_argument(
-                std::format("CohFDMT: expected {} input group(s), got {}",
+                fmt::format("CohFDMT: expected {} input group(s), got {}",
                             m_groups.size(), groups.size()));
         }
         for (SizeType g = 0; g < groups.size(); ++g) {
             if (groups[g].size() != input_size(g)) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "CohFDMT: input group {} has {} bytes, expected {} "
                     "(block_nsamps={} x {} subbands x 4 x {} bits / 8)",
                     g, groups[g].size(), input_size(g), m_nsamps, m_groups[g],
@@ -120,7 +121,7 @@ public:
                  std::span<ComplexType> out) const {
         validate(groups);
         if (out.size() != output_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "BasebandUnpackerCPU: output has {} elements, expected {}",
                 out.size(), output_size()));
         }

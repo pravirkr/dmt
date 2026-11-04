@@ -17,9 +17,8 @@
 
 #include <cstdint>
 
-#include "dmt/gpu_compat.cuh"
-
 #include "dmt/fourier_gpu.cuh"
+#include "dmt/gpu_compat.cuh"
 
 namespace dmt::cfdmt_gpu {
 

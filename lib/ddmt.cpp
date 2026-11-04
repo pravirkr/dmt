@@ -2,16 +2,18 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
 
+#include <fmt/format.h>
+
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/engines.hpp"
 
 namespace dmt::algorithms {
@@ -37,7 +39,7 @@ make_ddmt_engine(const plans::DDMTPlan& plan,
 
 SizeType require_nbeams(SizeType nbeams, bool shared_sums) {
     if (nbeams == 0) {
-        throw std::invalid_argument(std::format("{}: nbeams must be >= 1",
+        throw std::invalid_argument(fmt::format("{}: nbeams must be >= 1",
                                                 shared_sums ? "SDMT" : "DDMT"));
     }
     return nbeams;

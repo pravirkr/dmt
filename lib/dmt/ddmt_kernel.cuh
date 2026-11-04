@@ -2,8 +2,9 @@
 
 #include <cstdint>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 
 /**
  * @file ddmt_kernel.cuh

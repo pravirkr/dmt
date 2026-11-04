@@ -1,10 +1,11 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include <algorithm>
-#include <format>
 #include <limits>
 #include <stdexcept>
 #include <utility>
+
+#include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
 
@@ -148,7 +149,7 @@ FDMTBoxcarMemoryUsage FDMTBoxcar::get_memory_usage() const noexcept {
     return m_impl->engine->memory_usage();
 }
 std::string FDMTBoxcar::summary() const {
-    return std::format(
+    return fmt::format(
         "{}*** FDMTBoxcar ({}) ***\n{} beams, {} planes, {} widths, chunk {}, "
         "fuse_levels {}\nAllocated {:.2f} MiB; no root DM-time output\n",
         get_plan().summary(), to_string(backend()), get_nbeams(),

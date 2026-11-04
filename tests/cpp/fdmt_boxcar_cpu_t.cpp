@@ -1,10 +1,10 @@
-#include "fdmt_boxcar_reference.hpp"
-
 #include <bit>
 #include <limits>
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
+
+#include "fdmt_boxcar_reference.hpp"
 
 using namespace boxcar_test;
 

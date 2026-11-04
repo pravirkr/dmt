@@ -9,22 +9,19 @@ project(
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Compiler version requirements
+# Compiler version requirements: the system compilers of Ubuntu 22.04,
+# Debian 12 and RHEL 9 (GCC 11+), and Clang 17+. dmt needs only C++20 language
+# features and library parts that libstdc++ 11 ships; string formatting uses
+# fmt (libstdc++ < 13 has no <format>).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
-    message(
-      FATAL_ERROR
-        "GCC 13.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
-    )
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11.0)
+    message(FATAL_ERROR "GCC >= 11 is required. Found: ${CMAKE_CXX_COMPILER_VERSION}")
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
-    message(
-      FATAL_ERROR
-        "Clang 18.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
-    )
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17.0)
+    message(FATAL_ERROR "Clang >= 17 is required. Found: ${CMAKE_CXX_COMPILER_VERSION}")
   endif()
-else()
+elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
   message(
     WARNING
       "Compiler '${CMAKE_CXX_COMPILER_ID}' is not officially tested. Proceed at your own risk."

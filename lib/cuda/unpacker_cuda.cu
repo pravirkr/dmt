@@ -2,9 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "dmt/baseband_layout.hpp"
 #include "dmt/fourier_gpu.cuh"
@@ -86,7 +87,7 @@ public:
           m_noverlap(noverlap),
           m_device_id(device_id) {
         if (m_groups.empty() || nbin <= 2 * noverlap || nfft == 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "BasebandUnpackerCUDA: invalid geometry (groups={}, nbin={}, "
                 "noverlap={}, nfft={})",
                 m_groups.size(), nbin, noverlap, nfft));
@@ -129,13 +130,13 @@ public:
                  cudaStream_t stream) {
         if (groups.size() != m_groups.size()) {
             throw std::invalid_argument(
-                std::format("CohFDMT: expected {} input group(s), got {}",
+                fmt::format("CohFDMT: expected {} input group(s), got {}",
                             m_groups.size(), groups.size()));
         }
         SizeType isub = 0;
         for (SizeType g = 0; g < groups.size(); ++g) {
             if (groups[g].size() != input_size(g)) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "CohFDMT: input group {} has {} bytes, expected {}", g,
                     groups[g].size(), input_size(g)));
             }
@@ -163,12 +164,12 @@ public:
                 SizeType sub_end,
                 cudaStream_t stream) {
         if (out.size() != output_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "BasebandUnpackerCUDA: output has {} elements, expected {}",
                 out.size(), output_size()));
         }
         if (sub_begin > sub_end || sub_end > m_nsub) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "BasebandUnpackerCUDA: subband range [{}, {}) out of [0, {})",
                 sub_begin, sub_end, m_nsub));
         }

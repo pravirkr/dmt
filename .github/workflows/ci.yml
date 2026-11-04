@@ -46,16 +46,20 @@ jobs:
       - uses: pre-commit/action@v3.0.1
 
   # C++ correctness (Release). CMake builds library + bindings; ctest only.
+  # The toolchain floor (CMakeLists.txt: GCC 11 on Ubuntu 22.04 with its
+  # cmake 3.22, Clang 17) and the newest packaged GCC.
   cpp-tests:
-    name: "C++ tests (${{ matrix.compiler.cc }})"
-    runs-on: ubuntu-24.04
+    name: "C++ tests (${{ matrix.compiler.cc }}, ${{ matrix.compiler.os }})"
+    runs-on: ${{ matrix.compiler.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         compiler:
-          - { cc: gcc-13, cpp: g++-13 }
-          - { cc: clang-18, cpp: clang++-18 }
+          # jammy's catch2 is 2.x, so this job builds the pinned Catch2 3.
+          - { os: ubuntu-22.04, cc: gcc-11, cpp: g++-11, packages: "gcc-11 g++-11" }
+          - { os: ubuntu-24.04, cc: clang-17, cpp: clang++-17, packages: "clang-17 libomp-17-dev catch2" }
+          - { os: ubuntu-24.04, cc: gcc-14, cpp: g++-14, packages: "gcc-14 g++-14 catch2" }
     steps:
       - uses: actions/checkout@v7
 
@@ -64,8 +68,8 @@ jobs:
           sudo apt update
           sudo apt install -y --no-install-recommends \
             build-essential cmake ninja-build ccache \
-            gcc-13 g++-13 clang-18 \
-            python3-dev libfftw3-dev libomp-dev catch2 git
+            ${{ matrix.compiler.packages }} \
+            python3-dev libfftw3-dev libomp-dev git
 
       - uses: actions/setup-python@v6
         with:
@@ -76,7 +80,7 @@ jobs:
       - name: Cache ccache object store
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: cpp-tests-${{ matrix.compiler.cc }}
+          key: cpp-tests-${{ matrix.compiler.cc }}-${{ matrix.compiler.os }}
           max-size: 500M
           # PRs restore main's entry but never save their own: per-PR entries
           # fill the 10 GB cache store and evict the CPM caches.
@@ -86,9 +90,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ env.CPM_SOURCE_CACHE }}
-          key: cpm-${{ matrix.compiler.cc }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          key: cpm-${{ matrix.compiler.cc }}-${{ matrix.compiler.os }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
           restore-keys: |
-            cpm-${{ matrix.compiler.cc }}-
+            cpm-${{ matrix.compiler.cc }}-${{ matrix.compiler.os }}-
 
       - name: Configure (CMake preset ci)
         env:

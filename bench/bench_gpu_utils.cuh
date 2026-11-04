@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cstdio>
-#include <format>
 #include <stdexcept>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
 
 #include "dmt/common/backend.hpp"
+
 #include "dmt/gpu_compat.cuh"
 
 // Shared by the GPU benchmarks (dmt_bench and dmt_bench_suite), built for
@@ -25,7 +26,7 @@ inline dmt::Exec bench_gpu_exec(int device = 0) {
     do {                                                                       \
         auto const status = (call);                                            \
         if (cudaSuccess != status) {                                           \
-            throw std::runtime_error(std::format("{} runtime error: {}",       \
+            throw std::runtime_error(fmt::format("{} runtime error: {}",       \
                                                  DMT_GPU_NAME,                 \
                                                  cudaGetErrorString(status))); \
         }                                                                      \

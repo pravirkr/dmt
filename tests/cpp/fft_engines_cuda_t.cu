@@ -1,6 +1,3 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -8,15 +5,19 @@
 #include <span>
 #include <stdexcept>
 #include <vector>
-#include "dmt/gpu_compat.cuh"
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
 #include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
+
 #include "dmt/engines.hpp"
+#include "dmt/gpu_compat.cuh"
+
 #include "test_helpers.hpp"
 
 // Robustness and parity of the GPU Fourier engines against the CPU ones:

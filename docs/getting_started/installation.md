@@ -8,19 +8,20 @@ with CMake `find_package(dmt)`, or both.
 Hardware:
 
 - CPU: x86_64 with AVX2/AVX-512, or Apple Silicon (ARM64 with NEON).
-- GPU (optional): an NVIDIA GPU with compute capability 7.0+ (CUDA), or an
-  AMD GPU supported by ROCm (HIP).
+- GPU (optional): an NVIDIA GPU with compute capability 7.0+ (7.5+ with
+  CUDA 13), or an AMD GPU supported by ROCm (HIP).
 
 Compilers and dependencies:
 
-- A C++20 compiler: GCC 13+ or Clang 15+.
-- CMake 3.18+ and Ninja or Make.
+- A C++20 compiler: GCC 11+ (the system compiler of Ubuntu 22.04, Debian 12
+  and RHEL 9) or Clang 17+.
+- CMake 3.18+ (3.21+ for the presets and HIP) and Ninja or Make.
 - Python 3.12 or newer.
 - System libraries:
   - `libfftw3-dev` (FFTW 3.3+)
   - OpenMP runtime (`libomp` on macOS, included with GCC on Linux)
   - Optional GPU toolchain (one per build; every algorithm runs on it):
-    - CUDA Toolkit 12.6+ (NVIDIA)
+    - CUDA Toolkit 12.2+ (NVIDIA); a 12.x build runs on driver R525 or newer
     - ROCm 6.2+ with hipFFT and rocThrust, and CMake 3.21+ (AMD, via HIP);
       libhipcxx is used when installed
 

@@ -80,7 +80,7 @@ if(DMT_GPU STREQUAL "CUDA" OR DMT_GPU STREQUAL "AUTO")
     set(DMT_GPU_BACKEND "CUDA")
   elseif(DMT_GPU STREQUAL "CUDA")
     message(FATAL_ERROR "DMT_GPU=CUDA but no CUDA compiler (nvcc) was found. "
-                        "Install CUDA >= 12.6 or use DMT_GPU=AUTO/OFF."
+                        "Install CUDA >= 12.2 or use DMT_GPU=AUTO/OFF."
     )
   endif()
 endif()
@@ -113,14 +113,19 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "DMT_GPU=CUDA: detected GPU(s): ${_dmt_gpu_names}")
   endif()
 
-  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.6.0)
-    message(FATAL_ERROR "CUDA >= 12.6 is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
+  # CUDA 12.2 (driver >= R525 runs any 12.x build). 12.0/12.1 ship a CCCL
+  # without cuda::std::span.
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.2.0)
+    message(FATAL_ERROR "CUDA >= 12.2 is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
   endif()
   message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
 
   # Find CUDA Toolkit for proper include dirs and linking
   find_package(CUDAToolkit REQUIRED)
-  set(DMT_GPU_LIBRARIES CUDA::cuda_driver CUDA::cudart CUDA::cufft)
+  # Static CUDA runtime: binaries and the Python module need only the driver's
+  # libcuda (and libcufft), not a matching libcudart on the target machine.
+  set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
+  set(DMT_GPU_LIBRARIES CUDA::cuda_driver CUDA::cudart_static CUDA::cufft)
 
   set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -142,6 +147,20 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
               >
   )
   set(CMAKE_CUDA_ARCHITECTURES ${DMT_CUDA_ARCHITECTURES})
+  # CUDA 13 dropped Maxwell, Pascal and Volta (sm_50..sm_72).
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+    foreach(dmt_arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+      string(REGEX REPLACE "-(real|virtual)$" "" _dmt_sm "${dmt_arch}")
+      if(_dmt_sm MATCHES "^[0-9]+$" AND _dmt_sm LESS 75)
+        message(
+          FATAL_ERROR
+            "CUDA ${CMAKE_CUDA_COMPILER_VERSION} does not support sm_${_dmt_sm} "
+            "(DMT_CUDA_ARCHITECTURES=${DMT_CUDA_ARCHITECTURES}). Use sm_75 or newer, "
+            "or a CUDA 12.x toolkit for older GPUs."
+        )
+      endif()
+    endforeach()
+  endif()
   message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
   # Disable response files for better IDE integration
   set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)

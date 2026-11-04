@@ -3,15 +3,17 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <format>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_fft_common.hpp"
 #include "dmt/fft.hpp"
@@ -278,7 +280,7 @@ TreeDag make_tree_dag(const plans::FDMTPlan& plan, bool fractional, bool box) {
             seen[cur] = true;
         }
         if (!std::ranges::all_of(seen, [](bool b) { return b; })) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMTFFT: level {} has a node without producer", l));
         }
     }
@@ -399,7 +401,7 @@ Segments choose_segments(const Geometry& geom,
         cands.push_back({n, nseg, model(n, nseg, 0.33 * radix_penalty(n))});
     }
     if (capped && cands.empty()) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "FDMTFFT: segment cap {} is shorter than the minimum overlap-save "
             "segment {}",
             max_len, utils::next_fft_size(n_min)));

@@ -11,20 +11,22 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <omp.h>
 
-#include "ddmt_cpu_kernels.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
+
+#include "ddmt_cpu_kernels.hpp"
 
 namespace dmt::algorithms::ddmt_cpu {
 
@@ -64,7 +66,7 @@ template <typename F> void dispatch_nbits(SizeType nbits, F&& f) {
         break;
     default:
         throw std::invalid_argument(
-            std::format("DDMT: unsupported nbits={}", nbits));
+            fmt::format("DDMT: unsupported nbits={}", nbits));
     }
 }
 
@@ -399,7 +401,7 @@ public:
         const auto rows = m_nbeams * m_plan.get_nchans();
         if (rows == 0 || waterfall.size() % rows != 0) {
             throw std::invalid_argument(
-                std::format("{}: waterfall size {} is not a multiple of "
+                fmt::format("{}: waterfall size {} is not a multiple of "
                             "nbeams * nchans = {}",
                             Algo::kName, waterfall.size(), rows));
         }
@@ -417,7 +419,7 @@ public:
         const auto rows      = m_nbeams * m_plan.get_nchans();
         const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         if (waterfall_packed.size() != rows * row_bytes) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "{}: Packed input buffer size mismatch: expected {} "
                 "bytes ({} beams x {} chans x {} bytes/row), got {}",
                 Algo::kName, rows * row_bytes, m_nbeams, m_plan.get_nchans(),
@@ -442,7 +444,7 @@ public:
         const auto nchans     = m_plan.get_nchans();
         const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, nbits);
         if (filterbank_packed.size() != m_nbeams * nsamps * samp_bytes) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "{}: Time-major input buffer size mismatch: expected {}, "
                 "got {}",
                 Algo::kName, m_nbeams * nsamps * samp_bytes,
@@ -501,7 +503,7 @@ private:
 
     void check_float(std::string_view what) const {
         if (m_plan.get_nbits() != 32) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "{}::{}: plan nbits={} != 32; use the packed-integer "
                 "overload instead",
                 Algo::kName, what, m_plan.get_nbits()));
@@ -509,7 +511,7 @@ private:
     }
     void check_packed(std::string_view what) const {
         if (!is_packed_width(m_plan.get_nbits())) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "{}::{}: plan nbits={} is not a supported packed width "
                 "(1,2,4,8,16); use the float overload for nbits==32",
                 Algo::kName, what, m_plan.get_nbits()));
@@ -518,7 +520,7 @@ private:
     void check_warm() const {
         if (m_history_len != m_max_delay) {
             throw std::logic_error(
-                std::format("{}::save_history: stream is not fully "
+                fmt::format("{}::save_history: stream is not fully "
                             "warmed up yet ({} of {} history samples/channel)",
                             Algo::kName, m_history_len, m_max_delay));
         }
@@ -527,7 +529,7 @@ private:
     check_size(SizeType got, SizeType expected, std::string_view what) {
         if (got != expected) {
             throw std::invalid_argument(
-                std::format("{}: {} buffer size mismatch: expected {}, "
+                fmt::format("{}: {} buffer size mismatch: expected {}, "
                             "got {}",
                             Algo::kName, what, expected, got));
         }

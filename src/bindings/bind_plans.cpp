@@ -1,5 +1,3 @@
-#include "bindings/bind.hpp"
-
 #include <span>
 #include <string_view>
 #include <vector>
@@ -9,6 +7,8 @@
 #include <pybind11/stl.h>
 
 #include "dmt/dmt.hpp"
+
+#include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {

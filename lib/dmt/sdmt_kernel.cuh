@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "dmt/common/types.hpp"
+
 #include "dmt/ddmt_kernel.cuh"
 #include "dmt/sdmt_gpu_plan.hpp"
 

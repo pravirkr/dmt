@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
 #include <random>
 #include <span>
 #include <tuple>
@@ -10,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <fmt/format.h>
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
@@ -35,7 +35,7 @@ inline void compare(std::vector<RawCandidate> actual,
     sort(expected);
     REQUIRE(actual.size() == expected.size());
     const auto show = [](const RawCandidate& c) {
-        return std::format("beam {} level {} band {} dm {} filter {} [{}, {}] "
+        return fmt::format("beam {} level {} band {} dm {} filter {} [{}, {}] "
                            "peak {} snr {}",
                            c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
                            c.filter_idx, c.begin_sample, c.end_sample,

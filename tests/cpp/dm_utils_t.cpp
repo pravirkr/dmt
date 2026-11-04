@@ -1,14 +1,16 @@
+#include "dmt/dm_utils.hpp"
+
 #include <algorithm>
-#include <catch2/catch_approx.hpp>
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <vector>
 
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
 #include "dmt/common/types.hpp"
-#include "dmt/dm_utils.hpp"
 
 namespace dmt {
 

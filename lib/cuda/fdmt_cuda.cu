@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -14,23 +13,24 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
-#include "dmt/gpu_compat.cuh"
 
-#include "dmt/logging.hpp"
-
-#include "fdmt_direct.cuh"
+#include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
-#include "dmt/common/types.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_chunk.hpp"
 #include "dmt/fdmt_fused_tile.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
+#include "dmt/logging.hpp"
 #include "dmt/modes.hpp"
 #include "dmt/plans_cuda.cuh"
+
+#include "fdmt_direct.cuh"
 
 namespace dmt::algorithms {
 
@@ -1040,7 +1040,7 @@ public:
     // The stepper (always unfused) runs whole blocks only.
     void check_stepper_block() const {
         if (m_chunk < m_plan.get_nsamps()) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMT (cuda): the stepper runs whole blocks, but this engine "
                 "executes blocks of {} samples in chunks of {} "
                 "(chunk_nsamps); construct with chunk_nsamps >= nsamps to "
@@ -1099,7 +1099,7 @@ public:
         const auto mib = [](SizeType b) {
             return static_cast<double>(b) / 1048576.0;
         };
-        const auto summary = std::format(
+        const auto summary = fmt::format(
             "*** FDMT (cuda) ***\n"
             "Mode: {}, device {}, nbeams {}, chunk {} of {} samples, "
             "fuse_levels {}, int_tree {}\n"
@@ -1377,7 +1377,7 @@ public:
                       Stream stream_in) const override {
         const cuda::std::span<float> out = to_cuda(out_d);
         if (out.size() != history_state_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT::save_history: Invalid output size. Expected {}, "
                 "got {}",
                 history_state_size(), out.size()));
@@ -1394,7 +1394,7 @@ public:
     void load_history(DeviceSpan<const float> in_d, Stream stream_in) override {
         const cuda::std::span<const float> in = to_cuda(in_d);
         if (in.size() != history_state_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT::load_history: Invalid input size. Expected {}, "
                 "got {}",
                 history_state_size(), in.size()));
@@ -1408,7 +1408,7 @@ public:
     // buffer, after the stepper's queue drains.
     void save_history(std::span<float> out) const override {
         if (out.size() != history_state_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT::save_history: Invalid output size. Expected {}, "
                 "got {}",
                 history_state_size(), out.size()));
@@ -1425,7 +1425,7 @@ public:
 
     void load_history(std::span<const float> in) override {
         if (in.size() != history_state_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT::load_history: Invalid input size. Expected {}, "
                 "got {}",
                 history_state_size(), in.size()));
@@ -1672,7 +1672,7 @@ private:
             static_cast<SizeType>(std::numeric_limits<int32_t>::max());
         const auto check = [&](SizeType value, std::string_view what) {
             if (value > kMax) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "FDMT (cuda): per-beam {} ({} elements) exceeds the 32-bit "
                     "index range of the CUDA backend ({}); use a smaller "
                     "chunk_nsamps or block (nsamps), or fewer DM trials",
@@ -1686,7 +1686,7 @@ private:
         // Tree history offsets are unsigned 32-bit (plans_cuda.cuh).
         if (m_plan.get_tree_history_size() >
             static_cast<SizeType>(std::numeric_limits<uint32_t>::max())) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT (cuda): per-beam tree history ({} elements) exceeds the "
                 "unsigned 32-bit index range of the CUDA backend ({}); use "
                 "fewer DM trials or a lower maximum DM",
@@ -1700,13 +1700,13 @@ private:
         const auto nsamps = m_plan.get_nsamps();
         if (waterfall_size != m_nbeams * nchans * nsamps) {
             throw std::invalid_argument(
-                std::format("FDMT (cuda): Invalid size of waterfall. "
+                fmt::format("FDMT (cuda): Invalid size of waterfall. "
                             "Expected {}, got {}",
                             m_nbeams * nchans * nsamps, waterfall_size));
         }
         if (dmt_size < m_nbeams * m_plan.get_dmt_size()) {
             throw std::invalid_argument(
-                std::format("FDMT (cuda): Invalid size of dmt. Expected at "
+                fmt::format("FDMT (cuda): Invalid size of dmt. Expected at "
                             "least {}, got {}",
                             m_nbeams * m_plan.get_dmt_size(), dmt_size));
         }
@@ -1717,21 +1717,21 @@ private:
                              SizeType dmt_size) const {
         if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 &&
             nbits != 16) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT (cuda): nbits={} must be one of 1, 2, 4, 8, 16", nbits));
         }
         const auto row_bytes =
             bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
         const auto expected = m_nbeams * m_plan.get_nchans() * row_bytes;
         if (waterfall_bytes != expected) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT (cuda): Invalid size of packed waterfall (nbits={}). "
                 "Expected {} bytes, got {}",
                 nbits, expected, waterfall_bytes));
         }
         if (dmt_size < m_nbeams * m_plan.get_dmt_size()) {
             throw std::invalid_argument(
-                std::format("FDMT (cuda): Invalid size of dmt. Expected at "
+                fmt::format("FDMT (cuda): Invalid size of dmt. Expected at "
                             "least {}, got {}",
                             m_nbeams * m_plan.get_dmt_size(), dmt_size));
         }
@@ -1741,7 +1741,7 @@ private:
         const auto nsubs = m_plan.get_container().grids[m_current_level].size();
         if (subband_idx >= nsubs) {
             throw std::out_of_range(
-                std::format("FDMT (cuda): Subband index {} out of range "
+                fmt::format("FDMT (cuda): Subband index {} out of range "
                             "(current level has {} "
                             "subbands)",
                             subband_idx, nsubs));
@@ -1952,7 +1952,7 @@ private:
 
     [[nodiscard]] const float* current_level_f32() const {
         if (m_levels_d[m_current_level].type != Elem::kF32) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMT (cuda): level {} is stored as an integer type "
                 "(int_tree); construct with int_tree=false to inspect "
                 "intermediate levels.",
@@ -2169,7 +2169,7 @@ private:
         // block's history update, and the next block would read the
         // two-blocks-old ping-pong buffer.
         if (m_mode == FDMTMode::kValid && m_is_initialized && !is_finished()) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "FDMT (cuda): the previous block's stepper run stopped at "
                 "level "
                 "{} of {}. In mode='valid' every block must be finalized "

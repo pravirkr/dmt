@@ -6,6 +6,7 @@
 #include <benchmark/benchmark.h>
 
 #include "dmt/boxcar.hpp"
+
 #include "suite/suite_common.hpp"
 
 namespace dmt {
@@ -214,7 +215,7 @@ void bench_fdmt_boxcar_stream(benchmark::State& state,
         for (const auto threads : cpu_threads()) {
             for (const bool packed : {false, true}) {
                 benchmark::RegisterBenchmark(
-                    std::format("BM_fdmt_boxcar_stream/{}/{}wtsp:{:g}/cpu{}",
+                    fmt::format("BM_fdmt_boxcar_stream/{}/{}wtsp:{:g}/cpu{}",
                                 suite_config().name, packed ? "uint8/" : "",
                                 wtsp, threads),
                     [threads, wtsp, packed](benchmark::State& state) {

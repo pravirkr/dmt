@@ -1,6 +1,5 @@
 #pragma once
 
-#include <format>
 #include <mutex>
 #include <source_location>
 #include <stdexcept>
@@ -8,8 +7,10 @@
 #include <string_view>
 #include <unordered_map>
 
+#include <fmt/format.h>
 #include <thrust/complex.h>
 #include <thrust/device_vector.h>
+
 #include "dmt/gpu_compat.cuh"
 
 namespace dmt {
@@ -108,13 +109,13 @@ private:
                                             std::string_view user_msg,
                                             const std::source_location& loc) {
         auto base_msg =
-            std::format("{} runtime error [{}]: {}", DMT_GPU_NAME,
+            fmt::format("{} runtime error [{}]: {}", DMT_GPU_NAME,
                         static_cast<int>(code), cudaGetErrorString(code));
         return user_msg.empty()
-                   ? std::format("{} in {} ({}:{})", base_msg,
+                   ? fmt::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line())
-                   : std::format("{} in {} ({}:{}): {}", base_msg,
+                   : fmt::format("{} in {} ({}:{}): {}", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line(), user_msg);
     }
@@ -123,13 +124,13 @@ private:
                                         std::string_view user_msg,
                                         const std::source_location& loc) {
         auto base_msg =
-            std::format("{} FFT error [{}]: {}", DMT_GPU_NAME,
+            fmt::format("{} FFT error [{}]: {}", DMT_GPU_NAME,
                         static_cast<int>(code), fft_error_string(code));
         return user_msg.empty()
-                   ? std::format("{} in {} ({}:{})", base_msg,
+                   ? fmt::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line())
-                   : std::format("{} in {} ({}:{}): {}", base_msg,
+                   : fmt::format("{} in {} ({}:{}): {}", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line(), user_msg);
     }
@@ -193,7 +194,7 @@ inline void check_kernel_launch_params(
     auto check_limit = [&](auto val, auto max, std::string_view dim) {
         if (val > static_cast<unsigned>(max)) {
             throw std::runtime_error(
-                std::format("{} dimension {} exceeds device limit {} at {}:{}",
+                fmt::format("{} dimension {} exceeds device limit {} at {}:{}",
                             dim, val, max, loc.file_name(), loc.line()));
         }
     };
@@ -258,15 +259,15 @@ private:
     int device;
     cudaDeviceProp props{};
     if (auto err = cudaGetDevice(&device); err != cudaSuccess) {
-        return std::format("Failed to get device: {}", cudaGetErrorString(err));
+        return fmt::format("Failed to get device: {}", cudaGetErrorString(err));
     }
     if (auto err = cudaGetDeviceProperties(&props, device);
         err != cudaSuccess) {
-        return std::format("Failed to get properties: {}",
+        return fmt::format("Failed to get properties: {}",
                            cudaGetErrorString(err));
     }
 
-    return std::format("{} device {}: {} (CC {}.{}), Mem: {} MiB", DMT_GPU_NAME,
+    return fmt::format("{} device {}: {} (CC {}.{}), Mem: {} MiB", DMT_GPU_NAME,
                        device, props.name, props.major, props.minor,
                        props.totalGlobalMem >> 20);
 }
@@ -278,10 +279,10 @@ inline void set_device(int device_id) {
     if (device_id < 0 || device_id >= device_count) {
         throw GPUException(
             cudaErrorInvalidDevice,
-            std::format("Invalid device_id: {}. Must be between 0 and {}",
+            fmt::format("Invalid device_id: {}. Must be between 0 and {}",
                         device_id, device_count - 1));
     }
     check_gpu_call(cudaSetDevice(device_id),
-                   std::format("Failed to set device {}", device_id));
+                   fmt::format("Failed to set device {}", device_id));
 }
 } // namespace dmt::gpu_utils

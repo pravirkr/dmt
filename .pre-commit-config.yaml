@@ -44,3 +44,13 @@ repos:
         additional_dependencies: [pyyaml]
         args: [--config-files=.cmake-format.yaml]
         exclude: cmake/(CPM|FindFFTW)\.cmake$
+
+  # The toolchain floor (GCC 11, nvcc 12.2 with libstdc++ 11/12) has no
+  # <format>: format strings with fmt::format.
+  - repo: local
+    hooks:
+      - id: no-std-format
+        name: no std::format (use fmt::format)
+        language: pygrep
+        entry: 'std::format\b|#include <format>'
+        types_or: [c++, c, cuda]

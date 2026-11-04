@@ -9,10 +9,10 @@
 #include <span>
 #include <vector>
 
-#include "dmt/gpu_compat.cuh"
-
 #include "dmt/common/types.hpp"
+
 #include "dmt/fft.hpp"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 
 namespace dmt::utils {

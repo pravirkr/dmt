@@ -1,6 +1,3 @@
-#include "bindings/bind.hpp"
-
-#include <format>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -8,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -15,6 +13,8 @@
 #include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/common/fft_config.hpp"
 #include "dmt/common/plans.hpp"
+
+#include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -223,7 +223,7 @@ void bind_ddmt_fft(py::module_& mod) {
                 const auto nbeams =
                     ndim == 3 ? static_cast<SizeType>(waterfall.shape(0)) : 1;
                 if (nbeams != e.get_nbeams()) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "DDMTFFT.execute: waterfall has {} beam(s), but this "
                         "instance was configured for {}",
                         nbeams, e.get_nbeams()));
@@ -285,7 +285,7 @@ void bind_ddmt_fft(py::module_& mod) {
             "load_history",
             [](DDMTFFT& e, const py::array& obj) {
                 if (obj.dtype().kind() != 'f' || obj.itemsize() != 4) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "DDMTFFT.load_history: expects a float32 array, got "
                         "dtype '{}'",
                         std::string(py::str(obj.dtype()))));

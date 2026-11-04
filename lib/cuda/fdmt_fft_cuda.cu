@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -13,16 +12,18 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/gpu_compat.cuh"
+#include <fmt/format.h>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_fft_common.hpp"
 #include "dmt/fdmt_fft_tree.hpp"
 #include "dmt/fft_cuda.cuh"
 #include "dmt/fourier_gpu.cuh"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/logging.hpp"
@@ -465,7 +466,7 @@ public:
         const auto bytes = time_major ? tm_bytes(nbits) : cm_bytes(nbits);
         if (packed.size() != bytes) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: expected {} packed bytes, got {}",
+                fmt::format("FDMTFFT::{}: expected {} packed bytes, got {}",
                             time_major ? "execute_time_major" : "execute",
                             bytes, packed.size()));
         }
@@ -501,7 +502,7 @@ public:
             throw std::logic_error("FDMTFFT: search requires valid mode");
         }
         if (d_waterfall.size() != m_nbeams * m_nchans * m_nsamps) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::execute_search: expected {} samples, got {}",
                 m_nbeams * m_nchans * m_nsamps, d_waterfall.size()));
         }
@@ -554,7 +555,7 @@ public:
         gpu_utils::set_device(m_device_id);
         check_nbits(nbits, "execute");
         if (d_packed.size() != cm_bytes(nbits)) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::execute: expected {} packed bytes, got {}",
                 cm_bytes(nbits), d_packed.size()));
         }
@@ -588,7 +589,7 @@ public:
         check_nbits(nbits, "reset");
         if (packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::reset: expected {} packed bytes, got {}",
+                fmt::format("FDMTFFT::reset: expected {} packed bytes, got {}",
                             cm_bytes(nbits), packed.size()));
         }
         check_out(dmt.size(), "reset");
@@ -621,7 +622,7 @@ public:
         check_nbits(nbits, "reset");
         if (d_packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::reset: expected {} packed bytes, got {}",
+                fmt::format("FDMTFFT::reset: expected {} packed bytes, got {}",
                             cm_bytes(nbits), d_packed.size()));
         }
         check_out(d_dmt.size(), "reset");
@@ -750,7 +751,7 @@ public:
         const auto& plan_c = m_plan->get_container();
         const auto nsubs   = plan_c.grids[m_level].size();
         if (subband_idx >= nsubs) {
-            throw std::out_of_range(std::format(
+            throw std::out_of_range(fmt::format(
                 "FDMTFFT: Subband index {} out of range ({} subbands)",
                 subband_idx, nsubs));
         }
@@ -1016,7 +1017,7 @@ private:
         }
         std::string split;
         for (const auto& st : stages) {
-            split += std::format(" {}->{}({} prog, {} nodes)", st.level_in,
+            split += fmt::format(" {}->{}({} prog, {} nodes)", st.level_in,
                                  st.level_out, st.nprograms(), st.max_nodes);
         }
         logging::debug("FDMTFFT cuda: transform length {} x {} segment(s) "
@@ -1044,7 +1045,7 @@ private:
             static_cast<SizeType>(0.5 * static_cast<double>(free) / per_sample);
         if (fit < m_geom.n_fft) {
             if (m_mode == FDMTMode::kRoll) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "FDMTFFT (cuda): a roll-mode transform of {} samples needs "
                     "more device memory than is free",
                     m_geom.n_fft));
@@ -1119,7 +1120,7 @@ private:
         const auto total_in = m_nbeams * m_nchans * m_nsamps;
         if (in != total_in) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: expected waterfall size {}, got {}",
+                fmt::format("FDMTFFT::{}: expected waterfall size {}, got {}",
                             what, total_in, in));
         }
         check_out(out, what);
@@ -1128,13 +1129,13 @@ private:
         const auto total_out = m_nbeams * m_ndms * m_nsamps_out;
         if (out < total_out) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: dmt buffer size {} must be >= {}",
+                fmt::format("FDMTFFT::{}: dmt buffer size {} must be >= {}",
                             what, out, total_out));
         }
     }
     static void check_nbits(SizeType nbits, std::string_view what) {
         if (!valid_nbits(nbits)) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMTFFT::{}: nbits must be 1, 2, 4, 8 or 16, got {}", what,
                 nbits));
         }
@@ -1142,7 +1143,7 @@ private:
     void check_history(SizeType n, std::string_view what) const {
         if (n != history_state_size()) {
             throw std::invalid_argument(
-                std::format("FDMTFFT::{}: expected {} floats, got {}", what,
+                fmt::format("FDMTFFT::{}: expected {} floats, got {}", what,
                             history_state_size(), n));
         }
     }

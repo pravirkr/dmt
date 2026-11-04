@@ -1,6 +1,3 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/generators/catch_generators.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -12,13 +9,18 @@
 #include <stdexcept>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/ddmt_fft.hpp"
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/fft.hpp"
 #include "dmt/nufft.hpp"
+
 #include "test_helpers.hpp"
 
 namespace dmt {

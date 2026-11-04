@@ -7,8 +7,9 @@
 #include <algorithm>
 #include <cstdint>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 
 namespace dmt::algorithms::fft_cpu {
 

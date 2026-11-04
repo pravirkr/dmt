@@ -1,7 +1,5 @@
 #include <algorithm>
 #include <bit>
-#include <catch2/catch_approx.hpp>
-#include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
@@ -10,11 +8,14 @@
 #include <utility>
 #include <vector>
 
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/utils/simulate.hpp"
-#include "test_helpers.hpp"
 
-#include <catch2/matchers/catch_matchers_all.hpp>
+#include "test_helpers.hpp"
 
 namespace dmt {
 

@@ -1,6 +1,3 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -9,8 +6,12 @@
 #include <stdexcept>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
 #include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
+
 #include "dmt/engines.hpp"
 
 // FDMTFFT packed and time-major input, kill mask and streaming history, and

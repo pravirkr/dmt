@@ -9,9 +9,10 @@
 #include <type_traits>
 #include <vector>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_tree.hpp"
 

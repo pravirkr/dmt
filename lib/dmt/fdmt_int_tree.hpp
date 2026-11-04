@@ -5,9 +5,10 @@
 #include <cstdlib>
 #include <vector>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 
 // Narrow-integer FDMT tree state (the `int_tree` constructor parameter),

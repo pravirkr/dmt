@@ -5,13 +5,13 @@
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <omp.h>
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/fft.hpp"
 #include "dmt/unpacker.hpp"
-
-#include <omp.h>
 
 // CohFDMT CPU benchmarks. Reference search: one GUPPI node (64 x 2.9296875
 // MHz at 1312.5-1500 MHz, int8 FTPRI), t_p = 10 us, DM 50-60 pc/cc (one

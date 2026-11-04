@@ -1,13 +1,14 @@
 #include <span>
 #include <vector>
 
+#include <benchmark/benchmark.h>
 #include <thrust/device_vector.h>
+
+#include "dmt/algorithms/ddmt_fft.hpp"
+
 #include "dmt/gpu_compat.cuh"
 
-#include <benchmark/benchmark.h>
-
 #include "bench_gpu_utils.cuh"
-#include "dmt/algorithms/ddmt_fft.hpp"
 
 namespace dmt {
 using algorithms::DDMTFFT;

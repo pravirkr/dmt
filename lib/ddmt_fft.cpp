@@ -2,16 +2,18 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
 
+#include <fmt/format.h>
+
 #include "dmt/common/backend.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/ddmt_fft_common.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/engines.hpp"
@@ -29,7 +31,7 @@ DDMTFFTMethod parse_ddmt_fft_method(std::string_view name) {
     if (name == "nufft") {
         return DDMTFFTMethod::kNUFFT;
     }
-    throw std::invalid_argument(std::format(
+    throw std::invalid_argument(fmt::format(
         "DDMTFFT: unknown method '{}' (expected auto, brute or nufft)", name));
 }
 
@@ -51,7 +53,7 @@ DDMTFFTOptions resolve_options(const plans::DDMTPlan& plan,
                                DDMTFFTOptions options) {
     if (!utils::is_finite_bits(options.tolerance) ||
         options.tolerance < 1.0E-7 || options.tolerance > 1.0E-2) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "DDMTFFT: tolerance {} outside [1e-7, 1e-2]", options.tolerance));
     }
     const ddmt_fft::DelayModel model(plan, options.guard);

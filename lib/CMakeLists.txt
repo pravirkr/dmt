@@ -12,6 +12,11 @@ CPMAddPackage(
   EXCLUDE_FROM_ALL YES
   SYSTEM YES
 )
+# All string formatting is fmt::format (header-only): libstdc++ < 13 has no
+# <format>, and nvcc-compiled sources share these headers. Every in-tree
+# target (library, tests, bindings, benchmarks) links DMT_COMPILE_OPTIONS, which
+# is build-only, so installed consumers never see fmt.
+target_link_libraries(${DMT_COMPILE_OPTIONS} INTERFACE fmt::fmt-header-only)
 
 # spdlog — use the fmt package above (header-only external fmt).
 CPMAddPackage(

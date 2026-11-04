@@ -5,7 +5,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <format>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -14,7 +13,10 @@
 #include <utility>
 
 #include <fftw3.h>
+#include <fmt/format.h>
+
 #include "dmt/common/fft_config.hpp"
+
 #include "dmt/logging.hpp"
 
 namespace dmt::utils {
@@ -143,7 +145,7 @@ private:
 int to_fftw_int(SizeType value, std::string_view what) {
     if (value > static_cast<SizeType>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument(
-            std::format("FFTWManager: {} exceeds FFTW int limit", what));
+            fmt::format("FFTWManager: {} exceeds FFTW int limit", what));
     }
     return static_cast<int>(value);
 }
@@ -153,7 +155,7 @@ void check_extent(SizeType count, SizeType stride, std::string_view what) {
         stride == 0 || count <= (std::numeric_limits<SizeType>::max() / stride);
     if (!fits) {
         throw std::invalid_argument(
-            std::format("FFTWManager: {} * batch overflows SizeType", what));
+            fmt::format("FFTWManager: {} * batch overflows SizeType", what));
     }
 }
 
@@ -180,7 +182,7 @@ FFTWPlan make_c2c_plan(SizeType length, SizeType howmany, int sign) {
         export_env_wisdom_locked(flags);
     }
     if (raw == nullptr) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "FFTWManager: failed to create C2C plan (n={}, howmany={})", length,
             howmany));
     }
@@ -205,7 +207,7 @@ FFTWPlan make_r2c_plan(SizeType length, SizeType n_complex, SizeType howmany) {
         export_env_wisdom_locked(flags);
     }
     if (raw == nullptr) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "FFTWManager: failed to create R2C plan (n={}, howmany={})", length,
             howmany));
     }
@@ -230,7 +232,7 @@ FFTWPlan make_c2r_plan(SizeType length, SizeType n_complex, SizeType howmany) {
         export_env_wisdom_locked(flags);
     }
     if (raw == nullptr) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "FFTWManager: failed to create C2R plan (n={}, howmany={})", length,
             howmany));
     }
@@ -270,7 +272,7 @@ public:
           m_n_complex(is_real(kind) ? (length / 2) + 1 : length) {
         if (length == 0 || howmany == 0) {
             throw std::invalid_argument(
-                std::format("FFTWManager: length and howmany must be positive: "
+                fmt::format("FFTWManager: length and howmany must be positive: "
                             "length={}, howmany={}",
                             length, howmany));
         }
@@ -306,7 +308,7 @@ public:
         const SizeType expected = m_howmany * m_length;
         if (data.size() != expected) {
             throw std::invalid_argument(
-                std::format("FFTWManager: complex span size {} != {}",
+                fmt::format("FFTWManager: complex span size {} != {}",
                             data.size(), expected));
         }
         auto* ptr              = reinterpret_cast<fftwf_complex*>(data.data());
@@ -334,7 +336,7 @@ public:
         const SizeType n_real    = m_howmany * m_length;
         const SizeType n_complex = m_howmany * m_n_complex;
         if (real.size() != n_real || freq.size() != n_complex) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FFTWManager: span sizes real={} freq={} != {} and {}",
                 real.size(), freq.size(), n_real, n_complex));
         }
@@ -518,7 +520,7 @@ public:
         }
         export_env_wisdom_locked(flags);
         if (raw == nullptr) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "FFTWRowPlan: failed to create plan (kind={}, n={}, "
                 "howmany={})",
                 static_cast<int>(kind), length, howmany));

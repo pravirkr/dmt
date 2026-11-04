@@ -4,13 +4,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <limits>
 #include <memory>
 #include <numbers>
 #include <span>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -133,7 +134,7 @@ public:
         }
         if (!utils::is_finite_bits(tol) || tol < 1.0E-7 || tol > 1.0E-2) {
             throw std::invalid_argument(
-                std::format("NUFFT: tolerance {} outside [1e-7, 1e-2]", tol));
+                fmt::format("NUFFT: tolerance {} outside [1e-7, 1e-2]", tol));
         }
         // Width and shape for upsampling 2 (Barnett et al. 2019).
         m_w = std::clamp(static_cast<int>(std::ceil(-std::log10(tol))) + 1, 2,

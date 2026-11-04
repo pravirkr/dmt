@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <map>
 #include <memory>
 #include <span>
@@ -12,15 +11,17 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/gpu_compat.cuh"
+#include <fmt/format.h>
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/ddmt_fft_common.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fft_cuda.cuh"
 #include "dmt/fourier_gpu.cuh"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/logging.hpp"
@@ -801,7 +802,7 @@ private:
                 &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
             "DDMTFFT (gpu): shared memory limit");
         if (p->fine_grid() * sizeof(float2) > static_cast<SizeType>(optin)) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "DDMTFFT (gpu): a NUFFT grid of {} cells exceeds the device's "
                 "{} B of shared memory per block",
                 p->fine_grid(), optin));
@@ -845,7 +846,7 @@ private:
             break;
         default:
             throw std::logic_error(
-                std::format("DDMTFFT (gpu): NUFFT width {} unsupported", w));
+                fmt::format("DDMTFFT (gpu): NUFFT width {} unsupported", w));
         }
     }
 
@@ -878,7 +879,7 @@ private:
 
     void check_float(std::string_view what) const {
         if (m_plan.get_nbits() != 32) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMTFFT::{}: plan nbits={} != 32; use the packed overload",
                 what, m_plan.get_nbits()));
         }
@@ -887,14 +888,14 @@ private:
         if (!bit_pack_utils::detail::is_packed_nbits(
                 static_cast<unsigned>(m_plan.get_nbits()))) {
             throw std::invalid_argument(
-                std::format("DDMTFFT::{}: plan nbits={} is not a packed width "
+                fmt::format("DDMTFFT::{}: plan nbits={} is not a packed width "
                             "(1,2,4,8,16); use the float overload",
                             what, m_plan.get_nbits()));
         }
     }
     void check_warm() const {
         if (m_hist_len != m_ctx) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "DDMTFFT::save_history: stream is not fully warmed up yet "
                 "({} of {} history samples/channel)",
                 m_hist_len, m_ctx));
@@ -904,7 +905,7 @@ private:
     check_size(SizeType got, SizeType expected, std::string_view what) {
         if (got != expected) {
             throw std::invalid_argument(
-                std::format("DDMTFFT: {} buffer size mismatch: expected {}, "
+                fmt::format("DDMTFFT: {} buffer size mismatch: expected {}, "
                             "got {}",
                             what, expected, got));
         }
@@ -912,7 +913,7 @@ private:
     [[nodiscard]] SizeType rows_nsamps(SizeType size) const {
         const auto rows = m_nbeams * m_nchans;
         if (size % rows != 0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "DDMTFFT::execute: waterfall size {} is not a multiple of "
                 "nbeams * nchans = {}",
                 size, rows));

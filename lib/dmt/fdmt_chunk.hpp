@@ -1,12 +1,14 @@
 #pragma once
 
 #include <algorithm>
-#include <format>
 #include <limits>
 #include <stdexcept>
 
+#include <fmt/format.h>
+
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
 #include "dmt/modes.hpp"
 
 // Chunked execution of the FDMT (mode "valid"), shared by the CPU and GPU
@@ -83,7 +85,7 @@ inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
     const SizeType nsamps = plan.get_nsamps();
     if (mode != FDMTMode::kValid) {
         if (requested != 0 && requested < nsamps) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "FDMT: chunk_nsamps={} needs mode='valid' (mode '{}' runs "
                 "whole blocks of nsamps={})",
                 requested, fdmt_mode_to_string(mode), nsamps));

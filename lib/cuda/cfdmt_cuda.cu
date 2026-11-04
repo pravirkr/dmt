@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <memory>
 #include <numbers>
 #include <span>
@@ -12,16 +11,18 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/gpu_compat.cuh"
+#include <fmt/format.h>
 
 #include "dmt/algorithms/fdmt.hpp"
+#include "dmt/common/types.hpp"
+
 #include "dmt/baseband_layout.hpp"
 #include "dmt/cfdmt_common.hpp"
 #include "dmt/cfdmt_fused_gpu.cuh"
-#include "dmt/common/types.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fft_cuda.cuh"
 #include "dmt/fourier_gpu.cuh"
+#include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/unpacker_cuda.cuh"
@@ -347,14 +348,14 @@ public:
         const auto& sizes = m_plan.get_subband_groups();
         if (groups.size() != sizes.size()) {
             throw std::invalid_argument(
-                std::format("CohFDMT: expected {} input group(s), got {}",
+                fmt::format("CohFDMT: expected {} input group(s), got {}",
                             sizes.size(), groups.size()));
         }
         std::vector<cuda::std::span<const uint8_t>> d_groups;
         d_groups.reserve(groups.size());
         for (SizeType g = 0; g < groups.size(); ++g) {
             if (groups[g].size() != m_plan.get_input_size(g)) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "CohFDMT: input group {} has {} bytes, expected {}", g,
                     groups[g].size(), m_plan.get_input_size(g)));
             }
@@ -468,7 +469,7 @@ private:
 
     void check_output(SizeType size) const {
         if (size < m_plan.get_dmt_size()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "CohFDMT (gpu): dmt buffer too small. Expected at least {} "
                 "(get_dmt_size()), got {}",
                 m_plan.get_dmt_size(), size));
@@ -589,7 +590,7 @@ private:
             return false;
         }
         if (!fits) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "CohFDMT (gpu): the fused coherent kernel needs a "
                 "power-of-two channel FFT of 16-4096 bins fitting in shared "
                 "memory; mbin={}",

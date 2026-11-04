@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdint>
 #include <random>
@@ -8,13 +7,15 @@
 #include <type_traits>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_chunk.hpp"
 #include "dmt/fdmt_fused_tile.hpp"
 #include "dmt/modes.hpp"
-
-#include <catch2/matchers/catch_matchers_all.hpp>
 
 // The CUDA backend's fused-level tile (lib/dmt/fdmt_fused_tile.hpp), run
 // sequentially on the host -- one "thread", barriers as no-ops -- over every

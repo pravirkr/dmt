@@ -14,15 +14,16 @@
 #include <random>
 #include <vector>
 
-#include <thrust/device_vector.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_all.hpp>
+#include <thrust/device_vector.h>
 
 #include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/sdmt.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
+
 #include "test_helpers.hpp"
 
 namespace dmt {

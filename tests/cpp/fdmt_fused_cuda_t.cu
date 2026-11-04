@@ -1,6 +1,3 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_all.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -8,12 +5,17 @@
 #include <random>
 #include <span>
 #include <string>
-#include <thrust/device_vector.h>
 #include <vector>
-#include "dmt/gpu_compat.cuh"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_all.hpp>
+#include <thrust/device_vector.h>
 
 #include "dmt/algorithms/fdmt.hpp"
+
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/gpu_compat.cuh"
+
 #include "test_helpers.hpp"
 
 // FDMT level fusion (the fuse_levels constructor parameter). The fused

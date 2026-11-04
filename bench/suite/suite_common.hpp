@@ -11,13 +11,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <format>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
@@ -104,7 +104,7 @@ inline const SuiteConfig& suite_config() {
             return cryopaf_lband;
         }
         throw std::invalid_argument(
-            std::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband "
+            fmt::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband "
                         "or parkes_uwl",
                         sel));
     }();
@@ -239,7 +239,7 @@ inline int cpu_threads_max() {
  */
 inline std::string
 bench_name(Algo algo, std::string_view backend, const Point& p) {
-    return std::format("suite/{}/{}/{}/nsamps:{}/dmmax:{:g}/nbits:{}",
+    return fmt::format("suite/{}/{}/{}/nsamps:{}/dmmax:{:g}/nbits:{}",
                        sweep_name(p.sweep), algo_name(algo), backend, p.nsamps,
                        p.dm_max, p.nbits);
 }

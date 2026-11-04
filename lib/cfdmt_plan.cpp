@@ -1,9 +1,6 @@
-#include "dmt/common/plans.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <format>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -13,9 +10,13 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/baseband_layout.hpp"
+#include <fmt/format.h>
+
 #include "dmt/common/baseband.hpp"
+#include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/baseband_layout.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 
@@ -155,7 +156,7 @@ public:
     SizeType input_size(SizeType igroup) const {
         if (igroup >= m_groups.size()) {
             throw std::out_of_range(
-                std::format("CohFDMTPlan: group {} out of range [0, {})",
+                fmt::format("CohFDMTPlan: group {} out of range [0, {})",
                             igroup, m_groups.size()));
         }
         return utils::baseband_block_bytes(m_cfg.format, m_block_nsamps,
@@ -181,7 +182,7 @@ public:
     std::span<const IndexType> channel_shifts(SizeType idm) const {
         if (idm >= m_dm_grid_coh.size()) {
             throw std::out_of_range(
-                std::format("CohFDMTPlan: coarse trial {} out of range [0, {})",
+                fmt::format("CohFDMTPlan: coarse trial {} out of range [0, {})",
                             idm, m_dm_grid_coh.size()));
         }
         return {m_shifts.data() + (idm * m_nchans), m_nchans};
@@ -317,12 +318,12 @@ public:
         };
         const auto mem  = memory_estimate();
         std::string out = "*** CohFDMT Plan Summary ***\n";
-        out += std::format(
+        out += fmt::format(
             "Band: {:.4f}-{:.4f} MHz, {} subbands x {:.6f} MHz ({} group(s)), "
             "tbin {:.4g} s\n",
             m_f_min, m_f_max, m_cfg.nsub, m_cfg.bw_sub, m_groups.size(),
             m_tbin);
-        out += std::format(
+        out += fmt::format(
             "Input: {} order, {}-bit {}, {:.1f} MiB per block\n",
             m_cfg.format.order, m_cfg.format.nbits,
             m_cfg.format.nbits == 2
@@ -330,35 +331,35 @@ public:
                 : (m_cfg.format.is_signed ? "signed" : "offset-binary"),
             mib(utils::baseband_block_bytes(m_cfg.format, m_block_nsamps,
                                             m_cfg.nsub)));
-        out += std::format(
+        out += fmt::format(
             "Channels: n_p={} per subband, {} total of {:.6f} MHz, tsamp "
             "{:.4g} s (t_p requested {:.4g} s)\n",
             m_n_p, m_nchans, m_bw_chan, m_tsamp, m_cfg.t_p);
-        out += std::format(
+        out += fmt::format(
             "FFT: nbin={} (fwd), mbin={} (inv), noverlap={} raw samples/side, "
             "nfft={}\n",
             m_nbin, m_mbin, m_noverlap, m_nfft);
-        out += std::format(
+        out += fmt::format(
             "Block: {} raw samples/subband, stride {}, overlap {} ({:.1f}%); "
             "{} valid output samples (max delay {} samples)\n",
             m_block_nsamps, stride_nsamps(), m_block_nsamps - stride_nsamps(),
             100.0 * static_cast<double>(m_block_nsamps - stride_nsamps()) /
                 static_cast<double>(m_block_nsamps),
             m_nout, m_max_delay);
-        out += std::format(
+        out += fmt::format(
             "DM: [{}, {}] pc/cc, {} coarse trials (step {:.6g}, residual "
             "intra-channel smear {:.3f} tsamp), {} fine rows each "
             "(dt in [-{}, {}] step {}), {} rows total\n",
             m_cfg.dm_min, m_cfg.dm_max, m_dm_grid_coh.size(), m_dm_step_coh,
             m_intra_smear, ndm_fine(), m_fine_dt_max, m_fine_dt_max,
             m_cfg.dt_step, m_dm_grid_final.size());
-        out += std::format(
+        out += fmt::format(
             "Memory (est.): spectrum {:.1f} MiB, waterfall {:.1f} MiB, FDMT "
             "{:.1f} MiB, workspace {:.1f} MiB; output {:.1f} MiB\n",
             mib(mem.spectrum), mib(mem.waterfall), mib(mem.fdmt),
             mib(mem.workspace), mib(mem.output));
         out += m_fdmt_plan->summary("\t");
-        out += std::format("{:*>80}\n", "");
+        out += fmt::format("{:*>80}\n", "");
         return out;
     }
 
@@ -412,7 +413,7 @@ private:
         const double bw =
             static_cast<double>(c.bw_sub) * static_cast<double>(c.nsub);
         if (!finite(c.f_center) || c.f_center - (bw / 2.0) <= 0.0) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "CohFDMT: f_center={} MHz leaves the band below 0 MHz "
                 "(total bandwidth {} MHz)",
                 c.f_center, bw));
@@ -423,7 +424,7 @@ private:
         if (!finite(c.dm_min) || !finite(c.dm_max) || c.dm_min < 0.0F ||
             c.dm_max < c.dm_min) {
             throw std::invalid_argument(
-                std::format("CohFDMT: need 0 <= dm_min <= dm_max, got [{}, {}]",
+                fmt::format("CohFDMT: need 0 <= dm_min <= dm_max, got [{}, {}]",
                             c.dm_min, c.dm_max));
         }
         if (!finite(c.smear_tol) || c.smear_tol <= 0.0F) {
@@ -577,13 +578,13 @@ private:
         const auto& c = m_cfg;
         if (c.nbin != 0) {
             if (c.nbin % m_n_p != 0 || (c.nbin / m_n_p) % 2 != 0) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "CohFDMT: nbin={} must be an even multiple of n_p={}",
                     c.nbin, m_n_p));
             }
             m_mbin = c.nbin / m_n_p;
             if (m_mbin <= 2 * novc) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "CohFDMT: nbin={} too short for the coherent filter "
                     "margin: need nbin > {} (2 * noverlap)",
                     c.nbin, 2 * m_noverlap));
@@ -619,7 +620,7 @@ private:
         if (c.block_nsamps != 0) {
             if (c.block_nsamps <= 2 * m_noverlap ||
                 (c.block_nsamps - (2 * m_noverlap)) / l == 0) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "CohFDMT: block_nsamps={} shorter than one FFT block ({})",
                     c.block_nsamps, l + (2 * m_noverlap)));
             }
@@ -644,7 +645,7 @@ private:
         m_msamp = m_nfft * lc;
         if (m_msamp < guard + lc) {
             const SizeType need_nfft = (guard + lc + lc - 1) / lc;
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "CohFDMT: block too short for the dispersion sweep: "
                 "block_nsamps={} gives {} channel samples, need >= {} "
                 "(block_nsamps >= {})",

@@ -2,10 +2,11 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
 #include "dmt/fdmt_fft_common.hpp"
@@ -154,7 +155,7 @@ FDMTBoxcarMemoryUsage FDMTFFTBoxcar::get_memory_usage() const noexcept {
     return m_impl->engine->memory_usage();
 }
 std::string FDMTFFTBoxcar::summary() const {
-    return std::format(
+    return fmt::format(
         "{}*** FDMTFFTBoxcar ({}) ***\n{} beams, {} widths, segment {}, "
         "latency {}\nAllocated {:.2f} MiB; no DM-time output\n",
         get_plan().summary(), to_string(backend()), get_nbeams(),
