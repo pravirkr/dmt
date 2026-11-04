@@ -90,28 +90,21 @@ jobs:
           restore-keys: |
             cpm-${{ matrix.compiler.cc }}-
 
-      - name: Configure CMake
+      - name: Configure (CMake preset ci)
         env:
           CC: ${{ matrix.compiler.cc }}
           CXX: ${{ matrix.compiler.cpp }}
         run: >
-          cmake -B build -G Ninja
+          cmake --preset ci
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_BUILD_TYPE=Release
-          -DDMT_BUILD_DOCS=OFF
-          -DDMT_BUILD_PYTHON=ON
-          -DDMT_BUILD_TESTING=ON
-          -DDMT_ENABLE_COVERAGE=OFF
-          -DDMT_GPU=OFF
-          -DDMT_ENABLE_NATIVE_ARCH=OFF
           -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
 
       - name: Build
-        run: cmake --build build -j "$(nproc)"
+        run: cmake --build --preset ci --parallel "$(nproc)"
 
       - name: Run C++ unit tests
-        run: ctest --test-dir build/tests/cpp --output-on-failure --parallel "$(nproc)" -LE gpu
+        run: ctest --preset ci --parallel "$(nproc)"
 
   # Python: uv install + pytest (supported user path).
   python-tests:
@@ -209,31 +202,23 @@ jobs:
           restore-keys: |
             cpm-sanitizers-
 
-      - name: Configure CMake
+      - name: Configure (CMake preset asan)
         env:
           CC: gcc-13
           CXX: g++-13
-          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
-          LDFLAGS: -fsanitize=address,undefined
         run: >
-          cmake -B build -G Ninja
+          cmake --preset asan
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_BUILD_TYPE=Debug
-          -DDMT_BUILD_DOCS=OFF
-          -DDMT_BUILD_PYTHON=OFF
-          -DDMT_BUILD_TESTING=ON
-          -DDMT_GPU=OFF
-          -DDMT_ENABLE_NATIVE_ARCH=OFF
 
       - name: Build
-        run: cmake --build build -j "$(nproc)"
+        run: cmake --build --preset asan --parallel "$(nproc)"
 
       - name: Run tests under ASan/UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build/tests/cpp --output-on-failure --parallel "$(nproc)" -LE gpu
+        run: ctest --preset asan --parallel "$(nproc)"
 
   # =============================================================================
   # Tier 2 — run on push to main (post-merge) and workflow_dispatch
@@ -269,18 +254,12 @@ jobs:
           restore-keys: |
             cpm-clang-tidy-
 
-      - name: Configure (compile_commands.json)
+      - name: Configure (CMake preset ci-tidy, compile_commands.json)
         env:
           CC: gcc-13
           CXX: g++-13
         run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DDMT_BUILD_DOCS=OFF
-          -DDMT_BUILD_PYTHON=ON
-          -DDMT_BUILD_TESTING=ON
-          -DDMT_GPU=OFF
-          -DDMT_ENABLE_NATIVE_ARCH=OFF
+          cmake --preset ci-tidy
           -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
 
       # Only dmt's own library and binding sources. The compile database also
@@ -289,7 +268,7 @@ jobs:
       # from CHECK(a < b)); together they pushed the job past its timeout.
       - name: Run clang-tidy
         run: >
-          run-clang-tidy-18 -p build -quiet -j "$(nproc)"
+          run-clang-tidy-18 -p build-ci-tidy -quiet -j "$(nproc)"
           "^${GITHUB_WORKSPACE}/(lib|src)/"
 
   # C++ coverage (gcc-13, Debug). gcov upload to Codecov on main only.
@@ -326,32 +305,25 @@ jobs:
           restore-keys: |
             cpm-gcc-13-debug-
 
-      - name: Configure CMake
+      - name: Configure (CMake preset coverage)
         env:
           CC: gcc-13
           CXX: g++-13
         run: >
-          cmake -B build -G Ninja
+          cmake --preset coverage
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_BUILD_TYPE=Debug
-          -DDMT_BUILD_DOCS=OFF
-          -DDMT_BUILD_PYTHON=OFF
-          -DDMT_BUILD_TESTING=ON
-          -DDMT_ENABLE_COVERAGE=ON
-          -DDMT_GPU=OFF
-          -DDMT_ENABLE_NATIVE_ARCH=OFF
 
       - name: Build
-        run: cmake --build build -j "$(nproc)"
+        run: cmake --build --preset coverage --parallel "$(nproc)"
 
       - name: Run C++ unit tests (instrumented)
-        run: ctest --test-dir build/tests/cpp --output-on-failure --parallel "$(nproc)" -LE gpu
+        run: ctest --preset coverage --parallel "$(nproc)"
 
       - name: Generate coverage report
         run: |
           gcovr -r . --filter 'lib/.*' --filter 'include/.*' --filter 'src/.*' \
-            --exclude 'tests/.*' --exclude 'build/_deps/.*' --exclude 'bench/.*' \
+            --exclude 'tests/.*' --exclude 'build[^/]*/_deps/.*' --exclude 'bench/.*' \
             --gcov-executable gcov-13 \
             --cobertura coverage.xml
 

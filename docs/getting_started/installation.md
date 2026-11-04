@@ -157,6 +157,17 @@ ctest --output-on-failure
 cmake --install .
 ```
 
+### With CMake presets
+
+`CMakePresets.json` (CMake 3.21+) names the common configurations. Each one
+configures, builds and tests in its own directory:
+
+```bash
+cmake --preset release            # or cuda, hip, portable, asan, ...
+cmake --build --preset release
+ctest --preset release
+```
+
 ### Using `find_package(dmt)`
 
 Once installed, link `dmt::dmt` in your `CMakeLists.txt`:
@@ -223,6 +234,7 @@ PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
 | `DMT_CUDA_ARCHITECTURES` | `native` | CUDA architectures, e.g. `80` or `86;90` (passed to `CMAKE_CUDA_ARCHITECTURES`) |
 | `DMT_HIP_ARCHITECTURES` | `gfx90a;gfx942` | AMD architectures (passed to `CMAKE_HIP_ARCHITECTURES`), e.g. `gfx1100` for RDNA3 |
 | `DMT_ENABLE_NATIVE_ARCH`| `ON` | `-march=native` in Release builds. Turn `OFF` for binaries or wheels that must run on other CPUs |
+| `DMT_CPU_ARCH` | (empty) | Fixed Release `-march` value that overrides native, e.g. `x86-64-v3` (AVX2), `x86-64-v4` (AVX-512) |
 | `DMT_ENABLE_IPO` | `OFF` | Link-time optimization in Release builds |
 | `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt, spdlog) |
 | `DMT_ENABLE_COVERAGE` | `OFF` | Coverage instrumentation |
@@ -230,7 +242,11 @@ PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
 
 ```{warning}
 `DMT_ENABLE_NATIVE_ARCH` is `ON` by default, so Release builds use
-`-march=native`. Turn it `OFF` for binaries or wheels that must run on other
-CPUs. On build-only machines without a GPU, also set
+`-march=native`. For binaries that must run on other CPUs (containers, shared
+cluster installs, a login node that differs from the compute nodes), set
+`DMT_CPU_ARCH` instead, or use the `portable` preset. The SIMD kernels are
+chosen at compile time, so `DMT_ENABLE_NATIVE_ARCH=OFF` without `DMT_CPU_ARCH`
+builds for the baseline CPU (SSE2 on x86-64) and leaves out the AVX2 and
+AVX-512 paths. On build-only machines without a GPU, also set
 `DMT_GPU_CHECK_DEVICE=OFF` when you require `DMT_GPU=CUDA` or `HIP`.
 ```
