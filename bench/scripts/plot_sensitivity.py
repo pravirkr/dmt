@@ -12,8 +12,8 @@ dark theme,
 
 plus ``bench/results/plots/sensitivity_summary.md``, which the docs include.
 With ``--paper`` it also writes light-theme PDFs sized for MNRAS (two
-columns, 6.97 in) to ``tmp_files/figures/`` and a LaTeX table to
-``tmp_files/tables/sensitivity.tex``.
+columns, 6.97 in) to ``paper/figures/`` and a LaTeX table to
+``paper/tables/sensitivity.tex`` (``paper/`` is git-ignored).
 
     python bench/scripts/plot_sensitivity.py [--paper]
 
@@ -514,7 +514,7 @@ def main() -> None:
         "configs plot to <results>/plots/<config>/ and suffix paper files",
     )
     ap.add_argument("--paper", action="store_true")
-    ap.add_argument("--paper-dir", type=Path, default=REPO / "tmp_files")
+    ap.add_argument("--paper-dir", type=Path, default=REPO / "paper")
     args = ap.parse_args()
     path = args.results / "sensitivity" / f"{args.config}.npz"
     if not path.exists():
