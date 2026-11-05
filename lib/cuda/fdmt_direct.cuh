@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 #include "dmt/fdmt_direct.hpp"
 #include "dmt/gpu_compat.cuh"
@@ -34,55 +35,57 @@ inline constexpr int kPrefixRun     = 8;
  * block-wide scan of the runs (plus the previous segments' total) gives the
  * running sums.
  */
-template <typename Input>
+template <typename Input, typename TP = float>
 __global__ __launch_bounds__(kPrefixThreads) void kernel_direct_prefix(
     const Input waterfall,
     const float* __restrict__ win_in,
     int window,
     int nchans,
     int active,
-    float* __restrict__ prefix,
+    TP* __restrict__ prefix,
     int pitch) {
+    // TP: float, or uint32_t for packed input (exact integer sums; the
+    // engine checks (window + chunk) * maxval fits).
     constexpr int kWarp    = 32;
     constexpr int kSegment = kPrefixThreads * kPrefixRun;
     constexpr int kWarps   = kPrefixThreads / kWarp;
-    __shared__ float seg[kSegment];
-    __shared__ float warp_sums[kWarps];
+    __shared__ TP seg[kSegment];
+    __shared__ TP warp_sums[kWarps];
     const int tid  = static_cast<int>(threadIdx.x);
     const int lane = tid % kWarp;
     const int warp = tid / kWarp;
     const auto row = (static_cast<int64_t>(blockIdx.z) * nchans) +
                      static_cast<int64_t>(blockIdx.x);
-    float* p       = prefix + (row * pitch);
+    TP* p          = prefix + (row * pitch);
     if (tid == 0) {
-        p[0] = 0.0F;
+        p[0] = TP{0};
     }
     const int n = window + active;
-    float carry = 0.0F;
+    TP carry    = TP{0};
     for (int s0 = 0; s0 < n; s0 += kSegment) {
         for (int j = tid; j < kSegment; j += kPrefixThreads) {
             const int tau = s0 + j - window;
-            float v       = 0.0F;
+            TP v          = TP{0};
             if (s0 + j < n) {
                 if (tau >= 0) {
-                    v = waterfall.load(row, tau);
+                    v = static_cast<TP>(waterfall.load(row, tau));
                 } else if (win_in != nullptr) {
-                    v = win_in[(row * window) + s0 + j];
+                    v = static_cast<TP>(win_in[(row * window) + s0 + j]);
                 }
             }
             seg[j] = v;
         }
         __syncthreads();
         // This thread's run, then an exclusive scan of the runs.
-        float run = 0.0F;
+        TP run = TP{0};
 #pragma unroll
         for (int k = 0; k < kPrefixRun; ++k) {
             run += seg[(tid * kPrefixRun) + k];
         }
-        float incl = run;
+        TP incl = run;
 #pragma unroll
         for (int o = 1; o < kWarp; o <<= 1) {
-            const float u = __shfl_up_sync(0xffffffffU, incl, o);
+            const TP u = __shfl_up_sync(0xffffffffU, incl, o);
             if (lane >= o) {
                 incl += u;
             }
@@ -91,13 +94,13 @@ __global__ __launch_bounds__(kPrefixThreads) void kernel_direct_prefix(
             warp_sums[warp] = incl;
         }
         __syncthreads();
-        float before = carry;
-        float total  = 0.0F;
+        TP before = carry;
+        TP total  = TP{0};
         for (int w = 0; w < kWarps; ++w) {
-            before += w < warp ? warp_sums[w] : 0.0F;
+            before += w < warp ? warp_sums[w] : TP{0};
             total += warp_sums[w];
         }
-        float acc = before + incl - run;
+        TP acc = before + incl - run;
 #pragma unroll
         for (int k = 0; k < kPrefixRun; ++k) {
             acc += seg[(tid * kPrefixRun) + k];
@@ -119,21 +122,26 @@ __global__ __launch_bounds__(kPrefixThreads) void kernel_direct_prefix(
  * passes of `cpass` channels; each lane accumulates its samples of every
  * row in registers across the passes.
  */
+template <typename TP = float, typename TOut = float>
 __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
-    const float* __restrict__ prefix,
+    const TP* __restrict__ prefix,
     int pitch,
     int window,
     int nchans,
     const FDMTDirectSub* __restrict__ subs,
     const int32_t* __restrict__ leaf_off,
     const FDMTDirectLeaf* __restrict__ leaves,
-    float* __restrict__ out,
+    TOut* __restrict__ out,
     int row_stride,
     int64_t out_beam_stride,
     int cpass,
     int active,
     int ntiles) {
-    extern __shared__ float smem[];
+    // Float, or packed input: uint32_t running sums, integer leaf weights
+    // (the exact dyadic box weights, held exactly in the float `w`) and
+    // uint32_t / uint64_t rows; integer sums are exact.
+    extern __shared__ __align__(16) unsigned char smem_bytes[];
+    TP* smem               = reinterpret_cast<TP*>(smem_bytes);
     constexpr int kWarp    = 32;
     constexpr int kPer     = kDirectTile / kWarp;
     constexpr int kRows    = kDirectRowsPerWarp * kDirectWarps;
@@ -149,7 +157,7 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
     const int lane  = static_cast<int>(threadIdx.x) % kWarp;
     const int warp  = static_cast<int>(threadIdx.x) / kWarp;
 
-    float acc[kDirectRowsPerWarp][kPer];
+    TOut acc[kDirectRowsPerWarp][kPer];
     int cursor[kDirectRowsPerWarp];
     int row_end[kDirectRowsPerWarp];
 #pragma unroll
@@ -159,7 +167,7 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
         row_end[q]  = r < sb.nrows ? leaf_off[sb.row0 + r + 1] : 0;
 #pragma unroll
         for (int j = 0; j < kPer; ++j) {
-            acc[q][j] = 0.0F;
+            acc[q][j] = TOut{0};
         }
     }
     for (int cb = 0; cb < sb.nc; cb += cpass) {
@@ -168,9 +176,9 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
             __syncthreads();
         }
         for (int c = 0; c < ncp; ++c) {
-            const float* src = prefix +
-                               ((beam * nchans + sb.c0 + cb + c) * pitch) +
-                               (window - sb.span) + t0;
+            const TP* src = prefix +
+                            ((beam * nchans + sb.c0 + cb + c) * pitch) +
+                            (window - sb.span) + t0;
             for (int j = static_cast<int>(threadIdx.x); j < width;
                  j += static_cast<int>(blockDim.x)) {
                 smem[(c * width) + j] = src[j];
@@ -185,12 +193,22 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
                     break;
                 }
                 // Sample t reads the window at e = t + span - shift.
-                const float* p =
+                const TP* p =
                     smem + ((lf.c - cb) * width) + sb.span - lf.shift + lane;
+                if constexpr (std::is_same_v<TOut, float>) {
 #pragma unroll
-                for (int j = 0; j < kPer; ++j) {
-                    acc[q][j] +=
-                        lf.w * (p[(kWarp * j) + 1] - p[(kWarp * j) - lf.s]);
+                    for (int j = 0; j < kPer; ++j) {
+                        acc[q][j] +=
+                            lf.w * (p[(kWarp * j) + 1] - p[(kWarp * j) - lf.s]);
+                    }
+                } else {
+                    const auto w = static_cast<TOut>(lf.w);
+#pragma unroll
+                    for (int j = 0; j < kPer; ++j) {
+                        acc[q][j] +=
+                            w * static_cast<TOut>(p[(kWarp * j) + 1] -
+                                                  p[(kWarp * j) - lf.s]);
+                    }
                 }
             }
         }
@@ -201,8 +219,8 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
         if (r >= sb.nrows) {
             continue;
         }
-        float* o = out + (beam * out_beam_stride) +
-                   (static_cast<int64_t>(sb.row0 + r) * row_stride) + t0;
+        TOut* o = out + (beam * out_beam_stride) +
+                  (static_cast<int64_t>(sb.row0 + r) * row_stride) + t0;
 #pragma unroll
         for (int j = 0; j < kPer; ++j) {
             if (lane + (kWarp * j) < n) {
@@ -272,11 +290,12 @@ inline constexpr int kTopSampsPerLane = 8;
  * before. One warp per trial and 32 * kTopSampsPerLane samples; grid
  * (trials / warps, samples, beams).
  */
+template <typename T = float>
 __global__ __launch_bounds__(256) void kernel_direct_top(
-    const float* __restrict__ state,
+    const T* __restrict__ state,
     int64_t state_beam_stride,
     int row_stride,
-    const float* __restrict__ ring,
+    const T* __restrict__ ring,
     int64_t ring_beam_stride,
     const int64_t* __restrict__ ring_off,
     const int32_t* __restrict__ ring_len,
@@ -284,7 +303,7 @@ __global__ __launch_bounds__(256) void kernel_direct_top(
     const FDMTDirectTopLeaf* __restrict__ leaves,
     const int32_t* __restrict__ out_row,
     int ntrials,
-    float* __restrict__ out,
+    T* __restrict__ out,
     int64_t out_beam_stride,
     int out_row_stride,
     uint64_t pos,
@@ -298,17 +317,17 @@ __global__ __launch_bounds__(256) void kernel_direct_top(
     }
     const auto beam = static_cast<int64_t>(blockIdx.z);
     const int t0    = static_cast<int>(blockIdx.y) * kWarp * kTopSampsPerLane;
-    const float* st = state + (beam * state_beam_stride);
-    const float* rg = ring + (beam * ring_beam_stride);
-    float acc[kTopSampsPerLane];
+    const T* st     = state + (beam * state_beam_stride);
+    const T* rg     = ring + (beam * ring_beam_stride);
+    T acc[kTopSampsPerLane];
 #pragma unroll
     for (int j = 0; j < kTopSampsPerLane; ++j) {
-        acc[j] = 0.0F;
+        acc[j] = T{0};
     }
     for (int m = leaf_off[f]; m < leaf_off[f + 1]; ++m) {
         const FDMTDirectTopLeaf lf = leaves[m];
-        const float* row = st + (static_cast<int64_t>(lf.row) * row_stride);
-        const int tau0   = t0 + lane - lf.shift;
+        const T* row   = st + (static_cast<int64_t>(lf.row) * row_stride);
+        const int tau0 = t0 + lane - lf.shift;
         if (tau0 >= 0) { // the whole tile reads the state
 #pragma unroll
             for (int j = 0; j < kTopSampsPerLane; ++j) {
@@ -322,7 +341,7 @@ __global__ __launch_bounds__(256) void kernel_direct_top(
         // Ring slot of sample tau0, then stepped by a warp's stride: one
         // 64-bit remainder per leaf instead of one per sample.
         const int32_t h = ring_len[lf.row];
-        const float* rr = rg + ring_off[lf.row];
+        const T* rr     = rg + ring_off[lf.row];
         auto slot       = static_cast<int32_t>(
             direct_ring_slot(static_cast<int64_t>(pos) + tau0, h));
         const int32_t step = kWarp % h;
@@ -337,8 +356,8 @@ __global__ __launch_bounds__(256) void kernel_direct_top(
             slot -= slot >= h ? h : 0;
         }
     }
-    float* o = out + (beam * out_beam_stride) +
-               (static_cast<int64_t>(out_row[f]) * out_row_stride);
+    T* o = out + (beam * out_beam_stride) +
+           (static_cast<int64_t>(out_row[f]) * out_row_stride);
 #pragma unroll
     for (int j = 0; j < kTopSampsPerLane; ++j) {
         const int t = t0 + lane + (kWarp * j);
@@ -354,11 +373,12 @@ __global__ __launch_bounds__(256) void kernel_direct_top(
  * per (row, segment of kAdvanceSegment-like 256 samples); grid (rows /
  * warps, segments, beams).
  */
+template <typename T = float>
 __global__ __launch_bounds__(256) void kernel_direct_top_ring(
-    const float* __restrict__ state,
+    const T* __restrict__ state,
     int64_t state_beam_stride,
     int row_stride,
-    float* __restrict__ ring,
+    T* __restrict__ ring,
     int64_t ring_beam_stride,
     const int64_t* __restrict__ ring_off,
     const int32_t* __restrict__ ring_len,
@@ -379,13 +399,13 @@ __global__ __launch_bounds__(256) void kernel_direct_top_ring(
     if (seg0 >= newest) {
         return;
     }
-    const auto beam  = static_cast<int64_t>(blockIdx.z);
-    const float* row = state + (beam * state_beam_stride) +
-                       (static_cast<int64_t>(r) * row_stride);
-    float* rr        = ring + (beam * ring_beam_stride) + ring_off[r];
-    const int first  = active - newest;
-    const int end    = seg0 + kSegment < newest ? seg0 + kSegment : newest;
-    auto slot        = static_cast<int32_t>(
+    const auto beam = static_cast<int64_t>(blockIdx.z);
+    const T* row    = state + (beam * state_beam_stride) +
+                      (static_cast<int64_t>(r) * row_stride);
+    T* rr           = ring + (beam * ring_beam_stride) + ring_off[r];
+    const int first = active - newest;
+    const int end   = seg0 + kSegment < newest ? seg0 + kSegment : newest;
+    auto slot       = static_cast<int32_t>(
         direct_ring_slot(static_cast<int64_t>(pos) + first + seg0 + lane, h));
     const int32_t step = kWarp % h;
     for (int j = seg0 + lane; j < end; j += kWarp) {

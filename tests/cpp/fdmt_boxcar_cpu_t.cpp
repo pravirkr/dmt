@@ -751,3 +751,193 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
     }
 #endif
 }
+
+TEST_CASE("Boxcar width screen groups cover every width", "[boxcar][cpu]") {
+    using algorithms::detail::boxcar_screen_groups;
+    // Spacing 1.5 merges too few widths to pay: no groups.
+    CHECK(
+        boxcar_screen_groups(plans::generate_box_width_trials(163, 1.5F), false)
+            .empty());
+    for (const SizeType max_width : {SizeType{48}, SizeType{163}}) {
+        const auto widths = plans::generate_box_width_trials(max_width, 1.0F);
+        const auto groups = boxcar_screen_groups(widths, false);
+        REQUIRE_FALSE(groups.empty());
+        std::vector<int> covered(widths.size(), 0);
+        uint32_t level = 0;
+        for (const auto& g : groups) {
+            CHECK(g.level >= level); // ascending: one table raised in place
+            level = g.level;
+            CHECK(g.w_lo == widths[g.f_lo]);
+            CHECK(g.w_hi == widths[g.f_hi - 1]);
+            CHECK(g.w_hi < 2 * g.w_lo);
+            CHECK((1U << g.level) <= g.w_hi - g.w_lo + 1);
+            CHECK((2U << g.level) > g.w_hi - g.w_lo + 1);
+            for (uint32_t f = g.f_lo; f < g.f_hi; ++f) {
+                ++covered[f];
+            }
+        }
+        CHECK(std::ranges::all_of(covered, [](int c) { return c == 1; }));
+        // Trapezoid widths (>= 3) stay single, so grouping does not pay.
+        CHECK(boxcar_screen_groups(widths, true).empty());
+    }
+}
+
+TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
+          "[boxcar][packed][cpu]") {
+    // Spacing 1 up to 48 samples: the CPU and GPU scorers screen tiles by
+    // width group (boxcar_screen_groups), which must not change any result.
+    const plans::FDMTPlan plan(700, 1200, 7, 311, 0.001F,
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
+    constexpr SizeType blocks = 4;
+    REQUIRE_FALSE(algorithms::detail::boxcar_screen_groups(
+                      plans::generate_box_width_trials(48, 1.0F), false)
+                      .empty());
+    const auto input = waterfalls(plan, 1, blocks);
+    // 8-bit copies of a uniform integer stream, and the centred floats.
+    const SizeType size = plan.get_nchans() * plan.get_nsamps();
+    std::vector<std::vector<uint8_t>> packed(blocks,
+                                             std::vector<uint8_t>(size));
+    std::vector<std::vector<float>> centered(blocks, std::vector<float>(size));
+    std::mt19937 random(7);
+    for (SizeType k = 0; k < blocks; ++k) {
+        for (SizeType i = 0; i < size; ++i) {
+            packed[k][i]   = static_cast<uint8_t>(random() & 255U);
+            centered[k][i] = static_cast<float>(packed[k][i]) - 127.5F;
+        }
+    }
+    const float sigma = std::sqrt(255.0F * 257.0F / 12.0F);
+    for (const float thresh : {2.7F, 4.0F}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            DYNAMIC_SECTION("thresh=" << thresh
+                                      << " mode=" << static_cast<int>(mode)) {
+                BoxcarConfig cfg;
+                cfg.max_boxcar       = 48;
+                cfg.wtsp             = 1.0F;
+                cfg.detect_thresh    = thresh;
+                cfg.peak_mode        = mode;
+                cfg.max_candidates   = 2000000;
+                cfg.max_cands_per_dm = 0;
+                const auto expected =
+                    batched_reference(plan, cfg, true, 1, input);
+                REQUIRE_FALSE(expected.empty());
+                BoxcarConfig pcfg = cfg;
+                pcfg.noise_sigma  = sigma;
+                const auto expected_packed =
+                    batched_reference(plan, pcfg, true, 1, centered);
+                REQUIRE_FALSE(expected_packed.empty());
+                pcfg.input_nbits = 8;
+                pcfg.input_mean  = 127.5F;
+                std::vector<Exec> execs{Exec::cpu(3)};
+#ifdef DMT_ENABLE_GPU
+                execs.push_back(Exec{algorithms::detail::kGPUBackend, 0});
+#endif
+                for (const auto& exec : execs) {
+                    for (const SizeType chunk :
+                         {SizeType{64}, plan.get_nsamps()}) {
+                        FDMTBoxcar search(plan, cfg, true, exec, 1,
+                                          algorithms::kFDMTAutoFuse, chunk);
+                        std::vector<RawCandidate> actual;
+                        for (const auto& block : input) {
+                            append(actual, search.execute(block));
+                        }
+                        append(actual, search.flush());
+                        compare(actual, expected);
+                        FDMTBoxcar packed_search(plan, pcfg, true, exec, 1,
+                                                 algorithms::kFDMTAutoFuse,
+                                                 chunk);
+                        std::vector<RawCandidate> actual_packed;
+                        for (const auto& block : packed) {
+                            append(actual_packed, packed_search.execute(block));
+                        }
+                        append(actual_packed, packed_search.flush());
+                        compare(actual_packed, expected_packed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#ifdef DMT_ENABLE_GPU
+TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
+          "[boxcar][packed][gpu]") {
+    // 512 channels: the GPU computes levels 0..3 directly and, for subband
+    // depths 0 and 1, sums the trials (or level root - depth - 1) from a
+    // level-k ring (the direct top); depth 2 has only the direct levels.
+    // Packed input is exact on both backends (uint32_t state at 8 bits,
+    // uint64_t at 16); float32 agrees within rounding near the threshold.
+    constexpr SizeType kBeams  = 2;
+    constexpr SizeType kBlocks = 4;
+    for (const SizeType depth : {SizeType{0}, SizeType{1}, SizeType{2}}) {
+        const plans::FDMTPlan plan(1100.0F, 1714.0F, 512, 256, 455.6e-6F, 300,
+                                   0, 1, "valid", depth);
+        const SizeType size = kBeams * plan.get_nchans() * plan.get_nsamps();
+        for (const SizeType bits : {SizeType{8}, SizeType{16}, SizeType{32}}) {
+            DYNAMIC_SECTION("depth=" << depth << " bits=" << bits) {
+                const uint32_t maximum = bits == 32 ? 0U : (1U << bits) - 1U;
+                std::mt19937 random(static_cast<uint32_t>(17 + depth + bits));
+                std::vector<std::vector<uint8_t>> packed(kBlocks);
+                std::vector<std::vector<float>> floats(kBlocks);
+                std::normal_distribution<float> normal(0.0F, 1.0F);
+                for (SizeType k = 0; k < kBlocks; ++k) {
+                    if (bits == 32) {
+                        floats[k].resize(size);
+                        for (auto& x : floats[k]) {
+                            x = normal(random);
+                        }
+                        continue;
+                    }
+                    packed[k].resize(size * (bits / 8));
+                    for (SizeType i = 0; i < size; ++i) {
+                        const uint32_t v          = random() & maximum;
+                        packed[k][i * (bits / 8)] = static_cast<uint8_t>(v);
+                        if (bits == 16) {
+                            packed[k][(i * 2) + 1] =
+                                static_cast<uint8_t>(v >> 8U);
+                        }
+                    }
+                }
+                BoxcarConfig cfg(24, 1.0F, 3.2F, 1.0F,
+                                 PeakFindingMode::kContiguousPeakPerWidth);
+                cfg.max_candidates   = 4000000;
+                cfg.max_cands_per_dm = 0;
+                if (bits != 32) {
+                    cfg.input_nbits = bits;
+                    cfg.input_mean  = static_cast<float>(maximum) * 0.5F;
+                    cfg.noise_sigma = std::sqrt(static_cast<float>(maximum) *
+                                                (maximum + 2.0F) / 12.0F);
+                }
+                for (const SizeType chunk : {SizeType{64}, SizeType{0}}) {
+                    FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(4), kBeams,
+                                     algorithms::kFDMTAutoFuse, chunk);
+                    FDMTBoxcar gpu_s(plan, cfg, true,
+                                     Exec{algorithms::detail::kGPUBackend, 0},
+                                     kBeams, algorithms::kFDMTAutoFuse, chunk);
+                    std::vector<RawCandidate> c;
+                    std::vector<RawCandidate> g;
+                    for (SizeType k = 0; k < kBlocks; ++k) {
+                        if (bits == 32) {
+                            append(c, cpu_s.execute(floats[k]));
+                            append(g, gpu_s.execute(floats[k]));
+                        } else {
+                            append(c, cpu_s.execute(packed[k]));
+                            append(g, gpu_s.execute(packed[k]));
+                        }
+                    }
+                    append(c, cpu_s.flush());
+                    append(g, gpu_s.flush());
+                    REQUIRE_FALSE(c.empty());
+                    if (bits == 32) {
+                        compare_near_threshold(g, c, cfg.detect_thresh);
+                    } else {
+                        compare(g, c);
+                    }
+                }
+            }
+        }
+    }
+}
+#endif

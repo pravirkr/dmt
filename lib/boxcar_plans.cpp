@@ -7,6 +7,7 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "dmt/boxcar.hpp"
@@ -142,7 +143,11 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             // Trace each actual intermediate coordinate, including copy
             // nodes and plan-specific pruning. Shift does not change energy
             // between independent channels, but does determine cold support.
+            // Leaf lengths of a row, as a histogram: a row has one leaf per
+            // channel but only a few distinct box lengths, and the noise
+            // terms below depend on the length alone.
             std::vector<SizeType> lengths;
+            std::vector<std::pair<SizeType, SizeType>> length_counts;
             lengths.reserve(end - begin);
             for (SizeType d = 0; d < grid.ndt; ++d) {
                 lengths.clear();
@@ -173,6 +178,15 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     }
                 };
                 trace(trace, l, grid.coord_offset + d, 0);
+                std::ranges::sort(lengths);
+                length_counts.clear();
+                for (const auto len : lengths) {
+                    if (length_counts.empty() ||
+                        length_counts.back().first != len) {
+                        length_counts.emplace_back(len, 0);
+                    }
+                    ++length_counts.back().second;
+                }
                 out.warmup_samples[d] = support + extra_warmup;
                 const double f0       = out.f_low_mhz;
                 const double f1       = out.f_high_mhz;
@@ -191,15 +205,16 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                                              : 0;
                     double variance    = 0;
                     double mean_weight = 0;
-                    for (const auto len : lengths) {
+                    for (const auto& [len, count] : length_counts) {
                         const double weight =
                             smear ? box_weight(len,
                                                plan.get_box_fraction_bits()) *
                                         unit
                                   : 1.0;
-                        variance +=
-                            fdmt_trapezoid_variance(len, width, w_edge, weight);
-                        mean_weight += len * weight;
+                        const auto n = static_cast<double>(count);
+                        variance += n * fdmt_trapezoid_variance(len, width,
+                                                                w_edge, weight);
+                        mean_weight += n * static_cast<double>(len) * weight;
                     }
                     if (variance == 0) {
                         // Every channel of the row is killed: never detect.

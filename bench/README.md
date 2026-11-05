@@ -156,6 +156,15 @@ short runs) is for smoke tests only.
 - Release build only; `run_suite.py` warns otherwise.
 - Threads are pinned with `OMP_PROC_BIND=close OMP_PLACES=cores`, which you can
   override in the environment. `--threads 1,8` is the default.
+- The runner starts the binaries under `setarch -R`. Google Benchmark 1.10
+  re-executes itself to turn off ASLR, and the re-executed process inherits
+  the one-core affinity libgomp gave the main thread, so every OpenMP thread
+  would run on one core. Running a binary by hand with `OMP_PROC_BIND` set
+  needs `setarch -R` too.
+- On CPUs whose L3 is split per core complex (AMD EPYC: 32 MB per 8-core
+  CCD), `close` packs 8 threads into one CCD's L3. The FDMT is L3-bound:
+  on an EPYC 9654 the cryopaf transform takes 606 ms on one CCD and 252 ms
+  with one thread per CCD (`OMP_PLACES='{0}:8:8'`). Record which you ran.
 - `--max-gb` sets the memory budget (default 60% of RAM). Points above it
   are skipped rather than swapped.
 

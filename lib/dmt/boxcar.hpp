@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <bit>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -8,6 +11,7 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include "dmt/engines.hpp"
+#include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
 
@@ -20,6 +24,62 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                   bool smear,
                   std::span<const uint8_t> kill_mask = {},
                   uint64_t extra_warmup              = 0);
+
+/**
+ * @brief A group of the width screen: consecutive widths [w_lo, w_hi] with
+ * w_hi < 2 w_lo. For each width w of the group the boxcar sum
+ * P(t) - P(t - w) is at most P(t) - min(P[t - w_hi .. t - w_lo]), with the
+ * same rounding (it is monotonic), so a tile whose bound stays under the
+ * group's smallest threshold has no hit for any of its widths. The range
+ * minimum is two overlapping runs of 2^level entries.
+ */
+struct BoxcarScreenGroup {
+    uint32_t f_lo;  ///< first filter index
+    uint32_t f_hi;  ///< one past the last filter index
+    uint32_t w_lo;  ///< smallest width
+    uint32_t w_hi;  ///< largest width
+    uint32_t level; ///< floor(log2(w_hi - w_lo + 1))
+};
+
+/**
+ * @brief Width groups of the screen for `widths` (ascending), or none when
+ * grouping would not pay: each group check and each range-minimum level
+ * costs about one width check, so the screen is used only when groups plus
+ * levels are under half the widths (163 widths form 8 groups; 12 widths at
+ * spacing 1.5 form 7 and run faster ungrouped). Trapezoid widths are not
+ * bounded by the range minimum and stay single.
+ */
+[[nodiscard]] inline std::vector<BoxcarScreenGroup>
+boxcar_screen_groups(std::span<const uint32_t> widths, bool use_trapezoid) {
+    std::vector<BoxcarScreenGroup> groups;
+    uint32_t levels      = 0;
+    const auto trapezoid = [&](uint32_t w) {
+        return use_trapezoid && trapezoid_edge_width(w) > 0;
+    };
+    for (SizeType f = 0; f < widths.size();) {
+        const uint32_t w_lo = widths[f];
+        SizeType g          = f + 1;
+        while (!trapezoid(w_lo) && g < widths.size() && widths[g] < 2 * w_lo &&
+               !trapezoid(widths[g])) {
+            ++g;
+        }
+        const uint32_t w_hi = widths[g - 1];
+        const auto level =
+            static_cast<uint32_t>(std::bit_width(w_hi - w_lo + 1U) - 1);
+        groups.push_back({static_cast<uint32_t>(f), static_cast<uint32_t>(g),
+                          w_lo, w_hi, level});
+        levels = std::max(levels, level);
+        f      = g;
+    }
+    if (2 * (groups.size() + levels) >= widths.size()) {
+        groups.clear();
+    }
+    // Ascending levels, so a range-minimum table raised in place serves
+    // every group (the last group, cut short by max_width, can have a lower
+    // level than the one before). Order does not change the result.
+    std::ranges::stable_sort(groups, {}, &BoxcarScreenGroup::level);
+    return groups;
+}
 
 /// Per-plane row description, shared by CPU and device root sample readers.
 struct BoxcarRow {
@@ -37,13 +97,42 @@ struct BoxcarRow {
 make_boxcar_rows(const plans::FDMTPlan& plan,
                  std::span<const plans::BoxcarPlanePlan> planes);
 
+/// Ring slot of the call's first sample in an unmaterialized row's tree
+/// history (sample_begin mod delay), so readers of many samples take one
+/// 64-bit remainder per row instead of one per sample. SIZE_MAX when the
+/// row reads no ring.
+DMT_HD inline SizeType boxcar_ring0(const FDMTSearchInput& input,
+                                    const BoxcarRow& row) noexcept {
+    return input.history_ring && row.head != SIZE_MAX && row.delay > 0
+               ? input.sample_begin % row.delay
+               : SIZE_MAX;
+}
+
+/// History slot of sample t < row.delay: (sample_begin + t) mod delay from
+/// ring0 = boxcar_ring0() (SIZE_MAX: compute it), or t for a FIFO history.
+DMT_HD inline SizeType boxcar_history_slot(const FDMTSearchInput& input,
+                                           const BoxcarRow& row,
+                                           SizeType t,
+                                           SizeType ring0) noexcept {
+    if (!input.history_ring) {
+        return t;
+    }
+    if (ring0 == SIZE_MAX) {
+        return (input.sample_begin + t) % row.delay;
+    }
+    const SizeType slot = ring0 + t;
+    return slot >= row.delay ? slot - row.delay : slot;
+}
+
 /// The same merge addition as FDMT for unmaterialized rows (root and staggered
-/// subbands); history is not mutated by the reader.
+/// subbands); history is not mutated by the reader. `ring0`: see
+/// boxcar_history_slot().
 DMT_HD inline float boxcar_sample(const FDMTSearchInput& input,
                                   const BoxcarRow& row,
                                   SizeType beam,
                                   SizeType t,
-                                  bool root = false) noexcept {
+                                  bool root      = false,
+                                  SizeType ring0 = SIZE_MAX) noexcept {
     if (!(row.unmaterialized || root) || input.materialized_root) {
         const float* state = input.state + beam * input.beam_stride;
         return state[row.row * input.row_stride + t];
@@ -59,8 +148,7 @@ DMT_HD inline float boxcar_sample(const FDMTSearchInput& input,
     if (t >= row.delay) {
         head = prev[row.head * input.row_stride + t - row.delay];
     } else {
-        const SizeType slot =
-            input.history_ring ? (input.sample_begin + t) % row.delay : t;
+        const SizeType slot = boxcar_history_slot(input, row, t, ring0);
         head = input.history[beam * input.history_stride + row.hist -
                              input.history_base + slot];
     }
@@ -115,14 +203,16 @@ DMT_HD void boxcar_peak_step(BoxcarPeak& peak,
 }
 
 template <typename TInt>
-DMT_HD inline uint64_t boxcar_integer_sample_typed(const TInt* state_base,
-                                                   const TInt* prev_base,
-                                                   const TInt* hist_base,
-                                                   const FDMTSearchInput& input,
-                                                   const BoxcarRow& row,
-                                                   SizeType beam,
-                                                   SizeType t,
-                                                   bool root = false) noexcept {
+DMT_HD inline uint64_t
+boxcar_integer_sample_typed(const TInt* state_base,
+                            const TInt* prev_base,
+                            const TInt* hist_base,
+                            const FDMTSearchInput& input,
+                            const BoxcarRow& row,
+                            SizeType beam,
+                            SizeType t,
+                            bool root      = false,
+                            SizeType ring0 = SIZE_MAX) noexcept {
     if (!(row.unmaterialized || root) || input.materialized_root) {
         const TInt* state = state_base + beam * input.beam_stride;
         return static_cast<uint64_t>(state[row.row * input.row_stride + t]);
@@ -134,9 +224,8 @@ DMT_HD inline uint64_t boxcar_integer_sample_typed(const TInt* state_base,
     if (row.head == SIZE_MAX) {
         return tail;
     }
-    const SizeType slot = input.history_ring && t < row.delay
-                              ? (input.sample_begin + t) % row.delay
-                              : t;
+    const SizeType slot =
+        t < row.delay ? boxcar_history_slot(input, row, t, ring0) : t;
     const uint64_t head = static_cast<uint64_t>(
         t >= row.delay ? prev[row.head * input.row_stride + t - row.delay]
                        : hist_base[beam * input.history_stride + row.hist -
@@ -144,19 +233,21 @@ DMT_HD inline uint64_t boxcar_integer_sample_typed(const TInt* state_base,
     return tail + head;
 }
 
-DMT_HD inline uint64_t boxcar_integer_sample(const FDMTSearchInput& input,
-                                             const BoxcarRow& row,
-                                             SizeType beam,
-                                             SizeType t,
-                                             bool root = false) noexcept {
+DMT_HD inline uint64_t
+boxcar_integer_sample(const FDMTSearchInput& input,
+                      const BoxcarRow& row,
+                      SizeType beam,
+                      SizeType t,
+                      bool root      = false,
+                      SizeType ring0 = SIZE_MAX) noexcept {
     if (input.integer32_state != nullptr) {
         return boxcar_integer_sample_typed<uint32_t>(
             input.integer32_state, input.integer32_prev_state,
-            input.integer32_history, input, row, beam, t, root);
+            input.integer32_history, input, row, beam, t, root, ring0);
     }
     return boxcar_integer_sample_typed<uint64_t>(
         input.integer_state, input.integer_prev_state, input.integer_history,
-        input, row, beam, t, root);
+        input, row, beam, t, root, ring0);
 }
 
 DMT_HD inline bool boxcar_integer_better(uint64_t sum,

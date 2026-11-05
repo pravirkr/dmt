@@ -247,7 +247,14 @@ def main() -> None:
                 for k, v in env.items()
                 if k not in ("OMP_PROC_BIND", "OMP_PLACES") or k in os.environ
             }
+        # Google Benchmark >= 1.10 re-executes itself to disable ASLR. With
+        # OMP_PROC_BIND set, libgomp has already bound the main thread to
+        # its first place by then, and the re-executed process inherits that
+        # one-CPU affinity: every OpenMP thread runs on one core. Starting
+        # with ASLR off (setarch -R) skips the re-exec.
+        setarch = shutil.which("setarch") if sys.platform == "linux" else None
         cmd = [
+            *([setarch, "-R"] if setarch else []),
             str(binary),
             f"--benchmark_filter={regex}",
             f"--benchmark_repetitions={1 if args.quick else 3}",

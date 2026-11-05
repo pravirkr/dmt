@@ -66,6 +66,7 @@ public:
         }
         m_best.resize(m_threads * kTile);
         m_best_filter.resize(m_threads * kTile);
+        make_screen_groups(planes.front().widths);
         m_offsets.push_back(0);
         for (const auto& p : planes) {
             m_offsets.push_back(m_offsets.back() + p.dm_grid.size());
@@ -196,7 +197,8 @@ public:
                 .peaks      = m_peaks.size() * sizeof(BoxcarPeak),
                 .workspace  = fdmt.workspace +
                               (m_prefix.size() + m_integer_means.size() +
-                               m_integer_scales.size()) *
+                               m_integer_scales.size() + m_range_min.size() +
+                               m_group_thresh.size()) *
                                   sizeof(double) +
                               m_integer_prefix.size() * sizeof(uint64_t) +
                               m_best.size() * sizeof(float) +
@@ -212,6 +214,21 @@ public:
     }
 
 private:
+    void make_screen_groups(const std::vector<uint32_t>& widths) {
+        m_screen_levels = 0;
+        m_groups        = boxcar_screen_groups(widths, m_config.use_trapezoid);
+        for (const auto& g : m_groups) {
+            m_screen_levels = std::max<SizeType>(m_screen_levels, g.level);
+        }
+        // Packed rows keep their mean-centred running sums as level 0.
+        m_range_min.resize(m_threads * screen_slots() * (m_width + kTile + 1));
+        m_group_thresh.resize(m_threads * m_groups.size());
+    }
+
+    [[nodiscard]] SizeType screen_slots() const noexcept {
+        return m_screen_levels + (m_config.input_nbits != 32 ? 1 : 0);
+    }
+
     void begin_result(SizeType samples) {
         m_counts = {};
         m_next_slot.store(0, std::memory_order_relaxed);
@@ -284,11 +301,12 @@ private:
         auto* peaks          = m_peaks.data() + index * m_peak_count;
         const auto& row      = m_rows[row_idx];
         const bool root      = plane.level == m_plan.get_niters();
+        const SizeType ring0 = boxcar_ring0(input, row);
         const auto sample_at = [&](SizeType t) {
             if constexpr (std::is_integral_v<T>) {
-                return boxcar_integer_sample(input, row, beam, t, root);
+                return boxcar_integer_sample(input, row, beam, t, root, ring0);
             } else {
-                return boxcar_sample(input, row, beam, t, root);
+                return boxcar_sample(input, row, beam, t, root, ring0);
             }
         };
         // prefix[j] for j <= lookback holds the max_width - 1 samples before
@@ -313,7 +331,37 @@ private:
             return std::any_of(peaks, peaks + m_peak_count,
                                [](const BoxcarPeak& p) { return p.open; });
         };
-        bool open = any_open();
+        bool open            = any_open();
+        double* group_thresh = nullptr;
+        double* range_min    = nullptr;
+        if (!m_groups.empty()) {
+            group_thresh = m_group_thresh.data() + tid * m_groups.size();
+            range_min    = m_range_min.data() +
+                           tid * screen_slots() * (m_width + kTile + 1);
+            for (SizeType g = 0; g < m_groups.size(); ++g) {
+                if constexpr (std::is_integral_v<T>) {
+                    // Mean-centred cutoffs: integer cutoff minus the
+                    // width's mean (screen_tile_int()).
+                    double th = std::numeric_limits<double>::infinity();
+                    for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi;
+                         ++f) {
+                        const SizeType i = dm * m_filters + f;
+                        th = std::min(th, static_cast<double>(
+                                              plane.integer_thresh_lut[i]) -
+                                              plane.integer_mean_lut[i]);
+                    }
+                    group_thresh[g] = th;
+                } else {
+                    float th = std::numeric_limits<float>::max();
+                    for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi;
+                         ++f) {
+                        th = std::min(th,
+                                      plane.raw_thresh_lut[dm * m_filters + f]);
+                    }
+                    group_thresh[g] = th;
+                }
+            }
+        }
         for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
             const SizeType n     = std::min(kTile, input.nsamps - t0);
             const uint64_t start = input.sample_begin + t0;
@@ -325,8 +373,20 @@ private:
             // Without it (and no open run) every peak mode is unchanged.
             const bool cold =
                 m_config.skip_cold_prefix && start + 1 < row.warmup + m_width;
-            bool hit = false;
-            for (SizeType f = 0; f < m_filters && !hit; ++f) {
+            bool hit      = false;
+            bool screened = false;
+            if (!m_groups.empty() && !open) {
+                if constexpr (std::is_integral_v<T>) {
+                    hit =
+                        screen_tile_int(plane, dm, row, prefix, lookback, start,
+                                        n, cold, group_thresh, range_min);
+                } else {
+                    hit = screen_tile(plane, dm, row, prefix, lookback, start,
+                                      n, cold, group_thresh, range_min);
+                }
+                screened = true;
+            }
+            for (SizeType f = 0; f < m_filters && !hit && !screened; ++f) {
                 const SizeType width = plane.widths[f];
                 const SizeType w_edge =
                     m_config.use_trapezoid
@@ -375,6 +435,201 @@ private:
         for (SizeType t = input.nsamps - keep; t < input.nsamps; ++t) {
             carry[(input.sample_begin + t) % m_width] = sample_at(t);
         }
+    }
+
+    /**
+     * Whether any width exceeds its threshold in this tile (float rows, no
+     * open run), as the per-width check in score() decides. A group's
+     * bound P(t) - min(P[t - w_hi .. t - w_lo]) >= P(t) - P(t - w) for
+     * each of its widths w (rounding is monotonic), so a group whose bound
+     * stays under its smallest threshold has no hit; the others are checked
+     * width by width. range_min level k holds min(P[j .. j + 2^k - 1]).
+     */
+    bool screen_tile(const plans::BoxcarPlanePlan& plane,
+                     SizeType dm,
+                     const BoxcarRow& row,
+                     const double* prefix,
+                     SizeType lookback,
+                     uint64_t start,
+                     SizeType n,
+                     bool cold,
+                     const double* group_thresh,
+                     double* range_min) const {
+        const SizeType len    = lookback + n + 1; // prefix entries
+        const SizeType stride = m_width + kTile + 1;
+        for (SizeType k = 1; k <= m_screen_levels; ++k) {
+            const SizeType half = SizeType{1} << (k - 1);
+            if (half >= len) {
+                break;
+            }
+            const double* src = k == 1 ? prefix : range_min + (k - 2) * stride;
+            double* dst       = range_min + (k - 1) * stride;
+            const SizeType m  = len - 2 * half + 1;
+#pragma omp simd
+            for (SizeType j = 0; j < m; ++j) {
+                dst[j] = std::min(src[j], src[j + half]);
+            }
+        }
+        const double* hi = prefix + lookback + 1;
+        for (SizeType g = 0; g < m_groups.size(); ++g) {
+            const auto& grp     = m_groups[g];
+            const double thresh = group_thresh[g];
+            const SizeType span = SizeType{1} << grp.level;
+            const double* mins =
+                grp.level == 0 ? prefix : range_min + (grp.level - 1) * stride;
+            // Window [idx - w_hi, idx - w_lo] as two overlapping 2^k runs.
+            const double* a = mins + lookback + 1 - grp.w_hi;
+            const double* b = mins + lookback + 1 - grp.w_lo - span + 1;
+            // A trapezoid (always a group of one) is not bounded by the
+            // range minimum: check it exactly.
+            bool any =
+                m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0;
+            if (!any) {
+#pragma omp simd reduction(|| : any)
+                for (SizeType t = 0; t < n; ++t) {
+                    any = any || (hi[t] - std::min(a[t], b[t]) >= thresh);
+                }
+            }
+            if (!any) {
+                continue;
+            }
+            for (SizeType f = grp.f_lo; f < grp.f_hi; ++f) {
+                const SizeType width = plane.widths[f];
+                const SizeType w_edge =
+                    m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
+                const double* lo = prefix + lookback + 1 - width;
+                const auto th    = static_cast<double>(
+                    plane.raw_thresh_lut[dm * m_filters + f]);
+                const uint64_t first_valid = row.warmup + width - 1;
+                bool hit                   = false;
+                if (w_edge == 0) {
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        hit = hit || (hi[t] - lo[t] >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                } else {
+                    const double* lo_in =
+                        prefix + lookback + 1 - width + w_edge;
+                    const double* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        const double sum =
+                            (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                        hit = hit || (sum >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                }
+                if (hit) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * screen_tile() for packed rows (exact uint64 running sums P, which only
+     * grow, so the raw bound is useless). With m1 the row's mean per sample
+     * (integer_mean_lut[f] = m1 * w for a boxcar), D(j) = P(j) - m1 j gives
+     * S_w - m1 w = D(t) - D(t - w), so D(t) - min(D[t - w_hi .. t - w_lo])
+     * bounds every width's centred sum and is compared with the group's
+     * smallest cutoff - mean. D is in double: a group passes within a
+     * margin far above the rounding of D and of the cutoffs, so the screen
+     * stays conservative; passing groups are checked exactly in integers.
+     */
+    bool screen_tile_int(const plans::BoxcarPlanePlan& plane,
+                         SizeType dm,
+                         const BoxcarRow& row,
+                         const uint64_t* prefix,
+                         SizeType lookback,
+                         uint64_t start,
+                         SizeType n,
+                         bool cold,
+                         const double* group_thresh,
+                         double* range_min) const {
+        const SizeType len    = lookback + n + 1;
+        const SizeType stride = m_width + kTile + 1;
+        // m1 from the first boxcar width (widths 1 and 2 are never
+        // trapezoids); a killed row has mean 0 and infinite cutoffs.
+        const double m1 = plane.integer_mean_lut[dm * m_filters] /
+                          static_cast<double>(plane.widths[0]);
+        double* centred = range_min;
+#pragma omp simd
+        for (SizeType j = 0; j < len; ++j) {
+            centred[j] =
+                static_cast<double>(prefix[j]) - (m1 * static_cast<double>(j));
+        }
+        const double scale = static_cast<double>(prefix[len - 1]) +
+                             (std::abs(m1) * static_cast<double>(len)) + 1.0;
+        for (SizeType k = 1; k <= m_screen_levels; ++k) {
+            const SizeType half = SizeType{1} << (k - 1);
+            if (half >= len) {
+                break;
+            }
+            const double* src = range_min + (k - 1) * stride;
+            double* dst       = range_min + k * stride;
+            const SizeType m  = len - 2 * half + 1;
+#pragma omp simd
+            for (SizeType j = 0; j < m; ++j) {
+                dst[j] = std::min(src[j], src[j + half]);
+            }
+        }
+        const double* hi = centred + lookback + 1;
+        for (SizeType g = 0; g < m_groups.size(); ++g) {
+            const auto& grp = m_groups[g];
+            const double margin =
+                1e-12 * (scale + std::abs(group_thresh[g])) + 1.0;
+            const double thresh = group_thresh[g] - margin;
+            const SizeType span = SizeType{1} << grp.level;
+            const double* mins  = range_min + grp.level * stride;
+            const double* a     = mins + lookback + 1 - grp.w_hi;
+            const double* b     = mins + lookback + 1 - grp.w_lo - span + 1;
+            bool any =
+                m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0;
+            if (!any) {
+#pragma omp simd reduction(|| : any)
+                for (SizeType t = 0; t < n; ++t) {
+                    any = any || (hi[t] - std::min(a[t], b[t]) >= thresh);
+                }
+            }
+            if (!any) {
+                continue;
+            }
+            const uint64_t* phi = prefix + lookback + 1;
+            for (SizeType f = grp.f_lo; f < grp.f_hi; ++f) {
+                const SizeType width = plane.widths[f];
+                const SizeType w_edge =
+                    m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
+                const uint64_t* lo = prefix + lookback + 1 - width;
+                const uint64_t th =
+                    plane.integer_thresh_lut[dm * m_filters + f];
+                const uint64_t first_valid = row.warmup + width - 1;
+                bool hit                   = false;
+                if (w_edge == 0) {
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        hit = hit || (phi[t] - lo[t] >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                } else {
+                    const uint64_t* lo_in =
+                        prefix + lookback + 1 - width + w_edge;
+                    const uint64_t* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        const uint64_t sum =
+                            (phi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                        hit = hit || (sum >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                }
+                if (hit) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Exact run bookkeeping of one tile whose running sums are in
@@ -495,6 +750,10 @@ private:
     double m_integer_unit = 1;
     std::vector<float> m_best;
     std::vector<uint32_t> m_best_filter;
+    std::vector<BoxcarScreenGroup> m_groups;
+    SizeType m_screen_levels = 0;
+    std::vector<double> m_range_min;
+    std::vector<double> m_group_thresh;
     CandidateCounts m_counts{};
     std::atomic<uint64_t> m_next_slot{0};
     uint64_t m_position       = 0;

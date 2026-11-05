@@ -596,6 +596,7 @@ public:
             m_chunk = std::min(m_plan.get_nsamps(),
                                std::max<SizeType>(64, m_chunk / 2));
         }
+        m_requested_fuse = cfg.fuse_levels;
         init_device_structures(m_search_nbits == 32 ? cfg.fuse_levels : 0);
     }
 
@@ -737,6 +738,10 @@ public:
                                   cudaStream_t stream) {
         const SizeType root = m_plan.get_niters();
         const auto tree = static_cast<int64_t>(m_plan.get_tree_history_size());
+        if (m_direct) {
+            execute_search_int_direct<TInt>(full, ring, sink, queue, stream);
+            return;
+        }
         for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
             m_active    = std::min(m_chunk, m_plan.get_nsamps() - t0);
             m_chunk_pos = m_next_pos;
@@ -822,6 +827,231 @@ public:
                     "FDMT integer search launch failed");
             }
         }
+    }
+
+    /**
+     * The packed search with the direct levels (and the direct top when
+     * configured), as the float search runs them: level K from the input's
+     * uint32_t running sums, the tree from K + 1, and either the trials (a
+     * full-band search: materialised, as the sink's root) or level
+     * root - subband_depth - 1 summed from level k's rings. Both start at
+     * stream position 0 with all-zero windows and rings, so the tree
+     * histories of the levels they replace are never read (the integer
+     * search keeps no stepper, history export or tree fallback).
+     */
+    template <typename TInt>
+    void execute_search_int_direct(const FDMTInputPacked& full,
+                                   TInt* ring,
+                                   detail::FDMTSearchSink& sink,
+                                   Stream queue,
+                                   cudaStream_t stream) {
+        const SizeType root = m_plan.get_niters();
+        const auto tree = static_cast<int64_t>(m_plan.get_tree_history_size());
+        auto* state     = reinterpret_cast<TInt*>(
+            thrust::raw_pointer_cast(m_state_internal_d.data()));
+        const auto level_ptr = [&](SizeType l) {
+            return state + (l % 2) * m_nbeams * m_half_elems;
+        };
+        const auto beam_stride = static_cast<int64_t>(m_half_elems);
+        const auto consume = [&](SizeType l, const TInt* src, const TInt* prev,
+                                 int64_t src_beam_stride, bool materialized) {
+            detail::FDMTSearchInput in{
+                .row_stride        = m_chunk,
+                .beam_stride       = static_cast<SizeType>(src_beam_stride),
+                .history_stride    = m_plan.get_tree_history_size(),
+                .nsamps            = m_active,
+                .sample_begin      = m_chunk_pos,
+                .materialized_root = materialized,
+                .history_ring      = true,
+                .stream            = queue,
+            };
+            if constexpr (std::is_same_v<TInt, uint32_t>) {
+                in.integer32_state      = src;
+                in.integer32_prev_state = prev;
+                in.integer32_history    = ring;
+            } else {
+                in.integer_state      = src;
+                in.integer_prev_state = prev;
+                in.integer_history    = ring;
+            }
+            sink.consume(l, in);
+        };
+        const auto merge = [&](SizeType l) {
+            const auto& shape = m_plan.get_container().state_shape[l];
+            auto sums         = m_plan_d.coordinates_sum.get_raw_ptrs();
+            auto copies       = m_plan_d.coordinates_copy.get_raw_ptrs();
+            sums.update_offsets(m_coords_sum_offsets[l]);
+            copies.update_offsets(m_coords_copy_offsets[l]);
+            const auto reg_sum =
+                detail::fdmt_regular_sum_coords(m_plan.get_container(), l);
+            const int count =
+                static_cast<int>(std::max(reg_sum, shape.ncoords_copy));
+            const dim3 block(kIterThreads);
+            const dim3 grid((m_active + kIterThreads * kIterSampsPerTh - 1) /
+                                (kIterThreads * kIterSampsPerTh),
+                            std::min(count, kMaxGridY), m_nbeams);
+            gpu_utils::check_kernel_launch_params(grid, block);
+            const bool fuse_ring = grid.x == 1;
+            kernel_execute_iter<FDMTMode::kValid, TInt, TInt, TInt>
+                <<<grid, block, 0, stream>>>(
+                    level_ptr(l - 1), level_ptr(l), sums, copies, ring,
+                    static_cast<int>(m_active), static_cast<int>(reg_sum),
+                    static_cast<int>(shape.ncoords_copy),
+                    static_cast<int>(m_half_elems),
+                    static_cast<int>(m_half_elems), tree, 0, m_chunk_pos, 1.0F,
+                    static_cast<int>(m_active), fuse_ring);
+            return fuse_ring ? static_cast<int>(reg_sum) : 0;
+        };
+        const auto advance = [&](SizeType l, int adv_begin) {
+            const auto& shape = m_plan.get_container().state_shape[l];
+            const int adv_count =
+                static_cast<int>(shape.ncoords_sum) - adv_begin;
+            if (adv_count > 0 && shape.dt_max > 0) {
+                auto sums = m_plan_d.coordinates_sum.get_raw_ptrs();
+                sums.update_offsets(m_coords_sum_offsets[l] + adv_begin);
+                const auto newest = static_cast<int>(
+                    std::min<SizeType>(shape.dt_max, m_active));
+                launch_advance_tree_history(level_ptr(l - 1), sums, ring, ring,
+                                            adv_count, newest,
+                                            static_cast<int>(m_half_elems),
+                                            tree, 0, m_chunk_pos, 1.0F, stream);
+            }
+        };
+        const SizeType levels = m_direct->levels;
+        for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
+            m_active    = std::min(m_chunk, m_plan.get_nsamps() - t0);
+            m_chunk_pos = m_next_pos;
+            m_next_pos += m_active;
+            const int in = m_parity ? 1 : 0;
+            m_direct_win_in =
+                thrust::raw_pointer_cast(m_direct->win[in].data());
+            m_direct_win_out =
+                thrust::raw_pointer_cast(m_direct->win[1 - in].data());
+            m_parity         = !m_parity;
+            const auto input = chunk_input(full, t0);
+            launch_direct_int<TInt>(input, level_ptr(levels), stream);
+            advance_direct_window(input, stream);
+            SizeType level = levels;
+            consume(level, level_ptr(level), nullptr, beam_stride, false);
+            const SizeType last = m_top ? m_top->level : root - 1;
+            while (level < last) {
+                ++level;
+                const int adv_begin = merge(level);
+                consume(level, level_ptr(level), level_ptr(level - 1),
+                        beam_stride, false);
+                advance(level, adv_begin);
+            }
+            if (m_top) {
+                if (m_top->target == root) {
+                    // The trials, materialised: the sink's root.
+                    auto* trials = reinterpret_cast<TInt*>(
+                        thrust::raw_pointer_cast(m_top->trials.data()));
+                    const auto trial_stride = static_cast<int64_t>(
+                        m_plan.get_container().coordinates[root].size() *
+                        m_chunk);
+                    run_top_int<TInt>(level_ptr(m_top->level), trials,
+                                      trial_stride, stream);
+                    consume(root, trials, nullptr, trial_stride, true);
+                    gpu_utils::check_last_gpu_error(
+                        "FDMT integer search (direct) launch failed");
+                    continue;
+                }
+                run_top_int<TInt>(level_ptr(m_top->level),
+                                  level_ptr(m_top->target), beam_stride,
+                                  stream);
+                level = m_top->target;
+                consume(level, level_ptr(level), nullptr, beam_stride, false);
+            }
+            while (level + 1 < root) {
+                ++level;
+                const int adv_begin = merge(level);
+                consume(level, level_ptr(level), level_ptr(level - 1),
+                        beam_stride, false);
+                advance(level, adv_begin);
+            }
+            // The root: merged on the fly by the sink from level root - 1.
+            consume(root, level_ptr(root - 1), level_ptr(root - 1), beam_stride,
+                    false);
+            advance(root, 0);
+            gpu_utils::check_last_gpu_error(
+                "FDMT integer search (direct) launch failed");
+        }
+    }
+
+    /// Level K of the packed search from the input (uint32_t running sums).
+    template <typename TInt>
+    void launch_direct_int(const FDMTInputPacked& input,
+                           TInt* out,
+                           cudaStream_t stream) {
+        auto& d          = *m_direct;
+        const int nchans = static_cast<int>(m_plan.get_nchans());
+        const int active = static_cast<int>(m_active);
+        auto* prefix     = reinterpret_cast<uint32_t*>(
+            thrust::raw_pointer_cast(d.prefix.data()));
+        detail::kernel_direct_prefix<FDMTInputPacked, uint32_t>
+            <<<dim3(nchans, 1, m_nbeams), detail::kPrefixThreads, 0, stream>>>(
+                input, m_direct_win_in, d.window, nchans, active, prefix,
+                d.pitch);
+        constexpr int kRows = detail::kDirectRowsPerWarp * detail::kDirectWarps;
+        const int ntiles =
+            (active + detail::kDirectTile - 1) / detail::kDirectTile;
+        const dim3 grid((d.max_rows + kRows - 1) / kRows, d.nsubs,
+                        m_nbeams * ntiles);
+        gpu_utils::check_kernel_launch_params(grid,
+                                              dim3(detail::kDirectWarps * 32));
+        detail::kernel_direct_level<uint32_t, TInt>
+            <<<grid, detail::kDirectWarps * 32, d.smem, stream>>>(
+                prefix, d.pitch, d.window, nchans,
+                thrust::raw_pointer_cast(d.subs.data()),
+                thrust::raw_pointer_cast(d.leaf_off.data()),
+                thrust::raw_pointer_cast(d.leaves.data()), out,
+                static_cast<int>(m_chunk), static_cast<int64_t>(m_half_elems),
+                d.cpass, active, ntiles);
+        gpu_utils::check_last_gpu_error(
+            "FDMT (cuda): integer direct levels failed");
+    }
+
+    /// The direct top of the packed search: trials (rows m_chunk apart,
+    /// beams `out_beam_stride` apart) from level k's state and rings, then
+    /// level k's rings (run_top's integer analogue).
+    template <typename TInt>
+    void run_top_int(const TInt* level_state,
+                     TInt* out,
+                     int64_t out_beam_stride,
+                     cudaStream_t stream) {
+        auto& t              = *m_top;
+        constexpr int kWarps = 8;
+        constexpr int kSamps = 32 * detail::kTopSampsPerLane;
+        const int active     = static_cast<int>(m_active);
+        auto* rings =
+            reinterpret_cast<TInt*>(thrust::raw_pointer_cast(t.ring.data()));
+        const dim3 grid((t.ntrials + kWarps - 1) / kWarps,
+                        (active + kSamps - 1) / kSamps, m_nbeams);
+        gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
+        detail::kernel_direct_top<TInt><<<grid, kWarps * 32, 0, stream>>>(
+            level_state, static_cast<int64_t>(m_half_elems),
+            static_cast<int>(m_chunk), rings, t.ring_size,
+            thrust::raw_pointer_cast(t.ring_off.data()),
+            thrust::raw_pointer_cast(t.ring_len.data()),
+            thrust::raw_pointer_cast(t.leaf_off.data()),
+            thrust::raw_pointer_cast(t.leaves.data()),
+            thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
+            out_beam_stride, static_cast<int>(m_chunk), m_chunk_pos, active);
+        constexpr int kSegment = 256;
+        const int newest       = std::min(t.max_ring, active);
+        if (newest > 0) {
+            const dim3 rgrid((t.nrows + kWarps - 1) / kWarps,
+                             (newest + kSegment - 1) / kSegment, m_nbeams);
+            detail::kernel_direct_top_ring<TInt>
+                <<<rgrid, kWarps * 32, 0, stream>>>(
+                    level_state, static_cast<int64_t>(m_half_elems),
+                    static_cast<int>(m_chunk), rings, t.ring_size,
+                    thrust::raw_pointer_cast(t.ring_off.data()),
+                    thrust::raw_pointer_cast(t.ring_len.data()), t.nrows,
+                    m_chunk_pos, active);
+        }
+        gpu_utils::check_last_gpu_error(
+            "FDMT (cuda): integer direct top failed");
     }
 
     void reset_search_history(Stream queue) override {
@@ -1691,6 +1921,14 @@ private:
     SizeType m_search_max_fuse{SIZE_MAX};
     SizeType m_search_nbits{32};
     bool m_search_u32{false};
+    // The constructor's fuse_levels (the packed search runs no tile fusion,
+    // but takes the direct levels when this is automatic).
+    SizeType m_requested_fuse{kFDMTAutoFuse};
+    /// 32-bit words per direct-top ring / trial element: 2 for the packed
+    /// search's uint64_t state, else 1 (float or uint32_t).
+    [[nodiscard]] SizeType top_words() const noexcept {
+        return (m_search_nbits != 32 && !m_search_u32) ? 2 : 1;
+    }
     // Packed search: exact integer tree history, a ring at every level.
     thrust::device_vector<uint64_t> m_integer_ring;
     thrust::device_vector<uint32_t> m_integer32_ring;
@@ -2390,13 +2628,30 @@ private:
     void configure_direct(SizeType requested) {
         m_direct.reset();
         const SizeType levels = kDirectLevels;
-        if (m_mode != FDMTMode::kValid || m_search_nbits != 32 ||
-            requested != kFDMTAutoFuse || m_plan.get_niters() <= levels ||
-            m_search_max_fuse < levels || get_fuse_levels() >= levels) {
+        // The packed search (exact integers) takes them too: its level-0
+        // boxes use the plan's integer dyadic weights unrounded, so level K
+        // is an exact integer sum of weighted input boxes (uint32_t running
+        // sums, kernel_direct_level<uint32_t, TInt>).
+        const bool packed = m_search_nbits != 32;
+        if (packed) {
+            requested = m_requested_fuse;
+        }
+        if (m_mode != FDMTMode::kValid || requested != kFDMTAutoFuse ||
+            m_plan.get_niters() <= levels || m_search_max_fuse < levels ||
+            get_fuse_levels() >= levels) {
             return;
         }
         std::vector<float> box_w(m_box_w_d.size());
-        thrust::copy(m_box_w_d.begin(), m_box_w_d.end(), box_w.begin());
+        if (packed) {
+            // Integer weights (exact in float), so the leaves give the
+            // integer search's level-0 values.
+            const auto weights = m_plan.get_box_weights();
+            for (SizeType i = 0; i < box_w.size(); ++i) {
+                box_w[i] = static_cast<float>(weights[i]);
+            }
+        } else {
+            thrust::copy(m_box_w_d.begin(), m_box_w_d.end(), box_w.begin());
+        }
         auto plan = detail::build_fdmt_direct_plan(m_plan, levels,
                                                    m_use_box_smearing, box_w);
         int span  = 0;
@@ -2409,6 +2664,15 @@ private:
         const SizeType optin = max_optin_smem_bytes();
         if (per_channel > optin) {
             return;
+        }
+        if (packed) {
+            // uint32_t running sums over the window and a chunk.
+            const auto maxval = static_cast<double>(
+                bit_pack_utils::max_sample_value(m_search_nbits));
+            if (static_cast<double>(plan.window + m_chunk + 1) * maxval >
+                4294967295.0) {
+                return;
+            }
         }
         auto d         = std::make_unique<DirectLevelsD>();
         d->levels      = levels;
@@ -2436,11 +2700,20 @@ private:
         }
         d->pitch = d->window + static_cast<int>(m_chunk) + 1;
         d->prefix.resize(rows * static_cast<SizeType>(d->pitch));
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(detail::kernel_direct_level,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(d->smem)),
-            "FDMT (cuda): direct levels shared-memory opt-in");
+        const auto opt_in = [&](auto kernel) {
+            gpu_utils::check_gpu_call(
+                cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    static_cast<int>(d->smem)),
+                "FDMT (cuda): direct levels shared-memory opt-in");
+        };
+        if (!packed) {
+            opt_in(detail::kernel_direct_level<>);
+        } else if (m_search_u32) {
+            opt_in(detail::kernel_direct_level<uint32_t, uint32_t>);
+        } else {
+            opt_in(detail::kernel_direct_level<uint32_t, uint64_t>);
+        }
         logging::debug("FDMT (cuda): levels 0..{} direct ({} subbands, {} "
                        "leaves, window {}, {} channels per pass, {} B shared)",
                        levels, d->nsubs, plan.leaves.size(), d->window,
@@ -2475,15 +2748,15 @@ private:
                         m_nbeams * ntiles);
         gpu_utils::check_kernel_launch_params(grid,
                                               dim3(detail::kDirectWarps * 32));
-        detail::kernel_direct_level<<<grid, detail::kDirectWarps * 32, d.smem,
-                                      stream>>>(
-            thrust::raw_pointer_cast(d.prefix.data()), d.pitch, d.window,
-            nchans, thrust::raw_pointer_cast(d.subs.data()),
-            thrust::raw_pointer_cast(d.leaf_off.data()),
-            thrust::raw_pointer_cast(d.leaves.data()),
-            reinterpret_cast<float*>(m_levels_d[d.levels].base),
-            static_cast<int>(m_chunk), level_beam_stride(d.levels), d.cpass,
-            active, ntiles);
+        detail::kernel_direct_level<>
+            <<<grid, detail::kDirectWarps * 32, d.smem, stream>>>(
+                thrust::raw_pointer_cast(d.prefix.data()), d.pitch, d.window,
+                nchans, thrust::raw_pointer_cast(d.subs.data()),
+                thrust::raw_pointer_cast(d.leaf_off.data()),
+                thrust::raw_pointer_cast(d.leaves.data()),
+                reinterpret_cast<float*>(m_levels_d[d.levels].base),
+                static_cast<int>(m_chunk), level_beam_stride(d.levels), d.cpass,
+                active, ntiles);
         gpu_utils::check_last_gpu_error("FDMT (cuda): direct levels failed");
     }
 
@@ -2576,7 +2849,8 @@ private:
         }
         auto plan = detail::build_fdmt_direct_top(m_plan, level, target);
         constexpr SizeType kMaxRingBytes = SizeType{2} << 30;
-        if (m_nbeams * static_cast<SizeType>(plan.ring_size) * sizeof(float) >
+        if (m_nbeams * static_cast<SizeType>(plan.ring_size) * sizeof(float) *
+                top_words() >
             kMaxRingBytes) {
             return;
         }
@@ -2593,7 +2867,10 @@ private:
         t->ring_len    = plan.ring_len;
         t->ring_off    = plan.ring_off;
         t->hist_leaves = plan.hist_leaves;
-        t->ring.resize(m_nbeams * static_cast<SizeType>(plan.ring_size), 0.0F);
+        // uint64_t rings (packed search) take two floats' storage each.
+        t->ring.resize(m_nbeams * static_cast<SizeType>(plan.ring_size) *
+                           top_words(),
+                       0.0F);
         t->hist_coords.resize(target + 1);
         t->hist_max_delay.assign(target + 1, 0);
         for (SizeType l = level + 1; l <= target; ++l) {
@@ -2603,7 +2880,8 @@ private:
             }
         }
         if (target == root) {
-            t->trials.resize(m_nbeams * plan.out_row.size() * m_chunk);
+            t->trials.resize(m_nbeams * plan.out_row.size() * m_chunk *
+                             top_words());
         }
         logging::debug("FDMT (cuda): level {} summed from level {} ({} leaves, "
                        "rings {} floats per beam)",
@@ -2633,7 +2911,7 @@ private:
         const dim3 grid((t.ntrials + kWarps - 1) / kWarps,
                         (active + kSamps - 1) / kSamps, m_nbeams);
         gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
-        detail::kernel_direct_top<<<grid, kWarps * 32, 0, stream>>>(
+        detail::kernel_direct_top<><<<grid, kWarps * 32, 0, stream>>>(
             reinterpret_cast<const float*>(m_levels_d[t.level].base),
             level_beam_stride(t.level), static_cast<int>(m_chunk),
             thrust::raw_pointer_cast(t.ring.data()), t.ring_size,
@@ -2658,7 +2936,7 @@ private:
         if (newest > 0) {
             const dim3 grid((t.nrows + kWarps - 1) / kWarps,
                             (newest + kSegment - 1) / kSegment, m_nbeams);
-            detail::kernel_direct_top_ring<<<grid, kWarps * 32, 0, stream>>>(
+            detail::kernel_direct_top_ring<><<<grid, kWarps * 32, 0, stream>>>(
                 reinterpret_cast<const float*>(m_levels_d[t.level].base),
                 level_beam_stride(t.level), static_cast<int>(m_chunk),
                 thrust::raw_pointer_cast(t.ring.data()), t.ring_size,

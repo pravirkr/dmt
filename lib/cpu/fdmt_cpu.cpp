@@ -38,6 +38,18 @@ namespace dmt::algorithms {
 
 namespace {
 
+/// Stores src[0 .. n) into a ring of `delay` slots at stream positions
+/// pos .. pos + n (slot = position mod delay), n <= delay: at most two
+/// contiguous copies instead of a remainder per sample.
+template <typename T>
+void ring_store(
+    T* ring, SizeType delay, uint64_t pos, const T* src, SizeType n) {
+    const auto slot   = static_cast<SizeType>(pos % delay);
+    const SizeType n1 = std::min(n, delay - slot);
+    std::copy_n(src, n1, ring + slot);
+    std::copy_n(src + n1, n - n1, ring);
+}
+
 /**
  * @brief A large zero-initialised array for the engine's tree state and
  * tree history: 2 MiB-aligned, with transparent huge pages requested on
@@ -1231,9 +1243,13 @@ public:
         }
         m_search_nbits = cfg.search_nbits;
         m_search_upper = cfg.search_upper_levels;
+        // Packed search state in uint32_t when the plan bounds every tree
+        // value below 2^32 (as the GPU engine): half the bytes per merge.
+        m_search_u32 = detail::int_search_fits_u32(m_plan, m_use_box_smearing,
+                                                   m_search_nbits);
         m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
                                             cfg.chunk_nsamps, m_search_upper);
-        if (m_search_nbits != 32 && cfg.chunk_nsamps == 0) {
+        if (m_search_nbits != 32 && !m_search_u32 && cfg.chunk_nsamps == 0) {
             m_chunk = std::min(m_plan.get_nsamps(),
                                std::max<SizeType>(64, m_chunk / 2));
         }
@@ -1302,16 +1318,17 @@ public:
                     const float* state = level_ptr<float>(l - 1, b);
                     float* hist        = m_tree_history.data() +
                                          b * m_plan.get_tree_history_size();
+                    // Each coordinate owns a disjoint ring.
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
                     for (SizeType k = k_begin; k < m_ops[l].size(); ++k) {
                         const auto& op = m_ops[l][k];
                         if (op.head == SIZE_MAX || op.delay == 0) {
                             continue;
                         }
                         const SizeType keep = std::min(op.delay, m_active);
-                        for (SizeType t = m_active - keep; t < m_active; ++t) {
-                            hist[op.hist + (m_stream_pos + t) % op.delay] =
-                                state[op.head + t];
-                        }
+                        ring_store(hist + op.hist, op.delay,
+                                   m_stream_pos + m_active - keep,
+                                   state + op.head + m_active - keep, keep);
                     }
                 }
             };
@@ -1337,9 +1354,38 @@ public:
             throw std::invalid_argument(
                 "FDMT integer search: input bit depth mismatch");
         }
+        if (m_search_u32) {
+            execute_search_typed<uint32_t>(waterfall, nbits, sink,
+                                           m_integer32_history.data());
+        } else {
+            execute_search_typed<uint64_t>(waterfall, nbits, sink,
+                                           m_integer_history.data());
+        }
+    }
+
+    template <typename TInt>
+    void execute_search_typed(std::span<const uint8_t> waterfall,
+                              SizeType nbits,
+                              detail::FDMTSearchSink& sink,
+                              TInt* history) {
+        // The sink reads uint32_t state through the integer32_* fields.
+        const auto as_u64 = [](const TInt* p) -> const uint64_t* {
+            if constexpr (std::is_same_v<TInt, uint64_t>) {
+                return p;
+            } else {
+                return nullptr;
+            }
+        };
+        const auto as_u32 = [](const TInt* p) -> const uint32_t* {
+            if constexpr (std::is_same_v<TInt, uint32_t>) {
+                return p;
+            } else {
+                return nullptr;
+            }
+        };
         const auto input    = packed_input(waterfall, nbits);
         const SizeType root = m_plan.get_niters();
-        const SizeType half = m_nbeams * m_half_elems * sizeof(uint64_t);
+        const SizeType half = m_nbeams * m_half_elems * sizeof(TInt);
         for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
             m_input    = input;
             m_input.t0 = t0;
@@ -1347,18 +1393,17 @@ public:
             for (SizeType l = 0; l < root; ++l) {
                 m_levels[l] = {
                     .base = m_state_internal.data() + (l % 2) * half,
-                    .type = Elem::kF32, // private path uses level_ptr<uint64_t>
-                    .beam_stride = m_half_elems * sizeof(uint64_t)};
+                    .type = Elem::kF32, // private path uses level_ptr<TInt>
+                    .beam_stride = m_half_elems * sizeof(TInt)};
             }
             const auto& grids = m_plan.get_container().grids[0];
             for (SizeType b = 0; b < m_nbeams; ++b) {
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
                 for (SizeType c = 0; c < grids.size(); ++c) {
-                    init_channel<uint64_t>(beam_input(b),
-                                           level_ptr<uint64_t>(0, b) +
-                                               grids[c].coord_offset *
-                                                   m_row_len[0],
-                                           c, b, fdmt_thread_id());
+                    init_channel<TInt>(beam_input(b),
+                                       level_ptr<TInt>(0, b) +
+                                           grids[c].coord_offset * m_row_len[0],
+                                       c, b, fdmt_thread_id());
                 }
             }
             for (SizeType l = 0; l <= root; ++l) {
@@ -1366,23 +1411,36 @@ public:
                     const auto reg_coords =
                         detail::fdmt_regular_coords(m_plan.get_container(), l);
                     for (SizeType b = 0; b < m_nbeams; ++b) {
-                        const auto* in   = level_ptr<uint64_t>(l - 1, b);
-                        auto* out        = level_ptr<uint64_t>(l, b);
-                        const auto* hist = m_integer_history.data() +
-                                           b * m_plan.get_tree_history_size();
+                        const auto* in = level_ptr<TInt>(l - 1, b);
+                        auto* out      = level_ptr<TInt>(l, b);
+                        const auto* hist =
+                            history + b * m_plan.get_tree_history_size();
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
                         for (SizeType k = 0; k < reg_coords; ++k) {
-                            const auto& op = m_ops[l][k];
-                            for (SizeType t = 0; t < m_active; ++t) {
-                                uint64_t value = in[op.tail + t];
-                                if (op.head != SIZE_MAX) {
-                                    value += t >= op.delay
-                                                 ? in[op.head + t - op.delay]
-                                                 : hist[op.hist +
-                                                        (m_stream_pos + t) %
-                                                            op.delay];
+                            const auto& op   = m_ops[l][k];
+                            const TInt* tail = in + op.tail;
+                            TInt* dst        = out + op.out;
+                            if (op.head == SIZE_MAX) {
+                                std::copy_n(tail, m_active, dst);
+                                continue;
+                            }
+                            // Samples before the delay read the ring (slot
+                            // = stream position mod delay, wrapping once);
+                            // the rest read the head row.
+                            const SizeType split = std::min(op.delay, m_active);
+                            if (split > 0) {
+                                const TInt* ring = hist + op.hist;
+                                SizeType slot    = static_cast<SizeType>(
+                                    m_stream_pos % op.delay);
+                                for (SizeType t = 0; t < split; ++t) {
+                                    dst[t] = tail[t] + ring[slot];
+                                    slot = slot + 1 == op.delay ? 0 : slot + 1;
                                 }
-                                out[op.out + t] = value;
+                            }
+                            const TInt* head = in + op.head - op.delay;
+#pragma omp simd
+                            for (SizeType t = split; t < m_active; ++t) {
+                                dst[t] = tail[t] + head[t];
                             }
                         }
                     }
@@ -1395,17 +1453,21 @@ public:
                         .nsamps         = m_active,
                         .sample_begin   = m_stream_pos,
                         .history_ring   = true,
-                        .integer_state  = level_ptr<uint64_t>(source, 0),
+                        .integer_state  = as_u64(level_ptr<TInt>(source, 0)),
                         .integer_prev_state =
-                            l > 0 ? level_ptr<uint64_t>(l - 1, 0) : nullptr,
-                        .integer_history = m_integer_history.data()});
+                            l > 0 ? as_u64(level_ptr<TInt>(l - 1, 0)) : nullptr,
+                        .integer_history = as_u64(history),
+                        .integer32_state = as_u32(level_ptr<TInt>(source, 0)),
+                        .integer32_prev_state =
+                            l > 0 ? as_u32(level_ptr<TInt>(l - 1, 0)) : nullptr,
+                        .integer32_history = as_u32(history)});
                 // Advance only after the sink and the merge have read the
                 // old history. Each coordinate owns a disjoint ring.
                 if (l > 0) {
                     for (SizeType b = 0; b < m_nbeams; ++b) {
-                        const auto* in = level_ptr<uint64_t>(l - 1, b);
-                        auto* hist     = m_integer_history.data() +
-                                         b * m_plan.get_tree_history_size();
+                        const auto* in = level_ptr<TInt>(l - 1, b);
+                        auto* hist =
+                            history + b * m_plan.get_tree_history_size();
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
                         for (SizeType k = 0; k < m_ops[l].size(); ++k) {
                             const auto& op = m_ops[l][k];
@@ -1413,11 +1475,9 @@ public:
                                 continue;
                             }
                             const SizeType keep = std::min(op.delay, m_active);
-                            for (SizeType t = m_active - keep; t < m_active;
-                                 ++t) {
-                                hist[op.hist + (m_stream_pos + t) % op.delay] =
-                                    in[op.head + t];
-                            }
+                            ring_store(hist + op.hist, op.delay,
+                                       m_stream_pos + m_active - keep,
+                                       in + op.head + m_active - keep, keep);
                         }
                     }
                 }
@@ -1474,7 +1534,8 @@ public:
                          (m_ops_elems * sizeof(FDMTMergeOp)),
             .state     = m_state_internal.size(),
             .history   = history_state_size() * sizeof(float) +
-                         m_integer_history.size() * sizeof(uint64_t),
+                         m_integer_history.size() * sizeof(uint64_t) +
+                         m_integer32_history.size() * sizeof(uint32_t),
             .workspace = m_workspace.size(),
             .output    = m_nbeams * m_plan.get_dmt_size() * sizeof(float),
         };
@@ -1587,6 +1648,7 @@ public:
         std::ranges::fill(m_history, 0.0F);
         std::ranges::fill(m_tree_history, 0.0F);
         std::ranges::fill(m_integer_history, uint64_t{0});
+        std::ranges::fill(m_integer32_history, uint32_t{0});
         m_stream_pos = 0;
         // Abandons any unfinished stepper block along with its stream.
         m_is_initialized = false;
@@ -1678,7 +1740,9 @@ private:
     SizeType m_stream_pos{0};
     SizeType m_search_nbits{32};
     bool m_search_upper{false};
+    bool m_search_u32{false};
     FDMTLargeArray<uint64_t> m_integer_history;
+    FDMTLargeArray<uint32_t> m_integer32_history;
 
     // Level-0 box means (use_box_smearing; see fdmt_box_weights.hpp): dyadic
     // float weights, the packed-input rounding recipes on the common scale
@@ -1962,6 +2026,9 @@ private:
             if (m_search_nbits == 32) {
                 m_tree_history.assign(m_nbeams * m_plan.get_tree_history_size(),
                                       m_nthreads);
+            } else if (m_search_u32) {
+                m_integer32_history.assign(
+                    m_nbeams * m_plan.get_tree_history_size(), m_nthreads);
             } else {
                 m_integer_history.assign(
                     m_nbeams * m_plan.get_tree_history_size(), m_nthreads);

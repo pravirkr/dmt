@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -353,6 +355,13 @@ void bench_fused(benchmark::State& state,
         std::vector<SizeType> depths{0};
         if (suite_config().subband_depth != 0) {
             depths.push_back(suite_config().subband_depth);
+        }
+        // DMT_BENCH_SB adds one more subband depth (developer runs).
+        if (const char* env = std::getenv("DMT_BENCH_SB")) { // NOLINT
+            const auto sb = static_cast<SizeType>(std::stoul(env));
+            if (std::ranges::find(depths, sb) == depths.end()) {
+                depths.push_back(sb);
+            }
         }
         for (const auto sb : depths) {
             reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}", cfg,

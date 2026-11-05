@@ -199,6 +199,251 @@ DMT_D bool detect_tile(const T* ring,
     return hit;
 }
 
+// detect_tile through the width screen (BoxcarScreenGroup, float rows, no
+// trapezoid): `mn` (lookback + n + 1 entries of shared memory) receives the
+// tile's prefixes in linear order and is raised in place to range-minimum
+// level k as the groups need it (entry j then holds min(P[j .. j + 2^k - 1])).
+// Each update reads only entries at or above its own index, so updating in
+// ascending batches (read, sync, write, sync) is safe. Groups whose bound
+// passes are checked width by width, exactly as detect_tile does; a group
+// below the table's current level (sparse widths) is checked directly.
+template <typename T, int kBlockThreads, bool kFull, bool kCold>
+DMT_D bool detect_tile_grouped(const T* ring,
+                               uint32_t mask,
+                               uint32_t position,
+                               uint32_t lookback,
+                               int n,
+                               const uint32_t* widths,
+                               const T* thresholds,
+                               const BoxcarScreenGroup* groups,
+                               int ngroups,
+                               const float* group_thresholds,
+                               T* mn,
+                               uint64_t start,
+                               uint64_t warmup) {
+    const int tid       = static_cast<int>(threadIdx.x);
+    const int len       = static_cast<int>(lookback) + n + 1;
+    const uint32_t lin0 = position - lookback; // ring index of mn[0]
+    for (int j = tid; j < len; j += kBlockThreads) {
+        mn[j] = ring[(lin0 + static_cast<uint32_t>(j)) & mask];
+    }
+    T current[kItems];
+#pragma unroll
+    for (int k = 0; k < kItems; ++k) {
+        current[k] = ring[(position + 1U +
+                           static_cast<uint32_t>(k * kBlockThreads + tid)) &
+                          mask];
+    }
+    __syncthreads();
+    // One width checked exactly (as detect_tile), from the ring: mn holds
+    // the prefixes only until the first level is raised.
+    const auto exact = [&](uint32_t f) {
+        const uint32_t width = widths[f];
+        const T threshold    = thresholds[f];
+        bool hit             = false;
+#pragma unroll
+        for (int k = 0; k < kItems; ++k) {
+            const int s = k * kBlockThreads + tid;
+            if (!kFull && s >= n) {
+                break;
+            }
+            const uint32_t idx = position + 1U + static_cast<uint32_t>(s);
+            bool h = current[k] - ring[(idx - width) & mask] >= threshold;
+            if constexpr (kCold) {
+                h = h && start + s >= warmup + width - 1;
+            }
+            hit = hit || h;
+        }
+        return hit;
+    };
+    bool hit  = false;
+    int level = 0;
+    for (int g = 0; g < ngroups; ++g) {
+        const BoxcarScreenGroup grp = groups[g];
+        if (static_cast<int>(grp.level) < level ||
+            (level == 0 && grp.level == 0)) {
+            // A single-run group (no bound to gain), or the table is past
+            // the group's level (sparse widths; never with sorted groups).
+            for (uint32_t f = grp.f_lo; f < grp.f_hi; ++f) {
+                hit = exact(f) || hit;
+            }
+            continue;
+        }
+        while (level < static_cast<int>(grp.level)) {
+            const int half  = 1 << level;
+            const int valid = len - (2 * half) + 1;
+            for (int b0 = 0; b0 < valid; b0 += kItems * kBlockThreads) {
+                T v[kItems];
+#pragma unroll
+                for (int r = 0; r < kItems; ++r) {
+                    const int j = b0 + (r * kBlockThreads) + tid;
+                    if (j < valid) {
+                        v[r] = fminf(mn[j], mn[j + half]);
+                    }
+                }
+                __syncthreads();
+#pragma unroll
+                for (int r = 0; r < kItems; ++r) {
+                    const int j = b0 + (r * kBlockThreads) + tid;
+                    if (j < valid) {
+                        mn[j] = v[r];
+                    }
+                }
+                __syncthreads();
+            }
+            ++level;
+        }
+        // Bound of the whole group; a pass is checked width by width from
+        // the ring (mn holds range minima now).
+        const int span    = 1 << grp.level;
+        const T bound_thr = group_thresholds[g];
+        bool pass         = false;
+#pragma unroll
+        for (int k = 0; k < kItems; ++k) {
+            const int s = k * kBlockThreads + tid;
+            if (!kFull && s >= n) {
+                break;
+            }
+            const int j = static_cast<int>(lookback) + 1 + s;
+            const T m   = fminf(mn[j - static_cast<int>(grp.w_hi)],
+                                mn[j - static_cast<int>(grp.w_lo) - span + 1]);
+            pass        = pass || current[k] - m >= bound_thr;
+        }
+        if (pass) {
+            for (uint32_t f = grp.f_lo; f < grp.f_hi; ++f) {
+                hit = exact(f) || hit;
+            }
+        }
+    }
+    __syncthreads(); // mn is reused by the next tile
+    return hit;
+}
+
+// detect_tile_grouped for packed rows (uint64 running sums, which only
+// grow): with m1 the row's mean per sample, the centred sums
+// c(j) = (P(j) - P(0)) - m1 j satisfy S_w - m1 w = c(t) - c(t - w), so the
+// range-minimum bound of c is compared with the group's smallest
+// cutoff - mean (rounded down on the host). c is float: a group passes
+// within a margin of 2^-20 of the tile's magnitude, several times the
+// float rounding of c, m1 and the bound, so the screen stays conservative.
+// Passing groups are checked exactly in integers from the ring.
+template <int kBlockThreads, bool kFull, bool kCold>
+DMT_D bool detect_tile_grouped_int(const uint64_t* ring,
+                                   uint32_t mask,
+                                   uint32_t position,
+                                   uint32_t lookback,
+                                   int n,
+                                   const uint32_t* widths,
+                                   const uint64_t* thresholds,
+                                   const BoxcarScreenGroup* groups,
+                                   int ngroups,
+                                   const float* group_thresholds,
+                                   float m1,
+                                   float* mn,
+                                   uint64_t start,
+                                   uint64_t warmup) {
+    const int tid       = static_cast<int>(threadIdx.x);
+    const int len       = static_cast<int>(lookback) + n + 1;
+    const uint32_t lin0 = position - lookback;
+    const uint64_t p0   = ring[lin0 & mask];
+    for (int j = tid; j < len; j += kBlockThreads) {
+        const uint64_t e = ring[(lin0 + static_cast<uint32_t>(j)) & mask] - p0;
+        mn[j]            = __ull2float_rn(e) - (m1 * static_cast<float>(j));
+    }
+    const float extent =
+        __ull2float_ru(ring[(lin0 + static_cast<uint32_t>(len - 1)) & mask] -
+                       p0) +
+        (fabsf(m1) * static_cast<float>(len));
+    const float margin = (extent * 0x1p-20F) + 1.0F;
+    __syncthreads();
+    float current[kItems];
+    uint64_t current_raw[kItems];
+#pragma unroll
+    for (int k = 0; k < kItems; ++k) {
+        const int j = static_cast<int>(lookback) + 1 + k * kBlockThreads + tid;
+        current[k]  = j < len ? mn[j] : 0.0F;
+        current_raw[k] = ring[(position + 1U +
+                               static_cast<uint32_t>(k * kBlockThreads + tid)) &
+                              mask];
+    }
+    const auto exact = [&](uint32_t f) {
+        const uint32_t width = widths[f];
+        const uint64_t th    = thresholds[f];
+        bool hit             = false;
+#pragma unroll
+        for (int k = 0; k < kItems; ++k) {
+            const int s = k * kBlockThreads + tid;
+            if (!kFull && s >= n) {
+                break;
+            }
+            const uint32_t idx = position + 1U + static_cast<uint32_t>(s);
+            bool h = current_raw[k] - ring[(idx - width) & mask] >= th;
+            if constexpr (kCold) {
+                h = h && start + s >= warmup + width - 1;
+            }
+            hit = hit || h;
+        }
+        return hit;
+    };
+    bool hit  = false;
+    int level = 0;
+    for (int g = 0; g < ngroups; ++g) {
+        const BoxcarScreenGroup grp = groups[g];
+        if (static_cast<int>(grp.level) < level) {
+            for (uint32_t f = grp.f_lo; f < grp.f_hi; ++f) {
+                hit = exact(f) || hit;
+            }
+            continue;
+        }
+        while (level < static_cast<int>(grp.level)) {
+            const int half  = 1 << level;
+            const int valid = len - (2 * half) + 1;
+            for (int b0 = 0; b0 < valid; b0 += kItems * kBlockThreads) {
+                float v[kItems];
+#pragma unroll
+                for (int r = 0; r < kItems; ++r) {
+                    const int j = b0 + (r * kBlockThreads) + tid;
+                    if (j < valid) {
+                        v[r] = fminf(mn[j], mn[j + half]);
+                    }
+                }
+                __syncthreads();
+#pragma unroll
+                for (int r = 0; r < kItems; ++r) {
+                    const int j = b0 + (r * kBlockThreads) + tid;
+                    if (j < valid) {
+                        mn[j] = v[r];
+                    }
+                }
+                __syncthreads();
+            }
+            ++level;
+        }
+        const int span        = 1 << grp.level;
+        const float bound_thr = group_thresholds[g] - margin;
+        bool pass             = false;
+#pragma unroll
+        for (int k = 0; k < kItems; ++k) {
+            const int s = k * kBlockThreads + tid;
+            if (!kFull && s >= n) {
+                break;
+            }
+            const int j = static_cast<int>(lookback) + 1 + s;
+            const float m =
+                fminf(mn[j - static_cast<int>(grp.w_hi)],
+                      mn[j - static_cast<int>(grp.w_lo) - span + 1]);
+            pass = pass || current[k] - m >= bound_thr;
+        }
+        if (pass) {
+            for (uint32_t f = grp.f_lo; f < grp.f_hi; ++f) {
+                hit = exact(f) || hit;
+            }
+        }
+    }
+    __syncthreads(); // mn is reused by the next tile
+    return hit;
+}
+
 // Scan trailing-run summaries to give each worker the state of every
 // preceding sample. Each worker then emits only excursions ending within
 // its own four samples. The last worker saves the open trailing excursion.
@@ -265,7 +510,9 @@ DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
     __syncthreads();
 }
 
-template <typename T, int kBlockThreads>
+// kScreen: tiles are screened by width group (detect_tile_grouped*); a
+// separate instantiation, so the plain kernel keeps its register budget.
+template <typename T, int kBlockThreads, bool kScreen>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -279,6 +526,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        const float* inv_sigma,
                        T* carry_all,
                        BoxcarPeak* peaks_all,
+                       uint8_t* open_all,
                        SizeType peak_count,
                        RawCandidate* candidates,
                        CandidateCounts* counts,
@@ -294,7 +542,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        double unit,
                        uint32_t mask,
                        bool shared_tables,
-                       bool use_trapezoid) {
+                       bool use_trapezoid,
+                       const BoxcarScreenGroup* screen_groups,
+                       int screen_ngroups,
+                       const float* screen_thresholds,
+                       const float* screen_m1,
+                       SizeType screen_offset) {
     constexpr int kBlockTile = kBlockThreads * kItems;
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
@@ -348,7 +601,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         }
         return __syncthreads_or(open) != 0;
     };
-    bool open = input.sample_begin > 0 ? any_open() : false;
+    // Whether a run is open, as any_open() would find: kept per row by the
+    // last call, so the common call never reads the row's peaks.
+    bool open = input.sample_begin > 0 && open_all[index] != 0;
     if (input.sample_begin == 0) {
         for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
             ring[j & mask] = T{0};
@@ -360,6 +615,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         }
         __syncthreads();
         // Bootstrap only the short raw carry, never an entire DM-time row.
+        const auto carry0 =
+            static_cast<uint32_t>(input.sample_begin % max_width);
+        const auto width32 = static_cast<uint32_t>(max_width);
         for (uint32_t p = 0; p < lookback; p += kBlockTile) {
             const T base = ring[p & mask];
             T x[kItems];
@@ -367,7 +625,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 const uint32_t t    = p + tid * kItems + j;
                 const uint32_t back = t < lookback ? lookback - t : 0;
                 x[j] = t < lookback && input.sample_begin >= back
-                           ? carry[(input.sample_begin - back) % max_width]
+                           ? carry[carry0 >= back ? carry0 - back
+                                                  : carry0 + width32 - back]
                            : T{0};
             }
             prefix_tile<T, kBlockThreads>(shared, ring, mask, x, p, base);
@@ -399,6 +658,24 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         const auto run_detect = [&](auto full_tag, auto cold_tag) {
             constexpr bool kFull = decltype(full_tag)::value;
             constexpr bool kCold = decltype(cold_tag)::value;
+            if constexpr (kScreen) {
+                if constexpr (std::is_integral_v<T>) {
+                    return detect_tile_grouped_int<kBlockThreads, kFull, kCold>(
+                        ring, mask, position, lookback, n, wtab, ttab,
+                        screen_groups, screen_ngroups,
+                        screen_thresholds + row_index * screen_ngroups,
+                        screen_m1[row_index],
+                        reinterpret_cast<float*>(storage + screen_offset),
+                        start, row.warmup);
+                } else {
+                    return detect_tile_grouped<T, kBlockThreads, kFull, kCold>(
+                        ring, mask, position, lookback, n, wtab, ttab,
+                        screen_groups, screen_ngroups,
+                        screen_thresholds + row_index * screen_ngroups,
+                        reinterpret_cast<T*>(storage + screen_offset), start,
+                        row.warmup);
+                }
+            }
             return use_trapezoid
                        ? detect_tile<T, kBlockThreads, kFull, kCold, true>(
                              ring, mask, position, n, wtab, ttab, nfilters,
@@ -515,16 +792,23 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             __syncthreads();
         }
     }
+    if (tid == 0) {
+        open_all[index] = open ? 1 : 0;
+    }
     // The root's old FDMT history remains available until this kernel ends.
     const SizeType keep = (input.nsamps < max_width ? input.nsamps : max_width);
+    // Carry slot of the first kept sample; the kept samples follow it.
+    const auto keep0 = static_cast<uint32_t>(
+        (input.sample_begin + input.nsamps - keep) % max_width);
+    const auto width32 = static_cast<uint32_t>(max_width);
     for (SizeType t = tid; t < keep; t += kBlockThreads) {
         const SizeType sample = input.nsamps - keep + t;
+        uint32_t slot         = keep0 + static_cast<uint32_t>(t);
+        slot -= slot >= width32 ? width32 : 0U;
         if constexpr (std::is_integral_v<T>) {
-            carry[(input.sample_begin + sample) % max_width] =
-                boxcar_integer_sample(input, row, beam, sample, root);
+            carry[slot] = boxcar_integer_sample(input, row, beam, sample, root);
         } else {
-            carry[(input.sample_begin + sample) % max_width] =
-                boxcar_sample(input, row, beam, sample, root);
+            carry[slot] = boxcar_sample(input, row, beam, sample, root);
         }
     }
 }
@@ -533,6 +817,7 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
                                     SizeType nrows,
                                     SizeType peak_count,
                                     BoxcarPeak* peaks,
+                                    uint8_t* open,
                                     const uint32_t* widths,
                                     RawCandidate* candidates,
                                     CandidateCounts* counts,
@@ -567,6 +852,7 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
             peak.open = false;
         }
     }
+    open[index] = 0;
 }
 
 template <typename T> T* raw(thrust::device_vector<T>& v) {
@@ -630,6 +916,52 @@ public:
                 ? std::ldexp(1.0,
                              -static_cast<int>(plan.get_box_fraction_bits()))
                 : 1.0;
+        if (!config.use_trapezoid) {
+            const auto groups =
+                boxcar_screen_groups(planes.front().widths, false);
+            if (!groups.empty()) {
+                // Per row, each group's smallest threshold (float rows) or
+                // smallest cutoff - mean, rounded down (packed rows), and the
+                // packed rows' mean per sample (from the width-1 mean).
+                const bool packed = config.input_nbits != 32;
+                std::vector<float> group_thr;
+                std::vector<float> m1;
+                group_thr.reserve(m_rows.size() * groups.size());
+                for (const auto& p : planes) {
+                    for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
+                        const SizeType base = d * m_filters;
+                        for (const auto& g : groups) {
+                            double th = std::numeric_limits<double>::infinity();
+                            for (uint32_t f = g.f_lo; f < g.f_hi; ++f) {
+                                th = std::min(
+                                    th,
+                                    packed
+                                        ? static_cast<double>(
+                                              p.integer_thresh_lut[base + f]) -
+                                              p.integer_mean_lut[base + f]
+                                        : static_cast<double>(
+                                              p.raw_thresh_lut[base + f]));
+                            }
+                            auto thf = static_cast<float>(th);
+                            if (static_cast<double>(thf) > th) {
+                                thf = std::nextafter(
+                                    thf,
+                                    -std::numeric_limits<float>::infinity());
+                            }
+                            group_thr.push_back(thf);
+                        }
+                        if (packed) {
+                            m1.push_back(static_cast<float>(
+                                p.integer_mean_lut[base] /
+                                static_cast<double>(p.widths[0])));
+                        }
+                    }
+                }
+                m_screen_groups_d     = groups;
+                m_screen_thresholds_d = group_thr;
+                m_screen_m1_d         = m1;
+            }
+        }
         if (config.input_nbits == 32) {
             m_carry_d.resize(tasks * m_width, 0);
             configure_shared<float>();
@@ -648,6 +980,7 @@ public:
         m_integer_means      = means;
         m_integer_thresholds = cutoffs;
         m_peaks_d.resize(tasks * m_peak_count);
+        m_open_d.resize(tasks, 0);
         m_per_dm_d.resize(tasks, 0);
         m_candidates_d.resize(config.max_candidates);
         m_counts_d.resize(1);
@@ -729,10 +1062,10 @@ public:
         const auto stream = static_cast<cudaStream_t>(queue.native);
         kernel_flush_boxcar<<<(tasks + 127) / 128, 128, 0, stream>>>(
             raw(m_rows_d), m_rows.size(), m_peak_count, raw(m_peaks_d),
-            raw(m_widths_d), raw(m_candidates_d), raw(m_counts_d),
-            raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-            m_config.max_cands_per_dm, tasks, raw(m_integer_means),
-            raw(m_scales_d), m_filters, m_integer_unit,
+            raw(m_open_d), raw(m_widths_d), raw(m_candidates_d),
+            raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
+            m_config.max_candidates, m_config.max_cands_per_dm, tasks,
+            raw(m_integer_means), raw(m_scales_d), m_filters, m_integer_unit,
             m_config.input_nbits != 32 &&
                 m_config.peak_mode !=
                     PeakFindingMode::kContiguousPeakAcrossWidths);
@@ -769,6 +1102,8 @@ public:
             raw(m_carry_d), 0, m_carry_d.size() * sizeof(float), stream));
         gpu_utils::check_gpu_call(cudaMemsetAsync(
             raw(m_peaks_d), 0, m_peaks_d.size() * sizeof(BoxcarPeak), stream));
+        gpu_utils::check_gpu_call(
+            cudaMemsetAsync(raw(m_open_d), 0, m_open_d.size(), stream));
         if (!m_integer_carry.empty()) {
             gpu_utils::check_gpu_call(cudaMemsetAsync(
                 raw(m_integer_carry), 0,
@@ -815,13 +1150,16 @@ public:
             .plan = fdmt.plan + host_plan +
                     m_rows_d.size() * sizeof(BoxcarRow) +
                     m_widths_d.size() * sizeof(uint32_t) +
+                    m_screen_groups_d.size() * sizeof(BoxcarScreenGroup) +
+                    (m_screen_thresholds_d.size() + m_screen_m1_d.size()) *
+                        sizeof(float) +
                     m_integer_means.size() * sizeof(double) +
                     m_integer_thresholds.size() * sizeof(uint64_t) +
                     (m_thresholds_d.size() + m_scales_d.size()) * sizeof(float),
-            .state     = fdmt.state,
-            .history   = fdmt.history + m_carry_d.size() * sizeof(float) +
-                         m_integer_carry.size() * sizeof(uint64_t),
-            .peaks     = m_peaks_d.size() * sizeof(BoxcarPeak),
+            .state   = fdmt.state,
+            .history = fdmt.history + m_carry_d.size() * sizeof(float) +
+                       m_integer_carry.size() * sizeof(uint64_t),
+            .peaks   = m_peaks_d.size() * sizeof(BoxcarPeak) + m_open_d.size(),
             .workspace = fdmt.workspace + m_per_dm_d.size() * sizeof(uint64_t) +
                          sizeof(CandidateCounts) + sizeof(uint64_t),
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
@@ -849,17 +1187,37 @@ private:
                             dim3 grid,
                             dim3 block,
                             T* carry) {
+        if (m_screen_groups_d.empty()) {
+            launch_score_kernel<T, kBlockThreads, false>(input, g, grid, block,
+                                                         carry);
+        } else {
+            launch_score_kernel<T, kBlockThreads, true>(input, g, grid, block,
+                                                        carry);
+        }
+    }
+
+    template <typename T, int kBlockThreads, bool kScreen>
+    void launch_score_kernel(const FDMTSearchInput& input,
+                             const LevelGroup& g,
+                             dim3 grid,
+                             dim3 block,
+                             T* carry) {
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
-        kernel_fdmt_boxcar<T, kBlockThreads><<<grid, block, m_smem, stream>>>(
-            input, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
-            raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
-            raw(m_scales_d), carry, raw(m_peaks_d), m_peak_count,
-            raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d),
-            raw(m_per_dm_d), m_config.max_candidates, m_config.max_cands_per_dm,
-            m_config.peak_mode, m_config.skip_cold_prefix,
-            g.level == m_plan.get_niters(), raw(m_integer_thresholds),
-            raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
-            m_config.use_trapezoid);
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen>
+            <<<grid, block, m_smem, stream>>>(
+                input, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
+                raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
+                raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
+                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
+                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
+                m_config.max_cands_per_dm, m_config.peak_mode,
+                m_config.skip_cold_prefix, g.level == m_plan.get_niters(),
+                raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
+                m_mask, m_shared_tables, m_config.use_trapezoid,
+                raw(m_screen_groups_d),
+                static_cast<int>(m_screen_groups_d.size()),
+                raw(m_screen_thresholds_d), raw(m_screen_m1_d),
+                m_screen_offset);
     }
 
     template <typename T>
@@ -889,21 +1247,37 @@ private:
         m_shared_tables =
             m_filters <= kSharedFilters && fixed + tables <= limit;
         m_smem = fixed + (m_shared_tables ? tables : 0);
+        // The width screen's range-minimum buffer (float rows): one entry
+        // per prefix of a tile and its lookback.
+        m_screen_offset = 0;
+        if (!m_screen_groups_d.empty()) {
+            m_smem          = (m_smem + 15) / 16 * 16;
+            m_screen_offset = m_smem;
+            m_smem += ring * sizeof(T);
+        }
         if (m_smem > limit) {
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: max_boxcar {} needs {} B of shared memory per "
                 "block; the device allows {} B",
                 m_width, m_smem, limit));
         }
+        if (m_screen_groups_d.empty()) {
+            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false>);
+        } else {
+            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true>);
+        }
+    }
+
+    template <typename Kernel> void configure_kernel(Kernel kernel) const {
         gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel_fdmt_boxcar<T, kBlockThreads>,
+            cudaFuncSetAttribute(kernel,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(m_smem)),
             "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
         // Several resident rows per SM need the shared-memory carveout.
         gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel_fdmt_boxcar<T, kBlockThreads>,
+            cudaFuncSetAttribute(kernel,
                                  cudaFuncAttributePreferredSharedMemoryCarveout,
                                  cudaSharedmemCarveoutMaxShared),
             "FDMTBoxcar: shared-memory carveout");
@@ -991,10 +1365,15 @@ private:
     thrust::device_vector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
     int m_block_threads   = 256;
-    uint32_t m_mask       = 0;
-    bool m_shared_tables  = false;
-    SizeType m_smem       = 0;
+    thrust::device_vector<BoxcarScreenGroup> m_screen_groups_d;
+    thrust::device_vector<float> m_screen_thresholds_d;
+    thrust::device_vector<float> m_screen_m1_d; ///< packed: mean per sample
+    SizeType m_screen_offset = 0;
+    uint32_t m_mask          = 0;
+    bool m_shared_tables     = false;
+    SizeType m_smem          = 0;
     thrust::device_vector<BoxcarPeak> m_peaks_d;
+    thrust::device_vector<uint8_t> m_open_d; ///< any peak open, per task
     thrust::device_vector<uint64_t> m_per_dm_d, m_slots_d;
     thrust::device_vector<CandidateCounts> m_counts_d;
     thrust::device_vector<RawCandidate> m_candidates_d;
