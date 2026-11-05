@@ -85,4 +85,43 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     return types;
 }
 
+/// True when every tree coordinate of packed `nbits` search (using the plan's
+/// exact dyadic level-0 weights `get_box_weights()`) fits in `uint32_t`.
+inline bool int_search_fits_u32(const plans::FDMTPlan& plan,
+                                bool use_box_smearing,
+                                SizeType nbits) {
+    if (nbits >= 32) {
+        return false;
+    }
+    const auto& pc        = plan.get_container();
+    const SizeType niters = plan.get_niters();
+    const auto maxval =
+        static_cast<double>(bit_pack_utils::max_sample_value(nbits));
+    const auto weights = plan.get_box_weights();
+    std::vector<double> prev(pc.state_shape[0].ncoords, 0.0);
+    for (const auto& grid : pc.grids[0]) {
+        for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {
+            const auto s = static_cast<SizeType>(std::abs(grid.dt_grid[i_dt]));
+            prev[grid.coord_offset + i_dt] =
+                use_box_smearing ? maxval * static_cast<double>(s + 1) *
+                                       static_cast<double>(weights[s])
+                                 : maxval;
+        }
+    }
+    double max_bound = *std::ranges::max_element(prev);
+    for (SizeType l = 1; l <= niters; ++l) {
+        const auto& coords = pc.coordinates[l];
+        std::vector<double> cur(coords.size(), 0.0);
+        for (SizeType k = 0; k < coords.size(); ++k) {
+            cur[k] = prev[coords[k].i_coord_tail];
+            if (coords[k].i_coord_head != SIZE_MAX) {
+                cur[k] += prev[coords[k].i_coord_head];
+            }
+        }
+        max_bound = std::max(max_bound, *std::ranges::max_element(cur));
+        prev.swap(cur);
+    }
+    return max_bound <= 4294967295.0;
+}
+
 } // namespace dmt::algorithms::detail

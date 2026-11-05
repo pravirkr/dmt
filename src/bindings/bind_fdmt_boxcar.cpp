@@ -50,19 +50,20 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .value("ALL_ABOVE_THRESHOLD", PeakFindingMode::kAllAboveThreshold);
     py::class_<BoxcarConfig>(mod, "BoxcarConfig")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, bool, SizeType, float>(),
+                      SizeType, bool, SizeType, float, bool>(),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
              "max_candidates"_a = 131072, "max_cands_per_dm"_a = 4096,
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
-             "input_mean"_a = 0.0F)
+             "input_mean"_a = 0.0F, "use_trapezoid"_a = false)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
         .def_readwrite("noise_sigma", &BoxcarConfig::noise_sigma)
         .def_readwrite("input_nbits", &BoxcarConfig::input_nbits)
         .def_readwrite("input_mean", &BoxcarConfig::input_mean)
+        .def_readwrite("use_trapezoid", &BoxcarConfig::use_trapezoid)
         .def_readwrite("peak_mode", &BoxcarConfig::peak_mode)
         .def_readwrite("max_candidates", &BoxcarConfig::max_candidates)
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)

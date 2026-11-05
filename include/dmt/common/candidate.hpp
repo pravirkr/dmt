@@ -30,7 +30,8 @@ struct BoxcarConfig {
         SizeType max_cands_per_dm = 4096,
         bool skip_cold_prefix     = true,
         SizeType input_nbits      = 32,
-        float input_mean          = 0.0F) noexcept
+        float input_mean          = 0.0F,
+        bool use_trapezoid        = false) noexcept
         : max_boxcar(max_boxcar),
           wtsp(wtsp),
           detect_thresh(detect_thresh),
@@ -40,7 +41,8 @@ struct BoxcarConfig {
           max_cands_per_dm(max_cands_per_dm),
           skip_cold_prefix(skip_cold_prefix),
           input_nbits(input_nbits),
-          input_mean(input_mean) {}
+          input_mean(input_mean),
+          use_trapezoid(use_trapezoid) {}
 
     SizeType max_boxcar       = 4096;
     float wtsp                = 2.0F;
@@ -50,8 +52,9 @@ struct BoxcarConfig {
     SizeType max_candidates   = 131072;
     SizeType max_cands_per_dm = 4096; ///< Per plane/beam/DM/call; 0 disables.
     bool skip_cold_prefix     = true;
-    SizeType input_nbits = 32;   ///< 32: float32; otherwise packed 1/2/4/8/16.
-    float input_mean     = 0.0F; ///< Common mean in input code units.
+    SizeType input_nbits = 32;    ///< 32: float32; otherwise packed 1/2/4/8/16.
+    float input_mean     = 0.0F;  ///< Common mean in input code units.
+    bool use_trapezoid   = false; ///< Half-weight edge taper for widths >= 3.
 };
 
 /**

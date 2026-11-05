@@ -15,27 +15,25 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
+#include "dmt/fdmt_variance.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 
 namespace dmt::algorithms::detail {
 namespace {
 
-constexpr int kThreads = 256;
-constexpr int kItems   = 4;
-constexpr int kTile    = kThreads * kItems;
-constexpr int kWarp    = 32; // Logical warp; a 64-wide wavefront holds two.
-constexpr int kWarps   = kThreads / kWarp;
+constexpr int kItems = 4;
+constexpr int kWarp  = 32; // Logical warp; a 64-wide wavefront holds two.
 // Width and threshold tables are staged in shared memory up to this count;
 // longer tables are read through the cache.
 constexpr SizeType kSharedFilters = 512;
 
 // Fixed part of the block's shared memory. The dynamic part follows it:
-// the prefix ring (a power of two of at least max_width + kTile entries),
+// the prefix ring (a power of two of at least max_width + kBlockTile entries),
 // then optionally the thresholds and widths of the row.
-template <typename T> struct BoxcarShared {
-    BoxcarRunSummary runs[kThreads];
-    T warp_totals[kWarps];
+template <typename T, int kBlockThreads> struct BoxcarShared {
+    BoxcarRunSummary runs[kBlockThreads];
+    T warp_totals[kBlockThreads / kWarp];
 };
 
 template <typename T> DMT_D T shfl_up(T value, int delta) {
@@ -92,24 +90,27 @@ struct CandidateWriter {
 };
 
 // Ordered block prefix of each thread's four consecutive input samples,
-// written to ring[position + 1 .. position + kTile]: a warp shuffle scan
+// written to ring[position + 1 .. position + kBlockTile]: a warp shuffle scan
 // and one scan of the warp totals. The ring is rebased after every tile, so
 // float32 prefixes stay near the magnitude of one tile and the lookback.
-template <typename T>
-DMT_D void prefix_tile(BoxcarShared<T>& shared,
+template <typename T, int kBlockThreads>
+DMT_D void prefix_tile(BoxcarShared<T, kBlockThreads>& shared,
                        T* ring,
                        uint32_t mask,
                        const T (&x)[kItems],
                        uint32_t position,
                        T base) {
-    const int tid  = static_cast<int>(threadIdx.x);
-    const int lane = tid % kWarp;
-    const int warp = tid / kWarp;
-    T total        = 0;
+    constexpr int kBlockWarps = kBlockThreads / kWarp;
+    const int tid             = static_cast<int>(threadIdx.x);
+    const int lane            = tid % kWarp;
+    const int warp            = tid / kWarp;
+    T total                   = 0;
+#pragma unroll
     for (int j = 0; j < kItems; ++j) {
         total += x[j];
     }
     T inclusive = total;
+#pragma unroll
     for (int offset = 1; offset < kWarp; offset *= 2) {
         const T left = shfl_up(inclusive, offset);
         if (lane >= offset) {
@@ -121,20 +122,22 @@ DMT_D void prefix_tile(BoxcarShared<T>& shared,
     }
     __syncthreads();
     if (warp == 0) {
-        T w = lane < kWarps ? shared.warp_totals[lane] : T{0};
-        for (int offset = 1; offset < kWarps; offset *= 2) {
+        T w = lane < kBlockWarps ? shared.warp_totals[lane] : T{0};
+#pragma unroll
+        for (int offset = 1; offset < kBlockWarps; offset *= 2) {
             const T left = shfl_up(w, offset);
             if (lane >= offset) {
                 w += left;
             }
         }
-        if (lane < kWarps) {
+        if (lane < kBlockWarps) {
             shared.warp_totals[lane] = w;
         }
     }
     __syncthreads();
     T running = base + (inclusive - total) +
                 (warp > 0 ? shared.warp_totals[warp - 1] : T{0});
+#pragma unroll
     for (int j = 0; j < kItems; ++j) {
         running += x[j];
         ring[(position + tid * kItems + j + 1) & mask] = running;
@@ -146,7 +149,11 @@ DMT_D void prefix_tile(BoxcarShared<T>& shared,
 // take samples in a striped order, so ring reads are conflict-free. The
 // run bookkeeping runs only for tiles where this (or an open run) holds;
 // otherwise every peak mode leaves its state unchanged.
-template <typename T, bool kFull, bool kCold>
+template <typename T,
+          int kBlockThreads,
+          bool kFull,
+          bool kCold,
+          bool kTrapezoid>
 DMT_D bool detect_tile(const T* ring,
                        uint32_t mask,
                        uint32_t position,
@@ -159,38 +166,44 @@ DMT_D bool detect_tile(const T* ring,
     const int tid       = static_cast<int>(threadIdx.x);
     const uint32_t base = position + 1 + static_cast<uint32_t>(tid);
     T current[kItems];
+#pragma unroll
     for (int k = 0; k < kItems; ++k) {
-        current[k] = ring[(base + k * kThreads) & mask];
+        current[k] = ring[(base + k * kBlockThreads) & mask];
     }
+    bool hit = false;
     for (SizeType f = 0; f < nfilters; ++f) {
-        const uint32_t width = widths[f];
-        const T threshold    = thresholds[f];
-        bool hit             = false;
+        const uint32_t width  = widths[f];
+        const uint32_t w_edge = kTrapezoid ? trapezoid_edge_width(width) : 0U;
+        const T threshold     = thresholds[f];
+#pragma unroll
         for (int k = 0; k < kItems; ++k) {
-            const int s = k * kThreads + tid;
+            const int s = k * kBlockThreads + tid;
             if (!kFull && s >= n) {
                 break;
             }
-            const T sum =
-                current[k] - ring[(base + k * kThreads - width) & mask];
+            const uint32_t idx = base + k * kBlockThreads;
+            T sum              = current[k] - ring[(idx - width) & mask];
+            if constexpr (kTrapezoid) {
+                if (w_edge > 0) {
+                    sum += ring[(idx - w_edge) & mask] -
+                           ring[(idx - width + w_edge) & mask];
+                }
+            }
             bool h = sum >= threshold;
             if constexpr (kCold) {
                 h = h && start + s >= warmup + width - 1;
             }
             hit = hit || h;
         }
-        if (hit) {
-            return true;
-        }
     }
-    return false;
+    return hit;
 }
 
 // Scan trailing-run summaries to give each worker the state of every
 // preceding sample. Each worker then emits only excursions ending within
 // its own four samples. The last worker saves the open trailing excursion.
-template <typename T>
-DMT_D void reduce_runs(BoxcarShared<T>& shared,
+template <typename T, int kBlockThreads>
+DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                        const bool (&above)[kItems],
                        const float (&snr)[kItems],
                        const uint32_t (&filters)[kItems],
@@ -221,7 +234,7 @@ DMT_D void reduce_runs(BoxcarShared<T>& shared,
     const BoxcarRunSummary carried{*persistent, true};
     shared.runs[tid] = summary;
     __syncthreads();
-    for (int offset = 1; offset < kThreads; offset *= 2) {
+    for (int offset = 1; offset < kBlockThreads; offset *= 2) {
         const auto left =
             tid >= offset ? shared.runs[tid - offset] : BoxcarRunSummary{};
         __syncthreads();
@@ -246,14 +259,14 @@ DMT_D void reduce_runs(BoxcarShared<T>& shared,
     // All threads have read persistent and shared summaries before writing
     // the state for the next width/tile.
     __syncthreads();
-    if (tid == kThreads - 1) {
+    if (tid == kBlockThreads - 1) {
         *persistent = boxcar_join(carried, summary, integer).trailing;
     }
     __syncthreads();
 }
 
-template <typename T>
-__global__ void __launch_bounds__(kThreads, 4)
+template <typename T, int kBlockThreads>
+__global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
                        SizeType row_base,
@@ -280,10 +293,12 @@ __global__ void __launch_bounds__(kThreads, 4)
                        const double* means,
                        double unit,
                        uint32_t mask,
-                       bool shared_tables) {
+                       bool shared_tables,
+                       bool use_trapezoid) {
+    constexpr int kBlockTile = kBlockThreads * kItems;
     extern __shared__ __align__(16) unsigned char storage[];
-    auto& shared             = *reinterpret_cast<BoxcarShared<T>*>(storage);
-    T* ring                  = reinterpret_cast<T*>(storage + sizeof(shared));
+    auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
+    T* ring      = reinterpret_cast<T*>(storage + sizeof(shared));
     const SizeType task      = blockIdx.x;
     const SizeType beam      = input.beam_begin + task / ndm;
     const SizeType d         = task % ndm;
@@ -316,7 +331,7 @@ __global__ void __launch_bounds__(kThreads, 4)
     if (shared_tables) {
         T* s_thr       = ring + mask + 1;
         auto* s_widths = reinterpret_cast<uint32_t*>(s_thr + nfilters);
-        for (SizeType f = tid; f < nfilters; f += kThreads) {
+        for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
             s_thr[f]    = thr_row[f];
             s_widths[f] = widths[f];
         }
@@ -327,36 +342,44 @@ __global__ void __launch_bounds__(kThreads, 4)
     const auto any_open = [&] {
         bool open = false;
         if (mode != PeakFindingMode::kAllAboveThreshold) {
-            for (SizeType f = tid; f < peak_count; f += kThreads) {
+            for (SizeType f = tid; f < peak_count; f += kBlockThreads) {
                 open = open || peaks[f].open;
             }
         }
         return __syncthreads_or(open) != 0;
     };
-    bool open = any_open();
-    if (tid == 0) {
-        ring[0] = 0;
-    }
-    __syncthreads();
-    // Bootstrap only the short raw carry, never an entire DM-time row.
-    for (uint32_t p = 0; p < lookback; p += kTile) {
-        const T base = ring[p & mask];
-        T x[kItems];
-        for (int j = 0; j < kItems; ++j) {
-            const uint32_t t    = p + tid * kItems + j;
-            const uint32_t back = t < lookback ? lookback - t : 0;
-            x[j] = t < lookback && input.sample_begin >= back
-                       ? carry[(input.sample_begin - back) % max_width]
-                       : T{0};
+    bool open = input.sample_begin > 0 ? any_open() : false;
+    if (input.sample_begin == 0) {
+        for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
+            ring[j & mask] = T{0};
         }
-        prefix_tile(shared, ring, mask, x, p, base);
+        __syncthreads();
+    } else {
+        if (tid == 0) {
+            ring[0] = 0;
+        }
+        __syncthreads();
+        // Bootstrap only the short raw carry, never an entire DM-time row.
+        for (uint32_t p = 0; p < lookback; p += kBlockTile) {
+            const T base = ring[p & mask];
+            T x[kItems];
+            for (int j = 0; j < kItems; ++j) {
+                const uint32_t t    = p + tid * kItems + j;
+                const uint32_t back = t < lookback ? lookback - t : 0;
+                x[j] = t < lookback && input.sample_begin >= back
+                           ? carry[(input.sample_begin - back) % max_width]
+                           : T{0};
+            }
+            prefix_tile<T, kBlockThreads>(shared, ring, mask, x, p, base);
+        }
     }
-    for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
+    for (SizeType t0 = 0; t0 < input.nsamps; t0 += kBlockTile) {
         const int n = static_cast<int>(
-            input.nsamps - t0 < kTile ? input.nsamps - t0 : kTile);
+            input.nsamps - t0 < kBlockTile ? input.nsamps - t0 : kBlockTile);
         const auto position = static_cast<uint32_t>(lookback + t0);
         const T base        = ring[position & mask];
         T x[kItems];
+#pragma unroll
         for (int j = 0; j < kItems; ++j) {
             const SizeType local = tid * kItems + j;
             x[j]                 = 0;
@@ -369,25 +392,32 @@ __global__ void __launch_bounds__(kThreads, 4)
                 }
             }
         }
-        prefix_tile(shared, ring, mask, x, position, base);
+        prefix_tile<T, kBlockThreads>(shared, ring, mask, x, position, base);
         const uint64_t start = input.sample_begin + t0;
         // Tiles past the warm-up of every width skip the per-width check.
-        const bool cold = skip_cold && start + 1 < row.warmup + max_width;
+        const bool cold       = skip_cold && start + 1 < row.warmup + max_width;
+        const auto run_detect = [&](auto full_tag, auto cold_tag) {
+            constexpr bool kFull = decltype(full_tag)::value;
+            constexpr bool kCold = decltype(cold_tag)::value;
+            return use_trapezoid
+                       ? detect_tile<T, kBlockThreads, kFull, kCold, true>(
+                             ring, mask, position, n, wtab, ttab, nfilters,
+                             start, row.warmup)
+                       : detect_tile<T, kBlockThreads, kFull, kCold, false>(
+                             ring, mask, position, n, wtab, ttab, nfilters,
+                             start, row.warmup);
+        };
         bool hit;
-        if (n == kTile) {
-            hit = cold ? detect_tile<T, true, true>(ring, mask, position, n,
-                                                    wtab, ttab, nfilters, start,
-                                                    row.warmup)
-                       : detect_tile<T, true, false>(ring, mask, position, n,
-                                                     wtab, ttab, nfilters,
-                                                     start, row.warmup);
+        if (n == kBlockTile) {
+            hit = cold ? run_detect(cuda::std::true_type{},
+                                    cuda::std::true_type{})
+                       : run_detect(cuda::std::true_type{},
+                                    cuda::std::false_type{});
         } else {
-            hit = cold ? detect_tile<T, false, true>(ring, mask, position, n,
-                                                     wtab, ttab, nfilters,
-                                                     start, row.warmup)
-                       : detect_tile<T, false, false>(ring, mask, position, n,
-                                                      wtab, ttab, nfilters,
-                                                      start, row.warmup);
+            hit = cold ? run_detect(cuda::std::false_type{},
+                                    cuda::std::true_type{})
+                       : run_detect(cuda::std::false_type{},
+                                    cuda::std::false_type{});
         }
         if (__syncthreads_or(hit || open) != 0) {
             // Rare path: exact run bookkeeping in each thread's four
@@ -406,17 +436,25 @@ __global__ void __launch_bounds__(kThreads, 4)
                 float snr[kItems];
                 uint32_t filters[kItems];
                 const uint32_t width = wtab[f];
-                const T threshold    = ttab[f];
-                const float scale    = inv_sigma[row_index * nfilters + f];
+                const uint32_t w_edge =
+                    use_trapezoid ? trapezoid_edge_width(width) : 0U;
+                const T threshold = ttab[f];
+                const float scale = inv_sigma[row_index * nfilters + f];
+                bool f_hit        = false;
                 for (int j = 0; j < kItems; ++j) {
                     const uint32_t local  = tid * kItems + j;
                     const uint64_t sample = start + local;
-                    const T sum = current[j] -
-                                  ring[(position + local + 1 - width) & mask];
+                    const uint32_t idx    = position + local + 1;
+                    T sum = current[j] - ring[(idx - width) & mask];
+                    if (w_edge > 0) {
+                        sum += ring[(idx - w_edge) & mask] -
+                               ring[(idx - width + w_edge) & mask];
+                    }
                     above[j] =
                         local < static_cast<uint32_t>(n) &&
                         (!skip_cold || sample >= row.warmup + width - 1) &&
                         sum >= threshold;
+                    f_hit  = f_hit || above[j];
                     snr[j] = 0;
                     if constexpr (std::is_integral_v<T>) {
                         raw_sums[j] = sum;
@@ -447,10 +485,11 @@ __global__ void __launch_bounds__(kThreads, 4)
                         writer(peak);
                     }
                 }
-                if (mode == PeakFindingMode::kContiguousPeakPerWidth) {
-                    reduce_runs(shared, above, snr, filters, start, n,
-                                peaks + f, writer, raw_sums,
-                                std::is_integral_v<T>);
+                if (mode == PeakFindingMode::kContiguousPeakPerWidth &&
+                    __syncthreads_or(f_hit || peaks[f].open) != 0) {
+                    reduce_runs<T, kBlockThreads>(
+                        shared, above, snr, filters, start, n, peaks + f,
+                        writer, raw_sums, std::is_integral_v<T>);
                 }
             }
             if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
@@ -458,23 +497,27 @@ __global__ void __launch_bounds__(kThreads, 4)
                 for (int j = 0; j < kItems; ++j) {
                     above[j] = best[j] >= 0;
                 }
-                reduce_runs(shared, above, best, best_filter, start, n, peaks,
-                            writer, raw_sums, false);
+                reduce_runs<T, kBlockThreads>(shared, above, best, best_filter,
+                                              start, n, peaks, writer, raw_sums,
+                                              false);
             }
             open = any_open();
         }
-        // Recenter the retained prefix boundaries after all scorers finish.
-        const uint32_t end = position + n;
-        const T origin     = ring[(end - lookback) & mask];
-        __syncthreads();
-        for (uint32_t j = tid; j <= lookback; j += kThreads) {
-            ring[(end - lookback + j) & mask] -= origin;
+        // Recenter the retained prefix boundaries only when another tile
+        // follows.
+        if (t0 + kBlockTile < input.nsamps) {
+            const uint32_t end = position + n;
+            const T origin     = ring[(end - lookback) & mask];
+            __syncthreads();
+            for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
+                ring[(end - lookback + j) & mask] -= origin;
+            }
+            __syncthreads();
         }
-        __syncthreads();
     }
     // The root's old FDMT history remains available until this kernel ends.
     const SizeType keep = (input.nsamps < max_width ? input.nsamps : max_width);
-    for (SizeType t = tid; t < keep; t += kThreads) {
+    for (SizeType t = tid; t < keep; t += kBlockThreads) {
         const SizeType sample = input.nsamps - keep + t;
         if constexpr (std::is_integral_v<T>) {
             carry[(input.sample_begin + sample) % max_width] =
@@ -558,13 +601,24 @@ public:
         }
         m_driver = std::move(driver);
         std::vector<float> thresholds, scales;
-        m_offsets.push_back(0);
+        SizeType row_offset = 0;
         for (const auto& p : planes) {
             thresholds.insert(thresholds.end(), p.raw_thresh_lut.begin(),
                               p.raw_thresh_lut.end());
             scales.insert(scales.end(), p.inv_sigma_lut.begin(),
                           p.inv_sigma_lut.end());
-            m_offsets.push_back(m_offsets.back() + p.dm_grid.size());
+            const SizeType count = p.dm_grid.size();
+            if (count > 0) {
+                if (m_level_groups.empty() ||
+                    m_level_groups.back().level != p.level) {
+                    m_level_groups.push_back({.level     = p.level,
+                                              .row_begin = row_offset,
+                                              .row_count = count});
+                } else {
+                    m_level_groups.back().row_count += count;
+                }
+            }
+            row_offset += count;
         }
         m_rows_d             = m_rows;
         m_widths_d           = planes.front().widths;
@@ -725,20 +779,19 @@ public:
         m_work.mark(stream);
     }
     void consume(SizeType level, const FDMTSearchInput& input) override {
-        for (SizeType p = 0; p < m_planes.size(); ++p) {
-            const auto& plane = m_planes[p];
-            if (plane.level != level) {
+        for (const auto& g : m_level_groups) {
+            if (g.level != level) {
                 continue;
             }
             const SizeType beams =
                 std::min(input.beam_count, m_beams - input.beam_begin);
-            const dim3 grid(plane.dm_grid.size() * beams);
-            const dim3 block(kThreads);
+            const dim3 grid(g.row_count * beams);
+            const dim3 block(m_block_threads);
             gpu_utils::check_kernel_launch_params(grid, block);
             if (m_config.input_nbits == 32) {
-                launch_score<float>(input, p, grid, block, raw(m_carry_d));
+                launch_score<float>(input, g, grid, block, raw(m_carry_d));
             } else {
-                launch_score<uint64_t>(input, p, grid, block,
+                launch_score<uint64_t>(input, g, grid, block,
                                        raw(m_integer_carry));
             }
             gpu_utils::check_last_gpu_error("FDMTBoxcar scoring failed");
@@ -747,7 +800,7 @@ public:
     FDMTBoxcarMemoryUsage memory_usage() const noexcept override {
         const auto fdmt    = m_driver->memory();
         SizeType host_plan = m_rows.size() * sizeof(BoxcarRow) +
-                             m_offsets.size() * sizeof(SizeType);
+                             m_level_groups.size() * sizeof(LevelGroup);
         for (const auto& p : m_planes) {
             host_plan +=
                 sizeof(p) + p.widths.size() * sizeof(uint32_t) +
@@ -784,39 +837,55 @@ public:
     }
 
 private:
+    struct LevelGroup {
+        SizeType level;
+        SizeType row_begin;
+        SizeType row_count;
+    };
+
+    template <typename T, int kBlockThreads>
+    void launch_score_block(const FDMTSearchInput& input,
+                            const LevelGroup& g,
+                            dim3 grid,
+                            dim3 block,
+                            T* carry) {
+        const auto stream = static_cast<cudaStream_t>(input.stream.native);
+        kernel_fdmt_boxcar<T, kBlockThreads><<<grid, block, m_smem, stream>>>(
+            input, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
+            raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
+            raw(m_scales_d), carry, raw(m_peaks_d), m_peak_count,
+            raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d),
+            raw(m_per_dm_d), m_config.max_candidates, m_config.max_cands_per_dm,
+            m_config.peak_mode, m_config.skip_cold_prefix,
+            g.level == m_plan.get_niters(), raw(m_integer_thresholds),
+            raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
+            m_config.use_trapezoid);
+    }
+
     template <typename T>
     void launch_score(const FDMTSearchInput& input,
-                      SizeType p,
+                      const LevelGroup& g,
                       dim3 grid,
                       dim3 block,
                       T* carry) {
-        kernel_fdmt_boxcar<T>
-            <<<grid, block, m_smem,
-               static_cast<cudaStream_t>(input.stream.native)>>>(
-                input, raw(m_rows_d), m_offsets[p], m_planes[p].dm_grid.size(),
-                m_rows.size(), raw(m_widths_d), m_filters, m_width,
-                raw(m_thresholds_d), raw(m_scales_d), carry, raw(m_peaks_d),
-                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
-                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
-                m_config.skip_cold_prefix,
-                m_planes[p].level == m_plan.get_niters(),
-                raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
-                m_mask, m_shared_tables);
+        if (m_block_threads == 64) {
+            launch_score_block<T, 64>(input, g, grid, block, carry);
+        } else if (m_block_threads == 128) {
+            launch_score_block<T, 128>(input, g, grid, block, carry);
+        } else {
+            launch_score_block<T, 256>(input, g, grid, block, carry);
+        }
     }
-    // Ring of at least max_width + kTile prefixes (a power of two), plus the
-    // row's thresholds and widths when they fit.
-    template <typename T> void configure_shared() {
-        const SizeType ring   = std::bit_ceil(m_width + kTile);
-        const SizeType fixed  = sizeof(BoxcarShared<T>) + ring * sizeof(T);
+
+    template <typename T, int kBlockThreads>
+    void configure_shared_block(SizeType limit) {
+        constexpr SizeType kBlockTile = kBlockThreads * kItems;
+        const SizeType ring           = std::bit_ceil(m_width + kBlockTile);
+        const SizeType fixed =
+            sizeof(BoxcarShared<T, kBlockThreads>) + ring * sizeof(T);
         const SizeType tables = m_filters * (sizeof(T) + sizeof(uint32_t));
-        int optin             = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(
-                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
-            "FDMTBoxcar: shared memory limit");
-        const auto limit = static_cast<SizeType>(optin);
-        m_mask           = static_cast<uint32_t>(ring - 1);
+        m_block_threads       = kBlockThreads;
+        m_mask                = static_cast<uint32_t>(ring - 1);
         m_shared_tables =
             m_filters <= kSharedFilters && fixed + tables <= limit;
         m_smem = fixed + (m_shared_tables ? tables : 0);
@@ -827,18 +896,38 @@ private:
                 m_width, m_smem, limit));
         }
         gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel_fdmt_boxcar<T>,
+            cudaFuncSetAttribute(kernel_fdmt_boxcar<T, kBlockThreads>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(m_smem)),
             "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
         // Several resident rows per SM need the shared-memory carveout.
         gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel_fdmt_boxcar<T>,
+            cudaFuncSetAttribute(kernel_fdmt_boxcar<T, kBlockThreads>,
                                  cudaFuncAttributePreferredSharedMemoryCarveout,
                                  cudaSharedmemCarveoutMaxShared),
             "FDMTBoxcar: shared-memory carveout");
 #endif
+    }
+
+    // Ring of at least max_width + kBlockTile prefixes (a power of two), plus
+    // the row's thresholds and widths when they fit.
+    template <typename T> void configure_shared() {
+        int optin = 0;
+        gpu_utils::check_gpu_call(
+            cudaDeviceGetAttribute(
+                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
+            "FDMTBoxcar: shared memory limit");
+        const auto limit = static_cast<SizeType>(optin);
+        const SizeType eff_chunk =
+            std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
+        if (eff_chunk <= 64 * kItems) {
+            configure_shared_block<T, 64>(limit);
+        } else if (eff_chunk <= 128 * kItems) {
+            configure_shared_block<T, 128>(limit);
+        } else {
+            configure_shared_block<T, 256>(limit);
+        }
     }
     void validate_packed(SizeType size) const {
         if (m_config.input_nbits == 32 ||
@@ -892,7 +981,7 @@ private:
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
-    std::vector<SizeType> m_offsets;
+    std::vector<LevelGroup> m_level_groups;
     thrust::device_vector<BoxcarRow> m_rows_d;
     thrust::device_vector<uint32_t> m_widths_d;
     thrust::device_vector<float> m_thresholds_d, m_scales_d, m_carry_d,
@@ -901,6 +990,7 @@ private:
     thrust::device_vector<double> m_integer_means;
     thrust::device_vector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
+    int m_block_threads   = 256;
     uint32_t m_mask       = 0;
     bool m_shared_tables  = false;
     SizeType m_smem       = 0;

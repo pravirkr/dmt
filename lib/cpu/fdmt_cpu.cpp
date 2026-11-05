@@ -585,7 +585,7 @@ template <FDMTMode Mode, typename TIn = float, typename TOut = float>
 void fdmt_iter(const TIn* __restrict__ state_in,
                TOut* __restrict__ state_out,
                float* __restrict__ hist_ptr,
-               const std::vector<FDMTMergeOp>& level_ops,
+               std::span<const FDMTMergeOp> level_ops,
                FDMTRowLengths len,
                float int_unit,
                SizeType stream_pos,
@@ -1230,8 +1230,9 @@ public:
             throw std::invalid_argument("FDMT: nbeams must be at least 1");
         }
         m_search_nbits = cfg.search_nbits;
-        m_chunk        = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                                   cfg.chunk_nsamps);
+        m_search_upper = cfg.search_upper_levels;
+        m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
+                                            cfg.chunk_nsamps, m_search_upper);
         if (m_search_nbits != 32 && cfg.chunk_nsamps == 0) {
             m_chunk = std::min(m_plan.get_nsamps(),
                                std::max<SizeType>(64, m_chunk / 2));
@@ -1280,7 +1281,9 @@ public:
             const auto consume = [&](SizeType l, SizeType source) {
                 sink.consume(
                     l, {
-                           .state      = level_ptr<float>(source, 0),
+                           .state = level_ptr<float>(source, 0),
+                           .prev_state =
+                               l > 0 ? level_ptr<float>(l - 1, 0) : nullptr,
                            .history    = m_tree_history.data(),
                            .row_stride = m_row_len[source],
                            .beam_stride =
@@ -1291,29 +1294,38 @@ public:
                            .history_ring   = true,
                        });
             };
+            const auto advance_op_history = [&](SizeType l, SizeType k_begin) {
+                if (k_begin >= m_ops[l].size()) {
+                    return;
+                }
+                for (SizeType b = 0; b < m_nbeams; ++b) {
+                    const float* state = level_ptr<float>(l - 1, b);
+                    float* hist        = m_tree_history.data() +
+                                         b * m_plan.get_tree_history_size();
+                    for (SizeType k = k_begin; k < m_ops[l].size(); ++k) {
+                        const auto& op = m_ops[l][k];
+                        if (op.head == SIZE_MAX || op.delay == 0) {
+                            continue;
+                        }
+                        const SizeType keep = std::min(op.delay, m_active);
+                        for (SizeType t = m_active - keep; t < m_active; ++t) {
+                            hist[op.hist + (m_stream_pos + t) % op.delay] =
+                                state[op.head + t];
+                        }
+                    }
+                }
+            };
             consume(level, level);
             for (++level; level < root; ++level) {
-                execute_iter(level);
+                execute_iter(level, /*regular_only=*/true);
                 consume(level, level);
+                advance_op_history(level, detail::fdmt_regular_coords(
+                                              m_plan.get_container(), level));
             }
             consume(root, root - 1);
             // Every root coordinate owns its history slot. Save only the
             // trailing min(delay, chunk) input samples, after all readers.
-            for (SizeType b = 0; b < m_nbeams; ++b) {
-                const float* state = level_ptr<float>(root - 1, b);
-                float* hist =
-                    m_tree_history.data() + b * m_plan.get_tree_history_size();
-                for (const auto& op : m_ops[root]) {
-                    if (op.head == SIZE_MAX || op.delay == 0) {
-                        continue;
-                    }
-                    const SizeType keep = std::min(op.delay, m_active);
-                    for (SizeType t = m_active - keep; t < m_active; ++t) {
-                        hist[op.hist + (m_stream_pos + t) % op.delay] =
-                            state[op.head + t];
-                    }
-                }
-            }
+            advance_op_history(root, 0);
             end_chunk();
         }
     }
@@ -1351,13 +1363,15 @@ public:
             }
             for (SizeType l = 0; l <= root; ++l) {
                 if (l > 0 && l < root) {
+                    const auto reg_coords =
+                        detail::fdmt_regular_coords(m_plan.get_container(), l);
                     for (SizeType b = 0; b < m_nbeams; ++b) {
                         const auto* in   = level_ptr<uint64_t>(l - 1, b);
                         auto* out        = level_ptr<uint64_t>(l, b);
                         const auto* hist = m_integer_history.data() +
                                            b * m_plan.get_tree_history_size();
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
-                        for (SizeType k = 0; k < m_ops[l].size(); ++k) {
+                        for (SizeType k = 0; k < reg_coords; ++k) {
                             const auto& op = m_ops[l][k];
                             for (SizeType t = 0; t < m_active; ++t) {
                                 uint64_t value = in[op.tail + t];
@@ -1374,15 +1388,17 @@ public:
                     }
                 }
                 const SizeType source = l == root ? root - 1 : l;
-                sink.consume(l,
-                             {.row_stride      = m_row_len[source],
-                              .beam_stride     = m_half_elems,
-                              .history_stride  = m_plan.get_tree_history_size(),
-                              .nsamps          = m_active,
-                              .sample_begin    = m_stream_pos,
-                              .history_ring    = true,
-                              .integer_state   = level_ptr<uint64_t>(source, 0),
-                              .integer_history = m_integer_history.data()});
+                sink.consume(
+                    l, {.row_stride     = m_row_len[source],
+                        .beam_stride    = m_half_elems,
+                        .history_stride = m_plan.get_tree_history_size(),
+                        .nsamps         = m_active,
+                        .sample_begin   = m_stream_pos,
+                        .history_ring   = true,
+                        .integer_state  = level_ptr<uint64_t>(source, 0),
+                        .integer_prev_state =
+                            l > 0 ? level_ptr<uint64_t>(l - 1, 0) : nullptr,
+                        .integer_history = m_integer_history.data()});
                 // Advance only after the sink and the merge have read the
                 // old history. Each coordinate owns a disjoint ring.
                 if (l > 0) {
@@ -1661,6 +1677,7 @@ private:
     FDMTLargeArray<float> m_tree_history;
     SizeType m_stream_pos{0};
     SizeType m_search_nbits{32};
+    bool m_search_upper{false};
     FDMTLargeArray<uint64_t> m_integer_history;
 
     // Level-0 box means (use_box_smearing; see fdmt_box_weights.hpp): dyadic
@@ -2038,8 +2055,10 @@ private:
         }
         m_half_elems = 0;
         for (SizeType l = 0; l < niters; ++l) {
-            m_half_elems = std::max(m_half_elems,
-                                    pc.state_shape[l].ncoords * m_row_len[l]);
+            const SizeType n = m_search_upper
+                                   ? detail::fdmt_regular_coords(pc, l)
+                                   : pc.state_shape[l].ncoords;
+            m_half_elems     = std::max(m_half_elems, n * m_row_len[l]);
         }
         const auto relayout = [&](SizeType offset, SizeType l) {
             const auto plan_len = pc.state_shape[l].nsamps;
@@ -2607,21 +2626,26 @@ private:
     // ---------------------------------------------------------------------
 
     template <FDMTMode Mode, typename TIn, typename TOut>
-    void execute_iter_typed(SizeType i_iter) {
+    void execute_iter_typed(SizeType i_iter, bool regular_only = false) {
         const auto hist_beam_stride = m_plan.get_tree_history_size();
+        const auto ops_span = regular_only
+                                  ? std::span<const FDMTMergeOp>(m_ops[i_iter])
+                                        .first(detail::fdmt_regular_coords(
+                                            m_plan.get_container(), i_iter))
+                                  : std::span<const FDMTMergeOp>(m_ops[i_iter]);
         for (SizeType b = 0; b < m_nbeams; ++b) {
             float* __restrict__ hist_b =
                 (Mode == FDMTMode::kValid)
                     ? m_tree_history.data() + (b * hist_beam_stride)
                     : nullptr;
             fdmt_iter<Mode>(level_ptr<TIn>(i_iter - 1, b),
-                            level_ptr<TOut>(i_iter, b), hist_b, m_ops[i_iter],
+                            level_ptr<TOut>(i_iter, b), hist_b, ops_span,
                             row_lengths(), m_int_unit, m_stream_pos,
                             m_nthreads);
         }
     }
 
-    void execute_iter(SizeType i_iter) {
+    void execute_iter(SizeType i_iter, bool regular_only = false) {
         with_elem(m_levels[i_iter - 1].type, [&]<typename TIn>() {
             with_elem(m_levels[i_iter].type, [&]<typename TOut>() {
                 // Levels only ever widen (see int_tree_level_types()).
@@ -2629,11 +2653,14 @@ private:
                               !(std::is_floating_point_v<TIn> &&
                                 !std::is_floating_point_v<TOut>)) {
                     if (m_mode == FDMTMode::kFull) {
-                        execute_iter_typed<FDMTMode::kFull, TIn, TOut>(i_iter);
+                        execute_iter_typed<FDMTMode::kFull, TIn, TOut>(
+                            i_iter, regular_only);
                     } else if (m_mode == FDMTMode::kRoll) {
-                        execute_iter_typed<FDMTMode::kRoll, TIn, TOut>(i_iter);
+                        execute_iter_typed<FDMTMode::kRoll, TIn, TOut>(
+                            i_iter, regular_only);
                     } else {
-                        execute_iter_typed<FDMTMode::kValid, TIn, TOut>(i_iter);
+                        execute_iter_typed<FDMTMode::kValid, TIn, TOut>(
+                            i_iter, regular_only);
                     }
                 } else {
                     throw std::logic_error(

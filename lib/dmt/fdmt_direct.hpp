@@ -235,14 +235,15 @@ inline void collect_top(const plans::FDMTPlanContainer& pc,
 
 } // namespace fdmt_direct_impl
 
-/// Tables of the direct top from level `k` (1 <= k < root - 1) of a
-/// valid-mode plan.
+/// Tables of the direct top from level `k` (1 <= k < target) to `target`
+/// (defaults to root) of a valid-mode plan.
 inline FDMTDirectTopPlan build_fdmt_direct_top(const plans::FDMTPlan& plan,
-                                               SizeType k) {
+                                               SizeType k,
+                                               SizeType target = 0) {
     using fdmt_direct_impl::collect_top;
     const auto& pc  = plan.get_container();
-    const auto root = plan.get_niters();
-    if (k == 0 || k + 1 >= root) {
+    const auto root = target == 0 ? plan.get_niters() : target;
+    if (k == 0 || k + 1 >= root || root > plan.get_niters()) {
         throw std::invalid_argument("FDMT direct top: level out of range");
     }
     FDMTDirectTopPlan t;

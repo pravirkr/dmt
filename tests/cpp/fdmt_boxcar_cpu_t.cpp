@@ -3,6 +3,7 @@
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
+#include "dmt/fdmt_variance.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
 
@@ -663,4 +664,90 @@ TEST_CASE("Integer boxcar run summaries preserve exact peaks",
             }
         }
     }
+}
+
+TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
+          "[boxcar][trapezoid][cpu]") {
+    using namespace algorithms::detail;
+    // 1. Verify exact analytical variance against explicit discrete
+    // convolution.
+    for (SizeType len :
+         {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{5}, SizeType{8}}) {
+        for (uint32_t width : {1U, 2U, 3U, 4U, 5U, 8U, 12U, 16U, 32U}) {
+            const uint32_t w_edge = trapezoid_edge_width(width);
+            std::vector<double> filt(width, 1.0);
+            for (uint32_t k = w_edge; k < width - w_edge; ++k) {
+                filt[k] = w_edge > 0 ? 2.0 : 1.0;
+            }
+            const SizeType conv_len = len + width - 1;
+            double exact_var        = 0.0;
+            for (SizeType n = 0; n < conv_len; ++n) {
+                double c = 0.0;
+                for (SizeType i = 0; i < len; ++i) {
+                    const SizeType j = n - i;
+                    if (n >= i && j < width) {
+                        c += 1.25 * filt[j];
+                    }
+                }
+                exact_var += c * c;
+            }
+            CHECK_THAT(fdmt_trapezoid_variance(len, width, w_edge, 1.25),
+                       Catch::Matchers::WithinRel(exact_var, 1e-12));
+        }
+    }
+    // 2. Verify off-phase pulse sensitivity gain for [0.5, 1.0, 0.5] and
+    // [0.5, 1.0, 1.0, 0.5] profiles at DM=0.
+    const plans::FDMTPlan plan(700, 1200, 16, 128, 0.001F,
+                               std::vector<IndexType>{0, 4});
+    std::vector<float> pulse_w3(16 * 128, 0.0F);
+    for (SizeType c = 0; c < 16; ++c) {
+        pulse_w3[c * 128 + 40] = 0.5F;
+        pulse_w3[c * 128 + 41] = 1.0F;
+        pulse_w3[c * 128 + 42] = 0.5F;
+    }
+    BoxcarConfig cfg_rect(8, 1.5F, 1.0F, 1.0F);
+    BoxcarConfig cfg_trap  = cfg_rect;
+    cfg_trap.use_trapezoid = true;
+    FDMTBoxcar search_rect(plan, cfg_rect, true, Exec::cpu(1));
+    FDMTBoxcar search_trap(plan, cfg_trap, true, Exec::cpu(1));
+    const auto res_rect = search_rect.execute(pulse_w3);
+    const auto res_trap = search_trap.execute(pulse_w3);
+    float max_snr_rect  = 0.0F;
+    float max_snr_trap  = 0.0F;
+    for (const auto& c : res_rect.candidates) {
+        if (c.dm_idx == 0) {
+            max_snr_rect = std::max(max_snr_rect, c.snr);
+        }
+    }
+    for (const auto& c : res_trap.candidates) {
+        if (c.dm_idx == 0) {
+            max_snr_trap = std::max(max_snr_trap, c.snr);
+        }
+    }
+    // Optimal SNR is 4 * sqrt(1.5) = 4.898979; rectangular boxcar W=3 gets
+    // 4 * 2 / sqrt(3) = 4.618802 (+6.06% recovery).
+    CHECK_THAT(max_snr_trap,
+               Catch::Matchers::WithinRel(4.0F * std::sqrt(1.5F), 1e-5F));
+    CHECK(max_snr_trap > max_snr_rect * 1.05F);
+#ifdef DMT_ENABLE_GPU
+    // 3. Verify CPU and GPU agree on multi-chunk float32 and packed 8-bit.
+    const auto wf = waterfalls(plan, 1, 3);
+    for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                            PeakFindingMode::kContiguousPeakAcrossWidths,
+                            PeakFindingMode::kAllAboveThreshold}) {
+        BoxcarConfig cfg(16, 1.5F, 2.5F, 1.0F, mode);
+        cfg.use_trapezoid = true;
+        FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(2), 1, 0, 64);
+        FDMTBoxcar gpu_s(plan, cfg, true,
+                         Exec{algorithms::detail::kGPUBackend, 0}, 1, 0, 64);
+        for (const auto& block : wf) {
+            const auto g = gpu_s.execute(block).candidates;
+            const auto c = cpu_s.execute(block).candidates;
+            compare({g.begin(), g.end()}, {c.begin(), c.end()});
+        }
+        const auto gf = gpu_s.flush().candidates;
+        const auto cf = cpu_s.flush().candidates;
+        compare({gf.begin(), gf.end()}, {cf.begin(), cf.end()});
+    }
+#endif
 }

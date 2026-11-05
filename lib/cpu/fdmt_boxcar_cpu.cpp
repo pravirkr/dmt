@@ -14,6 +14,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
+#include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
 namespace {
@@ -327,6 +328,10 @@ private:
             bool hit = false;
             for (SizeType f = 0; f < m_filters && !hit; ++f) {
                 const SizeType width = plane.widths[f];
+                const SizeType w_edge =
+                    m_config.use_trapezoid
+                        ? trapezoid_edge_width(plane.widths[f])
+                        : 0;
                 const Prefix* lo     = prefix + lookback + 1 - width;
                 const Prefix* hi     = prefix + lookback + 1;
                 const auto threshold = [&] {
@@ -338,10 +343,23 @@ private:
                     }
                 }();
                 const uint64_t first_valid = row.warmup + width - 1;
+                if (w_edge == 0) {
 #pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    hit = hit || (hi[t] - lo[t] >= threshold &&
-                                  (!cold || start + t >= first_valid));
+                    for (SizeType t = 0; t < n; ++t) {
+                        hit = hit || (hi[t] - lo[t] >= threshold &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                } else {
+                    const Prefix* lo_in =
+                        prefix + lookback + 1 - width + w_edge;
+                    const Prefix* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        const Prefix sum =
+                            (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                        hit = hit || (sum >= threshold &&
+                                      (!cold || start + t >= first_valid));
+                    }
                 }
             }
             if (hit || open) {
@@ -384,12 +402,18 @@ private:
         }
         for (SizeType f = 0; f < m_filters; ++f) {
             const SizeType width  = plane.widths[f];
+            const SizeType w_edge = m_config.use_trapezoid
+                                        ? trapezoid_edge_width(plane.widths[f])
+                                        : 0;
             const float threshold = plane.raw_thresh_lut[dm * m_filters + f];
             const float inv_sigma = plane.inv_sigma_lut[dm * m_filters + f];
             for (SizeType t = 0; t < n; ++t) {
                 const uint64_t sample = start + t;
-                const Prefix sum =
-                    prefix[lookback + t + 1] - prefix[lookback + t + 1 - width];
+                const SizeType idx    = lookback + t + 1;
+                Prefix sum            = prefix[idx] - prefix[idx - width];
+                if (w_edge > 0) {
+                    sum += prefix[idx - w_edge] - prefix[idx - width + w_edge];
+                }
                 const bool valid = !m_config.skip_cold_prefix ||
                                    sample >= row.warmup + width - 1;
                 bool above;

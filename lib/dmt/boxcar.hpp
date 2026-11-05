@@ -23,12 +23,13 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
 
 /// Per-plane row description, shared by CPU and device root sample readers.
 struct BoxcarRow {
-    SizeType row    = 0;
-    SizeType tail   = 0;
-    SizeType head   = SIZE_MAX;
-    SizeType delay  = 0;
-    SizeType hist   = 0;
-    uint64_t warmup = 0;
+    SizeType row        = 0;
+    SizeType tail       = 0;
+    SizeType head       = SIZE_MAX;
+    SizeType delay      = 0;
+    SizeType hist       = 0;
+    uint64_t warmup     = 0;
+    bool unmaterialized = false;
     RawCandidate candidate{};
 };
 
@@ -36,23 +37,27 @@ struct BoxcarRow {
 make_boxcar_rows(const plans::FDMTPlan& plan,
                  std::span<const plans::BoxcarPlanePlan> planes);
 
-/// The same root addition as FDMT; history is not mutated by the reader.
+/// The same merge addition as FDMT for unmaterialized rows (root and staggered
+/// subbands); history is not mutated by the reader.
 DMT_HD inline float boxcar_sample(const FDMTSearchInput& input,
                                   const BoxcarRow& row,
                                   SizeType beam,
                                   SizeType t,
-                                  bool root) noexcept {
-    const float* state = input.state + beam * input.beam_stride;
-    if (!root || input.materialized_root) {
+                                  bool root = false) noexcept {
+    if (!(row.unmaterialized || root) || input.materialized_root) {
+        const float* state = input.state + beam * input.beam_stride;
         return state[row.row * input.row_stride + t];
     }
-    const float tail = state[row.tail * input.row_stride + t];
+    const float* prev =
+        (input.prev_state != nullptr ? input.prev_state : input.state) +
+        beam * input.beam_stride;
+    const float tail = prev[row.tail * input.row_stride + t];
     if (row.head == SIZE_MAX) {
         return tail;
     }
     float head;
     if (t >= row.delay) {
-        head = state[row.head * input.row_stride + t - row.delay];
+        head = prev[row.head * input.row_stride + t - row.delay];
     } else {
         const SizeType slot =
             input.history_ring ? (input.sample_begin + t) % row.delay : t;
@@ -109,28 +114,49 @@ DMT_HD void boxcar_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
-DMT_HD inline uint64_t boxcar_integer_sample(const FDMTSearchInput& input,
-                                             const BoxcarRow& row,
-                                             SizeType beam,
-                                             SizeType t,
-                                             bool root) noexcept {
-    const auto* state = input.integer_state + beam * input.beam_stride;
-    if (!root || input.materialized_root) {
-        return state[row.row * input.row_stride + t];
+template <typename TInt>
+DMT_HD inline uint64_t boxcar_integer_sample_typed(const TInt* state_base,
+                                                   const TInt* prev_base,
+                                                   const TInt* hist_base,
+                                                   const FDMTSearchInput& input,
+                                                   const BoxcarRow& row,
+                                                   SizeType beam,
+                                                   SizeType t,
+                                                   bool root = false) noexcept {
+    if (!(row.unmaterialized || root) || input.materialized_root) {
+        const TInt* state = state_base + beam * input.beam_stride;
+        return static_cast<uint64_t>(state[row.row * input.row_stride + t]);
     }
-    const uint64_t tail = state[row.tail * input.row_stride + t];
+    const TInt* prev = (prev_base != nullptr ? prev_base : state_base) +
+                       beam * input.beam_stride;
+    const uint64_t tail =
+        static_cast<uint64_t>(prev[row.tail * input.row_stride + t]);
     if (row.head == SIZE_MAX) {
         return tail;
     }
     const SizeType slot = input.history_ring && t < row.delay
                               ? (input.sample_begin + t) % row.delay
                               : t;
-    const uint64_t head =
-        t >= row.delay
-            ? state[row.head * input.row_stride + t - row.delay]
-            : input.integer_history[beam * input.history_stride + row.hist -
-                                    input.history_base + slot];
+    const uint64_t head = static_cast<uint64_t>(
+        t >= row.delay ? prev[row.head * input.row_stride + t - row.delay]
+                       : hist_base[beam * input.history_stride + row.hist -
+                                   input.history_base + slot]);
     return tail + head;
+}
+
+DMT_HD inline uint64_t boxcar_integer_sample(const FDMTSearchInput& input,
+                                             const BoxcarRow& row,
+                                             SizeType beam,
+                                             SizeType t,
+                                             bool root = false) noexcept {
+    if (input.integer32_state != nullptr) {
+        return boxcar_integer_sample_typed<uint32_t>(
+            input.integer32_state, input.integer32_prev_state,
+            input.integer32_history, input, row, beam, t, root);
+    }
+    return boxcar_integer_sample_typed<uint64_t>(
+        input.integer_state, input.integer_prev_state, input.integer_history,
+        input, row, beam, t, root);
 }
 
 DMT_HD inline bool boxcar_integer_better(uint64_t sum,

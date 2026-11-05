@@ -18,6 +18,7 @@ namespace dmt::algorithms::detail {
  */
 struct FDMTSearchInput {
     const float* state      = nullptr;
+    const float* prev_state = nullptr;
     const float* history    = nullptr;
     SizeType row_stride     = 0;
     SizeType beam_stride    = 0;
@@ -35,8 +36,12 @@ struct FDMTSearchInput {
     SizeType beam_begin = 0;
     SizeType beam_count = SIZE_MAX;
     Stream stream{};
-    const uint64_t* integer_state   = nullptr;
-    const uint64_t* integer_history = nullptr;
+    const uint64_t* integer_state        = nullptr;
+    const uint64_t* integer_prev_state   = nullptr;
+    const uint64_t* integer_history      = nullptr;
+    const uint32_t* integer32_state      = nullptr;
+    const uint32_t* integer32_prev_state = nullptr;
+    const uint32_t* integer32_history    = nullptr;
 };
 
 class FDMTSearchSink {
