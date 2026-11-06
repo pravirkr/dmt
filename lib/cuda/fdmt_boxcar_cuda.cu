@@ -951,6 +951,8 @@ public:
                             group_thr.push_back(thf);
                         }
                         if (packed) {
+                            // The mean per sample comes from widths[0], a
+                            // plain boxcar (no screen with use_trapezoid).
                             m1.push_back(static_cast<float>(
                                 p.integer_mean_lut[base] /
                                 static_cast<double>(p.widths[0])));
@@ -1170,6 +1172,7 @@ public:
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
     }
+    std::string search_path() const override { return m_driver->search_path(); }
     SizeType fuse_levels() const noexcept override {
         return m_driver->fuse_levels();
     }

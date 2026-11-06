@@ -149,12 +149,14 @@ FDMTBoxcarMemoryUsage FDMTBoxcar::get_memory_usage() const noexcept {
     return m_impl->engine->memory_usage();
 }
 std::string FDMTBoxcar::summary() const {
+    const auto path = m_impl->engine->search_path();
     return fmt::format(
         "{}*** FDMTBoxcar ({}) ***\n{} beams, {} planes, {} widths, chunk {}, "
-        "fuse_levels {}\nAllocated {:.2f} MiB; no root DM-time output\n",
+        "fuse_levels {}\n{}Allocated {:.2f} MiB; no root DM-time output\n",
         get_plan().summary(), to_string(backend()), get_nbeams(),
         m_impl->planes.size(), m_impl->planes.front().widths.size(),
         get_chunk_nsamps(), get_fuse_levels(),
+        path.empty() ? std::string{} : fmt::format("Transform: {}\n", path),
         static_cast<double>(get_memory_usage().total()) / 1048576.0);
 }
 

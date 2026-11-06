@@ -42,6 +42,9 @@ public:
     [[nodiscard]] SizeType fuse_levels() const noexcept override {
         return m_fdmt->get_fuse_levels();
     }
+    [[nodiscard]] std::string search_path() const override {
+        return m_fdmt->search_path();
+    }
 
 private:
     std::unique_ptr<FDMTEngine> m_fdmt;

@@ -209,6 +209,7 @@ public:
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
     }
+    std::string search_path() const override { return m_driver->search_path(); }
     SizeType fuse_levels() const noexcept override {
         return m_driver->fuse_levels();
     }
@@ -217,6 +218,14 @@ private:
     void make_screen_groups(const std::vector<uint32_t>& widths) {
         m_screen_levels = 0;
         m_groups        = boxcar_screen_groups(widths, m_config.use_trapezoid);
+        // The packed screen takes the mean per sample from widths[0]
+        // (screen_tile_int()), which must be a plain boxcar.
+        if (!m_groups.empty() &&
+            (widths.empty() ||
+             (m_config.use_trapezoid && trapezoid_edge_width(widths[0]) > 0))) {
+            throw std::logic_error(
+                "FDMTBoxcar (cpu): the width screen needs a plain first width");
+        }
         for (const auto& g : m_groups) {
             m_screen_levels = std::max<SizeType>(m_screen_levels, g.level);
         }
@@ -279,6 +288,81 @@ private:
 #pragma omp atomic
         ++m_counts.emitted_count;
     }
+    /// Running sums out[i + 1] = out[i] + sample(t0 + i), i < n, of the
+    /// same samples as boxcar_sample() / boxcar_integer_sample(), with the
+    /// row's pointers resolved once and the loop split at row.delay (ring
+    /// history before, plain head-row walk after) instead of branching per
+    /// sample. Same additions in the same order: exact.
+    template <typename T, typename Prefix>
+    static void prefix_tile(const FDMTSearchInput& input,
+                            const BoxcarRow& row,
+                            SizeType beam,
+                            bool root,
+                            SizeType ring0,
+                            SizeType t0,
+                            SizeType n,
+                            Prefix* out) noexcept {
+        const auto run = [&](const auto* state_base, const auto* prev_base,
+                             const auto* hist_base) {
+            // Float rows add in float, then widen (boxcar_sample); integer
+            // rows add in uint64_t (boxcar_integer_sample_typed).
+            const auto value = [](auto x) {
+                if constexpr (std::is_integral_v<T>) {
+                    return static_cast<uint64_t>(x);
+                } else {
+                    return x;
+                }
+            };
+            if (!(row.unmaterialized || root) || input.materialized_root) {
+                const auto* s = state_base + (beam * input.beam_stride) +
+                                (row.row * input.row_stride) + t0;
+                for (SizeType i = 0; i < n; ++i) {
+                    out[i + 1] = out[i] + static_cast<Prefix>(value(s[i]));
+                }
+                return;
+            }
+            const auto* prev = (prev_base != nullptr ? prev_base : state_base) +
+                               (beam * input.beam_stride);
+            const auto* tail = prev + (row.tail * input.row_stride) + t0;
+            if (row.head == SIZE_MAX) {
+                for (SizeType i = 0; i < n; ++i) {
+                    out[i + 1] = out[i] + static_cast<Prefix>(value(tail[i]));
+                }
+                return;
+            }
+            const SizeType split =
+                row.delay > t0 ? std::min(n, row.delay - t0) : 0;
+            const auto* hist = split > 0
+                                   ? hist_base + (beam * input.history_stride) +
+                                         (row.hist - input.history_base)
+                                   : hist_base;
+            for (SizeType i = 0; i < split; ++i) {
+                const SizeType slot =
+                    boxcar_history_slot(input, row, t0 + i, ring0);
+                out[i + 1] = out[i] + static_cast<Prefix>(value(tail[i]) +
+                                                          value(hist[slot]));
+            }
+            // Sample t reads head-row sample t - delay (t >= delay here).
+            const auto* head = prev + (row.head * input.row_stride);
+            for (SizeType i = split; i < n; ++i) {
+                out[i + 1] = out[i] + static_cast<Prefix>(
+                                          value(tail[i]) +
+                                          value(head[t0 + i - row.delay]));
+            }
+        };
+        if constexpr (std::is_integral_v<T>) {
+            if (input.integer32_state != nullptr) {
+                run(input.integer32_state, input.integer32_prev_state,
+                    input.integer32_history);
+            } else {
+                run(input.integer_state, input.integer_prev_state,
+                    input.integer_history);
+            }
+        } else {
+            run(input.state, input.prev_state, input.history);
+        }
+    }
+
     template <typename T>
     void score(const plans::BoxcarPlanePlan& plane,
                SizeType row_idx,
@@ -365,10 +449,8 @@ private:
         for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
             const SizeType n     = std::min(kTile, input.nsamps - t0);
             const uint64_t start = input.sample_begin + t0;
-            for (SizeType t = 0; t < n; ++t) {
-                prefix[lookback + t + 1] =
-                    prefix[lookback + t] + sample_at(t0 + t);
-            }
+            prefix_tile<T>(input, row, beam, root, ring0, t0, n,
+                           prefix + lookback);
             // Rare-event check: any width over its threshold in this tile.
             // Without it (and no open run) every peak mode is unchanged.
             const bool cold =

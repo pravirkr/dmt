@@ -2,30 +2,29 @@
 
 **Machines**
 
-| results | CPU | GPU | RAM | CPU threads | dmt |
-| :--- | :--- | :--- | ---: | :--- | :--- |
-| `l40s` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | — | 0.7.0 |
-| `xeon-6348h` | Intel(R) Xeon(R) Gold 6348H CPU @ 2.30GHz | — | 755 GB | 1 8 | 0.7.0 |
+| results | CPU | GPU | RAM | CPU threads | placement | load (1/5/15 min) | dmt |
+| :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- |
+| `l40-epyc9334` | AMD EPYC 9334 32-Core Processor | NVIDIA L40 | 629 GB | 1 8 | none, KVM VM | 8.2 10.9 14.3 of 60 CPUs → 9.3 9.8 13.1 of 60 CPUs | 0.7.0 |
 
 **Reference point**: 32768 samples × 1941 DM trials (DM 0-2000, 14.9 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Xeon Gold 6348H · 1 thr | 1.82 s | — | — | — | — | — | — | — | 8× |
-| Xeon Gold 6348H · 8 thr | 225 ms | 329 ms | 392 ms | 317 ms | 170 ms | 1.7× | 1.4× | 1.5× | 66× |
-| NVIDIA L40S | 11.8 ms | 17.1 ms | 34.4 ms | 9.67 ms | 17.3 ms | 2.9× | 0.8× | 1.4× | 1262× |
+| EPYC 9334 VM (8-CPU slot) · 1 thr | 538 ms | — | — | — | — | — | — | — | 28× |
+| EPYC 9334 VM (8-CPU slot) · 8 thr | 110 ms | 109 ms | 413 ms | 277 ms | 112 ms | 3.7× | 2.5× | 1.0× | 135× |
+| NVIDIA L40 | 12.4 ms | 19.7 ms | 37.2 ms | 12.7 ms | 17.3 ms | 3.0× | 1.0× | 1.6× | 1209× |
 
 **Real-time factor by input width** (data seconds per compute second, 32768 samples × 1941 DM trials):
 
 | platform | engine | 1-bit | 2-bit | 4-bit | 8-bit | 16-bit | float32 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Xeon Gold 6348H | FDMT, 1 thread | 12.1× | 12.4× | 10.3× | 8.2× | 7.7× | 8.7× |
-| Xeon Gold 6348H | FDMT, 8 threads | 97.2× | 95.8× | 80.5× | 68.7× | 56.8× | 54.7× |
-| Xeon Gold 6348H | DDMT, 8 threads | 81.3× | 73.7× | 77.6× | 77.6× | 31.1× | 27.5× |
-| Xeon Gold 6348H | SDMT, 8 threads | 114.4× | 103.2× | 110.3× | 109.5× | 58.8× | 35.8× |
-| Xeon Gold 6348H | DDMT-FFT, 8 threads | 87.2× | 89.3× | 87.1× | 87.2× | 72.2× | 88.5× |
-| NVIDIA L40S | FDMT, device-resident | 1433.0× | 1425.1× | 1134.6× | 1206.6× | 1071.6× | 1263.4× |
-| NVIDIA L40S | DDMT, device-resident | 764.1× | 751.9× | 737.6× | 766.3× | 644.5× | 435.9× |
-| NVIDIA L40S | SDMT, device-resident | 764.0× | 751.9× | 738.0× | 765.7× | 1664.2× | 1547.1× |
-| NVIDIA L40S | FDMT-FFT, device-resident | 886.5× | 885.5× | 884.6× | 883.0× | 880.8× | 873.0× |
-| NVIDIA L40S | DDMT-FFT, device-resident | 849.0× | 849.6× | 849.1× | 848.1× | 845.4× | 861.2× |
+| EPYC 9334 VM (8-CPU slot) | FDMT, 1 thread | 42.2× | 41.5× | 37.6× | 29.9× | 27.1× | 27.9× |
+| EPYC 9334 VM (8-CPU slot) | FDMT, 8 threads | 193.1× | 190.0× | 159.3× | 142.6× | 142.3× | 143.2× |
+| EPYC 9334 VM (8-CPU slot) | DDMT, 8 threads | 74.7× | 71.7× | 71.7× | 71.3× | 39.6× | 36.9× |
+| EPYC 9334 VM (8-CPU slot) | SDMT, 8 threads | 114.3× | 105.1× | 106.8× | 107.5× | 59.5× | 52.4× |
+| EPYC 9334 VM (8-CPU slot) | DDMT-FFT, 8 threads | 136.1× | 136.0× | 133.8× | 134.9× | 135.9× | 134.4× |
+| NVIDIA L40 | FDMT, device-resident | 1472.9× | 1428.9× | 1190.0× | 1114.7× | 904.9× | 1215.3× |
+| NVIDIA L40 | DDMT, device-resident | 723.6× | 708.5× | 693.7× | 715.9× | 599.0× | 403.4× |
+| NVIDIA L40 | SDMT, device-resident | 728.1× | 708.0× | 693.3× | 718.6× | 1322.7× | 1178.6× |
+| NVIDIA L40 | FDMT-FFT, device-resident | 782.6× | 774.0× | 756.1× | 756.1× | 768.8× | 753.7× |
+| NVIDIA L40 | DDMT-FFT, device-resident | 848.6× | 848.3× | 848.2× | 846.5× | 842.4× | 861.5× |

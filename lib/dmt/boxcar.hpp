@@ -6,6 +6,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
@@ -311,6 +312,7 @@ public:
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
+    [[nodiscard]] virtual std::string search_path() const { return {}; }
 };
 
 [[nodiscard]] std::unique_ptr<BoxcarDriver>
@@ -333,6 +335,7 @@ public:
     virtual FDMTBoxcarMemoryUsage memory_usage() const noexcept   = 0;
     virtual SizeType chunk_nsamps() const noexcept                = 0;
     virtual SizeType fuse_levels() const noexcept                 = 0;
+    virtual std::string search_path() const                       = 0;
 };
 
 /// The boxcar engines own `driver`, which calls them back per chunk.

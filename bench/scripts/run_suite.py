@@ -3,10 +3,11 @@
 One command per machine and preset; the JSON it writes is what plot_suite.py
 reads:
 
-    python bench/scripts/run_suite.py --machine xeon-6348h --no-gpu
-    python bench/scripts/run_suite.py --machine l40s --no-cpu      # GPU box
-    python bench/scripts/run_suite.py --machine l40s --no-cpu --config parkes_uwl
-    python bench/scripts/run_suite.py --machine xeon-6348h --suite cfdmt
+    python bench/scripts/run_suite.py --machine l40-epyc9334 --placement none
+    python bench/scripts/run_suite.py --machine l40-epyc9334 --placement none \
+        --config cryopaf_lband
+    python bench/scripts/run_suite.py --machine xeon-6348h --no-gpu  # CPU only
+    python bench/scripts/run_suite.py --machine l40-epyc9334 --suite cfdmt
 
 Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
 for the default ``cryopaf`` preset, and ``bench/results/<config>/<machine>/``
@@ -112,6 +113,25 @@ def gpu_model(kind: str) -> str:
     return names.splitlines()[0] if names else ""
 
 
+def load_average() -> str:
+    """1/5/15-minute load average and online CPU count (Linux, macOS)."""
+    try:
+        one, five, fifteen = os.getloadavg()
+    except OSError:
+        return "-"
+    return f"{one:.1f} {five:.1f} {fifteen:.1f} of {os.cpu_count()} CPUs"
+
+
+def virtualized() -> str:
+    """Hypervisor vendor when the CPU flags report one, else "no"."""
+    cpuinfo = Path("/proc/cpuinfo")
+    if not cpuinfo.is_file() or " hypervisor" not in cpuinfo.read_text():
+        return "no"
+    out = _run(["lscpu"])
+    m = re.search(r"^Hypervisor vendor:\s*(.+)$", out, re.MULTILINE)
+    return m.group(1).strip() if m else "yes"
+
+
 def dmt_version() -> str:
     text = (REPO / "CMakeLists.txt").read_text()
     m = re.search(r"project\(\s*dmt\s+VERSION\s+([\d.]+)", text)
@@ -133,11 +153,22 @@ def results_root(suite: str, config: str) -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument(
-        "--machine", required=True, help="results folder name, e.g. xeon-6348h"
+        "--machine", required=True, help="results folder name, e.g. l40-epyc9334"
     )
     ap.add_argument("--label", help="display name in plots (default: CPU/GPU model)")
     ap.add_argument("--build-dir", help="CMake build directory (default: auto)")
     ap.add_argument("--threads", default="1,8", help="CPU thread counts (default 1,8)")
+    ap.add_argument(
+        "--placement",
+        default="close",
+        choices=["close", "none"],
+        help="CPU thread placement: close (OMP_PROC_BIND=close OMP_PLACES=cores, "
+        "packed onto neighbouring cores) or none (unbound, scheduled by the OS "
+        "as a shared batch node runs them); recorded in the results",
+    )
+    ap.add_argument(
+        "--repetitions", type=int, default=3, help="repetitions per point (default 3)"
+    )
     ap.add_argument("--max-gb", type=float, help="memory budget (default 60%% of RAM)")
     ap.add_argument("--cpu", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument(
@@ -209,6 +240,8 @@ def main() -> None:
         "threads": args.threads.replace(",", " "),
         "fftw_planner": args.fftw_planner,
         "config": args.config if args.suite == "main" else "-",
+        "placement": args.placement,
+        "virtualized": virtualized(),
     }
     wisdom = args.fftw_wisdom or str(
         binary.parent.parent / f"fftw_{args.machine}.wisdom"
@@ -217,8 +250,14 @@ def main() -> None:
         **os.environ,
         "DMT_BENCH_THREADS": args.threads,
         "DMT_BENCH_MAX_GB": f"{args.max_gb or 0.6 * ram_gb():.1f}",
-        "OMP_PROC_BIND": os.environ.get("OMP_PROC_BIND", "close"),
-        "OMP_PLACES": os.environ.get("OMP_PLACES", "cores"),
+        **(
+            {
+                "OMP_PROC_BIND": os.environ.get("OMP_PROC_BIND", "close"),
+                "OMP_PLACES": os.environ.get("OMP_PLACES", "cores"),
+            }
+            if args.placement == "close"
+            else {}
+        ),
         # Planned once per size and machine (the first run pays for it, at
         # engine construction, outside the timed region).
         "DMT_FFTW_PLANNER": args.fftw_planner,
@@ -234,6 +273,9 @@ def main() -> None:
         runs.append(("cpu", rf"^{prefix}/.*/cpu[0-9]+/"))
     if run_gpu:
         runs.append((gpu_kind, rf"^{prefix}/.*/{gpu_kind}(_host)?/"))
+    if args.placement == "none":
+        for key in ("OMP_PROC_BIND", "OMP_PLACES"):
+            env.pop(key, None)
     for kind, pattern in runs:
         regex = pattern + (f".*{args.filter}" if args.filter else "")
         out = out_dir / f"{stem}_{kind}.json"
@@ -257,15 +299,18 @@ def main() -> None:
             *([setarch, "-R"] if setarch else []),
             str(binary),
             f"--benchmark_filter={regex}",
-            f"--benchmark_repetitions={1 if args.quick else 3}",
+            f"--benchmark_repetitions={1 if args.quick else args.repetitions}",
             f"--benchmark_min_time={'0.05s' if args.quick else '0.2s'}",
             f"--benchmark_out={out}",
             "--benchmark_out_format=json",
-            f"--benchmark_context={context_arg(ctx)}",
+            f"--benchmark_context={context_arg({**ctx, 'load_start': load_average()})}",
         ]
         print(f"[{kind}] {binary.name} -> {out.relative_to(REPO)}", flush=True)
         start = time.monotonic()
         subprocess.run(cmd, check=True, env=run_env, cwd=REPO)  # noqa: S603
+        data = json.loads(out.read_text())
+        data.setdefault("context", {})["load_end"] = load_average()
+        out.write_text(json.dumps(data))
         compact_benchmark_json(out)
         print(f"[{kind}] done in {(time.monotonic() - start) / 60:.1f} min")
     script = "plot_cfdmt.py" if args.suite == "cfdmt" else "plot_suite.py"

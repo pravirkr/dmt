@@ -654,20 +654,14 @@ public:
                                       : root - 1;
             while (m_current_level < last) {
                 const SizeType next = m_current_level + 1;
-                execute_iter_device(next, stream, /*regular_only=*/true,
-                                    /*advance_hist=*/false);
+                // The merge kernel may have advanced the regular rows'
+                // rings itself; advance only the rest after the search read
+                // the history.
+                const int coord_begin =
+                    execute_iter_device(next, stream, /*regular_only=*/true,
+                                        /*advance_hist=*/false);
                 m_current_level = next;
                 consume(next, next);
-                const auto hist = tree_history(next);
-                const bool fused_reg_ring =
-                    hist.ring != kFifoHistory && hist.out != nullptr &&
-                    m_active <=
-                        static_cast<SizeType>(kIterThreads * kIterSampsPerTh);
-                const int coord_begin =
-                    fused_reg_ring
-                        ? static_cast<int>(detail::fdmt_regular_sum_coords(
-                              m_plan.get_container(), next))
-                        : 0;
                 advance_tree_history<float>(
                     reinterpret_cast<const float*>(m_levels_d[next - 1].base),
                     next, stream, coord_begin);
@@ -1479,6 +1473,19 @@ public:
             mib(mem.plan + mem.state + mem.history + mem.workspace),
             mib(mem.output));
         return m_plan.summary() + summary;
+    }
+
+    [[nodiscard]] std::string search_path() const override {
+        std::string path;
+        if (m_direct) {
+            path = fmt::format("direct levels 0-{}", m_direct->levels);
+        }
+        if (m_top) {
+            path +=
+                fmt::format("{}direct top {} -> {}", path.empty() ? "" : ", ",
+                            m_top->level, m_top->target);
+        }
+        return path;
     }
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override {
@@ -2847,12 +2854,24 @@ private:
         if (level + 1 >= target) {
             return;
         }
-        auto plan = detail::build_fdmt_direct_top(m_plan, level, target);
+        // Over the ring budget (more likely with the 16-bit packed search's
+        // uint64_t rings), sum from a higher level instead of dropping the
+        // top: its fewer, longer rows need less ring (meerkat_lband: 21.1M
+        // floats per beam from level 4, 13.1M from level 10), at the cost of
+        // more tree merges. Keep the ping-pong parity.
         constexpr SizeType kMaxRingBytes = SizeType{2} << 30;
-        if (m_nbeams * static_cast<SizeType>(plan.ring_size) * sizeof(float) *
-                top_words() >
-            kMaxRingBytes) {
-            return;
+        const SizeType step              = target < root ? 2 : 1;
+        auto plan = detail::build_fdmt_direct_top(m_plan, level, target);
+        while (m_nbeams * static_cast<SizeType>(plan.ring_size) *
+                   sizeof(float) * top_words() >
+               kMaxRingBytes) {
+            if (level + step + 1 >= target) {
+                logging::debug("FDMT (cuda): direct top rings over budget at "
+                               "every level; top disabled");
+                return;
+            }
+            level += step;
+            plan = detail::build_fdmt_direct_top(m_plan, level, target);
         }
         auto t         = std::make_unique<DirectTopD>();
         t->level       = level;
@@ -3019,11 +3038,14 @@ private:
                hist;
     }
 
-    void execute_iter_device(SizeType next_level,
-                             cudaStream_t stream,
-                             bool regular_only = false,
-                             bool advance_hist = true) {
-        execute_iter_levels(next_level, stream, regular_only, advance_hist);
+    /// Returns the number of leading sum coordinates whose tree-history ring
+    /// the merge kernel already advanced (0 when the advance was not fused).
+    int execute_iter_device(SizeType next_level,
+                            cudaStream_t stream,
+                            bool regular_only = false,
+                            bool advance_hist = true) {
+        const int fused_coords =
+            execute_iter_levels(next_level, stream, regular_only, advance_hist);
         // The tree produced the direct top's level: keep its rings current
         // (a top chunk stores them after its trials read them).
         if (m_top && next_level == m_top->level && !m_top_chunk &&
@@ -3034,12 +3056,14 @@ private:
                 m_top_filled = 0; // integer level: the rings must refill
             }
         }
+        return fused_coords;
     }
 
-    void execute_iter_levels(SizeType next_level,
-                             cudaStream_t stream,
-                             bool regular_only = false,
-                             bool advance_hist = true) {
+    int execute_iter_levels(SizeType next_level,
+                            cudaStream_t stream,
+                            bool regular_only = false,
+                            bool advance_hist = true) {
+        int fused_coords = 0;
         with_elem(m_levels_d[next_level - 1].type, [&](auto tag_in) {
             using TIn = decltype(tag_in);
             with_elem(m_levels_d[next_level].type, [&](auto tag_out) {
@@ -3048,7 +3072,7 @@ private:
                 if constexpr (sizeof(TIn) <= sizeof(TOut) &&
                               !(std::is_floating_point_v<TIn> &&
                                 !std::is_floating_point_v<TOut>)) {
-                    execute_iter_typed<TIn, TOut>(
+                    fused_coords = execute_iter_typed<TIn, TOut>(
                         reinterpret_cast<const TIn*>(
                             m_levels_d[next_level - 1].base),
                         reinterpret_cast<TOut*>(m_levels_d[next_level].base),
@@ -3059,17 +3083,19 @@ private:
                 }
             });
         });
+        return fused_coords;
     }
 
     template <typename TIn, typename TOut>
-    void execute_iter_typed(const TIn* __restrict__ in_ptr,
-                            TOut* __restrict__ out_ptr,
-                            SizeType next_level,
-                            cudaStream_t stream,
-                            bool regular_only = false,
-                            bool advance_hist = true) {
+    int execute_iter_typed(const TIn* __restrict__ in_ptr,
+                           TOut* __restrict__ out_ptr,
+                           SizeType next_level,
+                           cudaStream_t stream,
+                           bool regular_only = false,
+                           bool advance_hist = true) {
         const auto& pc    = m_plan.get_container();
         const auto& shape = pc.state_shape[next_level];
+        int fused_coords  = 0;
         // Valid mode: this chunk's samples (rows keep their table strides).
         const bool valid = m_mode == FDMTMode::kValid;
         const int active = valid ? static_cast<int>(m_active) : 0;
@@ -3121,12 +3147,14 @@ private:
                     in_state_nelements, out_state_nelements, hist.stride,
                     hist.base, hist.ring, m_int_unit, active, fuse_ring);
 
+            fused_coords = fuse_ring ? ncoords_sum_cur : 0;
             if (advance_hist) {
                 advance_tree_history<TIn>(in_ptr, next_level, stream,
-                                          fuse_ring ? ncoords_sum_cur : 0);
+                                          fused_coords);
             }
         }
         gpu_utils::check_last_gpu_error("kernel_execute_iter launch failed");
+        return fused_coords;
     }
 
     /// Advances `level`'s tree history after its merges.

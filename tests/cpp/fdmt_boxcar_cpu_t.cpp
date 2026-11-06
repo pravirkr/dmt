@@ -730,24 +730,48 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
                Catch::Matchers::WithinRel(4.0F * std::sqrt(1.5F), 1e-5F));
     CHECK(max_snr_trap > max_snr_rect * 1.05F);
 #ifdef DMT_ENABLE_GPU
-    // 3. Verify CPU and GPU agree on multi-chunk float32 and packed 8-bit.
+    // 3. Verify CPU and GPU agree on multi-chunk float32 and packed 8-bit
+    // (integer thresholds use the filter weight 2 (W - w_edge); exact).
     const auto wf = waterfalls(plan, 1, 3);
-    for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
-                            PeakFindingMode::kContiguousPeakAcrossWidths,
-                            PeakFindingMode::kAllAboveThreshold}) {
-        BoxcarConfig cfg(16, 1.5F, 2.5F, 1.0F, mode);
-        cfg.use_trapezoid = true;
-        FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(2), 1, 0, 64);
-        FDMTBoxcar gpu_s(plan, cfg, true,
-                         Exec{algorithms::detail::kGPUBackend, 0}, 1, 0, 64);
-        for (const auto& block : wf) {
-            const auto g = gpu_s.execute(block).candidates;
-            const auto c = cpu_s.execute(block).candidates;
-            compare({g.begin(), g.end()}, {c.begin(), c.end()});
+    std::vector<std::vector<uint8_t>> wf8;
+    for (const auto& block : wf) {
+        auto& q = wf8.emplace_back(block.size());
+        for (SizeType i = 0; i < block.size(); ++i) {
+            q[i] = static_cast<uint8_t>(std::clamp(
+                std::nearbyint(128.0F + (16.0F * block[i])), 0.0F, 255.0F));
         }
-        const auto gf = gpu_s.flush().candidates;
-        const auto cf = cpu_s.flush().candidates;
-        compare({gf.begin(), gf.end()}, {cf.begin(), cf.end()});
+    }
+    for (const SizeType bits : {SizeType{32}, SizeType{8}}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            BoxcarConfig cfg(16, 1.5F, 2.5F, 1.0F, mode);
+            cfg.use_trapezoid = true;
+            if (bits == 8) {
+                cfg.input_nbits = 8;
+                cfg.input_mean  = 128.0F;
+                cfg.noise_sigma = 16.0F;
+            }
+            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(2), 1, 0, 64);
+            FDMTBoxcar gpu_s(plan, cfg, true,
+                             Exec{algorithms::detail::kGPUBackend, 0}, 1, 0,
+                             64);
+            std::vector<RawCandidate> c;
+            std::vector<RawCandidate> g;
+            for (SizeType k = 0; k < wf.size(); ++k) {
+                if (bits == 8) {
+                    append(g, gpu_s.execute(wf8[k]));
+                    append(c, cpu_s.execute(wf8[k]));
+                } else {
+                    append(g, gpu_s.execute(wf[k]));
+                    append(c, cpu_s.execute(wf[k]));
+                }
+            }
+            append(g, gpu_s.flush());
+            append(c, cpu_s.flush());
+            REQUIRE_FALSE(c.empty());
+            compare(g, c);
+        }
     }
 #endif
 }
@@ -867,16 +891,28 @@ TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
     // 512 channels: the GPU computes levels 0..3 directly and, for subband
     // depths 0 and 1, sums the trials (or level root - depth - 1) from a
     // level-k ring (the direct top); depth 2 has only the direct levels.
+    // 2048 channels at depth 3: the top sums level 7 from level 4.
     // Packed input is exact on both backends (uint32_t state at 8 bits,
     // uint64_t at 16); float32 agrees within rounding near the threshold.
+    // The packed search's summary names the path taken, so a size limit
+    // cannot silently fall back to the plain tree. A reset_history() replays
+    // the stream exactly.
     constexpr SizeType kBeams  = 2;
     constexpr SizeType kBlocks = 4;
-    for (const SizeType depth : {SizeType{0}, SizeType{1}, SizeType{2}}) {
-        const plans::FDMTPlan plan(1100.0F, 1714.0F, 512, 256, 455.6e-6F, 300,
-                                   0, 1, "valid", depth);
+    struct Case {
+        SizeType nchans;
+        SizeType depth;
+        bool top;
+    };
+    for (const Case cs : {Case{512, 0, true}, Case{512, 1, true},
+                          Case{512, 2, false}, Case{2048, 3, true}}) {
+        const SizeType depth = cs.depth;
+        const plans::FDMTPlan plan(1100.0F, 1714.0F, cs.nchans, 256, 455.6e-6F,
+                                   300, 0, 1, "valid", depth);
         const SizeType size = kBeams * plan.get_nchans() * plan.get_nsamps();
         for (const SizeType bits : {SizeType{8}, SizeType{16}, SizeType{32}}) {
-            DYNAMIC_SECTION("depth=" << depth << " bits=" << bits) {
+            DYNAMIC_SECTION("nchans=" << cs.nchans << " depth=" << depth
+                                      << " bits=" << bits) {
                 const uint32_t maximum = bits == 32 ? 0U : (1U << bits) - 1U;
                 std::mt19937 random(static_cast<uint32_t>(17 + depth + bits));
                 std::vector<std::vector<uint8_t>> packed(kBlocks);
@@ -935,6 +971,26 @@ TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
                     } else {
                         compare(g, c);
                     }
+                    const auto summary = gpu_s.summary();
+                    INFO(summary);
+                    // Only the packed search takes the direct path.
+                    const bool direct = bits != 32;
+                    CHECK((summary.find("direct levels") !=
+                           std::string::npos) == direct);
+                    CHECK((summary.find("direct top") != std::string::npos) ==
+                          (direct && cs.top));
+                    // Run, reset, run again: identical candidates.
+                    gpu_s.reset_history();
+                    std::vector<RawCandidate> again;
+                    for (SizeType k = 0; k < kBlocks; ++k) {
+                        if (bits == 32) {
+                            append(again, gpu_s.execute(floats[k]));
+                        } else {
+                            append(again, gpu_s.execute(packed[k]));
+                        }
+                    }
+                    append(again, gpu_s.flush());
+                    compare(again, g);
                 }
             }
         }

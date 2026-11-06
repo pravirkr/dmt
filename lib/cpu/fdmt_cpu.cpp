@@ -219,6 +219,60 @@ inline TOut fdmt_merge(TIn a, TIn b, float int_unit) noexcept {
     }
 }
 
+/**
+ * @brief out[i] = fdmt_merge(a[i], b[i]) with streaming stores, for the
+ * level types fdmt_stream_add does not cover (integer levels and the first
+ * float level after them). Each 64-byte block of `out` is computed with the
+ * plain merge expression into registers and stored non-temporally, so the
+ * result is bit-identical to the plain loop. Besides skipping the
+ * read-for-ownership, this keeps a level's lines from staying dirty in the
+ * writing core's cache: the next level's threads read them from memory
+ * instead of from another core (on a multi-CCD part such as EPYC, a slow
+ * cross-die transfer). Callers must fdmt_stream_fence() before another
+ * thread reads `out`.
+ */
+template <typename TOut, typename TIn>
+inline void fdmt_stream_merge(const TIn* __restrict__ a,
+                              const TIn* __restrict__ b,
+                              TOut* __restrict__ out,
+                              SizeType m,
+                              float int_unit) noexcept {
+#if defined(__AVX__)
+    constexpr SizeType kBlockBytes = 64;
+    constexpr SizeType kBlock      = kBlockBytes / sizeof(TOut);
+    SizeType i                     = 0;
+    for (; i < m &&
+           (reinterpret_cast<std::uintptr_t>(out + i) % kBlockBytes) != 0;
+         ++i) {
+        out[i] = fdmt_merge<TOut>(a[i], b[i], int_unit);
+    }
+    for (; i + kBlock <= m; i += kBlock) {
+        alignas(kBlockBytes) TOut blk[kBlock];
+#pragma omp simd
+        for (SizeType j = 0; j < kBlock; ++j) {
+            blk[j] = fdmt_merge<TOut>(a[i + j], b[i + j], int_unit);
+        }
+#if defined(__AVX512F__)
+        _mm512_stream_si512(reinterpret_cast<__m512i*>(out + i),
+                            _mm512_load_si512(blk));
+#else
+        const auto* src = reinterpret_cast<const __m256i*>(blk);
+        auto* dst       = reinterpret_cast<__m256i*>(out + i);
+        _mm256_stream_si256(dst, _mm256_load_si256(src));
+        _mm256_stream_si256(dst + 1, _mm256_load_si256(src + 1));
+#endif
+    }
+    for (; i < m; ++i) {
+        out[i] = fdmt_merge<TOut>(a[i], b[i], int_unit);
+    }
+#else
+#pragma omp simd
+    for (SizeType i = 0; i < m; ++i) {
+        out[i] = fdmt_merge<TOut>(a[i], b[i], int_unit);
+    }
+#endif
+}
+
 /// fdmt_convert_copy, rescaling int -> float.
 template <typename TIn, typename TOut>
 inline void fdmt_convert_copy_unit(const TIn* __restrict__ src,
@@ -299,8 +353,8 @@ void fdmt_advance_history_window(const TIn* __restrict__ new_data,
  * @tparam Mode FDMTMode enum specifying boundary handling behavior
  * @tparam TIn Storage type of the input (previous level) state.
  * @tparam TOut Storage type of the output (current level) state.
- * @tparam Stream Write the overlap region with streaming stores (float
- * levels only; see fdmt_stream_add).
+ * @tparam Stream Write the overlap region with streaming stores (see
+ * fdmt_stream_add and fdmt_stream_merge).
  *
  * @param data_tail Input array (tail component) - lower frequency band
  * @param size_tail Size of tail array (must equal size_head)
@@ -460,6 +514,9 @@ void offset_add(const TIn* __restrict__ data_tail,
                       std::is_same_v<TOut, float>) {
             fdmt_stream_add(data_tail + delay_shift, data_head,
                             out + delay_shift, nsum);
+        } else if constexpr (Stream) {
+            fdmt_stream_merge<TOut>(data_tail + delay_shift, data_head,
+                                    out + delay_shift, nsum, int_unit);
         } else {
 #pragma omp simd
             for (SizeType i = 0; i < nsum; ++i) {
@@ -1437,10 +1494,16 @@ public:
                                     slot = slot + 1 == op.delay ? 0 : slot + 1;
                                 }
                             }
-                            const TInt* head = in + op.head - op.delay;
-#pragma omp simd
-                            for (SizeType t = split; t < m_active; ++t) {
-                                dst[t] = tail[t] + head[t];
+                            // Sample t >= split reads head row sample
+                            // t - delay (split == delay here, so the head
+                            // pointer starts at the row). Streamed, like
+                            // the transform's levels (fdmt_stream_merge).
+                            if (split < m_active) {
+                                fdmt_stream_merge<TInt>(
+                                    tail + split, in + op.head, dst + split,
+                                    m_active - split, 1.0F);
+                                // Before the loop's barrier, on this thread.
+                                fdmt_stream_fence();
                             }
                         }
                     }

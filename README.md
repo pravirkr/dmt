@@ -143,20 +143,25 @@ Requirements, CMake options and development installs are in the
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.7.0 on an Intel Xeon Gold 6348H (8 threads) and an
-NVIDIA L40S (device-resident data). The `cryopaf` preset is 512 channels at
-704–1216 MHz and 512 µs, processed as a stream of 16.8 s blocks, with up to
-1545 DM trials from 0 to 2000 pc cm⁻³.
+Measured with dmt 0.7.0 on one node of a shared HTCondor cluster: an AMD EPYC
+9334 virtual machine in an 8-CPU batch slot (threads unpinned, other jobs
+running) and an NVIDIA L40 (device-resident data). The `meerkat_lband`
+preset is a typical L-band survey setup: 4096 channels at 856–1712 MHz and
+612.48 µs, processed as a stream of 20.1 s blocks, with up to 4057 DM trials
+from 0 to 2000 pc cm⁻³.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/dark/readme_highlight.png">
-  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT, and FDMT real-time factor vs input bit width" src="bench/results/plots/light/readme_highlight.png">
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/meerkat_lband/plots/dark/readme_highlight.png">
+  <img alt="Time per block vs number of DM trials for FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT, and FDMT real-time factor vs input bit width" src="bench/results/meerkat_lband/plots/light/readme_highlight.png">
 </picture>
 
-Every engine runs faster than real time on both machines: FDMT at 45× real
-time on the Xeon and 729× on the L40S, and DDMT-FFT, the fastest engine on
-this preset, at 124× and 1130×. Sweeps over DM range, block length and input
-width, a second L-band preset, and CohFDMT are on the
+Every engine runs faster than real time on both backends. FDMT is the
+fastest, at 80× real time on 8 CPU threads and 722× on the L40: 15× faster
+than brute-force DDMT on the CPU and 6× on the GPU. With fewer channels the
+margin shrinks: on the 512-channel `cryopaf` preset FDMT, DDMT and SDMT take
+about the same time on the CPU, and DDMT-FFT is the fastest engine. Sweeps
+over DM range, block length and input width, all three presets, and CohFDMT
+are on the
 [Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page;
 [`bench/README.md`](bench/README.md) shows how to reproduce them.
 

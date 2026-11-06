@@ -85,8 +85,20 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     return types;
 }
 
-/// True when every tree coordinate of packed `nbits` search (using the plan's
-/// exact dyadic level-0 weights `get_box_weights()`) fits in `uint32_t`.
+/**
+ * @brief True when every tree coordinate of packed `nbits` search (using the
+ * plan's exact dyadic level-0 weights `get_box_weights()`) fits in
+ * `uint32_t`.
+ *
+ * No headroom is needed: the bound is the exact maximum, not an estimate.
+ * Level 0 holds maxval * L * w(L) for integer weights w (the search keeps the
+ * level-0 boxes unrounded on the 2^-B scale), and each coordinate above is
+ * the plain sum of its tail and head; all are integers below 2^53, so the
+ * doubles here are exact. Values that exceed a coordinate's own range never
+ * live in `uint32_t`: the direct levels' running sums wrap modulo 2^32 and
+ * only their differences (a coordinate) are used, and the boxcar search over
+ * root rows keeps `uint64_t` prefix sums.
+ */
 inline bool int_search_fits_u32(const plans::FDMTPlan& plan,
                                 bool use_box_smearing,
                                 SizeType nbits) {

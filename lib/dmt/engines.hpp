@@ -157,6 +157,10 @@ public:
     [[nodiscard]] virtual algorithms::FDMTMemoryUsage
     get_memory_usage() const noexcept                 = 0;
     [[nodiscard]] virtual std::string summary() const = 0;
+    /// The search's transform path when it differs from the plain tree
+    /// (GPU direct levels and direct top), e.g. "direct levels 0-3, direct
+    /// top 5 -> 9"; empty otherwise.
+    [[nodiscard]] virtual std::string search_path() const { return {}; }
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

@@ -79,11 +79,14 @@ different widths have different baselines and noise scales.
 :::
 
 Accumulator bounds are checked at construction, including prefix workspace.
-The root merge is fused into scoring, but lower-level fusion is currently
-disabled for packed searches. The uint64 tree state and history cost more
-memory and bandwidth than float32, and the packed search does not use the
-GPU's direct levels yet. On the L40S it runs at about 3–4.5× the float32 time
-on the cryopaf presets, almost all of it in the uint64 FDMT merges.
+The root merge is fused into scoring. The tree state is uint32 when the
+plan bounds every tree value below 2^32, else uint64. On the GPU the packed
+search computes levels 0–3 directly from integer running sums and, where the
+plan allows, sums the upper levels' rows straight from a lower level (the
+direct top of the float transform, see the performance guide), all in exact
+integers. 8-bit input then takes about the float32 search time (0.94–1.05×
+on the three presets, L40). The CPU packed search does not fuse the lower
+levels and takes 1.3× the float32 time on 8 threads (1.1–1.2× on one).
 
 ## Running a search
 
@@ -164,6 +167,35 @@ Widths start at 1; each next width is
 `wtsp=2` gives powers of two, `1.5` a denser geometric grid, and `1` every
 integer. Widths 1–4096 are supported on both backends, without a 32-filter cap.
 Every trial is searched at the original time resolution.
+
+**Trapezoid filters (`use_trapezoid=True`).** Each width `W >= 3` is searched
+with a trapezoid *instead of* the boxcar: an edge of `w_edge = (W + 1) // 4`
+samples at weight 1/2 on each side of a flat core at weight 1, still `W`
+samples in all. Widths 1 and 2 stay boxcars. The analytical noise model
+includes the taper exactly, so the S/N scale and the thresholds are
+unchanged. The taper matches pulses that are not aligned with the sample
+grid, or that have soft edges. A narrow pulse that straddles sample
+boundaries gains about 6% S/N (the off-phase `[0.5, 1, 0.5]` profile at
+`W = 3`). A flat pulse aligned with the boxcar loses about 5% (`W = 8`). The
+reported `width` is the full support `W`, edges included. The trapezoids
+replace the boxcars; they are not searched alongside them, so the number of
+filters and the cost per width stay the same. Packed input supports them too:
+the integer thresholds use the filter weight `2 (W - w_edge)`.
+
+**Width screen.** With dense width grids, consecutive widths
+`[w_lo, w_hi]` with `w_hi < 2 w_lo` form a group. Before any width in a group
+is scored, one bound is checked per endpoint: the prefix sum at `t` minus the
+smallest prefix sum over `[t - w_hi, t - w_lo]` (a sparse-table range
+minimum). This bound is compared with the group's smallest threshold, and
+only the groups that pass are scored width by width. The screen is exact, so
+the candidates are the same with or without it. It is used only when it
+merges widths, i.e. when there are fewer than half as many groups plus
+range-minimum levels as widths. In practice that means `wtsp=1` grids
+(e.g. 195 widths in 8 groups). `wtsp>=1.5` grids are unaffected. On the
+CPU, the screen made `meerkat_lband` float32 at `wtsp=1` 4.4× faster. With
+`use_trapezoid`, the GPU turns the screen off, and the CPU finds no group
+worth screening (trapezoid widths stay single), so trapezoid searches pay
+the full per-width cost.
 
 `CONTIGUOUS_PEAK_PER_WIDTH`
 : One peak per contiguous threshold excursion of each DM/width response.
@@ -315,21 +347,26 @@ DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
   --benchmark_filter='^BM_fdmt_boxcar_stream/'
 ```
 
-On noise, with 32768-sample blocks and float32 input (L40S device-resident;
-Intel Xeon Gold 6348H with 8 threads):
+On noise, with 32768-sample blocks and float32 input, no subband search
+(NVIDIA L40, device-resident, minimum of 5 runs; AMD EPYC 9334 VM, 8
+unpinned threads in a shared batch slot, minimum of 5 runs for the search
+and median of 3 for `FDMT`):
 
-| preset, machine | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
+| preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `cryopaf` (1545 trials), L40S | 22.9 ms | 24.0 ms (12 widths) | 28.6 ms (195 widths) |
-| `cryopaf_lband` (1941 trials), L40S | 11.9 ms | 12.6 ms (13 widths) | 16.7 ms (219 widths) |
-| `cryopaf`, Xeon | 370 ms | 592 ms | 1.75 s |
-| `cryopaf_lband`, Xeon | 225 ms | 464 ms | 2.42 s |
+| `cryopaf` (1545 trials), GPU | 21.9 ms | 22.6 ms (12 widths) | 23.4 ms (195 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 12.1 ms | 13.9 ms (13 widths) | 14.2 ms (219 widths) |
+| `meerkat_lband` (4057 trials), GPU | 27.3 ms | 30.8 ms (12 widths) | 31.7 ms (163 widths) |
+| `cryopaf`, CPU | 200 ms | 239 ms | 249 ms |
+| `cryopaf_lband`, CPU | 110 ms | 370 ms | 355 ms |
+| `meerkat_lband`, CPU | 251 ms | 363 ms | 362 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
-dozen widths, so the search adds ~5%. On the CPU the scorer is a separate
-pass over each chunk's root rows whose cost grows with the number of widths
-(1.6–2× the transform at a dozen widths), still well faster than real time on
-8 threads. `working_bytes` is the algorithm allocation estimate, not process
+dozen widths, so the search adds 3–17%. On the CPU the scorer is a separate
+pass over each chunk's root rows (1.2–3.4× the transform), still well faster
+than real time on 8 threads. Thanks to the width screen, scoring every
+integer width up to 100 ms costs about the same as a dozen widths on both
+backends. `working_bytes` is the algorithm allocation estimate, not process
 RSS.
 
 ## FDMTFFTBoxcar

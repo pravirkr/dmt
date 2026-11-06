@@ -211,6 +211,10 @@ _CONTEXT_KEYS = (
     "threads",
     "build_type",
     "date",
+    "placement",
+    "virtualized",
+    "load_start",
+    "load_end",
 )
 
 
@@ -807,16 +811,23 @@ def _machines_table(machines: dict[str, Machine]) -> list[str]:
     out = [
         "**Machines**",
         "",
-        "| results | CPU | GPU | RAM | CPU threads | dmt |",
-        "| :--- | :--- | :--- | ---: | :--- | :--- |",
+        "| results | CPU | GPU | RAM | CPU threads | placement | load (1/5/15 min) "
+        "| dmt |",
+        "| :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- |",
     ]
     for m in sorted(machines.values(), key=lambda m: m.name):
         c = m.context
         threads = c.get("threads", "") if m.ran_cpu else "—"
+        placement = c.get("placement", "close") if m.ran_cpu else "—"
+        if m.ran_cpu and c.get("virtualized", "no") not in ("no", "-"):
+            placement += f", {c['virtualized']} VM"
+        load = c.get("load_start", "—")
+        if c.get("load_end"):
+            load += f" → {c['load_end']}"
         out.append(
             f"| `{m.name}` | {c.get('cpu_model', '')} "
             f"| {c.get('gpu_model', '') or '—'} | {c.get('ram_gb', '')} GB "
-            f"| {threads} | {c.get('dmt_version', '')} |"
+            f"| {threads} | {placement} | {load} | {c.get('dmt_version', '')} |"
         )
     return out
 

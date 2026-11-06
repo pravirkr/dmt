@@ -98,7 +98,7 @@ Benchmark JSON, written with `--benchmark_out`), for example:
 ```bash
 DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
   --benchmark_filter='^BM_fdmt_boxcar_cuda/' --benchmark_repetitions=3 \
-  --benchmark_out=bench/results/cryopaf_lband/l40s/boxcar_cuda.json \
+  --benchmark_out=bench/results/cryopaf_lband/l40-epyc9334/boxcar_cuda.json \
   --benchmark_out_format=json
 ```
 
@@ -111,8 +111,12 @@ the timed region).
 
 ### Running it on a machine
 
-On **each** machine (the Intel Xeon for the CPU results, the L40S box for the
-GPU results), for each preset:
+The published CPU and GPU numbers come from one machine, an EDGAR HTCondor
+GPU worker: an NVIDIA L40 and an AMD EPYC 9334 virtual machine, run in an
+8-CPU batch slot on a node shared with other jobs (results folder
+`l40-epyc9334`). Older results from other machines are kept under
+`bench/results/[<config>/]other/`, which `plot_suite.py` does not read.
+For each preset:
 
 ```bash
 # 1. Release build with benchmarks (on the GPU box, CUDA is detected automatically)
@@ -122,10 +126,9 @@ cmake --build build -j --target dmt_bench_suite
 # 2. Run the suite: bench/results/<machine>/suite_{cpu,cuda}.json for
 #    cryopaf, bench/results/<config>/<machine>/ for the other presets
 for config in cryopaf cryopaf_lband meerkat_lband; do   # parkes_uwl: deferred, see above
-  python bench/scripts/run_suite.py --machine xeon-6348h \
-      --label "Xeon Gold 6348H" --no-gpu --config $config     # CPU box
-  python bench/scripts/run_suite.py --machine l40s --label "NVIDIA L40S" \
-      --no-cpu --config $config                               # GPU box
+  python bench/scripts/run_suite.py --machine l40-epyc9334 \
+      --label "EPYC 9334 VM (8-CPU slot)" --placement none --max-gb 16 \
+      --config $config                                        # CPU, then GPU
 done
 
 # 3. Commit the JSON
@@ -142,10 +145,11 @@ python bench/scripts/plot_suite.py --config cryopaf_lband
 git add bench/results/plots && git commit -m "bench: update plots"
 ```
 
-`plot_suite.py` writes light and dark PNGs to `bench/results/plots/{light,dark}/`
-and a numbers table to `bench/results/plots/summary.md`. The README and the
-docs Benchmarks page reference those files directly, so nothing else needs
-editing. Brute-force DDMT takes most of a CPU run. `--quick` (1 repetition,
+`plot_suite.py` writes light and dark PNGs to
+`bench/results/[<config>/]plots/{light,dark}/` and a numbers table to
+`summary.md` next to them. The README's highlight figure comes from
+`meerkat_lband`, and the docs Benchmarks page has a tab per preset; both
+reference those files directly, so nothing else needs editing. Brute-force DDMT takes most of a CPU run. `--quick` (1 repetition,
 short runs) is for smoke tests only.
 
 ### Getting comparable numbers
@@ -154,8 +158,14 @@ short runs) is for smoke tests only.
   in `CMakeLists.txt`). The JSON records `dmt_version`, and `plot_suite.py`
   warns when the machines disagree.
 - Release build only; `run_suite.py` warns otherwise.
-- Threads are pinned with `OMP_PROC_BIND=close OMP_PLACES=cores`, which you can
-  override in the environment. `--threads 1,8` is the default.
+- `--placement close` (the default) pins threads with
+  `OMP_PROC_BIND=close OMP_PLACES=cores`, which you can override in the
+  environment. `--placement none` leaves them unbound, as a job in a shared
+  batch slot runs; the published `l40-epyc9334` CPU results use it, because
+  the VM hides which virtual CPUs share an L3 and the slot reserves no
+  cores. The JSON records the placement, whether the CPU is virtualised, and
+  the load average before and after each run (shown in `summary.md`).
+  `--threads 1,8` is the default.
 - The runner starts the binaries under `setarch -R`. Google Benchmark 1.10
   re-executes itself to turn off ASLR, and the re-executed process inherits
   the one-core affinity libgomp gave the main thread, so every OpenMP thread
@@ -165,6 +175,8 @@ short runs) is for smoke tests only.
   CCD), `close` packs 8 threads into one CCD's L3. The FDMT is L3-bound:
   on an EPYC 9654 the cryopaf transform takes 606 ms on one CCD and 252 ms
   with one thread per CCD (`OMP_PLACES='{0}:8:8'`). Record which you ran.
+- `--max-gb` must stay below the batch job's memory request (the EDGAR slot
+  above has 24 GB; the default of 60% of the node's RAM would not).
 - `--max-gb` sets the memory budget (default 60% of RAM). Points above it
   are skipped rather than swapped.
 
@@ -175,6 +187,9 @@ short runs) is for smoke tests only.
 --label TEXT       display name in plots (default: the CPU / GPU model)
 --build-dir DIR    CMake build directory (default: build, build2, build*)
 --threads 1,8      CPU thread counts
+--placement close  close: OMP_PROC_BIND=close OMP_PLACES=cores; none: unbound
+--repetitions 3    repetitions per point (plots use the median)
+--max-gb GB        memory budget (default 60% of RAM)
 --no-cpu / --no-gpu (alias --no-cuda)
 --quick            1 repetition, short minimum time
 --filter REGEX     extra filter AND-ed with the suite (e.g. 'FDMT/')
