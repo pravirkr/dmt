@@ -99,7 +99,7 @@ Notebooks from dispersion basics to the FDMT tree, DM grids, FDMT versus DDMT, b
 :link: benchmarks
 :link-type: doc
 
-Every engine on one shared cluster node (AMD EPYC 9334 CPU, NVIDIA L40 GPU), for three survey presets: time per block, real-time throughput by input bit width, and operation counts.
+Every engine on one shared cluster node (AMD EPYC 9654 CPU, NVIDIA L40S GPU), for three survey presets: time per block, real-time throughput by input bit width, and operation counts.
 :::
 
 ::::

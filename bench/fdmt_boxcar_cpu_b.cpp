@@ -139,7 +139,7 @@ void bench_fdmt_boxcar_stream(benchmark::State& state,
     const double extra =
         rows * (boxcar.max_boxcar * sizeof(float) +
                 widths.size() * sizeof(algorithms::detail::BoxcarPeak));
-    if ((packed ? 2 : 1) * (estimate_bytes(Algo::kFDMT, plan, point) + extra) >
+    if (estimate_bytes(Algo::kFDMT, plan, point) + extra >
         memory_budget_bytes()) {
         state.SkipWithError(
             "FDMTBoxcar target exceeds DMT_BENCH_MAX_GB budget");

@@ -71,11 +71,16 @@ histories and host plan tables, with doubled history storage on GPUs (an
 upper bound: the GPU now keeps the tree history above the fused levels in one
 in-place ring).
 
-**UWL is deferred.** On the L40S the float32 search needs 15–16 GB (uint8:
-26 GB) and FDMT-FFT cannot run at all (its shortest overlap-save segment is
-510k samples). Real-time use must fit in under 10 GB, so no UWL results are
-published until a lower-memory design (recomputing levels instead of storing
-history) exists; the preset stays for development.
+**UWL in the cross-engine suite.** On `parkes_uwl`, `FDMT` and `FDMTBoxcar`
+ automatically switch to the skewed-window / direct paths and fit well under
+10 GB (1.84 GiB engine / 2.4–3.5 GB working memory on the L40S at 342–355 ms
+per 32K block, ~6× real time; 1.87 GiB engine on 8-bit and 5.91 GiB on float32
+at `chunk = 1024` on the CPU). However, `FDMT-FFT` cannot run `parkes_uwl` at
+all (its shortest overlap-save segment is 510k samples, ~50 GB) and the full
+CPU `ndms`/`nsamps`/`nbits` sweeps of brute-force DDMT are prohibitively slow,
+so `parkes_uwl` is benchmarked via `BM_fdmt_boxcar_cuda/parkes_uwl`,
+`BM_fdmt_boxcar_stream/parkes_uwl` and `dmt_bench_mem` rather than the
+five-engine suite plots.
 
 The fused search benchmarks (`FDMTBoxcar`, `FDMTFFTBoxcar`) are in `dmt_bench`,
 at the reference point of the preset selected with `DMT_BENCH_CONFIG`, with
@@ -98,7 +103,7 @@ Benchmark JSON, written with `--benchmark_out`), for example:
 ```bash
 DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
   --benchmark_filter='^BM_fdmt_boxcar_cuda/' --benchmark_repetitions=3 \
-  --benchmark_out=bench/results/cryopaf_lband/l40-epyc9334/boxcar_cuda.json \
+  --benchmark_out=bench/results/cryopaf_lband/l40s-epyc9654/boxcar_cuda.json \
   --benchmark_out_format=json
 ```
 
@@ -111,11 +116,9 @@ the timed region).
 
 ### Running it on a machine
 
-The published CPU and GPU numbers come from one machine, an EDGAR HTCondor
-GPU worker: an NVIDIA L40 and an AMD EPYC 9334 virtual machine, run in an
-8-CPU batch slot on a node shared with other jobs (results folder
-`l40-epyc9334`). Older results from other machines are kept under
-`bench/results/[<config>/]other/`, which `plot_suite.py` does not read.
+The published CPU and GPU numbers come from one machine: an AMD EPYC 9654
+(up to 8 threads, pinned one thread per CCD with `OMP_PLACES='{0}:8:8'`) and
+an NVIDIA L40S (results folder `l40s-epyc9654`).
 For each preset:
 
 ```bash
@@ -125,9 +128,9 @@ cmake --build build -j --target dmt_bench_suite
 
 # 2. Run the suite: bench/results/<machine>/suite_{cpu,cuda}.json for
 #    cryopaf, bench/results/<config>/<machine>/ for the other presets
-for config in cryopaf cryopaf_lband meerkat_lband; do   # parkes_uwl: deferred, see above
-  python bench/scripts/run_suite.py --machine l40-epyc9334 \
-      --label "EPYC 9334 VM (8-CPU slot)" --placement none --max-gb 16 \
+for config in cryopaf cryopaf_lband meerkat_lband; do
+  OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --machine l40s-epyc9654 \
+      --label "AMD EPYC 9654" --threads 1,8 \
       --config $config                                        # CPU, then GPU
 done
 
@@ -142,7 +145,8 @@ installed, for the theory plot):
 pip install -e ".[bench]"      # matplotlib + numpy
 python bench/scripts/plot_suite.py
 python bench/scripts/plot_suite.py --config cryopaf_lband
-git add bench/results/plots && git commit -m "bench: update plots"
+python bench/scripts/plot_suite.py --config meerkat_lband
+git add bench/results/ && git commit -m "bench: update plots"
 ```
 
 `plot_suite.py` writes light and dark PNGs to
@@ -161,22 +165,19 @@ short runs) is for smoke tests only.
 - `--placement close` (the default) pins threads with
   `OMP_PROC_BIND=close OMP_PLACES=cores`, which you can override in the
   environment. `--placement none` leaves them unbound, as a job in a shared
-  batch slot runs; the published `l40-epyc9334` CPU results use it, because
-  the VM hides which virtual CPUs share an L3 and the slot reserves no
-  cores. The JSON records the placement, whether the CPU is virtualised, and
-  the load average before and after each run (shown in `summary.md`).
-  `--threads 1,8` is the default.
+  batch slot runs. The JSON records the placement, whether the CPU is
+  virtualised, and the load average before and after each run (shown in
+  `summary.md`). `--threads 1,8` is the default.
 - The runner starts the binaries under `setarch -R`. Google Benchmark 1.10
   re-executes itself to turn off ASLR, and the re-executed process inherits
   the one-core affinity libgomp gave the main thread, so every OpenMP thread
   would run on one core. Running a binary by hand with `OMP_PROC_BIND` set
   needs `setarch -R` too.
 - On CPUs whose L3 is split per core complex (AMD EPYC: 32 MB per 8-core
-  CCD), `close` packs 8 threads into one CCD's L3. The FDMT is L3-bound:
-  on an EPYC 9654 the cryopaf transform takes 606 ms on one CCD and 252 ms
-  with one thread per CCD (`OMP_PLACES='{0}:8:8'`). Record which you ran.
-- `--max-gb` must stay below the batch job's memory request (the EDGAR slot
-  above has 24 GB; the default of 60% of the node's RAM would not).
+  CCD), `OMP_PLACES=cores` packs 8 threads into one CCD's L3. The FDMT is
+  L3-bound: on the EPYC 9654 the `cryopaf` transform takes 619 ms on one CCD
+  and 258 ms with one thread per CCD (`OMP_PLACES='{0}:8:8'`, used for the
+  published `l40s-epyc9654` results). Record which you ran.
 - `--max-gb` sets the memory budget (default 60% of RAM). Points above it
   are skipped rather than swapped.
 

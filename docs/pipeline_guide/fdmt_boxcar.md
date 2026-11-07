@@ -85,7 +85,7 @@ search computes levels 0–3 directly from integer running sums and, where the
 plan allows, sums the upper levels' rows straight from a lower level (the
 direct top of the float transform, see the performance guide), all in exact
 integers. 8-bit input then takes about the float32 search time (0.94–1.05×
-on the three presets, L40). The CPU packed search does not fuse the lower
+on the three presets, L40S). The CPU packed search does not fuse the lower
 levels and takes 1.3× the float32 time on 8 threads (1.1–1.2× on one).
 
 ## Running a search
@@ -348,26 +348,29 @@ DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
 ```
 
 On noise, with 32768-sample blocks and float32 input, no subband search
-(NVIDIA L40, device-resident, minimum of 5 runs; AMD EPYC 9334 VM, 8
-unpinned threads in a shared batch slot, minimum of 5 runs for the search
-and median of 3 for `FDMT`):
+(NVIDIA L40S, device-resident, median of 3 runs; AMD EPYC 9654, 8 threads
+pinned one per CCD with `OMP_PLACES='{0}:8:8'`, median of 3 runs):
 
 | preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `cryopaf` (1545 trials), GPU | 21.9 ms | 22.6 ms (12 widths) | 23.4 ms (195 widths) |
-| `cryopaf_lband` (1941 trials), GPU | 12.1 ms | 13.9 ms (13 widths) | 14.2 ms (219 widths) |
-| `meerkat_lband` (4057 trials), GPU | 27.3 ms | 30.8 ms (12 widths) | 31.7 ms (163 widths) |
-| `cryopaf`, CPU | 200 ms | 239 ms | 249 ms |
-| `cryopaf_lband`, CPU | 110 ms | 370 ms | 355 ms |
-| `meerkat_lband`, CPU | 251 ms | 363 ms | 362 ms |
+| `cryopaf` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.3 ms (195 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.7 ms | 12.4 ms (13 widths) | 13.4 ms (219 widths) |
+| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.9 ms (12 widths) | 29.7 ms (163 widths) |
+| `parkes_uwl` (4749 trials), GPU | 353 ms | 355 ms (19 widths) | – |
+| `cryopaf`, CPU | 258 ms | 311 ms | 334 ms |
+| `cryopaf_lband`, CPU | 141 ms | 472 ms | 564 ms |
+| `meerkat_lband`, CPU | 368 ms | 510 ms | 553 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
-dozen widths, so the search adds 3–17%. On the CPU the scorer is a separate
-pass over each chunk's root rows (1.2–3.4× the transform), still well faster
-than real time on 8 threads. Thanks to the width screen, scoring every
-integer width up to 100 ms costs about the same as a dozen widths on both
-backends. `working_bytes` is the algorithm allocation estimate, not process
-RSS.
+dozen widths, so the search adds 1–15% (and on `parkes_uwl`, `fused_uint8`
+runs in 342 ms and 2.41 GB working memory, 6.1× real time). On the CPU the
+scorer is a separate pass over each chunk's root rows (1.2–4.0× the
+transform), still well faster than real time on 8 threads; on `parkes_uwl`
+with 8-bit input (`chunk = 1024`), `FDMTBoxcar` automatically uses the
+skewed-window engine in 2.72 GB working memory (9.22 s per block on 8
+threads). Thanks to the width screen, scoring every integer width up to 100 ms
+costs about the same as a dozen widths on both backends. `working_bytes` is
+the algorithm allocation estimate, not process RSS.
 
 ## FDMTFFTBoxcar
 

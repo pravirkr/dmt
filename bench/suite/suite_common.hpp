@@ -302,12 +302,24 @@ inline double estimate_bytes(Algo algo,
     // The FDMT runs blocks in chunks whose two state halves fit 2 GiB.
     constexpr double kChunkStateBudget = 2.0 * 1024.0 * 1024.0 * 1024.0;
     switch (algo) {
-    case Algo::kFDMT: // output + the engine's two state halves
-        return input + d + std::min(2.0 * b, kChunkStateBudget) +
-               static_cast<double>(plan.get_history_size() +
-                                   plan.get_tree_history_size()) *
-                   sizeof(float) * (device ? 2.0 : 1.0) +
+    case Algo::kFDMT: { // output + the engine's two state halves
+        const double raw_hist =
+            static_cast<double>(plan.get_history_size()) *
+            ((p.nbits == 32) ? 4.0 : (p.nbits == 16 ? 2.0 : 1.0));
+        const double tree_hist =
+            static_cast<double>(plan.get_history_size() +
+                                plan.get_tree_history_size()) *
+            sizeof(float);
+        // Wide plans whose unskewed tree history exceeds 2 GiB use the
+        // skewed-window / direct-top streaming ring (~0.85 * raw_hist +
+        // level-F / top ring <= 0.5 GiB).
+        const double hist =
+            (tree_hist > kChunkStateBudget)
+                ? (0.86 * raw_hist + 0.5 * 1024.0 * 1024.0 * 1024.0)
+                : tree_hist * (device ? 2.0 : 1.0);
+        return input + d + std::min(2.0 * b, kChunkStateBudget) + hist +
                static_cast<double>(plan.get_container().get_memory_usage());
+    }
     case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
     case Algo::kFDMTFFTFrac:
     case Algo::kDDMTFFT:

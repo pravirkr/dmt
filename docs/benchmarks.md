@@ -1,20 +1,17 @@
 # Benchmarks
 
 Every number here comes from one benchmark suite (`dmt_bench_suite`), run with
-the same fixed configuration on one machine: a GPU worker of a shared
-HTCondor cluster, as the code runs in production.
+the same fixed configuration on one machine:
 
-- **CPU:** an AMD EPYC 9334 virtual machine, in an 8-CPU batch slot. Threads
-  are not pinned: the VM hides which virtual CPUs share an L3 cache, the slot
-  reserves no cores, and other jobs run on the same node. The load average
-  is recorded with every run (`bench/results/[<config>/]plots/summary.md`).
-- **GPU:** an NVIDIA L40, assigned to the job.
+- **CPU:** an AMD EPYC 9654, with 1 and 8 threads pinned one thread per core
+  complex (`OMP_PROC_BIND=close OMP_PLACES='{0}:8:8'`) so each thread has its
+  own 32 MB L3 slice. The load average is recorded with every run
+  (`bench/results/[<config>/]plots/summary.md`).
+- **GPU:** an NVIDIA L40S.
 
 The rankings below hold for this machine. FDMT speed follows cache and
 memory bandwidth, while brute-force DDMT is compute-bound, so another CPU or
-GPU can order the engines differently. Results from the earlier machines
-(an Intel Xeon Gold 6348H and an NVIDIA L40S, dmt 0.7.0) are kept under
-`bench/results/[<config>/]other/` and summarised at the end of this page.
+GPU can order the engines differently.
 
 GPU times are for **device-resident** input and output, timed with CUDA
 events: they do not include copies between host and device. CPU FFTs are
@@ -56,33 +53,33 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 
 | engine | `meerkat_lband` CPU | `cryopaf` CPU | `cryopaf_lband` CPU | `meerkat_lband` GPU | `cryopaf` GPU | `cryopaf_lband` GPU |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| FDMT | 251 ms | 200 ms | 110 ms | 27.8 ms | 21.9 ms | 12.4 ms |
-| FDMT-FFT | 326 ms | 186 ms | 109 ms | 48.4 ms | 30.7 ms | 19.7 ms |
-| DDMT | 3.87 s | 214 ms | 413 ms | 167 ms | 42.9 ms | 37.2 ms |
-| SDMT | 1.46 s | 208 ms | 277 ms | 74.9 ms | 42.7 ms | 12.7 ms |
-| DDMT-FFT | 303 ms | 108 ms | 112 ms | 46.7 ms | 14.9 ms | 17.3 ms |
+| FDMT | 368 ms | 258 ms | 141 ms | 25.9 ms | 21.8 ms | 11.6 ms |
+| FDMT-FFT | 439 ms | 320 ms | 183 ms | 44.1 ms | 24.9 ms | 17.5 ms |
+| DDMT | 6.69 s | 342 ms | 719 ms | 158 ms | 31.9 ms | 33.8 ms |
+| SDMT | 2.35 s | 333 ms | 475 ms | 67.8 ms | 31.7 ms | 12.0 ms |
+| DDMT-FFT | 541 ms | 190 ms | 204 ms | 46.7 ms | 14.8 ms | 17.3 ms |
 
 (CPU: 8 threads. FDMT-FFT and DDMT-FFT with fractional delays.)
 
 - **Real time.** Every engine runs faster than real time on both backends,
-  by 5–155× on 8 CPU threads and 120–1200× on the GPU, so the choice
+  by 3–106× on 8 CPU threads and 127–1290× on the GPU, so the choice
   between them is about exactness and memory as much as speed.
 - **`meerkat_lband`.** With 4096 channels, FDMT is the fastest engine on
-  both backends: 251 ms on 8 CPU threads (80× real time, 15× faster than
-  DDMT) and 27.8 ms on the L40 (722×, 6× faster than DDMT, 1.7× faster than
+  both backends: 368 ms on 8 CPU threads (54× real time, 18× faster than
+  DDMT) and 25.9 ms on the L40S (774×, 6.1× faster than DDMT, 1.8× faster than
   DDMT-FFT).
 - **Hard presets for FDMT.** Few channels and long dispersion sweeps (21.8k
   samples on `cryopaf`) give every tree level 10⁴–2×10⁴ rows, and every merge
   is a memory access, while DDMT and SDMT reuse each input window from cache
-  or shared memory. On `cryopaf` the three take about the same time on the
-  CPU (FDMT 200 ms, DDMT 214 ms, SDMT 208 ms). With more channels per delay,
-  FDMT pulls ahead: 3.7× faster than DDMT on `cryopaf_lband`, 15× on
-  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf` and
-  matches FDMT on `cryopaf_lband`.
-- **On the GPU,** FDMT is 2× faster than DDMT and SDMT on `cryopaf`, and
-  3–6× faster than DDMT on the L-band presets. Only SDMT on `cryopaf_lband`
-  comes close (12.7 ms against 12.4 ms). DDMT-FFT is the fastest GPU
-  engine on `cryopaf`.
+  or shared memory. On `cryopaf` the three are within 1.3× on the
+  CPU (FDMT 258 ms, SDMT 333 ms, DDMT 342 ms). With more channels per delay,
+  FDMT pulls ahead: 5.1× faster than DDMT on `cryopaf_lband`, 18× on
+  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf` (190 ms),
+  while FDMT leads on both L-band presets.
+- **On the GPU,** FDMT is 1.5× faster than DDMT and SDMT on `cryopaf`, and
+  2.9–6.1× faster than DDMT on the L-band presets. Only SDMT on `cryopaf_lband`
+  comes close (12.0 ms against 11.6 ms). DDMT-FFT is the fastest GPU
+  engine on `cryopaf` (14.8 ms).
 
 ## Time per block vs number of DM trials
 
@@ -236,9 +233,10 @@ The real-time factor is seconds of data processed per second of compute.
 
 - **Packed low-bit input** runs the FDMT tree in narrow integer lanes. On
   the CPU that is 1.2–1.5× faster than float32 at 1–4 bits on one thread
-  and 1.1–1.4× on 8 threads (`cryopaf`: 117× against 84× real time at 1
-  bit). On the GPU, 1–2-bit input gains on the L-band presets
-  (`cryopaf_lband`: 1470× against 1215×) and loses on `cryopaf`.
+  and 1.2–1.4× on 8 threads (`cryopaf_lband`: 148× against 105× real time at 1
+  bit). On the GPU, 1–2-bit input gains on `cryopaf_lband`
+  (1587× against 1290×) and loses on `cryopaf` and `meerkat_lband`, where the
+  float32 path uses the direct bottom and top kernels.
 - At 16 bits the tree is mostly float again, so packed input is no faster
   than float32 (on the GPU it is 1.3–1.6× slower).
 - **DDMT** sums packed input two samples per instruction in 16-bit lanes.
@@ -330,27 +328,6 @@ With DM ranges of a few tens of pc cm⁻³ at L-band a single coherent trial is
 enough, and the time goes to the forward transform of the block, shared by
 all trials. Each additional coarse trial for a wider DM range adds its own
 inverse transforms and one fine FDMT.
-
-## Other machines
-
-Earlier runs, kept for comparison only. They used dmt 0.7.0 (2026-10-23),
-before the balanced FDMT tree, the staggered subbands and the newer CPU
-FDMT and FDMT-FFT code, so only the DDMT and SDMT columns (unchanged since)
-compare the hardware. Reference point, float32, median time per block:
-
-| machine | preset | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| Intel Xeon Gold 6348H, 8 threads (pinned) | `cryopaf` | 370 ms | 759 ms | 190 ms | 215 ms | 136 ms |
-| Intel Xeon Gold 6348H, 8 threads (pinned) | `cryopaf_lband` | 225 ms | 329 ms | 392 ms | 317 ms | 170 ms |
-| NVIDIA L40S (shared) | `cryopaf` | 23.0 ms | 25.3 ms | 33.5 ms | 33.3 ms | 14.8 ms |
-| NVIDIA L40S (shared) | `cryopaf_lband` | 11.8 ms | 17.1 ms | 34.4 ms | 9.7 ms | 17.3 ms |
-
-The Xeon's two 512-bit FMA units per core make brute-force DDMT
-faster there than on the EPYC 9334 (5–12%: 190 ms against 214 ms on `cryopaf`,
-392 ms against 413 ms on `cryopaf_lband`).
-The L40S ran DDMT and SDMT 8–30% faster than the L40 does now (built with
-CUDA 13.0 there, 12.6 here); the L40 keeps its full 2.49 GHz clock under
-load, so the gap is not throttling.
 
 ## Reproducing
 

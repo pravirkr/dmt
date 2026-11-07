@@ -69,6 +69,13 @@ struct FDMTEngineConfig {
     bool search_upper_levels{false};
     SizeType search_nbits{
         32}; ///< Exact dyadic integer search; ordinary FDMT unchanged.
+    /// Private (CPU): level-0 + tree history bytes above which a valid-mode
+    /// engine runs the skewed-window engine (fdmt_skew.hpp) instead of
+    /// storing the tree history. Tests lower it to cover small plans.
+    SizeType skew_history_bytes{SizeType{2} << 30};
+    /// Private (GPU): take the skewed direct levels and target-ring top
+    /// even when the unskewed direct top fits its ring budget (tests).
+    bool force_skewed_direct{false};
 };
 
 class FDMTEngine {

@@ -52,8 +52,7 @@ That is two loads and one store per output sample, for one addition. There is
 no arithmetic to optimize: the transform is memory-bandwidth bound, and
 the merge loop already runs at the bandwidth limit. An unfused merge level
 moves its three streams at over 90% of the bandwidth that a bare
-`c[i] = a[i] + b[i]` achieves on the same machine, and on an L40S (same chip
-and memory as the L40 used for the numbers below) the
+`c[i] = a[i] + b[i]` achieves on the same machine, and on an L40S the
 level-by-level kernels run at about 90% of the DRAM bandwidth.
 
 Two consequences follow:
@@ -86,7 +85,7 @@ DRAM.
   left halo, the sum of the group's merge delays at the fused levels, which
   neighbouring tiles recompute. The automatic depth is the deepest $F$ whose
   tile of at least 128 samples fits a quarter of the SM's shared memory
-  (four resident blocks; 24 KiB on an L40, at most 48 KiB), with a level-0
+  (four resident blocks; 24 KiB on an L40S, at most 48 KiB), with a level-0
   halo of at most half a tile.
 
 ### Direct levels (CUDA, many delays per channel)
@@ -109,6 +108,20 @@ computes the ends of the tree directly instead:
   be the only level read, so a subband search (plan `subband_depth`) keeps
   the tree above level 3, and fusion stops below the lowest level holding
   staggered subbands.
+- **Skewed windows and subband batching (ultra-wide plans).** When the tree
+  history exceeds 2 GiB (`parkes_uwl`: 6656 channels, $\Delta t_{\max} =
+  253\,891$), storing full-delay rings at level 4 or full tree histories at
+  intermediate levels would take ~9–20 GB. Instead, every row $r$ at levels
+  $K \dots k_{\text{top}}$ is evaluated on its skewed window
+  $[T - s_{\text{lo}}(r) - \text{spread}(r),\; T - s_{\text{lo}}(r) + \text{chunk})$
+  carrying only a causal ring of $\text{spread}(r) = s_{\text{hi}}(r) -
+  s_{\text{lo}}(r)$ samples, levels $K+1 \dots k_{\text{top}}$ are merged one
+  subband batch at a time (up to 24 batches balanced by $\text{rows} \times
+  \text{chunk} + \text{spread}$) in a shared device ping-pong workspace, and
+  `DirectTopD` reads level $k_{\text{top}}$ at relative offset $d -
+  s_{\text{lo}}(r) \le \text{spread}(r)$. On `parkes_uwl` this keeps the CUDA
+  FDMT engine in 1.84 GiB (down from 9.05 GB) and runs a 32K block in 353 ms
+  on an L40S (~6× real time).
 
 Integer-valued input gives the tree's values exactly. Float input agrees with
 the tree within rounding (a few 10⁻⁷ relative), so these engines are no longer
@@ -117,19 +130,22 @@ depths still are. Fractional-delay FDMTFFT adds a separate guard and
 segmentation error, distinct from this tree contract. Candidate agreement is
 threshold-aware: a small numerical difference can split or join an excursion,
 and a saturated parallel buffer does not promise the same survivor order.
-The streaming history keeps the CPU engine's format: the
-skipped levels' tree histories are rebuilt from the running-sum window and
+The streaming history keeps the CPU engine's format on standard direct plans:
+the skipped levels' tree histories are rebuilt from the running-sum window and
 the rings when `save_history()` (or a stepper block) needs them, and after
-`load_history()` the tree runs until the window and the rings have refilled.
+`load_history()` the tree runs until the window and the rings have refilled
+(on the skewed-window path, `save_history()` saves the compact raw and target
+rings directly; see [skewed-window FDMT](skewed_window_fdmt.md)).
 
-L40, device-resident 32 768-sample blocks, transform only, minimum of 10
-runs (the middle column switches the top off with a development build):
+L40S, device-resident 32 768-sample blocks, transform only, median of 3
+runs:
 
 | preset | tree (L2 chunks, `fuse_levels=0`) | + direct levels 0–3 | + direct top (default) |
 | :--- | ---: | ---: | ---: |
-| `cryopaf` | 37.9 ms | 24.4 ms | 21.9 ms |
-| `cryopaf_lband` | 17.2 ms | 13.8 ms | 11.7 ms |
-| `meerkat_lband` | 46.5 ms | 39.8 ms | 27.8 ms |
+| `cryopaf` | 37.9 ms | 24.4 ms | 21.8 ms |
+| `cryopaf_lband` | 17.2 ms | 13.8 ms | 11.6 ms |
+| `meerkat_lband` | 46.5 ms | 39.8 ms | 25.9 ms |
+| `parkes_uwl` | – | – | 353 ms (1.84 GiB) |
 
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)
 always runs level by level, so every level stays inspectable. An explicit
@@ -161,8 +177,7 @@ and map onto GPU thread blocks.
 :::
 
 Measured on the CPU (float input, valid mode, box smearing, 4096 channels,
-`dt_max=2048`; AMD EPYC 9334 VM in a shared 8-CPU batch slot, threads
-unpinned, minimum of 5 runs):
+`dt_max=2048`; AMD EPYC, 1 and 8 threads, minimum of 5 runs):
 
 | samples | threads | unfused | automatic (depth) | speedup |
 | ---: | ---: | ---: | ---: | ---: |
@@ -216,6 +231,16 @@ per-group working set is at most 1.75 MiB: two scratch tiles plus the rings,
 in float. It also requires at least two groups per thread. `summary()`
 reports the tile.
 
+**Valid mode on ultra-wide plans: skewed windows.** When the tree history
+exceeds 2 GiB (`parkes_uwl`, 10.1 GB of tree history), the CPU engine
+(`FDMT` and `FDMTBoxcar`, valid mode, `subband_depth=0`, `nbeams=1`,
+automatic fusion, 8-bit through float32 input) automatically switches to the
+[skewed-window engine](skewed_window_fdmt.md). It replaces the tree history
+with per-channel raw input rings and compact per-row causal rings, evaluates
+level 4 from per-subband running-sum stripes, and fuses levels 4–8 inside
+each 256-channel group before merging the upper levels, keeping `parkes_uwl`
+in 1.87 GiB on 8-bit input and 5.91 GiB on float32 at `chunk = 1024`.
+
 **Why the FDMT is memory-bound, and why the regime matters.**
 
 - A merge is one addition per 12 bytes moved: two float reads and one write,
@@ -241,16 +266,17 @@ cost is $N_\text{DM}\,N_\text{chan}$. Few channels and a sparse grid
 dominates) shrink the FDMT's advantage.
 
 Against whole-chunk fusion with plain stores, time-tiled fusion and streaming
-stores gave 1.4× on float32 input and 1.1–1.3× on packed input on a Xeon Gold
-6348H (8 threads, valid mode, box smearing, high-DM Levin grids), and let the
-fused levels scale past 8 threads on one socket.
+stores gave 1.4× on float32 input and 1.1–1.3× on packed input (8 threads,
+valid mode, box smearing, high-DM Levin grids), and let the fused levels
+scale past 8 threads on one socket.
 
 The big buffers are first-touched in parallel with huge pages requested, so
 runs that span sockets are no longer slower than one socket. For the best
 throughput, still run one engine per socket, or split the beams across
-sockets.
+sockets, and on AMD EPYC CPUs place one thread per CCD (`OMP_PLACES='{0}:8:8'`)
+so each thread gets its own 32 MB L3 cache.
 
-On CUDA (L40, device-resident, 4096 channels, `dt_max=2048`, valid mode,
+On CUDA (L40S, device-resident, 4096 channels, `dt_max=2048`, valid mode,
 minimum of 5 runs):
 
 | input | samples | unfused | automatic (depth 3) | speedup | best fixed depth |
@@ -291,7 +317,9 @@ accept them packed, with no float copy of the waterfall ever made:
   most 2% of the box-mean noise for input with $\sigma \ge 0.5$ LSB (S/N loss
   ≤ 0.5%). Packed input therefore differs from float input with the same
   values by at most $\sum_c 2^{-(f(L_c)+1)}$ per output sample; packed
-  results are bit-identical with `int_tree` on and off, and across backends.
+  results are bit-identical with `int_tree` on and off, and across backends
+  (except on wide plans run by the GPU's skewed-window path, which agrees
+  within float rounding, see [skewed-window FDMT](skewed_window_fdmt.md)).
   See {ref}`box means <box-mean>`.
 
 With `int_tree=True` (the default), every tree level whose exact value bound
@@ -344,7 +372,7 @@ Speedup over float input, both at the default configuration (automatic
 fusion, `int_tree` on; 4096 channels, `dt_max=2048`, 16 384 samples; minimum
 of 5 runs):
 
-| input | EPYC 9334 VM, 1 thread | EPYC 9334 VM, 8 threads | L40 (device-resident) |
+| input | AMD EPYC, 1 thread | AMD EPYC, 8 threads | L40S (device-resident) |
 | :--- | ---: | ---: | ---: |
 | 1-bit | 1.60× | 1.80× | 1.25× |
 | 2-bit | 1.53× | 1.83× | 1.23× |
@@ -358,7 +386,7 @@ float, so the per-channel unpack becomes a small net cost; pass 16-bit data
 as float if you already have it in that form. Against the original
 level-by-level float path (`fuse_levels=0`, `int_tree=False`), the default
 configuration with 1-bit input is 3.2× faster on 8 EPYC threads
-(32.7 → 10.2 ms) and 1.8× on the L40 (3.24 → 1.80 ms).
+(32.7 → 10.2 ms) and 1.8× on the L40S (3.24 → 1.80 ms).
 
 :::{dropdown} Streaming stores on the integer levels
 :icon: info
@@ -368,7 +396,7 @@ with non-temporal (streaming) stores. Besides saving the read-for-ownership
 of each output line, this matters for thread scaling: with ordinary stores
 a level stays dirty in the caches of the cores that wrote it, and the next
 level's threads, which read other rows, fetch those lines from other cores.
-On a multi-die CPU (the EPYC 9334 has four 8-core dies) that cross-die
+On a multi-die CPU (such as multi-CCD AMD EPYC processors) that cross-die
 traffic dominated: before the integer levels were streamed, 1–4-bit input
 was 0.65–0.89× the float speed on 8 threads, and an unfused integer level
 was *slower* on 2 threads than on 1. Streaming them made 1–4-bit input
@@ -385,7 +413,7 @@ construct the engine with `int_tree=False`.
 ## Threads, block size and construction
 
 - **Threads** (`nthreads`, CPU): scaling is good up to the point where the
-  memory bus saturates. On the EPYC 9334 VM, 8 threads give 4.5–5.8× over
+  memory bus saturates. On an AMD EPYC CPU, 8 threads give 4.5–5.8× over
   1 thread (float input).
 - **Block size** (`nsamps`): in valid mode the overlap-save history makes the
   result independent of the block size, so choose it for latency and
@@ -399,7 +427,7 @@ construct the engine with `int_tree=False`.
   allocates *all* working memory: the tree state (two levels of one chunk),
   the streaming history, and the per-thread fusion/unpack scratch (on CUDA:
   device state, history, the plan and the fused-kernel tables; ~70 ms for
-  `cryopaf` and ~150 ms for `meerkat_lband` on the L40 node). `execute()`
+  `cryopaf` and ~150 ms for `meerkat_lband` on the L40S node). `execute()`
   then allocates nothing (on the CPU a test enforces this), so a streaming
   pipeline constructs once and calls `execute()` block after block.
   `fdmt.memory_usage` (Python) / `get_memory_usage()` (C++) reports the
@@ -438,9 +466,9 @@ history traffic, a few per cent at a few thousand samples.
   `nsamps`. On a GPU the engine first tries the longest power of two ≥ 256
   whose state halves fit the device's L2 cache, so each merge reads the level
   below from L2 instead of DRAM; it falls back to the 2 GiB rule when even 256
-  samples do not fit. On the L40 (96 MiB L2) this picks 512 for `cryopaf`
+  samples do not fit. On the L40S (96 MiB L2) this picks 512 for `cryopaf`
   and 1024 for `cryopaf_lband`, 1.05× and 1.13× faster than the 2 GiB
-  rule's 8192 and 16384 (21.9 against 22.9 ms, 11.7 against 13.2 ms; the
+  rule's 8192 and 16384 (21.8 against 22.9 ms, 11.6 against 13.2 ms; the
   gap was larger before the direct levels removed most tree merges). Read the value used with `fdmt.chunk_nsamps` (C++
   `get_chunk_nsamps()`); `nsamps` means whole blocks.
 - **Explicit** values are rounded up to a multiple of 64 and capped at

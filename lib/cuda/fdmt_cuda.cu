@@ -9,6 +9,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -209,7 +210,8 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
     uint64_t ring_pos,
     float int_unit,
     int active,
-    bool update_ring = false) {
+    bool update_ring = false,
+    int chunk_nsamps = 0) {
     // `active` > 0: a valid-mode chunk of that many samples in every row
     // (rows keep the strides of the coordinate tables); else each
     // coordinate's own lengths.
@@ -261,11 +263,14 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
     for (int i_coord = static_cast<int>(blockIdx.y); i_coord < ncoords_max;
          i_coord += static_cast<int>(gridDim.y)) {
         if (i_coord < ncoords_sum_cur) {
+            const int extra = (active > 0 && chunk_nsamps > 0)
+                                  ? (coords_sum.nsamps[i_coord] - chunk_nsamps)
+                                  : 0;
             const auto nsamps_out =
-                active > 0 ? active : coords_sum.nsamps[i_coord];
+                active > 0 ? (active + extra) : coords_sum.nsamps[i_coord];
             const auto offset = coords_sum.offset[i_coord];
             const auto nsamps_tail =
-                active > 0 ? active : coords_sum.tail_nsamps[i_coord];
+                active > 0 ? (active + extra) : coords_sum.tail_nsamps[i_coord];
             TOut* out       = state_out + (i_beam * out_state_nelements) +
                               coords_sum.buf_offset[i_coord];
             const TIn* tail = state_in + (i_beam * in_state_nelements) +
@@ -343,10 +348,14 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
         }
 
         if (i_coord < ncoords_copy_cur) {
+            const int extra = (active > 0 && chunk_nsamps > 0)
+                                  ? (coords_copy.nsamps[i_coord] - chunk_nsamps)
+                                  : 0;
             const auto nsamps_out =
-                active > 0 ? active : coords_copy.nsamps[i_coord];
-            const auto nsamps_tail =
-                active > 0 ? active : coords_copy.tail_nsamps[i_coord];
+                active > 0 ? (active + extra) : coords_copy.nsamps[i_coord];
+            const auto nsamps_tail = active > 0
+                                         ? (active + extra)
+                                         : coords_copy.tail_nsamps[i_coord];
             TOut* out       = state_out + (i_beam * out_state_nelements) +
                               coords_copy.buf_offset[i_coord];
             const TIn* tail = state_in + (i_beam * in_state_nelements) +
@@ -578,6 +587,7 @@ public:
         m_search_max_fuse =
             std::min(cfg.max_fuse_levels, m_plan.get_max_fuse_levels());
         m_search_upper = cfg.search_upper_levels;
+        m_force_skewed = cfg.force_skewed_direct;
         m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
                                             cfg.chunk_nsamps, m_search_upper);
         // Automatic chunk: L2-resident state when it fits, else the budget
@@ -592,6 +602,12 @@ public:
                 : 0;
         if (cached != 0) {
             m_chunk = cached;
+        } else if (m_mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
+                   (m_plan.get_history_size() +
+                    m_plan.get_tree_history_size()) *
+                           sizeof(float) >
+                       detail::kFDMTChunkStateBudget) {
+            m_chunk = std::min<SizeType>(1024, m_plan.get_nsamps());
         } else if (elem == sizeof(uint64_t) && cfg.chunk_nsamps == 0) {
             m_chunk = std::min(m_plan.get_nsamps(),
                                std::max<SizeType>(64, m_chunk / 2));
@@ -625,7 +641,10 @@ public:
                                                      m_levels_d[l - 1].base)
                                                : nullptr,
                            .history    = hist.in,
-                           .row_stride = m_chunk,
+                           .row_stride =
+                               m_chunk + (source < m_level_max_extra.size()
+                                              ? m_level_max_extra[source]
+                                              : 0),
                            .beam_stride =
                                static_cast<SizeType>(level_beam_stride(source)),
                            .history_stride = static_cast<SizeType>(hist.stride),
@@ -840,8 +859,8 @@ public:
                                    Stream queue,
                                    cudaStream_t stream) {
         const SizeType root = m_plan.get_niters();
-        const auto tree = static_cast<int64_t>(m_plan.get_tree_history_size());
-        auto* state     = reinterpret_cast<TInt*>(
+        const auto h_stride = static_cast<int64_t>(m_ring_size);
+        auto* state         = reinterpret_cast<TInt*>(
             thrust::raw_pointer_cast(m_state_internal_d.data()));
         const auto level_ptr = [&](SizeType l) {
             return state + (l % 2) * m_nbeams * m_half_elems;
@@ -849,12 +868,16 @@ public:
         const auto beam_stride = static_cast<int64_t>(m_half_elems);
         const auto consume = [&](SizeType l, const TInt* src, const TInt* prev,
                                  int64_t src_beam_stride, bool materialized) {
+            const SizeType src_lvl = l == root ? root - 1 : l;
             detail::FDMTSearchInput in{
-                .row_stride        = m_chunk,
-                .beam_stride       = static_cast<SizeType>(src_beam_stride),
-                .history_stride    = m_plan.get_tree_history_size(),
-                .nsamps            = m_active,
-                .sample_begin      = m_chunk_pos,
+                .row_stride     = m_chunk + (src_lvl < m_level_max_extra.size()
+                                                 ? m_level_max_extra[src_lvl]
+                                                 : 0),
+                .beam_stride    = static_cast<SizeType>(src_beam_stride),
+                .history_stride = m_ring_size,
+                .history_base   = ring_base_for_level(l),
+                .nsamps         = m_active,
+                .sample_begin   = m_chunk_pos,
                 .materialized_root = materialized,
                 .history_ring      = true,
                 .stream            = queue,
@@ -880,35 +903,48 @@ public:
                 detail::fdmt_regular_sum_coords(m_plan.get_container(), l);
             const int count =
                 static_cast<int>(std::max(reg_sum, shape.ncoords_copy));
+            const int nsamps_l = static_cast<int>(
+                m_active +
+                (l < m_level_max_extra.size() ? m_level_max_extra[l] : 0));
             const dim3 block(kIterThreads);
-            const dim3 grid((m_active + kIterThreads * kIterSampsPerTh - 1) /
+            const dim3 grid((nsamps_l + kIterThreads * kIterSampsPerTh - 1) /
                                 (kIterThreads * kIterSampsPerTh),
                             std::min(count, kMaxGridY), m_nbeams);
             gpu_utils::check_kernel_launch_params(grid, block);
-            const bool fuse_ring = grid.x == 1;
+            const bool skewed_mid =
+                m_direct->skewed && m_top && l <= m_top->level;
+            const bool fuse_ring = !skewed_mid && grid.x == 1;
+            const auto h_base    = static_cast<int64_t>(ring_base_for_level(l));
             kernel_execute_iter<FDMTMode::kValid, TInt, TInt, TInt>
                 <<<grid, block, 0, stream>>>(
-                    level_ptr(l - 1), level_ptr(l), sums, copies, ring,
-                    static_cast<int>(m_active), static_cast<int>(reg_sum),
+                    level_ptr(l - 1), level_ptr(l), sums, copies,
+                    skewed_mid ? nullptr : ring, nsamps_l,
+                    static_cast<int>(reg_sum),
                     static_cast<int>(shape.ncoords_copy),
                     static_cast<int>(m_half_elems),
-                    static_cast<int>(m_half_elems), tree, 0, m_chunk_pos, 1.0F,
-                    static_cast<int>(m_active), fuse_ring);
-            return fuse_ring ? static_cast<int>(reg_sum) : 0;
+                    static_cast<int>(m_half_elems), h_stride, h_base,
+                    m_chunk_pos, 1.0F, static_cast<int>(m_active), fuse_ring,
+                    skewed_mid ? static_cast<int>(m_chunk) : 0);
+            return (skewed_mid || fuse_ring) ? static_cast<int>(reg_sum) : 0;
         };
         const auto advance = [&](SizeType l, int adv_begin) {
+            if (m_direct->skewed && m_top && l <= m_top->level) {
+                return;
+            }
             const auto& shape = m_plan.get_container().state_shape[l];
             const int adv_count =
                 static_cast<int>(shape.ncoords_sum) - adv_begin;
-            if (adv_count > 0 && shape.dt_max > 0) {
+            if (adv_count > 0 && shape.dt_max > 0 && ring != nullptr) {
                 auto sums = m_plan_d.coordinates_sum.get_raw_ptrs();
                 sums.update_offsets(m_coords_sum_offsets[l] + adv_begin);
                 const auto newest = static_cast<int>(
                     std::min<SizeType>(shape.dt_max, m_active));
-                launch_advance_tree_history(level_ptr(l - 1), sums, ring, ring,
-                                            adv_count, newest,
-                                            static_cast<int>(m_half_elems),
-                                            tree, 0, m_chunk_pos, 1.0F, stream);
+                const auto h_base =
+                    static_cast<int64_t>(ring_base_for_level(l));
+                launch_advance_tree_history(
+                    level_ptr(l - 1), sums, ring, ring, adv_count, newest,
+                    static_cast<int>(m_half_elems), h_stride, h_base,
+                    m_chunk_pos, 1.0F, stream);
             }
         };
         const SizeType levels = m_direct->levels;
@@ -917,15 +953,18 @@ public:
             m_chunk_pos = m_next_pos;
             m_next_pos += m_active;
             const int in = m_parity ? 1 : 0;
-            m_direct_win_in =
-                thrust::raw_pointer_cast(m_direct->win[in].data());
-            m_direct_win_out =
-                thrust::raw_pointer_cast(m_direct->win[1 - in].data());
+            if (!m_direct->skewed) {
+                m_direct_win_in =
+                    thrust::raw_pointer_cast(m_direct->win[in].data());
+                m_direct_win_out =
+                    thrust::raw_pointer_cast(m_direct->win[1 - in].data());
+            }
             m_parity         = !m_parity;
             const auto input = chunk_input(full, t0);
             launch_direct_int<TInt>(input, level_ptr(levels), stream);
             advance_direct_window(input, stream);
-            SizeType level = levels;
+            SizeType level =
+                (m_skew_nbatches > 1 && m_top) ? m_top->level : levels;
             consume(level, level_ptr(level), nullptr, beam_stride, false);
             const SizeType last = m_top ? m_top->level : root - 1;
             while (level < last) {
@@ -980,7 +1019,87 @@ public:
         auto& d          = *m_direct;
         const int nchans = static_cast<int>(m_plan.get_nchans());
         const int active = static_cast<int>(m_active);
-        auto* prefix     = reinterpret_cast<uint32_t*>(
+        if (d.skewed) {
+            const dim3 wgrid((active + 255) / 256, nchans, m_nbeams);
+            const int ntiles =
+                (active + d.max_extra + detail::kDirectTile - 1) /
+                detail::kDirectTile;
+            const int row_stride = static_cast<int>(m_chunk);
+            const auto b_stride_k =
+                static_cast<int64_t>(level_beam_stride(d.levels));
+            auto* state_int = reinterpret_cast<TInt*>(
+                thrust::raw_pointer_cast(m_state_internal_d.data()));
+            const auto lvl_ptr = [&](SizeType l) -> TInt* {
+                return state_int + (l % 2) * m_nbeams * m_half_elems;
+            };
+            if (m_search_nbits <= 8) {
+                auto* wring = thrust::raw_pointer_cast(d.win_ring_u8.data());
+                detail::kernel_direct_write_ring<FDMTInputPacked, uint8_t>
+                    <<<wgrid, 256, 0, stream>>>(
+                        wring, d.win_ring_size,
+                        thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                        thrust::raw_pointer_cast(d.chan_ring_len.data()), input,
+                        nchans, active, m_chunk_pos);
+                for (SizeType b = 0; b < m_skew_nbatches; ++b) {
+                    const int32_t sub0    = d.batch_sub_off[b];
+                    const int32_t nsubs_b = d.batch_sub_off[b + 1] - sub0;
+                    if (nsubs_b > 0) {
+                        const dim3 lgrid(nsubs_b, ntiles, m_nbeams);
+                        gpu_utils::check_kernel_launch_params(
+                            lgrid, dim3(detail::kDirectWarps * 32));
+                        detail::kernel_direct_level_skewed<uint8_t, uint32_t,
+                                                           TInt><<<
+                            lgrid, detail::kDirectWarps * 32, d.smem, stream>>>(
+                            wring, d.win_ring_size,
+                            thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                            thrust::raw_pointer_cast(d.chan_ring_len.data()),
+                            thrust::raw_pointer_cast(d.subs.data()) + sub0,
+                            thrust::raw_pointer_cast(d.leaf_off.data()),
+                            thrust::raw_pointer_cast(d.leaves.data()), out,
+                            row_stride, b_stride_k, d.cpass, m_chunk_pos,
+                            active);
+                    }
+                    if (m_skew_nbatches > 1 && m_top) {
+                        launch_skewed_batch_mid<TInt>(b, lvl_ptr, stream);
+                    }
+                }
+            } else {
+                auto* wring = thrust::raw_pointer_cast(d.win_ring_u16.data());
+                detail::kernel_direct_write_ring<FDMTInputPacked, uint16_t>
+                    <<<wgrid, 256, 0, stream>>>(
+                        wring, d.win_ring_size,
+                        thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                        thrust::raw_pointer_cast(d.chan_ring_len.data()), input,
+                        nchans, active, m_chunk_pos);
+                for (SizeType b = 0; b < m_skew_nbatches; ++b) {
+                    const int32_t sub0    = d.batch_sub_off[b];
+                    const int32_t nsubs_b = d.batch_sub_off[b + 1] - sub0;
+                    if (nsubs_b > 0) {
+                        const dim3 lgrid(nsubs_b, ntiles, m_nbeams);
+                        gpu_utils::check_kernel_launch_params(
+                            lgrid, dim3(detail::kDirectWarps * 32));
+                        detail::kernel_direct_level_skewed<uint16_t, uint32_t,
+                                                           TInt><<<
+                            lgrid, detail::kDirectWarps * 32, d.smem, stream>>>(
+                            wring, d.win_ring_size,
+                            thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                            thrust::raw_pointer_cast(d.chan_ring_len.data()),
+                            thrust::raw_pointer_cast(d.subs.data()) + sub0,
+                            thrust::raw_pointer_cast(d.leaf_off.data()),
+                            thrust::raw_pointer_cast(d.leaves.data()), out,
+                            row_stride, b_stride_k, d.cpass, m_chunk_pos,
+                            active);
+                    }
+                    if (m_skew_nbatches > 1 && m_top) {
+                        launch_skewed_batch_mid<TInt>(b, lvl_ptr, stream);
+                    }
+                }
+            }
+            gpu_utils::check_last_gpu_error(
+                "FDMT (cuda): integer skewed direct levels failed");
+            return;
+        }
+        auto* prefix = reinterpret_cast<uint32_t*>(
             thrust::raw_pointer_cast(d.prefix.data()));
         detail::kernel_direct_prefix<FDMTInputPacked, uint32_t>
             <<<dim3(nchans, 1, m_nbeams), detail::kPrefixThreads, 0, stream>>>(
@@ -1019,6 +1138,24 @@ public:
         const int active     = static_cast<int>(m_active);
         auto* rings =
             reinterpret_cast<TInt*>(thrust::raw_pointer_cast(t.ring.data()));
+        if (t.target_ring) {
+            const dim3 grid(t.ntrials, 1, m_nbeams);
+            gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
+            detail::kernel_direct_top_target<TInt>
+                <<<grid, kWarps * 32, 0, stream>>>(
+                    level_state, static_cast<int64_t>(m_half_elems),
+                    static_cast<int>(m_chunk), rings, t.ring_size,
+                    thrust::raw_pointer_cast(t.ring_off.data()),
+                    thrust::raw_pointer_cast(t.ring_len.data()),
+                    thrust::raw_pointer_cast(t.leaf_off.data()),
+                    thrust::raw_pointer_cast(t.leaves.data()),
+                    thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
+                    out_beam_stride, static_cast<int>(m_chunk), m_chunk_pos,
+                    active, 0, m_skew_nbatches > 1 ? 0 : -1, true);
+            gpu_utils::check_last_gpu_error(
+                "FDMT (cuda): integer direct top target failed");
+            return;
+        }
         const dim3 grid((t.ntrials + kWarps - 1) / kWarps,
                         (active + kSamps - 1) / kSamps, m_nbeams);
         gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
@@ -1077,6 +1214,21 @@ public:
                                         w.size() * sizeof(float), stream));
                 }
             }
+            if (!m_direct->win_ring.empty()) {
+                gpu_utils::check_gpu_call(cudaMemsetAsync(
+                    thrust::raw_pointer_cast(m_direct->win_ring.data()), 0,
+                    m_direct->win_ring.size() * sizeof(float), stream));
+            }
+            if (!m_direct->win_ring_u8.empty()) {
+                gpu_utils::check_gpu_call(cudaMemsetAsync(
+                    thrust::raw_pointer_cast(m_direct->win_ring_u8.data()), 0,
+                    m_direct->win_ring_u8.size() * sizeof(uint8_t), stream));
+            }
+            if (!m_direct->win_ring_u16.empty()) {
+                gpu_utils::check_gpu_call(cudaMemsetAsync(
+                    thrust::raw_pointer_cast(m_direct->win_ring_u16.data()), 0,
+                    m_direct->win_ring_u16.size() * sizeof(uint16_t), stream));
+            }
             m_direct_filled = static_cast<SizeType>(m_direct->window);
         }
         m_direct_stale = false;
@@ -1103,33 +1255,11 @@ public:
         // output's layout), so the kernels run unchanged on every chunk.
         const SizeType niters = m_plan.get_niters();
         const bool chunked    = m_chunk < m_plan.get_nsamps();
-        const plans::FDMTPlanContainer relaid =
+        plans::FDMTPlanContainer relaid =
             chunked ? detail::fdmt_relayout_container(m_plan.get_container(),
                                                       niters, m_chunk)
                     : plans::FDMTPlanContainer{};
-        const auto& pc = chunked ? relaid : m_plan.get_container();
-        m_row_len0     = pc.state_shape[0].nsamps;
-        m_half_elems   = 0;
-        for (SizeType l = 0; l < niters; ++l) {
-            const SizeType n = m_search_upper
-                                   ? detail::fdmt_regular_coords(pc, l)
-                                   : pc.state_shape[l].ncoords;
-            m_half_elems = std::max(m_half_elems, n * pc.state_shape[l].nsamps);
-        }
-        check_int32_extents();
         gpu_utils::set_device(m_device_id);
-        // The two state halves: level l < niters lives in half l % 2; the
-        // root is written straight into the caller's dmt buffer.
-        m_state_internal_d.resize(
-            ((m_search_nbits == 32 || m_search_u32) ? 2 : 4) * m_nbeams *
-                m_half_elems,
-            0.0F);
-        if (m_mode == FDMTMode::kValid) {
-            const auto hist_size = m_nbeams * m_plan.get_history_size();
-            m_history_a_d.resize(hist_size, 0.0F);
-            m_history_b_d.resize(hist_size, 0.0F);
-        }
-        plans::transfer_fdmt_plan_to_device(pc, m_plan_d);
         if (m_use_box_smearing) {
             // Level-0 box means (fdmt_box_weights.hpp), by |dt|: dyadic float
             // weights, and the packed-input rounding recipes on 2^-F.
@@ -1181,26 +1311,84 @@ public:
                 detail::int_tree_level_types(m_plan, m_use_box_smearing, nbits);
         }
         m_levels_d.resize(m_plan.get_niters() + 1);
-        configure_fusion(pc, fuse_levels);
+        const auto& pc_init = chunked ? relaid : m_plan.get_container();
+        configure_fusion(pc_init, fuse_levels);
         configure_direct(fuse_levels);
-        configure_top();
+        configure_top(relaid);
+        if (m_direct && m_direct->skewed) {
+            for (const SizeType nbits : {1, 2, 4, 8, 16}) {
+                m_int_levels[nbits].assign(niters + 1, Elem::kF32);
+            }
+        }
+        const auto& pc =
+            !relaid.state_shape.empty() ? relaid : m_plan.get_container();
+        m_row_len0   = pc.state_shape[0].nsamps;
+        m_half_elems = 0;
+        for (SizeType l = 0; l < niters; ++l) {
+            if (m_direct && m_direct->skewed && l < m_direct->levels) {
+                continue;
+            }
+            if (m_direct && m_direct->skewed && m_top && m_top->skewed &&
+                m_top->target == niters && l > m_top->level) {
+                continue;
+            }
+            const SizeType elems =
+                (m_direct && m_direct->skewed && m_top && l <= m_top->level)
+                    ? pc.state_shape[l].nelements
+                    : (m_search_upper ? detail::fdmt_regular_coords(pc, l)
+                                      : pc.state_shape[l].ncoords) *
+                          pc.state_shape[l].nsamps;
+            m_half_elems = std::max(m_half_elems, elems);
+        }
+        check_int32_extents();
+        // The two state halves: level l < niters lives in half l % 2; the
+        // root is written straight into the caller's dmt buffer.
+        m_state_internal_d.resize(
+            ((m_search_nbits == 32 || m_search_u32) ? 2 : 4) * m_nbeams *
+                m_half_elems,
+            0.0F);
+        if (m_mode == FDMTMode::kValid &&
+            !((m_direct && m_direct->skewed) ||
+              (m_search_nbits != 32 && m_direct))) {
+            const auto hist_size = m_nbeams * m_plan.get_history_size();
+            m_history_a_d.resize(hist_size, 0.0F);
+            m_history_b_d.resize(hist_size, 0.0F);
+        }
+        plans::transfer_fdmt_plan_to_device(pc, m_plan_d);
         if (m_mode == FDMTMode::kValid) {
             // FIFOs for the fused levels, a ring above (see m_tree_fifo_d).
-            // The direct levels keep rings (rebuilt when needed).
+            // Only active tree ring levels (outside m_direct and m_top) are
+            // allocated; save_history()/load_history() expand on demand.
             const auto tree = m_plan.get_tree_history_size();
+            m_fifo_levels   = (m_search_nbits == 32 && m_fused)
+                                  ? static_cast<SizeType>(m_fused->args.fuse)
+                                  : 0;
+            m_fifo_size     = tree_history_through(m_fifo_levels);
+            const SizeType low_first =
+                m_direct ? (m_direct->levels + 1) : (m_fifo_levels + 1);
+            const SizeType low_last = m_top ? m_top->level : niters;
+            m_ring_low_base         = tree_history_through(low_first - 1);
+            m_ring_low_size =
+                (m_direct && m_direct->skewed && m_top)
+                    ? 0
+                    : (low_last >= low_first
+                           ? tree_history_through(low_last) - m_ring_low_base
+                           : 0);
+            m_ring_high_orig_base = (m_top && m_top->target < niters)
+                                        ? tree_history_through(m_top->target)
+                                        : tree;
+            m_ring_high_size      = tree - m_ring_high_orig_base;
+            m_ring_size           = m_ring_low_size + m_ring_high_size;
+            m_full_tree_ring      = (m_ring_size == tree - m_fifo_size);
             if (m_search_nbits == 32) {
-                m_fifo_levels =
-                    m_fused ? static_cast<SizeType>(m_fused->args.fuse) : 0;
-                m_fifo_size = tree_history_through(m_fifo_levels);
-                m_ring_size = tree - m_fifo_size;
                 for (auto& fifo : m_tree_fifo_d) {
                     fifo.resize(m_nbeams * m_fifo_size, 0.0F);
                 }
                 m_tree_ring_d.resize(m_nbeams * m_ring_size, 0.0F);
             } else if (m_search_u32) {
-                m_integer32_ring.resize(m_nbeams * tree, 0);
+                m_integer32_ring.resize(m_nbeams * m_ring_size, 0);
             } else {
-                m_integer_ring.resize(m_nbeams * tree, 0);
+                m_integer_ring.resize(m_nbeams * m_ring_size, 0);
             }
         }
         gpu_utils::check_last_gpu_error("FDMT (gpu): constructor failed");
@@ -1331,7 +1519,10 @@ public:
         const FDMTInputPacked input{.data      = waterfall_d.data(),
                                     .row_bytes = static_cast<int>(row_bytes),
                                     .nbits     = static_cast<int>(nbits)};
-        run_block(input, m_int_tree ? m_int_levels[nbits] : m_float_levels,
+        run_block(input,
+                  (m_int_tree && !(m_direct && m_direct->skewed))
+                      ? m_int_levels[nbits]
+                      : m_float_levels,
                   dmt_d, stream);
     }
 
@@ -1478,7 +1669,9 @@ public:
     [[nodiscard]] std::string search_path() const override {
         std::string path;
         if (m_direct) {
-            path = fmt::format("direct levels 0-{}", m_direct->levels);
+            path = fmt::format("{}direct levels 0-{}",
+                               m_direct->skewed ? "skewed " : "",
+                               m_direct->levels);
         }
         if (m_top) {
             path +=
@@ -1499,7 +1692,6 @@ public:
         const auto& sh = m_plan_d.state_shape;
         const auto& g0 = m_plan_d.grids0;
         const SizeType plan_bytes =
-            coord_bytes(m_plan_d.coordinates) +
             coord_bytes(m_plan_d.coordinates_sum) +
             coord_bytes(m_plan_d.coordinates_copy) +
             ((sh.nchans.size() + sh.ncoords_sum.size() +
@@ -1514,15 +1706,16 @@ public:
                           sizeof(int);
         }
         return {
-            .plan    = plan_bytes,
-            .state   = m_state_internal_d.size() * sizeof(float),
-            .history = (m_history_a_d.size() + m_history_b_d.size() +
-                        m_tree_fifo_d[0].size() + m_tree_fifo_d[1].size() +
-                        m_tree_ring_d.size() + direct_window_elems() +
-                        (m_top ? m_top->ring.size() : 0)) *
-                           sizeof(float) +
-                       m_integer_ring.size() * sizeof(uint64_t) +
-                       m_integer32_ring.size() * sizeof(uint32_t),
+            .plan  = plan_bytes,
+            .state = m_state_internal_d.size() * sizeof(float),
+            .history =
+                (m_history_a_d.size() + m_history_b_d.size() +
+                 m_tree_fifo_d[0].size() + m_tree_fifo_d[1].size() +
+                 m_tree_ring_d.size() + (m_top ? m_top->ring.size() : 0)) *
+                    sizeof(float) +
+                direct_window_bytes() +
+                m_integer_ring.size() * sizeof(uint64_t) +
+                m_integer32_ring.size() * sizeof(uint32_t),
             // Fused or direct tables, plus the host-execute() staging once
             // allocated.
             .workspace = fused_bytes + direct_workspace_bytes() +
@@ -1716,6 +1909,15 @@ public:
             for (auto& w : m_direct->win) {
                 w.assign(w.size(), 0.0F);
             }
+            if (!m_direct->win_ring.empty()) {
+                m_direct->win_ring.assign(m_direct->win_ring.size(), 0.0F);
+            }
+            if (!m_direct->win_ring_u8.empty()) {
+                m_direct->win_ring_u8.assign(m_direct->win_ring_u8.size(), 0);
+            }
+            if (!m_direct->win_ring_u16.empty()) {
+                m_direct->win_ring_u16.assign(m_direct->win_ring_u16.size(), 0);
+            }
             // An all-zero window is consistent with all-zero tree histories.
             m_direct_filled = static_cast<SizeType>(m_direct->window);
         }
@@ -1739,10 +1941,19 @@ public:
     /// Of each ping-pong pair only the buffer the next chunk reads is live
     /// (selected by m_parity); the ring is live as a whole.
     [[nodiscard]] SizeType history_state_size() const noexcept override {
-        return m_history_a_d.size() +
-               (m_tree_ring_d.empty() && m_tree_fifo_d[0].empty()
-                    ? 0
-                    : m_nbeams * m_plan.get_tree_history_size());
+        if (skew_history()) {
+            SizeType n = kSkewHistHeader;
+            for (const auto& b : skew_hist_buffers()) {
+                n += b.size;
+            }
+            return n;
+        }
+        return m_mode == FDMTMode::kValid && m_search_nbits == 32
+                   ? m_history_a_d.size() +
+                         (m_plan.get_tree_history_size() == 0
+                              ? 0
+                              : m_nbeams * m_plan.get_tree_history_size())
+                   : 0;
     }
 
     /// Copies the live streaming history out to a caller-owned device
@@ -1888,6 +2099,10 @@ private:
     SizeType m_chunk{0};
     SizeType m_row_len0{0};
     SizeType m_half_elems{0};
+    SizeType m_skew_nbatches{1};
+    std::vector<int> m_skew_batch_top_grid;
+    std::vector<std::vector<int>> m_skew_batch_sum_off;
+    std::vector<std::vector<int>> m_skew_batch_copy_off;
     SizeType m_active{0};
     plans::FDMTPlanContainerD m_plan_d; // re-laid out for m_chunk
     // The two state halves (see init_device_structures()).
@@ -1908,10 +2123,16 @@ private:
     //   only its newest samples, and no history is shifted or doubled.
     // The level-0 input history and the FIFOs flip on m_parity per chunk.
     std::array<thrust::device_vector<float>, 2> m_tree_fifo_d;
-    thrust::device_vector<float> m_tree_ring_d;
+    mutable thrust::device_vector<float> m_tree_ring_d;
     SizeType m_fifo_levels{0};
     SizeType m_fifo_size{0};
-    SizeType m_ring_size{0};
+    mutable SizeType m_ring_size{0};
+    SizeType m_ring_low_base{0};
+    SizeType m_ring_low_size{0};
+    SizeType m_ring_high_orig_base{0};
+    SizeType m_ring_high_size{0};
+    mutable bool m_full_tree_ring{false};
+    std::vector<SizeType> m_level_max_extra;
     bool m_parity{false};
     float* m_fifo_in_ptr{nullptr};
     float* m_fifo_out_ptr{nullptr};
@@ -1961,12 +2182,18 @@ private:
     static constexpr SizeType kDirectLevels = 3;
     struct DirectLevelsD {
         SizeType levels{0};
+        bool skewed{false};
         int window{0};
         int nsubs{0};
         int max_rows{0};
+        int max_extra{0};
+        SizeType total_elems{0};
         int cpass{0};
         int pitch{0};
         SizeType smem{0};
+        int64_t win_ring_size{0};
+        std::vector<int32_t> row_off;
+        std::vector<int32_t> batch_sub_off;
         thrust::device_vector<detail::FDMTDirectSub> subs;
         thrust::device_vector<int32_t> leaf_off;
         thrust::device_vector<detail::FDMTDirectLeaf> leaves;
@@ -1976,8 +2203,14 @@ private:
         std::vector<int32_t> hist_max_delay;
         std::array<thrust::device_vector<float>, 2> win;
         thrust::device_vector<float> prefix;
+        thrust::device_vector<int32_t> chan_ring_len;
+        thrust::device_vector<int64_t> chan_ring_off;
+        thrust::device_vector<float> win_ring;
+        thrust::device_vector<uint8_t> win_ring_u8;
+        thrust::device_vector<uint16_t> win_ring_u16;
     };
     std::unique_ptr<DirectLevelsD> m_direct;
+    bool m_direct_eligible{false};
     const float* m_direct_win_in{nullptr};
     float* m_direct_win_out{nullptr};
     // Real input samples in the window (a load_history() empties it).
@@ -1988,6 +2221,8 @@ private:
     struct DirectTopD {
         SizeType level{0};
         SizeType target{0};
+        bool skewed{false};
+        bool target_ring{false};
         int ntrials{0};
         int nrows{0};
         int max_ring{0};
@@ -2006,6 +2241,7 @@ private:
     };
     std::unique_ptr<DirectTopD> m_top;
     bool m_search_upper{false};
+    bool m_force_skewed{false}; // FDMTEngineConfig::force_skewed_direct
     bool m_top_chunk{false};
     // Samples of the rings' reach streamed since a load_history().
     SizeType m_top_filled{0};
@@ -2136,9 +2372,190 @@ private:
         }
     }
 
+    void ensure_full_tree_history(cudaStream_t stream) const {
+        if (m_full_tree_ring || m_mode != FDMTMode::kValid ||
+            m_search_nbits != 32) {
+            return;
+        }
+        const SizeType full_ring = m_plan.get_tree_history_size() - m_fifo_size;
+        thrust::device_vector<float> expanded(m_nbeams * full_ring, 0.0F);
+        if (m_ring_low_size > 0 && !m_tree_ring_d.empty()) {
+            gpu_utils::check_gpu_call(
+                cudaMemcpy2DAsync(
+                    thrust::raw_pointer_cast(expanded.data()) +
+                        (m_ring_low_base - m_fifo_size),
+                    full_ring * sizeof(float),
+                    thrust::raw_pointer_cast(m_tree_ring_d.data()),
+                    m_ring_size * sizeof(float),
+                    m_ring_low_size * sizeof(float), m_nbeams,
+                    cudaMemcpyDeviceToDevice, stream),
+                "FDMT::ensure_full_tree_history (low)");
+        }
+        if (m_ring_high_size > 0 && !m_tree_ring_d.empty()) {
+            gpu_utils::check_gpu_call(
+                cudaMemcpy2DAsync(
+                    thrust::raw_pointer_cast(expanded.data()) +
+                        (m_ring_high_orig_base - m_fifo_size),
+                    full_ring * sizeof(float),
+                    thrust::raw_pointer_cast(m_tree_ring_d.data()) +
+                        m_ring_low_size,
+                    m_ring_size * sizeof(float),
+                    m_ring_high_size * sizeof(float), m_nbeams,
+                    cudaMemcpyDeviceToDevice, stream),
+                "FDMT::ensure_full_tree_history (high)");
+        }
+        m_tree_ring_d.swap(expanded);
+        m_ring_size      = full_ring;
+        m_full_tree_ring = true;
+    }
+
+    // ---- skewed-window streaming history (m_direct->skewed) -------------
+    //
+    // The skewed path keeps no tree history: its state is the raw input
+    // ring, the direct top's target rings and any active tree ring / FIFO /
+    // level-0 history, all tied to the stream position. They are saved
+    // verbatim after a header of 16-bit pieces held exactly in floats
+    // (magic, version, layout hash, stream position). A buffer is accepted
+    // only by an engine with the same skewed layout; anything else throws.
+    static constexpr SizeType kSkewHistHeader  = 16;
+    static constexpr uint64_t kSkewHistMagic   = 0x534BU; // "SK"
+    static constexpr uint64_t kSkewHistVersion = 1;
+
+    [[nodiscard]] bool skew_history() const noexcept {
+        return m_mode == FDMTMode::kValid && m_search_nbits == 32 && m_direct &&
+               m_direct->skewed;
+    }
+
+    struct SkewHistBuffer {
+        float* data;
+        SizeType size;
+    };
+    /// The live persistent buffers, in save order (the ping-pong buffers
+    /// the next chunk reads).
+    [[nodiscard]] std::vector<SkewHistBuffer> skew_hist_buffers() const {
+        std::vector<SkewHistBuffer> v;
+        const auto add = [&](const thrust::device_vector<float>& b) {
+            if (!b.empty()) {
+                v.push_back({const_cast<float*>( // NOLINT
+                                 thrust::raw_pointer_cast(b.data())),
+                             b.size()});
+            }
+        };
+        add(m_direct->win_ring);
+        if (m_top) {
+            add(m_top->ring);
+        }
+        add(m_tree_ring_d);
+        add(next_tree_fifo());
+        add(next_level0_history());
+        return v;
+    }
+
+    [[nodiscard]] uint64_t skew_layout_hash() const {
+        uint64_t h     = 1469598103934665603ULL;
+        const auto mix = [&](uint64_t x) {
+            for (int i = 0; i < 8; ++i) {
+                h = (h ^ ((x >> (8 * i)) & 0xFFU)) * 1099511628211ULL;
+            }
+        };
+        mix(m_plan.get_nchans());
+        mix(m_nbeams);
+        mix(m_chunk);
+        mix(m_direct->levels);
+        mix(static_cast<uint64_t>(m_direct->win_ring_size));
+        mix(m_top ? m_top->level : 0);
+        mix(m_top ? static_cast<uint64_t>(m_top->ring_size) : 0);
+        for (const auto& b : skew_hist_buffers()) {
+            mix(b.size);
+        }
+        return h;
+    }
+
+    void save_skew_history_d(float* dst, cudaStream_t stream) const {
+        std::array<float, kSkewHistHeader> hdr{};
+        const auto put16 = [&](SizeType at, uint64_t x, SizeType words) {
+            for (SizeType i = 0; i < words; ++i) {
+                hdr[at + i] = static_cast<float>((x >> (16 * i)) & 0xFFFFU);
+            }
+        };
+        put16(0, kSkewHistMagic, 1);
+        put16(1, kSkewHistVersion, 1);
+        put16(2, skew_layout_hash(), 4);
+        put16(6, m_next_pos, 4);
+        // Pageable source: returns once the header has been staged.
+        gpu_utils::check_gpu_call(cudaMemcpyAsync(dst, hdr.data(), sizeof(hdr),
+                                                  cudaMemcpyHostToDevice,
+                                                  stream),
+                                  "FDMT::save_history");
+        SizeType off = kSkewHistHeader;
+        for (const auto& b : skew_hist_buffers()) {
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(dst + off, b.data, b.size * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream),
+                "FDMT::save_history");
+            off += b.size;
+        }
+    }
+
+    void load_skew_history_d(const float* src, cudaStream_t stream) {
+        std::array<float, kSkewHistHeader> hdr{};
+        gpu_utils::check_gpu_call(cudaMemcpyAsync(hdr.data(), src, sizeof(hdr),
+                                                  cudaMemcpyDeviceToHost,
+                                                  stream),
+                                  "FDMT::load_history");
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(stream),
+                                  "FDMT::load_history");
+        const auto get16 = [&](SizeType at, SizeType words) {
+            uint64_t x = 0;
+            for (SizeType i = 0; i < words; ++i) {
+                const float f = hdr[at + i];
+                if (!(f >= 0.0F && f <= 65535.0F) || f != std::floor(f)) {
+                    throw std::invalid_argument(
+                        "FDMT::load_history: not a skewed-window history");
+                }
+                x |= static_cast<uint64_t>(f) << (16 * i);
+            }
+            return x;
+        };
+        if (get16(0, 1) != kSkewHistMagic || get16(1, 1) != kSkewHistVersion) {
+            throw std::invalid_argument(
+                "FDMT::load_history: not a skewed-window history (it was "
+                "saved by a different engine path)");
+        }
+        if (get16(2, 4) != skew_layout_hash()) {
+            throw std::invalid_argument(
+                "FDMT::load_history: the history was saved by an engine with "
+                "a different skewed-window layout (plan, chunk_nsamps, beams "
+                "or direct levels)");
+        }
+        const uint64_t pos = get16(6, 4);
+        SizeType off       = kSkewHistHeader;
+        for (const auto& b : skew_hist_buffers()) {
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(b.data, src + off, b.size * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream),
+                "FDMT::load_history");
+            off += b.size;
+        }
+        m_chunk_pos      = pos;
+        m_next_pos       = pos;
+        m_is_initialized = false;
+        m_direct_stale   = false;
+        m_top_stale      = false;
+        m_direct_filled  = static_cast<SizeType>(m_direct->window);
+        if (m_top) {
+            m_top_filled = static_cast<SizeType>(m_top->max_ring);
+        }
+    }
+
     // Saved history: level 0, then per beam the tree history in the plan
     // layout, oldest first (the FIFOs as stored, the ring linearized).
     void save_history_d(float* dst, cudaStream_t stream) const {
+        if (skew_history()) {
+            save_skew_history_d(dst, stream);
+            return;
+        }
+        ensure_full_tree_history(stream);
         rebuild_direct_history(stream);
         rebuild_top_history(stream);
         const auto& level0 = next_level0_history();
@@ -2177,6 +2594,11 @@ private:
     // Inverse of save_history_d(): an oldest-first history is the ring at
     // stream position 0.
     void load_history_d(const float* src, cudaStream_t stream) {
+        if (skew_history()) {
+            load_skew_history_d(src, stream);
+            return;
+        }
+        ensure_full_tree_history(stream);
         auto& level0 = next_level0_history();
         if (!level0.empty()) {
             gpu_utils::check_gpu_call(
@@ -2288,6 +2710,16 @@ private:
         int64_t base   = 0;
         uint64_t ring  = kFifoHistory;
     };
+    [[nodiscard]] SizeType ring_base_for_level(SizeType level) const noexcept {
+        if (m_full_tree_ring) {
+            return m_fifo_size;
+        }
+        if (m_top && level > m_top->target) {
+            return m_ring_high_orig_base - m_ring_low_size;
+        }
+        return m_ring_low_base;
+    }
+
     [[nodiscard]] TreeHistory tree_history(SizeType level) const {
         if (m_mode != FDMTMode::kValid) {
             return {};
@@ -2296,10 +2728,13 @@ private:
             return {m_fifo_in_ptr, m_fifo_out_ptr,
                     static_cast<int64_t>(m_fifo_size), 0, kFifoHistory};
         }
+        if (m_direct && m_direct->skewed && m_top && level <= m_top->level) {
+            return {nullptr, nullptr, 0, 0, m_chunk_pos};
+        }
         auto* ring = const_cast<float*>( // NOLINT: device buffer, host const
             thrust::raw_pointer_cast(m_tree_ring_d.data()));
         return {ring, ring, static_cast<int64_t>(m_ring_size),
-                static_cast<int64_t>(m_fifo_size), m_chunk_pos};
+                static_cast<int64_t>(ring_base_for_level(level)), m_chunk_pos};
     }
 
     // Per-beam tree history of levels 1..level (the plan assigns hist
@@ -2576,6 +3011,9 @@ private:
         const bool direct = fuse && use_direct<Input>(types);
         m_top_chunk       = fuse && use_top(types);
         if (m_mode == FDMTMode::kValid) {
+            if ((!direct && m_direct) || (!m_top_chunk && m_top)) {
+                ensure_full_tree_history(stream);
+            }
             // Tree levels after direct chunks lag behind: rebuild their
             // histories (at the current position) before the tree runs.
             if (!direct) {
@@ -2589,7 +3027,7 @@ private:
             // on which buffer is "previous" vs "this". The ring stays put;
             // its slots follow the stream position.
             const int in = m_parity ? 1 : 0;
-            if (m_direct) {
+            if (m_direct && !m_direct->skewed) {
                 m_direct_win_in =
                     thrust::raw_pointer_cast(m_direct->win[in].data());
                 m_direct_win_out =
@@ -2610,9 +3048,12 @@ private:
         layout_levels(types, dmt);
         if (direct) {
             launch_direct(input, stream);
-            advance_level0_history(input, stream);
-            m_current_level = m_direct->levels;
-            m_direct_stale  = true;
+            if (!m_direct->skewed) {
+                advance_level0_history(input, stream);
+            }
+            m_current_level = (m_skew_nbatches > 1 && m_top) ? m_top->level
+                                                             : m_direct->levels;
+            m_direct_stale  = !m_direct->skewed;
         } else if (fuse && m_fused) {
             launch_fused(input, stream);
             m_current_level = get_fuse_levels();
@@ -2623,7 +3064,9 @@ private:
                     input, reinterpret_cast<T0*>(m_levels_d[0].base), stream);
             });
         }
-        advance_direct_window(input, stream);
+        if (m_direct && !m_direct->skewed) {
+            advance_direct_window(input, stream);
+        }
         m_is_initialized = true;
     }
 
@@ -2634,6 +3077,7 @@ private:
     /// (replacing the tile fusion), if its shared-memory window fits.
     void configure_direct(SizeType requested) {
         m_direct.reset();
+        m_direct_eligible     = false;
         const SizeType levels = kDirectLevels;
         // The packed search (exact integers) takes them too: its level-0
         // boxes use the plan's integer dyadic weights unrounded, so level K
@@ -2648,6 +3092,7 @@ private:
             get_fuse_levels() >= levels) {
             return;
         }
+        m_direct_eligible = true;
         std::vector<float> box_w(m_box_w_d.size());
         if (packed) {
             // Integer weights (exact in float), so the leaves give the
@@ -2669,7 +3114,10 @@ private:
             static_cast<SizeType>(span + detail::kDirectTile + 1) *
             sizeof(float);
         const SizeType optin = max_optin_smem_bytes();
-        if (per_channel > optin) {
+        const auto rows      = m_nbeams * m_plan.get_nchans();
+        if (per_channel > optin ||
+            rows * static_cast<SizeType>(plan.window) * sizeof(float) >
+                (SizeType{256} << 20)) {
             return;
         }
         if (packed) {
@@ -2701,7 +3149,6 @@ private:
                 d->hist_max_delay[l] = std::max(d->hist_max_delay[l], hc.delay);
             }
         }
-        const auto rows = m_nbeams * m_plan.get_nchans();
         for (auto& w : d->win) {
             w.resize(rows * static_cast<SizeType>(d->window), 0.0F);
         }
@@ -2734,9 +3181,68 @@ private:
     /// levels, and an input window covering every row's reach.
     template <typename Input>
     [[nodiscard]] bool use_direct(const std::vector<Elem>& types) const {
-        return m_direct && std::is_same_v<Input, FDMTInputF32> &&
-               types[m_direct->levels] == Elem::kF32 &&
-               m_direct_filled >= static_cast<SizeType>(m_direct->window);
+        return m_direct && types[m_direct->levels] == Elem::kF32 &&
+               (m_direct->skewed ||
+                (std::is_same_v<Input, FDMTInputF32> &&
+                 m_direct_filled >= static_cast<SizeType>(m_direct->window)));
+    }
+
+    template <typename T, typename PtrFn>
+    void
+    launch_skewed_batch_mid(SizeType b, PtrFn&& lvl_ptr, cudaStream_t stream) {
+        const SizeType k     = m_direct->levels;
+        const SizeType top_k = m_top->level;
+        for (SizeType l = k + 1; l <= top_k; ++l) {
+            const int sum_b0         = m_skew_batch_sum_off[l][b];
+            const int sum_b1         = m_skew_batch_sum_off[l][b + 1];
+            const int copy_b0        = m_skew_batch_copy_off[l][b];
+            const int copy_b1        = m_skew_batch_copy_off[l][b + 1];
+            const int ncoords_sum_b  = sum_b1 - sum_b0;
+            const int ncoords_copy_b = copy_b1 - copy_b0;
+            const int coords_max     = std::max(ncoords_sum_b, ncoords_copy_b);
+            if (coords_max <= 0) {
+                continue;
+            }
+            auto sums   = m_plan_d.coordinates_sum.get_raw_ptrs();
+            auto copies = m_plan_d.coordinates_copy.get_raw_ptrs();
+            sums.update_offsets(m_coords_sum_offsets[l] + sum_b0);
+            copies.update_offsets(m_coords_copy_offsets[l] + copy_b0);
+            const int nsamps_l = static_cast<int>(
+                m_active +
+                (l < m_level_max_extra.size() ? m_level_max_extra[l] : 0));
+            constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
+            const dim3 block(kIterThreads, 1);
+            const dim3 grid((nsamps_l + kBlockSamps - 1) / kBlockSamps,
+                            std::min(coords_max, kMaxGridY), m_nbeams);
+            gpu_utils::check_kernel_launch_params(grid, block);
+            kernel_execute_iter<FDMTMode::kValid, T, T, T>
+                <<<grid, block, 0, stream>>>(
+                    lvl_ptr(l - 1), lvl_ptr(l), sums, copies, nullptr, nsamps_l,
+                    ncoords_sum_b, ncoords_copy_b, level_beam_stride(l - 1),
+                    level_beam_stride(l), 0, 0, m_chunk_pos, 1.0F,
+                    static_cast<int>(m_active), false,
+                    static_cast<int>(m_chunk));
+        }
+        if (m_top && m_top->target_ring) {
+            auto& t              = *m_top;
+            constexpr int kWarps = 8;
+            const dim3 grid(t.ntrials, 1, m_nbeams);
+            gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
+            auto* rings =
+                reinterpret_cast<T*>(thrust::raw_pointer_cast(t.ring.data()));
+            detail::kernel_direct_top_target<T>
+                <<<grid, kWarps * 32, 0, stream>>>(
+                    lvl_ptr(top_k), static_cast<int64_t>(m_half_elems),
+                    static_cast<int>(m_chunk), rings, t.ring_size,
+                    thrust::raw_pointer_cast(t.ring_off.data()),
+                    thrust::raw_pointer_cast(t.ring_len.data()),
+                    thrust::raw_pointer_cast(t.leaf_off.data()),
+                    thrust::raw_pointer_cast(t.leaves.data()),
+                    thrust::raw_pointer_cast(t.out_row.data()), t.ntrials,
+                    nullptr, 0, 0, m_chunk_pos, static_cast<int>(m_active),
+                    m_skew_batch_top_grid[b], m_skew_batch_top_grid[b + 1],
+                    false);
+        }
     }
 
     template <typename Input>
@@ -2744,6 +3250,74 @@ private:
         auto& d          = *m_direct;
         const int nchans = static_cast<int>(m_plan.get_nchans());
         const int active = static_cast<int>(m_active);
+        if (d.skewed) {
+            auto* wring = thrust::raw_pointer_cast(d.win_ring.data());
+            const dim3 wgrid((active + 255) / 256, nchans, m_nbeams);
+            detail::kernel_direct_write_ring<Input, float>
+                <<<wgrid, 256, 0, stream>>>(
+                    wring, d.win_ring_size,
+                    thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                    thrust::raw_pointer_cast(d.chan_ring_len.data()), input,
+                    nchans, active, m_chunk_pos);
+            const int ntiles =
+                (active + d.max_extra + detail::kDirectTile - 1) /
+                detail::kDirectTile;
+            const auto lvl_ptr = [&](SizeType l) {
+                return reinterpret_cast<float*>(m_levels_d[l].base);
+            };
+            for (SizeType b = 0; b < m_skew_nbatches; ++b) {
+                const int32_t sub0    = d.batch_sub_off[b];
+                const int32_t nsubs_b = d.batch_sub_off[b + 1] - sub0;
+                if (nsubs_b > 0) {
+                    const dim3 lgrid(nsubs_b, ntiles, m_nbeams);
+                    gpu_utils::check_kernel_launch_params(
+                        lgrid, dim3(detail::kDirectWarps * 32));
+                    const auto args = std::make_tuple(
+                        static_cast<const float*>(wring), d.win_ring_size,
+                        thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                        thrust::raw_pointer_cast(d.chan_ring_len.data()),
+                        thrust::raw_pointer_cast(d.subs.data()) + sub0,
+                        thrust::raw_pointer_cast(d.leaf_off.data()),
+                        thrust::raw_pointer_cast(d.leaves.data()),
+                        lvl_ptr(d.levels), static_cast<int>(m_chunk),
+                        level_beam_stride(d.levels), d.cpass, m_chunk_pos,
+                        active);
+                    if constexpr (detail::kFDMTPackedInput<Input>) {
+                        // Packed input keeps the tree's rounded box means
+                        // (exact integer sums, see FDMTDirectRound).
+                        const auto bm = box_means_for(input);
+                        const detail::FDMTDirectRound rnd{
+                            .round = m_use_box_smearing ? bm.round : nullptr,
+                            .round_u64 = bm.round_u64,
+                            .unit      = m_use_box_smearing ? m_int_unit : 1.0F,
+                        };
+                        std::apply(
+                            [&](auto... a) {
+                                detail::kernel_direct_level_skewed<
+                                    float, uint32_t, uint32_t, true, float>
+                                    <<<lgrid, detail::kDirectWarps * 32, d.smem,
+                                       stream>>>(a..., rnd);
+                            },
+                            args);
+                    } else {
+                        std::apply(
+                            [&](auto... a) {
+                                detail::kernel_direct_level_skewed<float, float,
+                                                                   float>
+                                    <<<lgrid, detail::kDirectWarps * 32, d.smem,
+                                       stream>>>(a...);
+                            },
+                            args);
+                    }
+                }
+                if (m_skew_nbatches > 1 && m_top) {
+                    launch_skewed_batch_mid<float>(b, lvl_ptr, stream);
+                }
+            }
+            gpu_utils::check_last_gpu_error(
+                "FDMT (cuda): skewed direct levels failed");
+            return;
+        }
         detail::kernel_direct_prefix<Input>
             <<<dim3(nchans, 1, m_nbeams), detail::kPrefixThreads, 0, stream>>>(
                 input, m_direct_win_in, d.window, nchans, active,
@@ -2771,7 +3345,7 @@ private:
     /// every channel) in step with the stream, whichever path ran.
     template <typename Input>
     void advance_direct_window(const Input& input, cudaStream_t stream) {
-        if (!m_direct || m_mode != FDMTMode::kValid) {
+        if (!m_direct || m_direct->skewed || m_mode != FDMTMode::kValid) {
             return;
         }
         const auto& d   = *m_direct;
@@ -2791,7 +3365,7 @@ private:
     /// window at the current stream position, after direct chunks left them
     /// behind (fdmt_direct.hpp).
     void rebuild_direct_history(cudaStream_t stream) const {
-        if (!m_direct || !m_direct_stale) {
+        if (!m_direct || !m_direct_stale || m_direct->skewed) {
             return;
         }
         const auto& d = *m_direct;
@@ -2818,24 +3392,452 @@ private:
         m_direct_stale = false;
     }
 
+    void build_skewed_direct_from_windows(
+        const std::vector<int32_t>& s_hi_k,
+        const std::vector<int32_t>& sp_k,
+        const std::vector<SizeType>& batch_grid_off = {}) {
+        const SizeType k  = kDirectLevels;
+        const bool packed = m_search_nbits != 32;
+        std::vector<float> box_w(m_box_w_d.size());
+        if (packed) {
+            const auto weights = m_plan.get_box_weights();
+            for (SizeType i = 0; i < box_w.size(); ++i) {
+                box_w[i] = static_cast<float>(weights[i]);
+            }
+        } else {
+            thrust::copy(m_box_w_d.begin(), m_box_w_d.end(), box_w.begin());
+        }
+        auto dplan = detail::build_fdmt_direct_skewed_plan(
+            m_plan, k, m_use_box_smearing, box_w, m_chunk, s_hi_k, sp_k,
+            batch_grid_off);
+        const auto per_channel =
+            static_cast<SizeType>(dplan.max_span + detail::kDirectTile + 1) *
+            sizeof(float);
+        const SizeType optin = max_optin_smem_bytes();
+        if (per_channel > optin) {
+            return;
+        }
+        auto d           = std::make_unique<DirectLevelsD>();
+        d->levels        = k;
+        d->skewed        = true;
+        d->window        = dplan.window;
+        d->nsubs         = static_cast<int>(dplan.subs.size());
+        d->max_rows      = dplan.max_rows;
+        d->max_extra     = dplan.max_extra;
+        d->total_elems   = static_cast<SizeType>(dplan.total_elems);
+        d->win_ring_size = dplan.win_ring_size;
+        d->row_off       = std::move(dplan.row_off);
+        d->batch_sub_off = std::move(dplan.batch_sub_off);
+        d->cpass         = static_cast<int>(std::min<SizeType>(
+            static_cast<SizeType>(dplan.max_nc), optin / per_channel));
+        d->smem          = static_cast<SizeType>(d->cpass) * per_channel;
+        d->subs          = dplan.subs;
+        d->leaf_off      = dplan.leaf_off;
+        d->leaves        = dplan.leaves;
+        d->chan_ring_len = dplan.chan_ring_len;
+        d->chan_ring_off = dplan.chan_ring_off;
+        const auto total_ring =
+            m_nbeams * static_cast<SizeType>(d->win_ring_size);
+        if (!packed) {
+            d->win_ring.resize(total_ring, 0.0F);
+        } else if (m_search_nbits <= 8) {
+            d->win_ring_u8.resize(total_ring, 0);
+        } else {
+            d->win_ring_u16.resize(total_ring, 0);
+        }
+        const auto opt_in = [&](auto kernel) {
+            gpu_utils::check_gpu_call(
+                cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    static_cast<int>(d->smem)),
+                "FDMT (cuda): skewed direct levels shared-memory opt-in");
+        };
+        if (!packed) {
+            opt_in(detail::kernel_direct_level_skewed<float, float, float>);
+        } else if (m_search_nbits <= 8 && m_search_u32) {
+            opt_in(detail::kernel_direct_level_skewed<uint8_t, uint32_t,
+                                                      uint32_t>);
+        } else if (m_search_nbits <= 8) {
+            opt_in(detail::kernel_direct_level_skewed<uint8_t, uint32_t,
+                                                      uint64_t>);
+        } else if (m_search_u32) {
+            opt_in(detail::kernel_direct_level_skewed<uint16_t, uint32_t,
+                                                      uint32_t>);
+        } else {
+            opt_in(detail::kernel_direct_level_skewed<uint16_t, uint32_t,
+                                                      uint64_t>);
+        }
+        logging::debug(
+            "FDMT (cuda): levels 0..{} skewed direct ({} slices, {} leaves, "
+            "win_ring {} MiB, max_span {}, max_extra {}, {} B shared)",
+            k, d->nsubs, dplan.leaves.size(),
+            (total_ring * (packed ? (m_search_nbits <= 8 ? 1 : 2) : 4)) >> 20,
+            dplan.max_span, d->max_extra, d->smem);
+        m_direct_filled = static_cast<SizeType>(d->window);
+        m_direct        = std::move(d);
+        m_fused.reset();
+    }
+
+    void configure_skewed_direct_and_mid(plans::FDMTPlanContainer& relaid,
+                                         detail::FDMTDirectTopPlan& top_plan) {
+        if (relaid.state_shape.empty()) {
+            relaid = detail::fdmt_relayout_container(
+                m_plan.get_container(), m_plan.get_niters(), m_chunk);
+        }
+        const auto& pc       = m_plan.get_container();
+        const SizeType k     = kDirectLevels;
+        const SizeType top_k = top_plan.level;
+        std::vector<std::vector<int32_t>> s_lo(top_k + 1);
+        std::vector<std::vector<int32_t>> s_hi(top_k + 1);
+        for (SizeType l = k; l <= top_k; ++l) {
+            s_lo[l].assign(pc.state_shape[l].ncoords, INT32_MAX);
+            s_hi[l].assign(pc.state_shape[l].ncoords, -1);
+        }
+        for (SizeType r = 0; r < pc.state_shape[top_k].ncoords; ++r) {
+            if (top_plan.row_s_hi[r] >= 0) {
+                s_lo[top_k][r] = top_plan.row_s_lo[r];
+                s_hi[top_k][r] = top_plan.row_s_lo[r];
+            }
+        }
+        for (SizeType l = top_k; l > k; --l) {
+            const auto in_stride  = pc.state_shape[l - 1].nsamps;
+            const auto out_stride = pc.state_shape[l].nsamps;
+            for (const auto& c : pc.coordinates_copy[l]) {
+                const auto p = c.buf_offset / out_stride;
+                const auto t = c.tail_buf_offset / in_stride;
+                if (s_hi[l][p] < 0) {
+                    continue;
+                }
+                s_lo[l - 1][t] = std::min(s_lo[l - 1][t], s_lo[l][p]);
+                s_hi[l - 1][t] = std::max(s_hi[l - 1][t], s_hi[l][p]);
+            }
+            for (const auto& c : pc.coordinates_sum[l]) {
+                const auto p = c.buf_offset / out_stride;
+                const auto t = c.tail_buf_offset / in_stride;
+                const auto h = c.head_buf_offset / in_stride;
+                const auto d = static_cast<int32_t>(c.delay);
+                if (s_hi[l][p] < 0) {
+                    continue;
+                }
+                s_lo[l - 1][t] = std::min(s_lo[l - 1][t], s_lo[l][p]);
+                s_hi[l - 1][t] = std::max(s_hi[l - 1][t], s_hi[l][p]);
+                s_lo[l - 1][h] = std::min(s_lo[l - 1][h], s_lo[l][p] + d);
+                s_hi[l - 1][h] = std::max(s_hi[l - 1][h], s_hi[l][p] + d);
+            }
+        }
+        m_level_max_extra.assign(m_plan.get_niters() + 1, 0);
+        std::vector<std::vector<int32_t>> sp(top_k + 1);
+        for (SizeType l = k; l <= top_k; ++l) {
+            sp[l].assign(pc.state_shape[l].ncoords, 0);
+            for (SizeType r = 0; r < pc.state_shape[l].ncoords; ++r) {
+                if (s_hi[l][r] >= 0) {
+                    sp[l][r]             = s_hi[l][r] - s_lo[l][r];
+                    m_level_max_extra[l] = std::max(
+                        m_level_max_extra[l], static_cast<SizeType>(sp[l][r]));
+                }
+            }
+        }
+        const SizeType ngrids_top = pc.grids[top_k].size();
+        for (SizeType f = 0; f < top_plan.out_row.size(); ++f) {
+            std::ranges::stable_sort(
+                top_plan.leaves.begin() + top_plan.leaf_off[f],
+                top_plan.leaves.begin() + top_plan.leaf_off[f + 1], {},
+                [](const detail::FDMTDirectTopLeaf& lf) { return lf.row; });
+        }
+        SizeType nbatches =
+            (!m_search_upper && top_plan.target_ring && ngrids_top >= 24) ? 24
+                                                                          : 1;
+        std::vector<std::vector<SizeType>> batch_grid(top_k + 1);
+        std::vector<std::vector<SizeType>> batch_coord(top_k + 1);
+        const auto build_batch_bounds = [&](SizeType nb) {
+            std::vector<SizeType> top_bounds(nb + 1, 0);
+            top_bounds[nb] = ngrids_top;
+            if (nb > 1) {
+                const SizeType ngrids_k = pc.grids[k].size();
+                std::vector<SizeType> cum_w(ngrids_top + 1, 0);
+                for (SizeType g = 0; g < ngrids_top; ++g) {
+                    const SizeType gk0 = std::min(ngrids_k, g << (top_k - k));
+                    const SizeType gk1 =
+                        std::min(ngrids_k, (g + 1) << (top_k - k));
+                    const SizeType c0 = gk0 < ngrids_k
+                                            ? pc.grids[k][gk0].coord_offset
+                                            : pc.state_shape[k].ncoords;
+                    const SizeType c1 = gk1 < ngrids_k
+                                            ? pc.grids[k][gk1].coord_offset
+                                            : pc.state_shape[k].ncoords;
+                    SizeType w        = 1;
+                    for (SizeType r = c0; r < c1; ++r) {
+                        if (s_hi[k][r] >= 0) {
+                            w += m_chunk + static_cast<SizeType>(sp[k][r]);
+                        }
+                    }
+                    cum_w[g + 1] = cum_w[g] + w;
+                }
+                const SizeType total_w = cum_w[ngrids_top];
+                for (SizeType b = 1; b < nb; ++b) {
+                    const SizeType target_w = (b * total_w) / nb;
+                    SizeType g              = top_bounds[b - 1] + 1;
+                    const SizeType max_g    = ngrids_top - (nb - b);
+                    while (g < max_g && cum_w[g] < target_w) {
+                        ++g;
+                    }
+                    top_bounds[b] = g;
+                }
+            }
+            for (SizeType l = k; l <= top_k; ++l) {
+                batch_grid[l].resize(nb + 1, 0);
+                batch_coord[l].resize(nb + 1, 0);
+                const SizeType ngrids_l = pc.grids[l].size();
+                for (SizeType b = 0; b <= nb; ++b) {
+                    const SizeType g_top = top_bounds[b];
+                    const SizeType g_l =
+                        (b == nb) ? ngrids_l
+                                  : std::min(ngrids_l, g_top << (top_k - l));
+                    batch_grid[l][b]  = g_l;
+                    batch_coord[l][b] = (g_l < ngrids_l)
+                                            ? pc.grids[l][g_l].coord_offset
+                                            : pc.state_shape[l].ncoords;
+                }
+            }
+        };
+        build_batch_bounds(nbatches);
+        if (nbatches > 1) {
+            bool valid_batches = true;
+            for (SizeType f = 0; f < top_plan.out_row.size() && valid_batches;
+                 ++f) {
+                const auto f0 = static_cast<SizeType>(top_plan.leaf_off[f]);
+                const auto f1 = static_cast<SizeType>(top_plan.leaf_off[f + 1]);
+                if (f1 - f0 != ngrids_top) {
+                    valid_batches = false;
+                    break;
+                }
+                for (SizeType b = 0; b < nbatches && valid_batches; ++b) {
+                    const auto c_lo = batch_coord[top_k][b];
+                    const auto c_hi = batch_coord[top_k][b + 1];
+                    for (SizeType m = batch_grid[top_k][b];
+                         m < batch_grid[top_k][b + 1]; ++m) {
+                        const auto r =
+                            static_cast<SizeType>(top_plan.leaves[f0 + m].row);
+                        if (r < c_lo || r >= c_hi) {
+                            valid_batches = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            for (SizeType l = k + 1; l <= top_k && valid_batches; ++l) {
+                const SizeType orig_in  = pc.state_shape[l - 1].nsamps;
+                const SizeType orig_out = pc.state_shape[l].nsamps;
+                SizeType b_cur          = 0;
+                for (const auto& o : pc.coordinates_copy[l]) {
+                    const auto p = o.buf_offset / orig_out;
+                    const auto t = o.tail_buf_offset / orig_in;
+                    if (p < batch_coord[l][b_cur]) {
+                        valid_batches = false;
+                        break;
+                    }
+                    while (b_cur < nbatches && p >= batch_coord[l][b_cur + 1]) {
+                        ++b_cur;
+                    }
+                    if (b_cur >= nbatches || t < batch_coord[l - 1][b_cur] ||
+                        t >= batch_coord[l - 1][b_cur + 1]) {
+                        valid_batches = false;
+                        break;
+                    }
+                }
+                b_cur = 0;
+                for (const auto& o : pc.coordinates_sum[l]) {
+                    const auto p = o.buf_offset / orig_out;
+                    const auto t = o.tail_buf_offset / orig_in;
+                    const auto h = o.head_buf_offset / orig_in;
+                    if (p < batch_coord[l][b_cur]) {
+                        valid_batches = false;
+                        break;
+                    }
+                    while (b_cur < nbatches && p >= batch_coord[l][b_cur + 1]) {
+                        ++b_cur;
+                    }
+                    if (b_cur >= nbatches || t < batch_coord[l - 1][b_cur] ||
+                        t >= batch_coord[l - 1][b_cur + 1] ||
+                        h < batch_coord[l - 1][b_cur] ||
+                        h >= batch_coord[l - 1][b_cur + 1]) {
+                        valid_batches = false;
+                        break;
+                    }
+                }
+            }
+            if (!valid_batches) {
+                nbatches = 1;
+                build_batch_bounds(1);
+            }
+        }
+        build_skewed_direct_from_windows(s_hi[k], sp[k], batch_grid[k]);
+        if (!m_direct || !m_direct->skewed) {
+            m_level_max_extra.clear();
+            return;
+        }
+        m_skew_nbatches = nbatches;
+        m_skew_batch_top_grid.resize(nbatches + 1, 0);
+        for (SizeType b = 0; b <= nbatches; ++b) {
+            m_skew_batch_top_grid[b] = static_cast<int>(batch_grid[top_k][b]);
+        }
+        m_skew_batch_sum_off.assign(top_k + 1, {});
+        m_skew_batch_copy_off.assign(top_k + 1, {});
+        relaid.state_shape[k].nsamps    = m_chunk + m_level_max_extra[k];
+        relaid.state_shape[k].nelements = m_direct->total_elems;
+        std::vector<std::vector<SizeType>> row_off(top_k + 1);
+        row_off[k].resize(m_direct->row_off.size());
+        for (SizeType r = 0; r < m_direct->row_off.size(); ++r) {
+            row_off[k][r] = static_cast<SizeType>(m_direct->row_off[r]);
+        }
+        for (SizeType l = k + 1; l <= top_k; ++l) {
+            const SizeType orig_in  = pc.state_shape[l - 1].nsamps;
+            const SizeType orig_out = pc.state_shape[l].nsamps;
+            const SizeType ncoords  = pc.state_shape[l].ncoords;
+            row_off[l].resize(ncoords, 0);
+            if (l == top_k) {
+                SizeType max_used_rows = 0;
+                std::vector<int32_t> remap(ncoords, -1);
+                for (SizeType b = 0; b < nbatches; ++b) {
+                    SizeType used_rows = 0;
+                    for (SizeType p = batch_coord[l][b];
+                         p < batch_coord[l][b + 1]; ++p) {
+                        row_off[l][p] = used_rows * m_chunk;
+                        if (s_hi[l][p] >= 0) {
+                            remap[p] = static_cast<int32_t>(used_rows);
+                            ++used_rows;
+                        }
+                    }
+                    max_used_rows = std::max(max_used_rows, used_rows);
+                }
+                for (auto& lf : top_plan.leaves) {
+                    lf.row = remap[static_cast<SizeType>(lf.row)];
+                }
+                if (!top_plan.target_ring) {
+                    std::vector<int32_t> new_ring_len(max_used_rows, 0);
+                    std::vector<int64_t> new_ring_off(max_used_rows, 0);
+                    for (SizeType p = 0; p < ncoords; ++p) {
+                        if (remap[p] >= 0) {
+                            const auto u    = static_cast<SizeType>(remap[p]);
+                            new_ring_len[u] = top_plan.ring_len[p];
+                            new_ring_off[u] = top_plan.ring_off[p];
+                        }
+                    }
+                    top_plan.ring_len = std::move(new_ring_len);
+                    top_plan.ring_off = std::move(new_ring_off);
+                }
+                relaid.state_shape[l].nsamps    = m_chunk;
+                relaid.state_shape[l].nelements = max_used_rows * m_chunk;
+            } else {
+                SizeType max_off = 0;
+                for (SizeType b = 0; b < nbatches; ++b) {
+                    SizeType off = 0;
+                    for (SizeType p = batch_coord[l][b];
+                         p < batch_coord[l][b + 1]; ++p) {
+                        row_off[l][p] = off;
+                        if (s_hi[l][p] >= 0) {
+                            off += m_chunk + static_cast<SizeType>(sp[l][p]);
+                        }
+                    }
+                    max_off = std::max(max_off, off);
+                }
+                relaid.state_shape[l].nsamps = m_chunk + m_level_max_extra[l];
+                relaid.state_shape[l].nelements = max_off;
+            }
+            m_skew_batch_copy_off[l].resize(nbatches + 1, 0);
+            m_skew_batch_sum_off[l].resize(nbatches + 1, 0);
+            SizeType i_copy = 0;
+            SizeType i_sum  = 0;
+            for (SizeType b = 0; b <= nbatches; ++b) {
+                const SizeType c_lim = batch_coord[l][b];
+                while (i_copy < pc.coordinates_copy[l].size() &&
+                       (pc.coordinates_copy[l][i_copy].buf_offset / orig_out) <
+                           c_lim) {
+                    ++i_copy;
+                }
+                m_skew_batch_copy_off[l][b] = static_cast<int>(i_copy);
+                while (i_sum < pc.coordinates_sum[l].size() &&
+                       (pc.coordinates_sum[l][i_sum].buf_offset / orig_out) <
+                           c_lim) {
+                    ++i_sum;
+                }
+                m_skew_batch_sum_off[l][b] = static_cast<int>(i_sum);
+            }
+            relaid.state_shape[l].dt_max = 0;
+            for (SizeType i = 0; i < relaid.coordinates_copy[l].size(); ++i) {
+                auto& c         = relaid.coordinates_copy[l][i];
+                const auto& o   = pc.coordinates_copy[l][i];
+                const auto p    = o.buf_offset / orig_out;
+                const auto t    = o.tail_buf_offset / orig_in;
+                const bool used = s_hi[l][p] >= 0;
+                const SizeType extra_p =
+                    used ? static_cast<SizeType>(sp[l][p]) : 0;
+                const SizeType shift_t =
+                    (used && s_hi[l - 1][t] >= s_hi[l][p])
+                        ? static_cast<SizeType>(s_hi[l - 1][t] - s_hi[l][p])
+                        : 0;
+                c.nsamps          = used ? (m_chunk + extra_p) : 0;
+                c.buf_offset      = row_off[l][p];
+                c.tail_buf_offset = row_off[l - 1][t] + shift_t;
+                c.tail_nsamps     = c.nsamps;
+            }
+            for (SizeType i = 0; i < relaid.coordinates_sum[l].size(); ++i) {
+                auto& c         = relaid.coordinates_sum[l][i];
+                const auto& o   = pc.coordinates_sum[l][i];
+                const auto p    = o.buf_offset / orig_out;
+                const auto t    = o.tail_buf_offset / orig_in;
+                const auto h    = o.head_buf_offset / orig_in;
+                const auto d    = static_cast<int32_t>(o.delay);
+                const bool used = s_hi[l][p] >= 0;
+                const SizeType extra_p =
+                    used ? static_cast<SizeType>(sp[l][p]) : 0;
+                const SizeType shift_t =
+                    (used && s_hi[l - 1][t] >= s_hi[l][p])
+                        ? static_cast<SizeType>(s_hi[l - 1][t] - s_hi[l][p])
+                        : 0;
+                const SizeType shift_h =
+                    (used && s_hi[l - 1][h] >= s_hi[l][p] + d)
+                        ? static_cast<SizeType>(s_hi[l - 1][h] -
+                                                (s_hi[l][p] + d))
+                        : 0;
+                c.nsamps          = used ? (m_chunk + extra_p) : 0;
+                c.buf_offset      = row_off[l][p];
+                c.tail_buf_offset = row_off[l - 1][t] + shift_t;
+                c.tail_nsamps     = c.nsamps;
+                c.head_buf_offset = row_off[l - 1][h] + shift_h;
+                c.head_nsamps     = c.nsamps;
+                c.delay           = 0;
+            }
+        }
+    }
+
     /// Direct top above the direct low levels (fdmt_direct.hpp) when no
     /// search reads the levels in between and its rings fit the budget.
-    void configure_top() {
+    void configure_top(plans::FDMTPlanContainer& relaid) {
         m_top.reset();
-        if (!m_direct) {
+        if (!m_direct && !m_direct_eligible) {
             return;
         }
         const auto& pc           = m_plan.get_container();
         const SizeType root      = m_plan.get_niters();
         const SizeType sub_depth = m_plan.get_subband_depth();
+        const SizeType k_direct  = m_direct ? m_direct->levels : kDirectLevels;
+        const auto fallback_skewed_direct = [&]() {
+            if (!m_direct && m_direct_eligible) {
+                const std::vector<int32_t> zeros(
+                    pc.state_shape[k_direct].ncoords, 0);
+                build_skewed_direct_from_windows(zeros, zeros);
+            }
+        };
         if (m_search_upper && sub_depth + 1 >= root) {
+            fallback_skewed_direct();
             return;
         }
         const SizeType target  = m_search_upper ? (root - sub_depth - 1) : root;
         const SizeType ntrials = detail::fdmt_regular_coords(pc, target);
         const SizeType target_subs =
             std::max<SizeType>(1, pc.state_shape[target].nchans);
-        SizeType level = m_direct->levels + 1;
+        SizeType level = k_direct + 1;
         while (level + 2 < target) {
             const SizeType leaves_saved =
                 (ntrials * (pc.state_shape[level].nchans -
@@ -2852,30 +3854,70 @@ private:
             ++level;
         }
         if (level + 1 >= target) {
+            fallback_skewed_direct();
             return;
         }
-        // Over the ring budget (more likely with the 16-bit packed search's
-        // uint64_t rings), sum from a higher level instead of dropping the
-        // top: its fewer, longer rows need less ring (meerkat_lband: 21.1M
-        // floats per beam from level 4, 13.1M from level 10), at the cost of
-        // more tree merges. Keep the ping-pong parity.
+        const SizeType orig_level        = level;
         constexpr SizeType kMaxRingBytes = SizeType{2} << 30;
         const SizeType step              = target < root ? 2 : 1;
-        auto plan = detail::build_fdmt_direct_top(m_plan, level, target);
-        while (m_nbeams * static_cast<SizeType>(plan.ring_size) *
-                   sizeof(float) * top_words() >
-               kMaxRingBytes) {
-            if (level + step + 1 >= target) {
-                logging::debug("FDMT (cuda): direct top rings over budget at "
-                               "every level; top disabled");
+        detail::FDMTDirectTopPlan plan;
+        bool use_skewed = !m_direct || m_force_skewed;
+        if (!use_skewed) {
+            plan = detail::build_fdmt_direct_top(m_plan, level, target, false);
+            while (m_nbeams * static_cast<SizeType>(plan.ring_size) *
+                       sizeof(float) * top_words() >
+                   kMaxRingBytes) {
+                if (level + step + 1 >= target) {
+                    use_skewed = true;
+                    break;
+                }
+                level += step;
+                plan =
+                    detail::build_fdmt_direct_top(m_plan, level, target, false);
+            }
+        }
+        if (use_skewed) {
+            level = std::max<SizeType>(
+                orig_level,
+                k_direct + (pc.state_shape[0].nchans > 4096 ? 3 : 2));
+            if (target < root && (target - level) % 2 == 0) {
+                ++level;
+            }
+            if (level + 1 >= target) {
+                level = orig_level;
+            }
+            plan = detail::build_fdmt_direct_top(m_plan, level, target, true,
+                                                 m_chunk, true);
+            if (m_nbeams * static_cast<SizeType>(plan.ring_size) *
+                    sizeof(float) * top_words() >
+                kMaxRingBytes) {
+                plan =
+                    detail::build_fdmt_direct_top(m_plan, level, target, true);
+                while (m_nbeams * static_cast<SizeType>(plan.ring_size) *
+                           sizeof(float) * top_words() >
+                       kMaxRingBytes) {
+                    if (level + step + 1 >= target) {
+                        logging::debug(
+                            "FDMT (cuda): skewed direct top rings over budget "
+                            "at every level; top disabled");
+                        fallback_skewed_direct();
+                        return;
+                    }
+                    level += step;
+                    plan = detail::build_fdmt_direct_top(m_plan, level, target,
+                                                         true);
+                }
+            }
+            configure_skewed_direct_and_mid(relaid, plan);
+            if (!m_direct || !m_direct->skewed) {
                 return;
             }
-            level += step;
-            plan = detail::build_fdmt_direct_top(m_plan, level, target);
         }
         auto t         = std::make_unique<DirectTopD>();
         t->level       = level;
         t->target      = target;
+        t->skewed      = plan.skewed;
+        t->target_ring = plan.target_ring;
         t->ntrials     = static_cast<int>(plan.out_row.size());
         t->nrows       = static_cast<int>(plan.ring_len.size());
         t->max_ring    = plan.max_ring;
@@ -2893,18 +3935,22 @@ private:
         t->hist_coords.resize(target + 1);
         t->hist_max_delay.assign(target + 1, 0);
         for (SizeType l = level + 1; l <= target; ++l) {
-            t->hist_coords[l] = plan.hist_coords[l];
-            for (const auto& hc : plan.hist_coords[l]) {
-                t->hist_max_delay[l] = std::max(t->hist_max_delay[l], hc.delay);
+            if (l < plan.hist_coords.size()) {
+                t->hist_coords[l] = plan.hist_coords[l];
+                for (const auto& hc : plan.hist_coords[l]) {
+                    t->hist_max_delay[l] =
+                        std::max(t->hist_max_delay[l], hc.delay);
+                }
             }
         }
         if (target == root) {
             t->trials.resize(m_nbeams * plan.out_row.size() * m_chunk *
                              top_words());
         }
-        logging::debug("FDMT (cuda): level {} summed from level {} ({} leaves, "
-                       "rings {} floats per beam)",
-                       target, level, plan.leaves.size(), plan.ring_size);
+        logging::debug("FDMT (cuda): level {} summed from level {} (skewed={}, "
+                       "target_ring={}, {} leaves, rings {} floats per beam)",
+                       target, level, t->skewed, t->target_ring,
+                       plan.leaves.size(), plan.ring_size);
         m_top_filled = static_cast<SizeType>(t->max_ring);
         m_top        = std::move(t);
     }
@@ -2914,7 +3960,8 @@ private:
     [[nodiscard]] bool use_top(const std::vector<Elem>& types) const {
         return m_top && m_mode == FDMTMode::kValid &&
                types[m_top->level] == Elem::kF32 &&
-               m_top_filled >= static_cast<SizeType>(m_top->max_ring);
+               (m_top->skewed ||
+                m_top_filled >= static_cast<SizeType>(m_top->max_ring));
     }
 
     /// The chunk's trials into `out` (rows `out_row_stride` apart, beams
@@ -2927,6 +3974,27 @@ private:
         constexpr int kWarps = 8;
         constexpr int kSamps = 32 * detail::kTopSampsPerLane;
         const int active     = static_cast<int>(m_active);
+        if (t.target_ring) {
+            const dim3 grid(t.ntrials, 1, m_nbeams);
+            gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
+            detail::kernel_direct_top_target<>
+                <<<grid, kWarps * 32, 0, stream>>>(
+                    reinterpret_cast<const float*>(m_levels_d[t.level].base),
+                    level_beam_stride(t.level), static_cast<int>(m_chunk),
+                    thrust::raw_pointer_cast(t.ring.data()), t.ring_size,
+                    thrust::raw_pointer_cast(t.ring_off.data()),
+                    thrust::raw_pointer_cast(t.ring_len.data()),
+                    thrust::raw_pointer_cast(t.leaf_off.data()),
+                    thrust::raw_pointer_cast(t.leaves.data()),
+                    thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
+                    out_beam_stride, out_row_stride, m_chunk_pos, active, 0,
+                    m_skew_nbatches > 1 ? 0 : -1, true);
+            gpu_utils::check_last_gpu_error(
+                "FDMT (cuda): direct top target failed");
+            m_top_stale     = false;
+            m_current_level = t.target;
+            return;
+        }
         const dim3 grid((t.ntrials + kWarps - 1) / kWarps,
                         (active + kSamps - 1) / kSamps, m_nbeams);
         gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
@@ -2942,12 +4010,15 @@ private:
             out_beam_stride, out_row_stride, m_chunk_pos, active);
         gpu_utils::check_last_gpu_error("FDMT (cuda): direct top failed");
         update_top_rings(stream);
-        m_top_stale     = true;
+        m_top_stale     = !t.skewed;
         m_current_level = t.target;
     }
 
     /// Level k's newest samples of this chunk into its rings.
     void update_top_rings(cudaStream_t stream) {
+        if (m_top->target_ring) {
+            return;
+        }
         auto& t                = *m_top;
         constexpr int kWarps   = 8;
         constexpr int kSegment = 256;
@@ -2972,7 +4043,7 @@ private:
     /// Rewrites the tree histories of levels k+1..root from the rings at the
     /// current stream position, after top chunks left them behind.
     void rebuild_top_history(cudaStream_t stream) const {
-        if (!m_top || !m_top_stale) {
+        if (!m_top || !m_top_stale || m_top->skewed) {
             return;
         }
         const auto& t = *m_top;
@@ -3017,8 +4088,15 @@ private:
                hist;
     }
 
-    [[nodiscard]] SizeType direct_window_elems() const noexcept {
-        return m_direct ? m_direct->win[0].size() + m_direct->win[1].size() : 0;
+    [[nodiscard]] SizeType direct_window_bytes() const noexcept {
+        if (!m_direct) {
+            return 0;
+        }
+        return ((m_direct->win[0].size() + m_direct->win[1].size() +
+                 m_direct->win_ring.size()) *
+                sizeof(float)) +
+               (m_direct->win_ring_u8.size() * sizeof(uint8_t)) +
+               (m_direct->win_ring_u16.size() * sizeof(uint16_t));
     }
 
     [[nodiscard]] SizeType direct_workspace_bytes() const noexcept {
@@ -3032,7 +4110,9 @@ private:
         }
         return (d.prefix.size() * sizeof(float)) +
                (d.subs.size() * sizeof(detail::FDMTDirectSub)) +
-               (d.leaf_off.size() * sizeof(int32_t)) +
+               ((d.leaf_off.size() + d.chan_ring_len.size()) *
+                sizeof(int32_t)) +
+               (d.chan_ring_off.size() * sizeof(int64_t)) +
                ((d.leaves.size() + d.hist_leaves.size()) *
                 sizeof(detail::FDMTDirectLeaf)) +
                hist;
@@ -3099,7 +4179,12 @@ private:
         // Valid mode: this chunk's samples (rows keep their table strides).
         const bool valid = m_mode == FDMTMode::kValid;
         const int active = valid ? static_cast<int>(m_active) : 0;
-        const int nsamps = valid ? active : static_cast<int>(shape.nsamps);
+        const int extra_l =
+            (valid && next_level < m_level_max_extra.size())
+                ? static_cast<int>(m_level_max_extra[next_level])
+                : 0;
+        const int nsamps =
+            valid ? (active + extra_l) : static_cast<int>(shape.nsamps);
         const int ncoords_sum_cur = static_cast<int>(
             regular_only ? detail::fdmt_regular_sum_coords(pc, next_level)
                          : shape.ncoords_sum);
@@ -3138,17 +4223,21 @@ private:
                     in_state_nelements, out_state_nelements, hist.stride,
                     hist.base, hist.ring, m_int_unit, active);
         } else {
-            const bool fuse_ring = valid && hist.ring != kFifoHistory &&
-                                   hist.out != nullptr && grid_size.x == 1;
+            const bool skewed_mid = m_direct && m_direct->skewed && m_top &&
+                                    next_level <= m_top->level;
+            const bool fuse_ring  = valid && !skewed_mid &&
+                                    hist.ring != kFifoHistory &&
+                                    hist.out != nullptr && grid_size.x == 1;
             kernel_execute_iter<FDMTMode::kValid, TIn, TOut>
                 <<<grid_size, block_size, 0, stream>>>(
-                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, hist.in,
-                    nsamps, ncoords_sum_cur, ncoords_copy_cur,
-                    in_state_nelements, out_state_nelements, hist.stride,
-                    hist.base, hist.ring, m_int_unit, active, fuse_ring);
+                    in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
+                    skewed_mid ? nullptr : hist.in, nsamps, ncoords_sum_cur,
+                    ncoords_copy_cur, in_state_nelements, out_state_nelements,
+                    hist.stride, hist.base, hist.ring, m_int_unit, active,
+                    fuse_ring, skewed_mid ? static_cast<int>(m_chunk) : 0);
 
-            fused_coords = fuse_ring ? ncoords_sum_cur : 0;
-            if (advance_hist) {
+            fused_coords = (skewed_mid || fuse_ring) ? ncoords_sum_cur : 0;
+            if (advance_hist && !skewed_mid) {
                 advance_tree_history<TIn>(in_ptr, next_level, stream,
                                           fused_coords);
             }

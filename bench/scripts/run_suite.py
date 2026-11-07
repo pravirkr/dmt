@@ -3,11 +3,12 @@
 One command per machine and preset; the JSON it writes is what plot_suite.py
 reads:
 
-    python bench/scripts/run_suite.py --machine l40-epyc9334 --placement none
-    python bench/scripts/run_suite.py --machine l40-epyc9334 --placement none \
+    OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --machine l40s-epyc9654
+    OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --machine l40s-epyc9654 \
         --config cryopaf_lband
-    python bench/scripts/run_suite.py --machine xeon-6348h --no-gpu  # CPU only
-    python bench/scripts/run_suite.py --machine l40-epyc9334 --suite cfdmt
+    OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --machine l40s-epyc9654 \
+        --config meerkat_lband
+    OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --machine l40s-epyc9654 --suite cfdmt
 
 Writes ``bench/results/<machine>/suite_cpu.json`` and/or ``suite_<gpu>.json``
 for the default ``cryopaf`` preset, and ``bench/results/<config>/<machine>/``
@@ -153,7 +154,7 @@ def results_root(suite: str, config: str) -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument(
-        "--machine", required=True, help="results folder name, e.g. l40-epyc9334"
+        "--machine", required=True, help="results folder name, e.g. l40s-epyc9654"
     )
     ap.add_argument("--label", help="display name in plots (default: CPU/GPU model)")
     ap.add_argument("--build-dir", help="CMake build directory (default: auto)")

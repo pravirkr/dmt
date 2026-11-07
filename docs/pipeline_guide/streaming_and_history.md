@@ -139,8 +139,12 @@ the same plan. On the CPU it holds the level-0 input history, then the tree
 history, each node's slot oldest sample first. On a GPU it lives in device
 memory. The C++ `DeviceSpan` overloads are asynchronous on the given stream,
 and the host overloads copy synchronously. A saved history belongs to the
-backend that wrote it, because the layouts differ. `CohFDMT` needs none of
-this: it is stateless across blocks.
+backend that wrote it, because the layouts differ. Plans large enough to
+run on the [skewed-window path](skewed_window_fdmt.md) save that engine's
+own, much smaller state, which only an engine with the same skewed layout
+accepts (same plan and `chunk_nsamps`, on the CPU also the same thread
+count); a mismatched buffer raises. `CohFDMT` needs none of this: it is
+stateless across blocks.
 
 :::{dropdown} GPU caveat: direct levels after `load_history()`
 :icon: info

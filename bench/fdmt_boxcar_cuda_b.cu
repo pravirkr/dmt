@@ -16,6 +16,7 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/algorithms/fdmt_fft_boxcar.hpp"
+#include "dmt/common/logging.hpp"
 
 #include "dmt/boxcar.hpp"
 #include "dmt/gpu_compat.cuh"
@@ -150,10 +151,9 @@ void bench_transform(benchmark::State& state) {
         const GPUEventTimer timer{state};
         fdmt.execute(dspan_c(wf), dspan(dmt));
     }
-    const auto mem = fdmt.get_memory_usage();
     common_counters(state, plan,
-                    mem.total() + dmt.size() * sizeof(float) +
-                        wf.size() * sizeof(float),
+                    fdmt.get_memory_usage().total() +
+                        dmt.size() * sizeof(float) + wf.size() * sizeof(float),
                     0);
     state.counters["chunk_nsamps"] =
         static_cast<double>(fdmt.get_chunk_nsamps());

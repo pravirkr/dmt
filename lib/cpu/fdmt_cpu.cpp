@@ -31,6 +31,7 @@
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_chunk.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/fdmt_skew.hpp"
 #include "dmt/fdmt_tree.hpp"
 #include "dmt/modes.hpp"
 
@@ -1306,12 +1307,18 @@ public:
                                                    m_search_nbits);
         m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
                                             cfg.chunk_nsamps, m_search_upper);
-        if (m_search_nbits != 32 && !m_search_u32 && cfg.chunk_nsamps == 0) {
+        if (m_mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
+            (m_plan.get_history_size() + m_plan.get_tree_history_size()) *
+                    sizeof(float) >
+                detail::kFDMTChunkStateBudget) {
+            m_chunk = std::min<SizeType>(1024, m_plan.get_nsamps());
+        } else if (m_search_nbits != 32 && !m_search_u32 &&
+                   cfg.chunk_nsamps == 0) {
             m_chunk = std::min(m_plan.get_nsamps(),
                                std::max<SizeType>(64, m_chunk / 2));
         }
-        allocate_working_memory(cfg.fuse_levels,
-                                m_search_nbits == 32 ? cfg.max_fuse_levels : 0);
+        allocate_working_memory(cfg.fuse_levels, cfg.max_fuse_levels,
+                                cfg.skew_history_bytes);
     }
 
     ~FDMTCpuEngine() override                      = default;
@@ -1322,18 +1329,30 @@ public:
 
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
+        if (m_skew) {
+            m_skew->execute(waterfall, dmt);
+            return;
+        }
         run_block(float_input(waterfall), m_float_levels, dmt);
     }
 
     void execute(std::span<const uint8_t> waterfall_packed,
                  SizeType nbits,
                  std::span<float> dmt) override {
+        if (m_skew) {
+            m_skew->execute(waterfall_packed, nbits, dmt);
+            return;
+        }
         const auto input = packed_input(waterfall_packed, nbits);
         run_block(input, packed_levels(nbits), dmt);
     }
 
     void execute_search(std::span<const float> waterfall,
                         detail::FDMTSearchSink& sink) override {
+        if (m_skew) {
+            m_skew->execute_search(waterfall, sink);
+            return;
+        }
         const auto input = float_input(waterfall);
         check_previous_block_finished();
         m_is_initialized    = false;
@@ -1410,6 +1429,10 @@ public:
         if (nbits != m_search_nbits || nbits == 32) {
             throw std::invalid_argument(
                 "FDMT integer search: input bit depth mismatch");
+        }
+        if (m_skew) {
+            m_skew->execute_search(waterfall, nbits, sink);
+            return;
         }
         if (m_search_u32) {
             execute_search_typed<uint32_t>(waterfall, nbits, sink,
@@ -1569,6 +1592,15 @@ public:
         return m_chunk;
     }
 
+    [[nodiscard]] std::string search_path() const override {
+        if (m_skew) {
+            return fmt::format(
+                "skewed direct 0-{}, fused {}-{}", m_skew->get_leaf_level(),
+                m_skew->get_leaf_level(), m_skew->get_fuse_level());
+        }
+        return {};
+    }
+
     [[nodiscard]] std::string summary() const override {
         const auto mem = get_memory_usage();
         const auto mib = [](SizeType b) {
@@ -1592,6 +1624,17 @@ public:
     }
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override {
+        if (m_skew) {
+            const auto sm = m_skew->memory_usage();
+            return {
+                .plan      = m_plan.get_container().get_memory_usage() +
+                             m_skew->plan_bytes(),
+                .state     = sm.state,
+                .history   = sm.ring + sm.rings,
+                .workspace = sm.stripes,
+                .output    = m_nbeams * m_plan.get_dmt_size() * sizeof(float),
+            };
+        }
         return {
             .plan      = m_plan.get_container().get_memory_usage() +
                          (m_ops_elems * sizeof(FDMTMergeOp)),
@@ -1708,6 +1751,10 @@ public:
     }
 
     void reset_history() noexcept override {
+        if (m_skew) {
+            m_skew->reset_history();
+            return;
+        }
         std::ranges::fill(m_history, 0.0F);
         std::ranges::fill(m_tree_history, 0.0F);
         std::ranges::fill(m_integer_history, uint64_t{0});
@@ -1718,6 +1765,9 @@ public:
     }
 
     [[nodiscard]] SizeType history_state_size() const noexcept override {
+        if (m_skew) {
+            return m_skew->history_state_size();
+        }
         return m_history.size() + m_tree_history.size();
     }
 
@@ -1730,6 +1780,10 @@ public:
                 fmt::format("FDMT::save_history: Invalid output size. "
                             "Expected {}, got {}",
                             history_state_size(), out.size()));
+        }
+        if (m_skew) { // the skewed-window engine's own layout
+            m_skew->save_history(out);
+            return;
         }
         std::ranges::copy(m_history, out.begin());
         const auto tree = out.subspan(m_history.size());
@@ -1748,6 +1802,11 @@ public:
                 fmt::format("FDMT::load_history: Invalid input size. "
                             "Expected {}, got {}",
                             history_state_size(), in.size()));
+        }
+        if (m_skew) {
+            m_skew->load_history(in);
+            m_is_initialized = false;
+            return;
         }
         std::copy_n(in.begin(), m_history.size(), m_history.begin());
         // FIFO order is the ring at stream position 0.
@@ -1804,6 +1863,7 @@ private:
     SizeType m_search_nbits{32};
     bool m_search_upper{false};
     bool m_search_u32{false};
+    std::unique_ptr<detail::FDMTSkewCpu> m_skew;
     FDMTLargeArray<uint64_t> m_integer_history;
     FDMTLargeArray<uint32_t> m_integer32_history;
 
@@ -2077,13 +2137,33 @@ private:
      * FDMTWorkspace). Nothing is allocated after this.
      */
     void allocate_working_memory(SizeType fuse_levels,
-                                 SizeType max_fuse_levels) {
+                                 SizeType max_fuse_levels,
+                                 SizeType skew_history_bytes) {
         const SizeType niters = m_plan.get_niters();
+        if (m_mode == FDMTMode::kValid && m_nbeams == 1 && !m_search_upper &&
+            m_chunk < m_plan.get_nsamps() && niters >= 5 && fuse_levels != 0 &&
+            max_fuse_levels >= 4 &&
+            (m_plan.get_history_size() + m_plan.get_tree_history_size()) *
+                    sizeof(float) >
+                skew_history_bytes) {
+            const SizeType req_fuse =
+                (fuse_levels == kFDMTAutoFuse)
+                    ? SizeType{0}
+                    : std::min({fuse_levels, max_fuse_levels,
+                                m_plan.get_max_fuse_levels()});
+            m_skew = std::make_unique<detail::FDMTSkewCpu>(
+                m_plan, m_use_box_smearing, m_nthreads, m_chunk, SizeType{4},
+                m_search_nbits, req_fuse, m_search_nbits != 32, m_search_u32);
+            m_fuse_levels = m_skew->get_fuse_level();
+            return;
+        }
+        max_fuse_levels = (m_search_nbits == 32) ? max_fuse_levels : 0;
         build_merge_ops();
-        m_state_internal.assign(
-            2 * m_nbeams * m_half_elems *
-                (m_search_nbits == 32 ? sizeof(float) : sizeof(uint64_t)),
-            m_nthreads);
+        const SizeType state_elem = (m_search_nbits == 32 || m_search_u32)
+                                        ? sizeof(uint32_t)
+                                        : sizeof(uint64_t);
+        m_state_internal.assign(2 * m_nbeams * m_half_elems * state_elem,
+                                m_nthreads);
         if (m_mode == FDMTMode::kValid) {
             m_history.assign(m_nbeams * m_plan.get_history_size(), 0.0F);
             if (m_search_nbits == 32) {

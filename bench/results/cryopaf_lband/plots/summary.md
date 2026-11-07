@@ -4,27 +4,27 @@
 
 | results | CPU | GPU | RAM | CPU threads | placement | load (1/5/15 min) | dmt |
 | :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- |
-| `l40-epyc9334` | AMD EPYC 9334 32-Core Processor | NVIDIA L40 | 629 GB | 1 8 | none, KVM VM | 8.2 10.9 14.3 of 60 CPUs → 9.3 9.8 13.1 of 60 CPUs | 0.7.0 |
+| `l40s-epyc9654` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | 1 8 | close | 1.7 13.3 57.3 of 384 CPUs → 7.7 9.3 43.9 of 384 CPUs | 0.7.0 |
 
 **Reference point**: 32768 samples × 1941 DM trials (DM 0-2000, 14.9 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| EPYC 9334 VM (8-CPU slot) · 1 thr | 538 ms | — | — | — | — | — | — | — | 28× |
-| EPYC 9334 VM (8-CPU slot) · 8 thr | 110 ms | 109 ms | 413 ms | 277 ms | 112 ms | 3.7× | 2.5× | 1.0× | 135× |
-| NVIDIA L40 | 12.4 ms | 19.7 ms | 37.2 ms | 12.7 ms | 17.3 ms | 3.0× | 1.0× | 1.6× | 1209× |
+| AMD EPYC 9654 · 1 thr | 890 ms | — | — | — | — | — | — | — | 17× |
+| AMD EPYC 9654 · 8 thr | 141 ms | 183 ms | 719 ms | 475 ms | 204 ms | 5.1× | 3.4× | 1.3× | 106× |
+| NVIDIA L40S | 11.6 ms | 17.5 ms | 33.8 ms | 12 ms | 17.3 ms | 2.9× | 1.0× | 1.5× | 1290× |
 
 **Real-time factor by input width** (data seconds per compute second, 32768 samples × 1941 DM trials):
 
 | platform | engine | 1-bit | 2-bit | 4-bit | 8-bit | 16-bit | float32 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| EPYC 9334 VM (8-CPU slot) | FDMT, 1 thread | 42.2× | 41.5× | 37.6× | 29.9× | 27.1× | 27.9× |
-| EPYC 9334 VM (8-CPU slot) | FDMT, 8 threads | 193.1× | 190.0× | 159.3× | 142.6× | 142.3× | 143.2× |
-| EPYC 9334 VM (8-CPU slot) | DDMT, 8 threads | 74.7× | 71.7× | 71.7× | 71.3× | 39.6× | 36.9× |
-| EPYC 9334 VM (8-CPU slot) | SDMT, 8 threads | 114.3× | 105.1× | 106.8× | 107.5× | 59.5× | 52.4× |
-| EPYC 9334 VM (8-CPU slot) | DDMT-FFT, 8 threads | 136.1× | 136.0× | 133.8× | 134.9× | 135.9× | 134.4× |
-| NVIDIA L40 | FDMT, device-resident | 1472.9× | 1428.9× | 1190.0× | 1114.7× | 904.9× | 1215.3× |
-| NVIDIA L40 | DDMT, device-resident | 723.6× | 708.5× | 693.7× | 715.9× | 599.0× | 403.4× |
-| NVIDIA L40 | SDMT, device-resident | 728.1× | 708.0× | 693.3× | 718.6× | 1322.7× | 1178.6× |
-| NVIDIA L40 | FDMT-FFT, device-resident | 782.6× | 774.0× | 756.1× | 756.1× | 768.8× | 753.7× |
-| NVIDIA L40 | DDMT-FFT, device-resident | 848.6× | 848.3× | 848.2× | 846.5× | 842.4× | 861.5× |
+| AMD EPYC 9654 | FDMT, 1 thread | 24.6× | 23.6× | 21.1× | 17.6× | 16.2× | 16.2× |
+| AMD EPYC 9654 | FDMT, 8 threads | 148.3× | 148.1× | 129.8× | 110.3× | 101.8× | 105.2× |
+| AMD EPYC 9654 | DDMT, 8 threads | 37.2× | 35.7× | 37.3× | 36.6× | 21.7× | 20.7× |
+| AMD EPYC 9654 | SDMT, 8 threads | 60.6× | 56.6× | 60.7× | 59.8× | 33.8× | 31.3× |
+| AMD EPYC 9654 | DDMT-FFT, 8 threads | 73.4× | 73.2× | 72.2× | 73.2× | 73.5× | 73.3× |
+| NVIDIA L40S | FDMT, device-resident | 1586.9× | 1550.6× | 1225.4× | 1206.5× | 983.4× | 1290.3× |
+| NVIDIA L40S | DDMT, device-resident | 750.2× | 738.1× | 731.4× | 755.9× | 638.7× | 441.4× |
+| NVIDIA L40S | SDMT, device-resident | 750.1× | 738.1× | 733.3× | 756.0× | 1339.5× | 1242.0× |
+| NVIDIA L40S | FDMT-FFT, device-resident | 865.9× | 865.2× | 864.5× | 862.0× | 859.5× | 851.6× |
+| NVIDIA L40S | DDMT-FFT, device-resident | 850.2× | 849.6× | 849.5× | 847.8× | 844.7× | 862.5× |

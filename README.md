@@ -143,9 +143,8 @@ Requirements, CMake options and development installs are in the
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.7.0 on one node of a shared HTCondor cluster: an AMD EPYC
-9334 virtual machine in an 8-CPU batch slot (threads unpinned, other jobs
-running) and an NVIDIA L40 (device-resident data). The `meerkat_lband`
+Measured with dmt 0.7.0 on one node: an AMD EPYC 9654 (up to 8 threads, one per
+CCD) and an NVIDIA L40S (device-resident data). The `meerkat_lband`
 preset is a typical L-band survey setup: 4096 channels at 856–1712 MHz and
 612.48 µs, processed as a stream of 20.1 s blocks, with up to 4057 DM trials
 from 0 to 2000 pc cm⁻³.
@@ -156,7 +155,7 @@ from 0 to 2000 pc cm⁻³.
 </picture>
 
 Every engine runs faster than real time on both backends. FDMT is the
-fastest, at 80× real time on 8 CPU threads and 722× on the L40: 15× faster
+fastest, at 54× real time on 8 CPU threads and 774× on the L40S: 18× faster
 than brute-force DDMT on the CPU and 6× on the GPU. With fewer channels the
 margin shrinks: on the 512-channel `cryopaf` preset FDMT, DDMT and SDMT take
 about the same time on the CPU, and DDMT-FFT is the fastest engine. Sweeps
