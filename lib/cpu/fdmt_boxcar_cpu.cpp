@@ -175,7 +175,17 @@ public:
         }
         return view();
     }
+    void set_search_stop(uint64_t stop) noexcept override {
+        m_search_stop = stop;
+    }
+    [[nodiscard]] uint64_t stream_position() const noexcept override {
+        return m_position;
+    }
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_driver->search_latency();
+    }
     void reset_history(Stream) override {
+        m_search_stop = UINT64_MAX;
         m_driver->reset({});
         std::ranges::fill(m_carry, 0.0F);
         std::ranges::fill(m_integer_carry, uint64_t{0});
@@ -202,18 +212,20 @@ public:
         const SizeType beams =
             std::min(input.beam_count, m_beams - input.beam_begin);
         const auto task = [&](SizeType t) {
-            const SizeType beam       = first + t / nrows;
-            const SizeType row_idx    = row_lo + t % nrows;
-            const SizeType p          = m_row_plane[row_idx];
-            const SizeType d          = row_idx - m_offsets[p];
-            const FDMTSearchInput* in = &input;
-            FDMTSearchInput lagged;
-            if (input.row_lag != nullptr) {
-                if (!lagged_row_input(input, m_rows[row_idx].row, lagged)) {
-                    return;
-                }
-                in = &lagged;
+            const SizeType beam    = first + t / nrows;
+            const SizeType row_idx = row_lo + t % nrows;
+            const SizeType p       = m_row_plane[row_idx];
+            const SizeType d       = row_idx - m_offsets[p];
+            FDMTSearchInput row_in = input;
+            if (input.row_lag != nullptr &&
+                !lagged_row_input(input, m_rows[row_idx].row, row_in)) {
+                return;
             }
+            row_in.search_stop = m_search_stop;
+            if (!stop_row_input(row_in)) {
+                return; // drain(): past the end of the stream
+            }
+            const FDMTSearchInput* in = &row_in;
             if (m_config.input_nbits == 32) {
                 score<float, float>(m_planes[p], row_idx, d, beam, *in);
             } else if (m_carry32) {
@@ -926,6 +938,7 @@ private:
     CandidateCounts m_counts{};
     std::atomic<uint64_t> m_next_slot{0};
     uint64_t m_position       = 0;
+    uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
 };

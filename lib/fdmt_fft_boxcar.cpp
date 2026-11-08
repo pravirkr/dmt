@@ -9,6 +9,7 @@
 #include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
+#include "dmt/boxcar_drain.hpp"
 #include "dmt/fdmt_fft_common.hpp"
 
 namespace dmt::algorithms {
@@ -91,6 +92,7 @@ public:
     SizeType latency = 0;
     std::vector<plans::BoxcarPlanePlan> planes;
     std::unique_ptr<detail::FDMTBoxcarEngine> engine;
+    detail::DrainState drain_state;
 };
 
 FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
@@ -106,10 +108,12 @@ FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;
 FDMTFFTBoxcar::FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept            = default;
 FDMTFFTBoxcar& FDMTFFTBoxcar::operator=(FDMTFFTBoxcar&&) noexcept = default;
 CandidateResultView FDMTFFTBoxcar::execute(std::span<const float> waterfall) {
+    m_impl->drain_state.check_open("FDMTFFTBoxcar::execute");
     return m_impl->engine->execute(waterfall);
 }
 CandidateDeviceResultView
 FDMTFFTBoxcar::execute(DeviceSpan<const float> waterfall, Stream stream) {
+    m_impl->drain_state.check_open("FDMTFFTBoxcar::execute");
     detail::check_device(waterfall.device, backend(), device(),
                          "FDMTFFTBoxcar::execute");
     return m_impl->engine->execute(waterfall, stream);
@@ -126,6 +130,16 @@ CandidateResultView FDMTFFTBoxcar::copy_result(Stream stream) {
 void FDMTFFTBoxcar::reset_history(Stream stream) {
     m_impl->check_stream(stream);
     m_impl->engine->reset_history(stream);
+    m_impl->drain_state.reset();
+}
+CandidateResultView FDMTFFTBoxcar::drain() {
+    return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
+                                m_impl->config.input_nbits, m_impl->latency,
+                                m_impl->drain_state);
+}
+uint64_t FDMTFFTBoxcar::get_searched_nsamps() const noexcept {
+    return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
+                                   m_impl->latency);
 }
 const plans::FDMTPlan& FDMTFFTBoxcar::get_plan() const noexcept {
     return m_impl->plan;

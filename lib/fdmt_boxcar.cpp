@@ -8,6 +8,7 @@
 #include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
+#include "dmt/boxcar_drain.hpp"
 #include "dmt/fdmt_int_tree.hpp"
 
 namespace dmt::algorithms {
@@ -145,6 +146,7 @@ public:
     SizeType beams;
     std::vector<plans::BoxcarPlanePlan> planes;
     std::unique_ptr<detail::FDMTBoxcarEngine> engine;
+    detail::DrainState drain_state;
 };
 
 FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
@@ -167,19 +169,23 @@ FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;
 FDMTBoxcar& FDMTBoxcar::operator=(FDMTBoxcar&&) noexcept = default;
 CandidateResultView FDMTBoxcar::execute(std::span<const float> waterfall) {
+    m_impl->drain_state.check_open("FDMTBoxcar::execute");
     return m_impl->engine->execute(waterfall);
 }
 CandidateDeviceResultView FDMTBoxcar::execute(DeviceSpan<const float> waterfall,
                                               Stream stream) {
+    m_impl->drain_state.check_open("FDMTBoxcar::execute");
     detail::check_device(waterfall.device, backend(), device(),
                          "FDMTBoxcar::execute");
     return m_impl->engine->execute(waterfall, stream);
 }
 CandidateResultView FDMTBoxcar::execute(std::span<const uint8_t> waterfall) {
+    m_impl->drain_state.check_open("FDMTBoxcar::execute");
     return m_impl->engine->execute(waterfall);
 }
 CandidateDeviceResultView
 FDMTBoxcar::execute(DeviceSpan<const uint8_t> waterfall, Stream stream) {
+    m_impl->drain_state.check_open("FDMTBoxcar::execute");
     detail::check_device(waterfall.device, backend(), device(),
                          "FDMTBoxcar::execute");
     return m_impl->engine->execute(waterfall, stream);
@@ -196,6 +202,20 @@ CandidateResultView FDMTBoxcar::copy_result(Stream stream) {
 void FDMTBoxcar::reset_history(Stream stream) {
     m_impl->check_stream(stream);
     m_impl->engine->reset_history(stream);
+    m_impl->drain_state.reset();
+}
+CandidateResultView FDMTBoxcar::drain() {
+    return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
+                                m_impl->config.input_nbits,
+                                m_impl->engine->search_latency(),
+                                m_impl->drain_state);
+}
+uint64_t FDMTBoxcar::get_searched_nsamps() const noexcept {
+    return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
+                                   m_impl->engine->search_latency());
+}
+uint64_t FDMTBoxcar::get_search_latency() const noexcept {
+    return m_impl->engine->search_latency();
 }
 const plans::FDMTPlan& FDMTBoxcar::get_plan() const noexcept {
     return m_impl->plan;

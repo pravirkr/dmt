@@ -365,6 +365,10 @@ struct StagesD {
     DevBuf<uint32_t> lvl_off;
     DevBuf<uint4> ops;
 
+    [[nodiscard]] SizeType bytes() const noexcept {
+        return out_begin.bytes() + lvl_off.bytes() + ops.bytes();
+    }
+
     void build(const std::vector<fdmt_fft::TreeStage>& ts) {
         std::vector<uint32_t> ob;
         std::vector<uint32_t> lo;
@@ -408,6 +412,18 @@ struct Geo {
     unsigned long long s1{};        // phase_fixed(1, N)
     DevBuf<unsigned long long> sfx; // per merge sid
     DevBuf<float2> w0;              // [dt0_max + 1][nb]
+
+    [[nodiscard]] SizeType table_bytes() const noexcept {
+        return sfx.bytes() + w0.bytes();
+    }
+    // The cuFFT work areas (allocated by CUFFTManager, not by cuFFT).
+    [[nodiscard]] SizeType fft_bytes() const noexcept {
+        SizeType b = 0;
+        for (const auto* m : {r2c.get(), c2r.get(), half.get()}) {
+            b += m != nullptr ? m->workspace_bytes() : 0;
+        }
+        return b;
+    }
 };
 
 class FDMTFFTCudaEngine final : public detail::FDMTFFTEngine {
@@ -535,19 +551,27 @@ public:
     }
 
     [[nodiscard]] FDMTMemoryUsage memory_usage() const noexcept override {
+        // The stepper's own geometry, when it is not the execute() one.
+        const Geo* step           = m_step_geo_own.get();
+        const SizeType geo_tables = (m_geo ? m_geo->table_bytes() : 0) +
+                                    (step != nullptr ? step->table_bytes() : 0);
+        const SizeType fft_work =
+            (m_geo ? m_geo->fft_bytes() : 0) +
+            (step != nullptr ? step->fft_bytes() : 0) +
+            (m_view_c2r ? m_view_c2r->workspace_bytes() : 0);
         return {
-            .plan  = (m_l0_chan.capacity() + m_l0_shift.capacity()) *
-                     sizeof(uint32_t),
-            .state = (m_spec.capacity() + m_mid[0].capacity() +
-                      m_mid[1].capacity() + m_out_spec.capacity()) *
-                     sizeof(float2),
-            .history =
-                (m_hist[0].capacity() + m_hist[1].capacity()) * sizeof(float),
-            .workspace =
-                (m_win.capacity() + m_in_d.capacity() + m_out_d.capacity()) *
-                    sizeof(float) +
-                m_packed_d.capacity(),
-            .output = 0,
+            .plan    = m_l0_chan.bytes() + m_l0_shift.bytes() + m_keep.bytes() +
+                       m_stages.bytes() + m_step_stages.bytes() + geo_tables,
+            .state   = m_spec.bytes() + m_mid[0].bytes() + m_mid[1].bytes() +
+                       m_out_spec.bytes() + m_step_spec.bytes() +
+                       m_state[0].bytes() + m_state[1].bytes(),
+            .history = m_hist[0].bytes() + m_hist[1].bytes(),
+            .workspace = m_win.bytes() + m_in_d.bytes() + m_out_d.bytes() +
+                         m_packed_d.bytes() + m_unpacked_d.bytes() +
+                         m_step_win.bytes() + m_step_time_d.bytes() +
+                         m_step_in_d.bytes() + m_view_spec.bytes() +
+                         m_view_time.bytes() + m_view_d.bytes() + fft_work,
+            .output    = 0,
         };
     }
 

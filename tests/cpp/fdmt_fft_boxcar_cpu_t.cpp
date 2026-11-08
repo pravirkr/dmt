@@ -297,3 +297,74 @@ TEST_CASE("FDMTFFTBoxcar warmup is each masked row's exact cold support",
         }
     }
 }
+
+TEST_CASE("FDMTFFTBoxcar drain() searches the last latency samples",
+          "[boxcar][cpu]") {
+    // With fractional delays the search lags the input by the latency, and
+    // flush() never searches the last `latency` samples. drain() does, with
+    // zero signal after the end: it matches the same stream continued by
+    // zero blocks, on every endpoint before the end.
+    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+                               std::vector<IndexType>{0, 4, 17, 40, 97});
+    const auto input = waterfalls(plan, 1, 3);
+    const uint64_t n = input.size() * plan.get_nsamps();
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 37;
+    cfg.wtsp             = 1;
+    cfg.detect_thresh    = 2.0F;
+    cfg.peak_mode        = PeakFindingMode::kAllAboveThreshold;
+    cfg.max_candidates   = 500000;
+    cfg.max_cands_per_dm = 0;
+    for (const bool frac : {true, false}) {
+        CAPTURE(frac);
+        FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(2), 1, frac);
+        const uint64_t latency = search.get_output_latency();
+        CHECK(latency == (frac ? 64U : 0U));
+        std::vector<RawCandidate> drained;
+        for (const auto& block : input) {
+            append(drained, search.execute(block));
+        }
+        CHECK(search.get_searched_nsamps() == n - latency);
+        const auto tail = search.drain();
+        append(drained, tail);
+        CHECK(tail.input_sample_begin == n);
+        CHECK(search.get_searched_nsamps() == n);
+        for (const auto& c : drained) {
+            REQUIRE(c.end_sample < n);
+        }
+        // The stream has ended.
+        CHECK_THROWS_AS(search.execute(input.front()), std::logic_error);
+        CHECK_THROWS_AS(search.drain(), std::logic_error);
+
+        // Reference: the stream continued with zero blocks, cut at the end.
+        FDMTFFTBoxcar longer(plan, cfg, true, Exec::cpu(2), 1, frac);
+        std::vector<RawCandidate> expected;
+        for (const auto& block : input) {
+            append(expected, longer.execute(block));
+        }
+        const std::vector<float> zeros(input.front().size(), 0.0F);
+        append(expected, longer.execute(zeros));
+        append(expected, longer.flush());
+        std::erase_if(expected,
+                      [&](const RawCandidate& c) { return c.end_sample >= n; });
+        compare(drained, expected);
+        if (frac) {
+            // The tail was searched: candidates flush() alone never gives.
+            const auto in_tail =
+                std::ranges::count_if(drained, [&](const RawCandidate& c) {
+                    return c.end_sample >= n - latency;
+                });
+            CHECK(in_tail > 0);
+        }
+
+        // reset_history() starts a new stream that reproduces the first.
+        search.reset_history();
+        CHECK(search.get_searched_nsamps() == 0);
+        std::vector<RawCandidate> again;
+        for (const auto& block : input) {
+            append(again, search.execute(block));
+        }
+        append(again, search.drain());
+        compare(again, drained);
+    }
+}

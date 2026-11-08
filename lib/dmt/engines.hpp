@@ -178,6 +178,10 @@ public:
     /// (GPU direct levels and direct top), e.g. "direct levels 0-3, direct
     /// top 5 -> 9"; empty otherwise.
     [[nodiscard]] virtual std::string search_path() const { return {}; }
+    /// Search latency of execute_search(): input samples that a stream
+    /// sample waits for before every searched row has emitted it (the
+    /// largest row lag of a subband search on the skewed paths; 0 otherwise).
+    [[nodiscard]] virtual uint64_t search_latency() const noexcept { return 0; }
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

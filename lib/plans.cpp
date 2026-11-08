@@ -79,12 +79,17 @@ SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
     mem_use += state_shape.size() * sizeof(FDMTShape);
     for (const auto& grid_iter : grids) {
         mem_use += grid_iter.size() * sizeof(FDMTCoordGrid);
+        for (const auto& grid : grid_iter) {
+            mem_use += grid.dt_grid.size() * sizeof(IndexType);
+        }
     }
+    // coordinates, plus coordinates_sum and coordinates_copy (a partition of
+    // the same operations).
     for (const auto& coord : coordinates) {
         mem_use += 2 * coord.size() * sizeof(FDMTCoord);
     }
     for (const auto& dt_grid : dt_grid_sub_top) {
-        mem_use += dt_grid.size() * sizeof(SizeType);
+        mem_use += dt_grid.size() * sizeof(IndexType);
     }
     return mem_use;
 }

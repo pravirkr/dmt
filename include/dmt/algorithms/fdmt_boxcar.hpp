@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -46,7 +47,9 @@ struct FDMTBoxcarMemoryUsage {
  *
  * Consecutive non-overlapping blocks form one stream. Root samples are
  * merged directly into the search without a DM-time output plane. Pending
- * contiguous excursions cross blocks; flush() emits them at end of stream.
+ * contiguous excursions cross blocks; drain() ends the stream (it searches
+ * any samples still behind the search latency and emits the open
+ * excursions); flush() only emits them.
  * Host calls block on every backend. Device calls are asynchronous; order
  * operations on one stream, or synchronize explicitly when changing streams.
  * GPU reset_history() is also ordered asynchronously on its supplied stream.
@@ -60,8 +63,8 @@ struct FDMTBoxcarMemoryUsage {
  * skewed-window path (plans whose tree history exceeds the budget) the rows
  * of a subband search are searched with a fixed per-row latency of up to
  * the dispersion delay from the subband to the bottom of the band (that of
- * the full-band search); flush() adds no samples, so the last such
- * samples of each subband row are searched only if the stream continues.
+ * the full-band search, get_search_latency()); flush() adds no samples,
+ * so at end of stream call drain(), which searches those samples too.
  */
 class FDMTBoxcar {
 public:
@@ -89,6 +92,23 @@ public:
     execute(DeviceSpan<const uint8_t> waterfall, Stream stream = {});
     [[nodiscard]] CandidateResultView flush();
     [[nodiscard]] CandidateDeviceResultView flush_device(Stream stream = {});
+    /**
+     * End of stream: searches the stream up to its last sample, then emits
+     * the open excursions as flush() does. Without it the last
+     * get_search_latency() samples are never searched. Endpoints after
+     * the last sample are not searched; the padding pushed through the
+     * transform does not change the rows before it (the FDMT is causal).
+     * A host call: after device calls, synchronize their stream first. It
+     * ends the stream: execute() throws until reset_history().
+     */
+    [[nodiscard]] CandidateResultView drain();
+    /// Stream samples [0, n) whose trailing endpoints every row has searched
+    /// (after drain(), the whole stream).
+    [[nodiscard]] uint64_t get_searched_nsamps() const noexcept;
+    /// Input samples that a stream sample waits for before every searched
+    /// row has searched it: the largest subband row lag on the skewed paths,
+    /// 0 otherwise.
+    [[nodiscard]] uint64_t get_search_latency() const noexcept;
     [[nodiscard]] CandidateResultView copy_result(Stream stream = {});
     /// Discard all histories and pending peaks; restart stream sample 0.
     void reset_history(Stream stream = {});

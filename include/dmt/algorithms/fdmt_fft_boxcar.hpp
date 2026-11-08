@@ -32,7 +32,8 @@ namespace dmt::algorithms {
  * fractional delays (the default) the search lags the input by
  * get_output_latency() samples: a block searches stream samples
  * [block_start - latency, block_end - latency). Pending excursions cross
- * blocks; flush() emits them at end of stream. Host calls block; device
+ * blocks; at end of stream drain() searches the last latency samples and
+ * emits them (flush() only emits). Host calls block; device
  * calls are asynchronous on the given stream. Not safe for concurrent calls.
  */
 class FDMTFFTBoxcar {
@@ -55,6 +56,19 @@ public:
     execute(DeviceSpan<const float> waterfall, Stream stream = {});
     [[nodiscard]] CandidateResultView flush();
     [[nodiscard]] CandidateDeviceResultView flush_device(Stream stream = {});
+    /**
+     * End of stream: searches the stream up to its last sample, then emits
+     * the open excursions as flush() does. Without it the last
+     * get_output_latency() samples are never searched. Endpoints after
+     * the last sample are not searched; the fractional delays near the end
+     * see zero signal after it.
+     * A host call: after device calls, synchronize their stream first. It
+     * ends the stream: execute() throws until reset_history().
+     */
+    [[nodiscard]] CandidateResultView drain();
+    /// Stream samples [0, n) whose trailing endpoints every row has searched
+    /// (after drain(), the whole stream).
+    [[nodiscard]] uint64_t get_searched_nsamps() const noexcept;
     [[nodiscard]] CandidateResultView copy_result(Stream stream = {});
     /// Discard all histories and pending peaks; restart stream sample 0.
     void reset_history(Stream stream = {});

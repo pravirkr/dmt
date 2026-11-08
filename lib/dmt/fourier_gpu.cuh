@@ -72,6 +72,7 @@ public:
     }
     [[nodiscard]] T* data() const noexcept { return m_ptr; }
     [[nodiscard]] SizeType capacity() const noexcept { return m_cap; }
+    [[nodiscard]] SizeType bytes() const noexcept { return m_cap * sizeof(T); }
     void release() noexcept {
         if (m_ptr != nullptr) {
             cudaFree(m_ptr);

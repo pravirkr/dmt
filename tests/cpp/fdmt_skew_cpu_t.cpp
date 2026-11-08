@@ -647,6 +647,44 @@ TEST_CASE("FDMTBoxcar skewed path: subband search matches the tree",
     }
 }
 
+TEST_CASE("FDMTBoxcar skewed path: drain() searches the lagged tail",
+          "[fdmt_cpu][cpu][skew][boxcar]") {
+    // flush() leaves each subband row's last `lag` samples unsearched on the
+    // skewed path; drain() searches them, so the two paths then agree on
+    // every candidate of the stream, and none lies past its end.
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    constexpr SizeType kBlocks = 3;
+    for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
+        const auto plan  = make_plan(kCryopafLband, 4096, 600.0F, depth);
+        const uint64_t n = kBlocks * plan.get_nsamps();
+        for (const bool packed : {false, true}) {
+            DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
+                const auto skew =
+                    run_subband_search(plan, Exec::cpu(4), true, packed,
+                                       kBlocks, 1024, packed ? 2 : 1, true);
+                const auto tree = run_subband_search(
+                    plan, Exec::cpu(4), false, packed, kBlocks, 1024, 0, true);
+                REQUIRE(skew.latency > 0);
+                REQUIRE(tree.latency == 0);
+                REQUIRE(skew.searched == n);
+                REQUIRE(tree.searched == n);
+                for (const auto& c : skew.candidates) {
+                    REQUIRE(c.end_sample < n);
+                }
+                require_same_before(skew.candidates, tree.candidates,
+                                    UINT64_MAX);
+                // Without drain() the skewed path misses some of them.
+                const auto flushed =
+                    run_subband_search(plan, Exec::cpu(4), true, packed,
+                                       kBlocks, 1024, packed ? 2 : 1, false);
+                REQUIRE(flushed.searched == n - skew.latency);
+                REQUIRE(flushed.candidates.size() < skew.candidates.size());
+            }
+        }
+    }
+}
+
 TEST_CASE("FDMT skewed-window: full presets", "[.skew_preset]") {
     for (const Preset* p : {&kCryopafLband, &kMeerkatLband}) {
         const auto plan = make_plan(*p, 32768, 2000.0F);
@@ -717,6 +755,32 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: subband search matches CPU tree",
                 require_same_before(gpu.candidates, cpu.candidates, cutoff,
                                     packed ? 0.0F : 2e-5F);
             }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar (gpu) windowed top: drain() searches the lagged tail",
+          "[fdmt_cuda][cuda][gpu][skew][boxcar]") {
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    constexpr SizeType kBlocks = 3;
+    const auto plan            = make_plan(kCryopafLband, 4096, 600.0F, 3);
+    const uint64_t n           = kBlocks * plan.get_nsamps();
+    for (const bool packed : {false, true}) {
+        DYNAMIC_SECTION("packed " << packed) {
+            const auto gpu = run_subband_search(plan, Exec::cuda(0), true,
+                                                packed, kBlocks, 1024, 0, true);
+            const auto cpu = run_subband_search(plan, Exec::cpu(4), false,
+                                                packed, kBlocks, 1024, 0, true);
+            INFO("gpu path: " << gpu.path);
+            REQUIRE(gpu.path.find("windowed") != std::string::npos);
+            REQUIRE(gpu.latency > 0);
+            REQUIRE(gpu.searched == n);
+            for (const auto& c : gpu.candidates) {
+                REQUIRE(c.end_sample < n);
+            }
+            require_same_before(gpu.candidates, cpu.candidates, UINT64_MAX,
+                                packed ? 0.0F : 2e-5F);
         }
     }
 }

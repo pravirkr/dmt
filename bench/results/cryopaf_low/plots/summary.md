@@ -41,15 +41,15 @@
 
 | benchmark | time per block | real-time factor | allocated | peak |
 | :--- | ---: | ---: | ---: | ---: |
-| `cuda: fft_fused/wtsp:1` | 25.6 ms | 654× | 3.55 GiB | 3.98 GiB |
-| `cuda: fft_fused/wtsp:1.5` | 25.1 ms | 670× | 3.53 GiB | 3.96 GiB |
-| `cuda: fft_transform` | 25.1 ms | 669× | 3.70 GiB | 4.14 GiB |
+| `cuda: fft_fused/wtsp:1` | 25.5 ms | 659× | 3.99 GiB | 3.98 GiB |
+| `cuda: fft_fused/wtsp:1.5` | 24.9 ms | 674× | 3.97 GiB | 3.96 GiB |
+| `cuda: fft_transform` | 24.9 ms | 673× | 4.14 GiB | 4.14 GiB |
 | `cuda: fused/wtsp:1.5/sb:0` | 22.4 ms | 748× | 0.56 GiB | 0.56 GiB |
-| `cuda: fused/wtsp:1/sb:0` | 23.2 ms | 722× | 0.58 GiB | 0.58 GiB |
-| `cuda: fused_uint8/wtsp:1.5/sb:0` | 23.1 ms | 727× | 0.52 GiB | 0.51 GiB |
-| `cuda: fused_uint8/wtsp:1/sb:0` | 24.7 ms | 678× | 0.54 GiB | 0.54 GiB |
+| `cuda: fused/wtsp:1/sb:0` | 23.3 ms | 721× | 0.58 GiB | 0.58 GiB |
+| `cuda: fused_uint8/wtsp:1.5/sb:0` | 22.6 ms | 742× | 0.52 GiB | 0.51 GiB |
+| `cuda: fused_uint8/wtsp:1/sb:0` | 23.9 ms | 701× | 0.54 GiB | 0.54 GiB |
 | `cuda: separate/wtsp:1` | 22.8 ms | 737× | 0.77 GiB | 0.77 GiB |
-| `cuda: separate/wtsp:1.5` | 22.2 ms | 757× | 0.75 GiB | 0.75 GiB |
+| `cuda: separate/wtsp:1.5` | 22.1 ms | 758× | 0.75 GiB | 0.75 GiB |
 | `cuda: transform` | 21.8 ms | 769× | 0.73 GiB | 0.74 GiB |
 | `cpu: uint8/wtsp:1.5/cpu1` | 2.2 s | 8× | 1.54 GiB | 1.60 GiB |
 | `cpu: uint8/wtsp:1.5/cpu8` | 422 ms | 40× | 1.54 GiB | 1.60 GiB |

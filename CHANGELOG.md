@@ -75,6 +75,18 @@ All notable changes to `dmt` are listed here. The format follows
   unplotted points (integer-delay FDMT-FFT, brute-force DDMT-FFT, host-array
   GPU rows). `dmt_bench` and `dmt_bench_mem` keep only developer
   microbenchmarks.
+- **End of stream: `drain()`** on `FDMTBoxcar` and `FDMTFFTBoxcar` (C++
+  and Python). It searches the samples still behind the search latency, then
+  emits the open excursions: the last `get_output_latency()` samples of
+  `FDMTFFTBoxcar` with fractional delays, and the last subband row lags of a
+  subband search on the skewed paths, which `flush()` never searched.
+  Endpoints after the last sample are not searched, so no candidate lies
+  past the end, and a drained skewed-path subband search now matches the
+  tree path's candidates over the whole stream. The stream ends there:
+  `execute()` throws `std::logic_error` (`RuntimeError`) until
+  `reset_history()`. New: `get_searched_nsamps()` (`searched_nsamps`), the
+  stream samples every row has searched, and
+  `FDMTBoxcar::get_search_latency()` (`search_latency`).
 
 ## [0.7.0] - 2026-11-03
 

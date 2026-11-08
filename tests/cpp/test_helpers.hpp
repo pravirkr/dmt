@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -149,6 +153,15 @@ inline void require_approx(const std::vector<float>& actual,
                  Catch::Matchers::Approx(prefix(expected, n)).margin(margin));
 }
 
+/// DMT_REQUIRE_GPU is set (to anything but "" or "0"): GPU tests must run,
+/// a missing GPU backend or device is a failure, not a skip.
+inline bool gpu_required() {
+    const char* env =
+        std::getenv("DMT_REQUIRE_GPU"); // NOLINT(concurrency-mt-unsafe)
+    return env != nullptr && std::string_view(env) != "" &&
+           std::string_view(env) != "0";
+}
+
 #ifdef DMT_ENABLE_GPU
 /// The GPU backend of this build (CUDA or HIP), on device `device`.
 inline Exec gpu_exec(int device = 0) {
@@ -159,10 +172,21 @@ inline Exec gpu_exec(int device = 0) {
 #endif
 }
 
+/// Whether a GPU device is present. With DMT_REQUIRE_GPU set (to anything
+/// but "" or "0"), a missing device fails the calling test instead of
+/// letting it skip: GPU runners set it so that a broken driver or an
+/// invisible device cannot pass CI as "skipped".
 inline bool gpu_device_available() {
     int count      = 0;
     const auto err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
+    const bool ok  = err == cudaSuccess && count > 0;
+    if (!ok && gpu_required()) {
+        throw std::runtime_error(
+            std::string(
+                "DMT_REQUIRE_GPU is set but no GPU device is usable: ") +
+            cudaGetErrorString(err));
+    }
+    return ok;
 }
 #endif
 

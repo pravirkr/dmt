@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import platform
 import re
 import subprocess
@@ -127,10 +128,24 @@ def main() -> None:
         seed=args.seed, far_per_hour=args.far, progress=progress,
     )  # fmt: skip
     elapsed = time.perf_counter() - start
+    build = dict(dmtlib.build_info())
+    if build["git_sha"] not in ("unknown", "") and not build["git_sha"].startswith(
+        git_sha()
+    ):
+        print(
+            f"warning: dmtlib was built from {build['git_sha'][:12]}, "
+            f"the source tree is at {git_sha()}"
+        )
+    trials = np.asarray(cfg.dm_trials, dtype=np.float32)
     res.meta.update(
         {
             "dmt_version": repo_version(),
             "git_sha": git_sha(),
+            # The extension that produced the numbers (commit, dirty flag,
+            # compiler and flags), and the requested DM grid's fingerprint.
+            "dmt_build": build,
+            "dm_trials_n": int(trials.size),
+            "dm_trials_sha256": hashlib.sha256(trials.tobytes()).hexdigest(),
             "date": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
             "machine": platform.platform(),
             "elapsed_s": round(elapsed, 1),

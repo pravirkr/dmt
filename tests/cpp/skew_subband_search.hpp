@@ -21,6 +21,7 @@
 #include "dmt/common/plans.hpp"
 
 #include "dmt/boxcar.hpp"
+#include "dmt/boxcar_drain.hpp"
 #include "dmt/engines.hpp"
 
 namespace dmt::skew_search_test {
@@ -28,6 +29,8 @@ namespace dmt::skew_search_test {
 struct SearchRun {
     std::vector<RawCandidate> candidates;
     std::string path;
+    uint64_t latency{0};  ///< search_latency() of the engine
+    uint64_t searched{0}; ///< searched samples at the end (drain: all)
 };
 
 /// Integer-valued input (exact on every path): float samples v - 128 for
@@ -59,14 +62,15 @@ inline BoxcarConfig search_config(bool packed) {
 }
 
 /// Streams `nblocks` blocks through FDMTBoxcar's engine on `exec`, on the
-/// skewed path (`skew`) or the tree path, then flushes.
+/// skewed path (`skew`) or the tree path, then flushes (or drains).
 inline SearchRun run_subband_search(const plans::FDMTPlan& plan,
                                     Exec exec,
                                     bool skew,
                                     bool packed,
                                     SizeType nblocks,
                                     SizeType chunk = 1024,
-                                    SizeType leaf  = 0) {
+                                    SizeType leaf  = 0,
+                                    bool drain     = false) {
     using namespace algorithms::detail; // NOLINT
     const auto box      = search_config(packed);
     const auto planes   = make_boxcar_plans(plan, box, true);
@@ -106,7 +110,17 @@ inline SearchRun run_subband_search(const plans::FDMTPlan& plan,
         add(packed ? engine->execute(std::span<const uint8_t>(blk.packed))
                    : engine->execute(std::span<const float>(blk.values)));
     }
-    add(engine->flush());
+    run.latency = engine->search_latency();
+    if (drain) {
+        DrainState state;
+        add(drain_stream(*engine, plan, 1, packed ? 8 : 32, run.latency,
+                         state));
+        run.searched = searched_nsamps(*engine, state, run.latency);
+    } else {
+        add(engine->flush());
+        const uint64_t pos = engine->stream_position();
+        run.searched       = pos > run.latency ? pos - run.latency : 0;
+    }
     return run;
 }
 

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -22,10 +23,43 @@
 #include <benchmark/benchmark.h>
 #include <fmt/format.h>
 
+#include "dmt/common/build_info.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
 namespace dmt::bench_suite {
+
+/// The build identity in every result file's context (dmt_build_*), next to
+/// the machine description run_suite.py passes. Registered once, before
+/// main() (Google Benchmark keeps the context in a lazily created map).
+inline const bool kBuildContext = [] {
+    const auto& b = build_info();
+    benchmark::AddCustomContext("dmt_build_git_sha", std::string(b.git_sha));
+    benchmark::AddCustomContext("dmt_build_git_dirty",
+                                b.git_dirty ? "yes" : "no");
+    benchmark::AddCustomContext("dmt_build_compiler", std::string(b.compiler));
+    benchmark::AddCustomContext("dmt_build_cxx_flags",
+                                std::string(b.cxx_flags));
+    benchmark::AddCustomContext("dmt_build_gpu", std::string(b.gpu));
+    benchmark::AddCustomContext("dmt_build_fftw", std::string(b.fftw));
+    return true;
+}();
+
+/// FNV-1a (32 bit) of a float grid's bytes: exact in a double counter, so a
+/// result file identifies the grid it ran on without storing it.
+inline double grid_fingerprint(const std::vector<float>& grid) {
+    uint32_t h = 2166136261U;
+    for (const float v : grid) {
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(v));
+        std::memcpy(&bits, &v, sizeof(v));
+        for (int k = 0; k < 4; ++k) {
+            h ^= (bits >> (8 * k)) & 0xFFU;
+            h *= 16777619U;
+        }
+    }
+    return static_cast<double>(h);
+}
 
 // Configurations selected with DMT_BENCH_CONFIG (run_suite.py --config),
 // all on the piecewise-uniform Levin grid
@@ -343,6 +377,33 @@ inline double estimate_bytes(Algo algo,
     return 0.0;
 }
 
+/// The DM grids of a point: the requested Levin grid (every engine's input)
+/// and the FDMT's effective grid (rounded to integer band delays), as
+/// fingerprints, the trial range and the largest rounding shift in DM.
+inline void set_grid_counters(benchmark::State& state,
+                              const plans::FDMTPlan& plan,
+                              const Point& p) {
+    const auto req = dm_grid(p);
+    const auto eff = plan.get_dm_grid_final();
+    double shift   = 0.0;
+    if (eff.size() == req.size()) {
+        for (SizeType i = 0; i < req.size(); ++i) {
+            shift =
+                std::max(shift, static_cast<double>(std::abs(eff[i] - req[i])));
+        }
+    } else {
+        shift = -1.0; // trial counts differ: no per-trial comparison
+    }
+    state.counters["dm_grid_requested_fnv"] = grid_fingerprint(req);
+    state.counters["dm_grid_requested_n"]   = static_cast<double>(req.size());
+    state.counters["dm_grid_effective_fnv"] = grid_fingerprint(eff);
+    state.counters["dm_grid_effective_lo"] =
+        eff.empty() ? 0.0 : static_cast<double>(eff.front());
+    state.counters["dm_grid_effective_hi"] =
+        eff.empty() ? 0.0 : static_cast<double>(eff.back());
+    state.counters["dm_grid_max_shift"] = shift;
+}
+
 /// Machine-readable counters (the name carries the same information).
 inline void set_counters(benchmark::State& state,
                          const plans::FDMTPlan& plan,
@@ -359,6 +420,7 @@ inline void set_counters(benchmark::State& state,
     state.counters["nbits"]     = static_cast<double>(p.nbits);
     state.counters["nthreads"]  = static_cast<double>(nthreads);
     state.counters["block_s"]   = static_cast<double>(p.nsamps) * kTsamp;
+    set_grid_counters(state, plan, p);
 }
 
 /// DDMT throughput in delay-and-sum additions per second (nchans x ndm per

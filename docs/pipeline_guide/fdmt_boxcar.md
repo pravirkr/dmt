@@ -112,7 +112,7 @@ for block in blocks:
     consume(result.candidates)  # Owned structured NumPy array.
     if result.overflowed:
         report_drops(result.dropped_global, result.dropped_per_dm)
-consume(search.flush().candidates)
+consume(search.drain().candidates)  # end of stream
 ```
 :::
 :::{tab-item} C++
@@ -126,7 +126,7 @@ dmt::BoxcarConfig config(256);
 dmt::algorithms::FDMTBoxcar search(plan, config, true, dmt::Exec::cpu(4));
 auto result = search.execute(waterfall); // std::span<const float>
 // Consume result.candidates before the next result-changing operation.
-auto last = search.flush();
+auto last = search.drain(); // end of stream
 ```
 :::
 ::::
@@ -225,10 +225,18 @@ winning peak's width.
 - **Block boundaries.** Raw sample carry and pending peaks survive internal
   chunks and input-block boundaries. A returned peak may therefore refer to an
   earlier block.
-- **Flush.** Call `flush()` once at end of stream to emit remaining peaks;
-  repeated flushes return no further candidates. Flush adds no padded samples
-  and permits subsequent input to continue, with excursions split at that
-  flush.
+- **End of stream.** Call `drain()` once at the end of the stream. It
+  searches the samples still behind the search latency (the last
+  `get_search_latency()` samples of the skewed subband search, the last
+  `get_output_latency()` of `FDMTFFTBoxcar` with fractional delays; none
+  otherwise), then emits the open excursions. Endpoints after the last
+  sample are never searched, so no candidate lies past the end. The stream
+  ends there: `execute()` raises until `reset_history()`.
+  `get_searched_nsamps()` (`searched_nsamps` in Python) gives the stream
+  samples every row has searched so far.
+- **Flush.** `flush()` only emits the open excursions: repeated flushes
+  return no further candidates, it adds no samples and lets the input
+  continue, with excursions split at that flush.
 - **Reset.** `reset_history()` discards all histories and pending peaks and
   restarts sample 0.
 
@@ -308,8 +316,8 @@ the full sweep for the top ones), i.e. a subband candidate is reported at
 about the time the full-band search would report the same burst.
 Candidates and S/N are the tree path's, bit for bit; only the call that
 returns a candidate moves. `flush()` adds no samples, so at the end of a
-stream the last `lag` samples of each subband row are searched only if the
-stream continues.
+stream call `drain()`: it searches the last `lag` samples of each subband
+row, and the candidates then match the tree path's over the whole stream.
 
 The root merge is fused into scoring. Selected intermediate subbands are
 searched in their existing FDMT buffers before the next merge. FDMT state,
@@ -384,17 +392,17 @@ L40S, device-resident; AMD EPYC 9654, 8 threads one per CCD; median of 3):
 
 | preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.8 ms (12 widths) | 29.7 ms (163 widths) |
-| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 14.6 ms (13 widths) | 15.3 ms (219 widths) |
-| `cryopaf_lband`, subband depth 1, GPU | – | 19.3 ms | 22.1 ms |
+| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.7 ms (12 widths) | 29.6 ms (163 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (13 widths) | 14.0 ms (219 widths) |
+| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 19.0 ms |
 | `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.2 ms (195 widths) |
 | `meerkat_lband`, CPU | 359 ms | 502 ms | 552 ms |
 | `cryopaf_lband`, subband depth 1, CPU | 141 ms | 468 ms | 544 ms |
 | `cryopaf_low`, CPU | 260 ms | 312 ms | 339 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
-dozen widths, so the full-band search adds 3–26%; a depth-1 subband search
-on `cryopaf_lband` adds a third more. On the CPU the scorer is a separate
+dozen widths, so the full-band search adds 3–10%; a depth-1 subband search
+on `cryopaf_lband` adds a fifth (wtsp 1.5) to a third (wtsp 1.0) more. On the CPU the scorer is a separate
 pass over each chunk's searched rows (1.2–3.3× the transform), still well
 faster than real time on 8 threads. Thanks to the width screen, scoring
 every integer width up to 100 ms costs about the same as a dozen widths on
@@ -407,8 +415,8 @@ blocks, subband depth 4: 218k searched rows, wtsp 1.5) runs within the
 
 | backend | input | chunk | time per block | real-time factor | working memory | peak |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| GPU | uint8 | 4096 | 1.17 s | 1.79× | 9.4 GiB | 9.2 GiB |
-| GPU | float32 | 2048 | 1.62 s | 1.30× | 10.8 GiB (9.96 GiB engine) | 10.7 GiB |
+| GPU | uint8 | 4096 | 1.16 s | 1.81× | 9.4 GiB | 9.2 GiB |
+| GPU | float32 | 2048 | 1.59 s | 1.32× | 10.8 GiB (9.96 GiB engine) | 10.7 GiB |
 | CPU, 8 threads | uint8 | 4096 | 14.3 s | 0.15× | 6.2 GiB | 6.3 GiB |
 | CPU, 8 threads | float32 | 2048 | 20.1 s | 0.10× | 9.2 GiB | 9.4 GiB |
 
@@ -433,7 +441,7 @@ search = FDMTFFTBoxcar(plan, BoxcarConfig(max_boxcar=195, wtsp=1.5),
                        backend="cuda")
 for block in blocks:
     consume(search.execute(block).candidates)
-consume(search.flush().candidates)
+consume(search.drain().candidates)  # searches the last output_latency samples
 ```
 
 `FDMTFFTBoxcar` takes the same `BoxcarConfig`, returns the same candidates and

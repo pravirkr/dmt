@@ -911,9 +911,9 @@ def tail_fit(
     correlated discrete sequence lies in between. The best boxcar over a
     ladder of widths is the maximum of a field in time and log-width, whose
     excursions grow as ``u * phi(u)`` (``beta = +1``, Siegmund & Worsley
-    1995); long simulations of the search statistic give ``beta`` = 1.05
-    for white noise and 0.66 for the FDMT's at DM 2000, and the fit over
-    2-4.5 sigma extrapolates their thresholds to within 0.04 sigma.
+    1995). The fitted ``beta`` of the search statistic, and how well the fit
+    extrapolates to detection thresholds, are measured by the long
+    simulations of the sensitivity study (``paper/sensitivity_analysis``).
     Weighted least squares on ``log`` counts (weights: the counts, i.e. Poisson); levels
     with fewer than ``min_count`` crossings are left out. Returns ``(c, beta)`` with
     the rate per sample; ``phi`` includes its ``1 / sqrt(2 pi)``.

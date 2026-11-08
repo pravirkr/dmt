@@ -150,3 +150,41 @@ def test_contract_and_validation() -> None:
     assert "FDMTFFTBoxcar" in repr(search)
     integer = FDMTFFTBoxcar(plan, BoxcarConfig(8), fractional_delays=False)
     assert integer.output_latency == 0
+
+
+@pytest.mark.parametrize("backend", backends())
+def test_drain_finds_a_pulse_in_the_last_latency_samples(backend: str) -> None:
+    # A pulse ending in the last output_latency samples: flush() never
+    # searches it, drain() does; the stream then refuses more blocks.
+    plan = FDMTPlan(1100, 1500, NCHANS, NSAMPS, 0.001, dt_grid=GRID)
+    rng = np.random.default_rng(3)
+    data = rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32)
+    add_frb_track(data, plan, 25, 3.0, NSAMPS - 20, 4)
+    config = BoxcarConfig(64, wtsp=1.5, detect_thresh=8.0)
+    found = {}
+    for end in ("flush", "drain"):
+        search = FDMTFFTBoxcar(plan, config, backend=backend)
+        first = search.execute(data)
+        assert search.searched_nsamps == NSAMPS - search.output_latency
+        last = getattr(search, end)()
+        cands = np.concatenate([first.candidates, last.candidates])
+        found[end] = cands[cands["dm_idx"] == 25]
+        if end == "drain":
+            assert search.searched_nsamps == NSAMPS
+            assert (cands["end_sample"] < NSAMPS).all()
+            with pytest.raises(RuntimeError, match="drained"):
+                search.execute(data)
+            search.reset_history()
+            assert search.searched_nsamps == 0
+    assert len(found["flush"]) == 0
+    assert len(found["drain"]) > 0
+    assert int(best(found["drain"])["peak_sample"]) >= NSAMPS - 20
+
+
+def test_fdmt_boxcar_drain_reports_its_latency() -> None:
+    plan = FDMTPlan(1100, 1500, NCHANS, NSAMPS, 0.001, dt_grid=GRID)
+    search = FDMTBoxcar(plan, BoxcarConfig(64))
+    assert search.search_latency == 0
+    search.execute(np.zeros((NCHANS, NSAMPS), dtype=np.float32))
+    assert search.searched_nsamps == NSAMPS
+    assert len(search.drain().candidates) == 0

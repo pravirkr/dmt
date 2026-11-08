@@ -41,20 +41,20 @@
 
 | benchmark | time per block | real-time factor | allocated | peak |
 | :--- | ---: | ---: | ---: | ---: |
-| `cuda: fft_fused/wtsp:1` | 18.1 ms | 824× | 2.27 GiB | 2.75 GiB |
-| `cuda: fft_fused/wtsp:1.5` | 17.4 ms | 858× | 2.24 GiB | 2.73 GiB |
-| `cuda: fft_transform` | 17.5 ms | 852× | 2.46 GiB | 2.96 GiB |
-| `cuda: fused/wtsp:1.5/sb:0` | 14.6 ms | 1024× | 0.34 GiB | 0.33 GiB |
-| `cuda: fused/wtsp:1.5/sb:1` | 19.3 ms | 773× | 0.32 GiB | 0.32 GiB |
-| `cuda: fused/wtsp:1/sb:0` | 15.3 ms | 978× | 0.36 GiB | 0.36 GiB |
-| `cuda: fused/wtsp:1/sb:1` | 22.1 ms | 675× | 0.42 GiB | 0.40 GiB |
-| `cuda: fused_uint8/wtsp:1.5/sb:0` | 14.5 ms | 1030× | 0.23 GiB | 0.23 GiB |
-| `cuda: fused_uint8/wtsp:1.5/sb:1` | 20.2 ms | 737× | 0.22 GiB | 0.21 GiB |
-| `cuda: fused_uint8/wtsp:1/sb:0` | 15.7 ms | 948× | 0.27 GiB | 0.26 GiB |
-| `cuda: fused_uint8/wtsp:1/sb:1` | 25.7 ms | 581× | 0.36 GiB | 0.33 GiB |
-| `cuda: separate/wtsp:1` | 12.9 ms | 1156× | 0.60 GiB | 0.59 GiB |
+| `cuda: fft_fused/wtsp:1` | 18 ms | 829× | 2.76 GiB | 2.75 GiB |
+| `cuda: fft_fused/wtsp:1.5` | 17.2 ms | 866× | 2.73 GiB | 2.73 GiB |
+| `cuda: fft_transform` | 17.5 ms | 853× | 2.95 GiB | 2.96 GiB |
+| `cuda: fused/wtsp:1.5/sb:0` | 12.8 ms | 1168× | 0.34 GiB | 0.33 GiB |
+| `cuda: fused/wtsp:1.5/sb:1` | 15.1 ms | 990× | 0.32 GiB | 0.32 GiB |
+| `cuda: fused/wtsp:1/sb:0` | 14 ms | 1063× | 0.36 GiB | 0.36 GiB |
+| `cuda: fused/wtsp:1/sb:1` | 19 ms | 787× | 0.42 GiB | 0.40 GiB |
+| `cuda: fused_uint8/wtsp:1.5/sb:0` | 13 ms | 1149× | 0.23 GiB | 0.23 GiB |
+| `cuda: fused_uint8/wtsp:1.5/sb:1` | 16.6 ms | 901× | 0.22 GiB | 0.21 GiB |
+| `cuda: fused_uint8/wtsp:1/sb:0` | 14.5 ms | 1027× | 0.27 GiB | 0.26 GiB |
+| `cuda: fused_uint8/wtsp:1/sb:1` | 22.7 ms | 659× | 0.36 GiB | 0.33 GiB |
+| `cuda: separate/wtsp:1` | 12.9 ms | 1157× | 0.60 GiB | 0.59 GiB |
 | `cuda: separate/wtsp:1.5` | 12.2 ms | 1221× | 0.57 GiB | 0.57 GiB |
-| `cuda: transform` | 11.7 ms | 1275× | 0.55 GiB | 0.56 GiB |
+| `cuda: transform` | 11.7 ms | 1277× | 0.55 GiB | 0.56 GiB |
 | `cpu: uint8/wtsp:1.5/cpu1` | 3.52 s | 4× | 1.38 GiB | 1.42 GiB |
 | `cpu: uint8/wtsp:1.5/cpu8` | 540 ms | 28× | 1.38 GiB | 1.42 GiB |
 | `cpu: uint8/wtsp:1/cpu1` | 4.37 s | 3× | 1.51 GiB | 1.55 GiB |

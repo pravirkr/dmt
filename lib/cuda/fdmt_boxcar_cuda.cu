@@ -559,6 +559,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         }
         input = lagged;
     }
+    if (!stop_row_input(input)) {
+        return; // drain(): past the end of the stream
+    }
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
     T* ring      = reinterpret_cast<T*>(storage + sizeof(shared));
@@ -1114,9 +1117,19 @@ public:
                 m_result_begin,
                 m_result_samples};
     }
+    void set_search_stop(uint64_t stop) noexcept override {
+        m_search_stop = stop;
+    }
+    [[nodiscard]] uint64_t stream_position() const noexcept override {
+        return m_position;
+    }
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_driver->search_latency();
+    }
     void reset_history(Stream queue) override {
         gpu_utils::set_device(m_device);
         const auto stream = static_cast<cudaStream_t>(queue.native);
+        m_search_stop     = UINT64_MAX;
         m_driver->reset(queue);
         gpu_utils::check_gpu_call(cudaMemsetAsync(
             raw(m_carry_d), 0, m_carry_d.size() * sizeof(float), stream));
@@ -1235,9 +1248,11 @@ private:
                              dim3 block,
                              C* carry) {
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
+        FDMTSearchInput stopped = input;
+        stopped.search_stop     = m_search_stop;
         kernel_fdmt_boxcar<T, kBlockThreads, kScreen, C>
             <<<grid, block, m_smem, stream>>>(
-                input, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
+                stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
                 raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
                 m_peak_count, raw(m_candidates_d), raw(m_counts_d),
@@ -1423,6 +1438,7 @@ private:
     CandidateCounts m_counts_h{};
     gpu_utils::DeviceWorkFence m_work;
     uint64_t m_position       = 0;
+    uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
 };

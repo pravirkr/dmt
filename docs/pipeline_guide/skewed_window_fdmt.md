@@ -165,8 +165,10 @@ its subband down to the bottom of the band: zero for the lowest subbands,
 up to the whole 16 s sweep for the top ones. A subband candidate thus
 arrives at about the time the full-band search would report the same burst,
 with the tree path's sample indices, S/N and widths; only the call that
-returns it moves. `flush()` adds no samples, so at the end of a stream the
-last `lag` samples of each subband row are searched only if it continues.
+returns it moves. `flush()` adds no samples; `FDMTBoxcar::drain()` ends a
+stream by searching the last `lag` samples of each subband row (endpoints
+after the last sample are not searched, and the FDMT rows before it do not
+depend on the padding it pushes through).
 
 - **CPU:** `FDMTSkewCpu(..., search_depth)` keeps the fused levels below
   the searched ones (`plan.max_fuse_levels`) and hands each searched level
@@ -261,8 +263,8 @@ boxcar suite (`bench/results/parkes_uwl/plots/summary.md`):
 | :--- | ---: | ---: |
 | full band, uint8 | 0.36 s per block (5.8× real time) | 4.17 s (0.50×) |
 | full band, float32 | 0.36 s (5.8×) | 5.25 s (0.40×) |
-| depth 4, uint8 | 1.17 s (1.79×) | 14.3 s (0.15×) |
-| depth 4, float32 | 1.62 s (1.30×) | 20.1 s (0.10×) |
+| depth 4, uint8 | 1.16 s (1.81×) | 14.3 s (0.15×) |
+| depth 4, float32 | 1.59 s (1.32×) | 20.1 s (0.10×) |
 
 (The CPU full-band rows are not in the suite; they come from a standalone
 FDMTBoxcar loop over 5 blocks on the same machine and threads. The float32 row

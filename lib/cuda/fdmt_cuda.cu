@@ -1703,6 +1703,9 @@ public:
         return m_plan.summary() + summary;
     }
 
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_top && m_top->windowed ? m_top->max_lag : 0;
+    }
     [[nodiscard]] std::string search_path() const override {
         std::string path;
         if (m_direct) {
@@ -2292,6 +2295,7 @@ private:
         thrust::device_vector<int32_t> carry_len;
         std::vector<thrust::device_vector<SizeType>> emit_off;
         std::vector<thrust::device_vector<uint64_t>> emit_lag;
+        uint64_t max_lag{0}; ///< largest emit_lag (search_latency())
     };
     std::unique_ptr<DirectTopD> m_top;
     bool m_search_upper{false};
@@ -4044,8 +4048,9 @@ private:
             std::vector<SizeType> off(n);
             std::vector<uint64_t> lag(n);
             for (SizeType r = 0; r < n; ++r) {
-                lag[r] = win.lag[l][r];
-                off[r] = row_off[l][r] + (win.s_hi[l][r] - win.lag[l][r]);
+                lag[r]     = win.lag[l][r];
+                off[r]     = row_off[l][r] + (win.s_hi[l][r] - win.lag[l][r]);
+                t->max_lag = std::max<uint64_t>(t->max_lag, lag[r]);
             }
             t->emit_off[l] = off;
             t->emit_lag[l] = lag;

@@ -52,7 +52,7 @@ def _run(cmd: list[str]) -> str:
     try:
         return subprocess.run(  # noqa: S603 - fixed local tools
             cmd, check=True, capture_output=True, text=True, cwd=REPO
-        ).stdout.strip()
+        ).stdout.rstrip()
     except (OSError, subprocess.CalledProcessError):
         return ""
 
@@ -72,6 +72,55 @@ def find_binary(build_dir: str | None) -> Path:
         "Build with -DCMAKE_BUILD_TYPE=Release -DDMT_BUILD_BENCHMARKS=ON, "
         "or pass --build-dir."
     )
+
+
+# Sources whose edits change dmt_bench_suite (the staleness check), a subset
+# of the paths whose changes, untracked files included, mark a build dirty
+# (cmake/dmtGitInfo.cmake).
+SOURCE_PATHS = (
+    "lib",
+    "include",
+    "bench/suite",
+    "bench/CMakeLists.txt",
+    "cmake",
+    "CMakeLists.txt",
+)
+
+
+def binary_identity(binary: Path) -> tuple[str, bool] | None:
+    """(git SHA, dirty) embedded by libdmt (lib/build_info.cpp), or None."""
+    m = re.search(
+        rb"DMT_BUILD_INFO\|sha=([0-9a-f]+|unknown)\|dirty=([01])\|", binary.read_bytes()
+    )
+    return (m.group(1).decode(), m.group(2) == b"1") if m else None
+
+
+def stale_reason(binary: Path) -> str:
+    """Why `binary` does not match the source tree, or "" when it does.
+
+    A binary built from another commit is stale; so is one built from a clean
+    tree that has been edited since, and one built from an edited tree whose
+    edited sources are newer than the binary.
+    """
+    ident = binary_identity(binary)
+    if ident is None:
+        return "it embeds no build identity (built before lib/build_info.cpp)"
+    sha, dirty = ident
+    head = _run(["git", "rev-parse", "HEAD"])
+    if not head or sha == "unknown":
+        return ""  # no git here: nothing to compare against
+    if sha != head:
+        return f"it was built from {sha[:12]}, HEAD is {head[:12]}"
+    status = _run(["git", "status", "--porcelain", "-uall", "--", *SOURCE_PATHS])
+    edited = [REPO / line[3:].split(" -> ")[-1] for line in status.splitlines()]
+    if edited and not dirty:
+        return f"it was built from a clean tree; {len(edited)} source file(s) changed since"
+    built = binary.stat().st_mtime
+    newer = [p for p in edited if p.is_file() and p.stat().st_mtime > built]
+    if newer:
+        more = f" (and {len(newer) - 1} more)" if len(newer) > 1 else ""
+        return f"{newer[0].relative_to(REPO)}{more} changed after the build"
+    return ""
 
 
 def build_type(binary: Path) -> str:
@@ -220,9 +269,23 @@ def main() -> None:
         help="FFTW wisdom file, reused across runs (default: "
         "<build-dir>/fftw_<machine>.wisdom)",
     )
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="run a binary that does not match the source tree (another "
+        "commit, or sources edited after the build); recorded in the results",
+    )
     args = ap.parse_args()
 
     binary = find_binary(args.build_dir)
+    stale = stale_reason(binary)
+    if stale and not args.allow_stale:
+        sys.exit(
+            f"{binary} is stale: {stale}. Rebuild dmt_bench_suite, or pass "
+            "--allow-stale (recorded in the results)."
+        )
+    if stale:
+        print(f"warning: {binary} is stale ({stale}); recorded as such")
     btype = build_type(binary)
     if btype != "Release":
         print(f"warning: {binary} is a {btype!r} build; publish Release numbers")
@@ -251,6 +314,9 @@ def main() -> None:
         "config": args.config if args.suite != "cfdmt" else "-",
         "placement": args.placement,
         "virtualized": virtualized(),
+        # The binary's own identity (dmt_build_*) is added by the suite.
+        "source_head": _run(["git", "rev-parse", "HEAD"]) or "unknown",
+        "stale_binary": stale or "no",
     }
     wisdom = args.fftw_wisdom or str(
         binary.parent.parent / f"fftw_{args.machine}.wisdom"
@@ -327,11 +393,23 @@ def main() -> None:
         ]
         print(f"[{kind}] {binary.name} -> {out.relative_to(REPO)}", flush=True)
         start = time.monotonic()
+        # Written next to the result and moved over it only when the run
+        # produced benchmarks: a failed or empty run keeps the old results.
+        tmp = out.with_name(out.name + ".partial")
+        cmd = [
+            f"--benchmark_out={tmp}" if c.startswith("--benchmark_out=") else c
+            for c in cmd
+        ]
         subprocess.run(cmd, check=True, env=run_env, cwd=REPO)  # noqa: S603
-        data = json.loads(out.read_text())
+        text = tmp.read_text() if tmp.is_file() else ""
+        data = json.loads(text) if text.strip() else {}
+        if not data.get("benchmarks"):
+            tmp.unlink(missing_ok=True)
+            sys.exit(f"[{kind}] no benchmark matched; {out.name} left unchanged")
         data.setdefault("context", {})["load_end"] = load_average()
-        out.write_text(json.dumps(data))
-        compact_benchmark_json(out)
+        tmp.write_text(json.dumps(data))
+        compact_benchmark_json(tmp)
+        tmp.replace(out)
         print(f"[{kind}] done in {(time.monotonic() - start) / 60:.1f} min")
     if args.suite == "cfdmt":
         print("Next: python bench/scripts/plot_cfdmt.py")

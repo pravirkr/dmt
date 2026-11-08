@@ -888,6 +888,16 @@ public:
     [[nodiscard]] SizeType get_chunk_nsamps() const noexcept { return m_chunk; }
     [[nodiscard]] SizeType get_fuse_level() const noexcept { return m_fuse; }
     [[nodiscard]] SizeType get_leaf_level() const noexcept { return m_level; }
+    /// Largest lag of a searched row (subband search; 0 without one).
+    [[nodiscard]] uint64_t max_emit_lag() const noexcept {
+        uint64_t lag = 0;
+        for (const auto& level : m_emit_lag) {
+            for (const auto l : level) {
+                lag = std::max(lag, l);
+            }
+        }
+        return lag;
+    }
 
     /// Wall-clock seconds spent per phase since construction (or the last
     /// reset_profile()): writing the ring, the level-K running-sum stripes

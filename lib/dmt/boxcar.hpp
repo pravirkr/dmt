@@ -313,6 +313,8 @@ public:
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
     [[nodiscard]] virtual std::string search_path() const { return {}; }
+    /// Input samples a searched sample waits for (FDMTEngine::search_latency).
+    [[nodiscard]] virtual uint64_t search_latency() const noexcept { return 0; }
 };
 
 [[nodiscard]] std::unique_ptr<BoxcarDriver>
@@ -336,6 +338,13 @@ public:
     virtual SizeType chunk_nsamps() const noexcept                = 0;
     virtual SizeType fuse_levels() const noexcept                 = 0;
     virtual std::string search_path() const                       = 0;
+    /// drain(): endpoints at or after `stop` are not searched (UINT64_MAX:
+    /// none); reset_history() clears it.
+    virtual void set_search_stop(uint64_t stop) noexcept = 0;
+    /// Stream samples consumed so far (the next block's first sample).
+    [[nodiscard]] virtual uint64_t stream_position() const noexcept = 0;
+    /// Input samples a sample waits for before every row has searched it.
+    [[nodiscard]] virtual uint64_t search_latency() const noexcept = 0;
 };
 
 /// The boxcar engines own `driver`, which calls them back per chunk.

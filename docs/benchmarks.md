@@ -337,10 +337,10 @@ of widths), on blocks of 2.1 s after the stream is warm:
 
 | time resolution | GPU, uint8 | GPU, float32 | CPU (8 threads), uint8 | CPU (8 threads), float32 |
 | ---: | ---: | ---: | ---: | ---: |
-| 64 µs (4749 trials) | **1.79×**, 9.4 GiB | **1.30×**, 10.8 GiB | 0.15×, 6.2 GiB | 0.10×, 9.2 GiB |
-| 256 µs (2302 trials) | 36×, 3.4 GiB | 38×, 3.5 GiB | **1.15×**, 3.3 GiB | **1.35×**, 3.5 GiB |
-| 512 µs (1153 trials) | 161×, 0.7 GiB | 163×, 0.8 GiB | 6.2×, 1.8 GiB | 6.8×, 2.0 GiB |
-| 1024 µs (577 trials) | 800×, 0.3 GiB | 940×, 0.3 GiB | 19×, 0.6 GiB | 25×, 0.7 GiB |
+| 64 µs (4749 trials) | **1.81×**, 9.4 GiB | **1.32×**, 10.8 GiB | 0.15×, 6.2 GiB | 0.10×, 9.2 GiB |
+| 256 µs (2302 trials) | 39×, 3.4 GiB | 42×, 3.5 GiB | **1.15×**, 3.3 GiB | **1.35×**, 3.5 GiB |
+| 512 µs (1153 trials) | 162×, 0.7 GiB | 163×, 0.8 GiB | 6.2×, 1.8 GiB | 6.8×, 2.0 GiB |
+| 1024 µs (577 trials) | 870×, 0.3 GiB | 930×, 0.3 GiB | 19×, 0.6 GiB | 25×, 0.7 GiB |
 
 (real-time factor = block duration / time per block; working memory
 includes the input block.)

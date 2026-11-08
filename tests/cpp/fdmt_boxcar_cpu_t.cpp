@@ -997,3 +997,41 @@ TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
     }
 }
 #endif
+
+TEST_CASE("FDMTBoxcar drain() ends the stream", "[boxcar][cpu]") {
+    // Off the skewed paths every row is searched up to the last sample, so
+    // drain() is flush() plus the end-of-stream contract.
+    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+                               std::vector<IndexType>{0, 4, 17, 40, 97});
+    const auto input = waterfalls(plan, 1, 3);
+    const uint64_t n = input.size() * plan.get_nsamps();
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 37;
+    cfg.wtsp             = 1;
+    cfg.detect_thresh    = 2.7F;
+    cfg.max_candidates   = 500000;
+    cfg.max_cands_per_dm = 0;
+    FDMTBoxcar flushed(plan, cfg, true, Exec::cpu(2));
+    FDMTBoxcar drained(plan, cfg, true, Exec::cpu(2));
+    CHECK(drained.get_search_latency() == 0);
+    std::vector<RawCandidate> a;
+    std::vector<RawCandidate> b;
+    for (const auto& block : input) {
+        append(a, flushed.execute(block));
+        append(b, drained.execute(block));
+    }
+    CHECK(drained.get_searched_nsamps() == n);
+    append(a, flushed.flush());
+    append(b, drained.drain());
+    compare(b, a);
+    CHECK(drained.get_searched_nsamps() == n);
+    CHECK_THROWS_AS(drained.execute(input.front()), std::logic_error);
+    drained.reset_history();
+    CHECK(drained.get_searched_nsamps() == 0);
+    std::vector<RawCandidate> again;
+    for (const auto& block : input) {
+        append(again, drained.execute(block));
+    }
+    append(again, drained.drain());
+    compare(again, a);
+}

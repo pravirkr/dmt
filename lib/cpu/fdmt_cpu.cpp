@@ -1602,6 +1602,9 @@ public:
         return m_chunk;
     }
 
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_skew ? m_skew->max_emit_lag() : 0;
+    }
     [[nodiscard]] std::string search_path() const override {
         if (m_skew) {
             return fmt::format(

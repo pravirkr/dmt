@@ -50,7 +50,26 @@ struct FDMTSearchInput {
     /// for ordinary rows. Rows are materialized (materialized_root).
     const SizeType* row_offset = nullptr;
     const uint64_t* row_lag    = nullptr;
+    /// End of stream (drain()): trailing-window endpoints at or after this
+    /// stream sample are not searched. UINT64_MAX: no end.
+    uint64_t search_stop = UINT64_MAX;
 };
+
+/// Clamps `in` (one row's or every row's samples, after lagged_row_input) to
+/// endpoints before in.search_stop. False when none of its samples are.
+DMT_HD inline bool stop_row_input(FDMTSearchInput& in) noexcept {
+    if (in.search_stop == UINT64_MAX) {
+        return true;
+    }
+    if (in.sample_begin >= in.search_stop) {
+        return false;
+    }
+    const uint64_t left = in.search_stop - in.sample_begin;
+    if (left < in.nsamps) {
+        in.nsamps = static_cast<SizeType>(left);
+    }
+    return in.nsamps > 0;
+}
 
 /// The single-row view of `in` for row `row` of a lagged input (row_lag
 /// set): the state pointers advanced to the row's first in-stream sample,

@@ -216,6 +216,31 @@ void bind_fdmt_boxcar(py::module_& mod) {
                  }
                  return own_result(view);
              })
+        .def(
+            "drain",
+            [](FDMTBoxcar& search) {
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.drain();
+                }
+                return own_result(view);
+            },
+            R"doc(
+            End of stream: search the stream up to its last sample and emit
+            the open excursions (as :meth:`flush`). Without it the last
+            :attr:`search_latency` samples are never searched. The stream ends:
+            ``execute`` raises until :meth:`reset_history`.
+            )doc")
+        .def_property_readonly(
+            "searched_nsamps", &FDMTBoxcar::get_searched_nsamps,
+            "Stream samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream).")
+        .def_property_readonly(
+            "search_latency", &FDMTBoxcar::get_search_latency,
+            "Input samples a stream sample waits for before every searched "
+            "row has searched it (the largest subband row lag on the skewed "
+            "paths; 0 otherwise).")
         .def("reset_history",
              [](FDMTBoxcar& search) {
                  py::gil_scoped_release release;
@@ -309,6 +334,26 @@ void bind_fdmt_boxcar(py::module_& mod) {
                  }
                  return own_result(view);
              })
+        .def(
+            "drain",
+            [](FDMTFFTBoxcar& search) {
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.drain();
+                }
+                return own_result(view);
+            },
+            R"doc(
+            End of stream: search the stream up to its last sample and emit
+            the open excursions (as :meth:`flush`). Without it the last
+            :attr:`output_latency` samples are never searched. The stream ends:
+            ``execute`` raises until :meth:`reset_history`.
+            )doc")
+        .def_property_readonly(
+            "searched_nsamps", &FDMTFFTBoxcar::get_searched_nsamps,
+            "Stream samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream).")
         .def("reset_history",
              [](FDMTFFTBoxcar& search) {
                  py::gil_scoped_release release;

@@ -42,8 +42,15 @@ std::vector<Backend> usable_gpu_backends() {
                        Exec{.backend = b, .nthreads = 1, .device = 0});
             out.push_back(b);
         } catch (const std::exception& e) {
+            if (test::gpu_required()) {
+                throw; // DMT_REQUIRE_GPU: an unusable backend is a failure
+            }
             WARN("skipping " << to_string(b) << ": " << e.what());
         }
+    }
+    if (out.empty() && test::gpu_required()) {
+        throw std::runtime_error(
+            "DMT_REQUIRE_GPU is set but this build has no GPU backend");
     }
     return out;
 }
