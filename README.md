@@ -156,11 +156,9 @@ from 0 to 2000 pc cm⁻³.
 
 Every engine runs faster than real time on both backends. FDMT is the
 fastest, at 54× real time on 8 CPU threads and 774× on the L40S: 18× faster
-than brute-force DDMT on the CPU and 6× on the GPU. With fewer channels the
-margin shrinks: on the 512-channel `cryopaf` preset FDMT, DDMT and SDMT take
-about the same time on the CPU, and DDMT-FFT is the fastest engine. Sweeps
-over DM range, block length and input width, all three presets, and CohFDMT
-are on the
+than brute-force DDMT on the CPU and 6× on the GPU. Sweeps over DM range,
+block length and input width, the other presets (including the 6656-channel
+Parkes UWL search within a 10 GiB memory budget), and CohFDMT are on the
 [Benchmarks](https://dmt.readthedocs.io/en/latest/benchmarks.html) page;
 [`bench/README.md`](bench/README.md) shows how to reproduce them.
 

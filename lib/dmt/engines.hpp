@@ -69,10 +69,16 @@ struct FDMTEngineConfig {
     bool search_upper_levels{false};
     SizeType search_nbits{
         32}; ///< Exact dyadic integer search; ordinary FDMT unchanged.
-    /// Private (CPU): level-0 + tree history bytes above which a valid-mode
-    /// engine runs the skewed-window engine (fdmt_skew.hpp) instead of
-    /// storing the tree history. Tests lower it to cover small plans.
-    SizeType skew_history_bytes{SizeType{2} << 30};
+    /// Memory budget of everything the engine allocates
+    /// (FDMTMemoryUsage::total(); see algorithms::kFDMTDefaultMaxMemory).
+    SizeType max_memory_bytes{algorithms::kFDMTDefaultMaxMemory};
+    /// Private (CPU): kSkewHistoryAuto (default) takes the skewed-window
+    /// engine (fdmt_skew.hpp) when the tree path does not fit
+    /// max_memory_bytes; any other value is a level-0 + tree history
+    /// threshold in bytes above which it is taken (tests: 0 forces it,
+    /// SIZE_MAX forbids it).
+    static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
+    SizeType skew_history_bytes{kSkewHistoryAuto};
     /// Private (GPU): take the skewed direct levels and target-ring top
     /// even when the unskewed direct top fits its ring budget (tests).
     bool force_skewed_direct{false};

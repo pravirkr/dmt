@@ -148,7 +148,7 @@ inline constexpr SizeType kFDMTMinCacheChunk = 256;
  * L2 rather than DRAM; capped at nsamps. 0 when even the shortest does not
  * fit: the merges are DRAM-bound at any chunk and fdmt_chunk_nsamps()'s
  * budget rule applies. On the L40S (96 MiB L2) this is 1.4-1.8x faster than
- * the budget rule on the cryopaf presets.
+ * the budget rule on the cryopaf_low presets.
  */
 inline SizeType fdmt_cache_chunk(const plans::FDMTPlan& plan,
                                  SizeType nbeams,

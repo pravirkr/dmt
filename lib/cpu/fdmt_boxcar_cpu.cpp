@@ -14,12 +14,22 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
+#include "dmt/fdmt_int_tree.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
 namespace {
 
-constexpr SizeType kTile = 1024;
+/// Scoring tile: each tile rebuilds its running sums and screen minima over
+/// the max_width - 1 lookback samples before it, so wide boxcars take longer
+/// tiles (about 4x the lookback, 1024 to 4096 samples) to amortize that.
+SizeType scoring_tile(SizeType max_width) noexcept {
+    SizeType tile = 1024;
+    while (tile < 4096 && tile < 4 * max_width) {
+        tile *= 2;
+    }
+    return tile;
+}
 
 class FDMTBoxcarCpuEngine final : public FDMTBoxcarEngine {
 public:
@@ -35,6 +45,7 @@ public:
           m_beams(cfg.nbeams),
           m_threads(std::max(1, cfg.exec.nthreads)),
           m_width(planes.front().widths.back()),
+          m_tile(scoring_tile(m_width)),
           m_filters(planes.front().widths.size()),
           m_peak_count(config.peak_mode ==
                                PeakFindingMode::kContiguousPeakPerWidth
@@ -51,8 +62,15 @@ public:
                 ? std::ldexp(1.0,
                              -static_cast<int>(plan.get_box_fraction_bits()))
                 : 1.0;
+        // Packed rows fit uint32_t whenever every tree value does (as the
+        // FDMT engines' own uint32_t state): half the carry's bytes.
+        m_carry32 =
+            config.input_nbits != 32 &&
+            int_search_fits_u32(plan, cfg.use_box_smearing, config.input_nbits);
         if (config.input_nbits == 32) {
             m_carry.resize(rows * m_width);
+        } else if (m_carry32) {
+            m_integer_carry32.resize(rows * m_width);
         } else {
             m_integer_carry.resize(rows * m_width);
         }
@@ -60,15 +78,30 @@ public:
         m_per_dm.resize(rows);
         m_candidates.resize(config.max_candidates);
         if (config.input_nbits == 32) {
-            m_prefix.resize(m_threads * (m_width + kTile + 1));
+            m_prefix.resize(m_threads * (m_width + m_tile + 1));
         } else {
-            m_integer_prefix.resize(m_threads * (m_width + kTile + 1));
+            m_integer_prefix.resize(m_threads * (m_width + m_tile + 1));
         }
-        m_best.resize(m_threads * kTile);
-        m_best_filter.resize(m_threads * kTile);
+        m_best.resize(m_threads * m_tile);
+        m_best_filter.resize(m_threads * m_tile);
         make_screen_groups(planes.front().widths);
         m_offsets.push_back(0);
-        for (const auto& p : planes) {
+        m_row_plane.reserve(m_rows.size());
+        for (SizeType ip = 0; ip < planes.size(); ++ip) {
+            const auto& p = planes[ip];
+            // Planes are ordered by level, so a level's rows are contiguous.
+            if (m_level_rows.size() <= p.level) {
+                m_level_rows.resize(p.level + 1, {0, 0});
+            }
+            auto& lr = m_level_rows[p.level];
+            if (lr.first == lr.second) {
+                lr.first = m_offsets.back();
+            } else if (lr.second != m_offsets.back()) {
+                throw std::logic_error("FDMTBoxcar (cpu): planes out of order");
+            }
+            lr.second = m_offsets.back() + p.dm_grid.size();
+            m_row_plane.insert(m_row_plane.end(), p.dm_grid.size(),
+                               static_cast<uint32_t>(ip));
             m_offsets.push_back(m_offsets.back() + p.dm_grid.size());
             m_integer_means.insert(m_integer_means.end(),
                                    p.integer_mean_lut.begin(),
@@ -146,32 +179,60 @@ public:
         m_driver->reset({});
         std::ranges::fill(m_carry, 0.0F);
         std::ranges::fill(m_integer_carry, uint64_t{0});
+        std::ranges::fill(m_integer_carry32, uint32_t{0});
         std::ranges::fill(m_peaks, BoxcarPeak{});
         m_position = 0;
         begin_result(0);
     }
 
     void consume(SizeType level, const FDMTSearchInput& input) override {
-        for (SizeType p = 0; p < m_planes.size(); ++p) {
-            if (m_planes[p].level != level) {
-                continue;
-            }
-            const auto& plane    = m_planes[p];
-            const SizeType ndm   = plane.dm_grid.size();
-            const SizeType base  = m_offsets[p];
-            const SizeType first = input.beam_begin;
-            const SizeType beams =
-                std::min(input.beam_count, m_beams - input.beam_begin);
-#pragma omp parallel for num_threads(m_threads) schedule(static)
-            for (SizeType task = 0; task < beams * ndm; ++task) {
-                const SizeType beam    = first + task / ndm;
-                const SizeType d       = task % ndm;
-                const SizeType row_idx = base + d;
-                if (m_config.input_nbits == 32) {
-                    score<float>(plane, row_idx, d, beam, input);
-                } else {
-                    score<uint64_t>(plane, row_idx, d, beam, input);
+        // Every row of every plane of the level in one loop. A level of many
+        // small planes (subband search) is scheduled dynamically: rows differ
+        // in cost (lags, cold prefixes, threshold hits) and static blocks
+        // leave threads idle (parkes_uwl depth 4: 11 s against 15 s per
+        // block). A single plane keeps static blocks, a few per cent faster
+        // on its uniform rows (meerkat_lband: 516 against 539 ms).
+        if (level >= m_level_rows.size() ||
+            m_level_rows[level].first == m_level_rows[level].second) {
+            return;
+        }
+        const auto [row_lo, row_hi] = m_level_rows[level];
+        const SizeType nrows        = row_hi - row_lo;
+        const SizeType first        = input.beam_begin;
+        const SizeType beams =
+            std::min(input.beam_count, m_beams - input.beam_begin);
+        const auto task = [&](SizeType t) {
+            const SizeType beam       = first + t / nrows;
+            const SizeType row_idx    = row_lo + t % nrows;
+            const SizeType p          = m_row_plane[row_idx];
+            const SizeType d          = row_idx - m_offsets[p];
+            const FDMTSearchInput* in = &input;
+            FDMTSearchInput lagged;
+            if (input.row_lag != nullptr) {
+                if (!lagged_row_input(input, m_rows[row_idx].row, lagged)) {
+                    return;
                 }
+                in = &lagged;
+            }
+            if (m_config.input_nbits == 32) {
+                score<float, float>(m_planes[p], row_idx, d, beam, *in);
+            } else if (m_carry32) {
+                score<uint64_t, uint32_t>(m_planes[p], row_idx, d, beam, *in);
+            } else {
+                score<uint64_t, uint64_t>(m_planes[p], row_idx, d, beam, *in);
+            }
+        };
+        const SizeType ntasks = beams * nrows;
+        const bool one_plane  = m_row_plane[row_lo] == m_row_plane[row_hi - 1];
+        if (one_plane) {
+#pragma omp parallel for num_threads(m_threads) schedule(static)
+            for (SizeType t = 0; t < ntasks; ++t) {
+                task(t);
+            }
+        } else {
+#pragma omp parallel for num_threads(m_threads) schedule(dynamic, 4)
+            for (SizeType t = 0; t < ntasks; ++t) {
+                task(t);
             }
         }
     }
@@ -179,7 +240,8 @@ public:
     FDMTBoxcarMemoryUsage memory_usage() const noexcept override {
         const auto fdmt     = m_driver->memory();
         SizeType plan_bytes = m_rows.size() * sizeof(BoxcarRow) +
-                              m_offsets.size() * sizeof(SizeType);
+                              m_offsets.size() * sizeof(SizeType) +
+                              m_row_plane.size() * sizeof(uint32_t);
         for (const auto& p : m_planes) {
             plan_bytes +=
                 sizeof(p) + p.widths.size() * sizeof(uint32_t) +
@@ -193,7 +255,8 @@ public:
         return {.plan       = fdmt.plan + plan_bytes,
                 .state      = fdmt.state,
                 .history    = fdmt.history + m_carry.size() * sizeof(float) +
-                              m_integer_carry.size() * sizeof(uint64_t),
+                              m_integer_carry.size() * sizeof(uint64_t) +
+                              m_integer_carry32.size() * sizeof(uint32_t),
                 .peaks      = m_peaks.size() * sizeof(BoxcarPeak),
                 .workspace  = fdmt.workspace +
                               (m_prefix.size() + m_integer_means.size() +
@@ -230,7 +293,7 @@ private:
             m_screen_levels = std::max<SizeType>(m_screen_levels, g.level);
         }
         // Packed rows keep their mean-centred running sums as level 0.
-        m_range_min.resize(m_threads * screen_slots() * (m_width + kTile + 1));
+        m_range_min.resize(m_threads * screen_slots() * (m_width + m_tile + 1));
         m_group_thresh.resize(m_threads * m_groups.size());
     }
 
@@ -363,7 +426,7 @@ private:
         }
     }
 
-    template <typename T>
+    template <typename T, typename C>
     void score(const plans::BoxcarPlanePlan& plane,
                SizeType row_idx,
                SizeType dm,
@@ -373,13 +436,16 @@ private:
         using Prefix =
             std::conditional_t<std::is_integral_v<T>, uint64_t, double>;
         Prefix* prefix;
-        T* carry;
+        C* carry;
         const SizeType index = beam * m_rows.size() + row_idx;
-        if constexpr (std::is_integral_v<T>) {
-            prefix = m_integer_prefix.data() + tid * (m_width + kTile + 1);
+        if constexpr (std::is_same_v<C, uint32_t>) {
+            prefix = m_integer_prefix.data() + tid * (m_width + m_tile + 1);
+            carry  = m_integer_carry32.data() + index * m_width;
+        } else if constexpr (std::is_integral_v<T>) {
+            prefix = m_integer_prefix.data() + tid * (m_width + m_tile + 1);
             carry  = m_integer_carry.data() + index * m_width;
         } else {
-            prefix = m_prefix.data() + tid * (m_width + kTile + 1);
+            prefix = m_prefix.data() + tid * (m_width + m_tile + 1);
             carry  = m_carry.data() + index * m_width;
         }
         auto* peaks          = m_peaks.data() + index * m_peak_count;
@@ -398,13 +464,22 @@ private:
         // prefix[lookback + t + 1] the tile's running sums.
         const SizeType lookback = m_width - 1;
         {
+            // Ring slot of sample first - lookback, then advanced by one
+            // per entry (one 64-bit remainder per call, not per sample).
             const uint64_t first = input.sample_begin;
             prefix[0]            = 0;
-            for (SizeType j = 0; j < lookback; ++j) {
-                const SizeType back = lookback - j;
-                const T x =
-                    first >= back ? carry[(first - back) % m_width] : T{0};
-                prefix[j + 1] = prefix[j] + x;
+            const SizeType cold =
+                first >= lookback ? 0 : lookback - static_cast<SizeType>(first);
+            for (SizeType j = 0; j < cold; ++j) {
+                prefix[j + 1] = prefix[j];
+            }
+            if (cold < lookback) {
+                SizeType slot = static_cast<SizeType>(
+                    (first - (lookback - cold)) % m_width);
+                for (SizeType j = cold; j < lookback; ++j) {
+                    prefix[j + 1] = prefix[j] + carry[slot];
+                    slot          = slot + 1 == m_width ? 0 : slot + 1;
+                }
             }
         }
         // Open runs force the bookkeeping until they close.
@@ -421,7 +496,7 @@ private:
         if (!m_groups.empty()) {
             group_thresh = m_group_thresh.data() + tid * m_groups.size();
             range_min    = m_range_min.data() +
-                           tid * screen_slots() * (m_width + kTile + 1);
+                           tid * screen_slots() * (m_width + m_tile + 1);
             for (SizeType g = 0; g < m_groups.size(); ++g) {
                 if constexpr (std::is_integral_v<T>) {
                     // Mean-centred cutoffs: integer cutoff minus the
@@ -446,8 +521,8 @@ private:
                 }
             }
         }
-        for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
-            const SizeType n     = std::min(kTile, input.nsamps - t0);
+        for (SizeType t0 = 0; t0 < input.nsamps; t0 += m_tile) {
+            const SizeType n     = std::min(m_tile, input.nsamps - t0);
             const uint64_t start = input.sample_begin + t0;
             prefix_tile<T>(input, row, beam, root, ring0, t0, n,
                            prefix + lookback);
@@ -514,8 +589,14 @@ private:
         }
         // Carry the last max_width - 1 samples (at most) to the next call.
         const SizeType keep = std::min(input.nsamps, lookback);
-        for (SizeType t = input.nsamps - keep; t < input.nsamps; ++t) {
-            carry[(input.sample_begin + t) % m_width] = sample_at(t);
+        if (keep > 0) {
+            const SizeType t_first = input.nsamps - keep;
+            SizeType slot =
+                static_cast<SizeType>((input.sample_begin + t_first) % m_width);
+            for (SizeType t = t_first; t < input.nsamps; ++t) {
+                carry[slot] = static_cast<C>(sample_at(t));
+                slot        = slot + 1 == m_width ? 0 : slot + 1;
+            }
         }
     }
 
@@ -538,7 +619,7 @@ private:
                      const double* group_thresh,
                      double* range_min) const {
         const SizeType len    = lookback + n + 1; // prefix entries
-        const SizeType stride = m_width + kTile + 1;
+        const SizeType stride = m_width + m_tile + 1;
         for (SizeType k = 1; k <= m_screen_levels; ++k) {
             const SizeType half = SizeType{1} << (k - 1);
             if (half >= len) {
@@ -631,7 +712,7 @@ private:
                          const double* group_thresh,
                          double* range_min) const {
         const SizeType len    = lookback + n + 1;
-        const SizeType stride = m_width + kTile + 1;
+        const SizeType stride = m_width + m_tile + 1;
         // m1 from the first boxcar width (widths 1 and 2 are never
         // trapezoids); a killed row has mean 0 and infinite cutoffs.
         const double m1 = plane.integer_mean_lut[dm * m_filters] /
@@ -728,8 +809,8 @@ private:
                     BoxcarPeak* peaks,
                     SizeType row_idx) {
         const SizeType tid    = static_cast<SizeType>(omp_get_thread_num());
-        float* best           = m_best.data() + tid * kTile;
-        uint32_t* best_filter = m_best_filter.data() + tid * kTile;
+        float* best           = m_best.data() + tid * m_tile;
+        uint32_t* best_filter = m_best_filter.data() + tid * m_tile;
         const auto emit_peak  = [&](const BoxcarPeak& peak) {
             emit(row_idx, beam, peak);
         };
@@ -818,16 +899,22 @@ private:
     SizeType m_beams;
     int m_threads;
     SizeType m_width;
+    SizeType m_tile;
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
     std::vector<SizeType> m_offsets;
+    /// Row range [first, second) of each level's planes, and each row's plane.
+    std::vector<std::pair<SizeType, SizeType>> m_level_rows;
+    std::vector<uint32_t> m_row_plane;
     std::vector<float> m_carry;
     std::vector<BoxcarPeak> m_peaks;
     std::vector<uint64_t> m_per_dm;
     std::vector<RawCandidate> m_candidates;
     std::vector<double> m_prefix;
     std::vector<uint64_t> m_integer_prefix, m_integer_carry;
+    std::vector<uint32_t> m_integer_carry32;
+    bool m_carry32{false};
     std::vector<double> m_integer_means, m_integer_scales;
     double m_integer_unit = 1;
     std::vector<float> m_best;

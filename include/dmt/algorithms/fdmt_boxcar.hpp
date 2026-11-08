@@ -51,16 +51,28 @@ struct FDMTBoxcarMemoryUsage {
  * operations on one stream, or synchronize explicitly when changing streams.
  * GPU reset_history() is also ordered asynchronously on its supplied stream.
  * An instance is not safe for concurrent calls. CPU device calls throw.
+ *
+ * Memory: max_memory_bytes (default kFDMTDefaultMaxMemory, 10 GiB) bounds
+ * everything the instance allocates (get_memory_usage().total()). The
+ * boxcar carry, peaks and candidate buffers are fixed by the plan and
+ * config; the FDMT takes its fastest path within the rest (see FDMT).
+ * Construction throws std::invalid_argument when nothing fits. On the
+ * skewed-window path (plans whose tree history exceeds the budget) the rows
+ * of a subband search are searched with a fixed per-row latency of up to
+ * the dispersion delay from the subband to the bottom of the band (that of
+ * the full-band search); flush() adds no samples, so the last such
+ * samples of each subband row are searched only if the stream continues.
  */
 class FDMTBoxcar {
 public:
     explicit FDMTBoxcar(plans::FDMTPlan plan,
-                        BoxcarConfig config   = {},
-                        bool use_box_smearing = true,
-                        Exec exec             = {},
-                        SizeType nbeams       = 1,
-                        SizeType fuse_levels  = kFDMTAutoFuse,
-                        SizeType chunk_nsamps = 0);
+                        BoxcarConfig config       = {},
+                        bool use_box_smearing     = true,
+                        Exec exec                 = {},
+                        SizeType nbeams           = 1,
+                        SizeType fuse_levels      = kFDMTAutoFuse,
+                        SizeType chunk_nsamps     = 0,
+                        SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
     ~FDMTBoxcar();
     FDMTBoxcar(FDMTBoxcar&&) noexcept;
     FDMTBoxcar& operator=(FDMTBoxcar&&) noexcept;

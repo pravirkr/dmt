@@ -6,8 +6,6 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
-### Added
-
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
   depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
   boundaries between that depth's `2**k` tree subbands. Each costs one extra
@@ -44,6 +42,31 @@ All notable changes to `dmt` are listed here. The format follows
   band edges from a SIGPROC header and the flip to ascending channel order.
   The getting-started guides and README document the channel order.
 - `dmtlib.dispersion_delay` broadcasts over array frequencies.
+- **Memory budget.** `FDMT` and `FDMTBoxcar` take `max_memory_bytes`
+  (default `kFDMTDefaultMaxMemory`, 10 GiB; Python keyword-only), a bound on
+  everything the instance allocates. Within it the fastest streaming path
+  is taken; a plan whose tree history does not fit runs the skewed-window
+  path at the longest automatic chunk that fits; construction raises
+  `std::invalid_argument` (`ValueError`) when nothing fits.
+- **Skewed-window streaming FDMT** (`lib/dmt/fdmt_skew.hpp`, CUDA skewed
+  direct levels): wide bands at fine time resolution (Parkes UWL, 6656
+  channels at 64 µs to DM 2000) stream without their 10–14 GB tree history.
+  FDMT output and FDMTBoxcar candidates are bit-identical to the tree path
+  (float32 within rounding), and `save_history()`/`load_history()` save the
+  skewed engines' own, much smaller state.
+- **Subband search on the skewed path** (`subband_depth > 0`, CPU and GPU):
+  every searched row is computed from the full band's windows at a fixed
+  per-row lag, with the tree path's candidates and S/N. On `parkes_uwl` at
+  depth 4 FDMTBoxcar drops from 17.4 GB to 6.4 GB on the CPU and from 15 GB
+  to 9.9 GB on the GPU, within the default budget at every depth to 5 on
+  8-bit input.
+- Benchmark preset `cryopaf` is renamed `cryopaf_low`; `meerkat_lband` is
+  the default preset; `parkes_uwl` searches at subband depth 4. Results
+  live in `bench/results/<config>/<machine>/` for every preset
+  (`bench/results/cfdmt/` for CohFDMT), and the suite no longer measures
+  unplotted points (integer-delay FDMT-FFT, brute-force DDMT-FFT, host-array
+  GPU rows). `dmt_bench` and `dmt_bench_mem` keep only developer
+  microbenchmarks.
 
 ## [0.7.0] - 2026-11-03
 

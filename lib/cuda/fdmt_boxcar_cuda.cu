@@ -15,6 +15,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
+#include "dmt/fdmt_int_tree.hpp"
 #include "dmt/fdmt_variance.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
@@ -512,7 +513,7 @@ DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
 
 // kScreen: tiles are screened by width group (detect_tile_grouped*); a
 // separate instantiation, so the plain kernel keeps its register budget.
-template <typename T, int kBlockThreads, bool kScreen>
+template <typename T, int kBlockThreads, bool kScreen, typename C = T>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -524,7 +525,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        SizeType max_width,
                        const float* thresholds,
                        const float* inv_sigma,
-                       T* carry_all,
+                       C* carry_all,
                        BoxcarPeak* peaks_all,
                        uint8_t* open_all,
                        SizeType peak_count,
@@ -549,6 +550,15 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        const float* screen_m1,
                        SizeType screen_offset) {
     constexpr int kBlockTile = kBlockThreads * kItems;
+    // Lagged rows (skewed-window subband search): this row's own samples.
+    if (input.row_lag != nullptr) {
+        FDMTSearchInput lagged;
+        if (!lagged_row_input(input, rows[row_base + blockIdx.x % ndm].row,
+                              lagged)) {
+            return;
+        }
+        input = lagged;
+    }
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
     T* ring      = reinterpret_cast<T*>(storage + sizeof(shared));
@@ -558,7 +568,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     const SizeType row_index = row_base + d;
     const SizeType index     = beam * total_rows + row_index;
     const BoxcarRow row      = rows[row_index];
-    T* carry                 = carry_all + index * max_width;
+    C* carry                 = carry_all + index * max_width;
     BoxcarPeak* peaks        = peaks_all + index * peak_count;
     RawCandidate prototype   = row.candidate;
     prototype.beam_idx       = static_cast<uint32_t>(beam);
@@ -806,7 +816,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         uint32_t slot         = keep0 + static_cast<uint32_t>(t);
         slot -= slot >= width32 ? width32 : 0U;
         if constexpr (std::is_integral_v<T>) {
-            carry[slot] = boxcar_integer_sample(input, row, beam, sample, root);
+            carry[slot] = static_cast<C>(
+                boxcar_integer_sample(input, row, beam, sample, root));
         } else {
             carry[slot] = boxcar_sample(input, row, beam, sample, root);
         }
@@ -968,7 +979,14 @@ public:
             m_carry_d.resize(tasks * m_width, 0);
             configure_shared<float>();
         } else {
-            m_integer_carry.resize(tasks * m_width, 0);
+            // uint32_t whenever every tree value fits (int_search_fits_u32),
+            // as the FDMT engines' own state: half the carry's bytes.
+            if (int_search_fits_u32(plan, cfg.use_box_smearing,
+                                    config.input_nbits)) {
+                m_integer_carry32.resize(tasks * m_width, 0);
+            } else {
+                m_integer_carry.resize(tasks * m_width, 0);
+            }
             configure_shared<uint64_t>();
         }
         std::vector<double> means;
@@ -1111,6 +1129,11 @@ public:
                 raw(m_integer_carry), 0,
                 m_integer_carry.size() * sizeof(uint64_t), stream));
         }
+        if (!m_integer_carry32.empty()) {
+            gpu_utils::check_gpu_call(cudaMemsetAsync(
+                raw(m_integer_carry32), 0,
+                m_integer_carry32.size() * sizeof(uint32_t), stream));
+        }
         m_position = 0;
         begin_result(0, queue);
         m_work.mark(stream);
@@ -1128,8 +1151,13 @@ public:
             if (m_config.input_nbits == 32) {
                 launch_score<float>(input, g, grid, block, raw(m_carry_d));
             } else {
-                launch_score<uint64_t>(input, g, grid, block,
-                                       raw(m_integer_carry));
+                if (!m_integer_carry32.empty()) {
+                    launch_score<uint64_t, uint32_t>(input, g, grid, block,
+                                                     raw(m_integer_carry32));
+                } else {
+                    launch_score<uint64_t>(input, g, grid, block,
+                                           raw(m_integer_carry));
+                }
             }
             gpu_utils::check_last_gpu_error("FDMTBoxcar scoring failed");
         }
@@ -1160,7 +1188,8 @@ public:
                     (m_thresholds_d.size() + m_scales_d.size()) * sizeof(float),
             .state   = fdmt.state,
             .history = fdmt.history + m_carry_d.size() * sizeof(float) +
-                       m_integer_carry.size() * sizeof(uint64_t),
+                       m_integer_carry.size() * sizeof(uint64_t) +
+                       m_integer_carry32.size() * sizeof(uint32_t),
             .peaks   = m_peaks_d.size() * sizeof(BoxcarPeak) + m_open_d.size(),
             .workspace = fdmt.workspace + m_per_dm_d.size() * sizeof(uint64_t) +
                          sizeof(CandidateCounts) + sizeof(uint64_t),
@@ -1184,29 +1213,29 @@ private:
         SizeType row_count;
     };
 
-    template <typename T, int kBlockThreads>
+    template <typename T, int kBlockThreads, typename C>
     void launch_score_block(const FDMTSearchInput& input,
                             const LevelGroup& g,
                             dim3 grid,
                             dim3 block,
-                            T* carry) {
+                            C* carry) {
         if (m_screen_groups_d.empty()) {
-            launch_score_kernel<T, kBlockThreads, false>(input, g, grid, block,
-                                                         carry);
+            launch_score_kernel<T, kBlockThreads, false, C>(input, g, grid,
+                                                            block, carry);
         } else {
-            launch_score_kernel<T, kBlockThreads, true>(input, g, grid, block,
-                                                        carry);
+            launch_score_kernel<T, kBlockThreads, true, C>(input, g, grid,
+                                                           block, carry);
         }
     }
 
-    template <typename T, int kBlockThreads, bool kScreen>
+    template <typename T, int kBlockThreads, bool kScreen, typename C>
     void launch_score_kernel(const FDMTSearchInput& input,
                              const LevelGroup& g,
                              dim3 grid,
                              dim3 block,
-                             T* carry) {
+                             C* carry) {
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
-        kernel_fdmt_boxcar<T, kBlockThreads, kScreen>
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, C>
             <<<grid, block, m_smem, stream>>>(
                 input, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
@@ -1223,18 +1252,18 @@ private:
                 m_screen_offset);
     }
 
-    template <typename T>
+    template <typename T, typename C = T>
     void launch_score(const FDMTSearchInput& input,
                       const LevelGroup& g,
                       dim3 grid,
                       dim3 block,
-                      T* carry) {
+                      C* carry) {
         if (m_block_threads == 64) {
-            launch_score_block<T, 64>(input, g, grid, block, carry);
+            launch_score_block<T, 64, C>(input, g, grid, block, carry);
         } else if (m_block_threads == 128) {
-            launch_score_block<T, 128>(input, g, grid, block, carry);
+            launch_score_block<T, 128, C>(input, g, grid, block, carry);
         } else {
-            launch_score_block<T, 256>(input, g, grid, block, carry);
+            launch_score_block<T, 256, C>(input, g, grid, block, carry);
         }
     }
 
@@ -1268,6 +1297,15 @@ private:
             configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false>);
         } else {
             configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true>);
+        }
+        if constexpr (std::is_integral_v<T>) {
+            if (m_screen_groups_d.empty()) {
+                configure_kernel(
+                    kernel_fdmt_boxcar<T, kBlockThreads, false, uint32_t>);
+            } else {
+                configure_kernel(
+                    kernel_fdmt_boxcar<T, kBlockThreads, true, uint32_t>);
+            }
         }
     }
 
@@ -1364,6 +1402,7 @@ private:
     thrust::device_vector<float> m_thresholds_d, m_scales_d, m_carry_d,
         m_input_d;
     thrust::device_vector<uint64_t> m_integer_carry, m_integer_thresholds;
+    thrust::device_vector<uint32_t> m_integer_carry32;
     thrust::device_vector<double> m_integer_means;
     thrust::device_vector<uint8_t> m_packed_input;
     double m_integer_unit = 1;

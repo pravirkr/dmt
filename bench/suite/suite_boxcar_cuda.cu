@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,7 +17,6 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/algorithms/fdmt_fft_boxcar.hpp"
-#include "dmt/common/logging.hpp"
 
 #include "dmt/boxcar.hpp"
 #include "dmt/gpu_compat.cuh"
@@ -24,16 +24,20 @@
 #include "bench_gpu_utils.cuh"
 #include "suite/suite_common.hpp"
 
-// Streaming FDMTBoxcar on the GPU at the reference point of the selected
-// suite configuration (DMT_BENCH_CONFIG), device-resident unless noted:
+// GPU half of the boxcar suite (run_suite.py --suite boxcar): streaming
+// FDMTBoxcar at the reference point of the selected configuration
+// (DMT_BENCH_CONFIG), device-resident:
 // - transform: FDMT alone, writing the DM-time plane (the floor to beat);
 // - separate: FDMT to the plane, then the boxcar scorer over the
 //   materialised root (full band only);
-// - fused: FDMTBoxcar, float32 or uint8 input, device or host API;
+// - fused: FDMTBoxcar, float32 or uint8 input, at subband depth 0 and the
+//   preset's depth;
 // - fft_transform / fft_fused: FDMT-FFT (fractional delays) to the plane,
 //   and FDMTFFTBoxcar searching its segments.
 // Widths follow the 100 ms rule, max_boxcar = floor(0.1 s / tsamp), at two
 // spacings per configuration. Input is Gaussian noise at threshold 6.
+// parkes_uwl adds the real-time sweep (BM_fdmt_boxcar_rt, suite_common.hpp):
+// depth 4 at 64, 256, 512 and 1024 us on 2.097 s blocks.
 namespace dmt::bench_suite {
 namespace {
 
@@ -98,7 +102,7 @@ make_packed(const thrust::device_vector<float>& x) {
 
 BoxcarConfig make_config(float wtsp, bool packed) {
     return BoxcarConfig(max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
-                        PeakFindingMode::kContiguousPeakPerWidth, 1U << 20U, 0,
+                        PeakFindingMode::kContiguousPeakPerWidth, 131072, 0,
                         true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
 }
 
@@ -255,65 +259,86 @@ void bench_fft_fused(benchmark::State& state, float wtsp) {
     state.counters["candidates_per_block"] = static_cast<double>(emitted);
 }
 
-enum class Api { kDevice, kHost };
+/// A warmed FDMTBoxcar, its device noise input and a stream, built once per
+/// benchmark point (cached_context) instead of once per repetition.
+struct GpuContext {
+    std::unique_ptr<FDMTBoxcar> search;
+    thrust::device_vector<float> wf;
+    thrust::device_vector<uint8_t> wf8;
+    cudaStream_t stream{};
+    std::string error;
+    GpuContext()                             = default;
+    GpuContext(const GpuContext&)            = delete;
+    GpuContext& operator=(const GpuContext&) = delete;
+    ~GpuContext() {
+        if (stream != nullptr) {
+            cudaStreamDestroy(stream);
+        }
+    }
+    void run() {
+        if (!wf8.empty()) {
+            (void)search->execute(dspan_c(wf8), Stream{stream});
+        } else {
+            (void)search->execute(dspan_c(wf), Stream{stream});
+        }
+    }
+};
+
+std::shared_ptr<GpuContext> gpu_context(const std::string& key,
+                                        plans::FDMTPlan plan,
+                                        const BoxcarConfig& config) {
+    return cached_context<GpuContext>(key, [&] {
+        auto ctx             = std::make_shared<GpuContext>();
+        const SizeType n     = plan.get_nchans() * plan.get_nsamps();
+        const SizeType block = plan.get_nsamps();
+        try {
+            ctx->search = std::make_unique<FDMTBoxcar>(
+                std::move(plan), config, true, bench_gpu_exec(), 1,
+                algorithms::kFDMTAutoFuse, bench_chunk());
+        } catch (const std::exception& e) {
+            ctx->error = e.what();
+            return ctx;
+        }
+        ctx->wf = make_noise(n);
+        if (config.input_nbits != 32) {
+            ctx->wf8 = make_packed(ctx->wf);
+            ctx->wf  = thrust::device_vector<float>{};
+        }
+        BENCH_GPU_TRY(
+            cudaStreamCreateWithFlags(&ctx->stream, cudaStreamNonBlocking));
+        for (uint64_t filled = 0;
+             filled < warmup_samples(ctx->search->get_search_plans());
+             filled += block) {
+            ctx->run();
+        }
+        BENCH_GPU_TRY(cudaStreamSynchronize(ctx->stream));
+        return ctx;
+    });
+}
 
 void bench_fused(benchmark::State& state,
                  float wtsp,
                  SizeType subband_depth,
-                 bool packed,
-                 Api api) {
+                 bool packed) {
     auto plan         = make_plan(ref_point(), subband_depth);
     const auto config = make_config(wtsp, packed);
-    FDMTBoxcar search(std::move(plan), config, true, bench_gpu_exec(), 1,
-                      algorithms::kFDMTAutoFuse, bench_chunk());
-    const auto wf = make_noise(kNchans * kNsampsRef);
-    const auto wf8 =
-        packed ? make_packed(wf) : thrust::device_vector<uint8_t>{};
-    std::vector<float> host_wf;
-    std::vector<uint8_t> host_wf8;
-    if (api == Api::kHost) {
-        if (packed) {
-            host_wf8.resize(wf8.size());
-            thrust::copy(wf8.begin(), wf8.end(), host_wf8.begin());
-        } else {
-            host_wf.resize(wf.size());
-            thrust::copy(wf.begin(), wf.end(), host_wf.begin());
-        }
+    auto ctx =
+        gpu_context(fmt::format("fused/{}/{}/{}", wtsp, subband_depth, packed),
+                    std::move(plan), config);
+    if (!ctx->error.empty()) {
+        state.SkipWithError(ctx->error);
+        return;
     }
-    cudaStream_t stream{};
-    BENCH_GPU_TRY(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-    SizeType emitted = 0;
-    const auto run   = [&] {
-        if (api == Api::kHost) {
-            const auto r =
-                packed ? search.execute(std::span<const uint8_t>(host_wf8))
-                       : search.execute(std::span<const float>(host_wf));
-            emitted = r.emitted_count;
-        } else if (packed) {
-            (void)search.execute(dspan_c(wf8), Stream{stream});
-        } else {
-            (void)search.execute(dspan_c(wf), Stream{stream});
-        }
-    };
-    for (uint64_t filled = 0;
-         filled < warmup_samples(search.get_search_plans());
-         filled += kNsampsRef) {
-        run();
-    }
-    BENCH_GPU_TRY(cudaStreamSynchronize(stream));
+    auto& search = *ctx->search;
     for (auto _ : state) {
-        const GPUEventTimer timer{state, api == Api::kHost ? nullptr : stream};
-        run();
+        const GPUEventTimer timer{state, ctx->stream};
+        ctx->run();
     }
-    if (api == Api::kDevice) {
-        emitted = search.copy_result(Stream{stream}).emitted_count;
-    }
-    BENCH_GPU_TRY(cudaStreamDestroy(stream));
+    const SizeType emitted =
+        search.copy_result(Stream{ctx->stream}).emitted_count;
     const auto mem = search.get_memory_usage();
     const SizeType input_bytes =
-        api == Api::kHost
-            ? (packed ? host_wf8.size() : host_wf.size() * sizeof(float))
-            : (packed ? wf8.size() : wf.size() * sizeof(float));
+        packed ? ctx->wf8.size() : ctx->wf.size() * sizeof(float);
     common_counters(state, search.get_plan(), mem.total() + input_bytes,
                     search.get_search_plans().front().widths.size());
     state.counters["input_nbits"]   = packed ? 8 : 32;
@@ -323,6 +348,56 @@ void bench_fused(benchmark::State& state,
     state.counters["fuse_levels"] =
         static_cast<double>(search.get_fuse_levels());
     state.counters["candidates_per_block"] = static_cast<double>(emitted);
+}
+
+/// One real-time sweep point (suite_common.hpp rt_points()): FDMTBoxcar
+/// at depth 4, device-resident, default memory budget.
+void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
+    auto plan = make_rt_plan(p);
+    const BoxcarConfig config(rt_max_boxcar(p), kRtWtsp, 6.0F,
+                              packed ? 12.0F : 1.0F,
+                              PeakFindingMode::kContiguousPeakPerWidth, 131072,
+                              0, true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
+    auto ctx =
+        gpu_context(rt_name(DMT_GPU_NAME, p, packed), std::move(plan), config);
+    if (!ctx->error.empty()) {
+        state.SkipWithError(ctx->error);
+        return;
+    }
+    auto& search    = *ctx->search;
+    const auto& wf  = ctx->wf;
+    const auto& wf8 = ctx->wf8;
+    for (auto _ : state) {
+        const GPUEventTimer timer{state, ctx->stream};
+        ctx->run();
+    }
+    const auto mem    = search.get_memory_usage();
+    const auto& rplan = search.get_plan();
+    state.counters["realtime_factor"] =
+        benchmark::Counter(static_cast<double>(p.nsamps) * p.tsamp,
+                           benchmark::Counter::kIsIterationInvariantRate);
+    state.counters["working_bytes"] = static_cast<double>(
+        mem.total() + (packed ? wf8.size() : wf.size() * sizeof(float)));
+    state.counters["engine_bytes"]  = static_cast<double>(mem.total());
+    state.counters["tsamp"]         = p.tsamp;
+    state.counters["nsamps"]        = static_cast<double>(p.nsamps);
+    state.counters["block_s"]       = static_cast<double>(p.nsamps) * p.tsamp;
+    state.counters["ndms"]          = static_cast<double>(rplan.get_dmt_ndms());
+    state.counters["dt_max"]        = static_cast<double>(rplan.get_dt_max());
+    state.counters["subband_depth"] = static_cast<double>(kRtSubbandDepth);
+    state.counters["max_boxcar"]    = static_cast<double>(rt_max_boxcar(p));
+    state.counters["nwidths"] =
+        static_cast<double>(search.get_search_plans().front().widths.size());
+    state.counters["input_nbits"] = packed ? 8 : 32;
+    state.counters["chunk_nsamps"] =
+        static_cast<double>(search.get_chunk_nsamps());
+    SizeType rows = 0;
+    for (const auto& plane : search.get_search_plans()) {
+        rows += plane.dm_grid.size();
+    }
+    state.counters["search_rows"] = static_cast<double>(rows);
+    state.SetItemsProcessed(state.iterations() *
+                            static_cast<int64_t>(kNchans * p.nsamps));
 }
 
 [[maybe_unused]] const bool kRegistered = [] {
@@ -367,19 +442,24 @@ void bench_fused(benchmark::State& state,
             reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}", cfg,
                             wtsp, sb),
                 [wtsp, sb](benchmark::State& s) {
-                    bench_fused(s, wtsp, sb, false, Api::kDevice);
+                    bench_fused(s, wtsp, sb, false);
                 });
             reg(fmt::format(
                     "BM_fdmt_boxcar_cuda/{}/fused_uint8/wtsp:{:g}/sb:{}", cfg,
                     wtsp, sb),
                 [wtsp, sb](benchmark::State& s) {
-                    bench_fused(s, wtsp, sb, true, Api::kDevice);
+                    bench_fused(s, wtsp, sb, true);
                 });
-            reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused_host/wtsp:{:g}/sb:{}",
-                            cfg, wtsp, sb),
-                [wtsp, sb](benchmark::State& s) {
-                    bench_fused(s, wtsp, sb, false, Api::kHost);
-                });
+        }
+    }
+    if (rt_sweep_enabled()) {
+        for (const auto& p : rt_points()) {
+            for (const bool packed : {true, false}) {
+                reg(rt_name(DMT_GPU_NAME, p, packed),
+                    [p, packed](benchmark::State& s) {
+                        bench_rt(s, p, packed);
+                    });
+            }
         }
     }
     return true;

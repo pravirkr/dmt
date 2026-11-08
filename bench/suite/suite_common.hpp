@@ -3,7 +3,7 @@
 // Published benchmark suite (dmt_bench_suite): one data configuration shared
 // by every algorithm and backend, so FDMT, FDMT-FFT (integer and fractional
 // merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force) land on the
-// same plots. DMT_BENCH_CONFIG selects cryopaf (512 channels),
+// same plots. DMT_BENCH_CONFIG selects cryopaf_low (512 channels),
 // cryopaf_lband (1152 channels), parkes_uwl (6656 channels) or
 // meerkat_lband (4096 channels). Only block
 // length, DM range and input bit width are swept. See bench/README.md.
@@ -12,9 +12,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -29,14 +31,16 @@ namespace dmt::bench_suite {
 // all on the piecewise-uniform Levin grid
 // from DM 0 (every engine gets the same grid; the FDMT engines round it to
 // integer delays, and DDMT-FFT runs one NUFFT per uniform segment):
-// - "cryopaf" (default): 512 channels over 704-1216 MHz at 512 us,
+// - "cryopaf_low": 512 channels over 704-1216 MHz at 512 us,
 //   DM 0-2000, tolerance 1.1.
 // - "cryopaf_lband": 1152 channels over 1100-1714 MHz at 455.6 us,
 //   DM 0-2000, tolerance 1.1, with one search subband level.
-// - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us,
+// - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us, searched at
+//   subband depth 4,
 //   DM 0-2000, tolerance 1.6 (4749 trials; 1.1 would need 12941). The
 //   dispersion sweep spans multiple blocks.
-// - "meerkat_lband": 4096 channels over 856-1712 MHz at 612.48 us (the
+// - "meerkat_lband" (default): 4096 channels over 856-1712 MHz at 612.48 us
+// (the
 //   MeerTRAP / TRAPUM filterbank mode, downsampled by two in time),
 //   DM 0-2000, tolerance 1.1: 12 tree levels on a 4057-trial grid, uniform
 //   at 3.28 delay samples to DM 1836 and 6.56 beyond, 101x fewer
@@ -63,16 +67,16 @@ struct SuiteConfig {
 inline const SuiteConfig& suite_config() {
     static const SuiteConfig cfg = [] {
         // Reference blocks retain 32768 samples for all presets.
-        SuiteConfig cryopaf{"cryopaf",
-                            704.0F,
-                            1216.0F,
-                            5.12e-4F,
-                            512,
-                            1.1F,
-                            32768,
-                            2000.0F,
-                            {8192, 16384, 32768, 65536},
-                            {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
+        SuiteConfig cryopaf_low{"cryopaf_low",
+                                704.0F,
+                                1216.0F,
+                                5.12e-4F,
+                                512,
+                                1.1F,
+                                32768,
+                                2000.0F,
+                                {8192, 16384, 32768, 65536},
+                                {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
         // DM 2000 sweeps 4.03365 s (8853.49 samples); the covering
         // Levin grid ends at DM 2005.36 (8877 rounded delay samples).
         // The 32768-sample reference block spans 14.9291 seconds.
@@ -87,6 +91,8 @@ inline const SuiteConfig& suite_config() {
                                   {8192, 16384, 32768, 65536},
                                   {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F},
                                   1};
+        // The UWL search: FDMTBoxcar at subband depth 4 (16 subbands and
+        // their staggered neighbours down to the full band).
         SuiteConfig parkes_uwl{"parkes_uwl",
                                704.0F,
                                4032.0F,
@@ -96,7 +102,8 @@ inline const SuiteConfig& suite_config() {
                                32768,
                                2000.0F,
                                {8192, 16384, 32768, 65536},
-                               {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
+                               {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F},
+                               4};
         // DM 2000 sweeps 8.49428 s (13868.67 samples); the covering Levin
         // grid ends at DM 2001.10. The 32768-sample reference block spans
         // 20.06974 seconds.
@@ -112,9 +119,9 @@ inline const SuiteConfig& suite_config() {
                                   {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
         const char* env = std::getenv("DMT_BENCH_CONFIG"); // NOLINT
         const std::string_view sel =
-            (env != nullptr && *env != '\0') ? env : "cryopaf";
-        if (sel == "cryopaf") {
-            return cryopaf;
+            (env != nullptr && *env != '\0') ? env : "meerkat_lband";
+        if (sel == "cryopaf_low") {
+            return cryopaf_low;
         }
         if (sel == "parkes_uwl") {
             return parkes_uwl;
@@ -125,10 +132,10 @@ inline const SuiteConfig& suite_config() {
         if (sel == "meerkat_lband") {
             return meerkat_lband;
         }
-        throw std::invalid_argument(
-            fmt::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband, "
-                        "parkes_uwl or meerkat_lband",
-                        sel));
+        throw std::invalid_argument(fmt::format(
+            "DMT_BENCH_CONFIG={}: expected cryopaf_low, cryopaf_lband, "
+            "parkes_uwl or meerkat_lband",
+            sel));
     }();
     return cfg;
 }
@@ -412,6 +419,72 @@ inline SizeType packed_bytes(SizeType nsamps, SizeType nbits) {
 /// spacing at coarse sampling; 1.5x and 2x for UWL's 64 us).
 inline SizeType max_boxcar_100ms() {
     return static_cast<SizeType>(std::floor(0.1 / kTsamp));
+}
+
+/// parkes_uwl real-time sweep (BM_fdmt_boxcar_rt): FDMTBoxcar at subband
+/// depth 4 on the preset's band, DM 0-2000 (its Levin tolerance), at the
+/// native 64 us and downsampled to 256, 512 and 1024 us. Blocks span the
+/// same 2.097 s at every resolution; boxcars run to 100 ms, wtsp 1.5.
+struct RtPoint {
+    float tsamp;
+    SizeType nsamps;
+};
+
+inline std::vector<RtPoint> rt_points() {
+    std::vector<RtPoint> pts;
+    for (const SizeType down : {1, 4, 8, 16}) {
+        pts.push_back({kTsamp * static_cast<float>(down), kNsampsRef / down});
+    }
+    return pts;
+}
+
+inline constexpr SizeType kRtSubbandDepth = 4;
+inline constexpr float kRtWtsp            = 1.5F;
+
+inline plans::FDMTPlan make_rt_plan(const RtPoint& p) {
+    const auto grid = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, kDmMaxRef, p.tsamp, p.tsamp, kFMin, kFMax, kNchans, kLevinTol);
+    return {kFMin,   kFMax, kNchans, p.nsamps,
+            p.tsamp, grid,  "valid", kRtSubbandDepth};
+}
+
+inline SizeType rt_max_boxcar(const RtPoint& p) {
+    return static_cast<SizeType>(std::floor(0.1 / p.tsamp));
+}
+
+inline std::string
+rt_name(std::string_view backend, const RtPoint& p, bool packed) {
+    return fmt::format("BM_fdmt_boxcar_rt/{}/tsamp_us:{}/{}/sb:{}/{}",
+                       suite_config().name,
+                       static_cast<int>(std::lround(p.tsamp * 1e6)),
+                       packed ? "uint8" : "float32", kRtSubbandDepth, backend);
+}
+
+inline bool rt_sweep_enabled() { return suite_config().name == "parkes_uwl"; }
+
+/// One benchmark point's warmed state, kept across its repetitions (Google
+/// Benchmark calls the function once per repetition): the context for `key`
+/// is built (and warmed) once, and the previous point's is released first,
+/// so at most one point's memory is held.
+struct ContextSlot {
+    std::string key;
+    std::shared_ptr<void> ctx;
+};
+inline ContextSlot& context_slot() {
+    static ContextSlot slot;
+    return slot;
+}
+
+template <typename T, typename Make>
+std::shared_ptr<T> cached_context(const std::string& key, Make&& make) {
+    auto& [slot_key, slot] = context_slot();
+    if (slot_key != key || !slot) {
+        slot.reset();
+        slot_key.clear();
+        slot     = std::forward<Make>(make)();
+        slot_key = key;
+    }
+    return std::static_pointer_cast<T>(slot);
 }
 
 inline std::vector<float> wtsp_sweep() {

@@ -55,6 +55,17 @@ struct FDMTSubbandDeviceView {
 inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
 
 /**
+ * Default memory budget of FDMT and FDMTBoxcar (10 GiB): everything the
+ * instance allocates (FDMTMemoryUsage::total(), FDMTBoxcarMemoryUsage::
+ * total()), not the caller's input and output buffers. Within the budget
+ * the fastest streaming path is taken; a plan whose tree history does not
+ * fit (e.g. 6656 channels at 64 us to DM 2000) takes the skewed-window
+ * path with the longest automatic chunk that fits. Construction throws
+ * std::invalid_argument when no path fits.
+ */
+inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
+
+/**
  * @brief Memory an FDMT engine allocates at construction, in bytes (host
  * memory on the CPU backend, device memory on a GPU backend). execute()
  * allocates nothing further; the caller provides the input and the `output`
@@ -207,6 +218,13 @@ public:
      * (GPU: the longest power of two >= 256 whose state fits the device L2,
      * when one does; see get_chunk_nsamps()); other values are rounded up to
      * a multiple of 64. The stepper (reset()/advance()) needs chunk >= nsamps.
+     * @param max_memory_bytes Budget for everything the instance allocates
+     * (get_memory_usage().total(); default kFDMTDefaultMaxMemory, 10 GiB).
+     * The fastest streaming path that fits is taken. A valid-mode plan whose
+     * tree history does not fit (e.g. 6656 channels at 64 us to DM 2000)
+     * runs the skewed-window path instead, with the longest automatic chunk
+     * that fits (slower on the CPU, faster on the GPU). Throws
+     * std::invalid_argument when no path fits.
      *
      * All working memory is allocated here (see get_memory_usage()); execute()
      * performs no allocation.
@@ -217,15 +235,16 @@ public:
          SizeType nsamps,
          float tsamp,
          IndexType dt_max,
-         IndexType dt_min      = 0,
-         SizeType dt_step      = 1,
-         bool use_box_smearing = true,
-         std::string_view mode = "valid",
-         Exec exec             = {},
-         SizeType nbeams       = 1,
-         SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true,
-         SizeType chunk_nsamps = 0);
+         IndexType dt_min          = 0,
+         SizeType dt_step          = 1,
+         bool use_box_smearing     = true,
+         std::string_view mode     = "valid",
+         Exec exec                 = {},
+         SizeType nbeams           = 1,
+         SizeType fuse_levels      = kFDMTAutoFuse,
+         bool int_tree             = true,
+         SizeType chunk_nsamps     = 0,
+         SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     /**
      * @brief Constructs an FDMT instance with a custom delay trial grid.
@@ -233,8 +252,8 @@ public:
      * @param dt_grid Explicit list of delay trials in samples (e.g. from
      * generate_optimal_dt_grid).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
-     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps See the first
-     * constructor.
+     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps, max_memory_bytes See
+     * the first constructor.
      */
     FDMT(float f_min,
          float f_max,
@@ -242,13 +261,14 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<IndexType>& dt_grid,
-         bool use_box_smearing = true,
-         std::string_view mode = "valid",
-         Exec exec             = {},
-         SizeType nbeams       = 1,
-         SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true,
-         SizeType chunk_nsamps = 0);
+         bool use_box_smearing     = true,
+         std::string_view mode     = "valid",
+         Exec exec                 = {},
+         SizeType nbeams           = 1,
+         SizeType fuse_levels      = kFDMTAutoFuse,
+         bool int_tree             = true,
+         SizeType chunk_nsamps     = 0,
+         SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     /**
      * @brief Constructs an FDMT instance with a custom physical DM trial
@@ -257,8 +277,8 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
      * non-uniform spacing and negative DMs).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
-     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps See the first
-     * constructor.
+     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps, max_memory_bytes See
+     * the first constructor.
      */
     FDMT(float f_min,
          float f_max,
@@ -266,13 +286,14 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<float>& dm_grid,
-         bool use_box_smearing = true,
-         std::string_view mode = "valid",
-         Exec exec             = {},
-         SizeType nbeams       = 1,
-         SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true,
-         SizeType chunk_nsamps = 0);
+         bool use_box_smearing     = true,
+         std::string_view mode     = "valid",
+         Exec exec                 = {},
+         SizeType nbeams           = 1,
+         SizeType fuse_levels      = kFDMTAutoFuse,
+         bool int_tree             = true,
+         SizeType chunk_nsamps     = 0,
+         SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     /**
      * @brief Constructs an FDMT instance from a prepared plan, e.g. one with
@@ -281,15 +302,16 @@ public:
      *
      * @param plan The plan, copied into the instance.
      * @param use_box_smearing, exec, nbeams, fuse_levels, int_tree,
-     * chunk_nsamps See the first constructor.
+     * chunk_nsamps, max_memory_bytes See the first constructor.
      */
     explicit FDMT(plans::FDMTPlan plan,
-                  bool use_box_smearing = true,
-                  Exec exec             = {},
-                  SizeType nbeams       = 1,
-                  SizeType fuse_levels  = kFDMTAutoFuse,
-                  bool int_tree         = true,
-                  SizeType chunk_nsamps = 0);
+                  bool use_box_smearing     = true,
+                  Exec exec                 = {},
+                  SizeType nbeams           = 1,
+                  SizeType fuse_levels      = kFDMTAutoFuse,
+                  bool int_tree             = true,
+                  SizeType chunk_nsamps     = 0,
+                  SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     ~FDMT();
     FDMT(FDMT&&) noexcept;

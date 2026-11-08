@@ -137,21 +137,31 @@ void bind_fdmt_boxcar(py::module_& mod) {
         the same width centred on their boundaries. Candidates carry
         ``subband_level`` (the depth), ``subband_idx``, the channel extent
         and ``staggered``.
+
+        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds everything
+        the instance allocates (:attr:`memory_usage`). Plans whose FDMT tree
+        history does not fit (UWL-like bands at high time resolution) run the
+        skewed-window path; their subband rows are then searched with a fixed
+        per-row latency of up to the dispersion delay to the bottom of the
+        band, so the final such samples of a stream are searched only if it
+        continues. Raises ``ValueError`` when nothing fits.
         )doc")
-        .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
-                         int nthreads, SizeType nbeams,
-                         std::optional<SizeType> fuse,
-                         std::optional<SizeType> chunk,
-                         std::string_view backend, int device) {
-                 return FDMTBoxcar(std::move(plan), config, smear,
-                                   make_exec(backend, nthreads, device), nbeams,
-                                   fuse.value_or(algorithms::kFDMTAutoFuse),
-                                   chunk.value_or(0));
-             }),
+        .def(py::init(
+                 [](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
+                    int nthreads, SizeType nbeams, std::optional<SizeType> fuse,
+                    std::optional<SizeType> chunk, std::string_view backend,
+                    int device, SizeType max_memory_bytes) {
+                     return FDMTBoxcar(std::move(plan), config, smear,
+                                       make_exec(backend, nthreads, device),
+                                       nbeams,
+                                       fuse.value_or(algorithms::kFDMTAutoFuse),
+                                       chunk.value_or(0), max_memory_bytes);
+                 }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
              "chunk_nsamps"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-             "device"_a = 0)
+             "device"_a           = 0,
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
         .def(
             "execute",
             [](FDMTBoxcar& search, const py::array& input) {

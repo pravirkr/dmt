@@ -6,8 +6,8 @@ sub-sample phase) at exactly that DM, runs FDMT, FDMT-FFT, DDMT, SDMT and
 DDMT-FFT (plus FDMT without box smearing) with that single trial on identical
 data, and writes
 
-    bench/results/sensitivity/cryopaf.npz   (arrays)
-    bench/results/sensitivity/cryopaf.json  (metadata)
+    bench/results/sensitivity/cryopaf_low.npz   (arrays)
+    bench/results/sensitivity/cryopaf_low.json  (metadata)
 
 for ``dmtlib.sensitivity.CRYOPAF`` (512 channels over 704-1216 MHz at
 512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband``,
@@ -95,9 +95,9 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument(
         "--config",
-        default="cryopaf",
+        default="cryopaf_low",
         choices=sorted(sens.CONFIGS),
-        help="search configuration (default cryopaf, the published one)",
+        help="search configuration (default cryopaf_low, the published one)",
     )
     ap.add_argument("--nthreads", type=int, default=8)
     ap.add_argument("--out", type=Path, default=REPO / "bench/results/sensitivity")

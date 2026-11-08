@@ -48,7 +48,7 @@ TIMES = "\N{MULTIPLICATION SIGN}"
 # Suite configurations (bench/suite/suite_common.hpp). main() installs the
 # selected geometry and trial-grid reference in the module constants below.
 CONFIGS: dict[str, dict[str, Any]] = {
-    "cryopaf": {
+    "cryopaf_low": {
         "F_MIN": 704.0,
         "F_MAX": 1216.0,
         "TSAMP": 5.12e-4,
@@ -89,22 +89,24 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
     },
 }
-F_MIN, F_MAX, TSAMP = 704.0, 1216.0, 5.12e-4
+F_MIN: float = CONFIGS["meerkat_lband"]["F_MIN"]
+F_MAX: float = CONFIGS["meerkat_lband"]["F_MAX"]
+TSAMP: float = CONFIGS["meerkat_lband"]["TSAMP"]
 NSAMPS_REF = 32768
 NSAMPS_TICKS = [8192, 16384, 32768, 65536]
-NCHANS: int = CONFIGS["cryopaf"]["NCHANS"]
-LEVIN_TOL: float = CONFIGS["cryopaf"]["LEVIN_TOL"]
-DM_MAX_REF: float = CONFIGS["cryopaf"]["DM_MAX_REF"]
-NDMS_REF: int = CONFIGS["cryopaf"]["NDMS_REF"]
-DM_MAX_SWEEP: list[float] = CONFIGS["cryopaf"]["DM_MAX_SWEEP"]
+NCHANS: int = CONFIGS["meerkat_lband"]["NCHANS"]
+LEVIN_TOL: float = CONFIGS["meerkat_lband"]["LEVIN_TOL"]
+DM_MAX_REF: float = CONFIGS["meerkat_lband"]["DM_MAX_REF"]
+NDMS_REF: int = CONFIGS["meerkat_lband"]["NDMS_REF"]
+DM_MAX_SWEEP: list[float] = CONFIGS["meerkat_lband"]["DM_MAX_SWEEP"]
 NBITS = [1, 2, 4, 8, 16, 32]
 NBITS_LABELS = [f"{b}-bit" if b < 32 else "float32" for b in NBITS]
 
 Theme = dict[str, Any]
 # The five engines compared. FDMT-FFT and DDMT-FFT are the Fourier-domain
-# engines with fractional delays (their point); the suite's integer-delay
-# FDMT-FFT (a verification mode, bit-for-bit comparable with FDMT) and the
-# brute-force DDMT-FFT are measured but not drawn (see SUITE_ALGOS).
+# engines with fractional delays (their point). Older result files may hold
+# the integer-delay FDMT-FFT and brute-force DDMT-FFT, which are not drawn
+# (see SUITE_ALGOS); the suite no longer measures them.
 ALGOS = ["FDMT", "FDMT-FFT", "DDMT", "SDMT", "DDMT-FFT"]
 # Suite benchmark name -> plotted engine (None: not plotted).
 SUITE_ALGOS: dict[str, str | None] = {
@@ -943,20 +945,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Plot the dmt benchmark suite.")
     ap.add_argument(
         "--config",
-        default="cryopaf",
-        choices=sorted(CONFIGS),
-        help="suite configuration (default cryopaf); other presets read and write "
-        "under bench/results/<config>/ unless --results is given",
+        default="meerkat_lband",
+        choices=sorted(c for c in CONFIGS if c != "parkes_uwl"),
+        help="suite configuration (default meerkat_lband); reads "
+        "bench/results/<config>/*/suite_*.json and writes "
+        "bench/results/<config>/plots/ unless --results is given",
     )
-    ap.add_argument(
-        "--results", help="results root (default: bench/results[/<config>])"
-    )
+    ap.add_argument("--results", help="results root (default: bench/results/<config>)")
     ap.add_argument("--no-ops", action="store_true", help="skip the dmtlib ops plot")
     args = ap.parse_args()
     globals().update(CONFIGS[args.config])
-    default = REPO / "bench" / "results"
-    if args.config != "cryopaf":
-        default /= args.config
+    default = REPO / "bench" / "results" / args.config
     results_dir = Path(args.results) if args.results else default
     try:
         results, machines = load(results_dir)

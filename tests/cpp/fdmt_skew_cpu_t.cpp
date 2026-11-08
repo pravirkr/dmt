@@ -17,6 +17,8 @@
 #include "dmt/boxcar.hpp"
 #include "dmt/fdmt_skew.hpp"
 
+#include "skew_subband_search.hpp"
+
 // Skewed-window streaming FDMT prototype (lib/dmt/fdmt_skew.hpp): on the
 // benchmark presets' geometry it must reproduce the streaming tree engine
 // bit for bit across consecutive blocks, for float input holding integers
@@ -45,13 +47,17 @@ const Preset kCryopafLband{"cryopaf_lband", 1100.0F, 1714.0F,
 const Preset kMeerkatLband{"meerkat_lband", 856.0F, 1712.0F,
                            612.48e-6F,      4096,   1.1F};
 const Preset kParkesUwl{"parkes_uwl", 704.0F, 4032.0F, 64e-6F, 6656, 1.6F};
-const Preset kCryopaf{"cryopaf", 704.0F, 1216.0F, 5.12e-4F, 512, 1.1F};
+const Preset kCryopaf{"cryopaf_low", 704.0F, 1216.0F, 5.12e-4F, 512, 1.1F};
 
-plans::FDMTPlan make_plan(const Preset& p, SizeType nsamps, float dm_max) {
+plans::FDMTPlan make_plan(const Preset& p,
+                          SizeType nsamps,
+                          float dm_max,
+                          SizeType subband_depth = 0) {
     const auto grid = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
         0.0F, dm_max, p.tsamp, p.tsamp, p.f_min, p.f_max, p.nchans,
         p.levin_tol);
-    return {p.f_min, p.f_max, p.nchans, nsamps, p.tsamp, grid, "valid"};
+    return {p.f_min, p.f_max, p.nchans, nsamps,
+            p.tsamp, grid,    "valid",  subband_depth};
 }
 
 // 8-bit filterbank values as floats, and the same values packed.
@@ -489,6 +495,43 @@ TEST_CASE("FDMT engine skewed path: wiring, history and input types",
             require_close(a, b);
         }
     }
+
+    SECTION("a packed-only skew engine rejects float input") {
+        // Ring widening (packed -> float) happens only on float-capable
+        // instances (nbits 32, as the engine builds them for transforms);
+        // an instance built for packed input refuses float blocks rather
+        // than widening its ring under 4-byte running-sum stripes.
+        FDMTSkewCpu skew(plan, true, 4, 1024, 4, 8);
+        const auto b0 = blk(50);
+        std::vector<float> a(plan.get_dmt_size());
+        skew.execute(std::span<const uint8_t>(b0.packed), 8, a);
+        REQUIRE_THROWS_AS(skew.execute(b0.values, a), std::invalid_argument);
+    }
+}
+
+TEST_CASE("FDMTBoxcar skewed path: subband search matches the tree",
+          "[fdmt_cpu][cpu][skew][boxcar]") {
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    for (const SizeType depth : {SizeType{1}, SizeType{3}, SizeType{5}}) {
+        const auto plan = make_plan(kCryopafLband, 4096, 600.0F, depth);
+        for (const bool packed : {false, true}) {
+            DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
+                constexpr SizeType kBlocks = 4;
+                const auto skew = run_subband_search(plan, Exec::cpu(4), true,
+                                                     packed, kBlocks);
+                const auto tree = run_subband_search(plan, Exec::cpu(4), false,
+                                                     packed, kBlocks);
+                REQUIRE_FALSE(skew.path.empty());
+                REQUIRE(tree.path.empty());
+                // Lags are at most the root's largest delay.
+                const uint64_t cutoff =
+                    (kBlocks * plan.get_nsamps()) -
+                    static_cast<uint64_t>(plan.get_dt_max()) - 64;
+                require_same_before(skew.candidates, tree.candidates, cutoff);
+            }
+        }
+    }
 }
 
 TEST_CASE("FDMT skewed-window: full presets", "[.skew_preset]") {
@@ -530,6 +573,86 @@ TEST_CASE("FDMT skewed-window: window statistics of the presets",
         print_estimate(*p, plan, 5, 4096, 1, 8);
         std::fflush(stdout);
     }
+}
+
+} // namespace dmt
+
+#ifdef DMT_ENABLE_GPU
+namespace dmt {
+
+// Subband search on the GPU windowed top (fdmt_cuda.cu
+// configure_windowed_top) against the CPU tree path. Host code, so the
+// Catch2 macros stay out of nvcc.
+TEST_CASE("FDMTBoxcar (gpu) windowed top: subband search matches CPU tree",
+          "[fdmt_cuda][cuda][gpu][skew][boxcar]") {
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    for (const SizeType depth : {SizeType{1}, SizeType{3}, SizeType{5}}) {
+        const auto plan = make_plan(kCryopafLband, 4096, 600.0F, depth);
+        for (const bool packed : {false, true}) {
+            DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
+                constexpr SizeType kBlocks = 4;
+                const auto gpu = run_subband_search(plan, Exec::cuda(0), true,
+                                                    packed, kBlocks);
+                const auto cpu = run_subband_search(plan, Exec::cpu(4), false,
+                                                    packed, kBlocks);
+                INFO("gpu path: " << gpu.path);
+                REQUIRE(gpu.path.find("windowed") != std::string::npos);
+                const uint64_t cutoff =
+                    (kBlocks * plan.get_nsamps()) -
+                    static_cast<uint64_t>(plan.get_dt_max()) - 64;
+                require_same_before(gpu.candidates, cpu.candidates, cutoff,
+                                    packed ? 0.0F : 2e-5F);
+            }
+        }
+    }
+}
+
+} // namespace dmt
+#endif
+
+namespace dmt {
+
+TEST_CASE("FDMT memory budget picks the path and rejects what cannot fit",
+          "[fdmt_cpu][cpu][skew][budget]") {
+    // DM 2000 on a 4096-sample block: the tree history is large next to
+    // the skewed engine's ring and windows.
+    const auto plan = make_plan(kCryopafLband, 16384, 2000.0F);
+    FDMT tree(plan, true, Exec::cpu(4));
+    REQUIRE(tree.get_memory_usage().total() > 0);
+    const SizeType tree_bytes = tree.get_memory_usage().total();
+    auto forced               = make_cpu_engine(plan, true, 1024);
+    const SizeType skew_bytes = forced->get_memory_usage().total();
+    INFO("tree " << tree_bytes << " B, skew (chunk 1024) " << skew_bytes
+                 << " B");
+    REQUIRE(skew_bytes < tree_bytes);
+
+    SECTION("a budget below the tree path takes the skewed path") {
+        const SizeType budget = (tree_bytes + skew_bytes) / 2;
+        FDMT fdmt(plan, true, Exec::cpu(4), 1, kFDMTAutoFuse, true, 0, budget);
+        CHECK(fdmt.get_memory_usage().total() <= budget);
+        CHECK(fdmt.get_chunk_nsamps() < plan.get_nsamps());
+        // Same output as the tree, bit for bit (integer-valued input).
+        const auto b = random_block(plan.get_nchans(), plan.get_nsamps(), 3);
+        REQUIRE_THAT(run_tree(fdmt, b, false),
+                     Catch::Matchers::Equals(run_tree(tree, b, false)));
+    }
+    SECTION("nothing fits: FDMT and FDMTBoxcar throw") {
+        REQUIRE_THROWS_AS(FDMT(plan, true, Exec::cpu(4), 1, kFDMTAutoFuse, true,
+                               0, SizeType{1} << 20),
+                          std::invalid_argument);
+        REQUIRE_THROWS_AS(algorithms::FDMTBoxcar(plan, BoxcarConfig(64), true,
+                                                 Exec::cpu(4), 1, kFDMTAutoFuse,
+                                                 0, SizeType{1} << 20),
+                          std::invalid_argument);
+    }
+#ifdef DMT_ENABLE_GPU
+    SECTION("GPU: nothing fits throws") {
+        REQUIRE_THROWS_AS(FDMT(plan, true, Exec::cuda(0), 1, kFDMTAutoFuse,
+                               true, 0, SizeType{1} << 20),
+                          std::invalid_argument);
+    }
+#endif
 }
 
 } // namespace dmt

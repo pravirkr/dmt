@@ -277,6 +277,40 @@ removes that cap. Global capacity is `max_candidates`. Counters satisfy
 Scanning and history updates continue after saturation. Parallel candidate
 order and the retained subset during overflow are unspecified.
 
+### Memory budget and wide bands
+
+`FDMTBoxcar(..., max_memory_bytes=...)` (default 10 GiB, `FDMT` takes the
+same argument) bounds everything the instance allocates
+(`get_memory_usage().total()`, not the caller's input or output). The
+boxcar's own buffers are fixed by the plan and config: each searched row
+keeps `max_boxcar` carried samples (float32, or uint32 for packed input
+when every tree value fits 32 bits) and its pending peaks. The FDMT takes
+the fastest path that fits in the rest:
+
+- **The tree path** when its streaming history fits: every preset except
+  `parkes_uwl`, which is unchanged.
+- **The skewed-window path** otherwise (a wide band at fine time
+  resolution with a long DM sweep: 6656 channels at 64 µs to DM 2000 keeps
+  10–14 GB of tree history). It keeps only the raw input of each channel's
+  own dispersion reach and recomputes the upper levels over short per-row
+  windows ([](skewed_window_fdmt.md)), at the longest automatic chunk
+  (4096 down to 256 samples) that fits; a longer chunk is faster.
+- Construction raises `ValueError` (`std::invalid_argument`) when nothing
+  fits.
+
+On the skewed path a subband search reads every searched row (tree,
+staggered, and delays the full-band grid does not use) from the full
+band's windows, each at a fixed **per-row lag**: at the call whose
+full-band samples are `[T, T + n)` a subband row is searched over
+`[T - lag, T - lag + n)`. The lag is about the dispersion delay from the
+subband down to the bottom of the band (zero for the lowest subbands, up to
+the full sweep for the top ones), i.e. a subband candidate is reported at
+about the time the full-band search would report the same burst.
+Candidates and S/N are the tree path's, bit for bit; only the call that
+returns a candidate moves. `flush()` adds no samples, so at the end of a
+stream the last `lag` samples of each subband row are searched only if the
+stream continues.
+
 The root merge is fused into scoring. Selected intermediate subbands are
 searched in their existing FDMT buffers before the next merge. FDMT state,
 sample histories, pending peaks, candidate buffers and bounded scoring
@@ -297,6 +331,9 @@ prefix difference and one comparison.
 
 - CPU: double prefixes (uint64 for packed input), slid from tile to tile;
   the carried samples are read once per call and written once at its end.
+  Tiles grow with the widest boxcar (1024 to 4096 samples, about four times
+  the lookback) so rebuilding the lookback per tile stays cheap, and every
+  row of a level's planes shares one dynamically scheduled loop.
 - GPU: one thread block per (beam, DM) row. The prefix of each 1024-sample
   tile is a warp-shuffle scan into a float32 ring in shared memory (a power of
   two of at least `max_boxcar + 1024` entries), rebased after every tile so
@@ -332,45 +369,54 @@ compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]
 ```
 :::
 
-Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The streaming benchmarks run
-at the reference point of a suite configuration (`DMT_BENCH_CONFIG`:
-`cryopaf`, `cryopaf_lband`, `parkes_uwl` or `meerkat_lband`) with widths up to 100 ms
-(`max_boxcar = floor(0.1 s / tsamp)`):
+Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The FDMTBoxcar benchmarks
+are the `boxcar` suite of `dmt_bench_suite`, at the reference point of each
+preset (`bench/README.md`) with widths up to 100 ms
+(`max_boxcar = floor(0.1 s / tsamp)`) and the default memory budget:
 
 ```bash
-# GPU: transform alone, transform + separate search, FDMTBoxcar (float32,
-# uint8, host arrays) and FDMT-FFT / FDMTFFTBoxcar
-DMT_BENCH_CONFIG=cryopaf build/bench/dmt_bench \
-  --benchmark_filter='^BM_fdmt_boxcar_cuda/'
-# CPU
-DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
-  --benchmark_filter='^BM_fdmt_boxcar_stream/'
+OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --suite boxcar \
+    --config meerkat_lband          # or cryopaf_lband, cryopaf_low, parkes_uwl
 ```
 
-On noise, with 32768-sample blocks and float32 input, no subband search
-(NVIDIA L40S, device-resident, median of 3 runs; AMD EPYC 9654, 8 threads
-pinned one per CCD with `OMP_PLACES='{0}:8:8'`, median of 3 runs):
+On noise, with 32768-sample blocks, float32 input, warmed histories (NVIDIA
+L40S, device-resident; AMD EPYC 9654, 8 threads one per CCD; median of 3):
 
 | preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `cryopaf` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.3 ms (195 widths) |
-| `cryopaf_lband` (1941 trials), GPU | 11.7 ms | 12.4 ms (13 widths) | 13.4 ms (219 widths) |
-| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.9 ms (12 widths) | 29.7 ms (163 widths) |
-| `parkes_uwl` (4749 trials), GPU | 353 ms | 355 ms (19 widths) | – |
-| `cryopaf`, CPU | 258 ms | 311 ms | 334 ms |
-| `cryopaf_lband`, CPU | 141 ms | 472 ms | 564 ms |
-| `meerkat_lband`, CPU | 368 ms | 510 ms | 553 ms |
+| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.7 ms (12 widths) | 29.6 ms (163 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 14.5 ms (13 widths) | 15.2 ms (219 widths) |
+| `cryopaf_lband`, subband depth 1, GPU | – | 19.3 ms | 22.0 ms |
+| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.2 ms (195 widths) |
+| `meerkat_lband`, CPU | 368 ms | 501 ms | 548 ms |
+| `cryopaf_lband`, subband depth 1, CPU | 141 ms | 468 ms | 542 ms |
+| `cryopaf_low`, CPU | 258 ms | 314 ms | 340 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
-dozen widths, so the search adds 1–15% (and on `parkes_uwl`, `fused_uint8`
-runs in 342 ms and 2.41 GB working memory, 6.1× real time). On the CPU the
-scorer is a separate pass over each chunk's root rows (1.2–4.0× the
-transform), still well faster than real time on 8 threads; on `parkes_uwl`
-with 8-bit input (`chunk = 1024`), `FDMTBoxcar` automatically uses the
-skewed-window engine in 2.72 GB working memory (9.22 s per block on 8
-threads). Thanks to the width screen, scoring every integer width up to 100 ms
-costs about the same as a dozen widths on both backends. `working_bytes` is
-the algorithm allocation estimate, not process RSS.
+dozen widths, so the full-band search adds 2–25%; a depth-1 subband search
+on `cryopaf_lband` adds a third more. On the CPU the scorer is a separate
+pass over each chunk's searched rows (1.2–3.3× the transform), still well
+faster than real time on 8 threads. Thanks to the width screen, scoring
+every integer width up to 100 ms costs about the same as a dozen widths on
+both backends. `working_bytes` in the results is the allocation plus the
+input block, not process RSS.
+
+The `parkes_uwl` search (6656 channels at 64 µs, 4749 trials, 2.1 s
+blocks, subband depth 4: 218k searched rows, wtsp 1.5) runs within the
+10 GiB budget on the skewed-window path:
+
+| backend | input | chunk | time per block | real-time factor | working memory |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| GPU | uint8 | 4096 | 1.27 s | 1.65× | 9.4 GiB |
+| GPU | float32 | 2048 | 1.82 s | 1.15× | 10.8 GiB (9.96 GiB allocated) |
+| CPU, 8 threads | uint8 | 4096 | 14.5 s | 0.14× | 6.2 GiB |
+| CPU, 8 threads | float32 | 2048 | 27.8 s | 0.08× | 9.3 GiB |
+
+The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.7 GiB).
+Searching at a coarser resolution is much cheaper: at 256 µs the GPU runs
+depth 4 at 36× real time and 8 CPU threads keep up (1.1–1.3×), and at
+512 µs the CPU is 6× faster than real time (the real-time sweep on the
+[Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 
 ## FDMTFFTBoxcar
 
@@ -412,6 +458,6 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
 
 ```{seealso}
 - [Noise calibration](noise_calibration.md): the exact per-trial sigma.
-- [Benchmarks: candidate search](../benchmarks.md#candidate-search).
+- [Benchmarks: Parkes UWL search](../benchmarks.md#parkes-uwl-search).
 - [Streaming and history](streaming_and_history.md).
 ```

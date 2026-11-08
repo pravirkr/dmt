@@ -1,9 +1,8 @@
 // GPU half of dmt_bench_suite (CUDA or HIP; backend names "cuda" / "hip");
 // see suite_common.hpp for the configuration.
 //
-// "cuda" benchmarks are device-resident (input and output already on the
-// GPU, timed with CUDA events). "cuda_host" benchmarks take host arrays, so
-// they include the PCIe transfers a streaming pipeline would pay.
+// Benchmarks are device-resident (input and output already on the GPU,
+// timed with CUDA events), the case a GPU pipeline runs in steady state.
 
 #include <cstdint>
 #include <new>
@@ -89,34 +88,6 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
         for (auto _ : state) {
             const GPUEventTimer timer{state};
             fdmt.execute(dspan_c(wf), p.nbits, dspan(dmt));
-        }
-    }
-    set_counters(state, plan, p, 0);
-}
-
-// Host arrays in and out: includes H2D of the (packed) input and D2H of the
-// result, as a pipeline without GPU-resident input would see.
-void bench_fdmt_cuda_host(benchmark::State& state, Point p) {
-    const auto plan = make_plan(p);
-    if (skip_if_over_device_budget(state, Algo::kFDMT, plan, p)) {
-        return;
-    }
-    FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
-              "valid", bench_gpu_exec());
-    std::vector<float> dmt(plan.get_dmt_size());
-    if (p.nbits == 32) {
-        const auto wf = make_float_input(kNchans * p.nsamps);
-        fdmt.execute(wf, dmt); // warm-up, also allocates the staging
-        for (auto _ : state) {
-            const GPUEventTimer timer{state};
-            fdmt.execute(wf, dmt);
-        }
-    } else {
-        const auto wf = make_packed_input(packed_bytes(p.nsamps, p.nbits));
-        fdmt.execute(std::span<const uint8_t>(wf), p.nbits, dmt);
-        for (auto _ : state) {
-            const GPUEventTimer timer{state};
-            fdmt.execute(std::span<const uint8_t>(wf), p.nbits, dmt);
         }
     }
     set_counters(state, plan, p, 0);
@@ -296,18 +267,10 @@ void register_cuda() {
     for (const auto sweep : {Sweep::kNsamps, Sweep::kNdms}) {
         for (const auto& p : sweep_points(sweep)) {
             add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
-            if (is_reference(p)) { // verification mode, not plotted
-                add(bench_name(Algo::kFDMTFFT, DMT_GPU_NAME, p),
-                    bench_fdmt_fft_cuda<false, false>, p);
-            }
             add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
                 bench_fdmt_fft_cuda<true, false>, p);
             add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
                 bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
-            if (is_reference(p)) { // exact reference, not plotted
-                add(bench_name(Algo::kDDMTFFTBrute, DMT_GPU_NAME, p),
-                    bench_ddmt_fft_cuda<DDMTFFTMethod::kBrute, false>, p);
-            }
             add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
                 bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
             add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
@@ -316,20 +279,14 @@ void register_cuda() {
     }
     for (const auto& p : sweep_points(Sweep::kNbits)) {
         add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
-        add(bench_name(Algo::kFDMT, DMT_GPU_NAME "_host", p),
-            bench_fdmt_cuda_host, p);
         add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
             bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
         add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
             bench_ddmt_cuda<SDMT, Algo::kSDMT>, p);
         add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
             bench_fdmt_fft_cuda<true, false>, p);
-        add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME "_host", p),
-            bench_fdmt_fft_cuda<true, true>, p);
         add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
             bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
-        add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME "_host", p),
-            bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, true>, p);
     }
 }
 

@@ -24,6 +24,7 @@ using algorithms::FDMT;
 using algorithms::FDMTFFT;
 using algorithms::FDMTMemoryUsage;
 using algorithms::kFDMTAutoFuse;
+using algorithms::kFDMTDefaultMaxMemory;
 using plans::FDMTPlan;
 
 namespace py = pybind11;
@@ -152,6 +153,13 @@ void bind_fdmt(py::module_& mod) {
             the longest power of two >= 256 whose state fits the device L2,
             when one does; see :attr:`chunk_nsamps`); other values are
             rounded up to a multiple of 64. The stepper needs ``chunk_nsamps >= nsamps``.
+        max_memory_bytes : int, optional
+            Keyword-only. Budget for everything the instance allocates
+            (:attr:`memory_usage`; default 10 GiB). The fastest streaming
+            path that fits is taken; a valid-mode plan whose tree history
+            does not fit (e.g. 6656 channels at 64 us to DM 2000) runs the
+            skewed-window path with the longest automatic chunk that fits.
+            Raises ``ValueError`` when nothing fits.
         backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``). See
             :func:`available_backends` for the backends in this build; any
@@ -182,19 +190,21 @@ void bind_fdmt(py::module_& mod) {
                          int nthreads, SizeType nbeams,
                          std::optional<SizeType> fuse_levels, bool int_tree,
                          std::string_view backend, int device,
-                         std::optional<SizeType> chunk_nsamps) {
+                         std::optional<SizeType> chunk_nsamps,
+                         SizeType max_memory_bytes) {
                  return FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                              dt_min, dt_step, use_box_smearing, mode,
                              make_exec(backend, nthreads, device), nbeams,
                              fuse_levels.value_or(kFDMTAutoFuse), int_tree,
-                             chunk_nsamps.value_or(0));
+                             chunk_nsamps.value_or(0), max_memory_bytes);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
              "use_box_smearing"_a = true, "mode"_a = "valid", "nthreads"_a = 1,
              "nbeams"_a = 1, "fuse_levels"_a = py::none(), "int_tree"_a = true,
              py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
-             "chunk_nsamps"_a = py::none())
+             "chunk_nsamps"_a     = py::none(),
+             "max_memory_bytes"_a = kFDMTDefaultMaxMemory)
         .def(
             py::init([](float f_min, float f_max, SizeType nchans,
                         SizeType nsamps, float tsamp, const py::object& dt_grid,
@@ -203,7 +213,8 @@ void bind_fdmt(py::module_& mod) {
                         std::string_view mode, int nthreads, SizeType nbeams,
                         std::optional<SizeType> fuse_levels, bool int_tree,
                         std::string_view backend, int device,
-                        std::optional<SizeType> chunk_nsamps) {
+                        std::optional<SizeType> chunk_nsamps,
+                        SizeType max_memory_bytes) {
                 const auto [type, obj] =
                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                 const auto fuse  = fuse_levels.value_or(kFDMTAutoFuse);
@@ -212,11 +223,12 @@ void bind_fdmt(py::module_& mod) {
                 if (type == CustomGridType::kDt) {
                     return FDMT(f_min, f_max, nchans, nsamps, tsamp,
                                 extract_dt_grid(obj), use_box_smearing, mode,
-                                exec, nbeams, fuse, int_tree, chunk);
+                                exec, nbeams, fuse, int_tree, chunk,
+                                max_memory_bytes);
                 }
                 return FDMT(f_min, f_max, nchans, nsamps, tsamp,
                             extract_dm_grid(obj), use_box_smearing, mode, exec,
-                            nbeams, fuse, int_tree, chunk);
+                            nbeams, fuse, int_tree, chunk, max_memory_bytes);
             }),
             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
@@ -226,21 +238,24 @@ void bind_fdmt(py::module_& mod) {
             py::arg("nthreads") = 1, py::arg("nbeams") = 1,
             py::arg("fuse_levels") = py::none(), py::arg("int_tree") = true,
             py::arg("backend") = "cpu", py::arg("device") = 0,
-            py::arg("chunk_nsamps") = py::none())
+            py::arg("chunk_nsamps")     = py::none(),
+            py::arg("max_memory_bytes") = kFDMTDefaultMaxMemory)
         .def(py::init([](const FDMTPlan& plan, bool use_box_smearing,
                          int nthreads, SizeType nbeams,
                          std::optional<SizeType> fuse_levels, bool int_tree,
                          std::string_view backend, int device,
-                         std::optional<SizeType> chunk_nsamps) {
+                         std::optional<SizeType> chunk_nsamps,
+                         SizeType max_memory_bytes) {
                  return FDMT(plan, use_box_smearing,
                              make_exec(backend, nthreads, device), nbeams,
                              fuse_levels.value_or(kFDMTAutoFuse), int_tree,
-                             chunk_nsamps.value_or(0));
+                             chunk_nsamps.value_or(0), max_memory_bytes);
              }),
              "plan"_a, py::kw_only(), "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
              "int_tree"_a = true, "backend"_a = "cpu", "device"_a = 0,
-             "chunk_nsamps"_a = py::none(),
+             "chunk_nsamps"_a     = py::none(),
+             "max_memory_bytes"_a = kFDMTDefaultMaxMemory,
              "Build from a prepared :class:`FDMTPlan` (its mode and, for "
              "``subband_depth > 0``, its staggered subbands, which the "
              "stepper's ``num_subbands``/``view_subband`` then include).")

@@ -3,11 +3,13 @@
 A valid-mode FDMT that keeps no per-merge tree history above level 4:
 `lib/dmt/fdmt_skew.hpp` (`FDMTSkewCpu`, `compute_skew_windows`,
 `estimate_skew_memory`), tested by `tests/cpp/fdmt_skew_cpu_t.cpp` and
-measured by `bench/fdmt_skew_cpu_b.cpp` and `bench/fdmt_skew_mem_b.cpp`.
-Both `FDMT` and `FDMTBoxcar` automatically select this path on the CPU (and
-its device counterpart in `lib/dmt/fdmt_direct.hpp` /
-`lib/cuda/fdmt_direct.cuh` on CUDA) when a plan's tree history exceeds 2 GiB
-(`parkes_uwl`).
+measured by `bench/fdmt_skew_cpu_b.cpp`, `bench/fdmt_skew_mem_b.cpp` and
+the `parkes_uwl` boxcar suite. Both `FDMT` and `FDMTBoxcar` automatically
+select this path on the CPU (and its device counterpart in
+`lib/dmt/fdmt_direct.hpp` / `lib/cuda/fdmt_direct.cuh` on CUDA) when the
+tree path does not fit the memory budget (`max_memory_bytes`, 10 GiB by
+default; `parkes_uwl`), and it supports the subband search
+(`subband_depth > 0`) as well as the full band.
 
 ## The problem
 
@@ -124,73 +126,131 @@ here, copies in and out of the rings) relative to the rows' chunk work:
 (at level 3: 1.0% / 1.9% / 8.4% at chunk 4096; at level 5: 0.3% / 0.6% /
 3.0%).
 
+## Subband search
+
+A subband search reads rows below the root: at depth $d$ every row of
+levels $\text{root} - d \dots \text{root} - 1$, tree and staggered, also
+the delays the full-band grid never reads. `compute_skew_windows(plan,
+level, d)` (`lib/dmt/fdmt_skew_windows.hpp`) gives each such row a window
+and a fixed **lag**: at the chunk whose root samples are $[T, T + n)$, the
+row is emitted for stream samples $[T - \text{lag}, T - \text{lag} + n)$,
+a slice of its own window $[T - s_{hi}, T + n - s_{lo})$.
+
+- A row the root already reads takes $\text{lag} = s_{lo}$: its window is
+  unchanged.
+- Any other row takes the lag that grows its children's windows least.
+  Its tail must be read at $[\text{lag}, \text{lag}]$ and its head at
+  $[\text{lag} + d, \text{lag} + d]$; where both fall inside the children's
+  existing windows, nothing grows. Ties go to the previous row of the same
+  subband, since adjacent delays have nearly equal lags. A staggered row's
+  two children are consistent in this sense whenever a DM exists that uses
+  both, so its lag fits them.
+
+The subband rows therefore ride on the full band's windows: on
+`parkes_uwl` the mean window spread at every level is within 1% of the
+full-band search's (level 3: 844 against 837 samples), and the state grows
+only by the extra rows. The lag of a row is about the dispersion delay from
+its subband down to the bottom of the band: zero for the lowest subbands,
+up to the whole 16 s sweep for the top ones. A subband candidate thus
+arrives at about the time the full-band search would report the same burst,
+with the tree path's sample indices, S/N and widths; only the call that
+returns it moves. `flush()` adds no samples, so at the end of a stream the
+last `lag` samples of each subband row are searched only if it continues.
+
+- **CPU:** `FDMTSkewCpu(..., search_depth)` keeps the fused levels below
+  the searched ones (`plan.max_fuse_levels`) and hands each searched level
+  to the sink right after its merge (`FDMTSearchInput::row_offset` /
+  `row_lag`).
+- **GPU (windowed top):** the skewed direct levels and the subband-batched
+  mid levels compute only level $k_{top}$'s $n$ newest samples (local
+  windows); each level-$k_{top}$ row carries the rest of its window,
+  $\text{spread}(r)$ samples, over from the previous chunk (88 MB on
+  `parkes_uwl`). Levels $k_{top} + 1 \dots \text{root}$ are merged over
+  their full windows in the state halves, with no history and no target
+  rings (which would need 13 GB at depth 4). The local windows of levels
+  3–6 are still wide (mean spread 753 samples at level 3 against a chunk of
+  1024), so the windowed top runs best at long chunks: 2.8 s per block at
+  chunk 1024, 1.7 s at 2048 and 1.25 s at 4096 on `parkes_uwl` uint8.
+
+Both are tested against the tree path (`tests/cpp/fdmt_skew_cpu_t.cpp`,
+`[skew][boxcar]`): identical candidates and S/N at depths 1, 3 and 5,
+float and packed, CPU and GPU.
+
+## Memory budget and chunk length
+
+`FDMT` and `FDMTBoxcar` take the tree path when it fits `max_memory_bytes`
+(10 GiB by default) and the skewed path otherwise, at the longest chunk
+that fits:
+
+- **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), trying
+  4096, 2048, 1024, 512 and 256 samples, with a tenth of headroom for the
+  merge tables; the allocation is then checked.
+- **GPU:** by building the engine (about 1 s) and measuring it. The
+  windowed top tries 4096 and 2048 first; any other path keeps its
+  automatic chunk and halves it while over budget.
+- **FDMTBoxcar** gives the FDMT the budget minus its own carry, peak,
+  candidate and threshold buffers, and halves an automatic chunk again if
+  the measured total is still over.
+
 ## Memory
 
-From `estimate_skew_memory` (`FDMTSkewCpu`, automatic `fuse_level = 8` on
-`parkes_uwl`), 8 threads, GiB = $2^{30}$ bytes (GB = $10^9$ bytes in
-parentheses). "raw ring" is the per-channel causal input ring (1 byte per
-sample for packed 8-bit input, 4 for float), "state + group scratch" the
-full-band ping-pong state above `fuse_level` plus the 8 threads' group
-scratch (`grp_a_`, `grp_b_`), "rings" the per-row causal window overlaps,
-and "plan" the compact leaf, row and merge tables.
+`parkes_uwl` (32768-sample blocks, DM 0–2000, 4749 trials), FDMTBoxcar with
+boxcars to 100 ms at wtsp 1.5, default budget; working memory is
+`get_memory_usage().total()` plus the input block (GiB = $2^{30}$ bytes):
 
-| preset, chunk, level | raw ring | state + group scratch | rings + stripes + plan | total (8-bit) | total (float) | tree state + history |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `cryopaf_lband`, 4096, 4 | 0.01 GB | 0.08 GB | 0.02 GB | 0.11 GB | 0.14 GB | 0.33 + 0.07 = 0.39 GB |
-| `meerkat_lband`, 4096, 4 | 0.04 GB | 0.14 GB | 0.04 GB | 0.22 GB | 0.36 GB | 0.59 + 0.26 = 0.85 GB |
-| `parkes_uwl`, 1024, 4 (F=8) | 1.01 GB | 0.11 GB | 0.88 GB | **1.87 GiB (2.00 GB)** | **5.91 GiB (6.35 GB)** | 2.13 + 10.14 = 12.3 GB |
-| `parkes_uwl`, 2048, 4 (F=8) | 1.02 GB | 0.19 GB | 0.88 GB | **2.36 GiB (2.53 GB)** | **6.41 GiB (6.88 GB)** | 4.23 + 10.14 = 14.4 GB |
-| `parkes_uwl`, 4096, 4 (F=8) | 1.03 GB | 0.34 GB | 0.89 GB | **3.34 GiB (3.58 GB)** | **7.41 GiB (7.95 GB)** | 8.54 + 10.14 = 18.7 GB |
+| search | backend | chunk | working memory | tree path |
+| :--- | :--- | ---: | ---: | ---: |
+| full band, uint8 | CPU, 8 threads | 4096 | 4.1 GiB | 12–16 GB |
+| full band, float32 | CPU, 8 threads | 4096 | 8.8 GiB | 12–16 GB |
+| depth 4, uint8 | CPU, 8 threads | 4096 | 6.2 GiB | 17.4 GB |
+| depth 4, float32 | CPU, 8 threads | 2048 | 9.3 GiB | 17.4 GB |
+| full band, uint8 | GPU | 1024 | 2.1 GiB | 9–15 GB |
+| full band, float32 | GPU | 1024 | 2.7 GiB | 9–15 GB |
+| depth 4, uint8 | GPU | 4096 | 9.4 GiB | 15.0 GB |
+| depth 4, float32 | GPU | 2048 | 10.8 GiB (9.96 allocated) | 14.0 GB |
+| depth 5, uint8 | GPU | 2048 | 8.1 GB engine | 16.3 GB |
 
-At level 4 with group fusion to level 8, the 10.1 GB UWL tree history
-becomes 0.73 GB of per-row rings and the 2.1–8.5 GB full-band chunk state
-becomes 0.11–0.34 GB (plus 8 threads' group scratch). **`parkes_uwl` fits
-well under 10 GB on both 8-bit and float32 input on CPU and GPU**:
-
-- **CPU (`dmt_bench_mem`, AMD EPYC 9654, 8 threads):**
-  - `parkes_uwl`, `chunk = 1024`, 8-bit: **1910.6 MiB (1.87 GiB)** engine, **3242 MiB** process peak RSS (`FDMTBoxcar` working memory: **2.72 GB**).
-  - `parkes_uwl`, `chunk = 4096`, 8-bit: **3418.8 MiB (3.34 GiB)** engine, **4750 MiB** process peak RSS.
-  - `parkes_uwl`, `chunk = 1024`, float32: **6051.9 MiB (5.91 GiB)** engine (`FDMTBoxcar` working memory: **7.70 GB**).
-- **GPU (`BM_fdmt_boxcar_cuda/parkes_uwl`, NVIDIA L40S):**
-  - FDMT engine allocation: **1883.9 MiB (1.84 GiB)** (down from 9.05 GB).
-  - Total working memory (including input/output/scorer): **2.41 GB** (`fused_uint8`), **3.08 GB** (`fused` float32), **3.51 GB** (`transform`).
+The largest parts are the raw input ring (each channel's dispersion reach
+plus a chunk: about 1 GB at 1 byte per sample, 4 GB for float input) and,
+for a subband search, the boxcar's carried samples (`max_boxcar` per row:
+218k rows at depth 4, 1.4 GB in float or uint32).
 
 ## Throughput
 
-Measured on `parkes_uwl` (32 768-sample blocks = 2.10 s of data, DM 0–2000,
-4749 trials, steady-state streaming after warm-up):
+`parkes_uwl`, FDMTBoxcar, steady-state streaming after warm-up (AMD EPYC
+9654 with 8 threads one per CCD; NVIDIA L40S, device-resident), from the
+boxcar suite (`bench/results/parkes_uwl/plots/summary.md`):
 
-- **NVIDIA L40S (`BM_fdmt_boxcar_cuda/parkes_uwl`):**
-  - `transform` (float32): **352.9 ms** (**5.94×** real time, 3.51 GB)
-  - `fused` (`FDMTBoxcar`, float32, wtsp 1.5): **355.3 ms** (**5.90×** real time, 3.08 GB)
-  - `fused_uint8` (`FDMTBoxcar`, 8-bit, wtsp 1.5): **342.4 ms** (**6.12×** real time, 2.41 GB)
-- **AMD EPYC 9654, 8 threads (`OMP_PLACES='{0}:8:8'`):**
-  - `bm_skew/packed8_level4`, `chunk = 4096`: **5.86 s** (engine 3.34 GiB, peak RSS 4.64 GiB)
-  - `bm_skew/packed8_level4`, `chunk = 1024`: **10.33 s** (engine 1.87 GiB, peak RSS 3.17 GiB)
-  - `BM_fdmt_boxcar_stream/parkes_uwl/uint8/wtsp:1.5/cpu8`, `chunk = 1024`: **9.22 s** (working memory 2.72 GB)
+| search | GPU | CPU, 8 threads |
+| :--- | ---: | ---: |
+| full band, uint8 | 0.36 s per block (5.8× real time) | 4.55 s (0.46×) |
+| full band, float32 | 0.36 s (5.8×) | 13.5 s (0.15×) |
+| depth 4, uint8 | 1.27 s (1.65×) | 14.5 s (0.14×) |
+| depth 4, float32 | 1.82 s (1.15×) | 27.8 s (0.08×) |
+
+The GPU searches depth 4 at the native 64 µs faster than real time within
+10 GiB; the CPU does not, but keeps up from 256 µs (the real-time sweep on
+the [Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 
 ## Scope and current limits
 
-- **Automatic selection (CPU):** `FDMT` and `FDMTBoxcar` use the
-  skewed-window engine when the level-0 plus tree history would exceed
-  2 GiB, in `"valid"` mode, with one beam, no subband search
-  (`subband_depth == 0`), fusion not disabled (`fuse_levels != 0`) and a
-  chunk shorter than the block (such plans default to `chunk_nsamps = 1024`).
-  Otherwise, for example with `nbeams > 1`, the engine silently keeps the
-  tree and allocates its full history.
-- **Automatic selection (GPU):** the skewed direct levels and target-ring
-  direct top replace the unskewed direct top when the latter's rings exceed
-  2 GiB at every candidate level (`"valid"` mode, automatic fusion).
+- **Automatic selection:** valid mode, one beam, automatic fusion (CPU:
+  `fuse_levels != 0`), and for a subband search a depth that leaves the
+  leaf and fused levels below the searched ones (CPU: `niters >= depth +
+  5`; GPU: `niters >= depth + 5` with the direct levels at 3). Otherwise
+  the tree path is taken, and construction throws if it does not fit the
+  budget (for example `nbeams > 1` on `parkes_uwl`).
 - **Stepper:** `reset()` / `advance()` need whole-block chunks, so they are
   not available on the skewed path.
 - **History serialization:** `save_history()` / `load_history()` work on both
   backends. The saved state is the skewed engine's own: the raw input ring,
-  the level-F (CPU) or target (GPU) rings and the stream position. That is
-  far smaller than the tree history it replaces, and a shared engine resumes
-  on the fast path at once. A buffer is accepted only by an engine with the
-  same skewed layout: the same plan and `chunk_nsamps`, and on the CPU the
-  same thread count, which can change the fusion level. Anything else raises
-  `invalid_argument`, as does a tree-format buffer.
+  the level-F (CPU), target or carried level-$k_{top}$ (GPU) rings and the
+  stream position. That is far smaller than the tree history it replaces,
+  and a shared engine resumes on the fast path at once. A buffer is accepted
+  only by an engine with the same skewed layout: the same plan and
+  `chunk_nsamps`, and on the CPU the same thread count, which can change the
+  fusion level. Anything else raises `invalid_argument`, as does a
+  tree-format buffer.
 - **Switching input type mid-stream** (float and packed blocks on one engine)
   keeps the history. Rows that straddle the switch are recomputed from the
   raw samples with the new block's box-mean convention. The tree instead keeps

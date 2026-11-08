@@ -90,7 +90,7 @@ DRAM.
 
 ### Direct levels (CUDA, many delays per channel)
 
-When a band has many delays per channel (the `cryopaf` presets: 512 channels
+When a band has many delays per channel (the `cryopaf_low` presets: 512 channels
 with a 21.8k-sample sweep), every level holds ~10⁴–2×10⁴ rows, the tile
 fusion cannot get past depth 0–1, and each merge streams two whole levels
 through L2 and DRAM. There the automatic setting (valid mode, float input)
@@ -109,8 +109,8 @@ computes the ends of the tree directly instead:
   the tree above level 3, and fusion stops below the lowest level holding
   staggered subbands.
 - **Skewed windows and subband batching (ultra-wide plans).** When the tree
-  history exceeds 2 GiB (`parkes_uwl`: 6656 channels, $\Delta t_{\max} =
-  253\,891$), storing full-delay rings at level 4 or full tree histories at
+  history does not fit the memory budget (`max_memory_bytes`, 10 GiB by
+  default; `parkes_uwl`: 6656 channels, $\Delta t_{\max} = 253\,891$), storing full-delay rings at level 4 or full tree histories at
   intermediate levels would take ~9–20 GB. Instead, every row $r$ at levels
   $K \dots k_{\text{top}}$ is evaluated on its skewed window
   $[T - s_{\text{lo}}(r) - \text{spread}(r),\; T - s_{\text{lo}}(r) + \text{chunk})$
@@ -121,7 +121,13 @@ computes the ends of the tree directly instead:
   `DirectTopD` reads level $k_{\text{top}}$ at relative offset $d -
   s_{\text{lo}}(r) \le \text{spread}(r)$. On `parkes_uwl` this keeps the CUDA
   FDMT engine in 1.84 GiB (down from 9.05 GB) and runs a 32K block in 353 ms
-  on an L40S (~6× real time).
+  on an L40S (~6× real time). A subband search (`subband_depth > 0`) needs
+  the levels in between, so it takes the *windowed top* instead: level
+  $k_{\text{top}}$ keeps each row's carried spread, and the levels above it
+  are merged over their full windows with every searched row emitted at a
+  fixed lag (see [skewed-window FDMT](skewed_window_fdmt.md#subband-search)):
+  `parkes_uwl` at depth 4 runs in 9.9 GB (8-bit input, chunk 4096) instead
+  of the tree path's 15 GB.
 
 Integer-valued input gives the tree's values exactly. Float input agrees with
 the tree within rounding (a few 10⁻⁷ relative), so these engines are no longer
@@ -142,7 +148,7 @@ runs:
 
 | preset | tree (L2 chunks, `fuse_levels=0`) | + direct levels 0–3 | + direct top (default) |
 | :--- | ---: | ---: | ---: |
-| `cryopaf` | 37.9 ms | 24.4 ms | 21.8 ms |
+| `cryopaf_low` | 37.9 ms | 24.4 ms | 21.8 ms |
 | `cryopaf_lband` | 17.2 ms | 13.8 ms | 11.6 ms |
 | `meerkat_lband` | 46.5 ms | 39.8 ms | 25.9 ms |
 | `parkes_uwl` | – | – | 353 ms (1.84 GiB) |
@@ -209,7 +215,7 @@ The table and the budget above are for the whole-block fused path, which
 modes `"full"` and `"roll"` still use.
 
 **Valid mode: time-tiled fusion.** At high DM the fused groups no longer fit
-in cache. For the `cryopaf` preset (512 channels at 512 µs, DM 0–2000) the
+in cache. For the `cryopaf_low` preset (512 channels at 512 µs, DM 0–2000) the
 plan has about 40 rows per input channel at every level from 0 to 4, and a
 whole-chunk level of one 16-channel group is several MB. Mode `"valid"`
 therefore walks each group through the chunk in time tiles of 512 or 256
@@ -231,15 +237,19 @@ per-group working set is at most 1.75 MiB: two scratch tiles plus the rings,
 in float. It also requires at least two groups per thread. `summary()`
 reports the tile.
 
-**Valid mode on ultra-wide plans: skewed windows.** When the tree history
-exceeds 2 GiB (`parkes_uwl`, 10.1 GB of tree history), the CPU engine
-(`FDMT` and `FDMTBoxcar`, valid mode, `subband_depth=0`, `nbeams=1`,
-automatic fusion, 8-bit through float32 input) automatically switches to the
-[skewed-window engine](skewed_window_fdmt.md). It replaces the tree history
-with per-channel raw input rings and compact per-row causal rings, evaluates
-level 4 from per-subband running-sum stripes, and fuses levels 4–8 inside
-each 256-channel group before merging the upper levels, keeping `parkes_uwl`
-in 1.87 GiB on 8-bit input and 5.91 GiB on float32 at `chunk = 1024`.
+**Valid mode on ultra-wide plans: skewed windows.** When the tree path does
+not fit the memory budget (`max_memory_bytes`, 10 GiB by default;
+`parkes_uwl`, 10.1 GB of tree history), the CPU engine (`FDMT` and
+`FDMTBoxcar`, valid mode, `nbeams=1`, automatic fusion, any subband depth
+that leaves the fused levels below it, 8-bit through float32 input)
+automatically switches to the [skewed-window engine](skewed_window_fdmt.md).
+It replaces the tree history with per-channel raw input rings and compact
+per-row causal rings, evaluates level 4 from per-subband running-sum
+stripes, and fuses levels 4–8 inside each 256-channel group before merging
+the upper levels. It takes the longest chunk (4096 to 256) whose estimate
+fits the budget: on `parkes_uwl` 4096 for the full-band search (4.1 GB on
+8-bit input, 8.5 GB on float32) and for the depth-4 subband search on 8-bit
+input (6.4 GB), 2048 for depth 4 on float32 (9.1 GB).
 
 **Why the FDMT is memory-bound, and why the regime matters.**
 
@@ -254,7 +264,7 @@ in 1.87 GiB on 8-bit input and 5.91 GiB on float32 at `chunk = 1024`.
 
 | preset (DM 0–2000, piecewise Levin grid) | trials | FDMT rows per sample | brute force / FDMT operations |
 | :--- | ---: | ---: | ---: |
-| `cryopaf`: 512 channels, 704–1216 MHz, 512 µs, tolerance 1.1 | 1545 | 138k | 5.7× |
+| `cryopaf_low`: 512 channels, 704–1216 MHz, 512 µs, tolerance 1.1 | 1545 | 138k | 5.7× |
 | `cryopaf_lband`: 1152 channels, 1100–1714 MHz, 455.6 µs, tolerance 1.1 | 1941 | 88k | 25.5× |
 | `parkes_uwl`: 6656 channels, 704–4032 MHz, 64 µs, tolerance 1.6 | 4749 | 1864k | 17.0× |
 | `meerkat_lband`: 4096 channels, 856–1712 MHz, 612.48 µs, tolerance 1.1 | 4057 | 165k | 100.9× |
@@ -427,7 +437,7 @@ construct the engine with `int_tree=False`.
   allocates *all* working memory: the tree state (two levels of one chunk),
   the streaming history, and the per-thread fusion/unpack scratch (on CUDA:
   device state, history, the plan and the fused-kernel tables; ~70 ms for
-  `cryopaf` and ~150 ms for `meerkat_lband` on the L40S node). `execute()`
+  `cryopaf_low` and ~150 ms for `meerkat_lband` on the L40S node). `execute()`
   then allocates nothing (on the CPU a test enforces this), so a streaming
   pipeline constructs once and calls `execute()` block after block.
   `fdmt.memory_usage` (Python) / `get_memory_usage()` (C++) reports the
@@ -466,7 +476,7 @@ history traffic, a few per cent at a few thousand samples.
   `nsamps`. On a GPU the engine first tries the longest power of two ≥ 256
   whose state halves fit the device's L2 cache, so each merge reads the level
   below from L2 instead of DRAM; it falls back to the 2 GiB rule when even 256
-  samples do not fit. On the L40S (96 MiB L2) this picks 512 for `cryopaf`
+  samples do not fit. On the L40S (96 MiB L2) this picks 512 for `cryopaf_low`
   and 1024 for `cryopaf_lband`, 1.05× and 1.13× faster than the 2 GiB
   rule's 8192 and 16384 (21.8 against 22.9 ms, 11.6 against 13.2 ms; the
   gap was larger before the direct levels removed most tree merges). Read the value used with `fdmt.chunk_nsamps` (C++
@@ -480,7 +490,7 @@ history traffic, a few per cent at a few thousand samples.
   construct a stepping engine with `chunk_nsamps=nsamps`. See
   {ref}`stepper rules <stepper-rules>`.
 
-Engine memory for the `cryopaf` preset (512 channels, 704–1216 MHz, 512 µs,
+Engine memory for the `cryopaf_low` preset (512 channels, 704–1216 MHz, 512 µs,
 DM 0–2000 in 1545 trials) with 32 768-sample blocks (16.8 s), CPU with 8
 threads (`fdmt.memory_usage`); `bench/scripts/bench_chunking.py` adds the
 timings and peak RSS on your machine:

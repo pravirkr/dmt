@@ -43,7 +43,7 @@ What that means in practice:
   tree. Automatic GPU direct levels agree within float rounding. By default
   the chunk is the longest power of two ≥ 2048 whose state fits in 2 GiB,
   capped at `nsamps`, and shorter on a GPU when that keeps the state in L2.
-  For example, for the `cryopaf` preset (512 channels at 512 µs, DM 0–2000)
+  For example, for the `cryopaf_low` preset (512 channels at 512 µs, DM 0–2000)
   with 32 768-sample blocks, a whole-block tree state is 5.5 GiB; the
   automatic 8192-sample chunk needs 1.4 GiB and gives the same output.
 - **Finish a stepped block before starting the next.** Stopping early raises
@@ -155,7 +155,7 @@ That keeps extra state the saved format does not hold: a running-sum window
 per channel and a ring per level-4 row. After `load_history()` the engine
 runs the plain tree, with the same output, until that state has refilled.
 That takes up to the longest delay any trial applies to a level-4 row, about
-21 000 samples for `cryopaf`. An engine shared by many streams therefore
+21 000 samples for `cryopaf_low`. An engine shared by many streams therefore
 spends the start of each block on the slower path. Where that matters, give
 each stream its own engine. For beams processed together, `nbeams` is
 simpler (see [multi-beam batching](multibeam.md)).

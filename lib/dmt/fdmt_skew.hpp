@@ -32,6 +32,7 @@
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_direct.hpp"
 #include "dmt/fdmt_search.hpp"
+#include "dmt/fdmt_skew_windows.hpp"
 #include "dmt/fdmt_tree.hpp"
 
 // Skewed-window streaming FDMT (CPU prototype, mode "valid").
@@ -72,164 +73,6 @@
 
 namespace dmt::algorithms::detail {
 
-/// Unused row marker in FDMTSkewWindows (never read on the way to the root:
-/// staggered subbands, or pruned rows).
-inline constexpr SizeType kSkewUnused = std::numeric_limits<SizeType>::max();
-
-/// Per-row skewed windows of levels `level` .. root of a valid-mode plan.
-struct FDMTSkewWindows {
-    SizeType level{0}; ///< K
-    SizeType root{0};
-    /// s_lo[l][row], s_hi[l][row] for l in [level, root] (kSkewUnused rows
-    /// are never consumed).
-    std::vector<std::vector<SizeType>> s_lo;
-    std::vector<std::vector<SizeType>> s_hi;
-
-    [[nodiscard]] bool used(SizeType l, SizeType row) const noexcept {
-        return s_lo[l][row] != kSkewUnused;
-    }
-    [[nodiscard]] SizeType spread(SizeType l, SizeType row) const noexcept {
-        return used(l, row) ? s_hi[l][row] - s_lo[l][row] : 0;
-    }
-    /// Rows used, largest spread and summed spread of level l.
-    struct LevelStats {
-        SizeType rows{0};
-        SizeType used{0};
-        SizeType max_spread{0};
-        SizeType sum_spread{0};
-        SizeType max_s_hi{0};
-    };
-    [[nodiscard]] LevelStats stats(SizeType l) const noexcept {
-        LevelStats st;
-        st.rows = s_lo[l].size();
-        for (SizeType r = 0; r < st.rows; ++r) {
-            if (!used(l, r)) {
-                continue;
-            }
-            ++st.used;
-            st.max_spread = std::max(st.max_spread, spread(l, r));
-            st.sum_spread += spread(l, r);
-            st.max_s_hi = std::max(st.max_s_hi, s_hi[l][r]);
-        }
-        return st;
-    }
-};
-
-/**
- * @brief Top-down accumulation of the head delays from the root: every root
- * row has s_lo = s_hi = 0; a merge at level l with head delay d passes
- * [s_lo, s_hi] to its tail child and [s_lo + d, s_hi + d] to its head
- * child; a copy passes its own. The operands are the rows the merge
- * kernels read (tail_buf_offset / head_buf_offset), as fdmt_direct.hpp.
- */
-inline FDMTSkewWindows compute_skew_windows(const plans::FDMTPlan& plan,
-                                            SizeType level) {
-    const auto& pc  = plan.get_container();
-    const auto root = plan.get_niters();
-    if (level == 0 || level >= root) {
-        throw std::invalid_argument(fmt::format(
-            "FDMT skew: level {} out of range [1, {})", level, root));
-    }
-    FDMTSkewWindows w;
-    w.level = level;
-    w.root  = root;
-    w.s_lo.resize(root + 1);
-    w.s_hi.resize(root + 1);
-    for (SizeType l = level; l <= root; ++l) {
-        w.s_lo[l].assign(pc.state_shape[l].ncoords, kSkewUnused);
-        w.s_hi[l].assign(pc.state_shape[l].ncoords, 0);
-    }
-    // Root rows: every final trial is read at delay 0.
-    for (const auto& c : pc.coordinates[root]) {
-        const auto row = c.buf_offset / pc.state_shape[root].nsamps; // dmt row
-        w.s_lo[root][row] = 0;
-        w.s_hi[root][row] = 0;
-    }
-    for (SizeType l = root; l > level; --l) {
-        const auto stride = pc.state_shape[l - 1].nsamps;
-        for (const auto& c : pc.coordinates[l]) {
-            const auto row = c.buf_offset / pc.state_shape[l].nsamps;
-            if (!w.used(l, row)) {
-                continue;
-            }
-            const auto lo   = w.s_lo[l][row];
-            const auto hi   = w.s_hi[l][row];
-            const auto push = [&](SizeType child, SizeType d) {
-                auto& clo = w.s_lo[l - 1][child];
-                auto& chi = w.s_hi[l - 1][child];
-                if (clo == kSkewUnused) {
-                    clo = lo + d;
-                    chi = hi + d;
-                } else {
-                    clo = std::min(clo, lo + d);
-                    chi = std::max(chi, hi + d);
-                }
-            };
-            push(c.tail_buf_offset / stride, 0);
-            if (c.head_buf_offset != SIZE_MAX) {
-                push(c.head_buf_offset / stride, c.delay);
-            }
-        }
-    }
-    return w;
-}
-
-/**
- * @brief Local skewed windows for levels `level .. fuse` when only the `n`
- * new samples [T - s_lo(fuse, r), T + n - s_lo(fuse, r)) are computed at
- * level `fuse` (its overlap is carried in `m_ring_f`).
- */
-inline FDMTSkewWindows
-compute_local_skew_windows(const plans::FDMTPlan& plan,
-                           const FDMTSkewWindows& global_win,
-                           SizeType level,
-                           SizeType fuse) {
-    const auto& pc  = plan.get_container();
-    const auto root = plan.get_niters();
-    FDMTSkewWindows w;
-    w.level = level;
-    w.root  = root;
-    w.s_lo.resize(root + 1);
-    w.s_hi.resize(root + 1);
-    for (SizeType l = level; l <= fuse; ++l) {
-        w.s_lo[l].assign(pc.state_shape[l].ncoords, kSkewUnused);
-        w.s_hi[l].assign(pc.state_shape[l].ncoords, 0);
-    }
-    for (SizeType r = 0; r < pc.state_shape[fuse].ncoords; ++r) {
-        if (global_win.used(fuse, r)) {
-            w.s_lo[fuse][r] = global_win.s_lo[fuse][r];
-            w.s_hi[fuse][r] = global_win.s_lo[fuse][r];
-        }
-    }
-    for (SizeType l = fuse; l > level; --l) {
-        const auto stride = pc.state_shape[l - 1].nsamps;
-        for (const auto& c : pc.coordinates[l]) {
-            const auto row = c.buf_offset / pc.state_shape[l].nsamps;
-            if (!w.used(l, row)) {
-                continue;
-            }
-            const auto lo   = w.s_lo[l][row];
-            const auto hi   = w.s_hi[l][row];
-            const auto push = [&](SizeType child, SizeType d) {
-                auto& clo = w.s_lo[l - 1][child];
-                auto& chi = w.s_hi[l - 1][child];
-                if (clo == kSkewUnused) {
-                    clo = lo + d;
-                    chi = hi + d;
-                } else {
-                    clo = std::min(clo, lo + d);
-                    chi = std::max(chi, hi + d);
-                }
-            };
-            push(c.tail_buf_offset / stride, 0);
-            if (c.head_buf_offset != SIZE_MAX) {
-                push(c.head_buf_offset / stride, c.delay);
-            }
-        }
-    }
-    return w;
-}
-
 /// Automatic group-fusion materialization level F >= level.
 inline SizeType auto_skew_fuse_level(const plans::FDMTPlan& plan,
                                      const FDMTSkewWindows& w,
@@ -263,12 +106,6 @@ inline SizeType auto_skew_fuse_level(const plans::FDMTPlan& plan,
         best = f;
     }
     return best;
-}
-
-/// Automatic overlap-ring level F_ring in [level, fuse].
-inline SizeType auto_skew_ring_level(SizeType /*level*/,
-                                     SizeType fuse) noexcept {
-    return fuse;
 }
 
 /// Automatic leaf level k_leaf in [1, level] for local windows up to
@@ -321,14 +158,15 @@ inline FDMTSkewEstimate estimate_skew_memory(const plans::FDMTPlan& plan,
                                              SizeType chunk,
                                              SizeType ring_elem,
                                              int nthreads,
-                                             bool smear    = true,
-                                             SizeType fuse = 0) {
+                                             bool smear            = true,
+                                             SizeType fuse         = 0,
+                                             SizeType search_depth = 0) {
     const auto& pc  = plan.get_container();
     const auto root = plan.get_niters();
-    const auto w    = compute_skew_windows(plan, 1);
+    const auto w    = compute_skew_windows(plan, 1, search_depth);
     const auto f_lvl =
         auto_skew_fuse_level(plan, w, level, chunk, nthreads, fuse);
-    const auto f_ring = auto_skew_ring_level(level, f_lvl);
+    const auto f_ring = f_lvl;
     const auto k_leaf = auto_skew_leaf_level(plan, w, level, f_ring, chunk);
     const auto lw     = compute_local_skew_windows(plan, w, k_leaf, f_ring);
     std::vector<float> box_w;
@@ -434,9 +272,10 @@ inline FDMTSkewEstimate estimate_skew_memory(const plans::FDMTPlan& plan,
     for (SizeType c = 0; c < plan.get_nchans(); ++c) {
         e.ring += (chan_reach[c] + chunk) * ring_elem;
     }
-    const SizeType stripe_elem = ring_elem == sizeof(float) ? 8 : 4;
-    const SizeType one_sub_b   = sub_stripe_elems * stripe_elem;
-    SizeType max_loc_sp        = 0;
+    // Tiling decision as build_tables(); stripes allocated for double sums.
+    const SizeType one_sub_b =
+        sub_stripe_elems * (ring_elem == sizeof(float) ? 8 : 4);
+    SizeType max_loc_sp = 0;
     for (SizeType l = k_leaf; l < f_ring; ++l) {
         max_loc_sp = std::max(max_loc_sp, lw.stats(l).max_spread);
     }
@@ -485,16 +324,17 @@ inline FDMTSkewEstimate estimate_skew_memory(const plans::FDMTPlan& plan,
             }
         }
     }
-    const SizeType stripe_b = ((stripe_subs * one_sub_b) + 63) / 64 * 64;
-    const SizeType nt       = static_cast<SizeType>(std::max(1, nthreads));
-    const SizeType grp_a_b  = ((grp_a_elems * sizeof(float)) + 63) / 64 * 64;
-    const SizeType grp_b_b  = ((grp_b_elems * sizeof(float)) + 63) / 64 * 64;
-    const SizeType group_b  = grp_a_b + grp_b_b;
-    SizeType half0          = 0;
-    SizeType half1          = 0;
-    SizeType rows           = 0;
-    SizeType spread_sum     = 0;
-    SizeType tree_rows      = 0;
+    const SizeType stripe_b =
+        ((stripe_subs * sub_stripe_elems * sizeof(double)) + 63) / 64 * 64;
+    const SizeType nt      = static_cast<SizeType>(std::max(1, nthreads));
+    const SizeType grp_a_b = ((grp_a_elems * sizeof(float)) + 63) / 64 * 64;
+    const SizeType grp_b_b = ((grp_b_elems * sizeof(float)) + 63) / 64 * 64;
+    const SizeType group_b = grp_a_b + grp_b_b;
+    SizeType half0         = 0;
+    SizeType half1         = 0;
+    SizeType rows          = 0;
+    SizeType spread_sum    = 0;
+    SizeType tree_rows     = 0;
     for (SizeType l = k_leaf; l < root; ++l) {
         const auto st = w.stats(l);
         if (l >= f_lvl) {
@@ -702,11 +542,12 @@ public:
                 bool use_box_smearing,
                 int nthreads,
                 SizeType chunk_nsamps,
-                SizeType level  = 4,
-                SizeType nbits  = 32,
-                SizeType fuse   = 0,
-                bool search_int = false,
-                bool search_u32 = true)
+                SizeType level        = 4,
+                SizeType nbits        = 32,
+                SizeType fuse         = 0,
+                bool search_int       = false,
+                bool search_u32       = true,
+                SizeType search_depth = 0)
         : m_plan(plan),
           m_smear(use_box_smearing),
           m_nthreads(std::max(1, nthreads)),
@@ -736,10 +577,17 @@ public:
             m_nbits     = nbits;
             m_ring_elem = nbits == 16 ? 2 : 1;
         }
-        m_win = compute_skew_windows(plan, 1);
+        if (search_depth > plan.get_subband_depth()) {
+            throw std::invalid_argument(
+                fmt::format("FDMT skew: search depth {} exceeds the plan's "
+                            "subband depth {}",
+                            search_depth, plan.get_subband_depth()));
+        }
+        m_win         = compute_skew_windows(plan, 1, search_depth);
+        m_search_from = m_win.search_from;
         m_fuse =
             auto_skew_fuse_level(plan, m_win, level, m_chunk, m_nthreads, fuse);
-        m_fuse_ring = auto_skew_ring_level(level, m_fuse);
+        m_fuse_ring = m_fuse;
         m_level =
             auto_skew_leaf_level(plan, m_win, level, m_fuse_ring, m_chunk);
         m_loc_win =
@@ -1159,6 +1007,28 @@ private:
             m_level_len[l] = off;
         }
 
+        // Subband search: where each searched row's emitted samples start in
+        // its level's window (index 0 is stream sample T - s_hi), and its lag.
+        m_emit_off.assign(m_root, {});
+        m_emit_lag.assign(m_root, {});
+        for (SizeType l = m_search_from; l < m_root; ++l) {
+            if (l <= f) {
+                throw std::logic_error(
+                    "FDMT skew: searched level inside the fused levels");
+            }
+            const auto n = pc.state_shape[l].ncoords;
+            m_emit_off[l].assign(n, 0);
+            m_emit_lag[l].assign(n, 0);
+            for (SizeType r = 0; r < n; ++r) {
+                if (!m_win.used(l, r)) {
+                    throw std::logic_error("FDMT skew: unplaced search row");
+                }
+                const auto lag   = m_win.lag[l][r];
+                m_emit_off[l][r] = m_row_off[l][r] + (m_win.s_hi[l][r] - lag);
+                m_emit_lag[l][r] = lag;
+            }
+        }
+
         // Overlap ring at level f_ring only (zero rings at all other levels).
         {
             const auto n = pc.state_shape[f_ring].ncoords;
@@ -1176,7 +1046,6 @@ private:
 
         // Local scratch row offsets for levels k .. f - 1 per fused group.
         m_need_back_max    = 0;
-        m_max_nc           = 0;
         m_sub_stripe_elems = 0;
         m_chan_reach.assign(m_nchans, 0);
         constexpr int64_t kMaxStripeSpan = 16384;
@@ -1219,7 +1088,6 @@ private:
                      .leaf_hi      = 0});
             }
             m_need_back_max = std::max(m_need_back_max, sub_need_back);
-            m_max_nc        = std::max(m_max_nc, static_cast<SizeType>(sub.nc));
             std::vector<int64_t> min_j(static_cast<SizeType>(sub.nc),
                                        INT64_MAX);
             std::vector<int64_t> max_j(static_cast<SizeType>(sub.nc), 0);
@@ -1661,9 +1529,12 @@ private:
             throw std::length_error(
                 "FDMT skew: plan too large for 32-bit table offsets");
         }
-        const SizeType stripe_elem = m_ring_elem == sizeof(float) ? 8 : 4;
+        // Sized for 8-byte (double) running sums whatever the ring's type:
+        // a packed ring widened to float by non-integer input switches
+        // level K to double sums (level_k_for) without reallocating.
+        constexpr SizeType kStripeElem = sizeof(double);
         m_stripe_bytes =
-            ((m_stripe_subs * m_sub_stripe_elems * stripe_elem) + 63) / 64 * 64;
+            ((m_stripe_subs * m_sub_stripe_elems * kStripeElem) + 63) / 64 * 64;
         const SizeType group_bytes = m_group_a_bytes + m_group_b_bytes;
         const SizeType nt          = static_cast<SizeType>(m_nthreads);
         if (m_shared_group || m_group_in_idle) {
@@ -1754,6 +1625,7 @@ private:
         mix(m_fuse);
         mix(m_fuse_ring);
         mix(m_chunk);
+        mix(m_search_from);
         mix(m_smear ? 1 : 0);
         mix(m_state_elem);
         mix(m_ring_f.size());
@@ -1866,6 +1738,9 @@ private:
                 t = omp_get_wtime();
                 for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                     merge_level<float>(l, n, nullptr, 0);
+                    if (l >= m_search_from && l < m_root) {
+                        consume_level(sink, l, n, {.state = half<float>(l)});
+                    }
                 }
                 m_prof.merges += omp_get_wtime() - t;
                 sink.consume(m_root, {.state             = half<float>(m_root),
@@ -1879,6 +1754,10 @@ private:
                 t = omp_get_wtime();
                 for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                     merge_level<uint32_t>(l, n, nullptr, 0);
+                    if (l >= m_search_from && l < m_root) {
+                        consume_level(sink, l, n,
+                                      {.integer32_state = half<uint32_t>(l)});
+                    }
                 }
                 m_prof.merges += omp_get_wtime() - t;
                 sink.consume(m_root,
@@ -1893,6 +1772,10 @@ private:
                 t = omp_get_wtime();
                 for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                     merge_level<uint64_t>(l, n, nullptr, 0);
+                    if (l >= m_search_from && l < m_root) {
+                        consume_level(sink, l, n,
+                                      {.integer_state = half<uint64_t>(l)});
+                    }
                 }
                 m_prof.merges += omp_get_wtime() - t;
                 sink.consume(m_root, {.row_stride        = m_chunk,
@@ -1905,6 +1788,21 @@ private:
             m_stream_pos += n;
         }
         end_block(in, kind);
+    }
+
+    /// Hands searched level l (lagged rows, see compute_skew_windows) to the
+    /// sink. The merge timing of the levels above it counts as merges.
+    void consume_level(FDMTSearchSink& sink,
+                       SizeType l,
+                       SizeType n,
+                       FDMTSearchInput in) {
+        in.row_stride        = m_chunk;
+        in.nsamps            = n;
+        in.sample_begin      = m_stream_pos;
+        in.materialized_root = true;
+        in.row_offset        = m_emit_off[l].data();
+        in.row_lag           = m_emit_lag[l].data();
+        sink.consume(l, in);
     }
 
     /// True when every sample of the block is an integer small enough for
@@ -2580,6 +2478,9 @@ private:
     SizeType m_nchans;
     SizeType m_nsamps;
     SizeType m_chunk;
+    SizeType m_search_from{0}; ///< first searched level (m_root: none)
+    std::vector<std::vector<SizeType>> m_emit_off; ///< [l][row], searched l
+    std::vector<std::vector<uint64_t>> m_emit_lag; ///< [l][row], searched l
     bool m_search_int{false};
     bool m_search_u32{true};
     SizeType m_state_elem{sizeof(float)};
@@ -2600,7 +2501,6 @@ private:
     std::vector<GroupBatch> m_group_batches;
     std::vector<Leaf> m_leaves;
     int64_t m_need_back_max{0};
-    SizeType m_max_nc{0};
     SizeType m_ring_len{0};
     std::vector<int64_t> m_chan_reach;
     std::vector<SizeType> m_chan_ring_len;
@@ -2624,7 +2524,6 @@ private:
     SkewLargeArray<float> m_state;
     SkewLargeArray<std::byte> m_ring;
     SkewLargeArray<std::byte> m_scratch;
-    SizeType m_stripe_stride{0};
     SizeType m_stripe_bytes{0};
     SizeType m_group_a_bytes{0};
     SizeType m_group_b_bytes{0};

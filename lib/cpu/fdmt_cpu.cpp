@@ -1317,8 +1317,17 @@ public:
             m_chunk = std::min(m_plan.get_nsamps(),
                                std::max<SizeType>(64, m_chunk / 2));
         }
-        allocate_working_memory(cfg.fuse_levels, cfg.max_fuse_levels,
-                                cfg.skew_history_bytes);
+        const bool skew = choose_skew(cfg);
+        allocate_working_memory(cfg.fuse_levels, cfg.max_fuse_levels, skew);
+        const SizeType used = get_memory_usage().total();
+        if (used > cfg.max_memory_bytes) {
+            throw std::invalid_argument(fmt::format(
+                "FDMT (cpu): this configuration needs {:.2f} GiB, over "
+                "max_memory_bytes ({:.2f} GiB){}",
+                static_cast<double>(used) / (1 << 30),
+                static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
+                skew ? "; use a shorter chunk_nsamps" : ""));
+        }
     }
 
     ~FDMTCpuEngine() override                      = default;
@@ -2136,24 +2145,102 @@ private:
      * type tables, the box means and the per-thread workspace (see
      * FDMTWorkspace). Nothing is allocated after this.
      */
+    /// Fuse level requested of the skewed-window engine (0: automatic).
+    [[nodiscard]] SizeType skew_fuse_request(SizeType fuse_levels,
+                                             SizeType max_fuse_levels) const {
+        return (fuse_levels == kFDMTAutoFuse)
+                   ? SizeType{0}
+                   : std::min({fuse_levels, max_fuse_levels,
+                               m_plan.get_max_fuse_levels()});
+    }
+
+    /**
+     * Tree path or skewed-window engine (fdmt_skew.hpp), under the memory
+     * budget: the tree path (fastest) when its history and state fit
+     * max_memory_bytes, else the skewed engine with the longest automatic
+     * chunk (4096 .. 256) whose estimate fits (an explicit chunk_nsamps is
+     * kept). Sets m_chunk. Throws when nothing fits.
+     */
+    bool choose_skew(const detail::FDMTEngineConfig& cfg) {
+        const SizeType niters = m_plan.get_niters();
+        const SizeType nsamps = m_plan.get_nsamps();
+        const SizeType depth =
+            m_search_upper ? m_plan.get_subband_depth() : SizeType{0};
+        const bool eligible =
+            m_mode == FDMTMode::kValid && m_nbeams == 1 && niters >= 5 &&
+            cfg.fuse_levels != 0 && cfg.max_fuse_levels >= 4 &&
+            // Searched subband levels sit above the leaf and fused levels.
+            (!m_search_upper || niters >= depth + 5);
+        if (!eligible) {
+            return false;
+        }
+        const SizeType hist_floats =
+            m_plan.get_history_size() + m_plan.get_tree_history_size();
+        if (cfg.skew_history_bytes !=
+            detail::FDMTEngineConfig::kSkewHistoryAuto) {
+            return m_chunk < nsamps &&
+                   hist_floats * sizeof(float) > cfg.skew_history_bytes;
+        }
+        const auto& pc            = m_plan.get_container();
+        const bool wide           = m_search_nbits != 32 && !m_search_u32;
+        const SizeType state_elem = wide ? sizeof(uint64_t) : sizeof(float);
+        const SizeType plan_bytes = pc.get_memory_usage();
+        SizeType max_rows         = 0;
+        for (SizeType l = 0; l < niters; ++l) {
+            max_rows = std::max(
+                max_rows, m_search_upper ? detail::fdmt_regular_coords(pc, l)
+                                         : pc.state_shape[l].ncoords);
+        }
+        const SizeType tree_bytes = (hist_floats * state_elem) +
+                                    (2 * max_rows * m_chunk * state_elem) +
+                                    plan_bytes;
+        if (tree_bytes <= cfg.max_memory_bytes) {
+            return false;
+        }
+        if (cfg.chunk_nsamps != 0) {
+            // Explicit chunk: checked against the budget once allocated.
+            return m_chunk < nsamps;
+        }
+        const SizeType ring_elem = m_search_nbits == 32   ? sizeof(float)
+                                   : m_search_nbits == 16 ? 2
+                                                          : 1;
+        const SizeType req_fuse =
+            skew_fuse_request(cfg.fuse_levels, cfg.max_fuse_levels);
+        for (const SizeType c : {4096, 2048, 1024, 512, 256}) {
+            if (c >= nsamps) {
+                continue;
+            }
+            const auto e = detail::estimate_skew_memory(
+                m_plan, 4, c, ring_elem, m_nthreads, m_use_box_smearing,
+                req_fuse, depth);
+            const SizeType bytes =
+                e.ring + ((e.state + e.rings) * state_elem / sizeof(float)) +
+                e.stripes + plan_bytes;
+            // A tenth of headroom for the engine's merge tables.
+            if (bytes + (bytes / 10) <= cfg.max_memory_bytes) {
+                m_chunk = c;
+                return true;
+            }
+        }
+        throw std::invalid_argument(fmt::format(
+            "FDMT (cpu): no streaming path fits max_memory_bytes ({:.2f} GiB): "
+            "the tree path needs {:.2f} GiB and the skewed-window path more "
+            "than the budget at every chunk length",
+            static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
+            static_cast<double>(tree_bytes) / (1 << 30)));
+    }
+
     void allocate_working_memory(SizeType fuse_levels,
                                  SizeType max_fuse_levels,
-                                 SizeType skew_history_bytes) {
+                                 bool skew) {
         const SizeType niters = m_plan.get_niters();
-        if (m_mode == FDMTMode::kValid && m_nbeams == 1 && !m_search_upper &&
-            m_chunk < m_plan.get_nsamps() && niters >= 5 && fuse_levels != 0 &&
-            max_fuse_levels >= 4 &&
-            (m_plan.get_history_size() + m_plan.get_tree_history_size()) *
-                    sizeof(float) >
-                skew_history_bytes) {
+        if (skew) {
             const SizeType req_fuse =
-                (fuse_levels == kFDMTAutoFuse)
-                    ? SizeType{0}
-                    : std::min({fuse_levels, max_fuse_levels,
-                                m_plan.get_max_fuse_levels()});
+                skew_fuse_request(fuse_levels, max_fuse_levels);
             m_skew = std::make_unique<detail::FDMTSkewCpu>(
                 m_plan, m_use_box_smearing, m_nthreads, m_chunk, SizeType{4},
-                m_search_nbits, req_fuse, m_search_nbits != 32, m_search_u32);
+                m_search_nbits, req_fuse, m_search_nbits != 32, m_search_u32,
+                m_search_upper ? m_plan.get_subband_depth() : SizeType{0});
             m_fuse_levels = m_skew->get_fuse_level();
             return;
         }

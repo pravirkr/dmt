@@ -465,7 +465,7 @@ class SearchConfig:
 
 CRYOPAF = SearchConfig(
     704.0, 1216.0, 512, 512e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
-    name="cryopaf",
+    name="cryopaf_low",
 )  # fmt: skip
 """CryoPAF benchmark: 512 channels over 704-1216 MHz at 512 us, DM 0-2000,
 Levin tolerance 1.1.

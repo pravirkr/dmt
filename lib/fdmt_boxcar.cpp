@@ -8,6 +8,7 @@
 #include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
+#include "dmt/fdmt_int_tree.hpp"
 
 namespace dmt::algorithms {
 
@@ -19,7 +20,8 @@ public:
          Exec exec,
          SizeType beams,
          SizeType fuse,
-         SizeType chunk)
+         SizeType chunk,
+         SizeType max_memory)
         : plan(std::move(plan)),
           config(config),
           exec(exec),
@@ -46,23 +48,90 @@ public:
             .search_upper_levels = this->plan.get_subband_depth() > 0,
             .search_nbits        = config.input_nbits,
         };
-        if (exec.backend == Backend::kCPU) {
-            engine = detail::make_fdmt_boxcar_cpu(
-                this->plan, config, planes, cfg,
-                detail::make_boxcar_driver(
-                    detail::make_fdmt_cpu(this->plan, cfg)));
+        // The boxcar's own buffers are fixed by plan and config; the FDMT
+        // takes its path within the rest of the budget.
+        const SizeType fixed = boxcar_bytes(smear, exec);
+        if (fixed >= max_memory) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: the boxcar buffers alone need {:.2f} GiB, over "
+                "max_memory_bytes ({:.2f} GiB); lower max_boxcar or "
+                "max_candidates, or raise the budget",
+                static_cast<double>(fixed) / (1 << 30),
+                static_cast<double>(max_memory) / (1 << 30)));
+        }
+        cfg.max_memory_bytes = max_memory - fixed;
+        engine               = make_engine(cfg, smear, exec);
+        // The fixed part is an estimate: with an automatic chunk, step it
+        // down while the measured total is over the budget.
+        SizeType used = engine->memory_usage().total();
+        while (used > max_memory && chunk == 0 &&
+               cfg.mode == FDMTMode::kValid && engine->chunk_nsamps() > 256) {
+            const SizeType over  = used - max_memory;
+            cfg.chunk_nsamps     = engine->chunk_nsamps() / 2;
+            cfg.max_memory_bytes = cfg.max_memory_bytes > over
+                                       ? cfg.max_memory_bytes - over
+                                       : cfg.max_memory_bytes;
+            engine.reset();
+            engine = make_engine(cfg, smear, exec);
+            used   = engine->memory_usage().total();
+        }
+        if (used > max_memory) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: this configuration needs {:.2f} GiB, over "
+                "max_memory_bytes ({:.2f} GiB)",
+                static_cast<double>(used) / (1 << 30),
+                static_cast<double>(max_memory) / (1 << 30)));
+        }
+    }
+    std::unique_ptr<detail::FDMTBoxcarEngine> make_engine(
+        const detail::FDMTEngineConfig& cfg, bool /*smear*/, Exec ex) const {
+        if (ex.backend == Backend::kCPU) {
+            return detail::make_fdmt_boxcar_cpu(
+                plan, config, planes, cfg,
+                detail::make_boxcar_driver(detail::make_fdmt_cpu(plan, cfg)));
         }
 #ifdef DMT_ENABLE_GPU
-        else if (exec.backend == detail::kGPUBackend) {
-            engine = detail::make_fdmt_boxcar_gpu(
-                this->plan, config, planes, cfg,
-                detail::make_boxcar_driver(
-                    detail::make_fdmt_gpu(this->plan, cfg)));
+        if (ex.backend == detail::kGPUBackend) {
+            return detail::make_fdmt_boxcar_gpu(
+                plan, config, planes, cfg,
+                detail::make_boxcar_driver(detail::make_fdmt_gpu(plan, cfg)));
         }
 #endif
-        else {
-            detail::throw_unavailable("FDMTBoxcar", exec.backend);
+        detail::throw_unavailable("FDMTBoxcar", ex.backend);
+    }
+    /// Carry, peaks and candidate storage of the search (bytes).
+    [[nodiscard]] SizeType boxcar_bytes(bool smear, Exec ex) const {
+        SizeType rows = 0;
+        for (const auto& p : planes) {
+            rows += p.dm_grid.size();
         }
+        rows *= beams;
+        const SizeType width   = planes.front().widths.back();
+        const SizeType filters = planes.front().widths.size();
+        const SizeType carry_elem =
+            config.input_nbits == 32 ? sizeof(float)
+            : detail::int_search_fits_u32(plan, smear, config.input_nbits)
+                ? sizeof(uint32_t)
+                : sizeof(uint64_t);
+        const SizeType peaks =
+            config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
+                ? filters
+                : 1;
+        const SizeType cands = config.max_candidates * sizeof(RawCandidate) *
+                               (ex.backend == Backend::kCPU ? 1 : 2);
+        // Per row and width: threshold and inverse sigma (float), plus the
+        // integer mean and cutoff of packed input; the row table (host and,
+        // on a GPU, device).
+        const SizeType luts =
+            rows * filters *
+            ((2 * sizeof(float)) + (config.input_nbits == 32
+                                        ? 0
+                                        : sizeof(double) + sizeof(uint64_t)));
+        const SizeType row_table = rows * sizeof(detail::BoxcarRow) *
+                                   (ex.backend == Backend::kCPU ? 1 : 2);
+        return (rows * width * carry_elem) +
+               (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
+               row_table;
     }
     void check_stream(Stream stream) const {
         if (exec.backend == Backend::kCPU && stream.native) {
@@ -84,9 +153,16 @@ FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
                        Exec exec,
                        SizeType beams,
                        SizeType fuse,
-                       SizeType chunk)
-    : m_impl(std::make_unique<Impl>(
-          std::move(plan), config, smear, exec, beams, fuse, chunk)) {}
+                       SizeType chunk,
+                       SizeType max_memory)
+    : m_impl(std::make_unique<Impl>(std::move(plan),
+                                    config,
+                                    smear,
+                                    exec,
+                                    beams,
+                                    fuse,
+                                    chunk,
+                                    max_memory)) {}
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;
 FDMTBoxcar& FDMTBoxcar::operator=(FDMTBoxcar&&) noexcept = default;
