@@ -22,6 +22,7 @@
 #include "dmt/boxcar.hpp"
 
 #include "suite_common.hpp"
+#include "suite_memory.hpp"
 
 namespace dmt::bench_suite {
 namespace {
@@ -35,6 +36,8 @@ struct CpuContext {
     std::vector<float> input;
     std::vector<uint8_t> packed_input;
     std::string error;
+    /// Peak RSS from construction through warm-up and the timed blocks.
+    PeakRss mem;
     CandidateResultView run() {
         return packed_input.empty()
                    ? search->execute(std::span<const float>(input))
@@ -47,7 +50,8 @@ std::shared_ptr<CpuContext> cpu_context(const std::string& key,
                                         const BoxcarConfig& config,
                                         int threads) {
     return cached_context<CpuContext>(key, [&] {
-        auto ctx             = std::make_shared<CpuContext>();
+        auto ctx = std::make_shared<CpuContext>();
+        ctx->mem.begin();
         const bool packed    = config.input_nbits != 32;
         const SizeType n     = plan.get_nchans() * plan.get_nsamps();
         const SizeType block = plan.get_nsamps();
@@ -143,6 +147,7 @@ void bench_fdmt_boxcar_stream(benchmark::State& state,
         static_cast<double>(search.get_fuse_levels());
     state.counters["candidates_per_block"] =
         static_cast<double>(result.emitted_count);
+    ctx->mem.report(state);
     state.SetItemsProcessed(state.iterations() *
                             static_cast<int64_t>(input_size));
 }
@@ -196,6 +201,7 @@ void bench_rt_cpu(benchmark::State& state,
         rows += plane.dm_grid.size();
     }
     state.counters["search_rows"] = static_cast<double>(rows);
+    ctx->mem.report(state);
     state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(n));
 }
 

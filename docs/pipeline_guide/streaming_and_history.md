@@ -143,7 +143,11 @@ backend that wrote it, because the layouts differ. Plans large enough to
 run on the [skewed-window path](skewed_window_fdmt.md) save that engine's
 own, much smaller state, which only an engine with the same skewed layout
 accepts (same plan and `chunk_nsamps`, on the CPU also the same thread
-count); a mismatched buffer raises. `CohFDMT` needs none of this: it is
+count); a mismatched buffer raises. On the CPU that state keeps 8- and
+16-bit input at its own width (three 8-bit samples per float word) while
+only packed blocks have arrived, so its size follows the input: ask
+`history_state_size()` when saving (the Python `save_history()` does), not
+once at setup. `CohFDMT` needs none of this: it is
 stateless across blocks.
 
 :::{dropdown} GPU caveat: direct levels after `load_history()`

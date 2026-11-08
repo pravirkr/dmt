@@ -23,6 +23,7 @@
 
 #include "bench_gpu_utils.cuh"
 #include "suite_common.hpp"
+#include "suite_memory_gpu.cuh"
 
 namespace dmt::bench_suite {
 namespace {
@@ -64,6 +65,8 @@ bool skip_if_over_device_budget(benchmark::State& state,
 }
 
 void bench_fdmt_cuda(benchmark::State& state, Point p) {
+    GpuPeakMemory mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_device_budget(state, Algo::kFDMT, plan, p)) {
         return;
@@ -76,6 +79,7 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
         const thrust::device_vector<float> wf(host.begin(), host.end());
         fdmt.execute(dspan_c(wf), dspan(dmt));
         BENCH_GPU_TRY(cudaDeviceSynchronize());
+        mem.pause();
         for (auto _ : state) {
             const GPUEventTimer timer{state};
             fdmt.execute(dspan_c(wf), dspan(dmt));
@@ -85,18 +89,22 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
         const thrust::device_vector<uint8_t> wf(host.begin(), host.end());
         fdmt.execute(dspan_c(wf), p.nbits, dspan(dmt));
         BENCH_GPU_TRY(cudaDeviceSynchronize());
+        mem.pause();
         for (auto _ : state) {
             const GPUEventTimer timer{state};
             fdmt.execute(dspan_c(wf), p.nbits, dspan(dmt));
         }
     }
     set_counters(state, plan, p, 0);
+    mem.report(state);
 }
 
 // FDMT-FFT: device-resident, or (kHost) host arrays in and out; float or
 // packed input.
 template <bool kFrac, bool kHost>
 void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
+    GpuPeakMemory mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_device_budget(
             state, kFrac ? Algo::kFDMTFFTFrac : Algo::kFDMTFFT, plan, p)) {
@@ -108,6 +116,7 @@ void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
         const auto run = [&](const auto& call) {
             call(); // warm-up (history, plans, staging)
             BENCH_GPU_TRY(cudaDeviceSynchronize());
+            mem.pause();
             for (auto _ : state) {
                 const GPUEventTimer timer{state};
                 call();
@@ -144,12 +153,15 @@ void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
         return;
     }
     set_counters(state, plan, p, 0);
+    mem.report(state);
 }
 
 // DDMT and SDMT (same interface; SDMT's plan is built in the constructor,
 // outside the timed loop).
 template <typename Engine, Algo kAlgo>
 void bench_ddmt_cuda(benchmark::State& state, Point p) {
+    GpuPeakMemory mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_device_budget(state, kAlgo, plan, p)) {
         return;
@@ -166,6 +178,7 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
                          DeviceSpan<float>(dspan(dmt).data(), ndms * n));
         });
         BENCH_GPU_TRY(cudaDeviceSynchronize());
+        mem.pause();
         for (auto _ : state) {
             const GPUEventTimer timer{state};
             ddmt.execute(dspan_c(wf), dspan(dmt));
@@ -179,12 +192,14 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
                          DeviceSpan<int32_t>(dspan(dmt).data(), ndms * n));
         });
         BENCH_GPU_TRY(cudaDeviceSynchronize());
+        mem.pause();
         for (auto _ : state) {
             const GPUEventTimer timer{state};
             ddmt.execute(dspan_c(wf), p.nsamps, dspan(dmt));
         }
     }
     set_counters(state, plan, p, 0);
+    mem.report(state);
     set_ddmt_rate(state, plan, p);
 }
 
@@ -192,6 +207,8 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
 // in and out; float or packed input.
 template <DDMTFFTMethod kMethod, bool kHost>
 void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
+    GpuPeakMemory mem;
+    mem.begin();
     constexpr auto kAlgo =
         kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
     const auto plan = make_plan(p);
@@ -209,6 +226,7 @@ void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
         const auto run = [&](const auto& call) {
             warm_up_stream(eng, p.nsamps, [&](SizeType n) { call(ndms * n); });
             BENCH_GPU_TRY(cudaDeviceSynchronize());
+            mem.pause();
             for (auto _ : state) {
                 const GPUEventTimer timer{state};
                 call(n_warm);
@@ -246,6 +264,7 @@ void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
         return;
     }
     set_counters(state, plan, p, 0);
+    mem.report(state);
     set_ddmt_rate(state, plan, p);
 }
 

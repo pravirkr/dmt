@@ -639,7 +639,10 @@ void bind_fdmt(py::module_& mod) {
         .def("history_state_size", &FDMT::history_state_size,
              R"doc(
              Size (in float32 elements) of this instance's streaming history state.
-             Zero for "full" or "roll" modes.
+             Zero for "full" or "roll" modes. On the CPU skewed-window path the
+             size follows the input seen so far: smaller while only packed
+             (8- or 16-bit) blocks have arrived, the float size after a float
+             block. save_history() always returns the current size.
              )doc")
         .def(
             "save_history",
@@ -664,13 +667,8 @@ void bind_fdmt(py::module_& mod) {
                 }
                 auto hist =
                     hist_obj.cast<py::array_t<float, py::array::c_style>>();
-                if (static_cast<SizeType>(hist.size()) !=
-                    fdmt.history_state_size()) {
-                    throw std::invalid_argument(
-                        fmt::format("FDMT.load_history: expected buffer of "
-                                    "size {}, got {}",
-                                    fdmt.history_state_size(), hist.size()));
-                }
+                // The size is checked by the engine (a CPU skewed-window
+                // engine accepts a packed or a float ring layout).
                 fdmt.load_history(
                     std::span<const float>(hist.data(), hist.size()));
             },

@@ -13,6 +13,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 #include <omp.h>
@@ -1806,16 +1807,16 @@ public:
     }
 
     void load_history(std::span<const float> in) override {
+        if (m_skew) { // either ring layout; the engine checks the size
+            m_skew->load_history(in);
+            m_is_initialized = false;
+            return;
+        }
         if (in.size() != history_state_size()) {
             throw std::invalid_argument(
                 fmt::format("FDMT::load_history: Invalid input size. "
                             "Expected {}, got {}",
                             history_state_size(), in.size()));
-        }
-        if (m_skew) {
-            m_skew->load_history(in);
-            m_is_initialized = false;
-            return;
         }
         std::copy_n(in.begin(), m_history.size(), m_history.begin());
         // FIFO order is the ring at stream position 0.
@@ -1873,6 +1874,8 @@ private:
     bool m_search_upper{false};
     bool m_search_u32{false};
     std::unique_ptr<detail::FDMTSkewCpu> m_skew;
+    /// Leaf level of the skewed engine (choose_skew; 0: automatic).
+    SizeType m_skew_leaf{0};
     FDMTLargeArray<uint64_t> m_integer_history;
     FDMTLargeArray<uint32_t> m_integer32_history;
 
@@ -2155,11 +2158,34 @@ private:
     }
 
     /**
+     * (chunk, leaf level) candidates of the skewed-window engine, fastest
+     * first. Measured on parkes_uwl (6656 channels, 8 threads one per CCD
+     * on an EPYC 9654, s per 2.1 s block): float ring K=1 4.96 at chunk
+     * 4096 and 7.4 at 2048, K=2 6.6 / 9.4, K=3 8.8 / 11.1, K=4 13.3 /
+     * 15.3, K=1 13.6 at 1024 (levels 1..K-1 of a direct leaf cost double
+     * running-sum gathers, the binary merges above them are cheap); 8-bit
+     * ring K=2 4.08, K=3 4.38, K=4 4.69, K=1 4.77 at 4096, K=4 5.99 and
+     * K=2 6.28 at 2048. Leaf 0: the automatic level (<= 4).
+     */
+    static std::vector<std::pair<SizeType, SizeType>>
+    skew_candidates(SizeType ring_elem) {
+        if (ring_elem == sizeof(float)) {
+            return {{4096, 1}, {4096, 2}, {2048, 1}, {4096, 3}, {2048, 2},
+                    {2048, 3}, {4096, 4}, {1024, 1}, {2048, 4}, {1024, 0},
+                    {512, 1},  {512, 0},  {256, 1},  {256, 0}};
+        }
+        return {{4096, 2}, {4096, 3}, {4096, 4}, {4096, 1},
+                {2048, 4}, {2048, 2}, {2048, 3}, {2048, 1},
+                {1024, 0}, {512, 0},  {256, 0}};
+    }
+
+    /**
      * Tree path or skewed-window engine (fdmt_skew.hpp), under the memory
      * budget: the tree path (fastest) when its history and state fit
-     * max_memory_bytes, else the skewed engine with the longest automatic
-     * chunk (4096 .. 256) whose estimate fits (an explicit chunk_nsamps is
-     * kept). Sets m_chunk. Throws when nothing fits.
+     * max_memory_bytes, else the skewed engine at the fastest (chunk, leaf
+     * level) of skew_candidates() whose estimate fits (an explicit
+     * chunk_nsamps is kept, with the fastest leaf level that fits it).
+     * Sets m_chunk and m_skew_leaf. Throws when nothing fits.
      */
     bool choose_skew(const detail::FDMTEngineConfig& cfg) {
         const SizeType niters = m_plan.get_niters();
@@ -2178,6 +2204,7 @@ private:
             m_plan.get_history_size() + m_plan.get_tree_history_size();
         if (cfg.skew_history_bytes !=
             detail::FDMTEngineConfig::kSkewHistoryAuto) {
+            m_skew_leaf = cfg.skew_leaf;
             return m_chunk < nsamps &&
                    hist_floats * sizeof(float) > cfg.skew_history_bytes;
         }
@@ -2197,28 +2224,40 @@ private:
         if (tree_bytes <= cfg.max_memory_bytes) {
             return false;
         }
-        if (cfg.chunk_nsamps != 0) {
-            // Explicit chunk: checked against the budget once allocated.
-            return m_chunk < nsamps;
-        }
         const SizeType ring_elem = m_search_nbits == 32   ? sizeof(float)
                                    : m_search_nbits == 16 ? 2
                                                           : 1;
         const SizeType req_fuse =
             skew_fuse_request(cfg.fuse_levels, cfg.max_fuse_levels);
-        for (const SizeType c : {4096, 2048, 1024, 512, 256}) {
-            if (c >= nsamps) {
-                continue;
-            }
+        const auto fits = [&](SizeType c, SizeType leaf) {
             const auto e = detail::estimate_skew_memory(
                 m_plan, 4, c, ring_elem, m_nthreads, m_use_box_smearing,
-                req_fuse, depth);
+                req_fuse, depth, leaf);
             const SizeType bytes =
                 e.ring + ((e.state + e.rings) * state_elem / sizeof(float)) +
                 e.stripes + plan_bytes;
             // A tenth of headroom for the engine's merge tables.
-            if (bytes + (bytes / 10) <= cfg.max_memory_bytes) {
-                m_chunk = c;
+            return bytes + (bytes / 10) <= cfg.max_memory_bytes;
+        };
+        if (cfg.chunk_nsamps != 0) {
+            // Explicit chunk: the fastest leaf level that fits it (else the
+            // automatic one); checked against the budget once allocated.
+            if (m_chunk >= nsamps) {
+                return false;
+            }
+            m_skew_leaf = 0;
+            for (const auto& [c, leaf] : skew_candidates(ring_elem)) {
+                if (c == m_chunk && leaf != 0 && fits(c, leaf)) {
+                    m_skew_leaf = leaf;
+                    break;
+                }
+            }
+            return true;
+        }
+        for (const auto& [c, leaf] : skew_candidates(ring_elem)) {
+            if (c < nsamps && fits(c, leaf)) {
+                m_chunk     = c;
+                m_skew_leaf = leaf;
                 return true;
             }
         }
@@ -2240,7 +2279,8 @@ private:
             m_skew = std::make_unique<detail::FDMTSkewCpu>(
                 m_plan, m_use_box_smearing, m_nthreads, m_chunk, SizeType{4},
                 m_search_nbits, req_fuse, m_search_nbits != 32, m_search_u32,
-                m_search_upper ? m_plan.get_subband_depth() : SizeType{0});
+                m_search_upper ? m_plan.get_subband_depth() : SizeType{0},
+                m_skew_leaf);
             m_fuse_levels = m_skew->get_fuse_level();
             return;
         }

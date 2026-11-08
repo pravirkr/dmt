@@ -155,7 +155,7 @@ from 0 to 2000 pc cm⁻³.
 </picture>
 
 Every engine runs faster than real time on both backends. FDMT is the
-fastest, at 54× real time on 8 CPU threads and 774× on the L40S: 18× faster
+fastest, at 56× real time on 8 CPU threads and 775× on the L40S: 19× faster
 than brute-force DDMT on the CPU and 6× on the GPU. Sweeps over DM range,
 block length and input width, the other presets (including the 6656-channel
 Parkes UWL search within a 10 GiB memory budget), and CohFDMT are on the

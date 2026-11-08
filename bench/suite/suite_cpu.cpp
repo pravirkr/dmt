@@ -20,6 +20,7 @@
 #include "dmt/algorithms/sdmt.hpp"
 
 #include "suite_common.hpp"
+#include "suite_memory.hpp"
 
 namespace dmt::bench_suite {
 namespace {
@@ -50,6 +51,8 @@ bool skip_if_over_budget(benchmark::State& state,
 }
 
 void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_budget(state, Algo::kFDMT, plan, p)) {
         return;
@@ -73,10 +76,13 @@ void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
         }
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
 }
 
 template <bool kFrac>
 void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_budget(state, kFrac ? Algo::kFDMTFFTFrac : Algo::kFDMTFFT,
                             plan, p)) {
@@ -97,11 +103,14 @@ void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
 }
 
 /// DDMT or SDMT (Engine) on the FDMT plan's DM grid.
 template <typename Engine, Algo kAlgo>
 void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_budget(state, kAlgo, plan, p)) {
         return;
@@ -134,6 +143,7 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
         }
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
     set_ddmt_rate(state, plan, p);
 }
 
@@ -141,6 +151,8 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
 /// the NUFFT applies), exact fractional delays.
 template <DDMTFFTMethod kMethod>
 void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     constexpr auto kAlgo =
         kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
     const auto plan = make_plan(p);
@@ -180,6 +192,7 @@ void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
     set_ddmt_rate(state, plan, p);
 }
 

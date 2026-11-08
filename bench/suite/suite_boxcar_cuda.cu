@@ -23,6 +23,7 @@
 
 #include "bench_gpu_utils.cuh"
 #include "suite/suite_common.hpp"
+#include "suite/suite_memory_gpu.cuh"
 
 // GPU half of the boxcar suite (run_suite.py --suite boxcar): streaming
 // FDMTBoxcar at the reference point of the selected configuration
@@ -90,13 +91,21 @@ thrust::device_vector<float> make_noise(SizeType n) {
     return v;
 }
 
-thrust::device_vector<uint8_t>
-make_packed(const thrust::device_vector<float>& x) {
-    thrust::device_vector<uint8_t> v(x.size());
-    thrust::transform(x.begin(), x.end(), v.begin(), [] __device__(float f) {
-        return static_cast<uint8_t>(
-            fminf(fmaxf(rintf(127.0F + 12.0F * f), 0.0F), 255.0F));
-    });
+/// make_noise() quantised to 8 bits (127 + 12 x, clamped), generated
+/// directly so no float copy of the block is ever resident (it would show
+/// in the point's peak device memory).
+thrust::device_vector<uint8_t> make_packed_noise(SizeType n) {
+    thrust::device_vector<uint8_t> v(n);
+    thrust::transform(thrust::counting_iterator<SizeType>(0),
+                      thrust::counting_iterator<SizeType>(n), v.begin(),
+                      [] __device__(SizeType i) {
+                          thrust::default_random_engine rng(1234);
+                          rng.discard(2 * i);
+                          thrust::normal_distribution<float> dist;
+                          const float f = dist(rng);
+                          return static_cast<uint8_t>(fminf(
+                              fmaxf(rintf(127.0F + 12.0F * f), 0.0F), 255.0F));
+                      });
     return v;
 }
 
@@ -143,6 +152,8 @@ void common_counters(benchmark::State& state,
 }
 
 void bench_transform(benchmark::State& state) {
+    GpuPeakMemory mem;
+    mem.begin();
     const auto plan = make_plan(ref_point());
     FDMT fdmt(kFMin, kFMax, kNchans, kNsampsRef, kTsamp, dm_grid(ref_point()),
               true, "valid", bench_gpu_exec(), 1, algorithms::kFDMTAutoFuse,
@@ -151,10 +162,12 @@ void bench_transform(benchmark::State& state) {
     thrust::device_vector<float> dmt(plan.get_dmt_size());
     fdmt.execute(dspan_c(wf), dspan(dmt));
     BENCH_GPU_TRY(cudaDeviceSynchronize());
+    mem.pause();
     for (auto _ : state) {
         const GPUEventTimer timer{state};
         fdmt.execute(dspan_c(wf), dspan(dmt));
     }
+    mem.report(state);
     common_counters(state, plan,
                     fdmt.get_memory_usage().total() +
                         dmt.size() * sizeof(float) + wf.size() * sizeof(float),
@@ -165,6 +178,8 @@ void bench_transform(benchmark::State& state) {
 
 // FDMT into the plane, then the same GPU scorer over the materialised root.
 void bench_separate(benchmark::State& state, float wtsp) {
+    GpuPeakMemory mem;
+    mem.begin();
     const auto plan   = make_plan(ref_point());
     const auto config = make_config(wtsp, false);
     FDMT fdmt(kFMin, kFMax, kNchans, kNsampsRef, kTsamp, dm_grid(ref_point()),
@@ -198,10 +213,12 @@ void bench_separate(benchmark::State& state, float wtsp) {
         run();
     }
     BENCH_GPU_TRY(cudaDeviceSynchronize());
+    mem.pause();
     for (auto _ : state) {
         const GPUEventTimer timer{state};
         run();
     }
+    mem.report(state);
     const auto transform = fdmt.get_memory_usage().total();
     const auto score     = scorer->memory_usage().total();
     common_counters(state, plan,
@@ -211,6 +228,8 @@ void bench_separate(benchmark::State& state, float wtsp) {
 }
 
 void bench_fft_transform(benchmark::State& state) {
+    GpuPeakMemory mem;
+    mem.begin();
     const auto plan = make_plan(ref_point());
     algorithms::FDMTFFT fft(kFMin, kFMax, kNchans, kNsampsRef, kTsamp,
                             dm_grid(ref_point()), true, "valid",
@@ -219,10 +238,12 @@ void bench_fft_transform(benchmark::State& state) {
     thrust::device_vector<float> dmt(plan.get_dmt_size());
     fft.execute(dspan_c(wf), dspan(dmt));
     BENCH_GPU_TRY(cudaDeviceSynchronize());
+    mem.pause();
     for (auto _ : state) {
         const GPUEventTimer timer{state};
         fft.execute(dspan_c(wf), dspan(dmt));
     }
+    mem.report(state);
     common_counters(state, plan,
                     fft.get_memory_usage().total() +
                         dmt.size() * sizeof(float) + wf.size() * sizeof(float),
@@ -230,6 +251,8 @@ void bench_fft_transform(benchmark::State& state) {
 }
 
 void bench_fft_fused(benchmark::State& state, float wtsp) {
+    GpuPeakMemory mem;
+    mem.begin();
     auto plan         = make_plan(ref_point());
     const auto config = make_config(wtsp, false);
     algorithms::FDMTFFTBoxcar search(std::move(plan), config, true,
@@ -244,10 +267,12 @@ void bench_fft_fused(benchmark::State& state, float wtsp) {
         run();
     }
     BENCH_GPU_TRY(cudaStreamSynchronize(stream));
+    mem.pause();
     for (auto _ : state) {
         const GPUEventTimer timer{state, stream};
         run();
     }
+    mem.report(state);
     const auto emitted = search.copy_result(Stream{stream}).emitted_count;
     BENCH_GPU_TRY(cudaStreamDestroy(stream));
     common_counters(state, search.get_plan(),
@@ -267,6 +292,9 @@ struct GpuContext {
     thrust::device_vector<uint8_t> wf8;
     cudaStream_t stream{};
     std::string error;
+    /// Host and device peaks from construction through warm-up (sampled)
+    /// and the timed blocks (host high-water, last device sample).
+    GpuPeakMemory mem;
     GpuContext()                             = default;
     GpuContext(const GpuContext&)            = delete;
     GpuContext& operator=(const GpuContext&) = delete;
@@ -288,7 +316,8 @@ std::shared_ptr<GpuContext> gpu_context(const std::string& key,
                                         plans::FDMTPlan plan,
                                         const BoxcarConfig& config) {
     return cached_context<GpuContext>(key, [&] {
-        auto ctx             = std::make_shared<GpuContext>();
+        auto ctx = std::make_shared<GpuContext>();
+        ctx->mem.begin();
         const SizeType n     = plan.get_nchans() * plan.get_nsamps();
         const SizeType block = plan.get_nsamps();
         try {
@@ -299,10 +328,10 @@ std::shared_ptr<GpuContext> gpu_context(const std::string& key,
             ctx->error = e.what();
             return ctx;
         }
-        ctx->wf = make_noise(n);
         if (config.input_nbits != 32) {
-            ctx->wf8 = make_packed(ctx->wf);
-            ctx->wf  = thrust::device_vector<float>{};
+            ctx->wf8 = make_packed_noise(n);
+        } else {
+            ctx->wf = make_noise(n);
         }
         BENCH_GPU_TRY(
             cudaStreamCreateWithFlags(&ctx->stream, cudaStreamNonBlocking));
@@ -312,6 +341,7 @@ std::shared_ptr<GpuContext> gpu_context(const std::string& key,
             ctx->run();
         }
         BENCH_GPU_TRY(cudaStreamSynchronize(ctx->stream));
+        ctx->mem.pause();
         return ctx;
     });
 }
@@ -348,6 +378,7 @@ void bench_fused(benchmark::State& state,
     state.counters["fuse_levels"] =
         static_cast<double>(search.get_fuse_levels());
     state.counters["candidates_per_block"] = static_cast<double>(emitted);
+    ctx->mem.report(state);
 }
 
 /// One real-time sweep point (suite_common.hpp rt_points()): FDMTBoxcar
@@ -396,6 +427,7 @@ void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
         rows += plane.dm_grid.size();
     }
     state.counters["search_rows"] = static_cast<double>(rows);
+    ctx->mem.report(state);
     state.SetItemsProcessed(state.iterations() *
                             static_cast<int64_t>(kNchans * p.nsamps));
 }

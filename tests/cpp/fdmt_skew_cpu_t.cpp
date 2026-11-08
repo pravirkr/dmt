@@ -105,9 +105,11 @@ std::vector<float> run_skew(FDMTSkewCpu& skew,
 // Non-integer float input (double running sums): within float rounding.
 void require_streams_close(const plans::FDMTPlan& plan,
                            SizeType nblocks,
-                           int nthreads) {
+                           int nthreads,
+                           SizeType leaf = 0) {
     FDMT tree(plan, true, Exec::cpu(nthreads), 1, kFDMTAutoFuse, true, 1024);
-    FDMTSkewCpu skew(plan, true, nthreads, 1024, 4);
+    FDMTSkewCpu skew(plan, true, nthreads, 1024, 4, 32, 0, false, true, 0,
+                     leaf);
     std::mt19937 gen(7);
     std::uniform_real_distribution<float> dis(-1.0F, 1.0F);
     for (unsigned blk = 0; blk < nblocks; ++blk) {
@@ -148,10 +150,16 @@ void require_streams_equal(const plans::FDMTPlan& plan,
                            SizeType chunk_tree,
                            SizeType chunk_skew,
                            SizeType nblocks,
-                           int nthreads) {
+                           int nthreads,
+                           SizeType leaf = 0) {
     FDMT tree(plan, smear, Exec::cpu(nthreads), 1, kFDMTAutoFuse, true,
               chunk_tree);
-    FDMTSkewCpu skew(plan, smear, nthreads, chunk_skew, level, packed ? 8 : 32);
+    FDMTSkewCpu skew(plan, smear, nthreads, chunk_skew, level, packed ? 8 : 32,
+                     0, false, true, 0, leaf);
+    if (leaf != 0) {
+        REQUIRE(skew.get_leaf_level() == leaf);
+        REQUIRE(skew.get_fuse_level() > leaf);
+    }
     for (unsigned blk = 0; blk < nblocks; ++blk) {
         const auto b =
             random_block(plan.get_nchans(), plan.get_nsamps(), 100 + blk);
@@ -176,7 +184,8 @@ void require_search_equal(const plans::FDMTPlan& plan,
                           bool search_u32,
                           SizeType chunk,
                           SizeType nblocks,
-                          int nthreads) {
+                          int nthreads,
+                          SizeType leaf = 0) {
     using algorithms::detail::boxcar_integer_sample;
     using algorithms::detail::boxcar_ring0;
     using algorithms::detail::boxcar_sample;
@@ -207,7 +216,7 @@ void require_search_equal(const plans::FDMTPlan& plan,
     };
     auto tree = make_fdmt_cpu(plan, ecfg);
     FDMTSkewCpu skew(plan, smear, nthreads, chunk, 4, packed ? 8 : 32, 0,
-                     packed, search_u32);
+                     packed, search_u32, 0, leaf);
 
     struct Collector final : FDMTSearchSink {
         const std::vector<BoxcarRow>& rows;
@@ -316,8 +325,18 @@ TEST_CASE("FDMT skewed-window streaming is bit-exact with the tree engine",
             SECTION("uneven chunk") {
                 require_streams_equal(plan, true, false, 4, 1024, 1000, 2, 4);
             }
+            SECTION("leaf levels 1 and 2 below fusion from level 4") {
+                // The budget-chosen leaf levels (FDMTCpuEngine).
+                require_streams_equal(plan, true, false, 4, 1024, 4096, 2, 4,
+                                      1);
+                require_streams_equal(plan, true, true, 4, 1024, 2048, 2, 4, 2);
+                require_streams_equal(plan, true, true, 4, 1024, 1024, 2, 4, 1);
+                require_search_equal(plan, true, true, true, 1024, 2, 4, 1);
+                require_search_equal(plan, true, false, true, 1024, 2, 4, 2);
+            }
             SECTION("non-integer float input agrees within rounding") {
                 require_streams_close(plan, 2, 4);
+                require_streams_close(plan, 2, 4, 1);
             }
             SECTION("execute_search float and packed integer (u32 and u64)") {
                 require_search_equal(plan, true, false, true, 1024, 2, 4);
@@ -407,7 +426,8 @@ TEST_CASE("FDMT engine skewed path: wiring, history and input types",
 
     SECTION("save/load resumes a stream exactly; layout is checked") {
         auto a = make_cpu_engine(plan, true, 1024);
-        // The size is fixed before any input (the ring is allocated lazily).
+        // The float size before any input (the ring is allocated lazily) and
+        // once float input has arrived.
         const SizeType hsize = a->history_state_size();
         REQUIRE(hsize > 0);
         for (const bool packed : {false, true}) {
@@ -428,11 +448,15 @@ TEST_CASE("FDMT engine skewed path: wiring, history and input types",
             a->load_history(hist);
             REQUIRE_THAT(run_engine(*a, plan, blk(22), packed),
                          Catch::Matchers::Equals(ref));
-            // Round trip: save after load gives the same buffer back.
+            // Round trip: save after load gives the same buffer back on an
+            // instance whose ring holds float input (a). The fresh c took
+            // the saved 8-bit samples into a packed ring (compact layout)
+            // and kept it unless it then ran a float block.
             std::vector<float> again(hsize);
-            c->load_history(hist);
-            c->save_history(again);
+            a->load_history(hist);
+            a->save_history(again);
             REQUIRE_THAT(again, Catch::Matchers::Equals(hist));
+            REQUIRE((c->history_state_size() < hsize) == packed);
         }
         // A different skewed layout (chunk) or a non-skewed buffer throws.
         auto other = make_cpu_engine(plan, true, 2048);
@@ -443,6 +467,92 @@ TEST_CASE("FDMT engine skewed path: wiring, history and input types",
         }
         std::vector<float> junk(hsize, 0.5F);
         REQUIRE_THROWS_AS(a->load_history(junk), std::invalid_argument);
+    }
+
+    SECTION("packed streams save a compact history; either layout loads") {
+        // 8-bit: three samples per 24-bit float word; 16-bit: three in two.
+        const auto pack16 = [&](unsigned seed) {
+            std::mt19937 gen(seed);
+            std::uniform_int_distribution<uint32_t> dis(0, 65535);
+            std::vector<uint8_t> bytes(2 * nch * ns);
+            for (SizeType i = 0; i < nch * ns; ++i) {
+                const auto v     = dis(gen);
+                bytes[2 * i]     = static_cast<uint8_t>(v & 0xFFU);
+                bytes[2 * i + 1] = static_cast<uint8_t>(v >> 8);
+            }
+            return bytes;
+        };
+        for (const SizeType nbits : {SizeType{8}, SizeType{16}}) {
+            CAPTURE(nbits);
+            const auto run = [&](algorithms::detail::FDMTEngine& e,
+                                 unsigned seed) {
+                std::vector<float> dmt(plan.get_dmt_size(), -9.0F);
+                if (nbits == 8) {
+                    e.execute(std::span<const uint8_t>(blk(seed).packed), 8,
+                              dmt);
+                } else {
+                    const auto bytes = pack16(seed);
+                    e.execute(std::span<const uint8_t>(bytes), 16, dmt);
+                }
+                return dmt;
+            };
+            auto a                = make_cpu_engine(plan, true, 1024);
+            const SizeType hfloat = a->history_state_size();
+            run(*a, 60);
+            run(*a, 61);
+            const SizeType hsize = a->history_state_size();
+            // N ring samples: N float words, ceil(N / 3) * nbits / 8 packed.
+            const SizeType saved = hfloat - hsize;
+            REQUIRE(hsize < hfloat);
+            REQUIRE(saved > (nbits == 8 ? hfloat / 2 : hfloat / 4));
+            std::vector<float> hist(hsize);
+            a->save_history(hist);
+            for (SizeType i = 16; i < 1024; ++i) { // packed ring words
+                REQUIRE(hist[i] == std::floor(hist[i]));
+                REQUIRE(hist[i] < 16777216.0F);
+            }
+            const auto ref = run(*a, 62);
+            // A fresh instance (float-built, ring not yet allocated).
+            auto c = make_cpu_engine(plan, true, 1024);
+            c->load_history(hist);
+            REQUIRE(c->history_state_size() == hsize);
+            REQUIRE_THAT(run(*c, 62), Catch::Matchers::Equals(ref));
+            // Round trip.
+            c->load_history(hist);
+            std::vector<float> again(hsize);
+            c->save_history(again);
+            REQUIRE_THAT(again, Catch::Matchers::Equals(hist));
+            // An instance whose ring already holds float input keeps its
+            // float layout and decodes the packed ring into it.
+            auto f = make_cpu_engine(plan, true, 1024);
+            run_engine(*f, plan, blk(63), false);
+            REQUIRE(f->history_state_size() == hfloat);
+            f->load_history(hist);
+            REQUIRE(f->history_state_size() == hfloat);
+            REQUIRE_THAT(run(*f, 62), Catch::Matchers::Equals(ref));
+            // ... and its float-layout save loads back into a packed ring.
+            f->load_history(hist);
+            std::vector<float> fhist(hfloat);
+            f->save_history(fhist);
+            auto g = make_cpu_engine(plan, true, 1024);
+            g->load_history(fhist);
+            REQUIRE(g->history_state_size() == hsize);
+            REQUIRE_THAT(run(*g, 62), Catch::Matchers::Equals(ref));
+            // Altered words and wrong sizes throw, leaving the stream alone.
+            for (const float bad : {0.5F, 16777216.0F, -1.0F}) {
+                auto broken = hist;
+                broken[17]  = bad;
+                REQUIRE_THROWS_AS(c->load_history(broken),
+                                  std::invalid_argument);
+            }
+            std::vector<float> shorter(hist.begin(), hist.end() - 1);
+            REQUIRE_THROWS_AS(c->load_history(shorter), std::invalid_argument);
+            if (nbits == 8) {
+                // A packed-built (8-bit) engine is compact from the start.
+                FDMTSkewCpu p8(plan, true, 4, 1024, 4, 8);
+                REQUIRE(p8.history_state_size() < hfloat);
+            }
+        }
     }
 
     SECTION("switching input type keeps the stream (matches the tree)") {
@@ -518,8 +628,11 @@ TEST_CASE("FDMTBoxcar skewed path: subband search matches the tree",
         for (const bool packed : {false, true}) {
             DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
                 constexpr SizeType kBlocks = 4;
-                const auto skew = run_subband_search(plan, Exec::cpu(4), true,
-                                                     packed, kBlocks);
+                // Leaf level 1 (float) and 2 (packed), as the budget picks
+                // them on wide plans.
+                const auto skew =
+                    run_subband_search(plan, Exec::cpu(4), true, packed,
+                                       kBlocks, 1024, packed ? 2 : 1);
                 const auto tree = run_subband_search(plan, Exec::cpu(4), false,
                                                      packed, kBlocks);
                 REQUIRE_FALSE(skew.path.empty());

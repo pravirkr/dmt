@@ -3523,6 +3523,9 @@ private:
         };
         if (!packed) {
             opt_in(detail::kernel_direct_level_skewed<float, float, float>);
+            // Packed blocks into the float ring (rounded box means).
+            opt_in(detail::kernel_direct_level_skewed<float, uint32_t, uint32_t,
+                                                      true, float>);
         } else if (m_search_nbits <= 8 && m_search_u32) {
             opt_in(detail::kernel_direct_level_skewed<uint8_t, uint32_t,
                                                       uint32_t>);
@@ -4742,7 +4745,11 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
     // chunk is chosen by building and measuring: the windowed top (subband
     // search on the skewed path) runs faster at longer chunks, so it takes
     // the longest that fits; any other path keeps its automatic chunk and
-    // halves it while over budget.
+    // halves it while over budget. A longer windowed-top chunk is only
+    // built when predicted to fit (its memory is affine in the chunk: rows
+    // of chunk + spread samples, rings of reach + chunk; extrapolated from
+    // two measured engines), so construction never holds more than the
+    // budget to find out (it held 12 GiB at chunk 4096 for float32 UWL).
     const auto fits = [&](const FDMTCudaEngine& e) {
         return e.get_memory_usage().total() <= cfg.max_memory_bytes;
     };
@@ -4773,20 +4780,32 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
         }
     };
     const SizeType nsamps = plan.get_nsamps();
-    if (engine->search_path().find("windowed") != std::string::npos) {
-        const SizeType current = engine->get_chunk_nsamps();
+    const SizeType c_auto = engine->get_chunk_nsamps();
+    if (engine->search_path().find("windowed") != std::string::npos &&
+        fits(*engine) && c_auto >= 512 &&
+        c_auto < std::min<SizeType>(4096, nsamps)) {
+        const SizeType c0 = c_auto;
+        const auto m0 = static_cast<double>(engine->get_memory_usage().total());
+        const auto budget = static_cast<double>(cfg.max_memory_bytes);
+        // Free the device memory before each build. The second point is a
+        // shorter chunk, which fits whenever c0 does.
+        engine.reset();
+        const SizeType c1 = c0 / 2;
+        double slope      = 0.0;
+        if (auto e1 = try_chunk(c1)) {
+            const auto m1 = static_cast<double>(e1->get_memory_usage().total());
+            slope         = (m0 - m1) / static_cast<double>(c0 - c1);
+        }
         for (const SizeType c : {4096, 2048}) {
-            if (c <= current || c > nsamps) {
+            if (c <= c0 || c > nsamps || slope <= 0.0 ||
+                m0 + (slope * static_cast<double>(c - c0)) > budget) {
                 continue;
             }
-            engine.reset(); // free the device memory first
             if (auto e = try_chunk(c)) {
                 return e;
             }
         }
-        if (!engine) {
-            engine = std::make_unique<FDMTCudaEngine>(plan, cfg);
-        }
+        engine = std::make_unique<FDMTCudaEngine>(plan, cfg);
     }
     SizeType chunk = engine->get_chunk_nsamps();
     while (!fits(*engine)) {

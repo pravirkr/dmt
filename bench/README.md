@@ -92,6 +92,25 @@ They warm the search histories first and report the real-time factor,
 working memory, chunk length and candidates per block. `DMT_BENCH_CHUNK`
 overrides the automatic chunk length (tuning).
 
+**Peak memory** is measured next to every `main` and `boxcar` timing, in the
+same run (`bench/suite/suite_memory.hpp`, `suite_memory_gpu.cuh`):
+
+- `peak_rss_bytes`: the process's peak resident set size from the point's
+  construction through warm-up and its timed blocks. On Linux the kernel's
+  high-water mark is reset when the point starts (`/proc/self/clear_refs`,
+  after returning freed heap with `malloc_trim`); `base_rss_bytes` is the
+  resident size at that reset (the benchmark process itself). Elsewhere it
+  is the monotonic `getrusage` peak (`rss_peak_resettable = 0`).
+- `peak_device_bytes` (GPU): device memory in use above the point's
+  starting level, sampled every millisecond (`cudaMemGetInfo`) through
+  construction and warm-up, and once after the timed blocks; the sampler is
+  paused while they run.
+- `working_bytes` (boxcar suite): the library's own accounting,
+  `get_memory_usage().total()` plus the input block.
+
+`plot_suite.py` and `plot_uwl.py` print them in the summaries (*allocated*
+against *peak*). The CohFDMT suite does not record them.
+
 **`cfdmt`** (`cfdmt/...`): CohFDMT on one GUPPI node (64 × 2.93 MHz at
 1.31–1.50 GHz, int8 FTPRI, t_p = 10 µs, DM 50–60;
 `bench/suite/suite_cfdmt_common.hpp`), swept over t_p, input bit width, DM
@@ -189,7 +208,12 @@ kernels and fusion (`fdmt_cuda_b.cu`), the DDMT kernel roofline
 chunk / level / stage breakdown on the presets (`fdmt_skew_cpu_b.cpp`), and
 the CohFDMT stages (`cfdmt_cpu_b.cpp`: unpack, forward FFT, fine FDMT, the
 inverse-FFT roofline; `cfdmt_cuda_b.cu`: fused and cuFFT coherent stages,
-chunked forward FFT, the fused kernel against a device copy). `dmt_bench_mem`
-reports the tree and skewed-window engines' peak memory on the preset given
-by `DMT_BENCH_CONFIG` (run one benchmark per process and compare
-`ProcessPeakRSS_MB`).
+chunked forward FFT, the fused kernel against a device copy). `bm_skew_env` in
+`fdmt_skew_cpu_b.cpp` builds one skewed engine from `DMT_SKEW_NBITS`,
+`DMT_SKEW_CHUNK`, `DMT_SKEW_LEVEL` (leaf level), `DMT_SKEW_FUSE` and
+`DMT_SKEW_THREADS` and prints its window summary and stage times (the sweep
+behind the CPU engine's (chunk, leaf level) order). `dmt_bench_mem`
+reports the tree and skewed-window FDMT transform's peak memory on the
+preset given by `DMT_BENCH_CONFIG` (run one benchmark per process and
+compare `ProcessPeakRSS_MB`); the published memory figures come from the
+suites.

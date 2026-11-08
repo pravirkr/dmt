@@ -129,6 +129,20 @@ inline SizeType auto_skew_leaf_level(const plans::FDMTPlan& plan,
     return level;
 }
 
+/// The leaf level of an engine: `leaf` when given (capped at the fusion
+/// ring level), else auto_skew_leaf_level().
+inline SizeType skew_leaf_level(const plans::FDMTPlan& plan,
+                                const FDMTSkewWindows& w,
+                                SizeType level,
+                                SizeType fuse_ring,
+                                SizeType chunk,
+                                SizeType leaf) noexcept {
+    if (leaf != 0) {
+        return std::min(leaf, fuse_ring);
+    }
+    return auto_skew_leaf_level(plan, w, level, fuse_ring, chunk);
+}
+
 /// Memory of the skewed-window engine for `plan` at level K and chunk
 /// length `chunk`, from the plan alone (bytes): the raw ring (`ring_elem`
 /// bytes per sample), the two state halves, the per-row rings and the
@@ -160,14 +174,15 @@ inline FDMTSkewEstimate estimate_skew_memory(const plans::FDMTPlan& plan,
                                              int nthreads,
                                              bool smear            = true,
                                              SizeType fuse         = 0,
-                                             SizeType search_depth = 0) {
+                                             SizeType search_depth = 0,
+                                             SizeType leaf         = 0) {
     const auto& pc  = plan.get_container();
     const auto root = plan.get_niters();
     const auto w    = compute_skew_windows(plan, 1, search_depth);
     const auto f_lvl =
         auto_skew_fuse_level(plan, w, level, chunk, nthreads, fuse);
     const auto f_ring = f_lvl;
-    const auto k_leaf = auto_skew_leaf_level(plan, w, level, f_ring, chunk);
+    const auto k_leaf = skew_leaf_level(plan, w, level, f_ring, chunk, leaf);
     const auto lw     = compute_local_skew_windows(plan, w, k_leaf, f_ring);
     std::vector<float> box_w;
     if (smear) {
@@ -538,6 +553,9 @@ class FDMTSkewCpu {
 public:
     /// `nbits` 32: float input (a 4-byte ring); 1, 2, 4, 8 or 16: packed
     /// input of that width (a 1- or 2-byte ring, integer running sums).
+    /// `level` places the fusion level F (automatic from it unless `fuse`
+    /// is given); `leaf` (1..F) is the leaf level K evaluated from the raw
+    /// ring, 0 for the automatic choice (auto_skew_leaf_level, <= level).
     FDMTSkewCpu(const plans::FDMTPlan& plan,
                 bool use_box_smearing,
                 int nthreads,
@@ -547,7 +565,8 @@ public:
                 SizeType fuse         = 0,
                 bool search_int       = false,
                 bool search_u32       = true,
-                SizeType search_depth = 0)
+                SizeType search_depth = 0,
+                SizeType leaf         = 0)
         : m_plan(plan),
           m_smear(use_box_smearing),
           m_nthreads(std::max(1, nthreads)),
@@ -589,7 +608,7 @@ public:
             auto_skew_fuse_level(plan, m_win, level, m_chunk, m_nthreads, fuse);
         m_fuse_ring = m_fuse;
         m_level =
-            auto_skew_leaf_level(plan, m_win, level, m_fuse_ring, m_chunk);
+            skew_leaf_level(plan, m_win, level, m_fuse_ring, m_chunk, leaf);
         m_loc_win =
             compute_local_skew_windows(plan, m_win, m_level, m_fuse_ring);
         build_tables();
@@ -675,17 +694,23 @@ public:
     //
     // Layout (floats): a header of kHistHeader words holding small integers
     // exactly (16-bit pieces: magic, version, layout hash, stream position,
-    // samples until non-integer input has left every channel's reach), then
-    // each channel's causal ring as floats in slot order (exact for packed
-    // samples), then the level-F carry ring as stored. The size is fixed at
-    // construction (independent of the input type seen so far). A buffer is
-    // only accepted by an engine with the same skewed-window layout (plan,
+    // samples until non-integer input has left every channel's reach, ring
+    // format), then the channels' causal rings in slot order, then the
+    // level-F carry ring as stored. The ring is saved in its own sample
+    // width: a float ring (float input seen) as one float per sample; an
+    // 8- or 16-bit ring (only packed input so far) as those bits packed
+    // into exact 24-bit integers, one per float word (8-bit: three samples
+    // per word, a third of the float layout). The size therefore follows
+    // the input: history_state_size() is the compact size while the ring is
+    // narrow and the float size once it holds float input (or before any
+    // input on an engine built for float). load_history() accepts either
+    // layout from an engine with the same skewed-window layout (plan,
     // chunk, leaf and fusion levels); anything else throws.
 
     static constexpr SizeType kHistHeader = 16;
 
     [[nodiscard]] SizeType history_state_size() const noexcept {
-        return kHistHeader + m_chan_ring_off[m_nchans] + m_ring_f.size();
+        return history_size_for(m_ring_elem);
     }
 
     void save_history(std::span<float> out) const {
@@ -707,31 +732,28 @@ public:
         put16(10,
               m_nonint_until > m_stream_pos ? m_nonint_until - m_stream_pos : 0,
               4);
-        float* ring        = out.data() + kHistHeader;
-        const SizeType tot = m_chan_ring_off[m_nchans];
+        put16(14, m_ring_elem, 1);
+        float* ring          = out.data() + kHistHeader;
+        const SizeType tot   = m_chan_ring_off[m_nchans];
+        const SizeType words = hist_ring_words(m_ring_elem);
         if (m_ring.size() == 0) {
-            std::fill_n(ring, tot, 0.0F);
-        } else {
-            const auto cvt = [&](const auto* src) {
-#pragma omp parallel for num_threads(m_nthreads) schedule(static)
-                for (SizeType i = 0; i < tot; ++i) {
-                    ring[i] = static_cast<float>(src[i]);
-                }
-            };
+            std::fill_n(ring, words, 0.0F);
+        } else if (m_ring_elem != sizeof(float)) {
             ring_dispatch(m_ring_elem, [&](auto tag) {
                 using T = decltype(tag);
-                cvt(reinterpret_cast<const T*>(m_ring.data()));
+                pack_history(reinterpret_cast<const T*>(m_ring.data()), ring);
             });
+        } else {
+            const auto* src = reinterpret_cast<const float*>(m_ring.data());
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+            for (SizeType i = 0; i < tot; ++i) {
+                ring[i] = src[i];
+            }
         }
-        std::copy(m_ring_f.begin(), m_ring_f.end(), ring + tot);
+        std::copy(m_ring_f.begin(), m_ring_f.end(), ring + words);
     }
 
     void load_history(std::span<const float> in) {
-        if (in.size() != history_state_size()) {
-            throw std::invalid_argument(fmt::format(
-                "FDMT::load_history: Invalid input size. Expected {}, got {}",
-                history_state_size(), in.size()));
-        }
         const auto get16 = [&](SizeType at, SizeType words) {
             uint64_t v = 0;
             for (SizeType i = 0; i < words; ++i) {
@@ -744,10 +766,24 @@ public:
             }
             return v;
         };
-        if (get16(0, 1) != kHistMagic || get16(1, 1) != kHistVersion) {
+        if (in.size() < kHistHeader || get16(0, 1) != kHistMagic ||
+            get16(1, 1) != kHistVersion) {
             throw std::invalid_argument(
                 "FDMT::load_history: not a skewed-window history (it was "
                 "saved by a different engine path)");
+        }
+        uint64_t elem = get16(14, 1);
+        if (elem == 0) { // written before the format word: a float ring
+            elem = sizeof(float);
+        }
+        if (elem != 1 && elem != 2 && elem != sizeof(float)) {
+            throw std::invalid_argument(
+                "FDMT::load_history: unknown skewed-window ring format");
+        }
+        if (in.size() != history_size_for(elem)) {
+            throw std::invalid_argument(fmt::format(
+                "FDMT::load_history: Invalid input size. Expected {}, got {}",
+                history_size_for(elem), in.size()));
         }
         if (get16(2, 4) != layout_hash()) {
             throw std::invalid_argument(
@@ -755,29 +791,47 @@ public:
                 "a different skewed-window layout (plan, chunk_nsamps or "
                 "fusion depth)");
         }
-        const uint64_t pos = get16(6, 4);
-        const uint64_t rem = get16(10, 4);
-        const float* ring  = in.data() + kHistHeader;
-        const SizeType tot = m_chan_ring_off[m_nchans];
-        // The narrowest ring type holding every saved sample exactly (a
-        // packed stream's ring stays packed), never narrower than the
-        // current ring.
-        float lo  = 0.0F;
-        float hi  = 0.0F;
-        bool ints = true;
+        const uint64_t pos   = get16(6, 4);
+        const uint64_t rem   = get16(10, 4);
+        const float* ring    = in.data() + kHistHeader;
+        const SizeType tot   = m_chan_ring_off[m_nchans];
+        const SizeType words = hist_ring_words(elem);
+        // The ring type that holds every saved sample: the saved width for
+        // a packed ring; for a float ring, the narrowest type holding its
+        // samples exactly (a packed stream saved by a float ring stays
+        // packed). Never narrower than the current ring.
+        SizeType need = elem;
+        if (elem != sizeof(float)) {
+            bool exact = true;
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)              \
+    reduction(&& : exact)
+            for (SizeType i = 0; i < words; ++i) {
+                const float v = ring[i];
+                exact         = exact && v >= 0.0F && v < kHistWordRange &&
+                                v == std::floor(v);
+            }
+            if (!exact) {
+                throw std::invalid_argument(
+                    "FDMT::load_history: a packed ring word is not a 24-bit "
+                    "integer (the buffer was altered)");
+            }
+        } else {
+            float lo  = 0.0F;
+            float hi  = 0.0F;
+            bool ints = true;
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)              \
     reduction(min : lo) reduction(max : hi) reduction(&& : ints)
-        for (SizeType i = 0; i < tot; ++i) {
-            const float v = ring[i];
-            lo            = std::min(lo, v);
-            hi            = std::max(hi, v);
-            ints          = ints && v == std::nearbyint(v);
-        }
-        SizeType need = sizeof(float);
-        if (ints && lo >= 0.0F && hi <= 255.0F) {
-            need = 1;
-        } else if (ints && lo >= 0.0F && hi <= 65535.0F) {
-            need = 2;
+            for (SizeType i = 0; i < tot; ++i) {
+                const float v = ring[i];
+                lo            = std::min(lo, v);
+                hi            = std::max(hi, v);
+                ints          = ints && v == std::nearbyint(v);
+            }
+            if (ints && lo >= 0.0F && hi <= 255.0F) {
+                need = 1;
+            } else if (ints && lo >= 0.0F && hi <= 65535.0F) {
+                need = 2;
+            }
         }
         if (m_ring.size() == 0) { // float-built, before any input
             alloc_ring(need);
@@ -792,12 +846,18 @@ public:
         ring_dispatch(m_ring_elem, [&](auto tag) {
             using T   = decltype(tag);
             auto* dst = reinterpret_cast<T*>(m_ring.data());
+            if (elem == 1) {
+                unpack_history<uint8_t>(ring, dst);
+            } else if (elem == 2) {
+                unpack_history<uint16_t>(ring, dst);
+            } else {
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
-            for (SizeType i = 0; i < tot; ++i) {
-                dst[i] = static_cast<T>(ring[i]);
+                for (SizeType i = 0; i < tot; ++i) {
+                    dst[i] = static_cast<T>(ring[i]);
+                }
             }
         });
-        std::copy_n(ring + tot, m_ring_f.size(), m_ring_f.begin());
+        std::copy_n(ring + words, m_ring_f.size(), m_ring_f.begin());
         m_stream_pos   = pos;
         m_nonint_until = pos + rem;
     }
@@ -1610,6 +1670,65 @@ private:
 
     static constexpr uint64_t kHistMagic   = 0x534BU; // "SK"
     static constexpr uint64_t kHistVersion = 1;
+    /// A packed history word holds an exact integer below 2^24.
+    static constexpr float kHistWordRange = 16777216.0F;
+
+    /// Saved ring words for a ring of `elem`-byte samples: one float per
+    /// sample for a float ring; for 8- and 16-bit rings, groups of three
+    /// samples packed into one (8-bit) or two (16-bit) 24-bit words.
+    [[nodiscard]] SizeType hist_ring_words(SizeType elem) const noexcept {
+        const SizeType tot = m_chan_ring_off[m_nchans];
+        if (elem == sizeof(float)) {
+            return tot;
+        }
+        return ((tot + 2) / 3) * elem;
+    }
+    [[nodiscard]] SizeType history_size_for(SizeType elem) const noexcept {
+        return kHistHeader + hist_ring_words(elem) + m_ring_f.size();
+    }
+
+    template <typename T>
+    void pack_history(const T* src, float* words) const noexcept {
+        constexpr SizeType kBits = 8 * sizeof(T);
+        constexpr SizeType kW    = sizeof(T); // words per group of three
+        const SizeType tot       = m_chan_ring_off[m_nchans];
+        const SizeType ng        = (tot + 2) / 3;
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+        for (SizeType q = 0; q < ng; ++q) {
+            const SizeType i0 = q * 3;
+            const SizeType m  = std::min<SizeType>(3, tot - i0);
+            uint64_t v        = 0;
+            for (SizeType j = 0; j < m; ++j) {
+                v |= static_cast<uint64_t>(src[i0 + j]) << (kBits * j);
+            }
+            for (SizeType k = 0; k < kW; ++k) {
+                words[(q * kW) + k] =
+                    static_cast<float>((v >> (24 * k)) & 0xFFFFFFU);
+            }
+        }
+    }
+
+    /// Unpacks `S`-wide saved samples into a ring of type T (S or wider).
+    template <typename S, typename T>
+    void unpack_history(const float* words, T* dst) const noexcept {
+        constexpr SizeType kBits = 8 * sizeof(S);
+        constexpr SizeType kW    = sizeof(S);
+        constexpr uint64_t kMask = (uint64_t{1} << kBits) - 1;
+        const SizeType tot       = m_chan_ring_off[m_nchans];
+        const SizeType ng        = (tot + 2) / 3;
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+        for (SizeType q = 0; q < ng; ++q) {
+            uint64_t v = 0;
+            for (SizeType k = 0; k < kW; ++k) {
+                v |= static_cast<uint64_t>(words[(q * kW) + k]) << (24 * k);
+            }
+            const SizeType i0 = q * 3;
+            const SizeType m  = std::min<SizeType>(3, tot - i0);
+            for (SizeType j = 0; j < m; ++j) {
+                dst[i0 + j] = static_cast<T>((v >> (kBits * j)) & kMask);
+            }
+        }
+    }
 
     /// Identifies the saved-history layout: everything that sizes or
     /// places the causal rings and the level-F carry ring.

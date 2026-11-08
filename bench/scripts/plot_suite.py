@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -173,6 +174,10 @@ class Result:
     times: list[float] = field(default_factory=list)  # seconds per block
     skipped: str = ""
     ndms: int = 0  # trials of the point's grid (benchmark counter)
+    # Peak memory per repetition (bytes): process peak RSS, and device
+    # memory above the point's starting level on the GPU.
+    peak_rss: list[float] = field(default_factory=list)
+    peak_device: list[float] = field(default_factory=list)
 
     @property
     def time(self) -> float:
@@ -182,6 +187,12 @@ class Result:
     def rtf(self) -> float:
         """Real-time factor: seconds of data processed per second of compute."""
         return self.nsamps * TSAMP / self.time
+
+    @property
+    def peak_memory(self) -> float:
+        """Peak bytes of the point: device memory on a GPU, else RSS."""
+        vals = self.peak_device if self.backend in GPU_KINDS else self.peak_rss
+        return max(vals) if vals else float("nan")
 
 
 @dataclass
@@ -285,6 +296,10 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:  # noqa:
                 continue
             res.times.append(b["real_time"] * _UNIT[b.get("time_unit", "ns")])
             res.ndms = int(b.get("ndms", res.ndms))
+            if "peak_rss_bytes" in b:
+                res.peak_rss.append(float(b["peak_rss_bytes"]))
+            if "peak_device_bytes" in b:
+                res.peak_device.append(float(b["peak_device_bytes"]))
     versions = {m.context.get("dmt_version") for m in machines.values()} - {None}
     if len(versions) > 1:
         print(f"warning: results come from different dmt versions: {sorted(versions)}")
@@ -878,6 +893,105 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
     return out
 
 
+GIB = 1024.0**3
+
+
+def fmt_gib(b: float) -> str:
+    if math.isnan(b):  # not measured
+        return "—"
+    return f"{b / GIB:.2f} GiB" if b < 10 * GIB else f"{b / GIB:.1f} GiB"
+
+
+def _memory_table(results: list[Result], machines: dict[str, Machine]) -> list[str]:
+    ref = {
+        (r.machine, r.backend, r.algo): r
+        for r in results
+        if r.sweep == "ndms" and r.dm_max == DM_MAX_REF and r.times
+    }
+    if not any(r.peak_rss or r.peak_device for r in ref.values()):
+        return []
+    out = [
+        "",
+        (
+            "**Peak memory at the reference point** (float32 input): process "
+            "peak resident set size on the CPU (input, output, engine and the "
+            "benchmark process itself), device memory in use on the GPU "
+            "(input, output and engine; sampled every millisecond). Measured "
+            "in the same runs as the times above."
+        ),
+        "",
+        "| platform | " + " | ".join(ALGOS) + " |",
+        "| :--- | " + " | ".join("---:" for _ in ALGOS) + " |",
+    ]
+    for mname, kind in platforms(results):
+        backends = cpu_backends(results, mname) if kind == "cpu" else [kind]
+        for b in backends:
+            t = {a: ref.get((mname, b, a)) for a in ALGOS}
+            if t["FDMT"] is None:
+                continue
+            cells = [fmt_gib(t[a].peak_memory) if t[a] else "—" for a in ALGOS]
+            plat = machines[mname].platform(kind) + backend_tag(b)
+            out.append(f"| {plat} | {' | '.join(cells)} |")
+    return out
+
+
+def load_boxcar(results_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Per-iteration rows of the boxcar suite JSON (run_suite.py --suite boxcar)."""
+    rows = []
+    for path in sorted(results_dir.glob("*/boxcar_*.json")):
+        data = json.loads(path.read_text())
+        rows += [
+            (path.parent.name, b)
+            for b in data.get("benchmarks", [])
+            if b.get("run_type") == "iteration" and not b.get("error_occurred")
+        ]
+    return rows
+
+
+def _boxcar_table(rows: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    """FDMTBoxcar at the reference point, one line per benchmark."""
+    if not rows:
+        return []
+    by: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for mname, b in rows:
+        name = b["name"].split("/real_time")[0].split("/min_warmup_time")[0]
+        by[(mname, name)].append(b)
+
+    def med(bs: list[dict[str, Any]], key: str) -> float:
+        vals = [float(b[key]) for b in bs if key in b]
+        return statistics.median(vals) if vals else float("nan")
+
+    out = [
+        "",
+        (
+            f"**FDMTBoxcar** (`run_suite.py --suite boxcar`): {NSAMPS_REF} "
+            f"samples {TIMES} {NDMS_REF} DM trials, boxcars to 100 ms, "
+            "threshold 6, median time per block. *allocated*: the library's "
+            "own accounting plus the input block; *peak*: process peak RSS "
+            "(CPU) or device memory in use (GPU), measured in the same run."
+        ),
+        "",
+        "| benchmark | time per block | real-time factor | allocated | peak |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for (_mname, name), bs in sorted(by.items()):
+        parts = name.split("/")
+        label = "/".join(p for p in parts[2:] if p)
+        backend = parts[0].removeprefix("BM_fdmt_boxcar_")
+        label = f"{'cpu' if backend == 'stream' else backend}: {label}"
+        t = med(bs, "real_time") * _UNIT[bs[0].get("time_unit", "ns")]
+        gpu = "peak_device_bytes" in bs[0]
+        peak = max(
+            float(b.get("peak_device_bytes" if gpu else "peak_rss_bytes", "nan"))
+            for b in bs
+        )
+        out.append(
+            f"| `{label}` | {fmt_seconds(t)} | {med(bs, 'realtime_factor'):.0f}"
+            f"{TIMES} | {fmt_gib(med(bs, 'working_bytes'))} | {fmt_gib(peak)} |"
+        )
+    return out
+
+
 def fmt_ratio(r: float) -> str:
     return f"{r:.1f}{TIMES}" if r < 10 else f"{r:.0f}{TIMES}"
 
@@ -931,11 +1045,17 @@ def _skipped_list(results: list[Result]) -> list[str]:
     return out
 
 
-def summary_md(results: list[Result], machines: dict[str, Machine]) -> str:
+def summary_md(
+    results: list[Result],
+    machines: dict[str, Machine],
+    boxcar: list[tuple[str, dict[str, Any]]] | None = None,
+) -> str:
     out = ["<!-- generated by bench/scripts/plot_suite.py; do not edit -->", ""]
     out += _machines_table(machines)
     out += _reference_table(results, machines)
+    out += _memory_table(results, machines)
     out += _nbits_table(results, machines)
+    out += _boxcar_table(boxcar or [])
     out += _skipped_list(results)
     return "\n".join([*out, ""])
 
@@ -1006,7 +1126,9 @@ def main() -> None:
             place_end_labels(fig)
             fig.savefig(out / f"{fname}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
-    (out_root / "summary.md").write_text(summary_md(results, machines))
+    (out_root / "summary.md").write_text(
+        summary_md(results, machines, load_boxcar(results_dir))
+    )
     print(
         f"wrote {len(figs)} figures {TIMES} {len(THEMES)} themes and summary.md "
         f"to {out_root}"

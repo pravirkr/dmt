@@ -223,8 +223,8 @@ public:
      * The fastest streaming path that fits is taken. A valid-mode plan whose
      * tree history does not fit (e.g. 6656 channels at 64 us to DM 2000)
      * runs the skewed-window path instead, with the longest automatic chunk
-     * that fits (slower on the CPU, faster on the GPU). Throws
-     * std::invalid_argument when no path fits.
+     * that fits (on parkes_uwl faster than the tree path on both backends).
+     * Throws std::invalid_argument when no path fits.
      *
      * All working memory is allocated here (see get_memory_usage()); execute()
      * performs no allocation.
@@ -660,6 +660,13 @@ public:
      * @brief Size (in floats) of this instance's "valid"-mode streaming
      * history state, as used by save_history()/load_history(). Zero for
      * "full"/"roll" mode instances.
+     *
+     * On the CPU skewed-window path (plans whose tree history exceeds the
+     * memory budget) the size follows the input seen so far: while only
+     * packed 8- or 16-bit blocks have arrived the raw input ring is saved at
+     * that width (about a third of the float size for 8-bit input); after a
+     * float block, or before any input, it is the float size. Query it when
+     * saving; load_history() accepts either layout.
      */
     [[nodiscard]] SizeType history_state_size() const noexcept;
 
@@ -684,8 +691,9 @@ public:
      * between backends), resuming that stream. Use reset_history() instead to
      * start a stream cold.
      *
-     * @param in Source span, size must equal history_state_size().
-     * @throws std::invalid_argument if in.size() != history_state_size().
+     * @param in Source span, size must equal history_state_size() (on the
+     * CPU skewed-window path: the size of the saved layout, packed or float).
+     * @throws std::invalid_argument on a size or layout mismatch.
      */
     void load_history(std::span<const float> in);
 

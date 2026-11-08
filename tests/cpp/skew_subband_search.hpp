@@ -65,7 +65,8 @@ inline SearchRun run_subband_search(const plans::FDMTPlan& plan,
                                     bool skew,
                                     bool packed,
                                     SizeType nblocks,
-                                    SizeType chunk = 1024) {
+                                    SizeType chunk = 1024,
+                                    SizeType leaf  = 0) {
     using namespace algorithms::detail; // NOLINT
     const auto box      = search_config(packed);
     const auto planes   = make_boxcar_plans(plan, box, true);
@@ -80,6 +81,7 @@ inline SearchRun run_subband_search(const plans::FDMTPlan& plan,
     cfg.search_nbits        = packed ? 8 : 32;
     cfg.skew_history_bytes  = skew ? 0 : SIZE_MAX;
     cfg.force_skewed_direct = skew;
+    cfg.skew_leaf           = leaf;
     const bool cpu          = exec.backend == Backend::kCPU;
     auto engine =
         cpu ? make_fdmt_boxcar_cpu(plan, box, planes, cfg,

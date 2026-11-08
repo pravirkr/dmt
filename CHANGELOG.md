@@ -60,6 +60,14 @@ All notable changes to `dmt` are listed here. The format follows
   depth 4 FDMTBoxcar drops from 17.4 GB to 6.4 GB on the CPU and from 15 GB
   to 9.9 GB on the GPU, within the default budget at every depth to 5 on
   8-bit input.
+- **Faster float32 on the CPU skewed path.** The engine now picks its leaf
+  level (the level read from the raw ring) together with the chunk, in
+  measured speed order within the budget: leaf level 1 for float input, 2
+  for 8-bit (when the width is known at construction, as in FDMTBoxcar),
+  instead of always 4. On `parkes_uwl` (8 threads) the float32
+  FDMT transform takes 4.9 s per 2.1 s block instead of 13.2 s (the old
+  tree path took 5.75 s in 16 GB), and the depth-4 float32 FDMTBoxcar search
+  20 s instead of 27.8 s. Output stays bit-identical to the tree path.
 - Benchmark preset `cryopaf` is renamed `cryopaf_low`; `meerkat_lband` is
   the default preset; `parkes_uwl` searches at subband depth 4. Results
   live in `bench/results/<config>/<machine>/` for every preset

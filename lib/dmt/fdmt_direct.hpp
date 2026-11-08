@@ -221,8 +221,16 @@ inline FDMTDirectPlan build_fdmt_direct_skewed_plan(
     if (levels == 0 || levels >= plan.get_niters()) {
         throw std::invalid_argument("FDMT direct levels: depth out of range");
     }
-    constexpr int32_t kMaxSliceRows        = 16;
-    constexpr int32_t kMaxSliceShiftSpread = 256;
+    constexpr int32_t kMaxSliceRows = 16;
+    // A slice's rows share one staging and prefix pass of every channel
+    // over the slice's span; up to kMaxSliceRows rows fill a block. Rows on
+    // local windows (the windowed top's subband search) sit hundreds of
+    // samples apart: a 256-sample shift spread left about one row per slice
+    // (15 of 16 row slots idle). 1024 is the measured optimum on parkes_uwl
+    // depth 4 (L40S, 1.27 -> 1.17 s per 2.1 s block for uint8, 1.82 ->
+    // 1.62 s for float32; 768: 1.21 / 1.68, 1280 and above slower as the
+    // staged span grows); the depth-0 skewed path is unchanged.
+    constexpr int32_t kMaxSliceShiftSpread = 1024;
     constexpr int32_t kMaxSliceSpan        = 8192;
     FDMTDirectPlan d;
     d.levels = levels;

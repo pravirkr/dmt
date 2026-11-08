@@ -11,6 +11,11 @@ plot_cfdmt.py and plot_uwl.py read:
     python bench/scripts/run_suite.py --suite boxcar --config parkes_uwl
     python bench/scripts/run_suite.py --suite cfdmt
 
+Every timed point also records its peak memory in the same run: process peak
+RSS (``peak_rss_bytes``; the kernel's high-water mark is reset per point) and,
+on the GPU, peak device memory in use (``peak_device_bytes``), next to the
+library's own accounting (``working_bytes``) where the suite reports it.
+
 Every result lands in ``bench/results/<config>/<machine>/`` (``cfdmt`` for
 ``--suite cfdmt``): ``suite_{cpu,<gpu>}.json`` (main), ``boxcar_{cpu,<gpu>}.json``
 (FDMTBoxcar at the preset's reference point; for ``parkes_uwl`` also the

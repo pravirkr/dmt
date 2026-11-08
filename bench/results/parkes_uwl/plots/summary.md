@@ -2,36 +2,38 @@
 
 Machine `l40s-epyc9654`: AMD EPYC 9654 96-Core Processor, NVIDIA L40S; CPU threads one per CCD (OMP_PLACES `{0}:8:8`). Default memory budget (10 GiB).
 
+*allocated*: the library's own accounting (`get_memory_usage()`) plus the input block; *peak*: process peak resident set size (CPU) or device memory in use (GPU, sampled every millisecond) from construction through warm-up and the timed blocks, in the same run.
+
 ### Real-time sweep (FDMTBoxcar, subband depth 4, 2.097 s blocks)
 
-| time resolution | backend | input | DM trials | searched rows | widths | chunk | time per block | real-time factor | working memory |
-|---:|:---|:---|---:|---:|---:|---:|---:|---:|---:|
-| 64 µs | GPU | uint8 | 4749 | 217941 | 17 | 4096 | 1.275 s | 1.64× | 9.38 GiB |
-| 64 µs | GPU | float32 | 4749 | 217941 | 17 | 2048 | 1.817 s | 1.15× | 10.77 GiB |
-| 64 µs | CPU (8 thr.) | uint8 | 4749 | 217941 | 17 | 4096 | 14.532 s | 0.14× | 6.17 GiB |
-| 64 µs | CPU (8 thr.) | float32 | 4749 | 217941 | 17 | 2048 | 27.776 s | 0.08× | 9.26 GiB |
-| 256 µs | GPU | uint8 | 2302 | 91238 | 14 | 2048 | 0.058 s | 36.40× | 3.35 GiB |
-| 256 µs | GPU | float32 | 2302 | 91238 | 14 | 2048 | 0.055 s | 37.85× | 3.47 GiB |
-| 256 µs | CPU (8 thr.) | uint8 | 2302 | 91238 | 14 | 2048 | 1.853 s | 1.13× | 3.32 GiB |
-| 256 µs | CPU (8 thr.) | float32 | 2302 | 91238 | 14 | 2048 | 1.562 s | 1.34× | 3.50 GiB |
-| 512 µs | GPU | uint8 | 1153 | 45714 | 12 | 256 | 0.013 s | 161.39× | 0.71 GiB |
-| 512 µs | GPU | float32 | 1153 | 45714 | 12 | 256 | 0.013 s | 162.74× | 0.77 GiB |
-| 512 µs | CPU (8 thr.) | uint8 | 1153 | 45714 | 12 | 4096 | 0.337 s | 6.22× | 1.82 GiB |
-| 512 µs | CPU (8 thr.) | float32 | 1153 | 45714 | 12 | 4096 | 0.310 s | 6.76× | 1.95 GiB |
-| 1024 µs | GPU | uint8 | 577 | 22886 | 11 | 512 | 0.003 s | 801.56× | 0.30 GiB |
-| 1024 µs | GPU | float32 | 577 | 22886 | 11 | 512 | 0.002 s | 940.52× | 0.34 GiB |
-| 1024 µs | CPU (8 thr.) | uint8 | 577 | 22886 | 11 | 2048 | 0.113 s | 18.62× | 0.55 GiB |
-| 1024 µs | CPU (8 thr.) | float32 | 577 | 22886 | 11 | 2048 | 0.083 s | 25.23× | 0.65 GiB |
+| time resolution | backend | input | DM trials | searched rows | widths | chunk | time per block | real-time factor | allocated | peak |
+|---:|:---|:---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 µs | GPU | uint8 | 4749 | 217941 | 17 | 4096 | 1.172 s | 1.79× | 9.37 GiB | 9.21 GiB |
+| 64 µs | GPU | float32 | 4749 | 217941 | 17 | 2048 | 1.616 s | 1.30× | 10.77 GiB | 10.69 GiB |
+| 64 µs | CPU (8 thr.) | uint8 | 4749 | 217941 | 17 | 4096 | 14.286 s | 0.15× | 6.15 GiB | 6.30 GiB |
+| 64 µs | CPU (8 thr.) | float32 | 4749 | 217941 | 17 | 2048 | 20.065 s | 0.10× | 9.24 GiB | 9.40 GiB |
+| 256 µs | GPU | uint8 | 2302 | 91238 | 14 | 2048 | 0.058 s | 36.39× | 3.35 GiB | 3.33 GiB |
+| 256 µs | GPU | float32 | 2302 | 91238 | 14 | 2048 | 0.055 s | 37.85× | 3.47 GiB | 3.47 GiB |
+| 256 µs | CPU (8 thr.) | uint8 | 2302 | 91238 | 14 | 2048 | 1.823 s | 1.15× | 3.32 GiB | 3.50 GiB |
+| 256 µs | CPU (8 thr.) | float32 | 2302 | 91238 | 14 | 2048 | 1.558 s | 1.35× | 3.50 GiB | 3.68 GiB |
+| 512 µs | GPU | uint8 | 1153 | 45714 | 12 | 256 | 0.013 s | 161.54× | 0.71 GiB | 0.71 GiB |
+| 512 µs | GPU | float32 | 1153 | 45714 | 12 | 256 | 0.013 s | 162.84× | 0.77 GiB | 0.78 GiB |
+| 512 µs | CPU (8 thr.) | uint8 | 1153 | 45714 | 12 | 4096 | 0.337 s | 6.22× | 1.82 GiB | 1.94 GiB |
+| 512 µs | CPU (8 thr.) | float32 | 1153 | 45714 | 12 | 4096 | 0.310 s | 6.77× | 1.95 GiB | 2.05 GiB |
+| 1024 µs | GPU | uint8 | 577 | 22886 | 11 | 512 | 0.003 s | 802.07× | 0.30 GiB | 0.30 GiB |
+| 1024 µs | GPU | float32 | 577 | 22886 | 11 | 512 | 0.002 s | 941.43× | 0.34 GiB | 0.34 GiB |
+| 1024 µs | CPU (8 thr.) | uint8 | 577 | 22886 | 11 | 2048 | 0.111 s | 18.91× | 0.55 GiB | 0.62 GiB |
+| 1024 µs | CPU (8 thr.) | float32 | 577 | 22886 | 11 | 2048 | 0.083 s | 25.24× | 0.65 GiB | 0.72 GiB |
 
 ### Reference point (64 µs, 32768-sample blocks, DM 0-2000)
 
-| backend | input | wtsp | subband depth | chunk | time per block | real-time factor | working memory |
-|:---|:---|---:|---:|---:|---:|---:|---:|
-| GPU | float32 | 1.5 | 0 | 1024 | 0.363 s | 5.77× | 2.73 GiB |
-| GPU | float32 | 2 | 0 | 1024 | 0.363 s | 5.77× | 2.73 GiB |
-| GPU | uint8 | 1.5 | 0 | 1024 | 0.361 s | 5.82× | 2.09 GiB |
-| GPU | uint8 | 2 | 0 | 1024 | 0.360 s | 5.83× | 2.09 GiB |
-| GPU | float32 | 1.5 | 4 | 2048 | 1.816 s | 1.15× | 10.77 GiB |
-| GPU | float32 | 2 | 4 | 2048 | 1.803 s | 1.16× | 10.66 GiB |
-| GPU | uint8 | 1.5 | 4 | 4096 | 1.274 s | 1.65× | 9.38 GiB |
-| GPU | uint8 | 2 | 4 | 4096 | 1.246 s | 1.68× | 9.23 GiB |
+| backend | input | wtsp | subband depth | chunk | time per block | real-time factor | allocated | peak |
+|:---|:---|---:|---:|---:|---:|---:|---:|---:|
+| GPU | float32 | 1.5 | 0 | 1024 | 0.363 s | 5.77× | 2.73 GiB | 2.75 GiB |
+| GPU | float32 | 2 | 0 | 1024 | 0.363 s | 5.77× | 2.73 GiB | 2.75 GiB |
+| GPU | uint8 | 1.5 | 0 | 1024 | 0.361 s | 5.82× | 2.09 GiB | 2.10 GiB |
+| GPU | uint8 | 2 | 0 | 1024 | 0.360 s | 5.83× | 2.09 GiB | 2.10 GiB |
+| GPU | float32 | 1.5 | 4 | 2048 | 1.615 s | 1.30× | 10.77 GiB | 10.69 GiB |
+| GPU | float32 | 2 | 4 | 2048 | 1.602 s | 1.31× | 10.66 GiB | 10.59 GiB |
+| GPU | uint8 | 1.5 | 4 | 4096 | 1.172 s | 1.79× | 9.37 GiB | 9.21 GiB |
+| GPU | uint8 | 2 | 4 | 4096 | 1.143 s | 1.84× | 9.22 GiB | 9.08 GiB |

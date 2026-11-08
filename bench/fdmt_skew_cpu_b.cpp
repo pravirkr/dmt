@@ -5,10 +5,13 @@
 // (one warm-up block, then one block per iteration).
 
 #include <cstdint>
+#include <cstdlib>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
 
 #include "dmt/algorithms/fdmt.hpp"
 
@@ -99,7 +102,62 @@ void bm_skew(benchmark::State& state,
     set_counters(state, plan, p, nthreads);
 }
 
+/// Developer sweep: DMT_SKEW_NBITS (32), DMT_SKEW_CHUNK (4096),
+/// DMT_SKEW_LEVEL (4) and DMT_SKEW_FUSE (0: automatic) select the engine;
+/// prints its summary once.
+void bm_skew_env(benchmark::State& state) {
+    const auto env = [](const char* name, SizeType def) {
+        const char* v = std::getenv(name); // NOLINT
+        return (v != nullptr && *v != '\0')
+                   ? static_cast<SizeType>(std::stoul(v))
+                   : def;
+    };
+    const SizeType nbits = env("DMT_SKEW_NBITS", 32);
+    const SizeType chunk = env("DMT_SKEW_CHUNK", 4096);
+    const SizeType level = env("DMT_SKEW_LEVEL", 4);
+    const SizeType fuse  = env("DMT_SKEW_FUSE", 0);
+    const int nthreads   = static_cast<int>(env("DMT_SKEW_THREADS", 8));
+    const auto p         = ref_point(nbits);
+    const auto plan      = make_plan(p);
+    FDMTSkewCpu skew(plan, true, nthreads, chunk, level, nbits, fuse);
+    static bool printed = false;
+    if (!printed) {
+        fmt::print("{}\n", skew.summary());
+        printed = true;
+    }
+    std::vector<float> dmt(plan.get_dmt_size());
+    const auto wf_f = nbits == 32 ? make_float_input(kNchans * p.nsamps)
+                                  : std::vector<float>{};
+    const auto wf_p = nbits == 32
+                          ? std::vector<uint8_t>{}
+                          : make_packed_input(packed_bytes(p.nsamps, nbits));
+    const auto run  = [&] {
+        if (nbits == 32) {
+            skew.execute(wf_f, dmt);
+        } else {
+            skew.execute(std::span<const uint8_t>(wf_p), nbits, dmt);
+        }
+    };
+    run();
+    skew.reset_profile();
+    for (auto _ : state) {
+        run();
+    }
+    const auto prof              = skew.profile();
+    const double iters           = static_cast<double>(state.iterations());
+    state.counters["ms_ring"]    = 1e3 * prof.ring / iters;
+    state.counters["ms_stripes"] = 1e3 * prof.stripes / iters;
+    state.counters["ms_rows"]    = 1e3 * prof.rows / iters;
+    state.counters["ms_merges"]  = 1e3 * prof.merges / iters;
+    state.counters["level"]      = static_cast<double>(skew.get_leaf_level());
+    state.counters["fuse"]       = static_cast<double>(skew.get_fuse_level());
+    state.counters["engine_MB"] =
+        static_cast<double>(skew.memory_usage().total()) / (1024.0 * 1024.0);
+}
+
 } // namespace
+
+BENCHMARK(bm_skew_env)->UseRealTime()->Unit(benchmark::kMillisecond);
 
 // Tree engine: automatic chunk, and the prototype's 4096.
 BENCHMARK_CAPTURE(bm_tree, float32_t8_auto, 32, 8, 0)->UseRealTime();

@@ -50,6 +50,16 @@ length, accumulated delay; the tables of `fdmt_direct.hpp`, which the CUDA
 direct path also uses), each read as a difference of the channel's running
 sum.
 
+The *leaf level* $K$ at which rows are read from the raw ring need not be
+4. Below the fusion level $F$ every row is computed on a *local* window
+(placed inside its level-$F$ ancestor's), so a lower $K$ is possible: its
+rows have fewer leaves (2 at $K = 1$) and the levels between $K$ and $F$
+become the tree's cheap binary merges inside the group scratch, at the cost
+of recomputing a larger local overlap and a little more group memory. On
+the CPU the leaf gathers dominate float input (double running sums, 16
+leaves per row at $K = 4$), so the engine picks the leaf level with the
+chunk (below).
+
 Three further observations make the chunk state and raw input ring compact
 too:
 
@@ -80,9 +90,10 @@ too:
    $k_{\text{top}}$ in `DirectTopD` at relative offset $d - s_{lo}(r) \le
    \text{spread}(r)$.
 
-**Exactness.** Levels 0–4 are summed in integer arithmetic (uint32 running
-sums, exact box sums, the plan's box-mean recipes for packed input) and
-converted once to float at level 4, the tree's own int → float conversion.
+**Exactness.** Levels 0–$K$ are summed in integer arithmetic (uint32
+running sums, exact box sums, the plan's box-mean recipes for packed input)
+and converted once to float at level $K$, the tree's own int → float
+conversion.
 The merges above are the tree's additions with the tree's operand order.
 So for packed input and for float input holding integers (a filterbank),
 while the level-4 row values stay below $2^{24}$ on the plan's scale (true
@@ -90,8 +101,8 @@ for 8-bit data on all four presets) and every level-0 box sum below
 $2^{31}$, the output is bit-identical to the streaming tree engine for any
 chunk length and any switch level; the unit test checks this on the
 `cryopaf_lband` and `meerkat_lband` geometry over three consecutive blocks,
-float and packed, with and without box smearing, at levels 3, 4 and 5, and
-with uneven chunks, and the hidden `[.skew_preset]` case on the full
+float and packed, with and without box smearing, at levels 3, 4 and 5,
+at leaf levels 1 and 2 below fusion from level 4, and with uneven chunks, and the hidden `[.skew_preset]` case on the full
 presets (DM 0–2000, 32 768-sample blocks). Non-integer float input is summed
 in double running sums on the CPU (float on the GPU) and agrees within float
 rounding (measured: within $1.5 \times 10^{-7}$ of the output scale on the
@@ -171,6 +182,10 @@ last `lag` samples of each subband row are searched only if it continues.
   3–6 are still wide (mean spread 753 samples at level 3 against a chunk of
   1024), so the windowed top runs best at long chunks: 2.8 s per block at
   chunk 1024, 1.7 s at 2048 and 1.25 s at 4096 on `parkes_uwl` uint8.
+  The skewed level-3 kernel stages each slice's channels once for up to 16
+  rows; a slice groups rows whose shifts lie within 1024 samples (256 left
+  about one row per slice on these local windows: 1.27 → 1.17 s per block
+  for uint8, 1.82 → 1.62 s for float32).
 
 Both are tested against the tree path (`tests/cpp/fdmt_skew_cpu_t.cpp`,
 `[skew][boxcar]`): identical candidates and S/N at depths 1, 3 and 5,
@@ -182,11 +197,32 @@ float and packed, CPU and GPU.
 (10 GiB by default) and the skewed path otherwise, at the longest chunk
 that fits:
 
-- **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), trying
-  4096, 2048, 1024, 512 and 256 samples, with a tenth of headroom for the
-  merge tables; the allocation is then checked.
+- **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), with a
+  tenth of headroom for the merge tables; the allocation is then checked.
+  It takes the first (chunk, leaf level) that fits from a list in measured
+  speed order (`FDMTCpuEngine::skew_candidates`; `parkes_uwl`, 8 threads,
+  s per 2.1 s block):
+
+  | ring | chunk 4096 | chunk 2048 |
+  | :--- | :--- | :--- |
+  | float | $K=1$ 4.96, $K=2$ 6.6, $K=3$ 8.8, $K=4$ 13.3 | $K=1$ 7.4, $K=2$ 9.4, $K=3$ 11.1, $K=4$ 15.3 |
+  | 8-bit | $K=2$ 4.08, $K=3$ 4.38, $K=4$ 4.69, $K=1$ 4.77 | $K=4$ 5.99, $K=2$ 6.28 |
+
+  A float ring prefers $K = 1$ at 4096, then $K = 2$, then $K = 1$ at 2048
+  ahead of $K \ge 3$ at 4096; an 8-bit ring prefers $K = 2$ (its integer
+  running sums make the leaves cheap). Chunks of 1024 and below follow.
+  An explicit `chunk_nsamps` takes the fastest leaf level that fits it.
+  The ring width is known at construction only for an `FDMTBoxcar` with a
+  packed configuration (`BoxcarConfig` input bits). A bare `FDMT` is built
+  for float input and keeps the float choice ($K = 1$) when it is later fed
+  packed blocks: 4.76 s per block on 8-bit `parkes_uwl` instead of 4.08 s.
 - **GPU:** by building the engine (about 1 s) and measuring it. The
-  windowed top tries 4096 and 2048 first; any other path keeps its
+  windowed top tries 4096 and 2048 first, but only builds a longer chunk
+  that is predicted to fit: its memory is affine in the chunk (rows of
+  chunk + spread samples, rings of reach + chunk), so two measured engines
+  (the automatic chunk and half of it) extrapolate exactly. Construction
+  thus never holds more than the budget (it used to build the 12 GiB
+  float32 engine at chunk 4096 to find it over). Any other path keeps its
   automatic chunk and halves it while over budget.
 - **FDMTBoxcar** gives the FDMT the budget minus its own carry, peak,
   candidate and threshold buffers, and halves an automatic chunk again if
@@ -200,14 +236,14 @@ boxcars to 100 ms at wtsp 1.5, default budget; working memory is
 
 | search | backend | chunk | working memory | tree path |
 | :--- | :--- | ---: | ---: | ---: |
-| full band, uint8 | CPU, 8 threads | 4096 | 4.1 GiB | 12–16 GB |
-| full band, float32 | CPU, 8 threads | 4096 | 8.8 GiB | 12–16 GB |
+| full band, uint8 | CPU, 8 threads | 4096 | 5.2 GiB | 12–16 GB |
+| full band, float32 | CPU, 8 threads | 4096 | 9.9 GiB | 12–16 GB |
 | depth 4, uint8 | CPU, 8 threads | 4096 | 6.2 GiB | 17.4 GB |
-| depth 4, float32 | CPU, 8 threads | 2048 | 9.3 GiB | 17.4 GB |
+| depth 4, float32 | CPU, 8 threads | 2048 | 9.2 GiB | 17.4 GB |
 | full band, uint8 | GPU | 1024 | 2.1 GiB | 9–15 GB |
 | full band, float32 | GPU | 1024 | 2.7 GiB | 9–15 GB |
 | depth 4, uint8 | GPU | 4096 | 9.4 GiB | 15.0 GB |
-| depth 4, float32 | GPU | 2048 | 10.8 GiB (9.96 allocated) | 14.0 GB |
+| depth 4, float32 | GPU | 2048 | 10.8 GiB (9.96 engine) | 14.0 GB |
 | depth 5, uint8 | GPU | 2048 | 8.1 GB engine | 16.3 GB |
 
 The largest parts are the raw input ring (each channel's dispersion reach
@@ -223,10 +259,15 @@ boxcar suite (`bench/results/parkes_uwl/plots/summary.md`):
 
 | search | GPU | CPU, 8 threads |
 | :--- | ---: | ---: |
-| full band, uint8 | 0.36 s per block (5.8× real time) | 4.55 s (0.46×) |
-| full band, float32 | 0.36 s (5.8×) | 13.5 s (0.15×) |
-| depth 4, uint8 | 1.27 s (1.65×) | 14.5 s (0.14×) |
-| depth 4, float32 | 1.82 s (1.15×) | 27.8 s (0.08×) |
+| full band, uint8 | 0.36 s per block (5.8× real time) | 4.17 s (0.50×) |
+| full band, float32 | 0.36 s (5.8×) | 5.25 s (0.40×) |
+| depth 4, uint8 | 1.17 s (1.79×) | 14.3 s (0.15×) |
+| depth 4, float32 | 1.62 s (1.30×) | 20.1 s (0.10×) |
+
+(The CPU full-band rows are not in the suite; they come from a standalone
+FDMTBoxcar loop over 5 blocks on the same machine and threads. The float32 row
+was 13.5 s before the leaf level was chosen by speed, see the budget
+section above.)
 
 The GPU searches depth 4 at the native 64 µs faster than real time within
 10 GiB; the CPU does not, but keeps up from 256 µs (the real-time sweep on
@@ -246,7 +287,14 @@ the [Benchmarks](../benchmarks.md#parkes-uwl-search) page).
   backends. The saved state is the skewed engine's own: the raw input ring,
   the level-F (CPU), target or carried level-$k_{top}$ (GPU) rings and the
   stream position. That is far smaller than the tree history it replaces,
-  and a shared engine resumes on the fast path at once. A buffer is accepted
+  and a shared engine resumes on the fast path at once. On the CPU the raw
+  ring is saved at its own width: while only packed 8- or 16-bit blocks
+  have arrived, three samples go into one (8-bit) or two (16-bit) exact
+  24-bit integer float words, so an 8-bit `parkes_uwl` checkpoint is
+  1.97 GB instead of 5.88 GB (float layout). `history_state_size()`
+  therefore follows the input (compact, then the float size after a float
+  block or before any input); `load_history()` accepts either layout and
+  rejects altered words. A buffer is accepted
   only by an engine with the same skewed layout: the same plan and
   `chunk_nsamps`, and on the CPU the same thread count, which can change the
   fusion level. Anything else raises `invalid_argument`, as does a

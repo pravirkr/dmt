@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
@@ -73,8 +74,24 @@ def load(results_dir: Path) -> tuple[dict, dict, dict]:
     return rt, ref, contexts
 
 
+def _peak(rows: list[dict]) -> float:
+    """Peak bytes over the repetitions: device memory on a GPU, else RSS."""
+    key = (
+        "peak_device_bytes"
+        if any("peak_device_bytes" in r for r in rows)
+        else ("peak_rss_bytes")
+    )
+    vals = [float(r[key]) for r in rows if key in r]
+    return max(vals) if vals else float("nan")
+
+
+def fmt_gib(v: float) -> str:
+    return "—" if math.isnan(v) else f"{v:.2f} GiB"  # NaN: not measured
+
+
 def summarize(rows: list[dict]) -> dict[str, float]:
     return {
+        "peak": _peak(rows) / GIB,
         "ms": _median(rows, "real_time"),
         "rtf": _median(rows, "realtime_factor"),
         "mem": _median(rows, "working_bytes") / GIB,
@@ -162,11 +179,20 @@ def summary_md(rt: dict, ref: dict, contexts: dict) -> str:
         )
     out += [
         "",
+        (
+            "*allocated*: the library's own accounting (`get_memory_usage()`) "
+            "plus the input block; *peak*: process peak resident set size (CPU) "
+            "or device memory in use (GPU, sampled every millisecond) from "
+            "construction through warm-up and the timed blocks, in the same run."
+        ),
+    ]
+    out += [
+        "",
         "### Real-time sweep (FDMTBoxcar, subband depth 4, 2.097 s blocks)",
         "",
         "| time resolution | backend | input | DM trials | searched rows | "
-        "widths | chunk | time per block | real-time factor | working memory |",
-        "|---:|:---|:---|---:|---:|---:|---:|---:|---:|---:|",
+        "widths | chunk | time per block | real-time factor | allocated | peak |",
+        "|---:|:---|:---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for key in sorted(rt, key=lambda k: (k[0], k[2] != "cuda", k[1] != "uint8")):
         t, nbits, backend = key
@@ -175,15 +201,15 @@ def summary_md(rt: dict, ref: dict, contexts: dict) -> str:
         out.append(
             f"| {t} µs | {be} | {nbits} | {s['ndms']:.0f} | {s['rows']:.0f} | "
             f"{s['widths']:.0f} | {s['chunk']:.0f} | {s['ms'] / 1e3:.3f} s | "
-            f"{s['rtf']:.2f}{chr(215)} | {s['mem']:.2f} GiB |"
+            f"{s['rtf']:.2f}{chr(215)} | {s['mem']:.2f} GiB | {fmt_gib(s['peak'])} |"
         )
     out += [
         "",
         "### Reference point (64 µs, 32768-sample blocks, DM 0-2000)",
         "",
         "| backend | input | wtsp | subband depth | chunk | time per block | "
-        "real-time factor | working memory |",
-        "|:---|:---|---:|---:|---:|---:|---:|---:|",
+        "real-time factor | allocated | peak |",
+        "|:---|:---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for key in sorted(ref, key=lambda k: (k[0] != "gpu", k[0], k[3], k[1], k[2])):
         be, nbits, wtsp, depth = key
@@ -191,7 +217,8 @@ def summary_md(rt: dict, ref: dict, contexts: dict) -> str:
         be_s = "GPU" if be == "gpu" else f"CPU ({be[3:]} thr.)"
         out.append(
             f"| {be_s} | {nbits} | {wtsp:g} | {depth} | {s['chunk']:.0f} | "
-            f"{s['ms'] / 1e3:.3f} s | {s['rtf']:.2f}{chr(215)} | {s['mem']:.2f} GiB |"
+            f"{s['ms'] / 1e3:.3f} s | {s['rtf']:.2f}{chr(215)} | {s['mem']:.2f} GiB | "
+            f"{fmt_gib(s['peak'])} |"
         )
     return "\n".join([*out, ""])
 

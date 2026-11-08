@@ -79,6 +79,10 @@ struct FDMTEngineConfig {
     /// SIZE_MAX forbids it).
     static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
     SizeType skew_history_bytes{kSkewHistoryAuto};
+    /// Private (CPU, tests): leaf level of a skewed engine forced by
+    /// skew_history_bytes (0: automatic). Budget-chosen engines take the
+    /// fastest leaf level that fits (FDMTCpuEngine::skew_candidates).
+    SizeType skew_leaf{0};
     /// Private (GPU): take the skewed direct levels and target-ring top
     /// even when the unskewed direct top fits its ring budget (tests).
     bool force_skewed_direct{false};

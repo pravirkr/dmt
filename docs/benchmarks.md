@@ -19,6 +19,12 @@ planned with `FFTW_MEASURE` and a saved wisdom file, as a long-running
 pipeline would. `FDMT-FFT` and `DDMT-FFT` are the Fourier-domain engines with
 fractional delays (`DDMT-FFT` with the NUFFT over the DM axis).
 
+Every timed point also records its **peak memory** in the same run: the
+process's peak resident set size on the CPU and the device memory in use on
+the GPU, from construction through warm-up and the timed blocks. The
+summaries list them for the reference point and every FDMTBoxcar run, next
+to the library's own accounting (`get_memory_usage()`).
+
 ## Setup
 
 Three presets share DM 0–2000 on a piecewise-uniform Levin DM grid (tolerance
@@ -58,28 +64,28 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 
 | engine | `meerkat_lband` CPU | `cryopaf_low` CPU | `cryopaf_lband` CPU | `meerkat_lband` GPU | `cryopaf_low` GPU | `cryopaf_lband` GPU |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| FDMT | 368 ms | 258 ms | 141 ms | 25.9 ms | 21.8 ms | 11.6 ms |
-| FDMT-FFT | 439 ms | 320 ms | 183 ms | 44.1 ms | 24.9 ms | 17.5 ms |
-| DDMT | 6.69 s | 342 ms | 719 ms | 158 ms | 31.9 ms | 33.8 ms |
-| SDMT | 2.35 s | 333 ms | 475 ms | 67.8 ms | 31.7 ms | 12.0 ms |
-| DDMT-FFT | 541 ms | 190 ms | 204 ms | 46.7 ms | 14.8 ms | 17.3 ms |
+| FDMT | 359 ms | 260 ms | 141 ms | 25.9 ms | 21.8 ms | 11.6 ms |
+| FDMT-FFT | 441 ms | 318 ms | 184 ms | 43.9 ms | 25.0 ms | 17.5 ms |
+| DDMT | 6.77 s | 345 ms | 724 ms | 158 ms | 32.0 ms | 33.7 ms |
+| SDMT | 2.38 s | 332 ms | 475 ms | 67.8 ms | 32.0 ms | 12.0 ms |
+| DDMT-FFT | 537 ms | 186 ms | 206 ms | 46.6 ms | 14.8 ms | 17.3 ms |
 
 (CPU: 8 threads. FDMT-FFT and DDMT-FFT with fractional delays.)
 
 - **Real time.** Every engine runs faster than real time on both backends,
-  by 3–106× on 8 CPU threads and 127–1290× on the GPU, so the choice
+  by 3–106× on 8 CPU threads and 127–1289× on the GPU, so the choice
   between them is about exactness and memory as much as speed.
 - **`meerkat_lband`.** With 4096 channels, FDMT is the fastest engine on
-  both backends: 368 ms on 8 CPU threads (54× real time, 18× faster than
-  DDMT) and 25.9 ms on the L40S (774×, 6.1× faster than DDMT, 1.8× faster than
+  both backends: 359 ms on 8 CPU threads (56× real time, 19× faster than
+  DDMT) and 25.9 ms on the L40S (775×, 6.1× faster than DDMT, 1.8× faster than
   DDMT-FFT).
 - **Hard presets for FDMT.** Few channels and long dispersion sweeps (21.8k
   samples on `cryopaf_low`) give every tree level 10⁴–2×10⁴ rows, and every merge
   is a memory access, while DDMT and SDMT reuse each input window from cache
   or shared memory. On `cryopaf_low` the three are within 1.3× on the
-  CPU (FDMT 258 ms, SDMT 333 ms, DDMT 342 ms). With more channels per delay,
-  FDMT pulls ahead: 5.1× faster than DDMT on `cryopaf_lband`, 18× on
-  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf_low` (190 ms),
+  CPU (FDMT 260 ms, SDMT 332 ms, DDMT 345 ms). With more channels per delay,
+  FDMT pulls ahead: 5.1× faster than DDMT on `cryopaf_lband`, 19× on
+  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf_low` (186 ms),
   while FDMT leads on both L-band presets.
 - **On the GPU,** FDMT is 1.5× faster than DDMT and SDMT on `cryopaf_low`, and
   2.9–6.1× faster than DDMT on the L-band presets. Only SDMT on `cryopaf_lband`
@@ -238,9 +244,9 @@ The real-time factor is seconds of data processed per second of compute.
 
 - **Packed low-bit input** runs the FDMT tree in narrow integer lanes. On
   the CPU that is 1.2–1.5× faster than float32 at 1–4 bits on one thread
-  and 1.2–1.4× on 8 threads (`cryopaf_lband`: 148× against 105× real time at 1
+  and 1.2–1.4× on 8 threads (`cryopaf_lband`: 148× against 106× real time at 1
   bit). On the GPU, 1–2-bit input gains on `cryopaf_lband`
-  (1587× against 1290×) and loses on `cryopaf_low` and `meerkat_lband`, where the
+  (1591× against 1289×) and loses on `cryopaf_low` and `meerkat_lband`, where the
   float32 path uses the direct bottom and top kernels.
 - At 16 bits the tree is mostly float again, so packed input is no faster
   than float32 (on the GPU it is 1.3–1.6× slower).
@@ -331,8 +337,8 @@ of widths), on blocks of 2.1 s after the stream is warm:
 
 | time resolution | GPU, uint8 | GPU, float32 | CPU (8 threads), uint8 | CPU (8 threads), float32 |
 | ---: | ---: | ---: | ---: | ---: |
-| 64 µs (4749 trials) | **1.64×**, 9.4 GiB | **1.15×**, 10.8 GiB | 0.14×, 6.2 GiB | 0.08×, 9.3 GiB |
-| 256 µs (2302 trials) | 36×, 3.4 GiB | 38×, 3.5 GiB | **1.13×**, 3.3 GiB | **1.34×**, 3.5 GiB |
+| 64 µs (4749 trials) | **1.79×**, 9.4 GiB | **1.30×**, 10.8 GiB | 0.15×, 6.2 GiB | 0.10×, 9.2 GiB |
+| 256 µs (2302 trials) | 36×, 3.4 GiB | 38×, 3.5 GiB | **1.15×**, 3.3 GiB | **1.35×**, 3.5 GiB |
 | 512 µs (1153 trials) | 161×, 0.7 GiB | 163×, 0.8 GiB | 6.2×, 1.8 GiB | 6.8×, 2.0 GiB |
 | 1024 µs (577 trials) | 800×, 0.3 GiB | 940×, 0.3 GiB | 19×, 0.6 GiB | 25×, 0.7 GiB |
 
@@ -349,7 +355,7 @@ includes the input block.)
   704 MHz and DM 2000), so a coarser search mostly costs sensitivity to
   narrow, low-DM bursts; a real-time system can search at 256–512 µs and
   keep the 64 µs data around triggers.
-- **The CPU at 64 µs** is 7–12× slower than real time on 8 threads: fine
+- **The CPU at 64 µs** is 7–10× slower than real time on 8 threads: fine
   for offline processing of recorded files, not for real time.
 
 The full-band search alone (subband depth 0) takes 0.36 s per 2.1 s block on
