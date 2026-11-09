@@ -818,8 +818,11 @@ TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
                 false, "valid", test::gpu_exec());
     const auto hist_size = shared.history_state_size();
     REQUIRE(hist_size > 0);
+    // Every stream starts from a cold history (saved with its header).
+    std::vector<float> cold(hist_size);
+    shared.save_history(cold);
     std::vector<thrust::device_vector<float>> histories(
-        n_streams, thrust::device_vector<float>(hist_size, 0.0F));
+        n_streams, thrust::device_vector<float>(cold.begin(), cold.end()));
     const auto buf_size = shared.get_plan().get_dmt_size();
     std::vector<std::vector<float>> actual(
         n_streams, std::vector<float>(buf_size * n_blocks, 0.0F));
@@ -840,6 +843,43 @@ TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
     for (SizeType s = 0; s < n_streams; ++s) {
         test::require_approx(actual[s], expected[s], 1e-3);
     }
+}
+
+TEST_CASE("FDMT device load_history checks the history header",
+          "[fdmt_gpu][gpu][history]") {
+    // The device overload copies the header to the host to check it before
+    // anything is replaced.
+    const auto make = [](bool smearing) {
+        return FDMT(1000.0F, 1500.0F, 32, 128, 0.001F, 40, 0, 1, smearing,
+                    "valid", test::gpu_exec());
+    };
+    FDMT a = make(true);
+    FDMT b = make(false);
+    REQUIRE(a.history_state_size() == b.history_state_size());
+    const auto size = a.history_state_size();
+    const auto wf   = test::sequential_waterfall(32, 128, 11, 1);
+    std::vector<float> out(a.get_plan().get_dmt_size());
+    a.execute(wf, out);
+    thrust::device_vector<float> hist(size);
+    const DeviceSpan<float> hist_out(thrust::raw_pointer_cast(hist.data()),
+                                     size);
+    const DeviceSpan<const float> hist_in(thrust::raw_pointer_cast(hist.data()),
+                                          size);
+    a.save_history(hist_out);
+    cudaDeviceSynchronize();
+    std::vector<float> host(size);
+    thrust::copy(hist.begin(), hist.end(), host.begin());
+    std::vector<float> host_saved(size);
+    a.save_history(host_saved);
+    REQUIRE(host == host_saved);
+    REQUIRE_THROWS_WITH(
+        b.load_history(hist_in),
+        Catch::Matchers::ContainsSubstring("different configuration"));
+    thrust::device_vector<float> zeros(size, 0.0F);
+    REQUIRE_THROWS_WITH(a.load_history(DeviceSpan<const float>(
+                            thrust::raw_pointer_cast(zeros.data()), size)),
+                        Catch::Matchers::ContainsSubstring("reset_history()"));
+    REQUIRE_NOTHROW(make(true).load_history(hist_in));
 }
 
 TEST_CASE("FDMT nbeams>1 valid-mode streaming keeps per-beam history isolated",

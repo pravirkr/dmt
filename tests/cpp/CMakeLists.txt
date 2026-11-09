@@ -58,11 +58,13 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
   target_include_directories(${TARGET_TESTS} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
+# DMT_COMPILE_OPTIONS (the CPM fmt) before Catch2, so a system fmt installed
+# next to Catch2 cannot shadow it (see bench/CMakeLists.txt).
 target_link_libraries(
   ${TARGET_TESTS}
   PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
-          Catch2::Catch2WithMain
           ${DMT_COMPILE_OPTIONS}
+          Catch2::Catch2WithMain
           OpenMP::OpenMP_CXX
 )
 # After DMT_COMPILE_OPTIONS, so the GPU flags come last on the command line.

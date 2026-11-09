@@ -9,6 +9,8 @@
 #include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
+#include "dmt/boxcar_drain.hpp"
+#include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_fft_common.hpp"
 
 namespace dmt::algorithms {
@@ -21,7 +23,8 @@ public:
          Exec exec,
          SizeType beams,
          bool frac,
-         std::span<const uint8_t> kill)
+         std::span<const uint8_t> kill,
+         SizeType max_memory)
         : plan(std::move(plan)),
           config(config),
           exec(exec),
@@ -46,37 +49,78 @@ public:
             geom.guard, geom.support > integer ? geom.support - integer : 0);
         planes =
             detail::make_boxcar_plans(this->plan, config, smear, kill, extra);
-        const detail::FDMTFFTEngineConfig fft_cfg{
+        detail::FDMTFFTEngineConfig fft_cfg{
             .use_box_smearing  = smear,
             .mode              = FDMTMode::kValid,
             .nbeams            = beams,
             .exec              = exec,
             .fractional_delays = frac,
             .kill_mask         = std::vector<uint8_t>(kill.begin(), kill.end()),
+            .search            = true,
         };
+        engine = make_engine(fft_cfg);
+        // Budget: shorten the overlap-save segments (halving the transform
+        // length) while the instance is over it. The boxcar buffers do not
+        // depend on the segment, so fail at once when they alone are over.
+        const SizeType discard = std::max(geom.skip, geom.support);
+        const SizeType n_min =
+            utils::next_fft_size((2 * (discard + geom.guard)) + 2);
+        auto used = engine->memory_usage();
+        if (const SizeType fixed = used.peaks + used.candidates;
+            fixed >= max_memory) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTFFTBoxcar: the boxcar buffers alone need {:.2f} GiB, "
+                "over max_memory_bytes ({:.2f} GiB); lower max_boxcar or "
+                "max_candidates, or raise the budget",
+                static_cast<double>(fixed) / (1U << 30U),
+                static_cast<double>(max_memory) / (1U << 30U)));
+        }
+        while (used.total() > max_memory) {
+            const SizeType n = std::min(geom.n_fft, engine->chunk_nsamps() +
+                                                        discard + geom.guard);
+            if (n / 2 < n_min) {
+                throw std::invalid_argument(fmt::format(
+                    "FDMTFFTBoxcar: this configuration needs {:.2f} GiB with "
+                    "the shortest overlap-save segments tried ({} samples), "
+                    "over max_memory_bytes ({:.2f} GiB)",
+                    static_cast<double>(used.total()) / (1U << 30U), n,
+                    static_cast<double>(max_memory) / (1U << 30U)));
+            }
+            const SizeType hop  = engine->chunk_nsamps();
+            fft_cfg.max_segment = n / 2;
+            engine.reset();
+            engine = make_engine(fft_cfg);
+            used   = engine->memory_usage();
+            if (used.total() > max_memory && engine->chunk_nsamps() >= hop) {
+                throw std::logic_error(
+                    "FDMTFFTBoxcar: the segment cap did not shorten the "
+                    "segments");
+            }
+        }
+    }
+    [[nodiscard]] std::unique_ptr<detail::FDMTBoxcarEngine>
+    make_engine(const detail::FDMTFFTEngineConfig& fft_cfg) const {
         const detail::FDMTEngineConfig cfg{
-            .use_box_smearing = smear,
+            .use_box_smearing = fft_cfg.use_box_smearing,
             .mode             = FDMTMode::kValid,
             .nbeams           = beams,
             .exec             = exec,
         };
         if (exec.backend == Backend::kCPU) {
-            engine = detail::make_fdmt_boxcar_cpu(
-                this->plan, config, planes, cfg,
+            return detail::make_fdmt_boxcar_cpu(
+                plan, config, planes, cfg,
                 detail::make_boxcar_driver(
-                    detail::make_fdmt_fft_cpu(this->plan, fft_cfg)));
+                    detail::make_fdmt_fft_cpu(plan, fft_cfg)));
         }
 #ifdef DMT_ENABLE_GPU
-        else if (exec.backend == detail::kGPUBackend) {
-            engine = detail::make_fdmt_boxcar_gpu(
-                this->plan, config, planes, cfg,
+        if (exec.backend == detail::kGPUBackend) {
+            return detail::make_fdmt_boxcar_gpu(
+                plan, config, planes, cfg,
                 detail::make_boxcar_driver(
-                    detail::make_fdmt_fft_gpu(this->plan, fft_cfg)));
+                    detail::make_fdmt_fft_gpu(plan, fft_cfg)));
         }
 #endif
-        else {
-            detail::throw_unavailable("FDMTFFTBoxcar", exec.backend);
-        }
+        detail::throw_unavailable("FDMTFFTBoxcar", exec.backend);
     }
     void check_stream(Stream stream) const {
         if (exec.backend == Backend::kCPU && stream.native) {
@@ -91,6 +135,7 @@ public:
     SizeType latency = 0;
     std::vector<plans::BoxcarPlanePlan> planes;
     std::unique_ptr<detail::FDMTBoxcarEngine> engine;
+    detail::DrainState drain_state;
 };
 
 FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
@@ -99,17 +144,26 @@ FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
                              Exec exec,
                              SizeType beams,
                              bool frac,
-                             std::span<const uint8_t> kill_mask)
-    : m_impl(std::make_unique<Impl>(
-          std::move(plan), config, smear, exec, beams, frac, kill_mask)) {}
+                             std::span<const uint8_t> kill_mask,
+                             SizeType max_memory_bytes)
+    : m_impl(std::make_unique<Impl>(std::move(plan),
+                                    config,
+                                    smear,
+                                    exec,
+                                    beams,
+                                    frac,
+                                    kill_mask,
+                                    max_memory_bytes)) {}
 FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;
 FDMTFFTBoxcar::FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept            = default;
 FDMTFFTBoxcar& FDMTFFTBoxcar::operator=(FDMTFFTBoxcar&&) noexcept = default;
 CandidateResultView FDMTFFTBoxcar::execute(std::span<const float> waterfall) {
+    m_impl->drain_state.check_open("FDMTFFTBoxcar::execute");
     return m_impl->engine->execute(waterfall);
 }
 CandidateDeviceResultView
 FDMTFFTBoxcar::execute(DeviceSpan<const float> waterfall, Stream stream) {
+    m_impl->drain_state.check_open("FDMTFFTBoxcar::execute");
     detail::check_device(waterfall.device, backend(), device(),
                          "FDMTFFTBoxcar::execute");
     return m_impl->engine->execute(waterfall, stream);
@@ -126,6 +180,16 @@ CandidateResultView FDMTFFTBoxcar::copy_result(Stream stream) {
 void FDMTFFTBoxcar::reset_history(Stream stream) {
     m_impl->check_stream(stream);
     m_impl->engine->reset_history(stream);
+    m_impl->drain_state.reset();
+}
+CandidateResultView FDMTFFTBoxcar::drain() {
+    return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
+                                m_impl->config.input_nbits, m_impl->latency,
+                                m_impl->drain_state);
+}
+uint64_t FDMTFFTBoxcar::get_searched_nsamps() const noexcept {
+    return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
+                                   m_impl->latency);
 }
 const plans::FDMTPlan& FDMTFFTBoxcar::get_plan() const noexcept {
     return m_impl->plan;

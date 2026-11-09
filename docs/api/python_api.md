@@ -120,6 +120,14 @@ dmt = fdmt.execute(waterfall, out=out, stream=cp.cuda.Stream())
 .. autofunction:: dmtlib.available_backends
 ```
 
+`build_info()` identifies the compiled extension (version, git commit and
+dirty flag, compiler and flags, GPU toolkit, FFTW and OpenMP versions). Store
+it with any result you publish.
+
+```{eval-rst}
+.. autofunction:: dmtlib.build_info
+```
+
 ## Plans and geometry
 
 ```{eval-rst}

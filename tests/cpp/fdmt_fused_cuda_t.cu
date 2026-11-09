@@ -226,6 +226,9 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                     thrust::raw_pointer_cast(hist.data()), hist.size());
                 const DeviceSpan<const float> hist_in(
                     thrust::raw_pointer_cast(hist.data()), hist.size());
+                // A cold stream's history (with its header), for the first
+                // load; the fused and unfused engines share the layout.
+                fused.save_history(hist_out);
                 for (SizeType b = 0; b < 8; ++b) {
                     FDMT& gpu     = (b % 3 == 2) ? unfused : fused;
                     const auto wf = random_2bit(nbeams * nchans, block,
@@ -274,6 +277,7 @@ TEST_CASE("FDMT direct low levels stream exactly like the tree",
                     thrust::raw_pointer_cast(hist.data()), hist.size());
                 const DeviceSpan<const float> hist_in(
                     thrust::raw_pointer_cast(hist.data()), hist.size());
+                direct.save_history(hist_out); // a cold stream's history
                 std::mt19937 gen(7 + static_cast<unsigned>(block + chunk));
                 std::uniform_int_distribution<int> dis(0, 7);
                 for (SizeType b = 0; b < 12; ++b) {

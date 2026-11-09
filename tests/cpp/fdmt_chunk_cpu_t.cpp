@@ -184,6 +184,7 @@ TEST_CASE("FDMT chunk streams interoperate through saved history",
     auto a                = make(nchans, nsamps, 333, -40, 1, 0, true, 64);
     auto b                = make(nchans, nsamps, 333, -40, 1, 2, true, 320);
     std::vector<float> hist(whole.fdmt.history_state_size(), 0.0F);
+    whole.fdmt.save_history(hist); // a cold stream's history
     std::vector<float> h_ref(hist.size());
     for (unsigned blk = 0; blk < 6; ++blk) {
         const auto wf = random_block(nchans * nsamps, 70 + blk);

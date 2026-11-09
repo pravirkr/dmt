@@ -61,7 +61,9 @@ jobs:
           # jammy's catch2 is 2.x, so the gcc-11 job builds the pinned Catch2 3.
           - { os: ubuntu-22.04, cc: gcc-11, cpp: g++-11, packages: "gcc-11 g++-11" }
           - { os: ubuntu-24.04, cc: clang-17, cpp: clang++-17, packages: "clang-17 libomp-17-dev catch2" }
-          - { os: ubuntu-24.04, cc: gcc-14, cpp: g++-14, packages: "gcc-14 g++-14 catch2" }
+          # The newest GCC also builds the benchmarks (bench/), which no
+          # other CPU job compiles.
+          - { os: ubuntu-24.04, cc: gcc-14, cpp: g++-14, packages: "gcc-14 g++-14 catch2", cmake_args: "-DDMT_BUILD_BENCHMARKS=ON" }
     steps:
       - uses: actions/checkout@v7
 
@@ -105,6 +107,7 @@ jobs:
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -Dpybind11_DIR=$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')
+          ${{ matrix.compiler.cmake_args }}
 
       - name: Build
         run: cmake --build --preset ci --parallel "$(nproc)"

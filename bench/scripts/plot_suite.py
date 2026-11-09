@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -48,7 +49,7 @@ TIMES = "\N{MULTIPLICATION SIGN}"
 # Suite configurations (bench/suite/suite_common.hpp). main() installs the
 # selected geometry and trial-grid reference in the module constants below.
 CONFIGS: dict[str, dict[str, Any]] = {
-    "cryopaf": {
+    "cryopaf_low": {
         "F_MIN": 704.0,
         "F_MAX": 1216.0,
         "TSAMP": 5.12e-4,
@@ -78,23 +79,35 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "NDMS_REF": 4749,
         "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
     },
+    "meerkat_lband": {
+        "F_MIN": 856.0,
+        "F_MAX": 1712.0,
+        "TSAMP": 612.48e-6,
+        "NCHANS": 4096,
+        "LEVIN_TOL": 1.1,
+        "DM_MAX_REF": 2000.0,
+        "NDMS_REF": 4057,
+        "DM_MAX_SWEEP": [125.0, 250.0, 500.0, 1000.0, 2000.0],
+    },
 }
-F_MIN, F_MAX, TSAMP = 704.0, 1216.0, 5.12e-4
+F_MIN: float = CONFIGS["meerkat_lband"]["F_MIN"]
+F_MAX: float = CONFIGS["meerkat_lband"]["F_MAX"]
+TSAMP: float = CONFIGS["meerkat_lband"]["TSAMP"]
 NSAMPS_REF = 32768
 NSAMPS_TICKS = [8192, 16384, 32768, 65536]
-NCHANS: int = CONFIGS["cryopaf"]["NCHANS"]
-LEVIN_TOL: float = CONFIGS["cryopaf"]["LEVIN_TOL"]
-DM_MAX_REF: float = CONFIGS["cryopaf"]["DM_MAX_REF"]
-NDMS_REF: int = CONFIGS["cryopaf"]["NDMS_REF"]
-DM_MAX_SWEEP: list[float] = CONFIGS["cryopaf"]["DM_MAX_SWEEP"]
+NCHANS: int = CONFIGS["meerkat_lband"]["NCHANS"]
+LEVIN_TOL: float = CONFIGS["meerkat_lband"]["LEVIN_TOL"]
+DM_MAX_REF: float = CONFIGS["meerkat_lband"]["DM_MAX_REF"]
+NDMS_REF: int = CONFIGS["meerkat_lband"]["NDMS_REF"]
+DM_MAX_SWEEP: list[float] = CONFIGS["meerkat_lband"]["DM_MAX_SWEEP"]
 NBITS = [1, 2, 4, 8, 16, 32]
 NBITS_LABELS = [f"{b}-bit" if b < 32 else "float32" for b in NBITS]
 
 Theme = dict[str, Any]
 # The five engines compared. FDMT-FFT and DDMT-FFT are the Fourier-domain
-# engines with fractional delays (their point); the suite's integer-delay
-# FDMT-FFT (a verification mode, bit-for-bit comparable with FDMT) and the
-# brute-force DDMT-FFT are measured but not drawn (see SUITE_ALGOS).
+# engines with fractional delays (their point). Older result files may hold
+# the integer-delay FDMT-FFT and brute-force DDMT-FFT, which are not drawn
+# (see SUITE_ALGOS); the suite no longer measures them.
 ALGOS = ["FDMT", "FDMT-FFT", "DDMT", "SDMT", "DDMT-FFT"]
 # Suite benchmark name -> plotted engine (None: not plotted).
 SUITE_ALGOS: dict[str, str | None] = {
@@ -161,6 +174,10 @@ class Result:
     times: list[float] = field(default_factory=list)  # seconds per block
     skipped: str = ""
     ndms: int = 0  # trials of the point's grid (benchmark counter)
+    # Peak memory per repetition (bytes): process peak RSS, and device
+    # memory above the point's starting level on the GPU.
+    peak_rss: list[float] = field(default_factory=list)
+    peak_device: list[float] = field(default_factory=list)
 
     @property
     def time(self) -> float:
@@ -170,6 +187,12 @@ class Result:
     def rtf(self) -> float:
         """Real-time factor: seconds of data processed per second of compute."""
         return self.nsamps * TSAMP / self.time
+
+    @property
+    def peak_memory(self) -> float:
+        """Peak bytes of the point: device memory on a GPU, else RSS."""
+        vals = self.peak_device if self.backend in GPU_KINDS else self.peak_rss
+        return max(vals) if vals else float("nan")
 
 
 @dataclass
@@ -201,6 +224,10 @@ _CONTEXT_KEYS = (
     "threads",
     "build_type",
     "date",
+    "placement",
+    "virtualized",
+    "load_start",
+    "load_end",
 )
 
 
@@ -269,6 +296,10 @@ def load(results_dir: Path) -> tuple[list[Result], dict[str, Machine]]:  # noqa:
                 continue
             res.times.append(b["real_time"] * _UNIT[b.get("time_unit", "ns")])
             res.ndms = int(b.get("ndms", res.ndms))
+            if "peak_rss_bytes" in b:
+                res.peak_rss.append(float(b["peak_rss_bytes"]))
+            if "peak_device_bytes" in b:
+                res.peak_device.append(float(b["peak_device_bytes"]))
     versions = {m.context.get("dmt_version") for m in machines.values()} - {None}
     if len(versions) > 1:
         print(f"warning: results come from different dmt versions: {sorted(versions)}")
@@ -797,16 +828,23 @@ def _machines_table(machines: dict[str, Machine]) -> list[str]:
     out = [
         "**Machines**",
         "",
-        "| results | CPU | GPU | RAM | CPU threads | dmt |",
-        "| :--- | :--- | :--- | ---: | :--- | :--- |",
+        "| results | CPU | GPU | RAM | CPU threads | placement | load (1/5/15 min) "
+        "| dmt |",
+        "| :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- |",
     ]
     for m in sorted(machines.values(), key=lambda m: m.name):
         c = m.context
         threads = c.get("threads", "") if m.ran_cpu else "—"
+        placement = c.get("placement", "close") if m.ran_cpu else "—"
+        if m.ran_cpu and c.get("virtualized", "no") not in ("no", "-"):
+            placement += f", {c['virtualized']} VM"
+        load = c.get("load_start", "—")
+        if c.get("load_end"):
+            load += f" → {c['load_end']}"
         out.append(
             f"| `{m.name}` | {c.get('cpu_model', '')} "
             f"| {c.get('gpu_model', '') or '—'} | {c.get('ram_gb', '')} GB "
-            f"| {threads} | {c.get('dmt_version', '')} |"
+            f"| {threads} | {placement} | {load} | {c.get('dmt_version', '')} |"
         )
     return out
 
@@ -852,6 +890,105 @@ def _reference_table(results: list[Result], machines: dict[str, Machine]) -> lis
                 f"| {plat} | {' | '.join(cells)} | {' | '.join(ratios)} "
                 f"| {fdmt.rtf:.0f}{TIMES} |"
             )
+    return out
+
+
+GIB = 1024.0**3
+
+
+def fmt_gib(b: float) -> str:
+    if math.isnan(b):  # not measured
+        return "—"
+    return f"{b / GIB:.2f} GiB" if b < 10 * GIB else f"{b / GIB:.1f} GiB"
+
+
+def _memory_table(results: list[Result], machines: dict[str, Machine]) -> list[str]:
+    ref = {
+        (r.machine, r.backend, r.algo): r
+        for r in results
+        if r.sweep == "ndms" and r.dm_max == DM_MAX_REF and r.times
+    }
+    if not any(r.peak_rss or r.peak_device for r in ref.values()):
+        return []
+    out = [
+        "",
+        (
+            "**Peak memory at the reference point** (float32 input): process "
+            "peak resident set size on the CPU (input, output, engine and the "
+            "benchmark process itself), device memory in use on the GPU "
+            "(input, output and engine; sampled every millisecond). Measured "
+            "in the same runs as the times above."
+        ),
+        "",
+        "| platform | " + " | ".join(ALGOS) + " |",
+        "| :--- | " + " | ".join("---:" for _ in ALGOS) + " |",
+    ]
+    for mname, kind in platforms(results):
+        backends = cpu_backends(results, mname) if kind == "cpu" else [kind]
+        for b in backends:
+            t = {a: ref.get((mname, b, a)) for a in ALGOS}
+            if t["FDMT"] is None:
+                continue
+            cells = [fmt_gib(t[a].peak_memory) if t[a] else "—" for a in ALGOS]
+            plat = machines[mname].platform(kind) + backend_tag(b)
+            out.append(f"| {plat} | {' | '.join(cells)} |")
+    return out
+
+
+def load_boxcar(results_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Per-iteration rows of the boxcar suite JSON (run_suite.py --suite boxcar)."""
+    rows = []
+    for path in sorted(results_dir.glob("*/boxcar_*.json")):
+        data = json.loads(path.read_text())
+        rows += [
+            (path.parent.name, b)
+            for b in data.get("benchmarks", [])
+            if b.get("run_type") == "iteration" and not b.get("error_occurred")
+        ]
+    return rows
+
+
+def _boxcar_table(rows: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    """FDMTBoxcar at the reference point, one line per benchmark."""
+    if not rows:
+        return []
+    by: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for mname, b in rows:
+        name = b["name"].split("/real_time")[0].split("/min_warmup_time")[0]
+        by[(mname, name)].append(b)
+
+    def med(bs: list[dict[str, Any]], key: str) -> float:
+        vals = [float(b[key]) for b in bs if key in b]
+        return statistics.median(vals) if vals else float("nan")
+
+    out = [
+        "",
+        (
+            f"**FDMTBoxcar** (`run_suite.py --suite boxcar`): {NSAMPS_REF} "
+            f"samples {TIMES} {NDMS_REF} DM trials, boxcars to 100 ms, "
+            "threshold 6, median time per block. *allocated*: the library's "
+            "own accounting plus the input block; *peak*: process peak RSS "
+            "(CPU) or device memory in use (GPU), measured in the same run."
+        ),
+        "",
+        "| benchmark | time per block | real-time factor | allocated | peak |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for (_mname, name), bs in sorted(by.items()):
+        parts = name.split("/")
+        label = "/".join(p for p in parts[2:] if p)
+        backend = parts[0].removeprefix("BM_fdmt_boxcar_")
+        label = f"{'cpu' if backend == 'stream' else backend}: {label}"
+        t = med(bs, "real_time") * _UNIT[bs[0].get("time_unit", "ns")]
+        gpu = "peak_device_bytes" in bs[0]
+        peak = max(
+            float(b.get("peak_device_bytes" if gpu else "peak_rss_bytes", "nan"))
+            for b in bs
+        )
+        out.append(
+            f"| `{label}` | {fmt_seconds(t)} | {med(bs, 'realtime_factor'):.0f}"
+            f"{TIMES} | {fmt_gib(med(bs, 'working_bytes'))} | {fmt_gib(peak)} |"
+        )
     return out
 
 
@@ -908,11 +1045,17 @@ def _skipped_list(results: list[Result]) -> list[str]:
     return out
 
 
-def summary_md(results: list[Result], machines: dict[str, Machine]) -> str:
+def summary_md(
+    results: list[Result],
+    machines: dict[str, Machine],
+    boxcar: list[tuple[str, dict[str, Any]]] | None = None,
+) -> str:
     out = ["<!-- generated by bench/scripts/plot_suite.py; do not edit -->", ""]
     out += _machines_table(machines)
     out += _reference_table(results, machines)
+    out += _memory_table(results, machines)
     out += _nbits_table(results, machines)
+    out += _boxcar_table(boxcar or [])
     out += _skipped_list(results)
     return "\n".join([*out, ""])
 
@@ -922,20 +1065,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Plot the dmt benchmark suite.")
     ap.add_argument(
         "--config",
-        default="cryopaf",
-        choices=sorted(CONFIGS),
-        help="suite configuration (default cryopaf); other presets read and write "
-        "under bench/results/<config>/ unless --results is given",
+        default="meerkat_lband",
+        choices=sorted(c for c in CONFIGS if c != "parkes_uwl"),
+        help="suite configuration (default meerkat_lband); reads "
+        "bench/results/<config>/*/suite_*.json and writes "
+        "bench/results/<config>/plots/ unless --results is given",
     )
-    ap.add_argument(
-        "--results", help="results root (default: bench/results[/<config>])"
-    )
+    ap.add_argument("--results", help="results root (default: bench/results/<config>)")
     ap.add_argument("--no-ops", action="store_true", help="skip the dmtlib ops plot")
     args = ap.parse_args()
     globals().update(CONFIGS[args.config])
-    default = REPO / "bench" / "results"
-    if args.config != "cryopaf":
-        default /= args.config
+    default = REPO / "bench" / "results" / args.config
     results_dir = Path(args.results) if args.results else default
     try:
         results, machines = load(results_dir)
@@ -986,7 +1126,9 @@ def main() -> None:
             place_end_labels(fig)
             fig.savefig(out / f"{fname}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
-    (out_root / "summary.md").write_text(summary_md(results, machines))
+    (out_root / "summary.md").write_text(
+        summary_md(results, machines, load_boxcar(results_dir))
+    )
     print(
         f"wrote {len(figs)} figures {TIMES} {len(THEMES)} themes and summary.md "
         f"to {out_root}"

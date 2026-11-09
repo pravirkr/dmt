@@ -49,7 +49,8 @@ public:
          SizeType fuse_levels,
          bool int_tree,
          Exec exec,
-         SizeType chunk_nsamps)
+         SizeType chunk_nsamps,
+         SizeType max_memory_bytes)
         : m_plan(std::move(plan)),
           m_cfg{
               .use_box_smearing = use_box_smearing,
@@ -59,6 +60,7 @@ public:
               .int_tree         = int_tree,
               .exec             = exec,
               .chunk_nsamps     = chunk_nsamps,
+              .max_memory_bytes = max_memory_bytes,
           },
           m_engine(make_fdmt_engine(m_plan, m_cfg)) {}
 
@@ -101,7 +103,8 @@ FDMT::FDMT(float f_min,
            SizeType nbeams,
            SizeType fuse_levels,
            bool int_tree,
-           SizeType chunk_nsamps)
+           SizeType chunk_nsamps,
+           SizeType max_memory_bytes)
     : m_impl(std::make_unique<Impl>(plans::FDMTPlan(f_min,
                                                     f_max,
                                                     nchans,
@@ -117,7 +120,8 @@ FDMT::FDMT(float f_min,
                                     fuse_levels,
                                     int_tree,
                                     exec,
-                                    chunk_nsamps)) {}
+                                    chunk_nsamps,
+                                    max_memory_bytes)) {}
 
 FDMT::FDMT(float f_min,
            float f_max,
@@ -131,7 +135,8 @@ FDMT::FDMT(float f_min,
            SizeType nbeams,
            SizeType fuse_levels,
            bool int_tree,
-           SizeType chunk_nsamps)
+           SizeType chunk_nsamps,
+           SizeType max_memory_bytes)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
           use_box_smearing,
@@ -140,7 +145,8 @@ FDMT::FDMT(float f_min,
           fuse_levels,
           int_tree,
           exec,
-          chunk_nsamps)) {}
+          chunk_nsamps,
+          max_memory_bytes)) {}
 
 FDMT::FDMT(float f_min,
            float f_max,
@@ -154,7 +160,8 @@ FDMT::FDMT(float f_min,
            SizeType nbeams,
            SizeType fuse_levels,
            bool int_tree,
-           SizeType chunk_nsamps)
+           SizeType chunk_nsamps,
+           SizeType max_memory_bytes)
     : m_impl(std::make_unique<Impl>(
           plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
           use_box_smearing,
@@ -163,7 +170,8 @@ FDMT::FDMT(float f_min,
           fuse_levels,
           int_tree,
           exec,
-          chunk_nsamps)) {}
+          chunk_nsamps,
+          max_memory_bytes)) {}
 
 FDMT::FDMT(plans::FDMTPlan plan,
            bool use_box_smearing,
@@ -171,13 +179,14 @@ FDMT::FDMT(plans::FDMTPlan plan,
            SizeType nbeams,
            SizeType fuse_levels,
            bool int_tree,
-           SizeType chunk_nsamps)
+           SizeType chunk_nsamps,
+           SizeType max_memory_bytes)
     // Read the mode (a string literal) before the plan is moved.
     : m_impl([&] {
           const auto mode = plan.get_mode();
           return std::make_unique<Impl>(std::move(plan), use_box_smearing, mode,
                                         nbeams, fuse_levels, int_tree, exec,
-                                        chunk_nsamps);
+                                        chunk_nsamps, max_memory_bytes);
       }()) {}
 
 FDMT::~FDMT()                                = default;

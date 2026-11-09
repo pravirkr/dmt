@@ -509,8 +509,8 @@ def main() -> None:
     ap.add_argument("--results", type=Path, default=REPO / "bench" / "results")
     ap.add_argument(
         "--config",
-        default="cryopaf",
-        help="result name under <results>/sensitivity (default cryopaf); other "
+        default="cryopaf_low",
+        help="result name under <results>/sensitivity (default cryopaf_low); other "
         "configs plot to <results>/plots/<config>/ and suffix paper files",
     )
     ap.add_argument("--paper", action="store_true")
@@ -522,7 +522,7 @@ def main() -> None:
     res = RecoveryResult.load(path)
     out_root = args.results / "plots"
     suffix = ""
-    if args.config != "cryopaf":
+    if args.config != "cryopaf_low":
         out_root /= args.config
         suffix = f"_{args.config}"
     for name, theme in THEMES.items():

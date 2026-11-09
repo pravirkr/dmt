@@ -3,38 +3,82 @@
 // Published benchmark suite (dmt_bench_suite): one data configuration shared
 // by every algorithm and backend, so FDMT, FDMT-FFT (integer and fractional
 // merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force) land on the
-// same plots. DMT_BENCH_CONFIG selects cryopaf (512 channels),
-// cryopaf_lband (1152 channels) or parkes_uwl (6656 channels). Only block
+// same plots. DMT_BENCH_CONFIG selects cryopaf_low (512 channels),
+// cryopaf_lband (1152 channels), parkes_uwl (6656 channels) or
+// meerkat_lband (4096 channels). Only block
 // length, DM range and input bit width are swept. See bench/README.md.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <benchmark/benchmark.h>
 #include <fmt/format.h>
 
+#include "dmt/common/build_info.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
 namespace dmt::bench_suite {
 
+/// The build identity in every result file's context (dmt_build_*), next to
+/// the machine description run_suite.py passes. Registered once, before
+/// main() (Google Benchmark keeps the context in a lazily created map).
+inline const bool kBuildContext = [] {
+    const auto& b = build_info();
+    benchmark::AddCustomContext("dmt_build_git_sha", std::string(b.git_sha));
+    benchmark::AddCustomContext("dmt_build_git_dirty",
+                                b.git_dirty ? "yes" : "no");
+    benchmark::AddCustomContext("dmt_build_compiler", std::string(b.compiler));
+    benchmark::AddCustomContext("dmt_build_cxx_flags",
+                                std::string(b.cxx_flags));
+    benchmark::AddCustomContext("dmt_build_gpu", std::string(b.gpu));
+    benchmark::AddCustomContext("dmt_build_fftw", std::string(b.fftw));
+    return true;
+}();
+
+/// FNV-1a (32 bit) of a float grid's bytes: exact in a double counter, so a
+/// result file identifies the grid it ran on without storing it.
+inline double grid_fingerprint(const std::vector<float>& grid) {
+    uint32_t h = 2166136261U;
+    for (const float v : grid) {
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(v));
+        std::memcpy(&bits, &v, sizeof(v));
+        for (int k = 0; k < 4; ++k) {
+            h ^= (bits >> (8 * k)) & 0xFFU;
+            h *= 16777619U;
+        }
+    }
+    return static_cast<double>(h);
+}
+
 // Configurations selected with DMT_BENCH_CONFIG (run_suite.py --config),
 // all on the piecewise-uniform Levin grid
 // from DM 0 (every engine gets the same grid; the FDMT engines round it to
 // integer delays, and DDMT-FFT runs one NUFFT per uniform segment):
-// - "cryopaf" (default): 512 channels over 704-1216 MHz at 512 us,
+// - "cryopaf_low": 512 channels over 704-1216 MHz at 512 us,
 //   DM 0-2000, tolerance 1.1.
 // - "cryopaf_lband": 1152 channels over 1100-1714 MHz at 455.6 us,
 //   DM 0-2000, tolerance 1.1, with one search subband level.
-// - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us,
+// - "parkes_uwl": 6656 channels over 704-4032 MHz at 64 us, searched at
+//   subband depth 4,
 //   DM 0-2000, tolerance 1.6 (4749 trials; 1.1 would need 12941). The
 //   dispersion sweep spans multiple blocks.
+// - "meerkat_lband" (default): 4096 channels over 856-1712 MHz at 612.48 us
+// (the
+//   MeerTRAP / TRAPUM filterbank mode, downsampled by two in time),
+//   DM 0-2000, tolerance 1.1: 12 tree levels on a 4057-trial grid, uniform
+//   at 3.28 delay samples to DM 1836 and 6.56 beyond, 101x fewer
+//   operations than brute force.
 // The benchmark names do not carry the configuration; run_suite.py writes
 // each one to its own results tree.
 struct SuiteConfig {
@@ -57,16 +101,16 @@ struct SuiteConfig {
 inline const SuiteConfig& suite_config() {
     static const SuiteConfig cfg = [] {
         // Reference blocks retain 32768 samples for all presets.
-        SuiteConfig cryopaf{"cryopaf",
-                            704.0F,
-                            1216.0F,
-                            5.12e-4F,
-                            512,
-                            1.1F,
-                            32768,
-                            2000.0F,
-                            {8192, 16384, 32768, 65536},
-                            {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
+        SuiteConfig cryopaf_low{"cryopaf_low",
+                                704.0F,
+                                1216.0F,
+                                5.12e-4F,
+                                512,
+                                1.1F,
+                                32768,
+                                2000.0F,
+                                {8192, 16384, 32768, 65536},
+                                {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
         // DM 2000 sweeps 4.03365 s (8853.49 samples); the covering
         // Levin grid ends at DM 2005.36 (8877 rounded delay samples).
         // The 32768-sample reference block spans 14.9291 seconds.
@@ -81,6 +125,8 @@ inline const SuiteConfig& suite_config() {
                                   {8192, 16384, 32768, 65536},
                                   {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F},
                                   1};
+        // The UWL search: FDMTBoxcar at subband depth 4 (16 subbands and
+        // their staggered neighbours down to the full band).
         SuiteConfig parkes_uwl{"parkes_uwl",
                                704.0F,
                                4032.0F,
@@ -90,12 +136,26 @@ inline const SuiteConfig& suite_config() {
                                32768,
                                2000.0F,
                                {8192, 16384, 32768, 65536},
-                               {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
+                               {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F},
+                               4};
+        // DM 2000 sweeps 8.49428 s (13868.67 samples); the covering Levin
+        // grid ends at DM 2001.10. The 32768-sample reference block spans
+        // 20.06974 seconds.
+        SuiteConfig meerkat_lband{"meerkat_lband",
+                                  856.0F,
+                                  1712.0F,
+                                  612.48e-6F,
+                                  4096,
+                                  1.1F,
+                                  32768,
+                                  2000.0F,
+                                  {8192, 16384, 32768, 65536},
+                                  {125.0F, 250.0F, 500.0F, 1000.0F, 2000.0F}};
         const char* env = std::getenv("DMT_BENCH_CONFIG"); // NOLINT
         const std::string_view sel =
-            (env != nullptr && *env != '\0') ? env : "cryopaf";
-        if (sel == "cryopaf") {
-            return cryopaf;
+            (env != nullptr && *env != '\0') ? env : "meerkat_lband";
+        if (sel == "cryopaf_low") {
+            return cryopaf_low;
         }
         if (sel == "parkes_uwl") {
             return parkes_uwl;
@@ -103,10 +163,13 @@ inline const SuiteConfig& suite_config() {
         if (sel == "cryopaf_lband") {
             return cryopaf_lband;
         }
-        throw std::invalid_argument(
-            fmt::format("DMT_BENCH_CONFIG={}: expected cryopaf, cryopaf_lband "
-                        "or parkes_uwl",
-                        sel));
+        if (sel == "meerkat_lband") {
+            return meerkat_lband;
+        }
+        throw std::invalid_argument(fmt::format(
+            "DMT_BENCH_CONFIG={}: expected cryopaf_low, cryopaf_lband, "
+            "parkes_uwl or meerkat_lband",
+            sel));
     }();
     return cfg;
 }
@@ -280,12 +343,24 @@ inline double estimate_bytes(Algo algo,
     // The FDMT runs blocks in chunks whose two state halves fit 2 GiB.
     constexpr double kChunkStateBudget = 2.0 * 1024.0 * 1024.0 * 1024.0;
     switch (algo) {
-    case Algo::kFDMT: // output + the engine's two state halves
-        return input + d + std::min(2.0 * b, kChunkStateBudget) +
-               static_cast<double>(plan.get_history_size() +
-                                   plan.get_tree_history_size()) *
-                   sizeof(float) * (device ? 2.0 : 1.0) +
+    case Algo::kFDMT: { // output + the engine's two state halves
+        const double raw_hist =
+            static_cast<double>(plan.get_history_size()) *
+            ((p.nbits == 32) ? 4.0 : (p.nbits == 16 ? 2.0 : 1.0));
+        const double tree_hist =
+            static_cast<double>(plan.get_history_size() +
+                                plan.get_tree_history_size()) *
+            sizeof(float);
+        // Wide plans whose unskewed tree history exceeds 2 GiB use the
+        // skewed-window / direct-top streaming ring (~0.85 * raw_hist +
+        // level-F / top ring <= 0.5 GiB).
+        const double hist =
+            (tree_hist > kChunkStateBudget)
+                ? (0.86 * raw_hist + 0.5 * 1024.0 * 1024.0 * 1024.0)
+                : tree_hist * (device ? 2.0 : 1.0);
+        return input + d + std::min(2.0 * b, kChunkStateBudget) + hist +
                static_cast<double>(plan.get_container().get_memory_usage());
+    }
     case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
     case Algo::kFDMTFFTFrac:
     case Algo::kDDMTFFT:
@@ -300,6 +375,33 @@ inline double estimate_bytes(Algo algo,
                 static_cast<double>(plan.get_dt_max()));
     }
     return 0.0;
+}
+
+/// The DM grids of a point: the requested Levin grid (every engine's input)
+/// and the FDMT's effective grid (rounded to integer band delays), as
+/// fingerprints, the trial range and the largest rounding shift in DM.
+inline void set_grid_counters(benchmark::State& state,
+                              const plans::FDMTPlan& plan,
+                              const Point& p) {
+    const auto req = dm_grid(p);
+    const auto eff = plan.get_dm_grid_final();
+    double shift   = 0.0;
+    if (eff.size() == req.size()) {
+        for (SizeType i = 0; i < req.size(); ++i) {
+            shift =
+                std::max(shift, static_cast<double>(std::abs(eff[i] - req[i])));
+        }
+    } else {
+        shift = -1.0; // trial counts differ: no per-trial comparison
+    }
+    state.counters["dm_grid_requested_fnv"] = grid_fingerprint(req);
+    state.counters["dm_grid_requested_n"]   = static_cast<double>(req.size());
+    state.counters["dm_grid_effective_fnv"] = grid_fingerprint(eff);
+    state.counters["dm_grid_effective_lo"] =
+        eff.empty() ? 0.0 : static_cast<double>(eff.front());
+    state.counters["dm_grid_effective_hi"] =
+        eff.empty() ? 0.0 : static_cast<double>(eff.back());
+    state.counters["dm_grid_max_shift"] = shift;
 }
 
 /// Machine-readable counters (the name carries the same information).
@@ -318,6 +420,7 @@ inline void set_counters(benchmark::State& state,
     state.counters["nbits"]     = static_cast<double>(p.nbits);
     state.counters["nthreads"]  = static_cast<double>(nthreads);
     state.counters["block_s"]   = static_cast<double>(p.nsamps) * kTsamp;
+    set_grid_counters(state, plan, p);
 }
 
 /// DDMT throughput in delay-and-sum additions per second (nchans x ndm per
@@ -378,6 +481,72 @@ inline SizeType packed_bytes(SizeType nsamps, SizeType nbits) {
 /// spacing at coarse sampling; 1.5x and 2x for UWL's 64 us).
 inline SizeType max_boxcar_100ms() {
     return static_cast<SizeType>(std::floor(0.1 / kTsamp));
+}
+
+/// parkes_uwl real-time sweep (BM_fdmt_boxcar_rt): FDMTBoxcar at subband
+/// depth 4 on the preset's band, DM 0-2000 (its Levin tolerance), at the
+/// native 64 us and downsampled to 256, 512 and 1024 us. Blocks span the
+/// same 2.097 s at every resolution; boxcars run to 100 ms, wtsp 1.5.
+struct RtPoint {
+    float tsamp;
+    SizeType nsamps;
+};
+
+inline std::vector<RtPoint> rt_points() {
+    std::vector<RtPoint> pts;
+    for (const SizeType down : {1, 4, 8, 16}) {
+        pts.push_back({kTsamp * static_cast<float>(down), kNsampsRef / down});
+    }
+    return pts;
+}
+
+inline constexpr SizeType kRtSubbandDepth = 4;
+inline constexpr float kRtWtsp            = 1.5F;
+
+inline plans::FDMTPlan make_rt_plan(const RtPoint& p) {
+    const auto grid = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, kDmMaxRef, p.tsamp, p.tsamp, kFMin, kFMax, kNchans, kLevinTol);
+    return {kFMin,   kFMax, kNchans, p.nsamps,
+            p.tsamp, grid,  "valid", kRtSubbandDepth};
+}
+
+inline SizeType rt_max_boxcar(const RtPoint& p) {
+    return static_cast<SizeType>(std::floor(0.1 / p.tsamp));
+}
+
+inline std::string
+rt_name(std::string_view backend, const RtPoint& p, bool packed) {
+    return fmt::format("BM_fdmt_boxcar_rt/{}/tsamp_us:{}/{}/sb:{}/{}",
+                       suite_config().name,
+                       static_cast<int>(std::lround(p.tsamp * 1e6)),
+                       packed ? "uint8" : "float32", kRtSubbandDepth, backend);
+}
+
+inline bool rt_sweep_enabled() { return suite_config().name == "parkes_uwl"; }
+
+/// One benchmark point's warmed state, kept across its repetitions (Google
+/// Benchmark calls the function once per repetition): the context for `key`
+/// is built (and warmed) once, and the previous point's is released first,
+/// so at most one point's memory is held.
+struct ContextSlot {
+    std::string key;
+    std::shared_ptr<void> ctx;
+};
+inline ContextSlot& context_slot() {
+    static ContextSlot slot;
+    return slot;
+}
+
+template <typename T, typename Make>
+std::shared_ptr<T> cached_context(const std::string& key, Make&& make) {
+    auto& [slot_key, slot] = context_slot();
+    if (slot_key != key || !slot) {
+        slot.reset();
+        slot_key.clear();
+        slot     = std::forward<Make>(make)();
+        slot_key = key;
+    }
+    return std::static_pointer_cast<T>(slot);
 }
 
 inline std::vector<float> wtsp_sweep() {

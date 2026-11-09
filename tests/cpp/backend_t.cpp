@@ -1,5 +1,6 @@
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -25,6 +26,23 @@ TEST_CASE("Backend names round-trip", "[backend][cpu]") {
         CHECK(parse_backend(to_string(b)) == b);
     }
     CHECK_THROWS_AS(parse_backend("opencl"), std::invalid_argument);
+}
+
+TEST_CASE("build_info identifies the build", "[backend][cpu]") {
+    const auto& b = build_info();
+    CHECK(!b.version.empty());
+    // A full SHA (40 hex digits), or "unknown" outside a git checkout.
+    if (b.git_sha != "unknown") {
+        CHECK(b.git_sha.size() == 40);
+        CHECK(b.git_sha.find_first_not_of("0123456789abcdef") ==
+              std::string_view::npos);
+    }
+    CHECK(!b.compiler.empty());
+    CHECK(!b.fftw.empty());
+    const bool gpu_build = available_backends().size() > 1;
+    CHECK((b.gpu == "none") == !gpu_build);
+    const auto line = build_info_string();
+    CHECK(line.find(std::string(b.git_sha)) != std::string::npos);
 }
 
 TEST_CASE("available_backends matches the build", "[backend][cpu]") {

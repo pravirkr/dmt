@@ -26,10 +26,13 @@
 #include <cuda/std/span>
 #else
 #include <span>
+#include <type_traits>
 
 #include <thrust/complex.h>
 namespace cuda::std {
+using ::std::false_type;
 using ::std::span;
+using ::std::true_type;
 template <typename T> using complex = ::thrust::complex<T>;
 } // namespace cuda::std
 #endif
@@ -54,6 +57,7 @@ namespace cuda = ::thrust::hip;
 #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define cudaMemcpyKind hipMemcpyKind
 #define cudaEventDisableTiming hipEventDisableTiming
+#define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaHostAllocDefault hipHostMallocDefault
 #define cudaDevAttrMaxSharedMemoryPerBlockOptin                                \
     hipDeviceAttributeSharedMemPerBlockOptin
@@ -61,6 +65,8 @@ namespace cuda = ::thrust::hip;
     hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #define cudaFuncAttributeMaxDynamicSharedMemorySize                            \
     hipFuncAttributeMaxDynamicSharedMemorySize
+#define cudaDevAttrL2CacheSize hipDeviceAttributeL2CacheSize
+#define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 
 // Runtime: functions
 #define cudaGetErrorString hipGetErrorString
@@ -80,10 +86,10 @@ namespace cuda = ::thrust::hip;
 #define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemset hipMemset
 #define cudaMemsetAsync hipMemsetAsync
+#define cudaMemset2DAsync hipMemset2DAsync
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
-#define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaStreamQuery hipStreamQuery
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
@@ -94,6 +100,9 @@ namespace cuda = ::thrust::hip;
 #define cudaEventRecord hipEventRecord
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEventElapsedTime hipEventElapsedTime
+// HIP's C++ overload takes the kernel itself, as CUDA's does.
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor                          \
+    hipOccupancyMaxActiveBlocksPerMultiprocessor
 // hipFuncSetAttribute takes the kernel as `const void*`. Variadic: the
 // kernel argument is often a template-id whose commas would split it.
 namespace dmt::gpu_compat {
@@ -155,3 +164,36 @@ func_set_attribute(Kernel kernel, hipFuncAttribute attr, int value) {
 #else
 #define DMT_GPU_DEVICE_PASS 0
 #endif
+
+// Warp shuffles over a logical warp of kLogicalWarp = 32 lanes, the warp the
+// kernels' lane/warp arithmetic assumes. On CUDA they are the full-mask
+// _sync intrinsics (width warpSize = 32: the same instructions as calling
+// them directly). On HIP a 64-lane wavefront holds two logical warps, and the
+// width argument keeps every shuffle inside its own 32-lane half; the
+// _sync forms are not used (older ROCm lacks them). Callers keep all lanes of
+// a logical warp converged at the shuffle.
+namespace dmt::gpu_compat {
+inline constexpr int kLogicalWarp = 32;
+
+// Device code only: the header also reaches host translation units.
+#if defined(__CUDACC__) || defined(__HIPCC__)
+/// Value of lane (lane - delta) of this logical warp (own value below delta).
+template <typename T>
+__device__ __forceinline__ T shfl_up(T value, unsigned delta) {
+#if defined(DMT_ENABLE_HIP)
+    return __shfl_up(value, delta, kLogicalWarp);
+#else
+    return __shfl_up_sync(0xFFFFFFFFU, value, delta);
+#endif
+}
+
+/// Value of lane `src` of this logical warp.
+template <typename T> __device__ __forceinline__ T shfl(T value, int src) {
+#if defined(DMT_ENABLE_HIP)
+    return __shfl(value, src, kLogicalWarp);
+#else
+    return __shfl_sync(0xFFFFFFFFU, value, src);
+#endif
+}
+#endif // __CUDACC__ || __HIPCC__
+} // namespace dmt::gpu_compat

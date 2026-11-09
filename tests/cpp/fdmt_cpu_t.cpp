@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -14,6 +15,8 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/utils/simulate.hpp"
+
+#include "dmt/fdmt_history.hpp"
 
 #include "test_helpers.hpp"
 
@@ -867,8 +870,10 @@ TEST_CASE("FDMT save_history/load_history multiplexes independent streams",
                      false, "valid");
     const auto hist_size = fdmt_shared.history_state_size();
     REQUIRE(hist_size > 0);
-    std::vector<std::vector<float>> histories(
-        n_streams, std::vector<float>(hist_size, 0.0F));
+    // Every stream starts from a cold history (saved with its header).
+    std::vector<float> cold(hist_size);
+    fdmt_shared.save_history(cold);
+    std::vector<std::vector<float>> histories(n_streams, cold);
     const auto buf_size = fdmt_shared.get_plan().get_buffer_size();
     std::vector<std::vector<float>> actual(
         n_streams, std::vector<float>(buf_size * n_blocks));
@@ -1043,6 +1048,113 @@ TEST_CASE("FDMT valid-mode ring-buffer warm-up transient across many small "
                   Catch::Approx(dmt_full[(d * full_nsamps) + t]).margin(1e-3));
         }
     }
+}
+
+TEST_CASE("FDMT plain-tree history header identifies the configuration",
+          "[fdmt_cpu][cpu][history]") {
+    const SizeType nchans = 32;
+    const SizeType block  = 96;
+    const auto make       = [&](bool smearing, SizeType nbeams = 1) {
+        return FDMT(test::kFMin, test::kFMax, nchans, block, test::kTsamp, 48,
+                    -8, 1, smearing, "valid", Exec::cpu(1), nbeams);
+    };
+    std::mt19937 gen(5);
+    std::uniform_int_distribution<int> dis(0, 7);
+    const auto block_of = [&]() {
+        std::vector<float> wf(nchans * block);
+        for (auto& v : wf) {
+            v = static_cast<float>(dis(gen));
+        }
+        return wf;
+    };
+    const auto wf0   = block_of();
+    const auto wf1   = block_of();
+    FDMT a           = make(true);
+    const auto& plan = a.get_plan();
+    std::vector<float> out(plan.get_dmt_size());
+    std::vector<float> want(plan.get_dmt_size());
+    REQUIRE(a.history_state_size() == algorithms::detail::kFDMTHistHeader +
+                                          plan.get_history_size() +
+                                          plan.get_tree_history_size());
+    a.execute(wf0, out);
+    std::vector<float> hist(a.history_state_size());
+    a.save_history(hist);
+    // Magic "TR", version 1, the stream position (one block) in words 6-9.
+    CHECK(hist[0] ==
+          static_cast<float>(algorithms::detail::kFDMTTreeHistMagic));
+    CHECK(hist[1] == 1.0F);
+    CHECK(hist[6] == static_cast<float>(block));
+    CHECK(hist[7] == 0.0F);
+    CHECK(std::all_of(hist.begin() + 10, hist.begin() + 16,
+                      [](float v) { return v == 0.0F; }));
+    a.execute(wf1, want);
+
+    SECTION("the same configuration resumes the stream") {
+        FDMT b = make(true);
+        b.load_history(hist);
+        b.execute(wf1, out);
+        test::require_exact(out, want);
+        // The position carries across the load.
+        std::vector<float> again(b.history_state_size());
+        b.save_history(again);
+        CHECK(again[6] == static_cast<float>(2 * block));
+    }
+    SECTION("a wrong buffer throws and leaves the stream as it was") {
+        FDMT b = make(true);
+        b.load_history(hist);
+        const auto throws = [&](std::vector<float> bad, const char* what) {
+            INFO(what);
+            REQUIRE_THROWS_WITH(b.load_history(bad),
+                                Catch::Matchers::ContainsSubstring(what));
+        };
+        // Box smearing scales every saved value: same size, other layout.
+        FDMT other = make(false);
+        REQUIRE(other.history_state_size() == hist.size());
+        std::vector<float> other_hist(hist.size());
+        other.save_history(other_hist);
+        throws(other_hist, "different configuration");
+        auto bad = hist;
+        bad[3] += 1.0F; // the layout hash
+        throws(bad, "different configuration");
+        throws(std::vector<float>(hist.size(), 0.0F), "reset_history()");
+        bad    = hist;
+        bad[0] = 0.5F;
+        throws(bad, "not an FDMT history");
+        bad    = hist;
+        bad[0] = static_cast<float>(algorithms::detail::kFDMTSkewHistMagic);
+        throws(bad, "skewed-window path");
+        bad    = hist;
+        bad[1] = 2.0F;
+        throws(bad, "version 2");
+        // A buffer without the header (the dmt < 0.8 layout).
+        throws(std::vector<float>(hist.begin() + 16, hist.end()),
+               "before dmt 0.8");
+        FDMT two = make(true, 2);
+        REQUIRE_THROWS_AS(two.load_history(hist), std::invalid_argument);
+        // Nothing was replaced: b continues the loaded stream.
+        b.execute(wf1, out);
+        test::require_exact(out, want);
+    }
+}
+
+TEST_CASE("FDMT plain-tree history hash follows the tree layout only",
+          "[fdmt_cpu][cpu][history]") {
+    using algorithms::detail::fdmt_tree_history_hash;
+    const plans::FDMTPlan p(test::kFMin, test::kFMax, 64, 256, test::kTsamp, 64,
+                            0, 1, "valid");
+    const plans::FDMTPlan same(test::kFMin, test::kFMax, 64, 1024, test::kTsamp,
+                               64, 0, 1, "valid");
+    const plans::FDMTPlan grid(test::kFMin, test::kFMax, 64, 256, test::kTsamp,
+                               64, 8, 1, "valid");
+    const plans::FDMTPlan step(test::kFMin, test::kFMax, 64, 256, test::kTsamp,
+                               64, 0, 2, "valid");
+    const auto h = fdmt_tree_history_hash(p, 1, true);
+    // The block length does not change the saved layout.
+    CHECK(fdmt_tree_history_hash(same, 1, true) == h);
+    CHECK(fdmt_tree_history_hash(p, 2, true) != h);
+    CHECK(fdmt_tree_history_hash(p, 1, false) != h);
+    CHECK(fdmt_tree_history_hash(grid, 1, true) != h);
+    CHECK(fdmt_tree_history_hash(step, 1, true) != h);
 }
 
 TEST_CASE("FDMT reset_history() actually resets streaming state",

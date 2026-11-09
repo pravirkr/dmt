@@ -8,6 +8,7 @@
 // Device-memory entry points have throwing defaults, so a host-only engine
 // (the CPU) implements only the host half.
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -69,6 +70,23 @@ struct FDMTEngineConfig {
     bool search_upper_levels{false};
     SizeType search_nbits{
         32}; ///< Exact dyadic integer search; ordinary FDMT unchanged.
+    /// Memory budget of everything the engine allocates
+    /// (FDMTMemoryUsage::total(); see algorithms::kFDMTDefaultMaxMemory).
+    SizeType max_memory_bytes{algorithms::kFDMTDefaultMaxMemory};
+    /// Private (CPU): kSkewHistoryAuto (default) takes the skewed-window
+    /// engine (fdmt_skew.hpp) when the tree path does not fit
+    /// max_memory_bytes; any other value is a level-0 + tree history
+    /// threshold in bytes above which it is taken (tests: 0 forces it,
+    /// SIZE_MAX forbids it).
+    static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
+    SizeType skew_history_bytes{kSkewHistoryAuto};
+    /// Private (CPU, tests): leaf level of a skewed engine forced by
+    /// skew_history_bytes (0: automatic). Budget-chosen engines take the
+    /// fastest leaf level that fits (FDMTCpuEngine::skew_candidates).
+    SizeType skew_leaf{0};
+    /// Private (GPU): take the skewed direct levels and target-ring top
+    /// even when the unskewed direct top fits its ring budget (tests).
+    bool force_skewed_direct{false};
 };
 
 class FDMTEngine {
@@ -157,6 +175,14 @@ public:
     [[nodiscard]] virtual algorithms::FDMTMemoryUsage
     get_memory_usage() const noexcept                 = 0;
     [[nodiscard]] virtual std::string summary() const = 0;
+    /// The search's transform path when it differs from the plain tree
+    /// (GPU direct levels and direct top), e.g. "direct levels 0-3, direct
+    /// top 5 -> 9"; empty otherwise.
+    [[nodiscard]] virtual std::string search_path() const { return {}; }
+    /// Search latency of execute_search(): input samples that a stream
+    /// sample waits for before every searched row has emitted it (the
+    /// largest row lag of a subband search on the skewed paths; 0 otherwise).
+    [[nodiscard]] virtual uint64_t search_latency() const noexcept { return 0; }
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
@@ -339,7 +365,24 @@ struct FDMTFFTEngineConfig {
     bool fractional_delays{true};
     // Per channel, 1 = keep (empty: keep all); killed channels read as zero.
     std::vector<uint8_t> kill_mask{};
+    // Longest overlap-save transform execute() may use (0: no cap); with
+    // the fft_segment_cap() testing hook the smaller one applies. The
+    // FDMTFFTBoxcar memory budget sets it.
+    SizeType max_segment{0};
+    // The engine drives a boxcar search (execute_search()): allocate the
+    // search's row buffer at construction, so memory_usage() is complete
+    // before the first block (the budget compares against it).
+    bool search{false};
 };
+
+/// The smaller of two segment caps, 0 meaning none.
+[[nodiscard]] constexpr SizeType combine_segment_caps(SizeType a,
+                                                      SizeType b) noexcept {
+    if (a == 0 || b == 0) {
+        return a + b;
+    }
+    return std::min(a, b);
+}
 
 class FDMTFFTEngine {
 public:

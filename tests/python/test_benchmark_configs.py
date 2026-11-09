@@ -32,7 +32,7 @@ def test_plot_rejects_conflicting_geometry(
     machine.mkdir()
     benchmark = {
         "name": "suite/ndms/FDMT/cpu1/nsamps:32768/dmmax:2000/nbits:32/real_time",
-        "nchans": 512,
+        "nchans": 4096,
         "real_time": 1,
         "time_unit": "s",
         **mismatch,
@@ -41,7 +41,8 @@ def test_plot_rejects_conflicting_geometry(
     result_file.write_text(json.dumps({"benchmarks": [benchmark]}))
     with pytest.raises(ValueError, match="does not match selected preset"):
         plot_suite.load(tmp_path)
-    benchmark.update(nchans=512, tsamp=512e-6)
+    # The default preset's geometry (meerkat_lband).
+    benchmark.update(nchans=4096, tsamp=612.48e-6)
     result_file.write_text(json.dumps({"benchmarks": [benchmark]}))
     results, machines = plot_suite.load(tmp_path)
     assert len(results) == 1

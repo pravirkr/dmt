@@ -51,8 +51,10 @@ box smearing (:data:`VARIANTS`) is measured as well.
 :data:`CRYOPAF` is the 512-channel CryoPAF benchmark over 704-1216 MHz at
 512 us, DM 0-2000, with Levin tolerance 1.1. :data:`CRYOPAF_LBAND` is the
 1152-channel L-band streaming target. :data:`PARKES_UWL` covers 704-4032 MHz
-with 6656 channels at 64 us and Levin tolerance 1.6. :data:`CONFIGS` holds
-these presets by name.
+with 6656 channels at 64 us and Levin tolerance 1.6. :data:`MEERKAT_LBAND`
+is the 4096-channel MeerTRAP filterbank mode over 856-1712 MHz at 612.48 us
+(306.24 us downsampled by two).
+:data:`CONFIGS` holds these presets by name.
 """
 
 from __future__ import annotations
@@ -463,7 +465,7 @@ class SearchConfig:
 
 CRYOPAF = SearchConfig(
     704.0, 1216.0, 512, 512e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
-    name="cryopaf",
+    name="cryopaf_low",
 )  # fmt: skip
 """CryoPAF benchmark: 512 channels over 704-1216 MHz at 512 us, DM 0-2000,
 Levin tolerance 1.1.
@@ -487,7 +489,18 @@ tolerance 1.6 keeps the grid under 5000 trials (4749; tolerance 1.1 would
 need 12941). At DM 2000 the dispersion sweep spans several blocks; histories
 must be warmed before steady-state timing. Full-band search is the default."""
 
-CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_LBAND, PARKES_UWL)}
+MEERKAT_LBAND = SearchConfig(
+    856.0, 1712.0, 4096, 612.48e-6, dm_min=0.0, dm_max=2000.0, levin_tol=1.1,
+    name="meerkat_lband", nsamps_ref=32768,
+)  # fmt: skip
+"""MeerKAT L-band benchmark: the 4096-channel MeerTRAP / TRAPUM filterbank
+mode over 856-1712 MHz, downsampled by two to 612.48 us, DM 0-2000, Levin
+tolerance 1.1, in 20.0697446-second blocks. The grid has 4057 trials in two
+uniform segments (3.28 delay samples per trial to DM 1836, 6.56 beyond), and
+the 12-level tree needs 101x fewer operations than brute force. The DM-2000
+band sweep is 8.49428 seconds (13868.67 samples)."""
+
+CONFIGS = {cfg.name: cfg for cfg in (CRYOPAF, CRYOPAF_LBAND, PARKES_UWL, MEERKAT_LBAND)}
 """The named configurations, by ``SearchConfig.name``."""
 
 
@@ -898,9 +911,9 @@ def tail_fit(
     correlated discrete sequence lies in between. The best boxcar over a
     ladder of widths is the maximum of a field in time and log-width, whose
     excursions grow as ``u * phi(u)`` (``beta = +1``, Siegmund & Worsley
-    1995); long simulations of the search statistic give ``beta`` = 1.05
-    for white noise and 0.66 for the FDMT's at DM 2000, and the fit over
-    2-4.5 sigma extrapolates their thresholds to within 0.04 sigma.
+    1995). The fitted ``beta`` of the search statistic, and how well the fit
+    extrapolates to detection thresholds, are measured by the long
+    simulations of the sensitivity study (``paper/sensitivity_analysis``).
     Weighted least squares on ``log`` counts (weights: the counts, i.e. Poisson); levels
     with fewer than ``min_count`` crossings are left out. Returns ``(c, beta)`` with
     the rate per sample; ``phi`` includes its ``1 / sqrt(2 pi)``.

@@ -434,6 +434,7 @@ TEST_CASE("FDMT fused levels: dt_grid, streaming, packed int tree",
             FDMT unfused(kFMin, kFMax, nchans, block, kTsamp, 48, -8, 1, true,
                          "valid", Exec::cpu(1), 1, kUnfused);
             std::vector<float> hist(ref.history_state_size(), 0.0F);
+            ref.save_history(hist); // a cold stream's history
             for (SizeType b = 0; b < 10; ++b) {
                 FDMT& engine  = (b % 3 == 2) ? unfused : fused;
                 const auto wf = random_waterfall(nchans * block,

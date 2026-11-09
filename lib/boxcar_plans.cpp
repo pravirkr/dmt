@@ -7,6 +7,7 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "dmt/boxcar.hpp"
@@ -38,6 +39,11 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
             break;
         }
         w = std::max(w + 1, static_cast<SizeType>(std::ceil(next)));
+    }
+    // The bank ends on max_width: the widest box searched is the one asked
+    // for, even when the geometric steps stop below it.
+    if (widths.back() < max_width) {
+        widths.push_back(static_cast<uint32_t>(max_width));
     }
     return widths;
 }
@@ -142,7 +148,11 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             // Trace each actual intermediate coordinate, including copy
             // nodes and plan-specific pruning. Shift does not change energy
             // between independent channels, but does determine cold support.
+            // Leaf lengths of a row, as a histogram: a row has one leaf per
+            // channel but only a few distinct box lengths, and the noise
+            // terms below depend on the length alone.
             std::vector<SizeType> lengths;
+            std::vector<std::pair<SizeType, SizeType>> length_counts;
             lengths.reserve(end - begin);
             for (SizeType d = 0; d < grid.ndt; ++d) {
                 lengths.clear();
@@ -173,6 +183,15 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     }
                 };
                 trace(trace, l, grid.coord_offset + d, 0);
+                std::ranges::sort(lengths);
+                length_counts.clear();
+                for (const auto len : lengths) {
+                    if (length_counts.empty() ||
+                        length_counts.back().first != len) {
+                        length_counts.emplace_back(len, 0);
+                    }
+                    ++length_counts.back().second;
+                }
                 out.warmup_samples[d] = support + extra_warmup;
                 const double f0       = out.f_low_mhz;
                 const double f1       = out.f_high_mhz;
@@ -185,16 +204,22 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     out.dm_grid[d] = root_dm[d];
                 }
                 for (SizeType f = 0; f < widths.size(); ++f) {
+                    const SizeType width = widths[f];
+                    const SizeType w_edge =
+                        config.use_trapezoid ? trapezoid_edge_width(widths[f])
+                                             : 0;
                     double variance    = 0;
                     double mean_weight = 0;
-                    for (const auto len : lengths) {
+                    for (const auto& [len, count] : length_counts) {
                         const double weight =
                             smear ? box_weight(len,
                                                plan.get_box_fraction_bits()) *
                                         unit
                                   : 1.0;
-                        variance += fdmt_box_variance(len, widths[f], weight);
-                        mean_weight += len * weight;
+                        const auto n = static_cast<double>(count);
+                        variance += n * fdmt_trapezoid_variance(len, width,
+                                                                w_edge, weight);
+                        mean_weight += n * static_cast<double>(len) * weight;
                     }
                     if (variance == 0) {
                         // Every channel of the row is killed: never detect.
@@ -223,8 +248,12 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     out.raw_thresh_lut[d * widths.size() + f] = threshold;
                     if (packed) {
                         const double scale = smear ? 1.0 / unit : 1.0;
-                        const double mean =
-                            config.input_mean * mean_weight * widths[f] * scale;
+                        const double filter_weight =
+                            w_edge == 0
+                                ? static_cast<double>(width)
+                                : static_cast<double>(2 * (width - w_edge));
+                        const double mean   = config.input_mean * mean_weight *
+                                              filter_weight * scale;
                         const double cutoff = std::ceil(
                             mean + config.detect_thresh * sigma * scale);
                         if (cutoff >= std::ldexp(1.0, 64)) {
@@ -249,16 +278,21 @@ make_boxcar_rows(const plans::FDMTPlan& plan,
     std::vector<BoxcarRow> rows;
     const auto& pc      = plan.get_container();
     const SizeType root = plan.get_niters();
-    std::vector<SizeType> root_history(pc.coordinates[root].size());
-    for (const auto& c : pc.coordinates_sum[root]) {
-        root_history[c.buf_offset / pc.state_shape[root].nsamps] =
-            c.hist_offset;
+    std::vector<std::vector<SizeType>> level_history(root + 1);
+    for (SizeType l = 1; l <= root; ++l) {
+        level_history[l].resize(pc.coordinates[l].size(), 0);
+        for (const auto& c : pc.coordinates_sum[l]) {
+            level_history[l][c.buf_offset / pc.state_shape[l].nsamps] =
+                c.hist_offset;
+        }
     }
     for (const auto& plane : planes) {
+        const bool unmat = (plane.level == root) || plane.staggered;
         for (SizeType d = 0; d < plane.dm_grid.size(); ++d) {
             BoxcarRow row;
             row.row                     = plane.coord_offset + d;
             row.warmup                  = plane.warmup_samples[d];
+            row.unmaterialized          = unmat;
             row.candidate.dm            = plane.dm_grid[d];
             row.candidate.dm_idx        = static_cast<uint32_t>(d);
             row.candidate.subband_level = plane.subband_level;
@@ -268,17 +302,18 @@ make_boxcar_rows(const plans::FDMTPlan& plan,
             row.candidate.chan_end      = plane.chan_end;
             row.candidate.f_low_mhz     = plane.f_low_mhz;
             row.candidate.f_high_mhz    = plane.f_high_mhz;
-            if (plane.level == root) {
-                const auto& c = pc.coordinates[root][row.row];
-                row.tail = c.tail_buf_offset / pc.state_shape[root - 1].nsamps;
-                row.head =
-                    c.i_coord_head == SIZE_MAX
-                        ? SIZE_MAX
-                        : c.head_buf_offset / pc.state_shape[root - 1].nsamps;
-                row.delay = row.head == SIZE_MAX ? 0 : c.delay;
+            if (unmat) {
+                const SizeType lvl  = plane.level;
+                const SizeType prev = pc.state_shape[lvl - 1].nsamps;
+                const auto& c       = pc.coordinates[lvl][row.row];
+                row.tail            = c.tail_buf_offset / prev;
+                row.head            = c.i_coord_head == SIZE_MAX
+                                          ? SIZE_MAX
+                                          : c.head_buf_offset / prev;
+                row.delay           = row.head == SIZE_MAX ? 0 : c.delay;
                 // Only coordinates_sum stores the allocated history slot.
                 if (row.head != SIZE_MAX) {
-                    row.hist = root_history[row.row];
+                    row.hist = level_history[lvl][row.row];
                 }
             }
             rows.push_back(row);

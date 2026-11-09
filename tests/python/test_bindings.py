@@ -32,8 +32,12 @@ def test_simulate_python_helpers() -> None:
 
     delays = simulate.get_dmdelays(10.0, 1000.0, 1500.0, 0.001, 8)
     assert delays.shape == (8,)
-    assert delays[0] == 0
     assert delays[-1] >= delays[0]
+    # Channel centres (the library's convention), referenced to f_min.
+    centres = 1000.0 + (np.arange(8) + 0.5) * 62.5
+    expected = simulate.DM_CONSTANT * 10.0 * (1000.0**-2 - centres**-2) / 0.001
+    np.testing.assert_array_equal(delays, np.round(expected).astype(np.int32))
+    assert delays[0] > 0  # the half-channel delay of channel 0
 
     arr, n_disp = simulate.generate_pure_frb(8, 32, 1000.0, 1500.0, 0, 10.0, 1.0)
     assert arr.shape == (8, 32)
@@ -46,6 +50,14 @@ class TestBackends:
         avail = dmtlib.available_backends()
         assert avail[0] == "cpu"
         assert set(avail) <= {"cpu", "cuda", "hip"}
+
+    def test_build_info(self) -> None:
+        info = dmtlib.build_info()
+        assert set(info) >= {"version", "git_sha", "git_dirty", "compiler", "gpu"}
+        assert info["git_sha"] == "unknown" or len(info["git_sha"]) == 40
+        assert isinstance(info["git_dirty"], bool)
+        assert info["fftw"]
+        assert (info["gpu"] == "none") == (dmtlib.available_backends() == ["cpu"])
 
     @pytest.mark.parametrize(
         "cls", [dmtlib.FDMT, dmtlib.FDMTFFT], ids=["FDMT", "FDMTFFT"]

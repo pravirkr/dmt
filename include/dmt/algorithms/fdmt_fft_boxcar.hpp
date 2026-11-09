@@ -32,8 +32,22 @@ namespace dmt::algorithms {
  * fractional delays (the default) the search lags the input by
  * get_output_latency() samples: a block searches stream samples
  * [block_start - latency, block_end - latency). Pending excursions cross
- * blocks; flush() emits them at end of stream. Host calls block; device
+ * blocks; at end of stream drain() searches the last latency samples and
+ * emits them (flush() only emits). Host calls block; device
  * calls are asynchronous on the given stream. Not safe for concurrent calls.
+ *
+ * Memory: max_memory_bytes (default kFDMTDefaultMaxMemory, 10 GiB) bounds
+ * everything the instance allocates (get_memory_usage().total()), as on
+ * FDMTBoxcar. Over it, the overlap-save segments are shortened (each try
+ * halves the transform length; get_chunk_nsamps() reports the segment) until
+ * the instance fits. Construction throws std::invalid_argument, naming the
+ * budget and the memory at the shortest segment, when nothing fits. Shorter
+ * segments change the rows as the block size does: by float rounding with
+ * integer delays; with fractional delays every segment still keeps the
+ * support behind and the 64-sample guard ahead of each output, and only the
+ * interpolation kernel's tail beyond the guard changes with the transform
+ * length (a few hundredths of sigma on noise rows, so near-threshold runs
+ * can split or join; see the Fourier variants page of the pipeline guide).
  */
 class FDMTFFTBoxcar {
 public:
@@ -43,7 +57,8 @@ public:
                            Exec exec                          = {},
                            SizeType nbeams                    = 1,
                            bool fractional_delays             = true,
-                           std::span<const uint8_t> kill_mask = {});
+                           std::span<const uint8_t> kill_mask = {},
+                           SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
     ~FDMTFFTBoxcar();
     FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept;
     FDMTFFTBoxcar& operator=(FDMTFFTBoxcar&&) noexcept;
@@ -55,6 +70,19 @@ public:
     execute(DeviceSpan<const float> waterfall, Stream stream = {});
     [[nodiscard]] CandidateResultView flush();
     [[nodiscard]] CandidateDeviceResultView flush_device(Stream stream = {});
+    /**
+     * End of stream: searches the stream up to its last sample, then emits
+     * the open excursions as flush() does. Without it the last
+     * get_output_latency() samples are never searched. Endpoints after
+     * the last sample are not searched; the fractional delays near the end
+     * see zero signal after it.
+     * A host call: after device calls, synchronize their stream first. It
+     * ends the stream: execute() throws until reset_history().
+     */
+    [[nodiscard]] CandidateResultView drain();
+    /// Stream samples [0, n) whose trailing endpoints every row has searched
+    /// (after drain(), the whole stream).
+    [[nodiscard]] uint64_t get_searched_nsamps() const noexcept;
     [[nodiscard]] CandidateResultView copy_result(Stream stream = {});
     /// Discard all histories and pending peaks; restart stream sample 0.
     void reset_history(Stream stream = {});

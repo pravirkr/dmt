@@ -42,6 +42,12 @@ public:
     [[nodiscard]] SizeType fuse_levels() const noexcept override {
         return m_fdmt->get_fuse_levels();
     }
+    [[nodiscard]] std::string search_path() const override {
+        return m_fdmt->search_path();
+    }
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_fdmt->search_latency();
+    }
 
 private:
     std::unique_ptr<FDMTEngine> m_fdmt;

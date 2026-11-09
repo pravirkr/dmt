@@ -20,6 +20,7 @@
 #include "dmt/algorithms/sdmt.hpp"
 
 #include "suite_common.hpp"
+#include "suite_memory.hpp"
 
 namespace dmt::bench_suite {
 namespace {
@@ -50,6 +51,8 @@ bool skip_if_over_budget(benchmark::State& state,
 }
 
 void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_budget(state, Algo::kFDMT, plan, p)) {
         return;
@@ -73,10 +76,13 @@ void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
         }
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
 }
 
 template <bool kFrac>
 void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_budget(state, kFrac ? Algo::kFDMTFFTFrac : Algo::kFDMTFFT,
                             plan, p)) {
@@ -97,11 +103,14 @@ void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
 }
 
 /// DDMT or SDMT (Engine) on the FDMT plan's DM grid.
 template <typename Engine, Algo kAlgo>
 void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     const auto plan = make_plan(p);
     if (skip_if_over_budget(state, kAlgo, plan, p)) {
         return;
@@ -134,6 +143,7 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
         }
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
     set_ddmt_rate(state, plan, p);
 }
 
@@ -141,6 +151,8 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
 /// the NUFFT applies), exact fractional delays.
 template <DDMTFFTMethod kMethod>
 void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
+    PeakRss mem;
+    mem.begin();
     constexpr auto kAlgo =
         kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
     const auto plan = make_plan(p);
@@ -180,11 +192,13 @@ void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
         return;
     }
     set_counters(state, plan, p, nthreads);
+    mem.report(state);
     set_ddmt_rate(state, plan, p);
 }
 
-// DDMT points above this many additions per call run one repetition.
-constexpr double kSingleRepetitionAdds = 5.0e10;
+// DDMT and SDMT points above this many channel-trial-sample additions per
+// call (about a second or more on 8 cores) run one repetition.
+constexpr double kSingleRepetitionAdds = 1.0e10;
 
 void register_cpu() {
     const auto threads   = cpu_threads();
@@ -199,13 +213,16 @@ void register_cpu() {
     // Brute-force DDMT calls run for seconds; one repetition of those is
     // already stable and keeps the whole suite to minutes.
     const auto add_ddmt = [&](const Point& p, int t) {
-        auto* bm          = add(bench_name(Algo::kDDMT, cpu_label(t), p),
-                                bench_ddmt<DDMT, Algo::kDDMT>, p, t);
         const double adds = static_cast<double>(kNchans) *
                             static_cast<double>(dm_grid(p).size()) *
                             static_cast<double>(p.nsamps);
-        if (adds > kSingleRepetitionAdds) {
-            bm->Repetitions(1);
+        for (auto* bm : {add(bench_name(Algo::kDDMT, cpu_label(t), p),
+                             bench_ddmt<DDMT, Algo::kDDMT>, p, t),
+                         add(bench_name(Algo::kSDMT, cpu_label(t), p),
+                             bench_ddmt<SDMT, Algo::kSDMT>, p, t)}) {
+            if (adds > kSingleRepetitionAdds) {
+                bm->Repetitions(1);
+            }
         }
     };
 
@@ -214,24 +231,11 @@ void register_cpu() {
             for (const int t : threads) {
                 add(bench_name(Algo::kFDMT, cpu_label(t), p), bench_fdmt, p, t);
             }
-            if (is_reference(p)) { // verification mode, not plotted
-                add(bench_name(Algo::kFDMTFFT, cpu_label(multi), p),
-                    bench_fdmt_fft<false>, p, multi);
-            }
             add(bench_name(Algo::kFDMTFFTFrac, cpu_label(multi), p),
                 bench_fdmt_fft<true>, p, multi);
             add_ddmt(p, multi);
-            add(bench_name(Algo::kSDMT, cpu_label(multi), p),
-                bench_ddmt<SDMT, Algo::kSDMT>, p, multi);
             add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p),
                 bench_ddmt_fft<DDMTFFTMethod::kNUFFT>, p, multi);
-            // Exact brute-force FDD (a reference, not plotted) is
-            // compute-bound like DDMT: one repetition is stable.
-            if (is_reference(p)) {
-                add(bench_name(Algo::kDDMTFFTBrute, cpu_label(multi), p),
-                    bench_ddmt_fft<DDMTFFTMethod::kBrute>, p, multi)
-                    ->Repetitions(1);
-            }
         }
     }
     for (const auto& p : sweep_points(Sweep::kNbits)) {
@@ -239,8 +243,6 @@ void register_cpu() {
             add(bench_name(Algo::kFDMT, cpu_label(t), p), bench_fdmt, p, t);
         }
         add_ddmt(p, multi);
-        add(bench_name(Algo::kSDMT, cpu_label(multi), p),
-            bench_ddmt<SDMT, Algo::kSDMT>, p, multi);
         add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p),
             bench_ddmt_fft<DDMTFFTMethod::kNUFFT>, p, multi);
     }

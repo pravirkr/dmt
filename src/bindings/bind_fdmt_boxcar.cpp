@@ -50,19 +50,20 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .value("ALL_ABOVE_THRESHOLD", PeakFindingMode::kAllAboveThreshold);
     py::class_<BoxcarConfig>(mod, "BoxcarConfig")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, bool, SizeType, float>(),
+                      SizeType, bool, SizeType, float, bool>(),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
              "max_candidates"_a = 131072, "max_cands_per_dm"_a = 4096,
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
-             "input_mean"_a = 0.0F)
+             "input_mean"_a = 0.0F, "use_trapezoid"_a = false)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
         .def_readwrite("noise_sigma", &BoxcarConfig::noise_sigma)
         .def_readwrite("input_nbits", &BoxcarConfig::input_nbits)
         .def_readwrite("input_mean", &BoxcarConfig::input_mean)
+        .def_readwrite("use_trapezoid", &BoxcarConfig::use_trapezoid)
         .def_readwrite("peak_mode", &BoxcarConfig::peak_mode)
         .def_readwrite("max_candidates", &BoxcarConfig::max_candidates)
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)
@@ -115,7 +116,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("staging", &FDMTBoxcarMemoryUsage::staging)
         .def_property_readonly("total", &FDMTBoxcarMemoryUsage::total);
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
-            "max_width"_a, "wtsp"_a = 2.0F);
+            "max_width"_a, "wtsp"_a = 2.0F, R"doc(
+        Boxcar widths searched for max_boxcar=max_width and this wtsp.
+
+        From 1, each next width is max(w + 1, ceil(w * wtsp)) while it does
+        not exceed max_width; max_width ends the bank when the steps stop
+        below it (9 at wtsp 2: 1, 2, 4, 8, 9).
+        )doc");
     py::class_<FDMTBoxcar>(mod, "FDMTBoxcar", R"doc(
         Streaming valid-mode FDMT and analytical boxcar detection.
 
@@ -136,21 +143,39 @@ void bind_fdmt_boxcar(py::module_& mod) {
         the same width centred on their boundaries. Candidates carry
         ``subband_level`` (the depth), ``subband_idx``, the channel extent
         and ``staggered``.
+
+        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds everything
+        the instance allocates (:attr:`memory_usage`). Plans whose FDMT tree
+        history does not fit (UWL-like bands at high time resolution) run the
+        skewed-window path; their subband rows are then searched with a fixed
+        per-row latency of up to the dispersion delay to the bottom of the
+        band, so the final such samples of a stream are searched only if it
+        continues. Raises ``ValueError`` when nothing fits.
+
+        ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
+        channel, low frequency first. Channels with 0 read as zero (code 0
+        for packed input) and are left out of every row's noise model, so
+        S/N stays calibrated on the remaining channels. Fixed at
+        construction; each block is copied once to zero them.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,
                          std::optional<SizeType> fuse,
                          std::optional<SizeType> chunk,
-                         std::string_view backend, int device) {
+                         std::string_view backend, int device,
+                         SizeType max_memory_bytes, const py::object& kill) {
+                 const auto mask = extract_kill_mask(kill);
                  return FDMTBoxcar(std::move(plan), config, smear,
                                    make_exec(backend, nthreads, device), nbeams,
                                    fuse.value_or(algorithms::kFDMTAutoFuse),
-                                   chunk.value_or(0));
+                                   chunk.value_or(0), max_memory_bytes, mask);
              }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
              "chunk_nsamps"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-             "device"_a = 0)
+             "device"_a           = 0,
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+             "kill_mask"_a        = py::none())
         .def(
             "execute",
             [](FDMTBoxcar& search, const py::array& input) {
@@ -205,6 +230,31 @@ void bind_fdmt_boxcar(py::module_& mod) {
                  }
                  return own_result(view);
              })
+        .def(
+            "drain",
+            [](FDMTBoxcar& search) {
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.drain();
+                }
+                return own_result(view);
+            },
+            R"doc(
+            End of stream: search the stream up to its last sample and emit
+            the open excursions (as :meth:`flush`). Without it the last
+            :attr:`search_latency` samples are never searched. The stream ends:
+            ``execute`` raises until :meth:`reset_history`.
+            )doc")
+        .def_property_readonly(
+            "searched_nsamps", &FDMTBoxcar::get_searched_nsamps,
+            "Stream samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream).")
+        .def_property_readonly(
+            "search_latency", &FDMTBoxcar::get_search_latency,
+            "Input samples a stream sample waits for before every searched "
+            "row has searched it (the largest subband row lag on the skewed "
+            "paths; 0 otherwise).")
         .def("reset_history",
              [](FDMTBoxcar& search) {
                  py::gil_scoped_release release;
@@ -247,20 +297,27 @@ void bind_fdmt_boxcar(py::module_& mod) {
         by output_latency samples; candidate sample indices are input-stream
         indices, comparable with FDMTBoxcar's. Channels with kill_mask 0 read
         as zero and are excluded from the noise model.
+
+        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds everything
+        the instance allocates (:attr:`memory_usage`), as on FDMTBoxcar:
+        over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
+        until it fits. Raises ``ValueError`` when even the shortest segment
+        does not fit.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
                          const py::object& kill, std::string_view backend,
-                         int device) {
+                         int device, SizeType max_memory_bytes) {
                  const auto mask = extract_kill_mask(kill);
                  return FDMTFFTBoxcar(std::move(plan), config, smear,
                                       make_exec(backend, nthreads, device),
-                                      nbeams, frac, mask);
+                                      nbeams, frac, mask, max_memory_bytes);
              }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
              "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-             "device"_a = 0)
+             "device"_a           = 0,
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
         .def(
             "execute",
             [](FDMTFFTBoxcar& search, const py::array& input) {
@@ -298,6 +355,26 @@ void bind_fdmt_boxcar(py::module_& mod) {
                  }
                  return own_result(view);
              })
+        .def(
+            "drain",
+            [](FDMTFFTBoxcar& search) {
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.drain();
+                }
+                return own_result(view);
+            },
+            R"doc(
+            End of stream: search the stream up to its last sample and emit
+            the open excursions (as :meth:`flush`). Without it the last
+            :attr:`output_latency` samples are never searched. The stream ends:
+            ``execute`` raises until :meth:`reset_history`.
+            )doc")
+        .def_property_readonly(
+            "searched_nsamps", &FDMTFFTBoxcar::get_searched_nsamps,
+            "Stream samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream).")
         .def("reset_history",
              [](FDMTFFTBoxcar& search) {
                  py::gil_scoped_release release;

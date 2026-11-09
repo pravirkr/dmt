@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -14,11 +15,22 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
+#include "dmt/fdmt_int_tree.hpp"
+#include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
 namespace {
 
-constexpr SizeType kTile = 1024;
+/// Scoring tile: each tile rebuilds its running sums and screen minima over
+/// the max_width - 1 lookback samples before it, so wide boxcars take longer
+/// tiles (about 4x the lookback, 1024 to 4096 samples) to amortize that.
+SizeType scoring_tile(SizeType max_width) noexcept {
+    SizeType tile = 1024;
+    while (tile < 4096 && tile < 4 * max_width) {
+        tile *= 2;
+    }
+    return tile;
+}
 
 class FDMTBoxcarCpuEngine final : public FDMTBoxcarEngine {
 public:
@@ -26,7 +38,8 @@ public:
                         const BoxcarConfig& config,
                         const std::vector<plans::BoxcarPlanePlan>& planes,
                         const FDMTEngineConfig& cfg,
-                        std::unique_ptr<BoxcarDriver> driver)
+                        std::unique_ptr<BoxcarDriver> driver,
+                        std::vector<std::pair<SizeType, SizeType>> kill_runs)
         : m_plan(plan),
           m_config(config),
           m_planes(planes),
@@ -34,12 +47,31 @@ public:
           m_beams(cfg.nbeams),
           m_threads(std::max(1, cfg.exec.nthreads)),
           m_width(planes.front().widths.back()),
+          m_tile(scoring_tile(m_width)),
           m_filters(planes.front().widths.size()),
           m_peak_count(config.peak_mode ==
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1),
-          m_driver(std::move(driver)) {
+          m_driver(std::move(driver)),
+          m_kill_runs(std::move(kill_runs)) {
+        if (!m_kill_runs.empty()) {
+            m_killed.assign(plan.get_nchans(), 0);
+            for (const auto& [c0, c1] : m_kill_runs) {
+                std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
+                          m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
+                          1);
+            }
+            if (config.input_nbits == 32) {
+                m_masked.resize(m_beams * plan.get_nchans() *
+                                plan.get_nsamps());
+            } else {
+                m_masked_packed.resize(
+                    m_beams * plan.get_nchans() *
+                    bit_pack_utils::packed_row_bytes(plan.get_nsamps(),
+                                                     config.input_nbits));
+            }
+        }
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count) {
             throw std::invalid_argument("FDMTBoxcar: history size overflow");
@@ -50,8 +82,15 @@ public:
                 ? std::ldexp(1.0,
                              -static_cast<int>(plan.get_box_fraction_bits()))
                 : 1.0;
+        // Packed rows fit uint32_t whenever every tree value does (as the
+        // FDMT engines' own uint32_t state): half the carry's bytes.
+        m_carry32 =
+            config.input_nbits != 32 &&
+            int_search_fits_u32(plan, cfg.use_box_smearing, config.input_nbits);
         if (config.input_nbits == 32) {
             m_carry.resize(rows * m_width);
+        } else if (m_carry32) {
+            m_integer_carry32.resize(rows * m_width);
         } else {
             m_integer_carry.resize(rows * m_width);
         }
@@ -59,14 +98,30 @@ public:
         m_per_dm.resize(rows);
         m_candidates.resize(config.max_candidates);
         if (config.input_nbits == 32) {
-            m_prefix.resize(m_threads * (m_width + kTile + 1));
+            m_prefix.resize(m_threads * (m_width + m_tile + 1));
         } else {
-            m_integer_prefix.resize(m_threads * (m_width + kTile + 1));
+            m_integer_prefix.resize(m_threads * (m_width + m_tile + 1));
         }
-        m_best.resize(m_threads * kTile);
-        m_best_filter.resize(m_threads * kTile);
+        m_best.resize(m_threads * m_tile);
+        m_best_filter.resize(m_threads * m_tile);
+        make_screen_groups(planes.front().widths);
         m_offsets.push_back(0);
-        for (const auto& p : planes) {
+        m_row_plane.reserve(m_rows.size());
+        for (SizeType ip = 0; ip < planes.size(); ++ip) {
+            const auto& p = planes[ip];
+            // Planes are ordered by level, so a level's rows are contiguous.
+            if (m_level_rows.size() <= p.level) {
+                m_level_rows.resize(p.level + 1, {0, 0});
+            }
+            auto& lr = m_level_rows[p.level];
+            if (lr.first == lr.second) {
+                lr.first = m_offsets.back();
+            } else if (lr.second != m_offsets.back()) {
+                throw std::logic_error("FDMTBoxcar (cpu): planes out of order");
+            }
+            lr.second = m_offsets.back() + p.dm_grid.size();
+            m_row_plane.insert(m_row_plane.end(), p.dm_grid.size(),
+                               static_cast<uint32_t>(ip));
             m_offsets.push_back(m_offsets.back() + p.dm_grid.size());
             m_integer_means.insert(m_integer_means.end(),
                                    p.integer_mean_lut.begin(),
@@ -90,7 +145,7 @@ public:
                 "FDMTBoxcar: stream sample index overflow");
         }
         begin_result(m_plan.get_nsamps());
-        m_driver->search(waterfall, *this);
+        m_driver->search(masked(waterfall, m_masked), *this);
         m_position += m_plan.get_nsamps();
         return view();
     }
@@ -112,7 +167,8 @@ public:
                 "FDMTBoxcar: stream sample index overflow");
         }
         begin_result(m_plan.get_nsamps());
-        m_driver->search(waterfall, m_config.input_nbits, *this);
+        m_driver->search(masked(waterfall, m_masked_packed),
+                         m_config.input_nbits, *this);
         m_position += m_plan.get_nsamps();
         return view();
     }
@@ -140,36 +196,77 @@ public:
         }
         return view();
     }
+    void set_search_stop(uint64_t stop) noexcept override {
+        m_search_stop = stop;
+    }
+    [[nodiscard]] uint64_t stream_position() const noexcept override {
+        return m_position;
+    }
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_driver->search_latency();
+    }
     void reset_history(Stream) override {
+        m_search_stop = UINT64_MAX;
         m_driver->reset({});
         std::ranges::fill(m_carry, 0.0F);
         std::ranges::fill(m_integer_carry, uint64_t{0});
+        std::ranges::fill(m_integer_carry32, uint32_t{0});
         std::ranges::fill(m_peaks, BoxcarPeak{});
         m_position = 0;
         begin_result(0);
     }
 
     void consume(SizeType level, const FDMTSearchInput& input) override {
-        for (SizeType p = 0; p < m_planes.size(); ++p) {
-            if (m_planes[p].level != level) {
-                continue;
+        // Every row of every plane of the level in one loop. A level of many
+        // small planes (subband search) is scheduled dynamically: rows differ
+        // in cost (lags, cold prefixes, threshold hits) and static blocks
+        // leave threads idle (parkes_uwl depth 4: 11 s against 15 s per
+        // block). A single plane keeps static blocks, a few per cent faster
+        // on its uniform rows (meerkat_lband: 516 against 539 ms).
+        if (level >= m_level_rows.size() ||
+            m_level_rows[level].first == m_level_rows[level].second) {
+            return;
+        }
+        const SizeType row_lo = m_level_rows[level].first;
+        const SizeType row_hi = m_level_rows[level].second;
+        const SizeType nrows  = row_hi - row_lo;
+        const SizeType first  = input.beam_begin;
+        const SizeType beams =
+            std::min(input.beam_count, m_beams - input.beam_begin);
+        const auto task = [&](SizeType t) {
+            const SizeType beam    = first + t / nrows;
+            const SizeType row_idx = row_lo + t % nrows;
+            const SizeType p       = m_row_plane[row_idx];
+            const SizeType d       = row_idx - m_offsets[p];
+            FDMTSearchInput row_in = input;
+            if (input.row_lag != nullptr &&
+                !lagged_row_input(input, m_rows[row_idx].row, row_in)) {
+                return;
             }
-            const auto& plane    = m_planes[p];
-            const SizeType ndm   = plane.dm_grid.size();
-            const SizeType base  = m_offsets[p];
-            const SizeType first = input.beam_begin;
-            const SizeType beams =
-                std::min(input.beam_count, m_beams - input.beam_begin);
+            row_in.search_stop = m_search_stop;
+            if (!stop_row_input(row_in)) {
+                return; // drain(): past the end of the stream
+            }
+            const FDMTSearchInput* in = &row_in;
+            if (m_config.input_nbits == 32) {
+                score<float, float>(m_planes[p], row_idx, d, beam, *in);
+            } else if (m_carry32) {
+                score<uint64_t, uint32_t>(m_planes[p], row_idx, d, beam, *in);
+            } else {
+                score<uint64_t, uint64_t>(m_planes[p], row_idx, d, beam, *in);
+            }
+        };
+        const SizeType ntasks = beams * nrows;
+        const bool one_plane  = m_row_plane[row_lo] == m_row_plane[row_hi - 1];
+        if (one_plane) {
 #pragma omp parallel for num_threads(m_threads) schedule(static)
-            for (SizeType task = 0; task < beams * ndm; ++task) {
-                const SizeType beam    = first + task / ndm;
-                const SizeType d       = task % ndm;
-                const SizeType row_idx = base + d;
-                if (m_config.input_nbits == 32) {
-                    score<float>(plane, row_idx, d, beam, input);
-                } else {
-                    score<uint64_t>(plane, row_idx, d, beam, input);
-                }
+            for (SizeType t = 0; t < ntasks; ++t) {
+                task(t);
+            }
+        } else {
+#pragma omp parallel for num_threads(m_threads) schedule(dynamic, 4)
+            for (SizeType t = 0; t < ntasks; ++t) {
+                task(t);
             }
         }
     }
@@ -177,7 +274,8 @@ public:
     FDMTBoxcarMemoryUsage memory_usage() const noexcept override {
         const auto fdmt     = m_driver->memory();
         SizeType plan_bytes = m_rows.size() * sizeof(BoxcarRow) +
-                              m_offsets.size() * sizeof(SizeType);
+                              m_offsets.size() * sizeof(SizeType) +
+                              m_row_plane.size() * sizeof(uint32_t);
         for (const auto& p : m_planes) {
             plan_bytes +=
                 sizeof(p) + p.widths.size() * sizeof(uint32_t) +
@@ -191,26 +289,54 @@ public:
         return {.plan       = fdmt.plan + plan_bytes,
                 .state      = fdmt.state,
                 .history    = fdmt.history + m_carry.size() * sizeof(float) +
-                              m_integer_carry.size() * sizeof(uint64_t),
+                              m_integer_carry.size() * sizeof(uint64_t) +
+                              m_integer_carry32.size() * sizeof(uint32_t),
                 .peaks      = m_peaks.size() * sizeof(BoxcarPeak),
                 .workspace  = fdmt.workspace +
                               (m_prefix.size() + m_integer_means.size() +
-                               m_integer_scales.size()) *
+                               m_integer_scales.size() + m_range_min.size() +
+                               m_group_thresh.size()) *
                                   sizeof(double) +
                               m_integer_prefix.size() * sizeof(uint64_t) +
                               m_best.size() * sizeof(float) +
                               m_best_filter.size() * sizeof(uint32_t) +
                               m_per_dm.size() * sizeof(uint64_t),
-                .candidates = m_candidates.size() * sizeof(RawCandidate)};
+                .candidates = m_candidates.size() * sizeof(RawCandidate),
+                .staging =
+                    (m_masked.size() * sizeof(float)) + m_masked_packed.size()};
     }
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
     }
+    std::string search_path() const override { return m_driver->search_path(); }
     SizeType fuse_levels() const noexcept override {
         return m_driver->fuse_levels();
     }
 
 private:
+    void make_screen_groups(const std::vector<uint32_t>& widths) {
+        m_screen_levels = 0;
+        m_groups        = boxcar_screen_groups(widths, m_config.use_trapezoid);
+        // The packed screen takes the mean per sample from widths[0]
+        // (screen_tile_int()), which must be a plain boxcar.
+        if (!m_groups.empty() &&
+            (widths.empty() ||
+             (m_config.use_trapezoid && trapezoid_edge_width(widths[0]) > 0))) {
+            throw std::logic_error(
+                "FDMTBoxcar (cpu): the width screen needs a plain first width");
+        }
+        for (const auto& g : m_groups) {
+            m_screen_levels = std::max<SizeType>(m_screen_levels, g.level);
+        }
+        // Packed rows keep their mean-centred running sums as level 0.
+        m_range_min.resize(m_threads * screen_slots() * (m_width + m_tile + 1));
+        m_group_thresh.resize(m_threads * m_groups.size());
+    }
+
+    [[nodiscard]] SizeType screen_slots() const noexcept {
+        return m_screen_levels + (m_config.input_nbits != 32 ? 1 : 0);
+    }
+
     void begin_result(SizeType samples) {
         m_counts = {};
         m_next_slot.store(0, std::memory_order_relaxed);
@@ -261,7 +387,82 @@ private:
 #pragma omp atomic
         ++m_counts.emitted_count;
     }
-    template <typename T>
+    /// Running sums out[i + 1] = out[i] + sample(t0 + i), i < n, of the
+    /// same samples as boxcar_sample() / boxcar_integer_sample(), with the
+    /// row's pointers resolved once and the loop split at row.delay (ring
+    /// history before, plain head-row walk after) instead of branching per
+    /// sample. Same additions in the same order: exact.
+    template <typename T, typename Prefix>
+    static void prefix_tile(const FDMTSearchInput& input,
+                            const BoxcarRow& row,
+                            SizeType beam,
+                            bool root,
+                            SizeType ring0,
+                            SizeType t0,
+                            SizeType n,
+                            Prefix* out) noexcept {
+        const auto run = [&](const auto* state_base, const auto* prev_base,
+                             const auto* hist_base) {
+            // Float rows add in float, then widen (boxcar_sample); integer
+            // rows add in uint64_t (boxcar_integer_sample_typed).
+            const auto value = [](auto x) {
+                if constexpr (std::is_integral_v<T>) {
+                    return static_cast<uint64_t>(x);
+                } else {
+                    return x;
+                }
+            };
+            if (!(row.unmaterialized || root) || input.materialized_root) {
+                const auto* s = state_base + (beam * input.beam_stride) +
+                                (row.row * input.row_stride) + t0;
+                for (SizeType i = 0; i < n; ++i) {
+                    out[i + 1] = out[i] + static_cast<Prefix>(value(s[i]));
+                }
+                return;
+            }
+            const auto* prev = (prev_base != nullptr ? prev_base : state_base) +
+                               (beam * input.beam_stride);
+            const auto* tail = prev + (row.tail * input.row_stride) + t0;
+            if (row.head == SIZE_MAX) {
+                for (SizeType i = 0; i < n; ++i) {
+                    out[i + 1] = out[i] + static_cast<Prefix>(value(tail[i]));
+                }
+                return;
+            }
+            const SizeType split =
+                row.delay > t0 ? std::min(n, row.delay - t0) : 0;
+            const auto* hist = split > 0
+                                   ? hist_base + (beam * input.history_stride) +
+                                         (row.hist - input.history_base)
+                                   : hist_base;
+            for (SizeType i = 0; i < split; ++i) {
+                const SizeType slot =
+                    boxcar_history_slot(input, row, t0 + i, ring0);
+                out[i + 1] = out[i] + static_cast<Prefix>(value(tail[i]) +
+                                                          value(hist[slot]));
+            }
+            // Sample t reads head-row sample t - delay (t >= delay here).
+            const auto* head = prev + (row.head * input.row_stride);
+            for (SizeType i = split; i < n; ++i) {
+                out[i + 1] = out[i] + static_cast<Prefix>(
+                                          value(tail[i]) +
+                                          value(head[t0 + i - row.delay]));
+            }
+        };
+        if constexpr (std::is_integral_v<T>) {
+            if (input.integer32_state != nullptr) {
+                run(input.integer32_state, input.integer32_prev_state,
+                    input.integer32_history);
+            } else {
+                run(input.integer_state, input.integer_prev_state,
+                    input.integer_history);
+            }
+        } else {
+            run(input.state, input.prev_state, input.history);
+        }
+    }
+
+    template <typename T, typename C>
     void score(const plans::BoxcarPlanePlan& plane,
                SizeType row_idx,
                SizeType dm,
@@ -271,23 +472,27 @@ private:
         using Prefix =
             std::conditional_t<std::is_integral_v<T>, uint64_t, double>;
         Prefix* prefix;
-        T* carry;
+        C* carry;
         const SizeType index = beam * m_rows.size() + row_idx;
-        if constexpr (std::is_integral_v<T>) {
-            prefix = m_integer_prefix.data() + tid * (m_width + kTile + 1);
+        if constexpr (std::is_same_v<C, uint32_t>) {
+            prefix = m_integer_prefix.data() + tid * (m_width + m_tile + 1);
+            carry  = m_integer_carry32.data() + index * m_width;
+        } else if constexpr (std::is_integral_v<T>) {
+            prefix = m_integer_prefix.data() + tid * (m_width + m_tile + 1);
             carry  = m_integer_carry.data() + index * m_width;
         } else {
-            prefix = m_prefix.data() + tid * (m_width + kTile + 1);
+            prefix = m_prefix.data() + tid * (m_width + m_tile + 1);
             carry  = m_carry.data() + index * m_width;
         }
         auto* peaks          = m_peaks.data() + index * m_peak_count;
         const auto& row      = m_rows[row_idx];
         const bool root      = plane.level == m_plan.get_niters();
+        const SizeType ring0 = boxcar_ring0(input, row);
         const auto sample_at = [&](SizeType t) {
             if constexpr (std::is_integral_v<T>) {
-                return boxcar_integer_sample(input, row, beam, t, root);
+                return boxcar_integer_sample(input, row, beam, t, root, ring0);
             } else {
-                return boxcar_sample(input, row, beam, t, root);
+                return boxcar_sample(input, row, beam, t, root, ring0);
             }
         };
         // prefix[j] for j <= lookback holds the max_width - 1 samples before
@@ -295,13 +500,22 @@ private:
         // prefix[lookback + t + 1] the tile's running sums.
         const SizeType lookback = m_width - 1;
         {
+            // Ring slot of sample first - lookback, then advanced by one
+            // per entry (one 64-bit remainder per call, not per sample).
             const uint64_t first = input.sample_begin;
             prefix[0]            = 0;
-            for (SizeType j = 0; j < lookback; ++j) {
-                const SizeType back = lookback - j;
-                const T x =
-                    first >= back ? carry[(first - back) % m_width] : T{0};
-                prefix[j + 1] = prefix[j] + x;
+            const SizeType cold =
+                first >= lookback ? 0 : lookback - static_cast<SizeType>(first);
+            for (SizeType j = 0; j < cold; ++j) {
+                prefix[j + 1] = prefix[j];
+            }
+            if (cold < lookback) {
+                SizeType slot = static_cast<SizeType>(
+                    (first - (lookback - cold)) % m_width);
+                for (SizeType j = cold; j < lookback; ++j) {
+                    prefix[j + 1] = prefix[j] + carry[slot];
+                    slot          = slot + 1 == m_width ? 0 : slot + 1;
+                }
             }
         }
         // Open runs force the bookkeeping until they close.
@@ -312,21 +526,65 @@ private:
             return std::any_of(peaks, peaks + m_peak_count,
                                [](const BoxcarPeak& p) { return p.open; });
         };
-        bool open = any_open();
-        for (SizeType t0 = 0; t0 < input.nsamps; t0 += kTile) {
-            const SizeType n     = std::min(kTile, input.nsamps - t0);
-            const uint64_t start = input.sample_begin + t0;
-            for (SizeType t = 0; t < n; ++t) {
-                prefix[lookback + t + 1] =
-                    prefix[lookback + t] + sample_at(t0 + t);
+        bool open            = any_open();
+        double* group_thresh = nullptr;
+        double* range_min    = nullptr;
+        if (!m_groups.empty()) {
+            group_thresh = m_group_thresh.data() + tid * m_groups.size();
+            range_min    = m_range_min.data() +
+                           tid * screen_slots() * (m_width + m_tile + 1);
+            for (SizeType g = 0; g < m_groups.size(); ++g) {
+                if constexpr (std::is_integral_v<T>) {
+                    // Mean-centred cutoffs: integer cutoff minus the
+                    // width's mean (screen_tile_int()).
+                    double th = std::numeric_limits<double>::infinity();
+                    for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi;
+                         ++f) {
+                        const SizeType i = dm * m_filters + f;
+                        th = std::min(th, static_cast<double>(
+                                              plane.integer_thresh_lut[i]) -
+                                              plane.integer_mean_lut[i]);
+                    }
+                    group_thresh[g] = th;
+                } else {
+                    float th = std::numeric_limits<float>::max();
+                    for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi;
+                         ++f) {
+                        th = std::min(th,
+                                      plane.raw_thresh_lut[dm * m_filters + f]);
+                    }
+                    group_thresh[g] = th;
+                }
             }
+        }
+        for (SizeType t0 = 0; t0 < input.nsamps; t0 += m_tile) {
+            const SizeType n     = std::min(m_tile, input.nsamps - t0);
+            const uint64_t start = input.sample_begin + t0;
+            prefix_tile<T>(input, row, beam, root, ring0, t0, n,
+                           prefix + lookback);
             // Rare-event check: any width over its threshold in this tile.
             // Without it (and no open run) every peak mode is unchanged.
             const bool cold =
                 m_config.skip_cold_prefix && start + 1 < row.warmup + m_width;
-            bool hit = false;
-            for (SizeType f = 0; f < m_filters && !hit; ++f) {
+            bool hit      = false;
+            bool screened = false;
+            if (!m_groups.empty() && !open) {
+                if constexpr (std::is_integral_v<T>) {
+                    hit =
+                        screen_tile_int(plane, dm, row, prefix, lookback, start,
+                                        n, cold, group_thresh, range_min);
+                } else {
+                    hit = screen_tile(plane, dm, row, prefix, lookback, start,
+                                      n, cold, group_thresh, range_min);
+                }
+                screened = true;
+            }
+            for (SizeType f = 0; f < m_filters && !hit && !screened; ++f) {
                 const SizeType width = plane.widths[f];
+                const SizeType w_edge =
+                    m_config.use_trapezoid
+                        ? trapezoid_edge_width(plane.widths[f])
+                        : 0;
                 const Prefix* lo     = prefix + lookback + 1 - width;
                 const Prefix* hi     = prefix + lookback + 1;
                 const auto threshold = [&] {
@@ -338,10 +596,23 @@ private:
                     }
                 }();
                 const uint64_t first_valid = row.warmup + width - 1;
+                if (w_edge == 0) {
 #pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    hit = hit || (hi[t] - lo[t] >= threshold &&
-                                  (!cold || start + t >= first_valid));
+                    for (SizeType t = 0; t < n; ++t) {
+                        hit = hit || (hi[t] - lo[t] >= threshold &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                } else {
+                    const Prefix* lo_in =
+                        prefix + lookback + 1 - width + w_edge;
+                    const Prefix* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        const Prefix sum =
+                            (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                        hit = hit || (sum >= threshold &&
+                                      (!cold || start + t >= first_valid));
+                    }
                 }
             }
             if (hit || open) {
@@ -354,9 +625,210 @@ private:
         }
         // Carry the last max_width - 1 samples (at most) to the next call.
         const SizeType keep = std::min(input.nsamps, lookback);
-        for (SizeType t = input.nsamps - keep; t < input.nsamps; ++t) {
-            carry[(input.sample_begin + t) % m_width] = sample_at(t);
+        if (keep > 0) {
+            const SizeType t_first = input.nsamps - keep;
+            SizeType slot =
+                static_cast<SizeType>((input.sample_begin + t_first) % m_width);
+            for (SizeType t = t_first; t < input.nsamps; ++t) {
+                carry[slot] = static_cast<C>(sample_at(t));
+                slot        = slot + 1 == m_width ? 0 : slot + 1;
+            }
         }
+    }
+
+    /**
+     * Whether any width exceeds its threshold in this tile (float rows, no
+     * open run), as the per-width check in score() decides. A group's
+     * bound P(t) - min(P[t - w_hi .. t - w_lo]) >= P(t) - P(t - w) for
+     * each of its widths w (rounding is monotonic), so a group whose bound
+     * stays under its smallest threshold has no hit; the others are checked
+     * width by width. range_min level k holds min(P[j .. j + 2^k - 1]).
+     */
+    bool screen_tile(const plans::BoxcarPlanePlan& plane,
+                     SizeType dm,
+                     const BoxcarRow& row,
+                     const double* prefix,
+                     SizeType lookback,
+                     uint64_t start,
+                     SizeType n,
+                     bool cold,
+                     const double* group_thresh,
+                     double* range_min) const {
+        const SizeType len    = lookback + n + 1; // prefix entries
+        const SizeType stride = m_width + m_tile + 1;
+        for (SizeType k = 1; k <= m_screen_levels; ++k) {
+            const SizeType half = SizeType{1} << (k - 1);
+            if (half >= len) {
+                break;
+            }
+            const double* src = k == 1 ? prefix : range_min + (k - 2) * stride;
+            double* dst       = range_min + (k - 1) * stride;
+            const SizeType m  = len - 2 * half + 1;
+#pragma omp simd
+            for (SizeType j = 0; j < m; ++j) {
+                dst[j] = std::min(src[j], src[j + half]);
+            }
+        }
+        const double* hi = prefix + lookback + 1;
+        for (SizeType g = 0; g < m_groups.size(); ++g) {
+            const auto& grp     = m_groups[g];
+            const double thresh = group_thresh[g];
+            const SizeType span = SizeType{1} << grp.level;
+            const double* mins =
+                grp.level == 0 ? prefix : range_min + (grp.level - 1) * stride;
+            // Window [idx - w_hi, idx - w_lo] as two overlapping 2^k runs.
+            const double* a = mins + lookback + 1 - grp.w_hi;
+            const double* b = mins + lookback + 1 - grp.w_lo - span + 1;
+            // A trapezoid (always a group of one) is not bounded by the
+            // range minimum: check it exactly.
+            bool any =
+                m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0;
+            if (!any) {
+#pragma omp simd reduction(|| : any)
+                for (SizeType t = 0; t < n; ++t) {
+                    any = any || (hi[t] - std::min(a[t], b[t]) >= thresh);
+                }
+            }
+            if (!any) {
+                continue;
+            }
+            for (SizeType f = grp.f_lo; f < grp.f_hi; ++f) {
+                const SizeType width = plane.widths[f];
+                const SizeType w_edge =
+                    m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
+                const double* lo = prefix + lookback + 1 - width;
+                const auto th    = static_cast<double>(
+                    plane.raw_thresh_lut[dm * m_filters + f]);
+                const uint64_t first_valid = row.warmup + width - 1;
+                bool hit                   = false;
+                if (w_edge == 0) {
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        hit = hit || (hi[t] - lo[t] >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                } else {
+                    const double* lo_in =
+                        prefix + lookback + 1 - width + w_edge;
+                    const double* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        const double sum =
+                            (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                        hit = hit || (sum >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                }
+                if (hit) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * screen_tile() for packed rows (exact uint64 running sums P, which only
+     * grow, so the raw bound is useless). With m1 the row's mean per sample
+     * (integer_mean_lut[f] = m1 * w for a boxcar), D(j) = P(j) - m1 j gives
+     * S_w - m1 w = D(t) - D(t - w), so D(t) - min(D[t - w_hi .. t - w_lo])
+     * bounds every width's centred sum and is compared with the group's
+     * smallest cutoff - mean. D is in double: a group passes within a
+     * margin far above the rounding of D and of the cutoffs, so the screen
+     * stays conservative; passing groups are checked exactly in integers.
+     */
+    bool screen_tile_int(const plans::BoxcarPlanePlan& plane,
+                         SizeType dm,
+                         const BoxcarRow& row,
+                         const uint64_t* prefix,
+                         SizeType lookback,
+                         uint64_t start,
+                         SizeType n,
+                         bool cold,
+                         const double* group_thresh,
+                         double* range_min) const {
+        const SizeType len    = lookback + n + 1;
+        const SizeType stride = m_width + m_tile + 1;
+        // m1 from the first boxcar width (widths 1 and 2 are never
+        // trapezoids); a killed row has mean 0 and infinite cutoffs.
+        const double m1 = plane.integer_mean_lut[dm * m_filters] /
+                          static_cast<double>(plane.widths[0]);
+        double* centred = range_min;
+#pragma omp simd
+        for (SizeType j = 0; j < len; ++j) {
+            centred[j] =
+                static_cast<double>(prefix[j]) - (m1 * static_cast<double>(j));
+        }
+        const double scale = static_cast<double>(prefix[len - 1]) +
+                             (std::abs(m1) * static_cast<double>(len)) + 1.0;
+        for (SizeType k = 1; k <= m_screen_levels; ++k) {
+            const SizeType half = SizeType{1} << (k - 1);
+            if (half >= len) {
+                break;
+            }
+            const double* src = range_min + (k - 1) * stride;
+            double* dst       = range_min + k * stride;
+            const SizeType m  = len - 2 * half + 1;
+#pragma omp simd
+            for (SizeType j = 0; j < m; ++j) {
+                dst[j] = std::min(src[j], src[j + half]);
+            }
+        }
+        const double* hi = centred + lookback + 1;
+        for (SizeType g = 0; g < m_groups.size(); ++g) {
+            const auto& grp = m_groups[g];
+            const double margin =
+                1e-12 * (scale + std::abs(group_thresh[g])) + 1.0;
+            const double thresh = group_thresh[g] - margin;
+            const SizeType span = SizeType{1} << grp.level;
+            const double* mins  = range_min + grp.level * stride;
+            const double* a     = mins + lookback + 1 - grp.w_hi;
+            const double* b     = mins + lookback + 1 - grp.w_lo - span + 1;
+            bool any =
+                m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0;
+            if (!any) {
+#pragma omp simd reduction(|| : any)
+                for (SizeType t = 0; t < n; ++t) {
+                    any = any || (hi[t] - std::min(a[t], b[t]) >= thresh);
+                }
+            }
+            if (!any) {
+                continue;
+            }
+            const uint64_t* phi = prefix + lookback + 1;
+            for (SizeType f = grp.f_lo; f < grp.f_hi; ++f) {
+                const SizeType width = plane.widths[f];
+                const SizeType w_edge =
+                    m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
+                const uint64_t* lo = prefix + lookback + 1 - width;
+                const uint64_t th =
+                    plane.integer_thresh_lut[dm * m_filters + f];
+                const uint64_t first_valid = row.warmup + width - 1;
+                bool hit                   = false;
+                if (w_edge == 0) {
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        hit = hit || (phi[t] - lo[t] >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                } else {
+                    const uint64_t* lo_in =
+                        prefix + lookback + 1 - width + w_edge;
+                    const uint64_t* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+                    for (SizeType t = 0; t < n; ++t) {
+                        const uint64_t sum =
+                            (phi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                        hit = hit || (sum >= th &&
+                                      (!cold || start + t >= first_valid));
+                    }
+                }
+                if (hit) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Exact run bookkeeping of one tile whose running sums are in
@@ -373,8 +845,8 @@ private:
                     BoxcarPeak* peaks,
                     SizeType row_idx) {
         const SizeType tid    = static_cast<SizeType>(omp_get_thread_num());
-        float* best           = m_best.data() + tid * kTile;
-        uint32_t* best_filter = m_best_filter.data() + tid * kTile;
+        float* best           = m_best.data() + tid * m_tile;
+        uint32_t* best_filter = m_best_filter.data() + tid * m_tile;
         const auto emit_peak  = [&](const BoxcarPeak& peak) {
             emit(row_idx, beam, peak);
         };
@@ -384,12 +856,18 @@ private:
         }
         for (SizeType f = 0; f < m_filters; ++f) {
             const SizeType width  = plane.widths[f];
+            const SizeType w_edge = m_config.use_trapezoid
+                                        ? trapezoid_edge_width(plane.widths[f])
+                                        : 0;
             const float threshold = plane.raw_thresh_lut[dm * m_filters + f];
             const float inv_sigma = plane.inv_sigma_lut[dm * m_filters + f];
             for (SizeType t = 0; t < n; ++t) {
                 const uint64_t sample = start + t;
-                const Prefix sum =
-                    prefix[lookback + t + 1] - prefix[lookback + t + 1 - width];
+                const SizeType idx    = lookback + t + 1;
+                Prefix sum            = prefix[idx] - prefix[idx - width];
+                if (w_edge > 0) {
+                    sum += prefix[idx - w_edge] - prefix[idx - width + w_edge];
+                }
                 const bool valid = !m_config.skip_cold_prefix ||
                                    sample >= row.warmup + width - 1;
                 bool above;
@@ -450,6 +928,31 @@ private:
         }
     }
 
+    /// The block with the killed channels' rows zeroed (in `buffer`), or
+    /// the block itself without a kill mask. Rows are copied in parallel:
+    /// the copy is bound by memory bandwidth.
+    template <typename T>
+    std::span<const T> masked(std::span<const T> block,
+                              std::vector<T>& buffer) const {
+        if (m_kill_runs.empty()) {
+            return block;
+        }
+        const SizeType nchans = m_plan.get_nchans();
+        const SizeType rows   = m_beams * nchans;
+        const SizeType row    = block.size() / rows;
+        const T* src          = block.data();
+        T* dst                = buffer.data();
+#pragma omp parallel for num_threads(m_threads) schedule(static)
+        for (SizeType r = 0; r < rows; ++r) {
+            if (m_killed[r % nchans] != 0) {
+                std::fill_n(dst + (r * row), row, T{0});
+            } else {
+                std::copy_n(src + (r * row), row, dst + (r * row));
+            }
+        }
+        return buffer;
+    }
+
     const plans::FDMTPlan& m_plan;
     BoxcarConfig m_config;
     const std::vector<plans::BoxcarPlanePlan>& m_planes;
@@ -457,23 +960,39 @@ private:
     SizeType m_beams;
     int m_threads;
     SizeType m_width;
+    SizeType m_tile;
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
+    /// Killed channel runs and the staging block they are zeroed in.
+    std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
+    std::vector<uint8_t> m_killed; ///< per channel, 1 = killed
+    std::vector<float> m_masked;
+    std::vector<uint8_t> m_masked_packed;
     std::vector<SizeType> m_offsets;
+    /// Row range [first, second) of each level's planes, and each row's plane.
+    std::vector<std::pair<SizeType, SizeType>> m_level_rows;
+    std::vector<uint32_t> m_row_plane;
     std::vector<float> m_carry;
     std::vector<BoxcarPeak> m_peaks;
     std::vector<uint64_t> m_per_dm;
     std::vector<RawCandidate> m_candidates;
     std::vector<double> m_prefix;
     std::vector<uint64_t> m_integer_prefix, m_integer_carry;
+    std::vector<uint32_t> m_integer_carry32;
+    bool m_carry32{false};
     std::vector<double> m_integer_means, m_integer_scales;
     double m_integer_unit = 1;
     std::vector<float> m_best;
     std::vector<uint32_t> m_best_filter;
+    std::vector<BoxcarScreenGroup> m_groups;
+    SizeType m_screen_levels = 0;
+    std::vector<double> m_range_min;
+    std::vector<double> m_group_thresh;
     CandidateCounts m_counts{};
     std::atomic<uint64_t> m_next_slot{0};
     uint64_t m_position       = 0;
+    uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
 };
@@ -485,9 +1004,10 @@ make_fdmt_boxcar_cpu(const plans::FDMTPlan& plan,
                      const BoxcarConfig& config,
                      const std::vector<plans::BoxcarPlanePlan>& planes,
                      const FDMTEngineConfig& cfg,
-                     std::unique_ptr<BoxcarDriver> driver) {
-    return std::make_unique<FDMTBoxcarCpuEngine>(plan, config, planes, cfg,
-                                                 std::move(driver));
+                     std::unique_ptr<BoxcarDriver> driver,
+                     std::vector<std::pair<SizeType, SizeType>> kill_runs) {
+    return std::make_unique<FDMTBoxcarCpuEngine>(
+        plan, config, planes, cfg, std::move(driver), std::move(kill_runs));
 }
 
 } // namespace dmt::algorithms::detail

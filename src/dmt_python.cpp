@@ -2,7 +2,10 @@
 #include <vector>
 
 #include <pybind11/pybind11.h>
+#include <pybind11/pytypes.h>
 #include <pybind11/stl.h>
+
+#include "dmt/common/build_info.hpp"
 
 #include "bindings/bind.hpp"
 #include "pybind_utils.hpp"
@@ -34,6 +37,27 @@ PYBIND11_MODULE(libdmt, mod) { // NOLINT
         R"doc(
         Backends compiled into this build, e.g. ``['cpu']`` or
         ``['cpu', 'cuda']``. Pass one as ``backend=`` to an algorithm class.
+        )doc");
+    mod.def(
+        "build_info",
+        [] {
+            const auto& b = dmt::build_info();
+            py::dict d;
+            d["version"]    = std::string(b.version);
+            d["git_sha"]    = std::string(b.git_sha);
+            d["git_dirty"]  = b.git_dirty;
+            d["compiler"]   = std::string(b.compiler);
+            d["cxx_flags"]  = std::string(b.cxx_flags);
+            d["build_type"] = std::string(b.build_type);
+            d["gpu"]        = std::string(b.gpu);
+            d["fftw"]       = std::string(b.fftw);
+            d["openmp"]     = std::string(b.openmp);
+            return d;
+        },
+        R"doc(
+        Identity of the compiled extension: version, git commit (``git_sha``,
+        ``git_dirty``), compiler and flags, build type, GPU toolkit, FFTW and
+        OpenMP versions. Store it with any result produced by this build.
         )doc");
     dmt::bind_plans(mod);
     dmt::bind_fdmt(mod);
