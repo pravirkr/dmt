@@ -6,7 +6,7 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
-### Added
+## [0.8.0] - 2026-11-09
 
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
   depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
@@ -44,6 +44,60 @@ All notable changes to `dmt` are listed here. The format follows
   band edges from a SIGPROC header and the flip to ascending channel order.
   The getting-started guides and README document the channel order.
 - `dmtlib.dispersion_delay` broadcasts over array frequencies.
+- **Memory budget.** `FDMT` and `FDMTBoxcar` take `max_memory_bytes`
+  (default `kFDMTDefaultMaxMemory`, 10 GiB; Python keyword-only), a bound on
+  everything the instance allocates. Within it the fastest streaming path
+  is taken; a plan whose tree history does not fit runs the skewed-window
+  path at the longest automatic chunk that fits; construction raises
+  `std::invalid_argument` (`ValueError`) when nothing fits.
+- **Skewed-window streaming FDMT** (`lib/dmt/fdmt_skew.hpp`, CUDA skewed
+  direct levels): wide bands at fine time resolution (Parkes UWL, 6656
+  channels at 64 µs to DM 2000) stream without their 10–14 GB tree history.
+  FDMT output and FDMTBoxcar candidates are bit-identical to the tree path
+  (float32 within rounding), and `save_history()`/`load_history()` save the
+  skewed engines' own, much smaller state.
+- **Subband search on the skewed path** (`subband_depth > 0`, CPU and GPU):
+  every searched row is computed from the full band's windows at a fixed
+  per-row lag, with the tree path's candidates and S/N. On `parkes_uwl` at
+  depth 4 FDMTBoxcar drops from 17.4 GB to 6.4 GB on the CPU and from 15 GB
+  to 9.9 GB on the GPU, within the default budget at every depth to 5 on
+  8-bit input.
+- **Faster float32 on the CPU skewed path.** The engine now picks its leaf
+  level (the level read from the raw ring) together with the chunk, in
+  measured speed order within the budget: leaf level 1 for float input, 2
+  for 8-bit (when the width is known at construction, as in FDMTBoxcar),
+  instead of always 4. On `parkes_uwl` (8 threads) the float32
+  FDMT transform takes 4.9 s per 2.1 s block instead of 13.2 s (the old
+  tree path took 5.75 s in 16 GB), and the depth-4 float32 FDMTBoxcar search
+  20 s instead of 27.8 s. Output stays bit-identical to the tree path.
+- Benchmark preset `cryopaf` is renamed `cryopaf_low`; `meerkat_lband` is
+  the default preset; `parkes_uwl` searches at subband depth 4. Results
+  live in `bench/results/<config>/<machine>/` for every preset
+  (`bench/results/cfdmt/` for CohFDMT), and the suite no longer measures
+  unplotted points (integer-delay FDMT-FFT, brute-force DDMT-FFT, host-array
+  GPU rows). `dmt_bench` and `dmt_bench_mem` keep only developer
+  microbenchmarks.
+- **End of stream: `drain()`** on `FDMTBoxcar` and `FDMTFFTBoxcar` (C++
+  and Python). It searches the samples still behind the search latency, then
+  emits the open excursions: the last `get_output_latency()` samples of
+  `FDMTFFTBoxcar` with fractional delays, and the last subband row lags of a
+  subband search on the skewed paths, which `flush()` never searched.
+  Endpoints after the last sample are not searched, so no candidate lies
+  past the end, and a drained skewed-path subband search now matches the
+  tree path's candidates over the whole stream. The stream ends there:
+  `execute()` throws `std::logic_error` (`RuntimeError`) until
+  `reset_history()`. New: `get_searched_nsamps()` (`searched_nsamps`), the
+  stream samples every row has searched, and
+  `FDMTBoxcar::get_search_latency()` (`search_latency`).
+- **Kill mask on `FDMTBoxcar`**, as on `FDMTFFTBoxcar`: a construction-time
+  `kill_mask` (C++: trailing `std::span<const uint8_t>` constructor argument
+  after `max_memory_bytes`; Python: keyword-only `kill_mask=`). Killed
+  channels read as zero (code 0 for packed input) and leave every row's
+  noise model and packed mean, so S/N stays calibrated on the remaining
+  channels; zeroing channels upstream instead overestimates sigma by
+  `sqrt(N / (N - k))`. Each block is copied once to a staging buffer to zero
+  them (`memory_usage.staging`, within `max_memory_bytes`); without a mask
+  nothing changes. CPU and GPU agree bit for bit on packed input.
 
 ## [0.7.0] - 2026-11-03
 
@@ -108,5 +162,7 @@ their changes are included here.
 
 - FDMT on the CPU (`FDMTCPU`) and GPU (`FDMTGPU`) with Python bindings.
 
+[Unreleased]: https://github.com/pravirkr/dmt/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/pravirkr/dmt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pravirkr/dmt/compare/v0.2.0...v0.7.0
 [0.2.0]: https://github.com/pravirkr/dmt/releases/tag/v0.2.0

@@ -30,7 +30,8 @@ not make them any faster algorithmically; it only reduces the input bytes read
 off for float waterfalls, and when fractional delays matter.
 
 Packed input, the kill mask and the history work as for the time-domain
-engines:
+engines (an `FDMTFFT` history is the per-beam, per-channel overlap, with no
+header, the same on every backend):
 
 ```python
 fdmt = dmtlib.FDMTFFT(1200.0, 1600.0, 1024, 16384, 6.4e-5, 1024,

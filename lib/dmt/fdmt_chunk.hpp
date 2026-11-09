@@ -63,12 +63,31 @@ inline SizeType state_bytes_per_sample(SizeType rows,
     return two_row_bytes * beams;
 }
 
+/// Number of regular (non-staggered) coordinates at level `l`.
+inline SizeType fdmt_regular_coords(const plans::FDMTPlanContainer& pc,
+                                    SizeType l) noexcept {
+    const auto& sh = pc.state_shape[l];
+    if (sh.nstaggered == 0) {
+        return sh.ncoords;
+    }
+    return pc.grids[l][sh.nchans].coord_offset;
+}
+
+/// Number of regular (non-staggered) sum coordinates at level `l`.
+inline SizeType fdmt_regular_sum_coords(const plans::FDMTPlanContainer& pc,
+                                        SizeType l) noexcept {
+    return fdmt_regular_coords(pc, l) - pc.state_shape[l].ncoords_copy;
+}
+
 /// Largest level row count below the root (rows of the two state halves).
-inline SizeType fdmt_state_rows(const plans::FDMTPlan& plan) noexcept {
-    const auto& shapes = plan.get_container().state_shape;
+inline SizeType fdmt_state_rows(const plans::FDMTPlan& plan,
+                                bool regular_only = false) noexcept {
+    const auto& pc     = plan.get_container();
+    const auto& shapes = pc.state_shape;
     SizeType rows      = 0;
     for (SizeType l = 0; l < plan.get_niters(); ++l) {
-        rows = std::max(rows, shapes[l].ncoords);
+        rows = std::max(rows, regular_only ? fdmt_regular_coords(pc, l)
+                                           : shapes[l].ncoords);
     }
     return rows;
 }
@@ -81,7 +100,8 @@ inline SizeType fdmt_state_rows(const plans::FDMTPlan& plan) noexcept {
 inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
                                   FDMTMode mode,
                                   SizeType nbeams,
-                                  SizeType requested) {
+                                  SizeType requested,
+                                  bool regular_only = false) {
     const SizeType nsamps = plan.get_nsamps();
     if (mode != FDMTMode::kValid) {
         if (requested != 0 && requested < nsamps) {
@@ -103,8 +123,8 @@ inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
             kFDMTChunkAlign;
         return std::min(aligned, nsamps);
     }
-    const SizeType per_sample =
-        state_bytes_per_sample(fdmt_state_rows(plan), sizeof(float), nbeams);
+    const SizeType per_sample = state_bytes_per_sample(
+        fdmt_state_rows(plan, regular_only), sizeof(float), nbeams);
     SizeType chunk = kFDMTMinChunk;
     while (chunk < nsamps && product_fits(chunk, 2)) {
         const SizeType next = chunk * 2;
@@ -128,14 +148,15 @@ inline constexpr SizeType kFDMTMinCacheChunk = 256;
  * L2 rather than DRAM; capped at nsamps. 0 when even the shortest does not
  * fit: the merges are DRAM-bound at any chunk and fdmt_chunk_nsamps()'s
  * budget rule applies. On the L40S (96 MiB L2) this is 1.4-1.8x faster than
- * the budget rule on the cryopaf presets.
+ * the budget rule on the cryopaf_low presets.
  */
 inline SizeType fdmt_cache_chunk(const plans::FDMTPlan& plan,
                                  SizeType nbeams,
                                  SizeType elem_bytes,
-                                 SizeType cache_bytes) noexcept {
-    const SizeType per_sample =
-        state_bytes_per_sample(fdmt_state_rows(plan), elem_bytes, nbeams);
+                                 SizeType cache_bytes,
+                                 bool regular_only = false) noexcept {
+    const SizeType per_sample = state_bytes_per_sample(
+        fdmt_state_rows(plan, regular_only), elem_bytes, nbeams);
     if (!product_fits(per_sample, kFDMTMinCacheChunk) ||
         per_sample * kFDMTMinCacheChunk > cache_bytes) {
         return 0;

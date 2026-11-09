@@ -13,6 +13,7 @@ other algorithms are unchanged.
 | Fused into the search | the root merge (root rows are never stored) | each overlap-save segment's inverse transform |
 | Input | float32, or packed 1/2/4/8/16-bit | float32 |
 | Subband search | plan `subband_depth` (any depth below the root), with staggered subbands | full band only |
+| Kill mask | yes, in the noise model of every subband row | yes |
 | Latency | none | `output_latency` samples (64 with fractional delays) |
 
 ## Input and statistical contract
@@ -29,8 +30,9 @@ Prepare the waterfall upstream: remove the baseline and normalize to zero
 mean and a known common per-channel noise standard deviation (`noise_sigma`,
 default 1). Analytical S/N assumes independent channel/time input noise before
 the FDMT's modeled filtering. Normalization alone does not establish this
-independence. Channel masking, common-mode subtraction, temporal filtering and
-residual correlations can change the variance and require upstream calibration.
+independence. Channel masking (other than through `kill_mask`, below),
+common-mode subtraction, temporal filtering and residual correlations can
+change the variance and require upstream calibration.
 **The search does not estimate a baseline or RMS** from dedispersed rows.
 ```
 
@@ -38,6 +40,26 @@ Sigma accounts for the actual FDMT leaf box means and temporal covariance,
 including each subband's tree lineage.
 `FDMTPlan.get_effective_sigma_grid(width)` already gives sigma for the raw
 full-band sum, so **do not multiply it by the number of channels**.
+
+### Kill mask
+
+Pass `kill_mask=` (Python, keyword-only; C++: the trailing
+`std::span<const uint8_t>` constructor argument) to drop channels flagged
+as RFI: one bool or integer per channel, low frequency first, 0 for a
+killed channel. Killed channels read as zero (code 0 for packed input),
+whatever the block holds there, and are left out of every row's noise
+model and packed mean, so S/N stays calibrated on the channels that remain:
+the sigma is `FDMTPlan.get_subband_sigma_grid(..., kill_mask=mask)`. A pulse
+across all `N` channels with `k` of them killed scores `sqrt((N - k) / N)` of
+its unmasked S/N. Zeroing the channels upstream without a mask is not the
+same: the noise model still counts them, so sigma is too high by
+`sqrt(N / (N - k))` (5% S/N for a 10% mask). Rows whose channels are all
+killed (a killed subband) have no noise and never detect.
+
+The mask is fixed at construction: a different mask needs a new
+`FDMTBoxcar`. Each block is copied once into a staging buffer to zero the
+killed rows; it appears in `memory_usage.staging` and counts against
+`max_memory_bytes`. Without a mask there is no copy.
 
 ## Packed integer input
 
@@ -79,11 +101,14 @@ different widths have different baselines and noise scales.
 :::
 
 Accumulator bounds are checked at construction, including prefix workspace.
-The root merge is fused into scoring, but lower-level fusion is currently
-disabled for packed searches. The uint64 tree state and history cost more
-memory and bandwidth than float32, and the packed search does not use the
-GPU's direct levels yet. On the L40S it runs at about 3–4.5× the float32 time
-on the cryopaf presets, almost all of it in the uint64 FDMT merges.
+The root merge is fused into scoring. The tree state is uint32 when the
+plan bounds every tree value below 2^32, else uint64. On the GPU the packed
+search computes levels 0–3 directly from integer running sums and, where the
+plan allows, sums the upper levels' rows straight from a lower level (the
+direct top of the float transform, see the performance guide), all in exact
+integers. 8-bit input then takes about the float32 search time (0.94–1.05×
+on the three presets, L40S). The CPU packed search does not fuse the lower
+levels and takes 1.3× the float32 time on 8 threads (1.1–1.2× on one).
 
 ## Running a search
 
@@ -109,7 +134,7 @@ for block in blocks:
     consume(result.candidates)  # Owned structured NumPy array.
     if result.overflowed:
         report_drops(result.dropped_global, result.dropped_per_dm)
-consume(search.flush().candidates)
+consume(search.drain().candidates)  # end of stream
 ```
 :::
 :::{tab-item} C++
@@ -123,7 +148,7 @@ dmt::BoxcarConfig config(256);
 dmt::algorithms::FDMTBoxcar search(plan, config, true, dmt::Exec::cpu(4));
 auto result = search.execute(waterfall); // std::span<const float>
 // Consume result.candidates before the next result-changing operation.
-auto last = search.flush();
+auto last = search.drain(); // end of stream
 ```
 :::
 ::::
@@ -160,10 +185,45 @@ reused. Warm CPU execution and flush allocate no working memory.
 ## Widths, excursions and boundaries
 
 Widths start at 1; each next width is
-`max(previous + 1, ceil(previous * wtsp))`, stopping at `max_boxcar`.
-`wtsp=2` gives powers of two, `1.5` a denser geometric grid, and `1` every
-integer. Widths 1–4096 are supported on both backends, without a 32-filter cap.
+`max(previous + 1, ceil(previous * wtsp))` while it does not exceed
+`max_boxcar`, and `max_boxcar` itself ends the bank when the last step falls
+short of it (`max_boxcar=9, wtsp=2` searches 1, 2, 4, 8, 9), so the widest
+box searched is always `max_boxcar`. `wtsp=2` gives powers of two, `1.5` a
+denser geometric grid, and `1` every integer, each ending on `max_boxcar`.
+`dmtlib.generate_box_width_trials(max_boxcar, wtsp)` returns the bank.
+Widths 1–4096 are supported on both backends, without a 32-filter cap.
 Every trial is searched at the original time resolution.
+
+**Trapezoid filters (`use_trapezoid=True`).** Each width `W >= 3` is searched
+with a trapezoid *instead of* the boxcar: an edge of `w_edge = (W + 1) // 4`
+samples at weight 1/2 on each side of a flat core at weight 1, still `W`
+samples in all. Widths 1 and 2 stay boxcars. The analytical noise model
+includes the taper exactly, so the S/N scale and the thresholds are
+unchanged. The taper matches pulses that are not aligned with the sample
+grid, or that have soft edges. A narrow pulse that straddles sample
+boundaries gains about 6% S/N (the off-phase `[0.5, 1, 0.5]` profile at
+`W = 3`). A flat pulse aligned with the boxcar loses about 5% (`W = 8`). The
+reported `width` is the full support `W`, edges included. The trapezoids
+replace the boxcars; they are not searched alongside them, so the number of
+filters and the cost per width stay the same. Packed input supports them too:
+the integer thresholds use the filter weight `2 (W - w_edge)`. Boxcar-only is
+the default; a mode that searches trapezoids alongside the boxcars would be
+added as a separate option.
+
+**Width screen.** With dense width grids, consecutive widths
+`[w_lo, w_hi]` with `w_hi < 2 w_lo` form a group. Before any width in a group
+is scored, one bound is checked per endpoint: the prefix sum at `t` minus the
+smallest prefix sum over `[t - w_hi, t - w_lo]` (a sparse-table range
+minimum). This bound is compared with the group's smallest threshold, and
+only the groups that pass are scored width by width. The screen is exact, so
+the candidates are the same with or without it. It is used only when it
+merges widths, i.e. when there are fewer than half as many groups plus
+range-minimum levels as widths. In practice that means `wtsp=1` grids
+(e.g. 195 widths in 8 groups). `wtsp>=1.5` grids are unaffected. On the
+CPU, the screen made `meerkat_lband` float32 at `wtsp=1` 4.4× faster. With
+`use_trapezoid`, the GPU turns the screen off, and the CPU finds no group
+worth screening (trapezoid widths stay single), so trapezoid searches pay
+the full per-width cost.
 
 `CONTIGUOUS_PEAK_PER_WIDTH`
 : One peak per contiguous threshold excursion of each DM/width response.
@@ -189,14 +249,23 @@ winning peak's width.
 - **Cold windows.** They are skipped by default until their complete FDMT
   dependency support and boxcar lookback are available. This can span
   multiple blocks. `skip_cold_prefix=False` searches the zero-padded cold
-  response using the stationary sigma table.
+  response using the stationary sigma table, which does not describe it;
+  hence the default `True`.
 - **Block boundaries.** Raw sample carry and pending peaks survive internal
   chunks and input-block boundaries. A returned peak may therefore refer to an
   earlier block.
-- **Flush.** Call `flush()` once at end of stream to emit remaining peaks;
-  repeated flushes return no further candidates. Flush adds no padded samples
-  and permits subsequent input to continue, with excursions split at that
-  flush.
+- **End of stream.** Call `drain()` once at the end of the stream. It
+  searches the samples still behind the search latency (the last
+  `get_search_latency()` samples of the skewed subband search, the last
+  `get_output_latency()` of `FDMTFFTBoxcar` with fractional delays; none
+  otherwise), then emits the open excursions. Endpoints after the last
+  sample are never searched, so no candidate lies past the end. The stream
+  ends there: `execute()` raises until `reset_history()`.
+  `get_searched_nsamps()` (`searched_nsamps` in Python) gives the stream
+  samples every row has searched so far.
+- **Flush.** `flush()` only emits the open excursions: repeated flushes
+  return no further candidates, it adds no samples and lets the input
+  continue, with excursions split at that flush.
 - **Reset.** `reset_history()` discards all histories and pending peaks and
   restarts sample 0.
 
@@ -245,6 +314,40 @@ removes that cap. Global capacity is `max_candidates`. Counters satisfy
 Scanning and history updates continue after saturation. Parallel candidate
 order and the retained subset during overflow are unspecified.
 
+### Memory budget and wide bands
+
+`FDMTBoxcar(..., max_memory_bytes=...)` (default 10 GiB, `FDMT` takes the
+same argument) bounds everything the instance allocates
+(`get_memory_usage().total()`, not the caller's input or output). The
+boxcar's own buffers are fixed by the plan and config: each searched row
+keeps `max_boxcar` carried samples (float32, or uint32 for packed input
+when every tree value fits 32 bits) and its pending peaks. The FDMT takes
+the fastest path that fits in the rest:
+
+- **The tree path** when its streaming history fits: every preset except
+  `parkes_uwl`, which is unchanged.
+- **The skewed-window path** otherwise (a wide band at fine time
+  resolution with a long DM sweep: 6656 channels at 64 µs to DM 2000 keeps
+  10–14 GB of tree history). It keeps only the raw input of each channel's
+  own dispersion reach and recomputes the upper levels over short per-row
+  windows ([](skewed_window_fdmt.md)), at the longest automatic chunk
+  (4096 down to 256 samples) that fits; a longer chunk is faster.
+- Construction raises `ValueError` (`std::invalid_argument`) when nothing
+  fits.
+
+On the skewed path a subband search reads every searched row (tree,
+staggered, and delays the full-band grid does not use) from the full
+band's windows, each at a fixed **per-row lag**: at the call whose
+full-band samples are `[T, T + n)` a subband row is searched over
+`[T - lag, T - lag + n)`. The lag is about the dispersion delay from the
+subband down to the bottom of the band (zero for the lowest subbands, up to
+the full sweep for the top ones), i.e. a subband candidate is reported at
+about the time the full-band search would report the same burst.
+Candidates and S/N are the tree path's, bit for bit; only the call that
+returns a candidate moves. `flush()` adds no samples, so at the end of a
+stream call `drain()`: it searches the last `lag` samples of each subband
+row, and the candidates then match the tree path's over the whole stream.
+
 The root merge is fused into scoring. Selected intermediate subbands are
 searched in their existing FDMT buffers before the next merge. FDMT state,
 sample histories, pending peaks, candidate buffers and bounded scoring
@@ -265,6 +368,9 @@ prefix difference and one comparison.
 
 - CPU: double prefixes (uint64 for packed input), slid from tile to tile;
   the carried samples are read once per call and written once at its end.
+  Tiles grow with the widest boxcar (1024 to 4096 samples, about four times
+  the lookback) so rebuilding the lookback per tile stays cheap, and every
+  row of a level's planes shares one dynamically scheduled loop.
 - GPU: one thread block per (beam, DM) row. The prefix of each 1024-sample
   tile is a warp-shuffle scan into a float32 ring in shared memory (a power of
   two of at least `max_boxcar + 1024` entries), rebased after every tile so
@@ -300,37 +406,63 @@ compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]
 ```
 :::
 
-Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The streaming benchmarks run
-at the reference point of a suite configuration (`DMT_BENCH_CONFIG`:
-`cryopaf`, `cryopaf_lband` or `parkes_uwl`) with widths up to 100 ms
-(`max_boxcar = floor(0.1 s / tsamp)`):
+Build benchmarks with `DMT_BUILD_BENCHMARKS=ON`. The FDMTBoxcar benchmarks
+are the `boxcar` suite of `dmt_bench_suite`, at the reference point of each
+preset (`bench/README.md`) with widths up to 100 ms
+(`max_boxcar = floor(0.1 s / tsamp)`) and the default memory budget:
 
 ```bash
-# GPU: transform alone, transform + separate search, FDMTBoxcar (float32,
-# uint8, host arrays) and FDMT-FFT / FDMTFFTBoxcar
-DMT_BENCH_CONFIG=cryopaf build/bench/dmt_bench \
-  --benchmark_filter='^BM_fdmt_boxcar_cuda/'
-# CPU
-DMT_BENCH_CONFIG=cryopaf_lband build/bench/dmt_bench \
-  --benchmark_filter='^BM_fdmt_boxcar_stream/'
+OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --suite boxcar \
+    --config meerkat_lband          # or cryopaf_lband, cryopaf_low, parkes_uwl
 ```
 
-On noise, with 32768-sample blocks and float32 input (L40S device-resident;
-Intel Xeon Gold 6348H with 8 threads):
+On noise, with 32768-sample blocks, float32 input, warmed histories (NVIDIA
+L40S, device-resident; AMD EPYC 9654, 8 threads one per CCD; median of 3):
 
-| preset, machine | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
+| preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `cryopaf` (1545 trials), L40S | 22.9 ms | 24.0 ms (12 widths) | 28.6 ms (195 widths) |
-| `cryopaf_lband` (1941 trials), L40S | 11.9 ms | 12.6 ms (13 widths) | 16.7 ms (219 widths) |
-| `cryopaf`, Xeon | 370 ms | 592 ms | 1.75 s |
-| `cryopaf_lband`, Xeon | 225 ms | 464 ms | 2.42 s |
+| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.7 ms (12 widths) | 29.6 ms (163 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (13 widths) | 14.0 ms (219 widths) |
+| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 19.0 ms |
+| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.2 ms (195 widths) |
+| `meerkat_lband`, CPU | 359 ms | 502 ms | 552 ms |
+| `cryopaf_lband`, subband depth 1, CPU | 141 ms | 468 ms | 544 ms |
+| `cryopaf_low`, CPU | 260 ms | 312 ms | 339 ms |
+
+Measured with the 0.7.0 width banks, before a bank ended on `max_boxcar`
+(0.8.0): the wtsp 1.5 banks of these presets now hold one more width (13, 14
+and 13), which adds a few percent of search work.
 
 On the GPU the root merge the search saves costs about as much as scoring a
-dozen widths, so the search adds ~5%. On the CPU the scorer is a separate
-pass over each chunk's root rows whose cost grows with the number of widths
-(1.6–2× the transform at a dozen widths), still well faster than real time on
-8 threads. `working_bytes` is the algorithm allocation estimate, not process
-RSS.
+dozen widths, so the full-band search adds 3–10%; a depth-1 subband search
+on `cryopaf_lband` adds a fifth (wtsp 1.5) to a third (wtsp 1.0) more. On the CPU the scorer is a separate
+pass over each chunk's searched rows (1.2–3.3× the transform), still well
+faster than real time on 8 threads. Thanks to the width screen, scoring
+every integer width up to 100 ms costs about the same as a dozen widths on
+both backends. `working_bytes` in the results is the allocation plus the
+input block, not process RSS.
+
+The `parkes_uwl` search (6656 channels at 64 µs, 4749 trials, 2.1 s
+blocks, subband depth 4: 218k searched rows, wtsp 1.5) runs within the
+10 GiB budget on the skewed-window path:
+
+| backend | input | chunk | time per block | real-time factor | working memory | peak |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| GPU | uint8 | 4096 | 1.16 s | 1.81× | 9.4 GiB | 9.2 GiB |
+| GPU | float32 | 2048 | 1.59 s | 1.32× | 10.8 GiB (9.96 GiB engine) | 10.7 GiB |
+| CPU, 8 threads | uint8 | 4096 | 14.3 s | 0.15× | 6.2 GiB | 6.3 GiB |
+| CPU, 8 threads | float32 | 2048 | 20.1 s | 0.10× | 9.2 GiB | 9.4 GiB |
+
+*working memory* is the library's accounting plus the input block; *peak* is
+the measured device memory (GPU) or process resident set (CPU) in the same
+run. The GPU peak can be below the working memory because the accounting
+also counts host-side tables and the host candidate buffer.
+
+The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.7 GiB).
+Searching at a coarser resolution is much cheaper: at 256 µs the GPU runs
+depth 4 at 36× real time and 8 CPU threads keep up (1.15–1.35×), and at
+512 µs the CPU is 6× faster than real time (the real-time sweep on the
+[Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 
 ## FDMTFFTBoxcar
 
@@ -342,7 +474,7 @@ search = FDMTFFTBoxcar(plan, BoxcarConfig(max_boxcar=195, wtsp=1.5),
                        backend="cuda")
 for block in blocks:
     consume(search.execute(block).candidates)
-consume(search.flush().candidates)
+consume(search.drain().candidates)  # searches the last output_latency samples
 ```
 
 `FDMTFFTBoxcar` takes the same `BoxcarConfig`, returns the same candidates and
@@ -367,11 +499,18 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   long call by the truncation of the interpolation kernel (FDMTFFT: below
   0.5% of the row peak), so a near-threshold point can move between blocked
   and unblocked runs; with integer delays they agree to float rounding.
+- **Memory.** `max_memory_bytes` (keyword-only, default 10 GiB) bounds
+  everything the instance allocates (`memory_usage`), as on `FDMTBoxcar`. Over
+  it the overlap-save segments are shortened (each try halves the transform
+  length; `chunk_nsamps` reports the segment) until the instance fits, and
+  construction raises `ValueError` with the memory at the shortest segment
+  when nothing does. Shorter segments change the rows as blocking does (see
+  Streaming).
 - **Limits.** Float32 input only and plan `subband_depth=0`: subband rows exist
   only in the Fourier domain and would each need an extra inverse transform.
 
 ```{seealso}
 - [Noise calibration](noise_calibration.md): the exact per-trial sigma.
-- [Benchmarks: candidate search](../benchmarks.md#candidate-search).
+- [Benchmarks: Parkes UWL search](../benchmarks.md#parkes-uwl-search).
 - [Streaming and history](streaming_and_history.md).
 ```

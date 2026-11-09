@@ -42,7 +42,10 @@ def get_dmdelays(
 ) -> np.ndarray:
     """Calculate dispersive time delays across frequency channels relative to f_min.
 
-    Calculates the cold-plasma group delay for each channel frequency :math:`\\nu_i`:
+    Calculates the cold-plasma group delay for each channel centre
+    :math:`\\nu_i = f_{\\text{min}} + (i + 1/2) \\, \\Delta f`, the library's
+    convention (every engine references its delays to ``f_min`` and channel
+    centres), so channel 0 has the half-channel delay:
 
     .. math::
         \\Delta t_i = k_{\\text{DM}} \\cdot \\text{DM} \\cdot \\left(
@@ -70,7 +73,7 @@ def get_dmdelays(
         Array of length `nchans` containing relative delays per channel.
     """
     foff = (f_max - f_min) / nchans
-    chan_freqs = np.arange(nchans, dtype=np.float64) * foff + f_min
+    chan_freqs = (np.arange(nchans, dtype=np.float64) + 0.5) * foff + f_min
     delays = dm * DM_CONSTANT * (f_min**-2 - chan_freqs**-2)
     if in_samples:
         return (delays / tsamp).round().astype(np.int32)

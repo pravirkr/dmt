@@ -18,6 +18,7 @@ namespace dmt::algorithms::detail {
  */
 struct FDMTSearchInput {
     const float* state      = nullptr;
+    const float* prev_state = nullptr;
     const float* history    = nullptr;
     SizeType row_stride     = 0;
     SizeType beam_stride    = 0;
@@ -35,9 +36,73 @@ struct FDMTSearchInput {
     SizeType beam_begin = 0;
     SizeType beam_count = SIZE_MAX;
     Stream stream{};
-    const uint64_t* integer_state   = nullptr;
-    const uint64_t* integer_history = nullptr;
+    const uint64_t* integer_state        = nullptr;
+    const uint64_t* integer_prev_state   = nullptr;
+    const uint64_t* integer_history      = nullptr;
+    const uint32_t* integer32_state      = nullptr;
+    const uint32_t* integer32_prev_state = nullptr;
+    const uint32_t* integer32_history    = nullptr;
+    /// Lagged rows (skewed-window subband search, fdmt_skew.hpp): row r of
+    /// the level starts at element row_offset[r] of the state (row_stride is
+    /// not used) and holds stream samples [sample_begin - row_lag[r],
+    /// sample_begin - row_lag[r] + nsamps). Samples before stream sample 0
+    /// are not searched. Host pointers on the CPU, device on the GPU; null
+    /// for ordinary rows. Rows are materialized (materialized_root).
+    const SizeType* row_offset = nullptr;
+    const uint64_t* row_lag    = nullptr;
+    /// End of stream (drain()): trailing-window endpoints at or after this
+    /// stream sample are not searched. UINT64_MAX: no end.
+    uint64_t search_stop = UINT64_MAX;
 };
+
+/// Clamps `in` (one row's or every row's samples, after lagged_row_input) to
+/// endpoints before in.search_stop. False when none of its samples are.
+DMT_HD inline bool stop_row_input(FDMTSearchInput& in) noexcept {
+    if (in.search_stop == UINT64_MAX) {
+        return true;
+    }
+    if (in.sample_begin >= in.search_stop) {
+        return false;
+    }
+    const uint64_t left = in.search_stop - in.sample_begin;
+    if (left < in.nsamps) {
+        in.nsamps = static_cast<SizeType>(left);
+    }
+    return in.nsamps > 0;
+}
+
+/// The single-row view of `in` for row `row` of a lagged input (row_lag
+/// set): the state pointers advanced to the row's first in-stream sample,
+/// row_stride 0, sample_begin and nsamps that row's own. False when none
+/// of the call's samples of the row are in the stream yet. Single beam.
+DMT_HD inline bool lagged_row_input(const FDMTSearchInput& in,
+                                    SizeType row,
+                                    FDMTSearchInput& out) noexcept {
+    const uint64_t lag  = in.row_lag[row];
+    const uint64_t back = in.sample_begin >= lag ? 0 : lag - in.sample_begin;
+    const uint64_t skip = back < in.nsamps ? back : in.nsamps;
+    if (skip >= in.nsamps) {
+        return false;
+    }
+    out              = in;
+    const auto off   = in.row_offset[row] + static_cast<SizeType>(skip);
+    out.row_stride   = 0;
+    out.beam_stride  = 0;
+    out.row_offset   = nullptr;
+    out.row_lag      = nullptr;
+    out.nsamps       = in.nsamps - static_cast<SizeType>(skip);
+    out.sample_begin = in.sample_begin + skip - lag;
+    if (in.state != nullptr) {
+        out.state = in.state + off;
+    }
+    if (in.integer_state != nullptr) {
+        out.integer_state = in.integer_state + off;
+    }
+    if (in.integer32_state != nullptr) {
+        out.integer32_state = in.integer32_state + off;
+    }
+    return true;
+}
 
 class FDMTSearchSink {
 public:

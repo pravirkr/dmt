@@ -43,7 +43,7 @@ What that means in practice:
   tree. Automatic GPU direct levels agree within float rounding. By default
   the chunk is the longest power of two ≥ 2048 whose state fits in 2 GiB,
   capped at `nsamps`, and shorter on a GPU when that keeps the state in L2.
-  For example, for the `cryopaf` preset (512 channels at 512 µs, DM 0–2000)
+  For example, for the `cryopaf_low` preset (512 channels at 512 µs, DM 0–2000)
   with 32 768-sample blocks, a whole-block tree state is 5.5 GiB; the
   automatic 8192-sample chunk needs 1.4 GiB and gives the same output.
 - **Finish a stepped block before starting the next.** Stopping early raises
@@ -135,12 +135,29 @@ fdmt.load_history(std::span<const float>(beam0));
 
 The saved state is only the small history (`history_state_size()` floats),
 not the engine's working buffers, so one engine can serve many streams with
-the same plan. On the CPU it holds the level-0 input history, then the tree
-history, each node's slot oldest sample first. On a GPU it lives in device
-memory. The C++ `DeviceSpan` overloads are asynchronous on the given stream,
-and the host overloads copy synchronously. A saved history belongs to the
-backend that wrote it, because the layouts differ. `CohFDMT` needs none of
-this: it is stateless across blocks.
+the same plan. It starts with a 16-word header (a magic number, the format
+version, a hash of the layout and the stream position), followed by the
+level-0 input history and then the tree history, each node's slot oldest
+sample first. The layout is the same on the CPU and on a GPU, so a stream
+saved on one continues on the other. Chunk length, fusion depth and thread
+count do not change it. `load_history()` checks the header and raises
+(`std::invalid_argument`, `ValueError` in Python) on a buffer saved by an
+engine with a different DM grid or tree, beam count or box smearing, by the
+skewed-window path, or without a header: a zeroed buffer, or one saved
+before 0.8. Start a new stream with `reset_history()`, not with a zeroed
+buffer. On a GPU the history lives in device memory. The C++ `DeviceSpan`
+overloads are asynchronous on the given stream, except that
+`load_history()` first copies the header to the host to check it; the host
+overloads copy synchronously. Plans large enough to run on the
+[skewed-window path](skewed_window_fdmt.md) save that engine's own, much
+smaller state, specific to its backend, which only an engine with the same
+skewed layout accepts (same plan and `chunk_nsamps`, on the CPU also the
+same thread count); a mismatched buffer raises. On the CPU that state keeps 8- and
+16-bit input at its own width (three 8-bit samples per float word) while
+only packed blocks have arrived, so its size follows the input: ask
+`history_state_size()` when saving (the Python `save_history()` does), not
+once at setup. `CohFDMT` needs none of this: it is
+stateless across blocks.
 
 :::{dropdown} GPU caveat: direct levels after `load_history()`
 :icon: info
@@ -151,7 +168,7 @@ That keeps extra state the saved format does not hold: a running-sum window
 per channel and a ring per level-4 row. After `load_history()` the engine
 runs the plain tree, with the same output, until that state has refilled.
 That takes up to the longest delay any trial applies to a level-4 row, about
-21 000 samples for `cryopaf`. An engine shared by many streams therefore
+21 000 samples for `cryopaf_low`. An engine shared by many streams therefore
 spends the start of each block on the slower path. Where that matters, give
 each stream its own engine. For beams processed together, `nbeams` is
 simpler (see [multi-beam batching](multibeam.md)).

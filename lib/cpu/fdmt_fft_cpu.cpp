@@ -173,6 +173,8 @@ public:
           m_mode(cfg.mode),
           m_frac(cfg.fractional_delays),
           m_kill(cfg.kill_mask),
+          m_max_segment(cfg.max_segment),
+          m_search(cfg.search),
           m_plan(&plan) {
         initialize();
     }
@@ -452,6 +454,8 @@ private:
     FDMTMode m_mode;
     bool m_frac;                 // exact merge delays
     std::vector<uint8_t> m_kill; // per channel, 1 = keep (empty: all)
+    SizeType m_max_segment;      // transform length cap (0: none)
+    bool m_search;               // allocate the search rows up front
 
     const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
     fdmt_fft::Geometry m_geom;     // single-transform geometry
@@ -587,6 +591,11 @@ private:
         if (m_mode == FDMTMode::kValid) {
             m_overlap.assign(m_nbeams * m_nchans * m_overlap_len, 0.0F);
         }
+        if (m_search && m_mode == FDMTMode::kValid) {
+            // One segment of DM rows for execute_search(); counted by
+            // memory_usage() from construction (the boxcar's budget).
+            m_search_rows.assign(m_ndms * m_seg_hop, 0.0F);
+        }
 
         // Pad bins [n_bins, bins_stride) of the per-thread rows are never
         // written by FFTW and stay zero; tiles read them harmlessly.
@@ -615,14 +624,15 @@ private:
         for (const auto& l : m_levels) {
             nodes += l.sum.size() + l.copy.size();
         }
-        const auto seg = fdmt_fft::choose_segments(m_geom, m_mode, m_nsamps_out,
-                                                   nodes, m_nchans, m_ndms,
-                                                   detail::fft_segment_cap());
-        m_seg_len      = seg.n_fft;
-        m_nseg         = seg.nseg;
-        m_seg_hop      = seg.hop;
-        m_seg_skip     = seg.skip;
-        m_seg_zeros    = seg.zeros;
+        const auto seg = fdmt_fft::choose_segments(
+            m_geom, m_mode, m_nsamps_out, nodes, m_nchans, m_ndms,
+            detail::combine_segment_caps(detail::fft_segment_cap(),
+                                         m_max_segment));
+        m_seg_len   = seg.n_fft;
+        m_nseg      = seg.nseg;
+        m_seg_hop   = seg.hop;
+        m_seg_skip  = seg.skip;
+        m_seg_zeros = seg.zeros;
     }
 
     void build_tree_ops() {

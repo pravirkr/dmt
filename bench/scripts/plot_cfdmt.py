@@ -1,17 +1,17 @@
 """Plot the CohFDMT section of the dmt benchmark suite.
 
-Reads every ``bench/results/<machine>/suite_cfdmt_*.json`` written by
+Reads every ``bench/results/cfdmt/<machine>/suite_cfdmt_*.json`` written by
 ``run_suite.py --suite cfdmt`` and writes, for both themes,
 
-    bench/results/plots/{light,dark}/cfdmt_rtf.png
+    bench/results/cfdmt/plots/{light,dark}/cfdmt_rtf.png
 
-plus ``bench/results/plots/cfdmt_summary.md`` (reference-point table), which
+plus ``bench/results/cfdmt/plots/cfdmt_summary.md`` (reference-point table), which
 the docs page includes. CohFDMT searches baseband voltages (one GUPPI node,
 64 x 2.93 MHz at 1312.5-1500 MHz, int8, t_p = 10 us, DM 50-60, see
 bench/suite/suite_cfdmt_common.hpp), so it has its own figures and is not
 compared with the filterbank algorithms.
 
-    python bench/scripts/plot_cfdmt.py [--results bench/results]
+    python bench/scripts/plot_cfdmt.py [--results bench/results/cfdmt]
 """
 
 from __future__ import annotations
@@ -230,7 +230,7 @@ def summary_md(points: list[Point], contexts: dict) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Plot the CohFDMT benchmark suite.")
-    ap.add_argument("--results", default=str(REPO / "bench" / "results"))
+    ap.add_argument("--results", default=str(REPO / "bench" / "results" / "cfdmt"))
     args = ap.parse_args()
     results_dir = Path(args.results)
     points, contexts = load(results_dir)

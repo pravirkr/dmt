@@ -91,7 +91,6 @@ struct FDMTCoordGridD {
 struct FDMTPlanContainerD {
     FDMTShapeD state_shape;
     FDMTCoordGridD grids0;
-    FDMTCoordD coordinates;
     FDMTCoordD coordinates_sum;
     FDMTCoordD coordinates_copy;
 };
@@ -100,8 +99,8 @@ namespace detail {
 __host__ inline void
 transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
                      FDMTCoordD& device_coords) {
-    std::vector<int> nsamps, buf_offset, i_coord_tail, i_coord_head, offset,
-        tail_buf_offset, tail_nsamps, head_buf_offset, head_nsamps;
+    std::vector<int> nsamps, buf_offset, offset, tail_buf_offset, tail_nsamps,
+        head_buf_offset, head_nsamps;
     std::vector<uint32_t> hist_offset;
 
     // Calculate total size for efficient allocation
@@ -113,8 +112,6 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
     // Reserve space once
     nsamps.reserve(total_size);
     buf_offset.reserve(total_size);
-    i_coord_tail.reserve(total_size);
-    i_coord_head.reserve(total_size);
     offset.reserve(total_size);
     tail_buf_offset.reserve(total_size);
     tail_nsamps.reserve(total_size);
@@ -127,8 +124,6 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
         for (const auto& coord : host_coords_iter) {
             nsamps.emplace_back(coord.nsamps);
             buf_offset.emplace_back(coord.buf_offset);
-            i_coord_tail.emplace_back(coord.i_coord_tail);
-            i_coord_head.emplace_back(coord.i_coord_head);
             offset.emplace_back(coord.delay);
             tail_buf_offset.emplace_back(coord.tail_buf_offset);
             tail_nsamps.emplace_back(coord.tail_nsamps);
@@ -186,8 +181,7 @@ __host__ inline void transfer_fdmt_plan_to_device(const FDMTPlanContainer& plan,
                                      grid_init[i].dt_grid.end());
     }
 
-    // Transfer coordinates to device
-    detail::transfer_coords_impl(plan.coordinates, plan_d.coordinates);
+    // Transfer merge coordinates to device
     detail::transfer_coords_impl(plan.coordinates_sum, plan_d.coordinates_sum);
     detail::transfer_coords_impl(plan.coordinates_copy,
                                  plan_d.coordinates_copy);

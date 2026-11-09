@@ -9,21 +9,20 @@ CPMFindPackage(
 set(TARGET_BENCHMARKS ${PROJECT_NAME}_bench)
 set(TARGET_BENCHMARKS_MEM ${PROJECT_NAME}_bench_mem)
 
-# Collect CPU benchmark sources: FDMT, FDMT-FFT, and DDMT on equal footing.
+# Developer microbenchmarks (dmt_bench): kernel and fusion calibration,
+# the skewed-window stage breakdown and the CohFDMT stages. The published,
+# preset-based numbers come from dmt_bench_suite (bench/suite).
 set(BENCH_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cpu_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cpu_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_boxcar_cpu_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cpu_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cpu_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cpu_b.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_skew_cpu_b.cpp
 )
 
 # GPU benchmark sources (CUDA source, built for CUDA or HIP): the same
 # algorithms, plus CohFDMT.
 if(DMT_GPU_BACKEND)
   set(BENCH_SOURCES_CUDA
-      ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_cuda_b.cu
-      ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_cuda_b.cu
-      ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_boxcar_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cuda_b.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_cuda_b.cu ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_cuda_b.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/cfdmt_cuda_b.cu
   )
   list(APPEND BENCH_SOURCES ${BENCH_SOURCES_CUDA})
 
@@ -44,12 +43,15 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
   target_include_directories(${TARGET_BENCHMARKS} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
+# DMT_COMPILE_OPTIONS (the CPM fmt) before the benchmark package: a system fmt
+# next to it (Homebrew's /opt/homebrew/include) would otherwise be found first
+# and mix two fmt versions into one binary, which garbles formatted floats.
 target_link_libraries(
   ${TARGET_BENCHMARKS}
   PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          ${DMT_COMPILE_OPTIONS}
           benchmark::benchmark_main
           OpenMP::OpenMP_CXX
-          ${DMT_COMPILE_OPTIONS}
 )
 
 target_compile_definitions(${TARGET_BENCHMARKS} PRIVATE ${DMT_BACKEND_DEFINITIONS})
@@ -57,9 +59,9 @@ if(DMT_GPU_BACKEND)
   target_link_libraries(${TARGET_BENCHMARKS} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})
 endif()
 
-# Memory benchmarks executable: FDMT, FDMT-FFT, and DDMT (float + packed),
-# split into one file per algorithm (mirroring the timing executable above)
-# plus a shared bench_mem_utils.hpp and a single mem_b_main.cpp anchor TU
+# Memory benchmarks executable: peak memory of the tree and skewed-window
+# FDMT engines on the suite presets (fdmt_skew_mem_b.cpp), with a shared
+# bench_mem_utils.hpp and a single mem_b_main.cpp anchor TU
 # that owns the global operator new/delete overrides and main() -- these
 # must be defined exactly once across the binary (a replacement allocation
 # function must not be declared inline per [new.delete]), so they cannot
@@ -68,11 +70,7 @@ endif()
 # main() (incompatible with benchmark::benchmark_main, which the timing
 # executable above links).
 set(BENCH_SOURCES_MEM
-    ${CMAKE_CURRENT_SOURCE_DIR}/mem_b_main.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_mem_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_fft_mem_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_mem_b.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/ddmt_fft_mem_b.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mem_b_main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_skew_mem_b.cpp
 )
 
 add_executable(${TARGET_BENCHMARKS_MEM} ${BENCH_SOURCES_MEM})
@@ -84,21 +82,25 @@ target_include_directories(
 target_link_libraries(
   ${TARGET_BENCHMARKS_MEM}
   PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          ${DMT_COMPILE_OPTIONS}
           benchmark::benchmark
           OpenMP::OpenMP_CXX
-          ${DMT_COMPILE_OPTIONS}
 )
 
 # Published benchmark suite (bench/suite): one fixed configuration shared by
 # FDMT, FDMT-FFT and DDMT on CPU and GPU (CUDA or HIP), run by bench/scripts/run_suite.py
 # and plotted by bench/scripts/plot_suite.py. See bench/README.md.
 set(TARGET_BENCHMARKS_SUITE ${PROJECT_NAME}_bench_suite)
-set(BENCH_SOURCES_SUITE ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cpu.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cfdmt_cpu.cpp
+set(BENCH_SOURCES_SUITE
+    ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cpu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cfdmt_cpu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_boxcar_cpu.cpp
 )
 if(DMT_GPU_BACKEND)
-  set(BENCH_SOURCES_SUITE_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cuda.cu
-                               ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cfdmt_cuda.cu
+  set(BENCH_SOURCES_SUITE_CUDA
+      ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cuda.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_cfdmt_cuda.cu
+      ${CMAKE_CURRENT_SOURCE_DIR}/suite/suite_boxcar_cuda.cu
   )
   set_source_files_properties(
     ${BENCH_SOURCES_SUITE_CUDA} PROPERTIES LANGUAGE ${DMT_GPU_BACKEND}
@@ -121,8 +123,8 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
   target_include_directories(${TARGET_BENCHMARKS_SUITE} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 target_link_libraries(
-  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} benchmark::benchmark_main
-                                     ${DMT_COMPILE_OPTIONS}
+  ${TARGET_BENCHMARKS_SUITE} PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
+                                     benchmark::benchmark_main
 )
 if(DMT_GPU_BACKEND)
   target_link_libraries(${TARGET_BENCHMARKS_SUITE} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})

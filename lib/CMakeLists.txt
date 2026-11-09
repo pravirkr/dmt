@@ -56,6 +56,10 @@ add_library(${PROJECT_NAME}::${DMT_LIBRARY_NAME} ALIAS ${DMT_LIBRARY_NAME})
 
 target_compile_features(${DMT_LIBRARY_NAME} PUBLIC cxx_std_20)
 
+# dmt::build_info(): commit, dirty flag and toolchain of this build.
+include(dmtBuildInfo)
+dmt_add_build_info(${DMT_LIBRARY_NAME})
+
 # The backend macros are private: they only select which engines the facades
 # can build. The installed headers are identical in every build; callers ask
 # dmt::available_backends() at run time. The tests reuse the same list.

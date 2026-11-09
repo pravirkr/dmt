@@ -15,6 +15,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_chunk.hpp"
 #include "dmt/fdmt_fused_tile.hpp"
+#include "dmt/fdmt_history.hpp"
 #include "dmt/modes.hpp"
 
 // The CUDA backend's fused-level tile (lib/dmt/fdmt_fused_tile.hpp), run
@@ -335,11 +336,15 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                         const auto expected =
                             reference_level(ref, wf.values, fuse);
                         ref.save_history(after);
-                        const float* hist0   = before.data();
-                        const float* tree_in = before.data() + h0_size;
+                        // Past the header: the level-0, then the tree
+                        // history.
+                        const float* hist0 =
+                            before.data() + detail::kFDMTHistHeader;
+                        const float* tree_in = hist0 + h0_size;
                         std::vector<float> tree_after(
                             after.begin() +
-                                static_cast<std::ptrdiff_t>(h0_size),
+                                static_cast<std::ptrdiff_t>(
+                                    detail::kFDMTHistHeader + h0_size),
                             after.end());
                         // Finite sentinel (release builds use -ffast-math,
                         // which folds NaN checks away); never a sum of

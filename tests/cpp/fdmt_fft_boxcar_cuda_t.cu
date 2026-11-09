@@ -130,3 +130,41 @@ TEST_CASE("FDMTFFTBoxcar GPU kill mask and wide windows match the reference",
                            gpu_reference(plan, cfg, true, true, kill, 1, input),
                            cfg.detect_thresh);
 }
+
+TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
+          "[gpu][boxcar][budget]") {
+    // MeerKAT L-band sized (4096 channels at 612.48 us): half the
+    // unconstrained memory forces shorter segments; the candidates agree
+    // with the unconstrained run within the fractional kernel's truncation
+    // (0.5% of each row's peak; compare_clusters).
+    // An impossible budget throws.
+    const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 16384, 612.48e-6F, 800);
+    const auto input = waterfalls(plan, 1, 2);
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 64;
+    cfg.wtsp             = 1.5F;
+    cfg.detect_thresh    = 6.0F;
+    cfg.max_candidates   = 200000;
+    cfg.max_cands_per_dm = 0;
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    FDMTFFTBoxcar open(plan, cfg, true, exec);
+    const SizeType full   = open.get_memory_usage().total();
+    const SizeType budget = full / 2;
+    FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, {}, budget);
+    INFO(open.summary() << capped.summary());
+    CHECK(capped.get_memory_usage().total() <= budget);
+    CHECK(capped.get_chunk_nsamps() < open.get_chunk_nsamps());
+    std::vector<RawCandidate> a;
+    std::vector<RawCandidate> b;
+    for (const auto& block : input) {
+        append(a, open.execute(block));
+        append(b, capped.execute(block));
+    }
+    append(a, open.drain());
+    append(b, capped.drain());
+    REQUIRE(a.size() > 20);
+    compare_clusters(b, a, cfg.detect_thresh, 5e-3, 0.05);
+    CHECK_THROWS_AS(
+        FDMTFFTBoxcar(plan, cfg, true, exec, 1, true, {}, SizeType{1} << 20),
+        std::invalid_argument);
+}

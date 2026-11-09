@@ -233,6 +233,32 @@ def test_fdmt_gpu_execute_out_buffer(gpu_backend: str) -> None:
     np.testing.assert_allclose(got, cpu.execute(waterfall), rtol=2e-3, atol=2e-3)
 
 
+def test_fdmt_history_moves_between_cpu_and_gpu(gpu_backend: str) -> None:
+    # One plain-tree layout on every backend: a stream saved on the CPU
+    # continues on the GPU and back, bit for bit on integer input, and the
+    # header refuses a buffer from another configuration.
+    rng = np.random.default_rng(12)
+    blocks = [rng.integers(0, 8, size=(32, 128)).astype(np.float32) for _ in "abc"]
+    ref = FDMT(1000.0, 1500.0, 32, 128, 0.001, 40)
+    want = [ref.execute(b) for b in blocks]
+    cpu = FDMT(1000.0, 1500.0, 32, 128, 0.001, 40)
+    gpu = on(gpu_backend, FDMT, 1000.0, 1500.0, 32, 128, 0.001, 40)
+    cpu.execute(blocks[0])
+    gpu.load_history(cpu.save_history())
+    np.testing.assert_array_equal(gpu.execute(blocks[1]), want[1])
+    back = FDMT(1000.0, 1500.0, 32, 128, 0.001, 40)
+    back.load_history(gpu.save_history())
+    np.testing.assert_array_equal(back.execute(blocks[2]), want[2])
+    np.testing.assert_array_equal(back.save_history(), ref.save_history())
+    other = on(
+        gpu_backend, FDMT, 1000.0, 1500.0, 32, 128, 0.001, 40, use_box_smearing=False
+    )
+    with pytest.raises(ValueError, match="different configuration"):
+        other.load_history(ref.save_history())
+    with pytest.raises(ValueError, match="reset_history"):
+        gpu.load_history(np.zeros(gpu.history_state_size(), dtype=np.float32))
+
+
 def test_ddmt_gpu_matches_cpu(gpu_backend: str) -> None:
     nchans, nsamps = 64, 1024
     rng = np.random.default_rng(7)

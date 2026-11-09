@@ -116,8 +116,8 @@ def sweep_recovery(
     index) as a fraction of the pulse's own matched-filter S/N ceiling
     `sqrt(sum(pulse**2))` -- the best any linear method could do against
     dmt's assumed unit-variance-per-raw-sample noise model (see
-    `variance_from_smearing_row` in `lib/plans.cpp`). Without `sigma_fn`,
-    the fraction is simply peak amplitude over the ideal `nchans *
+    `variance_from_smearing_row` in `lib/fdmt_plan_noise.cpp`). Without
+    `sigma_fn`, the fraction is simply peak amplitude over the ideal `nchans *
     amplitude` (every channel landing constructively in one output sample)
     -- adequate for A/B-comparing two variants of an engine that has no
     analytical noise model of its own.

@@ -95,13 +95,6 @@ void register_gpu() {
             [p](benchmark::State& s) { bench_gpu<false>(s, p); })
             ->UseManualTime()
             ->Unit(benchmark::kMillisecond);
-        if (p.sweep == Sweep::kRef || p.sweep == Sweep::kNbits) {
-            benchmark::RegisterBenchmark(
-                name(DMT_GPU_NAME "_host", p),
-                [p](benchmark::State& s) { bench_gpu<true>(s, p); })
-                ->UseManualTime()
-                ->Unit(benchmark::kMillisecond);
-        }
     }
 }
 

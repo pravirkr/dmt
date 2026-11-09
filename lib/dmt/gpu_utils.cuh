@@ -87,7 +87,9 @@ public:
     [[nodiscard]] constexpr const char* function() const noexcept {
         return m_func;
     }
-    [[nodiscard]] constexpr std::string_view user_message() const noexcept {
+    // Not constexpr: libstdc++ 11 (the GCC 11 floor) has no constexpr
+    // std::string, and nvcc host builds with it reject the conversion.
+    [[nodiscard]] std::string_view user_message() const noexcept {
         return m_user_msg;
     }
     [[nodiscard]] std::string error_string() const {

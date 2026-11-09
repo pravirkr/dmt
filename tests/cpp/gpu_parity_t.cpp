@@ -42,8 +42,15 @@ std::vector<Backend> usable_gpu_backends() {
                        Exec{.backend = b, .nthreads = 1, .device = 0});
             out.push_back(b);
         } catch (const std::exception& e) {
+            if (test::gpu_required()) {
+                throw; // DMT_REQUIRE_GPU: an unusable backend is a failure
+            }
             WARN("skipping " << to_string(b) << ": " << e.what());
         }
+    }
+    if (out.empty() && test::gpu_required()) {
+        throw std::runtime_error(
+            "DMT_REQUIRE_GPU is set but this build has no GPU backend");
     }
     return out;
 }
@@ -277,6 +284,70 @@ TEST_CASE("parity: FDMT GPU host stepper and history match the CPU",
             gpu.execute(wf2, out_gpu);
             test::require_exact(dmt_result(gpu, out_gpu),
                                 dmt_result(cold, out_cold));
+        }
+    }
+}
+
+TEST_CASE("parity: FDMT plain-tree history moves CPU -> GPU -> CPU",
+          "[fdmt][gpu][parity][history]") {
+    // One layout on every backend: a stream saved on the CPU continues on
+    // a GPU and back, bit for bit (integer-valued input), and the buffers
+    // saved at the same point of the stream are identical, header included.
+    // Many delays per channel, so the GPU computes its low levels directly
+    // and rebuilds their histories on save_history().
+    const auto backends = usable_gpu_backends();
+    if (backends.empty()) {
+        return;
+    }
+    const SizeType nchans  = 64;
+    const SizeType nsamps  = 1500;
+    const SizeType nbeams  = 2;
+    const IndexType dt_max = 1200;
+    for (const auto backend : backends) {
+        DYNAMIC_SECTION(to_string(backend)) {
+            const auto make = [&](Exec exec) {
+                return FDMT(1000.0F, 1500.0F, nchans, nsamps, 0.001F, dt_max, 0,
+                            1, true, "valid", exec, nbeams);
+            };
+            FDMT ref        = make(Exec::cpu(2));
+            FDMT cpu_a      = make(Exec::cpu(2));
+            FDMT gpu        = make(exec_of(backend));
+            FDMT cpu_b      = make(Exec::cpu(1));
+            const auto n    = nbeams * ref.get_plan().get_dmt_size();
+            const auto size = ref.history_state_size();
+            REQUIRE(gpu.history_state_size() == size);
+            std::vector<std::vector<float>> want(3, std::vector<float>(n));
+            std::vector<float> got(n);
+            std::vector<float> h_ref(size);
+            std::vector<float> h(size);
+            std::vector<std::vector<float>> wf;
+            for (unsigned b = 0; b < 3; ++b) {
+                wf.push_back(as_floats(
+                    random_ints(nbeams * nchans * nsamps, 7, 40 + b)));
+                ref.execute(wf[b], want[b]);
+            }
+            cpu_a.execute(wf[0], got);
+            cpu_a.save_history(h);
+            gpu.load_history(h);
+            gpu.execute(wf[1], got);
+            test::require_exact(dmt_result(gpu, got), dmt_result(ref, want[1]));
+            gpu.save_history(h);
+            FDMT ref2 = make(Exec::cpu(2));
+            ref2.execute(wf[0], got);
+            ref2.execute(wf[1], got);
+            ref2.save_history(h_ref);
+            REQUIRE(std::ranges::equal(h, h_ref));
+            cpu_b.load_history(h);
+            cpu_b.execute(wf[2], got);
+            test::require_exact(dmt_result(cpu_b, got),
+                                dmt_result(ref, want[2]));
+            // A different configuration of the same size is refused.
+            FDMT plain(1000.0F, 1500.0F, nchans, nsamps, 0.001F, dt_max, 0, 1,
+                       false, "valid", exec_of(backend), nbeams);
+            REQUIRE(plain.history_state_size() == size);
+            REQUIRE_THROWS_WITH(
+                plain.load_history(h),
+                Catch::Matchers::ContainsSubstring("different configuration"));
         }
     }
 }

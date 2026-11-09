@@ -6,12 +6,13 @@ sub-sample phase) at exactly that DM, runs FDMT, FDMT-FFT, DDMT, SDMT and
 DDMT-FFT (plus FDMT without box smearing) with that single trial on identical
 data, and writes
 
-    bench/results/sensitivity/cryopaf.npz   (arrays)
-    bench/results/sensitivity/cryopaf.json  (metadata)
+    bench/results/sensitivity/cryopaf_low.npz   (arrays)
+    bench/results/sensitivity/cryopaf_low.json  (metadata)
 
 for ``dmtlib.sensitivity.CRYOPAF`` (512 channels over 704-1216 MHz at
-512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband`` and
-``--config parkes_uwl`` select the other presets and write their named
+512 us, DM 0-2000, Levin tolerance 1.1). ``--config cryopaf_lband``,
+``--config parkes_uwl`` and ``--config meerkat_lband`` select the other
+presets and write their named
 ``{npz,json}`` outputs.
 
 which plot_sensitivity.py turns into figures. A unit-variance noise
@@ -30,6 +31,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import platform
 import re
 import subprocess
@@ -94,9 +96,9 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument(
         "--config",
-        default="cryopaf",
+        default="cryopaf_low",
         choices=sorted(sens.CONFIGS),
-        help="search configuration (default cryopaf, the published one)",
+        help="search configuration (default cryopaf_low, the published one)",
     )
     ap.add_argument("--nthreads", type=int, default=8)
     ap.add_argument("--out", type=Path, default=REPO / "bench/results/sensitivity")
@@ -126,10 +128,24 @@ def main() -> None:
         seed=args.seed, far_per_hour=args.far, progress=progress,
     )  # fmt: skip
     elapsed = time.perf_counter() - start
+    build = dict(dmtlib.build_info())
+    if build["git_sha"] not in ("unknown", "") and not build["git_sha"].startswith(
+        git_sha()
+    ):
+        print(
+            f"warning: dmtlib was built from {build['git_sha'][:12]}, "
+            f"the source tree is at {git_sha()}"
+        )
+    trials = np.asarray(cfg.dm_trials, dtype=np.float32)
     res.meta.update(
         {
             "dmt_version": repo_version(),
             "git_sha": git_sha(),
+            # The extension that produced the numbers (commit, dirty flag,
+            # compiler and flags), and the requested DM grid's fingerprint.
+            "dmt_build": build,
+            "dm_trials_n": int(trials.size),
+            "dm_trials_sha256": hashlib.sha256(trials.tobytes()).hexdigest(),
             "date": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
             "machine": platform.platform(),
             "elapsed_s": round(elapsed, 1),

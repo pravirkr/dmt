@@ -55,6 +55,17 @@ struct FDMTSubbandDeviceView {
 inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
 
 /**
+ * Default memory budget of FDMT and FDMTBoxcar (10 GiB): everything the
+ * instance allocates (FDMTMemoryUsage::total(), FDMTBoxcarMemoryUsage::
+ * total()), not the caller's input and output buffers. Within the budget
+ * the fastest streaming path is taken; a plan whose tree history does not
+ * fit (e.g. 6656 channels at 64 us to DM 2000) takes the skewed-window
+ * path with the longest automatic chunk that fits. Construction throws
+ * std::invalid_argument when no path fits.
+ */
+inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
+
+/**
  * @brief Memory an FDMT engine allocates at construction, in bytes (host
  * memory on the CPU backend, device memory on a GPU backend). execute()
  * allocates nothing further; the caller provides the input and the `output`
@@ -207,6 +218,13 @@ public:
      * (GPU: the longest power of two >= 256 whose state fits the device L2,
      * when one does; see get_chunk_nsamps()); other values are rounded up to
      * a multiple of 64. The stepper (reset()/advance()) needs chunk >= nsamps.
+     * @param max_memory_bytes Budget for everything the instance allocates
+     * (get_memory_usage().total(); default kFDMTDefaultMaxMemory, 10 GiB).
+     * The fastest streaming path that fits is taken. A valid-mode plan whose
+     * tree history does not fit (e.g. 6656 channels at 64 us to DM 2000)
+     * runs the skewed-window path instead, with the longest automatic chunk
+     * that fits (on parkes_uwl faster than the tree path on both backends).
+     * Throws std::invalid_argument when no path fits.
      *
      * All working memory is allocated here (see get_memory_usage()); execute()
      * performs no allocation.
@@ -217,15 +235,16 @@ public:
          SizeType nsamps,
          float tsamp,
          IndexType dt_max,
-         IndexType dt_min      = 0,
-         SizeType dt_step      = 1,
-         bool use_box_smearing = true,
-         std::string_view mode = "valid",
-         Exec exec             = {},
-         SizeType nbeams       = 1,
-         SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true,
-         SizeType chunk_nsamps = 0);
+         IndexType dt_min          = 0,
+         SizeType dt_step          = 1,
+         bool use_box_smearing     = true,
+         std::string_view mode     = "valid",
+         Exec exec                 = {},
+         SizeType nbeams           = 1,
+         SizeType fuse_levels      = kFDMTAutoFuse,
+         bool int_tree             = true,
+         SizeType chunk_nsamps     = 0,
+         SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     /**
      * @brief Constructs an FDMT instance with a custom delay trial grid.
@@ -233,8 +252,8 @@ public:
      * @param dt_grid Explicit list of delay trials in samples (e.g. from
      * generate_optimal_dt_grid).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
-     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps See the first
-     * constructor.
+     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps, max_memory_bytes See
+     * the first constructor.
      */
     FDMT(float f_min,
          float f_max,
@@ -242,13 +261,14 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<IndexType>& dt_grid,
-         bool use_box_smearing = true,
-         std::string_view mode = "valid",
-         Exec exec             = {},
-         SizeType nbeams       = 1,
-         SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true,
-         SizeType chunk_nsamps = 0);
+         bool use_box_smearing     = true,
+         std::string_view mode     = "valid",
+         Exec exec                 = {},
+         SizeType nbeams           = 1,
+         SizeType fuse_levels      = kFDMTAutoFuse,
+         bool int_tree             = true,
+         SizeType chunk_nsamps     = 0,
+         SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     /**
      * @brief Constructs an FDMT instance with a custom physical DM trial
@@ -257,8 +277,8 @@ public:
      * @param dm_grid Explicit list of DM trials in pc/cm^3 (supports
      * non-uniform spacing and negative DMs).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
-     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps See the first
-     * constructor.
+     * exec, nbeams, fuse_levels, int_tree, chunk_nsamps, max_memory_bytes See
+     * the first constructor.
      */
     FDMT(float f_min,
          float f_max,
@@ -266,13 +286,14 @@ public:
          SizeType nsamps,
          float tsamp,
          const std::vector<float>& dm_grid,
-         bool use_box_smearing = true,
-         std::string_view mode = "valid",
-         Exec exec             = {},
-         SizeType nbeams       = 1,
-         SizeType fuse_levels  = kFDMTAutoFuse,
-         bool int_tree         = true,
-         SizeType chunk_nsamps = 0);
+         bool use_box_smearing     = true,
+         std::string_view mode     = "valid",
+         Exec exec                 = {},
+         SizeType nbeams           = 1,
+         SizeType fuse_levels      = kFDMTAutoFuse,
+         bool int_tree             = true,
+         SizeType chunk_nsamps     = 0,
+         SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     /**
      * @brief Constructs an FDMT instance from a prepared plan, e.g. one with
@@ -281,15 +302,16 @@ public:
      *
      * @param plan The plan, copied into the instance.
      * @param use_box_smearing, exec, nbeams, fuse_levels, int_tree,
-     * chunk_nsamps See the first constructor.
+     * chunk_nsamps, max_memory_bytes See the first constructor.
      */
     explicit FDMT(plans::FDMTPlan plan,
-                  bool use_box_smearing = true,
-                  Exec exec             = {},
-                  SizeType nbeams       = 1,
-                  SizeType fuse_levels  = kFDMTAutoFuse,
-                  bool int_tree         = true,
-                  SizeType chunk_nsamps = 0);
+                  bool use_box_smearing     = true,
+                  Exec exec                 = {},
+                  SizeType nbeams           = 1,
+                  SizeType fuse_levels      = kFDMTAutoFuse,
+                  bool int_tree             = true,
+                  SizeType chunk_nsamps     = 0,
+                  SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     ~FDMT();
     FDMT(FDMT&&) noexcept;
@@ -638,6 +660,18 @@ public:
      * @brief Size (in floats) of this instance's "valid"-mode streaming
      * history state, as used by save_history()/load_history(). Zero for
      * "full"/"roll" mode instances.
+     *
+     * Off the skewed-window path the layout is the same on every backend: a
+     * 16-word header (magic, version, layout hash, stream position), then
+     * the level-0 input history and the tree history (each merge's slot,
+     * oldest sample first).
+     *
+     * On the CPU skewed-window path (plans whose tree history exceeds the
+     * memory budget) the size follows the input seen so far: while only
+     * packed 8- or 16-bit blocks have arrived the raw input ring is saved at
+     * that width (about a third of the float size for 8-bit input); after a
+     * float block, or before any input, it is the float size. Query it when
+     * saving; load_history() accepts either layout.
      */
     [[nodiscard]] SizeType history_state_size() const noexcept;
 
@@ -657,13 +691,19 @@ public:
 
     /**
      * @brief Replaces this instance's current "valid"-mode streaming history
-     * with a host buffer previously produced by save_history() (from an
-     * instance with the same backend and plan geometry; the layout differs
-     * between backends), resuming that stream. Use reset_history() instead to
-     * start a stream cold.
+     * with a host buffer previously produced by save_history(), resuming
+     * that stream. Off the skewed-window path any backend's buffer is
+     * accepted from an instance with the same plan tree (DM grid), nbeams
+     * and use_box_smearing; chunk length, fusion and threads may differ. A
+     * skewed-window history is accepted only by the same backend and
+     * skewed layout. Use reset_history() instead to start a stream cold (a
+     * zeroed buffer is not a history).
      *
-     * @param in Source span, size must equal history_state_size().
-     * @throws std::invalid_argument if in.size() != history_state_size().
+     * @param in Source span, size must equal history_state_size() (on the
+     * CPU skewed-window path: the size of the saved layout, packed or float).
+     * @throws std::invalid_argument on a size mismatch, or when the header
+     * shows another configuration, another path or no header (nothing is
+     * replaced then).
      */
     void load_history(std::span<const float> in);
 
@@ -675,10 +715,12 @@ public:
     void save_history(DeviceSpan<float> out, Stream stream = {}) const;
 
     /**
-     * @brief Device-memory analogue of load_history() (GPU backends). Fully
-     * asynchronous on @p stream; later work on the same stream sees the
-     * loaded history.
-     * @throws std::invalid_argument on the CPU backend.
+     * @brief Device-memory analogue of load_history() (GPU backends). The
+     * header is copied to the host and checked first, which synchronizes
+     * @p stream; the copy of the history is then asynchronous on it, and
+     * later work on the same stream sees the loaded history.
+     * @throws std::invalid_argument on the CPU backend, and as
+     * load_history().
      */
     void load_history(DeviceSpan<const float> in, Stream stream = {});
 

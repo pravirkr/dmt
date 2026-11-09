@@ -1,3 +1,10 @@
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <random>
+#include <vector>
+
 #include <thrust/device_vector.h>
 
 #include "dmt/engines.hpp"
@@ -203,6 +210,149 @@ TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",
                     gpu_utils::check_gpu_call(cudaStreamDestroy(stream));
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
+          "[gpu][parity][boxcar][kill]") {
+    // 512 channels at depth 1: packed input takes the direct levels and top,
+    // float32 the tree. The mask kills channel 0, a run inside the lower
+    // half and the whole upper half (rows without noise never detect; the
+    // screen thresholds see their sentinels). Killed rows hold the largest
+    // code or a strong float value. Packed candidates are bit-identical,
+    // S/N included; float32 agrees within rounding near the threshold.
+    // Host input and device input on a nondefault stream.
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 512, 256, 455.6e-6F, 300, 0, 1,
+                               "valid", 1);
+    constexpr SizeType kBeams  = 2;
+    constexpr SizeType kBlocks = 3;
+    const SizeType nchans      = plan.get_nchans();
+    std::vector<uint8_t> kill(nchans, 1);
+    kill[0] = 0;
+    std::fill(kill.begin() + 40, kill.begin() + 57, 0);
+    std::fill(kill.begin() + 256, kill.end(), 0);
+    const auto killed_row = [&](SizeType row) {
+        return kill[row % nchans] == 0;
+    };
+    for (const SizeType bits : {SizeType{8}, SizeType{16}, SizeType{32}}) {
+        DYNAMIC_SECTION("bits=" << bits) {
+            const uint32_t maximum = bits == 32 ? 0U : (1U << bits) - 1U;
+            const SizeType nsamps  = plan.get_nsamps();
+            std::mt19937 random(static_cast<uint32_t>(5 + bits));
+            std::normal_distribution<float> normal(0.0F, 1.0F);
+            std::vector<std::vector<uint8_t>> packed(kBlocks);
+            std::vector<std::vector<float>> floats(kBlocks);
+            for (SizeType k = 0; k < kBlocks; ++k) {
+                if (bits == 32) {
+                    floats[k].resize(kBeams * nchans * nsamps);
+                    for (SizeType i = 0; i < floats[k].size(); ++i) {
+                        floats[k][i] =
+                            killed_row(i / nsamps) ? 40.0F : normal(random);
+                    }
+                    continue;
+                }
+                const SizeType bytes = bits / 8;
+                packed[k].resize(kBeams * nchans * nsamps * bytes);
+                for (SizeType i = 0; i < kBeams * nchans * nsamps; ++i) {
+                    const uint32_t v =
+                        killed_row(i / nsamps) ? maximum : random() & maximum;
+                    packed[k][i * bytes] = static_cast<uint8_t>(v);
+                    if (bits == 16) {
+                        packed[k][(i * 2) + 1] = static_cast<uint8_t>(v >> 8U);
+                    }
+                }
+            }
+            BoxcarConfig cfg(24, 1.5F, 3.2F, 1.0F,
+                             PeakFindingMode::kContiguousPeakPerWidth);
+            cfg.max_candidates   = 4000000;
+            cfg.max_cands_per_dm = 0;
+            if (bits != 32) {
+                cfg.input_nbits = bits;
+                cfg.input_mean  = static_cast<float>(maximum) * 0.5F;
+                cfg.noise_sigma = std::sqrt(static_cast<float>(maximum) *
+                                            (maximum + 2.0F) / 12.0F);
+            }
+            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(4), kBeams,
+                             algorithms::kFDMTAutoFuse, 64,
+                             algorithms::kFDMTDefaultMaxMemory, kill);
+            const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+            FDMTBoxcar gpu_s(plan, cfg, true, exec, kBeams,
+                             algorithms::kFDMTAutoFuse, 0,
+                             algorithms::kFDMTDefaultMaxMemory, kill);
+            std::vector<RawCandidate> c;
+            std::vector<RawCandidate> g;
+            for (SizeType k = 0; k < kBlocks; ++k) {
+                if (bits == 32) {
+                    append(c, cpu_s.execute(floats[k]));
+                    append(g, gpu_s.execute(floats[k]));
+                } else {
+                    append(c, cpu_s.execute(packed[k]));
+                    append(g, gpu_s.execute(packed[k]));
+                }
+            }
+            append(c, cpu_s.flush());
+            append(g, gpu_s.flush());
+            REQUIRE_FALSE(c.empty());
+            for (const auto& x : c) {
+                CHECK(x.chan_begin < 256);
+            }
+            const auto check = [&](std::vector<RawCandidate> actual) {
+                if (bits == 32) {
+                    compare_near_threshold(actual, c, cfg.detect_thresh);
+                    return;
+                }
+                compare(actual, c);
+                auto expected = c;
+                sort(actual);
+                sort(expected);
+                for (SizeType i = 0; i < actual.size(); ++i) {
+                    CHECK(actual[i].snr == expected[i].snr);
+                }
+            };
+            check(g);
+            CHECK(gpu_s.get_memory_usage().staging ==
+                  (bits == 32 ? floats.front().size() * sizeof(float)
+                              : packed.front().size()));
+
+            cudaStream_t stream;
+            gpu_utils::check_gpu_call(cudaStreamCreate(&stream));
+            gpu_s.reset_history(Stream{stream});
+            const SizeType size = bits == 32
+                                      ? floats.front().size() * sizeof(float)
+                                      : packed.front().size();
+            thrust::device_vector<uint8_t> device_input(size);
+            auto* ptr = thrust::raw_pointer_cast(device_input.data());
+            std::vector<RawCandidate> d;
+            for (SizeType k = 0; k < kBlocks; ++k) {
+                const void* src =
+                    bits == 32 ? static_cast<const void*>(floats[k].data())
+                               : packed[k].data();
+                gpu_utils::check_gpu_call(cudaMemcpyAsync(
+                    ptr, src, size, cudaMemcpyHostToDevice, stream));
+                if (bits == 32) {
+                    (void)gpu_s.execute(DeviceSpan<const float>(
+                                            reinterpret_cast<const float*>(ptr),
+                                            floats[k].size(),
+                                            {exec.backend, 0}),
+                                        Stream{stream});
+                } else {
+                    (void)gpu_s.execute(
+                        DeviceSpan<const uint8_t>(ptr, size, {exec.backend, 0}),
+                        Stream{stream});
+                }
+                append(d, gpu_s.copy_result(Stream{stream}));
+                // The caller's buffer is not modified.
+                std::vector<uint8_t> back(size);
+                gpu_utils::check_gpu_call(cudaMemcpyAsync(
+                    back.data(), ptr, size, cudaMemcpyDeviceToHost, stream));
+                gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
+                CHECK(std::memcmp(back.data(), src, size) == 0);
+            }
+            (void)gpu_s.flush_device(Stream{stream});
+            append(d, gpu_s.copy_result(Stream{stream}));
+            check(d);
+            gpu_utils::check_gpu_call(cudaStreamDestroy(stream));
         }
     }
 }
