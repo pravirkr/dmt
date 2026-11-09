@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <random>
 #include <span>
 #include <tuple>
@@ -112,6 +114,72 @@ inline void compare_near_threshold(std::vector<RawCandidate> actual,
     }
     // Rounding moves are rare: at most one run in a hundred.
     CHECK(moved * 100 <= expected.size() + 100);
+}
+
+// For FDMT-FFT rows whose values differ by a bound relative to each row's
+// peak (overlap-save segments of other lengths with fractional delays: the
+// kernel truncation, below 0.5% of the peak). Per (beam, plane, DM,
+// filter) row, overlapping runs of both sets form clusters (a point near
+// the threshold may split or join runs); matched clusters' peak S/N agree
+// within frac * the row's peak + abs_tol (S/N units: noise rows differ by
+// a fraction of sigma), and a cluster on one side only peaks within that of
+// the threshold.
+inline void compare_clusters(const std::vector<RawCandidate>& actual,
+                             const std::vector<RawCandidate>& expected,
+                             float threshold,
+                             double frac,
+                             double abs_tol) {
+    using Row =
+        std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>;
+    struct Tagged {
+        Row row;
+        const RawCandidate* c;
+        int side;
+    };
+    std::vector<Tagged> all;
+    for (int side = 0; side < 2; ++side) {
+        for (const auto& c : side == 0 ? actual : expected) {
+            all.push_back({{c.beam_idx, c.subband_level, c.subband_idx,
+                            c.staggered, c.dm_idx, c.filter_idx},
+                           &c,
+                           side});
+        }
+    }
+    std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.row, a.c->begin_sample) <
+               std::tie(b.row, b.c->begin_sample);
+    });
+    SizeType i        = 0;
+    SizeType clusters = 0;
+    while (i < all.size()) {
+        // One row at a time: its peak sets the tolerance.
+        SizeType end    = i;
+        double row_peak = 0;
+        while (end < all.size() && all[end].row == all[i].row) {
+            row_peak = std::max(row_peak, static_cast<double>(all[end].c->snr));
+            ++end;
+        }
+        const double tol = (frac * row_peak) + abs_tol;
+        for (SizeType k = i; k < end;) {
+            uint64_t last  = all[k].c->end_sample;
+            double peak[2] = {0, 0};
+            for (; k < end && all[k].c->begin_sample <= last; ++k) {
+                last              = std::max(last, all[k].c->end_sample);
+                peak[all[k].side] = std::max(
+                    peak[all[k].side], static_cast<double>(all[k].c->snr));
+            }
+            ++clusters;
+            INFO("cluster ending at " << last << ": " << peak[0] << " vs "
+                                      << peak[1] << ", row peak " << row_peak);
+            if (peak[0] > 0 && peak[1] > 0) {
+                CHECK(std::abs(peak[0] - peak[1]) <= tol);
+            } else {
+                CHECK(std::max(peak[0], peak[1]) <= threshold + tol);
+            }
+        }
+        i = end;
+    }
+    CHECK(clusters > 0);
 }
 
 inline void append(std::vector<RawCandidate>& to, CandidateResultView view) {
@@ -246,13 +314,18 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
 
 // Materialize existing FDMT's actual intermediate planes, then evaluate
 // windows by direct float64 summation. No new scorer/prefix helpers used.
+// With a kill mask the FDMT sees the killed channels as zero and the windows
+// use the masked search planes.
 inline std::vector<RawCandidate>
 reference(const plans::FDMTPlan& plan,
           const BoxcarConfig& config,
           bool smear,
           SizeType beams,
-          const std::vector<std::vector<float>>& input) {
-    FDMTBoxcar metadata(plan, config, smear, Exec::cpu(), beams);
+          const std::vector<std::vector<float>>& input,
+          std::span<const uint8_t> kill = {}) {
+    FDMTBoxcar metadata(plan, config, smear, Exec::cpu(), beams,
+                        algorithms::kFDMTAutoFuse, 0,
+                        algorithms::kFDMTDefaultMaxMemory, kill);
     const auto planes = metadata.get_search_plans();
     std::vector<std::vector<float>> rows;
     SizeType nrows = 0;
@@ -262,7 +335,15 @@ reference(const plans::FDMTPlan& plan,
     rows.resize(nrows);
     FDMT fdmt(plan, smear, Exec::cpu(), beams, 0, false, plan.get_nsamps());
     std::vector<float> output(beams * plan.get_dmt_size());
-    for (const auto& block : input) {
+    for (auto block : input) {
+        for (SizeType c = 0; c < kill.size(); ++c) {
+            for (SizeType b = 0; b < beams && kill[c] == 0; ++b) {
+                std::fill_n(block.begin() + static_cast<std::ptrdiff_t>(
+                                                ((b * plan.get_nchans()) + c) *
+                                                plan.get_nsamps()),
+                            plan.get_nsamps(), 0.0F);
+            }
+        }
         fdmt.reset(block, output);
         SizeType index = 0;
         for (const auto& p : planes) {
@@ -290,7 +371,8 @@ batched_reference(const plans::FDMTPlan& plan,
                   const BoxcarConfig& config,
                   bool smear,
                   SizeType beams,
-                  const std::vector<std::vector<float>>& input) {
+                  const std::vector<std::vector<float>>& input,
+                  std::span<const uint8_t> kill = {}) {
     std::vector<RawCandidate> expected;
     const SizeType size = plan.get_nchans() * plan.get_nsamps();
     for (SizeType b = 0; b < beams; ++b) {
@@ -299,7 +381,7 @@ batched_reference(const plans::FDMTPlan& plan,
             beam[k].assign(input[k].begin() + b * size,
                            input[k].begin() + (b + 1) * size);
         }
-        auto candidates = reference(plan, config, smear, 1, beam);
+        auto candidates = reference(plan, config, smear, 1, beam, kill);
         for (auto& c : candidates) {
             c.beam_idx = static_cast<uint32_t>(b);
         }

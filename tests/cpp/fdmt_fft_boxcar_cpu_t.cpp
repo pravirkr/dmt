@@ -4,6 +4,8 @@
 #include <random>
 #include <vector>
 
+#include <catch2/matchers/catch_matchers_string.hpp>
+
 #include "dmt/engines.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
@@ -366,5 +368,59 @@ TEST_CASE("FDMTFFTBoxcar drain() searches the last latency samples",
         }
         append(again, search.drain());
         compare(again, drained);
+    }
+}
+
+TEST_CASE("FDMTFFTBoxcar memory budget shortens the segments",
+          "[boxcar][budget][cpu]") {
+    // Under a budget below the unconstrained instance the segments are
+    // shortened until it fits. With integer delays the candidates agree with
+    // the unconstrained run to float rounding; with fractional delays the
+    // kernel tail beyond the guard changes with the transform length, which
+    // moves a row by up to 0.5% of its peak plus a few hundredths of sigma
+    // (0.026 on this test's noise rows; up to about 0.08 on larger
+    // configurations) and can split or join runs near the threshold
+    // (compare_clusters). A budget below the shortest segment throws.
+    // 256 channels, so that the transform's buffers dominate the fixed
+    // candidate and boxcar ones.
+    const plans::FDMTPlan plan(1100, 1500, 256, 8192, 0.001F,
+                               std::vector<IndexType>{0, 9, 33, 71, 120});
+    const auto input = waterfalls(plan, 1, 2);
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 16;
+    cfg.wtsp             = 1.5F;
+    cfg.detect_thresh    = 3.5F;
+    cfg.max_candidates   = 20000;
+    cfg.max_cands_per_dm = 0;
+    for (const bool frac : {true, false}) {
+        DYNAMIC_SECTION("fractional=" << frac) {
+            FDMTFFTBoxcar open(plan, cfg, true, Exec::cpu(2), 1, frac);
+            const SizeType full   = open.get_memory_usage().total();
+            const SizeType budget = full * 6 / 10;
+            FDMTFFTBoxcar capped(plan, cfg, true, Exec::cpu(2), 1, frac, {},
+                                 budget);
+            CHECK(capped.get_memory_usage().total() <= budget);
+            CHECK(capped.get_chunk_nsamps() < open.get_chunk_nsamps());
+            std::vector<RawCandidate> a;
+            std::vector<RawCandidate> b;
+            for (const auto& block : input) {
+                append(a, open.execute(block));
+                append(b, capped.execute(block));
+            }
+            append(a, open.drain());
+            append(b, capped.drain());
+            // Everything the search allocates was counted at construction.
+            CHECK(capped.get_memory_usage().total() <= budget);
+            REQUIRE(a.size() > 20);
+            if (frac) {
+                compare_clusters(b, a, cfg.detect_thresh, 5e-3, 0.05);
+            } else {
+                compare_near_threshold(b, a, cfg.detect_thresh);
+            }
+            CHECK_THROWS_WITH(
+                FDMTFFTBoxcar(plan, cfg, true, Exec::cpu(), 1, frac, {},
+                              SizeType{1} << 10),
+                Catch::Matchers::ContainsSubstring("max_memory_bytes"));
+        }
     }
 }

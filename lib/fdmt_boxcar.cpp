@@ -1,12 +1,16 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_drain.hpp"
 #include "dmt/fdmt_int_tree.hpp"
@@ -22,12 +26,15 @@ public:
          SizeType beams,
          SizeType fuse,
          SizeType chunk,
-         SizeType max_memory)
+         SizeType max_memory,
+         std::span<const uint8_t> kill)
         : plan(std::move(plan)),
           config(config),
           exec(exec),
           beams(beams),
-          planes(detail::make_boxcar_plans(this->plan, config, smear)) {
+          // Validates the mask's size; killed channels leave the noise model.
+          planes(detail::make_boxcar_plans(this->plan, config, smear, kill)),
+          kill_runs(detail::boxcar_kill_runs(kill)) {
         if (beams == 0 || beams > UINT32_MAX ||
             beams >
                 SIZE_MAX / this->plan.get_nchans() / this->plan.get_nsamps()) {
@@ -89,13 +96,15 @@ public:
         if (ex.backend == Backend::kCPU) {
             return detail::make_fdmt_boxcar_cpu(
                 plan, config, planes, cfg,
-                detail::make_boxcar_driver(detail::make_fdmt_cpu(plan, cfg)));
+                detail::make_boxcar_driver(detail::make_fdmt_cpu(plan, cfg)),
+                kill_runs);
         }
 #ifdef DMT_ENABLE_GPU
         if (ex.backend == detail::kGPUBackend) {
             return detail::make_fdmt_boxcar_gpu(
                 plan, config, planes, cfg,
-                detail::make_boxcar_driver(detail::make_fdmt_gpu(plan, cfg)));
+                detail::make_boxcar_driver(detail::make_fdmt_gpu(plan, cfg)),
+                kill_runs);
         }
 #endif
         detail::throw_unavailable("FDMTBoxcar", ex.backend);
@@ -130,9 +139,18 @@ public:
                                         : sizeof(double) + sizeof(uint64_t)));
         const SizeType row_table = rows * sizeof(detail::BoxcarRow) *
                                    (ex.backend == Backend::kCPU ? 1 : 2);
+        // A kill mask zeroes its channels in a staging copy of each block.
+        const SizeType staging =
+            kill_runs.empty()
+                ? 0
+                : beams * plan.get_nchans() *
+                      (config.input_nbits == 32
+                           ? plan.get_nsamps() * sizeof(float)
+                           : bit_pack_utils::packed_row_bytes(
+                                 plan.get_nsamps(), config.input_nbits));
         return (rows * width * carry_elem) +
                (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
-               row_table;
+               row_table + staging;
     }
     void check_stream(Stream stream) const {
         if (exec.backend == Backend::kCPU && stream.native) {
@@ -145,6 +163,7 @@ public:
     Exec exec;
     SizeType beams;
     std::vector<plans::BoxcarPlanePlan> planes;
+    std::vector<std::pair<SizeType, SizeType>> kill_runs;
     std::unique_ptr<detail::FDMTBoxcarEngine> engine;
     detail::DrainState drain_state;
 };
@@ -156,7 +175,8 @@ FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
                        SizeType beams,
                        SizeType fuse,
                        SizeType chunk,
-                       SizeType max_memory)
+                       SizeType max_memory,
+                       std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
                                     smear,
@@ -164,7 +184,8 @@ FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
                                     beams,
                                     fuse,
                                     chunk,
-                                    max_memory)) {}
+                                    max_memory,
+                                    kill_mask)) {}
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;
 FDMTBoxcar& FDMTBoxcar::operator=(FDMTBoxcar&&) noexcept = default;

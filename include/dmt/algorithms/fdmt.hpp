@@ -661,6 +661,11 @@ public:
      * history state, as used by save_history()/load_history(). Zero for
      * "full"/"roll" mode instances.
      *
+     * Off the skewed-window path the layout is the same on every backend: a
+     * 16-word header (magic, version, layout hash, stream position), then
+     * the level-0 input history and the tree history (each merge's slot,
+     * oldest sample first).
+     *
      * On the CPU skewed-window path (plans whose tree history exceeds the
      * memory budget) the size follows the input seen so far: while only
      * packed 8- or 16-bit blocks have arrived the raw input ring is saved at
@@ -686,14 +691,19 @@ public:
 
     /**
      * @brief Replaces this instance's current "valid"-mode streaming history
-     * with a host buffer previously produced by save_history() (from an
-     * instance with the same backend and plan geometry; the layout differs
-     * between backends), resuming that stream. Use reset_history() instead to
-     * start a stream cold.
+     * with a host buffer previously produced by save_history(), resuming
+     * that stream. Off the skewed-window path any backend's buffer is
+     * accepted from an instance with the same plan tree (DM grid), nbeams
+     * and use_box_smearing; chunk length, fusion and threads may differ. A
+     * skewed-window history is accepted only by the same backend and
+     * skewed layout. Use reset_history() instead to start a stream cold (a
+     * zeroed buffer is not a history).
      *
      * @param in Source span, size must equal history_state_size() (on the
      * CPU skewed-window path: the size of the saved layout, packed or float).
-     * @throws std::invalid_argument on a size or layout mismatch.
+     * @throws std::invalid_argument on a size mismatch, or when the header
+     * shows another configuration, another path or no header (nothing is
+     * replaced then).
      */
     void load_history(std::span<const float> in);
 
@@ -705,10 +715,12 @@ public:
     void save_history(DeviceSpan<float> out, Stream stream = {}) const;
 
     /**
-     * @brief Device-memory analogue of load_history() (GPU backends). Fully
-     * asynchronous on @p stream; later work on the same stream sees the
-     * loaded history.
-     * @throws std::invalid_argument on the CPU backend.
+     * @brief Device-memory analogue of load_history() (GPU backends). The
+     * header is copied to the host and checked first, which synchronizes
+     * @p stream; the copy of the history is then asynchronous on it, and
+     * later work on the same stream sees the loaded history.
+     * @throws std::invalid_argument on the CPU backend, and as
+     * load_history().
      */
     void load_history(DeviceSpan<const float> in, Stream stream = {});
 

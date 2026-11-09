@@ -17,8 +17,8 @@
 
 #include "test_helpers.hpp"
 
-// Skewed-window GPU path (fdmt_cuda.cu: skewed direct levels, batched mid
-// levels and the target-ring direct top). Small plans take the unskewed
+// Skewed-window GPU path (fdmt_cuda_direct.cu: skewed direct levels, batched
+// mid levels and the target-ring direct top). Small plans take the unskewed
 // direct top, so the engines here force the skewed path
 // (FDMTEngineConfig::force_skewed_direct) and check that they took it.
 

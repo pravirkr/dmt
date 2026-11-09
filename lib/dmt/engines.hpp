@@ -8,6 +8,7 @@
 // Device-memory entry points have throwing defaults, so a host-only engine
 // (the CPU) implements only the host half.
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -364,7 +365,24 @@ struct FDMTFFTEngineConfig {
     bool fractional_delays{true};
     // Per channel, 1 = keep (empty: keep all); killed channels read as zero.
     std::vector<uint8_t> kill_mask{};
+    // Longest overlap-save transform execute() may use (0: no cap); with
+    // the fft_segment_cap() testing hook the smaller one applies. The
+    // FDMTFFTBoxcar memory budget sets it.
+    SizeType max_segment{0};
+    // The engine drives a boxcar search (execute_search()): allocate the
+    // search's row buffer at construction, so memory_usage() is complete
+    // before the first block (the budget compares against it).
+    bool search{false};
 };
+
+/// The smaller of two segment caps, 0 meaning none.
+[[nodiscard]] constexpr SizeType combine_segment_caps(SizeType a,
+                                                      SizeType b) noexcept {
+    if (a == 0 || b == 0) {
+        return a + b;
+    }
+    return std::min(a, b);
+}
 
 class FDMTFFTEngine {
 public:

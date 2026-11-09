@@ -47,7 +47,7 @@ __global__ __launch_bounds__(kPrefixThreads) void kernel_direct_prefix(
     int pitch) {
     // TP: float, or uint32_t for packed input (exact integer sums; the
     // engine checks (window + chunk) * maxval fits).
-    constexpr int kWarp    = 32;
+    constexpr int kWarp    = gpu_compat::kLogicalWarp;
     constexpr int kSegment = kPrefixThreads * kPrefixRun;
     constexpr int kWarps   = kPrefixThreads / kWarp;
     __shared__ TP seg[kSegment];
@@ -86,7 +86,7 @@ __global__ __launch_bounds__(kPrefixThreads) void kernel_direct_prefix(
         TP incl = run;
 #pragma unroll
         for (int o = 1; o < kWarp; o <<= 1) {
-            const TP u = __shfl_up_sync(0xffffffffU, incl, o);
+            const TP u = gpu_compat::shfl_up(incl, o);
             if (lane >= o) {
                 incl += u;
             }
@@ -143,7 +143,7 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level(
     // uint32_t / uint64_t rows; integer sums are exact.
     extern __shared__ __align__(16) unsigned char smem_bytes[];
     TP* smem               = reinterpret_cast<TP*>(smem_bytes);
-    constexpr int kWarp    = 32;
+    constexpr int kWarp    = gpu_compat::kLogicalWarp;
     constexpr int kPer     = kDirectTile / kWarp;
     constexpr int kRows    = kDirectRowsPerWarp * kDirectWarps;
     const FDMTDirectSub sb = subs[blockIdx.y];
@@ -350,7 +350,7 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level_skewed(
                   "packed rounding: uint32 sums and rows, float output");
     extern __shared__ __align__(16) unsigned char smem_bytes[];
     TP* smem               = reinterpret_cast<TP*>(smem_bytes);
-    constexpr int kWarp    = 32;
+    constexpr int kWarp    = gpu_compat::kLogicalWarp;
     constexpr int kPer     = kDirectTile / kWarp;
     const FDMTDirectSub sb = subs[blockIdx.x];
     const int t0           = static_cast<int>(blockIdx.y) * kDirectTile;
@@ -426,7 +426,7 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level_skewed(
                 TP v          = idx < width ? s[idx] : TP{0};
 #pragma unroll
                 for (int o = 1; o < kWarp; o <<= 1) {
-                    const TP u = __shfl_up_sync(0xffffffffU, v, o);
+                    const TP u = gpu_compat::shfl_up(v, o);
                     if (lane >= o) {
                         v += u;
                     }
@@ -435,7 +435,7 @@ __global__ __launch_bounds__(kDirectWarps * 32) void kernel_direct_level_skewed(
                 if (idx < width) {
                     s[idx] = v;
                 }
-                carry = __shfl_sync(0xffffffffU, v, kWarp - 1);
+                carry = gpu_compat::shfl(v, kWarp - 1);
             }
         }
         __syncthreads();
@@ -613,7 +613,7 @@ __global__ __launch_bounds__(256) void kernel_direct_top_ring(
     int nrows,
     uint64_t pos,
     int active) {
-    constexpr int kWarp    = 32;
+    constexpr int kWarp    = gpu_compat::kLogicalWarp;
     constexpr int kSegment = 256;
     const int lane         = static_cast<int>(threadIdx.x) % kWarp;
     const int r =

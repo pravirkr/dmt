@@ -40,6 +40,11 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
         }
         w = std::max(w + 1, static_cast<SizeType>(std::ceil(next)));
     }
+    // The bank ends on max_width: the widest box searched is the one asked
+    // for, even when the geometric steps stop below it.
+    if (widths.back() < max_width) {
+        widths.push_back(static_cast<uint32_t>(max_width));
+    }
     return widths;
 }
 

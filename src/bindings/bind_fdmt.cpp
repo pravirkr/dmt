@@ -656,6 +656,9 @@ void bind_fdmt(py::module_& mod) {
             R"doc(
         Save the internal streaming history state into a 1D float32 NumPy array.
         Enables time-multiplexing multiple beams or sub-streams on a single FDMT instance.
+        Off the skewed-window path the layout is the same on every backend:
+        a 16-word header (magic, version, layout hash, stream position), then
+        the level-0 input history and the tree history.
         )doc")
         .def(
             "load_history",
@@ -675,6 +678,9 @@ void bind_fdmt(py::module_& mod) {
             py::arg("history"),
             R"doc(
         Restore previously saved streaming history state from a 1D float32 NumPy array.
+        Raises ValueError when the header shows a different configuration (DM
+        grid or tree, nbeams, use_box_smearing), the skewed-window path, or no
+        header (a zeroed array is not a history: use reset_history()).
         )doc");
 
     py::class_<FDMTFFT>(mod, "FDMTFFT", py::dynamic_attr(),

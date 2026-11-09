@@ -135,15 +135,24 @@ fdmt.load_history(std::span<const float>(beam0));
 
 The saved state is only the small history (`history_state_size()` floats),
 not the engine's working buffers, so one engine can serve many streams with
-the same plan. On the CPU it holds the level-0 input history, then the tree
-history, each node's slot oldest sample first. On a GPU it lives in device
-memory. The C++ `DeviceSpan` overloads are asynchronous on the given stream,
-and the host overloads copy synchronously. A saved history belongs to the
-backend that wrote it, because the layouts differ. Plans large enough to
-run on the [skewed-window path](skewed_window_fdmt.md) save that engine's
-own, much smaller state, which only an engine with the same skewed layout
-accepts (same plan and `chunk_nsamps`, on the CPU also the same thread
-count); a mismatched buffer raises. On the CPU that state keeps 8- and
+the same plan. It starts with a 16-word header (a magic number, the format
+version, a hash of the layout and the stream position), followed by the
+level-0 input history and then the tree history, each node's slot oldest
+sample first. The layout is the same on the CPU and on a GPU, so a stream
+saved on one continues on the other. Chunk length, fusion depth and thread
+count do not change it. `load_history()` checks the header and raises
+(`std::invalid_argument`, `ValueError` in Python) on a buffer saved by an
+engine with a different DM grid or tree, beam count or box smearing, by the
+skewed-window path, or without a header: a zeroed buffer, or one saved
+before 0.8. Start a new stream with `reset_history()`, not with a zeroed
+buffer. On a GPU the history lives in device memory. The C++ `DeviceSpan`
+overloads are asynchronous on the given stream, except that
+`load_history()` first copies the header to the host to check it; the host
+overloads copy synchronously. Plans large enough to run on the
+[skewed-window path](skewed_window_fdmt.md) save that engine's own, much
+smaller state, specific to its backend, which only an engine with the same
+skewed layout accepts (same plan and `chunk_nsamps`, on the CPU also the
+same thread count); a mismatched buffer raises. On the CPU that state keeps 8- and
 16-bit input at its own width (three 8-bit samples per float word) while
 only packed blocks have arrived, so its size follows the input: ask
 `history_state_size()` when saving (the Python `save_history()` does), not

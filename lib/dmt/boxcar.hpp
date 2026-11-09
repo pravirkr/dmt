@@ -7,6 +7,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
@@ -25,6 +26,24 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                   bool smear,
                   std::span<const uint8_t> kill_mask = {},
                   uint64_t extra_warmup              = 0);
+
+/// Channels whose input FDMTBoxcar zeroes (kill_mask[c] == 0), as runs
+/// [begin, end) of consecutive channels; none for an empty mask.
+[[nodiscard]] inline std::vector<std::pair<SizeType, SizeType>>
+boxcar_kill_runs(std::span<const uint8_t> kill_mask) {
+    std::vector<std::pair<SizeType, SizeType>> runs;
+    for (SizeType c = 0; c < kill_mask.size(); ++c) {
+        if (kill_mask[c] != 0) {
+            continue;
+        }
+        if (!runs.empty() && runs.back().second == c) {
+            ++runs.back().second;
+        } else {
+            runs.emplace_back(c, c + 1);
+        }
+    }
+    return runs;
+}
 
 /**
  * @brief A group of the width screen: consecutive widths [w_lo, w_hi] with
@@ -348,17 +367,22 @@ public:
 };
 
 /// The boxcar engines own `driver`, which calls them back per chunk.
+/// Input rows of the `kill_runs` channels (boxcar_kill_runs()) are zeroed
+/// in a staging copy of each block before the driver reads it (FDMTBoxcar's
+/// kill mask; FDMT-FFT drivers mask inside the transform and pass none).
 std::unique_ptr<FDMTBoxcarEngine>
 make_fdmt_boxcar_cpu(const plans::FDMTPlan&,
                      const BoxcarConfig&,
                      const std::vector<plans::BoxcarPlanePlan>&,
                      const FDMTEngineConfig&,
-                     std::unique_ptr<BoxcarDriver> driver);
+                     std::unique_ptr<BoxcarDriver> driver,
+                     std::vector<std::pair<SizeType, SizeType>> kill_runs = {});
 std::unique_ptr<FDMTBoxcarEngine>
 make_fdmt_boxcar_gpu(const plans::FDMTPlan&,
                      const BoxcarConfig&,
                      const std::vector<plans::BoxcarPlanePlan>&,
                      const FDMTEngineConfig&,
-                     std::unique_ptr<BoxcarDriver> driver);
+                     std::unique_ptr<BoxcarDriver> driver,
+                     std::vector<std::pair<SizeType, SizeType>> kill_runs = {});
 
 } // namespace dmt::algorithms::detail

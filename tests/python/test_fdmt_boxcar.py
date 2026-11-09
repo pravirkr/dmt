@@ -212,3 +212,205 @@ def test_constructor_calibrates_unsigned_codes() -> None:
     width4 = candidates[(candidates["dm_idx"] == 0) & (candidates["width"] == 4)]
     assert len(width4) == 61
     np.testing.assert_allclose(width4["snr"], 4, rtol=1e-6)
+
+
+def run(search: FDMTBoxcar, blocks: list[np.ndarray]) -> np.ndarray:
+    parts = [search.execute(block).candidates for block in blocks]
+    parts.append(search.flush().candidates)
+    return sorted_candidates(parts)
+
+
+def assert_same(a: np.ndarray, b: np.ndarray) -> None:
+    assert len(a) == len(b)
+    for name in a.dtype.names:
+        np.testing.assert_array_equal(a[name], b[name])
+
+
+def test_kill_mask_zeroes_channels_and_masks_the_noise() -> None:
+    rng = np.random.default_rng(5)
+    samples = 256
+    plan = FDMTPlan(700, 1200, 8, samples, 0.001, dt_grid=[0, 5, 17], subband_depth=1)
+    kill = [1, 0, 1, 1, 0, 0, 0, 0]
+    keep = np.array(kill, dtype=bool)
+    clean = [
+        np.round(rng.standard_normal((8, samples), dtype=np.float32) * 16) / 16
+        for _ in range(3)
+    ]
+    for block in clean:
+        block[~keep] = 0
+    dirty = [block.copy() for block in clean]
+    for block in dirty:
+        block[~keep] = 30
+    masked = FDMTBoxcar(plan, config(), kill_mask=kill)
+    as_array = FDMTBoxcar(plan, config(), kill_mask=keep)
+    got = run(masked, dirty)
+    assert len(got) > 0
+    # Killed channels are never seen: zeroing them gives the same search.
+    assert_same(got, run(as_array, clean))
+    # Rows of the killed upper half have no noise and never detect.
+    assert np.all(got["chan_begin"] < 4)
+    for p in masked.search_plans:
+        for f, width in enumerate(p.widths):
+            var = plan.get_subband_variance_grid(
+                p.level, p.subband_idx, width, kill_mask=kill
+            )
+            inv = np.asarray(p.inv_sigma_lut).reshape(-1, len(p.widths))[:, f]
+            live = var > 0
+            np.testing.assert_allclose(1 / inv[live] ** 2, var[live], rtol=1e-5)
+            assert np.all(inv[~live] == 0)
+    assert masked.memory_usage.staging == 8 * samples * 4
+    assert FDMTBoxcar(plan, config()).memory_usage.staging == 0
+    # The noise model differs from the unmasked search's.
+    unmasked = FDMTBoxcar(plan, config())
+    assert (
+        masked.search_plans[-1].inv_sigma_lut != unmasked.search_plans[-1].inv_sigma_lut
+    )
+    with pytest.raises(ValueError, match="kill mask"):
+        FDMTBoxcar(plan, config(), kill_mask=[1] * 7)
+    with pytest.raises(TypeError, match="bool or integer"):
+        FDMTBoxcar(plan, config(), kill_mask=np.ones(8, dtype=np.float32))
+
+
+def test_kill_mask_pulse_snr() -> None:
+    # A pulse of amplitude a in every channel at DM 0 scores a sqrt(N - k)
+    # with k channels killed, a sqrt(N) unmasked.
+    plan = FDMTPlan(700, 1200, 8, 512, 0.001, dt_grid=[0, 3, 9])
+    cfg = BoxcarConfig(max_boxcar=1, detect_thresh=2)
+    data = np.zeros((8, 512), np.float32)
+    data[:, 300] = 4
+    kill = [1, 1, 0, 1, 1, 1, 0, 1]
+
+    def root_snr(search: FDMTBoxcar) -> float:
+        c = search.execute(data).candidates
+        c = c[(c["dm_idx"] == 0) & (c["subband_level"] == 0)]
+        assert np.all(c["peak_sample"] == 300)
+        return float(c["snr"].max())
+
+    np.testing.assert_allclose(
+        root_snr(FDMTBoxcar(plan, cfg, kill_mask=kill)), 4 * np.sqrt(6), rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        root_snr(FDMTBoxcar(plan, cfg)), 4 * np.sqrt(8), rtol=1e-6
+    )
+
+
+@pytest.mark.parametrize("bits", [8, 32])
+def test_kill_mask_gpu_matches_cpu(gpu_backend: str, bits: int) -> None:
+    rng = np.random.default_rng(9)
+    samples = 733
+    plan = FDMTPlan(
+        700, 1200, 7, samples, 0.001, dt_grid=[-73, -12, 0, 4, 97], subband_depth=2
+    )
+    kill = np.array([0, 1, 1, 0, 1, 1, 1], dtype=np.uint8)
+    cfg = config()
+    blocks = []
+    if bits == 8:
+        cfg.input_nbits = 8
+        cfg.input_mean = 127.5
+        cfg.noise_sigma = np.sqrt(255 * 257 / 12)
+        for _ in range(3):
+            codes = rng.integers(0, 256, (7, samples), dtype=np.uint8)
+            codes[kill == 0] = 255
+            blocks.append(codes)
+    else:
+        for _ in range(3):
+            data = np.round(rng.standard_normal((7, samples), dtype=np.float32) * 16)
+            data /= 16
+            data[kill == 0] = 30
+            data[1:3, 320:340] += 4
+            blocks.append(data)
+    cpu = run(FDMTBoxcar(plan, cfg, chunk_nsamps=64, kill_mask=kill), blocks)
+    gpu = run(
+        FDMTBoxcar(plan, cfg, chunk_nsamps=64, kill_mask=kill, backend=gpu_backend),
+        blocks,
+    )
+    assert len(cpu) > 0
+    if bits == 8:
+        assert_same(gpu, cpu)
+        return
+    for name in cpu.dtype.names:
+        if name == "snr":
+            np.testing.assert_allclose(gpu[name], cpu[name], rtol=2e-5)
+        else:
+            np.testing.assert_array_equal(gpu[name], cpu[name])
+
+
+def test_drain_searches_the_skewed_tail() -> None:
+    # On the skewed-window path (forced by a budget below the tree path's)
+    # subband rows lag the input by up to search_latency samples: flush()
+    # leaves the stream's tail unsearched, drain() searches it and then
+    # agrees with the tree path on every candidate; the stream then refuses
+    # blocks until reset_history().
+    rng = np.random.default_rng(5)
+    nchans, nsamps, nblocks = 1152, 4096, 2
+    n = nsamps * nblocks
+    plan = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, subband_depth=1)
+    codes = rng.integers(0, 216, (nchans, n), dtype=np.uint8)
+    codes[600:1100, n - 12 : n - 6] += 40
+    blocks = [
+        np.ascontiguousarray(codes[:, k * nsamps : (k + 1) * nsamps])
+        for k in range(nblocks)
+    ]
+    cfg = BoxcarConfig(
+        17,
+        wtsp=1.5,
+        detect_thresh=5.5,
+        noise_sigma=float(np.sqrt((216**2 - 1) / 12)),
+        input_nbits=8,
+        input_mean=107.5,
+    )
+    found = {}
+    for end in ("flush", "drain"):
+        search = FDMTBoxcar(plan, cfg, nthreads=4, max_memory_bytes=75 << 20)
+        latency = search.search_latency
+        assert latency > 0
+        parts = [search.execute(block).candidates for block in blocks]
+        assert search.searched_nsamps == n - latency
+        parts.append(getattr(search, end)().candidates)
+        found[end] = sorted_candidates(parts)
+        if end == "drain":
+            assert search.searched_nsamps == n
+            assert (found[end]["end_sample"] < n).all()
+            with pytest.raises(RuntimeError, match="drained"):
+                search.execute(blocks[0])
+            search.reset_history()
+            assert search.searched_nsamps == 0
+    tree = FDMTBoxcar(plan, cfg, nthreads=4)
+    assert tree.search_latency == 0
+    expected = run(tree, blocks)
+    assert_same(found["drain"], expected)
+    assert len(found["flush"]) < len(found["drain"])
+
+
+def test_drain_contract_on_the_gpu(gpu_backend: str) -> None:
+    # The GPU searches this plan on its direct path (search_latency 0; its
+    # windowed top, which lags, is covered by the C++ [skew] tests): drain()
+    # ends the stream with the CPU tree path's candidates, bit for bit on
+    # packed input, and the stream then refuses blocks.
+    rng = np.random.default_rng(6)
+    nchans, nsamps = 1152, 4096
+    plan = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, subband_depth=1)
+    codes = rng.integers(0, 216, (nchans, 2 * nsamps), dtype=np.uint8)
+    codes[600:1100, -12:-6] += 40
+    blocks = [
+        np.ascontiguousarray(codes[:, k * nsamps : (k + 1) * nsamps]) for k in range(2)
+    ]
+    cfg = BoxcarConfig(
+        17,
+        wtsp=1.5,
+        detect_thresh=5.5,
+        noise_sigma=float(np.sqrt((216**2 - 1) / 12)),
+        input_nbits=8,
+        input_mean=107.5,
+    )
+    gpu = FDMTBoxcar(plan, cfg, backend=gpu_backend)
+    parts = [gpu.execute(block).candidates for block in blocks]
+    parts.append(gpu.drain().candidates)
+    assert gpu.searched_nsamps == 2 * nsamps
+    with pytest.raises(RuntimeError, match="drained"):
+        gpu.execute(blocks[0])
+    gpu.reset_history()
+    assert gpu.searched_nsamps == 0
+    expected = run(FDMTBoxcar(plan, cfg, nthreads=4), blocks)
+    assert len(expected) > 0
+    assert_same(sorted_candidates(parts), expected)

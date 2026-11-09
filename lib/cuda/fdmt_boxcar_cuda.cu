@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -24,7 +25,7 @@ namespace dmt::algorithms::detail {
 namespace {
 
 constexpr int kItems = 4;
-constexpr int kWarp  = 32; // Logical warp; a 64-wide wavefront holds two.
+constexpr int kWarp = gpu_compat::kLogicalWarp; // a 64-lane wavefront holds two
 // Width and threshold tables are staged in shared memory up to this count;
 // longer tables are read through the cache.
 constexpr SizeType kSharedFilters = 512;
@@ -38,11 +39,7 @@ template <typename T, int kBlockThreads> struct BoxcarShared {
 };
 
 template <typename T> DMT_D T shfl_up(T value, int delta) {
-#if defined(DMT_ENABLE_HIP)
-    return __shfl_up(value, delta, kWarp);
-#else
-    return __shfl_up_sync(0xFFFFFFFFU, value, delta);
-#endif
+    return gpu_compat::shfl_up(value, static_cast<unsigned>(delta));
 }
 
 DMT_D uint64_t increment(uint64_t* count) {
@@ -879,7 +876,8 @@ public:
                          const BoxcarConfig& config,
                          const std::vector<plans::BoxcarPlanePlan>& planes,
                          const FDMTEngineConfig& cfg,
-                         std::unique_ptr<BoxcarDriver> driver)
+                         std::unique_ptr<BoxcarDriver> driver,
+                         std::vector<std::pair<SizeType, SizeType>> kill_runs)
         : m_plan(plan),
           m_config(config),
           m_planes(planes),
@@ -899,7 +897,20 @@ public:
             throw std::invalid_argument(
                 "FDMTBoxcar: GPU search extent exceeds limits");
         }
-        m_driver = std::move(driver);
+        m_driver    = std::move(driver);
+        m_kill_runs = std::move(kill_runs);
+        if (!m_kill_runs.empty()) {
+            // The staging block the killed rows are zeroed in.
+            if (config.input_nbits == 32) {
+                m_input_d.resize(m_beams * plan.get_nchans() *
+                                 plan.get_nsamps());
+            } else {
+                m_packed_input.resize(
+                    m_beams * plan.get_nchans() *
+                    bit_pack_utils::packed_row_bytes(plan.get_nsamps(),
+                                                     config.input_nbits));
+            }
+        }
         std::vector<float> thresholds, scales;
         SizeType row_offset = 0;
         for (const auto& p : planes) {
@@ -1043,7 +1054,7 @@ public:
         }
         validate_input(waterfall.size());
         begin_result(m_plan.get_nsamps(), queue);
-        m_driver->search(waterfall, *this, queue);
+        m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
         m_position += m_plan.get_nsamps();
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
@@ -1068,7 +1079,8 @@ public:
                                       Stream queue) override {
         validate_packed(waterfall.size());
         begin_result(m_plan.get_nsamps(), queue);
-        m_driver->search(waterfall, m_config.input_nbits, *this, queue);
+        m_driver->search(masked(waterfall, m_packed_input, queue),
+                         m_config.input_nbits, *this, queue);
         m_position += m_plan.get_nsamps();
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
@@ -1359,6 +1371,35 @@ private:
             configure_shared_block<T, 256>(limit);
         }
     }
+    /// The block with the killed channels' rows zeroed in `buffer` (copied
+    /// there first unless the host path staged it there), or the block
+    /// itself without a kill mask.
+    template <typename T>
+    DeviceSpan<const T> masked(DeviceSpan<const T> block,
+                               thrust::device_vector<T>& buffer,
+                               Stream queue) const {
+        if (m_kill_runs.empty()) {
+            return block;
+        }
+        const auto stream = static_cast<cudaStream_t>(queue.native);
+        T* dst            = raw(buffer);
+        if (block.data() != dst) {
+            // The previous block's search may still read the buffer.
+            m_work.order(stream);
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(dst, block.data(), block.size_bytes(),
+                                cudaMemcpyDeviceToDevice, stream));
+        }
+        const SizeType nchans = m_plan.get_nchans();
+        const SizeType row    = block.size_bytes() / (m_beams * nchans);
+        for (const auto& [c0, c1] : m_kill_runs) {
+            // Channels [c0, c1) of every beam: rows nchans rows apart.
+            gpu_utils::check_gpu_call(cudaMemset2DAsync(
+                reinterpret_cast<std::byte*>(dst) + (c0 * row), nchans * row, 0,
+                (c1 - c0) * row, m_beams, stream));
+        }
+        return {dst, block.size(), block.device};
+    }
     void validate_packed(SizeType size) const {
         if (m_config.input_nbits == 32 ||
             size != m_beams * m_plan.get_nchans() *
@@ -1411,6 +1452,8 @@ private:
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
+    /// Killed channel runs, zeroed in m_input_d / m_packed_input.
+    std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
     std::vector<LevelGroup> m_level_groups;
     thrust::device_vector<BoxcarRow> m_rows_d;
     thrust::device_vector<uint32_t> m_widths_d;
@@ -1449,8 +1492,9 @@ make_fdmt_boxcar_gpu(const plans::FDMTPlan& plan,
                      const BoxcarConfig& config,
                      const std::vector<plans::BoxcarPlanePlan>& planes,
                      const FDMTEngineConfig& cfg,
-                     std::unique_ptr<BoxcarDriver> driver) {
-    return std::make_unique<FDMTBoxcarCudaEngine>(plan, config, planes, cfg,
-                                                  std::move(driver));
+                     std::unique_ptr<BoxcarDriver> driver,
+                     std::vector<std::pair<SizeType, SizeType>> kill_runs) {
+    return std::make_unique<FDMTBoxcarCudaEngine>(
+        plan, config, planes, cfg, std::move(driver), std::move(kill_runs));
 }
 } // namespace dmt::algorithms::detail

@@ -44,17 +44,27 @@ struct BoxcarConfig {
           input_mean(input_mean),
           use_trapezoid(use_trapezoid) {}
 
-    SizeType max_boxcar       = 4096;
+    /// Widest box searched, 1..4096; always the last width of the bank.
+    SizeType max_boxcar = 4096;
+    /// Width spacing >= 1: from 1, next = max(w + 1, ceil(w * wtsp)) while
+    /// it is <= max_boxcar, then max_boxcar when the steps stop below it
+    /// (plans::generate_box_width_trials).
     float wtsp                = 2.0F;
     float detect_thresh       = 6.0F;
     float noise_sigma         = 1.0F;
     PeakFindingMode peak_mode = PeakFindingMode::kContiguousPeakPerWidth;
     SizeType max_candidates   = 131072;
     SizeType max_cands_per_dm = 4096; ///< Per plane/beam/DM/call; 0 disables.
-    bool skip_cold_prefix     = true;
-    SizeType input_nbits = 32;    ///< 32: float32; otherwise packed 1/2/4/8/16.
-    float input_mean     = 0.0F;  ///< Common mean in input code units.
-    bool use_trapezoid   = false; ///< Half-weight edge taper for widths >= 3.
+    /// Default true: a window reaching before the row's cold support
+    /// (warmup_samples) sums an incomplete sweep, whose S/N the noise model
+    /// does not describe, so it is not searched.
+    bool skip_cold_prefix = true;
+    SizeType input_nbits  = 32;   ///< 32: float32; otherwise packed 1/2/4/8/16.
+    float input_mean      = 0.0F; ///< Common mean in input code units.
+    /// Half-weight edge taper for widths >= 3, replacing the boxcar there.
+    /// Default false (boxcar-only); searching trapezoids alongside the
+    /// boxcars would come as a separate option.
+    bool use_trapezoid = false;
 };
 
 /**

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -37,7 +38,8 @@ public:
                         const BoxcarConfig& config,
                         const std::vector<plans::BoxcarPlanePlan>& planes,
                         const FDMTEngineConfig& cfg,
-                        std::unique_ptr<BoxcarDriver> driver)
+                        std::unique_ptr<BoxcarDriver> driver,
+                        std::vector<std::pair<SizeType, SizeType>> kill_runs)
         : m_plan(plan),
           m_config(config),
           m_planes(planes),
@@ -51,7 +53,25 @@ public:
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1),
-          m_driver(std::move(driver)) {
+          m_driver(std::move(driver)),
+          m_kill_runs(std::move(kill_runs)) {
+        if (!m_kill_runs.empty()) {
+            m_killed.assign(plan.get_nchans(), 0);
+            for (const auto& [c0, c1] : m_kill_runs) {
+                std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
+                          m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
+                          1);
+            }
+            if (config.input_nbits == 32) {
+                m_masked.resize(m_beams * plan.get_nchans() *
+                                plan.get_nsamps());
+            } else {
+                m_masked_packed.resize(
+                    m_beams * plan.get_nchans() *
+                    bit_pack_utils::packed_row_bytes(plan.get_nsamps(),
+                                                     config.input_nbits));
+            }
+        }
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count) {
             throw std::invalid_argument("FDMTBoxcar: history size overflow");
@@ -125,7 +145,7 @@ public:
                 "FDMTBoxcar: stream sample index overflow");
         }
         begin_result(m_plan.get_nsamps());
-        m_driver->search(waterfall, *this);
+        m_driver->search(masked(waterfall, m_masked), *this);
         m_position += m_plan.get_nsamps();
         return view();
     }
@@ -147,7 +167,8 @@ public:
                 "FDMTBoxcar: stream sample index overflow");
         }
         begin_result(m_plan.get_nsamps());
-        m_driver->search(waterfall, m_config.input_nbits, *this);
+        m_driver->search(masked(waterfall, m_masked_packed),
+                         m_config.input_nbits, *this);
         m_position += m_plan.get_nsamps();
         return view();
     }
@@ -279,7 +300,9 @@ public:
                               m_best.size() * sizeof(float) +
                               m_best_filter.size() * sizeof(uint32_t) +
                               m_per_dm.size() * sizeof(uint64_t),
-                .candidates = m_candidates.size() * sizeof(RawCandidate)};
+                .candidates = m_candidates.size() * sizeof(RawCandidate),
+                .staging =
+                    (m_masked.size() * sizeof(float)) + m_masked_packed.size()};
     }
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
@@ -904,6 +927,31 @@ private:
         }
     }
 
+    /// The block with the killed channels' rows zeroed (in `buffer`), or
+    /// the block itself without a kill mask. Rows are copied in parallel:
+    /// the copy is bound by memory bandwidth.
+    template <typename T>
+    std::span<const T> masked(std::span<const T> block,
+                              std::vector<T>& buffer) const {
+        if (m_kill_runs.empty()) {
+            return block;
+        }
+        const SizeType nchans = m_plan.get_nchans();
+        const SizeType rows   = m_beams * nchans;
+        const SizeType row    = block.size() / rows;
+        const T* src          = block.data();
+        T* dst                = buffer.data();
+#pragma omp parallel for num_threads(m_threads) schedule(static)
+        for (SizeType r = 0; r < rows; ++r) {
+            if (m_killed[r % nchans] != 0) {
+                std::fill_n(dst + (r * row), row, T{0});
+            } else {
+                std::copy_n(src + (r * row), row, dst + (r * row));
+            }
+        }
+        return buffer;
+    }
+
     const plans::FDMTPlan& m_plan;
     BoxcarConfig m_config;
     const std::vector<plans::BoxcarPlanePlan>& m_planes;
@@ -915,6 +963,11 @@ private:
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
+    /// Killed channel runs and the staging block they are zeroed in.
+    std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
+    std::vector<uint8_t> m_killed; ///< per channel, 1 = killed
+    std::vector<float> m_masked;
+    std::vector<uint8_t> m_masked_packed;
     std::vector<SizeType> m_offsets;
     /// Row range [first, second) of each level's planes, and each row's plane.
     std::vector<std::pair<SizeType, SizeType>> m_level_rows;
@@ -950,9 +1003,10 @@ make_fdmt_boxcar_cpu(const plans::FDMTPlan& plan,
                      const BoxcarConfig& config,
                      const std::vector<plans::BoxcarPlanePlan>& planes,
                      const FDMTEngineConfig& cfg,
-                     std::unique_ptr<BoxcarDriver> driver) {
-    return std::make_unique<FDMTBoxcarCpuEngine>(plan, config, planes, cfg,
-                                                 std::move(driver));
+                     std::unique_ptr<BoxcarDriver> driver,
+                     std::vector<std::pair<SizeType, SizeType>> kill_runs) {
+    return std::make_unique<FDMTBoxcarCpuEngine>(
+        plan, config, planes, cfg, std::move(driver), std::move(kill_runs));
 }
 
 } // namespace dmt::algorithms::detail

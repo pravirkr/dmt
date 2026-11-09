@@ -6,6 +6,8 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-09
+
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
   depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
   boundaries between that depth's `2**k` tree subbands. Each costs one extra
@@ -87,6 +89,15 @@ All notable changes to `dmt` are listed here. The format follows
   `reset_history()`. New: `get_searched_nsamps()` (`searched_nsamps`), the
   stream samples every row has searched, and
   `FDMTBoxcar::get_search_latency()` (`search_latency`).
+- **Kill mask on `FDMTBoxcar`**, as on `FDMTFFTBoxcar`: a construction-time
+  `kill_mask` (C++: trailing `std::span<const uint8_t>` constructor argument
+  after `max_memory_bytes`; Python: keyword-only `kill_mask=`). Killed
+  channels read as zero (code 0 for packed input) and leave every row's
+  noise model and packed mean, so S/N stays calibrated on the remaining
+  channels; zeroing channels upstream instead overestimates sigma by
+  `sqrt(N / (N - k))`. Each block is copied once to a staging buffer to zero
+  them (`memory_usage.staging`, within `max_memory_bytes`); without a mask
+  nothing changes. CPU and GPU agree bit for bit on packed input.
 
 ## [0.7.0] - 2026-11-03
 
@@ -151,5 +162,7 @@ their changes are included here.
 
 - FDMT on the CPU (`FDMTCPU`) and GPU (`FDMTGPU`) with Python bindings.
 
+[Unreleased]: https://github.com/pravirkr/dmt/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/pravirkr/dmt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pravirkr/dmt/compare/v0.2.0...v0.7.0
 [0.2.0]: https://github.com/pravirkr/dmt/releases/tag/v0.2.0

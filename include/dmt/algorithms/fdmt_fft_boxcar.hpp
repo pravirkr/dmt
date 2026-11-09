@@ -35,6 +35,19 @@ namespace dmt::algorithms {
  * blocks; at end of stream drain() searches the last latency samples and
  * emits them (flush() only emits). Host calls block; device
  * calls are asynchronous on the given stream. Not safe for concurrent calls.
+ *
+ * Memory: max_memory_bytes (default kFDMTDefaultMaxMemory, 10 GiB) bounds
+ * everything the instance allocates (get_memory_usage().total()), as on
+ * FDMTBoxcar. Over it, the overlap-save segments are shortened (each try
+ * halves the transform length; get_chunk_nsamps() reports the segment) until
+ * the instance fits. Construction throws std::invalid_argument, naming the
+ * budget and the memory at the shortest segment, when nothing fits. Shorter
+ * segments change the rows as the block size does: by float rounding with
+ * integer delays; with fractional delays every segment still keeps the
+ * support behind and the 64-sample guard ahead of each output, and only the
+ * interpolation kernel's tail beyond the guard changes with the transform
+ * length (a few hundredths of sigma on noise rows, so near-threshold runs
+ * can split or join; see the Fourier variants page of the pipeline guide).
  */
 class FDMTFFTBoxcar {
 public:
@@ -44,7 +57,8 @@ public:
                            Exec exec                          = {},
                            SizeType nbeams                    = 1,
                            bool fractional_delays             = true,
-                           std::span<const uint8_t> kill_mask = {});
+                           std::span<const uint8_t> kill_mask = {},
+                           SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
     ~FDMTFFTBoxcar();
     FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept;
     FDMTFFTBoxcar& operator=(FDMTFFTBoxcar&&) noexcept;

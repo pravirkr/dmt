@@ -32,7 +32,8 @@ struct FDMTBoxcarMemoryUsage {
  * Input is finite float32, (nbeams, nchans, nsamps), low frequency first,
  * normalized to zero mean and known common noise sigma. Analytical S/N
  * assumes independent channel/time noise before the modeled FDMT filtering;
- * masking or additional correlations require upstream calibration.
+ * masking other than kill_mask (below) or additional correlations require
+ * upstream calibration.
  * For packed unsigned input set config.input_nbits (1/2/4/8/16), input_mean
  * and noise_sigma in code units, and execute byte spans. Packed rows follow
  * FDMT byte order with independent row padding; 32 denotes float32 input.
@@ -65,6 +66,16 @@ struct FDMTBoxcarMemoryUsage {
  * the dispersion delay from the subband to the bottom of the band (that of
  * the full-band search, get_search_latency()); flush() adds no samples,
  * so at end of stream call drain(), which searches those samples too.
+ *
+ * Kill mask: kill_mask is empty (keep every channel) or has nchans entries,
+ * low frequency first; channels with kill_mask[c] == 0 read as zero (code
+ * 0 for packed input) and are left out of every row's noise model and
+ * packed mean, so S/N stays calibrated on the remaining channels (a pulse
+ * scores the S/N of its signal in them). Zeroing channels upstream instead
+ * leaves sigma too high by
+ * sqrt(N / (N - k)). The mask is fixed at construction; a new mask needs a
+ * new instance. Each block is copied to a staging buffer to zero its killed
+ * rows (counted in get_memory_usage().staging and the memory budget).
  */
 class FDMTBoxcar {
 public:
@@ -75,7 +86,8 @@ public:
                         SizeType nbeams           = 1,
                         SizeType fuse_levels      = kFDMTAutoFuse,
                         SizeType chunk_nsamps     = 0,
-                        SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+                        SizeType max_memory_bytes = kFDMTDefaultMaxMemory,
+                        std::span<const uint8_t> kill_mask = {});
     ~FDMTBoxcar();
     FDMTBoxcar(FDMTBoxcar&&) noexcept;
     FDMTBoxcar& operator=(FDMTBoxcar&&) noexcept;

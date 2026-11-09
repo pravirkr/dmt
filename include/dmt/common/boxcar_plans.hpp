@@ -7,7 +7,9 @@
 
 namespace dmt::plans {
 
-/// Widths begin at 1; each next width is max(w + 1, ceil(w * wtsp)).
+/// Widths begin at 1; each next width is max(w + 1, ceil(w * wtsp)) while it
+/// does not exceed max_width, and max_width ends the bank when the steps stop
+/// below it (9 at wtsp 2: 1, 2, 4, 8, 9).
 [[nodiscard]] std::vector<uint32_t>
 generate_box_width_trials(SizeType max_width, float wtsp);
 

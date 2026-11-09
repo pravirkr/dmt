@@ -1,5 +1,12 @@
+#include <algorithm>
 #include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <random>
+#include <span>
+#include <vector>
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
@@ -10,10 +17,15 @@
 using namespace boxcar_test;
 
 TEST_CASE("Boxcar width generation and validation", "[boxcar][cpu]") {
+    // Geometric widths, then max_width itself when the steps stop below it.
     CHECK(plans::generate_box_width_trials(9, 2) ==
-          std::vector<uint32_t>{1, 2, 4, 8});
+          std::vector<uint32_t>{1, 2, 4, 8, 9});
     CHECK(plans::generate_box_width_trials(9, 1.5) ==
-          std::vector<uint32_t>{1, 2, 3, 5, 8});
+          std::vector<uint32_t>{1, 2, 3, 5, 8, 9});
+    CHECK(plans::generate_box_width_trials(8, 2) ==
+          std::vector<uint32_t>{1, 2, 4, 8});
+    CHECK(plans::generate_box_width_trials(1, 2) == std::vector<uint32_t>{1});
+    CHECK(plans::generate_box_width_trials(219, 2).back() == 219);
     CHECK(plans::generate_box_width_trials(4096, 1).size() == 4096);
     for (const float invalid :
          {0.0F, 0.9F, std::bit_cast<float>(uint32_t{0x7F800000U}),
@@ -1034,4 +1046,272 @@ TEST_CASE("FDMTBoxcar drain() ends the stream", "[boxcar][cpu]") {
     }
     append(again, drained.drain());
     compare(again, a);
+}
+
+namespace {
+
+// Rows of the killed channels of every beam and block set to `value`.
+template <typename T>
+void fill_killed(std::vector<std::vector<T>>& blocks,
+                 std::span<const uint8_t> kill,
+                 SizeType beams,
+                 SizeType row,
+                 T value) {
+    for (auto& block : blocks) {
+        for (SizeType b = 0; b < beams; ++b) {
+            for (SizeType c = 0; c < kill.size(); ++c) {
+                if (kill[c] == 0) {
+                    std::fill_n(block.begin() +
+                                    static_cast<std::ptrdiff_t>(
+                                        ((b * kill.size()) + c) * row),
+                                row, value);
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("FDMTBoxcar kill mask reads killed channels as zero",
+          "[boxcar][kill][cpu]") {
+    // Killed channels hold a strong signal that must not be seen; the search
+    // equals the FDMT of the input with those channels zeroed, windowed
+    // with the masked noise model. The second mask kills a whole half band:
+    // its rows have no noise and never detect.
+    const plans::FDMTPlan plan(700, 1200, 8, 96, 0.001F,
+                               std::vector<IndexType>{0, 5, 17, 40}, "valid",
+                               1);
+    const auto input = waterfalls(plan, 2, 3);
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 12;
+    cfg.wtsp             = 1.5F;
+    cfg.detect_thresh    = 2.5F;
+    cfg.max_candidates   = 200000;
+    cfg.max_cands_per_dm = 0;
+    const std::vector<uint8_t> scattered{1, 0, 1, 1, 1, 1, 0, 0};
+    const std::vector<uint8_t> upper_half{1, 1, 1, 1, 0, 0, 0, 0};
+    for (const bool half : {false, true}) {
+        const auto& kill = half ? upper_half : scattered;
+        DYNAMIC_SECTION("upper_half=" << half) {
+            auto dirty = input;
+            fill_killed<float>(dirty, kill, 2, plan.get_nsamps(), 50.0F);
+            const auto expected =
+                batched_reference(plan, cfg, true, 2, input, kill);
+            REQUIRE_FALSE(expected.empty());
+            for (const SizeType chunk : {SizeType{32}, SizeType{0}}) {
+                FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 2,
+                                  algorithms::kFDMTAutoFuse, chunk,
+                                  algorithms::kFDMTDefaultMaxMemory, kill);
+                std::vector<RawCandidate> actual;
+                for (const auto& block : dirty) {
+                    append(actual, search.execute(block));
+                }
+                append(actual, search.flush());
+                compare(actual, expected);
+                CHECK(search.get_memory_usage().staging ==
+                      dirty.front().size() * sizeof(float));
+            }
+            // The noise model is the plan's, with the same mask.
+            FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 2,
+                              algorithms::kFDMTAutoFuse, 0,
+                              algorithms::kFDMTDefaultMaxMemory, kill);
+            bool silent = false;
+            for (const auto& p : search.get_search_plans()) {
+                for (SizeType f = 0; f < p.widths.size(); ++f) {
+                    const auto var = plan.get_subband_variance_grid(
+                        p.level, p.subband_idx, p.widths[f], true, kill);
+                    const auto full = plan.get_subband_variance_grid(
+                        p.level, p.subband_idx, p.widths[f], true);
+                    for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
+                        const SizeType i = (d * p.widths.size()) + f;
+                        CAPTURE(p.level, p.subband_idx, d, f);
+                        CHECK(var[d] <= full[d]);
+                        if (var[d] == 0) {
+                            silent = true;
+                            CHECK(p.inv_sigma_lut[i] == 0);
+                            CHECK(p.raw_thresh_lut[i] ==
+                                  std::numeric_limits<float>::max());
+                            continue;
+                        }
+                        const double inv = p.inv_sigma_lut[i];
+                        CHECK_THAT(1.0 / (inv * inv),
+                                   Catch::Matchers::WithinRel(
+                                       static_cast<double>(var[d]), 1e-5));
+                    }
+                }
+            }
+            CHECK(silent == half);
+            if (half) {
+                for (const auto& c : expected) {
+                    CHECK(c.chan_begin < 4);
+                }
+            }
+        }
+    }
+    FDMTBoxcar unmasked(plan, cfg, true, Exec::cpu(), 2);
+    CHECK(unmasked.get_memory_usage().staging == 0);
+    const std::vector<uint8_t> wrong(7, 1);
+    CHECK_THROWS_AS(FDMTBoxcar(plan, cfg, true, Exec::cpu(), 1,
+                               algorithms::kFDMTAutoFuse, 0,
+                               algorithms::kFDMTDefaultMaxMemory, wrong),
+                    std::invalid_argument);
+}
+
+TEST_CASE("Packed FDMTBoxcar kill mask reads killed channels as code zero",
+          "[boxcar][kill][packed][cpu]") {
+    // Killed rows hold the largest code; the packed search ignores them and
+    // leaves them out of the mean, so it equals the centred float search
+    // with those channels zeroed.
+    const plans::FDMTPlan plan(700, 1200, 7, 139, 0.001F,
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
+    constexpr SizeType beams  = 2;
+    constexpr SizeType blocks = 3;
+    const std::vector<uint8_t> kill{0, 1, 1, 0, 1, 1, 1};
+    for (const SizeType bits : {SizeType{2}, SizeType{8}}) {
+        DYNAMIC_SECTION("bits=" << bits) {
+            const uint32_t maximum   = (1U << bits) - 1;
+            const float mean         = static_cast<float>(maximum) * 0.5F;
+            const auto maxf          = static_cast<float>(maximum);
+            const float sigma        = std::sqrt(maxf * (maxf + 2.0F) / 12.0F);
+            const SizeType row_bytes = ((plan.get_nsamps() * bits) + 7) / 8;
+            std::vector<std::vector<uint8_t>> packed(
+                blocks,
+                std::vector<uint8_t>(beams * plan.get_nchans() * row_bytes));
+            std::vector<std::vector<float>> centered(
+                blocks, std::vector<float>(beams * plan.get_nchans() *
+                                           plan.get_nsamps()));
+            std::mt19937 random(7);
+            for (SizeType k = 0; k < blocks; ++k) {
+                for (SizeType row = 0; row < beams * plan.get_nchans(); ++row) {
+                    for (SizeType t = 0; t < plan.get_nsamps(); ++t) {
+                        const auto value = random() & maximum;
+                        centered[k][(row * plan.get_nsamps()) + t] =
+                            static_cast<float>(value) - mean;
+                        for (SizeType bit = 0; bit < bits; ++bit) {
+                            const SizeType offset = (t * bits) + bit;
+                            packed[k][(row * row_bytes) + (offset / 8)] |=
+                                ((value >> bit) & 1U) << (offset % 8);
+                        }
+                    }
+                }
+            }
+            fill_killed<uint8_t>(packed, kill, beams, row_bytes, 0xFF);
+            BoxcarConfig cfg;
+            cfg.max_boxcar       = 37;
+            cfg.wtsp             = 1.5F;
+            cfg.detect_thresh    = 2.713F;
+            cfg.noise_sigma      = sigma;
+            cfg.max_candidates   = 200000;
+            cfg.max_cands_per_dm = 0;
+            const auto expected =
+                batched_reference(plan, cfg, true, beams, centered, kill);
+            REQUIRE_FALSE(expected.empty());
+            cfg.input_nbits = bits;
+            cfg.input_mean  = mean;
+            FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), beams,
+                              algorithms::kFDMTAutoFuse, 64,
+                              algorithms::kFDMTDefaultMaxMemory, kill);
+            std::vector<RawCandidate> actual;
+            for (const auto& block : packed) {
+                append(actual, search.execute(block));
+            }
+            append(actual, search.flush());
+            compare(actual, expected);
+            CHECK(search.get_memory_usage().staging == packed.front().size());
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar kill mask keeps scores calibrated",
+          "[boxcar][kill][cpu]") {
+    // Gaussian noise: the masked scores have unit variance. A pulse of
+    // amplitude a in every channel at DM 0 scores a sqrt(N - k) with k
+    // channels killed; zeroing them upstream without a mask scores
+    // a (N - k) / sqrt(N), lower by sqrt(N / (N - k)).
+    const SizeType samples = 32768;
+    const SizeType nchans  = 8;
+    const plans::FDMTPlan plan(700, 1200, nchans, samples, 0.001F,
+                               std::vector<IndexType>{-20, 0, 19}, "valid", 1);
+    const std::vector<uint8_t> kill{1, 1, 0, 1, 1, 1, 0, 1};
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 7;
+    FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 1,
+                      algorithms::kFDMTAutoFuse, 0,
+                      algorithms::kFDMTDefaultMaxMemory, kill);
+    FDMT fdmt(plan, true, {}, 1, 0, false, samples);
+    std::mt19937 random(33);
+    std::normal_distribution<float> noise;
+    std::vector<float> input(nchans * samples), output(plan.get_dmt_size());
+    for (SizeType c = 0; c < nchans; ++c) {
+        for (SizeType t = 0; t < samples; ++t) {
+            input[(c * samples) + t] = kill[c] != 0 ? noise(random) : 0.0F;
+        }
+    }
+    fdmt.reset(input, output);
+    for (const auto& p : search.get_search_plans()) {
+        fdmt.advance_until_remaining(p.subband_level);
+        const auto values = fdmt.view_subband(p.subband_idx).data;
+        for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
+            for (SizeType f = 0; f < p.widths.size(); ++f) {
+                const SizeType first = p.warmup_samples[d] + p.widths[f] - 1;
+                double sum = 0, square = 0;
+                const SizeType count = samples - first;
+                for (SizeType t = first; t < samples; ++t) {
+                    double value = 0;
+                    for (SizeType k = 0; k < p.widths[f]; ++k) {
+                        value += values[(d * samples) + t - k];
+                    }
+                    value *= p.inv_sigma_lut[(d * p.widths.size()) + f];
+                    sum += value;
+                    square += value * value;
+                }
+                const double mean = sum / static_cast<double>(count);
+                CAPTURE(p.subband_level, p.subband_idx, d, f);
+                CHECK(std::abs(mean) < 0.08);
+                CHECK(std::abs((square / static_cast<double>(count)) -
+                               (mean * mean) - 1.0) < 0.08);
+            }
+        }
+    }
+    fdmt.finalize();
+
+    const plans::FDMTPlan pulse_plan(700, 1200, nchans, 512, 0.001F,
+                                     std::vector<IndexType>{0, 3, 9});
+    BoxcarConfig pulse_cfg;
+    pulse_cfg.max_boxcar    = 1;
+    pulse_cfg.detect_thresh = 2;
+    constexpr float kAmp    = 4;
+    std::vector<float> pulse(nchans * 512, 0.0F);
+    std::vector<float> zeroed(nchans * 512, 0.0F);
+    for (SizeType c = 0; c < nchans; ++c) {
+        pulse[(c * 512) + 300] = kAmp;
+        if (kill[c] != 0) {
+            zeroed[(c * 512) + 300] = kAmp;
+        }
+    }
+    const auto root_snr = [](CandidateResultView view) {
+        float best = 0;
+        for (const auto& c : view.candidates) {
+            if (c.dm_idx == 0 && c.subband_level == 0) {
+                CHECK(c.peak_sample == 300);
+                best = std::max(best, c.snr);
+            }
+        }
+        return best;
+    };
+    FDMTBoxcar masked(pulse_plan, pulse_cfg, true, Exec::cpu(), 1,
+                      algorithms::kFDMTAutoFuse, 0,
+                      algorithms::kFDMTDefaultMaxMemory, kill);
+    FDMTBoxcar unmasked(pulse_plan, pulse_cfg);
+    const double n = nchans;
+    const double k = 2;
+    CHECK_THAT(root_snr(masked.execute(pulse)),
+               Catch::Matchers::WithinRel(kAmp * std::sqrt(n - k), 1e-6));
+    CHECK_THAT(root_snr(unmasked.execute(pulse)),
+               Catch::Matchers::WithinRel(kAmp * std::sqrt(n), 1e-6));
+    unmasked.reset_history();
+    CHECK_THAT(root_snr(unmasked.execute(zeroed)),
+               Catch::Matchers::WithinRel(kAmp * (n - k) / std::sqrt(n), 1e-6));
 }

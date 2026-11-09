@@ -116,7 +116,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("staging", &FDMTBoxcarMemoryUsage::staging)
         .def_property_readonly("total", &FDMTBoxcarMemoryUsage::total);
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
-            "max_width"_a, "wtsp"_a = 2.0F);
+            "max_width"_a, "wtsp"_a = 2.0F, R"doc(
+        Boxcar widths searched for max_boxcar=max_width and this wtsp.
+
+        From 1, each next width is max(w + 1, ceil(w * wtsp)) while it does
+        not exceed max_width; max_width ends the bank when the steps stop
+        below it (9 at wtsp 2: 1, 2, 4, 8, 9).
+        )doc");
     py::class_<FDMTBoxcar>(mod, "FDMTBoxcar", R"doc(
         Streaming valid-mode FDMT and analytical boxcar detection.
 
@@ -145,23 +151,31 @@ void bind_fdmt_boxcar(py::module_& mod) {
         per-row latency of up to the dispersion delay to the bottom of the
         band, so the final such samples of a stream are searched only if it
         continues. Raises ``ValueError`` when nothing fits.
+
+        ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
+        channel, low frequency first. Channels with 0 read as zero (code 0
+        for packed input) and are left out of every row's noise model, so
+        S/N stays calibrated on the remaining channels. Fixed at
+        construction; each block is copied once to zero them.
         )doc")
-        .def(py::init(
-                 [](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
-                    int nthreads, SizeType nbeams, std::optional<SizeType> fuse,
-                    std::optional<SizeType> chunk, std::string_view backend,
-                    int device, SizeType max_memory_bytes) {
-                     return FDMTBoxcar(std::move(plan), config, smear,
-                                       make_exec(backend, nthreads, device),
-                                       nbeams,
-                                       fuse.value_or(algorithms::kFDMTAutoFuse),
-                                       chunk.value_or(0), max_memory_bytes);
-                 }),
+        .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
+                         int nthreads, SizeType nbeams,
+                         std::optional<SizeType> fuse,
+                         std::optional<SizeType> chunk,
+                         std::string_view backend, int device,
+                         SizeType max_memory_bytes, const py::object& kill) {
+                 const auto mask = extract_kill_mask(kill);
+                 return FDMTBoxcar(std::move(plan), config, smear,
+                                   make_exec(backend, nthreads, device), nbeams,
+                                   fuse.value_or(algorithms::kFDMTAutoFuse),
+                                   chunk.value_or(0), max_memory_bytes, mask);
+             }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
              "chunk_nsamps"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
              "device"_a           = 0,
-             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+             "kill_mask"_a        = py::none())
         .def(
             "execute",
             [](FDMTBoxcar& search, const py::array& input) {
@@ -283,20 +297,27 @@ void bind_fdmt_boxcar(py::module_& mod) {
         by output_latency samples; candidate sample indices are input-stream
         indices, comparable with FDMTBoxcar's. Channels with kill_mask 0 read
         as zero and are excluded from the noise model.
+
+        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds everything
+        the instance allocates (:attr:`memory_usage`), as on FDMTBoxcar:
+        over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
+        until it fits. Raises ``ValueError`` when even the shortest segment
+        does not fit.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
                          const py::object& kill, std::string_view backend,
-                         int device) {
+                         int device, SizeType max_memory_bytes) {
                  const auto mask = extract_kill_mask(kill);
                  return FDMTFFTBoxcar(std::move(plan), config, smear,
                                       make_exec(backend, nthreads, device),
-                                      nbeams, frac, mask);
+                                      nbeams, frac, mask, max_memory_bytes);
              }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
              "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-             "device"_a = 0)
+             "device"_a           = 0,
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
         .def(
             "execute",
             [](FDMTFFTBoxcar& search, const py::array& input) {

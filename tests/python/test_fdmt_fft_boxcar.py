@@ -19,8 +19,14 @@ GRID = list(range(0, 120, 3))
 
 
 def backends() -> list[str]:
+    # The GPU backend only with a device for it (conftest's probe), so these
+    # cases skip, rather than fail, on a GPU build without a GPU.
+    try:
+        from .conftest import _usable
+    except ImportError:
+        from conftest import _usable
     names = ["cpu"]
-    names += [b for b in ("cuda", "hip") if b in dmtlib.available_backends()]
+    names += [b for b in ("cuda", "hip") if _usable(b)]
     return names
 
 
@@ -75,10 +81,13 @@ def test_noise_follows_the_analytical_scale() -> None:
     assert fraction == pytest.approx(0.1587, abs=0.01)
 
 
-def match_runs(got: np.ndarray, ref: np.ndarray, thresh: float, rtol: float) -> None:
+def match_runs(
+    got: np.ndarray, ref: np.ndarray, thresh: float, rtol: float, atol: float = 0.0
+) -> None:
     """Per row, runs of both sets whose extents overlap form a cluster (a
     near-threshold point may split or join runs); each cluster's peak S/N
-    agrees within rtol, and a cluster on one side only is near threshold."""
+    agrees within rtol (plus atol S/N units), and a cluster on one side only
+    is near threshold."""
     row = ("beam_idx", "dm_idx", "filter_idx")
     tagged = [(c, side) for side, cands in ((0, got), (1, ref)) for c in cands]
     tagged.sort(key=lambda x: (*(int(x[0][f]) for f in row), int(x[0]["begin_sample"])))
@@ -95,9 +104,9 @@ def match_runs(got: np.ndarray, ref: np.ndarray, thresh: float, rtol: float) -> 
             clusters.append([key, int(c["end_sample"]), peaks])
     for key, end, (a, b) in clusters:
         if a and b:
-            assert a == pytest.approx(b, rel=rtol), (key, end)
+            assert abs(a - b) <= rtol * abs(b) + atol, (key, end, a, b)
         else:
-            assert max(a, b) < thresh * (1 + rtol), (key, end, a, b)
+            assert max(a, b) < thresh * (1 + rtol) + atol, (key, end, a, b)
 
 
 @pytest.mark.parametrize(("frac", "rtol"), [(False, 1e-4), (True, 0.02)])
@@ -188,3 +197,36 @@ def test_fdmt_boxcar_drain_reports_its_latency() -> None:
     search.execute(np.zeros((NCHANS, NSAMPS), dtype=np.float32))
     assert search.searched_nsamps == NSAMPS
     assert len(search.drain().candidates) == 0
+
+
+@pytest.mark.parametrize("backend", backends())
+def test_memory_budget_shortens_segments(backend: str) -> None:
+    # 256 channels: the transform's buffers dominate the fixed ones.
+    nchans = 256
+    plan = FDMTPlan(1100, 1500, nchans, 4 * NSAMPS, 0.001, dt_grid=GRID)
+    rng = np.random.default_rng(11)
+    data = np.round(rng.standard_normal((nchans, 8 * NSAMPS), dtype=np.float32) * 16)
+    data /= 16
+    config = BoxcarConfig(16, wtsp=1.5, detect_thresh=3.5, max_cands_per_dm=0)
+    config.max_candidates = 20000
+    unbounded = FDMTFFTBoxcar(plan, config, backend=backend)
+    budget = unbounded.memory_usage.total * 6 // 10
+    capped = FDMTFFTBoxcar(plan, config, backend=backend, max_memory_bytes=budget)
+    assert capped.memory_usage.total <= budget
+    assert capped.chunk_nsamps < unbounded.chunk_nsamps
+    found = []
+    for search in (unbounded, capped):
+        parts = [
+            search.execute(data[:, k * 4 * NSAMPS : (k + 1) * 4 * NSAMPS].copy())
+            for k in range(2)
+        ]
+        parts.append(search.drain())
+        found.append(np.concatenate([p.candidates for p in parts]))
+    assert capped.memory_usage.total <= budget  # nothing allocated lazily
+    assert len(found[0]) > 100
+    # Fractional delays: segment edges truncate the interpolation kernel as
+    # block edges do, so the bound of the streaming test applies (2%, plus a
+    # small absolute term for noise peaks).
+    match_runs(found[1], found[0], config.detect_thresh, 0.02, 0.05)
+    with pytest.raises(ValueError, match="max_memory_bytes"):
+        FDMTFFTBoxcar(plan, config, backend=backend, max_memory_bytes=1024)

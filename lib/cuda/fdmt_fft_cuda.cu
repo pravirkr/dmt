@@ -440,6 +440,7 @@ public:
           m_use_box_smearing(cfg.use_box_smearing),
           m_mode(cfg.mode),
           m_frac(cfg.fractional_delays),
+          m_max_segment(cfg.max_segment),
           m_plan(&plan) {
         if (m_nbeams == 0) {
             throw std::invalid_argument("FDMTFFT: nbeams must be positive");
@@ -895,6 +896,7 @@ private:
     bool m_use_box_smearing;
     FDMTMode m_mode;
     bool m_frac;
+    SizeType m_max_segment;        // transform length cap (0: none)
     const plans::FDMTPlan* m_plan; // owned by the FDMTFFT facade
 
     fdmt_fft::Geometry m_geom;
@@ -1052,10 +1054,12 @@ private:
                        m_seg.n_fft, m_seg.nseg, m_geom.n_fft, m_frac, split);
     }
 
-    // Segment length cap: the testing hook, and device memory (execute()
-    // buffers per transform sample within half the free memory).
+    // Segment length cap: the testing hook, the configured cap (memory
+    // budget), and device memory (execute() buffers per transform sample
+    // within half the free memory).
     [[nodiscard]] SizeType segment_cap() const {
-        SizeType cap = detail::fft_segment_cap();
+        SizeType cap = detail::combine_segment_caps(detail::fft_segment_cap(),
+                                                    m_max_segment);
         size_t free  = 0;
         size_t total = 0;
         gpu_utils::check_gpu_call(cudaMemGetInfo(&free, &total),
