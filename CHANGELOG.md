@@ -8,6 +8,21 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **Device arrays in Python (DLPack).** On a GPU backend, `FDMT`, `FDMTFFT`,
+  `DDMT`, `SDMT`, `DDMTFFT` and `CohFDMT` accept PyTorch, CuPy or any other
+  `__dlpack__` array on the engine's device in `execute()` (and
+  `execute_time_major()` for DDMT/SDMT), the FDMT steppers' `reset()`, and
+  `save_history()`/`load_history()`. The arrays are read and written in
+  place: no host round trip and no copy. Results are arrays of the input's
+  library, allocated on the call's stream, or views of a caller's `out=`
+  buffer. Keyword-only `stream=` takes a raw `cudaStream_t`/`hipStream_t`
+  int, a `torch.cuda.Stream` or a `cupy.cuda.Stream`. By default it is the
+  current stream of the input's library. Calls are asynchronous on that
+  stream, and pending producer work is ordered before them through
+  `__dlpack__(stream=...)`. The FDMT steppers' `advance()`,
+  `advance_until_remaining()` and `finalize()` take `stream=` too. The
+  wrong dtype or a non-contiguous array raises `TypeError` and is never
+  converted silently. NumPy input works as before.
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
   depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
   boundaries between that depth's `2**k` tree subbands. Each costs one extra

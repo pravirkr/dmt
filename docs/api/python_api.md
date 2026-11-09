@@ -53,12 +53,46 @@
 Every engine runs on the backend given by its keyword-only `backend=`
 argument (`"cpu"` by default; `"cuda"` or `"hip"` when that backend is in the
 build), with `nthreads` for the CPU and `device` for a GPU.
-`available_backends()` lists the backends in the installed build; asking for any other raises `ValueError`. Inputs and
-outputs are NumPy arrays on every backend: a GPU backend copies the input to
+`available_backends()` lists the backends in the installed build; asking for any other raises `ValueError`. NumPy
+inputs and outputs work on every backend: a GPU backend copies the input to
 the device and the result back, and blocks until it is on the host. The
 stepper's `view_*` methods return host views of the current level (a host
-snapshot on a GPU). Device-memory overloads (`DeviceSpan`) are C++ only for
-now (see the C++ API reference).
+snapshot on a GPU).
+
+On a GPU backend, `execute()` (and DDMT's `execute_time_major()`), the FDMT
+steppers' `reset()`, and `save_history()`/`load_history()` of `FDMT`,
+`FDMTFFT`, `DDMT`, `SDMT`, `DDMTFFT` and `CohFDMT` also take device arrays:
+PyTorch tensors, CuPy arrays, or any other `__dlpack__` array on the engine's
+device. They are read and written in place, without copies:
+
+```python
+import cupy as cp
+
+fdmt = dmtlib.FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max, backend="cuda")
+waterfall = cp.asarray(block)                  # or a torch.cuda tensor
+dmt = fdmt.execute(waterfall)                  # a cupy.ndarray on the GPU
+out = cp.empty(fdmt.plan.dmt_size, cp.float32)
+dmt = fdmt.execute(waterfall, out=out, stream=cp.cuda.Stream())
+```
+
+- **Dtypes.** Device arrays must be C-contiguous and have the exact dtype:
+  float32, packed uint8 with `nbits`, or uint8/int8 baseband for `CohFDMT`.
+  Anything else raises `TypeError`; nothing is converted.
+- **Output.** Without `out=`, the result is a new array from the input's own
+  library (PyTorch or CuPy), allocated on the call's stream from that
+  library's memory pool. With `out=` (a writeable, C-contiguous device array
+  of at least the output size), the result is a view of `out`. Other
+  `__dlpack__` libraries need `out=`.
+- **Streams.** `stream=` (keyword-only) takes a `cudaStream_t`/`hipStream_t`
+  handle as an int, a `torch.cuda.Stream`, a `cupy.cuda.Stream`, or any
+  object with `__cuda_stream__`. The default is the input library's current
+  stream on its device. The call queues its work on that stream after the
+  producers' pending work on the arrays, and returns at once. Synchronize the
+  stream, or keep using it, before reading the result.
+- **Stepper.** After a device `reset()`, `advance()`,
+  `advance_until_remaining()` and `finalize()` keep using the reset's stream
+  unless they get `stream=`, and `finalize()` returns a device view. The
+  `view_*` methods still return host snapshots.
 
 ```{eval-rst}
 .. autofunction:: dmtlib.available_backends

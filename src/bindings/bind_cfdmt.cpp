@@ -16,6 +16,7 @@
 #include "dmt/utils/simulate.hpp"
 
 #include "bindings/bind.hpp"
+#include "dlpack_utils.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -66,17 +67,77 @@ output_buffer(const CohFDMT& coh, const std::optional<py::array>& out) {
     return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
 }
 
+// Device-memory execute(): every group a C-contiguous 1-byte device array on
+// the instance's device; the result is a device array of the first group's
+// library (or a view of `out`).
+py::object coh_execute_device(const CohFDMT& coh,
+                              const std::vector<py::object>& items,
+                              const Device& device,
+                              const py::object& out,
+                              const py::object& stream) {
+    const DeviceCall call = device_call(
+        "CohFDMT.execute", coh.backend(), coh.device(),
+        DeviceArray{.obj = items.front(), .device = device}, stream);
+    std::vector<DLPackTensor> tensors;
+    std::vector<DeviceSpan<const uint8_t>> groups;
+    tensors.reserve(items.size());
+    groups.reserve(items.size());
+    for (const auto& item : items) {
+        auto t           = call.consume(item, "every baseband block");
+        const auto dtype = t.tensor().dtype;
+        if ((dtype.code != kDLUInt && dtype.code != kDLInt) ||
+            dtype.bits != 8 || dtype.lanes != 1) {
+            throw py::type_error(fmt::format(
+                "CohFDMT.execute: baseband blocks must be uint8 or int8 "
+                "arrays (the config's BasebandFormat decides the decoding), "
+                "got {}",
+                dl_dtype_name(dtype)));
+        }
+        if (!t.is_c_contiguous()) {
+            throw py::type_error(
+                "CohFDMT.execute: baseband blocks must be C-contiguous");
+        }
+        groups.push_back(call.span<const uint8_t>(t));
+        tensors.push_back(std::move(t));
+    }
+    const auto& plan = coh.get_plan();
+    auto result      = device_output<float>(
+        call, items.front(), out, {plan.get_ndm(), plan.get_output_nsamps()});
+    {
+        const py::gil_scoped_release release;
+        coh.execute<uint8_t>(std::span<const DeviceSpan<const uint8_t>>(groups),
+                             call.span<float>(result.tensor),
+                             call.native_stream());
+    }
+    return std::move(result.array);
+}
+
 py::object coh_execute(const CohFDMT& coh,
                        const py::object& data,
-                       const std::optional<py::array>& out) {
-    // Keep every group alive (and contiguous) for the call.
-    std::vector<py::array> arrays;
+                       const py::object& out,
+                       const py::object& stream) {
+    std::vector<py::object> items;
     if (py::isinstance<py::list>(data) || py::isinstance<py::tuple>(data)) {
         for (const auto& item : data) {
-            arrays.push_back(py::array::ensure(item));
+            items.push_back(py::reinterpret_borrow<py::object>(item));
         }
     } else {
-        arrays.push_back(py::array::ensure(data));
+        items.push_back(data);
+    }
+    if (!items.empty()) {
+        if (const auto device = gpu_device_of(items.front())) {
+            return coh_execute_device(coh, items, *device, out, stream);
+        }
+    }
+    if (!stream.is_none()) {
+        throw py::type_error("CohFDMT.execute: stream applies to device "
+                             "arrays only, got host data");
+    }
+    // Keep every group alive (and contiguous) for the call.
+    std::vector<py::array> arrays;
+    arrays.reserve(items.size());
+    for (const auto& item : items) {
+        arrays.push_back(py::array::ensure(item));
     }
     std::vector<std::span<const uint8_t>> groups;
     groups.reserve(arrays.size());
@@ -87,7 +148,13 @@ py::object coh_execute(const CohFDMT& coh,
         }
         groups.push_back(byte_view(a));
     }
-    auto buf = output_buffer(coh, out);
+    if (!out.is_none() && !py::isinstance<py::array>(out)) {
+        throw py::type_error("CohFDMT.execute: out must be a NumPy array for "
+                             "host data");
+    }
+    auto buf = output_buffer(
+        coh, out.is_none() ? std::nullopt
+                           : std::optional<py::array>(out.cast<py::array>()));
     {
         const py::gil_scoped_release release;
         coh.execute<uint8_t>(std::span<const std::span<const uint8_t>>(groups),
@@ -330,24 +397,36 @@ void bind_cfdmt(py::module_& mod) {
             "Bytes allocated by the engine, by kind (``output`` is the "
             "caller's result buffer and not part of ``total``).")
         .def("execute", &coh_execute, "data"_a, py::kw_only(),
-             "out"_a = py::none(),
+             "out"_a = py::none(), "stream"_a = py::none(),
              R"doc(
              Search one baseband block.
 
              Parameters
              ----------
-             data : numpy.ndarray or list of numpy.ndarray
+             data : array or list of array
                  C-contiguous uint8/int8 block of ``input_size()`` bytes (any
-                 shape), or one such array per subband group.
-             out : numpy.ndarray, optional
+                 shape), or one such array per subband group. NumPy arrays
+                 work on every backend; on a GPU backend device arrays
+                 (PyTorch, CuPy or any other ``__dlpack__`` array on this
+                 instance's device; all groups alike) are read in place.
+             out : array, optional
                  Keyword-only float32 buffer of at least ``dmt_size``
-                 elements to reuse (else one is allocated).
+                 elements to reuse (else one is allocated): a NumPy array
+                 for host data, a writeable C-contiguous device array for
+                 device data.
+             stream : int or stream, optional
+                 Keyword-only, device data only: ``cudaStream_t`` /
+                 ``hipStream_t`` handle as an int, or a ``torch.cuda.Stream``
+                 / ``cupy.cuda.Stream``. Default: the current stream of the
+                 data's library on its device.
 
              Returns
              -------
-             numpy.ndarray
+             array
                  ``(plan.ndm, plan.output_nsamps)`` float32 view; row i is
-                 DM ``plan.dm_grid_final[i]``.
+                 DM ``plan.dm_grid_final[i]``. For device data, a device
+                 array of the data's (or ``out``'s) library, returned at
+                 once while the search runs asynchronously on ``stream``.
              )doc");
 
     mod.def(
