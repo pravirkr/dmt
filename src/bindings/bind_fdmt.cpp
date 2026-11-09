@@ -40,7 +40,7 @@ std::vector<uint8_t> fft_kill_mask(const py::object& m) {
 // Consumes a device waterfall: float32 (`nbits` unset) or packed uint8, 2D
 // for nbeams == 1 or 3D (beams first).
 template <typename Engine>
-DLPackTensor consume_device_waterfall(const Engine& eng,
+DeviceTensor consume_device_waterfall(const Engine& eng,
                                       const DeviceCall& call,
                                       const DeviceArray& waterfall,
                                       std::optional<SizeType> nbits) {
@@ -279,12 +279,13 @@ void bind_fdmt(py::module_& mod) {
         NumPy (host) arrays work on every backend; a GPU backend copies the
         input to the device and the result back, and blocks until it is on
         the host. On a GPU backend :meth:`execute`, :meth:`reset` and the
-        history methods also take device arrays (PyTorch, CuPy or any other
-        ``__dlpack__`` array on this instance's device) without a copy: the
-        call is asynchronous on ``stream`` and the result is a device array
-        of the input's library. Packed paths, integer-valued input,
-        explicit fusion depths and the CPU tree are bit-identical. Automatic
-        GPU direct levels agree within float rounding.
+        history methods also take device arrays (PyTorch, CuPy, Numba, or
+        any other ``__dlpack__`` or ``__cuda_array_interface__`` array on
+        this instance's device) without a copy: the call is asynchronous on
+        ``stream`` and the result is a device array of the input's library.
+        Packed paths, integer-valued input, explicit fusion depths and the
+        CPU tree are bit-identical. Automatic GPU direct levels agree within
+        float rounding.
 
         All working memory is allocated by the constructor (see
         :attr:`memory_usage`); ``execute`` allocates only its output array,
@@ -634,18 +635,24 @@ void bind_fdmt(py::module_& mod) {
             Parameters
             ----------
             waterfall, waterfall_packed : array
-                PyTorch, CuPy or any other ``__dlpack__`` array on this
-                instance's device: C-contiguous float32, or packed uint8 with
-                ``nbits``; shapes as for NumPy input. Never converted: another
-                dtype or layout raises ``TypeError``.
+                PyTorch, CuPy, Numba or any other ``__dlpack__`` /
+                ``__cuda_array_interface__`` array on this instance's device
+                (DLPack is used when both exist): C-contiguous float32, or
+                packed uint8 with ``nbits``; shapes as for NumPy input. Never
+                converted: another dtype or layout raises ``TypeError``.
             out : array, optional
                 Writeable C-contiguous float32 device array of at least
                 ``nbeams * plan.dmt_size`` elements to write into. Default: a
-                new array from the input's library (PyTorch or CuPy).
+                new array from the input's library (PyTorch, CuPy or Numba;
+                other libraries must pass ``out``).
             stream : int or stream, optional
                 ``cudaStream_t`` / ``hipStream_t`` handle as an int, or a
-                ``torch.cuda.Stream`` / ``cupy.cuda.Stream``. Default: the
-                current stream of the input's library on its device.
+                ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` / Numba stream /
+                ``__cuda_stream__`` object. Default: the current stream of
+                the input's library on its device (Numba: its default
+                stream). The input's pending work is ordered before the call
+                (``__dlpack__(stream=...)``, or an event on the
+                ``__cuda_array_interface__`` ``stream``).
 
             Returns
             -------

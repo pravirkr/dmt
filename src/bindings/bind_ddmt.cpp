@@ -173,8 +173,9 @@ void bind_ddmt(py::module_& mod) {
         NumPy (host) arrays work on every backend; a GPU backend pipelines
         the host transfers and blocks until the result is on the host. On a
         GPU backend the execute and history methods also take device arrays
-        (PyTorch, CuPy or any other ``__dlpack__`` array on this instance's
-        device) without a copy, asynchronously on ``stream``, as for
+        (PyTorch, CuPy, Numba, or any other ``__dlpack__`` or
+        ``__cuda_array_interface__`` array on this instance's device)
+        without a copy, asynchronously on ``stream``, as for
         :meth:`FDMT.execute`.
         )doc");
     def_ddmt_inits<DDMT>(ddmt_cls);
@@ -374,8 +375,9 @@ void bind_ddmt(py::module_& mod) {
             Parameters
             ----------
             waterfall : array
-                C-contiguous float32 PyTorch, CuPy or other ``__dlpack__``
-                array on this instance's device, shaped as for NumPy input.
+                C-contiguous float32 PyTorch, CuPy, Numba or other
+                ``__dlpack__`` / ``__cuda_array_interface__`` array on this
+                instance's device, shaped as for NumPy input.
                 Another dtype or layout raises ``TypeError``.
             out : array, optional
                 Writeable C-contiguous device array of at least
@@ -384,8 +386,9 @@ void bind_ddmt(py::module_& mod) {
                 input's library.
             stream : int or stream, optional
                 ``cudaStream_t`` / ``hipStream_t`` handle as an int, or a
-                ``torch.cuda.Stream`` / ``cupy.cuda.Stream``. Default: the
-                current stream of the input's library on its device.
+                ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` / Numba stream.
+                Default: the current stream of the input's library on its
+                device, as for :meth:`FDMT.execute`.
 
             Returns
             -------

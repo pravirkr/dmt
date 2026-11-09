@@ -52,6 +52,18 @@ bool is_available(Backend backend) {
     return std::ranges::find(avail, backend) != avail.end();
 }
 
+#ifndef DMT_ENABLE_GPU
+// GPU builds define these in lib/cuda/backend_gpu.cu.
+int pointer_device(Backend /*backend*/, const void* /*ptr*/) { return -1; }
+
+void stream_wait(Backend backend,
+                 int /*device*/,
+                 Stream /*consumer*/,
+                 Stream /*producer*/) {
+    algorithms::detail::throw_unavailable("stream_wait", backend);
+}
+#endif
+
 } // namespace dmt
 
 namespace dmt::algorithms::detail {

@@ -78,7 +78,7 @@ py::object coh_execute_device(const CohFDMT& coh,
     const DeviceCall call = device_call(
         "CohFDMT.execute", coh.backend(), coh.device(),
         DeviceArray{.obj = items.front(), .device = device}, stream);
-    std::vector<DLPackTensor> tensors;
+    std::vector<DeviceTensor> tensors;
     std::vector<DeviceSpan<const uint8_t>> groups;
     tensors.reserve(items.size());
     groups.reserve(items.size());
@@ -407,8 +407,9 @@ void bind_cfdmt(py::module_& mod) {
                  C-contiguous uint8/int8 block of ``input_size()`` bytes (any
                  shape), or one such array per subband group. NumPy arrays
                  work on every backend; on a GPU backend device arrays
-                 (PyTorch, CuPy or any other ``__dlpack__`` array on this
-                 instance's device; all groups alike) are read in place.
+                 (PyTorch, CuPy, Numba or any other ``__dlpack__`` /
+                 ``__cuda_array_interface__`` array on this instance's
+                 device; all groups alike) are read in place.
              out : array, optional
                  Keyword-only float32 buffer of at least ``dmt_size``
                  elements to reuse (else one is allocated): a NumPy array
@@ -417,8 +418,8 @@ void bind_cfdmt(py::module_& mod) {
              stream : int or stream, optional
                  Keyword-only, device data only: ``cudaStream_t`` /
                  ``hipStream_t`` handle as an int, or a ``torch.cuda.Stream``
-                 / ``cupy.cuda.Stream``. Default: the current stream of the
-                 data's library on its device.
+                 / ``cupy.cuda.Stream`` / Numba stream. Default: the current
+                 stream of the data's library on its device.
 
              Returns
              -------

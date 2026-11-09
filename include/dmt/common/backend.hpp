@@ -84,6 +84,31 @@ struct Device {
 };
 
 /**
+ * @brief Device ordinal of the memory at @p ptr, as the @p backend runtime
+ * reports it, or -1 when @p ptr is not device memory of that runtime (host
+ * memory, null) or @p backend is not a GPU backend of this build. Managed
+ * memory reports the device it was allocated on.
+ *
+ * For interop layers that receive a bare device pointer without a device
+ * (e.g. `__cuda_array_interface__`).
+ */
+[[nodiscard]] int pointer_device(Backend backend, const void* ptr);
+
+/**
+ * @brief Orders the work queued on @p consumer from now on after the work
+ * already queued on @p producer, without blocking the host: an event is
+ * recorded on @p producer and @p consumer waits for it. Does nothing when
+ * both are the same stream.
+ *
+ * Both are native handles of @p backend on @p device: null is the default
+ * stream; on CUDA, 1 and 2 are also accepted as `cudaStreamLegacy` and
+ * `cudaStreamPerThread`.
+ * @throws std::invalid_argument if @p backend is not a GPU backend of this
+ * build.
+ */
+void stream_wait(Backend backend, int device, Stream consumer, Stream producer);
+
+/**
  * @brief Non-owning view of `size` elements of type T in device memory.
  *
  * Laid out like a DLPack tensor: `handle` is the allocation (the device

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -24,7 +25,8 @@ namespace dmt {
 namespace py = pybind11;
 
 /// A Python array in GPU memory: an object whose `__dlpack_device__()` names
-/// a CUDA, CUDA-managed or ROCm device (PyTorch, CuPy, JAX, ...). As a bound
+/// a CUDA, CUDA-managed or ROCm device (PyTorch, CuPy, JAX, ...), or, failing
+/// that, one with a `__cuda_array_interface__` (Numba, ...). As a bound
 /// argument it selects a method's device overload; NumPy and other host
 /// arrays do not convert and fall through to the host overload.
 struct DeviceArray {
@@ -32,11 +34,47 @@ struct DeviceArray {
     Device device;
 };
 
-/// The device of `obj` if it is a DLPack array in GPU memory.
+/// Device id of a CUDA-array-interface array with a null pointer (no
+/// elements): it lives on no device, so it goes with any.
+inline constexpr int kAnyDevice = -1;
+/// Device id of a CUDA-array-interface array whose pointer the CUDA runtime
+/// does not know as device memory (or a build without CUDA).
+inline constexpr int kNotDeviceMemory = -2;
+
+/// Whether `obj` is consumed through DLPack (it has `__dlpack_device__`)
+/// rather than the CUDA array interface. DLPack wins when it has both.
+inline bool has_dlpack(py::handle obj) {
+    return py::hasattr(obj, "__dlpack_device__");
+}
+
+/// The device of `obj` if it is an array in GPU memory: a DLPack array on a
+/// CUDA or ROCm device, or any `__cuda_array_interface__` array (CUDA; the
+/// device is the one the runtime reports for its pointer).
 inline std::optional<Device> gpu_device_of(py::handle obj) {
-    if (py::isinstance<py::array>(obj) ||
-        !py::hasattr(obj, "__dlpack_device__")) {
+    if (py::isinstance<py::array>(obj)) {
         return std::nullopt;
+    }
+    if (!has_dlpack(obj)) {
+        if (!py::hasattr(obj, "__cuda_array_interface__")) {
+            return std::nullopt;
+        }
+        std::uintptr_t ptr = 0;
+        try {
+            ptr = py::tuple(
+                      py::dict(obj.attr("__cuda_array_interface__"))["data"])[0]
+                      .cast<std::uintptr_t>();
+        } catch (const py::error_already_set&) {
+            return std::nullopt;
+        } catch (const py::cast_error&) {
+            return std::nullopt;
+        }
+        if (ptr == 0) {
+            return Device{.backend = Backend::kCUDA, .id = kAnyDevice};
+        }
+        const int id =
+            pointer_device(Backend::kCUDA, reinterpret_cast<const void*>(ptr));
+        return Device{.backend = Backend::kCUDA,
+                      .id      = id < 0 ? kNotDeviceMemory : id};
     }
     int type = 0;
     int id   = 0;
@@ -60,45 +98,171 @@ inline std::optional<Device> gpu_device_of(py::handle obj) {
     }
 }
 
-/// A tensor consumed from `__dlpack__`. Owns the producer's managed tensor
-/// and calls its deleter on destruction, so the memory stays valid while
-/// this lives (keep_alive() extends that past the call).
-class DLPackTensor {
+/// "cuda:0", or what is wrong with a CUDA-array-interface pointer.
+inline std::string device_name(const Device& dev) {
+    if (dev.id == kNotDeviceMemory) {
+        return fmt::format("memory that is not {} device memory",
+                           to_string(dev.backend));
+    }
+    return fmt::format("{}:{}", to_string(dev.backend), dev.id);
+}
+
+/// A `__cuda_array_interface__` (v3) description as a DLTensor over the
+/// producer's memory. There is no deleter: the producer object is held
+/// instead, which keeps the memory alive.
+struct CudaArrayInterface {
+    py::object owner;
+    std::vector<int64_t> shape;
+    DLTensor tensor{};
+    bool read_only  = false;
+    bool contiguous = true;
+    /// The producer's stream (`stream` entry), when it states one: 1 is the
+    /// legacy default stream, 2 the per-thread default stream, any other
+    /// value a cudaStream_t.
+    std::optional<std::uintptr_t> stream;
+
+    static std::unique_ptr<CudaArrayInterface> parse(py::handle obj,
+                                                     int device_id) {
+        const auto desc = py::dict(obj.attr("__cuda_array_interface__"));
+        auto cai        = std::make_unique<CudaArrayInterface>();
+        cai->owner      = py::reinterpret_borrow<py::object>(obj);
+        if (desc.contains("mask") && !desc["mask"].is_none()) {
+            throw py::type_error("masked __cuda_array_interface__ arrays are "
+                                 "not supported");
+        }
+        for (const auto& n : py::tuple(desc["shape"])) {
+            cai->shape.push_back(n.cast<int64_t>());
+        }
+        const auto typestr = desc["typestr"].cast<std::string>();
+        cai->tensor.dtype  = parse_typestr(typestr);
+        const auto data    = py::tuple(desc["data"]);
+        cai->read_only     = data[1].cast<bool>();
+        if (desc.contains("strides") && !desc["strides"].is_none()) {
+            std::vector<int64_t> strides;
+            for (const auto& s : py::tuple(desc["strides"])) {
+                strides.push_back(s.cast<int64_t>());
+            }
+            cai->contiguous =
+                strides.size() == cai->shape.size() &&
+                is_c_contiguous(cai->shape, strides,
+                                static_cast<int64_t>(cai->tensor.dtype.bits) /
+                                    8);
+        }
+        if (desc.contains("stream") && !desc["stream"].is_none()) {
+            const auto stream = desc["stream"].cast<std::uintptr_t>();
+            if (stream == 0) {
+                throw py::value_error(
+                    "__cuda_array_interface__: stream 0 is disallowed by the "
+                    "interface (v3); producers use 1 for the legacy default "
+                    "stream");
+            }
+            cai->stream = stream;
+        }
+        auto& t       = cai->tensor;
+        t.data        = reinterpret_cast<void*>( // NOLINT
+            data[0].cast<std::uintptr_t>());
+        t.device      = {.device_type = kDLCUDA, .device_id = device_id};
+        t.ndim        = static_cast<int32_t>(cai->shape.size());
+        t.shape       = cai->shape.data();
+        t.strides     = nullptr; // read through `contiguous`
+        t.byte_offset = 0;
+        return cai;
+    }
+
+private:
+    /// "<f4", "|u1", ...: NumPy array-interface type strings.
+    static DLDataType parse_typestr(const std::string& s) {
+        const auto bad = [&] {
+            return py::type_error(fmt::format(
+                "__cuda_array_interface__: unsupported typestr '{}'", s));
+        };
+        if (s.size() < 3 || s[0] == '>') { // big-endian data is not native
+            throw bad();
+        }
+        uint8_t code = 0;
+        switch (s[1]) {
+        case 'f':
+            code = kDLFloat;
+            break;
+        case 'i':
+            code = kDLInt;
+            break;
+        case 'u':
+            code = kDLUInt;
+            break;
+        case 'b':
+            code = kDLBool;
+            break;
+        case 'c':
+            code = kDLComplex;
+            break;
+        default:
+            throw bad();
+        }
+        int bytes = 0;
+        try {
+            bytes = std::stoi(s.substr(2));
+        } catch (const std::exception&) {
+            throw bad();
+        }
+        if (bytes <= 0 || bytes > 32) {
+            throw bad();
+        }
+        return {
+            .code = code, .bits = static_cast<uint8_t>(bytes * 8), .lanes = 1};
+    }
+
+    /// C order with these byte strides (size-1 axes ignore their stride).
+    static bool is_c_contiguous(const std::vector<int64_t>& shape,
+                                const std::vector<int64_t>& strides,
+                                int64_t itemsize) {
+        int64_t expected = itemsize;
+        for (auto i = static_cast<std::ptrdiff_t>(shape.size()) - 1; i >= 0;
+             --i) {
+            const auto k = static_cast<std::size_t>(i);
+            if (shape[k] != 1 && strides[k] != expected) {
+                return false;
+            }
+            expected *= shape[k];
+        }
+        return true;
+    }
+};
+
+/// A device array consumed for one call: a tensor from `__dlpack__`, whose
+/// deleter runs on destruction, or a `__cuda_array_interface__` description
+/// holding a reference to its producer. Either way the memory stays valid
+/// while this lives (keep_alive() extends that past the call).
+class DeviceTensor {
 public:
-    DLPackTensor() = default;
-    DLPackTensor(DLPackTensor&& other) noexcept
+    DeviceTensor() = default;
+    DeviceTensor(DeviceTensor&& other) noexcept
         : m_versioned(std::exchange(other.m_versioned, nullptr)),
-          m_unversioned(std::exchange(other.m_unversioned, nullptr)) {}
-    DLPackTensor& operator=(DLPackTensor&& other) noexcept {
+          m_unversioned(std::exchange(other.m_unversioned, nullptr)),
+          m_cai(std::move(other.m_cai)) {}
+    DeviceTensor& operator=(DeviceTensor&& other) noexcept {
         if (this != &other) {
             release();
             m_versioned   = std::exchange(other.m_versioned, nullptr);
             m_unversioned = std::exchange(other.m_unversioned, nullptr);
+            m_cai         = std::move(other.m_cai);
         }
         return *this;
     }
-    DLPackTensor(const DLPackTensor&)            = delete;
-    DLPackTensor& operator=(const DLPackTensor&) = delete;
-    ~DLPackTensor() { release(); }
+    DeviceTensor(const DeviceTensor&)            = delete;
+    DeviceTensor& operator=(const DeviceTensor&) = delete;
+    ~DeviceTensor() { release(); }
 
-    /// Consumes `obj.__dlpack__(stream=stream)`: the producer orders its
+    /// Consumes `obj.__dlpack__(stream=stream)` (through dmtlib._device.dlpack)
+    /// for a call queued on native stream `native`: the producer orders its
     /// pending work on the array before `stream`, a DLPack stream value.
-    static DLPackTensor consume(py::handle obj, std::intptr_t stream) {
-        const auto dlpack = obj.attr("__dlpack__");
-        py::object capsule;
-        try {
-            capsule = dlpack(py::arg("stream")      = stream,
-                             py::arg("max_version") = py::make_tuple(
-                                 DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION));
-        } catch (py::error_already_set& e) {
-            if (!e.matches(PyExc_TypeError)) {
-                throw;
-            }
-            // Producers predating DLPack 1.0 take no max_version.
-            capsule = dlpack(py::arg("stream") = stream);
-        }
+    static DeviceTensor
+    consume(py::handle obj, std::intptr_t stream, std::uintptr_t native);
+
+    /// Takes ownership of a `__dlpack__()` capsule.
+    static DeviceTensor from_capsule(const py::object& capsule) {
         PyObject* cap = capsule.ptr();
-        DLPackTensor out;
+        DeviceTensor out;
         if (PyCapsule_IsValid(cap, "dltensor_versioned") != 0) {
             out.m_versioned = static_cast<DLManagedTensorVersioned*>(
                 PyCapsule_GetPointer(cap, "dltensor_versioned"));
@@ -121,11 +285,25 @@ public:
         return out;
     }
 
+    /// Wraps a parsed `__cuda_array_interface__`.
+    static DeviceTensor
+    from_interface(std::unique_ptr<CudaArrayInterface> cai) noexcept {
+        DeviceTensor out;
+        out.m_cai = std::move(cai);
+        return out;
+    }
+
     [[nodiscard]] const DLTensor& tensor() const noexcept {
+        if (m_cai) {
+            return m_cai->tensor;
+        }
         return m_versioned != nullptr ? m_versioned->dl_tensor
                                       : m_unversioned->dl_tensor;
     }
     [[nodiscard]] bool read_only() const noexcept {
+        if (m_cai) {
+            return m_cai->read_only;
+        }
         return m_versioned != nullptr &&
                (m_versioned->flags & DLPACK_FLAG_BITMASK_READ_ONLY) != 0;
     }
@@ -143,6 +321,9 @@ public:
         return n;
     }
     [[nodiscard]] bool is_c_contiguous() const noexcept {
+        if (m_cai) {
+            return m_cai->contiguous;
+        }
         const auto& t = tensor();
         if (t.strides == nullptr) {
             return true;
@@ -172,18 +353,20 @@ private:
         }
         m_versioned   = nullptr;
         m_unversioned = nullptr;
+        m_cai.reset();
     }
 
     DLManagedTensorVersioned* m_versioned = nullptr;
     DLManagedTensor* m_unversioned        = nullptr;
+    std::unique_ptr<CudaArrayInterface> m_cai;
 };
 
 /// A Python object owning `tensor`, for memory an engine keeps using after
 /// the call returns (the stepper's reset()).
-inline py::capsule keep_alive(DLPackTensor&& tensor) {
-    auto owned = std::make_unique<DLPackTensor>(std::move(tensor));
+inline py::capsule keep_alive(DeviceTensor&& tensor) {
+    auto owned = std::make_unique<DeviceTensor>(std::move(tensor));
     py::capsule capsule(owned.get(), [](void* p) {
-        delete static_cast<DLPackTensor*>(p); // NOLINT
+        delete static_cast<DeviceTensor*>(p); // NOLINT
     });
     owned.release();
     return capsule;
@@ -253,6 +436,14 @@ inline py::object device_helper(const char* name) {
         .attr(name);
 }
 
+inline DeviceTensor DeviceTensor::consume(py::handle obj,
+                                          std::intptr_t stream,
+                                          std::uintptr_t native) {
+    return from_capsule(device_helper("dlpack")(
+        obj, stream, native,
+        py::make_tuple(DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION)));
+}
+
 /// Native stream handle of `stream`: an int, a stream object, or None for
 /// the current stream of `like`'s array library (see dmtlib._device).
 inline std::uintptr_t resolve_stream(const py::object& stream,
@@ -269,6 +460,14 @@ inline Stream stepper_stream(const py::object& stream) {
         return {};
     }
     return {reinterpret_cast<void*>(resolve_stream(stream, py::none()))};
+}
+
+/// Whether a consumer orders its work after a `__cuda_array_interface__`
+/// producer's stream: yes unless NUMBA_CUDA_ARRAY_INTERFACE_SYNC=0, the
+/// switch Numba documents for the same purpose.
+inline bool cuda_array_interface_sync() {
+    const char* env = std::getenv("NUMBA_CUDA_ARRAY_INTERFACE_SYNC"); // NOLINT
+    return env == nullptr || std::string_view(env) != "0";
 }
 
 /// The device and stream of one device-memory call.
@@ -290,22 +489,39 @@ struct DeviceCall {
         return static_cast<std::intptr_t>(stream);
     }
 
+    /// Whether an array on `dev` can be used by this call.
+    [[nodiscard]] bool accepts(const Device& dev) const noexcept {
+        return dev.backend == device.backend &&
+               (dev.id == device.id || dev.id == kAnyDevice);
+    }
+
     /// Consumes `obj`, which must be a device array on this call's device.
-    [[nodiscard]] DLPackTensor consume(py::handle obj,
+    /// A `__cuda_array_interface__` array that states a producer stream is
+    /// ordered before this call's stream (an event, no host wait).
+    [[nodiscard]] DeviceTensor consume(py::handle obj,
                                        std::string_view arg) const {
         const auto dev = gpu_device_of(obj);
-        if (!dev || dev->backend != device.backend || dev->id != device.id) {
+        if (!dev || !accepts(*dev)) {
             throw py::type_error(fmt::format(
-                "{}: {} must be a device array on {}:{} (like the input)", what,
-                arg, to_string(device.backend), device.id));
+                "{}: {} must be a device array on {} (like the input){}", what,
+                arg, device_name(device),
+                dev ? fmt::format(", got {}", device_name(*dev)) : ""));
         }
-        return DLPackTensor::consume(obj, dlpack_stream());
+        if (has_dlpack(obj)) {
+            return DeviceTensor::consume(obj, dlpack_stream(), stream);
+        }
+        auto cai = CudaArrayInterface::parse(obj, device.id);
+        if (cai->stream && cuda_array_interface_sync()) {
+            stream_wait(device.backend, device.id, native_stream(),
+                        Stream{reinterpret_cast<void*>(*cai->stream)});
+        }
+        return DeviceTensor::from_interface(std::move(cai));
     }
 
     /// Checks that `t` is a C-contiguous T array (and writeable in place
     /// when `writable`).
     template <typename T>
-    void check(const DLPackTensor& t,
+    void check(const DeviceTensor& t,
                std::string_view arg,
                bool writable = false) const {
         if (!same_dtype(t.tensor().dtype, dl_dtype<T>())) {
@@ -326,7 +542,7 @@ struct DeviceCall {
     }
 
     template <typename T>
-    [[nodiscard]] DLPackTensor
+    [[nodiscard]] DeviceTensor
     consume(py::handle obj, std::string_view arg, bool writable) const {
         auto t = consume(obj, arg);
         check<T>(t, arg, writable);
@@ -336,7 +552,7 @@ struct DeviceCall {
     /// `t` as the DeviceSpan an engine takes (no copy: the same allocation,
     /// offset and device).
     template <typename T>
-    [[nodiscard]] DeviceSpan<T> span(const DLPackTensor& t) const noexcept {
+    [[nodiscard]] DeviceSpan<T> span(const DeviceTensor& t) const noexcept {
         DeviceSpan<T> s;
         s.handle      = t.tensor().data;
         s.byte_offset = t.tensor().byte_offset;
@@ -360,20 +576,22 @@ inline DeviceCall device_call(std::string_view what,
             "backend; construct it with backend='{}' or pass a NumPy array",
             what, to_string(dev.backend), to_string(dev.backend)));
     }
-    if (dev.backend != backend || dev.id != device_id) {
-        throw std::invalid_argument(fmt::format(
-            "{}: the array is on {}:{} but this instance runs on {}:{}", what,
-            to_string(dev.backend), dev.id, to_string(backend), device_id));
+    const Device engine{.backend = backend, .id = device_id};
+    if (dev.backend != backend ||
+        (dev.id != device_id && dev.id != kAnyDevice)) {
+        throw std::invalid_argument(
+            fmt::format("{}: the array is on {} but this instance runs on {}",
+                        what, device_name(dev), device_name(engine)));
     }
     return {.what   = what,
-            .device = dev,
+            .device = engine,
             .stream = resolve_stream(stream, input.obj)};
 }
 
 /// The output of a device call: the array returned to Python and its memory.
 struct DeviceOutput {
     py::object array;
-    DLPackTensor tensor;
+    DeviceTensor tensor;
 };
 
 /// `out` (a writeable, C-contiguous T device array of at least prod(shape)
@@ -394,7 +612,7 @@ DeviceOutput device_output(const DeviceCall& call,
     const bool fresh = out.is_none();
     py::object array =
         fresh ? device_helper("empty")(like, shape_tuple, dtype_name<T>(),
-                                       call.stream)
+                                       call.stream, call.device.id)
               : out;
     auto tensor = call.consume<T>(array, "out", /*writable=*/true);
     if (tensor.size() < count) {
@@ -409,7 +627,7 @@ DeviceOutput device_output(const DeviceCall& call,
 }
 
 /// The shape of a DLPack tensor.
-inline std::vector<SizeType> shape_of(const DLPackTensor& t) {
+inline std::vector<SizeType> shape_of(const DeviceTensor& t) {
     const auto& dl = t.tensor();
     return std::vector<SizeType>(dl.shape, dl.shape + dl.ndim);
 }
@@ -449,7 +667,7 @@ void load_history_device(Engine& eng,
 template <typename Engine>
 SizeType ddmt_waterfall_nsamps(const Engine& eng,
                                const DeviceCall& call,
-                               const DLPackTensor& waterfall) {
+                               const DeviceTensor& waterfall) {
     const auto shape = shape_of(waterfall);
     if (shape.size() != 2 && shape.size() != 3) {
         throw std::invalid_argument(
@@ -482,7 +700,7 @@ template <typename In, typename Out, typename Engine, typename Run>
 py::object ddmt_execute_device(Engine& eng,
                                const DeviceCall& call,
                                py::handle like,
-                               const DLPackTensor& input,
+                               const DeviceTensor& input,
                                SizeType nsamps,
                                bool beam_axis,
                                const py::object& out,

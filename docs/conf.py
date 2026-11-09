@@ -208,6 +208,9 @@ myst_links_external_new_tab = True
 # MyST-NB renders those outputs when execution is off, which is what the
 # HTML pages show. Set NB_EXECUTION_MODE=force to re-run them during a build.
 nb_execution_mode = os.environ.get("NB_EXECUTION_MODE", "off")
+# Needs a CUDA GPU (PyTorch, CuPy, Numba): never executed by a docs build, even
+# with NB_EXECUTION_MODE=force; its stored outputs come from a GPU machine.
+nb_execution_excludepatterns = ["tutorials/08_gpu_zero_copy_arrays.ipynb"]
 nb_execution_timeout = 300
 nb_execution_allow_errors = False
 nb_execution_raise_on_error = True

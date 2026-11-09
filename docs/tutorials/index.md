@@ -1,7 +1,8 @@
 # Tutorials
 
-Notebooks that run on a laptop in seconds. The first two build up
-from dispersion to how FDMT works; the rest each take one topic.
+Notebooks that run on a laptop in seconds (the last one needs a CUDA GPU).
+The first two build up from dispersion to how FDMT works; the rest each take
+one topic.
 
 ::::{grid} 1 2 2 2
 :gutter: 3
@@ -54,6 +55,13 @@ Streaming blocks and batching beams.
 
 Is the output noise white? The cold start, and periodicity searches.
 :::
+
+:::{grid-item-card} 8. Zero-copy GPU arrays
+:link: 08_gpu_zero_copy_arrays
+:link-type: doc
+
+PyTorch, CuPy and Numba arrays in place: a search that stays on the GPU.
+:::
 ::::
 
 ```{toctree}
@@ -67,4 +75,5 @@ Is the output noise white? The cold start, and periodicity searches.
 05_coherent_fdmt_cfdmt_hybrid_search
 06_realtime_streaming_and_batching
 07_fdmt_noise_statistics
+08_gpu_zero_copy_arrays
 ```
