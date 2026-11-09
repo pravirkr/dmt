@@ -227,9 +227,10 @@ public:
             m_level_rows[level].first == m_level_rows[level].second) {
             return;
         }
-        const auto [row_lo, row_hi] = m_level_rows[level];
-        const SizeType nrows        = row_hi - row_lo;
-        const SizeType first        = input.beam_begin;
+        const SizeType row_lo = m_level_rows[level].first;
+        const SizeType row_hi = m_level_rows[level].second;
+        const SizeType nrows  = row_hi - row_lo;
+        const SizeType first  = input.beam_begin;
         const SizeType beams =
             std::min(input.beam_count, m_beams - input.beam_begin);
         const auto task = [&](SizeType t) {
