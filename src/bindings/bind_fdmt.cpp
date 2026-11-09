@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <pybind11/numpy.h>
 #include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
@@ -17,6 +18,7 @@
 #include "dmt/dmt.hpp"
 
 #include "bindings/bind.hpp"
+#include "dlpack_utils.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -34,6 +36,119 @@ namespace {
 
 std::vector<uint8_t> fft_kill_mask(const py::object& m) {
     return extract_kill_mask(m);
+}
+
+// Consumes a device waterfall: float32 (`nbits` unset) or packed uint8, 2D
+// for nbeams == 1 or 3D (beams first).
+template <typename Engine>
+DeviceTensor consume_device_waterfall(const Engine& eng,
+                                      const DeviceCall& call,
+                                      const DeviceArray& waterfall,
+                                      std::optional<SizeType> nbits) {
+    auto input     = call.consume(waterfall.obj, "waterfall");
+    const auto& dl = input.tensor();
+    if (nbits.has_value()) {
+        call.check<uint8_t>(input, "waterfall_packed");
+    } else if (same_dtype(dl.dtype, dl_dtype<uint8_t>())) {
+        throw py::type_error(fmt::format(
+            "{}: got a uint8 waterfall; pass nbits for packed input or "
+            "convert to float32 explicitly",
+            call.what));
+    } else {
+        call.check<float>(input, "waterfall");
+    }
+    if (dl.ndim != 2 && dl.ndim != 3) {
+        throw std::runtime_error(fmt::format(
+            "{}: waterfall must be 2D (nchans, nsamps) or 3D (nbeams, "
+            "nchans, nsamps)",
+            call.what));
+    }
+    const auto nbeams = eng.get_nbeams();
+    if ((dl.ndim == 2 && nbeams != 1) ||
+        (dl.ndim == 3 && static_cast<SizeType>(dl.shape[0]) != nbeams)) {
+        throw std::invalid_argument(
+            fmt::format("{}: waterfall has shape ({}), but this instance "
+                        "processes {} beam(s)",
+                        call.what, fmt::join(shape_of(input), ", "), nbeams));
+    }
+    return input;
+}
+
+// Device-memory execute() of FDMT and FDMTFFT: asynchronous on the stream,
+// into `out` or a new array of the input's library; returns (ndms,
+// dmt_nsamps) or (nbeams, ndms, dmt_nsamps) as the input is 2D or 3D.
+template <typename Engine>
+py::object fdmt_execute_device(Engine& eng,
+                               std::string_view what,
+                               const DeviceArray& waterfall,
+                               std::optional<SizeType> nbits,
+                               const py::object& out,
+                               const py::object& stream) {
+    const DeviceCall call =
+        device_call(what, eng.backend(), eng.device(), waterfall, stream);
+    const auto input = consume_device_waterfall(eng, call, waterfall, nbits);
+    const auto& plan = eng.get_plan();
+    std::vector<SizeType> shape{plan.get_dmt_ndms(), plan.get_dmt_nsamps()};
+    if (input.tensor().ndim == 3) {
+        shape.insert(shape.begin(), eng.get_nbeams());
+    }
+    auto result = device_output<float>(call, waterfall.obj, out, shape);
+    {
+        const py::gil_scoped_release release;
+        if (nbits.has_value()) {
+            eng.execute(call.span<const uint8_t>(input), *nbits,
+                        call.span<float>(result.tensor), call.native_stream());
+        } else {
+            eng.execute(call.span<const float>(input),
+                        call.span<float>(result.tensor), call.native_stream());
+        }
+    }
+    return result.array;
+}
+
+// Device-memory reset() of the FDMT and FDMTFFT steppers. Both buffers are
+// kept alive on `self` until the next reset(); finalize() returns a view of
+// the dmt buffer.
+template <typename Engine>
+void fdmt_reset_device(const py::object& self,
+                       std::string_view what,
+                       const DeviceArray& waterfall,
+                       std::optional<SizeType> nbits,
+                       const py::object& dmt,
+                       const py::object& stream) {
+    auto& eng = self.cast<Engine&>();
+    const DeviceCall call =
+        device_call(what, eng.backend(), eng.device(), waterfall, stream);
+    auto input  = consume_device_waterfall(eng, call, waterfall, nbits);
+    auto result = device_output<float>(
+        call, waterfall.obj, dmt,
+        {eng.get_nbeams() * eng.get_plan().get_dmt_size()});
+    {
+        const py::gil_scoped_release release;
+        if (nbits.has_value()) {
+            eng.reset(call.span<const uint8_t>(input), *nbits,
+                      call.span<float>(result.tensor), call.native_stream());
+        } else {
+            eng.reset(call.span<const float>(input),
+                      call.span<float>(result.tensor), call.native_stream());
+        }
+    }
+    self.attr("_waterfall_buffer") = py::make_tuple(
+        keep_alive(std::move(input)), keep_alive(std::move(result.tensor)));
+    self.attr("_dmt_buffer") = result.array;
+}
+
+// finalize() after a device reset(): the transform as a view of the dmt
+// buffer, (ndms, dmt_nsamps) for one beam or (nbeams, ndms, dmt_nsamps).
+template <typename Engine>
+py::object fdmt_device_result(const Engine& eng, const py::object& dmt) {
+    const auto& plan      = eng.get_plan();
+    const auto ndms       = plan.get_dmt_ndms();
+    const auto nout       = plan.get_dmt_nsamps();
+    const auto nb         = eng.get_nbeams();
+    const py::tuple shape = nb == 1 ? py::tuple(py::make_tuple(ndms, nout))
+                                    : py::tuple(py::make_tuple(nb, ndms, nout));
+    return device_helper("view")(dmt, nb * plan.get_dmt_size(), shape);
 }
 
 // FDMTFFT output for an input of `ndim` dimensions.
@@ -169,11 +284,16 @@ void bind_fdmt(py::module_& mod) {
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
 
-        Input and output are NumPy (host) arrays on every backend; a GPU
-        backend copies the input to the device and the result back, and
-        blocks until it is on the host. Packed paths, integer-valued input,
-        explicit fusion depths and the CPU tree are bit-identical. Automatic
-        GPU direct levels agree within float rounding.
+        NumPy (host) arrays work on every backend; a GPU backend copies the
+        input to the device and the result back, and blocks until it is on
+        the host. On a GPU backend :meth:`execute`, :meth:`reset` and the
+        history methods also take device arrays (PyTorch, CuPy, Numba, or
+        any other ``__dlpack__`` or ``__cuda_array_interface__`` array on
+        this instance's device) without a copy: the call is asynchronous on
+        ``stream`` and the result is a device array of the input's library.
+        Packed paths, integer-valued input, explicit fusion depths and the
+        CPU tree are bit-identical. Automatic GPU direct levels agree within
+        float rounding.
 
         All working memory is allocated by the constructor (see
         :attr:`memory_usage`); ``execute`` allocates only its output array,
@@ -504,6 +624,66 @@ void bind_fdmt(py::module_& mod) {
             :meth:`reset_history` to start a new stream.
             )doc")
         .def(
+            "execute",
+            [](FDMT& fdmt, const DeviceArray& waterfall_packed, SizeType nbits,
+               const py::object& out, const py::object& stream) {
+                return fdmt_execute_device(fdmt, "FDMT.execute",
+                                           waterfall_packed, nbits, out,
+                                           stream);
+            },
+            py::arg("waterfall_packed"), py::arg("nbits"), py::kw_only(),
+            py::arg("out") = py::none(), py::arg("stream") = py::none(),
+            "Packed overload of the device-memory execute() below.")
+        .def(
+            "execute",
+            [](FDMT& fdmt, const DeviceArray& waterfall, const py::object& out,
+               const py::object& stream) {
+                return fdmt_execute_device(fdmt, "FDMT.execute", waterfall,
+                                           std::nullopt, out, stream);
+            },
+            py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
+            py::arg("stream") = py::none(),
+            R"doc(
+            Run the FDMT transform on device memory (GPU backends), without
+            copies.
+
+            Parameters
+            ----------
+            waterfall, waterfall_packed : array
+                PyTorch, CuPy, Numba or any other ``__dlpack__`` /
+                ``__cuda_array_interface__`` array on this instance's device
+                (DLPack is used when both exist): C-contiguous float32, or
+                packed uint8 with ``nbits``; shapes as for NumPy input. Never
+                converted: another dtype or layout raises ``TypeError``.
+            out : array, optional
+                Writeable C-contiguous float32 device array of at least
+                ``nbeams * plan.dmt_size`` elements to write into. Default: a
+                new array from the input's library (PyTorch, CuPy or Numba;
+                other libraries must pass ``out``).
+            stream : int or stream, optional
+                ``cudaStream_t`` / ``hipStream_t`` handle as an int, or a
+                ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` / Numba stream /
+                ``__cuda_stream__`` object. Default: the current stream of
+                the input's library on its device (Numba: its default
+                stream). The input's pending work is ordered before the call
+                (``__dlpack__(stream=...)``, or an event on the
+                ``__cuda_array_interface__`` ``stream``).
+
+            Returns
+            -------
+            array
+                Device view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
+                n_times)`` of the output, of the input's (or ``out``'s)
+                library.
+
+            Notes
+            -----
+            Asynchronous: the work is queued on ``stream`` after the
+            producers' pending work on the arrays, and the call returns at
+            once. Keep the arrays alive and read the result on that stream,
+            or synchronize it first.
+            )doc")
+        .def(
             "reset",
             [](py::object self,
                const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
@@ -564,21 +744,52 @@ void bind_fdmt(py::module_& mod) {
 
             In ``mode='valid'`` a block must be finalized before the next
             ``reset``/``execute`` (else RuntimeError); :meth:`reset_history`
-            abandons it. The stepper never fuses. On a GPU backend the block
-            is staged on the device, and the ``view_*`` methods return a host
-            snapshot of the current level.
+            abandons it. The stepper never fuses. On a GPU backend a NumPy
+            block is staged on the device, and the ``view_*`` methods return
+            a host snapshot of the current level.
+
+            On a GPU backend ``waterfall`` (and ``dmt``) may also be device
+            arrays, used in place as for the device-memory :meth:`execute`
+            (keyword-only ``stream``; default: the input library's current
+            stream). The stepper then keeps queueing on that stream, and
+            :meth:`finalize` returns a device view of ``dmt``.
             )doc")
         .def(
+            "reset",
+            [](const py::object& self, const DeviceArray& waterfall_packed,
+               SizeType nbits, const py::object& dmt,
+               const py::object& stream) {
+                fdmt_reset_device<FDMT>(self, "FDMT.reset", waterfall_packed,
+                                        nbits, dmt, stream);
+            },
+            py::arg("waterfall_packed"), py::arg("nbits"),
+            py::arg("dmt") = py::none(), py::kw_only(),
+            py::arg("stream") = py::none())
+        .def(
+            "reset",
+            [](const py::object& self, const DeviceArray& waterfall,
+               const py::object& dmt, const py::object& stream) {
+                fdmt_reset_device<FDMT>(self, "FDMT.reset", waterfall,
+                                        std::nullopt, dmt, stream);
+            },
+            py::arg("waterfall"), py::arg("dmt") = py::none(), py::kw_only(),
+            py::arg("stream") = py::none())
+        .def(
             "advance",
-            [](FDMT& fdmt, SizeType levels) { fdmt.advance(levels); },
-            py::arg("levels") = 1,
-            "Advance execution by a given number of levels.")
+            [](FDMT& fdmt, SizeType levels, const py::object& stream) {
+                fdmt.advance(levels, stepper_stream(stream));
+            },
+            py::arg("levels") = 1, py::kw_only(),
+            py::arg("stream") = py::none(),
+            "Advance execution by a given number of levels (``stream``: GPU "
+            "stream, default the one given to reset()).")
         .def(
             "advance_until_remaining",
-            [](FDMT& fdmt, SizeType remaining) {
-                fdmt.advance_until_remaining(remaining);
+            [](FDMT& fdmt, SizeType remaining, const py::object& stream) {
+                fdmt.advance_until_remaining(remaining, stepper_stream(stream));
             },
-            py::arg("remaining_levels"),
+            py::arg("remaining_levels"), py::kw_only(),
+            py::arg("stream") = py::none(),
             "Advance execution until N levels remain before root.")
         .def("view_level_data",
              [](py::object self) {
@@ -606,9 +817,13 @@ void bind_fdmt(py::module_& mod) {
             py::arg("subband_idx"))
         .def(
             "finalize",
-            [](py::object self) {
+            [](py::object self, const py::object& stream) -> py::object {
                 auto& fdmt = self.cast<FDMT&>();
-                fdmt.finalize();
+                fdmt.finalize(stepper_stream(stream));
+                const py::object buffer = self.attr("_dmt_buffer");
+                if (!py::isinstance<py::array>(buffer)) {
+                    return fdmt_device_result(fdmt, buffer);
+                }
                 py::array_t<float, py::array::c_style> dmt =
                     self.attr("_dmt_buffer")
                         .cast<py::array_t<float, py::array::c_style>>();
@@ -626,9 +841,11 @@ void bind_fdmt(py::module_& mod) {
                     {plan.get_dmt_size() * fsize, nsamps * fsize, fsize},
                     dmt.data(), self);
             },
+            py::kw_only(), py::arg("stream") = py::none(),
             "Advance to the root and return the transform, (n_delays, "
             "n_times) or (nbeams, n_delays, n_times), as a view into the dmt "
-            "buffer given to reset().")
+            "buffer given to reset() (a device array after a device "
+            "reset()).")
         .def_property_readonly("current_level", &FDMT::current_level)
         .def_property_readonly("total_levels", &FDMT::total_levels)
         .def_property_readonly("remaining_levels", &FDMT::remaining_levels)
@@ -681,7 +898,28 @@ void bind_fdmt(py::module_& mod) {
         Raises ValueError when the header shows a different configuration (DM
         grid or tree, nbeams, use_box_smearing), the skewed-window path, or no
         header (a zeroed array is not a history: use reset_history()).
-        )doc");
+        )doc")
+        .def(
+            "save_history",
+            [](const FDMT& fdmt, const DeviceArray& out,
+               const py::object& stream) {
+                return save_history_device<float>(fdmt, "FDMT.save_history", out,
+                                           stream);
+            },
+            py::arg("out"), py::kw_only(), py::arg("stream") = py::none(),
+            "Save the streaming history into ``out``, a float32 device array "
+            "of history_state_size() elements (GPU backends; asynchronous on "
+            "``stream``). Returns ``out``.")
+        .def(
+            "load_history",
+            [](FDMT& fdmt, const DeviceArray& history,
+               const py::object& stream) {
+                load_history_device<float>(fdmt, "FDMT.load_history", history,
+                                    stream);
+            },
+            py::arg("history"), py::kw_only(), py::arg("stream") = py::none(),
+            "Restore the streaming history from a float32 device array (GPU "
+            "backends; asynchronous on ``stream``).");
 
     py::class_<FDMTFFT>(mod, "FDMTFFT", py::dynamic_attr(),
                         R"doc(
@@ -741,6 +979,9 @@ void bind_fdmt(py::module_& mod) {
             Keyword-only. Per-channel mask of bool or any integer dtype
             (nonzero = keep, 0 = kill; floats raise ``TypeError``); killed
             channels read as zero.
+
+        On a GPU backend :meth:`execute`, :meth:`reset` and the history
+        methods also take device arrays without a copy, as for :class:`FDMT`.
 
         See also
         --------
@@ -1015,6 +1256,53 @@ void bind_fdmt(py::module_& mod) {
                 ``(n_delays, n_times)`` or ``(nbeams, n_delays, n_times)``.
             )doc")
         .def(
+            "execute",
+            [](FDMTFFT& fdmt, const DeviceArray& waterfall_packed,
+               SizeType nbits, const py::object& out,
+               const py::object& stream) {
+                return fdmt_execute_device(fdmt, "FDMTFFT.execute",
+                                           waterfall_packed, nbits, out,
+                                           stream);
+            },
+            py::arg("waterfall_packed"), py::arg("nbits"), py::kw_only(),
+            py::arg("out") = py::none(), py::arg("stream") = py::none(),
+            "Packed overload of the device-memory execute() below.")
+        .def(
+            "execute",
+            [](FDMTFFT& fdmt, const DeviceArray& waterfall,
+               const py::object& out, const py::object& stream) {
+                return fdmt_execute_device(fdmt, "FDMTFFT.execute", waterfall,
+                                           std::nullopt, out, stream);
+            },
+            py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
+            py::arg("stream") = py::none(),
+            "Run the transform on device memory (GPU backends), without "
+            "copies; asynchronous on ``stream``. Arguments and result as for "
+            ":meth:`FDMT.execute` with device arrays.")
+        .def(
+            "reset",
+            [](const py::object& self, const DeviceArray& waterfall_packed,
+               SizeType nbits, const py::object& dmt,
+               const py::object& stream) {
+                fdmt_reset_device<FDMTFFT>(self, "FDMTFFT.reset",
+                                           waterfall_packed, nbits, dmt,
+                                           stream);
+            },
+            py::arg("waterfall_packed"), py::arg("nbits"),
+            py::arg("dmt")    = py::none(), py::kw_only(),
+            py::arg("stream") = py::none())
+        .def(
+            "reset",
+            [](const py::object& self, const DeviceArray& waterfall,
+               const py::object& dmt, const py::object& stream) {
+                fdmt_reset_device<FDMTFFT>(self, "FDMTFFT.reset", waterfall,
+                                           std::nullopt, dmt, stream);
+            },
+            py::arg("waterfall"), py::arg("dmt") = py::none(), py::kw_only(),
+            py::arg("stream") = py::none(),
+            "Initialize the stepper from device arrays (GPU backends), as "
+            ":meth:`FDMT.reset`.")
+        .def(
             "reset",
             [](py::object self,
                const py::array_t<float, py::array::c_style>& waterfall,
@@ -1037,14 +1325,18 @@ void bind_fdmt(py::module_& mod) {
             py::arg("waterfall"), py::arg("dmt") = py::none())
         .def(
             "advance",
-            [](FDMTFFT& fdmt, SizeType levels) { fdmt.advance(levels); },
-            py::arg("levels") = 1)
+            [](FDMTFFT& fdmt, SizeType levels, const py::object& stream) {
+                fdmt.advance(levels, stepper_stream(stream));
+            },
+            py::arg("levels") = 1, py::kw_only(),
+            py::arg("stream") = py::none())
         .def(
             "advance_until_remaining",
-            [](FDMTFFT& fdmt, SizeType remaining) {
-                fdmt.advance_until_remaining(remaining);
+            [](FDMTFFT& fdmt, SizeType remaining, const py::object& stream) {
+                fdmt.advance_until_remaining(remaining, stepper_stream(stream));
             },
-            py::arg("remaining_levels"))
+            py::arg("remaining_levels"), py::kw_only(),
+            py::arg("stream") = py::none())
         .def("view_level_data",
              [](py::object self) {
                  auto& fdmt = self.cast<FDMTFFT&>();
@@ -1069,20 +1361,26 @@ void bind_fdmt(py::module_& mod) {
                 return fdmt.view_subband(subband_idx);
             },
             py::arg("subband_idx"))
-        .def("finalize",
-             [](py::object self) {
-                 auto& fdmt = self.cast<FDMTFFT&>();
-                 fdmt.finalize();
-                 py::array_t<float, py::array::c_style> dmt =
-                     self.attr("_dmt_buffer")
-                         .cast<py::array_t<float, py::array::c_style>>();
-                 const auto& plan   = fdmt.get_plan();
-                 const auto ncoords = plan.get_dmt_ndms();
-                 const auto nsamps  = plan.get_dmt_nsamps();
-                 return py::array_t<float>(
-                     {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
-                     dmt.data(), self);
-             })
+        .def(
+            "finalize",
+            [](py::object self, const py::object& stream) -> py::object {
+                auto& fdmt = self.cast<FDMTFFT&>();
+                fdmt.finalize(stepper_stream(stream));
+                const py::object buffer = self.attr("_dmt_buffer");
+                if (!py::isinstance<py::array>(buffer)) {
+                    return fdmt_device_result(fdmt, buffer);
+                }
+                py::array_t<float, py::array::c_style> dmt =
+                    self.attr("_dmt_buffer")
+                        .cast<py::array_t<float, py::array::c_style>>();
+                const auto& plan   = fdmt.get_plan();
+                const auto ncoords = plan.get_dmt_ndms();
+                const auto nsamps  = plan.get_dmt_nsamps();
+                return py::array_t<float>(
+                    {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
+                    dmt.data(), self);
+            },
+            py::kw_only(), py::arg("stream") = py::none())
         .def_property_readonly("current_level", &FDMTFFT::current_level)
         .def_property_readonly("total_levels", &FDMTFFT::total_levels)
         .def_property_readonly("remaining_levels", &FDMTFFT::remaining_levels)
@@ -1111,7 +1409,27 @@ void bind_fdmt(py::module_& mod) {
                     std::span<const float>(hist.data(), hist.size()));
             },
             py::arg("history").noconvert(),
-            "Restore a streaming history saved by save_history().");
+            "Restore a streaming history saved by save_history().")
+        .def(
+            "save_history",
+            [](const FDMTFFT& fdmt, const DeviceArray& out,
+               const py::object& stream) {
+                return save_history_device<float>(fdmt, "FDMTFFT.save_history",
+                                                  out, stream);
+            },
+            py::arg("out"), py::kw_only(), py::arg("stream") = py::none(),
+            "Save the streaming history into a float32 device array (GPU "
+            "backends; asynchronous on ``stream``). Returns ``out``.")
+        .def(
+            "load_history",
+            [](FDMTFFT& fdmt, const DeviceArray& history,
+               const py::object& stream) {
+                load_history_device<float>(fdmt, "FDMTFFT.load_history",
+                                           history, stream);
+            },
+            py::arg("history"), py::kw_only(), py::arg("stream") = py::none(),
+            "Restore the streaming history from a float32 device array (GPU "
+            "backends; asynchronous on ``stream``).");
 
     mod.def(
         "compute_fdmt_fft",

@@ -15,6 +15,7 @@
 #include "dmt/common/plans.hpp"
 
 #include "bindings/bind.hpp"
+#include "dlpack_utils.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -25,6 +26,30 @@ using plans::LevinConfig;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
+
+namespace {
+
+// Device-memory packed execute() / execute_time_major(): int32 output,
+// beam-major 3D at nbeams > 1 like the host overloads.
+template <typename Run>
+py::object ddmt_packed_device(DDMT& ddmt,
+                              std::string_view what,
+                              const DeviceArray& packed,
+                              SizeType nsamps,
+                              const py::object& out,
+                              const py::object& stream,
+                              Run&& run) {
+    const DeviceCall call =
+        device_call(what, ddmt.backend(), ddmt.device(), packed, stream);
+    const auto input = call.consume<uint8_t>(packed.obj, "waterfall", false);
+    return ddmt_execute_device<uint8_t, int32_t>(
+        ddmt, call, packed.obj, input, nsamps, ddmt.get_nbeams() > 1, out,
+        [&](DeviceSpan<const uint8_t> in, DeviceSpan<int32_t> dmt, Stream s) {
+            run(in, nsamps, dmt, s);
+        });
+}
+
+} // namespace
 
 /// Binds the constructor set shared by DDMT and SDMT.
 template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
@@ -145,9 +170,13 @@ void bind_ddmt(py::module_& mod) {
             at the end. Only the delay table changes; speed and history are
             the same.
 
-        Input and output are NumPy (host) arrays on every backend; a GPU
-        backend pipelines the host transfers and blocks until the result is
-        on the host.
+        NumPy (host) arrays work on every backend; a GPU backend pipelines
+        the host transfers and blocks until the result is on the host. On a
+        GPU backend the execute and history methods also take device arrays
+        (PyTorch, CuPy, Numba, or any other ``__dlpack__`` or
+        ``__cuda_array_interface__`` array on this instance's device)
+        without a copy, asynchronously on ``stream``, as for
+        :meth:`FDMT.execute`.
         )doc");
     def_ddmt_inits<DDMT>(ddmt_cls);
     ddmt_cls
@@ -322,6 +351,86 @@ void bind_ddmt(py::module_& mod) {
             :meth:`execute`: consecutive calls continue one stream; call
             :meth:`reset_history` to start a new one.
             )doc")
+        .def(
+            "execute",
+            [](DDMT& ddmt, const DeviceArray& waterfall, const py::object& out,
+               const py::object& stream) {
+                const DeviceCall call =
+                    device_call("DDMT.execute", ddmt.backend(), ddmt.device(),
+                                waterfall, stream);
+                const auto input =
+                    call.consume<float>(waterfall.obj, "waterfall", false);
+                const auto nsamps = ddmt_waterfall_nsamps(ddmt, call, input);
+                return ddmt_execute_device<float, float>(
+                    ddmt, call, waterfall.obj, input, nsamps,
+                    input.tensor().ndim == 3, out,
+                    [&](DeviceSpan<const float> in, DeviceSpan<float> dmt,
+                        Stream s) { ddmt.execute(in, dmt, s); });
+            },
+            "waterfall"_a, py::kw_only(), "out"_a = py::none(),
+            "stream"_a = py::none(),
+            R"doc(
+            Dedisperse device memory (GPU backends), without copies.
+
+            Parameters
+            ----------
+            waterfall : array
+                C-contiguous float32 PyTorch, CuPy, Numba or other
+                ``__dlpack__`` / ``__cuda_array_interface__`` array on this
+                instance's device, shaped as for NumPy input.
+                Another dtype or layout raises ``TypeError``.
+            out : array, optional
+                Writeable C-contiguous device array of at least
+                ``nbeams * n_dm * output_nsamps`` elements (float32; int32
+                for the packed overloads). Default: a new array from the
+                input's library.
+            stream : int or stream, optional
+                ``cudaStream_t`` / ``hipStream_t`` handle as an int, or a
+                ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` / Numba stream.
+                Default: the current stream of the input's library on its
+                device, as for :meth:`FDMT.execute`.
+
+            Returns
+            -------
+            array
+                Device view ``(n_dm, output_nsamps)`` or ``(nbeams, n_dm,
+                output_nsamps)`` of the output.
+
+            Notes
+            -----
+            Asynchronous on ``stream``, with the stream history kept on the
+            device. The packed :meth:`execute` and
+            :meth:`execute_time_major` take ``(waterfall_packed, nsamps)``
+            uint8 device arrays the same way.
+            )doc")
+        .def(
+            "execute",
+            [](DDMT& ddmt, const DeviceArray& waterfall_packed, SizeType nsamps,
+               const py::object& out, const py::object& stream) {
+                return ddmt_packed_device(
+                    ddmt, "DDMT.execute", waterfall_packed, nsamps, out, stream,
+                    [&](DeviceSpan<const uint8_t> in, SizeType n,
+                        DeviceSpan<int32_t> dmt,
+                        Stream s) { ddmt.execute(in, n, dmt, s); });
+            },
+            "waterfall_packed"_a, "nsamps"_a, py::kw_only(),
+            "out"_a = py::none(), "stream"_a = py::none(),
+            "Packed analogue of the device-memory execute() (int32 output).")
+        .def(
+            "execute_time_major",
+            [](DDMT& ddmt, const DeviceArray& filterbank_packed,
+               SizeType nsamps, const py::object& out,
+               const py::object& stream) {
+                return ddmt_packed_device(
+                    ddmt, "DDMT.execute_time_major", filterbank_packed, nsamps,
+                    out, stream,
+                    [&](DeviceSpan<const uint8_t> in, SizeType n,
+                        DeviceSpan<int32_t> dmt,
+                        Stream s) { ddmt.execute_time_major(in, n, dmt, s); });
+            },
+            "filterbank_packed"_a, "nsamps"_a, py::kw_only(),
+            "out"_a = py::none(), "stream"_a = py::none(),
+            "Device-memory execute_time_major() (GPU backends, int32 output).")
         .def("set_gulp_size", &DDMT::set_gulp_size, "gulp_size"_a,
              R"doc(
             Set the chunk length (input samples) that host-memory calls on a
@@ -382,7 +491,36 @@ void bind_ddmt(py::module_& mod) {
                         std::span<const uint8_t>(hist.data(), hist.size()));
                 }
             },
-            "history"_a);
+            "history"_a)
+        .def(
+            "save_history",
+            [](const DDMT& ddmt, const DeviceArray& out,
+               const py::object& stream) {
+                return ddmt.get_plan().get_nbits() == 32
+                           ? save_history_device<float>(
+                                 ddmt, "DDMT.save_history", out, stream)
+                           : save_history_device<uint8_t>(
+                                 ddmt, "DDMT.save_history", out, stream);
+            },
+            "out"_a, py::kw_only(), "stream"_a = py::none(),
+            "Save the streaming history into ``out``, a device array of "
+            "history_state_size() elements (float32 at nbits=32, else uint8; "
+            "GPU backends, asynchronous on ``stream``). Returns ``out``.")
+        .def(
+            "load_history",
+            [](DDMT& ddmt, const DeviceArray& history,
+               const py::object& stream) {
+                if (ddmt.get_plan().get_nbits() == 32) {
+                    load_history_device<float>(ddmt, "DDMT.load_history",
+                                               history, stream);
+                } else {
+                    load_history_device<uint8_t>(ddmt, "DDMT.load_history",
+                                                 history, stream);
+                }
+            },
+            "history"_a, py::kw_only(), "stream"_a = py::none(),
+            "Restore the streaming history from a device array (GPU "
+            "backends, asynchronous on ``stream``).");
 
     py::class_<SDMT, DDMT> sdmt_cls(mod, "SDMT",
                                     R"doc(

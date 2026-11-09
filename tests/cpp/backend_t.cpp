@@ -167,4 +167,15 @@ TEST_CASE("Exec replaces the old nthreads / device_id slot", "[backend][cpu]") {
         std::is_convertible_v<std::vector<float>&, DeviceSpan<float>>);
 }
 
+TEST_CASE("pointer_device and stream_wait refuse non-GPU input",
+          "[backend][cpu]") {
+    int host = 0;
+    for (const auto b : {Backend::kCPU, Backend::kCUDA, Backend::kHIP}) {
+        CHECK(pointer_device(b, nullptr) == -1);
+    }
+    CHECK(pointer_device(Backend::kCPU, &host) == -1);
+    CHECK_THROWS_AS(stream_wait(Backend::kCPU, 0, {}, {}),
+                    std::invalid_argument);
+}
+
 } // namespace dmt

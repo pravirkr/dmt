@@ -15,6 +15,7 @@
 #include "dmt/common/plans.hpp"
 
 #include "bindings/bind.hpp"
+#include "dlpack_utils.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -118,6 +119,10 @@ void bind_ddmt_fft(py::module_& mod) {
             largest positive delay (rounded up) plus ``guard``.
         backend, device, f_ref
             Keyword-only, as for :class:`DDMT`.
+
+        On a GPU backend :meth:`execute` and the history methods also take
+        device arrays without a copy, asynchronously on ``stream``, as for
+        :class:`DDMT`.
         )doc");
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                         float dm_max, float dm_step, float dm_min, int nthreads,
@@ -268,6 +273,43 @@ void bind_ddmt_fft(py::module_& mod) {
             },
             "filterbank_packed"_a, "nsamps"_a,
             "Dedisperse a time-major packed filterbank (float32 output).")
+        .def(
+            "execute",
+            [](DDMTFFT& e, const DeviceArray& waterfall, const py::object& out,
+               const py::object& stream) {
+                const DeviceCall call =
+                    device_call("DDMTFFT.execute", e.backend(), e.device(),
+                                waterfall, stream);
+                const auto input =
+                    call.consume<float>(waterfall.obj, "waterfall", false);
+                const auto nsamps = ddmt_waterfall_nsamps(e, call, input);
+                return ddmt_execute_device<float, float>(
+                    e, call, waterfall.obj, input, nsamps,
+                    input.tensor().ndim == 3, out,
+                    [&](DeviceSpan<const float> in, DeviceSpan<float> dmt,
+                        Stream s) { e.execute(in, dmt, s); });
+            },
+            "waterfall"_a, py::kw_only(), "out"_a = py::none(),
+            "stream"_a = py::none(),
+            "Dedisperse a float32 device array (GPU backends) without "
+            "copies; ``out`` and ``stream`` as for :meth:`DDMT.execute`.")
+        .def(
+            "execute",
+            [](DDMTFFT& e, const DeviceArray& packed, SizeType nsamps,
+               const py::object& out, const py::object& stream) {
+                const DeviceCall call = device_call(
+                    "DDMTFFT.execute", e.backend(), e.device(), packed, stream);
+                const auto input =
+                    call.consume<uint8_t>(packed.obj, "waterfall", false);
+                return ddmt_execute_device<uint8_t, float>(
+                    e, call, packed.obj, input, nsamps, e.get_nbeams() > 1, out,
+                    [&](DeviceSpan<const uint8_t> in, DeviceSpan<float> dmt,
+                        Stream s) { e.execute(in, nsamps, dmt, s); });
+            },
+            "waterfall_packed"_a, "nsamps"_a, py::kw_only(),
+            "out"_a = py::none(), "stream"_a = py::none(),
+            "Dedisperse a channel-major packed uint8 device array (float32 "
+            "output).")
         .def("get_output_nsamps", &DDMTFFT::get_output_nsamps, "input_nsamps"_a)
         .def("reset_history", &DDMTFFT::reset_history)
         .def("history_state_size", &DDMTFFT::history_state_size)
@@ -294,7 +336,27 @@ void bind_ddmt_fft(py::module_& mod) {
                 e.load_history(
                     std::span<const float>(hist.data(), hist.size()));
             },
-            "history"_a);
+            "history"_a)
+        .def(
+            "save_history",
+            [](const DDMTFFT& e, const DeviceArray& out,
+               const py::object& stream) {
+                return save_history_device<float>(e, "DDMTFFT.save_history",
+                                                  out, stream);
+            },
+            "out"_a, py::kw_only(), "stream"_a = py::none(),
+            "Save the streaming history into a float32 device array (GPU "
+            "backends, asynchronous on ``stream``). Returns ``out``.")
+        .def(
+            "load_history",
+            [](DDMTFFT& e, const DeviceArray& history,
+               const py::object& stream) {
+                load_history_device<float>(e, "DDMTFFT.load_history", history,
+                                           stream);
+            },
+            "history"_a, py::kw_only(), "stream"_a = py::none(),
+            "Restore the streaming history from a float32 device array (GPU "
+            "backends, asynchronous on ``stream``).");
 }
 
 } // namespace dmt

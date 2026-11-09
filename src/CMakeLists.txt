@@ -6,6 +6,15 @@ find_package(
 )
 find_package(pybind11 CONFIG REQUIRED)
 
+# DLPack (header only): the tensor exchange structs behind __dlpack__, through
+# which the bindings take PyTorch, CuPy, JAX, ... device arrays without a copy.
+CPMAddPackage(
+  NAME dlpack
+  VERSION 1.4
+  URL https://github.com/dmlc/dlpack/archive/refs/tags/v1.4.tar.gz
+  DOWNLOAD_ONLY YES
+)
+
 # One module for every backend: the backend is chosen at runtime (Exec), so
 # the bindings never include a GPU runtime header.
 set(DMT_PYMODULE_NAME lib${DMT_LIBRARY_NAME})
@@ -26,6 +35,11 @@ target_include_directories(
 target_link_libraries(
   ${DMT_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${DMT_LIBRARY_NAME} ${DMT_COMPILE_OPTIONS}
 )
+if(dlpack_ADDED)
+  target_include_directories(${DMT_PYMODULE_NAME} SYSTEM PRIVATE ${dlpack_SOURCE_DIR}/include)
+else()
+  target_link_libraries(${DMT_PYMODULE_NAME} PRIVATE dlpack::dlpack)
+endif()
 # pybind11's include directory comes first on the module's command line (a
 # system pybind11 brings /opt/homebrew/include or /usr/include), where another
 # fmt may live. Put the CPM fmt ahead of it so one fmt version reaches every

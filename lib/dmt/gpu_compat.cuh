@@ -48,6 +48,7 @@ namespace cuda = ::thrust::hip;
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess
 #define cudaErrorInvalidDevice hipErrorInvalidDevice
+#define cudaErrorNotReady hipErrorNotReady
 #define cudaStream_t hipStream_t
 #define cudaEvent_t hipEvent_t
 #define cudaDeviceProp hipDeviceProp_t
@@ -89,6 +90,7 @@ namespace cuda = ::thrust::hip;
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
+#define cudaStreamQuery hipStreamQuery
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStreamWaitEvent hipStreamWaitEvent

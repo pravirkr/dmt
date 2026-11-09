@@ -111,7 +111,12 @@ join into one continuous DM-time stream. Call
 - **GPU.** On a GPU, pass `backend="cuda"` (and `device=` for another GPU); the
   arguments and the `execute`/stepper calls on NumPy arrays are the same.
   `dmtlib.available_backends()` lists the backends in your build, e.g.
-  `['cpu', 'cuda']`.
+  `['cpu', 'cuda']`. Data already on the GPU (PyTorch, CuPy, Numba, or any
+  `__dlpack__` / `__cuda_array_interface__` array) goes straight in:
+  `fdmt.execute(waterfall_gpu, out=dmt_gpu, stream=torch_stream)` reads and
+  writes device memory in place and returns at once. See the
+  [Python API reference](../api/python_api.md) and the
+  [zero-copy GPU arrays tutorial](../tutorials/08_gpu_zero_copy_arrays.ipynb).
 
 (channel-order)=
 ### Channel order and band edges
