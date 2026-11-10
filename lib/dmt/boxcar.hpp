@@ -12,6 +12,7 @@
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
+#include "dmt/boxcar_noise.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_variance.hpp"
 
@@ -341,6 +342,25 @@ make_boxcar_driver(std::unique_ptr<FDMTEngine> fdmt);
 [[nodiscard]] std::unique_ptr<BoxcarDriver>
 make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
 
+/**
+ * @brief Noise model of one block under FDMTBoxcar's per-call kill mask.
+ *
+ * Endpoints of the block (stream samples from first_sample to the next
+ * block's) use the `steady` tables, except, when `transition` is set, the
+ * first S_r + W - 1 of each row r and width W (S_r: the row's support with
+ * every channel active), whose input windows also reach the previous block:
+ * they use `transition_tables`, the variance of the OR of both blocks'
+ * masks. A null table pointer means the constructor tables (the search
+ * planes). The block's input rows of the `kill_runs` channels are zeroed.
+ */
+struct BlockNoise {
+    uint64_t first_sample = 0;
+    std::shared_ptr<const NoiseTables> steady;
+    bool transition = false;
+    std::shared_ptr<const NoiseTables> transition_tables;
+    std::vector<std::pair<SizeType, SizeType>> kill_runs;
+};
+
 class FDMTBoxcarEngine : public FDMTSearchSink {
 public:
     virtual CandidateResultView execute(std::span<const float>)   = 0;
@@ -364,6 +384,30 @@ public:
     [[nodiscard]] virtual uint64_t stream_position() const noexcept = 0;
     /// Input samples a sample waits for before every row has searched it.
     [[nodiscard]] virtual uint64_t search_latency() const noexcept = 0;
+
+    // Per-call kill masks (FDMTBoxcar, float input). Until enabled, every
+    // block uses the constructor tables and kill runs.
+    /// Bytes that enable_block_noise() would add to memory_usage().
+    [[nodiscard]] virtual SizeType block_noise_bytes() const noexcept {
+        return 0;
+    }
+    /// Starts per-block noise: `support` holds each row's support with
+    /// every channel active. The ring starts with the constructor entry.
+    virtual void
+    enable_block_noise(std::shared_ptr<const std::vector<uint64_t>>) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: per-call kill masks are not supported here");
+    }
+    /// The next execute()'s block; the entry is committed only once that
+    /// call passes its checks. An execute() without one (drain() padding)
+    /// repeats the last block's steady tables, with no transition and the
+    /// constructor kill runs.
+    virtual void push_block_noise(BlockNoise) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: per-call kill masks are not supported here");
+    }
+    /// Drops an entry pushed for an execute() that threw.
+    virtual void drop_block_noise() noexcept {}
 };
 
 /// The boxcar engines own `driver`, which calls them back per chunk.

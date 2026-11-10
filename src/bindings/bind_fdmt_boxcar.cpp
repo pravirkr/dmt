@@ -155,8 +155,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
         for packed input) and are left out of every row's noise model, so
-        S/N stays calibrated on the remaining channels. Fixed at
-        construction; each block is copied once to zero them.
+        S/N stays calibrated on the remaining channels. Each block is copied
+        once to zero them. :meth:`execute` also takes a mask per block
+        (float32 input), ANDed with this one.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,
@@ -178,7 +179,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "kill_mask"_a        = py::none())
         .def(
             "execute",
-            [](FDMTBoxcar& search, const py::array& input) {
+            [](FDMTBoxcar& search, const py::array& input,
+               const py::object& kill) {
+                const auto mask   = extract_kill_mask(kill);
                 const auto& plan  = search.get_plan();
                 const bool packed = search.get_config().input_nbits != 32;
                 const auto row_size =
@@ -208,6 +211,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
                 CandidateResultView view;
                 {
                     py::gil_scoped_release release;
+                    if (packed && !kill.is_none()) {
+                        throw std::invalid_argument(
+                            "FDMTBoxcar: per-call kill masks need float32 "
+                            "input");
+                    }
                     if (packed) {
                         view = search.execute(
                             std::span(static_cast<const uint8_t*>(input.data()),
@@ -215,12 +223,27 @@ void bind_fdmt_boxcar(py::module_& mod) {
                     } else {
                         view = search.execute(
                             std::span(static_cast<const float*>(input.data()),
-                                      static_cast<SizeType>(input.size())));
+                                      static_cast<SizeType>(input.size())),
+                            std::span<const uint8_t>(mask));
                     }
                 }
                 return own_result(view);
             },
-            "waterfall"_a)
+            "waterfall"_a, "kill_mask"_a = py::none(),
+            R"doc(
+            Search one block and return its candidates.
+
+            ``kill_mask``: ``None`` or one bool/integer per channel, low
+            frequency first (0 = killed), for this block only (float32
+            input). It is ANDed with the constructor's mask; ``None`` means
+            the constructor's mask alone. When the mask changes, the
+            endpoints whose input reaches back into the previous block are
+            scored with the variance of the OR of both masks (no extra false
+            alarms, S/N there slightly low). The first mask needs blocks of
+            at least the largest row support plus ``max_boxcar - 1`` samples
+            and its noise tables within ``max_memory_bytes``; otherwise
+            ``ValueError``, with the stream unchanged.
+            )doc")
         .def("flush",
              [](FDMTBoxcar& search) {
                  CandidateResultView view;

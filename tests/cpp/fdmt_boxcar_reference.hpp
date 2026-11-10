@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <random>
 #include <span>
 #include <tuple>
@@ -16,6 +17,8 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 #include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/algorithms/fdmt_fft_boxcar.hpp"
+
+#include "dmt/fdmt_variance.hpp"
 
 namespace boxcar_test {
 using namespace dmt;
@@ -218,11 +221,15 @@ waterfalls(const plans::FDMTPlan& plan, SizeType beams, SizeType blocks) {
 }
 
 // Direct float64 windows over each plane row's stream (rows in plane, then
-// DM order), with the same peak bookkeeping as the engines.
+// DM order), with the same peak bookkeeping as the engines. `table(row, t,
+// f)` gives the threshold and inverse sigma of endpoint t (default: the
+// planes' tables).
+template <typename Table>
 inline std::vector<RawCandidate>
 direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
                const std::vector<std::vector<float>>& rows,
-               const BoxcarConfig& config) {
+               const BoxcarConfig& config,
+               Table&& table) {
     std::vector<RawCandidate> expected;
     SizeType row_idx = 0;
     for (const auto& p : planes) {
@@ -275,15 +282,21 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
                     for (SizeType k = 0; k < w && k <= t; ++k) {
                         sum += values[t - k];
                     }
-                    const bool valid = !config.skip_cold_prefix ||
-                                       t >= p.warmup_samples[d] + w - 1;
-                    const bool above =
-                        valid &&
-                        sum >= p.raw_thresh_lut[d * p.widths.size() + f];
-                    const auto c = point(
-                        t, f,
-                        static_cast<float>(
-                            sum * p.inv_sigma_lut[d * p.widths.size() + f]));
+                    // Trapezoid {1, 2, 1}: the box plus its core.
+                    const SizeType w_edge =
+                        config.use_trapezoid
+                            ? algorithms::detail::trapezoid_edge_width(
+                                  static_cast<uint32_t>(w))
+                            : 0;
+                    for (SizeType k = w_edge;
+                         w_edge > 0 && k < w - w_edge && k <= t; ++k) {
+                        sum += values[t - k];
+                    }
+                    const bool valid      = !config.skip_cold_prefix ||
+                                            t >= p.warmup_samples[d] + w - 1;
+                    const auto [thr, inv] = table(row_idx, t, f);
+                    const bool above      = valid && sum >= thr;
+                    const auto c = point(t, f, static_cast<float>(sum * inv));
                     if (config.peak_mode ==
                         PeakFindingMode::kAllAboveThreshold) {
                         if (above) {
@@ -312,21 +325,39 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
     return expected;
 }
 
+inline std::vector<RawCandidate>
+direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
+               const std::vector<std::vector<float>>& rows,
+               const BoxcarConfig& config) {
+    // Flat row index -> (plane, DM) for the planes' own tables.
+    std::vector<std::pair<SizeType, SizeType>> where;
+    for (SizeType ip = 0; ip < planes.size(); ++ip) {
+        for (SizeType d = 0; d < planes[ip].dm_grid.size(); ++d) {
+            where.emplace_back(ip, d);
+        }
+    }
+    return direct_windows(
+        planes, rows, config, [&](SizeType row, SizeType, SizeType f) {
+            const auto& p    = planes[where[row].first];
+            const SizeType i = (where[row].second * p.widths.size()) + f;
+            return std::pair{p.raw_thresh_lut[i], p.inv_sigma_lut[i]};
+        });
+}
+
 // Materialize existing FDMT's actual intermediate planes, then evaluate
 // windows by direct float64 summation. No new scorer/prefix helpers used.
 // With a kill mask the FDMT sees the killed channels as zero and the windows
 // use the masked search planes.
-inline std::vector<RawCandidate>
-reference(const plans::FDMTPlan& plan,
-          const BoxcarConfig& config,
-          bool smear,
-          SizeType beams,
-          const std::vector<std::vector<float>>& input,
-          std::span<const uint8_t> kill = {}) {
-    FDMTBoxcar metadata(plan, config, smear, Exec::cpu(), beams,
-                        algorithms::kFDMTAutoFuse, 0,
-                        algorithms::kFDMTDefaultMaxMemory, kill);
-    const auto planes = metadata.get_search_plans();
+// The rows of `planes` over the stream from the materialized FDMT (one
+// beam); block k's channels with block_kill[k][c] == 0 read as zero (an
+// empty entry: none).
+inline std::vector<std::vector<float>>
+reference_rows(const plans::FDMTPlan& plan,
+               bool smear,
+               SizeType beams,
+               std::span<const plans::BoxcarPlanePlan> planes,
+               const std::vector<std::vector<float>>& input,
+               const std::vector<std::vector<uint8_t>>& block_kill) {
     std::vector<std::vector<float>> rows;
     SizeType nrows = 0;
     for (const auto& p : planes) {
@@ -335,7 +366,9 @@ reference(const plans::FDMTPlan& plan,
     rows.resize(nrows);
     FDMT fdmt(plan, smear, Exec::cpu(), beams, 0, false, plan.get_nsamps());
     std::vector<float> output(beams * plan.get_dmt_size());
-    for (auto block : input) {
+    for (SizeType k = 0; k < input.size(); ++k) {
+        auto block       = input[k];
+        const auto& kill = block_kill[k];
         for (SizeType c = 0; c < kill.size(); ++c) {
             for (SizeType b = 0; b < beams && kill[c] == 0; ++b) {
                 std::fill_n(block.begin() + static_cast<std::ptrdiff_t>(
@@ -363,7 +396,124 @@ reference(const plans::FDMTPlan& plan,
         }
         fdmt.finalize();
     }
-    return direct_windows(planes, rows, config);
+    return rows;
+}
+
+inline std::vector<RawCandidate>
+reference(const plans::FDMTPlan& plan,
+          const BoxcarConfig& config,
+          bool smear,
+          SizeType beams,
+          const std::vector<std::vector<float>>& input,
+          std::span<const uint8_t> kill = {}) {
+    FDMTBoxcar metadata(plan, config, smear, Exec::cpu(), beams,
+                        algorithms::kFDMTAutoFuse, 0,
+                        algorithms::kFDMTDefaultMaxMemory, kill);
+    const auto planes = metadata.get_search_plans();
+    const std::vector<std::vector<uint8_t>> block_kill(
+        input.size(), std::vector<uint8_t>(kill.begin(), kill.end()));
+    return direct_windows(
+        planes, reference_rows(plan, smear, beams, planes, input, block_kill),
+        config);
+}
+
+/**
+ * Per-call kill masks (FDMTBoxcar::execute(waterfall, kill_mask)): block k
+ * runs with effective mask ctor AND masks[k] (an empty masks[k]: ctor
+ * alone). Killed input reads as zero per block. Endpoint t of block k uses
+ * the tables of that mask, except, when the mask changed from block k - 1
+ * (k > 0), the first S_r + W - 1 endpoints of each row (S_r its support
+ * with every channel active), which use the tables of the OR of both masks.
+ * Tables come from constructor-masked instances (independent of the
+ * engines' noise model); the warm-up from the constructor mask. One beam.
+ */
+struct MaskedReference {
+    std::vector<std::vector<uint8_t>> effective;
+    std::vector<RawCandidate> candidates;
+};
+inline MaskedReference
+masked_reference(const plans::FDMTPlan& plan,
+                 const BoxcarConfig& config,
+                 bool smear,
+                 const std::vector<std::vector<float>>& input,
+                 std::span<const uint8_t> ctor,
+                 const std::vector<std::vector<uint8_t>>& masks) {
+    const SizeType nchans = plan.get_nchans();
+    const SizeType ns     = plan.get_nsamps();
+    const auto metadata   = [&](std::span<const uint8_t> kill) {
+        return FDMTBoxcar(plan, config, smear, Exec::cpu(), 1,
+                          algorithms::kFDMTAutoFuse, 0,
+                          algorithms::kFDMTDefaultMaxMemory, kill);
+    };
+    MaskedReference out;
+    for (SizeType k = 0; k < input.size(); ++k) {
+        std::vector<uint8_t> e(nchans, 1);
+        for (SizeType c = 0; c < nchans; ++c) {
+            const bool on = (ctor.empty() || ctor[c] != 0) &&
+                            (masks[k].empty() || masks[k][c] != 0);
+            e[c]          = on ? 1 : 0;
+        }
+        out.effective.push_back(e);
+    }
+    // Flat row tables of a mask, cached.
+    struct Tables {
+        std::vector<float> thr, inv;
+    };
+    std::map<std::vector<uint8_t>, Tables> cache;
+    const auto tables = [&](const std::vector<uint8_t>& mask) -> const Tables& {
+        auto it = cache.find(mask);
+        if (it == cache.end()) {
+            Tables t;
+            const auto m = metadata(mask);
+            for (const auto& p : m.get_search_plans()) {
+                t.thr.insert(t.thr.end(), p.raw_thresh_lut.begin(),
+                             p.raw_thresh_lut.end());
+                t.inv.insert(t.inv.end(), p.inv_sigma_lut.begin(),
+                             p.inv_sigma_lut.end());
+            }
+            it = cache.emplace(mask, std::move(t)).first;
+        }
+        return it->second;
+    };
+    std::vector<uint64_t> support;
+    {
+        const auto all = metadata({});
+        for (const auto& p : all.get_search_plans()) {
+            support.insert(support.end(), p.warmup_samples.begin(),
+                           p.warmup_samples.end());
+        }
+    }
+    std::vector<const Tables*> steady;
+    std::vector<const Tables*> transition;
+    for (SizeType k = 0; k < input.size(); ++k) {
+        steady.push_back(&tables(out.effective[k]));
+        const Tables* tr = nullptr;
+        if (k > 0 && out.effective[k] != out.effective[k - 1]) {
+            std::vector<uint8_t> u(nchans);
+            for (SizeType c = 0; c < nchans; ++c) {
+                u[c] = out.effective[k][c] | out.effective[k - 1][c];
+            }
+            tr = &tables(u);
+        }
+        transition.push_back(tr);
+    }
+    const auto ctor_meta = metadata(ctor);
+    const auto planes    = ctor_meta.get_search_plans();
+    const SizeType nf    = planes.front().widths.size();
+    const auto rows =
+        reference_rows(plan, smear, 1, planes, input, out.effective);
+    out.candidates = direct_windows(
+        planes, rows, config, [&](SizeType row, SizeType t, SizeType f) {
+            const SizeType k  = t / ns;
+            const Tables* tab = steady[k];
+            if (transition[k] != nullptr &&
+                t < (k * ns) + support[row] + planes.front().widths[f] - 1) {
+                tab = transition[k];
+            }
+            return std::pair{tab->thr[(row * nf) + f],
+                             tab->inv[(row * nf) + f]};
+        });
+    return out;
 }
 
 inline std::vector<RawCandidate>

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -144,6 +145,7 @@ public:
             throw std::overflow_error(
                 "FDMTBoxcar: stream sample index overflow");
         }
+        commit_block_noise();
         begin_result(m_plan.get_nsamps());
         m_driver->search(masked(waterfall, m_masked), *this);
         m_position += m_plan.get_nsamps();
@@ -205,7 +207,41 @@ public:
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_driver->search_latency();
     }
+    [[nodiscard]] SizeType block_noise_bytes() const noexcept override {
+        // The staging block (when the constructor mask has none) and the
+        // per-thread screen thresholds of tiles that mix tables.
+        const SizeType staging = m_masked.empty()
+                                     ? m_beams * m_plan.get_nchans() *
+                                           m_plan.get_nsamps() * sizeof(float)
+                                     : 0;
+        return staging +
+               (static_cast<SizeType>(m_threads) * m_filters * sizeof(float));
+    }
+    void enable_block_noise(
+        std::shared_ptr<const std::vector<uint64_t>> support) override {
+        if (m_config.input_nbits != 32) {
+            throw std::logic_error(
+                "FDMTBoxcar (cpu): per-call kill masks need float input");
+        }
+        m_masked.resize(m_beams * m_plan.get_nchans() * m_plan.get_nsamps());
+        m_killed.resize(m_plan.get_nchans());
+        m_screen_thr.resize(static_cast<SizeType>(m_threads) * m_filters);
+        m_support         = std::move(support);
+        const uint64_t ns = m_plan.get_nsamps();
+        m_ring_size =
+            1 + static_cast<SizeType>((search_latency() + ns - 1) / ns);
+        m_ring.reserve(m_ring_size + 1);
+        m_noise_on = true;
+        reset_block_noise();
+    }
+    void push_block_noise(BlockNoise entry) override {
+        m_pending = std::move(entry);
+    }
+    void drop_block_noise() noexcept override { m_pending.reset(); }
     void reset_history(Stream) override {
+        if (m_noise_on) {
+            reset_block_noise();
+        }
         m_search_stop = UINT64_MAX;
         m_driver->reset({});
         std::ranges::fill(m_carry, 0.0F);
@@ -300,7 +336,8 @@ public:
                               m_integer_prefix.size() * sizeof(uint64_t) +
                               m_best.size() * sizeof(float) +
                               m_best_filter.size() * sizeof(uint32_t) +
-                              m_per_dm.size() * sizeof(uint64_t),
+                              m_per_dm.size() * sizeof(uint64_t) +
+                              m_screen_thr.size() * sizeof(float),
                 .candidates = m_candidates.size() * sizeof(RawCandidate),
                 .staging =
                     (m_masked.size() * sizeof(float)) + m_masked_packed.size()};
@@ -386,6 +423,119 @@ private:
         m_candidates[slot]   = candidate;
 #pragma omp atomic
         ++m_counts.emitted_count;
+    }
+    /// Thresholds and inverse sigmas of a float row's tile: one table
+    /// (`thr`, `inv`: the row's entries), or, when `mixed`, a table per
+    /// sample and width chosen from the block ring (support: the row's
+    /// support with every channel active).
+    struct TileTables {
+        const float* thr = nullptr;
+        const float* inv = nullptr;
+        bool mixed       = false;
+        uint64_t support = 0;
+    };
+    [[nodiscard]] static const float* table_thr(const NoiseTables* t,
+                                                const float* plane_row,
+                                                SizeType row,
+                                                SizeType filters) noexcept {
+        return t == nullptr ? plane_row : t->thresh.data() + (row * filters);
+    }
+    [[nodiscard]] static const float* table_inv(const NoiseTables* t,
+                                                const float* plane_row,
+                                                SizeType row,
+                                                SizeType filters) noexcept {
+        return t == nullptr ? plane_row : t->inv_sigma.data() + (row * filters);
+    }
+    /**
+     * Tables of the tile [start, start + n) of a float row under per-call
+     * masks: the steady tables of every block it touches, and a block's
+     * transition tables where it touches the first S + max_width - 1
+     * endpoints of a block with a transition. One table: `tables` points at
+     * it. Several: `tables` is mixed, and the screen thresholds returned
+     * are the per-width minimum over them (a lower bound for every sample,
+     * so the screen stays exact).
+     */
+    const float* tile_tables(const plans::BoxcarPlanePlan& plane,
+                             SizeType dm,
+                             SizeType row_idx,
+                             uint64_t start,
+                             SizeType n,
+                             TileTables& tables) {
+        const uint64_t support = (*m_support)[row_idx];
+        const uint64_t last    = start + n - 1;
+        const NoiseTables* in_play[4];
+        int count      = 0;
+        const auto add = [&](const NoiseTables* t) {
+            for (int j = 0; j < count; ++j) {
+                if (in_play[j] == t) {
+                    return;
+                }
+            }
+            in_play[count++] = t;
+        };
+        const SizeType i0 = ring_index(start);
+        const SizeType i1 = ring_index(last);
+        for (SizeType i = i0; i <= i1; ++i) {
+            const auto& e     = m_ring[i];
+            const uint64_t lo = i == i0 ? start : e.first_sample;
+            const uint64_t hi =
+                i + 1 <= i1 ? m_ring[i + 1].first_sample - 1 : last;
+            if (!e.transition) {
+                add(e.steady.get());
+                continue;
+            }
+            if (lo < e.first_sample + support + m_width - 1) {
+                add(e.transition_tables.get());
+            }
+            if (hi + 1 >=
+                e.first_sample + support + m_planes.front().widths[0]) {
+                add(e.steady.get());
+            }
+        }
+        const float* plane_thr = plane.raw_thresh_lut.data() + (dm * m_filters);
+        const float* plane_inv = plane.inv_sigma_lut.data() + (dm * m_filters);
+        if (count == 1) {
+            tables.thr   = table_thr(in_play[0], plane_thr, row_idx, m_filters);
+            tables.inv   = table_inv(in_play[0], plane_inv, row_idx, m_filters);
+            tables.mixed = false;
+            return tables.thr;
+        }
+        tables.thr     = plane_thr;
+        tables.inv     = plane_inv;
+        tables.mixed   = true;
+        tables.support = support;
+        const auto tid = static_cast<SizeType>(omp_get_thread_num());
+        float* screen  = m_screen_thr.data() + (tid * m_filters);
+        for (SizeType f = 0; f < m_filters; ++f) {
+            float th = std::numeric_limits<float>::max();
+            for (int j = 0; j < count; ++j) {
+                th = std::min(th, table_thr(in_play[j], plane_thr, row_idx,
+                                            m_filters)[f]);
+            }
+            screen[f] = th;
+        }
+        return screen;
+    }
+    /// Under mixed tables: the table of endpoint `sample` for width
+    /// `width` and the first sample after it that may use another.
+    struct SampleTable {
+        const NoiseTables* table;
+        uint64_t until;
+    };
+    [[nodiscard]] SampleTable sample_table(uint64_t sample,
+                                           SizeType width,
+                                           uint64_t support) const noexcept {
+        const SizeType i = ring_index(sample);
+        const auto& e    = m_ring[i];
+        const uint64_t next =
+            i + 1 < m_ring.size() ? m_ring[i + 1].first_sample : UINT64_MAX;
+        if (e.transition) {
+            const uint64_t end = e.first_sample + support + width - 1;
+            if (sample < end) {
+                return {e.transition_tables.get(), std::min(end, next)};
+            }
+        }
+        return {e.steady.get(), next};
     }
     /// Running sums out[i + 1] = out[i] + sample(t0 + i), i < n, of the
     /// same samples as boxcar_sample() / boxcar_integer_sample(), with the
@@ -529,6 +679,28 @@ private:
         bool open            = any_open();
         double* group_thresh = nullptr;
         double* range_min    = nullptr;
+        // Float rows: the thresholds of the row (TileTables), per tile under
+        // per-call masks; the screen's per-width thresholds and the group
+        // minima follow them.
+        TileTables tables{
+            .thr = plane.raw_thresh_lut.data() + (dm * m_filters),
+            .inv = plane.inv_sigma_lut.data() + (dm * m_filters),
+        };
+        const float* screen_thr = tables.thr;
+        const float* groups_for = nullptr; // thresholds group_thresh holds
+        const auto set_groups   = [&](const float* thr) {
+            if (thr == groups_for) {
+                return;
+            }
+            for (SizeType g = 0; g < m_groups.size(); ++g) {
+                float th = std::numeric_limits<float>::max();
+                for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi; ++f) {
+                    th = std::min(th, thr[f]);
+                }
+                group_thresh[g] = th;
+            }
+            groups_for = thr;
+        };
         if (!m_groups.empty()) {
             group_thresh = m_group_thresh.data() + tid * m_groups.size();
             range_min    = m_range_min.data() +
@@ -546,14 +718,6 @@ private:
                                               plane.integer_mean_lut[i]);
                     }
                     group_thresh[g] = th;
-                } else {
-                    float th = std::numeric_limits<float>::max();
-                    for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi;
-                         ++f) {
-                        th = std::min(th,
-                                      plane.raw_thresh_lut[dm * m_filters + f]);
-                    }
-                    group_thresh[g] = th;
                 }
             }
         }
@@ -566,6 +730,12 @@ private:
             // Without it (and no open run) every peak mode is unchanged.
             const bool cold =
                 m_config.skip_cold_prefix && start + 1 < row.warmup + m_width;
+            if constexpr (!std::is_integral_v<T>) {
+                if (m_noise_on) {
+                    screen_thr =
+                        tile_tables(plane, dm, row_idx, start, n, tables);
+                }
+            }
             bool hit      = false;
             bool screened = false;
             if (!m_groups.empty() && !open) {
@@ -574,8 +744,9 @@ private:
                         screen_tile_int(plane, dm, row, prefix, lookback, start,
                                         n, cold, group_thresh, range_min);
                 } else {
-                    hit = screen_tile(plane, dm, row, prefix, lookback, start,
-                                      n, cold, group_thresh, range_min);
+                    set_groups(screen_thr);
+                    hit = screen_tile(plane, screen_thr, row, prefix, lookback,
+                                      start, n, cold, group_thresh, range_min);
                 }
                 screened = true;
             }
@@ -591,8 +762,7 @@ private:
                     if constexpr (std::is_integral_v<T>) {
                         return plane.integer_thresh_lut[dm * m_filters + f];
                     } else {
-                        return static_cast<Prefix>(
-                            plane.raw_thresh_lut[dm * m_filters + f]);
+                        return static_cast<Prefix>(screen_thr[f]);
                     }
                 }();
                 const uint64_t first_valid = row.warmup + width - 1;
@@ -617,7 +787,7 @@ private:
             }
             if (hit || open) {
                 score_tile<T>(plane, dm, row, beam, prefix, lookback, start, n,
-                              peaks, row_idx);
+                              peaks, row_idx, tables);
                 open = any_open();
             }
             // Slide the last lookback prefixes in front of the next tile.
@@ -645,7 +815,7 @@ private:
      * width by width. range_min level k holds min(P[j .. j + 2^k - 1]).
      */
     bool screen_tile(const plans::BoxcarPlanePlan& plane,
-                     SizeType dm,
+                     const float* thr_row,
                      const BoxcarRow& row,
                      const double* prefix,
                      SizeType lookback,
@@ -696,9 +866,8 @@ private:
                 const SizeType width = plane.widths[f];
                 const SizeType w_edge =
                     m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
-                const double* lo = prefix + lookback + 1 - width;
-                const auto th    = static_cast<double>(
-                    plane.raw_thresh_lut[dm * m_filters + f]);
+                const double* lo           = prefix + lookback + 1 - width;
+                const auto th              = static_cast<double>(thr_row[f]);
                 const uint64_t first_valid = row.warmup + width - 1;
                 bool hit                   = false;
                 if (w_edge == 0) {
@@ -843,7 +1012,8 @@ private:
                     uint64_t start,
                     SizeType n,
                     BoxcarPeak* peaks,
-                    SizeType row_idx) {
+                    SizeType row_idx,
+                    const TileTables& tables) {
         const SizeType tid    = static_cast<SizeType>(omp_get_thread_num());
         float* best           = m_best.data() + tid * m_tile;
         uint32_t* best_filter = m_best_filter.data() + tid * m_tile;
@@ -859,64 +1029,95 @@ private:
             const SizeType w_edge = m_config.use_trapezoid
                                         ? trapezoid_edge_width(plane.widths[f])
                                         : 0;
-            const float threshold = plane.raw_thresh_lut[dm * m_filters + f];
-            const float inv_sigma = plane.inv_sigma_lut[dm * m_filters + f];
-            for (SizeType t = 0; t < n; ++t) {
-                const uint64_t sample = start + t;
-                const SizeType idx    = lookback + t + 1;
-                Prefix sum            = prefix[idx] - prefix[idx - width];
-                if (w_edge > 0) {
-                    sum += prefix[idx - w_edge] - prefix[idx - width + w_edge];
-                }
-                const bool valid = !m_config.skip_cold_prefix ||
-                                   sample >= row.warmup + width - 1;
-                bool above;
-                float snr = 0;
-                if constexpr (std::is_integral_v<T>) {
-                    above = valid &&
-                            sum >= plane.integer_thresh_lut[dm * m_filters + f];
-                    if (above &&
-                        m_config.peak_mode ==
-                            PeakFindingMode::kContiguousPeakAcrossWidths) {
-                        snr = static_cast<float>(
-                            (static_cast<double>(sum) -
-                             plane.integer_mean_lut[dm * m_filters + f]) *
-                            (inv_sigma * m_integer_unit));
+            // Float rows take the tile's tables (per sample when mixed);
+            // packed rows the planes' (no per-call masks).
+            const auto points = [&](SizeType t_begin, SizeType t_end,
+                                    float threshold, float inv_sigma) {
+                for (SizeType t = t_begin; t < t_end; ++t) {
+                    const uint64_t sample = start + t;
+                    const SizeType idx    = lookback + t + 1;
+                    Prefix sum            = prefix[idx] - prefix[idx - width];
+                    if (w_edge > 0) {
+                        sum +=
+                            prefix[idx - w_edge] - prefix[idx - width + w_edge];
                     }
-                } else {
-                    above = valid && sum >= threshold;
-                    snr   = above ? static_cast<float>(sum * inv_sigma) : 0.0F;
-                }
-                if (m_config.peak_mode ==
-                    PeakFindingMode::kContiguousPeakAcrossWidths) {
-                    if (above && snr > best[t]) {
-                        best[t]        = snr;
-                        best_filter[t] = static_cast<uint32_t>(f);
-                    }
-                } else if (m_config.peak_mode ==
-                           PeakFindingMode::kAllAboveThreshold) {
-                    if (above) {
-                        BoxcarPeak peak{sample,
-                                        sample,
-                                        sample,
-                                        snr,
-                                        static_cast<uint32_t>(f),
-                                        true};
-                        if constexpr (std::is_integral_v<T>) {
-                            peak.raw_sum = sum;
-                        }
-                        emit_peak(peak);
-                    }
-                } else {
+                    const bool valid = !m_config.skip_cold_prefix ||
+                                       sample >= row.warmup + width - 1;
+                    bool above;
+                    float snr = 0;
                     if constexpr (std::is_integral_v<T>) {
-                        boxcar_integer_peak_step(peaks[f], above, sum, sample,
-                                                 static_cast<uint32_t>(f),
-                                                 emit_peak);
+                        above =
+                            valid &&
+                            sum >= plane.integer_thresh_lut[dm * m_filters + f];
+                        if (above &&
+                            m_config.peak_mode ==
+                                PeakFindingMode::kContiguousPeakAcrossWidths) {
+                            snr = static_cast<float>(
+                                (static_cast<double>(sum) -
+                                 plane.integer_mean_lut[dm * m_filters + f]) *
+                                (inv_sigma * m_integer_unit));
+                        }
                     } else {
-                        boxcar_peak_step(peaks[f], above, snr, sample,
-                                         static_cast<uint32_t>(f), emit_peak);
+                        above = valid && sum >= threshold;
+                        snr =
+                            above ? static_cast<float>(sum * inv_sigma) : 0.0F;
+                    }
+                    if (m_config.peak_mode ==
+                        PeakFindingMode::kContiguousPeakAcrossWidths) {
+                        if (above && snr > best[t]) {
+                            best[t]        = snr;
+                            best_filter[t] = static_cast<uint32_t>(f);
+                        }
+                    } else if (m_config.peak_mode ==
+                               PeakFindingMode::kAllAboveThreshold) {
+                        if (above) {
+                            BoxcarPeak peak{sample,
+                                            sample,
+                                            sample,
+                                            snr,
+                                            static_cast<uint32_t>(f),
+                                            true};
+                            if constexpr (std::is_integral_v<T>) {
+                                peak.raw_sum = sum;
+                            }
+                            emit_peak(peak);
+                        }
+                    } else {
+                        if constexpr (std::is_integral_v<T>) {
+                            boxcar_integer_peak_step(
+                                peaks[f], above, sum, sample,
+                                static_cast<uint32_t>(f), emit_peak);
+                        } else {
+                            boxcar_peak_step(peaks[f], above, snr, sample,
+                                             static_cast<uint32_t>(f),
+                                             emit_peak);
+                        }
                     }
                 }
+            };
+            if (std::is_integral_v<T> || !tables.mixed) {
+                const float* thr =
+                    std::is_integral_v<T>
+                        ? plane.raw_thresh_lut.data() + (dm * m_filters)
+                        : tables.thr;
+                const float* inv =
+                    std::is_integral_v<T>
+                        ? plane.inv_sigma_lut.data() + (dm * m_filters)
+                        : tables.inv;
+                points(0, n, thr[f], inv[f]);
+                continue;
+            }
+            // Mixed: runs of samples with one table each.
+            for (SizeType t = 0; t < n;) {
+                const auto [table, until] =
+                    sample_table(start + t, width, tables.support);
+                const SizeType end = until - start < n
+                                         ? static_cast<SizeType>(until - start)
+                                         : n;
+                points(t, end,
+                       table_thr(table, tables.thr, row_idx, m_filters)[f],
+                       table_inv(table, tables.inv, row_idx, m_filters)[f]);
+                t = end;
             }
         }
         if (m_config.peak_mode ==
@@ -933,9 +1134,19 @@ private:
     /// the copy is bound by memory bandwidth.
     template <typename T>
     std::span<const T> masked(std::span<const T> block,
-                              std::vector<T>& buffer) const {
-        if (m_kill_runs.empty()) {
+                              std::vector<T>& buffer) {
+        // The block's own kill runs under per-call masks.
+        const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
+        if (runs.empty()) {
             return block;
+        }
+        if (m_noise_on) {
+            std::ranges::fill(m_killed, uint8_t{0});
+            for (const auto& [c0, c1] : runs) {
+                std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
+                          m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
+                          uint8_t{1});
+            }
         }
         const SizeType nchans = m_plan.get_nchans();
         const SizeType rows   = m_beams * nchans;
@@ -951,6 +1162,45 @@ private:
             }
         }
         return buffer;
+    }
+
+    /// The ring back to one constructor entry (stream sample 0).
+    void reset_block_noise() {
+        m_pending.reset();
+        m_ring.clear();
+        BlockNoise first; // the constructor tables from stream sample 0
+        first.kill_runs = m_kill_runs;
+        m_ring.push_back(std::move(first));
+    }
+    /// Commits the pushed entry of the block about to run (or, without one,
+    /// a repeat of the last block's steady tables) and drops entries no
+    /// endpoint can reach any more.
+    void commit_block_noise() {
+        if (!m_noise_on) {
+            return;
+        }
+        BlockNoise entry;
+        if (m_pending) {
+            entry = std::move(*m_pending);
+            m_pending.reset();
+        } else {
+            entry.steady    = m_ring.back().steady;
+            entry.kill_runs = m_kill_runs;
+        }
+        entry.first_sample = m_position;
+        if (m_ring.size() == m_ring_size) {
+            m_ring.erase(m_ring.begin());
+        }
+        m_ring.push_back(std::move(entry));
+    }
+    /// Index of the ring entry of stream sample `sample` (the oldest entry
+    /// for samples before it).
+    [[nodiscard]] SizeType ring_index(uint64_t sample) const noexcept {
+        SizeType i = m_ring.size() - 1;
+        while (i > 0 && m_ring[i].first_sample > sample) {
+            --i;
+        }
+        return i;
     }
 
     const plans::FDMTPlan& m_plan;
@@ -995,6 +1245,14 @@ private:
     uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
+    // Per-call kill masks: off until the first one (then the per-block
+    // tables below replace the planes' tables).
+    bool m_noise_on = false;
+    std::shared_ptr<const std::vector<uint64_t>> m_support;
+    std::vector<BlockNoise> m_ring; ///< oldest first, at most m_ring_size
+    std::optional<BlockNoise> m_pending;
+    SizeType m_ring_size = 1;
+    std::vector<float> m_screen_thr; ///< per thread: min thresholds of a tile
 };
 
 } // namespace

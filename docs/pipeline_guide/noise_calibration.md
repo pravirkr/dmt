@@ -37,6 +37,16 @@ zero, so they are left out of the sum. `FDMTBoxcar` and `FDMTFFTBoxcar` take
 `kill_mask=` and apply it to their S/N. `FDMTFFT` applies its own mask, and its
 `get_subband_sigma_grid(level, subband, boxcar_width)` gives the sigma of
 each stepper subband view (`FDMTPlan.get_subband_sigma_grid` with the mask).
+
+`FDMTBoxcar.execute(block, kill_mask=...)` also takes a mask per block (see
+the FDMTBoxcar guide). Within a block its sigma is the one above for that
+block's mask (ANDed with the constructor's). Right after a mask change the
+first `S + W - 1` endpoints of each row sum samples read under both masks;
+they use the sigma of the OR of the two masks, which bounds their true
+sigma from above, so their S/N is slightly low and never high. Masking
+channels by zeroing them and rescaling the S/N by one factor such as
+`sqrt(N / G)` is not equivalent: the right factor differs between subband
+rows and DM trials.
 For unit-variance white input the variance of trial $k$ after a
 boxcar of $W$ samples is
 

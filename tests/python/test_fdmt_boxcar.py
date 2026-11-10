@@ -414,3 +414,99 @@ def test_drain_contract_on_the_gpu(gpu_backend: str) -> None:
     expected = run(FDMTBoxcar(plan, cfg, nthreads=4), blocks)
     assert len(expected) > 0
     assert_same(sorted_candidates(parts), expected)
+
+
+def masked_stream(search: FDMTBoxcar, blocks: list, masks: list) -> np.ndarray:
+    parts = [
+        search.execute(block, kill_mask=mask).candidates
+        for block, mask in zip(blocks, masks, strict=True)
+    ]
+    parts.append(search.flush().candidates)
+    return sorted_candidates(parts)
+
+
+def mask_blocks(seed: int = 5) -> tuple[FDMTPlan, list, list]:
+    # 16 channels, 300 samples per block: room for the largest support plus
+    # max_boxcar - 1 (a per-call mask requires it).
+    rng = np.random.default_rng(seed)
+    plan = FDMTPlan(700, 1200, 16, 300, 0.001, dt_grid=[0, 4, 20, 60], subband_depth=1)
+    blocks = []
+    for _ in range(4):
+        data = np.round(rng.standard_normal((16, 300), dtype=np.float32) * 16) / 16
+        data[:, 290:] += 2
+        blocks.append(data)
+    masks = [
+        (rng.random(16) > 0.3).astype(np.uint8),
+        (rng.random(16) > 0.5).astype(bool),
+        None,
+        np.ones(16, dtype=np.uint8),
+    ]
+    return plan, blocks, masks
+
+
+def test_per_call_kill_mask() -> None:
+    plan, blocks, masks = mask_blocks()
+    cfg = config()
+    cfg.skip_cold_prefix = False
+    # uint8 and bool masks; an all-ones or omitted mask is the old call.
+    plain = masked_stream(FDMTBoxcar(plan, cfg), blocks, [None] * 4)
+    ones = masked_stream(FDMTBoxcar(plan, cfg), blocks, [np.ones(16, dtype=bool)] * 4)
+    np.testing.assert_array_equal(ones, plain)
+    # A constant per-call mask is the constructor mask, bit for bit.
+    fixed = masks[0]
+    by_call = masked_stream(FDMTBoxcar(plan, cfg), blocks, [fixed] * 4)
+    by_ctor = masked_stream(FDMTBoxcar(plan, cfg, kill_mask=fixed), blocks, [None] * 4)
+    np.testing.assert_array_equal(by_call, by_ctor)
+    # Changing masks: the constructor mask ANDs in; nonzero means active.
+    changing = masked_stream(FDMTBoxcar(plan, cfg), blocks, masks)
+    assert not np.array_equal(changing, plain)
+    scaled = [None if m is None else m.astype(np.uint8) * 7 for m in masks]
+    np.testing.assert_array_equal(
+        masked_stream(FDMTBoxcar(plan, cfg), blocks, scaled), changing
+    )
+    ones16 = np.ones(16, dtype=np.uint8)
+    np.testing.assert_array_equal(
+        masked_stream(FDMTBoxcar(plan, cfg, kill_mask=ones16), blocks, masks),
+        changing,
+    )
+
+
+def test_per_call_kill_mask_validation() -> None:
+    plan, blocks, _ = mask_blocks()
+    search = FDMTBoxcar(plan, config())
+    reference = FDMTBoxcar(plan, config())
+    with pytest.raises(ValueError, match="kill_mask"):
+        search.execute(blocks[0], kill_mask=np.ones(15, dtype=np.uint8))
+    with pytest.raises(TypeError):
+        search.execute(blocks[0], kill_mask=np.ones(16, dtype=np.float32))
+    # The rejected calls left the stream untouched.
+    for block in blocks:
+        np.testing.assert_array_equal(
+            search.execute(block).candidates, reference.execute(block).candidates
+        )
+    # Blocks shorter than the largest support plus max_boxcar - 1.
+    short = FDMTPlan(700, 1200, 16, 60, 0.001, dt_grid=[0, 4, 20, 60])
+    with pytest.raises(ValueError, match="at least"):
+        FDMTBoxcar(short, config()).execute(
+            np.zeros((16, 60), dtype=np.float32), kill_mask=np.ones(16, np.uint8)
+        )
+    # Packed input takes no per-call mask.
+    cfg = config()
+    cfg.input_nbits = 8
+    cfg.input_mean = 1.0
+    packed = FDMTBoxcar(plan, cfg)
+    with pytest.raises(ValueError, match="float32"):
+        packed.execute(
+            np.zeros((16, 300), dtype=np.uint8), kill_mask=np.ones(16, np.uint8)
+        )
+
+
+def test_per_call_kill_mask_gpu_matches_cpu(gpu_backend: str) -> None:
+    plan, blocks, masks = mask_blocks(9)
+    cpu = masked_stream(FDMTBoxcar(plan, config()), blocks, masks)
+    gpu = masked_stream(FDMTBoxcar(plan, config(), backend=gpu_backend), blocks, masks)
+    for name in cpu.dtype.names:
+        if name == "snr":
+            np.testing.assert_allclose(gpu[name], cpu[name], rtol=2e-5)
+        else:
+            np.testing.assert_array_equal(gpu[name], cpu[name])

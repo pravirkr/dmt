@@ -22,6 +22,7 @@
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_drain.hpp"
+#include "dmt/boxcar_noise.hpp"
 #include "dmt/engines.hpp"
 
 namespace dmt::skew_search_test {
@@ -62,15 +63,19 @@ inline BoxcarConfig search_config(bool packed) {
 }
 
 /// Streams `nblocks` blocks through FDMTBoxcar's engine on `exec`, on the
-/// skewed path (`skew`) or the tree path, then flushes (or drains).
-inline SearchRun run_subband_search(const plans::FDMTPlan& plan,
-                                    Exec exec,
-                                    bool skew,
-                                    bool packed,
-                                    SizeType nblocks,
-                                    SizeType chunk = 1024,
-                                    SizeType leaf  = 0,
-                                    bool drain     = false) {
+/// skewed path (`skew`) or the tree path, then flushes (or drains). With
+/// `masks` (float input), block b runs with per-call kill mask masks[b]
+/// (empty: none), handed to the engine as FDMTBoxcar does.
+inline SearchRun
+run_subband_search(const plans::FDMTPlan& plan,
+                   Exec exec,
+                   bool skew,
+                   bool packed,
+                   SizeType nblocks,
+                   SizeType chunk                                 = 1024,
+                   SizeType leaf                                  = 0,
+                   bool drain                                     = false,
+                   const std::vector<std::vector<uint8_t>>* masks = nullptr) {
     using namespace algorithms::detail; // NOLINT
     const auto box      = search_config(packed);
     const auto planes   = make_boxcar_plans(plan, box, true);
@@ -100,13 +105,46 @@ inline SearchRun run_subband_search(const plans::FDMTPlan& plan,
     SearchRun run;
     run.path         = engine->search_path();
     const SizeType n = plan.get_nchans() * plan.get_nsamps();
-    const auto add   = [&](const CandidateResultView& r) {
+    std::unique_ptr<BoxcarNoiseModel> model;
+    std::vector<uint8_t> prev(plan.get_nchans(), 1);
+    if (masks != nullptr) {
+        model = std::make_unique<BoxcarNoiseModel>(plan, box, true, 4);
+        engine->enable_block_noise(model->support());
+    }
+    const auto push = [&](SizeType b) {
+        std::vector<uint8_t> eff(plan.get_nchans(), 1);
+        for (SizeType c = 0; c < (*masks)[b].size(); ++c) {
+            eff[c] = (*masks)[b][c] != 0 ? 1 : 0;
+        }
+        const std::vector<uint8_t> ones(plan.get_nchans(), 1);
+        const auto tables = [&](const std::vector<uint8_t>& m) {
+            return m == ones ? nullptr : model->compute(m);
+        };
+        BlockNoise entry;
+        entry.first_sample = engine->stream_position();
+        entry.steady       = tables(eff);
+        if (b > 0 && eff != prev) {
+            std::vector<uint8_t> u(eff.size());
+            for (SizeType c = 0; c < u.size(); ++c) {
+                u[c] = eff[c] | prev[c];
+            }
+            entry.transition        = true;
+            entry.transition_tables = tables(u);
+        }
+        entry.kill_runs = boxcar_kill_runs(eff);
+        engine->push_block_noise(std::move(entry));
+        prev = eff;
+    };
+    const auto add = [&](const CandidateResultView& r) {
         REQUIRE_FALSE(r.overflowed());
         run.candidates.insert(run.candidates.end(), r.candidates.begin(),
                               r.candidates.end());
     };
     for (SizeType b = 0; b < nblocks; ++b) {
         const auto blk = search_block(n, 900 + static_cast<unsigned>(b));
+        if (masks != nullptr) {
+            push(b);
+        }
         add(packed ? engine->execute(std::span<const uint8_t>(blk.packed))
                    : engine->execute(std::span<const float>(blk.values)));
     }

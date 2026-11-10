@@ -13,7 +13,7 @@ other algorithms are unchanged.
 | Fused into the search | the root merge (root rows are never stored) | each overlap-save segment's inverse transform |
 | Input | float32, or packed 1/2/4/8/16-bit | float32 |
 | Subband search | plan `subband_depth` (any depth below the root), with staggered subbands | full band only |
-| Kill mask | yes, in the noise model of every subband row | yes |
+| Kill mask | yes, in the noise model of every subband row; also per block (float32) | yes |
 | Latency | none | `output_latency` samples (64 with fractional delays) |
 
 ## Input and statistical contract
@@ -56,10 +56,55 @@ same: the noise model still counts them, so sigma is too high by
 `sqrt(N / (N - k))` (5% S/N for a 10% mask). Rows whose channels are all
 killed (a killed subband) have no noise and never detect.
 
-The mask is fixed at construction: a different mask needs a new
-`FDMTBoxcar`. Each block is copied once into a staging buffer to zero the
-killed rows; it appears in `memory_usage.staging` and counts against
-`max_memory_bytes`. Without a mask there is no copy.
+Each block is copied once into a staging buffer to zero the killed rows; it
+appears in `memory_usage.staging` and counts against `max_memory_bytes`.
+Without a mask there is no copy.
+
+#### A mask per block
+
+A real-time pipeline flags RFI per gulp, so `execute()` also takes a mask
+for its block (float32 input): `search.execute(block, kill_mask=mask)` in
+Python, `execute(waterfall, kill_mask)` in C++ (host or device waterfall;
+the mask is a host span, read before the call returns). The format and
+convention are the constructor's: one value per channel, nonzero active.
+The block's mask applies to every beam and sample of the block and is
+ANDed with the constructor mask; `None` (an empty span, or the overloads
+without a mask) means the constructor mask alone, not the previous block's.
+Static zaps can stay in the constructor and the dynamic flags go per call.
+The stream keeps its FDMT history, boxcar carry and open excursions across
+mask changes; samples keep the mask they were read with.
+
+While the mask stays the same, S/N is calibrated exactly as with that mask
+given to the constructor. When it changes between blocks, the endpoints
+whose input windows reach back into the previous block, the first
+`S + W - 1` of each row (`S` the row's FDMT support with every channel
+active, `W` the boxcar width), mix samples read under both masks. Those
+endpoints use the variance of the **OR** of the two masks, an upper bound
+of their true variance: a change adds no false alarms, and S/N there is low
+by at most `sqrt(V_or / V_true)` (about `1 - k / 2G` when `k` of `G` similar
+channels flip). A wholly killed block still closes the excursions of the
+block before it. At most `(dt_max + max_boxcar) / nsamps` of the stream is
+affected per change, and none while the mask is unchanged.
+
+The first per-call mask checks two things and raises (`ValueError`;
+C++ `std::invalid_argument`) without changing the stream if either fails:
+
+- the block is long enough for every window to span at most two blocks:
+  `nsamps >= S_max + max_boxcar - 1` (`parkes_uwl` at depth 4 with 100 ms
+  boxcars needs 255,452 samples);
+- the noise tables fit in `max_memory_bytes`: the noise model, a few table
+  sets of `rows x widths x 8` bytes, the staging block if the constructor
+  had no mask and, on GPUs, device and pinned copies of the tables.
+
+The tables of a new mask are computed on the host when it first appears,
+with the instance's `nthreads` (also on GPUs, where it has no other use):
+a few milliseconds on the bench presets, 0.2 s per set on `parkes_uwl` at
+depth 4 with 8 threads (1.3 s with one). A change needs a set for the new
+mask and, unless it only kills or only revives channels, one for the OR;
+the last three masks are cached. `skip_cold_prefix` keeps the constructor mask's
+warm-up. `reset_history()` clears the mask state, and `drain()` pads with
+the last block's mask. `search_plans` (`get_search_plans()`) shows the
+constructor mask's tables only. Packed input takes no per-call mask.
 
 ## Packed integer input
 
