@@ -436,6 +436,7 @@ void bind_cfdmt(py::module_& mod) {
            const std::vector<std::array<double, 4>>& pulses, float noise_sigma,
            uint64_t seed, int nthreads) {
             std::vector<utils::BasebandPulse> ps;
+            ps.reserve(pulses.size());
             for (const auto& p : pulses) {
                 ps.push_back({.dm        = p[0],
                               .t_arrival = p[1],

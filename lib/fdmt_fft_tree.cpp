@@ -335,6 +335,8 @@ plan_tree_stages(const TreeDag& dag, SizeType budget, SizeType max_out) {
     }
     std::vector<TreeStage> stages;
     for (SizeType h = nl; h > 0; h = from[h]) {
+        // The path only follows stages the search above found feasible.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         stages.push_back(*make_tree_stage(dag, from[h], h, budget, max_out));
     }
     std::ranges::reverse(stages);
@@ -344,6 +346,8 @@ plan_tree_stages(const TreeDag& dag, SizeType budget, SizeType max_out) {
 std::vector<TreeStage> level_tree_stages(const TreeDag& dag, SizeType max_out) {
     std::vector<TreeStage> stages;
     for (SizeType l = 1; l <= dag.levels(); ++l) {
+        // A one-level stage has no inner levels: it always fits budget 0.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         stages.push_back(*make_tree_stage(dag, l - 1, l, 0, max_out));
     }
     return stages;

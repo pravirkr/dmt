@@ -321,11 +321,15 @@ public:
 
     virtual void search(std::span<const float>, FDMTSearchSink&)          = 0;
     virtual void search(DeviceSpan<const float>, FDMTSearchSink&, Stream) = 0;
-    virtual void search(std::span<const uint8_t>, SizeType, FDMTSearchSink&) {
+    virtual void search(std::span<const uint8_t> /*unused*/,
+                        SizeType /*unused*/,
+                        FDMTSearchSink& /*unused*/) {
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
-    virtual void
-    search(DeviceSpan<const uint8_t>, SizeType, FDMTSearchSink&, Stream) {
+    virtual void search(DeviceSpan<const uint8_t> /*unused*/,
+                        SizeType /*unused*/,
+                        FDMTSearchSink& /*unused*/,
+                        Stream /*unused*/) {
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
     virtual void reset(Stream)                                    = 0;
@@ -397,8 +401,8 @@ public:
     }
     /// Starts per-block noise: `support` holds each row's support with
     /// every channel active. The ring starts with the constructor entry.
-    virtual void
-    enable_block_noise(std::shared_ptr<const std::vector<uint64_t>>) {
+    virtual void enable_block_noise(
+        std::shared_ptr<const std::vector<uint64_t>> /*unused*/) {
         throw std::invalid_argument(
             "FDMTBoxcar: per-call kill masks are not supported here");
     }
@@ -406,7 +410,7 @@ public:
     /// call passes its checks. An execute() without one (drain() padding)
     /// repeats the last block's steady tables, with no transition and the
     /// constructor kill runs.
-    virtual void push_block_noise(BlockNoise) {
+    virtual void push_block_noise(BlockNoise /*unused*/) {
         throw std::invalid_argument(
             "FDMTBoxcar: per-call kill masks are not supported here");
     }
@@ -419,10 +423,10 @@ public:
 /// in a staging copy of each block before the driver reads it (FDMTBoxcar's
 /// kill mask; FDMT-FFT drivers mask inside the transform and pass none).
 std::unique_ptr<FDMTBoxcarEngine>
-make_fdmt_boxcar_cpu(const plans::FDMTPlan&,
-                     const BoxcarConfig&,
-                     const std::vector<plans::BoxcarPlanePlan>&,
-                     const FDMTEngineConfig&,
+make_fdmt_boxcar_cpu(const plans::FDMTPlan& /*plan*/,
+                     const BoxcarConfig& /*config*/,
+                     const std::vector<plans::BoxcarPlanePlan>& /*planes*/,
+                     const FDMTEngineConfig& /*cfg*/,
                      std::unique_ptr<BoxcarDriver> driver,
                      std::vector<std::pair<SizeType, SizeType>> kill_runs = {});
 std::unique_ptr<FDMTBoxcarEngine>

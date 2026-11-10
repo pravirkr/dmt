@@ -72,6 +72,7 @@ inline std::optional<Device> gpu_device_of(py::handle obj) {
             return Device{.backend = Backend::kCUDA, .id = kAnyDevice};
         }
         const int id =
+            // NOLINTNEXTLINE(performance-no-int-to-ptr)
             pointer_device(Backend::kCUDA, reinterpret_cast<const void*>(ptr));
         return Device{.backend = Backend::kCUDA,
                       .id      = id < 0 ? kNotDeviceMemory : id};
@@ -368,7 +369,7 @@ inline py::capsule keep_alive(DeviceTensor&& tensor) {
     py::capsule capsule(owned.get(), [](void* p) {
         delete static_cast<DeviceTensor*>(p); // NOLINT
     });
-    owned.release();
+    owned.release(); // NOLINT(bugprone-unused-return-value): capsule owns it
     return capsule;
 }
 
@@ -459,7 +460,8 @@ inline Stream stepper_stream(const py::object& stream) {
     if (stream.is_none()) {
         return {};
     }
-    return {reinterpret_cast<void*>(resolve_stream(stream, py::none()))};
+    return {reinterpret_cast<void*>( // NOLINT(performance-no-int-to-ptr)
+        resolve_stream(stream, py::none()))};
 }
 
 /// Whether a consumer orders its work after a `__cuda_array_interface__`
@@ -512,8 +514,10 @@ struct DeviceCall {
         }
         auto cai = CudaArrayInterface::parse(obj, device.id);
         if (cai->stream && cuda_array_interface_sync()) {
-            stream_wait(device.backend, device.id, native_stream(),
-                        Stream{reinterpret_cast<void*>(*cai->stream)});
+            stream_wait(
+                device.backend, device.id, native_stream(),
+                // NOLINTNEXTLINE(performance-no-int-to-ptr,bugprone-unchecked-optional-access)
+                Stream{reinterpret_cast<void*>(*cai->stream)});
         }
         return DeviceTensor::from_interface(std::move(cai));
     }

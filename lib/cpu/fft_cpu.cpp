@@ -31,6 +31,7 @@ std::mutex& fftw_planner_mutex() {
 // Initial planner effort: DMT_FFTW_PLANNER (estimate, measure, patient or
 // exhaustive), else ESTIMATE.
 fft::Planner planner_from_env() noexcept {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): no setenv in the library
     const char* env = std::getenv("DMT_FFTW_PLANNER");
     if (env == nullptr) {
         return fft::Planner::kEstimate;
@@ -60,11 +61,12 @@ std::atomic<fft::Planner>& planner_setting() {
 // rewritten after every timed plan, so measured plans are paid for once per
 // machine. Both run under the planner mutex.
 const std::string& env_wisdom_path() {
-    static const std::string path = [] {
+    static const std::string kPath = [] {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read once
         const char* env = std::getenv("DMT_FFTW_WISDOM");
         return env == nullptr ? std::string{} : std::string(env);
     }();
-    return path;
+    return kPath;
 }
 
 void import_env_wisdom_locked() noexcept {
@@ -104,6 +106,8 @@ struct PlanScratch {
     ~PlanScratch() { release(); }
     PlanScratch(const PlanScratch&)            = delete;
     PlanScratch& operator=(const PlanScratch&) = delete;
+    PlanScratch(PlanScratch&&)                 = delete;
+    PlanScratch& operator=(PlanScratch&&)      = delete;
     void release() noexcept {
         fftwf_free(in);
         fftwf_free(out);

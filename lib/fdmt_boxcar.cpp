@@ -282,7 +282,7 @@ public:
         cache.clear();
     }
     void check_stream(Stream stream) const {
-        if (exec.backend == Backend::kCPU && stream.native) {
+        if (exec.backend == Backend::kCPU && stream.native != nullptr) {
             throw std::invalid_argument(
                 "FDMTBoxcar: CPU backend has no stream");
         }
@@ -313,21 +313,21 @@ public:
 
 FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
                        BoxcarConfig config,
-                       bool smear,
+                       bool use_box_smearing,
                        Exec exec,
-                       SizeType beams,
-                       SizeType fuse,
-                       SizeType chunk,
-                       SizeType max_memory,
+                       SizeType nbeams,
+                       SizeType fuse_levels,
+                       SizeType chunk_nsamps,
+                       SizeType max_memory_bytes,
                        std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
-                                    smear,
+                                    use_box_smearing,
                                     exec,
-                                    beams,
-                                    fuse,
-                                    chunk,
-                                    max_memory,
+                                    nbeams,
+                                    fuse_levels,
+                                    chunk_nsamps,
+                                    max_memory_bytes,
                                     kill_mask)) {}
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;

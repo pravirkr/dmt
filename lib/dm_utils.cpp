@@ -273,8 +273,8 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
                                                     SizeType nchans,
                                                     float tol,
                                                     SizeType min_run) {
-    const auto levin = generate_levin_dm_grid(
-        dm_start, dm_end, tsamp, pulse_width, f_min, f_max, nchans, tol);
+    auto levin = generate_levin_dm_grid(dm_start, dm_end, tsamp, pulse_width,
+                                        f_min, f_max, nchans, tol);
     if (levin.size() < 2) {
         return levin;
     }

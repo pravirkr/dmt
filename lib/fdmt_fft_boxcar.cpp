@@ -123,7 +123,7 @@ public:
         detail::throw_unavailable("FDMTFFTBoxcar", exec.backend);
     }
     void check_stream(Stream stream) const {
-        if (exec.backend == Backend::kCPU && stream.native) {
+        if (exec.backend == Backend::kCPU && stream.native != nullptr) {
             throw std::invalid_argument(
                 "FDMTFFTBoxcar: CPU backend has no stream");
         }
@@ -140,18 +140,18 @@ public:
 
 FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
                              BoxcarConfig config,
-                             bool smear,
+                             bool use_box_smearing,
                              Exec exec,
-                             SizeType beams,
-                             bool frac,
+                             SizeType nbeams,
+                             bool fractional_delays,
                              std::span<const uint8_t> kill_mask,
                              SizeType max_memory_bytes)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
-                                    smear,
+                                    use_box_smearing,
                                     exec,
-                                    beams,
-                                    frac,
+                                    nbeams,
+                                    fractional_delays,
                                     kill_mask,
                                     max_memory_bytes)) {}
 FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;

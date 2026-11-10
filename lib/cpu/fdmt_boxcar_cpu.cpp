@@ -152,8 +152,8 @@ public:
         update_open_begin();
         return view();
     }
-    CandidateDeviceResultView execute(DeviceSpan<const float>,
-                                      Stream) override {
+    CandidateDeviceResultView execute(DeviceSpan<const float> /*unused*/,
+                                      Stream /*unused*/) override {
         throw_no_device_memory("FDMTBoxcar::execute", Backend::kCPU);
     }
     CandidateResultView execute(std::span<const uint8_t> waterfall) override {
@@ -176,14 +176,16 @@ public:
         update_open_begin();
         return view();
     }
-    CandidateDeviceResultView execute(DeviceSpan<const uint8_t>,
-                                      Stream) override {
+    CandidateDeviceResultView execute(DeviceSpan<const uint8_t> /*unused*/,
+                                      Stream /*unused*/) override {
         throw_no_device_memory("FDMTBoxcar::execute", Backend::kCPU);
     }
-    CandidateDeviceResultView flush_device(Stream) override {
+    CandidateDeviceResultView flush_device(Stream /*unused*/) override {
         throw_no_device_memory("FDMTBoxcar::flush_device", Backend::kCPU);
     }
-    CandidateResultView copy_result(Stream) override { return view(); }
+    CandidateResultView copy_result(Stream /*unused*/) override {
+        return view();
+    }
     CandidateResultView flush() override {
         begin_result(0);
         for (SizeType b = 0; b < m_beams; ++b) {
@@ -244,7 +246,7 @@ public:
         m_pending = std::move(entry);
     }
     void drop_block_noise() noexcept override { m_pending.reset(); }
-    void reset_history(Stream) override {
+    void reset_history(Stream /*unused*/) override {
         if (m_noise_on) {
             reset_block_noise();
         }

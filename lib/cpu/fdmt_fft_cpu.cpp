@@ -1326,7 +1326,8 @@ private:
 #pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (std::int64_t ri = 0; ri < n; ++ri) {
             const auto r = static_cast<SizeType>(ri);
-            auto& w      = const_cast<Workspace&>(ws());
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): scratch
+            auto& w = const_cast<Workspace&>(ws());
             std::copy_n(rows + (r * g.n_bins), g.n_bins, w.cplx.data());
             g.c2r->c2r(w.cplx.data(), w.time.data());
             const auto ncopy =

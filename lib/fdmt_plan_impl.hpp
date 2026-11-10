@@ -68,6 +68,8 @@ public:
     IndexType get_dt_max() const noexcept { return m_dt_max; }
     IndexType get_dt_min() const noexcept { return m_dt_min; }
     SizeType get_dt_step() const noexcept { return m_dt_step; }
+    // m_mode is a validated enum: fdmt_mode_to_string() cannot throw.
+    // NOLINTNEXTLINE(bugprone-exception-escape)
     std::string_view get_mode() const noexcept {
         return fdmt_mode_to_string(m_mode);
     }

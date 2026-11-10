@@ -446,16 +446,17 @@ void bind_ddmt(py::module_& mod) {
                  const auto& plan = ddmt.get_plan();
                  const auto sz    = ddmt.history_state_size();
                  if (plan.get_nbits() == 32) {
-                     py::array_t<float, py::array::c_style> hist(sz);
+                     py::array_t<float, py::array::c_style> hist(
+                         static_cast<py::ssize_t>(sz));
                      ddmt.save_history(
                          std::span<float>(hist.mutable_data(), hist.size()));
                      return hist;
-                 } else {
-                     py::array_t<uint8_t, py::array::c_style> hist(sz);
-                     ddmt.save_history(
-                         std::span<uint8_t>(hist.mutable_data(), hist.size()));
-                     return hist;
                  }
+                 py::array_t<uint8_t, py::array::c_style> hist(
+                     static_cast<py::ssize_t>(sz));
+                 ddmt.save_history(
+                     std::span<uint8_t>(hist.mutable_data(), hist.size()));
+                 return hist;
              })
         .def(
             "load_history",

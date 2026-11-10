@@ -449,7 +449,7 @@ private:
         // Shared leaves read at group end: (trial, pool slot + offset).
         std::vector<std::pair<int, Src>>* defer{nullptr};
         int pool_used{0};
-        std::vector<int> chain{}; // pending channel positions of the node
+        std::vector<int> chain; // pending channel positions of the node
         // Estimated loads + stores (x4) per time-tile sample.
         int64_t cost{0};
         int max_slot{0};

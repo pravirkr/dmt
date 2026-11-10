@@ -91,10 +91,12 @@ inline constexpr std::size_t kFFTAlignment = 64;
 template <typename T> struct FFTAllocator {
     using value_type = T;
     FFTAllocator()   = default;
-    template <typename U> explicit FFTAllocator(const FFTAllocator<U>&) {}
+    template <typename U>
+    explicit FFTAllocator(const FFTAllocator<U>& /*unused*/) {}
     T* allocate(std::size_t n) {
         const std::size_t bytes = ((n * sizeof(T)) + kFFTAlignment - 1) /
                                   kFFTAlignment * kFFTAlignment;
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc,hicpp-no-malloc)
         void* ptr = std::aligned_alloc(kFFTAlignment,
                                        bytes == 0 ? kFFTAlignment : bytes);
         if (ptr == nullptr) {
@@ -102,8 +104,12 @@ template <typename T> struct FFTAllocator {
         }
         return static_cast<T*>(ptr);
     }
-    void deallocate(T* ptr, std::size_t /*n*/) noexcept { std::free(ptr); }
-    template <typename U> bool operator==(const FFTAllocator<U>&) const {
+    void deallocate(T* ptr, std::size_t /*n*/) noexcept {
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc,hicpp-no-malloc)
+        std::free(ptr);
+    }
+    template <typename U>
+    bool operator==(const FFTAllocator<U>& /*unused*/) const {
         return true;
     }
 };

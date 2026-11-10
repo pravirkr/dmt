@@ -51,6 +51,8 @@ DMT_HD constexpr SizeType box_fraction_bits(SizeType dt0_max) noexcept {
 DMT_HD constexpr uint32_t box_weight(SizeType box_len, SizeType bits) noexcept {
     const SizeType own = box_fraction_bits(box_len - 1);
     const auto weight  = ((SizeType{1} << own) + (box_len / 2)) / box_len;
+    // bits >= own: every caller passes the plan's box_fraction_bits().
+    // NOLINTNEXTLINE(clang-analyzer-core.BitwiseShift)
     return static_cast<uint32_t>(weight << (bits - own));
 }
 

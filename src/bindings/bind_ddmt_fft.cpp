@@ -20,7 +20,6 @@
 
 namespace dmt {
 using algorithms::DDMTFFT;
-using algorithms::DDMTFFTMethod;
 using algorithms::DDMTFFTOptions;
 using plans::DDMTPlan;
 using plans::LevinConfig;

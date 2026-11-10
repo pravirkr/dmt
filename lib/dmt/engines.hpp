@@ -99,22 +99,25 @@ public:
     FDMTEngine& operator=(FDMTEngine&&)      = delete;
 
     // Search consumes chunks without allocating a root output plane.
-    virtual void execute_search(std::span<const float>, FDMTSearchSink&) {
+    virtual void execute_search(std::span<const float> /*unused*/,
+                                FDMTSearchSink& /*unused*/) {
         throw_no_device_memory("FDMT search host execution", backend());
     }
-    virtual void
-    execute_search(DeviceSpan<const float>, FDMTSearchSink&, Stream) {
+    virtual void execute_search(DeviceSpan<const float> /*unused*/,
+                                FDMTSearchSink& /*unused*/,
+                                Stream /*unused*/) {
         throw_no_device_memory("FDMT search device execution", backend());
     }
 
-    virtual void
-    execute_search(std::span<const uint8_t>, SizeType, FDMTSearchSink&) {
+    virtual void execute_search(std::span<const uint8_t> /*unused*/,
+                                SizeType /*unused*/,
+                                FDMTSearchSink& /*unused*/) {
         throw_no_device_memory("FDMT packed search host execution", backend());
     }
-    virtual void execute_search(DeviceSpan<const uint8_t>,
-                                SizeType,
-                                FDMTSearchSink&,
-                                Stream) {
+    virtual void execute_search(DeviceSpan<const uint8_t> /*unused*/,
+                                SizeType /*unused*/,
+                                FDMTSearchSink& /*unused*/,
+                                Stream /*unused*/) {
         throw_no_device_memory("FDMT packed search device execution",
                                backend());
     }
@@ -166,7 +169,7 @@ public:
     [[nodiscard]] virtual SizeType num_subbands() const                     = 0;
     [[nodiscard]] virtual bool is_finished() const noexcept                 = 0;
 
-    virtual void reset_search_history(Stream) { reset_history(); }
+    virtual void reset_search_history(Stream /*unused*/) { reset_history(); }
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
 
@@ -364,7 +367,7 @@ struct FDMTFFTEngineConfig {
     // FDMT-equivalence tests.
     bool fractional_delays{true};
     // Per channel, 1 = keep (empty: keep all); killed channels read as zero.
-    std::vector<uint8_t> kill_mask{};
+    std::vector<uint8_t> kill_mask;
     // Longest overlap-save transform execute() may use (0: no cap); with
     // the fft_segment_cap() testing hook the smaller one applies. The
     // FDMTFFTBoxcar memory budget sets it.
@@ -398,15 +401,17 @@ public:
     // Rows are in input-stream sample coordinates: output sample o of a
     // block is stream sample block_start - latency + o, and the first
     // `latency` output samples of a stream (before sample 0) are dropped.
-    virtual void execute_search(std::span<const float>, FDMTSearchSink&) {
+    virtual void execute_search(std::span<const float> /*unused*/,
+                                FDMTSearchSink& /*unused*/) {
         throw_no_device_memory("FDMTFFT search host execution", backend());
     }
-    virtual void
-    execute_search(DeviceSpan<const float>, FDMTSearchSink&, Stream) {
+    virtual void execute_search(DeviceSpan<const float> /*unused*/,
+                                FDMTSearchSink& /*unused*/,
+                                Stream /*unused*/) {
         throw_no_device_memory("FDMTFFT search device execution", backend());
     }
     /// Clears the overlap history and restarts the search stream at 0.
-    virtual void reset_search_history(Stream) { reset_history(); }
+    virtual void reset_search_history(Stream /*unused*/) { reset_history(); }
     /// Engine-owned buffers (output: the caller's DM-time plane).
     [[nodiscard]] virtual FDMTMemoryUsage memory_usage() const noexcept {
         return {};

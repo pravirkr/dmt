@@ -672,10 +672,10 @@ void bind_fdmt(py::module_& mod) {
             "copies; see above.")
         .def(
             "reset",
-            [](py::object self,
+            [](const py::object& self,
                const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
                SizeType nbits,
-               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+               const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
                 auto& fdmt = self.cast<FDMT&>();
                 if (waterfall_packed.ndim() != 2 &&
                     waterfall_packed.ndim() != 3) {
@@ -698,8 +698,8 @@ void bind_fdmt(py::module_& mod) {
             "of at least nbeams * plan.dmt_size floats.")
         .def(
             "reset",
-            [](py::object self, const py::array& waterfall_obj,
-               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+            [](const py::object& self, const py::array& waterfall_obj,
+               const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
                 auto& fdmt = self.cast<FDMT&>();
                 if (waterfall_obj.dtype().kind() == 'u' &&
                     waterfall_obj.itemsize() == 1) {
@@ -779,14 +779,15 @@ void bind_fdmt(py::module_& mod) {
             py::arg("stream") = py::none(),
             "Advance execution until N levels remain before root.")
         .def("view_level_data",
-             [](py::object self) {
+             [](const py::object& self) {
                  auto& fdmt = self.cast<FDMT&>();
                  auto span  = fdmt.view_level_data();
-                 return py::array_t<float>(span.size(), span.data(), self);
+                 return py::array_t<float>(static_cast<py::ssize_t>(span.size()),
+                                           span.data(), self);
              })
         .def(
             "view_subband_data",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt    = self.cast<FDMT&>();
                 auto sub_view = fdmt.view_subband(subband_idx);
                 return py::array_t<float>(
@@ -797,14 +798,14 @@ void bind_fdmt(py::module_& mod) {
             py::arg("subband_idx"))
         .def(
             "view_subband",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt = self.cast<FDMT&>();
                 return fdmt.view_subband(subband_idx);
             },
             py::arg("subband_idx"))
         .def(
             "finalize",
-            [](py::object self, const py::object& stream) -> py::object {
+            [](const py::object& self, const py::object& stream) -> py::object {
                 auto& fdmt = self.cast<FDMT&>();
                 fdmt.finalize(stepper_stream(stream));
                 const py::object buffer = self.attr("_dmt_buffer");
@@ -852,7 +853,8 @@ void bind_fdmt(py::module_& mod) {
             "save_history",
             [](const FDMT& fdmt) -> py::object {
                 const auto sz = fdmt.history_state_size();
-                py::array_t<float, py::array::c_style> hist(sz);
+                py::array_t<float, py::array::c_style> hist(
+                    static_cast<py::ssize_t>(sz));
                 fdmt.save_history(
                     std::span<float>(hist.mutable_data(), hist.size()));
                 return hist;
@@ -1158,7 +1160,7 @@ void bind_fdmt(py::module_& mod) {
             "uint8 at ``nbits``; shares the streaming history.")
         .def(
             "reset",
-            [](py::object self,
+            [](const py::object& self,
                const py::array_t<uint8_t, py::array::c_style>& packed,
                SizeType nbits,
                std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
@@ -1167,8 +1169,9 @@ void bind_fdmt(py::module_& mod) {
                     dmt_opt.has_value()
                         ? *dmt_opt
                         : py::array_t<float, py::array::c_style>(
-                              fdmt.get_nbeams() *
-                              fdmt.get_plan().get_dmt_size());
+                              static_cast<py::ssize_t>(
+                                  fdmt.get_nbeams() *
+                                  fdmt.get_plan().get_dmt_size()));
                 self.attr("_waterfall_buffer") = packed;
                 self.attr("_dmt_buffer")       = dmt;
                 fdmt.reset(
@@ -1291,7 +1294,7 @@ void bind_fdmt(py::module_& mod) {
             ":meth:`FDMT.reset`.")
         .def(
             "reset",
-            [](py::object self,
+            [](const py::object& self,
                const py::array_t<float, py::array::c_style>& waterfall,
                std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
                 auto& fdmt = self.cast<FDMTFFT&>();
@@ -1301,7 +1304,8 @@ void bind_fdmt(py::module_& mod) {
                 } else {
                     const auto nbeams = fdmt.get_nbeams();
                     dmt               = py::array_t<float, py::array::c_style>(
-                        nbeams * fdmt.get_plan().get_dmt_size());
+                        static_cast<py::ssize_t>(
+                            nbeams * fdmt.get_plan().get_dmt_size()));
                 }
                 self.attr("_waterfall_buffer") = waterfall;
                 self.attr("_dmt_buffer")       = dmt;
@@ -1325,14 +1329,15 @@ void bind_fdmt(py::module_& mod) {
             py::arg("remaining_levels"), py::kw_only(),
             py::arg("stream") = py::none())
         .def("view_level_data",
-             [](py::object self) {
+             [](const py::object& self) {
                  auto& fdmt = self.cast<FDMTFFT&>();
                  auto span  = fdmt.view_level_data();
-                 return py::array_t<float>(span.size(), span.data(), self);
+                 return py::array_t<float>(
+                     static_cast<py::ssize_t>(span.size()), span.data(), self);
              })
         .def(
             "view_subband_data",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt    = self.cast<FDMTFFT&>();
                 auto sub_view = fdmt.view_subband(subband_idx);
                 return py::array_t<float>(
@@ -1343,14 +1348,14 @@ void bind_fdmt(py::module_& mod) {
             py::arg("subband_idx"))
         .def(
             "view_subband",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt = self.cast<FDMTFFT&>();
                 return fdmt.view_subband(subband_idx);
             },
             py::arg("subband_idx"))
         .def(
             "finalize",
-            [](py::object self, const py::object& stream) -> py::object {
+            [](const py::object& self, const py::object& stream) -> py::object {
                 auto& fdmt = self.cast<FDMTFFT&>();
                 fdmt.finalize(stepper_stream(stream));
                 const py::object buffer = self.attr("_dmt_buffer");
@@ -1382,7 +1387,7 @@ void bind_fdmt(py::module_& mod) {
             "save_history",
             [](const FDMTFFT& fdmt) {
                 py::array_t<float, py::array::c_style> hist(
-                    fdmt.history_state_size());
+                    static_cast<py::ssize_t>(fdmt.history_state_size()));
                 fdmt.save_history(
                     std::span<float>(hist.mutable_data(), hist.size()));
                 return hist;

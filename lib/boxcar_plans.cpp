@@ -80,7 +80,8 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
          config.input_nbits != 4 && config.input_nbits != 8 &&
          config.input_nbits != 16) ||
         config.input_mean < 0 ||
-        (packed && config.input_mean > ((1U << config.input_nbits) - 1))) {
+        (packed && config.input_mean >
+                       static_cast<float>((1U << config.input_nbits) - 1))) {
         throw std::invalid_argument(
             "FDMTBoxcar: input_nbits must be 32 or 1/2/4/8/16; packed mean "
             "must be finite and within code range; float mean must be zero");
@@ -197,8 +198,9 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                 const double f1       = out.f_high_mhz;
                 const double delay_per_dm =
                     kDispConst * (1.0 / (f0 * f0) - 1.0 / (f1 * f1));
-                out.dm_grid[d] = static_cast<float>(
-                    grid.dt_grid[d] * plan.get_tsamp() / delay_per_dm);
+                out.dm_grid[d] =
+                    static_cast<float>(static_cast<float>(grid.dt_grid[d]) *
+                                       plan.get_tsamp() / delay_per_dm);
                 if (l == root) {
                     // Preserve the exact DM values of custom physical grids.
                     out.dm_grid[d] = root_dm[d];
