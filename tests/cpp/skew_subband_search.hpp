@@ -54,10 +54,11 @@ inline SearchBlock search_block(SizeType n, unsigned seed) {
     return b;
 }
 
-inline BoxcarConfig search_config(bool packed) {
+inline BoxcarConfig search_config(bool packed, float wtsp = 1.5F) {
     // Uniform bytes: sigma 73.9 per sample. A low threshold gives
-    // candidates from noise in every plane.
-    return BoxcarConfig(24, 1.5F, 4.2F, 73.9F,
+    // candidates from noise in every plane. Width spacing 1.5 leaves the
+    // width screen off; spacing 1 (24 widths) turns it on.
+    return BoxcarConfig(24, wtsp, 4.2F, 73.9F,
                         PeakFindingMode::kContiguousPeakPerWidth, 1U << 20, 0,
                         true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
 }
@@ -65,7 +66,8 @@ inline BoxcarConfig search_config(bool packed) {
 /// Streams `nblocks` blocks through FDMTBoxcar's engine on `exec`, on the
 /// skewed path (`skew`) or the tree path, then flushes (or drains). With
 /// `masks` (float input), block b runs with per-call kill mask masks[b]
-/// (empty: none), handed to the engine as FDMTBoxcar does.
+/// (empty: none), handed to the engine as FDMTBoxcar does. `wtsp`: the
+/// boxcar width spacing (search_config()).
 inline SearchRun
 run_subband_search(const plans::FDMTPlan& plan,
                    Exec exec,
@@ -75,9 +77,10 @@ run_subband_search(const plans::FDMTPlan& plan,
                    SizeType chunk                                 = 1024,
                    SizeType leaf                                  = 0,
                    bool drain                                     = false,
-                   const std::vector<std::vector<uint8_t>>* masks = nullptr) {
+                   const std::vector<std::vector<uint8_t>>* masks = nullptr,
+                   float wtsp                                     = 1.5F) {
     using namespace algorithms::detail; // NOLINT
-    const auto box      = search_config(packed);
+    const auto box      = search_config(packed, wtsp);
     const auto planes   = make_boxcar_plans(plan, box, true);
     const SizeType root = plan.get_niters();
     FDMTEngineConfig cfg{};

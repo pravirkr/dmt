@@ -1238,6 +1238,8 @@ public:
         }
         validate_input(waterfall.size());
         const auto stream = static_cast<cudaStream_t>(queue.native);
+        // Before the table uploads, which go to the current device.
+        gpu_utils::set_device(m_device);
         commit_block_noise(stream);
         begin_result(m_plan.get_nsamps(), queue);
         m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);

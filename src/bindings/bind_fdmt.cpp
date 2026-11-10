@@ -584,15 +584,21 @@ void bind_fdmt(py::module_& mod) {
             },
             py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
             R"doc(
-            Run the FDMT transform on float or packed low-bit input.
+            Run the FDMT transform on float or packed low-bit input, in host
+            or device memory.
 
             Parameters
             ----------
-            waterfall : numpy.ndarray
+            waterfall : numpy.ndarray or device array
                 ``(nchans, nsamps)`` for ``nbeams=1``, or ``(nbeams, nchans,
                 nsamps)``. Other float dtypes are cast to float32 (a copy);
-                uint8 input needs ``nbits`` (packed overload).
-            waterfall_packed : numpy.ndarray, dtype uint8
+                uint8 input needs ``nbits`` (packed overload). Device memory
+                (GPU backends, no copies): a PyTorch, CuPy, Numba or any
+                other ``__dlpack__`` / ``__cuda_array_interface__`` array on
+                this instance's device (DLPack is used when both exist),
+                C-contiguous float32 or packed uint8 with ``nbits``; never
+                converted: another dtype or layout raises ``TypeError``.
+            waterfall_packed : numpy.ndarray or device array, dtype uint8
                 Packed overload, called as ``execute(waterfall_packed, nbits)``:
                 C-contiguous ``(nchans, row_bytes)`` or ``(nbeams, nchans,
                 row_bytes)``; each row holds ``nsamps`` unsigned samples of
@@ -603,25 +609,42 @@ void bind_fdmt(py::module_& mod) {
                 few fractional bits (see :attr:`FDMTPlan.box_mean_bits`).
             nbits : int
                 Packed sample width: 1, 2, 4, 8 or 16.
-            out : numpy.ndarray, optional
+            out : numpy.ndarray or device array, optional
                 Writeable C-contiguous float32 buffer of at least
                 ``nbeams * plan.dmt_size`` elements, reused instead of
                 allocating a new one per call (e.g.
                 ``np.empty(fdmt.nbeams * fdmt.plan.dmt_size, np.float32)``).
+                For device input, a device array; default: a new array from
+                the input's library (PyTorch, CuPy or Numba; other libraries
+                must pass ``out``).
+            stream : int or stream, optional
+                Device input only. ``cudaStream_t`` / ``hipStream_t`` handle
+                as an int, or a ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` /
+                Numba stream / ``__cuda_stream__`` object. Default: the
+                current stream of the input's library on its device (Numba:
+                its default stream). The input's pending work is ordered
+                before the call (``__dlpack__(stream=...)``, or an event on
+                the ``__cuda_array_interface__`` ``stream``).
 
             Returns
             -------
-            numpy.ndarray
+            numpy.ndarray or device array
                 float32 view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
                 n_times)`` of the output buffer; ``n_times`` is
                 ``plan.dmt_nsamps``. With ``out``, the next call overwrites
-                the returned view.
+                the returned view. For device input, a device view of the
+                input's (or ``out``'s) library.
 
             Notes
             -----
             In ``valid`` mode, successive calls keep inter-block history:
             pass contiguous, non-overlapping blocks. Call
             :meth:`reset_history` to start a new stream.
+
+            Device input is asynchronous: the work is queued on ``stream``
+            after the producers' pending work on the arrays, and the call
+            returns at once. Keep the arrays alive and read the result on
+            that stream, or synchronize it first.
             )doc")
         .def(
             "execute",
@@ -643,46 +666,10 @@ void bind_fdmt(py::module_& mod) {
             },
             py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
             py::arg("stream") = py::none(),
-            R"doc(
-            Run the FDMT transform on device memory (GPU backends), without
-            copies.
-
-            Parameters
-            ----------
-            waterfall, waterfall_packed : array
-                PyTorch, CuPy, Numba or any other ``__dlpack__`` /
-                ``__cuda_array_interface__`` array on this instance's device
-                (DLPack is used when both exist): C-contiguous float32, or
-                packed uint8 with ``nbits``; shapes as for NumPy input. Never
-                converted: another dtype or layout raises ``TypeError``.
-            out : array, optional
-                Writeable C-contiguous float32 device array of at least
-                ``nbeams * plan.dmt_size`` elements to write into. Default: a
-                new array from the input's library (PyTorch, CuPy or Numba;
-                other libraries must pass ``out``).
-            stream : int or stream, optional
-                ``cudaStream_t`` / ``hipStream_t`` handle as an int, or a
-                ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` / Numba stream /
-                ``__cuda_stream__`` object. Default: the current stream of
-                the input's library on its device (Numba: its default
-                stream). The input's pending work is ordered before the call
-                (``__dlpack__(stream=...)``, or an event on the
-                ``__cuda_array_interface__`` ``stream``).
-
-            Returns
-            -------
-            array
-                Device view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
-                n_times)`` of the output, of the input's (or ``out``'s)
-                library.
-
-            Notes
-            -----
-            Asynchronous: the work is queued on ``stream`` after the
-            producers' pending work on the arrays, and the call returns at
-            once. Keep the arrays alive and read the result on that stream,
-            or synchronize it first.
-            )doc")
+            // No numpydoc sections here: pybind11 joins the overload
+            // docstrings, and the host overload above documents both.
+            "Run the FDMT transform on device memory (GPU backends), without "
+            "copies; see above.")
         .def(
             "reset",
             [](py::object self,

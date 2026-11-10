@@ -741,6 +741,10 @@ private:
                 if (m_noise_on) {
                     screen_thr =
                         tile_tables(plane, dm, row_idx, start, n, tables);
+                    if (tables.mixed) {
+                        // Mixed tiles share one buffer: new minima each time.
+                        groups_for = nullptr;
+                    }
                 }
             }
             bool hit      = false;

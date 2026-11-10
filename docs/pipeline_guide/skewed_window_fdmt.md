@@ -272,8 +272,9 @@ was 13.5 s before the leaf level was chosen by speed, see the budget
 section above.)
 
 The GPU searches depth 4 at the native 64 µs faster than real time within
-10 GiB; the CPU does not, but keeps up from 256 µs (the real-time sweep on
-the [Benchmarks](../benchmarks.md#parkes-uwl-search) page).
+10 GiB on 8-bit input; float32 input runs just below real time. The CPU
+does not keep up at 64 µs but does from 256 µs (the real-time sweep on the
+[Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 
 ## Scope and current limits
 
