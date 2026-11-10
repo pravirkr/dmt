@@ -1036,11 +1036,36 @@ private:
             const SizeType w_edge = m_config.use_trapezoid
                                         ? trapezoid_edge_width(plane.widths[f])
                                         : 0;
-            // Float rows take the tile's tables (per sample when mixed);
-            // packed rows the planes' (no per-call masks).
-            const auto points = [&](SizeType t_begin, SizeType t_end,
-                                    float threshold, float inv_sigma) {
-                for (SizeType t = t_begin; t < t_end; ++t) {
+            // Float rows take the tile's tables; packed rows the planes' (no
+            // per-call masks). Mixed tiles go in runs of samples with one
+            // table each; otherwise the tile is one run. The per-sample body
+            // stays inline here: moved into a lambda the scorer ran 35%
+            // slower, even forced inline.
+            const float* thr_row =
+                std::is_integral_v<T>
+                    ? plane.raw_thresh_lut.data() + (dm * m_filters)
+                    : tables.thr;
+            const float* inv_row =
+                std::is_integral_v<T>
+                    ? plane.inv_sigma_lut.data() + (dm * m_filters)
+                    : tables.inv;
+            const bool mixed = !std::is_integral_v<T> && tables.mixed;
+            for (SizeType t_run = 0; t_run < n;) {
+                SizeType t_end  = n;
+                float threshold = thr_row[f];
+                float inv_sigma = inv_row[f];
+                if (mixed) {
+                    const auto [table, until] =
+                        sample_table(start + t_run, width, tables.support);
+                    t_end = until - start < n
+                                ? static_cast<SizeType>(until - start)
+                                : n;
+                    threshold =
+                        table_thr(table, tables.thr, row_idx, m_filters)[f];
+                    inv_sigma =
+                        table_inv(table, tables.inv, row_idx, m_filters)[f];
+                }
+                for (SizeType t = t_run; t < t_end; ++t) {
                     const uint64_t sample = start + t;
                     const SizeType idx    = lookback + t + 1;
                     Prefix sum            = prefix[idx] - prefix[idx - width];
@@ -1101,30 +1126,7 @@ private:
                         }
                     }
                 }
-            };
-            if (std::is_integral_v<T> || !tables.mixed) {
-                const float* thr =
-                    std::is_integral_v<T>
-                        ? plane.raw_thresh_lut.data() + (dm * m_filters)
-                        : tables.thr;
-                const float* inv =
-                    std::is_integral_v<T>
-                        ? plane.inv_sigma_lut.data() + (dm * m_filters)
-                        : tables.inv;
-                points(0, n, thr[f], inv[f]);
-                continue;
-            }
-            // Mixed: runs of samples with one table each.
-            for (SizeType t = 0; t < n;) {
-                const auto [table, until] =
-                    sample_table(start + t, width, tables.support);
-                const SizeType end = until - start < n
-                                         ? static_cast<SizeType>(until - start)
-                                         : n;
-                points(t, end,
-                       table_thr(table, tables.thr, row_idx, m_filters)[f],
-                       table_inv(table, tables.inv, row_idx, m_filters)[f]);
-                t = end;
+                t_run = t_end;
             }
         }
         if (m_config.peak_mode ==

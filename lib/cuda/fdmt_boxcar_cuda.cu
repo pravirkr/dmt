@@ -542,7 +542,14 @@ DMT_D inline int block_table(const BlockTables& bt,
 
 // kScreen: tiles are screened by width group (detect_tile_grouped*); a
 // separate instantiation, so the plain kernel keeps its register budget.
-template <typename T, int kBlockThreads, bool kScreen, typename C = T>
+// kBlockNoise: per-call mask tables are in use (float rows only). A
+// separate instance, so the common unmasked launch carries none of their
+// state (it cost ~160 B of stack per thread and 15-50% of the run time).
+template <typename T,
+          int kBlockThreads,
+          bool kScreen,
+          bool kBlockNoise = false,
+          typename C       = T>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -627,7 +634,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     int n_play           = 0;
     bool mixed           = false;
     uint64_t row_support = 0;
-    if constexpr (!std::is_integral_v<T>) {
+    if constexpr (kBlockNoise && !std::is_integral_v<T>) {
         if (block_tables.count > 0) {
             row_support       = block_tables.support[row_index];
             const uint64_t s0 = input.sample_begin;
@@ -1492,16 +1499,34 @@ private:
                             dim3 grid,
                             dim3 block,
                             C* carry) {
+        // Per-call mask tables take their own kernel instance (float
+        // rows only).
+        if constexpr (!std::is_integral_v<T>) {
+            if (m_block_tables.count > 0) {
+                if (m_screen_groups_d.empty()) {
+                    launch_score_kernel<T, kBlockThreads, false, true, C>(
+                        input, g, grid, block, carry);
+                } else {
+                    launch_score_kernel<T, kBlockThreads, true, true, C>(
+                        input, g, grid, block, carry);
+                }
+                return;
+            }
+        }
         if (m_screen_groups_d.empty()) {
-            launch_score_kernel<T, kBlockThreads, false, C>(input, g, grid,
-                                                            block, carry);
+            launch_score_kernel<T, kBlockThreads, false, false, C>(
+                input, g, grid, block, carry);
         } else {
-            launch_score_kernel<T, kBlockThreads, true, C>(input, g, grid,
-                                                           block, carry);
+            launch_score_kernel<T, kBlockThreads, true, false, C>(
+                input, g, grid, block, carry);
         }
     }
 
-    template <typename T, int kBlockThreads, bool kScreen, typename C>
+    template <typename T,
+              int kBlockThreads,
+              bool kScreen,
+              bool kBlockNoise,
+              typename C>
     void launch_score_kernel(const FDMTSearchInput& input,
                              const LevelGroup& g,
                              dim3 grid,
@@ -1510,7 +1535,7 @@ private:
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
         FDMTSearchInput stopped = input;
         stopped.search_stop     = m_search_stop;
-        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, C>
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C>
             <<<grid, block, m_smem, stream>>>(
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
@@ -1524,8 +1549,7 @@ private:
                 raw(m_screen_groups_d),
                 static_cast<int>(m_screen_groups_d.size()),
                 raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
-                std::is_integral_v<T> ? BlockTables{} : m_block_tables,
-                m_group_offset);
+                kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset);
     }
 
     template <typename T, typename C = T>
@@ -1584,11 +1608,19 @@ private:
         }
         if constexpr (std::is_integral_v<T>) {
             if (m_screen_groups_d.empty()) {
+                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false,
+                                                    false, uint32_t>);
+            } else {
+                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true,
+                                                    false, uint32_t>);
+            }
+        } else {
+            if (m_screen_groups_d.empty()) {
                 configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, false, uint32_t>);
+                    kernel_fdmt_boxcar<T, kBlockThreads, false, true>);
             } else {
                 configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, true, uint32_t>);
+                    kernel_fdmt_boxcar<T, kBlockThreads, true, true>);
             }
         }
     }
