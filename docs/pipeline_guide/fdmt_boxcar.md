@@ -485,22 +485,18 @@ L40S, device-resident; AMD EPYC 9654, 8 threads one per CCD; median of 3):
 
 | preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.7 ms (12 widths) | 29.6 ms (163 widths) |
-| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (13 widths) | 14.0 ms (219 widths) |
-| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 19.0 ms |
-| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.2 ms (195 widths) |
-| `meerkat_lband`, CPU | 359 ms | 502 ms | 552 ms |
-| `cryopaf_lband`, subband depth 1, CPU | 141 ms | 468 ms | 544 ms |
-| `cryopaf_low`, CPU | 260 ms | 312 ms | 339 ms |
-
-Measured with the 0.7.0 width banks, before a bank ended on `max_boxcar`
-(0.8.0): the wtsp 1.5 banks of these presets now hold one more width (13, 14
-and 13), which adds a few percent of search work.
+| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.8 ms (13 widths) | 29.4 ms (163 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (14 widths) | 13.6 ms (219 widths) |
+| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 18.0 ms |
+| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.5 ms (13 widths) | 23.2 ms (195 widths) |
+| `meerkat_lband`, CPU | 362 ms | 515 ms | 559 ms |
+| `cryopaf_lband`, subband depth 1, CPU | 139 ms | 486 ms | 545 ms |
+| `cryopaf_low`, CPU | 252 ms | 315 ms | 339 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
 dozen widths, so the full-band search adds 3–10%; a depth-1 subband search
 on `cryopaf_lband` adds a fifth (wtsp 1.5) to a third (wtsp 1.0) more. On the CPU the scorer is a separate
-pass over each chunk's searched rows (1.2–3.3× the transform), still well
+pass over each chunk's searched rows (1.3–3.5× the transform), still well
 faster than real time on 8 threads. Thanks to the width screen, scoring
 every integer width up to 100 ms costs about the same as a dozen widths on
 both backends. `working_bytes` in the results is the allocation plus the
@@ -512,19 +508,21 @@ blocks, subband depth 4: 218k searched rows, wtsp 1.5) runs within the
 
 | backend | input | chunk | time per block | real-time factor | working memory | peak |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| GPU | uint8 | 4096 | 1.16 s | 1.81× | 9.4 GiB | 9.2 GiB |
-| GPU | float32 | 2048 | 1.59 s | 1.32× | 10.8 GiB (9.96 GiB engine) | 10.7 GiB |
-| CPU, 8 threads | uint8 | 4096 | 14.3 s | 0.15× | 6.2 GiB | 6.3 GiB |
-| CPU, 8 threads | float32 | 2048 | 20.1 s | 0.10× | 9.2 GiB | 9.4 GiB |
+| GPU | uint8 | 4096 | 1.17 s | 1.80× | 9.8 GiB | 9.6 GiB |
+| GPU | float32 | 1024 | 2.34 s | 0.90× | 9.6 GiB | 9.5 GiB |
+| CPU, 8 threads | uint8 | 4096 | 15.5 s | 0.14× | 6.6 GiB | 6.7 GiB |
+| CPU, 8 threads | float32 | 2048 | 22.0 s | 0.10× | 9.7 GiB | 9.8 GiB |
 
 *working memory* is the library's accounting plus the input block; *peak* is
 the measured device memory (GPU) or process resident set (CPU) in the same
 run. The GPU peak can be below the working memory because the accounting
-also counts host-side tables and the host candidate buffer.
+also counts host-side tables and the host candidate buffer. Float32 input on
+the GPU fits the 10 GiB budget only at 1024-sample chunks, which keeps it
+just below real time (0.90×); the 8-bit tree is narrower and fits 4096.
 
 The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.7 GiB).
 Searching at a coarser resolution is much cheaper: at 256 µs the GPU runs
-depth 4 at 36× real time and 8 CPU threads keep up (1.15–1.35×), and at
+depth 4 at 39–41× real time and 8 CPU threads keep up (1.11–1.31×), and at
 512 µs the CPU is 6× faster than real time (the real-time sweep on the
 [Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 

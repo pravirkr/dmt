@@ -68,7 +68,7 @@ point:
 - **ndms**: DM 0–125, 0–250, 0–500, 0–1000 and 0–2000, at 32K samples.
 - **nbits**: 1, 2, 4, 8, 16-bit packed and float32 input.
 
-CPU at 1 and 8 threads (FDMT-FFT, DDMT and SDMT at 8 only); CUDA with
+CPU at 8 threads; CUDA with
 device-resident data. DDMT and SDMT points of more than 10¹⁰ additions run
 one repetition (they are compute-bound and stable). Points whose estimated
 memory exceeds `--max-gb` are skipped and listed in the summary.
@@ -78,7 +78,7 @@ point and subband depth, boxcars to 100 ms (`max_boxcar = floor(0.1 s /
 tsamp)`) at two width spacings (1.0 and 1.5; UWL 1.5 and 2.0), float32 and
 packed 8-bit, with the default 10 GiB memory budget:
 
-- CPU (`BM_fdmt_boxcar_stream`): 1 and 8 threads (UWL: 8).
+- CPU (`BM_fdmt_boxcar_stream`): 8 threads.
 - GPU (`BM_fdmt_boxcar_cuda`): the FDMT transform alone (the floor), FDMT
   plus a separate search of the plane, FDMTBoxcar at depth 0 and the
   preset's depth, and FDMT-FFT with FDMTFFTBoxcar.
@@ -133,7 +133,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDMT_BUILD_BENCHMARKS=ON
 cmake --build build -j --target dmt_bench_suite
 
 # 2. Run the suites (CPU, then GPU, for each)
-export OMP_PLACES='{0}:8:8'
+export OMP_PLACES='{8}:8:8'  # one thread per CCD, CCDs 1-8 (core 0 has kernel load)
 for config in meerkat_lband cryopaf_lband cryopaf_low; do
   python bench/scripts/run_suite.py --config $config
   python bench/scripts/run_suite.py --suite boxcar --config $config
@@ -164,7 +164,8 @@ smoke tests only.
   dmt version, and `plot_suite.py` warns when result files disagree.
 - `--placement close` (the default) pins threads with
   `OMP_PROC_BIND=close` and `OMP_PLACES` (default `cores`; the published
-  numbers use `'{0}:8:8'`). `--placement none` leaves them unbound. The
+  numbers use `'{8}:8:8'`, one thread on each of CCDs 1-8, idle during the
+  runs on the shared node). `--placement none` leaves them unbound. The
   JSON records the placement, virtualisation and the load average before
   and after each run.
 - The FDMT is L3-bound. On CPUs whose L3 is split per core complex (AMD
@@ -186,7 +187,7 @@ smoke tests only.
 --machine NAME     results folder (default l40s-epyc9654)
 --label TEXT       display name in plots (default: the CPU / GPU model)
 --build-dir DIR    CMake build directory (default: build, build2, build*)
---threads 1,8      CPU thread counts
+--threads 8        CPU thread counts (published numbers: 8)
 --placement close  close: OMP_PROC_BIND=close; none: unbound
 --repetitions 3    repetitions per point (plots use the median)
 --max-gb GB        suite memory budget for skipping points (default 60% of RAM)

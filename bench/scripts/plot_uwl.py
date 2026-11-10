@@ -175,7 +175,7 @@ def summary_md(rt: dict, ref: dict, contexts: dict) -> str:
         out.append(
             f"Machine `{machine}`: {ctx.get('cpu_model', '-')}, "
             f"{ctx.get('gpu_model', '-')}; CPU threads one per CCD "
-            f"(OMP_PLACES `{{0}}:8:8`). Default memory budget (10 GiB)."
+            f"(OMP_PLACES `{{8}}:8:8`). Default memory budget (10 GiB)."
         )
     out += [
         "",

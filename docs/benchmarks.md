@@ -3,10 +3,11 @@
 Every number here comes from one benchmark suite (`dmt_bench_suite`), run with
 the same fixed configuration on one machine:
 
-- **CPU:** an AMD EPYC 9654, with 1 and 8 threads pinned one thread per core
-  complex (`OMP_PROC_BIND=close OMP_PLACES='{0}:8:8'`) so each thread has its
-  own 32 MB L3 slice. The load average is recorded with every run
-  (`bench/results/<config>/plots/summary.md`).
+- **CPU:** an AMD EPYC 9654, with 8 threads pinned one thread per core
+  complex (`OMP_PROC_BIND=close OMP_PLACES='{8}:8:8'`, core complexes 1–8)
+  so each thread has its own 32 MB L3 slice. The node is shared: those core
+  complexes were idle before and during every run. The load average in
+  `bench/results/<config>/plots/summary.md` covers the whole machine.
 - **GPU:** an NVIDIA L40S.
 
 The rankings below hold for this machine. FDMT speed follows cache and
@@ -64,28 +65,28 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 
 | engine | `meerkat_lband` CPU | `cryopaf_low` CPU | `cryopaf_lband` CPU | `meerkat_lband` GPU | `cryopaf_low` GPU | `cryopaf_lband` GPU |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| FDMT | 359 ms | 260 ms | 141 ms | 25.9 ms | 21.8 ms | 11.6 ms |
-| FDMT-FFT | 441 ms | 318 ms | 184 ms | 43.9 ms | 25.0 ms | 17.5 ms |
-| DDMT | 6.77 s | 345 ms | 724 ms | 158 ms | 32.0 ms | 33.7 ms |
-| SDMT | 2.38 s | 332 ms | 475 ms | 67.8 ms | 32.0 ms | 12.0 ms |
-| DDMT-FFT | 537 ms | 186 ms | 206 ms | 46.6 ms | 14.8 ms | 17.3 ms |
+| FDMT | 362 ms | 252 ms | 139 ms | 25.9 ms | 21.8 ms | 11.6 ms |
+| FDMT-FFT | 438 ms | 318 ms | 182 ms | 43.8 ms | 25.0 ms | 17.5 ms |
+| DDMT | 6.79 s | 337 ms | 715 ms | 157 ms | 31.8 ms | 33.8 ms |
+| SDMT | 2.35 s | 331 ms | 478 ms | 67.7 ms | 31.6 ms | 12.0 ms |
+| DDMT-FFT | 527 ms | 185 ms | 204 ms | 46.6 ms | 14.8 ms | 17.3 ms |
 
 (CPU: 8 threads. FDMT-FFT and DDMT-FFT with fractional delays.)
 
 - **Real time.** Every engine runs faster than real time on both backends,
-  by 3–106× on 8 CPU threads and 127–1289× on the GPU, so the choice
+  by 3–107× on 8 CPU threads and 128–1290× on the GPU, so the choice
   between them is about exactness and memory as much as speed.
 - **`meerkat_lband`.** With 4096 channels, FDMT is the fastest engine on
-  both backends: 359 ms on 8 CPU threads (56× real time, 19× faster than
-  DDMT) and 25.9 ms on the L40S (775×, 6.1× faster than DDMT, 1.8× faster than
+  both backends: 362 ms on 8 CPU threads (55× real time, 19× faster than
+  DDMT) and 25.9 ms on the L40S (776×, 6.1× faster than DDMT, 1.8× faster than
   DDMT-FFT).
 - **Hard presets for FDMT.** Few channels and long dispersion sweeps (21.8k
   samples on `cryopaf_low`) give every tree level 10⁴–2×10⁴ rows, and every merge
   is a memory access, while DDMT and SDMT reuse each input window from cache
   or shared memory. On `cryopaf_low` the three are within 1.3× on the
-  CPU (FDMT 260 ms, SDMT 332 ms, DDMT 345 ms). With more channels per delay,
+  CPU (FDMT 252 ms, SDMT 331 ms, DDMT 337 ms). With more channels per delay,
   FDMT pulls ahead: 5.1× faster than DDMT on `cryopaf_lband`, 19× on
-  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf_low` (186 ms),
+  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf_low` (185 ms),
   while FDMT leads on both L-band presets.
 - **On the GPU,** FDMT is 1.5× faster than DDMT and SDMT on `cryopaf_low`, and
   2.9–6.1× faster than DDMT on the L-band presets. Only SDMT on `cryopaf_lband`
@@ -243,13 +244,12 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 The real-time factor is seconds of data processed per second of compute.
 
 - **Packed low-bit input** runs the FDMT tree in narrow integer lanes. On
-  the CPU that is 1.2–1.5× faster than float32 at 1–4 bits on one thread
-  and 1.2–1.4× on 8 threads (`cryopaf_lband`: 148× against 106× real time at 1
-  bit). On the GPU, 1–2-bit input gains on `cryopaf_lband`
-  (1591× against 1289×) and loses on `cryopaf_low` and `meerkat_lband`, where the
+  the CPU that is 1.1–1.4× faster than float32 at 1–4 bits on 8 threads
+  (`cryopaf_lband`: 148× against 107× real time at 1 bit). On the GPU,
+  1–2-bit input gains on `cryopaf_lband` (1590× against 1290×) and loses on `cryopaf_low` and `meerkat_lband`, where the
   float32 path uses the direct bottom and top kernels.
 - At 16 bits the tree is mostly float again, so packed input is no faster
-  than float32 (on the GPU it is 1.3–1.6× slower).
+  than float32 (on the GPU it is 1.2–1.6× slower).
 - **DDMT** sums packed input two samples per instruction in 16-bit lanes.
   **SDMT** shares sums only for float32 and 16-bit input on the GPU; at 1–8
   bits it runs the DDMT kernel.
@@ -337,17 +337,18 @@ of widths), on blocks of 2.1 s after the stream is warm:
 
 | time resolution | GPU, uint8 | GPU, float32 | CPU (8 threads), uint8 | CPU (8 threads), float32 |
 | ---: | ---: | ---: | ---: | ---: |
-| 64 µs (4749 trials) | **1.81×**, 9.4 GiB | **1.32×**, 10.8 GiB | 0.15×, 6.2 GiB | 0.10×, 9.2 GiB |
-| 256 µs (2302 trials) | 39×, 3.4 GiB | 42×, 3.5 GiB | **1.15×**, 3.3 GiB | **1.35×**, 3.5 GiB |
-| 512 µs (1153 trials) | 162×, 0.7 GiB | 163×, 0.8 GiB | 6.2×, 1.8 GiB | 6.8×, 2.0 GiB |
-| 1024 µs (577 trials) | 870×, 0.3 GiB | 930×, 0.3 GiB | 19×, 0.6 GiB | 25×, 0.7 GiB |
+| 64 µs (4749 trials) | **1.80×**, 9.8 GiB | 0.90×, 9.6 GiB | 0.14×, 6.6 GiB | 0.10×, 9.7 GiB |
+| 256 µs (2302 trials) | 39×, 3.4 GiB | 41×, 3.5 GiB | **1.11×**, 3.4 GiB | **1.31×**, 3.5 GiB |
+| 512 µs (1153 trials) | 158×, 0.7 GiB | 159×, 0.8 GiB | 6.0×, 1.8 GiB | 6.4×, 2.0 GiB |
+| 1024 µs (577 trials) | 859×, 0.3 GiB | 923×, 0.3 GiB | 18×, 0.6 GiB | 24×, 0.7 GiB |
 
 (real-time factor = block duration / time per block; working memory
 includes the input block.)
 
 - **The GPU searches depth 4 at the native 64 µs faster than real time**
-  within 10 GiB, on 8-bit and float32 input. The tree path needed 15 GB for
-  the same search.
+  within 10 GiB on 8-bit input (1.8×). Float32 input fits the budget only
+  at 1024-sample chunks and runs just below real time (0.90×). The tree
+  path needed 15 GB for the same search.
 - **Each halving of the resolution makes the search 4–5× cheaper**: fewer
   samples, half the DM trials, and a tree half as deep in delay. From
   256 µs 8 CPU threads keep up. At high DM the band's bottom channels are
