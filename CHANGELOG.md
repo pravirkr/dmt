@@ -6,38 +6,7 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- **Device arrays in Python (DLPack and CUDA array interface).** On a GPU
-  backend, `FDMT`, `FDMTFFT`, `DDMT`, `SDMT`, `DDMTFFT` and `CohFDMT` accept
-  PyTorch, CuPy, Numba or any other `__dlpack__` or
-  `__cuda_array_interface__` array on the engine's device in `execute()` (and
-  `execute_time_major()` for DDMT/SDMT), the FDMT steppers' `reset()`, and
-  `save_history()`/`load_history()`. The arrays are read and written in
-  place: no host round trip and no copy. Results are arrays of the input's
-  library, allocated on the call's stream, or views of a caller's `out=`
-  buffer. Keyword-only `stream=` takes a raw `cudaStream_t`/`hipStream_t`
-  int, a `torch.cuda.Stream`, a `cupy.cuda.Stream`, a Numba stream or a
-  `__cuda_stream__` object. By default it is the current stream of the
-  input's library (Numba: its default stream). Calls are asynchronous on
-  that stream, and pending producer work is ordered before them through
-  `__dlpack__(stream=...)` or, for `__cuda_array_interface__` arrays that
-  state a `stream`, an event the call's stream waits for (no host wait;
-  `NUMBA_CUDA_ARRAY_INTERFACE_SYNC=0` turns it off, as in Numba). DLPack is
-  used when an array has both. PyTorch inputs are marked in use on the
-  call's stream (`record_stream`), so dropping them right after the call is
-  safe. The FDMT steppers' `advance()`,
-  `advance_until_remaining()` and `finalize()` take `stream=` too. The
-  wrong dtype or a non-contiguous array raises `TypeError` and is never
-  converted silently. NumPy input works as before.
-
-### Changed
-
-- `CohFDMT.execute(host_data, out=...)` raises `TypeError` when `out` is not
-  a NumPy array. It used to convert `out` (a list, say) into a temporary and
-  write the result there, so it never reached the caller's object.
-
-## [0.8.0] - 2026-11-09
+## [0.8.0] - 2026-11-10
 
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
   depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
@@ -129,6 +98,54 @@ All notable changes to `dmt` are listed here. The format follows
   `sqrt(N / (N - k))`. Each block is copied once to a staging buffer to zero
   them (`memory_usage.staging`, within `max_memory_bytes`); without a mask
   nothing changes. CPU and GPU agree bit for bit on packed input.
+- **Kill mask per block on `FDMTBoxcar`** (float32 input): `execute(waterfall,
+  kill_mask)` for host and device waterfalls (Python: `execute(waterfall,
+  kill_mask=None)`), ANDed with the constructor mask, so a pipeline that
+  flags RFI per block keeps one engine. Within a block the S/N is calibrated
+  on that block's active channels. After a mask change, the first `S + W - 1`
+  endpoints of each row (`S` the row's dispersion support) read samples
+  under both masks and use the noise of the OR of the two: never more false
+  alarms, S/N there slightly low. The noise tables are computed exactly,
+  bit-identical to the construction-time ones (0.2 s per mask on
+  `parkes_uwl` subband depth 4 with 8 threads; the last three masks are
+  cached), and count against `max_memory_bytes`. Blocks must be at least
+  `S_max + max_boxcar - 1` samples long (255,452 on `parkes_uwl` depth 4).
+  Existing overloads and outputs are unchanged; packed input takes no
+  per-block mask.
+- **`get_candidate_frontier()`** on `FDMTBoxcar` and `FDMTFFTBoxcar` (C++ and
+  Python): the oldest `begin_sample` any later `execute()`, `flush()` or
+  `drain()` can still emit, i.e. the begin of the oldest open excursion, or
+  `get_searched_nsamps()` when none is open. It never decreases between
+  resets. An excursion stays open as long as it lasts, so use this, not a
+  fixed `dt_max + boxcar` lag, to decide when candidates are complete. On a
+  GPU it adds no host synchronisation; read it after synchronising the
+  call's stream.
+- **Device arrays in Python (DLPack and CUDA array interface).** On a GPU
+  backend, `FDMT`, `FDMTFFT`, `DDMT`, `SDMT`, `DDMTFFT` and `CohFDMT` accept
+  PyTorch, CuPy, Numba or any other `__dlpack__` or
+  `__cuda_array_interface__` array on the engine's device in `execute()` (and
+  `execute_time_major()` for DDMT/SDMT), the FDMT steppers' `reset()`, and
+  `save_history()`/`load_history()`. The arrays are read and written in
+  place: no host round trip and no copy. Results are arrays of the input's
+  library, allocated on the call's stream, or views of a caller's `out=`
+  buffer. Keyword-only `stream=` takes a raw `cudaStream_t`/`hipStream_t`
+  int, a `torch.cuda.Stream`, a `cupy.cuda.Stream`, a Numba stream or a
+  `__cuda_stream__` object. By default it is the current stream of the
+  input's library (Numba: its default stream). Calls are asynchronous on
+  that stream, and pending producer work is ordered before them through
+  `__dlpack__(stream=...)` or, for `__cuda_array_interface__` arrays that
+  state a `stream`, an event the call's stream waits for (no host wait;
+  `NUMBA_CUDA_ARRAY_INTERFACE_SYNC=0` turns it off, as in Numba). DLPack is
+  used when an array has both. PyTorch inputs are marked in use on the
+  call's stream (`record_stream`), so dropping them right after the call is
+  safe. The FDMT steppers' `advance()`,
+  `advance_until_remaining()` and `finalize()` take `stream=` too. The
+  wrong dtype or a non-contiguous array raises `TypeError` and is never
+  converted silently. NumPy input works as before.
+- **Changed:** `CohFDMT.execute(host_data, out=...)` raises `TypeError` when
+  `out` is not a NumPy array. It used to convert `out` (a list, say) into a
+  temporary and write the result there, so it never reached the caller's
+  object.
 
 ## [0.7.0] - 2026-11-03
 
