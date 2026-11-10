@@ -395,6 +395,10 @@ uint64_t FDMTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
                                    m_impl->engine->search_latency());
 }
+uint64_t FDMTBoxcar::get_candidate_frontier() const noexcept {
+    // New excursions begin at endpoints not yet searched by every row.
+    return std::min(get_searched_nsamps(), m_impl->engine->open_begin_min());
+}
 uint64_t FDMTBoxcar::get_search_latency() const noexcept {
     return m_impl->engine->search_latency();
 }

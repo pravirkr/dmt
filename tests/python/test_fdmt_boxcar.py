@@ -510,3 +510,30 @@ def test_per_call_kill_mask_gpu_matches_cpu(gpu_backend: str) -> None:
             np.testing.assert_allclose(gpu[name], cpu[name], rtol=2e-5)
         else:
             np.testing.assert_array_equal(gpu[name], cpu[name])
+
+
+@pytest.mark.parametrize("mode", list(PeakFindingMode.__members__.values()))
+def test_candidate_frontier(mode: PeakFindingMode) -> None:
+    # Every candidate of a later call begins at or after the frontier, which
+    # never decreases; a long excursion holds it at its begin.
+    plan, blocks, masks = mask_blocks(13)
+    for block in blocks[1:3]:
+        block += 2.5  # one excursion over two blocks in most rows
+    search = FDMTBoxcar(plan, config(mode))
+    assert search.get_candidate_frontier() == 0
+    frontier = 0
+    held = []
+    for block, mask in zip(blocks, masks, strict=True):
+        result = search.execute(block, kill_mask=mask)
+        assert np.all(result.candidates["begin_sample"] >= frontier)
+        nxt = search.get_candidate_frontier()
+        assert frontier <= nxt <= search.searched_nsamps
+        frontier = nxt
+        held.append(nxt)
+    if mode != PeakFindingMode.ALL_ABOVE_THRESHOLD:
+        assert held[1] < 300  # the excursion opened in block 1 is still open
+    result = search.flush()
+    assert np.all(result.candidates["begin_sample"] >= frontier)
+    assert search.get_candidate_frontier() == search.searched_nsamps
+    search.reset_history()
+    assert search.get_candidate_frontier() == 0

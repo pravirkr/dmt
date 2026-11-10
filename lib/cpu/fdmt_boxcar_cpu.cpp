@@ -149,6 +149,7 @@ public:
         begin_result(m_plan.get_nsamps());
         m_driver->search(masked(waterfall, m_masked), *this);
         m_position += m_plan.get_nsamps();
+        update_open_begin();
         return view();
     }
     CandidateDeviceResultView execute(DeviceSpan<const float>,
@@ -172,6 +173,7 @@ public:
         m_driver->search(masked(waterfall, m_masked_packed),
                          m_config.input_nbits, *this);
         m_position += m_plan.get_nsamps();
+        update_open_begin();
         return view();
     }
     CandidateDeviceResultView execute(DeviceSpan<const uint8_t>,
@@ -196,6 +198,7 @@ public:
                 }
             }
         }
+        m_open_begin = UINT64_MAX;
         return view();
     }
     void set_search_stop(uint64_t stop) noexcept override {
@@ -206,6 +209,9 @@ public:
     }
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_driver->search_latency();
+    }
+    [[nodiscard]] uint64_t open_begin_min() const noexcept override {
+        return m_open_begin;
     }
     [[nodiscard]] SizeType block_noise_bytes() const noexcept override {
         // The staging block (when the constructor mask has none) and the
@@ -248,7 +254,8 @@ public:
         std::ranges::fill(m_integer_carry, uint64_t{0});
         std::ranges::fill(m_integer_carry32, uint32_t{0});
         std::ranges::fill(m_peaks, BoxcarPeak{});
-        m_position = 0;
+        m_position   = 0;
+        m_open_begin = UINT64_MAX;
         begin_result(0);
     }
 
@@ -1164,6 +1171,22 @@ private:
         return buffer;
     }
 
+    /// The oldest begin sample of the open excursions (candidate
+    /// frontier); no excursion stays open in kAllAboveThreshold.
+    void update_open_begin() {
+        uint64_t oldest = UINT64_MAX;
+        if (m_config.peak_mode != PeakFindingMode::kAllAboveThreshold) {
+            const auto n = static_cast<std::ptrdiff_t>(m_peaks.size());
+#pragma omp parallel for num_threads(m_threads) schedule(static)               \
+    reduction(min : oldest)
+            for (std::ptrdiff_t i = 0; i < n; ++i) {
+                if (m_peaks[i].open) {
+                    oldest = std::min(oldest, m_peaks[i].begin);
+                }
+            }
+        }
+        m_open_begin = oldest;
+    }
     /// The ring back to one constructor entry (stream sample 0).
     void reset_block_noise() {
         m_pending.reset();
@@ -1247,7 +1270,8 @@ private:
     SizeType m_result_samples = 0;
     // Per-call kill masks: off until the first one (then the per-block
     // tables below replace the planes' tables).
-    bool m_noise_on = false;
+    uint64_t m_open_begin = UINT64_MAX; ///< see open_begin_min()
+    bool m_noise_on       = false;
     std::shared_ptr<const std::vector<uint64_t>> m_support;
     std::vector<BlockNoise> m_ring; ///< oldest first, at most m_ring_size
     std::optional<BlockNoise> m_pending;

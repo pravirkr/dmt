@@ -1005,6 +1005,33 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
     open[index] = 0;
 }
 
+// Candidate frontier: the smallest begin sample of the open excursions,
+// min-reduced into *oldest (preset to UINT64_MAX). Only rows flagged open
+// are read.
+__global__ void kernel_open_begin(const BoxcarPeak* peaks,
+                                  const uint8_t* open,
+                                  SizeType tasks,
+                                  SizeType peak_count,
+                                  uint64_t* oldest) {
+    uint64_t local = UINT64_MAX;
+    for (SizeType i = blockIdx.x * blockDim.x + threadIdx.x; i < tasks;
+         i += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        if (open[i] == 0) {
+            continue;
+        }
+        for (SizeType f = 0; f < peak_count; ++f) {
+            const BoxcarPeak& p = peaks[i * peak_count + f];
+            if (p.open && p.begin < local) {
+                local = p.begin;
+            }
+        }
+    }
+    if (local != UINT64_MAX) {
+        atomicMin(reinterpret_cast<unsigned long long*>(oldest),
+                  static_cast<unsigned long long>(local));
+    }
+}
+
 template <typename T> T* raw(thrust::device_vector<T>& v) {
     return thrust::raw_pointer_cast(v.data());
 }
@@ -1159,6 +1186,9 @@ public:
         m_counts_d.resize(1);
         m_slots_d.resize(1, 0);
         m_candidates_h.resize(config.max_candidates);
+        m_oldest_d.resize(1, UINT64_MAX);
+        m_oldest_h.reserve(1);
+        *m_oldest_h.data() = UINT64_MAX;
     }
     ~FDMTBoxcarCudaEngine() override {
         // Destruction must not release search buffers while queued work
@@ -1206,6 +1236,7 @@ public:
         m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
         m_position += m_plan.get_nsamps();
         release_slots(stream);
+        update_open_begin(stream);
         m_work.mark(stream);
         return device_view();
     }
@@ -1232,6 +1263,7 @@ public:
         m_driver->search(masked(waterfall, m_packed_input, queue),
                          m_config.input_nbits, *this, queue);
         m_position += m_plan.get_nsamps();
+        update_open_begin(static_cast<cudaStream_t>(queue.native));
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
     }
@@ -1255,6 +1287,7 @@ public:
                 m_config.peak_mode !=
                     PeakFindingMode::kContiguousPeakAcrossWidths);
         gpu_utils::check_last_gpu_error("FDMTBoxcar flush failed");
+        update_open_begin(stream);
         m_work.mark(stream);
         return device_view();
     }
@@ -1287,6 +1320,9 @@ public:
     }
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_driver->search_latency();
+    }
+    [[nodiscard]] uint64_t open_begin_min() const noexcept override {
+        return *m_oldest_h.data();
     }
     [[nodiscard]] SizeType block_noise_bytes() const noexcept override {
         // Staging (unless allocated), the row supports, and the table slots
@@ -1369,6 +1405,7 @@ public:
         }
         m_position = 0;
         begin_result(0, queue);
+        update_open_begin(stream);
         m_work.mark(stream);
     }
     void consume(SizeType level, const FDMTSearchInput& input) override {
@@ -1427,7 +1464,8 @@ public:
                        m_integer_carry32.size() * sizeof(uint32_t),
             .peaks   = m_peaks_d.size() * sizeof(BoxcarPeak) + m_open_d.size(),
             .workspace = fdmt.workspace + m_per_dm_d.size() * sizeof(uint64_t) +
-                         sizeof(CandidateCounts) + sizeof(uint64_t),
+                         sizeof(CandidateCounts) + sizeof(uint64_t) +
+                         (2 * sizeof(uint64_t)), // candidate frontier word
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
                           sizeof(RawCandidate),
             .staging =
@@ -1619,6 +1657,24 @@ private:
                 (c1 - c0) * row, m_beams, stream));
         }
         return {dst, block.size(), block.device};
+    }
+    /// Candidate frontier: the oldest open begin sample, reduced on the
+    /// device and copied to a pinned word on `stream` (no host wait).
+    void update_open_begin(cudaStream_t stream) {
+        gpu_utils::check_gpu_call(
+            cudaMemsetAsync(raw(m_oldest_d), 0xFF, sizeof(uint64_t), stream));
+        const SizeType tasks = m_rows.size() * m_beams;
+        if (m_config.peak_mode != PeakFindingMode::kAllAboveThreshold) {
+            const auto blocks = static_cast<unsigned>(
+                std::min<SizeType>((tasks + 255) / 256, 1024));
+            kernel_open_begin<<<blocks, 256, 0, stream>>>(
+                raw(m_peaks_d), raw(m_open_d), tasks, m_peak_count,
+                raw(m_oldest_d));
+            gpu_utils::check_last_gpu_error("FDMTBoxcar frontier failed");
+        }
+        gpu_utils::check_gpu_call(
+            cudaMemcpyAsync(m_oldest_h.data(), raw(m_oldest_d),
+                            sizeof(uint64_t), cudaMemcpyDeviceToHost, stream));
     }
     /// Table slots: steady and transition sets of every ring entry, plus
     /// the entry being committed.
@@ -1831,6 +1887,8 @@ private:
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
     SizeType m_group_offset   = 0;
+    thrust::device_vector<uint64_t> m_oldest_d; ///< candidate frontier
+    gpu_host::PinnedBuffer<uint64_t> m_oldest_h;
     // Per-call kill masks: off until the first one.
     struct TableSlot {
         thrust::device_vector<float> device; ///< thresholds, then inv sigma

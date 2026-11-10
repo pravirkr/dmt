@@ -269,6 +269,18 @@ void bind_fdmt_boxcar(py::module_& mod) {
             :attr:`search_latency` samples are never searched. The stream ends:
             ``execute`` raises until :meth:`reset_history`.
             )doc")
+        .def("get_candidate_frontier", &FDMTBoxcar::get_candidate_frontier,
+             R"doc(
+            The oldest sample a later candidate can still have: every
+            candidate emitted by a later :meth:`execute`, :meth:`flush` or
+            :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
+            ``end_sample``) at or after it. It is the smallest
+            ``begin_sample`` of the excursions still open, or
+            :attr:`searched_nsamps` when none is open; it never decreases
+            until :meth:`reset_history` (then 0). Use it as the watermark
+            for releasing candidate groups, whatever the length of an
+            excursion.
+            )doc")
         .def_property_readonly(
             "searched_nsamps", &FDMTBoxcar::get_searched_nsamps,
             "Stream samples [0, n) searched by every row so far (after "
@@ -393,6 +405,18 @@ void bind_fdmt_boxcar(py::module_& mod) {
             the open excursions (as :meth:`flush`). Without it the last
             :attr:`output_latency` samples are never searched. The stream ends:
             ``execute`` raises until :meth:`reset_history`.
+            )doc")
+        .def("get_candidate_frontier", &FDMTFFTBoxcar::get_candidate_frontier,
+             R"doc(
+            The oldest sample a later candidate can still have: every
+            candidate emitted by a later :meth:`execute`, :meth:`flush` or
+            :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
+            ``end_sample``) at or after it. It is the smallest
+            ``begin_sample`` of the excursions still open, or
+            :attr:`searched_nsamps` when none is open; it never decreases
+            until :meth:`reset_history` (then 0). Use it as the watermark
+            for releasing candidate groups, whatever the length of an
+            excursion.
             )doc")
         .def_property_readonly(
             "searched_nsamps", &FDMTFFTBoxcar::get_searched_nsamps,

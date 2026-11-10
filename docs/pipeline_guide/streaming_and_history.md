@@ -75,6 +75,14 @@ The history has two parts, both kept per beam:
 `mode="full"` and `mode="roll"` keep no history; each block stands alone.
 ```
 
+`FDMTBoxcar` and `FDMTFFTBoxcar` also carry open excursions across blocks:
+a candidate is returned when its excursion ends, possibly many blocks after
+it began. `get_candidate_frontier()` is the oldest `begin_sample` a later
+call can still return, so every candidate that begins before it has
+already been returned. Use it, not a fixed lag, to decide when candidates
+near a sample can be grouped and released (see the
+[Python API](../api/python_api.md)).
+
 ## DDMT
 
 `DDMT` (and `SDMT`, `DDMT-FFT`) always streams. Its history is the raw input

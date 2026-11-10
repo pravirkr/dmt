@@ -384,6 +384,10 @@ public:
     [[nodiscard]] virtual uint64_t stream_position() const noexcept = 0;
     /// Input samples a sample waits for before every row has searched it.
     [[nodiscard]] virtual uint64_t search_latency() const noexcept = 0;
+    /// Smallest begin sample of the excursions still open after the last
+    /// call (UINT64_MAX: none). GPU: valid once the last call's stream has
+    /// completed.
+    [[nodiscard]] virtual uint64_t open_begin_min() const noexcept = 0;
 
     // Per-call kill masks (FDMTBoxcar, float input). Until enabled, every
     // block uses the constructor tables and kill runs.

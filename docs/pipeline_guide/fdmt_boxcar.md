@@ -313,6 +313,19 @@ winning peak's width.
   continue, with excursions split at that flush.
 - **Reset.** `reset_history()` discards all histories and pending peaks and
   restarts sample 0.
+- **Candidate frontier.** In the contiguous modes an excursion is emitted
+  only when it ends, and nothing limits how long it stays open, so a later
+  call can return a candidate far older than `dt_max + max_boxcar` samples
+  (persistent RFI, a long bright event). `get_candidate_frontier()` gives
+  the oldest `begin_sample` any later `execute()`, `flush()` or `drain()`
+  can still emit: the smallest begin of the excursions still open (any
+  beam, row or width), or `get_searched_nsamps()` when none is open. It
+  never decreases between resets. Use it as the watermark for releasing
+  grouped candidates instead of a fixed lag. With `ALL_ABOVE_THRESHOLD`
+  nothing stays open, so it is the searched position. After `flush()` or
+  `drain()` it equals `get_searched_nsamps()`, and `reset_history()` sets it
+  to 0. After device calls, synchronise their stream before reading it, as
+  for a device result. `FDMTFFTBoxcar` has the same method.
 
 ## Subbands, overflow and memory
 

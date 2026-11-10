@@ -135,10 +135,25 @@ run_subband_search(const plans::FDMTPlan& plan,
         engine->push_block_noise(std::move(entry));
         prev = eff;
     };
-    const auto add = [&](const CandidateResultView& r) {
+    // Candidate frontier (FDMTBoxcar::get_candidate_frontier()): every
+    // later candidate begins at or after it, and it never decreases.
+    const uint64_t latency  = engine->search_latency();
+    const auto frontier_now = [&] {
+        const uint64_t pos = engine->stream_position();
+        return std::min(pos > latency ? pos - latency : 0,
+                        engine->open_begin_min());
+    };
+    uint64_t frontier = 0;
+    const auto add    = [&](const CandidateResultView& r) {
         REQUIRE_FALSE(r.overflowed());
+        for (const auto& c : r.candidates) {
+            REQUIRE(c.begin_sample >= frontier);
+        }
         run.candidates.insert(run.candidates.end(), r.candidates.begin(),
                               r.candidates.end());
+        const uint64_t next = frontier_now();
+        REQUIRE(next >= frontier);
+        frontier = next;
     };
     for (SizeType b = 0; b < nblocks; ++b) {
         const auto blk = search_block(n, 900 + static_cast<unsigned>(b));
