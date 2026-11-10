@@ -150,7 +150,10 @@ void bind_fdmt_boxcar(py::module_& mod) {
         skewed-window path; their subband rows are then searched with a fixed
         per-row latency of up to the dispersion delay to the bottom of the
         band, so the final such samples of a stream are searched only if it
-        continues. Raises ``ValueError`` when nothing fits.
+        continues. Raises ``ValueError`` when nothing fits. On a GPU the
+        staging block for host (NumPy) input is allocated by the first such
+        :meth:`execute`, outside that check; ``memory_usage.staging`` shows
+        it once allocated.
 
         ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
@@ -337,7 +340,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         the instance allocates (:attr:`memory_usage`), as on FDMTBoxcar:
         over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
         until it fits. Raises ``ValueError`` when even the shortest segment
-        does not fit.
+        does not fit. GPU host-input staging is allocated lazily, outside
+        that check, as on FDMTBoxcar.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,

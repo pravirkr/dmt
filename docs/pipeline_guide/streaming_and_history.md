@@ -157,7 +157,7 @@ buffer. On a GPU the history lives in device memory. The C++ `DeviceSpan`
 overloads are asynchronous on the given stream, except that
 `load_history()` first copies the header to the host to check it; the host
 overloads copy synchronously. Plans large enough to run on the
-[skewed-window path](skewed_window_fdmt.md) save that engine's own, much
+skewed-window path save that engine's own, much
 smaller state, specific to its backend, which only an engine with the same
 skewed layout accepts (same plan and `chunk_nsamps`, on the CPU also the
 same thread count); a mismatched buffer raises. On the CPU that state keeps 8- and

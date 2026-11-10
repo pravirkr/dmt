@@ -60,7 +60,11 @@ struct FDMTBoxcarMemoryUsage {
  * everything the instance allocates (get_memory_usage().total()). The
  * boxcar carry, peaks and candidate buffers are fixed by the plan and
  * config; the FDMT takes its fastest path within the rest (see FDMT).
- * Construction throws std::invalid_argument when nothing fits. On the
+ * Construction throws std::invalid_argument when nothing fits. On a GPU
+ * the staging block for host-memory input is allocated by the first host
+ * execute() and is not part of that check (device input never needs it);
+ * get_memory_usage().staging reports it once allocated, and a per-call kill
+ * mask counts it against the budget when the first mask arrives. On the
  * skewed-window path (plans whose tree history exceeds the budget) the rows
  * of a subband search are searched with a fixed per-row latency of up to
  * the dispersion delay from the subband to the bottom of the band (that of

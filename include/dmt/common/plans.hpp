@@ -828,6 +828,8 @@ public:
      * @param dm_arr Explicit span of DM trials in pc/cm^3.
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min), as for the first constructor.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -849,6 +851,8 @@ public:
      * tol.
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min), as for the first constructor.
      */
     DDMTPlan(float f_min,
              float f_max,

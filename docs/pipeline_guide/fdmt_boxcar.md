@@ -393,6 +393,12 @@ the fastest path that fits in the rest:
 - Construction raises `ValueError` (`std::invalid_argument`) when nothing
   fits.
 
+On a GPU, host-memory input goes through a device staging block that is
+allocated by the first host-memory `execute()` and reused. The check at
+construction does not include it, since device-memory input never needs
+it; it shows in `memory_usage.staging` once allocated. A per-block kill
+mask counts it when the first mask arrives.
+
 On the skewed path a subband search reads every searched row (tree,
 staggered, and delays the full-band grid does not use) from the full
 band's windows, each at a fixed **per-row lag**: at the call whose
@@ -563,7 +569,10 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   length; `chunk_nsamps` reports the segment) until the instance fits, and
   construction raises `ValueError` with the memory at the shortest segment
   when nothing does. Shorter segments change the rows as blocking does (see
-  Streaming).
+  Streaming). GPU host-input staging is allocated lazily, outside this
+  check, as on `FDMTBoxcar`. On `parkes_uwl` the CPU instance needs 19.45
+  GiB even at the shortest segment, so the default budget raises; pass a
+  larger `max_memory_bytes`.
 - **Limits.** Float32 input only and plan `subband_depth=0`: subband rows exist
   only in the Fourier domain and would each need an extra inverse transform.
 

@@ -15,6 +15,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
+#include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_skew.hpp"
 
 #include "skew_subband_search.hpp"
@@ -467,6 +468,41 @@ TEST_CASE("FDMT engine skewed path: wiring, history and input types",
         }
         std::vector<float> junk(hsize, 0.5F);
         REQUIRE_THROWS_AS(a->load_history(junk), std::invalid_argument);
+    }
+
+    SECTION("the saved layout is pinned; a tree history is rejected") {
+        // The size and header of a saved skewed history are part of the
+        // format: buffers saved by an earlier build must keep loading.
+        auto a               = make_cpu_engine(plan, true, 1024);
+        const SizeType hsize = a->history_state_size();
+        CHECK(hsize == 2441635); // float layout, this plan, chunk 1024
+        run_engine(*a, plan, blk(30), false);
+        REQUIRE(a->history_state_size() == hsize);
+        std::vector<float> hist(hsize);
+        a->save_history(hist);
+        CHECK(hist[0] ==
+              static_cast<float>(algorithms::detail::kFDMTSkewHistMagic));
+        CHECK(hist[1] == 1.0F);                               // version
+        CHECK(hist[14] == static_cast<float>(sizeof(float))); // float ring
+        // The same buffer marked as a plain-tree ("TR") history.
+        auto tree_marked = hist;
+        tree_marked[0] =
+            static_cast<float>(algorithms::detail::kFDMTTreeHistMagic);
+        REQUIRE_THROWS_AS(a->load_history(tree_marked), std::invalid_argument);
+        // The rejected load left the stream as it was.
+        auto b = make_cpu_engine(plan, true, 1024);
+        b->load_history(hist);
+        REQUIRE_THAT(
+            run_engine(*a, plan, blk(31), false),
+            Catch::Matchers::Equals(run_engine(*b, plan, blk(31), false)));
+        // A real plain-tree history of the same plan does not load either.
+        auto tree = make_cpu_engine(plan, false, 1024);
+        run_engine(*tree, plan, blk(30), false);
+        std::vector<float> tree_hist(tree->history_state_size());
+        tree->save_history(tree_hist);
+        CHECK(tree_hist[0] ==
+              static_cast<float>(algorithms::detail::kFDMTTreeHistMagic));
+        REQUIRE_THROWS_AS(a->load_history(tree_hist), std::invalid_argument);
     }
 
     SECTION("packed streams save a compact history; either layout loads") {

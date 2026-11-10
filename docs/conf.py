@@ -83,6 +83,7 @@ exclude_patterns = [
     "api/_breathe_body.rst",
     # Kept in the repository but not published yet.
     "pipeline_guide/fdmt_boxcar.md",
+    "pipeline_guide/skewed_window_fdmt.md",
     "pipeline_guide/coherent_hybrid.md",
     "pipeline_guide/performance.md",
 ]

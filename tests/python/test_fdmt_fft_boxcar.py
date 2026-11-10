@@ -222,7 +222,11 @@ def test_memory_budget_shortens_segments(backend: str) -> None:
         ]
         parts.append(search.drain())
         found.append(np.concatenate([p.candidates for p in parts]))
-    assert capped.memory_usage.total <= budget  # nothing allocated lazily
+    # Only GPU host-input staging is allocated lazily, outside the budget.
+    usage = capped.memory_usage
+    assert usage.total - usage.staging <= budget
+    if backend == "cpu":
+        assert usage.total <= budget
     assert len(found[0]) > 100
     # Fractional delays: segment edges truncate the interpolation kernel as
     # block edges do, so the bound of the streaming test applies (2%, plus a

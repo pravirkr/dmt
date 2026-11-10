@@ -31,6 +31,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_direct.hpp"
+#include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_search.hpp"
 #include "dmt/fdmt_skew_windows.hpp"
 #include "dmt/fdmt_tree.hpp"
@@ -1678,7 +1679,7 @@ private:
         }
     }
 
-    static constexpr uint64_t kHistMagic   = 0x534BU; // "SK"
+    static constexpr uint64_t kHistMagic   = kFDMTSkewHistMagic; // "SK"
     static constexpr uint64_t kHistVersion = 1;
     /// A packed history word holds an exact integer below 2^24.
     static constexpr float kHistWordRange = 16777216.0F;

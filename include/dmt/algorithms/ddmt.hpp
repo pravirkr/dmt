@@ -96,6 +96,8 @@ public:
      * @param nbits Input precision (default: 32).
      * @param kill_mask Optional per-channel mask.
      * @param nbeams Number of batched beams (default: 1).
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min), as for the first constructor.
      */
     DDMT(float f_min,
          float f_max,
@@ -121,6 +123,8 @@ public:
      * @param nbits Input bit precision.
      * @param kill_mask Optional per-channel mask.
      * @param nbeams Number of batched beams.
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min), as for the first constructor.
      */
     DDMT(float f_min,
          float f_max,
