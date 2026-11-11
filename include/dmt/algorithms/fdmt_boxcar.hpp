@@ -60,7 +60,11 @@ struct FDMTBoxcarMemoryUsage {
  * everything the instance allocates (get_memory_usage().total()). The
  * boxcar carry, peaks and candidate buffers are fixed by the plan and
  * config; the FDMT takes its fastest path within the rest (see FDMT).
- * Construction throws std::invalid_argument when nothing fits. On the
+ * Construction throws std::invalid_argument when nothing fits. On a GPU
+ * the staging block for host-memory input is allocated by the first host
+ * execute() and is not part of that check (device input never needs it);
+ * get_memory_usage().staging reports it once allocated, and a per-call kill
+ * mask counts it against the budget when the first mask arrives. On the
  * skewed-window path (plans whose tree history exceeds the budget) the rows
  * of a subband search are searched with a fixed per-row latency of up to
  * the dispersion delay from the subband to the bottom of the band (that of
@@ -72,10 +76,32 @@ struct FDMTBoxcarMemoryUsage {
  * 0 for packed input) and are left out of every row's noise model and
  * packed mean, so S/N stays calibrated on the remaining channels (a pulse
  * scores the S/N of its signal in them). Zeroing channels upstream instead
- * leaves sigma too high by
- * sqrt(N / (N - k)). The mask is fixed at construction; a new mask needs a
- * new instance. Each block is copied to a staging buffer to zero its killed
- * rows (counted in get_memory_usage().staging and the memory budget).
+ * leaves sigma too high by sqrt(N / (N - k)). Each block is copied to a
+ * staging buffer to zero its killed rows (counted in
+ * get_memory_usage().staging and the memory budget).
+ *
+ * Per-call kill mask (float32 input): execute(waterfall, kill_mask) also
+ * takes a mask for that block (same format and convention; nonzero is
+ * active). It applies to every beam and sample of the block and is ANDed
+ * with the constructor mask; an empty mask, or the overloads without one,
+ * mean the constructor mask alone. The mask is read before the call
+ * returns (device calls stay asynchronous). Killed input never reaches the
+ * transform, and samples keep the mask they were ingested with. When the
+ * mask changes, the endpoints whose input windows reach back into the
+ * previous block (the first S + W - 1 of each row, S its FDMT support with
+ * every channel active, W the width) are thresholded and scored with the
+ * variance of the OR of both masks: no extra false alarms, S/N there
+ * slightly low (at most sqrt(V_or / V_true)). Elsewhere S/N is exact for
+ * the block's mask. The first per-call mask requires blocks of at least
+ * max(S) + max_boxcar - 1 samples (so that a window spans at most two
+ * blocks) and the memory for the noise tables within max_memory_bytes;
+ * either failure throws std::invalid_argument before any state changes.
+ * The noise tables of a new mask are computed on the host with
+ * exec.nthreads threads (on GPUs too); the last three masks are cached.
+ * skip_cold_prefix keeps the constructor mask's warm-up. reset_history()
+ * clears the mask state; drain() pads with the last block's mask.
+ * get_search_plans() shows the constructor mask's tables only. Packed
+ * input takes no per-call mask.
  */
 class FDMTBoxcar {
 public:
@@ -97,6 +123,15 @@ public:
     [[nodiscard]] CandidateResultView execute(std::span<const float> waterfall);
     [[nodiscard]] CandidateDeviceResultView
     execute(DeviceSpan<const float> waterfall, Stream stream = {});
+    /// One block with its own kill mask (empty or nchans entries, 0 =
+    /// killed), ANDed with the constructor mask; see the class comment.
+    [[nodiscard]] CandidateResultView
+    execute(std::span<const float> waterfall,
+            std::span<const uint8_t> kill_mask);
+    [[nodiscard]] CandidateDeviceResultView
+    execute(DeviceSpan<const float> waterfall,
+            std::span<const uint8_t> kill_mask,
+            Stream stream = {});
     /// Packed rows follow FDMT byte order and have independent byte padding.
     [[nodiscard]] CandidateResultView
     execute(std::span<const uint8_t> waterfall);
@@ -117,6 +152,18 @@ public:
     /// Stream samples [0, n) whose trailing endpoints every row has searched
     /// (after drain(), the whole stream).
     [[nodiscard]] uint64_t get_searched_nsamps() const noexcept;
+    /**
+     * Every candidate emitted by a later execute(), flush() or drain() has
+     * begin_sample (hence peak_sample and end_sample) >= this value: the
+     * smallest begin_sample of the excursions still open (any beam, row,
+     * width), or get_searched_nsamps() when none is open. Non-decreasing
+     * between reset_history() calls; get_searched_nsamps() after flush() or
+     * drain(), 0 after reset_history(). A pipeline can release candidate
+     * groups that end before it, however long an excursion stays open. A
+     * host call; after device calls, synchronize their stream first (as
+     * for reading a device result).
+     */
+    [[nodiscard]] uint64_t get_candidate_frontier() const noexcept;
     /// Input samples that a stream sample waits for before every searched
     /// row has searched it: the largest subband row lag on the skewed paths,
     /// 0 otherwise.

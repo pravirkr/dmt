@@ -35,7 +35,7 @@ struct FDMTSearchInput {
     /// state + b * beam_stride (beam_stride 0 for a single-beam buffer).
     SizeType beam_begin = 0;
     SizeType beam_count = SIZE_MAX;
-    Stream stream{};
+    Stream stream;
     const uint64_t* integer_state        = nullptr;
     const uint64_t* integer_prev_state   = nullptr;
     const uint64_t* integer_history      = nullptr;
@@ -106,8 +106,15 @@ DMT_HD inline bool lagged_row_input(const FDMTSearchInput& in,
 
 class FDMTSearchSink {
 public:
+    FDMTSearchSink()          = default;
     virtual ~FDMTSearchSink() = default;
     virtual void consume(SizeType level, const FDMTSearchInput& input) = 0;
+
+protected:
+    FDMTSearchSink(const FDMTSearchSink&)            = default;
+    FDMTSearchSink(FDMTSearchSink&&)                 = default;
+    FDMTSearchSink& operator=(const FDMTSearchSink&) = default;
+    FDMTSearchSink& operator=(FDMTSearchSink&&)      = default;
 };
 
 } // namespace dmt::algorithms::detail

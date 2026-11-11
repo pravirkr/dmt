@@ -677,6 +677,7 @@ void fdmt_init_row0_box(const TS* __restrict__ wf_sub,
     // The last pass also writes the row's box mean out[i] = scale(acc[i]);
     // the running sum is kept only if a wider row extends it.
     if (s0 == 0) {
+        // NOLINTNEXTLINE(bugprone-branch-clone): differs; omp simd compares equal
         if (keep_acc) {
 #pragma omp simd
             for (SizeType i = 0; i < nsamps; ++i) {
@@ -713,6 +714,7 @@ void fdmt_init_row0_box(const TS* __restrict__ wf_sub,
             for (SizeType i = 0; i < nb; ++i) {
                 out[i] = scale(acc[i]);
             }
+            // NOLINTNEXTLINE(bugprone-branch-clone): differs; omp simd compares equal
             if (keep_acc) {
 #pragma omp simd
                 for (SizeType i = s; i < nsamps; ++i) {
@@ -763,6 +765,7 @@ void fdmt_init_box_extend(const TS* __restrict__ wf_sub,
     for (SizeType i = 0; i < nb; ++i) {
         out[i] = scale(acc[i]);
     }
+    // NOLINTNEXTLINE(bugprone-branch-clone): differs; omp simd compares equal
     if (keep_acc) {
 #pragma omp simd
         for (SizeType i = s; i < nsamps; ++i) {
@@ -1043,7 +1046,7 @@ void fdmt_init_channel(const FDMTInput& input,
     // Valid mode: advance the channel's raw-input history window by this
     // chunk, right after its rows are built (the only point a packed
     // input's unpacked row exists). Raw samples, never rescaled.
-    const auto finish = [&](const auto* wf) {
+    const auto finish = [&]([[maybe_unused]] const auto* wf) {
         if constexpr (Mode == FDMTMode::kValid) {
             fdmt_advance_history_window(wf, ch.hist_sub, nsamps, ch.hist_len);
         }

@@ -126,7 +126,7 @@ double window_autocorr(IndexType s, IndexType w, IndexType tau) {
 
 class CohFDMTPlan::Impl {
 public:
-    explicit Impl(const CohFDMTConfig& config) : m_cfg(config) {
+    explicit Impl(CohFDMTConfig config) : m_cfg(std::move(config)) {
         validate();
         configure();
     }

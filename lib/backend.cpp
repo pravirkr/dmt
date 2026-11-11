@@ -102,6 +102,8 @@ void check_device(const Device& view,
 }
 
 namespace {
+// Process-wide knob.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<bool> g_sdmt_gpu_always_shared{false};
 } // namespace
 
@@ -114,6 +116,8 @@ bool sdmt_gpu_always_shared() noexcept {
 }
 
 namespace {
+// Process-wide knob.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<SizeType> g_fft_segment_cap{0};
 } // namespace
 

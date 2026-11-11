@@ -111,15 +111,15 @@ struct CandidateCounts {
 
 /// Engine-owned storage; invalidated by the next result-changing operation.
 struct CandidateResultView : CandidateCounts {
-    std::span<const RawCandidate> candidates{};
+    std::span<const RawCandidate> candidates;
     uint64_t input_sample_begin = 0;
     SizeType input_nsamps       = 0; ///< 0 for flush().
 };
 
 /// Asynchronous result: synchronize the supplied stream before reading.
 struct CandidateDeviceResultView {
-    DeviceSpan<const RawCandidate> candidates{}; ///< Capacity, not count.
-    DeviceSpan<const CandidateCounts> counts{};  ///< One device object.
+    DeviceSpan<const RawCandidate> candidates; ///< Capacity, not count.
+    DeviceSpan<const CandidateCounts> counts;  ///< One device object.
     uint64_t input_sample_begin = 0;
     SizeType input_nsamps       = 0;
 };

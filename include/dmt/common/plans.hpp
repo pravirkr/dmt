@@ -46,18 +46,20 @@ struct FDMTShape {
  * @endcode
  */
 struct FDMTCoord {
-    SizeType i_sub;        ///< Subband index
-    SizeType i_dt;         ///< Delay-trial index within the subband
-    SizeType nsamps;       ///< Valid output time samples
-    SizeType buf_offset;   ///< Start offset in the destination state buffer
-    SizeType i_coord_tail; ///< Prev-level linear index of tail (lower subband)
-    SizeType i_coord_head; ///< Prev-level linear index of head (upper subband)
-    SizeType delay;        ///< Head dispersive shift in samples
-    SizeType tail_buf_offset; ///< Tail start offset in source buffer
-    SizeType tail_nsamps;     ///< Valid samples in tail operand
-    SizeType head_buf_offset; ///< Head start offset in source buffer
-    SizeType head_nsamps;     ///< Valid samples in the head operand
-    SizeType hist_offset{0};  ///< Overlap-save history offset (mode="valid")
+    SizeType i_sub{};      ///< Subband index
+    SizeType i_dt{};       ///< Delay-trial index within the subband
+    SizeType nsamps{};     ///< Valid output time samples
+    SizeType buf_offset{}; ///< Start offset in the destination state buffer
+    SizeType
+        i_coord_tail{}; ///< Prev-level linear index of tail (lower subband)
+    SizeType
+        i_coord_head{}; ///< Prev-level linear index of head (upper subband)
+    SizeType delay{};   ///< Head dispersive shift in samples
+    SizeType tail_buf_offset{}; ///< Tail start offset in source buffer
+    SizeType tail_nsamps{};     ///< Valid samples in tail operand
+    SizeType head_buf_offset{}; ///< Head start offset in source buffer
+    SizeType head_nsamps{};     ///< Valid samples in the head operand
+    SizeType hist_offset{0};    ///< Overlap-save history offset (mode="valid")
 };
 
 /**
@@ -74,10 +76,10 @@ struct FDMTCoord {
  */
 struct FDMTCoordGrid {
     std::vector<IndexType> dt_grid; ///< Delay trials in sample units
-    SizeType ndt;                   ///< Number of delay trials
-    SizeType coord_offset;          ///< Offset into the global coordinate list
-    float f_start;                  ///< Subband lower edge frequency (MHz)
-    float f_end;                    ///< Subband upper edge frequency (MHz)
+    SizeType ndt{};                 ///< Number of delay trials
+    SizeType coord_offset{};        ///< Offset into the global coordinate list
+    float f_start{};                ///< Subband lower edge frequency (MHz)
+    float f_end{};                  ///< Subband upper edge frequency (MHz)
     SizeType chan_begin{0};         ///< First input channel
     SizeType chan_end{0};           ///< One past the last input channel
     SizeType i_sub_tail{SIZE_MAX};  ///< Lower child at the previous level
@@ -113,7 +115,7 @@ struct DDMTPlanContainer {
                                                ///< relative to f_ref
     SizeType time_offset{0};        ///< ceil of the largest lag behind f_ref
     std::vector<uint8_t> kill_mask; ///< Channel mask: 1=active, 0=RFI masked
-    SizeType nchans;                ///< Number of frequency channels
+    SizeType nchans{};              ///< Number of frequency channels
     SizeType nbits = 32;            ///< Bits per sample (32, 16, 8, 4, 2, 1)
 };
 
@@ -241,8 +243,8 @@ public:
     ~FDMTPlan();
     FDMTPlan(FDMTPlan&&) noexcept;
     FDMTPlan& operator=(FDMTPlan&&) noexcept;
-    FDMTPlan(const FDMTPlan&);
-    FDMTPlan& operator=(const FDMTPlan&);
+    FDMTPlan(const FDMTPlan& /*other*/);
+    FDMTPlan& operator=(const FDMTPlan& /*other*/);
 
     // --- Getters ---
     /// @brief Minimum frequency in MHz
@@ -600,8 +602,8 @@ public:
     ~CohFDMTPlan();
     CohFDMTPlan(CohFDMTPlan&&) noexcept;
     CohFDMTPlan& operator=(CohFDMTPlan&&) noexcept;
-    CohFDMTPlan(const CohFDMTPlan&);
-    CohFDMTPlan& operator=(const CohFDMTPlan&);
+    CohFDMTPlan(const CohFDMTPlan& /*other*/);
+    CohFDMTPlan& operator=(const CohFDMTPlan& /*other*/);
 
     // --- Configuration and band ---
     /// @brief The configuration the plan was built from
@@ -763,11 +765,11 @@ private:
  * @f$ W_{\text{eff}} \le \text{tol} \cdot W_0 @f$.
  */
 struct LevinConfig {
-    float dm_start;    ///< Lowest DM trial in pc/cm^3 (must be >= 0)
-    float dm_end;      ///< Upper DM search bound in pc/cm^3
-    float pulse_width; ///< Intrinsic pulse width in seconds
-    float tol; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must
-               ///< be > 1.0)
+    float dm_start{};    ///< Lowest DM trial in pc/cm^3 (must be >= 0)
+    float dm_end{};      ///< Upper DM search bound in pc/cm^3
+    float pulse_width{}; ///< Intrinsic pulse width in seconds
+    float tol{}; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must
+                 ///< be > 1.0)
     /// Use the DDplan-style piecewise-uniform grid
     /// (DDMTPlan::generate_levin_dm_grid_piecewise()) instead of the
     /// continuously varying Levin grid: typically 1.2-1.4x the trials, and
@@ -828,6 +830,8 @@ public:
      * @param dm_arr Explicit span of DM trials in pc/cm^3.
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min), as for the first constructor.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -849,6 +853,8 @@ public:
      * tol.
      * @param nbits Precision per sample (default: 32).
      * @param kill_mask Optional per-channel mask.
+     * @param f_ref Reference frequency of output times in MHz (default:
+     * f_min), as for the first constructor.
      */
     DDMTPlan(float f_min,
              float f_max,
@@ -863,8 +869,8 @@ public:
     ~DDMTPlan();
     DDMTPlan(DDMTPlan&&) noexcept;
     DDMTPlan& operator=(DDMTPlan&&) noexcept;
-    DDMTPlan(const DDMTPlan&);
-    DDMTPlan& operator=(const DDMTPlan&);
+    DDMTPlan(const DDMTPlan& /*other*/);
+    DDMTPlan& operator=(const DDMTPlan& /*other*/);
 
     // --- Getters ---
     /// @brief Minimum frequency in MHz

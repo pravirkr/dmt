@@ -106,7 +106,7 @@ struct CohFDMTConfig {
     BasebandFormat format{};
     /// Subbands per input group (e.g. one group per GUPPI node file), in
     /// ascending frequency; must sum to nsub. Empty = one group.
-    std::vector<SizeType> subband_groups{};
+    std::vector<SizeType> subband_groups;
 };
 
 } // namespace dmt

@@ -12,6 +12,7 @@
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
+#include "dmt/boxcar_noise.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_variance.hpp"
 
@@ -320,11 +321,15 @@ public:
 
     virtual void search(std::span<const float>, FDMTSearchSink&)          = 0;
     virtual void search(DeviceSpan<const float>, FDMTSearchSink&, Stream) = 0;
-    virtual void search(std::span<const uint8_t>, SizeType, FDMTSearchSink&) {
+    virtual void search(std::span<const uint8_t> /*unused*/,
+                        SizeType /*unused*/,
+                        FDMTSearchSink& /*unused*/) {
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
-    virtual void
-    search(DeviceSpan<const uint8_t>, SizeType, FDMTSearchSink&, Stream) {
+    virtual void search(DeviceSpan<const uint8_t> /*unused*/,
+                        SizeType /*unused*/,
+                        FDMTSearchSink& /*unused*/,
+                        Stream /*unused*/) {
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
     virtual void reset(Stream)                                    = 0;
@@ -340,6 +345,25 @@ public:
 make_boxcar_driver(std::unique_ptr<FDMTEngine> fdmt);
 [[nodiscard]] std::unique_ptr<BoxcarDriver>
 make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
+
+/**
+ * @brief Noise model of one block under FDMTBoxcar's per-call kill mask.
+ *
+ * Endpoints of the block (stream samples from first_sample to the next
+ * block's) use the `steady` tables, except, when `transition` is set, the
+ * first S_r + W - 1 of each row r and width W (S_r: the row's support with
+ * every channel active), whose input windows also reach the previous block:
+ * they use `transition_tables`, the variance of the OR of both blocks'
+ * masks. A null table pointer means the constructor tables (the search
+ * planes). The block's input rows of the `kill_runs` channels are zeroed.
+ */
+struct BlockNoise {
+    uint64_t first_sample = 0;
+    std::shared_ptr<const NoiseTables> steady;
+    bool transition = false;
+    std::shared_ptr<const NoiseTables> transition_tables;
+    std::vector<std::pair<SizeType, SizeType>> kill_runs;
+};
 
 class FDMTBoxcarEngine : public FDMTSearchSink {
 public:
@@ -364,6 +388,34 @@ public:
     [[nodiscard]] virtual uint64_t stream_position() const noexcept = 0;
     /// Input samples a sample waits for before every row has searched it.
     [[nodiscard]] virtual uint64_t search_latency() const noexcept = 0;
+    /// Smallest begin sample of the excursions still open after the last
+    /// call (UINT64_MAX: none). GPU: valid once the last call's stream has
+    /// completed.
+    [[nodiscard]] virtual uint64_t open_begin_min() const noexcept = 0;
+
+    // Per-call kill masks (FDMTBoxcar, float input). Until enabled, every
+    // block uses the constructor tables and kill runs.
+    /// Bytes that enable_block_noise() would add to memory_usage().
+    [[nodiscard]] virtual SizeType block_noise_bytes() const noexcept {
+        return 0;
+    }
+    /// Starts per-block noise: `support` holds each row's support with
+    /// every channel active. The ring starts with the constructor entry.
+    virtual void enable_block_noise(
+        std::shared_ptr<const std::vector<uint64_t>> /*unused*/) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: per-call kill masks are not supported here");
+    }
+    /// The next execute()'s block; the entry is committed only once that
+    /// call passes its checks. An execute() without one (drain() padding)
+    /// repeats the last block's steady tables, with no transition and the
+    /// constructor kill runs.
+    virtual void push_block_noise(BlockNoise /*unused*/) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: per-call kill masks are not supported here");
+    }
+    /// Drops an entry pushed for an execute() that threw.
+    virtual void drop_block_noise() noexcept {}
 };
 
 /// The boxcar engines own `driver`, which calls them back per chunk.
@@ -371,10 +423,10 @@ public:
 /// in a staging copy of each block before the driver reads it (FDMTBoxcar's
 /// kill mask; FDMT-FFT drivers mask inside the transform and pass none).
 std::unique_ptr<FDMTBoxcarEngine>
-make_fdmt_boxcar_cpu(const plans::FDMTPlan&,
-                     const BoxcarConfig&,
-                     const std::vector<plans::BoxcarPlanePlan>&,
-                     const FDMTEngineConfig&,
+make_fdmt_boxcar_cpu(const plans::FDMTPlan& /*plan*/,
+                     const BoxcarConfig& /*config*/,
+                     const std::vector<plans::BoxcarPlanePlan>& /*planes*/,
+                     const FDMTEngineConfig& /*cfg*/,
                      std::unique_ptr<BoxcarDriver> driver,
                      std::vector<std::pair<SizeType, SizeType>> kill_runs = {});
 std::unique_ptr<FDMTBoxcarEngine>

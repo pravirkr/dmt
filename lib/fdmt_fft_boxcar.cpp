@@ -123,7 +123,7 @@ public:
         detail::throw_unavailable("FDMTFFTBoxcar", exec.backend);
     }
     void check_stream(Stream stream) const {
-        if (exec.backend == Backend::kCPU && stream.native) {
+        if (exec.backend == Backend::kCPU && stream.native != nullptr) {
             throw std::invalid_argument(
                 "FDMTFFTBoxcar: CPU backend has no stream");
         }
@@ -140,18 +140,18 @@ public:
 
 FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
                              BoxcarConfig config,
-                             bool smear,
+                             bool use_box_smearing,
                              Exec exec,
-                             SizeType beams,
-                             bool frac,
+                             SizeType nbeams,
+                             bool fractional_delays,
                              std::span<const uint8_t> kill_mask,
                              SizeType max_memory_bytes)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
-                                    smear,
+                                    use_box_smearing,
                                     exec,
-                                    beams,
-                                    frac,
+                                    nbeams,
+                                    fractional_delays,
                                     kill_mask,
                                     max_memory_bytes)) {}
 FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;
@@ -190,6 +190,10 @@ CandidateResultView FDMTFFTBoxcar::drain() {
 uint64_t FDMTFFTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
                                    m_impl->latency);
+}
+uint64_t FDMTFFTBoxcar::get_candidate_frontier() const noexcept {
+    // New excursions begin at endpoints not yet searched by every row.
+    return std::min(get_searched_nsamps(), m_impl->engine->open_begin_min());
 }
 const plans::FDMTPlan& FDMTFFTBoxcar::get_plan() const noexcept {
     return m_impl->plan;

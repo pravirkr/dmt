@@ -220,7 +220,9 @@ public:
      * straight into the transform rows; the output equals execute() on the
      * same values converted to float. On a GPU backend only the packed
      * bytes are copied to the device.
+     * @param waterfall_packed Packed input, layout as above.
      * @param nbits Sample width: 1, 2, 4, 8 or 16.
+     * @param dmt Output DM-time, beam-major (nbeams * ndms * dmt_nsamps).
      * @throws std::invalid_argument for another nbits or a size mismatch.
      */
     void execute(std::span<const uint8_t> waterfall_packed,

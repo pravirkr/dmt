@@ -6,38 +6,7 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- **Device arrays in Python (DLPack and CUDA array interface).** On a GPU
-  backend, `FDMT`, `FDMTFFT`, `DDMT`, `SDMT`, `DDMTFFT` and `CohFDMT` accept
-  PyTorch, CuPy, Numba or any other `__dlpack__` or
-  `__cuda_array_interface__` array on the engine's device in `execute()` (and
-  `execute_time_major()` for DDMT/SDMT), the FDMT steppers' `reset()`, and
-  `save_history()`/`load_history()`. The arrays are read and written in
-  place: no host round trip and no copy. Results are arrays of the input's
-  library, allocated on the call's stream, or views of a caller's `out=`
-  buffer. Keyword-only `stream=` takes a raw `cudaStream_t`/`hipStream_t`
-  int, a `torch.cuda.Stream`, a `cupy.cuda.Stream`, a Numba stream or a
-  `__cuda_stream__` object. By default it is the current stream of the
-  input's library (Numba: its default stream). Calls are asynchronous on
-  that stream, and pending producer work is ordered before them through
-  `__dlpack__(stream=...)` or, for `__cuda_array_interface__` arrays that
-  state a `stream`, an event the call's stream waits for (no host wait;
-  `NUMBA_CUDA_ARRAY_INTERFACE_SYNC=0` turns it off, as in Numba). DLPack is
-  used when an array has both. PyTorch inputs are marked in use on the
-  call's stream (`record_stream`), so dropping them right after the call is
-  safe. The FDMT steppers' `advance()`,
-  `advance_until_remaining()` and `finalize()` take `stream=` too. The
-  wrong dtype or a non-contiguous array raises `TypeError` and is never
-  converted silently. NumPy input works as before.
-
-### Changed
-
-- `CohFDMT.execute(host_data, out=...)` raises `TypeError` when `out` is not
-  a NumPy array. It used to convert `out` (a list, say) into a temporary and
-  write the result there, so it never reached the caller's object.
-
-## [0.8.0] - 2026-11-09
+## [0.8.0] - 2026-11-11
 
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each
   depth `k = 1..d`, the `2**k - 1` subbands of the same width centred on the
@@ -45,22 +14,9 @@ All notable changes to `dmt` are listed here. The format follows
   merge of two existing nodes. `FDMTBoxcar` searches every tree and staggered
   subband to depth `d`; candidates gain a `staggered` field. A narrowband
   burst on a subband boundary is no longer split between aligned subbands.
-- `FDMT(plan, ...)`: build an engine from a prepared plan. The stepper's
-  `num_subbands()`/`view_subband()` include the staggered subbands, and
-  subband views gain `chan_begin`, `chan_end` and `staggered`.
-- `FDMTFFT(plan, ...)`, likewise: its stepper exposes the staggered subbands.
-- `FDMTPlan.get_subband_variance_grid(level, subband, boxcar_width,
-  use_box_smearing)` and `get_subband_sigma_grid(...)`: the noise of every
-  row of any tree or staggered subband, for S/N on stepper views.
-  `FDMTFFT.get_subband_variance_grid(level, subband, boxcar_width)` and
-  `get_subband_sigma_grid(...)` give the same with the engine's box
-  smearing and kill mask.
 - Every `FDMTPlan` variance and sigma method takes an optional kill mask
   (C++: a trailing `std::span<const uint8_t>`; Python: keyword-only
   `kill_mask=`) and leaves killed channels out.
-- `FDMTCoordGrid` (Python `FDMTSubDTGrid`) gains `chan_begin`, `chan_end`,
-  `i_sub_tail`, `i_sub_head` and `staggered`; `FDMTShape` gains `nstaggered`;
-  `FDMTPlan.get_subband_depth()` and `get_max_fuse_levels()`.
 - **`f_ref` for DDMT, SDMT and DDMT-FFT** (plans and engines, C++ and
   Python, and `dmtlib.dedisperse`): the reference frequency of the output
   times, either `f_min` (default) or `f_max`. Passing `f_max` gives
@@ -68,13 +24,6 @@ All notable changes to `dmt` are listed here. The format follows
   for every DM, and the incomplete samples are at the end. Only the delay
   table changes. Any other value raises `std::invalid_argument`
   (`ValueError` in Python). The FDMT engines stay referenced to `f_min`.
-- `DDMTPlan.get_time_offset()` (Python `plan.time_offset`): output sample
-  `k` of DDMT, SDMT and DDMT-FFT is the `f_ref` arrival at input sample
-  `k + time_offset` (0 when `f_ref == f_max`).
-- `dmtlib.sigproc_band(fch1, foff, nchans)` and `dmtlib.to_ascending()`:
-  band edges from a SIGPROC header and the flip to ascending channel order.
-  The getting-started guides and README document the channel order.
-- `dmtlib.dispersion_delay` broadcasts over array frequencies.
 - **Memory budget.** `FDMT` and `FDMTBoxcar` take `max_memory_bytes`
   (default `kFDMTDefaultMaxMemory`, 10 GiB; Python keyword-only), a bound on
   everything the instance allocates. Within it the fastest streaming path
@@ -93,14 +42,6 @@ All notable changes to `dmt` are listed here. The format follows
   depth 4 FDMTBoxcar drops from 17.4 GB to 6.4 GB on the CPU and from 15 GB
   to 9.9 GB on the GPU, within the default budget at every depth to 5 on
   8-bit input.
-- **Faster float32 on the CPU skewed path.** The engine now picks its leaf
-  level (the level read from the raw ring) together with the chunk, in
-  measured speed order within the budget: leaf level 1 for float input, 2
-  for 8-bit (when the width is known at construction, as in FDMTBoxcar),
-  instead of always 4. On `parkes_uwl` (8 threads) the float32
-  FDMT transform takes 4.9 s per 2.1 s block instead of 13.2 s (the old
-  tree path took 5.75 s in 16 GB), and the depth-4 float32 FDMTBoxcar search
-  20 s instead of 27.8 s. Output stays bit-identical to the tree path.
 - Benchmark preset `cryopaf` is renamed `cryopaf_low`; `meerkat_lband` is
   the default preset; `parkes_uwl` searches at subband depth 4. Results
   live in `bench/results/<config>/<machine>/` for every preset
@@ -108,27 +49,20 @@ All notable changes to `dmt` are listed here. The format follows
   unplotted points (integer-delay FDMT-FFT, brute-force DDMT-FFT, host-array
   GPU rows). `dmt_bench` and `dmt_bench_mem` keep only developer
   microbenchmarks.
-- **End of stream: `drain()`** on `FDMTBoxcar` and `FDMTFFTBoxcar` (C++
-  and Python). It searches the samples still behind the search latency, then
-  emits the open excursions: the last `get_output_latency()` samples of
-  `FDMTFFTBoxcar` with fractional delays, and the last subband row lags of a
-  subband search on the skewed paths, which `flush()` never searched.
-  Endpoints after the last sample are not searched, so no candidate lies
-  past the end, and a drained skewed-path subband search now matches the
-  tree path's candidates over the whole stream. The stream ends there:
-  `execute()` throws `std::logic_error` (`RuntimeError`) until
-  `reset_history()`. New: `get_searched_nsamps()` (`searched_nsamps`), the
-  stream samples every row has searched, and
-  `FDMTBoxcar::get_search_latency()` (`search_latency`).
-- **Kill mask on `FDMTBoxcar`**, as on `FDMTFFTBoxcar`: a construction-time
-  `kill_mask` (C++: trailing `std::span<const uint8_t>` constructor argument
-  after `max_memory_bytes`; Python: keyword-only `kill_mask=`). Killed
-  channels read as zero (code 0 for packed input) and leave every row's
-  noise model and packed mean, so S/N stays calibrated on the remaining
-  channels; zeroing channels upstream instead overestimates sigma by
-  `sqrt(N / (N - k))`. Each block is copied once to a staging buffer to zero
-  them (`memory_usage.staging`, within `max_memory_bytes`); without a mask
-  nothing changes. CPU and GPU agree bit for bit on packed input.
+- **Kill mask per block on `FDMTBoxcar`** (float32 input): `execute(waterfall,
+  kill_mask)` for host and device waterfalls (Python: `execute(waterfall,
+  kill_mask=None)`), ANDed with the constructor mask, so a pipeline that
+  flags RFI per block keeps one engine. Within a block the S/N is calibrated
+  on that block's active channels. After a mask change, the first `S + W - 1`
+  endpoints of each row (`S` the row's dispersion support) read samples
+  under both masks and use the noise of the OR of the two: never more false
+  alarms, S/N there slightly low.
+- **Device arrays in Python (DLPack and CUDA array interface).** On a GPU
+  backend, `FDMT`, `FDMTFFT`, `DDMT`, `SDMT`, `DDMTFFT` and `CohFDMT` accept
+  PyTorch, CuPy, Numba or any other `__dlpack__` or
+  `__cuda_array_interface__` array on the engine's device in `execute()` (and
+  `execute_time_major()` for DDMT/SDMT), the FDMT steppers' `reset()`, and
+  `save_history()`/`load_history()`.
 
 ## [0.7.0] - 2026-11-03
 

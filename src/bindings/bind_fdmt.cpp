@@ -584,15 +584,21 @@ void bind_fdmt(py::module_& mod) {
             },
             py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
             R"doc(
-            Run the FDMT transform on float or packed low-bit input.
+            Run the FDMT transform on float or packed low-bit input, in host
+            or device memory.
 
             Parameters
             ----------
-            waterfall : numpy.ndarray
+            waterfall : numpy.ndarray or device array
                 ``(nchans, nsamps)`` for ``nbeams=1``, or ``(nbeams, nchans,
                 nsamps)``. Other float dtypes are cast to float32 (a copy);
-                uint8 input needs ``nbits`` (packed overload).
-            waterfall_packed : numpy.ndarray, dtype uint8
+                uint8 input needs ``nbits`` (packed overload). Device memory
+                (GPU backends, no copies): a PyTorch, CuPy, Numba or any
+                other ``__dlpack__`` / ``__cuda_array_interface__`` array on
+                this instance's device (DLPack is used when both exist),
+                C-contiguous float32 or packed uint8 with ``nbits``; never
+                converted: another dtype or layout raises ``TypeError``.
+            waterfall_packed : numpy.ndarray or device array, dtype uint8
                 Packed overload, called as ``execute(waterfall_packed, nbits)``:
                 C-contiguous ``(nchans, row_bytes)`` or ``(nbeams, nchans,
                 row_bytes)``; each row holds ``nsamps`` unsigned samples of
@@ -603,25 +609,42 @@ void bind_fdmt(py::module_& mod) {
                 few fractional bits (see :attr:`FDMTPlan.box_mean_bits`).
             nbits : int
                 Packed sample width: 1, 2, 4, 8 or 16.
-            out : numpy.ndarray, optional
+            out : numpy.ndarray or device array, optional
                 Writeable C-contiguous float32 buffer of at least
                 ``nbeams * plan.dmt_size`` elements, reused instead of
                 allocating a new one per call (e.g.
                 ``np.empty(fdmt.nbeams * fdmt.plan.dmt_size, np.float32)``).
+                For device input, a device array; default: a new array from
+                the input's library (PyTorch, CuPy or Numba; other libraries
+                must pass ``out``).
+            stream : int or stream, optional
+                Device input only. ``cudaStream_t`` / ``hipStream_t`` handle
+                as an int, or a ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` /
+                Numba stream / ``__cuda_stream__`` object. Default: the
+                current stream of the input's library on its device (Numba:
+                its default stream). The input's pending work is ordered
+                before the call (``__dlpack__(stream=...)``, or an event on
+                the ``__cuda_array_interface__`` ``stream``).
 
             Returns
             -------
-            numpy.ndarray
+            numpy.ndarray or device array
                 float32 view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
                 n_times)`` of the output buffer; ``n_times`` is
                 ``plan.dmt_nsamps``. With ``out``, the next call overwrites
-                the returned view.
+                the returned view. For device input, a device view of the
+                input's (or ``out``'s) library.
 
             Notes
             -----
             In ``valid`` mode, successive calls keep inter-block history:
             pass contiguous, non-overlapping blocks. Call
             :meth:`reset_history` to start a new stream.
+
+            Device input is asynchronous: the work is queued on ``stream``
+            after the producers' pending work on the arrays, and the call
+            returns at once. Keep the arrays alive and read the result on
+            that stream, or synchronize it first.
             )doc")
         .def(
             "execute",
@@ -643,52 +666,16 @@ void bind_fdmt(py::module_& mod) {
             },
             py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
             py::arg("stream") = py::none(),
-            R"doc(
-            Run the FDMT transform on device memory (GPU backends), without
-            copies.
-
-            Parameters
-            ----------
-            waterfall, waterfall_packed : array
-                PyTorch, CuPy, Numba or any other ``__dlpack__`` /
-                ``__cuda_array_interface__`` array on this instance's device
-                (DLPack is used when both exist): C-contiguous float32, or
-                packed uint8 with ``nbits``; shapes as for NumPy input. Never
-                converted: another dtype or layout raises ``TypeError``.
-            out : array, optional
-                Writeable C-contiguous float32 device array of at least
-                ``nbeams * plan.dmt_size`` elements to write into. Default: a
-                new array from the input's library (PyTorch, CuPy or Numba;
-                other libraries must pass ``out``).
-            stream : int or stream, optional
-                ``cudaStream_t`` / ``hipStream_t`` handle as an int, or a
-                ``torch.cuda.Stream`` / ``cupy.cuda.Stream`` / Numba stream /
-                ``__cuda_stream__`` object. Default: the current stream of
-                the input's library on its device (Numba: its default
-                stream). The input's pending work is ordered before the call
-                (``__dlpack__(stream=...)``, or an event on the
-                ``__cuda_array_interface__`` ``stream``).
-
-            Returns
-            -------
-            array
-                Device view ``(n_delays, n_times)`` or ``(nbeams, n_delays,
-                n_times)`` of the output, of the input's (or ``out``'s)
-                library.
-
-            Notes
-            -----
-            Asynchronous: the work is queued on ``stream`` after the
-            producers' pending work on the arrays, and the call returns at
-            once. Keep the arrays alive and read the result on that stream,
-            or synchronize it first.
-            )doc")
+            // No numpydoc sections here: pybind11 joins the overload
+            // docstrings, and the host overload above documents both.
+            "Run the FDMT transform on device memory (GPU backends), without "
+            "copies; see above.")
         .def(
             "reset",
-            [](py::object self,
+            [](const py::object& self,
                const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
                SizeType nbits,
-               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+               const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
                 auto& fdmt = self.cast<FDMT&>();
                 if (waterfall_packed.ndim() != 2 &&
                     waterfall_packed.ndim() != 3) {
@@ -711,8 +698,8 @@ void bind_fdmt(py::module_& mod) {
             "of at least nbeams * plan.dmt_size floats.")
         .def(
             "reset",
-            [](py::object self, const py::array& waterfall_obj,
-               std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
+            [](const py::object& self, const py::array& waterfall_obj,
+               const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
                 auto& fdmt = self.cast<FDMT&>();
                 if (waterfall_obj.dtype().kind() == 'u' &&
                     waterfall_obj.itemsize() == 1) {
@@ -792,14 +779,15 @@ void bind_fdmt(py::module_& mod) {
             py::arg("stream") = py::none(),
             "Advance execution until N levels remain before root.")
         .def("view_level_data",
-             [](py::object self) {
+             [](const py::object& self) {
                  auto& fdmt = self.cast<FDMT&>();
                  auto span  = fdmt.view_level_data();
-                 return py::array_t<float>(span.size(), span.data(), self);
+                 return py::array_t<float>(static_cast<py::ssize_t>(span.size()),
+                                           span.data(), self);
              })
         .def(
             "view_subband_data",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt    = self.cast<FDMT&>();
                 auto sub_view = fdmt.view_subband(subband_idx);
                 return py::array_t<float>(
@@ -810,14 +798,14 @@ void bind_fdmt(py::module_& mod) {
             py::arg("subband_idx"))
         .def(
             "view_subband",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt = self.cast<FDMT&>();
                 return fdmt.view_subband(subband_idx);
             },
             py::arg("subband_idx"))
         .def(
             "finalize",
-            [](py::object self, const py::object& stream) -> py::object {
+            [](const py::object& self, const py::object& stream) -> py::object {
                 auto& fdmt = self.cast<FDMT&>();
                 fdmt.finalize(stepper_stream(stream));
                 const py::object buffer = self.attr("_dmt_buffer");
@@ -865,7 +853,8 @@ void bind_fdmt(py::module_& mod) {
             "save_history",
             [](const FDMT& fdmt) -> py::object {
                 const auto sz = fdmt.history_state_size();
-                py::array_t<float, py::array::c_style> hist(sz);
+                py::array_t<float, py::array::c_style> hist(
+                    static_cast<py::ssize_t>(sz));
                 fdmt.save_history(
                     std::span<float>(hist.mutable_data(), hist.size()));
                 return hist;
@@ -1171,7 +1160,7 @@ void bind_fdmt(py::module_& mod) {
             "uint8 at ``nbits``; shares the streaming history.")
         .def(
             "reset",
-            [](py::object self,
+            [](const py::object& self,
                const py::array_t<uint8_t, py::array::c_style>& packed,
                SizeType nbits,
                std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
@@ -1180,8 +1169,9 @@ void bind_fdmt(py::module_& mod) {
                     dmt_opt.has_value()
                         ? *dmt_opt
                         : py::array_t<float, py::array::c_style>(
-                              fdmt.get_nbeams() *
-                              fdmt.get_plan().get_dmt_size());
+                              static_cast<py::ssize_t>(
+                                  fdmt.get_nbeams() *
+                                  fdmt.get_plan().get_dmt_size()));
                 self.attr("_waterfall_buffer") = packed;
                 self.attr("_dmt_buffer")       = dmt;
                 fdmt.reset(
@@ -1304,7 +1294,7 @@ void bind_fdmt(py::module_& mod) {
             ":meth:`FDMT.reset`.")
         .def(
             "reset",
-            [](py::object self,
+            [](const py::object& self,
                const py::array_t<float, py::array::c_style>& waterfall,
                std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
                 auto& fdmt = self.cast<FDMTFFT&>();
@@ -1314,7 +1304,8 @@ void bind_fdmt(py::module_& mod) {
                 } else {
                     const auto nbeams = fdmt.get_nbeams();
                     dmt               = py::array_t<float, py::array::c_style>(
-                        nbeams * fdmt.get_plan().get_dmt_size());
+                        static_cast<py::ssize_t>(
+                            nbeams * fdmt.get_plan().get_dmt_size()));
                 }
                 self.attr("_waterfall_buffer") = waterfall;
                 self.attr("_dmt_buffer")       = dmt;
@@ -1338,14 +1329,15 @@ void bind_fdmt(py::module_& mod) {
             py::arg("remaining_levels"), py::kw_only(),
             py::arg("stream") = py::none())
         .def("view_level_data",
-             [](py::object self) {
+             [](const py::object& self) {
                  auto& fdmt = self.cast<FDMTFFT&>();
                  auto span  = fdmt.view_level_data();
-                 return py::array_t<float>(span.size(), span.data(), self);
+                 return py::array_t<float>(
+                     static_cast<py::ssize_t>(span.size()), span.data(), self);
              })
         .def(
             "view_subband_data",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt    = self.cast<FDMTFFT&>();
                 auto sub_view = fdmt.view_subband(subband_idx);
                 return py::array_t<float>(
@@ -1356,14 +1348,14 @@ void bind_fdmt(py::module_& mod) {
             py::arg("subband_idx"))
         .def(
             "view_subband",
-            [](py::object self, SizeType subband_idx) {
+            [](const py::object& self, SizeType subband_idx) {
                 auto& fdmt = self.cast<FDMTFFT&>();
                 return fdmt.view_subband(subband_idx);
             },
             py::arg("subband_idx"))
         .def(
             "finalize",
-            [](py::object self, const py::object& stream) -> py::object {
+            [](const py::object& self, const py::object& stream) -> py::object {
                 auto& fdmt = self.cast<FDMTFFT&>();
                 fdmt.finalize(stepper_stream(stream));
                 const py::object buffer = self.attr("_dmt_buffer");
@@ -1395,7 +1387,7 @@ void bind_fdmt(py::module_& mod) {
             "save_history",
             [](const FDMTFFT& fdmt) {
                 py::array_t<float, py::array::c_style> hist(
-                    fdmt.history_state_size());
+                    static_cast<py::ssize_t>(fdmt.history_state_size()));
                 fdmt.save_history(
                     std::span<float>(hist.mutable_data(), hist.size()));
                 return hist;

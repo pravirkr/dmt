@@ -3,40 +3,69 @@ Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   -bugprone-incorrect-roundings,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-misplaced-widening-cast,
+  -bugprone-signed-bitwise,
   clang-analyzer-*,
   clang-diagnostic-*,
   concurrency-*,
   cppcoreguidelines*,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
   -cppcoreguidelines-avoid-magic-numbers,
   -cppcoreguidelines-init-variables,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-missing-std-forward,
   -cppcoreguidelines-non-private-member-variables-in-classes,
   -cppcoreguidelines-prefer-member-initializer,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
   -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-pro-bounds-constant-array-index,
   -cppcoreguidelines-pro-type-reinterpret-cast,
   -cppcoreguidelines-slicing,
   google-*,
+  -google-runtime-int,
   hicpp-*,
+  -hicpp-avoid-c-arrays,
+  -hicpp-no-array-decay,
+  -hicpp-signed-bitwise,
+  -hicpp-use-auto,
   llvm-*,
+  -llvm-header-guard,
   -llvm-prefer-static-over-anonymous-namespace,
   -llvm-use-ranges,
   misc-*,
+  -misc-const-correctness,
+  -misc-include-cleaner,
   -misc-non-private-member-variables-in-classes,
   -misc-no-recursion,
   -misc-use-anonymous-namespace,
   modernize-*,
+  -modernize-avoid-c-arrays,
   -modernize-loop-convert,
+  -modernize-return-braced-init-list,
+  -modernize-use-auto,
+  -modernize-use-designated-initializers,
+  -modernize-use-ranges,
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
   openmp-*,
+  -openmp-use-default-none,
   performance-*,
+  -performance-enum-size,
   portability-*,
+  -portability-avoid-pragma-once,
   readability-*,
+  -readability-avoid-nested-conditional-operator,
+  -readability-function-cognitive-complexity,
   -readability-identifier-length,
   -readability-isolate-declaration,
   -readability-magic-numbers,
+  -readability-math-missing-parentheses,
   -readability-suspicious-call-argument,
+  -readability-trailing-comma,
+  -readability-use-concise-preprocessor-directives,
 
 WarningsAsErrors: ""
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
@@ -54,9 +83,14 @@ CheckOptions:
   readability-identifier-naming.ProtectedMemberPrefix: "m_"
   readability-identifier-naming.NamespaceCase: "lower_case"
   readability-identifier-naming.ParameterCase: "lower_case"
+  readability-identifier-naming.ParameterIgnoredRegexp: "^[A-Z](_[a-z]+)?$"
   readability-identifier-naming.TypeAliasCase: "CamelCase"
+  # Standard trait/allocator members (type, value_type) and *_t aliases.
+  readability-identifier-naming.TypeAliasIgnoredRegexp: "^(type|value_type|[a-z0-9_]+_t)$"
   readability-identifier-naming.TypedefCase: "CamelCase"
   readability-identifier-naming.VariableCase: "lower_case"
+  # Single-letter math names (W, T, P, P_sub).
+  readability-identifier-naming.VariableIgnoredRegexp: "^[A-Z](_[a-z]+)?$"
   readability-identifier-naming.StaticVariableCase: "lower_case"
   readability-identifier-naming.ConstexprVariableCase: "CamelCase"
   readability-identifier-naming.ConstexprVariablePrefix: "k"
@@ -70,6 +104,5 @@ CheckOptions:
   readability-identifier-naming.StaticConstantPrefix: "k"
   readability-identifier-naming.StructCase: "CamelCase"
   readability-identifier-naming.TemplateParameterCase: "CamelCase"
-  readability-function-cognitive-complexity.IgnoreMacros: "true"
-  readability-function-cognitive-complexity.Threshold: "50"
+  readability-simplify-boolean-expr.SimplifyDeMorgan: false
   readability-trailing-comma.SingleLineCommaPolicy: Ignore

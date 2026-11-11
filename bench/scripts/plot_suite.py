@@ -14,6 +14,10 @@ real-time factors, skipped points), which the docs page includes verbatim.
 
     python bench/scripts/plot_suite.py [--results bench/results] [--no-ops]
 
+``--reference`` instead plots the reference point of every preset side by side
+(real-time factor per engine, CPU and GPU) to
+``bench/results/plots/{light,dark}/reference_rtf.png``.
+
 Only matplotlib and numpy are required (``pip install -e ".[bench]"``).
 Colour = algorithm and marker = platform, in every figure.
 """
@@ -36,6 +40,7 @@ mpl.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -821,6 +826,106 @@ def highlight_figure(
     return fig
 
 
+REFERENCE_CONFIGS = ["meerkat_lband", "cryopaf_lband", "cryopaf_low"]
+# (preset, platform label) -> engine -> real-time factor at the reference point
+ReferenceRtf = dict[tuple[str, str], dict[str, float]]
+
+
+def load_reference(results_root: Path) -> ReferenceRtf:
+    """Reference-point real-time factors of every preset, CPU and GPU.
+
+    Uses each preset's largest CPU thread count and its device-resident GPU
+    series, like the per-preset figures.
+    """
+    out: ReferenceRtf = {}
+    for config in REFERENCE_CONFIGS:
+        globals().update(CONFIGS[config])  # load() and Result.rtf read these
+        results, machines = load(results_root / config)
+        results = [r for r in results if not r.backend.endswith("_host")]
+        for mname, kind in platforms(results):
+            backend = cpu_backends(results, mname)[-1] if kind == "cpu" else kind
+            plat = machines[mname].platform(kind) + backend_tag(backend)
+            out[(config, plat)] = {
+                r.algo: r.rtf
+                for r in results
+                if r.machine == mname
+                and r.backend == backend
+                and r.sweep == "ndms"
+                and r.dm_max == DM_MAX_REF
+                and r.times
+            }
+    return out
+
+
+def reference_figure(ref: ReferenceRtf, theme: Theme) -> Figure:
+    """Grouped bars: real-time factor of every engine on every preset.
+
+    One panel per platform (CPU, then GPU), one group per preset, one bar per
+    engine, labelled with its factor.
+    """
+    plats = list(dict.fromkeys(p for _, p in ref))
+    configs = [c for c in REFERENCE_CONFIGS if any(k[0] == c for k in ref)]
+    fig, axes = plt.subplots(1, len(plats), figsize=(5.6 * len(plats), 4.4),
+                             sharey=True, squeeze=False)  # fmt: skip
+    width = 0.8 / len(ALGOS)
+    for ax, plat in zip(axes[0], plats, strict=True):
+        for g, config in enumerate(configs):
+            rtf = ref.get((config, plat), {})
+            for i, algo in enumerate(ALGOS):
+                if algo not in rtf:
+                    continue
+                x = g + (i - (len(ALGOS) - 1) / 2) * width
+                ax.bar(x, rtf[algo], width * 0.92, color=theme["algo"][algo],
+                       label=algo, gid=f"{algo}|main")  # fmt: skip
+                ax.annotate(f"{rtf[algo]:.0f}{TIMES}", (x, rtf[algo]),
+                            xytext=(0, 2), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=6.5,
+                            color=theme["ink2"], rotation=90)  # fmt: skip
+        ax.axhline(1.0, color=theme["muted"], lw=1.0)
+        ax.set_yscale("log")
+        ax.set_ylim(bottom=1.0)
+        ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(fmt_factor))
+        ax.set_xticks(range(len(configs)))
+        ax.set_xticklabels([f"{c}\n{CONFIGS[c]['NCHANS']} ch" for c in configs])
+        ax.tick_params(axis="x", length=0)
+        ax.grid(axis="x", visible=False)
+        ax.set_title(plat)
+    axes[0][0].set_ylabel("real-time factor (higher is faster)")
+    ymax = max(v for d in ref.values() for v in d.values())
+    for ax in axes[0]:
+        ax.set_ylim(1.0, ymax * 4)  # room for the labels
+    finish(
+        fig,
+        list(axes[0]),
+        theme,
+        "Real-time factor at the reference point",
+        f"{NSAMPS_REF // 1024}K-sample blocks, DM 0-{DM_MAX_REF:g}, float32; "
+        f"1{TIMES} is real time",
+        legend=False,
+    )
+    handles = [Patch(color=theme["algo"][a]) for a in ALGOS]
+    fig.legend(handles, ALGOS, loc="lower center", ncol=len(ALGOS),
+               bbox_to_anchor=(0.5, 0.0))  # fmt: skip
+    fig.tight_layout(rect=(0, 0.07, 1, 0.92))
+    return fig
+
+
+def reference_main(results_root: Path) -> None:
+    """Write bench/results/plots/{light,dark}/reference_rtf.png."""
+    ref = load_reference(results_root)
+    if not ref:
+        sys.exit(f"no reference-point results under {results_root}")
+    for name, theme in THEMES.items():
+        style(theme)
+        out = results_root / "plots" / name
+        out.mkdir(parents=True, exist_ok=True)
+        fig = reference_figure(ref, theme)
+        fig.savefig(out / "reference_rtf.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    print(f"wrote reference_rtf.png {TIMES} {len(THEMES)} themes to "
+          f"{results_root / 'plots'}")  # fmt: skip
+
+
 # --------------------------------------------------------------------------
 # Summary table (included by docs/benchmarks.md)
 # --------------------------------------------------------------------------
@@ -1052,6 +1157,7 @@ def summary_md(
 ) -> str:
     out = ["<!-- generated by bench/scripts/plot_suite.py; do not edit -->", ""]
     out += _machines_table(machines)
+    out += ["", "<!-- results -->"]  # docs/benchmarks.md includes from here
     out += _reference_table(results, machines)
     out += _memory_table(results, machines)
     out += _nbits_table(results, machines)
@@ -1073,7 +1179,18 @@ def main() -> None:
     )
     ap.add_argument("--results", help="results root (default: bench/results/<config>)")
     ap.add_argument("--no-ops", action="store_true", help="skip the dmtlib ops plot")
+    ap.add_argument(
+        "--reference",
+        action="store_true",
+        help="instead, plot the reference point of every preset side by side "
+        "(reads bench/results/<preset>/, writes bench/results/plots/)",
+    )
     args = ap.parse_args()
+    if args.reference:
+        reference_main(
+            Path(args.results) if args.results else REPO / "bench" / "results"
+        )
+        return
     globals().update(CONFIGS[args.config])
     default = REPO / "bench" / "results" / args.config
     results_dir = Path(args.results) if args.results else default

@@ -31,6 +31,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_direct.hpp"
+#include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_search.hpp"
 #include "dmt/fdmt_skew_windows.hpp"
 #include "dmt/fdmt_tree.hpp"
@@ -474,6 +475,7 @@ inline void skew_stream_add(const StateT* __restrict__ a,
                             const StateT* __restrict__ b,
                             StateT* __restrict__ out,
                             SizeType m) noexcept {
+    // NOLINTNEXTLINE(bugprone-branch-clone): SIMD path when AVX is on
     if constexpr (std::is_same_v<StateT, float>) {
 #if defined(__AVX512F__) || defined(__AVX__)
 #if defined(__AVX512F__)
@@ -922,9 +924,9 @@ public:
             s += fmt::format("  level {:2d}: rows {:8d} used {:8d} spread "
                              "max {:7d} mean {:9.1f}\n",
                              l, st.rows, st.used, st.max_spread,
-                             st.used ? static_cast<double>(st.sum_spread) /
-                                           static_cast<double>(st.used)
-                                     : 0.0);
+                             st.used != 0 ? static_cast<double>(st.sum_spread) /
+                                                static_cast<double>(st.used)
+                                          : 0.0);
         }
         s += fmt::format("  memory: ring {:.1f} MiB, stripes {:.1f} MiB, "
                          "state {:.1f} MiB, rings {:.1f} MiB, total {:.1f} "
@@ -1678,7 +1680,7 @@ private:
         }
     }
 
-    static constexpr uint64_t kHistMagic   = 0x534BU; // "SK"
+    static constexpr uint64_t kHistMagic   = kFDMTSkewHistMagic; // "SK"
     static constexpr uint64_t kHistVersion = 1;
     /// A packed history word holds an exact integer below 2^24.
     static constexpr float kHistWordRange = 16777216.0F;

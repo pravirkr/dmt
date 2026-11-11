@@ -213,7 +213,11 @@ def main() -> None:
     )
     ap.add_argument("--label", help="display name in plots (default: CPU/GPU model)")
     ap.add_argument("--build-dir", help="CMake build directory (default: auto)")
-    ap.add_argument("--threads", default="1,8", help="CPU thread counts (default 1,8)")
+    ap.add_argument(
+        "--threads",
+        default="8",
+        help="CPU thread counts (default 8: the published suite runs 8 threads only)",
+    )
     ap.add_argument(
         "--placement",
         default="close",

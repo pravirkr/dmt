@@ -267,10 +267,11 @@ inline bool is_reference(const Point& p) {
            p.dm_max == kDmMaxRef && p.nbits == 32;
 }
 
-/// CPU thread counts: DMT_BENCH_THREADS="1,8" (the default).
+/// CPU thread counts: DMT_BENCH_THREADS, e.g. "8" (the default: the
+/// published suite runs 8 threads only) or "1,8".
 inline std::vector<int> cpu_threads() {
     const char* env        = std::getenv("DMT_BENCH_THREADS"); // NOLINT
-    const std::string spec = (env != nullptr) ? env : "1,8";
+    const std::string spec = (env != nullptr) ? env : "8";
     std::vector<int> threads;
     std::size_t start = 0;
     while (start < spec.size()) {

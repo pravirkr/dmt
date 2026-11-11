@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -32,9 +33,15 @@ public:
           config(config),
           exec(exec),
           beams(beams),
+          smear(smear),
+          max_memory(max_memory),
           // Validates the mask's size; killed channels leave the noise model.
           planes(detail::make_boxcar_plans(this->plan, config, smear, kill)),
-          kill_runs(detail::boxcar_kill_runs(kill)) {
+          kill_runs(detail::boxcar_kill_runs(kill)),
+          ctor_mask(this->plan.get_nchans(), 1) {
+        for (SizeType c = 0; c < kill.size(); ++c) {
+            ctor_mask[c] = kill[c] != 0 ? 1 : 0;
+        }
         if (beams == 0 || beams > UINT32_MAX ||
             beams >
                 SIZE_MAX / this->plan.get_nchans() / this->plan.get_nsamps()) {
@@ -152,53 +159,203 @@ public:
                (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
                row_table + staging;
     }
+    /**
+     * One block with a per-call kill mask (empty: the constructor mask):
+     * validates, composes the effective mask (constructor AND per-call),
+     * hands the engine the block's tables and kill runs, then runs `call`
+     * (the engine's execute). Before any per-call mask, the old path.
+     */
+    template <typename Call>
+    auto run_masked(std::span<const uint8_t> mask,
+                    SizeType waterfall_size,
+                    Call&& call) {
+        if (!mask.empty() && mask.size() != plan.get_nchans()) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: kill_mask must be empty or have nchans ({}) "
+                "entries, got {}",
+                plan.get_nchans(), mask.size()));
+        }
+        if (!noise) {
+            if (mask.empty()) {
+                return call();
+            }
+            if (config.input_nbits != 32) {
+                throw std::invalid_argument(
+                    "FDMTBoxcar: per-call kill masks need float32 input "
+                    "(input_nbits 32)");
+            }
+            if (waterfall_size !=
+                beams * plan.get_nchans() * plan.get_nsamps()) {
+                throw std::invalid_argument("FDMTBoxcar: wrong waterfall size");
+            }
+            enable_block_noise();
+        }
+        effective = ctor_mask;
+        for (SizeType c = 0; c < mask.size(); ++c) {
+            effective[c] = (ctor_mask[c] != 0 && mask[c] != 0) ? 1 : 0;
+        }
+        detail::BlockNoise entry;
+        entry.first_sample = engine->stream_position();
+        entry.steady       = tables_for(effective);
+        // The first block of a stream has no previous block to straddle.
+        if (entry.first_sample > 0 && effective != prev_mask) {
+            union_mask.resize(effective.size());
+            for (SizeType c = 0; c < effective.size(); ++c) {
+                union_mask[c] = effective[c] | prev_mask[c];
+            }
+            entry.transition        = true;
+            entry.transition_tables = tables_for(union_mask);
+        }
+        entry.kill_runs = detail::boxcar_kill_runs(effective);
+        engine->push_block_noise(std::move(entry));
+        try {
+            auto view = call();
+            prev_mask.swap(effective);
+            return view;
+        } catch (...) {
+            engine->drop_block_noise();
+            throw;
+        }
+    }
+    /// Tables of an effective mask: null for the constructor mask (the
+    /// search planes), else from the cache of recent masks or computed.
+    /// The cache keeps the last three masks, so the OR of a change that
+    /// only kills or only revives channels (one of the two masks) is free.
+    std::shared_ptr<const detail::NoiseTables>
+    tables_for(const std::vector<uint8_t>& mask) {
+        if (mask == ctor_mask) {
+            return nullptr;
+        }
+        for (auto it = cache.begin(); it != cache.end(); ++it) {
+            if (it->first == mask) {
+                auto hit = *it;
+                cache.erase(it);
+                cache.push_back(hit);
+                return hit.second;
+            }
+        }
+        auto tables = noise->compute(mask);
+        cache.emplace_back(mask, tables);
+        if (cache.size() > kCacheMasks) {
+            cache.erase(cache.begin());
+        }
+        return tables;
+    }
+    /// First per-call mask: block-size requirement and memory budget, then
+    /// the noise model and the engine's block ring. Throws before any
+    /// state change.
+    void enable_block_noise() {
+        auto model = std::make_unique<detail::BoxcarNoiseModel>(
+            plan, config, smear, std::max(1, exec.nthreads));
+        const SizeType max_width = planes.front().widths.back();
+        const uint64_t need      = model->max_support() + max_width - 1;
+        if (plan.get_nsamps() < need) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: a per-call kill mask needs blocks of at least "
+                "{} samples (largest row support {} + max_boxcar {} - 1), so "
+                "that every endpoint's input spans at most two blocks; this "
+                "plan has {}",
+                need, model->max_support(), max_width, plan.get_nsamps()));
+        }
+        // Table sets alive at once: steady and transition of each ring
+        // entry, plus the mask cache.
+        const uint64_t latency = engine->search_latency();
+        const SizeType ring =
+            1 + static_cast<SizeType>((latency + plan.get_nsamps() - 1) /
+                                      plan.get_nsamps());
+        const SizeType extra =
+            model->plan_bytes() + model->workspace_bytes() +
+            ((2 * ring + kCacheMasks) * model->table_bytes()) +
+            engine->block_noise_bytes();
+        const SizeType used = engine->memory_usage().total();
+        if (used + extra > max_memory) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: per-call kill masks need {:.2f} GiB more, over "
+                "max_memory_bytes ({:.2f} GiB, {:.2f} GiB in use)",
+                static_cast<double>(extra) / (1 << 30),
+                static_cast<double>(max_memory) / (1 << 30),
+                static_cast<double>(used) / (1 << 30)));
+        }
+        engine->enable_block_noise(model->support());
+        noise     = std::move(model);
+        prev_mask = ctor_mask;
+        cache.clear();
+    }
     void check_stream(Stream stream) const {
-        if (exec.backend == Backend::kCPU && stream.native) {
+        if (exec.backend == Backend::kCPU && stream.native != nullptr) {
             throw std::invalid_argument(
                 "FDMTBoxcar: CPU backend has no stream");
         }
     }
+    static constexpr SizeType kCacheMasks = 3;
     plans::FDMTPlan plan;
     BoxcarConfig config;
     Exec exec;
     SizeType beams;
+    bool smear;
+    SizeType max_memory;
     std::vector<plans::BoxcarPlanePlan> planes;
     std::vector<std::pair<SizeType, SizeType>> kill_runs;
     std::unique_ptr<detail::FDMTBoxcarEngine> engine;
     detail::DrainState drain_state;
+    // Per-call kill masks (0/1 per channel): the constructor mask, the
+    // previous block's effective mask, scratch for the next, and the model
+    // with its recent tables (created by the first per-call mask).
+    std::vector<uint8_t> ctor_mask;
+    std::vector<uint8_t> prev_mask;
+    std::vector<uint8_t> effective;
+    std::vector<uint8_t> union_mask;
+    std::unique_ptr<detail::BoxcarNoiseModel> noise;
+    std::vector<std::pair<std::vector<uint8_t>,
+                          std::shared_ptr<const detail::NoiseTables>>>
+        cache;
 };
 
 FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
                        BoxcarConfig config,
-                       bool smear,
+                       bool use_box_smearing,
                        Exec exec,
-                       SizeType beams,
-                       SizeType fuse,
-                       SizeType chunk,
-                       SizeType max_memory,
+                       SizeType nbeams,
+                       SizeType fuse_levels,
+                       SizeType chunk_nsamps,
+                       SizeType max_memory_bytes,
                        std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
-                                    smear,
+                                    use_box_smearing,
                                     exec,
-                                    beams,
-                                    fuse,
-                                    chunk,
-                                    max_memory,
+                                    nbeams,
+                                    fuse_levels,
+                                    chunk_nsamps,
+                                    max_memory_bytes,
                                     kill_mask)) {}
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;
 FDMTBoxcar& FDMTBoxcar::operator=(FDMTBoxcar&&) noexcept = default;
 CandidateResultView FDMTBoxcar::execute(std::span<const float> waterfall) {
-    m_impl->drain_state.check_open("FDMTBoxcar::execute");
-    return m_impl->engine->execute(waterfall);
+    return execute(waterfall, std::span<const uint8_t>{});
 }
 CandidateDeviceResultView FDMTBoxcar::execute(DeviceSpan<const float> waterfall,
                                               Stream stream) {
+    return execute(waterfall, std::span<const uint8_t>{}, stream);
+}
+CandidateResultView FDMTBoxcar::execute(std::span<const float> waterfall,
+                                        std::span<const uint8_t> kill_mask) {
+    m_impl->drain_state.check_open("FDMTBoxcar::execute");
+    return m_impl->run_masked(kill_mask, waterfall.size(), [&] {
+        return m_impl->engine->execute(waterfall);
+    });
+}
+CandidateDeviceResultView
+FDMTBoxcar::execute(DeviceSpan<const float> waterfall,
+                    std::span<const uint8_t> kill_mask,
+                    Stream stream) {
     m_impl->drain_state.check_open("FDMTBoxcar::execute");
     detail::check_device(waterfall.device, backend(), device(),
                          "FDMTBoxcar::execute");
-    return m_impl->engine->execute(waterfall, stream);
+    return m_impl->run_masked(kill_mask, waterfall.size(), [&] {
+        return m_impl->engine->execute(waterfall, stream);
+    });
 }
 CandidateResultView FDMTBoxcar::execute(std::span<const uint8_t> waterfall) {
     m_impl->drain_state.check_open("FDMTBoxcar::execute");
@@ -224,6 +381,9 @@ void FDMTBoxcar::reset_history(Stream stream) {
     m_impl->check_stream(stream);
     m_impl->engine->reset_history(stream);
     m_impl->drain_state.reset();
+    if (m_impl->noise) {
+        m_impl->prev_mask = m_impl->ctor_mask; // same size: no allocation
+    }
 }
 CandidateResultView FDMTBoxcar::drain() {
     return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
@@ -234,6 +394,10 @@ CandidateResultView FDMTBoxcar::drain() {
 uint64_t FDMTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
                                    m_impl->engine->search_latency());
+}
+uint64_t FDMTBoxcar::get_candidate_frontier() const noexcept {
+    // New excursions begin at endpoints not yet searched by every row.
+    return std::min(get_searched_nsamps(), m_impl->engine->open_begin_min());
 }
 uint64_t FDMTBoxcar::get_search_latency() const noexcept {
     return m_impl->engine->search_latency();
@@ -263,7 +427,14 @@ int FDMTBoxcar::nthreads() const noexcept {
     return backend() == Backend::kCPU ? std::max(1, m_impl->exec.nthreads) : 1;
 }
 FDMTBoxcarMemoryUsage FDMTBoxcar::get_memory_usage() const noexcept {
-    return m_impl->engine->memory_usage();
+    auto usage = m_impl->engine->memory_usage();
+    if (m_impl->noise) {
+        // The per-call mask's model and the tables alive (ring and cache).
+        usage.plan +=
+            m_impl->noise->plan_bytes() + m_impl->noise->live_table_bytes();
+        usage.workspace += m_impl->noise->workspace_bytes();
+    }
+    return usage;
 }
 std::string FDMTBoxcar::summary() const {
     const auto path = m_impl->engine->search_path();

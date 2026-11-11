@@ -13,7 +13,7 @@ other algorithms are unchanged.
 | Fused into the search | the root merge (root rows are never stored) | each overlap-save segment's inverse transform |
 | Input | float32, or packed 1/2/4/8/16-bit | float32 |
 | Subband search | plan `subband_depth` (any depth below the root), with staggered subbands | full band only |
-| Kill mask | yes, in the noise model of every subband row | yes |
+| Kill mask | yes, in the noise model of every subband row; also per block (float32) | yes |
 | Latency | none | `output_latency` samples (64 with fractional delays) |
 
 ## Input and statistical contract
@@ -56,10 +56,55 @@ same: the noise model still counts them, so sigma is too high by
 `sqrt(N / (N - k))` (5% S/N for a 10% mask). Rows whose channels are all
 killed (a killed subband) have no noise and never detect.
 
-The mask is fixed at construction: a different mask needs a new
-`FDMTBoxcar`. Each block is copied once into a staging buffer to zero the
-killed rows; it appears in `memory_usage.staging` and counts against
-`max_memory_bytes`. Without a mask there is no copy.
+Each block is copied once into a staging buffer to zero the killed rows; it
+appears in `memory_usage.staging` and counts against `max_memory_bytes`.
+Without a mask there is no copy.
+
+#### A mask per block
+
+A real-time pipeline flags RFI per gulp, so `execute()` also takes a mask
+for its block (float32 input): `search.execute(block, kill_mask=mask)` in
+Python, `execute(waterfall, kill_mask)` in C++ (host or device waterfall;
+the mask is a host span, read before the call returns). The format and
+convention are the constructor's: one value per channel, nonzero active.
+The block's mask applies to every beam and sample of the block and is
+ANDed with the constructor mask; `None` (an empty span, or the overloads
+without a mask) means the constructor mask alone, not the previous block's.
+Static zaps can stay in the constructor and the dynamic flags go per call.
+The stream keeps its FDMT history, boxcar carry and open excursions across
+mask changes; samples keep the mask they were read with.
+
+While the mask stays the same, S/N is calibrated exactly as with that mask
+given to the constructor. When it changes between blocks, the endpoints
+whose input windows reach back into the previous block, the first
+`S + W - 1` of each row (`S` the row's FDMT support with every channel
+active, `W` the boxcar width), mix samples read under both masks. Those
+endpoints use the variance of the **OR** of the two masks, an upper bound
+of their true variance: a change adds no false alarms, and S/N there is low
+by at most `sqrt(V_or / V_true)` (about `1 - k / 2G` when `k` of `G` similar
+channels flip). A wholly killed block still closes the excursions of the
+block before it. At most `(dt_max + max_boxcar) / nsamps` of the stream is
+affected per change, and none while the mask is unchanged.
+
+The first per-call mask checks two things and raises (`ValueError`;
+C++ `std::invalid_argument`) without changing the stream if either fails:
+
+- the block is long enough for every window to span at most two blocks:
+  `nsamps >= S_max + max_boxcar - 1` (`parkes_uwl` at depth 4 with 100 ms
+  boxcars needs 255,452 samples);
+- the noise tables fit in `max_memory_bytes`: the noise model, a few table
+  sets of `rows x widths x 8` bytes, the staging block if the constructor
+  had no mask and, on GPUs, device and pinned copies of the tables.
+
+The tables of a new mask are computed on the host when it first appears,
+with the instance's `nthreads` (also on GPUs, where it has no other use):
+a few milliseconds on the bench presets, 0.2 s per set on `parkes_uwl` at
+depth 4 with 8 threads (1.3 s with one). A change needs a set for the new
+mask and, unless it only kills or only revives channels, one for the OR;
+the last three masks are cached. `skip_cold_prefix` keeps the constructor mask's
+warm-up. `reset_history()` clears the mask state, and `drain()` pads with
+the last block's mask. `search_plans` (`get_search_plans()`) shows the
+constructor mask's tables only. Packed input takes no per-call mask.
 
 ## Packed integer input
 
@@ -268,6 +313,19 @@ winning peak's width.
   continue, with excursions split at that flush.
 - **Reset.** `reset_history()` discards all histories and pending peaks and
   restarts sample 0.
+- **Candidate frontier.** In the contiguous modes an excursion is emitted
+  only when it ends, and nothing limits how long it stays open, so a later
+  call can return a candidate far older than `dt_max + max_boxcar` samples
+  (persistent RFI, a long bright event). `get_candidate_frontier()` gives
+  the oldest `begin_sample` any later `execute()`, `flush()` or `drain()`
+  can still emit: the smallest begin of the excursions still open (any
+  beam, row or width), or `get_searched_nsamps()` when none is open. It
+  never decreases between resets. Use it as the watermark for releasing
+  grouped candidates instead of a fixed lag. With `ALL_ABOVE_THRESHOLD`
+  nothing stays open, so it is the searched position. After `flush()` or
+  `drain()` it equals `get_searched_nsamps()`, and `reset_history()` sets it
+  to 0. After device calls, synchronise their stream before reading it, as
+  for a device result. `FDMTFFTBoxcar` has the same method.
 
 ## Subbands, overflow and memory
 
@@ -334,6 +392,12 @@ the fastest path that fits in the rest:
   (4096 down to 256 samples) that fits; a longer chunk is faster.
 - Construction raises `ValueError` (`std::invalid_argument`) when nothing
   fits.
+
+On a GPU, host-memory input goes through a device staging block that is
+allocated by the first host-memory `execute()` and reused. The check at
+construction does not include it, since device-memory input never needs
+it; it shows in `memory_usage.staging` once allocated. A per-block kill
+mask counts it when the first mask arrives.
 
 On the skewed path a subband search reads every searched row (tree,
 staggered, and delays the full-band grid does not use) from the full
@@ -421,22 +485,18 @@ L40S, device-resident; AMD EPYC 9654, 8 threads one per CCD; median of 3):
 
 | preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.7 ms (12 widths) | 29.6 ms (163 widths) |
-| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (13 widths) | 14.0 ms (219 widths) |
-| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 19.0 ms |
-| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.4 ms (12 widths) | 23.2 ms (195 widths) |
-| `meerkat_lband`, CPU | 359 ms | 502 ms | 552 ms |
-| `cryopaf_lband`, subband depth 1, CPU | 141 ms | 468 ms | 544 ms |
-| `cryopaf_low`, CPU | 260 ms | 312 ms | 339 ms |
-
-Measured with the 0.7.0 width banks, before a bank ended on `max_boxcar`
-(0.8.0): the wtsp 1.5 banks of these presets now hold one more width (13, 14
-and 13), which adds a few percent of search work.
+| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.8 ms (13 widths) | 29.4 ms (163 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (14 widths) | 13.6 ms (219 widths) |
+| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 18.0 ms |
+| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.5 ms (13 widths) | 23.2 ms (195 widths) |
+| `meerkat_lband`, CPU | 362 ms | 515 ms | 559 ms |
+| `cryopaf_lband`, subband depth 1, CPU | 139 ms | 486 ms | 545 ms |
+| `cryopaf_low`, CPU | 252 ms | 315 ms | 339 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
 dozen widths, so the full-band search adds 3–10%; a depth-1 subband search
 on `cryopaf_lband` adds a fifth (wtsp 1.5) to a third (wtsp 1.0) more. On the CPU the scorer is a separate
-pass over each chunk's searched rows (1.2–3.3× the transform), still well
+pass over each chunk's searched rows (1.3–3.5× the transform), still well
 faster than real time on 8 threads. Thanks to the width screen, scoring
 every integer width up to 100 ms costs about the same as a dozen widths on
 both backends. `working_bytes` in the results is the allocation plus the
@@ -448,19 +508,21 @@ blocks, subband depth 4: 218k searched rows, wtsp 1.5) runs within the
 
 | backend | input | chunk | time per block | real-time factor | working memory | peak |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| GPU | uint8 | 4096 | 1.16 s | 1.81× | 9.4 GiB | 9.2 GiB |
-| GPU | float32 | 2048 | 1.59 s | 1.32× | 10.8 GiB (9.96 GiB engine) | 10.7 GiB |
-| CPU, 8 threads | uint8 | 4096 | 14.3 s | 0.15× | 6.2 GiB | 6.3 GiB |
-| CPU, 8 threads | float32 | 2048 | 20.1 s | 0.10× | 9.2 GiB | 9.4 GiB |
+| GPU | uint8 | 4096 | 1.17 s | 1.80× | 9.8 GiB | 9.6 GiB |
+| GPU | float32 | 1024 | 2.34 s | 0.90× | 9.6 GiB | 9.5 GiB |
+| CPU, 8 threads | uint8 | 4096 | 15.5 s | 0.14× | 6.6 GiB | 6.7 GiB |
+| CPU, 8 threads | float32 | 2048 | 22.0 s | 0.10× | 9.7 GiB | 9.8 GiB |
 
 *working memory* is the library's accounting plus the input block; *peak* is
 the measured device memory (GPU) or process resident set (CPU) in the same
 run. The GPU peak can be below the working memory because the accounting
-also counts host-side tables and the host candidate buffer.
+also counts host-side tables and the host candidate buffer. Float32 input on
+the GPU fits the 10 GiB budget only at 1024-sample chunks, which keeps it
+just below real time (0.90×); the 8-bit tree is narrower and fits 4096.
 
 The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.7 GiB).
 Searching at a coarser resolution is much cheaper: at 256 µs the GPU runs
-depth 4 at 36× real time and 8 CPU threads keep up (1.15–1.35×), and at
+depth 4 at 39–41× real time and 8 CPU threads keep up (1.11–1.31×), and at
 512 µs the CPU is 6× faster than real time (the real-time sweep on the
 [Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 
@@ -505,7 +567,10 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   length; `chunk_nsamps` reports the segment) until the instance fits, and
   construction raises `ValueError` with the memory at the shortest segment
   when nothing does. Shorter segments change the rows as blocking does (see
-  Streaming).
+  Streaming). GPU host-input staging is allocated lazily, outside this
+  check, as on `FDMTBoxcar`. On `parkes_uwl` the CPU instance needs 19.45
+  GiB even at the shortest segment, so the default budget raises; pass a
+  larger `max_memory_bytes`.
 - **Limits.** Float32 input only and plan `subband_depth=0`: subband rows exist
   only in the Fourier domain and would each need an extra inverse transform.
 

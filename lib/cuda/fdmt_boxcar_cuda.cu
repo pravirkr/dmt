@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -20,6 +21,7 @@
 #include "dmt/fdmt_variance.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
+#include "dmt/host_staging.cuh"
 
 namespace dmt::algorithms::detail {
 namespace {
@@ -508,9 +510,46 @@ DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
     __syncthreads();
 }
 
+// Per-call kill masks (float rows): the tables of the (at most two) ring
+// entries a call's endpoints can reach, older first. Per entry: its first
+// stream sample, steady [0] and transition [1] thresholds and inverse
+// sigmas (rows x filters; null: the constructor tables) and whether it has
+// a transition (its first support + W - 1 endpoints per row use [1]).
+// count 0: the constructor tables only.
+struct BlockTables {
+    uint64_t first[2]{0, 0};
+    const float* thr[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
+    const float* inv[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
+    bool transition[2]{false, false};
+    int count               = 0;
+    const uint64_t* support = nullptr;
+};
+
+// The entry of stream sample `s` (the older one for samples before the
+// newer's first).
+DMT_D inline int block_entry(const BlockTables& bt, uint64_t s) {
+    return bt.count == 2 && s >= bt.first[1] ? 1 : 0;
+}
+
+// Table (0 steady, 1 transition) of entry `e` for endpoint `s` and width w.
+DMT_D inline int block_table(const BlockTables& bt,
+                             int e,
+                             uint64_t s,
+                             uint32_t width,
+                             uint64_t support) {
+    return bt.transition[e] && s < bt.first[e] + support + width - 1 ? 1 : 0;
+}
+
 // kScreen: tiles are screened by width group (detect_tile_grouped*); a
 // separate instantiation, so the plain kernel keeps its register budget.
-template <typename T, int kBlockThreads, bool kScreen, typename C = T>
+// kBlockNoise: per-call mask tables are in use (float rows only). A
+// separate instance, so the common unmasked launch carries none of their
+// state (it cost ~160 B of stack per thread and 15-50% of the run time).
+template <typename T,
+          int kBlockThreads,
+          bool kScreen,
+          bool kBlockNoise = false,
+          typename C       = T>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -545,7 +584,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        int screen_ngroups,
                        const float* screen_thresholds,
                        const float* screen_m1,
-                       SizeType screen_offset) {
+                       SizeType screen_offset,
+                       BlockTables block_tables,
+                       SizeType group_offset) {
     constexpr int kBlockTile = kBlockThreads * kItems;
     // Lagged rows (skewed-window subband search): this row's own samples.
     if (input.row_lag != nullptr) {
@@ -581,12 +622,68 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                           mode != PeakFindingMode::kContiguousPeakAcrossWidths;
     const int tid       = static_cast<int>(threadIdx.x);
     const auto lookback = static_cast<uint32_t>(max_width - 1);
+    // Per-call kill masks (float rows): the tables this call's endpoints
+    // use. One table: the row reads it as the constructor's. Several
+    // ("mixed"): the screen takes their per-width minimum (a lower bound
+    // for every endpoint) and the bookkeeping picks the table per sample.
+    const float* plane_thr = thresholds + row_index * nfilters;
+    const float* plane_inv = inv_sigma + row_index * nfilters;
+    const float* inv_row   = plane_inv;
+    const float* thr_float = plane_thr;
+    const float* in_play[4][2];
+    int n_play           = 0;
+    bool mixed           = false;
+    uint64_t row_support = 0;
+    if constexpr (kBlockNoise && !std::is_integral_v<T>) {
+        if (block_tables.count > 0) {
+            row_support       = block_tables.support[row_index];
+            const uint64_t s0 = input.sample_begin;
+            const uint64_t s1 = s0 + input.nsamps - 1;
+            const int e0      = block_entry(block_tables, s0);
+            const int e1      = block_entry(block_tables, s1);
+            const auto add    = [&](int e, int k) {
+                const float* t = block_tables.thr[e][k];
+                const float* v = block_tables.inv[e][k];
+                t = t != nullptr ? t + row_index * nfilters : plane_thr;
+                v = v != nullptr ? v + row_index * nfilters : plane_inv;
+                for (int j = 0; j < n_play; ++j) {
+                    if (in_play[j][0] == t) {
+                        return;
+                    }
+                }
+                in_play[n_play][0] = t;
+                in_play[n_play][1] = v;
+                ++n_play;
+            };
+            for (int e = e0; e <= e1; ++e) {
+                const uint64_t first = block_tables.first[e];
+                const uint64_t lo    = e == e0 ? s0 : first;
+                const uint64_t hi = e < e1 ? block_tables.first[e + 1] - 1 : s1;
+                if (!block_tables.transition[e]) {
+                    add(e, 0);
+                    continue;
+                }
+                if (lo < first + row_support + max_width - 1) {
+                    add(e, 1);
+                }
+                if (hi + 1 >= first + row_support + widths[0]) {
+                    add(e, 0);
+                }
+            }
+            if (n_play == 1) {
+                thr_float = in_play[0][0];
+                inv_row   = in_play[0][1];
+            } else {
+                mixed = true;
+            }
+        }
+    }
     // Row tables: raw thresholds in the units of the prefix ring.
     const T* thr_row = [&] {
         if constexpr (std::is_integral_v<T>) {
             return integer_thresholds + row_index * nfilters;
         } else {
-            return thresholds + row_index * nfilters;
+            return thr_float;
         }
     }();
     const uint32_t* wtab = widths;
@@ -595,11 +692,45 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         T* s_thr       = ring + mask + 1;
         auto* s_widths = reinterpret_cast<uint32_t*>(s_thr + nfilters);
         for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
-            s_thr[f]    = thr_row[f];
+            T th = thr_row[f];
+            if constexpr (!std::is_integral_v<T>) {
+                if (mixed) {
+                    th = in_play[0][0][f];
+                    for (int j = 1; j < n_play; ++j) {
+                        th = th < in_play[j][0][f] ? th : in_play[j][0][f];
+                    }
+                }
+            }
+            s_thr[f]    = th;
             s_widths[f] = widths[f];
         }
         wtab = s_widths;
         ttab = s_thr;
+    }
+    // Mixed tables without the shared row: every tile takes the exact
+    // bookkeeping (no screen bound is stored).
+    bool force_bookkeeping = mixed && !shared_tables;
+    // Group screen bounds of tables other than the constructor's: the
+    // per-group minimum of the row's (staged) thresholds.
+    const float* group_thr =
+        screen_ngroups > 0 ? screen_thresholds + row_index * screen_ngroups
+                           : nullptr;
+    if constexpr (kScreen && !std::is_integral_v<T>) {
+        if ((thr_float != plane_thr || mixed) && group_offset == 0) {
+            force_bookkeeping = true; // no room for the group bounds
+        } else if (thr_float != plane_thr || mixed) {
+            auto* s_grp = reinterpret_cast<float*>(storage + group_offset);
+            __syncthreads();
+            for (int g = tid; g < screen_ngroups; g += kBlockThreads) {
+                float th = 3.402823466e38F;
+                for (uint32_t f = screen_groups[g].f_lo;
+                     f < screen_groups[g].f_hi; ++f) {
+                    th = th < ttab[f] ? th : ttab[f];
+                }
+                s_grp[g] = th;
+            }
+            group_thr = s_grp;
+        }
     }
     // Open runs force the bookkeeping path until they close.
     const auto any_open = [&] {
@@ -680,8 +811,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 } else {
                     return detect_tile_grouped<T, kBlockThreads, kFull, kCold>(
                         ring, mask, position, lookback, n, wtab, ttab,
-                        screen_groups, screen_ngroups,
-                        screen_thresholds + row_index * screen_ngroups,
+                        screen_groups, screen_ngroups, group_thr,
                         reinterpret_cast<T*>(storage + screen_offset), start,
                         row.warmup);
                 }
@@ -695,7 +825,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                              start, row.warmup);
         };
         bool hit;
-        if (n == kBlockTile) {
+        if (force_bookkeeping) {
+            hit = true;
+        } else if (n == kBlockTile) {
             hit = cold ? run_detect(cuda::std::true_type{},
                                     cuda::std::true_type{})
                        : run_detect(cuda::std::true_type{},
@@ -725,13 +857,27 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 const uint32_t width = wtab[f];
                 const uint32_t w_edge =
                     use_trapezoid ? trapezoid_edge_width(width) : 0U;
-                const T threshold = ttab[f];
-                const float scale = inv_sigma[row_index * nfilters + f];
-                bool f_hit        = false;
+                T threshold = ttab[f];
+                float scale = inv_row[f];
+                bool f_hit  = false;
                 for (int j = 0; j < kItems; ++j) {
                     const uint32_t local  = tid * kItems + j;
                     const uint64_t sample = start + local;
-                    const uint32_t idx    = position + local + 1;
+                    if constexpr (!std::is_integral_v<T>) {
+                        if (mixed) {
+                            const int e = block_entry(block_tables, sample);
+                            const int k = block_table(block_tables, e, sample,
+                                                      width, row_support);
+                            const float* t = block_tables.thr[e][k];
+                            const float* v = block_tables.inv[e][k];
+                            threshold      = t != nullptr
+                                                 ? t[row_index * nfilters + f]
+                                                 : plane_thr[f];
+                            scale = v != nullptr ? v[row_index * nfilters + f]
+                                                 : plane_inv[f];
+                        }
+                    }
+                    const uint32_t idx = position + local + 1;
                     T sum = current[j] - ring[(idx - width) & mask];
                     if (w_edge > 0) {
                         sum += ring[(idx - w_edge) & mask] -
@@ -864,6 +1010,33 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
         }
     }
     open[index] = 0;
+}
+
+// Candidate frontier: the smallest begin sample of the open excursions,
+// min-reduced into *oldest (preset to UINT64_MAX). Only rows flagged open
+// are read.
+__global__ void kernel_open_begin(const BoxcarPeak* peaks,
+                                  const uint8_t* open,
+                                  SizeType tasks,
+                                  SizeType peak_count,
+                                  uint64_t* oldest) {
+    uint64_t local = UINT64_MAX;
+    for (SizeType i = blockIdx.x * blockDim.x + threadIdx.x; i < tasks;
+         i += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        if (open[i] == 0) {
+            continue;
+        }
+        for (SizeType f = 0; f < peak_count; ++f) {
+            const BoxcarPeak& p = peaks[i * peak_count + f];
+            if (p.open && p.begin < local) {
+                local = p.begin;
+            }
+        }
+    }
+    if (local != UINT64_MAX) {
+        atomicMin(reinterpret_cast<unsigned long long*>(oldest),
+                  static_cast<unsigned long long>(local));
+    }
 }
 
 template <typename T> T* raw(thrust::device_vector<T>& v) {
@@ -1020,12 +1193,23 @@ public:
         m_counts_d.resize(1);
         m_slots_d.resize(1, 0);
         m_candidates_h.resize(config.max_candidates);
+        m_oldest_d.resize(1, UINT64_MAX);
+        m_oldest_h.reserve(1);
+        *m_oldest_h.data() = UINT64_MAX;
     }
     ~FDMTBoxcarCudaEngine() override {
         // Destruction must not release search buffers while queued work
         // still references them, including on a nondefault stream.
         cudaSetDevice(m_device);
         m_work.wait();
+        for (auto& slot : m_slots) {
+            if (slot->copied != nullptr) {
+                cudaEventDestroy(slot->copied);
+            }
+            if (slot->released != nullptr) {
+                cudaEventDestroy(slot->released);
+            }
+        }
     }
     CandidateResultView execute(std::span<const float> waterfall) override {
         if (m_config.input_nbits != 32) {
@@ -1053,10 +1237,16 @@ public:
                 "FDMTBoxcar: expected packed uint8 input");
         }
         validate_input(waterfall.size());
+        const auto stream = static_cast<cudaStream_t>(queue.native);
+        // Before the table uploads, which go to the current device.
+        gpu_utils::set_device(m_device);
+        commit_block_noise(stream);
         begin_result(m_plan.get_nsamps(), queue);
         m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
         m_position += m_plan.get_nsamps();
-        m_work.mark(static_cast<cudaStream_t>(queue.native));
+        release_slots(stream);
+        update_open_begin(stream);
+        m_work.mark(stream);
         return device_view();
     }
     CandidateResultView execute(std::span<const uint8_t> waterfall) override {
@@ -1082,6 +1272,7 @@ public:
         m_driver->search(masked(waterfall, m_packed_input, queue),
                          m_config.input_nbits, *this, queue);
         m_position += m_plan.get_nsamps();
+        update_open_begin(static_cast<cudaStream_t>(queue.native));
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
     }
@@ -1105,6 +1296,7 @@ public:
                 m_config.peak_mode !=
                     PeakFindingMode::kContiguousPeakAcrossWidths);
         gpu_utils::check_last_gpu_error("FDMTBoxcar flush failed");
+        update_open_begin(stream);
         m_work.mark(stream);
         return device_view();
     }
@@ -1138,10 +1330,71 @@ public:
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_driver->search_latency();
     }
+    [[nodiscard]] uint64_t open_begin_min() const noexcept override {
+        return *m_oldest_h.data();
+    }
+    [[nodiscard]] SizeType block_noise_bytes() const noexcept override {
+        // Staging (unless allocated), the row supports, and the table slots
+        // on the device and in pinned host memory.
+        const SizeType full =
+            m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
+        const SizeType staging = m_input_d.size() < full
+                                     ? (full - m_input_d.size()) * sizeof(float)
+                                     : 0;
+        return staging + (m_rows.size() * sizeof(uint64_t)) +
+               (slot_count() * 4 * table_floats() * sizeof(float));
+    }
+    void enable_block_noise(
+        std::shared_ptr<const std::vector<uint64_t>> support) override {
+        if (m_config.input_nbits != 32) {
+            throw std::logic_error(
+                "FDMTBoxcar (gpu): per-call kill masks need float input");
+        }
+        if (ring_size() > 2) {
+            // A call's endpoints reach at most two blocks only when the
+            // search latency is at most one block.
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar (gpu): per-call kill masks need a search latency "
+                "of at most one block ({} > {} samples)",
+                search_latency(), m_plan.get_nsamps()));
+        }
+        gpu_utils::set_device(m_device);
+        const SizeType full =
+            m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
+        if (m_input_d.size() < full) {
+            m_work.wait(); // the staging buffer may still be read
+            m_input_d.resize(full);
+        }
+        m_support_d = *support;
+        m_slots.clear();
+        for (SizeType i = 0; i < slot_count(); ++i) {
+            auto slot = std::make_unique<TableSlot>();
+            slot->device.resize(2 * table_floats());
+            slot->host.reserve(2 * table_floats());
+            gpu_utils::check_gpu_call(
+                cudaEventCreateWithFlags(&slot->copied, cudaEventDisableTiming),
+                "FDMTBoxcar: event creation failed");
+            gpu_utils::check_gpu_call(
+                cudaEventCreateWithFlags(&slot->released,
+                                         cudaEventDisableTiming),
+                "FDMTBoxcar: event creation failed");
+            m_slots.push_back(std::move(slot));
+        }
+        m_ring.reserve(3);
+        m_noise_on = true;
+        reset_block_noise();
+    }
+    void push_block_noise(BlockNoise entry) override {
+        m_pending = std::move(entry);
+    }
+    void drop_block_noise() noexcept override { m_pending.reset(); }
     void reset_history(Stream queue) override {
         gpu_utils::set_device(m_device);
         const auto stream = static_cast<cudaStream_t>(queue.native);
-        m_search_stop     = UINT64_MAX;
+        if (m_noise_on) {
+            reset_block_noise();
+        }
+        m_search_stop = UINT64_MAX;
         m_driver->reset(queue);
         gpu_utils::check_gpu_call(cudaMemsetAsync(
             raw(m_carry_d), 0, m_carry_d.size() * sizeof(float), stream));
@@ -1161,6 +1414,7 @@ public:
         }
         m_position = 0;
         begin_result(0, queue);
+        update_open_begin(stream);
         m_work.mark(stream);
     }
     void consume(SizeType level, const FDMTSearchInput& input) override {
@@ -1202,22 +1456,25 @@ public:
                     sizeof(float);
         }
         return {
-            .plan = fdmt.plan + host_plan +
-                    m_rows_d.size() * sizeof(BoxcarRow) +
-                    m_widths_d.size() * sizeof(uint32_t) +
-                    m_screen_groups_d.size() * sizeof(BoxcarScreenGroup) +
-                    (m_screen_thresholds_d.size() + m_screen_m1_d.size()) *
-                        sizeof(float) +
-                    m_integer_means.size() * sizeof(double) +
-                    m_integer_thresholds.size() * sizeof(uint64_t) +
-                    (m_thresholds_d.size() + m_scales_d.size()) * sizeof(float),
+            .plan =
+                fdmt.plan + host_plan + m_rows_d.size() * sizeof(BoxcarRow) +
+                m_widths_d.size() * sizeof(uint32_t) +
+                m_screen_groups_d.size() * sizeof(BoxcarScreenGroup) +
+                (m_screen_thresholds_d.size() + m_screen_m1_d.size()) *
+                    sizeof(float) +
+                m_integer_means.size() * sizeof(double) +
+                m_integer_thresholds.size() * sizeof(uint64_t) +
+                (m_thresholds_d.size() + m_scales_d.size()) * sizeof(float) +
+                m_support_d.size() * sizeof(uint64_t) +
+                (m_slots.size() * 4 * table_floats() * sizeof(float)),
             .state   = fdmt.state,
             .history = fdmt.history + m_carry_d.size() * sizeof(float) +
                        m_integer_carry.size() * sizeof(uint64_t) +
                        m_integer_carry32.size() * sizeof(uint32_t),
             .peaks   = m_peaks_d.size() * sizeof(BoxcarPeak) + m_open_d.size(),
             .workspace = fdmt.workspace + m_per_dm_d.size() * sizeof(uint64_t) +
-                         sizeof(CandidateCounts) + sizeof(uint64_t),
+                         sizeof(CandidateCounts) + sizeof(uint64_t) +
+                         (2 * sizeof(uint64_t)), // candidate frontier word
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
                           sizeof(RawCandidate),
             .staging =
@@ -1244,16 +1501,34 @@ private:
                             dim3 grid,
                             dim3 block,
                             C* carry) {
+        // Per-call mask tables take their own kernel instance (float
+        // rows only).
+        if constexpr (!std::is_integral_v<T>) {
+            if (m_block_tables.count > 0) {
+                if (m_screen_groups_d.empty()) {
+                    launch_score_kernel<T, kBlockThreads, false, true, C>(
+                        input, g, grid, block, carry);
+                } else {
+                    launch_score_kernel<T, kBlockThreads, true, true, C>(
+                        input, g, grid, block, carry);
+                }
+                return;
+            }
+        }
         if (m_screen_groups_d.empty()) {
-            launch_score_kernel<T, kBlockThreads, false, C>(input, g, grid,
-                                                            block, carry);
+            launch_score_kernel<T, kBlockThreads, false, false, C>(
+                input, g, grid, block, carry);
         } else {
-            launch_score_kernel<T, kBlockThreads, true, C>(input, g, grid,
-                                                           block, carry);
+            launch_score_kernel<T, kBlockThreads, true, false, C>(
+                input, g, grid, block, carry);
         }
     }
 
-    template <typename T, int kBlockThreads, bool kScreen, typename C>
+    template <typename T,
+              int kBlockThreads,
+              bool kScreen,
+              bool kBlockNoise,
+              typename C>
     void launch_score_kernel(const FDMTSearchInput& input,
                              const LevelGroup& g,
                              dim3 grid,
@@ -1262,7 +1537,7 @@ private:
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
         FDMTSearchInput stopped = input;
         stopped.search_stop     = m_search_stop;
-        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, C>
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C>
             <<<grid, block, m_smem, stream>>>(
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
@@ -1275,8 +1550,8 @@ private:
                 m_mask, m_shared_tables, m_config.use_trapezoid,
                 raw(m_screen_groups_d),
                 static_cast<int>(m_screen_groups_d.size()),
-                raw(m_screen_thresholds_d), raw(m_screen_m1_d),
-                m_screen_offset);
+                raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
+                kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset);
     }
 
     template <typename T, typename C = T>
@@ -1314,6 +1589,14 @@ private:
             m_screen_offset = m_smem;
             m_smem += ring * sizeof(T);
         }
+        // Group screen bounds of per-call mask tables, when they fit (else
+        // those rows take the exact bookkeeping on every tile).
+        m_group_offset = 0;
+        if (!m_screen_groups_d.empty() && std::is_floating_point_v<T> &&
+            m_smem + (m_screen_groups_d.size() * sizeof(float)) <= limit) {
+            m_group_offset = m_smem;
+            m_smem += m_screen_groups_d.size() * sizeof(float);
+        }
         if (m_smem > limit) {
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: max_boxcar {} needs {} B of shared memory per "
@@ -1327,11 +1610,19 @@ private:
         }
         if constexpr (std::is_integral_v<T>) {
             if (m_screen_groups_d.empty()) {
+                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false,
+                                                    false, uint32_t>);
+            } else {
+                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true,
+                                                    false, uint32_t>);
+            }
+        } else {
+            if (m_screen_groups_d.empty()) {
                 configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, false, uint32_t>);
+                    kernel_fdmt_boxcar<T, kBlockThreads, false, true>);
             } else {
                 configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, true, uint32_t>);
+                    kernel_fdmt_boxcar<T, kBlockThreads, true, true>);
             }
         }
     }
@@ -1378,7 +1669,8 @@ private:
     DeviceSpan<const T> masked(DeviceSpan<const T> block,
                                thrust::device_vector<T>& buffer,
                                Stream queue) const {
-        if (m_kill_runs.empty()) {
+        const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
+        if (runs.empty()) {
             return block;
         }
         const auto stream = static_cast<cudaStream_t>(queue.native);
@@ -1392,13 +1684,157 @@ private:
         }
         const SizeType nchans = m_plan.get_nchans();
         const SizeType row    = block.size_bytes() / (m_beams * nchans);
-        for (const auto& [c0, c1] : m_kill_runs) {
+        for (const auto& [c0, c1] : runs) {
             // Channels [c0, c1) of every beam: rows nchans rows apart.
             gpu_utils::check_gpu_call(cudaMemset2DAsync(
                 reinterpret_cast<std::byte*>(dst) + (c0 * row), nchans * row, 0,
                 (c1 - c0) * row, m_beams, stream));
         }
         return {dst, block.size(), block.device};
+    }
+    /// Candidate frontier: the oldest open begin sample, reduced on the
+    /// device and copied to a pinned word on `stream` (no host wait).
+    void update_open_begin(cudaStream_t stream) {
+        gpu_utils::check_gpu_call(
+            cudaMemsetAsync(raw(m_oldest_d), 0xFF, sizeof(uint64_t), stream));
+        const SizeType tasks = m_rows.size() * m_beams;
+        if (m_config.peak_mode != PeakFindingMode::kAllAboveThreshold) {
+            const auto blocks = static_cast<unsigned>(
+                std::min<SizeType>((tasks + 255) / 256, 1024));
+            kernel_open_begin<<<blocks, 256, 0, stream>>>(
+                raw(m_peaks_d), raw(m_open_d), tasks, m_peak_count,
+                raw(m_oldest_d));
+            gpu_utils::check_last_gpu_error("FDMTBoxcar frontier failed");
+        }
+        gpu_utils::check_gpu_call(
+            cudaMemcpyAsync(m_oldest_h.data(), raw(m_oldest_d),
+                            sizeof(uint64_t), cudaMemcpyDeviceToHost, stream));
+    }
+    /// Table slots: steady and transition sets of every ring entry, plus
+    /// the entry being committed.
+    [[nodiscard]] SizeType ring_size() const noexcept {
+        const uint64_t ns = m_plan.get_nsamps();
+        return 1 + static_cast<SizeType>((search_latency() + ns - 1) / ns);
+    }
+    [[nodiscard]] SizeType slot_count() const noexcept {
+        return (2 * ring_size()) + 2;
+    }
+    [[nodiscard]] SizeType table_floats() const noexcept {
+        return m_rows.size() * m_filters;
+    }
+    void reset_block_noise() {
+        m_pending.reset();
+        m_ring.clear();
+        BlockNoise first; // the constructor tables from stream sample 0
+        first.kill_runs = m_kill_runs;
+        m_ring.push_back(std::move(first));
+        m_block_tables = {};
+    }
+    /// The device copy of `tables` (uploaded into a slot no ring entry uses
+    /// if needed); null for the constructor tables.
+    const float* slot_of(const NoiseTables* tables, cudaStream_t stream) {
+        if (tables == nullptr) {
+            return nullptr;
+        }
+        for (auto& slot : m_slots) {
+            if (slot->id == tables->id) {
+                return raw(slot->device);
+            }
+        }
+        const auto in_ring = [&](uint64_t id) {
+            for (const auto& e : m_ring) {
+                if ((e.steady && e.steady->id == id) ||
+                    (e.transition_tables && e.transition_tables->id == id)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (auto& slot : m_slots) {
+            if (slot->id != 0 && in_ring(slot->id)) {
+                continue;
+            }
+            // The previous copy out of the pinned buffer has finished
+            // before it is overwritten; the device buffer is rewritten only
+            // after the kernels that read it (stream order, no host wait).
+            if (slot->copy_pending) {
+                gpu_utils::check_gpu_call(cudaEventSynchronize(slot->copied),
+                                          "FDMTBoxcar: table copy failed");
+            }
+            const SizeType n = table_floats();
+            std::copy_n(tables->thresh.data(), n, slot->host.data());
+            std::copy_n(tables->inv_sigma.data(), n, slot->host.data() + n);
+            if (slot->release_pending) {
+                gpu_utils::check_gpu_call(
+                    cudaStreamWaitEvent(stream, slot->released, 0),
+                    "FDMTBoxcar: stream wait failed");
+            }
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(raw(slot->device), slot->host.data(),
+                                2 * n * sizeof(float), cudaMemcpyHostToDevice,
+                                stream),
+                "FDMTBoxcar: table upload failed");
+            gpu_utils::check_gpu_call(cudaEventRecord(slot->copied, stream),
+                                      "FDMTBoxcar: event record failed");
+            slot->copy_pending = true;
+            slot->id           = tables->id;
+            return raw(slot->device);
+        }
+        throw std::logic_error("FDMTBoxcar (gpu): no free table slot");
+    }
+    /// Commits the pushed entry (or repeats the last steady tables), then
+    /// sets the kernels' tables to the ring's last two entries.
+    void commit_block_noise(cudaStream_t stream) {
+        if (!m_noise_on) {
+            return;
+        }
+        BlockNoise entry;
+        if (m_pending) {
+            entry = std::move(*m_pending);
+            m_pending.reset();
+        } else {
+            entry.steady    = m_ring.back().steady;
+            entry.kill_runs = m_kill_runs;
+        }
+        entry.first_sample = m_position;
+        if (m_ring.size() == ring_size()) {
+            m_ring.erase(m_ring.begin());
+        }
+        m_ring.push_back(std::move(entry));
+        BlockTables bt;
+        const SizeType n   = table_floats();
+        const SizeType off = m_ring.size() > 2 ? m_ring.size() - 2 : 0;
+        bt.count           = static_cast<int>(m_ring.size() - off);
+        bt.support         = raw(m_support_d);
+        for (int e = 0; e < bt.count; ++e) {
+            const auto& r    = m_ring[off + e];
+            bt.first[e]      = r.first_sample;
+            bt.transition[e] = r.transition;
+            const float* st  = slot_of(r.steady.get(), stream);
+            bt.thr[e][0]     = st;
+            bt.inv[e][0]     = st != nullptr ? st + n : nullptr;
+            if (r.transition) {
+                const float* tr = slot_of(r.transition_tables.get(), stream);
+                bt.thr[e][1]    = tr;
+                bt.inv[e][1]    = tr != nullptr ? tr + n : nullptr;
+            }
+        }
+        m_block_tables = bt;
+    }
+    /// After a call's kernels: the slots its tables used are free for
+    /// reuse only after them.
+    void release_slots(cudaStream_t stream) {
+        if (!m_noise_on) {
+            return;
+        }
+        for (auto& slot : m_slots) {
+            if (slot->id != 0) {
+                gpu_utils::check_gpu_call(
+                    cudaEventRecord(slot->released, stream),
+                    "FDMTBoxcar: event record failed");
+                slot->release_pending = true;
+            }
+        }
     }
     void validate_packed(SizeType size) const {
         if (m_config.input_nbits == 32 ||
@@ -1484,6 +1920,25 @@ private:
     uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
+    SizeType m_group_offset   = 0;
+    thrust::device_vector<uint64_t> m_oldest_d; ///< candidate frontier
+    gpu_host::PinnedBuffer<uint64_t> m_oldest_h;
+    // Per-call kill masks: off until the first one.
+    struct TableSlot {
+        thrust::device_vector<float> device; ///< thresholds, then inv sigma
+        gpu_host::PinnedBuffer<float> host;
+        uint64_t id          = 0; ///< NoiseTables::id held (0: none)
+        cudaEvent_t copied   = nullptr;
+        cudaEvent_t released = nullptr;
+        bool copy_pending    = false;
+        bool release_pending = false;
+    };
+    bool m_noise_on = false;
+    std::vector<BlockNoise> m_ring; ///< oldest first, at most ring_size()
+    std::optional<BlockNoise> m_pending;
+    std::vector<std::unique_ptr<TableSlot>> m_slots;
+    thrust::device_vector<uint64_t> m_support_d;
+    BlockTables m_block_tables{};
 };
 
 } // namespace

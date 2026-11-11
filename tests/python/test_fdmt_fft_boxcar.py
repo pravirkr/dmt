@@ -222,7 +222,11 @@ def test_memory_budget_shortens_segments(backend: str) -> None:
         ]
         parts.append(search.drain())
         found.append(np.concatenate([p.candidates for p in parts]))
-    assert capped.memory_usage.total <= budget  # nothing allocated lazily
+    # Only GPU host-input staging is allocated lazily, outside the budget.
+    usage = capped.memory_usage
+    assert usage.total - usage.staging <= budget
+    if backend == "cpu":
+        assert usage.total <= budget
     assert len(found[0]) > 100
     # Fractional delays: segment edges truncate the interpolation kernel as
     # block edges do, so the bound of the streaming test applies (2%, plus a
@@ -230,3 +234,24 @@ def test_memory_budget_shortens_segments(backend: str) -> None:
     match_runs(found[1], found[0], config.detect_thresh, 0.02, 0.05)
     with pytest.raises(ValueError, match="max_memory_bytes"):
         FDMTFFTBoxcar(plan, config, backend=backend, max_memory_bytes=1024)
+
+
+@pytest.mark.parametrize("backend", backends())
+def test_candidate_frontier(backend: str) -> None:
+    plan = FDMTPlan(1100, 1500, NCHANS, NSAMPS, 0.001, dt_grid=GRID)
+    rng = np.random.default_rng(3)
+    search = FDMTFFTBoxcar(
+        plan, BoxcarConfig(16, wtsp=1.5, detect_thresh=3.0), backend=backend
+    )
+    frontier = search.get_candidate_frontier()
+    assert frontier == 0
+    for _ in range(3):
+        data = rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32)
+        result = search.execute(data)
+        assert np.all(result.candidates["begin_sample"] >= frontier)
+        nxt = search.get_candidate_frontier()
+        assert frontier <= nxt <= search.searched_nsamps
+        frontier = nxt
+    result = search.drain()
+    assert np.all(result.candidates["begin_sample"] >= frontier)
+    assert search.get_candidate_frontier() == search.searched_nsamps

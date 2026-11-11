@@ -1,96 +1,92 @@
 # Benchmarks
 
-Every number here comes from one benchmark suite (`dmt_bench_suite`), run with
-the same fixed configuration on one machine:
-
-- **CPU:** an AMD EPYC 9654, with 1 and 8 threads pinned one thread per core
-  complex (`OMP_PROC_BIND=close OMP_PLACES='{0}:8:8'`) so each thread has its
-  own 32 MB L3 slice. The load average is recorded with every run
-  (`bench/results/<config>/plots/summary.md`).
-- **GPU:** an NVIDIA L40S.
-
-The rankings below hold for this machine. FDMT speed follows cache and
-memory bandwidth, while brute-force DDMT is compute-bound, so another CPU or
-GPU can order the engines differently.
-
-GPU times are for **device-resident** input and output, timed with CUDA
-events: they do not include copies between host and device. CPU FFTs are
-planned with `FFTW_MEASURE` and a saved wisdom file, as a long-running
-pipeline would. `FDMT-FFT` and `DDMT-FFT` are the Fourier-domain engines with
-fractional delays (`DDMT-FFT` with the NUFFT over the DM axis).
-
-Every timed point also records its **peak memory** in the same run: the
-process's peak resident set size on the CPU and the device memory in use on
-the GPU, from construction through warm-up and the timed blocks. The
-summaries list them for the reference point and every FDMTBoxcar run, next
-to the library's own accounting (`get_memory_usage()`).
+Every engine on one shared node: an AMD EPYC 9654 (8 threads) and an NVIDIA
+L40S. The rankings hold for this machine. FDMT speed follows memory bandwidth,
+brute-force DDMT is compute-bound, so other hardware can order the engines
+differently.
 
 ## Setup
 
-Three presets share DM 0–2000 on a piecewise-uniform Levin DM grid (tolerance
-1.1), valid mode (streaming) and box smearing. Each figure has a tab per
-preset.
+| preset | band | channels | sampling | DM trials (0–2000) | 32K-sample block |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| `meerkat_lband` | 856–1712 MHz | 4096 | 612.48 µs | 4057 | 20.1 s |
+| `cryopaf_lband` | 1100–1714 MHz | 1152 | 455.6 µs | 1941 | 14.9 s |
+| `cryopaf_low` | 704–1216 MHz | 512 | 512 µs | 1545 | 16.8 s |
 
-`meerkat_lband` (the headline preset, shown first)
-: 856–1712 MHz, 4096 channels at 612.48 µs, 4057 DM trials: a typical L-band
-  survey setup.
+- **Timing.** Steady-state streaming (valid mode, box smearing): the median
+  of 3 `execute()` calls on a 32 768-sample block, after warm-up.
+- **GPU.** Device-resident input and output, timed with CUDA events (no host
+  copies).
+- **Grid.** Every engine gets the same piecewise-uniform Levin grid
+  (tolerance 1.1); the FDMT engines round it to integer delays and keep every
+  trial.
+- **Reading the figures.** Colour is the engine. The grey line is real time
+  (the duration of one block); below it, or above 1×, keeps up.
 
-`cryopaf_low`
-: 704–1216 MHz, 512 channels at 512 µs, 1545 DM trials: the hard case for
-  FDMT (few channels, long dispersion sweeps).
+:::{dropdown} Measurement details
+:icon: info
 
-`cryopaf_lband`
-: 1100–1714 MHz, 1152 channels at 455.6 µs, 1941 DM trials: the CryoPAF
-  production configuration (its FDMTBoxcar search adds one subband level).
-
-`parkes_uwl` (its own section, [below](#parkes-uwl-search))
-: 704–4032 MHz, 6656 channels at 64 µs, 4749 DM trials (tolerance 1.6):
-  the Parkes UWL search, FDMTBoxcar at subband depth 4.
-
-Timing is steady-state streaming: construction and warm-up calls are
-excluded, and each point is the median of 3 runs of one `execute()` on a
-32 768-sample block (20.1 s, 16.8 s and 14.9 s of data). Every engine gets
-the same DM grid; the FDMT engines round it to integer delays and keep every
-trial.
-
-Colour always identifies the algorithm (FDMT blue, FDMT-FFT orange, DDMT
-green, SDMT yellow, DDMT-FFT pink). The grey line marks real time: the
-duration of the data in one block. Points below it (or above 1× in the
-throughput plot) keep up with the telescope.
+- **CPU placement.** One thread per core complex (`OMP_PROC_BIND=close
+  OMP_PLACES='{8}:8:8'`), so each thread has its own 32 MB L3 slice. The node
+  is shared; those core complexes were idle during every run.
+- **FFTs.** CPU FFTs are planned with `FFTW_MEASURE` and saved wisdom, as a
+  long-running pipeline would. `FDMT-FFT` and `DDMT-FFT` use fractional
+  delays (`DDMT-FFT` with the NUFFT over the DM axis).
+- **Memory.** Every point records its peak memory in the same run: peak RSS on
+  the CPU, device memory in use on the GPU, from construction through the
+  timed blocks.
+:::
 
 ## Key results
 
-Reference point (32 768 samples, DM 0–2000, float32), time per block:
+```{image} ../bench/results/plots/light/reference_rtf.png
+:class: only-light
+:alt: Real-time factor of FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT on three presets, on 8 CPU threads and on the GPU
+```
+```{image} ../bench/results/plots/dark/reference_rtf.png
+:class: only-dark
+:alt: Real-time factor of FDMT, FDMT-FFT, DDMT, SDMT and DDMT-FFT on three presets, on 8 CPU threads and on the GPU
+```
 
-| engine | `meerkat_lband` CPU | `cryopaf_low` CPU | `cryopaf_lband` CPU | `meerkat_lband` GPU | `cryopaf_low` GPU | `cryopaf_lband` GPU |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| FDMT | 359 ms | 260 ms | 141 ms | 25.9 ms | 21.8 ms | 11.6 ms |
-| FDMT-FFT | 441 ms | 318 ms | 184 ms | 43.9 ms | 25.0 ms | 17.5 ms |
-| DDMT | 6.77 s | 345 ms | 724 ms | 158 ms | 32.0 ms | 33.7 ms |
-| SDMT | 2.38 s | 332 ms | 475 ms | 67.8 ms | 32.0 ms | 12.0 ms |
-| DDMT-FFT | 537 ms | 186 ms | 206 ms | 46.6 ms | 14.8 ms | 17.3 ms |
+- **Every engine keeps up** on both backends at the reference point.
+- **FDMT's lead grows with the channel count.** It is the fastest engine on
+  `meerkat_lband` on both backends and on `cryopaf_lband` on the CPU; on the
+  GPU SDMT matches it there.
+- **With few channels the engines converge.** On `cryopaf_low` long
+  dispersion sweeps make every tree level large and memory-bound, while DDMT
+  and SDMT reuse each input window from cache. All five are within about 2× of
+  each other, and DDMT-FFT is the fastest on both backends.
 
-(CPU: 8 threads. FDMT-FFT and DDMT-FFT with fractional delays.)
+:::::{dropdown} Exact numbers (time per block, memory, input widths)
+:icon: table
 
-- **Real time.** Every engine runs faster than real time on both backends,
-  by 3–106× on 8 CPU threads and 127–1289× on the GPU, so the choice
-  between them is about exactness and memory as much as speed.
-- **`meerkat_lband`.** With 4096 channels, FDMT is the fastest engine on
-  both backends: 359 ms on 8 CPU threads (56× real time, 19× faster than
-  DDMT) and 25.9 ms on the L40S (775×, 6.1× faster than DDMT, 1.8× faster than
-  DDMT-FFT).
-- **Hard presets for FDMT.** Few channels and long dispersion sweeps (21.8k
-  samples on `cryopaf_low`) give every tree level 10⁴–2×10⁴ rows, and every merge
-  is a memory access, while DDMT and SDMT reuse each input window from cache
-  or shared memory. On `cryopaf_low` the three are within 1.3× on the
-  CPU (FDMT 260 ms, SDMT 332 ms, DDMT 345 ms). With more channels per delay,
-  FDMT pulls ahead: 5.1× faster than DDMT on `cryopaf_lband`, 19× on
-  `meerkat_lband`. DDMT-FFT is the fastest CPU engine on `cryopaf_low` (186 ms),
-  while FDMT leads on both L-band presets.
-- **On the GPU,** FDMT is 1.5× faster than DDMT and SDMT on `cryopaf_low`, and
-  2.9–6.1× faster than DDMT on the L-band presets. Only SDMT on `cryopaf_lband`
-  comes close (12.0 ms against 11.6 ms). DDMT-FFT is the fastest GPU
-  engine on `cryopaf_low` (14.8 ms).
+::::{tab-set}
+:::{tab-item} meerkat_lband
+:sync: meerkat
+
+```{include} ../bench/results/meerkat_lband/plots/summary.md
+:start-after: "<!-- results -->"
+:end-before: "**FDMTBoxcar**"
+```
+:::
+:::{tab-item} cryopaf_low
+:sync: cryopaf_low
+
+```{include} ../bench/results/cryopaf_low/plots/summary.md
+:start-after: "<!-- results -->"
+:end-before: "**FDMTBoxcar**"
+```
+:::
+:::{tab-item} cryopaf_lband
+:sync: lband
+
+```{include} ../bench/results/cryopaf_lband/plots/summary.md
+:start-after: "<!-- results -->"
+:end-before: "**FDMTBoxcar**"
+```
+:::
+::::
+:::::
 
 ## Time per block vs number of DM trials
 
@@ -133,22 +129,13 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 :::
 ::::
 
-- **FDMT** cost follows the tree's row count, which grows with the maximum
-  delay as well as the trial count.
-- **Brute-force DDMT** does `nchans × ndm` additions per output sample, so it
-  scales linearly with the DM count.
-- **SDMT** computes the same sums as DDMT (integer output bit-identical,
-  float equal to rounding) but shares partial sums between DM trials within
-  subbands. The saving depends on the grid: dense trials share the most, and
-  where the Levin grid gets sparse (`cryopaf_low` from DM 1000) SDMT falls back to
-  the DDMT kernel. On `cryopaf_lband` it is the fastest GPU engine at every
-  DM range.
-- **FDMT-FFT** runs the FDMT tree in the Fourier domain, with each merge's
-  shift applied as a fractional phase ramp. Its cost is dominated by the
-  per-channel and per-trial FFTs, so it grows slowly with the DM count.
-- **DDMT-FFT** is DDMT with exact (unrounded) per-channel delays, applied as
-  phase ramps, with a NUFFT over the DM axis. It wins where the grid has many
-  trials per channel (`cryopaf_low` at DM 1000–2000).
+- **FDMT** follows the tree's row count, which grows with the maximum delay
+  as well as the trial count.
+- **DDMT** is linear in the trial count. **SDMT** shares partial sums within
+  subbands: most on dense grids, none where the Levin grid gets sparse
+  (`cryopaf_low` above DM 1000), where it runs the DDMT kernel.
+- **The Fourier-domain engines** are dominated by their FFTs and grow slowly
+  with the trial count. DDMT-FFT wins where there are many trials per channel.
 
 ## Time per block vs block length
 
@@ -191,13 +178,10 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 :::
 ::::
 
-- **FDMT, DDMT and SDMT** are linear in the block length, so their distance to
-  the real-time line stays constant as blocks grow. In valid mode the
-  streaming history makes the result independent of the block size, so
-  choose the block for latency.
-- **FDMT-FFT and DDMT-FFT** get cheaper per sample with longer blocks: they
-  transform long blocks in overlap-save segments, and the overlap (the
-  dispersion sweep) is amortised over more samples.
+- **FDMT, DDMT and SDMT** are linear in the block length, so their distance
+  to real time stays constant. Choose the block for latency.
+- **The Fourier-domain engines** get cheaper per sample with longer blocks,
+  which amortise the overlap (the dispersion sweep).
 
 ## Real-time throughput by input width
 
@@ -240,21 +224,14 @@ Reference point (32 768 samples, DM 0–2000, float32), time per block:
 :::
 ::::
 
-The real-time factor is seconds of data processed per second of compute.
-
-- **Packed low-bit input** runs the FDMT tree in narrow integer lanes. On
-  the CPU that is 1.2–1.5× faster than float32 at 1–4 bits on one thread
-  and 1.2–1.4× on 8 threads (`cryopaf_lband`: 148× against 106× real time at 1
-  bit). On the GPU, 1–2-bit input gains on `cryopaf_lband`
-  (1591× against 1289×) and loses on `cryopaf_low` and `meerkat_lband`, where the
-  float32 path uses the direct bottom and top kernels.
-- At 16 bits the tree is mostly float again, so packed input is no faster
-  than float32 (on the GPU it is 1.3–1.6× slower).
-- **DDMT** sums packed input two samples per instruction in 16-bit lanes.
-  **SDMT** shares sums only for float32 and 16-bit input on the GPU; at 1–8
-  bits it runs the DDMT kernel.
-- **The Fourier-domain engines** transform complex float spectra whatever the
-  input width, so their speed hardly depends on it.
+- **CPU.** Packed 1–4-bit input runs the FDMT tree in narrow integer lanes,
+  1.1–1.4× faster than float32.
+- **GPU.** Only `cryopaf_lband` gains from 1–2-bit input; on the other
+  presets float32 uses the faster direct bottom and top kernels.
+- **16-bit** input is no faster than float32 (slower on the GPU).
+- **DDMT** sums packed input two samples per instruction; **SDMT** shares sums
+  only for float32 and 16-bit input on the GPU. **The Fourier-domain engines**
+  transform complex floats whatever the input, so their curves are flat.
 
 ## Operation count
 
@@ -297,34 +274,22 @@ The real-time factor is seconds of data processed per second of compute.
 :::
 ::::
 
-The theoretical cost per output time sample, summed over all DM trials:
+Additions per output sample, summed over all DM trials: `nchans × ndm` for
+DDMT, the plan's exact count for FDMT (`FDMTPlan.total_operations`), and a
+flop model for FDMT-FFT (channel and row FFTs plus one complex multiply-add
+per tree node and bin). SDMT's count depends on the grid and is not drawn.
 
-- **DDMT**: `nchans × ndm` additions (brute force). SDMT is not drawn: its
-  count depends on the DM grid.
-- **FDMT**: the plan's exact addition count (`FDMTPlan.total_operations`).
-- **FDMT-FFT**: a flop model. It counts forward FFTs of every channel,
-  inverse FFTs of every DM row, and one complex multiply-add per tree node
-  and frequency bin.
-
-FDMT's advantage grows with both the channel count and the DM count. How
-much of it shows up in wall-clock time depends on the platform: FDMT does
-fewer operations, but each one is a memory access, so its speed follows the
-memory (or cache) bandwidth, while brute force's inner loop is
-compute-bound and reuses each input window across a tile of trials.
+FDMT's advantage grows with both channels and trials. Less of it shows in
+wall-clock time: each FDMT operation is a memory access, while brute force
+is compute-bound and reuses its input from cache.
 
 ## Parkes UWL search
 
-`parkes_uwl` is the search the skewed-window path was built for: 6656
-channels over 704–4032 MHz at 64 µs, DM 0–2000 (Levin tolerance 1.6, 4749
-trials, a 16.2 s sweep), searched by `FDMTBoxcar` at subband depth 4 (the
-full band, 2 + 1, 4 + 3, 8 + 7 and 16 + 15 tree and staggered subbands:
-218 000 searched rows) with boxcars to 100 ms (wtsp 1.5), within the default
-10 GiB memory budget. It is not in the five-engine figures above (FDMT-FFT
-needs ~50 GB on it, and brute-force CPU DDMT hours).
-
-The real-time sweep runs the same search at the native 64 µs and
-downsampled to 256, 512 and 1024 µs (each with its own DM grid and 100 ms
-of widths), on blocks of 2.1 s after the stream is warm:
+6656 channels over 704–4032 MHz at 64 µs, DM 0–2000 (4749 trials), searched
+by `FDMTBoxcar` at subband depth 4 (about 218 000 searched rows) with
+boxcars to 100 ms, within the default 10 GiB memory budget. The sweep repeats
+the search downsampled to 256, 512 and 1024 µs, on 2.1 s blocks. The other
+engines are not run here (FDMT-FFT needs ~50 GB; CPU DDMT takes hours).
 
 ```{image} ../bench/results/parkes_uwl/plots/light/uwl_realtime.png
 :class: only-light
@@ -335,46 +300,28 @@ of widths), on blocks of 2.1 s after the stream is warm:
 :alt: Real-time factor of the Parkes UWL depth-4 search against time resolution, GPU and 8 CPU threads, uint8 and float32
 ```
 
-| time resolution | GPU, uint8 | GPU, float32 | CPU (8 threads), uint8 | CPU (8 threads), float32 |
-| ---: | ---: | ---: | ---: | ---: |
-| 64 µs (4749 trials) | **1.81×**, 9.4 GiB | **1.32×**, 10.8 GiB | 0.15×, 6.2 GiB | 0.10×, 9.2 GiB |
-| 256 µs (2302 trials) | 39×, 3.4 GiB | 42×, 3.5 GiB | **1.15×**, 3.3 GiB | **1.35×**, 3.5 GiB |
-| 512 µs (1153 trials) | 162×, 0.7 GiB | 163×, 0.8 GiB | 6.2×, 1.8 GiB | 6.8×, 2.0 GiB |
-| 1024 µs (577 trials) | 870×, 0.3 GiB | 930×, 0.3 GiB | 19×, 0.6 GiB | 25×, 0.7 GiB |
+- **The GPU keeps up at the native 64 µs on 8-bit input.** Float32 fits the
+  budget only with short chunks and runs just below real time.
+- **Each halving of the resolution is 4–5× cheaper.** From 256 µs, 8 CPU
+  threads keep up. At high DM the bottom channels are smeared far beyond
+  256 µs anyway, so a real-time system can search at 256–512 µs and keep the
+  64 µs data around triggers.
+- **On the CPU, 64 µs** is for offline processing.
 
-(real-time factor = block duration / time per block; working memory
-includes the input block.)
+:::{dropdown} Exact numbers
+:icon: table
 
-- **The GPU searches depth 4 at the native 64 µs faster than real time**
-  within 10 GiB, on 8-bit and float32 input. The tree path needed 15 GB for
-  the same search.
-- **Each halving of the resolution makes the search 4–5× cheaper**: fewer
-  samples, half the DM trials, and a tree half as deep in delay. From
-  256 µs 8 CPU threads keep up. At high DM the band's bottom channels are
-  smeared far beyond 256 µs anyway (24 ms within one 0.5 MHz channel at
-  704 MHz and DM 2000), so a coarser search mostly costs sensitivity to
-  narrow, low-DM bursts; a real-time system can search at 256–512 µs and
-  keep the 64 µs data around triggers.
-- **The CPU at 64 µs** is 7–10× slower than real time on 8 threads: fine
-  for offline processing of recorded files, not for real time.
-
-The full-band search alone (subband depth 0) takes 0.36 s per 2.1 s block on
-the GPU (5.8× real time, 2.1–2.7 GiB). Exact numbers, chunks and the
-reference-point runs are in `bench/results/parkes_uwl/plots/summary.md`.
+```{include} ../bench/results/parkes_uwl/plots/summary.md
+```
+:::
 
 ## Coherent hybrid search (CohFDMT)
 
-CohFDMT searches baseband voltages rather than a filterbank, so it has its own
-fixed configuration and is not compared with the engines above:
-
-- **Reference configuration:** one GUPPI node (64 × 2.93 MHz at
-  1.31–1.50 GHz, int8 FTPRI), t_p = 10 µs (n_p = 30), DM 50–60 pc cm⁻³, and
-  the automatic block length.
-- **Sweeps:** each one passes through the reference point and varies the
-  target resolution, the input bit width, the DM range width (and with it the
-  number of coarse coherent trials) or the block length.
-- **Real-time factor:** seconds of baseband searched per second of compute,
-  counting one stride per block, i.e. excluding the overlap.
+CohFDMT searches baseband voltages, so it has its own configuration: one GUPPI
+node (64 × 2.93 MHz at 1.31–1.50 GHz, int8), t_p = 10 µs, DM 50–60 pc cm⁻³.
+Each sweep passes through that point and varies one of the target
+resolution, input width, DM range or block length. The real-time factor
+counts one stride per block (excluding the overlap).
 
 ```{image} ../bench/results/cfdmt/plots/light/cfdmt_rtf.png
 :class: only-light
@@ -385,20 +332,13 @@ fixed configuration and is not compared with the engines above:
 :alt: CohFDMT real-time factor against t_p, input bits, DM range width and block length
 ```
 
-With DM ranges of a few tens of pc cm⁻³ at L-band a single coherent trial is
-enough, and the time goes to the forward transform of the block, shared by
-all trials. Each additional coarse trial for a wider DM range adds its own
-inverse transforms and one fine FDMT.
+At L-band a DM range of a few tens of pc cm⁻³ needs a single coherent trial,
+and the time goes to the forward transform shared by all trials. Each extra
+coarse trial for a wider range adds its own inverse transforms and one fine
+FDMT.
 
 ## Reproducing
 
-The suite, the runner and the plotting scripts live in `bench/`.
-`bench/README.md` gives the steps (build; `run_suite.py` with `--suite main`,
-`boxcar` or `cfdmt` per preset; `plot_suite.py`, `plot_uwl.py`,
-`plot_cfdmt.py`) and the tips for comparable numbers. The raw results are the
-JSON files under `bench/results/<config>/l40s-epyc9654/`.
-
-```{seealso}
-- [Fourier-domain variants](pipeline_guide/fourier_variants.md)
-- [Streaming and history](pipeline_guide/streaming_and_history.md)
-```
+The suite, runner and plot scripts are in `bench/`; `bench/README.md` gives
+the steps. Raw results are the JSON files under
+`bench/results/<config>/l40s-epyc9654/`.

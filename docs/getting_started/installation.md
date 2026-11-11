@@ -61,7 +61,8 @@ Then install from the clone as below (`pip install .`).
 
 ### From source with `uv` or `pip`
 
-Clone the repository and install into your active Python environment:
+`dmtlib` builds from source. Clone the repository and install into your
+active Python environment:
 
 ```bash
 git clone https://github.com/pravirkr/dmt.git
@@ -87,15 +88,10 @@ uv pip install -e ".[develop,docs,tests]"
 :::
 ::::
 
-```{tip}
-For a Python pipeline, `uv pip install .` with the default `DMT_GPU=AUTO` is
-all you need: the build picks up a CUDA or ROCm toolchain if it finds one.
-```
-
 ### GPU builds
 
-By default the build uses whichever GPU toolchain it finds (`DMT_GPU=AUTO`:
-CUDA first, then ROCm). To require one:
+`uv pip install .` already builds the GPU backend when it finds a toolchain
+(`DMT_GPU=AUTO`: CUDA first, then ROCm). To require one:
 
 ::::{tab-set}
 :::{tab-item} CUDA
@@ -126,13 +122,11 @@ print(f"dmtlib version: {dmtlib.__version__}")
 
 ### Build and install
 
-To build and install the C++20 static or shared library:
-
 ```bash
 mkdir build && cd build
 ```
 
-Configure for the backend you want:
+Configure for your backend:
 
 ::::{tab-set}
 :::{tab-item} CPU
@@ -183,6 +177,7 @@ cmake --build --preset release
 ctest --preset release
 ```
 
+(find-package)=
 ### Using `find_package(dmt)`
 
 Once installed, link `dmt::dmt` in your `CMakeLists.txt`:
@@ -227,14 +222,7 @@ target_link_libraries(my_pipeline PRIVATE dmt::dmt)
 ```
 
 With CPM: `CPMAddPackage("gh:pravirkr/dmt#main")`. With a vendored copy:
-`add_subdirectory(external/dmt)`. In all cases include `<dmt/dmt.hpp>` (or
-`<dmt/algorithms/fdmt.hpp>`), then continue with the
-[C++ quickstart](quickstart_cpp.md).
-
-```{note}
-For a Python pipeline, install `dmtlib` from source as above (there is no
-PyPI wheel yet) and continue with the [Python quickstart](quickstart_python.md).
-```
+`add_subdirectory(external/dmt)`. Then continue with the [C++ quickstart](quickstart_cpp.md).
 
 ## CMake options
 
