@@ -146,6 +146,7 @@ pip install -e ".[bench]"
 for config in meerkat_lband cryopaf_lband cryopaf_low; do
   python bench/scripts/plot_suite.py --config $config
 done
+python bench/scripts/plot_suite.py --reference   # all presets side by side
 python bench/scripts/plot_uwl.py
 python bench/scripts/plot_cfdmt.py
 ```

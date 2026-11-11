@@ -1,8 +1,8 @@
 # Pipeline Guide
 
-These pages cover what you need once `dmt` sits inside a real pipeline rather
-than a notebook. Read the first three if you are building a streaming search.
-Read *Periodicity searches* if you want a plain dedispersed time series.
+What you need once `dmt` runs inside a pipeline. Building a streaming search:
+read the first three. Want a plain dedispersed time series: read
+*Periodicity searches*.
 
 ::::{grid} 1 2 2 2
 :gutter: 3

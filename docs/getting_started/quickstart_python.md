@@ -1,137 +1,94 @@
 # Python quickstart
 
-The `dmtlib` package provides high-level convenience functions as well as object-oriented engine classes for fine-grained pipeline control.
+From one waterfall to a streaming engine in `dmtlib`. The
+[pipeline guide](../pipeline_guide/index.md) covers the details.
 
----
-
-## One-shot dedispersion with `compute_fdmt`
-
-To dedisperse a single 2D waterfall of shape `(nchans, nsamps)`, call
-`compute_fdmt`:
+## One-shot dedispersion
 
 ```python
 import numpy as np
 from dmtlib import compute_fdmt
 
-# Create dummy waterfall (256 channels, 1024 time samples)
-waterfall = np.random.normal(0, 1, size=(256, 1024)).astype(np.float32)
+waterfall = np.random.normal(size=(256, 1024)).astype(np.float32)  # (nchans, nsamps)
 
-# Run FDMT
-dmt_matrix, plan = compute_fdmt(
+dmt, plan = compute_fdmt(
     waterfall,
-    f_min=1200.0,       # Bottom of frequency band (MHz)
-    f_max=1600.0,       # Top of frequency band (MHz)
-    nchans=256,         # Number of frequency channels
-    nsamps=1024,        # Number of time samples in block
-    tsamp=1e-3,         # Sampling interval in seconds (1 ms)
-    dt_max=150,         # Maximum delay to search (in samples)
-    dt_min=0,           # Minimum delay (may be negative)
-    mode="valid",       # 'valid', 'full', or 'roll'
+    f_min=1200.0,   # bottom edge of the band (MHz)
+    f_max=1600.0,   # top edge of the band (MHz)
+    nchans=256,
+    nsamps=1024,
+    tsamp=1e-3,     # sampling interval (s)
+    dt_max=150,     # largest delay trial (samples)
 )
-
-# Reshape into the 2D DM-time plane: (n_dm, n_times)
-dmt_plane = dmt_matrix.reshape(plan.dmt_ndms, plan.dmt_nsamps)
-
-print("DMT shape:", dmt_plane.shape)
-print("Physical DM trials (pc cm^-3):", plan.dm_grid_final)
+dmt_plane = dmt.reshape(plan.dmt_ndms, plan.dmt_nsamps)   # (n_dm, n_times)
+dms = plan.dm_grid_final                                  # DM of each row (pc cm^-3)
 ```
 
----
+## Streaming with the `FDMT` engine
 
-## The `FDMT` engine
-
-In a loop over blocks, construct an `FDMT` once so the tree is planned once
-rather than on every block:
+For a stream of blocks, construct the engine once and call it per block:
 
 ```python
 from dmtlib import FDMT
 
-# Construct once
-fdmt = FDMT(
-    f_min=1200.0,
-    f_max=1600.0,
-    nchans=256,
-    nsamps=1024,
-    tsamp=1e-3,
-    dt_max=150,
-    mode="valid",
-    nthreads=4,         # Number of OpenMP threads
-    # backend="cuda",   # run the same engine on a GPU (CUDA builds)
-)
+fdmt = FDMT(f_min=1200.0, f_max=1600.0, nchans=256, nsamps=1024,
+            tsamp=1e-3, dt_max=150, nthreads=4)   # backend="cuda" for a GPU
 
-# Reuse one output buffer for every block (no per-call allocation)
 out = np.empty(fdmt.nbeams * fdmt.plan.dmt_size, dtype=np.float32)
-
-# Successive blocks, contiguous and non-overlapping in time
-for block_id in range(10):
-    waterfall = get_next_block()            # (256, 1024), float32
-    dmt_plane = fdmt.execute(waterfall, out=out)
-    # (n_dm, n_times) float32 view into `out`, overwritten by the next call
-    process_candidates(dmt_plane)
+for block in stream:                        # contiguous (256, 1024) float32 blocks
+    dmt_plane = fdmt.execute(block, out=out)
+    process(dmt_plane)
 ```
 
-```{warning}
-`dmt_plane` is a view into `out`, overwritten by the next call. `.copy()` the
-results you keep.
+- **Blocks join exactly.** The engine keeps the history between calls
+  (`mode="valid"`, the default). Call `fdmt.reset_history()` only when the
+  stream breaks. See [streaming](../pipeline_guide/streaming_and_history.md).
+- **`out=` is reused.** The result is a view of `out`, overwritten by the next
+  call; `.copy()` what you keep.
+- **S/N.** With box smearing (the default) the output is in box-mean units and
+  the noise differs per DM trial. Divide by `fdmt.get_effective_sigma_grid()`;
+  see [noise calibration](../pipeline_guide/noise_calibration.md).
+
+## Inputs and outputs
+
+| input | call |
+| :--- | :--- |
+| float32 `(nchans, nsamps)` or `(nbeams, nchans, nsamps)` | `execute(waterfall)` |
+| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits)` |
+
+- **Output.** float32, `(n_dm, n_times)` or `(nbeams, n_dm, n_times)`, with
+  `n_dm = plan.dmt_ndms` and `n_times = plan.dmt_nsamps`.
+- **Arrays** must be C-contiguous; other float dtypes are cast (a copy).
+- **Packed input.** `nbits` ∈ {1, 2, 4, 8, 16}, samples LSB-first within a
+  byte, `row_bytes = ceil(nsamps * nbits / 8)`. Pass digitiser output as is:
+  it is faster than converting to float, with the same result up to the
+  rounding of the box means (S/N loss ≤ 0.5%).
+- **Errors.** Wrong sizes or `nbits` raise `ValueError`; a `uint8` array
+  without `nbits` raises `TypeError`.
+- **GPU.** `backend="cuda"` (and `device=`) takes the same arguments.
+  `dmtlib.available_backends()` lists what your build has. Arrays already on
+  the GPU (PyTorch, CuPy, Numba, DLPack) go straight in; see the
+  {doc}`zero-copy GPU tutorial <../tutorials/08_gpu_zero_copy_arrays>`.
+
+```python
+nbits = 2
+packed = np.random.randint(0, 256, size=(256, 1024 * nbits // 8), dtype=np.uint8)
+dmt_plane = fdmt.execute(packed, nbits)
 ```
-
-In `mode="valid"` the engine keeps a per-node history, so the output blocks
-join into one continuous DM-time stream. Call
-`fdmt.reset_history()` when the input stream breaks. See
-[Streaming](../pipeline_guide/streaming_and_history.md).
-
-### Inputs, outputs and errors
-
-| input | call | notes |
-| :--- | :--- | :--- |
-| float32 `(nchans, nsamps)` or `(nbeams, nchans, nsamps)` | `execute(waterfall)` | other float dtypes are cast (a copy); arrays must be C-contiguous |
-| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits)` | `nbits` ∈ {1, 2, 4, 8, 16}; `row_bytes = ceil(nsamps * nbits / 8)`; samples LSB-first within a byte |
-
-- **Output shape.** The result is always float32 with shape `(n_dm, n_times)` or
-  `(nbeams, n_dm, n_times)`. `n_dm = plan.dmt_ndms` (DM values:
-  `fdmt.dm_grid_final`) and `n_times = plan.dmt_nsamps`.
-- **Output buffer.** The returned array is a zero-copy view of an output buffer of exactly
-  `nbeams * plan.dmt_size` floats (or of `out=`, which needs at least that
-  many). Pass `out=` to reuse one buffer, and `.copy()` the results you keep
-  from it. See {ref}`output buffers <output-buffers>`.
-- **Units.** With `use_box_smearing=True` (the default) each channel contributes the
-  *mean* of its level-0 box (the matched filter for intra-channel smearing),
-  so the output is in box-mean units. Divide by
-  `fdmt.get_effective_sigma_grid()` for S/N; see
-  [noise calibration](../pipeline_guide/noise_calibration.md).
-- **Errors.** Misuse raises an exception: wrong sizes or `nbits` raise `ValueError`, a
-  `uint8` array without `nbits` raises `TypeError`, and starting a new
-  `valid`-mode block before finishing a stepped one raises `RuntimeError`.
-- **Stepper.** To inspect intermediate sub-bands, use the stepper (`reset`, `advance`,
-  `advance_until_remaining`, `view_subband`, `finalize`) on an engine built
-  with `chunk_nsamps=nsamps`; see {ref}`stepper rules <stepper-rules>`.
-- **Chunked execution.** In `mode="valid"`, `execute()` runs the tree in chunks of
-  `fdmt.chunk_nsamps` samples (keyword `chunk_nsamps=None`, automatic), which
-  bounds its memory at high DM without changing the output.
-- **GPU.** On a GPU, pass `backend="cuda"` (and `device=` for another GPU); the
-  arguments and the `execute`/stepper calls on NumPy arrays are the same.
-  `dmtlib.available_backends()` lists the backends in your build, e.g.
-  `['cpu', 'cuda']`. Data already on the GPU (PyTorch, CuPy, Numba, or any
-  `__dlpack__` / `__cuda_array_interface__` array) goes straight in:
-  `fdmt.execute(waterfall_gpu, out=dmt_gpu, stream=torch_stream)` reads and
-  writes device memory in place and returns at once. See the
-  [Python API reference](../api/python_api.md) and the
-  [zero-copy GPU arrays tutorial](../tutorials/08_gpu_zero_copy_arrays.ipynb).
 
 (channel-order)=
-### Channel order and band edges
+## Channel order and band edges
 
-Every engine takes rows in **ascending** frequency: row 0 is the lowest
-channel. `f_min` and `f_max` are the band **edges** (not channel centres):
-channel `c` covers `[f_min + c * df, f_min + (c + 1) * df)` with
-`df = (f_max - f_min) / nchans`. Output times refer to `f_min` by default
-(`plan.f_ref`); DDMT, SDMT and DDMT-FFT also accept `f_ref=f_max` (for
-PRESTO-style series that start at the file's first sample). The sign of a header's channel offset does not enter
-the API: flip descending data before it reaches dmt.
+- **Ascending rows.** Row 0 is the lowest channel. Flip descending data before
+  it reaches dmt; the wrong order dedisperses the sweep backwards and finds
+  nothing at positive DM.
+- **Band edges.** `f_min` and `f_max` are edges, not channel centres: channel
+  `c` covers `[f_min + c * df, f_min + (c + 1) * df)`.
+- **Time reference.** Output times refer to `f_min` (`plan.f_ref`); see
+  [periodicity searches](../pipeline_guide/periodicity.md) for `f_ref=f_max`.
 
-SIGPROC filterbanks give `fch1`, the centre of the first channel, and `foff`,
-usually negative (highest channel first). `dmtlib.sigproc_band` converts the
-header and `dmtlib.to_ascending` flips the data when needed:
+SIGPROC headers give `fch1` (the first channel's centre) and a usually
+negative `foff`. Convert them and flip the data with:
 
 ```python
 band = dmtlib.sigproc_band(hdr["fch1"], hdr["foff"], hdr["nchans"])
@@ -139,80 +96,22 @@ wf = np.ascontiguousarray(dmtlib.to_ascending(data, band))  # (nchans, nsamps)
 fdmt = dmtlib.FDMT(band.f_min, band.f_max, band.nchans, nsamps, tsamp, dt_max)
 ```
 
-A band fed in the wrong order dedisperses with the sweep reversed and finds
-nothing at positive DM.
+## Custom trial grids
 
----
-
-## Custom and sparse trial grids
-
-Instead of the dense integer range `[0, dt_max]`, you can pass your own delay
-or DM grid. A sparse grid saves compute and can be matched to the
-intra-channel dispersion smearing:
+Pass your own delays (`dt_grid=`, samples) or DMs (`dm_grid=`, pc cm⁻³)
+instead of `dt_max`, for example a sparse grid matched to the intra-channel
+smearing:
 
 ```python
-import numpy as np
-from dmtlib import FDMTPlan, FDMT
-
-# Geometrically spaced delay trials
-custom_dt = np.array([0, 1, 2, 4, 8, 16, 32, 64, 128, 256], dtype=int)
-
-fdmt_sparse = FDMT(
-    f_min=1200.0,
-    f_max=1600.0,
-    nchans=256,
-    nsamps=1024,
-    tsamp=1e-3,
-    dt_grid=custom_dt,
-)
-
-print("Active delay trials:", fdmt_sparse.plan.dt_grid_final)
+fdmt = FDMT(1200.0, 1600.0, 256, 1024, 1e-3,
+            dt_grid=np.array([0, 1, 2, 4, 8, 16, 32, 64, 128, 256]))
+fdmt.plan.dt_grid_final
 ```
 
----
+## Next
 
-## Multi-beam batching
-
-Beams that share one plan can be processed in a single call:
-
-```python
-nbeams = 8
-
-fdmt_beams = FDMT(
-    f_min=1200.0,
-    f_max=1600.0,
-    nchans=256,
-    nsamps=1024,
-    tsamp=1e-3,
-    dt_max=100,
-    nbeams=nbeams,
-)
-
-# 3D input: (nbeams, nchans, nsamps)
-batch_input = np.random.normal(0, 1, size=(nbeams, 256, 1024)).astype(np.float32)
-
-# 3D output: (nbeams, n_delays, n_times)
-batch_output = fdmt_beams.execute(batch_input)
-print("Batch output shape:", batch_output.shape)
-```
-
----
-
-## Packed low-bit input
-
-You can pass low-bit digitiser output packed (LSB-first within each byte,
-rows padded to a whole byte), and 1- to 4-bit input runs ~1.8-2.7x faster on
-8 CPU threads. The result equals passing the same values as float, except
-that with box smearing each level-0 box mean is rounded to a few fractional
-bits (`plan.box_mean_bits`; S/N loss ≤ 0.5%):
-
-```python
-nbits = 2
-packed = np.random.randint(0, 256, size=(256, 1024 * nbits // 8), dtype=np.uint8)
-dmt_plane = fdmt.execute(packed, nbits)  # float32 (n_dm, n_times)
-```
-
-```{tip}
-The execution defaults (automatic level fusion, narrow-integer tree for
-packed input) are already the fastest settings.
-```
+- [Multi-beam batching](../pipeline_guide/multibeam.md): `nbeams=` for several
+  beams per call.
+- [Quirks and gotchas](../pipeline_guide/quirks_and_gotchas.md): output
+  modes, the stepper, logging.
+- [Python API reference](../api/python_api.md).

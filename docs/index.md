@@ -99,23 +99,17 @@ Notebooks from dispersion basics to the FDMT tree, DM grids, FDMT versus DDMT, b
 :link: benchmarks
 :link-type: doc
 
-Every engine on one shared cluster node (AMD EPYC 9654 CPU, NVIDIA L40S GPU), for three survey presets: time per block, real-time throughput by input bit width, and operation counts.
+Every engine on one shared cluster node (AMD EPYC 9654 CPU, NVIDIA L40S GPU), for three survey presets.
 :::
 
 ::::
-
-```{tip}
-Want a plain dedispersed time series, for example for a periodicity search?
-Start with {doc}`pipeline_guide/periodicity`: it shows the settings that keep
-the noise white and the one-call `dmtlib.dedisperse` helper.
-```
 
 ---
 
 ## Table of Contents
 
 ```{toctree}
-:maxdepth: 2
+:maxdepth: 1
 :caption: User Guide
 
 getting_started/index
@@ -125,7 +119,7 @@ benchmarks
 ```
 
 ```{toctree}
-:maxdepth: 2
+:maxdepth: 1
 :caption: API Reference
 
 api/index

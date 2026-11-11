@@ -6,6 +6,8 @@
 | :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- |
 | `l40s-epyc9654` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | 8 | close | 17.0 169.5 282.7 of 384 CPUs → 6.4 102.9 240.0 of 384 CPUs | 0.8.0 |
 
+<!-- results -->
+
 **Reference point**: 32768 samples × 1545 DM trials (DM 0-2000, 16.8 s of data), float32 input, median time per block. FDMT-FFT and DDMT-FFT use fractional delays (DDMT-FFT: NUFFT over the DM axis).
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |
