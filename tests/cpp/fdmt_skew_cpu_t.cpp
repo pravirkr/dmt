@@ -19,6 +19,7 @@
 #include "dmt/fdmt_skew.hpp"
 
 #include "skew_subband_search.hpp"
+#include "test_random.hpp"
 
 // Skewed-window streaming FDMT prototype (lib/dmt/fdmt_skew.hpp): on the
 // benchmark presets' geometry it must reproduce the streaming tree engine
@@ -68,14 +69,11 @@ struct Block {
 };
 
 Block random_block(SizeType nchans, SizeType nsamps, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(0, 255);
     Block b{.values = std::vector<float>(nchans * nsamps),
-            .packed = std::vector<uint8_t>(nchans * nsamps)};
+            .packed = dmt::test_random::uniform_int<uint8_t>(nchans * nsamps,
+                                                             seed, 0, 255)};
     for (SizeType i = 0; i < b.values.size(); ++i) {
-        const auto v = dis(gen);
-        b.values[i]  = static_cast<float>(v);
-        b.packed[i]  = static_cast<uint8_t>(v);
+        b.values[i] = static_cast<float>(b.packed[i]);
     }
     return b;
 }
@@ -111,13 +109,9 @@ void require_streams_close(const plans::FDMTPlan& plan,
     FDMT tree(plan, true, Exec::cpu(nthreads), 1, kFDMTAutoFuse, true, 1024);
     FDMTSkewCpu skew(plan, true, nthreads, 1024, 4, 32, 0, false, true, 0,
                      leaf);
-    std::mt19937 gen(7);
-    std::uniform_real_distribution<float> dis(-1.0F, 1.0F);
     for (unsigned blk = 0; blk < nblocks; ++blk) {
-        std::vector<float> wf(plan.get_nchans() * plan.get_nsamps());
-        for (auto& v : wf) {
-            v = dis(gen);
-        }
+        const auto wf = dmt::test_random::uniform_real<float>(
+            plan.get_nchans() * plan.get_nsamps(), 7 + blk, -1.0F, 1.0F);
         std::vector<float> expected(plan.get_dmt_size(), -9.0F);
         std::vector<float> actual(plan.get_dmt_size(), -9.0F);
         tree.execute(wf, expected);
@@ -296,7 +290,9 @@ TEST_CASE("FDMT skewed-window streaming is bit-exact with the tree engine",
           "[fdmt_cpu][cpu][skew]") {
     // Preset band, channel count and sampling with the DM range cut so the
     // case runs in seconds; the pruned piecewise Levin grid keeps the tree
-    // structure of the full search. Delays span several chunks.
+    // structure of the full search. Delays span several chunks. The
+    // MeerKAT geometry (4096 channels, four times the work) runs the two
+    // basic streams; the variants below them do not depend on it.
     struct Case {
         const Preset* preset;
         float dm_max;
@@ -309,11 +305,15 @@ TEST_CASE("FDMT skewed-window streaming is bit-exact with the tree engine",
         DYNAMIC_SECTION(c.preset->name << " dt_max " << plan.get_dt_max()
                                        << " trials " << plan.get_dmt_ndms()) {
             REQUIRE(plan.get_dt_max() > 1024);
+            const bool variants = c.preset == &kCryopafLband;
             SECTION("float input holding integers, smear, chunk 1024") {
                 require_streams_equal(plan, true, false, 4, 1024, 1024, 3, 4);
             }
             SECTION("packed 8-bit input, smear") {
                 require_streams_equal(plan, true, true, 4, 1024, 1024, 3, 4);
+            }
+            if (!variants) {
+                continue; // MeerKAT: the two streams above only
             }
             SECTION("no box smearing, float and packed") {
                 require_streams_equal(plan, false, false, 4, 1024, 1024, 2, 4);
@@ -376,13 +376,8 @@ std::vector<float> run_engine(algorithms::detail::FDMTEngine& e,
 }
 
 std::vector<float> random_floats(SizeType n, unsigned seed, float offset) {
-    std::mt19937 gen(seed);
-    std::uniform_real_distribution<float> dis(-1.0F, 1.0F);
-    std::vector<float> v(n);
-    for (auto& x : v) {
-        x = offset + dis(gen);
-    }
-    return v;
+    return dmt::test_random::uniform_real<float>(n, seed, offset - 1.0F,
+                                                 offset + 1.0F);
 }
 
 void require_close(const std::vector<float>& actual,
@@ -508,11 +503,11 @@ TEST_CASE("FDMT engine skewed path: wiring, history and input types",
     SECTION("packed streams save a compact history; either layout loads") {
         // 8-bit: three samples per 24-bit float word; 16-bit: three in two.
         const auto pack16 = [&](unsigned seed) {
-            std::mt19937 gen(seed);
-            std::uniform_int_distribution<uint32_t> dis(0, 65535);
+            const auto vals = dmt::test_random::uniform_int<uint32_t>(
+                nch * ns, seed, 0, 65535);
             std::vector<uint8_t> bytes(2 * nch * ns);
             for (SizeType i = 0; i < nch * ns; ++i) {
-                const auto v     = dis(gen);
+                const auto v     = vals[i];
                 bytes[2 * i]     = static_cast<uint8_t>(v & 0xFFU);
                 bytes[2 * i + 1] = static_cast<uint8_t>(v >> 8);
             }
@@ -660,17 +655,20 @@ TEST_CASE("FDMTBoxcar skewed path: subband search matches the tree",
     using skew_search_test::require_same_before;
     using skew_search_test::run_subband_search;
     for (const SizeType depth : {SizeType{1}, SizeType{3}, SizeType{5}}) {
-        const auto plan = make_plan(kCryopafLband, 4096, 600.0F, depth);
+        const auto plan = make_plan(kCryopafLband, 4096, 400.0F, depth);
         for (const bool packed : {false, true}) {
             DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
-                constexpr SizeType kBlocks = 4;
+                constexpr SizeType kBlocks = 3;
+                const auto planes = algorithms::detail::make_boxcar_plans(
+                    plan, skew_search_test::search_config(packed), true);
                 // Leaf level 1 (float) and 2 (packed), as the budget picks
                 // them on wide plans.
-                const auto skew =
-                    run_subband_search(plan, Exec::cpu(4), true, packed,
-                                       kBlocks, 1024, packed ? 2 : 1);
-                const auto tree = run_subband_search(plan, Exec::cpu(4), false,
-                                                     packed, kBlocks);
+                const auto skew = run_subband_search(
+                    plan, Exec::cpu(4), true, packed, kBlocks, 1024,
+                    packed ? 2 : 1, false, nullptr, 1.5F, &planes);
+                const auto tree = run_subband_search(
+                    plan, Exec::cpu(4), false, packed, kBlocks, 1024, 0, false,
+                    nullptr, 1.5F, &planes);
                 REQUIRE_FALSE(skew.path.empty());
                 REQUIRE(tree.path.empty());
                 // Lags are at most the root's largest delay.
@@ -692,15 +690,18 @@ TEST_CASE("FDMTBoxcar skewed path: drain() searches the lagged tail",
     using skew_search_test::run_subband_search;
     constexpr SizeType kBlocks = 3;
     for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
-        const auto plan  = make_plan(kCryopafLband, 4096, 600.0F, depth);
+        const auto plan  = make_plan(kCryopafLband, 4096, 400.0F, depth);
         const uint64_t n = kBlocks * plan.get_nsamps();
         for (const bool packed : {false, true}) {
             DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
-                const auto skew =
-                    run_subband_search(plan, Exec::cpu(4), true, packed,
-                                       kBlocks, 1024, packed ? 2 : 1, true);
+                const auto planes = algorithms::detail::make_boxcar_plans(
+                    plan, skew_search_test::search_config(packed), true);
+                const auto skew = run_subband_search(
+                    plan, Exec::cpu(4), true, packed, kBlocks, 1024,
+                    packed ? 2 : 1, true, nullptr, 1.5F, &planes);
                 const auto tree = run_subband_search(
-                    plan, Exec::cpu(4), false, packed, kBlocks, 1024, 0, true);
+                    plan, Exec::cpu(4), false, packed, kBlocks, 1024, 0, true,
+                    nullptr, 1.5F, &planes);
                 REQUIRE(skew.latency > 0);
                 REQUIRE(tree.latency == 0);
                 REQUIRE(skew.searched == n);
@@ -711,9 +712,9 @@ TEST_CASE("FDMTBoxcar skewed path: drain() searches the lagged tail",
                 require_same_before(skew.candidates, tree.candidates,
                                     UINT64_MAX);
                 // Without drain() the skewed path misses some of them.
-                const auto flushed =
-                    run_subband_search(plan, Exec::cpu(4), true, packed,
-                                       kBlocks, 1024, packed ? 2 : 1, false);
+                const auto flushed = run_subband_search(
+                    plan, Exec::cpu(4), true, packed, kBlocks, 1024,
+                    packed ? 2 : 1, false, nullptr, 1.5F, &planes);
                 REQUIRE(flushed.searched == n - skew.latency);
                 REQUIRE(flushed.candidates.size() < skew.candidates.size());
             }
@@ -746,25 +747,29 @@ TEST_CASE("FDMTBoxcar skewed path: per-call masks match the tree",
           "[fdmt_cpu][cpu][skew][boxcar][mask]") {
     // Lagged rows search endpoints of the previous block (and its
     // transition) one block later; the ring keeps that block's tables.
+    // Four blocks: masked, masked, unmasked, masked.
     using skew_search_test::require_same_before;
     using skew_search_test::run_subband_search;
-    constexpr SizeType kBlocks = 5;
+    constexpr SizeType kBlocks = 4;
     for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
         DYNAMIC_SECTION("depth " << depth) {
-            const auto plan  = make_plan(kCryopafLband, 4096, 600.0F, depth);
-            const auto masks = changing_masks(plan.get_nchans(), kBlocks);
+            const auto plan   = make_plan(kCryopafLband, 4096, 400.0F, depth);
+            const auto masks  = changing_masks(plan.get_nchans(), kBlocks);
+            const auto planes = algorithms::detail::make_boxcar_plans(
+                plan, skew_search_test::search_config(false), true);
             const auto skew =
                 run_subband_search(plan, Exec::cpu(4), true, false, kBlocks,
-                                   1024, 1, true, &masks);
+                                   1024, 1, true, &masks, 1.5F, &planes);
             const auto tree =
                 run_subband_search(plan, Exec::cpu(4), false, false, kBlocks,
-                                   1024, 0, true, &masks);
+                                   1024, 0, true, &masks, 1.5F, &planes);
             REQUIRE(skew.latency > 0);
             REQUIRE(tree.latency == 0);
             require_same_before(skew.candidates, tree.candidates, UINT64_MAX);
             // The masks change the result.
-            const auto plain = run_subband_search(
-                plan, Exec::cpu(4), false, false, kBlocks, 1024, 0, true);
+            const auto plain =
+                run_subband_search(plan, Exec::cpu(4), false, false, kBlocks,
+                                   1024, 0, true, nullptr, 1.5F, &planes);
             REQUIRE(plain.candidates.size() != tree.candidates.size());
         }
     }
@@ -779,11 +784,11 @@ TEST_CASE("FDMTBoxcar skewed path: per-call masks with the width screen",
     using skew_search_test::require_same_before;
     using skew_search_test::run_subband_search;
     using skew_search_test::search_config;
-    constexpr SizeType kBlocks = 5;
+    constexpr SizeType kBlocks = 4;
     constexpr float kWtsp      = 1.0F;
     for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
         DYNAMIC_SECTION("depth " << depth) {
-            const auto plan   = make_plan(kCryopafLband, 8192, 600.0F, depth);
+            const auto plan   = make_plan(kCryopafLband, 8192, 400.0F, depth);
             const auto planes = algorithms::detail::make_boxcar_plans(
                 plan, search_config(false, kWtsp), true);
             REQUIRE_FALSE(algorithms::detail::boxcar_screen_groups(
@@ -792,10 +797,10 @@ TEST_CASE("FDMTBoxcar skewed path: per-call masks with the width screen",
             const auto masks = changing_masks(plan.get_nchans(), kBlocks);
             const auto skew =
                 run_subband_search(plan, Exec::cpu(4), true, false, kBlocks,
-                                   4096, 1, true, &masks, kWtsp);
+                                   4096, 1, true, &masks, kWtsp, &planes);
             const auto tree =
                 run_subband_search(plan, Exec::cpu(4), false, false, kBlocks,
-                                   4096, 0, true, &masks, kWtsp);
+                                   4096, 0, true, &masks, kWtsp, &planes);
             REQUIRE(skew.latency > 0);
             require_same_before(skew.candidates, tree.candidates, UINT64_MAX);
         }

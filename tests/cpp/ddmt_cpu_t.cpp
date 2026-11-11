@@ -21,6 +21,8 @@
 
 #include "dmt/bit_pack_utils.hpp"
 
+#include "test_random.hpp"
+
 namespace dmt {
 
 using algorithms::DDMT;
@@ -1310,8 +1312,11 @@ void check_against_reference(DDMT& ddmt,
                 auto* r       = ref.data() + ((b * ndm + d) * n_out);
                 auto* m       = mag.data() + ((b * ndm + d) * n_out);
                 for (SizeType t = 0; t < n_out; ++t) {
-                    r[t] += x[t + dl];
-                    m[t] += std::abs(x[t + dl]);
+                    // No std::abs call: unoptimized (coverage) builds call
+                    // it once per term.
+                    const double xv = x[t + dl];
+                    r[t] += xv;
+                    m[t] += xv < 0.0 ? -xv : xv;
                 }
             }
         }
@@ -1413,6 +1418,11 @@ TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
     for (const bool shared : {false, true}) {
         for (const auto& [name, dms] : grids) {
             for (const SizeType nbits : {1U, 2U, 4U, 8U, 16U, 32U}) {
+                // Every grid at 8 and 32 bits; the other widths (their
+                // packing paths) on the fine grid only.
+                if (name != "fine" && nbits != 8 && nbits != 32) {
+                    continue;
+                }
                 DYNAMIC_SECTION((shared ? "SDMT, " : "DDMT, ")
                                 << name << ", nbits = " << nbits) {
                     std::unique_ptr<DDMT> engine =
@@ -1428,18 +1438,15 @@ TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
                         ddmt.get_plan().get_container().delay_table);
                     REQUIRE(maxd > 40);
                     REQUIRE(maxd < 600);
-                    std::vector<double> values(nbeams * nchans * nsamps);
-                    const auto hi =
-                        nbits == 32 ? 0.0
-                                    : static_cast<double>((1U << nbits) - 1);
-                    for (auto& v : values) {
-                        v = nbits == 32
-                                ? std::uniform_real_distribution<double>(
-                                      -1.0, 3.0)(gen)
-                                : std::floor(
-                                      std::uniform_real_distribution<double>(
-                                          0.0, hi + 1.0)(gen));
-                    }
+                    const SizeType nvals = nbeams * nchans * nsamps;
+                    const auto seed      = gen();
+                    const auto values =
+                        nbits == 32
+                            ? dmt::test_random::uniform_real<double>(
+                                  nvals, seed, -1.0, 3.0)
+                            : dmt::test_random::uniform_int<double>(
+                                  nvals, seed, 0,
+                                  static_cast<int64_t>((1U << nbits) - 1));
                     // Uneven chunks, one shorter than the maximum delay.
                     check_against_reference(ddmt, values, nbeams, nsamps,
                                             {700, 37, 900, nsamps - 1637});

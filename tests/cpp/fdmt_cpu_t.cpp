@@ -19,6 +19,7 @@
 #include "dmt/fdmt_history.hpp"
 
 #include "test_helpers.hpp"
+#include "test_random.hpp"
 
 namespace dmt {
 
@@ -1058,14 +1059,10 @@ TEST_CASE("FDMT plain-tree history header identifies the configuration",
         return FDMT(test::kFMin, test::kFMax, nchans, block, test::kTsamp, 48,
                     -8, 1, smearing, "valid", Exec::cpu(1), nbeams);
     };
-    std::mt19937 gen(5);
-    std::uniform_int_distribution<int> dis(0, 7);
+    uint64_t seed       = 5;
     const auto block_of = [&]() {
-        std::vector<float> wf(nchans * block);
-        for (auto& v : wf) {
-            v = static_cast<float>(dis(gen));
-        }
-        return wf;
+        return dmt::test_random::uniform_int<float>(nchans * block, seed++, 0,
+                                                    7);
     };
     const auto wf0   = block_of();
     const auto wf1   = block_of();

@@ -25,6 +25,8 @@
 #include "dmt/boxcar_noise.hpp"
 #include "dmt/engines.hpp"
 
+#include "test_random.hpp"
+
 namespace dmt::skew_search_test {
 
 struct SearchRun {
@@ -42,14 +44,10 @@ struct SearchBlock {
 };
 
 inline SearchBlock search_block(SizeType n, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(0, 255);
     SearchBlock b{.values = std::vector<float>(n),
-                  .packed = std::vector<uint8_t>(n)};
+                  .packed = test_random::uniform_int<uint8_t>(n, seed, 0, 255)};
     for (SizeType i = 0; i < n; ++i) {
-        const auto v = dis(gen);
-        b.packed[i]  = static_cast<uint8_t>(v);
-        b.values[i]  = static_cast<float>(v) - 128.0F;
+        b.values[i] = static_cast<float>(b.packed[i]) - 128.0F;
     }
     return b;
 }
@@ -67,21 +65,25 @@ inline BoxcarConfig search_config(bool packed, float wtsp = 1.5F) {
 /// skewed path (`skew`) or the tree path, then flushes (or drains). With
 /// `masks` (float input), block b runs with per-call kill mask masks[b]
 /// (empty: none), handed to the engine as FDMTBoxcar does. `wtsp`: the
-/// boxcar width spacing (search_config()).
-inline SearchRun
-run_subband_search(const plans::FDMTPlan& plan,
-                   Exec exec,
-                   bool skew,
-                   bool packed,
-                   SizeType nblocks,
-                   SizeType chunk                                 = 1024,
-                   SizeType leaf                                  = 0,
-                   bool drain                                     = false,
-                   const std::vector<std::vector<uint8_t>>* masks = nullptr,
-                   float wtsp                                     = 1.5F) {
+/// boxcar width spacing (search_config()). `planes_in`: the result of
+/// make_boxcar_plans(plan, search_config(packed, wtsp), true) when the
+/// caller already has it (it dominates the setup on wide plans).
+inline SearchRun run_subband_search(
+    const plans::FDMTPlan& plan,
+    Exec exec,
+    bool skew,
+    bool packed,
+    SizeType nblocks,
+    SizeType chunk                                       = 1024,
+    SizeType leaf                                        = 0,
+    bool drain                                           = false,
+    const std::vector<std::vector<uint8_t>>* masks       = nullptr,
+    float wtsp                                           = 1.5F,
+    const std::vector<plans::BoxcarPlanePlan>* planes_in = nullptr) {
     using namespace algorithms::detail; // NOLINT
-    const auto box      = search_config(packed, wtsp);
-    const auto planes   = make_boxcar_plans(plan, box, true);
+    const auto box = search_config(packed, wtsp);
+    const auto planes =
+        planes_in != nullptr ? *planes_in : make_boxcar_plans(plan, box, true);
     const SizeType root = plan.get_niters();
     FDMTEngineConfig cfg{};
     cfg.use_box_smearing = true;
@@ -202,9 +204,25 @@ inline void require_same_before(std::vector<RawCandidate> actual,
     REQUIRE(actual.size() == expected.size());
     SizeType sub  = 0;
     SizeType stag = 0;
+    for (const auto& e : expected) {
+        sub += e.subband_level > 0 ? 1 : 0;
+        stag += e.staggered;
+    }
+    // Plain comparison first; assertions (with their INFO) only for a
+    // mismatch, as the lists hold tens of thousands of candidates.
+    const auto same = [&](const RawCandidate& a, const RawCandidate& e) {
+        return candidate_key(a) == candidate_key(e) &&
+               a.staggered == e.staggered &&
+               (snr_rtol == 0.0F
+                    ? a.snr == e.snr
+                    : Catch::Matchers::WithinRel(e.snr, snr_rtol).match(a.snr));
+    };
     for (SizeType i = 0; i < actual.size(); ++i) {
         const auto& a = actual[i];
         const auto& e = expected[i];
+        if (same(a, e)) {
+            continue;
+        }
         INFO("candidate " << i << " level " << e.subband_level << " band "
                           << e.subband_idx << " dm " << e.dm_idx << " filter "
                           << e.filter_idx << " [" << e.begin_sample << ", "
@@ -216,8 +234,6 @@ inline void require_same_before(std::vector<RawCandidate> actual,
         } else {
             REQUIRE_THAT(a.snr, Catch::Matchers::WithinRel(e.snr, snr_rtol));
         }
-        sub += e.subband_level > 0 ? 1 : 0;
-        stag += e.staggered;
     }
     // Every kind of row took part.
     REQUIRE(sub > 0);

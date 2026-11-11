@@ -14,6 +14,8 @@
 
 #include "dmt/engines.hpp"
 
+#include "test_random.hpp"
+
 // FDMTFFT packed and time-major input, kill mask and streaming history, and
 // the shared overlap-save segment rule (forced by the testing hook), on the
 // CPU. The GPU engine is checked against these in fft_engines_cuda_t.cu.
@@ -34,13 +36,7 @@ constexpr SizeType kNch = 64;
 constexpr SizeType kNs  = 1024;
 
 std::vector<float> noise(SizeType n, unsigned seed) {
-    std::mt19937 rng(seed);
-    std::normal_distribution<float> dist(0.0F, 1.0F);
-    std::vector<float> v(n);
-    for (auto& x : v) {
-        x = dist(rng);
-    }
-    return v;
+    return dmt::test_random::normal<float>(n, seed);
 }
 
 // rows x n unsigned values -> rows of LSB-first packed bytes.
@@ -95,15 +91,10 @@ TEST_CASE("FDMTFFT packed and time-major input match float input",
     for (const auto* mode : {"valid", "full", "roll"}) {
         for (const SizeType nbits : {1, 2, 4, 8, 16}) {
             CAPTURE(mode, nbits);
-            std::mt19937 rng(static_cast<unsigned>(nbits));
-            std::uniform_int_distribution<uint32_t> val(
-                0, (nbits == 16) ? 65535U : ((1U << nbits) - 1U));
-            std::vector<uint32_t> vals(2 * kNch * kNs);
-            std::vector<float> wf(vals.size());
-            for (SizeType i = 0; i < vals.size(); ++i) {
-                vals[i] = val(rng);
-                wf[i]   = static_cast<float>(vals[i]);
-            }
+            const auto vals = dmt::test_random::uniform_int<uint32_t>(
+                2 * kNch * kNs, nbits, 0,
+                (nbits == 16) ? 65535U : ((1U << nbits) - 1U));
+            const std::vector<float> wf(vals.begin(), vals.end());
             // Time-major values: (beam, t, chan).
             std::vector<uint32_t> tm(vals.size());
             for (SizeType b = 0; b < 2; ++b) {
@@ -140,12 +131,8 @@ TEST_CASE("FDMTFFT packed and time-major input match float input",
 
 TEST_CASE("FDMTFFT packed stepper matches packed execute",
           "[cpu][fdmt_fft_cpu]") {
-    std::vector<uint32_t> vals(kNch * kNs);
-    std::mt19937 rng(9);
-    std::uniform_int_distribution<uint32_t> val(0, 15);
-    for (auto& v : vals) {
-        v = val(rng);
-    }
+    const auto vals =
+        dmt::test_random::uniform_int<uint32_t>(kNch * kNs, 9, 0, 15);
     const auto packed = pack_rows(vals, kNch, kNs, 4);
     FDMTFFT a(kFMin, kFMax, kNch, kNs, kTsamp, 48);
     FDMTFFT b(kFMin, kFMax, kNch, kNs, kTsamp, 48);

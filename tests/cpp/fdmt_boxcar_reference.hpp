@@ -20,6 +20,8 @@
 
 #include "dmt/fdmt_variance.hpp"
 
+#include "test_random.hpp"
+
 namespace boxcar_test {
 using namespace dmt;
 using algorithms::FDMT;
@@ -46,7 +48,24 @@ inline void compare(std::vector<RawCandidate> actual,
                            c.filter_idx, c.begin_sample, c.end_sample,
                            c.peak_sample, c.snr);
     };
-    for (SizeType i = 0; i < actual.size(); ++i) {
+    // The checks below, without Catch2: these lists hold up to ~10^5
+    // candidates, and an INFO plus nine assertions per candidate dominated
+    // the slow (Debug, coverage, sanitizer) CI jobs. Only mismatching
+    // candidates (the first few) go through the assertions.
+    const auto same = [](const RawCandidate& a, const RawCandidate& e) {
+        return key(a) == key(e) && a.width == e.width &&
+               a.chan_begin == e.chan_begin && a.chan_end == e.chan_end &&
+               a.staggered == e.staggered && a.dm == e.dm &&
+               a.f_low_mhz == e.f_low_mhz && a.f_high_mhz == e.f_high_mhz &&
+               Catch::Matchers::WithinRel(e.snr, 2e-5F).match(a.snr);
+    };
+    constexpr SizeType kMaxReported = 10;
+    SizeType reported               = 0;
+    for (SizeType i = 0; i < actual.size() && reported < kMaxReported; ++i) {
+        if (same(actual[i], expected[i])) {
+            continue;
+        }
+        ++reported;
         INFO("candidate " << i << "\n  actual   " << show(actual[i])
                           << "\n  expected " << show(expected[i]));
         REQUIRE(key(actual[i]) == key(expected[i]));
@@ -193,12 +212,12 @@ inline void append(std::vector<RawCandidate>& to, CandidateResultView view) {
 
 inline std::vector<std::vector<float>>
 waterfalls(const plans::FDMTPlan& plan, SizeType beams, SizeType blocks) {
-    std::mt19937 random(42);
-    std::normal_distribution<float> noise;
+    const SizeType per_block = beams * plan.get_nchans() * plan.get_nsamps();
     std::vector<std::vector<float>> input(
         blocks,
         std::vector<float>(beams * plan.get_nchans() * plan.get_nsamps()));
     for (SizeType k = 0; k < blocks; ++k) {
+        const auto noise = test_random::normal<float>(per_block, 42 + k);
         for (SizeType b = 0; b < beams; ++b) {
             for (SizeType c = 0; c < plan.get_nchans(); ++c) {
                 for (SizeType t = 0; t < plan.get_nsamps(); ++t) {
@@ -210,9 +229,9 @@ waterfalls(const plans::FDMTPlan& plan, SizeType beams, SizeType blocks) {
                                 time % plan.get_nsamps() > plan.get_nsamps() - 9
                             ? (c < 3 ? 3.0F : 1.0F)
                             : 0.0F;
-                    input[k]
-                         [(b * plan.get_nchans() + c) * plan.get_nsamps() + t] =
-                             std::round(noise(random) * 16.0F) / 16.0F + pulse;
+                    const SizeType i =
+                        (b * plan.get_nchans() + c) * plan.get_nsamps() + t;
+                    input[k][i] = std::round(noise[i] * 16.0F) / 16.0F + pulse;
                 }
             }
         }
@@ -273,24 +292,39 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
                     old.end_sample = c.end_sample;
                 }
             };
-            for (SizeType t = 0; t < values.size(); ++t) {
+            // Per-width constants and raw pointers: this loop is
+            // O(nsamps * sum of widths) per row and runs unoptimized in the
+            // coverage job, where every vector access is a call. The sums
+            // keep their order (bit-identical to a plain loop).
+            const SizeType nwidths = p.widths.size();
+            std::vector<SizeType> box_w(nwidths);
+            std::vector<SizeType> edge_w(nwidths);
+            for (SizeType f = 0; f < nwidths; ++f) {
+                box_w[f] = p.widths[f];
+                // Trapezoid {1, 2, 1}: the box plus its core.
+                edge_w[f] = config.use_trapezoid
+                                ? algorithms::detail::trapezoid_edge_width(
+                                      static_cast<uint32_t>(box_w[f]))
+                                : 0;
+            }
+            const float* const v   = values.data();
+            const SizeType nvalues = values.size();
+            for (SizeType t = 0; t < nvalues; ++t) {
                 bool any = false;
                 RawCandidate best;
-                for (SizeType f = 0; f < p.widths.size(); ++f) {
-                    const SizeType w = p.widths[f];
-                    double sum       = 0;
-                    for (SizeType k = 0; k < w && k <= t; ++k) {
-                        sum += values[t - k];
+                for (SizeType f = 0; f < nwidths; ++f) {
+                    const SizeType w      = box_w[f];
+                    const SizeType w_edge = edge_w[f];
+                    double sum            = 0;
+                    const SizeType nbox   = w <= t ? w : t + 1;
+                    const float* x        = v + t;
+                    for (SizeType k = 0; k < nbox; ++k) {
+                        sum += *(x - k);
                     }
-                    // Trapezoid {1, 2, 1}: the box plus its core.
-                    const SizeType w_edge =
-                        config.use_trapezoid
-                            ? algorithms::detail::trapezoid_edge_width(
-                                  static_cast<uint32_t>(w))
-                            : 0;
-                    for (SizeType k = w_edge;
-                         w_edge > 0 && k < w - w_edge && k <= t; ++k) {
-                        sum += values[t - k];
+                    const SizeType core_end =
+                        w_edge > 0 ? (w - w_edge <= t ? w - w_edge : t + 1) : 0;
+                    for (SizeType k = w_edge; k < core_end; ++k) {
+                        sum += *(x - k);
                     }
                     const bool valid      = !config.skip_cold_prefix ||
                                             t >= p.warmup_samples[d] + w - 1;

@@ -14,6 +14,8 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_chunk.hpp"
 
+#include "test_random.hpp"
+
 // Chunked execution (chunk_nsamps, mode "valid"): a block of nsamps runs as
 // chunks of the given length through the engine's own state, which must give
 // exactly the output of the whole block in one chunk, for every chunk length
@@ -32,26 +34,19 @@ constexpr float kFMax  = 1500.0F;
 constexpr float kTsamp = 0.001F;
 
 std::vector<float> random_block(SizeType n, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_real_distribution<float> dis(-1.0F, 1.0F);
-    std::vector<float> wf(n);
-    for (auto& v : wf) {
-        v = dis(gen);
-    }
-    return wf;
+    return dmt::test_random::uniform_real<float>(n, seed, -1.0F, 1.0F);
 }
 
 std::vector<uint8_t>
 random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(
-        0, bit_pack_utils::max_sample_value(nbits));
+    const auto vals = dmt::test_random::uniform_int<uint32_t>(
+        nrows * nsamps, seed, 0, bit_pack_utils::max_sample_value(nbits));
     const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
     std::vector<uint8_t> packed(nrows * row_bytes, 0);
     for (SizeType r = 0; r < nrows; ++r) {
         uint8_t* row = packed.data() + (r * row_bytes);
         for (SizeType s = 0; s < nsamps; ++s) {
-            const uint32_t v = dis(gen);
+            const uint32_t v = vals[(r * nsamps) + s];
             switch (nbits) {
             case 1:
                 bit_pack_utils::write_packed_sample<1>(row, s, v);

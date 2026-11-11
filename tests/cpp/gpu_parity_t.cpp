@@ -15,6 +15,7 @@
 #include "dmt/bit_pack_utils.hpp"
 
 #include "test_helpers.hpp"
+#include "test_random.hpp"
 
 // The GPU backend of this build (CUDA or HIP) against the CPU,
 // through the host-memory API only, so the one source covers all of them.
@@ -58,13 +59,7 @@ std::vector<Backend> usable_gpu_backends() {
 Exec exec_of(Backend b) { return {.backend = b, .nthreads = 1, .device = 0}; }
 
 std::vector<uint32_t> random_ints(SizeType n, uint32_t max, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(0, max);
-    std::vector<uint32_t> v(n);
-    for (auto& x : v) {
-        x = dis(gen);
-    }
-    return v;
+    return dmt::test_random::uniform_int<uint32_t>(n, seed, 0, max);
 }
 
 std::vector<float> as_floats(const std::vector<uint32_t>& v) {
@@ -201,12 +196,7 @@ TEST_CASE("parity: FDMT GPU float input matches the CPU closely",
     if (backends.empty()) {
         return;
     }
-    std::mt19937 gen(7);
-    std::normal_distribution<float> dis(0.0F, 1.0F);
-    std::vector<float> wf(kNchans * kNsamps);
-    for (auto& x : wf) {
-        x = dis(gen);
-    }
+    const auto wf = dmt::test_random::normal<float>(kNchans * kNsamps, 7);
     for (const auto backend : backends) {
         FDMT cpu(1000.0F, 1500.0F, kNchans, kNsamps, 0.001F, kDtMax, 0, 1, true,
                  "valid", Exec::cpu(1));

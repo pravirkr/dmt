@@ -13,6 +13,7 @@
 #include "dmt/fdmt_variance.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
+#include "test_random.hpp"
 
 using namespace boxcar_test;
 
@@ -331,12 +332,8 @@ TEST_CASE("FDMTBoxcar analytical scaling predicts Gaussian noise",
     cfg.max_boxcar = 7;
     FDMTBoxcar search(plan, cfg);
     FDMT fdmt(plan, true, {}, 1, 0, false, samples);
-    std::mt19937 random(32);
-    std::normal_distribution<float> noise;
-    std::vector<float> input(4 * samples), output(plan.get_dmt_size());
-    for (auto& x : input) {
-        x = noise(random);
-    }
+    const auto input = dmt::test_random::normal<float>(4 * samples, 32);
+    std::vector<float> output(plan.get_dmt_size());
     fdmt.reset(input, output);
     for (const auto& p : search.get_search_plans()) {
         fdmt.advance_until_remaining(p.subband_level);
@@ -926,21 +923,20 @@ TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
             DYNAMIC_SECTION("nchans=" << cs.nchans << " depth=" << depth
                                       << " bits=" << bits) {
                 const uint32_t maximum = bits == 32 ? 0U : (1U << bits) - 1U;
-                std::mt19937 random(static_cast<uint32_t>(17 + depth + bits));
+                const uint64_t seed    = 17 + depth + bits;
                 std::vector<std::vector<uint8_t>> packed(kBlocks);
                 std::vector<std::vector<float>> floats(kBlocks);
-                std::normal_distribution<float> normal(0.0F, 1.0F);
                 for (SizeType k = 0; k < kBlocks; ++k) {
                     if (bits == 32) {
-                        floats[k].resize(size);
-                        for (auto& x : floats[k]) {
-                            x = normal(random);
-                        }
+                        floats[k] = dmt::test_random::normal<float>(
+                            size, seed + (k << 8U));
                         continue;
                     }
+                    const auto values = dmt::test_random::uniform_int<uint32_t>(
+                        size, seed + (k << 8U), 0, maximum);
                     packed[k].resize(size * (bits / 8));
                     for (SizeType i = 0; i < size; ++i) {
-                        const uint32_t v          = random() & maximum;
+                        const uint32_t v          = values[i];
                         packed[k][i * (bits / 8)] = static_cast<uint8_t>(v);
                         if (bits == 16) {
                             packed[k][(i * 2) + 1] =
@@ -1241,12 +1237,13 @@ TEST_CASE("FDMTBoxcar kill mask keeps scores calibrated",
                       algorithms::kFDMTAutoFuse, 0,
                       algorithms::kFDMTDefaultMaxMemory, kill);
     FDMT fdmt(plan, true, {}, 1, 0, false, samples);
-    std::mt19937 random(33);
-    std::normal_distribution<float> noise;
-    std::vector<float> input(nchans * samples), output(plan.get_dmt_size());
+    auto input = dmt::test_random::normal<float>(nchans * samples, 33);
+    std::vector<float> output(plan.get_dmt_size());
     for (SizeType c = 0; c < nchans; ++c) {
-        for (SizeType t = 0; t < samples; ++t) {
-            input[(c * samples) + t] = kill[c] != 0 ? noise(random) : 0.0F;
+        if (kill[c] == 0) {
+            std::fill_n(input.begin() +
+                            static_cast<std::ptrdiff_t>(c * samples),
+                        samples, 0.0F);
         }
     }
     fdmt.reset(input, output);

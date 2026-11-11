@@ -9,6 +9,7 @@
 #include "dmt/engines.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
+#include "test_random.hpp"
 
 using namespace boxcar_test;
 using algorithms::FDMTFFT;
@@ -128,15 +129,12 @@ TEST_CASE("FDMTFFTBoxcar analytical scaling predicts Gaussian noise",
             FDMTFFT fft(700, 1200, 16, samples, 0.001F,
                         plan.get_dt_grid_final(), smear, "valid", Exec::cpu(),
                         1, true, mask);
-            std::mt19937 random(32);
-            std::normal_distribution<float> noise;
             std::vector<float> input(16 * samples);
             std::vector<float> output(plan.get_dmt_size());
             // Two blocks: the second is fully warm.
             for (int block = 0; block < 2; ++block) {
-                for (auto& x : input) {
-                    x = noise(random);
-                }
+                dmt::test_random::fill_normal<float>(
+                    input, 32 + static_cast<uint64_t>(block));
                 fft.execute(input, output);
             }
             const auto& p = search.get_search_plans().front();
@@ -224,16 +222,13 @@ TEST_CASE("FDMTFFTBoxcar warmup is each masked row's exact cold support",
     const plans::FDMTPlan plan(700.0F, 1200.0F, nchans, nsamps, 0.001F, 32, 0,
                                1, "valid");
     BoxcarConfig cfg;
-    cfg.max_boxcar = 8;
-    std::mt19937 random(5);
-    std::uniform_real_distribution<float> value(1.0F, 2.0F);
+    cfg.max_boxcar    = 8;
+    uint64_t seed     = 5;
     const auto blocks = [&](SizeType n) {
-        std::vector<std::vector<float>> out(
-            n, std::vector<float>(nchans * nsamps));
-        for (auto& block : out) {
-            for (auto& x : block) {
-                x = value(random);
-            }
+        std::vector<std::vector<float>> out;
+        for (SizeType k = 0; k < n; ++k) {
+            out.push_back(dmt::test_random::uniform_real<float>(
+                nchans * nsamps, seed++, 1.0F, 2.0F));
         }
         return out;
     };

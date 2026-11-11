@@ -17,6 +17,7 @@
 #include "dmt/fdmt_box_weights.hpp"
 
 #include "test_helpers.hpp"
+#include "test_random.hpp"
 
 // Performance parameters (fuse_levels / int_tree), construction-time memory,
 // and packed low-bit input. Every variant must be bit-identical to the
@@ -39,13 +40,7 @@ constexpr SizeType kUnfused = 0;
 constexpr bool kFloatTree   = false;
 
 std::vector<float> random_waterfall(SizeType n, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_real_distribution<float> dis(-1.0F, 1.0F);
-    std::vector<float> wf(n);
-    for (auto& v : wf) {
-        v = dis(gen);
-    }
-    return wf;
+    return dmt::test_random::uniform_real<float>(n, seed, -1.0F, 1.0F);
 }
 
 // Random nbits-wide unsigned samples, as float (reference) and packed rows.
@@ -56,16 +51,15 @@ struct PackedWaterfall {
 
 PackedWaterfall
 random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(
-        0, bit_pack_utils::max_sample_value(nbits));
+    const auto vals = dmt::test_random::uniform_int<uint32_t>(
+        nrows * nsamps, seed, 0, bit_pack_utils::max_sample_value(nbits));
     const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
     PackedWaterfall out{.values = std::vector<float>(nrows * nsamps),
                         .packed = std::vector<uint8_t>(nrows * row_bytes, 0)};
     for (SizeType r = 0; r < nrows; ++r) {
         uint8_t* row = out.packed.data() + (r * row_bytes);
         for (SizeType s = 0; s < nsamps; ++s) {
-            const uint32_t v             = dis(gen);
+            const uint32_t v             = vals[(r * nsamps) + s];
             out.values[(r * nsamps) + s] = static_cast<float>(v);
             switch (nbits) {
             case 1:
@@ -321,12 +315,8 @@ TEST_CASE("FDMT level-0 box rows match a float64 reference",
         DYNAMIC_SECTION("mode=" << mode) {
             FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 90, 60, 1, true,
                       mode);
-            std::mt19937 gen(5);
-            std::normal_distribution<float> dis(1000.0F, 1.0F);
-            std::vector<float> wf(nchans * nsamps);
-            for (auto& v : wf) {
-                v = dis(gen);
-            }
+            const auto wf = dmt::test_random::normal<float>(nchans * nsamps, 5,
+                                                            1000.0F, 1.0F);
             std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
             fdmt.reset(wf, dmt);
             const auto level0 = fdmt.view_level_data();

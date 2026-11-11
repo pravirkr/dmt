@@ -16,6 +16,7 @@
 #include "dmt/common/types.hpp"
 
 #include "test_helpers.hpp"
+#include "test_random.hpp"
 
 // The balanced merge tree and its staggered subbands (FDMTPlan
 // subband_depth): tree shape, the value of every node in every engine path,
@@ -112,12 +113,8 @@ TEST_CASE("FDMT subband depth leaves the root transform unchanged",
     for (const SizeType nchans : {SizeType{12}, SizeType{37}, SizeType{64}}) {
         const SizeType nsamps = 256;
         const FDMTPlan base(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 90, -30);
-        std::mt19937 random(7);
-        std::uniform_int_distribution<int> value(-8, 8);
-        std::vector<float> input(nchans * nsamps);
-        for (auto& x : input) {
-            x = static_cast<float>(value(random));
-        }
+        const auto input =
+            dmt::test_random::uniform_int<float>(nchans * nsamps, 7, -8, 8);
         for (SizeType depth = 1; depth < base.get_niters(); ++depth) {
             const FDMTPlan plan(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 90,
                                 -30, 1, "valid", depth);
@@ -155,12 +152,8 @@ TEST_CASE("FDMT stepper computes every tree and staggered subband exactly",
         const FDMTPlan plan(800.0F, 1400.0F, nchans, nsamps, 0.001F, 60, -20, 1,
                             "valid", depth);
         const auto& pc = plan.get_container();
-        std::mt19937 random(11);
-        std::uniform_int_distribution<int> value(0, 15);
-        std::vector<float> input(nchans * nsamps);
-        for (auto& x : input) {
-            x = static_cast<float>(value(random));
-        }
+        const auto input =
+            dmt::test_random::uniform_int<float>(nchans * nsamps, 11, 0, 15);
         DYNAMIC_SECTION("nchans=" << nchans << " depth=" << depth) {
             FDMT fdmt(plan, false, Exec::cpu(2), 1, 0, false, nsamps);
             std::vector<float> output(plan.get_dmt_size());
@@ -221,12 +214,8 @@ TEST_CASE("FDMT stepper subbands stay exact across streamed blocks",
         const FDMTPlan plan(800.0F, 1400.0F, nchans, nsamps, 0.001F, 50, -15, 1,
                             "valid", depth);
         const auto& pc = plan.get_container();
-        std::mt19937 random(5);
-        std::uniform_int_distribution<int> value(0, 15);
-        std::vector<float> stream(nchans * 2 * nsamps);
-        for (auto& x : stream) {
-            x = static_cast<float>(value(random));
-        }
+        const auto stream =
+            dmt::test_random::uniform_int<float>(nchans * 2 * nsamps, 5, 0, 15);
         std::vector<float> blocks[2];
         for (SizeType b = 0; b < 2; ++b) {
             blocks[b].resize(nchans * nsamps);
@@ -291,12 +280,8 @@ TEST_CASE("FDMTFFT plan constructor exposes staggered subbands",
     const FDMTPlan plan(800.0F, 1400.0F, nchans, nsamps, 0.001F, 60, -20, 1,
                         "valid", 3);
     const auto& pc = plan.get_container();
-    std::mt19937 random(9);
-    std::uniform_int_distribution<int> value(0, 15);
-    std::vector<float> input(nchans * nsamps);
-    for (auto& x : input) {
-        x = static_cast<float>(value(random));
-    }
+    const auto input =
+        dmt::test_random::uniform_int<float>(nchans * nsamps, 9, 0, 15);
     // Rounded delays: every node equals FDMT's (up to FFT rounding).
     FDMTFFT fft(plan, false, Exec::cpu(2), 1, false);
     FDMT ref(plan, false, Exec::cpu(2), 1, 0, false, nsamps);
