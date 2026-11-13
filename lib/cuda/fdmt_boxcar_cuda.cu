@@ -23,6 +23,7 @@
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
+#include "dmt/logging.hpp"
 
 namespace dmt::algorithms::detail {
 namespace {
@@ -1441,6 +1442,7 @@ public:
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1) {
+        m_shared_limit = cfg.boxcar_shared_limit;
         gpu_utils::set_device(m_device);
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count ||
@@ -1903,7 +1905,15 @@ public:
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
     }
-    std::string search_path() const override { return m_driver->search_path(); }
+    std::string search_path() const override {
+        std::string path = m_driver->search_path();
+        if (m_screen_dropped || m_block_shrunk) {
+            path += fmt::format(" (boxcar: {}-thread blocks{})",
+                                m_block_threads,
+                                m_screen_dropped ? ", no width screen" : "");
+        }
+        return path;
+    }
     SizeType fuse_levels() const noexcept override {
         return m_driver->fuse_levels();
     }
@@ -2134,16 +2144,66 @@ private:
             cudaDeviceGetAttribute(
                 &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
             "FDMTBoxcar: shared memory limit");
-        const auto limit = static_cast<SizeType>(optin);
+        const auto limit = m_shared_limit != 0
+                               ? std::min(m_shared_limit,
+                                          static_cast<SizeType>(optin))
+                               : static_cast<SizeType>(optin);
         const SizeType eff_chunk =
             std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
-        if (eff_chunk <= 64 * kItems) {
+        int threads = eff_chunk <= 64 * kItems    ? 64
+                      : eff_chunk <= 128 * kItems ? 128
+                                                  : 256;
+        // Wide boxes on small-shared-memory GPUs: when the block's prefix
+        // ring does not fit, drop the width screen (its second ring; the
+        // screen only skips work, candidates are the same), then take
+        // smaller blocks (shorter tile and ring, smaller run state).
+        // Configurations that fit are unchanged.
+        if (!m_screen_groups_d.empty() &&
+            shared_need<T>(threads, true) > limit) {
+            m_screen_groups_d.clear();
+            m_screen_thresholds_d.clear();
+            m_screen_m1_d.clear();
+            m_screen_groups_d.shrink_to_fit();
+            m_screen_thresholds_d.shrink_to_fit();
+            m_screen_m1_d.shrink_to_fit();
+            m_screen_dropped = true;
+        }
+        const bool screen = !m_screen_groups_d.empty();
+        while (threads > 64 && shared_need<T>(threads, screen) > limit) {
+            threads /= 2;
+            m_block_shrunk = true;
+        }
+        if (m_screen_dropped || m_block_shrunk) {
+            logging::debug("FDMTBoxcar: max_boxcar {} in {} B of shared "
+                           "memory: {}-thread blocks{}",
+                           m_width, limit, threads,
+                           m_screen_dropped ? ", no width screen" : "");
+        }
+        if (threads == 64) {
             configure_shared_block<T, 64>(limit);
-        } else if (eff_chunk <= 128 * kItems) {
+        } else if (threads == 128) {
             configure_shared_block<T, 128>(limit);
         } else {
             configure_shared_block<T, 256>(limit);
         }
+    }
+    /// Shared memory a block needs at the least (configure_shared_block):
+    /// run state, prefix ring and, with the width screen, its ring.
+    template <typename T>
+    [[nodiscard]] SizeType shared_need(int threads, bool screen) const {
+        const auto need = [&]<int kBlockThreads>() {
+            const SizeType ring =
+                std::bit_ceil(m_width + SizeType{kBlockThreads * kItems});
+            SizeType bytes =
+                sizeof(BoxcarShared<T, kBlockThreads>) + (ring * sizeof(T));
+            if (screen) {
+                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(T));
+            }
+            return bytes;
+        };
+        return threads == 64    ? need.template operator()<64>()
+               : threads == 128 ? need.template operator()<128>()
+                                : need.template operator()<256>();
     }
     /// The block to search under this call's kill runs. With the mask
     /// applied by the transform (FDMT): the block itself, the keep bytes
@@ -2455,6 +2515,11 @@ private:
     thrust::device_vector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
     int m_block_threads   = 256;
+    // FDMTEngineConfig::boxcar_shared_limit (0: the device's opt-in limit).
+    SizeType m_shared_limit = 0;
+    // Fallbacks taken to fit max_boxcar in shared memory (configure_shared).
+    bool m_screen_dropped = false;
+    bool m_block_shrunk   = false;
     thrust::device_vector<BoxcarScreenGroup> m_screen_groups_d;
     thrust::device_vector<float> m_screen_thresholds_d;
     thrust::device_vector<float> m_screen_m1_d; ///< packed: mean per sample

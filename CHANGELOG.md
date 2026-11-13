@@ -43,6 +43,13 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Fixed
 
+- `FDMTBoxcar` on the GPU no longer rejects wide boxes that don't fit a
+  block's shared memory. It now drops the width screen and then uses
+  smaller blocks, with the same candidates. Packed input with
+  `max_boxcar` 4096 and dense widths (`wtsp` near 1) failed this way even
+  on 99 KB GPUs (L40); GPUs with 64 KB per block fit wider boxes than
+  before. Configurations that fitted are unchanged.
+
 - `FDMTBoxcar` on the GPU applies kill masks (constructor and per-call)
   inside the FDMT, which reads killed channels as zero from one byte per beam
   and channel. It no longer copies each block to a staging buffer to zero
