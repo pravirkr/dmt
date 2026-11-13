@@ -87,6 +87,10 @@ struct FDMTEngineConfig {
     /// Private (GPU): take the skewed direct levels and target-ring top
     /// even when the unskewed direct top fits its ring budget (tests).
     bool force_skewed_direct{false};
+    /// Private (GPU): the engine only runs execute_search() (FDMTBoxcar),
+    /// which never writes a full-block root plane, so the root output is
+    /// exempt from the 32-bit extent check; root-writing calls then throw.
+    bool search_only{false};
 };
 
 class FDMTEngine {

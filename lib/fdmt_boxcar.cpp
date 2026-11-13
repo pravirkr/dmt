@@ -63,6 +63,7 @@ public:
             .search_upper_levels = this->plan.get_subband_depth() > 0,
             .search_nbits        = config.input_nbits,
         };
+        cfg.search_only = true;
         // The boxcar's own buffers are fixed by plan and config; the FDMT
         // takes its path within the rest of the budget.
         const SizeType fixed = boxcar_bytes(smear, exec);

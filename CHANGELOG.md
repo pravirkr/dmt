@@ -6,6 +6,15 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `FDMTBoxcar` on the GPU no longer rejects plans whose full-block root
+  plane (`ndt × nsamps`) exceeds 2^31 elements. The search consumes the
+  root chunk by chunk and never allocates that plane, so the 32-bit output
+  check only applies to the root-writing `FDMT` calls, which still enforce
+  it. Fine DM grids on long blocks (e.g. Parkes UWL, 9466 trials ×
+  262144 samples) now construct.
+
 ## [0.8.0] - 2026-11-11
 
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each

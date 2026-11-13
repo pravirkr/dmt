@@ -530,6 +530,7 @@ private:
     bool m_search_upper{false};
     SizeType m_max_memory{kFDMTDefaultMaxMemory}; // FDMTEngineConfig
     bool m_force_skewed{false}; // FDMTEngineConfig::force_skewed_direct
+    bool m_search_only{false};  // FDMTEngineConfig::search_only
     bool m_top_chunk{false};
     // Samples of the rings' reach streamed since a load_history().
     SizeType m_top_filled{0};
@@ -580,6 +581,9 @@ private:
     // arithmetic (only the beam-strided part is 64-bit). Reject plans whose
     // per-beam extents do not fit, instead of silently wrapping indices.
     void check_int32_extents() const;
+    /// Throws for a search-only engine (FDMTEngineConfig::search_only),
+    /// whose root output may exceed the 32-bit range.
+    void check_root_output() const;
 
     /// Tree history offsets are unsigned 32-bit (plans_cuda.cuh), taken from
     /// the full tree layout. Checked against the highest offset an active

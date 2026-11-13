@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -121,6 +122,57 @@ TEST_CASE("FDMTBoxcar GPU supports width 4096 and bounded overflow",
     limited.reset_history();
     std::ranges::fill(loud, 0.0F);
     CHECK(limited.execute(loud).candidates.empty());
+}
+
+TEST_CASE("FDMTBoxcar GPU searches plans whose root plane exceeds 32 bits",
+          "[gpu][parity][boxcar]") {
+    // 1024 delay trials x 2,101,248 samples: the root plane has more than
+    // INT32_MAX elements. Standalone FDMT on the GPU rejects it (it writes
+    // that plane); FDMTBoxcar never materialises it and must match the CPU.
+    constexpr SizeType kNsamps = (SizeType{1} << 21) + 4096;
+    constexpr IndexType kDtMax = 1023;
+    static_assert(SizeType{kDtMax + 1} * kNsamps >
+                  SizeType{std::numeric_limits<int32_t>::max()});
+    CHECK_THROWS_AS(FDMT(1200.0F, 1500.0F, 4, kNsamps, 0.001F, kDtMax, 0, 1,
+                         true, "valid",
+                         {algorithms::detail::kGPUBackend, 1, 0}),
+                    std::invalid_argument);
+
+    const plans::FDMTPlan plan(1200.0F, 1500.0F, 4, kNsamps, 0.001F, kDtMax);
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> dist(-3, 3);
+    std::vector<float> block(plan.get_nchans() * kNsamps);
+    for (auto& v : block) {
+        v = static_cast<float>(dist(rng));
+    }
+    // A bright pulse at zero delay, late in the block (row offsets past the
+    // 32-bit range of the full-block root layout).
+    const SizeType t_pulse = kNsamps - 50000;
+    for (SizeType c = 0; c < plan.get_nchans(); ++c) {
+        for (SizeType t = t_pulse; t < t_pulse + 3; ++t) {
+            block[(c * kNsamps) + t] += 40.0F;
+        }
+    }
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 4;
+    cfg.detect_thresh    = 7.0F;
+    cfg.noise_sigma      = 2.0F;
+    cfg.peak_mode        = PeakFindingMode::kContiguousPeakAcrossWidths;
+    cfg.max_candidates   = SizeType{1} << 16;
+    cfg.max_cands_per_dm = 0;
+    FDMTBoxcar cpu(plan, cfg, true, {Backend::kCPU, 4, 0});
+    FDMTBoxcar gpu(plan, cfg, true, {algorithms::detail::kGPUBackend, 1, 0});
+    std::vector<RawCandidate> expected;
+    std::vector<RawCandidate> actual;
+    append(expected, cpu.execute(block));
+    append(expected, cpu.flush());
+    append(actual, gpu.execute(block));
+    append(actual, gpu.flush());
+    REQUIRE_FALSE(expected.empty());
+    CHECK(std::ranges::any_of(expected, [&](const RawCandidate& c) {
+        return c.peak_sample >= t_pulse && c.peak_sample < t_pulse + 8;
+    }));
+    compare(actual, expected);
 }
 
 TEST_CASE("FDMTBoxcar GPU accepts all 4096 integer width trials",
