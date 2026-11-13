@@ -40,7 +40,11 @@ struct FDMTBoxcarMemoryUsage {
  * normalized to zero mean and known common noise sigma. Analytical S/N
  * assumes independent channel/time noise before the modeled FDMT filtering;
  * masking other than kill_mask (below) or additional correlations require
- * upstream calibration.
+ * upstream calibration. Red noise (slow drifts correlated over many
+ * samples) inflates the S/N of wide boxes, and the search keeps no
+ * baseline beyond max_boxcar samples, so detrend each channel upstream on
+ * timescales several times the widest box and keep max_boxcar at about
+ * 100 ms or less.
  * For packed unsigned input set config.input_nbits (1/2/4/8/16), input_mean
  * and noise_sigma in code units, and execute byte spans. Packed rows follow
  * FDMT byte order with independent row padding; 32 denotes float32 input.

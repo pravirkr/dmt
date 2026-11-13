@@ -16,7 +16,7 @@
 #include <omp.h>
 
 #if defined(__AVX512F__)
-#include <immintrin.h>
+#include "dmt/x86_intrinsics.hpp"
 #endif
 
 #include "dmt/common/plans.hpp"

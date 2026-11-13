@@ -21,6 +21,9 @@ snr = dmt_plane / fdmt.get_effective_sigma_grid()[:, None]
 ```{warning}
 The sigma assumes independent channels with **zero mean and unit variance**.
 Normalise each channel first; on raw data the S/N is meaningless.
+It also assumes white noise: slow drifts (red noise) make wide boxes
+noisier than their sigma, so detrend upstream and keep boxcars short (see
+[Red noise and wide boxcars](fdmt_boxcar.md#red-noise-and-wide-boxcars)).
 ```
 
 - **`FDMTPlan`** has the same methods. Pass `use_box_smearing` and

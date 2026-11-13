@@ -20,7 +20,7 @@
 #include <sys/mman.h>
 #endif
 #if defined(__AVX__)
-#include <immintrin.h>
+#include "dmt/x86_intrinsics.hpp"
 #endif
 
 #include <array>

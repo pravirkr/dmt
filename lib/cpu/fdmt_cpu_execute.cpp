@@ -23,7 +23,7 @@
 #include "fdmt_cpu_engine.hpp"
 
 #if defined(__AVX__)
-#include <immintrin.h>
+#include "dmt/x86_intrinsics.hpp"
 #endif
 
 // CPU FDMT engine: execute(), the boxcar search input and the tree

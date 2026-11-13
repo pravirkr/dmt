@@ -17,6 +17,10 @@ All notable changes to `dmt` are listed here. The format follows
   early RFI storm no longer hides a bright burst later in the block. The
   per-row stores count in the memory budget, so `max_cands_per_dm` must be
   positive and small. The default `kDropNew` (first come) is unchanged.
+- Pipeline guide section on red noise and wide boxcars: slow drifts inflate
+  the S/N of wide boxes and the search cannot correct for them, so detrend
+  each channel upstream and keep `max_boxcar` at about 100 ms or less.
+  `kKeepBrightest` does not help against red-noise candidates.
 
 ### Changed
 
@@ -44,6 +48,11 @@ All notable changes to `dmt` are listed here. The format follows
   block's tables for lagged rows on the next call.
 - Per-call kill masks: an unchanged mask reuses its kill runs instead of
   rebuilding them every call.
+
+- GCC 12 Release builds with AVX-512 no longer print hundreds of false
+  `-Wmaybe-uninitialized` warnings from its own `avx512fintrin.h`
+  (`_mm512_undefined_epi32`, GCC PR 105593). The warning is silenced in
+  that header only.
 
 - `FDMTBoxcar` on the GPU no longer rejects plans whose full-block root
   plane (`ndt × nsamps`) exceeds 2^31 elements. The search consumes the

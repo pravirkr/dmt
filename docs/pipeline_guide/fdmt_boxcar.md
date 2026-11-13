@@ -41,6 +41,35 @@ including each subband's tree lineage.
 `FDMTPlan.get_effective_sigma_grid(width)` already gives sigma for the raw
 full-band sum, so **do not multiply it by the number of channels**.
 
+### Red noise and wide boxcars
+
+The sigma of a width-`W` box assumes white input noise. Slow variation
+that survives upstream (gain drift, baseline wander, zero-DM power, red
+noise from the receiver or RFI) is correlated over many samples, so a box's
+real variance grows faster than its sigma. The excess grows with `W`. At
+the widest widths, stretches of plain noise then cross the threshold at a
+high S/N in every DM row, and a pipeline sees a flood of wide candidates.
+
+The search cannot correct for this. It does not estimate a baseline or RMS
+from the dedispersed rows, and its running state per row is only the last
+`max_boxcar` samples, so it cannot see trends longer than the widest box.
+Correct for it upstream:
+
+- Detrend each channel on a timescale several times longer than the widest
+  box: subtract a running median or mean, or high-pass filter, before
+  normalizing. Zero-DM subtraction alone doesn't remove drifts that differ
+  between channels.
+- Keep `max_boxcar` at about 100 ms or less (in samples, `0.1 / tsamp`)
+  unless the input is known to be white on longer timescales. Bursts wider
+  than that are rare, and every extra width adds red-noise candidates.
+- To check, run the search on data without a burst and look at the S/N
+  distribution per width: on white input it follows the model at every
+  width; red noise shows up as a tail that grows with width.
+
+`OverflowPolicy.KEEP_BRIGHTEST` (below) doesn't help here. It keeps the
+highest S/N, and red-noise candidates at wide widths can have a higher S/N
+than a real burst, so they still take the quota.
+
 ### Kill mask
 
 Pass `kill_mask=` (Python, keyword-only; C++: the trailing

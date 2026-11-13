@@ -14,7 +14,7 @@
 #include <fmt/format.h>
 
 #if defined(__AVX2__)
-#include <immintrin.h>
+#include "dmt/x86_intrinsics.hpp"
 #elif defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif

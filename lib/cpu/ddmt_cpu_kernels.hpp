@@ -7,7 +7,7 @@
 #include <type_traits>
 
 #if defined(__AVX512F__) || defined(__AVX2__)
-#include <immintrin.h>
+#include "dmt/x86_intrinsics.hpp"
 #endif
 
 /**
