@@ -775,6 +775,34 @@ TEST_CASE("FDMTBoxcar skewed path: per-call masks match the tree",
     }
 }
 
+TEST_CASE("FDMTBoxcar skewed path: a call failing after its mask commit "
+          "leaves the stream unchanged",
+          "[fdmt_cpu][cpu][skew][boxcar][mask]") {
+    // The ring keeps two blocks' tables on the skewed path. A call that
+    // throws after committing its entry must not leave that entry behind
+    // (it would displace the previous block's tables for lagged rows).
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    constexpr SizeType kBlocks = 4;
+    const auto plan            = make_plan(kCryopafLband, 4096, 400.0F, 1);
+    const auto masks           = changing_masks(plan.get_nchans(), kBlocks);
+    const auto planes          = algorithms::detail::make_boxcar_plans(
+        plan, skew_search_test::search_config(false), true);
+    const auto clean =
+        run_subband_search(plan, Exec::cpu(4), true, false, kBlocks, 1024, 1,
+                           true, &masks, 1.5F, &planes);
+    REQUIRE(clean.latency > 0);
+    for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
+        DYNAMIC_SECTION("fail before block " << fail_at) {
+            const auto failed = run_subband_search(
+                plan, Exec::cpu(4), true, false, kBlocks, 1024, 1, true, &masks,
+                1.5F, &planes, fail_at);
+            require_same_before(failed.candidates, clean.candidates, UINT64_MAX,
+                                0.0F);
+        }
+    }
+}
+
 TEST_CASE("FDMTBoxcar skewed path: per-call masks with the width screen",
           "[fdmt_cpu][cpu][skew][boxcar][mask]") {
     // Every width up to 24 turns the width screen on, and 4096-sample
@@ -901,6 +929,29 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: per-call masks match the CPU tree",
             REQUIRE(gpu.latency > 0);
             require_same_before(gpu.candidates, cpu.candidates, UINT64_MAX,
                                 2e-5F);
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar (gpu) windowed top: a call failing after its mask "
+          "commit leaves the stream unchanged",
+          "[fdmt_cuda][cuda][gpu][skew][boxcar][mask]") {
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    constexpr SizeType kBlocks = 5;
+    const auto plan            = make_plan(kCryopafLband, 4096, 600.0F, 1);
+    const auto masks           = changing_masks(plan.get_nchans(), kBlocks);
+    const auto clean = run_subband_search(plan, Exec::cuda(0), true, false,
+                                          kBlocks, 1024, 0, true, &masks);
+    REQUIRE(clean.path.find("windowed") != std::string::npos);
+    REQUIRE(clean.latency > 0);
+    for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
+        DYNAMIC_SECTION("fail before block " << fail_at) {
+            const auto failed = run_subband_search(
+                plan, Exec::cuda(0), true, false, kBlocks, 1024, 0, true,
+                &masks, 1.5F, nullptr, fail_at);
+            require_same_before(failed.candidates, clean.candidates, UINT64_MAX,
+                                0.0F);
         }
     }
 }

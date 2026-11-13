@@ -25,6 +25,14 @@ All notable changes to `dmt` are listed here. The format follows
   device buffer (6.5 GiB for 6656 channels × 262144 samples), which could
   push a configuration over the budget. Candidates are bit-identical.
 
+- Per-call kill masks: a call that throws after the engine took its mask
+  (an allocation or launch failure during the search) no longer leaves that
+  mask's noise tables in the stream's history. On paths with a search
+  latency (skewed path, GPU windowed top) they replaced the previous
+  block's tables for lagged rows on the next call.
+- Per-call kill masks: an unchanged mask reuses its kill runs instead of
+  rebuilding them every call.
+
 - `FDMTBoxcar` on the GPU no longer rejects plans whose full-block root
   plane (`ndt × nsamps`) exceeds 2^31 elements. The search consumes the
   root chunk by chunk and never allocates that plane, so the 32-bit output

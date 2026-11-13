@@ -201,8 +201,9 @@ public:
         detail::BlockNoise entry;
         entry.first_sample = engine->stream_position();
         entry.steady       = tables_for(effective);
+        const bool changed = effective != prev_mask;
         // The first block of a stream has no previous block to straddle.
-        if (entry.first_sample > 0 && effective != prev_mask) {
+        if (entry.first_sample > 0 && changed) {
             union_mask.resize(effective.size());
             for (SizeType c = 0; c < effective.size(); ++c) {
                 union_mask[c] = effective[c] | prev_mask[c];
@@ -210,11 +211,18 @@ public:
             entry.transition        = true;
             entry.transition_tables = tables_for(union_mask);
         }
-        entry.kill_runs = detail::boxcar_kill_runs(effective);
+        // An unchanged mask reuses its kill runs instead of rebuilding them.
+        if (changed) {
+            next_runs = detail::boxcar_kill_runs(effective);
+        }
+        entry.kill_runs = changed ? next_runs : prev_runs;
         engine->push_block_noise(std::move(entry));
         try {
             auto view = call();
-            prev_mask.swap(effective);
+            if (changed) {
+                prev_mask.swap(effective);
+                prev_runs.swap(next_runs);
+            }
             return view;
         } catch (...) {
             engine->drop_block_noise();
@@ -287,6 +295,7 @@ public:
         engine->enable_block_noise(model->support());
         noise     = std::move(model);
         prev_mask = ctor_mask;
+        prev_runs = kill_runs;
         cache.clear();
     }
     void check_stream(Stream stream) const {
@@ -311,6 +320,8 @@ public:
     // with its recent tables (created by the first per-call mask).
     std::vector<uint8_t> ctor_mask;
     std::vector<uint8_t> prev_mask;
+    /// Kill runs of prev_mask, and of a changed mask until its call ends.
+    std::vector<std::pair<SizeType, SizeType>> prev_runs, next_runs;
     std::vector<uint8_t> effective;
     std::vector<uint8_t> union_mask;
     std::unique_ptr<detail::BoxcarNoiseModel> noise;
@@ -391,6 +402,7 @@ void FDMTBoxcar::reset_history(Stream stream) {
     m_impl->drain_state.reset();
     if (m_impl->noise) {
         m_impl->prev_mask = m_impl->ctor_mask; // same size: no allocation
+        m_impl->prev_runs = m_impl->kill_runs;
     }
 }
 CandidateResultView FDMTBoxcar::drain() {

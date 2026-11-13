@@ -8,8 +8,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <random>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -61,6 +64,68 @@ inline BoxcarConfig search_config(bool packed, float wtsp = 1.5F) {
                         true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
 }
 
+/// A driver that throws from the next search() once armed: a failure after
+/// the engine committed the call's kill-mask entry (allocation, launch).
+class ThrowingDriver final : public algorithms::detail::BoxcarDriver {
+public:
+    ThrowingDriver(std::unique_ptr<BoxcarDriver> inner, bool* armed)
+        : m_inner(std::move(inner)),
+          m_armed(armed) {}
+    void search(std::span<const float> in,
+                algorithms::detail::FDMTSearchSink& sink) override {
+        trip();
+        m_inner->search(in, sink);
+    }
+    void search(DeviceSpan<const float> in,
+                algorithms::detail::FDMTSearchSink& sink,
+                Stream stream) override {
+        trip();
+        m_inner->search(in, sink, stream);
+    }
+    void search(std::span<const uint8_t> in,
+                SizeType nbits,
+                algorithms::detail::FDMTSearchSink& sink) override {
+        trip();
+        m_inner->search(in, nbits, sink);
+    }
+    void search(DeviceSpan<const uint8_t> in,
+                SizeType nbits,
+                algorithms::detail::FDMTSearchSink& sink,
+                Stream stream) override {
+        trip();
+        m_inner->search(in, nbits, sink, stream);
+    }
+    void reset(Stream stream) override { m_inner->reset(stream); }
+    bool set_search_keep(const uint8_t* keep) override {
+        return m_inner->set_search_keep(keep);
+    }
+    [[nodiscard]] algorithms::FDMTMemoryUsage memory() const noexcept override {
+        return m_inner->memory();
+    }
+    [[nodiscard]] SizeType chunk_nsamps() const noexcept override {
+        return m_inner->chunk_nsamps();
+    }
+    [[nodiscard]] SizeType fuse_levels() const noexcept override {
+        return m_inner->fuse_levels();
+    }
+    [[nodiscard]] std::string search_path() const override {
+        return m_inner->search_path();
+    }
+    [[nodiscard]] uint64_t search_latency() const noexcept override {
+        return m_inner->search_latency();
+    }
+
+private:
+    void trip() {
+        if (*m_armed) {
+            *m_armed = false;
+            throw std::runtime_error("injected search failure");
+        }
+    }
+    std::unique_ptr<BoxcarDriver> m_inner;
+    bool* m_armed;
+};
+
 /// Streams `nblocks` blocks through FDMTBoxcar's engine on `exec`, on the
 /// skewed path (`skew`) or the tree path, then flushes (or drains). With
 /// `masks` (float input), block b runs with per-call kill mask masks[b]
@@ -68,6 +133,9 @@ inline BoxcarConfig search_config(bool packed, float wtsp = 1.5F) {
 /// boxcar width spacing (search_config()). `planes_in`: the result of
 /// make_boxcar_plans(plan, search_config(packed, wtsp), true) when the
 /// caller already has it (it dominates the setup on wide plans).
+/// `fail_at` (with `masks`): before block fail_at, a call with a different
+/// mask throws after the engine committed it; the engine's
+/// drop_block_noise() must leave the stream as if it never happened.
 inline SearchRun run_subband_search(
     const plans::FDMTPlan& plan,
     Exec exec,
@@ -79,7 +147,8 @@ inline SearchRun run_subband_search(
     bool drain                                           = false,
     const std::vector<std::vector<uint8_t>>* masks       = nullptr,
     float wtsp                                           = 1.5F,
-    const std::vector<plans::BoxcarPlanePlan>* planes_in = nullptr) {
+    const std::vector<plans::BoxcarPlanePlan>* planes_in = nullptr,
+    SizeType fail_at                                     = SIZE_MAX) {
     using namespace algorithms::detail; // NOLINT
     const auto box = search_config(packed, wtsp);
     const auto planes =
@@ -97,15 +166,18 @@ inline SearchRun run_subband_search(
     cfg.force_skewed_direct = skew;
     cfg.skew_leaf           = leaf;
     const bool cpu          = exec.backend == Backend::kCPU;
-    auto engine =
-        cpu ? make_fdmt_boxcar_cpu(plan, box, planes, cfg,
-                                   make_boxcar_driver(make_fdmt_cpu(plan, cfg)))
+    bool armed              = false;
+    const auto driver       = [&](std::unique_ptr<FDMTEngine> fdmt) {
+        return std::make_unique<ThrowingDriver>(
+            make_boxcar_driver(std::move(fdmt)), &armed);
+    };
+    auto engine = cpu ? make_fdmt_boxcar_cpu(plan, box, planes, cfg,
+                                             driver(make_fdmt_cpu(plan, cfg)))
 #ifdef DMT_ENABLE_GPU
-            : make_fdmt_boxcar_gpu(
-                  plan, box, planes, cfg,
-                  make_boxcar_driver(make_fdmt_gpu(plan, cfg)));
+                      : make_fdmt_boxcar_gpu(plan, box, planes, cfg,
+                                             driver(make_fdmt_gpu(plan, cfg)));
 #else
-            : nullptr;
+                      : nullptr;
 #endif
     SearchRun run;
     run.path         = engine->search_path();
@@ -116,10 +188,16 @@ inline SearchRun run_subband_search(
         model = std::make_unique<BoxcarNoiseModel>(plan, box, true, 4);
         engine->enable_block_noise(model->support());
     }
-    const auto push = [&](SizeType b) {
+    const auto push = [&](SizeType b, bool failing = false) {
         std::vector<uint8_t> eff(plan.get_nchans(), 1);
         for (SizeType c = 0; c < (*masks)[b].size(); ++c) {
             eff[c] = (*masks)[b][c] != 0 ? 1 : 0;
+        }
+        if (failing) {
+            // A different mask: the low half of the band killed.
+            for (SizeType c = 0; c < eff.size() / 2; ++c) {
+                eff[c] = 0;
+            }
         }
         const std::vector<uint8_t> ones(plan.get_nchans(), 1);
         const auto tables = [&](const std::vector<uint8_t>& m) {
@@ -138,7 +216,9 @@ inline SearchRun run_subband_search(
         }
         entry.kill_runs = boxcar_kill_runs(eff);
         engine->push_block_noise(std::move(entry));
-        prev = eff;
+        if (!failing) {
+            prev = eff;
+        }
     };
     // Candidate frontier (FDMTBoxcar::get_candidate_frontier()): every
     // later candidate begins at or after it, and it never decreases.
@@ -162,6 +242,14 @@ inline SearchRun run_subband_search(
     };
     for (SizeType b = 0; b < nblocks; ++b) {
         const auto blk = search_block(n, 900 + static_cast<unsigned>(b));
+        if (masks != nullptr && b == fail_at) {
+            push(b, true);
+            armed = true;
+            REQUIRE_THROWS_AS(
+                engine->execute(std::span<const float>(blk.values)),
+                std::runtime_error);
+            engine->drop_block_noise(); // as FDMTBoxcar does
+        }
         if (masks != nullptr) {
             push(b);
         }

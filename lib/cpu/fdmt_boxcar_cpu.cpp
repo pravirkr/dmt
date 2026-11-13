@@ -148,6 +148,7 @@ public:
         commit_block_noise();
         begin_result(m_plan.get_nsamps());
         m_driver->search(masked(waterfall, m_masked), *this);
+        m_commit_open = false;
         m_position += m_plan.get_nsamps();
         update_open_begin();
         return view();
@@ -245,7 +246,18 @@ public:
     void push_block_noise(BlockNoise entry) override {
         m_pending = std::move(entry);
     }
-    void drop_block_noise() noexcept override { m_pending.reset(); }
+    void drop_block_noise() noexcept override {
+        m_pending.reset();
+        // A call that threw after its commit: restore the ring.
+        if (m_commit_open) {
+            m_ring.pop_back();
+            if (m_evicted) {
+                m_ring.insert(m_ring.begin(), std::move(*m_evicted));
+                m_evicted.reset();
+            }
+            m_commit_open = false;
+        }
+    }
     void reset_history(Stream /*unused*/) override {
         if (m_noise_on) {
             reset_block_noise();
@@ -1198,6 +1210,8 @@ private:
     /// The ring back to one constructor entry (stream sample 0).
     void reset_block_noise() {
         m_pending.reset();
+        m_evicted.reset();
+        m_commit_open = false;
         m_ring.clear();
         BlockNoise first; // the constructor tables from stream sample 0
         first.kill_runs = m_kill_runs;
@@ -1219,10 +1233,13 @@ private:
             entry.kill_runs = m_kill_runs;
         }
         entry.first_sample = m_position;
+        m_evicted.reset();
         if (m_ring.size() == m_ring_size) {
+            m_evicted = std::move(m_ring.front());
             m_ring.erase(m_ring.begin());
         }
         m_ring.push_back(std::move(entry));
+        m_commit_open = true;
     }
     /// Index of the ring entry of stream sample `sample` (the oldest entry
     /// for samples before it).
@@ -1283,6 +1300,9 @@ private:
     std::shared_ptr<const std::vector<uint64_t>> m_support;
     std::vector<BlockNoise> m_ring; ///< oldest first, at most m_ring_size
     std::optional<BlockNoise> m_pending;
+    /// The entry the last commit evicted, kept until its call completes.
+    std::optional<BlockNoise> m_evicted;
+    bool m_commit_open   = false;
     SizeType m_ring_size = 1;
     std::vector<float> m_screen_thr; ///< per thread: min thresholds of a tile
 };

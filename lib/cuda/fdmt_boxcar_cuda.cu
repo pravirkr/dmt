@@ -1246,6 +1246,7 @@ public:
         commit_block_noise(stream);
         begin_result(m_plan.get_nsamps(), queue);
         m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
+        m_commit_open = false;
         m_position += m_plan.get_nsamps();
         release_slots(stream);
         update_open_begin(stream);
@@ -1394,7 +1395,10 @@ public:
     void push_block_noise(BlockNoise entry) override {
         m_pending = std::move(entry);
     }
-    void drop_block_noise() noexcept override { m_pending.reset(); }
+    void drop_block_noise() noexcept override {
+        m_pending.reset();
+        undo_commit();
+    }
     void reset_history(Stream queue) override {
         gpu_utils::set_device(m_device);
         const auto stream = static_cast<cudaStream_t>(queue.native);
@@ -1772,6 +1776,8 @@ private:
     }
     void reset_block_noise() {
         m_pending.reset();
+        m_evicted.reset();
+        m_commit_open = false;
         m_ring.clear();
         BlockNoise first; // the constructor tables from stream sample 0
         first.kill_runs = m_kill_runs;
@@ -1845,10 +1851,13 @@ private:
             entry.kill_runs = m_kill_runs;
         }
         entry.first_sample = m_position;
+        m_evicted.reset();
         if (m_ring.size() == ring_size()) {
+            m_evicted = std::move(m_ring.front());
             m_ring.erase(m_ring.begin());
         }
         m_ring.push_back(std::move(entry));
+        m_commit_open = true;
         BlockTables bt;
         const SizeType n   = table_floats();
         const SizeType off = m_ring.size() > 2 ? m_ring.size() - 2 : 0;
@@ -1868,6 +1877,20 @@ private:
             }
         }
         m_block_tables = bt;
+    }
+    /// A call that threw after commit_block_noise() (allocation, launch):
+    /// restore the ring as before the commit, so no entry describes a block
+    /// that never ran. m_block_tables is rebuilt by the next commit.
+    void undo_commit() noexcept {
+        if (!m_commit_open) {
+            return;
+        }
+        m_ring.pop_back();
+        if (m_evicted) {
+            m_ring.insert(m_ring.begin(), std::move(*m_evicted));
+            m_evicted.reset();
+        }
+        m_commit_open = false;
     }
     /// After a call's kernels: the slots its tables used are free for
     /// reuse only after them.
@@ -1990,6 +2013,9 @@ private:
     bool m_noise_on = false;
     std::vector<BlockNoise> m_ring; ///< oldest first, at most ring_size()
     std::optional<BlockNoise> m_pending;
+    /// The entry the last commit evicted, kept until its call completes.
+    std::optional<BlockNoise> m_evicted;
+    bool m_commit_open = false;
     std::vector<std::unique_ptr<TableSlot>> m_slots;
     thrust::device_vector<uint64_t> m_support_d;
     BlockTables m_block_tables{};
