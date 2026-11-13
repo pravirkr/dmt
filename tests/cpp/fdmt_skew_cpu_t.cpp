@@ -18,6 +18,7 @@
 #include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_skew.hpp"
 
+#include "fdmt_boxcar_overflow_reference.hpp"
 #include "skew_subband_search.hpp"
 #include "test_random.hpp"
 
@@ -953,6 +954,44 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: a call failing after its mask "
             require_same_before(failed.candidates, clean.candidates, UINT64_MAX,
                                 0.0F);
         }
+    }
+}
+
+TEST_CASE("FDMTBoxcar (gpu) windowed top: kKeepBrightest keeps the "
+          "brightest of each call",
+          "[fdmt_cuda][cuda][gpu][skew][boxcar][overflow]") {
+    // Lagged rows: a call searches some rows' endpoints of earlier blocks;
+    // the stores still hold exactly each call's brightest.
+    using skew_search_test::run_subband_search;
+    using skew_search_test::search_config;
+    constexpr SizeType kBlocks = 4;
+    const auto plan            = make_plan(kCryopafLband, 4096, 600.0F, 1);
+    const auto open            = search_config(false);
+    std::vector<std::vector<RawCandidate>> all;
+    const auto clean = run_subband_search(plan, Exec::cuda(0), true, false,
+                                          kBlocks, 1024, 0, false, nullptr,
+                                          1.5F, nullptr, SIZE_MAX, &open, &all);
+    REQUIRE(clean.path.find("windowed") != std::string::npos);
+    REQUIRE(clean.latency > 0);
+    for (const auto& [q, k] :
+         {std::pair<SizeType, SizeType>{2, 500}, {1, 100}}) {
+        auto cfg             = open;
+        cfg.overflow_policy  = OverflowPolicy::kKeepBrightest;
+        cfg.max_cands_per_dm = q;
+        cfg.max_candidates   = k;
+        std::vector<std::vector<RawCandidate>> kept;
+        (void)run_subband_search(plan, Exec::cuda(0), true, false, kBlocks,
+                                 1024, 0, false, nullptr, 1.5F, nullptr,
+                                 SIZE_MAX, &cfg, &kept);
+        REQUIRE(kept.size() == all.size());
+        SizeType dropped = 0;
+        for (SizeType i = 0; i < all.size(); ++i) {
+            CandidateCounts want;
+            boxcar_test::require_same(
+                kept[i], boxcar_test::keep_brightest(all[i], q, k, want));
+            dropped += want.dropped_per_dm + want.dropped_global;
+        }
+        CHECK(dropped > 0);
     }
 }
 

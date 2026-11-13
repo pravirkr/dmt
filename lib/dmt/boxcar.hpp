@@ -308,6 +308,16 @@ DMT_HD void boxcar_integer_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
+/// One kept candidate of a row's kKeepBrightest store on a GPU (the row
+/// supplies the rest of its RawCandidate).
+struct BoxcarKeepEntry {
+    uint64_t peak   = 0;
+    uint64_t begin  = 0;
+    uint64_t end    = 0;
+    float snr       = 0.0F;
+    uint32_t filter = 0;
+};
+
 /// OverflowPolicy::kKeepBrightest order: higher S/N first; ties to the
 /// earlier peak, then beam, subband, DM row, width and begin sample. A
 /// strict total order on the candidates of one call (a row emits at most

@@ -136,6 +136,9 @@ private:
 /// `fail_at` (with `masks`): before block fail_at, a call with a different
 /// mask throws after the engine committed it; the engine's
 /// drop_block_noise() must leave the stream as if it never happened.
+/// `box_in`: the boxcar configuration instead of search_config(); with
+/// `per_call`, each call's candidates are appended there (and overflow is
+/// allowed).
 inline SearchRun run_subband_search(
     const plans::FDMTPlan& plan,
     Exec exec,
@@ -148,9 +151,11 @@ inline SearchRun run_subband_search(
     const std::vector<std::vector<uint8_t>>* masks       = nullptr,
     float wtsp                                           = 1.5F,
     const std::vector<plans::BoxcarPlanePlan>* planes_in = nullptr,
-    SizeType fail_at                                     = SIZE_MAX) {
+    SizeType fail_at                                     = SIZE_MAX,
+    const BoxcarConfig* box_in                           = nullptr,
+    std::vector<std::vector<RawCandidate>>* per_call     = nullptr) {
     using namespace algorithms::detail; // NOLINT
-    const auto box = search_config(packed, wtsp);
+    const auto box = box_in != nullptr ? *box_in : search_config(packed, wtsp);
     const auto planes =
         planes_in != nullptr ? *planes_in : make_boxcar_plans(plan, box, true);
     const SizeType root = plan.get_niters();
@@ -230,7 +235,11 @@ inline SearchRun run_subband_search(
     };
     uint64_t frontier = 0;
     const auto add    = [&](const CandidateResultView& r) {
-        REQUIRE_FALSE(r.overflowed());
+        if (per_call != nullptr) {
+            per_call->emplace_back(r.candidates.begin(), r.candidates.end());
+        } else {
+            REQUIRE_FALSE(r.overflowed());
+        }
         for (const auto& c : r.candidates) {
             REQUIRE(c.begin_sample >= frontier);
         }

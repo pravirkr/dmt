@@ -540,6 +540,14 @@ def test_candidate_frontier(mode: PeakFindingMode) -> None:
 
 
 def test_keep_brightest_keeps_a_late_pulse_after_a_storm() -> None:
+    _keep_brightest_storm("cpu")
+
+
+def test_keep_brightest_storm_gpu(gpu_backend: str) -> None:
+    _keep_brightest_storm(gpu_backend)
+
+
+def _keep_brightest_storm(backend: str) -> None:
     # An early broadband storm fills every row's quota and the global
     # buffer under first come; KEEP_BRIGHTEST keeps the late bright pulse.
     plan = FDMTPlan(1200, 1500, 64, 4096, 0.001, 63, subband_depth=1)
@@ -560,11 +568,11 @@ def test_keep_brightest_keeps_a_late_pulse_after_a_storm() -> None:
             np.any((cands["peak_sample"] >= 3500) & (cands["peak_sample"] < 3520))
         )
 
-    first = FDMTBoxcar(plan, cfg).execute(data)
+    first = FDMTBoxcar(plan, cfg, backend=backend).execute(data)
     assert first.emitted_count < first.total_detected
     assert not pulse(first.candidates)
     cfg.overflow_policy = OverflowPolicy.KEEP_BRIGHTEST
-    kept = FDMTBoxcar(plan, cfg).execute(data)
+    kept = FDMTBoxcar(plan, cfg, backend=backend).execute(data)
     assert kept.emitted_count == 400
     assert pulse(kept.candidates)
     best = kept.candidates[np.argmax(kept.candidates["snr"])]

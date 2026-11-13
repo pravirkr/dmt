@@ -71,7 +71,8 @@ public:
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: the boxcar buffers alone need {:.2f} GiB, over "
                 "max_memory_bytes ({:.2f} GiB); lower max_boxcar or "
-                "max_candidates, or raise the budget",
+                "max_candidates (or max_cands_per_dm with kKeepBrightest), or "
+                "raise the budget",
                 static_cast<double>(fixed) / (1 << 30),
                 static_cast<double>(max_memory) / (1 << 30)));
         }
@@ -139,8 +140,12 @@ public:
         // storage and host row table are reported, not budgeted).
         SizeType cands = config.max_candidates * sizeof(RawCandidate);
         if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
-            // The per-row stores of the brightest max_cands_per_dm.
-            cands += rows * config.max_cands_per_dm * sizeof(RawCandidate);
+            // The per-row stores of the brightest max_cands_per_dm (compact
+            // entries on a GPU).
+            cands +=
+                rows * config.max_cands_per_dm *
+                (ex.backend == Backend::kCPU ? sizeof(RawCandidate)
+                                             : sizeof(detail::BoxcarKeepEntry));
         }
         // Per row and width: threshold and inverse sigma (float), plus the
         // integer mean and cutoff of packed input; the row table.

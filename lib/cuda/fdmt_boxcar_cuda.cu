@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -88,6 +89,138 @@ struct CandidateWriter {
         increment(&counts->emitted_count);
     }
 };
+
+// OverflowPolicy::kKeepBrightest. Within one row: brighter() restricted to
+// the fields that differ (S/N, peak sample, width).
+DMT_D inline bool keep_brighter(const BoxcarKeepEntry& a,
+                                const BoxcarKeepEntry& b) {
+    if (a.snr != b.snr) {
+        return a.snr > b.snr;
+    }
+    if (a.peak != b.peak) {
+        return a.peak < b.peak;
+    }
+    return a.filter < b.filter;
+}
+
+// A row's store: a heap of at most q entries, dimmest at the top, with
+// `*count` entries. One thread inserts at a time.
+DMT_D inline void keep_insert(BoxcarKeepEntry* store,
+                              uint64_t* count,
+                              SizeType q,
+                              const BoxcarKeepEntry& entry,
+                              CandidateCounts* counts) {
+    uint64_t n = *count;
+    if (n < q) {
+        uint64_t i = n;
+        store[i]   = entry;
+        while (i > 0) {
+            const uint64_t p = (i - 1) / 2;
+            if (!keep_brighter(store[p], store[i])) {
+                break;
+            }
+            const BoxcarKeepEntry t = store[p];
+            store[p]                = store[i];
+            store[i]                = t;
+            i                       = p;
+        }
+        *count = n + 1;
+        return;
+    }
+    increment(&counts->dropped_per_dm);
+    if (!keep_brighter(entry, store[0])) {
+        return;
+    }
+    store[0]   = entry;
+    uint64_t i = 0;
+    for (;;) {
+        const uint64_t l = (2 * i) + 1;
+        if (l >= q) {
+            break;
+        }
+        const uint64_t r = l + 1;
+        const uint64_t c =
+            (r < q && keep_brighter(store[l], store[r])) ? r : l; // dimmer
+        if (!keep_brighter(store[i], store[c])) {
+            break;
+        }
+        const BoxcarKeepEntry t = store[c];
+        store[c]                = store[i];
+        store[i]                = t;
+        i                       = c;
+    }
+}
+
+// A thread's candidates since the last keep_drain(): at most one per
+// sample of its kItems (one width at a time, or one run end per sample).
+struct KeepPending {
+    BoxcarKeepEntry entry[kItems];
+    int n = 0;
+};
+
+// kKeepBrightest emission in the scoring kernel: the S/N is final here;
+// a candidate dimmer than a full store's dimmest is dropped at once, the
+// rest wait in the thread's KeepPending for keep_drain().
+struct KeepWriter {
+    CandidateCounts* counts;
+    BoxcarKeepEntry* store; // this row's q entries
+    uint64_t* count;        // entries in the store
+    SizeType q;
+    KeepPending* pending;
+    const double* means = nullptr;
+    const float* scales = nullptr;
+    double unit         = 1;
+    bool integer        = false;
+
+    DMT_D void operator()(const BoxcarPeak& peak) const {
+        increment(&counts->total_detected);
+        const float snr =
+            integer ? static_cast<float>((static_cast<double>(peak.raw_sum) -
+                                          means[peak.filter]) *
+                                         (scales[peak.filter] * unit))
+                    : peak.snr;
+        if (*count >= q && snr < store[0].snr) {
+            increment(&counts->dropped_per_dm);
+            return;
+        }
+        pending->entry[pending->n++] = {peak.peak, peak.begin, peak.end, snr,
+                                        peak.filter};
+    }
+};
+
+// Block-uniform: every thread's pending candidates into the row's store.
+// Each round a thread stages one in its slot of shared.runs (unused outside
+// reduce_runs()) and thread 0 inserts them in slot order.
+template <typename T, int kBlockThreads>
+DMT_D void keep_drain(BoxcarShared<T, kBlockThreads>& shared,
+                      KeepPending& pending,
+                      const KeepWriter& writer) {
+    const int tid = static_cast<int>(threadIdx.x);
+    while (__syncthreads_or(pending.n > 0) != 0) {
+        BoxcarPeak& slot = shared.runs[tid].trailing;
+        slot.open        = pending.n > 0;
+        if (pending.n > 0) {
+            const BoxcarKeepEntry& e = pending.entry[--pending.n];
+            slot.peak                = e.peak;
+            slot.begin               = e.begin;
+            slot.end                 = e.end;
+            slot.snr                 = e.snr;
+            slot.filter              = e.filter;
+        }
+        __syncthreads();
+        if (tid == 0) {
+            for (int i = 0; i < kBlockThreads; ++i) {
+                const BoxcarPeak& s = shared.runs[i].trailing;
+                if (s.open) {
+                    keep_insert(writer.store, writer.count, writer.q,
+                                {s.peak, s.begin, s.end, s.snr, s.filter},
+                                writer.counts);
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
 
 // Ordered block prefix of each thread's four consecutive input samples,
 // written to ring[position + 1 .. position + kBlockTile]: a warp shuffle scan
@@ -447,7 +580,7 @@ DMT_D bool detect_tile_grouped_int(const uint64_t* ring,
 // Scan trailing-run summaries to give each worker the state of every
 // preceding sample. Each worker then emits only excursions ending within
 // its own four samples. The last worker saves the open trailing excursion.
-template <typename T, int kBlockThreads>
+template <typename T, int kBlockThreads, typename Writer>
 DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                        const bool (&above)[kItems],
                        const float (&snr)[kItems],
@@ -455,7 +588,7 @@ DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                        uint64_t start,
                        int n,
                        BoxcarPeak* persistent,
-                       const CandidateWriter& writer,
+                       const Writer& writer,
                        const uint64_t (&raw_sum)[kItems],
                        bool integer) {
     const int tid   = static_cast<int>(threadIdx.x);
@@ -545,11 +678,14 @@ DMT_D inline int block_table(const BlockTables& bt,
 // kBlockNoise: per-call mask tables are in use (float rows only). A
 // separate instance, so the common unmasked launch carries none of their
 // state (it cost ~160 B of stack per thread and 15-50% of the run time).
+// kKeep: OverflowPolicy::kKeepBrightest (KeepWriter, per-row stores); a
+// separate instance, so kDropNew keeps its code and output.
 template <typename T,
           int kBlockThreads,
           bool kScreen,
           bool kBlockNoise = false,
-          typename C       = T>
+          typename C       = T,
+          bool kKeep       = false>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -586,7 +722,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        const float* screen_m1,
                        SizeType screen_offset,
                        BlockTables block_tables,
-                       SizeType group_offset) {
+                       SizeType group_offset,
+                       BoxcarKeepEntry* keep_all,
+                       SizeType keep_q) {
     constexpr int kBlockTile = kBlockThreads * kItems;
     // Lagged rows (skewed-window subband search): this row's own samples.
     if (input.row_lag != nullptr) {
@@ -615,11 +753,33 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     prototype.beam_idx       = static_cast<uint32_t>(beam);
     CandidateWriter writer{candidates, counts,    slots,    per_dm_all + index,
                            widths,     prototype, capacity, dm_cap};
-    writer.means        = means ? means + row_index * nfilters : nullptr;
-    writer.scales       = inv_sigma + row_index * nfilters;
-    writer.unit         = unit;
-    writer.integer      = std::is_integral_v<T> &&
-                          mode != PeakFindingMode::kContiguousPeakAcrossWidths;
+    writer.means   = means ? means + row_index * nfilters : nullptr;
+    writer.scales  = inv_sigma + row_index * nfilters;
+    writer.unit    = unit;
+    writer.integer = std::is_integral_v<T> &&
+                     mode != PeakFindingMode::kContiguousPeakAcrossWidths;
+    // kKeepBrightest: the row's store and this thread's pending candidates.
+    struct NoKeep {};
+    std::conditional_t<kKeep, KeepPending, NoKeep> pending{};
+    std::conditional_t<kKeep, KeepWriter, NoKeep> keeper{};
+    if constexpr (kKeep) {
+        keeper = KeepWriter{counts,
+                            keep_all + (index * keep_q),
+                            per_dm_all + index,
+                            keep_q,
+                            &pending,
+                            writer.means,
+                            writer.scales,
+                            unit,
+                            writer.integer};
+    }
+    const auto& out = [&]() -> const auto& {
+        if constexpr (kKeep) {
+            return keeper;
+        } else {
+            return writer;
+        }
+    }();
     const int tid       = static_cast<int>(threadIdx.x);
     const auto lookback = static_cast<uint32_t>(max_width - 1);
     // Per-call kill masks (float rows): the tables this call's endpoints
@@ -915,14 +1075,17 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                         if constexpr (std::is_integral_v<T>) {
                             peak.raw_sum = sum;
                         }
-                        writer(peak);
+                        out(peak);
                     }
                 }
                 if (mode == PeakFindingMode::kContiguousPeakPerWidth &&
                     __syncthreads_or(f_hit || peaks[f].open) != 0) {
                     reduce_runs<T, kBlockThreads>(
-                        shared, above, snr, filters, start, n, peaks + f,
-                        writer, raw_sums, std::is_integral_v<T>);
+                        shared, above, snr, filters, start, n, peaks + f, out,
+                        raw_sums, std::is_integral_v<T>);
+                }
+                if constexpr (kKeep) {
+                    keep_drain(shared, pending, keeper);
                 }
             }
             if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
@@ -931,8 +1094,11 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     above[j] = best[j] >= 0;
                 }
                 reduce_runs<T, kBlockThreads>(shared, above, best, best_filter,
-                                              start, n, peaks, writer, raw_sums,
+                                              start, n, peaks, out, raw_sums,
                                               false);
+                if constexpr (kKeep) {
+                    keep_drain(shared, pending, keeper);
+                }
             }
             open = any_open();
         }
@@ -987,10 +1153,35 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
                                     const float* scales,
                                     SizeType nfilters,
                                     double unit,
-                                    bool integer) {
+                                    bool integer,
+                                    BoxcarKeepEntry* keep_all,
+                                    SizeType keep_q) {
     const SizeType index =
         static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= tasks) {
+        return;
+    }
+    if (keep_q != 0) {
+        // kKeepBrightest: this thread owns the row's store.
+        const SizeType row_index = index % nrows;
+        for (SizeType f = 0; f < peak_count; ++f) {
+            auto& peak = peaks[index * peak_count + f];
+            if (peak.open) {
+                increment(&counts->total_detected);
+                const float snr =
+                    integer ? static_cast<float>(
+                                  (static_cast<double>(peak.raw_sum) -
+                                   means[row_index * nfilters + peak.filter]) *
+                                  (scales[row_index * nfilters + peak.filter] *
+                                   unit))
+                            : peak.snr;
+                keep_insert(keep_all + index * keep_q, per_dm + index, keep_q,
+                            {peak.peak, peak.begin, peak.end, snr, peak.filter},
+                            counts);
+                peak.open = false;
+            }
+        }
+        open[index] = 0;
         return;
     }
     const SizeType row_index = index % nrows;
@@ -1010,6 +1201,193 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
         }
     }
     open[index] = 0;
+}
+
+// kKeepBrightest, end of a call: the stores' entries become the call's
+// candidates, or, when there are more than `capacity`, exactly the
+// `capacity` brightest. Keys order the entries as brighter() does (S/N,
+// peak sample, row rank (beam and row in brighter() order), width), most
+// significant byte first, smaller = brighter; they are unique within a
+// call. A radix select over their bytes finds the capacity-th key on the
+// device (no host wait).
+constexpr int kKeepKeyBytes = 18;
+
+struct KeepSelect {
+    uint64_t n        = 0; ///< entries in the stores
+    uint64_t k        = 0; ///< still to select within the prefix
+    uint32_t resolved = 0; ///< selection fixed by prefix[0, depth)
+    uint32_t depth    = 0;
+    uint8_t prefix[kKeepKeyBytes]{};
+};
+
+DMT_D inline uint8_t
+keep_key_byte(const BoxcarKeepEntry& e, uint32_t rank, int d) {
+    if (d < 4) {
+        uint32_t u = __float_as_uint(e.snr);
+        u          = (u & 0x80000000U) != 0 ? ~u : (u | 0x80000000U);
+        u          = ~u; // larger S/N first
+        return static_cast<uint8_t>(u >> (8 * (3 - d)));
+    }
+    if (d < 12) {
+        return static_cast<uint8_t>(e.peak >> (8 * (11 - d)));
+    }
+    if (d < 16) {
+        return static_cast<uint8_t>(rank >> (8 * (15 - d)));
+    }
+    return static_cast<uint8_t>(e.filter >> (8 * (17 - d)));
+}
+
+// Whether an entry is selected: its key's first `depth` bytes are at most
+// the prefix.
+DMT_D inline bool
+keep_selected(const BoxcarKeepEntry& e, uint32_t rank, const KeepSelect& sel) {
+    for (uint32_t d = 0; d < sel.depth; ++d) {
+        const uint8_t b = keep_key_byte(e, rank, static_cast<int>(d));
+        if (b != sel.prefix[d]) {
+            return b < sel.prefix[d];
+        }
+    }
+    return true;
+}
+
+// After kernel_keep_init: the entries in the stores.
+__global__ void
+kernel_keep_count(const uint64_t* per_dm, SizeType tasks, KeepSelect* sel) {
+    uint64_t local = 0;
+    for (SizeType i = blockIdx.x * blockDim.x + threadIdx.x; i < tasks;
+         i += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        local += per_dm[i];
+    }
+    if (local != 0) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(&sel->n),
+                  static_cast<unsigned long long>(local));
+    }
+}
+
+__global__ void kernel_keep_init(KeepSelect* sel, SizeType capacity) {
+    *sel   = KeepSelect{};
+    sel->k = capacity;
+}
+
+__global__ void kernel_keep_resolve_all(KeepSelect* sel) {
+    if (sel->n <= sel->k) {
+        sel->resolved = 1; // depth 0: every entry
+    }
+}
+
+// Histogram of byte `d` of the keys that match the prefix so far.
+__global__ void kernel_keep_hist(const BoxcarKeepEntry* keep_all,
+                                 const uint64_t* per_dm,
+                                 const uint32_t* rank,
+                                 SizeType nrows,
+                                 SizeType tasks,
+                                 SizeType q,
+                                 const KeepSelect* sel,
+                                 uint64_t* hist,
+                                 int d) {
+    __shared__ uint32_t local[256];
+    if (sel->resolved != 0) {
+        return;
+    }
+    for (int b = static_cast<int>(threadIdx.x); b < 256;
+         b += static_cast<int>(blockDim.x)) {
+        local[b] = 0;
+    }
+    __syncthreads();
+    const SizeType total = tasks * q;
+    for (SizeType s = blockIdx.x * blockDim.x + threadIdx.x; s < total;
+         s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        const SizeType index = s / q;
+        if (s % q >= per_dm[index]) {
+            continue;
+        }
+        const BoxcarKeepEntry& e = keep_all[s];
+        const auto r = static_cast<uint32_t>((index / nrows) * nrows +
+                                             rank[index % nrows]);
+        bool match   = true;
+        for (int j = 0; j < d && match; ++j) {
+            match = keep_key_byte(e, r, j) == sel->prefix[j];
+        }
+        if (match) {
+            atomicAdd(&local[keep_key_byte(e, r, d)], 1U);
+        }
+    }
+    __syncthreads();
+    for (int b = static_cast<int>(threadIdx.x); b < 256;
+         b += static_cast<int>(blockDim.x)) {
+        if (local[b] != 0) {
+            atomicAdd(reinterpret_cast<unsigned long long*>(&hist[b]),
+                      static_cast<unsigned long long>(local[b]));
+        }
+    }
+}
+
+// Byte `d` of the k-th key; clears the histogram for the next byte.
+__global__ void kernel_keep_pick(KeepSelect* sel, uint64_t* hist, int d) {
+    if (sel->resolved == 0) {
+        uint64_t below = 0;
+        for (int b = 0; b < 256; ++b) {
+            if (below + hist[b] >= sel->k) {
+                sel->prefix[d] = static_cast<uint8_t>(b);
+                sel->k -= below;
+                sel->depth = static_cast<uint32_t>(d) + 1;
+                // The whole bin is selected: no later byte matters.
+                if (hist[b] == sel->k || d + 1 == kKeepKeyBytes) {
+                    sel->resolved = 1;
+                }
+                break;
+            }
+            below += hist[b];
+        }
+    }
+    for (int b = 0; b < 256; ++b) {
+        hist[b] = 0;
+    }
+}
+
+// The selected entries as candidates; counts follow.
+__global__ void kernel_keep_emit(const BoxcarKeepEntry* keep_all,
+                                 const uint64_t* per_dm,
+                                 const uint32_t* rank,
+                                 const BoxcarRow* rows,
+                                 const uint32_t* widths,
+                                 SizeType nrows,
+                                 SizeType tasks,
+                                 SizeType q,
+                                 const KeepSelect* sel,
+                                 RawCandidate* candidates,
+                                 CandidateCounts* counts,
+                                 uint64_t* slots) {
+    const SizeType total = tasks * q;
+    for (SizeType s = blockIdx.x * blockDim.x + threadIdx.x; s < total;
+         s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        const SizeType index = s / q;
+        if (s % q >= per_dm[index]) {
+            continue;
+        }
+        const BoxcarKeepEntry& e = keep_all[s];
+        const SizeType row_index = index % nrows;
+        const auto r =
+            static_cast<uint32_t>((index / nrows) * nrows + rank[row_index]);
+        if (!keep_selected(e, r, *sel)) {
+            continue;
+        }
+        RawCandidate c               = rows[row_index].candidate;
+        c.beam_idx                   = static_cast<uint32_t>(index / nrows);
+        c.peak_sample                = e.peak;
+        c.begin_sample               = e.begin;
+        c.end_sample                 = e.end;
+        c.snr                        = e.snr;
+        c.filter_idx                 = e.filter;
+        c.width                      = widths[e.filter];
+        candidates[increment(slots)] = c;
+        increment(&counts->emitted_count);
+    }
+}
+
+__global__ void kernel_keep_finish(const KeepSelect* sel,
+                                   CandidateCounts* counts) {
+    counts->dropped_global = sel->n - counts->emitted_count;
 }
 
 // Candidate frontier: the smallest begin sample of the open excursions,
@@ -1063,11 +1441,6 @@ public:
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1) {
-        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
-            throw std::invalid_argument(
-                "FDMTBoxcar (gpu): overflow_policy kKeepBrightest is not "
-                "available on GPUs yet");
-        }
         gpu_utils::set_device(m_device);
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count ||
@@ -1197,6 +1570,26 @@ public:
         m_peaks_d.resize(tasks * m_peak_count);
         m_open_d.resize(tasks, 0);
         m_per_dm_d.resize(tasks, 0);
+        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
+            m_bright_q = config.max_cands_per_dm;
+            m_bright_d.resize(tasks * m_bright_q);
+            // Each row's place in brighter() order among the rows (equal
+            // S/N, sample and beam): the key's row rank.
+            std::vector<uint32_t> order(m_rows.size());
+            std::iota(order.begin(), order.end(), 0U);
+            std::ranges::sort(order, [&](uint32_t a, uint32_t b) {
+                return brighter(m_rows[a].candidate, m_rows[b].candidate);
+            });
+            std::vector<uint32_t> rank(m_rows.size());
+            for (SizeType i = 0; i < order.size(); ++i) {
+                rank[order[i]] = static_cast<uint32_t>(i);
+            }
+            m_bright_rank_d = rank;
+            m_bright_sel_d.resize(1);
+            m_bright_hist_d.resize(256, 0);
+            // A selection is needed only when the stores can exceed it.
+            m_bright_select = tasks * m_bright_q > config.max_candidates;
+        }
         m_candidates_d.resize(config.max_candidates);
         m_counts_d.resize(1);
         m_slots_d.resize(1, 0);
@@ -1253,6 +1646,7 @@ public:
         m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
         m_commit_open = false;
         m_position += m_plan.get_nsamps();
+        finish_keep(stream);
         release_slots(stream);
         update_open_begin(stream);
         m_work.mark(stream);
@@ -1281,6 +1675,7 @@ public:
         m_driver->search(masked(waterfall, m_packed_input, queue),
                          m_config.input_nbits, *this, queue);
         m_position += m_plan.get_nsamps();
+        finish_keep(static_cast<cudaStream_t>(queue.native));
         update_open_begin(static_cast<cudaStream_t>(queue.native));
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
@@ -1303,8 +1698,10 @@ public:
             raw(m_integer_means), raw(m_scales_d), m_filters, m_integer_unit,
             m_config.input_nbits != 32 &&
                 m_config.peak_mode !=
-                    PeakFindingMode::kContiguousPeakAcrossWidths);
+                    PeakFindingMode::kContiguousPeakAcrossWidths,
+            raw(m_bright_d), m_bright_q);
         gpu_utils::check_last_gpu_error("FDMTBoxcar flush failed");
+        finish_keep(stream);
         update_open_begin(stream);
         m_work.mark(stream);
         return device_view();
@@ -1492,7 +1889,11 @@ public:
                          sizeof(CandidateCounts) + sizeof(uint64_t) +
                          (2 * sizeof(uint64_t)), // candidate frontier word
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
-                          sizeof(RawCandidate),
+                              sizeof(RawCandidate) +
+                          m_bright_d.size() * sizeof(BoxcarKeepEntry) +
+                          m_bright_rank_d.size() * sizeof(uint32_t) +
+                          sizeof(KeepSelect) * m_bright_sel_d.size() +
+                          m_bright_hist_d.size() * sizeof(uint64_t),
             .staging    = m_input_d.size() * sizeof(float) +
                           m_packed_input.size() + m_keep_d.size(),
             .host = host_plan +
@@ -1556,7 +1957,27 @@ private:
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
         FDMTSearchInput stopped = input;
         stopped.search_stop     = m_search_stop;
-        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C>
+        if (m_bright_q != 0) {
+            launch_score_args<T, kBlockThreads, kScreen, kBlockNoise, C, true>(
+                stopped, g, grid, block, carry, stream);
+        } else {
+            launch_score_args<T, kBlockThreads, kScreen, kBlockNoise, C, false>(
+                stopped, g, grid, block, carry, stream);
+        }
+    }
+    template <typename T,
+              int kBlockThreads,
+              bool kScreen,
+              bool kBlockNoise,
+              typename C,
+              bool kKeep>
+    void launch_score_args(const FDMTSearchInput& stopped,
+                           const LevelGroup& g,
+                           dim3 grid,
+                           dim3 block,
+                           C* carry,
+                           cudaStream_t stream) {
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, kKeep>
             <<<grid, block, m_smem, stream>>>(
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
@@ -1570,7 +1991,8 @@ private:
                 raw(m_screen_groups_d),
                 static_cast<int>(m_screen_groups_d.size()),
                 raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
-                kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset);
+                kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
+                raw(m_bright_d), m_bright_q);
     }
 
     template <typename T, typename C = T>
@@ -1623,27 +2045,69 @@ private:
                 m_width, m_smem, limit));
         }
         if (m_screen_groups_d.empty()) {
-            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false>);
+            configure_variants<T, kBlockThreads, false, false, T>();
         } else {
-            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true>);
+            configure_variants<T, kBlockThreads, true, false, T>();
         }
         if constexpr (std::is_integral_v<T>) {
             if (m_screen_groups_d.empty()) {
-                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false,
-                                                    false, uint32_t>);
+                configure_variants<T, kBlockThreads, false, false, uint32_t>();
             } else {
-                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true,
-                                                    false, uint32_t>);
+                configure_variants<T, kBlockThreads, true, false, uint32_t>();
             }
         } else {
             if (m_screen_groups_d.empty()) {
-                configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, false, true>);
+                configure_variants<T, kBlockThreads, false, true, T>();
             } else {
-                configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, true, true>);
+                configure_variants<T, kBlockThreads, true, true, T>();
             }
         }
+    }
+    /// The kernel instance and, under kKeepBrightest, its kKeep twin.
+    template <typename T,
+              int kBlockThreads,
+              bool kScreen,
+              bool kBlockNoise,
+              typename C>
+    void configure_variants() {
+        configure_kernel(
+            kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C>);
+        if (m_bright_q != 0) {
+            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen,
+                                                kBlockNoise, C, true>);
+        }
+    }
+    /// kKeepBrightest, end of a call: the stores (or their max_candidates
+    /// brightest) into the candidate buffer, on `stream`.
+    void finish_keep(cudaStream_t stream) {
+        if (m_bright_q == 0) {
+            return;
+        }
+        const SizeType tasks   = m_rows.size() * m_beams;
+        constexpr int kThreads = 256;
+        const auto grid        = static_cast<unsigned>(std::min<SizeType>(
+            (tasks * m_bright_q + kThreads - 1) / kThreads, 4096));
+        KeepSelect* sel        = raw(m_bright_sel_d);
+        kernel_keep_init<<<1, 1, 0, stream>>>(sel, m_config.max_candidates);
+        kernel_keep_count<<<std::min<SizeType>((tasks + 255) / 256, 1024), 256,
+                            0, stream>>>(raw(m_per_dm_d), tasks, sel);
+        kernel_keep_resolve_all<<<1, 1, 0, stream>>>(sel);
+        if (m_bright_select) {
+            for (int d = 0; d < kKeepKeyBytes; ++d) {
+                kernel_keep_hist<<<grid, kThreads, 0, stream>>>(
+                    raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
+                    m_rows.size(), tasks, m_bright_q, sel, raw(m_bright_hist_d),
+                    d);
+                kernel_keep_pick<<<1, 1, 0, stream>>>(sel, raw(m_bright_hist_d),
+                                                      d);
+            }
+        }
+        kernel_keep_emit<<<grid, kThreads, 0, stream>>>(
+            raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
+            raw(m_rows_d), raw(m_widths_d), m_rows.size(), tasks, m_bright_q,
+            sel, raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d));
+        kernel_keep_finish<<<1, 1, 0, stream>>>(sel, raw(m_counts_d));
+        gpu_utils::check_last_gpu_error("FDMTBoxcar keep-brightest failed");
     }
 
     template <typename Kernel> void configure_kernel(Kernel kernel) const {
@@ -1968,6 +2432,14 @@ private:
     /// zeroed in m_input_d / m_packed_input.
     std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
     bool m_keep_in_transform = false;
+    /// kKeepBrightest: max_cands_per_dm entries per (beam, row), the rows'
+    /// brighter() ranks, the selection state and histogram (0: kDropNew).
+    SizeType m_bright_q  = 0;
+    bool m_bright_select = false;
+    thrust::device_vector<BoxcarKeepEntry> m_bright_d;
+    thrust::device_vector<uint32_t> m_bright_rank_d;
+    thrust::device_vector<KeepSelect> m_bright_sel_d;
+    thrust::device_vector<uint64_t> m_bright_hist_d;
     /// One byte per input row (beam, channel), for m_keep_runs.
     thrust::device_vector<uint8_t> m_keep_d;
     std::vector<uint8_t> m_keep_h;

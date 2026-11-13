@@ -10,7 +10,7 @@ All notable changes to `dmt` are listed here. The format follows
 
 - **`OverflowPolicy::kKeepBrightest`** (`BoxcarConfig::overflow_policy`;
   Python `OverflowPolicy.KEEP_BRIGHTEST`, `BoxcarConfig(overflow_policy=...)`)
-  for `FDMTBoxcar` and `FDMTFFTBoxcar`, CPU backend: when more candidates
+  for `FDMTBoxcar` and `FDMTFFTBoxcar`, CPU and GPU: when more candidates
   cross the threshold than fit, each DM row keeps exactly its
   `max_cands_per_dm` brightest candidates of the call and the call keeps the
   `max_candidates` brightest of those, with a deterministic tie-break. An

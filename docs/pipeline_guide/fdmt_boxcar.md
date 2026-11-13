@@ -389,7 +389,10 @@ What survives an overflow depends on `BoxcarConfig.overflow_policy`:
   deterministic. Each row has a store of `max_cands_per_dm` candidates,
   counted in `memory_usage.candidates` and the memory budget, so the cap
   must be positive and small (e.g. 16): 4096 per row is about 20 GB on a
-  UWL-sized search. CPU only in this release.
+  UWL-sized search (on GPUs an entry takes 32 bytes, on the CPU a full
+  candidate). On GPUs the brightest are kept per row inside the scoring
+  kernel; when the stores can exceed `max_candidates`, a radix select on
+  the device picks the global brightest at the end of the call.
 
 Independently of the policy, `PeakFindingMode.CONTIGUOUS_PEAK_ACROSS_WIDTHS`
 emits one candidate per excursion instead of one per width, which cuts the
