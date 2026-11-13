@@ -319,9 +319,8 @@ struct BoxcarKeepEntry {
 };
 
 /// OverflowPolicy::kKeepBrightest order: higher S/N first; ties to the
-/// earlier peak, then beam, subband, DM row, width and begin sample. A
-/// strict total order on the candidates of one call (a row emits at most
-/// one candidate per peak sample and width).
+/// earlier peak, then beam, subband, DM row, width, begin sample and end
+/// sample. A strict total order on distinct candidates of one call.
 DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
     if (a.snr != b.snr) {
         return a.snr > b.snr;
@@ -347,7 +346,13 @@ DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
     if (a.filter_idx != b.filter_idx) {
         return a.filter_idx < b.filter_idx;
     }
-    return a.begin_sample < b.begin_sample;
+    if (a.begin_sample != b.begin_sample) {
+        return a.begin_sample < b.begin_sample;
+    }
+    if (a.end_sample != b.end_sample) {
+        return a.end_sample < b.end_sample;
+    }
+    return a.width < b.width;
 }
 
 /// The transform feeding a boxcar engine: FDMT (merged root rows) or
