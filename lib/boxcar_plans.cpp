@@ -67,12 +67,16 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
         config.noise_sigma <= 0 || config.max_candidates == 0 ||
         static_cast<unsigned>(config.peak_mode) >
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
+        static_cast<unsigned>(config.overflow_policy) >
+            static_cast<unsigned>(OverflowPolicy::kKeepBrightest) ||
+        (config.overflow_policy == OverflowPolicy::kKeepBrightest &&
+         config.max_cands_per_dm == 0) ||
         plan.get_nchans() > UINT32_MAX ||
         (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(
             "FDMTBoxcar: invalid configuration (requires valid mode, positive "
             "finite threshold/sigma and capacity, kill mask of nchans "
-            "entries)");
+            "entries, max_cands_per_dm > 0 with kKeepBrightest)");
     }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||

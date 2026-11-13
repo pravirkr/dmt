@@ -137,7 +137,11 @@ public:
                 : 1;
         // Budgeted bytes only: on a GPU the device copies (the host result
         // storage and host row table are reported, not budgeted).
-        const SizeType cands = config.max_candidates * sizeof(RawCandidate);
+        SizeType cands = config.max_candidates * sizeof(RawCandidate);
+        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
+            // The per-row stores of the brightest max_cands_per_dm.
+            cands += rows * config.max_cands_per_dm * sizeof(RawCandidate);
+        }
         // Per row and width: threshold and inverse sigma (float), plus the
         // integer mean and cutoff of packed input; the row table.
         const SizeType luts =

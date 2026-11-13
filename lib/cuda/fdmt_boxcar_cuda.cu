@@ -1063,6 +1063,11 @@ public:
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1) {
+        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
+            throw std::invalid_argument(
+                "FDMTBoxcar (gpu): overflow_policy kKeepBrightest is not "
+                "available on GPUs yet");
+        }
         gpu_utils::set_device(m_device);
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count ||

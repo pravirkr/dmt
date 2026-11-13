@@ -6,6 +6,18 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`OverflowPolicy::kKeepBrightest`** (`BoxcarConfig::overflow_policy`;
+  Python `OverflowPolicy.KEEP_BRIGHTEST`, `BoxcarConfig(overflow_policy=...)`)
+  for `FDMTBoxcar` and `FDMTFFTBoxcar`, CPU backend: when more candidates
+  cross the threshold than fit, each DM row keeps exactly its
+  `max_cands_per_dm` brightest candidates of the call and the call keeps the
+  `max_candidates` brightest of those, with a deterministic tie-break. An
+  early RFI storm no longer hides a bright burst later in the block. The
+  per-row stores count in the memory budget, so `max_cands_per_dm` must be
+  positive and small. The default `kDropNew` (first come) is unchanged.
+
 ### Changed
 
 - **GPU memory budget.** On a GPU, `max_memory_bytes` of `FDMTBoxcar` and

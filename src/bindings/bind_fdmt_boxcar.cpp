@@ -48,15 +48,28 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .value("CONTIGUOUS_PEAK_ACROSS_WIDTHS",
                PeakFindingMode::kContiguousPeakAcrossWidths)
         .value("ALL_ABOVE_THRESHOLD", PeakFindingMode::kAllAboveThreshold);
+    py::enum_<OverflowPolicy>(mod, "OverflowPolicy", R"doc(
+        What a call keeps when more candidates cross the threshold than fit.
+
+        ``DROP_NEW`` (default): first come; which candidates survive an
+        overflow is unspecified. ``KEEP_BRIGHTEST``: exactly the brightest:
+        each DM row keeps its ``max_cands_per_dm`` highest-S/N candidates of
+        the call, and the call the ``max_candidates`` highest of those (ties
+        to the earlier peak sample). Needs a small positive
+        ``max_cands_per_dm`` (a per-row store counted in the memory budget).
+        )doc")
+        .value("DROP_NEW", OverflowPolicy::kDropNew)
+        .value("KEEP_BRIGHTEST", OverflowPolicy::kKeepBrightest);
     py::class_<BoxcarConfig>(mod, "BoxcarConfig")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, bool, SizeType, float, bool>(),
+                      SizeType, bool, SizeType, float, bool, OverflowPolicy>(),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
              "max_candidates"_a = 131072, "max_cands_per_dm"_a = 4096,
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
-             "input_mean"_a = 0.0F, "use_trapezoid"_a = false)
+             "input_mean"_a = 0.0F, "use_trapezoid"_a = false,
+             "overflow_policy"_a = OverflowPolicy::kDropNew)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -67,7 +80,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readwrite("peak_mode", &BoxcarConfig::peak_mode)
         .def_readwrite("max_candidates", &BoxcarConfig::max_candidates)
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)
-        .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix);
+        .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix)
+        .def_readwrite("overflow_policy", &BoxcarConfig::overflow_policy);
     py::class_<BoxcarResult>(mod, "BoxcarResult")
         .def_readonly("candidates", &BoxcarResult::candidates)
         .def_readonly("input_sample_begin", &BoxcarResult::input_sample_begin)

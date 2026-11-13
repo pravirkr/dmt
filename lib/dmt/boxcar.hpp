@@ -308,6 +308,38 @@ DMT_HD void boxcar_integer_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
+/// OverflowPolicy::kKeepBrightest order: higher S/N first; ties to the
+/// earlier peak, then beam, subband, DM row, width and begin sample. A
+/// strict total order on the candidates of one call (a row emits at most
+/// one candidate per peak sample and width).
+DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
+    if (a.snr != b.snr) {
+        return a.snr > b.snr;
+    }
+    if (a.peak_sample != b.peak_sample) {
+        return a.peak_sample < b.peak_sample;
+    }
+    if (a.beam_idx != b.beam_idx) {
+        return a.beam_idx < b.beam_idx;
+    }
+    if (a.subband_level != b.subband_level) {
+        return a.subband_level < b.subband_level;
+    }
+    if (a.subband_idx != b.subband_idx) {
+        return a.subband_idx < b.subband_idx;
+    }
+    if (a.staggered != b.staggered) {
+        return a.staggered < b.staggered;
+    }
+    if (a.dm_idx != b.dm_idx) {
+        return a.dm_idx < b.dm_idx;
+    }
+    if (a.filter_idx != b.filter_idx) {
+        return a.filter_idx < b.filter_idx;
+    }
+    return a.begin_sample < b.begin_sample;
+}
+
 /// The transform feeding a boxcar engine: FDMT (merged root rows) or
 /// FDMT-FFT (materialized root rows per overlap-save segment).
 class BoxcarDriver {

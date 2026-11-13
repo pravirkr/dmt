@@ -374,7 +374,26 @@ excursions (or points in all mode), including dropped candidates. A
 removes that cap. Global capacity is `max_candidates`. Counters satisfy
 `total_detected = emitted_count + dropped_per_dm + dropped_global`.
 Scanning and history updates continue after saturation. Parallel candidate
-order and the retained subset during overflow are unspecified.
+order is unspecified.
+
+What survives an overflow depends on `BoxcarConfig.overflow_policy`:
+
+- `OverflowPolicy.DROP_NEW` (default): first come. The retained subset is
+  unspecified, and in practice it is the earliest candidates of the call: an
+  RFI storm at the start of a block can fill the quotas and hide a bright
+  burst later in the same block.
+- `OverflowPolicy.KEEP_BRIGHTEST`: exactly the brightest. Each row keeps its
+  `max_cands_per_dm` highest-S/N candidates of the call, and the call keeps
+  the `max_candidates` highest of those (ties go to the earlier peak
+  sample, then beam, subband, DM row and width), so the retained set is
+  deterministic. Each row has a store of `max_cands_per_dm` candidates,
+  counted in `memory_usage.candidates` and the memory budget, so the cap
+  must be positive and small (e.g. 16): 4096 per row is about 20 GB on a
+  UWL-sized search. CPU only in this release.
+
+Independently of the policy, `PeakFindingMode.CONTIGUOUS_PEAK_ACROSS_WIDTHS`
+emits one candidate per excursion instead of one per width, which cuts the
+count during a storm by about the number of widths.
 
 ### Memory budget and wide bands
 

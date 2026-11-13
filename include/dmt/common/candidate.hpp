@@ -15,6 +15,23 @@ enum class PeakFindingMode : uint8_t {
     kAllAboveThreshold,
 };
 
+/// What a call keeps when more candidates cross the threshold than fit
+/// (BoxcarConfig::overflow_policy, max_cands_per_dm and max_candidates).
+enum class OverflowPolicy : uint8_t {
+    /// First come (default): once a row has max_cands_per_dm candidates in
+    /// the call, or the call max_candidates, later ones are dropped. Which
+    /// candidates survive an overflow is unspecified.
+    kDropNew,
+    /// The brightest, exactly: each row (plane, beam, DM) keeps its
+    /// max_cands_per_dm highest-S/N candidates of the call, and of those
+    /// the call keeps the max_candidates highest. Ties go to the earlier
+    /// peak sample, then beam, subband, DM row and width. A store of
+    /// max_cands_per_dm candidates per row counts in the memory budget, so
+    /// max_cands_per_dm must be positive (and is meant to be small, e.g.
+    /// 16). The surviving set is deterministic.
+    kKeepBrightest,
+};
+
 /// Analytical search of independent input noise of known common mean/sigma.
 /// The subband search depth is the plan's (FDMTPlan subband_depth).
 struct BoxcarConfig {
@@ -31,7 +48,8 @@ struct BoxcarConfig {
         bool skip_cold_prefix     = true,
         SizeType input_nbits      = 32,
         float input_mean          = 0.0F,
-        bool use_trapezoid        = false) noexcept
+        bool use_trapezoid        = false,
+        OverflowPolicy overflow_policy = OverflowPolicy::kDropNew) noexcept
         : max_boxcar(max_boxcar),
           wtsp(wtsp),
           detect_thresh(detect_thresh),
@@ -42,7 +60,8 @@ struct BoxcarConfig {
           skip_cold_prefix(skip_cold_prefix),
           input_nbits(input_nbits),
           input_mean(input_mean),
-          use_trapezoid(use_trapezoid) {}
+          use_trapezoid(use_trapezoid),
+          overflow_policy(overflow_policy) {}
 
     /// Widest box searched, 1..4096; always the last width of the bank.
     SizeType max_boxcar = 4096;
@@ -54,7 +73,9 @@ struct BoxcarConfig {
     float noise_sigma         = 1.0F;
     PeakFindingMode peak_mode = PeakFindingMode::kContiguousPeakPerWidth;
     SizeType max_candidates   = 131072;
-    SizeType max_cands_per_dm = 4096; ///< Per plane/beam/DM/call; 0 disables.
+    /// Per plane/beam/DM/call; 0 disables (kDropNew). Under kKeepBrightest
+    /// the size of each row's store of brightest candidates (must be > 0).
+    SizeType max_cands_per_dm = 4096;
     /// Default true: a window reaching before the row's cold support
     /// (warmup_samples) sums an incomplete sweep, whose S/N the noise model
     /// does not describe, so it is not searched.
@@ -65,6 +86,8 @@ struct BoxcarConfig {
     /// Default false (boxcar-only); searching trapezoids alongside the
     /// boxcars would come as a separate option.
     bool use_trapezoid = false;
+    /// Default kDropNew; see OverflowPolicy.
+    OverflowPolicy overflow_policy = OverflowPolicy::kDropNew;
 };
 
 /**

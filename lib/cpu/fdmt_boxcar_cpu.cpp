@@ -98,6 +98,11 @@ public:
         m_peaks.resize(rows * m_peak_count);
         m_per_dm.resize(rows);
         m_candidates.resize(config.max_candidates);
+        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
+            // Each row's brightest max_cands_per_dm of the call (a heap).
+            m_keep_q = config.max_cands_per_dm;
+            m_keep.resize(rows * m_keep_q);
+        }
         if (config.input_nbits == 32) {
             m_prefix.resize(m_threads * (m_width + m_tile + 1));
         } else {
@@ -151,6 +156,7 @@ public:
         m_commit_open = false;
         m_position += m_plan.get_nsamps();
         update_open_begin();
+        finish_result();
         return view();
     }
     CandidateDeviceResultView execute(DeviceSpan<const float> /*unused*/,
@@ -175,6 +181,7 @@ public:
                          m_config.input_nbits, *this);
         m_position += m_plan.get_nsamps();
         update_open_begin();
+        finish_result();
         return view();
     }
     CandidateDeviceResultView execute(DeviceSpan<const uint8_t> /*unused*/,
@@ -202,6 +209,7 @@ public:
             }
         }
         m_open_begin = UINT64_MAX;
+        finish_result();
         return view();
     }
     void set_search_stop(uint64_t stop) noexcept override {
@@ -359,7 +367,8 @@ public:
                               m_best_filter.size() * sizeof(uint32_t) +
                               m_per_dm.size() * sizeof(uint64_t) +
                               m_screen_thr.size() * sizeof(float),
-                .candidates = m_candidates.size() * sizeof(RawCandidate),
+                .candidates = (m_candidates.size() + m_keep.size()) *
+                              sizeof(RawCandidate),
                 .staging =
                     (m_masked.size() * sizeof(float)) + m_masked_packed.size()};
     }
@@ -396,7 +405,8 @@ private:
     }
 
     void begin_result(SizeType samples) {
-        m_counts = {};
+        m_counts    = {};
+        m_keep_open = m_keep_q != 0;
         m_next_slot.store(0, std::memory_order_relaxed);
         std::ranges::fill(m_per_dm, 0);
         m_result_begin   = m_position;
@@ -413,6 +423,11 @@ private:
 #pragma omp atomic
         ++m_counts.total_detected;
         auto& count = m_per_dm[beam * m_rows.size() + row];
+        if (m_keep_q != 0) {
+            keep(beam * m_rows.size() + row, count,
+                 candidate_of(row, beam, peak));
+            return;
+        }
         if (m_config.max_cands_per_dm != 0 &&
             count++ >= m_config.max_cands_per_dm) {
 #pragma omp atomic
@@ -425,6 +440,12 @@ private:
             ++m_counts.dropped_global;
             return;
         }
+        m_candidates[slot] = candidate_of(row, beam, peak);
+#pragma omp atomic
+        ++m_counts.emitted_count;
+    }
+    [[nodiscard]] RawCandidate
+    candidate_of(SizeType row, SizeType beam, const BoxcarPeak& peak) const {
         auto candidate         = m_rows[row].candidate;
         candidate.beam_idx     = static_cast<uint32_t>(beam);
         candidate.peak_sample  = peak.peak;
@@ -441,9 +462,52 @@ private:
         }
         candidate.filter_idx = peak.filter;
         candidate.width      = m_planes.front().widths[peak.filter];
-        m_candidates[slot]   = candidate;
+        return candidate;
+    }
+    /// kKeepBrightest: `candidate` into row `index`'s store, a heap whose
+    /// top is its dimmest entry (`count` entries). A row is scored by one
+    /// thread at a time, so the store needs no lock.
+    void keep(SizeType index, uint64_t& count, const RawCandidate& candidate) {
+        auto* store       = m_keep.data() + index * m_keep_q;
+        const auto dimmer = [](const RawCandidate& a, const RawCandidate& b) {
+            return brighter(a, b);
+        };
+        if (count < m_keep_q) {
+            store[count++] = candidate;
+            std::push_heap(store, store + count, dimmer);
+            return;
+        }
 #pragma omp atomic
-        ++m_counts.emitted_count;
+        ++m_counts.dropped_per_dm;
+        if (brighter(candidate, store[0])) {
+            std::pop_heap(store, store + m_keep_q, dimmer);
+            store[m_keep_q - 1] = candidate;
+            std::push_heap(store, store + m_keep_q, dimmer);
+        }
+    }
+    /// kKeepBrightest, end of a call: the stores' candidates, or the
+    /// max_candidates brightest of them, become the result.
+    void finish_result() {
+        if (!m_keep_open) {
+            return;
+        }
+        m_keep_open = false;
+        // Compact the rows' entries to the front of the store (in place).
+        SizeType n = 0;
+        for (SizeType index = 0; index < m_per_dm.size(); ++index) {
+            const auto* store = m_keep.data() + index * m_keep_q;
+            const auto count  = static_cast<SizeType>(m_per_dm[index]);
+            std::move(store, store + count, m_keep.begin() + n);
+            n += count;
+        }
+        const SizeType kept = std::min(n, m_candidates.size());
+        if (kept < n) {
+            std::nth_element(m_keep.begin(), m_keep.begin() + kept,
+                             m_keep.begin() + n, brighter);
+        }
+        std::copy_n(m_keep.begin(), kept, m_candidates.begin());
+        m_counts.emitted_count  = kept;
+        m_counts.dropped_global = n - kept;
     }
     /// Thresholds and inverse sigmas of a float row's tile: one table
     /// (`thr`, `inv`: the row's entries), or, when `mixed`, a table per
@@ -1274,6 +1338,11 @@ private:
     std::vector<float> m_carry;
     std::vector<BoxcarPeak> m_peaks;
     std::vector<uint64_t> m_per_dm;
+    /// kKeepBrightest: per row, a heap of max_cands_per_dm candidates
+    /// (m_per_dm entries used); m_keep_q 0 under kDropNew.
+    std::vector<RawCandidate> m_keep;
+    SizeType m_keep_q = 0;
+    bool m_keep_open  = false;
     std::vector<RawCandidate> m_candidates;
     std::vector<double> m_prefix;
     std::vector<uint64_t> m_integer_prefix, m_integer_carry;
