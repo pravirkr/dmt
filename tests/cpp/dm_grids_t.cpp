@@ -7,6 +7,7 @@
 #include <functional>
 #include <limits>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -146,6 +147,10 @@ TEST_CASE("generate_dm_grid: S/N-loss rule over negative DMs", "[grid][cpu]") {
     CHECK(both.front() == -100.0);
     CHECK(both.back() == 100.0);
     CHECK(std::ranges::count(both, 0.0) == 1);
+    // An all-negative range ending at 0 ends on +0.0, not -0.0.
+    const auto to_zero = plans::generate_dm_grid(c, -100.0, 0.0);
+    CHECK(to_zero.back() == 0.0);
+    CHECK_FALSE(std::signbit(to_zero.back()));
 }
 
 TEST_CASE("generate_dt_grid: integer delays with both ends", "[grid][cpu]") {
@@ -159,6 +164,17 @@ TEST_CASE("generate_dt_grid: integer delays with both ends", "[grid][cpu]") {
         const plans::FDMTPlan plan(704.0F, 4032.0F, 64, 8192, 64e-6F,
                                    std::vector<IndexType>(g.begin(), g.end()));
         CHECK(plan.get_dt_grid_final().size() == g.size());
+    }
+    // A swapped band is reported as a band error, not as non-finite input.
+    auto swapped  = uwl(DMGridMethod::kSnrLoss);
+    swapped.f_min = 4032.0;
+    swapped.f_max = 704.0;
+    try {
+        (void)plans::generate_dt_grid(swapped, 0.0, 5000.0);
+        FAIL("expected std::invalid_argument");
+    } catch (const std::invalid_argument& e) {
+        CHECK(std::string_view(e.what()).find("frequency band") !=
+              std::string_view::npos);
     }
 }
 

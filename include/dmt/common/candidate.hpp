@@ -27,7 +27,7 @@ enum class OverflowPolicy : uint8_t {
     /// the call keeps the max_candidates highest. Ties go to the earlier
     /// peak sample, then beam, subband, DM row and width. A store of
     /// max_cands_per_dm candidates per row counts in the memory budget, so
-    /// max_cands_per_dm must be positive (and is meant to be small, e.g.
+    /// max_cands_per_dm must be in 1..1024 (and is meant to be small, e.g.
     /// 16). The surviving set is deterministic.
     kKeepBrightest,
 };

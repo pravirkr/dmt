@@ -497,7 +497,9 @@ private:
         for (SizeType index = 0; index < m_per_dm.size(); ++index) {
             const auto* store = m_keep.data() + index * m_keep_q;
             const auto count  = static_cast<SizeType>(m_per_dm[index]);
-            std::move(store, store + count, m_keep.begin() + n);
+            if (n != index * m_keep_q) { // not already in place
+                std::move(store, store + count, m_keep.begin() + n);
+            }
             n += count;
         }
         const SizeType kept = std::min(n, m_candidates.size());

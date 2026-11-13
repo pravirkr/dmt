@@ -40,6 +40,24 @@ from .libdmt import DMGridMethod, generate_dm_grid, generate_dt_grid
 DM_CONSTANT = 1 / 2.41e-4  # TEMPO2, Manchester&Taylor (1972)
 
 
+_METHODS = {
+    "snr_loss": DMGridMethod.SNR_LOSS,
+    "levin": DMGridMethod.LEVIN,
+    "levin_piecewise": DMGridMethod.LEVIN_PIECEWISE,
+}
+
+
+def _method(method: str) -> DMGridMethod:
+    """Return the C++ rule of a method name."""
+    if method not in _METHODS:
+        msg = (
+            f"Unknown grid generation method '{method}'; choose 'snr_loss', "
+            "'levin' or 'levin_piecewise'"
+        )
+        raise ValueError(msg)
+    return _METHODS[method]
+
+
 def _effective_tol(method: str, tol: float | None, max_snr_loss: float) -> float:
     """Return the C++ ``tol`` (0 lets the S/N-loss rule use ``max_snr_loss``)."""
     if tol is not None:
@@ -112,17 +130,7 @@ def generate_optimal_dm_grid(
     np.ndarray
         Sorted 1-D array of trial DMs (float64).
     """
-    methods = {
-        "snr_loss": DMGridMethod.SNR_LOSS,
-        "levin": DMGridMethod.LEVIN,
-        "levin_piecewise": DMGridMethod.LEVIN_PIECEWISE,
-    }
-    if method not in methods:
-        msg = (
-            f"Unknown grid generation method '{method}'; choose 'snr_loss', "
-            "'levin' or 'levin_piecewise'"
-        )
-        raise ValueError(msg)
+    rule = _method(method)
     effective_tol = _effective_tol(method, tol, max_snr_loss)
     return np.asarray(
         generate_dm_grid(
@@ -132,7 +140,7 @@ def generate_optimal_dm_grid(
             tsamp,
             dm_min,
             dm_max,
-            method=methods[method],
+            method=rule,
             pulse_width=pulse_width * tsamp,
             chan_dm=chan_dm,
             max_snr_loss=max_snr_loss,
@@ -197,14 +205,7 @@ def generate_optimal_dt_grid(
     """
     k_disp = DM_CONSTANT * (f_min**-2 - f_max**-2) / tsamp
     if integer_grid:
-        methods = {
-            "snr_loss": DMGridMethod.SNR_LOSS,
-            "levin": DMGridMethod.LEVIN,
-            "levin_piecewise": DMGridMethod.LEVIN_PIECEWISE,
-        }
-        if method not in methods:
-            msg = f"Unknown grid generation method '{method}'"
-            raise ValueError(msg)
+        rule = _method(method)
         effective_tol = _effective_tol(method, tol, max_snr_loss)
         return np.asarray(
             generate_dt_grid(
@@ -214,7 +215,7 @@ def generate_optimal_dt_grid(
                 tsamp,
                 dt_min,
                 dt_max,
-                method=methods[method],
+                method=rule,
                 pulse_width=pulse_width * tsamp,
                 chan_dm=chan_dm,
                 max_snr_loss=max_snr_loss,

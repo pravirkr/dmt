@@ -55,8 +55,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         overflow is unspecified. ``KEEP_BRIGHTEST``: exactly the brightest:
         each DM row keeps its ``max_cands_per_dm`` highest-S/N candidates of
         the call, and the call the ``max_candidates`` highest of those (ties
-        to the earlier peak sample). Needs a small positive
-        ``max_cands_per_dm`` (a per-row store counted in the memory budget).
+        to the earlier peak sample). Needs ``max_cands_per_dm`` in 1..1024,
+        e.g. 16 (a per-row store counted in the memory budget).
         )doc")
         .value("DROP_NEW", OverflowPolicy::kDropNew)
         .value("KEEP_BRIGHTEST", OverflowPolicy::kKeepBrightest);

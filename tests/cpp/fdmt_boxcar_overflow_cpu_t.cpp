@@ -175,11 +175,15 @@ TEST_CASE("FDMTBoxcar kKeepBrightest: validation and memory",
     CHECK(kept.get_memory_usage().candidates ==
           plain.get_memory_usage().candidates +
               (rows * 16 * sizeof(RawCandidate)));
-    // The store counts in the budget: with q = 4096 the store (rows x 4096
-    // candidates) dwarfs this small plan's FDMT, so a budget half a store
-    // above the kDropNew search cannot hold it.
-    cfg.max_cands_per_dm  = 4096;
-    const SizeType store  = rows * 4096 * sizeof(RawCandidate);
+    // Above 1024 per row (the kDropNew default 4096) is rejected.
+    cfg.overflow_policy  = OverflowPolicy::kKeepBrightest;
+    cfg.max_cands_per_dm = 4096;
+    CHECK_THROWS_AS(FDMTBoxcar(plan, cfg), std::invalid_argument);
+    cfg.overflow_policy = OverflowPolicy::kDropNew;
+    // The store counts in the budget: a budget half a store (rows x 1024
+    // candidates) above the kDropNew search cannot hold it.
+    cfg.max_cands_per_dm  = 1024;
+    const SizeType store  = rows * 1024 * sizeof(RawCandidate);
     const SizeType budget = plain.get_memory_usage().budgeted() + (store / 2);
     CHECK_NOTHROW(FDMTBoxcar(plan, cfg, true, Exec{}, 1,
                              algorithms::kFDMTAutoFuse, 0, budget));

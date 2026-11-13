@@ -432,8 +432,8 @@ What survives an overflow depends on `BoxcarConfig.overflow_policy`:
   sample, then beam, subband, DM row and width), so the retained set is
   deterministic. Each row has a store of `max_cands_per_dm` candidates,
   counted in `memory_usage.candidates` and the memory budget, so the cap
-  must be positive and small (e.g. 16): 4096 per row is about 20 GB on a
-  UWL-sized search (on GPUs an entry takes 32 bytes, on the CPU a full
+  must be in 1..1024 and is best small (e.g. 16): the `DROP_NEW` default of
+  4096 per row would be about 20 GB on a UWL-sized search (on GPUs an entry takes 32 bytes, on the CPU a full
   candidate). On GPUs the brightest are kept per row inside the scoring
   kernel; when the stores can exceed `max_candidates`, a radix select on
   the device picks the global brightest at the end of the call.

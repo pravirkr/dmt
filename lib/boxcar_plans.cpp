@@ -38,8 +38,22 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
         throw std::invalid_argument(
             "Boxcar: max_width must be 1..1048576 and wtsp finite >= 1");
     }
+    // Per-row tables grow with the number of widths and are built before
+    // the memory budget is checked: at most 4096 widths, as when max_width
+    // itself was capped at 4096 (wide boxes need wtsp > 1). Checked while
+    // building, so a bad width fails before a long list is made.
+    constexpr SizeType kMaxTrials = 4096;
+    const auto too_many           = [&] {
+        return std::invalid_argument(fmt::format(
+            "Boxcar: max_width {} at wtsp {} gives more than {} widths; raise "
+            "wtsp",
+            max_width, wtsp, kMaxTrials));
+    };
     std::vector<uint32_t> widths;
     for (SizeType w = 1; w <= max_width;) {
+        if (widths.size() == kMaxTrials) {
+            throw too_many();
+        }
         widths.push_back(static_cast<uint32_t>(w));
         const double next = static_cast<double>(w) * wtsp;
         if (next > static_cast<double>(max_width)) {
@@ -50,17 +64,10 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
     // The bank ends on max_width: the widest box searched is the one asked
     // for, even when the geometric steps stop below it.
     if (widths.back() < max_width) {
+        if (widths.size() == kMaxTrials) {
+            throw too_many();
+        }
         widths.push_back(static_cast<uint32_t>(max_width));
-    }
-    // Per-row tables grow with the number of widths and are built before
-    // the memory budget is checked: at most 4096 widths, as when max_width
-    // itself was capped at 4096 (wide boxes need wtsp > 1).
-    constexpr SizeType kMaxTrials = 4096;
-    if (widths.size() > kMaxTrials) {
-        throw std::invalid_argument(fmt::format(
-            "Boxcar: max_width {} at wtsp {} gives {} widths, over {}; raise "
-            "wtsp",
-            max_width, wtsp, widths.size(), kMaxTrials));
     }
     return widths;
 }
@@ -86,14 +93,23 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
         static_cast<unsigned>(config.overflow_policy) >
             static_cast<unsigned>(OverflowPolicy::kKeepBrightest) ||
-        (config.overflow_policy == OverflowPolicy::kKeepBrightest &&
-         config.max_cands_per_dm == 0) ||
         plan.get_nchans() > UINT32_MAX ||
         (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(
             "FDMTBoxcar: invalid configuration (requires valid mode, positive "
             "finite threshold/sigma and capacity, kill mask of nchans "
-            "entries, max_cands_per_dm > 0 with kKeepBrightest)");
+            "entries)");
+    }
+    // kKeepBrightest keeps a store of max_cands_per_dm candidates per row:
+    // the default 4096 (meant for kDropNew) would cost GBs on a large search.
+    constexpr SizeType kMaxKeepPerDM = 1024;
+    if (config.overflow_policy == OverflowPolicy::kKeepBrightest &&
+        (config.max_cands_per_dm == 0 ||
+         config.max_cands_per_dm > kMaxKeepPerDM)) {
+        throw std::invalid_argument(fmt::format(
+            "FDMTBoxcar: kKeepBrightest needs max_cands_per_dm in 1..{} (a "
+            "per-row store; e.g. 16), got {}",
+            kMaxKeepPerDM, config.max_cands_per_dm));
     }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||

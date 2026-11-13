@@ -1101,9 +1101,18 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     reduce_runs<T, kBlockThreads>(
                         shared, above, snr, filters, start, n, peaks + f, out,
                         raw_sums, std::is_integral_v<T>);
+                    // Only reduce_runs() emits in this mode: drain behind
+                    // the same block vote, not once per width.
+                    if constexpr (kKeep) {
+                        keep_drain(shared, pending, keeper);
+                    }
                 }
                 if constexpr (kKeep) {
-                    keep_drain(shared, pending, keeper);
+                    // Direct emission above: drain each width (mode is
+                    // block-uniform).
+                    if (mode == PeakFindingMode::kAllAboveThreshold) {
+                        keep_drain(shared, pending, keeper);
+                    }
                 }
             }
             if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {

@@ -126,13 +126,13 @@ level_snapshots = []
 for step in range(fdmt.total_levels):
     curr_lvl = fdmt.current_level
     n_subs = fdmt.num_subbands
-    
+
     # Inspect subband 0 at the current level
     sub0_data = fdmt.view_subband_data(0)
     level_snapshots.append((curr_lvl, n_subs, sub0_data.shape, np.max(sub0_data)))
-    
+
     print(f"Level {curr_lvl}: {n_subs} subbands, Subband 0 shape (n_dt, n_t) = {sub0_data.shape}")
-    
+
     # Advance to next level
     fdmt.advance(1)
 
@@ -158,7 +158,7 @@ for lvl in range(min(6, fdmt.total_levels + 1)):
     ax.set_xlabel("Time sample")
     ax.set_ylabel("Trial delay $d_t$")
     fig.colorbar(im, ax=ax)
-    
+
     if not fdmt.is_finished:
         fdmt.advance(1)
 

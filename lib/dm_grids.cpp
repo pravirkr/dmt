@@ -114,6 +114,11 @@ snr_loss_grid(const DMGridConfig& c, double dm_min, double dm_max) {
         for (auto it = pos.rbegin(); it != pos.rend(); ++it) {
             out.push_back(-*it);
         }
+        // dm_max = 0 negates to -0.0; store +0.0 (fast-math folds a
+        // conditional negation back into -x, so assign the literal).
+        if (dm_max == 0.0) {
+            out.back() = 0.0;
+        }
         return out;
     }
     return snr_loss_positive(c, loss, dm_min, dm_max, cd);
@@ -154,6 +159,7 @@ generate_dm_grid(const DMGridConfig& config, double dm_min, double dm_max) {
 
 std::vector<IndexType>
 generate_dt_grid(const DMGridConfig& config, double dt_min, double dt_max) {
+    validate(config, 0.0, 0.0); // the band and sampling, before k_disp
     const double k_disp =
         kDMConstant *
         (std::pow(config.f_min, -2.0) - std::pow(config.f_max, -2.0)) /

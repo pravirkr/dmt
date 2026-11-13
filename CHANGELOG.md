@@ -8,98 +8,42 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
-- **DM-grid generators in C++** (`dmt/common/dm_grids.hpp`:
-  `plans::generate_dm_grid`, `plans::generate_dt_grid`; Python
-  `dmtlib.generate_dm_grid`, `dmtlib.generate_dt_grid`, `DMGridMethod`), so
-  C++ pipelines get the same grids as `dmtlib.generate_optimal_dm_grid` /
-  `generate_optimal_dt_grid`, which now wrap them (same trials). The default
-  S/N-loss rule gains `chan_dm`, for data coherently dedispersed to a DM
-  (trials get dense around it), and takes `tol` as its knob like the Levin
-  rules (`max_snr_loss = 1 - 1/tol`). The Levin rules are unchanged. A new
-  pipeline-guide page explains the rules and their limits on very wide
-  bands.
-- **`OverflowPolicy::kKeepBrightest`** (`BoxcarConfig::overflow_policy`;
-  Python `OverflowPolicy.KEEP_BRIGHTEST`, `BoxcarConfig(overflow_policy=...)`)
-  for `FDMTBoxcar` and `FDMTFFTBoxcar`, CPU and GPU: when more candidates
-  cross the threshold than fit, each DM row keeps exactly its
-  `max_cands_per_dm` brightest candidates of the call and the call keeps the
-  `max_candidates` brightest of those, with a deterministic tie-break. An
-  early RFI storm no longer hides a bright burst later in the block. The
-  per-row stores count in the memory budget, so `max_cands_per_dm` must be
-  positive and small. The default `kDropNew` (first come) is unchanged.
-- FDMTBoxcar guide (`docs/pipeline_guide/fdmt_boxcar.md`, not yet
-  published; the noise-calibration page and the header carry the advice)
-  section on red noise and wide boxcars: slow drifts inflate
-  the S/N of wide boxes and the search cannot correct for them, so detrend
-  each channel upstream and keep `max_boxcar` at about 100 ms or less.
-  `kKeepBrightest` does not help against red-noise candidates.
+- **C++ DM-grid generators**: `plans::generate_dm_grid` and
+  `plans::generate_dt_grid` (Python `dmtlib.generate_dm_grid`,
+  `generate_dt_grid`, `DMGridMethod`). `generate_optimal_dm_grid` and
+  `generate_optimal_dt_grid` now wrap them. The S/N-loss rule gains
+  `chan_dm` for coherently dedispersed data and accepts `tol`.
+- **`OverflowPolicy::kKeepBrightest`** for `FDMTBoxcar` and `FDMTFFTBoxcar`
+  (CPU and GPU): on overflow each DM row keeps its `max_cands_per_dm`
+  brightest candidates, and the call keeps the `max_candidates` brightest of
+  those, deterministically. Set a small positive `max_cands_per_dm`; the
+  stores count in the memory budget. `kDropNew` stays the default.
 
 ### Changed
 
-- **`max_boxcar` above 4096.** Boxes up to 2^20 samples are accepted
-  (before: at most 4096), in banks of at most 4096 widths as before (so
-  `wtsp` must exceed 1 beyond 4096). Up to 4096 the search is tuned as before. Wider
-  boxes are searched exactly but with no speed promise: on a GPU their
-  prefix rings live in device memory, which is also the fallback when a
-  narrower box doesn't fit a small GPU's shared memory.
-
-- **GPU memory budget.** On a GPU, `max_memory_bytes` of `FDMTBoxcar` and
-  `FDMTFFTBoxcar` now bounds device memory only. Host-side allocations (host
-  plan copies, host result storage, the per-call kill-mask noise model) are
-  reported in the new `FDMTBoxcarMemoryUsage::host` field (Python
-  `memory_usage.host`) but not budgeted; `budgeted()` (`memory_usage.budgeted`)
-  is the part checked against the budget. `total()` is unchanged. On the CPU
-  nothing changes (`host` is 0).
-
-- Tutorials 1-7 are MyST notebooks (`docs/tutorials/*.md`) without stored
-  outputs, executed by every docs build against the current `dmtlib`. Their
-  committed outputs had gone stale (the CohFDMT tutorial's peak S/N moved
-  with the 0.8.0 time reference, since a pulse's sub-sample phase changes
-  its peak S/N by up to 25%). The GPU tutorial (8) and the landing-page
-  example stay `.ipynb` with stored outputs. The `docs` extra adds
-  `ipykernel` and `jupyter-cache`; `NB_EXECUTION_MODE=off` builds without
-  running them.
+- `max_boxcar` may exceed 4096 (up to 2^20 samples, still at most 4096
+  widths). Boxes wider than 4096 are exact but not tuned for speed.
+- On a GPU, `max_memory_bytes` of `FDMTBoxcar` and `FDMTFFTBoxcar` bounds
+  device memory only. Host allocations are reported in the new
+  `memory_usage.host`, and `memory_usage.budgeted` is the part checked.
+- Tutorials 1-7 are MyST notebooks, executed by the docs build. The `docs`
+  extra adds `ipykernel` and `jupyter-cache`.
 
 ### Fixed
 
-- `dmtlib.generate_optimal_dm_grid(method="levin" or "levin_piecewise")`
-  and `generate_optimal_dt_grid` with those methods passed `pulse_width`
-  (in samples) on as seconds: the default of one sample became a 1 s pulse,
-  and the grid nearly empty (3 trials for DM 0-2000 on Parkes UWL).
-
-- `FDMTBoxcar` on the GPU no longer rejects wide boxes that don't fit a
-  block's shared memory. It now drops the width screen and then uses
-  smaller blocks, with the same candidates. Packed input with
-  `max_boxcar` 4096 and dense widths (`wtsp` near 1) failed this way even
-  on 99 KB GPUs (L40); GPUs with 64 KB per block fit wider boxes than
-  before. Configurations that fitted are unchanged.
-
-- `FDMTBoxcar` on the GPU applies kill masks (constructor and per-call)
-  inside the FDMT, which reads killed channels as zero from one byte per beam
-  and channel. It no longer copies each block to a staging buffer to zero
-  them: device-memory input under a per-call mask needed a block-sized
-  device buffer (6.5 GiB for 6656 channels × 262144 samples), which could
-  push a configuration over the budget. Candidates are bit-identical.
-
-- Per-call kill masks: a call that throws after the engine took its mask
-  (an allocation or launch failure during the search) no longer leaves that
-  mask's noise tables in the stream's history. On paths with a search
-  latency (skewed path, GPU windowed top) they replaced the previous
-  block's tables for lagged rows on the next call.
-- Per-call kill masks: an unchanged mask reuses its kill runs instead of
-  rebuilding them every call.
-
-- GCC 12 Release builds with AVX-512 no longer print hundreds of false
-  `-Wmaybe-uninitialized` warnings from its own `avx512fintrin.h`
-  (`_mm512_undefined_epi32`). The warning is silenced in that header
-  only.
-
-- `FDMTBoxcar` on the GPU no longer rejects plans whose full-block root
-  plane (`ndt × nsamps`) exceeds 2^31 elements. The search consumes the
-  root chunk by chunk and never allocates that plane, so the 32-bit output
-  check only applies to the root-writing `FDMT` calls, which still enforce
-  it. Fine DM grids on long blocks (e.g. Parkes UWL, 9466 trials ×
-  262144 samples) now construct.
+- The Levin grid methods of `generate_optimal_dm_grid` and
+  `generate_optimal_dt_grid` treated `pulse_width` (in samples) as seconds,
+  which gave nearly empty grids.
+- `FDMTBoxcar` on the GPU:
+  - Wide boxes that don't fit shared memory no longer throw. The search
+    falls back to smaller blocks or a device-memory ring, with the same
+    candidates.
+  - Kill masks are applied inside the FDMT, without a block-sized staging
+    copy. Candidates are bit-identical.
+  - Plans whose root plane exceeds 2^31 elements now construct (e.g. Parkes
+    UWL with fine DM grids).
+- A per-call kill mask whose call throws no longer leaves its noise tables
+  in the stream history.
 
 ## [0.8.0] - 2026-11-11
 
