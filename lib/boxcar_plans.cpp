@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/boxcar.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
@@ -49,6 +51,16 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
     // for, even when the geometric steps stop below it.
     if (widths.back() < max_width) {
         widths.push_back(static_cast<uint32_t>(max_width));
+    }
+    // Per-row tables grow with the number of widths and are built before
+    // the memory budget is checked: at most 4096 widths, as when max_width
+    // itself was capped at 4096 (wide boxes need wtsp > 1).
+    constexpr SizeType kMaxTrials = 4096;
+    if (widths.size() > kMaxTrials) {
+        throw std::invalid_argument(fmt::format(
+            "Boxcar: max_width {} at wtsp {} gives {} widths, over {}; raise "
+            "wtsp",
+            max_width, wtsp, widths.size(), kMaxTrials));
     }
     return widths;
 }

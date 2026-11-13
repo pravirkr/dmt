@@ -40,10 +40,15 @@ TEST_CASE("Boxcar width generation and validation", "[boxcar][cpu]") {
     CHECK(plans::generate_box_width_trials(1U << 20, 2).back() == 1U << 20);
     CHECK_THROWS_AS(plans::generate_box_width_trials((1U << 20) + 1, 2),
                     std::invalid_argument);
+    // At most 4096 widths: every integer up to 4096, not beyond.
+    CHECK(plans::generate_box_width_trials(4096, 1).size() == 4096);
+    CHECK_THROWS_AS(plans::generate_box_width_trials(4097, 1),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(plans::generate_box_width_trials(65536, 1.0001F),
+                    std::invalid_argument);
 }
 
-TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096",
-          "[boxcar][cpu]") {
+TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096", "[boxcar][cpu]") {
     // Wider than a block: the carry spans blocks.
     const plans::FDMTPlan plan(700, 1200, 7, 2048, 0.001F,
                                std::vector<IndexType>{-5, 0, 7, 40}, "valid",

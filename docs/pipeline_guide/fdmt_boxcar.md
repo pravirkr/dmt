@@ -274,7 +274,8 @@ Every trial is searched at the original time resolution, without a
 
 **How wide.** The search is tuned for `max_boxcar` up to 4096 samples
 (262 ms at 64 µs). Wider boxes, up to 2^20 samples, are searched exactly
-(the same candidates), with no speed promise: on a GPU their prefix rings
+(the same candidates), with no speed promise, in banks of at most 4096
+widths (so `wtsp` must exceed 1 beyond 4096): on a GPU their prefix rings
 move from shared to device memory. The same happens below 4096 on GPUs
 with little shared memory per block, after the search first drops the
 width screen and then uses smaller blocks; the search path then ends in

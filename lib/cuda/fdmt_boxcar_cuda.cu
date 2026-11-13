@@ -747,8 +747,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     // Lagged rows (skewed-window subband search): this row's own samples.
     if (input.row_lag != nullptr) {
         FDMTSearchInput lagged;
-        if (!lagged_row_input(input, rows[row_base + task % ndm].row,
-                              lagged)) {
+        if (!lagged_row_input(input, rows[row_base + task % ndm].row, lagged)) {
             return;
         }
         input = lagged;
@@ -758,9 +757,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     }
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
-    T* ring      = kGlobalRing ? ring_global + (SizeType{blockIdx.x} *
-                                                (SizeType{mask} + 1))
-                               : reinterpret_cast<T*>(storage + sizeof(shared));
+    T* ring = kGlobalRing
+                  ? ring_global + (SizeType{blockIdx.x} * (SizeType{mask} + 1))
+                  : reinterpret_cast<T*>(storage + sizeof(shared));
     const SizeType beam      = input.beam_begin + task / ndm;
     const SizeType d         = task % ndm;
     const SizeType row_index = row_base + d;
@@ -1929,9 +1928,9 @@ public:
         if (m_global_ring) {
             path += " (boxcar: device-memory ring)";
         } else if (m_screen_dropped || m_block_shrunk) {
-            path += fmt::format(" (boxcar: {}-thread blocks{})",
-                                m_block_threads,
-                                m_screen_dropped ? ", no width screen" : "");
+            path +=
+                fmt::format(" (boxcar: {}-thread blocks{})", m_block_threads,
+                            m_screen_dropped ? ", no width screen" : "");
         }
         return path;
     }
@@ -2011,24 +2010,22 @@ private:
                            cudaStream_t stream,
                            SizeType task_base = 0) {
         kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, kKeep,
-                           kGlobalRing>
-            <<<grid, block, m_smem, stream>>>(
-                stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
-                raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
-                raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
-                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
-                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
-                m_config.skip_cold_prefix, g.level == m_plan.get_niters(),
-                raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
-                m_mask, m_shared_tables, m_config.use_trapezoid,
-                raw(m_screen_groups_d),
-                static_cast<int>(m_screen_groups_d.size()),
-                raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
-                kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
-                raw(m_bright_d), m_bright_q,
-                kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr,
-                task_base);
+                           kGlobalRing><<<grid, block, m_smem, stream>>>(
+            stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
+            raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
+            raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d), m_peak_count,
+            raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d),
+            raw(m_per_dm_d), m_config.max_candidates, m_config.max_cands_per_dm,
+            m_config.peak_mode, m_config.skip_cold_prefix,
+            g.level == m_plan.get_niters(), raw(m_integer_thresholds),
+            raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
+            m_config.use_trapezoid, raw(m_screen_groups_d),
+            static_cast<int>(m_screen_groups_d.size()),
+            raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
+            kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
+            raw(m_bright_d), m_bright_q,
+            kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr,
+            task_base);
     }
     /// kGlobalRing: the group's tasks in batches of m_ring_batch blocks,
     /// each batch reusing the rings (stream order).
@@ -2047,12 +2044,12 @@ private:
                 static_cast<unsigned>(std::min(m_ring_batch, tasks - base)));
             if (m_bright_q != 0) {
                 launch_score_args<T, kGlobalBlock, false, kBlockNoise, C, true,
-                                  true>(stopped, g, batch, block, carry,
-                                        stream, base);
+                                  true>(stopped, g, batch, block, carry, stream,
+                                        base);
             } else {
-                launch_score_args<T, kGlobalBlock, false, kBlockNoise, C,
-                                  false, true>(stopped, g, batch, block, carry,
-                                               stream, base);
+                launch_score_args<T, kGlobalBlock, false, kBlockNoise, C, false,
+                                  true>(stopped, g, batch, block, carry, stream,
+                                        base);
             }
         }
     }
@@ -2144,13 +2141,13 @@ private:
               typename C,
               bool kGlobalRing = false>
     void configure_variants() {
-        configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen,
-                                            kBlockNoise, C, false,
-                                            kGlobalRing>);
+        configure_kernel(
+            kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, false,
+                               kGlobalRing>);
         if (m_bright_q != 0) {
-            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen,
-                                                kBlockNoise, C, true,
-                                                kGlobalRing>);
+            configure_kernel(
+                kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C,
+                                   true, kGlobalRing>);
         }
     }
     /// kKeepBrightest, end of a call: the stores (or their max_candidates
@@ -2210,10 +2207,10 @@ private:
             cudaDeviceGetAttribute(
                 &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
             "FDMTBoxcar: shared memory limit");
-        const auto limit = m_shared_limit != 0
-                               ? std::min(m_shared_limit,
-                                          static_cast<SizeType>(optin))
-                               : static_cast<SizeType>(optin);
+        const auto limit =
+            m_shared_limit != 0
+                ? std::min(m_shared_limit, static_cast<SizeType>(optin))
+                : static_cast<SizeType>(optin);
         const SizeType eff_chunk =
             std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
         int threads = eff_chunk <= 64 * kItems    ? 64
@@ -2303,8 +2300,7 @@ private:
                        m_ring_d.size() * sizeof(uint64_t));
         configure_variants<T, kGlobalBlock, false, false, T, true>();
         if constexpr (std::is_integral_v<T>) {
-            configure_variants<T, kGlobalBlock, false, false, uint32_t,
-                               true>();
+            configure_variants<T, kGlobalBlock, false, false, uint32_t, true>();
         } else {
             configure_variants<T, kGlobalBlock, false, true, T, true>();
         }

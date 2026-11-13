@@ -208,7 +208,7 @@ TEST_CASE("FDMTBoxcar GPU fits wide boxes in small shared memory",
                                1);
     const auto input = waterfalls(plan, 1, 4);
     const auto run   = [&](const BoxcarConfig& box, SizeType limit,
-                         std::string& path) {
+                           std::string& path) {
         const SizeType root = plan.get_niters();
         FDMTEngineConfig cfg{};
         cfg.use_box_smearing    = true;
@@ -239,14 +239,11 @@ TEST_CASE("FDMTBoxcar GPU fits wide boxes in small shared memory",
         SizeType limit;
         const char* note; // nullptr: no fallback taken
     };
-    for (const auto& c : {Case{1.5F, 0, nullptr},
-                          Case{1.5F, 44000, "128-thread blocks)"},
-                          Case{1.5F, 38000, "64-thread blocks)"},
-                          Case{1.02F, 0, nullptr},
-                          Case{1.02F, 65536,
-                               "256-thread blocks, no width screen)"},
-                          Case{1.02F, 38000,
-                               "64-thread blocks, no width screen)"}}) {
+    for (const auto& c :
+         {Case{1.5F, 0, nullptr}, Case{1.5F, 44000, "128-thread blocks)"},
+          Case{1.5F, 38000, "64-thread blocks)"}, Case{1.02F, 0, nullptr},
+          Case{1.02F, 65536, "256-thread blocks, no width screen)"},
+          Case{1.02F, 38000, "64-thread blocks, no width screen)"}}) {
         DYNAMIC_SECTION("wtsp " << c.wtsp << " limit " << c.limit) {
             box.wtsp            = c.wtsp;
             const auto expected = reference(plan, box, true, 1, input);
@@ -267,8 +264,7 @@ TEST_CASE("FDMTBoxcar GPU fits wide boxes in small shared memory",
     // boxes wider than 4096 at any limit.
     for (const auto& [width, limit] :
          {std::pair<SizeType, SizeType>{4096, 30000}, {6000, 0}}) {
-        DYNAMIC_SECTION("device-memory ring, max_boxcar " << width
-                                                          << " limit "
+        DYNAMIC_SECTION("device-memory ring, max_boxcar " << width << " limit "
                                                           << limit) {
             box.wtsp            = 1.5F;
             box.max_boxcar      = width;
@@ -290,8 +286,7 @@ TEST_CASE("Packed FDMTBoxcar GPU searches boxes far wider than 4096",
     // the rings. Exact against the CPU, across blocks shorter than the box.
     const plans::FDMTPlan plan(700, 1200, 16, 1024, 0.001F, 300);
     std::mt19937 random(11);
-    std::vector<std::vector<uint8_t>> input(3,
-                                            std::vector<uint8_t>(16 * 1024));
+    std::vector<std::vector<uint8_t>> input(3, std::vector<uint8_t>(16 * 1024));
     for (auto& block : input) {
         for (auto& x : block) {
             x = static_cast<uint8_t>(random());
@@ -356,6 +351,26 @@ TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",
     const auto expected = run(Exec::cpu(2));
     REQUIRE(expected.size() > 100);
     compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
+
+    // Float rows at the same width: the GPU's float prefix rings against
+    // the CPU, within float rounding.
+    const auto floats    = waterfalls(plan, 1, 3);
+    BoxcarConfig fcfg    = cfg;
+    fcfg.input_nbits     = 32;
+    fcfg.input_mean      = 0.0F;
+    fcfg.noise_sigma     = 1.0F;
+    const auto run_float = [&](const Exec& exec) {
+        FDMTBoxcar search(plan, fcfg, true, exec);
+        std::vector<RawCandidate> out;
+        for (const auto& block : floats) {
+            append(out, search.execute(block));
+        }
+        append(out, search.flush());
+        return out;
+    };
+    const auto expected_f = run_float(Exec::cpu(2));
+    REQUIRE(expected_f.size() > 100);
+    compare(run_float({algorithms::detail::kGPUBackend, 1, 0}), expected_f);
 }
 
 TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",

@@ -194,6 +194,71 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest: screen, masks, wide and 16-bit "
         };
         CHECK(check_keep(run, cfg, {{3, 40}, {1, 10}}) > 100);
     }
+    SECTION("max_boxcar 6000: device-memory rings, 2 beams, short chunks") {
+        // Wider than 4096: the kGlobalRing instances (kKeep twin included),
+        // two beams and chunks of 64 samples, shorter than a block's tile.
+        const plans::FDMTPlan plan(700, 1200, 3, 4500, 0.001F,
+                                   std::vector<IndexType>{-5, 0, 7}, "valid",
+                                   1);
+        const auto input = waterfalls(plan, 2, 3);
+        BoxcarConfig cfg;
+        cfg.max_boxcar    = 6000;
+        cfg.wtsp          = 2.0F;
+        cfg.detect_thresh = 2.0F;
+        const auto run    = [&](const BoxcarConfig& c,
+                                std::vector<CandidateCounts>* n) {
+            FDMTBoxcar s(plan, c, true, kGpu, 2, algorithms::kFDMTAutoFuse, 64);
+            return run_calls(s, input, n);
+        };
+        CHECK(check_keep(run, cfg, {{3, 40}, {1, 10}}) > 100);
+        // The open run against the CPU.
+        auto open             = cfg;
+        open.max_candidates   = SizeType{1} << 20;
+        open.max_cands_per_dm = 0;
+        FDMTBoxcar cpu(plan, open, true, Exec::cpu(3), 2);
+        const auto expected = run_calls(cpu, input);
+        const auto actual   = run(open, nullptr);
+        REQUIRE(actual.size() == expected.size());
+        for (SizeType i = 0; i < actual.size(); ++i) {
+            compare(actual[i], expected[i]);
+        }
+    }
+    SECTION("max_boxcar 6000 with per-call kill masks") {
+        // kGlobalRing with kBlockNoise (float rows), plain and kKeep.
+        const plans::FDMTPlan plan(700, 1200, 32, 8192, 0.001F,
+                                   std::vector<IndexType>{0, 3, 9, 20, 41});
+        const auto input = waterfalls(plan, 1, 3);
+        std::vector<std::vector<uint8_t>> masks;
+        std::mt19937 gen(19);
+        std::bernoulli_distribution kill(0.25);
+        for (SizeType k = 0; k < input.size(); ++k) {
+            std::vector<uint8_t> m(plan.get_nchans());
+            for (auto& v : m) {
+                v = kill(gen) ? 0 : 1;
+            }
+            masks.push_back(std::move(m));
+        }
+        BoxcarConfig cfg;
+        cfg.max_boxcar    = 6000;
+        cfg.wtsp          = 2.0F;
+        cfg.detect_thresh = 2.0F;
+        const auto run    = [&](const BoxcarConfig& c,
+                                std::vector<CandidateCounts>* n) {
+            FDMTBoxcar s(plan, c, true, kGpu);
+            return run_calls_masked(s, input, masks, n);
+        };
+        CHECK(check_keep(run, cfg, {{3, 100}, {1, 30}}) > 400);
+        auto open             = cfg;
+        open.max_candidates   = SizeType{1} << 20;
+        open.max_cands_per_dm = 0;
+        FDMTBoxcar cpu(plan, open, true, Exec::cpu(3));
+        const auto expected = run_calls_masked(cpu, input, masks);
+        const auto actual   = run(open, nullptr);
+        REQUIRE(actual.size() == expected.size());
+        for (SizeType i = 0; i < actual.size(); ++i) {
+            compare(actual[i], expected[i]);
+        }
+    }
     SECTION("16-bit packed input (uint64 carry)") {
         // 64 channels of 16-bit codes with boxcars to 1100: tree sums
         // exceed 32 bits, so the search carries uint64.

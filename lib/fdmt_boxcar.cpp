@@ -173,9 +173,9 @@ public:
         // most 256 MiB (launched in batches of blocks).
         SizeType rings = 0;
         if (ex.backend != Backend::kCPU && width > 4096) {
-            rings = std::min<SizeType>(
-                SizeType{256} << 20,
-                rows * std::bit_ceil(width + 1024) * sizeof(uint64_t));
+            rings = std::min<SizeType>(SizeType{256} << 20,
+                                       rows * std::bit_ceil(width + 1024) *
+                                           sizeof(uint64_t));
         }
         return (rows * width * carry_elem) +
                (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +

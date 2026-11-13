@@ -27,7 +27,9 @@ All notable changes to `dmt` are listed here. The format follows
   early RFI storm no longer hides a bright burst later in the block. The
   per-row stores count in the memory budget, so `max_cands_per_dm` must be
   positive and small. The default `kDropNew` (first come) is unchanged.
-- Pipeline guide section on red noise and wide boxcars: slow drifts inflate
+- FDMTBoxcar guide (`docs/pipeline_guide/fdmt_boxcar.md`, not yet
+  published; the noise-calibration page and the header carry the advice)
+  section on red noise and wide boxcars: slow drifts inflate
   the S/N of wide boxes and the search cannot correct for them, so detrend
   each channel upstream and keep `max_boxcar` at about 100 ms or less.
   `kKeepBrightest` does not help against red-noise candidates.
@@ -35,7 +37,8 @@ All notable changes to `dmt` are listed here. The format follows
 ### Changed
 
 - **`max_boxcar` above 4096.** Boxes up to 2^20 samples are accepted
-  (before: at most 4096). Up to 4096 the search is tuned as before. Wider
+  (before: at most 4096), in banks of at most 4096 widths as before (so
+  `wtsp` must exceed 1 beyond 4096). Up to 4096 the search is tuned as before. Wider
   boxes are searched exactly but with no speed promise: on a GPU their
   prefix rings live in device memory, which is also the fallback when a
   narrower box doesn't fit a small GPU's shared memory.
@@ -88,8 +91,8 @@ All notable changes to `dmt` are listed here. The format follows
 
 - GCC 12 Release builds with AVX-512 no longer print hundreds of false
   `-Wmaybe-uninitialized` warnings from its own `avx512fintrin.h`
-  (`_mm512_undefined_epi32`, GCC PR 105593). The warning is silenced in
-  that header only.
+  (`_mm512_undefined_epi32`). The warning is silenced in that header
+  only.
 
 - `FDMTBoxcar` on the GPU no longer rejects plans whose full-block root
   plane (`ndt × nsamps`) exceeds 2^31 elements. The search consumes the
