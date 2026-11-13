@@ -4,6 +4,12 @@ Notebooks that run on a laptop in seconds (the last one needs a CUDA GPU).
 The first two build up from dispersion to how FDMT works; the rest each take
 one topic.
 
+Tutorials 1–7 are [MyST notebooks](https://myst-nb.readthedocs.io/) (`.md`
+files in `docs/tutorials/`), run against the current `dmtlib` on every docs
+build. To run one in Jupyter, install
+[jupytext](https://jupytext.readthedocs.io/) and open the `.md` file as a
+notebook, or convert it with `jupytext --to ipynb <file>.md`.
+
 ::::{grid} 1 2 2 2
 :gutter: 3
 

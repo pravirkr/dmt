@@ -32,6 +32,15 @@ All notable changes to `dmt` are listed here. The format follows
   is the part checked against the budget. `total()` is unchanged. On the CPU
   nothing changes (`host` is 0).
 
+- Tutorials 1-7 are MyST notebooks (`docs/tutorials/*.md`) without stored
+  outputs, executed by every docs build against the current `dmtlib`. Their
+  committed outputs had gone stale (the CohFDMT tutorial's peak S/N moved
+  with the 0.8.0 time reference, since a pulse's sub-sample phase changes
+  its peak S/N by up to 25%). The GPU tutorial (8) and the landing-page
+  example stay `.ipynb` with stored outputs. The `docs` extra adds
+  `ipykernel` and `jupyter-cache`; `NB_EXECUTION_MODE=off` builds without
+  running them.
+
 ### Fixed
 
 - `FDMTBoxcar` on the GPU applies kill masks (constructor and per-call)

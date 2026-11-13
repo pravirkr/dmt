@@ -44,6 +44,8 @@ docs = [
     "breathe",
     "sphinx-design",
     "matplotlib",
+    "ipykernel",
+    "jupyter-cache",
 ]
 develop = ["ruff", "ty"]
 bench = ["matplotlib", "numpy"]
