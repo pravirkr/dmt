@@ -6,7 +6,24 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **GPU memory budget.** On a GPU, `max_memory_bytes` of `FDMTBoxcar` and
+  `FDMTFFTBoxcar` now bounds device memory only. Host-side allocations (host
+  plan copies, host result storage, the per-call kill-mask noise model) are
+  reported in the new `FDMTBoxcarMemoryUsage::host` field (Python
+  `memory_usage.host`) but not budgeted; `budgeted()` (`memory_usage.budgeted`)
+  is the part checked against the budget. `total()` is unchanged. On the CPU
+  nothing changes (`host` is 0).
+
 ### Fixed
+
+- `FDMTBoxcar` on the GPU applies kill masks (constructor and per-call)
+  inside the FDMT, which reads killed channels as zero from one byte per beam
+  and channel. It no longer copies each block to a staging buffer to zero
+  them: device-memory input under a per-call mask needed a block-sized
+  device buffer (6.5 GiB for 6656 channels × 262144 samples), which could
+  push a configuration over the budget. Candidates are bit-identical.
 
 - `FDMTBoxcar` on the GPU no longer rejects plans whose full-block root
   plane (`ndt × nsamps`) exceeds 2^31 elements. The search consumes the

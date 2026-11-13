@@ -114,7 +114,14 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("workspace", &FDMTBoxcarMemoryUsage::workspace)
         .def_readonly("candidates", &FDMTBoxcarMemoryUsage::candidates)
         .def_readonly("staging", &FDMTBoxcarMemoryUsage::staging)
-        .def_property_readonly("total", &FDMTBoxcarMemoryUsage::total);
+        .def_readonly("host", &FDMTBoxcarMemoryUsage::host,
+                      "Of total, bytes in host memory on a GPU backend "
+                      "(reported, not budgeted); 0 on the CPU.")
+        .def_property_readonly("total", &FDMTBoxcarMemoryUsage::total)
+        .def_property_readonly(
+            "budgeted", &FDMTBoxcarMemoryUsage::budgeted,
+            "The part of total that max_memory_bytes bounds: device memory "
+            "on a GPU, everything on the CPU.");
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
             "max_width"_a, "wtsp"_a = 2.0F, R"doc(
         Boxcar widths searched for max_boxcar=max_width and this wtsp.
@@ -144,8 +151,10 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``subband_level`` (the depth), ``subband_idx``, the channel extent
         and ``staggered``.
 
-        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds everything
-        the instance allocates (:attr:`memory_usage`). Plans whose FDMT tree
+        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds
+        ``memory_usage.budgeted``: everything the instance allocates on the
+        CPU, device memory on a GPU (host copies and result storage are
+        reported in ``memory_usage.host``, not budgeted). Plans whose FDMT tree
         history does not fit (UWL-like bands at high time resolution) run the
         skewed-window path; their subband rows are then searched with a fixed
         per-row latency of up to the dispersion delay to the bottom of the
@@ -158,8 +167,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
         for packed input) and are left out of every row's noise model, so
-        S/N stays calibrated on the remaining channels. Each block is copied
-        once to zero them. :meth:`execute` also takes a mask per block
+        S/N stays calibrated on the remaining channels. On the CPU each
+        block is copied once to zero them; on a GPU the transform reads them
+        as zero, without a copy. :meth:`execute` also takes a mask per block
         (float32 input), ANDed with this one.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
@@ -336,8 +346,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         indices, comparable with FDMTBoxcar's. Channels with kill_mask 0 read
         as zero and are excluded from the noise model.
 
-        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds everything
-        the instance allocates (:attr:`memory_usage`), as on FDMTBoxcar:
+        ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds
+        ``memory_usage.budgeted``, as on FDMTBoxcar (device memory on a
+        GPU):
         over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
         until it fits. Raises ``ValueError`` when even the shortest segment
         does not fit. GPU host-input staging is allocated lazily, outside

@@ -79,7 +79,7 @@ public:
         engine               = make_engine(cfg, smear, exec);
         // The fixed part is an estimate: with an automatic chunk, step it
         // down while the measured total is over the budget.
-        SizeType used = engine->memory_usage().total();
+        SizeType used = engine->memory_usage().budgeted();
         while (used > max_memory && chunk == 0 &&
                cfg.mode == FDMTMode::kValid && engine->chunk_nsamps() > 256) {
             const SizeType over  = used - max_memory;
@@ -89,7 +89,7 @@ public:
                                        : cfg.max_memory_bytes;
             engine.reset();
             engine = make_engine(cfg, smear, exec);
-            used   = engine->memory_usage().total();
+            used   = engine->memory_usage().budgeted();
         }
         if (used > max_memory) {
             throw std::invalid_argument(fmt::format(
@@ -135,27 +135,30 @@ public:
             config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
                 ? filters
                 : 1;
-        const SizeType cands = config.max_candidates * sizeof(RawCandidate) *
-                               (ex.backend == Backend::kCPU ? 1 : 2);
+        // Budgeted bytes only: on a GPU the device copies (the host result
+        // storage and host row table are reported, not budgeted).
+        const SizeType cands = config.max_candidates * sizeof(RawCandidate);
         // Per row and width: threshold and inverse sigma (float), plus the
-        // integer mean and cutoff of packed input; the row table (host and,
-        // on a GPU, device).
+        // integer mean and cutoff of packed input; the row table.
         const SizeType luts =
             rows * filters *
             ((2 * sizeof(float)) + (config.input_nbits == 32
                                         ? 0
                                         : sizeof(double) + sizeof(uint64_t)));
-        const SizeType row_table = rows * sizeof(detail::BoxcarRow) *
-                                   (ex.backend == Backend::kCPU ? 1 : 2);
-        // A kill mask zeroes its channels in a staging copy of each block.
-        const SizeType staging =
-            kill_runs.empty()
-                ? 0
-                : beams * plan.get_nchans() *
-                      (config.input_nbits == 32
-                           ? plan.get_nsamps() * sizeof(float)
-                           : bit_pack_utils::packed_row_bytes(
-                                 plan.get_nsamps(), config.input_nbits));
+        const SizeType row_table = rows * sizeof(detail::BoxcarRow);
+        // A kill mask: on the CPU its channels are zeroed in a staging copy
+        // of each block; on a GPU the transform reads one byte per row.
+        SizeType staging = 0;
+        if (!kill_runs.empty()) {
+            staging =
+                ex.backend != Backend::kCPU
+                    ? beams * plan.get_nchans()
+                    : beams * plan.get_nchans() *
+                          (config.input_nbits == 32
+                               ? plan.get_nsamps() * sizeof(float)
+                               : bit_pack_utils::packed_row_bytes(
+                                     plan.get_nsamps(), config.input_nbits));
+        }
         return (rows * width * carry_elem) +
                (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
                row_table + staging;
@@ -264,11 +267,15 @@ public:
         const SizeType ring =
             1 + static_cast<SizeType>((latency + plan.get_nsamps() - 1) /
                                       plan.get_nsamps());
-        const SizeType extra =
+        // The noise model and its table sets live in host memory: budgeted
+        // on the CPU only (on a GPU, max_memory_bytes bounds device memory).
+        const SizeType model_bytes =
             model->plan_bytes() + model->workspace_bytes() +
-            ((2 * ring + kCacheMasks) * model->table_bytes()) +
+            ((2 * ring + kCacheMasks) * model->table_bytes());
+        const SizeType extra =
+            (exec.backend == Backend::kCPU ? model_bytes : 0) +
             engine->block_noise_bytes();
-        const SizeType used = engine->memory_usage().total();
+        const SizeType used = engine->memory_usage().budgeted();
         if (used + extra > max_memory) {
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: per-call kill masks need {:.2f} GiB more, over "
@@ -431,9 +438,13 @@ FDMTBoxcarMemoryUsage FDMTBoxcar::get_memory_usage() const noexcept {
     auto usage = m_impl->engine->memory_usage();
     if (m_impl->noise) {
         // The per-call mask's model and the tables alive (ring and cache).
-        usage.plan +=
+        const SizeType plan_bytes =
             m_impl->noise->plan_bytes() + m_impl->noise->live_table_bytes();
+        usage.plan += plan_bytes;
         usage.workspace += m_impl->noise->workspace_bytes();
+        if (backend() != Backend::kCPU) {
+            usage.host += plan_bytes + m_impl->noise->workspace_bytes();
+        }
     }
     return usage;
 }

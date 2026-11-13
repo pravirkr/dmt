@@ -56,8 +56,9 @@ inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
 
 /**
  * Default memory budget of FDMT and FDMTBoxcar (10 GiB): everything the
- * instance allocates (FDMTMemoryUsage::total(), FDMTBoxcarMemoryUsage::
- * total()), not the caller's input and output buffers. Within the budget
+ * instance allocates (FDMTMemoryUsage::total(); for FDMTBoxcar
+ * FDMTBoxcarMemoryUsage::budgeted(), device memory only on a GPU), not the
+ * caller's input and output buffers. Within the budget
  * the fastest streaming path is taken; a plan whose tree history does not
  * fit (e.g. 6656 channels at 64 us to DM 2000) takes the skewed-window
  * path with the longest automatic chunk that fits. Construction throws

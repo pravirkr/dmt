@@ -56,9 +56,12 @@ same: the noise model still counts them, so sigma is too high by
 `sqrt(N / (N - k))` (5% S/N for a 10% mask). Rows whose channels are all
 killed (a killed subband) have no noise and never detect.
 
-Each block is copied once into a staging buffer to zero the killed rows; it
-appears in `memory_usage.staging` and counts against `max_memory_bytes`.
-Without a mask there is no copy.
+On the CPU each block is copied once into a staging buffer to zero the
+killed rows; it appears in `memory_usage.staging` and counts against
+`max_memory_bytes`. On a GPU the FDMT reads killed rows as zero itself, from
+one byte per beam and channel, so there is no copy of the block (device
+input under a mask needs no extra block-sized memory). Without a mask there
+is no copy.
 
 #### A mask per block
 
@@ -92,9 +95,10 @@ C++ `std::invalid_argument`) without changing the stream if either fails:
 - the block is long enough for every window to span at most two blocks:
   `nsamps >= S_max + max_boxcar - 1` (`parkes_uwl` at depth 4 with 100 ms
   boxcars needs 255,452 samples);
-- the noise tables fit in `max_memory_bytes`: the noise model, a few table
-  sets of `rows x widths x 8` bytes, the staging block if the constructor
-  had no mask and, on GPUs, device and pinned copies of the tables.
+- the noise tables fit in `max_memory_bytes`: on the CPU the noise model, a
+  few table sets of `rows x widths x 8` bytes and the staging block if the
+  constructor had no mask; on GPUs the device copies of the tables (the
+  host-side model and tables are reported in `memory_usage.host`).
 
 The tables of a new mask are computed on the host when it first appears,
 with the instance's `nthreads` (also on GPUs, where it has no other use):
@@ -375,8 +379,11 @@ order and the retained subset during overflow are unspecified.
 ### Memory budget and wide bands
 
 `FDMTBoxcar(..., max_memory_bytes=...)` (default 10 GiB, `FDMT` takes the
-same argument) bounds everything the instance allocates
-(`get_memory_usage().total()`, not the caller's input or output). The
+same argument) bounds what the instance allocates where it runs
+(`memory_usage.budgeted`, not the caller's input or output): everything on
+the CPU, device memory on a GPU. On a GPU the host plan copies, host result
+storage and the per-call mask noise model live in host memory; they are
+reported in `memory_usage.host` (included in `total`) but not budgeted. The
 boxcar's own buffers are fixed by the plan and config: each searched row
 keeps `max_boxcar` carried samples (float32, or uint32 for packed input
 when every tree value fits 32 bits) and its pending peaks. The FDMT takes
@@ -396,8 +403,7 @@ the fastest path that fits in the rest:
 On a GPU, host-memory input goes through a device staging block that is
 allocated by the first host-memory `execute()` and reused. The check at
 construction does not include it, since device-memory input never needs
-it; it shows in `memory_usage.staging` once allocated. A per-block kill
-mask counts it when the first mask arrives.
+it; it shows in `memory_usage.staging` once allocated.
 
 On the skewed path a subband search reads every searched row (tree,
 staggered, and delays the full-band grid does not use) from the full
@@ -562,7 +568,7 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   0.5% of the row peak), so a near-threshold point can move between blocked
   and unblocked runs; with integer delays they agree to float rounding.
 - **Memory.** `max_memory_bytes` (keyword-only, default 10 GiB) bounds
-  everything the instance allocates (`memory_usage`), as on `FDMTBoxcar`. Over
+  `memory_usage.budgeted`, as on `FDMTBoxcar` (device memory on a GPU). Over
   it the overlap-save segments are shortened (each try halves the transform
   length; `chunk_nsamps` reports the segment) until the instance fits, and
   construction raises `ValueError` with the memory at the shortest segment

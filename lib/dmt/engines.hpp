@@ -125,6 +125,12 @@ public:
         throw_no_device_memory("FDMT packed search device execution",
                                backend());
     }
+    /// Device search only: level-0 rows (beam * nchans + channel) whose
+    /// byte in `keep` is 0 read as zero in later execute_search() calls on
+    /// device input; nullptr reads every row. The bytes are read by the
+    /// queued kernels, so they must stay valid until those complete.
+    /// Returns false (and ignores `keep`) where unsupported.
+    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,

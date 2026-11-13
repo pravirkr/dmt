@@ -72,6 +72,11 @@ public:
                         detail::FDMTSearchSink& sink,
                         Stream queue) override;
 
+    bool set_search_keep(const uint8_t* keep) override {
+        m_search_keep = keep;
+        return true;
+    }
+
     template <typename TInt>
     void execute_search_int_typed(const FDMTInputPacked& full,
                                   TInt* ring,
@@ -143,13 +148,14 @@ public:
     // chunks start on a whole byte: chunks are multiples of 64 samples).
     [[nodiscard]] static FDMTInputF32 chunk_input(const FDMTInputF32& in,
                                                   SizeType t0) {
-        return {.data = in.data + t0, .nsamps = in.nsamps};
+        return {.data = in.data + t0, .nsamps = in.nsamps, .keep = in.keep};
     }
     [[nodiscard]] static FDMTInputPacked chunk_input(const FDMTInputPacked& in,
                                                      SizeType t0) {
         return {.data = in.data + ((t0 * static_cast<SizeType>(in.nbits)) / 8),
                 .row_bytes = in.row_bytes,
-                .nbits     = in.nbits};
+                .nbits     = in.nbits,
+                .keep      = in.keep};
     }
 
     void execute(std::span<const uint8_t> waterfall_h,
@@ -531,6 +537,8 @@ private:
     SizeType m_max_memory{kFDMTDefaultMaxMemory}; // FDMTEngineConfig
     bool m_force_skewed{false}; // FDMTEngineConfig::force_skewed_direct
     bool m_search_only{false};  // FDMTEngineConfig::search_only
+    // set_search_keep(): level-0 rows the search reads as zero.
+    const uint8_t* m_search_keep{nullptr};
     bool m_top_chunk{false};
     // Samples of the rings' reach streamed since a load_history().
     SizeType m_top_filled{0};

@@ -332,7 +332,10 @@ public:
                         Stream /*unused*/) {
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
-    virtual void reset(Stream)                                    = 0;
+    virtual void reset(Stream) = 0;
+    /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
+    /// transform itself, without a staging copy. False where unsupported.
+    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;

@@ -20,10 +20,17 @@ struct FDMTBoxcarMemoryUsage {
     SizeType workspace  = 0;
     SizeType candidates = 0; ///< Includes host result storage on GPUs.
     SizeType staging    = 0;
+    /// Of total(), the bytes in host memory on a GPU backend (host plan
+    /// copies, host result storage, the per-call mask noise model). 0 on
+    /// the CPU, where every byte is host memory and counts in the budget.
+    SizeType host = 0;
     [[nodiscard]] SizeType total() const noexcept {
         return plan + state + history + peaks + workspace + candidates +
                staging;
     }
+    /// The part of total() that max_memory_bytes bounds: device memory on
+    /// a GPU, everything on the CPU.
+    [[nodiscard]] SizeType budgeted() const noexcept { return total() - host; }
 };
 
 /**
@@ -57,14 +64,16 @@ struct FDMTBoxcarMemoryUsage {
  * An instance is not safe for concurrent calls. CPU device calls throw.
  *
  * Memory: max_memory_bytes (default kFDMTDefaultMaxMemory, 10 GiB) bounds
- * everything the instance allocates (get_memory_usage().total()). The
- * boxcar carry, peaks and candidate buffers are fixed by the plan and
- * config; the FDMT takes its fastest path within the rest (see FDMT).
- * Construction throws std::invalid_argument when nothing fits. On a GPU
- * the staging block for host-memory input is allocated by the first host
- * execute() and is not part of that check (device input never needs it);
- * get_memory_usage().staging reports it once allocated, and a per-call kill
- * mask counts it against the budget when the first mask arrives. On the
+ * what the instance allocates where it runs (get_memory_usage().budgeted()):
+ * everything on the CPU; device memory on a GPU, where the host plan
+ * copies, host result storage and per-call mask noise model are reported
+ * (get_memory_usage().host) but not budgeted. The boxcar carry, peaks and
+ * candidate buffers are fixed by the plan and config; the FDMT takes its
+ * fastest path within the rest (see FDMT). Construction throws
+ * std::invalid_argument when nothing fits. On a GPU the staging block for
+ * host-memory input is allocated by the first host execute() and is not
+ * part of that check (device input never needs it);
+ * get_memory_usage().staging reports it once allocated. On the
  * skewed-window path (plans whose tree history exceeds the budget) the rows
  * of a subband search are searched with a fixed per-row latency of up to
  * the dispersion delay from the subband to the bottom of the band (that of
@@ -76,9 +85,11 @@ struct FDMTBoxcarMemoryUsage {
  * 0 for packed input) and are left out of every row's noise model and
  * packed mean, so S/N stays calibrated on the remaining channels (a pulse
  * scores the S/N of its signal in them). Zeroing channels upstream instead
- * leaves sigma too high by sqrt(N / (N - k)). Each block is copied to a
- * staging buffer to zero its killed rows (counted in
- * get_memory_usage().staging and the memory budget).
+ * leaves sigma too high by sqrt(N / (N - k)). On the CPU each block is
+ * copied to a staging buffer to zero its killed rows (counted in
+ * get_memory_usage().staging and the memory budget); on a GPU the
+ * transform reads killed rows as zero (one byte per beam and channel, no
+ * copy of the block).
  *
  * Per-call kill mask (float32 input): execute(waterfall, kill_mask) also
  * takes a mask for that block (same format and convention; nonzero is
@@ -94,7 +105,8 @@ struct FDMTBoxcarMemoryUsage {
  * slightly low (at most sqrt(V_or / V_true)). Elsewhere S/N is exact for
  * the block's mask. The first per-call mask requires blocks of at least
  * max(S) + max_boxcar - 1 samples (so that a window spans at most two
- * blocks) and the memory for the noise tables within max_memory_bytes;
+ * blocks) and the memory for the noise tables within max_memory_bytes
+ * (on a GPU: their device copies);
  * either failure throws std::invalid_argument before any state changes.
  * The noise tables of a new mask are computed on the host with
  * exec.nthreads threads (on GPUs too); the last three masks are cached.

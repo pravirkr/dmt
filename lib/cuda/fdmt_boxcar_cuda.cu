@@ -1072,7 +1072,10 @@ public:
         }
         m_driver    = std::move(driver);
         m_kill_runs = std::move(kill_runs);
-        if (!m_kill_runs.empty()) {
+        // FDMT reads killed rows as zero itself (one byte per row); other
+        // drivers read a staging copy with the rows zeroed.
+        m_keep_in_transform = m_driver->set_search_keep(nullptr);
+        if (!m_kill_runs.empty() && !m_keep_in_transform) {
             // The staging block the killed rows are zeroed in.
             if (config.input_nbits == 32) {
                 m_input_d.resize(m_beams * plan.get_nchans() *
@@ -1338,11 +1341,15 @@ public:
         // on the device and in pinned host memory.
         const SizeType full =
             m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
-        const SizeType staging = m_input_d.size() < full
-                                     ? (full - m_input_d.size()) * sizeof(float)
-                                     : 0;
+        const SizeType staging =
+            m_keep_in_transform
+                ? (m_keep_d.empty() ? m_beams * m_plan.get_nchans() : 0)
+            : m_input_d.size() < full
+                ? (full - m_input_d.size()) * sizeof(float)
+                : 0;
+        // Device bytes only (the host halves of the slots are not budgeted).
         return staging + (m_rows.size() * sizeof(uint64_t)) +
-               (slot_count() * 4 * table_floats() * sizeof(float));
+               (slot_count() * 2 * table_floats() * sizeof(float));
     }
     void enable_block_noise(
         std::shared_ptr<const std::vector<uint64_t>> support) override {
@@ -1361,7 +1368,7 @@ public:
         gpu_utils::set_device(m_device);
         const SizeType full =
             m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
-        if (m_input_d.size() < full) {
+        if (!m_keep_in_transform && m_input_d.size() < full) {
             m_work.wait(); // the staging buffer may still be read
             m_input_d.resize(full);
         }
@@ -1477,8 +1484,11 @@ public:
                          (2 * sizeof(uint64_t)), // candidate frontier word
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
                           sizeof(RawCandidate),
-            .staging =
-                m_input_d.size() * sizeof(float) + m_packed_input.size()};
+            .staging    = m_input_d.size() * sizeof(float) +
+                          m_packed_input.size() + m_keep_d.size(),
+            .host = host_plan +
+                    (m_slots.size() * 2 * table_floats() * sizeof(float)) +
+                    (m_candidates_h.size() * sizeof(RawCandidate))};
     }
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
@@ -1662,14 +1672,20 @@ private:
             configure_shared_block<T, 256>(limit);
         }
     }
-    /// The block with the killed channels' rows zeroed in `buffer` (copied
-    /// there first unless the host path staged it there), or the block
-    /// itself without a kill mask.
+    /// The block to search under this call's kill runs. With the mask
+    /// applied by the transform (FDMT): the block itself, the keep bytes
+    /// set. Otherwise the block with the killed channels' rows zeroed in
+    /// `buffer` (copied there first unless the host path staged it there),
+    /// or the block itself without a kill mask.
     template <typename T>
     DeviceSpan<const T> masked(DeviceSpan<const T> block,
                                thrust::device_vector<T>& buffer,
-                               Stream queue) const {
+                               Stream queue) {
         const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
+        if (m_keep_in_transform) {
+            set_keep(runs, queue);
+            return block;
+        }
         if (runs.empty()) {
             return block;
         }
@@ -1691,6 +1707,38 @@ private:
                 (c1 - c0) * row, m_beams, stream));
         }
         return {dst, block.size(), block.device};
+    }
+    /// The transform's keep bytes for `runs` (none: read every row). The
+    /// device copy is rewritten only when the runs change, after the work
+    /// still reading it.
+    void set_keep(const std::vector<std::pair<SizeType, SizeType>>& runs,
+                  Stream queue) {
+        if (runs.empty()) {
+            (void)m_driver->set_search_keep(nullptr);
+            return;
+        }
+        if (m_keep_d.empty() || runs != m_keep_runs) {
+            const SizeType nchans = m_plan.get_nchans();
+            m_keep_h.assign(m_beams * nchans, 1);
+            for (SizeType b = 0; b < m_beams; ++b) {
+                for (const auto& [c0, c1] : runs) {
+                    std::fill_n(m_keep_h.begin() + static_cast<std::ptrdiff_t>(
+                                                       b * nchans + c0),
+                                c1 - c0, uint8_t{0});
+                }
+            }
+            if (m_keep_d.empty()) {
+                m_keep_d.resize(m_keep_h.size());
+            }
+            const auto stream = static_cast<cudaStream_t>(queue.native);
+            m_work.order(stream);
+            // Pageable source: staged before the call returns.
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(raw(m_keep_d), m_keep_h.data(), m_keep_h.size(),
+                                cudaMemcpyHostToDevice, stream));
+            m_keep_runs = runs;
+        }
+        (void)m_driver->set_search_keep(raw(m_keep_d));
     }
     /// Candidate frontier: the oldest open begin sample, reduced on the
     /// device and copied to a pinned word on `stream` (no host wait).
@@ -1888,8 +1936,14 @@ private:
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
-    /// Killed channel runs, zeroed in m_input_d / m_packed_input.
+    /// Killed channel runs: read as zero by the transform (m_keep_d) or
+    /// zeroed in m_input_d / m_packed_input.
     std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
+    bool m_keep_in_transform = false;
+    /// One byte per input row (beam, channel), for m_keep_runs.
+    thrust::device_vector<uint8_t> m_keep_d;
+    std::vector<uint8_t> m_keep_h;
+    std::vector<std::pair<SizeType, SizeType>> m_keep_runs;
     std::vector<LevelGroup> m_level_groups;
     thrust::device_vector<BoxcarRow> m_rows_d;
     thrust::device_vector<uint32_t> m_widths_d;

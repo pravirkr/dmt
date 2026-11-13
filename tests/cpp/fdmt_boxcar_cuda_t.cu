@@ -363,9 +363,12 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                 }
             };
             check(g);
+            // Host input staging plus the transform's keep bytes (one per
+            // beam and channel); the mask needs no block copy of its own.
             CHECK(gpu_s.get_memory_usage().staging ==
                   (bits == 32 ? floats.front().size() * sizeof(float)
-                              : packed.front().size()));
+                              : packed.front().size()) +
+                      (plan.get_nchans() * gpu_s.get_nbeams()));
 
             cudaStream_t stream;
             gpu_utils::check_gpu_call(cudaStreamCreate(&stream));
