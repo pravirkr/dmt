@@ -34,7 +34,7 @@ The `dmt` namespaces: backend selection, engines, plans and utilities.
 - `dmtlib`: engines, plans, candidate search and convenience functions (`FDMT`, `DDMT`, `SDMT`, `CohFDMT`, `FDMTFFT`, `DDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`, `compute_fdmt`, `FDMTPlan`, `available_backends`), and the CPU FFT planner controls (`set_fft_planner`, `import_fft_wisdom`, `export_fft_wisdom`).
 - `dmtlib.dedisperse`: one-call dedispersion of a whole waterfall into complete time series (`dedisperse`, `Dedispersed`, `dispersion_delay`, also exported from `dmtlib`).
 - `dmtlib.simulate`: pulse injection and dispersion modelling (`generate_frb`, `generate_pure_frb`, `generate_dispersed_periodic_signal`).
-- `dmtlib.grid`: smearing-aware sparse DM grid generators (`generate_optimal_dm_grid` with `method="snr_loss"`, `"levin"`, or the piecewise-uniform `"levin_piecewise"` for `DDMTFFT`).
+- `dmtlib.grid`: smearing-aware sparse DM grid generators (`generate_optimal_dm_grid` with `method="snr_loss"`, `"levin"`, or the piecewise-uniform `"levin_piecewise"` for `DDMTFFT`), wrapping `generate_dm_grid` / `generate_dt_grid` (C++ `dmt/common/dm_grids.hpp`); see [DM grids](../pipeline_guide/dm_grids.md).
 
 ## C++ namespaces
 

@@ -8,6 +8,16 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **DM-grid generators in C++** (`dmt/common/dm_grids.hpp`:
+  `plans::generate_dm_grid`, `plans::generate_dt_grid`; Python
+  `dmtlib.generate_dm_grid`, `dmtlib.generate_dt_grid`, `DMGridMethod`), so
+  C++ pipelines get the same grids as `dmtlib.generate_optimal_dm_grid` /
+  `generate_optimal_dt_grid`, which now wrap them (same trials). The default
+  S/N-loss rule gains `chan_dm`, for data coherently dedispersed to a DM
+  (trials get dense around it), and takes `tol` as its knob like the Levin
+  rules (`max_snr_loss = 1 - 1/tol`). The Levin rules are unchanged. A new
+  pipeline-guide page explains the rules and their limits on very wide
+  bands.
 - **`OverflowPolicy::kKeepBrightest`** (`BoxcarConfig::overflow_policy`;
   Python `OverflowPolicy.KEEP_BRIGHTEST`, `BoxcarConfig(overflow_policy=...)`)
   for `FDMTBoxcar` and `FDMTFFTBoxcar`, CPU and GPU: when more candidates
@@ -48,6 +58,11 @@ All notable changes to `dmt` are listed here. The format follows
   running them.
 
 ### Fixed
+
+- `dmtlib.generate_optimal_dm_grid(method="levin" or "levin_piecewise")`
+  and `generate_optimal_dt_grid` with those methods passed `pulse_width`
+  (in samples) on as seconds: the default of one sample became a 1 s pulse,
+  and the grid nearly empty (3 trials for DM 0-2000 on Parkes UWL).
 
 - `FDMTBoxcar` on the GPU no longer rejects wide boxes that don't fit a
   block's shared memory. It now drops the width screen and then uses

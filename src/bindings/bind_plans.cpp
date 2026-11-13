@@ -751,6 +751,76 @@ void bind_plans(py::module_& mod) {
             "effective_sigma_grid", [](const DDMTPlan& plan) {
                 return as_pyarray(plan.get_effective_sigma_grid());
             });
+
+    // Trial grids (dmt/common/dm_grids.hpp). dmtlib.grid wraps them with
+    // pulse widths in samples.
+    py::enum_<plans::DMGridMethod>(mod, "DMGridMethod",
+                                   "Spacing rule of generate_dm_grid().")
+        .value("SNR_LOSS", plans::DMGridMethod::kSnrLoss)
+        .value("LEVIN", plans::DMGridMethod::kLevin)
+        .value("LEVIN_PIECEWISE", plans::DMGridMethod::kLevinPiecewise);
+    const auto grid_config =
+        [](double f_min, double f_max, SizeType nchans, double tsamp,
+           plans::DMGridMethod method, double pulse_width, double chan_dm,
+           double max_snr_loss, double tol, SizeType min_run) {
+            plans::DMGridConfig c;
+            c.f_min        = f_min;
+            c.f_max        = f_max;
+            c.nchans       = nchans;
+            c.tsamp        = tsamp;
+            c.method       = method;
+            c.pulse_width  = pulse_width;
+            c.chan_dm      = chan_dm;
+            c.max_snr_loss = max_snr_loss;
+            c.tol          = tol;
+            c.min_run      = min_run;
+            return c;
+        };
+    mod.def(
+        "generate_dm_grid",
+        [grid_config](double f_min, double f_max, SizeType nchans, double tsamp,
+                      double dm_min, double dm_max, plans::DMGridMethod method,
+                      double pulse_width, double chan_dm, double max_snr_loss,
+                      double tol, SizeType min_run) {
+            return as_pyarray(plans::generate_dm_grid(
+                grid_config(f_min, f_max, nchans, tsamp, method, pulse_width,
+                            chan_dm, max_snr_loss, tol, min_run),
+                dm_min, dm_max));
+        },
+        "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_min"_a, "dm_max"_a,
+        py::kw_only(), "method"_a = plans::DMGridMethod::kSnrLoss,
+        "pulse_width"_a = 0.0, "chan_dm"_a = 0.0, "max_snr_loss"_a = 0.05,
+        "tol"_a = 0.0, "min_run"_a = 32,
+        R"doc(
+        Trial DMs (pc cm^-3) from dm_min to dm_max, ascending
+        (``dmt::plans::generate_dm_grid``). Frequencies in MHz, ``tsamp`` and
+        ``pulse_width`` in seconds; ``chan_dm`` is the DM the channels were
+        coherently dedispersed to (0: none; S/N-loss rule only). ``tol``
+        (> 1) is every rule's broadening tolerance; 0 takes the rule's
+        default (1.25 for Levin, 1 / (1 - max_snr_loss) for S/N loss). See
+        :func:`dmtlib.generate_optimal_dm_grid` for the rules.
+        )doc");
+    mod.def(
+        "generate_dt_grid",
+        [grid_config](double f_min, double f_max, SizeType nchans, double tsamp,
+                      double dt_min, double dt_max, plans::DMGridMethod method,
+                      double pulse_width, double chan_dm, double max_snr_loss,
+                      double tol, SizeType min_run) {
+            return as_pyarray(plans::generate_dt_grid(
+                grid_config(f_min, f_max, nchans, tsamp, method, pulse_width,
+                            chan_dm, max_snr_loss, tol, min_run),
+                dt_min, dt_max));
+        },
+        "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dt_min"_a, "dt_max"_a,
+        py::kw_only(), "method"_a = plans::DMGridMethod::kSnrLoss,
+        "pulse_width"_a = 0.0, "chan_dm"_a = 0.0, "max_snr_loss"_a = 0.05,
+        "tol"_a = 0.0, "min_run"_a = 32,
+        R"doc(
+        Integer delay trials (samples across the band) from dt_min to dt_max
+        for an FDMT delay grid (``dmt::plans::generate_dt_grid``): the DM
+        grid of that range as delays, rounded half to even, deduplicated,
+        both ends kept. Units as :func:`generate_dm_grid`.
+        )doc");
 }
 
 } // namespace dmt
