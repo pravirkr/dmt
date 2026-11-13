@@ -93,6 +93,8 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
         static_cast<unsigned>(config.overflow_policy) >
             static_cast<unsigned>(OverflowPolicy::kKeepBrightest) ||
+        static_cast<unsigned>(config.screen_mode) >
+            static_cast<unsigned>(BoxcarScreenMode::kNone) ||
         plan.get_nchans() > UINT32_MAX ||
         (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(
@@ -110,6 +112,12 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             "FDMTBoxcar: kKeepBrightest needs max_cands_per_dm in 1..{} (a "
             "per-row store; e.g. 16), got {}",
             kMaxKeepPerDM, config.max_cands_per_dm));
+    }
+    constexpr SizeType kMaxSurrogateBoxcar = 4096;
+    if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate &&
+        config.max_boxcar > kMaxSurrogateBoxcar) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: kKadaneSurrogate supports max_boxcar up to 4096");
     }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||
