@@ -6,6 +6,45 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **C++ DM-grid generators**: `plans::generate_dm_grid` and
+  `plans::generate_dt_grid` (Python `dmtlib.generate_dm_grid`,
+  `generate_dt_grid`, `DMGridMethod`). `generate_optimal_dm_grid` and
+  `generate_optimal_dt_grid` now wrap them. The S/N-loss rule gains
+  `chan_dm` for coherently dedispersed data and accepts `tol`.
+- **`OverflowPolicy::kKeepBrightest`** for `FDMTBoxcar` and `FDMTFFTBoxcar`
+  (CPU and GPU): on overflow each DM row keeps its `max_cands_per_dm`
+  brightest candidates, and the call keeps the `max_candidates` brightest of
+  those, deterministically. Set a small positive `max_cands_per_dm`; the
+  stores count in the memory budget. `kDropNew` stays the default.
+
+### Changed
+
+- `max_boxcar` may exceed 4096 (up to 2^20 samples, still at most 4096
+  widths). Boxes wider than 4096 are exact but not tuned for speed.
+- On a GPU, `max_memory_bytes` of `FDMTBoxcar` and `FDMTFFTBoxcar` bounds
+  device memory only. Host allocations are reported in the new
+  `memory_usage.host`, and `memory_usage.budgeted` is the part checked.
+- Tutorials 1-7 are MyST notebooks, executed by the docs build. The `docs`
+  extra adds `ipykernel` and `jupyter-cache`.
+
+### Fixed
+
+- The Levin grid methods of `generate_optimal_dm_grid` and
+  `generate_optimal_dt_grid` treated `pulse_width` (in samples) as seconds,
+  which gave nearly empty grids.
+- `FDMTBoxcar` on the GPU:
+  - Wide boxes that don't fit shared memory no longer throw. The search
+    falls back to smaller blocks or a device-memory ring, with the same
+    candidates.
+  - Kill masks are applied inside the FDMT, without a block-sized staging
+    copy. Candidates are bit-identical.
+  - Plans whose root plane exceeds 2^31 elements now construct (e.g. Parkes
+    UWL with fine DM grids).
+- A per-call kill mask whose call throws no longer leaves its noise tables
+  in the stream history.
+
 ## [0.8.0] - 2026-11-11
 
 - **Staggered subband search.** `FDMTPlan(..., subband_depth=d)` adds, at each

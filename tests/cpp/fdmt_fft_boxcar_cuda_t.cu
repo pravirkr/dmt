@@ -148,11 +148,13 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     cfg.max_cands_per_dm = 0;
     const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
     FDMTFFTBoxcar open(plan, cfg, true, exec);
-    const SizeType full   = open.get_memory_usage().total();
+    const SizeType full   = open.get_memory_usage().budgeted();
     const SizeType budget = full / 2;
     FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, {}, budget);
     INFO(open.summary() << capped.summary());
-    CHECK(capped.get_memory_usage().total() <= budget);
+    // On a GPU the budget bounds device memory; host storage is reported.
+    CHECK(capped.get_memory_usage().budgeted() <= budget);
+    CHECK(capped.get_memory_usage().host > 0);
     CHECK(capped.get_chunk_nsamps() < open.get_chunk_nsamps());
     std::vector<RawCandidate> a;
     std::vector<RawCandidate> b;

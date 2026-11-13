@@ -87,6 +87,14 @@ struct FDMTEngineConfig {
     /// Private (GPU): take the skewed direct levels and target-ring top
     /// even when the unskewed direct top fits its ring budget (tests).
     bool force_skewed_direct{false};
+    /// Private (GPU): the engine only runs execute_search() (FDMTBoxcar),
+    /// which never writes a full-block root plane, so the root output is
+    /// exempt from the 32-bit extent check; root-writing calls then throw.
+    bool search_only{false};
+    /// Private (GPU, tests): shared memory per block the boxcar search may
+    /// use, in bytes; 0 takes the device's opt-in limit. Tests lower it to
+    /// reach the fallbacks of small-shared-memory GPUs.
+    SizeType boxcar_shared_limit{0};
 };
 
 class FDMTEngine {
@@ -121,6 +129,12 @@ public:
         throw_no_device_memory("FDMT packed search device execution",
                                backend());
     }
+    /// Device search only: level-0 rows (beam * nchans + channel) whose
+    /// byte in `keep` is 0 read as zero in later execute_search() calls on
+    /// device input; nullptr reads every row. The bytes are read by the
+    /// queued kernels, so they must stay valid until those complete.
+    /// Returns false (and ignores `keep`) where unsupported.
+    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,

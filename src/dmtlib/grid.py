@@ -1,91 +1,71 @@
-"""Optimal sparse DM and dt grid generation for FDMT and DDMT.
+"""Trial DM and delay grids for FDMT and DDMT.
 
-Provides physically motivated non-uniform trial grids that guarantee a maximum
-fractional sensitivity loss (e.g. <= 5%) across the entire DM search range
-while minimizing redundant trials.
+Wrappers of the C++ generators (``dmt/common/dm_grids.hpp``, also
+:func:`dmtlib.generate_dm_grid` and :func:`dmtlib.generate_dt_grid`) that take
+the pulse width in samples. Each rule bounds how much a pulse may broaden
+between two trials (``tol``, or ``max_snr_loss = 1 - 1 / tol``).
 
-Algorithms supported:
+1. ``method="snr_loss"`` (default, dmt's rule): the effective width::
 
-1. ``method="snr_loss"`` (Default, recommended for FDMT):
-   Evaluates intra-channel dispersion smearing at the band edge (f_min, the
-   worst-case channel)::
+       W_eff(DM) = sqrt(W_pulse^2 + t_samp^2 + t_chan(DM)^2),
+       t_chan(DM) = 2 * K_DM * |DM - chan_dm| * df / f_min^3
 
-       t_chan(DM) = 2 * K_DM * DM * df / f_min^3
+   may grow by at most ``tol`` under the delay error of half a step, from the
+   exact dispersion sweep across the band::
 
-   The effective pulse width including smearing and sampling interval is::
+       dt_step(DM) <= max(1.0, 2 * eta * W_eff(DM)),  eta = sqrt(tol^2 - 1)
 
-       W_eff(DM) = sqrt(W_pulse^2 + t_samp^2 + t_chan(DM)^2)
+   Never collapses at high DM; supports negative DMs and coherently
+   dedispersed data (``chan_dm``). On very wide bands the bottom-channel
+   smearing makes it lose more than ``max_snr_loss`` at high DM.
 
-   The allowed delay mismatch for a maximum fractional S/N loss eta is::
+2. ``method="levin"`` (Levin 2012, as in Heimdall): smearing and sweep from
+   the band centre (a straight-line sweep, so too sparse on very wide bands),
+   broadening bounded by ``tol``. The classic formula, kept as it is.
 
-       dt_step(DM) <= max(1.0, 2 * eta * W_eff(DM))
+3. ``method="levin_piecewise"`` (DDplan-style): the Levin grid made piecewise
+   uniform: the range is split where the Levin step doubles and each segment
+   is uniformly spaced at its smallest Levin step. Typically 1.2-1.4x the
+   Levin trials; the grid for :class:`DDMTFFT`'s NUFFT path.
 
-   where eta = sqrt(1 / (1 - max_snr_loss)^2 - 1).
-   This method is strictly monotonic, never collapses at high DM, and
-   supports negative and symmetric DM ranges.
-
-2. ``method="levin"`` (Classical Lina Levin 2012 pulse-broadening formulation):
-   Evaluates smearing at the center frequency f_center and bounds pulse broadening
-   by a tolerance factor tol > 1.0 (typically 1.15 to 1.25). Calls into C++
-   ``DDMTPlan.generate_levin_dm_grid``. Note that the quadratic equation can
-   collapse at high DM when the discriminant becomes negative.
-
-3. ``method="levin_piecewise"`` (DDplan-style):
-   The Levin grid made piecewise uniform: the range is split where the Levin
-   step doubles and each segment is uniformly spaced at its smallest Levin
-   step (``DDMTPlan.generate_levin_dm_grid_piecewise``). Typically 1.2-1.4x
-   the Levin trials; the grid for :class:`DDMTFFT`'s NUFFT path.
+See the pipeline guide's DM-grid page for choosing one.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .libdmt import DDMTPlan
+from .libdmt import DMGridMethod, generate_dm_grid, generate_dt_grid
 
 DM_CONSTANT = 1 / 2.41e-4  # TEMPO2, Manchester&Taylor (1972)
 
 
-def _generate_positive_dm_grid(
-    f_min: float,
-    f_max: float,
-    nchans: int,
-    tsamp: float,
-    dm_max: float,
-    dm_min: float = 0.0,
-    pulse_width: float = 1.0,
-    max_snr_loss: float = 0.05,
-) -> np.ndarray:
-    """Generate a non-uniform DM grid for non-negative DM bounds [dm_min, dm_max]."""
-    if dm_max < dm_min:
-        msg = f"dm_max ({dm_max}) must be >= dm_min ({dm_min})"
+_METHODS = {
+    "snr_loss": DMGridMethod.SNR_LOSS,
+    "levin": DMGridMethod.LEVIN,
+    "levin_piecewise": DMGridMethod.LEVIN_PIECEWISE,
+}
+
+
+def _method(method: str) -> DMGridMethod:
+    """Return the C++ rule of a method name."""
+    if method not in _METHODS:
+        msg = (
+            f"Unknown grid generation method '{method}'; choose 'snr_loss', "
+            "'levin' or 'levin_piecewise'"
+        )
         raise ValueError(msg)
-    if dm_max == dm_min:
-        return np.array([float(dm_min)], dtype=np.float64)
+    return _METHODS[method]
 
-    df_chan = (f_max - f_min) / nchans
-    k_disp = DM_CONSTANT * (f_min**-2 - f_max**-2) / tsamp
-    # Fractional tolerance parameter
-    eta = np.sqrt(1.0 / (1.0 - max_snr_loss) ** 2 - 1.0)
 
-    dms = [float(dm_min)]
-    cur_dm = float(dm_min)
-    while cur_dm < dm_max:
-        # Intra-channel smearing at bottom of the band (worst-case channel)
-        t_chan = (2.0 * DM_CONSTANT * cur_dm * df_chan / (f_min**3)) / tsamp
-        w_eff = np.sqrt(pulse_width**2 + 1.0 + t_chan**2)
-
-        # Allow at most 2 * eta * w_eff delay mismatch across band
-        dt_step = max(1.0, 2.0 * eta * w_eff)
-        dm_step = dt_step / k_disp
-
-        cur_dm += dm_step
-        if cur_dm >= dm_max:
-            dms.append(float(dm_max))
-            break
-        dms.append(cur_dm)
-
-    return np.array(dms, dtype=np.float64)
+def _effective_tol(method: str, tol: float | None, max_snr_loss: float) -> float:
+    """Return the C++ ``tol`` (0 lets the S/N-loss rule use ``max_snr_loss``)."""
+    if tol is not None:
+        return tol
+    if method == "snr_loss":
+        return 0.0
+    # Levin: the broadening of the requested loss (1.25 if it is invalid).
+    return 1.0 / (1.0 - max_snr_loss) if max_snr_loss < 1.0 else 1.25
 
 
 def generate_optimal_dm_grid(
@@ -100,8 +80,12 @@ def generate_optimal_dm_grid(
     max_snr_loss: float = 0.05,
     method: str = "snr_loss",
     tol: float | None = None,
+    chan_dm: float = 0.0,
 ) -> np.ndarray:
     """Generate an optimal non-uniform DM trial grid (in pc cm^-3).
+
+    A wrapper of the C++ ``dmt::plans::generate_dm_grid`` (also
+    :func:`dmtlib.generate_dm_grid`, which takes ``pulse_width`` in seconds).
 
     Parameters
     ----------
@@ -132,109 +116,37 @@ def generate_optimal_dm_grid(
           segments where the Levin step doubles, never coarser than "levin").
           Use it with :class:`DDMTFFT`, which runs one NUFFT per segment.
     tol : float, optional
-        Pulse broadening factor (tol > 1.0, e.g. 1.25) for ``method="levin"``.
-        If omitted when using "levin", defaults to 1 / (1 - max_snr_loss).
+        Pulse broadening factor (tol > 1.0, e.g. 1.25), the knob of every
+        method. If omitted: 1 / (1 - max_snr_loss) for "levin" (the same
+        for "snr_loss", whose ``max_snr_loss`` is that tolerance:
+        ``max_snr_loss = 1 - 1 / tol``).
+    chan_dm : float, default=0.0
+        DM the channels were coherently dedispersed to (0: ordinary
+        filterbank data); "snr_loss" only. Intra-channel smearing grows with
+        ``|DM - chan_dm|``, so trials get denser near ``chan_dm``.
 
     Returns
     -------
     np.ndarray
         Sorted 1-D array of trial DMs (float64).
     """
-    if method in {"levin", "levin_piecewise"}:
-        if dm_min < 0.0:
-            msg = f"Levin method does not support negative dm_min ({dm_min})"
-            raise ValueError(msg)
-        effective_tol = (
-            tol
-            if tol is not None
-            else (1.0 / (1.0 - max_snr_loss) if max_snr_loss < 1.0 else 1.25)
-        )
-        if effective_tol <= 1.0:
-            msg = f"Levin tol must be > 1.0, got {effective_tol}"
-            raise ValueError(msg)
-        generate = (
-            DDMTPlan.generate_levin_dm_grid_piecewise
-            if method == "levin_piecewise"
-            else DDMTPlan.generate_levin_dm_grid
-        )
-        return np.asarray(
-            generate(
-                dm_min,
-                dm_max,
-                tsamp,
-                pulse_width,
-                f_min,
-                f_max,
-                nchans,
-                effective_tol,
-            ),
-            dtype=np.float64,
-        )
-
-    if method != "snr_loss":
-        msg = (
-            f"Unknown grid generation method '{method}'; choose 'snr_loss', "
-            "'levin' or 'levin_piecewise'"
-        )
-        raise ValueError(msg)
-
-    if not 0.0 < max_snr_loss < 1.0:
-        msg = f"max_snr_loss must be between 0 and 1, got {max_snr_loss}"
-        raise ValueError(msg)
-    if f_min <= 0 or f_max <= f_min:
-        msg = f"Invalid frequency band: f_min={f_min}, f_max={f_max}"
-        raise ValueError(msg)
-    if nchans <= 0 or tsamp <= 0:
-        msg = f"Invalid nchans={nchans} or tsamp={tsamp}"
-        raise ValueError(msg)
-
-    # Handle symmetric / negative ranges
-    if dm_min < 0.0 and dm_max > 0.0:
-        neg_half = _generate_positive_dm_grid(
+    rule = _method(method)
+    effective_tol = _effective_tol(method, tol, max_snr_loss)
+    return np.asarray(
+        generate_dm_grid(
             f_min,
             f_max,
             nchans,
             tsamp,
-            -dm_min,
-            0.0,
-            pulse_width,
-            max_snr_loss,
-        )
-        pos_half = _generate_positive_dm_grid(
-            f_min,
-            f_max,
-            nchans,
-            tsamp,
+            dm_min,
             dm_max,
-            0.0,
-            pulse_width,
-            max_snr_loss,
-        )
-        # Combine: -neg_half (reversed, dropping the duplicated 0.0) + pos_half
-        return np.concatenate([-neg_half[:0:-1], pos_half])
-
-    if dm_max <= 0.0:
-        pos_grid = _generate_positive_dm_grid(
-            f_min,
-            f_max,
-            nchans,
-            tsamp,
-            -dm_min,
-            -dm_max,
-            pulse_width,
-            max_snr_loss,
-        )
-        return -pos_grid[::-1]
-
-    return _generate_positive_dm_grid(
-        f_min,
-        f_max,
-        nchans,
-        tsamp,
-        dm_max,
-        dm_min,
-        pulse_width,
-        max_snr_loss,
+            method=rule,
+            pulse_width=pulse_width * tsamp,
+            chan_dm=chan_dm,
+            max_snr_loss=max_snr_loss,
+            tol=effective_tol,
+        ),
+        dtype=np.float64,
     )
 
 
@@ -251,8 +163,11 @@ def generate_optimal_dt_grid(
     integer_grid: bool = True,
     method: str = "snr_loss",
     tol: float | None = None,
+    chan_dm: float = 0.0,
 ) -> np.ndarray:
     """Generate an optimal non-uniform delay grid (in samples) for FDMT.
+
+    A wrapper of the C++ ``dmt::plans::generate_dt_grid`` (integer grids).
 
     Parameters
     ----------
@@ -279,6 +194,9 @@ def generate_optimal_dt_grid(
         Grid generation algorithm: "snr_loss" or "levin".
     tol : float, optional
         Broadening factor for "levin".
+    chan_dm : float, default=0.0
+        DM the channels were coherently dedispersed to (0: none);
+        "snr_loss" only.
 
     Returns
     -------
@@ -286,31 +204,39 @@ def generate_optimal_dt_grid(
         Sorted 1-D array of trial delays (int64 if integer_grid=True, else float64).
     """
     k_disp = DM_CONSTANT * (f_min**-2 - f_max**-2) / tsamp
-    dm_min = dt_min / k_disp
-    dm_max = dt_max / k_disp
-
+    if integer_grid:
+        rule = _method(method)
+        effective_tol = _effective_tol(method, tol, max_snr_loss)
+        return np.asarray(
+            generate_dt_grid(
+                f_min,
+                f_max,
+                nchans,
+                tsamp,
+                dt_min,
+                dt_max,
+                method=rule,
+                pulse_width=pulse_width * tsamp,
+                chan_dm=chan_dm,
+                max_snr_loss=max_snr_loss,
+                tol=effective_tol,
+            ),
+            dtype=np.int64,
+        )
     dm_grid = generate_optimal_dm_grid(
         f_min,
         f_max,
         nchans,
         tsamp,
-        dm_max,
-        dm_min=dm_min,
+        dt_max / k_disp,
+        dm_min=dt_min / k_disp,
         pulse_width=pulse_width,
         max_snr_loss=max_snr_loss,
         method=method,
         tol=tol,
+        chan_dm=chan_dm,
     )
-
-    dt_floats = dm_grid * k_disp
-    if not integer_grid:
-        return dt_floats
-
-    int_grid = np.unique(np.round(dt_floats).astype(np.int64))
-    # Ensure boundary endpoints are preserved
-    int_grid[0] = round(dt_min)
-    int_grid[-1] = round(dt_max)
-    return np.unique(int_grid)
+    return dm_grid * k_disp
 
 
 def calculate_snr_loss(
@@ -321,6 +247,7 @@ def calculate_snr_loss(
     nchans: int,
     tsamp: float,
     pulse_width: float = 1.0,
+    chan_dm: float = 0.0,
 ) -> float | np.ndarray:
     """Calculate expected fractional S/N loss for given true DM(s).
 
@@ -340,6 +267,8 @@ def calculate_snr_loss(
         Sampling interval in seconds.
     pulse_width : float, default=1.0
         Intrinsic pulse width in units of sampling time.
+    chan_dm : float, default=0.0
+        DM the channels were coherently dedispersed to (0: none).
 
     Returns
     -------
@@ -366,7 +295,9 @@ def calculate_snr_loss(
     delta_t = closest_dm_diff * k_disp
 
     # Intra-channel smearing at bottom of band
-    t_chan = (2.0 * DM_CONSTANT * np.abs(dm_arr) * df_chan / (f_min**3)) / tsamp
+    t_chan = (
+        2.0 * DM_CONSTANT * np.abs(dm_arr - chan_dm) * df_chan / (f_min**3)
+    ) / tsamp
     w_eff = np.sqrt(pulse_width**2 + 1.0 + t_chan**2)
 
     # Broadened effective width

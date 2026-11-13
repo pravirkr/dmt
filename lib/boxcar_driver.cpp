@@ -33,6 +33,9 @@ public:
         m_fdmt->execute_search(in, nbits, sink, stream);
     }
     void reset(Stream stream) override { m_fdmt->reset_search_history(stream); }
+    bool set_search_keep(const uint8_t* keep) override {
+        return m_fdmt->set_search_keep(keep);
+    }
     [[nodiscard]] FDMTMemoryUsage memory() const noexcept override {
         return m_fdmt->get_memory_usage();
     }

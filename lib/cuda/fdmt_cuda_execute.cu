@@ -286,8 +286,10 @@ void FDMTCudaEngine::execute_search(DeviceSpan<const float> waterfall,
             "FDMT search requires valid mode and a separate root");
     }
     const auto stream = to_cuda(queue);
-    const detail::FDMTInputF32 input{waterfall.data(),
-                                     static_cast<int>(m_plan.get_nsamps())};
+    const detail::FDMTInputF32 input{.data = waterfall.data(),
+                                     .nsamps =
+                                         static_cast<int>(m_plan.get_nsamps()),
+                                     .keep = m_search_keep};
     for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
         start(chunk_input(input, t0), m_float_levels, nullptr,
               std::min(m_chunk, m_plan.get_nsamps() - t0), stream, true);
@@ -392,7 +394,8 @@ void FDMTCudaEngine::execute_search(DeviceSpan<const uint8_t> waterfall,
         .data      = waterfall.data(),
         .row_bytes = static_cast<int>(
             bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits)),
-        .nbits = static_cast<int>(nbits)};
+        .nbits = static_cast<int>(nbits),
+        .keep  = m_search_keep};
     if (m_search_u32) {
         execute_search_int_typed<uint32_t>(
             full, thrust::raw_pointer_cast(m_integer32_ring.data()), sink,
@@ -672,6 +675,7 @@ void FDMTCudaEngine::execute(std::span<const float> waterfall_h,
 void FDMTCudaEngine::execute_d(cuda::std::span<const float> waterfall_d,
                                cuda::std::span<float> dmt_d,
                                cudaStream_t stream) {
+    check_root_output();
     check_inputs(waterfall_d.size(), dmt_d.size());
     const FDMTInputF32 input{
         .data   = waterfall_d.data(),
@@ -737,6 +741,7 @@ void FDMTCudaEngine::execute_d(cuda::std::span<const uint8_t> waterfall_d,
                                SizeType nbits,
                                cuda::std::span<float> dmt_d,
                                cudaStream_t stream) {
+    check_root_output();
     check_packed_inputs(waterfall_d.size(), nbits, dmt_d.size());
     const auto row_bytes =
         bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
@@ -825,6 +830,7 @@ void FDMTCudaEngine::reset_impl(cuda::std::span<const uint8_t> d_waterfall,
                                 cuda::std::span<float> d_dmt,
                                 cudaStream_t stream,
                                 bool fuse) {
+    check_root_output();
     check_stepper_block();
     check_packed_inputs(d_waterfall.size(), nbits, d_dmt.size());
     const auto row_bytes =
@@ -840,6 +846,7 @@ void FDMTCudaEngine::reset_impl(cuda::std::span<const float> d_waterfall,
                                 cuda::std::span<float> d_dmt,
                                 cudaStream_t stream,
                                 bool fuse) {
+    check_root_output();
     check_stepper_block();
     check_inputs(d_waterfall.size(), d_dmt.size());
     const FDMTInputF32 input{

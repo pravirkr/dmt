@@ -205,13 +205,20 @@ myst_enable_extensions = [
 myst_heading_anchors = 3
 myst_links_external_new_tab = True
 
-# Notebooks in the repo already contain executed outputs (text and plots).
-# MyST-NB renders those outputs when execution is off, which is what the
-# HTML pages show. Set NB_EXECUTION_MODE=force to re-run them during a build.
-nb_execution_mode = os.environ.get("NB_EXECUTION_MODE", "off")
-# Needs a CUDA GPU (PyTorch, CuPy, Numba): never executed by a docs build, even
-# with NB_EXECUTION_MODE=force; its stored outputs come from a GPU machine.
-nb_execution_excludepatterns = ["tutorials/08_gpu_zero_copy_arrays.ipynb"]
+# Tutorials 01-07 are MyST notebooks (.md, no stored outputs): the build runs
+# them with the installed dmtlib, so the pages always show the current code's
+# results. "cache" re-runs a notebook only when its code changes (jupyter-cache,
+# in _build/.jupyter_cache). NB_EXECUTION_MODE=off skips them (pages without
+# outputs, e.g. without dmtlib built); "force" re-runs them all.
+nb_execution_mode = os.environ.get("NB_EXECUTION_MODE", "cache")
+# Needs a CUDA GPU (PyTorch, CuPy, Numba), which a docs build doesn't have: it
+# stays an .ipynb with outputs stored from a GPU machine and is never executed.
+# getting_started/example.ipynb writes the landing-page images in _static/
+# (waterfall.png, dmt.png): it keeps its stored outputs and is run by hand.
+nb_execution_excludepatterns = [
+    "tutorials/08_gpu_zero_copy_arrays.ipynb",
+    "getting_started/example.ipynb",
+]
 nb_execution_timeout = 300
 nb_execution_allow_errors = False
 nb_execution_raise_on_error = True

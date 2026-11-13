@@ -206,6 +206,10 @@ it with any result you publish.
    :members:
    :undoc-members:
 
+.. autoclass:: dmtlib.OverflowPolicy
+   :members:
+   :undoc-members:
+
 .. autoclass:: dmtlib.FDMTBoxcarMemoryUsage
    :members:
    :undoc-members:

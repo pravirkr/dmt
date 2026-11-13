@@ -18,6 +18,7 @@
 #include "dmt/fdmt_variance.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
+#include "test_random.hpp"
 
 using namespace boxcar_test;
 
@@ -59,7 +60,20 @@ void compare_exact(std::vector<RawCandidate> a, std::vector<RawCandidate> b) {
     sort(a);
     sort(b);
     REQUIRE(a.size() == b.size());
-    for (SizeType i = 0; i < a.size(); ++i) {
+    // Plain comparison first; assertions only for the first mismatches
+    // (per-candidate assertions dominated the Debug CI jobs).
+    const auto same = [](const RawCandidate& x, const RawCandidate& y) {
+        return key(x) == key(y) &&
+               std::bit_cast<uint32_t>(x.snr) ==
+                   std::bit_cast<uint32_t>(y.snr) &&
+               x.width == y.width && x.dm == y.dm && x.staggered == y.staggered;
+    };
+    SizeType reported = 0;
+    for (SizeType i = 0; i < a.size() && reported < 10; ++i) {
+        if (same(a[i], b[i])) {
+            continue;
+        }
+        ++reported;
         INFO("candidate " << i);
         REQUIRE(key(a[i]) == key(b[i]));
         REQUIRE(std::bit_cast<uint32_t>(a[i].snr) ==
@@ -544,13 +558,9 @@ TEST_CASE("FDMTBoxcar per-call mask: scores stay calibrated on white noise",
     const auto plan   = mask_plan(1);
     const SizeType ns = plan.get_nsamps();
     const SizeType nb = 16;
-    std::mt19937 gen(2026);
-    std::normal_distribution<float> noise;
-    std::vector<std::vector<float>> input(nb, std::vector<float>(32 * ns));
-    for (auto& b : input) {
-        for (auto& v : b) {
-            v = noise(gen);
-        }
+    std::vector<std::vector<float>> input;
+    for (SizeType k = 0; k < nb; ++k) {
+        input.push_back(dmt::test_random::normal<float>(32 * ns, 2026 + k));
     }
     Masks masks;
     for (SizeType k = 0; k < nb; ++k) {

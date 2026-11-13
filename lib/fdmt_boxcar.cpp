@@ -1,6 +1,7 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -63,6 +64,7 @@ public:
             .search_upper_levels = this->plan.get_subband_depth() > 0,
             .search_nbits        = config.input_nbits,
         };
+        cfg.search_only = true;
         // The boxcar's own buffers are fixed by plan and config; the FDMT
         // takes its path within the rest of the budget.
         const SizeType fixed = boxcar_bytes(smear, exec);
@@ -70,7 +72,8 @@ public:
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: the boxcar buffers alone need {:.2f} GiB, over "
                 "max_memory_bytes ({:.2f} GiB); lower max_boxcar or "
-                "max_candidates, or raise the budget",
+                "max_candidates (or max_cands_per_dm with kKeepBrightest), or "
+                "raise the budget",
                 static_cast<double>(fixed) / (1 << 30),
                 static_cast<double>(max_memory) / (1 << 30)));
         }
@@ -78,7 +81,7 @@ public:
         engine               = make_engine(cfg, smear, exec);
         // The fixed part is an estimate: with an automatic chunk, step it
         // down while the measured total is over the budget.
-        SizeType used = engine->memory_usage().total();
+        SizeType used = engine->memory_usage().budgeted();
         while (used > max_memory && chunk == 0 &&
                cfg.mode == FDMTMode::kValid && engine->chunk_nsamps() > 256) {
             const SizeType over  = used - max_memory;
@@ -88,7 +91,7 @@ public:
                                        : cfg.max_memory_bytes;
             engine.reset();
             engine = make_engine(cfg, smear, exec);
-            used   = engine->memory_usage().total();
+            used   = engine->memory_usage().budgeted();
         }
         if (used > max_memory) {
             throw std::invalid_argument(fmt::format(
@@ -134,30 +137,49 @@ public:
             config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
                 ? filters
                 : 1;
-        const SizeType cands = config.max_candidates * sizeof(RawCandidate) *
-                               (ex.backend == Backend::kCPU ? 1 : 2);
+        // Budgeted bytes only: on a GPU the device copies (the host result
+        // storage and host row table are reported, not budgeted).
+        SizeType cands = config.max_candidates * sizeof(RawCandidate);
+        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
+            // The per-row stores of the brightest max_cands_per_dm (compact
+            // entries on a GPU).
+            cands +=
+                rows * config.max_cands_per_dm *
+                (ex.backend == Backend::kCPU ? sizeof(RawCandidate)
+                                             : sizeof(detail::BoxcarKeepEntry));
+        }
         // Per row and width: threshold and inverse sigma (float), plus the
-        // integer mean and cutoff of packed input; the row table (host and,
-        // on a GPU, device).
+        // integer mean and cutoff of packed input; the row table.
         const SizeType luts =
             rows * filters *
             ((2 * sizeof(float)) + (config.input_nbits == 32
                                         ? 0
                                         : sizeof(double) + sizeof(uint64_t)));
-        const SizeType row_table = rows * sizeof(detail::BoxcarRow) *
-                                   (ex.backend == Backend::kCPU ? 1 : 2);
-        // A kill mask zeroes its channels in a staging copy of each block.
-        const SizeType staging =
-            kill_runs.empty()
-                ? 0
-                : beams * plan.get_nchans() *
-                      (config.input_nbits == 32
-                           ? plan.get_nsamps() * sizeof(float)
-                           : bit_pack_utils::packed_row_bytes(
-                                 plan.get_nsamps(), config.input_nbits));
+        const SizeType row_table = rows * sizeof(detail::BoxcarRow);
+        // A kill mask: on the CPU its channels are zeroed in a staging copy
+        // of each block; on a GPU the transform reads one byte per row.
+        SizeType staging = 0;
+        if (!kill_runs.empty()) {
+            staging =
+                ex.backend != Backend::kCPU
+                    ? beams * plan.get_nchans()
+                    : beams * plan.get_nchans() *
+                          (config.input_nbits == 32
+                               ? plan.get_nsamps() * sizeof(float)
+                               : bit_pack_utils::packed_row_bytes(
+                                     plan.get_nsamps(), config.input_nbits));
+        }
+        // Boxes wider than 4096 on a GPU: prefix rings in device memory, at
+        // most 256 MiB (launched in batches of blocks).
+        SizeType rings = 0;
+        if (ex.backend != Backend::kCPU && width > 4096) {
+            rings = std::min<SizeType>(SizeType{256} << 20,
+                                       rows * std::bit_ceil(width + 1024) *
+                                           sizeof(uint64_t));
+        }
         return (rows * width * carry_elem) +
                (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
-               row_table + staging;
+               row_table + staging + rings;
     }
     /**
      * One block with a per-call kill mask (empty: the constructor mask):
@@ -197,8 +219,9 @@ public:
         detail::BlockNoise entry;
         entry.first_sample = engine->stream_position();
         entry.steady       = tables_for(effective);
+        const bool changed = effective != prev_mask;
         // The first block of a stream has no previous block to straddle.
-        if (entry.first_sample > 0 && effective != prev_mask) {
+        if (entry.first_sample > 0 && changed) {
             union_mask.resize(effective.size());
             for (SizeType c = 0; c < effective.size(); ++c) {
                 union_mask[c] = effective[c] | prev_mask[c];
@@ -206,11 +229,18 @@ public:
             entry.transition        = true;
             entry.transition_tables = tables_for(union_mask);
         }
-        entry.kill_runs = detail::boxcar_kill_runs(effective);
+        // An unchanged mask reuses its kill runs instead of rebuilding them.
+        if (changed) {
+            next_runs = detail::boxcar_kill_runs(effective);
+        }
+        entry.kill_runs = changed ? next_runs : prev_runs;
         engine->push_block_noise(std::move(entry));
         try {
             auto view = call();
-            prev_mask.swap(effective);
+            if (changed) {
+                prev_mask.swap(effective);
+                prev_runs.swap(next_runs);
+            }
             return view;
         } catch (...) {
             engine->drop_block_noise();
@@ -263,11 +293,15 @@ public:
         const SizeType ring =
             1 + static_cast<SizeType>((latency + plan.get_nsamps() - 1) /
                                       plan.get_nsamps());
-        const SizeType extra =
+        // The noise model and its table sets live in host memory: budgeted
+        // on the CPU only (on a GPU, max_memory_bytes bounds device memory).
+        const SizeType model_bytes =
             model->plan_bytes() + model->workspace_bytes() +
-            ((2 * ring + kCacheMasks) * model->table_bytes()) +
+            ((2 * ring + kCacheMasks) * model->table_bytes());
+        const SizeType extra =
+            (exec.backend == Backend::kCPU ? model_bytes : 0) +
             engine->block_noise_bytes();
-        const SizeType used = engine->memory_usage().total();
+        const SizeType used = engine->memory_usage().budgeted();
         if (used + extra > max_memory) {
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: per-call kill masks need {:.2f} GiB more, over "
@@ -279,6 +313,7 @@ public:
         engine->enable_block_noise(model->support());
         noise     = std::move(model);
         prev_mask = ctor_mask;
+        prev_runs = kill_runs;
         cache.clear();
     }
     void check_stream(Stream stream) const {
@@ -303,6 +338,8 @@ public:
     // with its recent tables (created by the first per-call mask).
     std::vector<uint8_t> ctor_mask;
     std::vector<uint8_t> prev_mask;
+    /// Kill runs of prev_mask, and of a changed mask until its call ends.
+    std::vector<std::pair<SizeType, SizeType>> prev_runs, next_runs;
     std::vector<uint8_t> effective;
     std::vector<uint8_t> union_mask;
     std::unique_ptr<detail::BoxcarNoiseModel> noise;
@@ -383,6 +420,7 @@ void FDMTBoxcar::reset_history(Stream stream) {
     m_impl->drain_state.reset();
     if (m_impl->noise) {
         m_impl->prev_mask = m_impl->ctor_mask; // same size: no allocation
+        m_impl->prev_runs = m_impl->kill_runs;
     }
 }
 CandidateResultView FDMTBoxcar::drain() {
@@ -430,9 +468,13 @@ FDMTBoxcarMemoryUsage FDMTBoxcar::get_memory_usage() const noexcept {
     auto usage = m_impl->engine->memory_usage();
     if (m_impl->noise) {
         // The per-call mask's model and the tables alive (ring and cache).
-        usage.plan +=
+        const SizeType plan_bytes =
             m_impl->noise->plan_bytes() + m_impl->noise->live_table_bytes();
+        usage.plan += plan_bytes;
         usage.workspace += m_impl->noise->workspace_bytes();
+        if (backend() != Backend::kCPU) {
+            usage.host += plan_bytes + m_impl->noise->workspace_bytes();
+        }
     }
     return usage;
 }

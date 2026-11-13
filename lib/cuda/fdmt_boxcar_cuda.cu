@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -22,6 +23,7 @@
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
+#include "dmt/logging.hpp"
 
 namespace dmt::algorithms::detail {
 namespace {
@@ -31,6 +33,13 @@ constexpr int kWarp = gpu_compat::kLogicalWarp; // a 64-lane wavefront holds two
 // Width and threshold tables are staged in shared memory up to this count;
 // longer tables are read through the cache.
 constexpr SizeType kSharedFilters = 512;
+// Widest boxcar of the fast path (prefix ring in shared memory); wider
+// boxes take the device-memory ring (kGlobalRing), with no speed promise.
+constexpr SizeType kFastMaxWidth = 4096;
+// Device memory of the kGlobalRing rings: blocks are launched in batches
+// whose rings fit it (at least one block).
+constexpr SizeType kGlobalRingBytes = SizeType{256} << 20;
+constexpr int kGlobalBlock          = 256;
 
 // Fixed part of the block's shared memory. The dynamic part follows it:
 // the prefix ring (a power of two of at least max_width + kBlockTile entries),
@@ -88,6 +97,138 @@ struct CandidateWriter {
         increment(&counts->emitted_count);
     }
 };
+
+// OverflowPolicy::kKeepBrightest. Within one row: brighter() restricted to
+// the fields that differ (S/N, peak sample, width).
+DMT_D inline bool keep_brighter(const BoxcarKeepEntry& a,
+                                const BoxcarKeepEntry& b) {
+    if (a.snr != b.snr) {
+        return a.snr > b.snr;
+    }
+    if (a.peak != b.peak) {
+        return a.peak < b.peak;
+    }
+    return a.filter < b.filter;
+}
+
+// A row's store: a heap of at most q entries, dimmest at the top, with
+// `*count` entries. One thread inserts at a time.
+DMT_D inline void keep_insert(BoxcarKeepEntry* store,
+                              uint64_t* count,
+                              SizeType q,
+                              const BoxcarKeepEntry& entry,
+                              CandidateCounts* counts) {
+    uint64_t n = *count;
+    if (n < q) {
+        uint64_t i = n;
+        store[i]   = entry;
+        while (i > 0) {
+            const uint64_t p = (i - 1) / 2;
+            if (!keep_brighter(store[p], store[i])) {
+                break;
+            }
+            const BoxcarKeepEntry t = store[p];
+            store[p]                = store[i];
+            store[i]                = t;
+            i                       = p;
+        }
+        *count = n + 1;
+        return;
+    }
+    increment(&counts->dropped_per_dm);
+    if (!keep_brighter(entry, store[0])) {
+        return;
+    }
+    store[0]   = entry;
+    uint64_t i = 0;
+    for (;;) {
+        const uint64_t l = (2 * i) + 1;
+        if (l >= q) {
+            break;
+        }
+        const uint64_t r = l + 1;
+        const uint64_t c =
+            (r < q && keep_brighter(store[l], store[r])) ? r : l; // dimmer
+        if (!keep_brighter(store[i], store[c])) {
+            break;
+        }
+        const BoxcarKeepEntry t = store[c];
+        store[c]                = store[i];
+        store[i]                = t;
+        i                       = c;
+    }
+}
+
+// A thread's candidates since the last keep_drain(): at most one per
+// sample of its kItems (one width at a time, or one run end per sample).
+struct KeepPending {
+    BoxcarKeepEntry entry[kItems];
+    int n = 0;
+};
+
+// kKeepBrightest emission in the scoring kernel: the S/N is final here;
+// a candidate dimmer than a full store's dimmest is dropped at once, the
+// rest wait in the thread's KeepPending for keep_drain().
+struct KeepWriter {
+    CandidateCounts* counts;
+    BoxcarKeepEntry* store; // this row's q entries
+    uint64_t* count;        // entries in the store
+    SizeType q;
+    KeepPending* pending;
+    const double* means = nullptr;
+    const float* scales = nullptr;
+    double unit         = 1;
+    bool integer        = false;
+
+    DMT_D void operator()(const BoxcarPeak& peak) const {
+        increment(&counts->total_detected);
+        const float snr =
+            integer ? static_cast<float>((static_cast<double>(peak.raw_sum) -
+                                          means[peak.filter]) *
+                                         (scales[peak.filter] * unit))
+                    : peak.snr;
+        if (*count >= q && snr < store[0].snr) {
+            increment(&counts->dropped_per_dm);
+            return;
+        }
+        pending->entry[pending->n++] = {peak.peak, peak.begin, peak.end, snr,
+                                        peak.filter};
+    }
+};
+
+// Block-uniform: every thread's pending candidates into the row's store.
+// Each round a thread stages one in its slot of shared.runs (unused outside
+// reduce_runs()) and thread 0 inserts them in slot order.
+template <typename T, int kBlockThreads>
+DMT_D void keep_drain(BoxcarShared<T, kBlockThreads>& shared,
+                      KeepPending& pending,
+                      const KeepWriter& writer) {
+    const int tid = static_cast<int>(threadIdx.x);
+    while (__syncthreads_or(pending.n > 0) != 0) {
+        BoxcarPeak& slot = shared.runs[tid].trailing;
+        slot.open        = pending.n > 0;
+        if (pending.n > 0) {
+            const BoxcarKeepEntry& e = pending.entry[--pending.n];
+            slot.peak                = e.peak;
+            slot.begin               = e.begin;
+            slot.end                 = e.end;
+            slot.snr                 = e.snr;
+            slot.filter              = e.filter;
+        }
+        __syncthreads();
+        if (tid == 0) {
+            for (int i = 0; i < kBlockThreads; ++i) {
+                const BoxcarPeak& s = shared.runs[i].trailing;
+                if (s.open) {
+                    keep_insert(writer.store, writer.count, writer.q,
+                                {s.peak, s.begin, s.end, s.snr, s.filter},
+                                writer.counts);
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
 
 // Ordered block prefix of each thread's four consecutive input samples,
 // written to ring[position + 1 .. position + kBlockTile]: a warp shuffle scan
@@ -447,7 +588,7 @@ DMT_D bool detect_tile_grouped_int(const uint64_t* ring,
 // Scan trailing-run summaries to give each worker the state of every
 // preceding sample. Each worker then emits only excursions ending within
 // its own four samples. The last worker saves the open trailing excursion.
-template <typename T, int kBlockThreads>
+template <typename T, int kBlockThreads, typename Writer>
 DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                        const bool (&above)[kItems],
                        const float (&snr)[kItems],
@@ -455,7 +596,7 @@ DMT_D void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                        uint64_t start,
                        int n,
                        BoxcarPeak* persistent,
-                       const CandidateWriter& writer,
+                       const Writer& writer,
                        const uint64_t (&raw_sum)[kItems],
                        bool integer) {
     const int tid   = static_cast<int>(threadIdx.x);
@@ -545,11 +686,20 @@ DMT_D inline int block_table(const BlockTables& bt,
 // kBlockNoise: per-call mask tables are in use (float rows only). A
 // separate instance, so the common unmasked launch carries none of their
 // state (it cost ~160 B of stack per thread and 15-50% of the run time).
+// kKeep: OverflowPolicy::kKeepBrightest (KeepWriter, per-row stores); a
+// separate instance, so kDropNew keeps its code and output.
+// kGlobalRing: the prefix ring lives in device memory (`ring_global`, one
+// ring of mask + 1 entries per block, blocks launched in batches from task
+// `task_base`) instead of shared memory: boxcars wider than the fast path
+// (kFastMaxWidth) or than the device's shared memory. No width screen and
+// no shared tables; same candidates, no speed promise.
 template <typename T,
           int kBlockThreads,
           bool kScreen,
           bool kBlockNoise = false,
-          typename C       = T>
+          typename C       = T,
+          bool kKeep       = false,
+          bool kGlobalRing = false>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -586,13 +736,18 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        const float* screen_m1,
                        SizeType screen_offset,
                        BlockTables block_tables,
-                       SizeType group_offset) {
+                       SizeType group_offset,
+                       BoxcarKeepEntry* keep_all,
+                       SizeType keep_q,
+                       T* ring_global,
+                       SizeType task_base) {
     constexpr int kBlockTile = kBlockThreads * kItems;
+    const SizeType task =
+        kGlobalRing ? task_base + blockIdx.x : SizeType{blockIdx.x};
     // Lagged rows (skewed-window subband search): this row's own samples.
     if (input.row_lag != nullptr) {
         FDMTSearchInput lagged;
-        if (!lagged_row_input(input, rows[row_base + blockIdx.x % ndm].row,
-                              lagged)) {
+        if (!lagged_row_input(input, rows[row_base + task % ndm].row, lagged)) {
             return;
         }
         input = lagged;
@@ -602,8 +757,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     }
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
-    T* ring      = reinterpret_cast<T*>(storage + sizeof(shared));
-    const SizeType task      = blockIdx.x;
+    T* ring = kGlobalRing
+                  ? ring_global + (SizeType{blockIdx.x} * (SizeType{mask} + 1))
+                  : reinterpret_cast<T*>(storage + sizeof(shared));
     const SizeType beam      = input.beam_begin + task / ndm;
     const SizeType d         = task % ndm;
     const SizeType row_index = row_base + d;
@@ -615,11 +771,33 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     prototype.beam_idx       = static_cast<uint32_t>(beam);
     CandidateWriter writer{candidates, counts,    slots,    per_dm_all + index,
                            widths,     prototype, capacity, dm_cap};
-    writer.means        = means ? means + row_index * nfilters : nullptr;
-    writer.scales       = inv_sigma + row_index * nfilters;
-    writer.unit         = unit;
-    writer.integer      = std::is_integral_v<T> &&
-                          mode != PeakFindingMode::kContiguousPeakAcrossWidths;
+    writer.means   = means ? means + row_index * nfilters : nullptr;
+    writer.scales  = inv_sigma + row_index * nfilters;
+    writer.unit    = unit;
+    writer.integer = std::is_integral_v<T> &&
+                     mode != PeakFindingMode::kContiguousPeakAcrossWidths;
+    // kKeepBrightest: the row's store and this thread's pending candidates.
+    struct NoKeep {};
+    std::conditional_t<kKeep, KeepPending, NoKeep> pending{};
+    std::conditional_t<kKeep, KeepWriter, NoKeep> keeper{};
+    if constexpr (kKeep) {
+        keeper = KeepWriter{counts,
+                            keep_all + (index * keep_q),
+                            per_dm_all + index,
+                            keep_q,
+                            &pending,
+                            writer.means,
+                            writer.scales,
+                            unit,
+                            writer.integer};
+    }
+    const auto& out = [&]() -> const auto& {
+        if constexpr (kKeep) {
+            return keeper;
+        } else {
+            return writer;
+        }
+    }();
     const int tid       = static_cast<int>(threadIdx.x);
     const auto lookback = static_cast<uint32_t>(max_width - 1);
     // Per-call kill masks (float rows): the tables this call's endpoints
@@ -915,14 +1093,26 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                         if constexpr (std::is_integral_v<T>) {
                             peak.raw_sum = sum;
                         }
-                        writer(peak);
+                        out(peak);
                     }
                 }
                 if (mode == PeakFindingMode::kContiguousPeakPerWidth &&
                     __syncthreads_or(f_hit || peaks[f].open) != 0) {
                     reduce_runs<T, kBlockThreads>(
-                        shared, above, snr, filters, start, n, peaks + f,
-                        writer, raw_sums, std::is_integral_v<T>);
+                        shared, above, snr, filters, start, n, peaks + f, out,
+                        raw_sums, std::is_integral_v<T>);
+                    // Only reduce_runs() emits in this mode: drain behind
+                    // the same block vote, not once per width.
+                    if constexpr (kKeep) {
+                        keep_drain(shared, pending, keeper);
+                    }
+                }
+                if constexpr (kKeep) {
+                    // Direct emission above: drain each width (mode is
+                    // block-uniform).
+                    if (mode == PeakFindingMode::kAllAboveThreshold) {
+                        keep_drain(shared, pending, keeper);
+                    }
                 }
             }
             if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
@@ -931,8 +1121,11 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     above[j] = best[j] >= 0;
                 }
                 reduce_runs<T, kBlockThreads>(shared, above, best, best_filter,
-                                              start, n, peaks, writer, raw_sums,
+                                              start, n, peaks, out, raw_sums,
                                               false);
+                if constexpr (kKeep) {
+                    keep_drain(shared, pending, keeper);
+                }
             }
             open = any_open();
         }
@@ -987,10 +1180,35 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
                                     const float* scales,
                                     SizeType nfilters,
                                     double unit,
-                                    bool integer) {
+                                    bool integer,
+                                    BoxcarKeepEntry* keep_all,
+                                    SizeType keep_q) {
     const SizeType index =
         static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= tasks) {
+        return;
+    }
+    if (keep_q != 0) {
+        // kKeepBrightest: this thread owns the row's store.
+        const SizeType row_index = index % nrows;
+        for (SizeType f = 0; f < peak_count; ++f) {
+            auto& peak = peaks[index * peak_count + f];
+            if (peak.open) {
+                increment(&counts->total_detected);
+                const float snr =
+                    integer ? static_cast<float>(
+                                  (static_cast<double>(peak.raw_sum) -
+                                   means[row_index * nfilters + peak.filter]) *
+                                  (scales[row_index * nfilters + peak.filter] *
+                                   unit))
+                            : peak.snr;
+                keep_insert(keep_all + index * keep_q, per_dm + index, keep_q,
+                            {peak.peak, peak.begin, peak.end, snr, peak.filter},
+                            counts);
+                peak.open = false;
+            }
+        }
+        open[index] = 0;
         return;
     }
     const SizeType row_index = index % nrows;
@@ -1010,6 +1228,193 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
         }
     }
     open[index] = 0;
+}
+
+// kKeepBrightest, end of a call: the stores' entries become the call's
+// candidates, or, when there are more than `capacity`, exactly the
+// `capacity` brightest. Keys order the entries as brighter() does (S/N,
+// peak sample, row rank (beam and row in brighter() order), width), most
+// significant byte first, smaller = brighter; they are unique within a
+// call. A radix select over their bytes finds the capacity-th key on the
+// device (no host wait).
+constexpr int kKeepKeyBytes = 18;
+
+struct KeepSelect {
+    uint64_t n        = 0; ///< entries in the stores
+    uint64_t k        = 0; ///< still to select within the prefix
+    uint32_t resolved = 0; ///< selection fixed by prefix[0, depth)
+    uint32_t depth    = 0;
+    uint8_t prefix[kKeepKeyBytes]{};
+};
+
+DMT_D inline uint8_t
+keep_key_byte(const BoxcarKeepEntry& e, uint32_t rank, int d) {
+    if (d < 4) {
+        uint32_t u = __float_as_uint(e.snr);
+        u          = (u & 0x80000000U) != 0 ? ~u : (u | 0x80000000U);
+        u          = ~u; // larger S/N first
+        return static_cast<uint8_t>(u >> (8 * (3 - d)));
+    }
+    if (d < 12) {
+        return static_cast<uint8_t>(e.peak >> (8 * (11 - d)));
+    }
+    if (d < 16) {
+        return static_cast<uint8_t>(rank >> (8 * (15 - d)));
+    }
+    return static_cast<uint8_t>(e.filter >> (8 * (17 - d)));
+}
+
+// Whether an entry is selected: its key's first `depth` bytes are at most
+// the prefix.
+DMT_D inline bool
+keep_selected(const BoxcarKeepEntry& e, uint32_t rank, const KeepSelect& sel) {
+    for (uint32_t d = 0; d < sel.depth; ++d) {
+        const uint8_t b = keep_key_byte(e, rank, static_cast<int>(d));
+        if (b != sel.prefix[d]) {
+            return b < sel.prefix[d];
+        }
+    }
+    return true;
+}
+
+// After kernel_keep_init: the entries in the stores.
+__global__ void
+kernel_keep_count(const uint64_t* per_dm, SizeType tasks, KeepSelect* sel) {
+    uint64_t local = 0;
+    for (SizeType i = blockIdx.x * blockDim.x + threadIdx.x; i < tasks;
+         i += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        local += per_dm[i];
+    }
+    if (local != 0) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(&sel->n),
+                  static_cast<unsigned long long>(local));
+    }
+}
+
+__global__ void kernel_keep_init(KeepSelect* sel, SizeType capacity) {
+    *sel   = KeepSelect{};
+    sel->k = capacity;
+}
+
+__global__ void kernel_keep_resolve_all(KeepSelect* sel) {
+    if (sel->n <= sel->k) {
+        sel->resolved = 1; // depth 0: every entry
+    }
+}
+
+// Histogram of byte `d` of the keys that match the prefix so far.
+__global__ void kernel_keep_hist(const BoxcarKeepEntry* keep_all,
+                                 const uint64_t* per_dm,
+                                 const uint32_t* rank,
+                                 SizeType nrows,
+                                 SizeType tasks,
+                                 SizeType q,
+                                 const KeepSelect* sel,
+                                 uint64_t* hist,
+                                 int d) {
+    __shared__ uint32_t local[256];
+    if (sel->resolved != 0) {
+        return;
+    }
+    for (int b = static_cast<int>(threadIdx.x); b < 256;
+         b += static_cast<int>(blockDim.x)) {
+        local[b] = 0;
+    }
+    __syncthreads();
+    const SizeType total = tasks * q;
+    for (SizeType s = blockIdx.x * blockDim.x + threadIdx.x; s < total;
+         s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        const SizeType index = s / q;
+        if (s % q >= per_dm[index]) {
+            continue;
+        }
+        const BoxcarKeepEntry& e = keep_all[s];
+        const auto r = static_cast<uint32_t>((index / nrows) * nrows +
+                                             rank[index % nrows]);
+        bool match   = true;
+        for (int j = 0; j < d && match; ++j) {
+            match = keep_key_byte(e, r, j) == sel->prefix[j];
+        }
+        if (match) {
+            atomicAdd(&local[keep_key_byte(e, r, d)], 1U);
+        }
+    }
+    __syncthreads();
+    for (int b = static_cast<int>(threadIdx.x); b < 256;
+         b += static_cast<int>(blockDim.x)) {
+        if (local[b] != 0) {
+            atomicAdd(reinterpret_cast<unsigned long long*>(&hist[b]),
+                      static_cast<unsigned long long>(local[b]));
+        }
+    }
+}
+
+// Byte `d` of the k-th key; clears the histogram for the next byte.
+__global__ void kernel_keep_pick(KeepSelect* sel, uint64_t* hist, int d) {
+    if (sel->resolved == 0) {
+        uint64_t below = 0;
+        for (int b = 0; b < 256; ++b) {
+            if (below + hist[b] >= sel->k) {
+                sel->prefix[d] = static_cast<uint8_t>(b);
+                sel->k -= below;
+                sel->depth = static_cast<uint32_t>(d) + 1;
+                // The whole bin is selected: no later byte matters.
+                if (hist[b] == sel->k || d + 1 == kKeepKeyBytes) {
+                    sel->resolved = 1;
+                }
+                break;
+            }
+            below += hist[b];
+        }
+    }
+    for (int b = 0; b < 256; ++b) {
+        hist[b] = 0;
+    }
+}
+
+// The selected entries as candidates; counts follow.
+__global__ void kernel_keep_emit(const BoxcarKeepEntry* keep_all,
+                                 const uint64_t* per_dm,
+                                 const uint32_t* rank,
+                                 const BoxcarRow* rows,
+                                 const uint32_t* widths,
+                                 SizeType nrows,
+                                 SizeType tasks,
+                                 SizeType q,
+                                 const KeepSelect* sel,
+                                 RawCandidate* candidates,
+                                 CandidateCounts* counts,
+                                 uint64_t* slots) {
+    const SizeType total = tasks * q;
+    for (SizeType s = blockIdx.x * blockDim.x + threadIdx.x; s < total;
+         s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        const SizeType index = s / q;
+        if (s % q >= per_dm[index]) {
+            continue;
+        }
+        const BoxcarKeepEntry& e = keep_all[s];
+        const SizeType row_index = index % nrows;
+        const auto r =
+            static_cast<uint32_t>((index / nrows) * nrows + rank[row_index]);
+        if (!keep_selected(e, r, *sel)) {
+            continue;
+        }
+        RawCandidate c               = rows[row_index].candidate;
+        c.beam_idx                   = static_cast<uint32_t>(index / nrows);
+        c.peak_sample                = e.peak;
+        c.begin_sample               = e.begin;
+        c.end_sample                 = e.end;
+        c.snr                        = e.snr;
+        c.filter_idx                 = e.filter;
+        c.width                      = widths[e.filter];
+        candidates[increment(slots)] = c;
+        increment(&counts->emitted_count);
+    }
+}
+
+__global__ void kernel_keep_finish(const KeepSelect* sel,
+                                   CandidateCounts* counts) {
+    counts->dropped_global = sel->n - counts->emitted_count;
 }
 
 // Candidate frontier: the smallest begin sample of the open excursions,
@@ -1063,6 +1468,7 @@ public:
                                PeakFindingMode::kContiguousPeakPerWidth
                            ? m_filters
                            : 1) {
+        m_shared_limit = cfg.boxcar_shared_limit;
         gpu_utils::set_device(m_device);
         if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
             m_rows.size() > SIZE_MAX / m_beams / m_peak_count ||
@@ -1072,7 +1478,10 @@ public:
         }
         m_driver    = std::move(driver);
         m_kill_runs = std::move(kill_runs);
-        if (!m_kill_runs.empty()) {
+        // FDMT reads killed rows as zero itself (one byte per row); other
+        // drivers read a staging copy with the rows zeroed.
+        m_keep_in_transform = m_driver->set_search_keep(nullptr);
+        if (!m_kill_runs.empty() && !m_keep_in_transform) {
             // The staging block the killed rows are zeroed in.
             if (config.input_nbits == 32) {
                 m_input_d.resize(m_beams * plan.get_nchans() *
@@ -1189,6 +1598,26 @@ public:
         m_peaks_d.resize(tasks * m_peak_count);
         m_open_d.resize(tasks, 0);
         m_per_dm_d.resize(tasks, 0);
+        if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
+            m_bright_q = config.max_cands_per_dm;
+            m_bright_d.resize(tasks * m_bright_q);
+            // Each row's place in brighter() order among the rows (equal
+            // S/N, sample and beam): the key's row rank.
+            std::vector<uint32_t> order(m_rows.size());
+            std::iota(order.begin(), order.end(), 0U);
+            std::ranges::sort(order, [&](uint32_t a, uint32_t b) {
+                return brighter(m_rows[a].candidate, m_rows[b].candidate);
+            });
+            std::vector<uint32_t> rank(m_rows.size());
+            for (SizeType i = 0; i < order.size(); ++i) {
+                rank[order[i]] = static_cast<uint32_t>(i);
+            }
+            m_bright_rank_d = rank;
+            m_bright_sel_d.resize(1);
+            m_bright_hist_d.resize(256, 0);
+            // A selection is needed only when the stores can exceed it.
+            m_bright_select = tasks * m_bright_q > config.max_candidates;
+        }
         m_candidates_d.resize(config.max_candidates);
         m_counts_d.resize(1);
         m_slots_d.resize(1, 0);
@@ -1243,7 +1672,9 @@ public:
         commit_block_noise(stream);
         begin_result(m_plan.get_nsamps(), queue);
         m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
+        m_commit_open = false;
         m_position += m_plan.get_nsamps();
+        finish_keep(stream);
         release_slots(stream);
         update_open_begin(stream);
         m_work.mark(stream);
@@ -1272,6 +1703,7 @@ public:
         m_driver->search(masked(waterfall, m_packed_input, queue),
                          m_config.input_nbits, *this, queue);
         m_position += m_plan.get_nsamps();
+        finish_keep(static_cast<cudaStream_t>(queue.native));
         update_open_begin(static_cast<cudaStream_t>(queue.native));
         m_work.mark(static_cast<cudaStream_t>(queue.native));
         return device_view();
@@ -1294,8 +1726,10 @@ public:
             raw(m_integer_means), raw(m_scales_d), m_filters, m_integer_unit,
             m_config.input_nbits != 32 &&
                 m_config.peak_mode !=
-                    PeakFindingMode::kContiguousPeakAcrossWidths);
+                    PeakFindingMode::kContiguousPeakAcrossWidths,
+            raw(m_bright_d), m_bright_q);
         gpu_utils::check_last_gpu_error("FDMTBoxcar flush failed");
+        finish_keep(stream);
         update_open_begin(stream);
         m_work.mark(stream);
         return device_view();
@@ -1338,11 +1772,15 @@ public:
         // on the device and in pinned host memory.
         const SizeType full =
             m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
-        const SizeType staging = m_input_d.size() < full
-                                     ? (full - m_input_d.size()) * sizeof(float)
-                                     : 0;
+        const SizeType staging =
+            m_keep_in_transform
+                ? (m_keep_d.empty() ? m_beams * m_plan.get_nchans() : 0)
+            : m_input_d.size() < full
+                ? (full - m_input_d.size()) * sizeof(float)
+                : 0;
+        // Device bytes only (the host halves of the slots are not budgeted).
         return staging + (m_rows.size() * sizeof(uint64_t)) +
-               (slot_count() * 4 * table_floats() * sizeof(float));
+               (slot_count() * 2 * table_floats() * sizeof(float));
     }
     void enable_block_noise(
         std::shared_ptr<const std::vector<uint64_t>> support) override {
@@ -1361,7 +1799,7 @@ public:
         gpu_utils::set_device(m_device);
         const SizeType full =
             m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
-        if (m_input_d.size() < full) {
+        if (!m_keep_in_transform && m_input_d.size() < full) {
             m_work.wait(); // the staging buffer may still be read
             m_input_d.resize(full);
         }
@@ -1387,7 +1825,10 @@ public:
     void push_block_noise(BlockNoise entry) override {
         m_pending = std::move(entry);
     }
-    void drop_block_noise() noexcept override { m_pending.reset(); }
+    void drop_block_noise() noexcept override {
+        m_pending.reset();
+        undo_commit();
+    }
     void reset_history(Stream queue) override {
         gpu_utils::set_device(m_device);
         const auto stream = static_cast<cudaStream_t>(queue.native);
@@ -1473,17 +1914,35 @@ public:
                        m_integer_carry32.size() * sizeof(uint32_t),
             .peaks   = m_peaks_d.size() * sizeof(BoxcarPeak) + m_open_d.size(),
             .workspace = fdmt.workspace + m_per_dm_d.size() * sizeof(uint64_t) +
+                         m_ring_d.size() * sizeof(uint64_t) +
                          sizeof(CandidateCounts) + sizeof(uint64_t) +
                          (2 * sizeof(uint64_t)), // candidate frontier word
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
-                          sizeof(RawCandidate),
-            .staging =
-                m_input_d.size() * sizeof(float) + m_packed_input.size()};
+                              sizeof(RawCandidate) +
+                          m_bright_d.size() * sizeof(BoxcarKeepEntry) +
+                          m_bright_rank_d.size() * sizeof(uint32_t) +
+                          sizeof(KeepSelect) * m_bright_sel_d.size() +
+                          m_bright_hist_d.size() * sizeof(uint64_t),
+            .staging    = m_input_d.size() * sizeof(float) +
+                          m_packed_input.size() + m_keep_d.size(),
+            .host = host_plan +
+                    (m_slots.size() * 2 * table_floats() * sizeof(float)) +
+                    (m_candidates_h.size() * sizeof(RawCandidate))};
     }
     SizeType chunk_nsamps() const noexcept override {
         return m_driver->chunk_nsamps();
     }
-    std::string search_path() const override { return m_driver->search_path(); }
+    std::string search_path() const override {
+        std::string path = m_driver->search_path();
+        if (m_global_ring) {
+            path += " (boxcar: device-memory ring)";
+        } else if (m_screen_dropped || m_block_shrunk) {
+            path +=
+                fmt::format(" (boxcar: {}-thread blocks{})", m_block_threads,
+                            m_screen_dropped ? ", no width screen" : "");
+        }
+        return path;
+    }
     SizeType fuse_levels() const noexcept override {
         return m_driver->fuse_levels();
     }
@@ -1537,21 +1996,71 @@ private:
         const auto stream = static_cast<cudaStream_t>(input.stream.native);
         FDMTSearchInput stopped = input;
         stopped.search_stop     = m_search_stop;
-        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C>
-            <<<grid, block, m_smem, stream>>>(
-                stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
-                raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
-                raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
-                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
-                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
-                m_config.skip_cold_prefix, g.level == m_plan.get_niters(),
-                raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
-                m_mask, m_shared_tables, m_config.use_trapezoid,
-                raw(m_screen_groups_d),
-                static_cast<int>(m_screen_groups_d.size()),
-                raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
-                kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset);
+        if (m_bright_q != 0) {
+            launch_score_args<T, kBlockThreads, kScreen, kBlockNoise, C, true>(
+                stopped, g, grid, block, carry, stream);
+        } else {
+            launch_score_args<T, kBlockThreads, kScreen, kBlockNoise, C, false>(
+                stopped, g, grid, block, carry, stream);
+        }
+    }
+    template <typename T,
+              int kBlockThreads,
+              bool kScreen,
+              bool kBlockNoise,
+              typename C,
+              bool kKeep,
+              bool kGlobalRing = false>
+    void launch_score_args(const FDMTSearchInput& stopped,
+                           const LevelGroup& g,
+                           dim3 grid,
+                           dim3 block,
+                           C* carry,
+                           cudaStream_t stream,
+                           SizeType task_base = 0) {
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, kKeep,
+                           kGlobalRing><<<grid, block, m_smem, stream>>>(
+            stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
+            raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
+            raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d), m_peak_count,
+            raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d),
+            raw(m_per_dm_d), m_config.max_candidates, m_config.max_cands_per_dm,
+            m_config.peak_mode, m_config.skip_cold_prefix,
+            g.level == m_plan.get_niters(), raw(m_integer_thresholds),
+            raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
+            m_config.use_trapezoid, raw(m_screen_groups_d),
+            static_cast<int>(m_screen_groups_d.size()),
+            raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
+            kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
+            raw(m_bright_d), m_bright_q,
+            kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr,
+            task_base);
+    }
+    /// kGlobalRing: the group's tasks in batches of m_ring_batch blocks,
+    /// each batch reusing the rings (stream order).
+    template <typename T, bool kBlockNoise, typename C>
+    void launch_score_global(const FDMTSearchInput& input,
+                             const LevelGroup& g,
+                             dim3 grid,
+                             dim3 block,
+                             C* carry) {
+        const auto stream = static_cast<cudaStream_t>(input.stream.native);
+        FDMTSearchInput stopped = input;
+        stopped.search_stop     = m_search_stop;
+        const SizeType tasks    = grid.x;
+        for (SizeType base = 0; base < tasks; base += m_ring_batch) {
+            const dim3 batch(
+                static_cast<unsigned>(std::min(m_ring_batch, tasks - base)));
+            if (m_bright_q != 0) {
+                launch_score_args<T, kGlobalBlock, false, kBlockNoise, C, true,
+                                  true>(stopped, g, batch, block, carry, stream,
+                                        base);
+            } else {
+                launch_score_args<T, kGlobalBlock, false, kBlockNoise, C, false,
+                                  true>(stopped, g, batch, block, carry, stream,
+                                        base);
+            }
+        }
     }
 
     template <typename T, typename C = T>
@@ -1560,6 +2069,17 @@ private:
                       dim3 grid,
                       dim3 block,
                       C* carry) {
+        if (m_global_ring) {
+            if constexpr (!std::is_integral_v<T>) {
+                if (m_block_tables.count > 0) {
+                    launch_score_global<T, true, C>(input, g, grid, block,
+                                                    carry);
+                    return;
+                }
+            }
+            launch_score_global<T, false, C>(input, g, grid, block, carry);
+            return;
+        }
         if (m_block_threads == 64) {
             launch_score_block<T, 64, C>(input, g, grid, block, carry);
         } else if (m_block_threads == 128) {
@@ -1604,27 +2124,72 @@ private:
                 m_width, m_smem, limit));
         }
         if (m_screen_groups_d.empty()) {
-            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false>);
+            configure_variants<T, kBlockThreads, false, false, T>();
         } else {
-            configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true>);
+            configure_variants<T, kBlockThreads, true, false, T>();
         }
         if constexpr (std::is_integral_v<T>) {
             if (m_screen_groups_d.empty()) {
-                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, false,
-                                                    false, uint32_t>);
+                configure_variants<T, kBlockThreads, false, false, uint32_t>();
             } else {
-                configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, true,
-                                                    false, uint32_t>);
+                configure_variants<T, kBlockThreads, true, false, uint32_t>();
             }
         } else {
             if (m_screen_groups_d.empty()) {
-                configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, false, true>);
+                configure_variants<T, kBlockThreads, false, true, T>();
             } else {
-                configure_kernel(
-                    kernel_fdmt_boxcar<T, kBlockThreads, true, true>);
+                configure_variants<T, kBlockThreads, true, true, T>();
             }
         }
+    }
+    /// The kernel instance and, under kKeepBrightest, its kKeep twin.
+    template <typename T,
+              int kBlockThreads,
+              bool kScreen,
+              bool kBlockNoise,
+              typename C,
+              bool kGlobalRing = false>
+    void configure_variants() {
+        configure_kernel(
+            kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, false,
+                               kGlobalRing>);
+        if (m_bright_q != 0) {
+            configure_kernel(
+                kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C,
+                                   true, kGlobalRing>);
+        }
+    }
+    /// kKeepBrightest, end of a call: the stores (or their max_candidates
+    /// brightest) into the candidate buffer, on `stream`.
+    void finish_keep(cudaStream_t stream) {
+        if (m_bright_q == 0) {
+            return;
+        }
+        const SizeType tasks   = m_rows.size() * m_beams;
+        constexpr int kThreads = 256;
+        const auto grid        = static_cast<unsigned>(std::min<SizeType>(
+            (tasks * m_bright_q + kThreads - 1) / kThreads, 4096));
+        KeepSelect* sel        = raw(m_bright_sel_d);
+        kernel_keep_init<<<1, 1, 0, stream>>>(sel, m_config.max_candidates);
+        kernel_keep_count<<<std::min<SizeType>((tasks + 255) / 256, 1024), 256,
+                            0, stream>>>(raw(m_per_dm_d), tasks, sel);
+        kernel_keep_resolve_all<<<1, 1, 0, stream>>>(sel);
+        if (m_bright_select) {
+            for (int d = 0; d < kKeepKeyBytes; ++d) {
+                kernel_keep_hist<<<grid, kThreads, 0, stream>>>(
+                    raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
+                    m_rows.size(), tasks, m_bright_q, sel, raw(m_bright_hist_d),
+                    d);
+                kernel_keep_pick<<<1, 1, 0, stream>>>(sel, raw(m_bright_hist_d),
+                                                      d);
+            }
+        }
+        kernel_keep_emit<<<grid, kThreads, 0, stream>>>(
+            raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
+            raw(m_rows_d), raw(m_widths_d), m_rows.size(), tasks, m_bright_q,
+            sel, raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d));
+        kernel_keep_finish<<<1, 1, 0, stream>>>(sel, raw(m_counts_d));
+        gpu_utils::check_last_gpu_error("FDMTBoxcar keep-brightest failed");
     }
 
     template <typename Kernel> void configure_kernel(Kernel kernel) const {
@@ -1651,25 +2216,136 @@ private:
             cudaDeviceGetAttribute(
                 &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
             "FDMTBoxcar: shared memory limit");
-        const auto limit = static_cast<SizeType>(optin);
+        const auto limit =
+            m_shared_limit != 0
+                ? std::min(m_shared_limit, static_cast<SizeType>(optin))
+                : static_cast<SizeType>(optin);
         const SizeType eff_chunk =
             std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
-        if (eff_chunk <= 64 * kItems) {
+        int threads = eff_chunk <= 64 * kItems    ? 64
+                      : eff_chunk <= 128 * kItems ? 128
+                                                  : 256;
+        if (m_width > kFastMaxWidth) {
+            configure_global<T>(limit);
+            return;
+        }
+        // Wide boxes on small-shared-memory GPUs: when the block's prefix
+        // ring does not fit, drop the width screen (its second ring; the
+        // screen only skips work, candidates are the same), then take
+        // smaller blocks (shorter tile and ring, smaller run state).
+        // Configurations that fit are unchanged.
+        if (!m_screen_groups_d.empty() &&
+            shared_need<T>(threads, true) > limit) {
+            m_screen_groups_d.clear();
+            m_screen_thresholds_d.clear();
+            m_screen_m1_d.clear();
+            m_screen_groups_d.shrink_to_fit();
+            m_screen_thresholds_d.shrink_to_fit();
+            m_screen_m1_d.shrink_to_fit();
+            m_screen_dropped = true;
+        }
+        const bool screen = !m_screen_groups_d.empty();
+        while (threads > 64 && shared_need<T>(threads, screen) > limit) {
+            threads /= 2;
+            m_block_shrunk = true;
+        }
+        if (shared_need<T>(threads, screen) > limit) {
+            m_block_shrunk = false;
+            configure_global<T>(limit);
+            return;
+        }
+        if (m_screen_dropped || m_block_shrunk) {
+            logging::debug("FDMTBoxcar: max_boxcar {} in {} B of shared "
+                           "memory: {}-thread blocks{}",
+                           m_width, limit, threads,
+                           m_screen_dropped ? ", no width screen" : "");
+        }
+        if (threads == 64) {
             configure_shared_block<T, 64>(limit);
-        } else if (eff_chunk <= 128 * kItems) {
+        } else if (threads == 128) {
             configure_shared_block<T, 128>(limit);
         } else {
             configure_shared_block<T, 256>(limit);
         }
     }
-    /// The block with the killed channels' rows zeroed in `buffer` (copied
-    /// there first unless the host path staged it there), or the block
-    /// itself without a kill mask.
+    /// kGlobalRing: prefix rings in device memory, kGlobalBlock threads, no
+    /// width screen, tables read through the cache.
+    template <typename T> void configure_global(SizeType limit) {
+        if (!m_screen_groups_d.empty()) {
+            m_screen_groups_d.clear();
+            m_screen_thresholds_d.clear();
+            m_screen_m1_d.clear();
+            m_screen_groups_d.shrink_to_fit();
+            m_screen_thresholds_d.shrink_to_fit();
+            m_screen_m1_d.shrink_to_fit();
+            m_screen_dropped = true;
+        }
+        const SizeType ring =
+            std::bit_ceil(m_width + SizeType{kGlobalBlock * kItems});
+        m_global_ring   = true;
+        m_block_threads = kGlobalBlock;
+        m_mask          = static_cast<uint32_t>(ring - 1);
+        m_shared_tables = false;
+        m_screen_offset = 0;
+        m_group_offset  = 0;
+        m_smem          = sizeof(BoxcarShared<T, kGlobalBlock>);
+        if (m_smem > limit) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: the search needs {} B of shared memory per "
+                "block; the device allows {} B",
+                m_smem, limit));
+        }
+        SizeType tasks = 1;
+        for (const auto& g : m_level_groups) {
+            tasks = std::max(tasks, g.row_count * m_beams);
+        }
+        const SizeType ring_words = ring * sizeof(T) / sizeof(uint64_t);
+        m_ring_batch              = std::clamp<SizeType>(
+            kGlobalRingBytes / (ring_words * sizeof(uint64_t)), 1, tasks);
+        m_ring_d.resize(m_ring_batch * ring_words);
+        logging::debug("FDMTBoxcar: max_boxcar {}: prefix rings in device "
+                       "memory ({} blocks per batch, {} B)",
+                       m_width, m_ring_batch,
+                       m_ring_d.size() * sizeof(uint64_t));
+        configure_variants<T, kGlobalBlock, false, false, T, true>();
+        if constexpr (std::is_integral_v<T>) {
+            configure_variants<T, kGlobalBlock, false, false, uint32_t, true>();
+        } else {
+            configure_variants<T, kGlobalBlock, false, true, T, true>();
+        }
+    }
+    /// Shared memory a block needs at the least (configure_shared_block):
+    /// run state, prefix ring and, with the width screen, its ring.
+    template <typename T>
+    [[nodiscard]] SizeType shared_need(int threads, bool screen) const {
+        const auto need = [&]<int kBlockThreads>() {
+            const SizeType ring =
+                std::bit_ceil(m_width + SizeType{kBlockThreads * kItems});
+            SizeType bytes =
+                sizeof(BoxcarShared<T, kBlockThreads>) + (ring * sizeof(T));
+            if (screen) {
+                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(T));
+            }
+            return bytes;
+        };
+        return threads == 64    ? need.template operator()<64>()
+               : threads == 128 ? need.template operator()<128>()
+                                : need.template operator()<256>();
+    }
+    /// The block to search under this call's kill runs. With the mask
+    /// applied by the transform (FDMT): the block itself, the keep bytes
+    /// set. Otherwise the block with the killed channels' rows zeroed in
+    /// `buffer` (copied there first unless the host path staged it there),
+    /// or the block itself without a kill mask.
     template <typename T>
     DeviceSpan<const T> masked(DeviceSpan<const T> block,
                                thrust::device_vector<T>& buffer,
-                               Stream queue) const {
+                               Stream queue) {
         const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
+        if (m_keep_in_transform) {
+            set_keep(runs, queue);
+            return block;
+        }
         if (runs.empty()) {
             return block;
         }
@@ -1691,6 +2367,38 @@ private:
                 (c1 - c0) * row, m_beams, stream));
         }
         return {dst, block.size(), block.device};
+    }
+    /// The transform's keep bytes for `runs` (none: read every row). The
+    /// device copy is rewritten only when the runs change, after the work
+    /// still reading it.
+    void set_keep(const std::vector<std::pair<SizeType, SizeType>>& runs,
+                  Stream queue) {
+        if (runs.empty()) {
+            (void)m_driver->set_search_keep(nullptr);
+            return;
+        }
+        if (m_keep_d.empty() || runs != m_keep_runs) {
+            const SizeType nchans = m_plan.get_nchans();
+            m_keep_h.assign(m_beams * nchans, 1);
+            for (SizeType b = 0; b < m_beams; ++b) {
+                for (const auto& [c0, c1] : runs) {
+                    std::fill_n(m_keep_h.begin() + static_cast<std::ptrdiff_t>(
+                                                       b * nchans + c0),
+                                c1 - c0, uint8_t{0});
+                }
+            }
+            if (m_keep_d.empty()) {
+                m_keep_d.resize(m_keep_h.size());
+            }
+            const auto stream = static_cast<cudaStream_t>(queue.native);
+            m_work.order(stream);
+            // Pageable source: staged before the call returns.
+            gpu_utils::check_gpu_call(
+                cudaMemcpyAsync(raw(m_keep_d), m_keep_h.data(), m_keep_h.size(),
+                                cudaMemcpyHostToDevice, stream));
+            m_keep_runs = runs;
+        }
+        (void)m_driver->set_search_keep(raw(m_keep_d));
     }
     /// Candidate frontier: the oldest open begin sample, reduced on the
     /// device and copied to a pinned word on `stream` (no host wait).
@@ -1724,6 +2432,8 @@ private:
     }
     void reset_block_noise() {
         m_pending.reset();
+        m_evicted.reset();
+        m_commit_open = false;
         m_ring.clear();
         BlockNoise first; // the constructor tables from stream sample 0
         first.kill_runs = m_kill_runs;
@@ -1797,10 +2507,13 @@ private:
             entry.kill_runs = m_kill_runs;
         }
         entry.first_sample = m_position;
+        m_evicted.reset();
         if (m_ring.size() == ring_size()) {
+            m_evicted = std::move(m_ring.front());
             m_ring.erase(m_ring.begin());
         }
         m_ring.push_back(std::move(entry));
+        m_commit_open = true;
         BlockTables bt;
         const SizeType n   = table_floats();
         const SizeType off = m_ring.size() > 2 ? m_ring.size() - 2 : 0;
@@ -1820,6 +2533,20 @@ private:
             }
         }
         m_block_tables = bt;
+    }
+    /// A call that threw after commit_block_noise() (allocation, launch):
+    /// restore the ring as before the commit, so no entry describes a block
+    /// that never ran. m_block_tables is rebuilt by the next commit.
+    void undo_commit() noexcept {
+        if (!m_commit_open) {
+            return;
+        }
+        m_ring.pop_back();
+        if (m_evicted) {
+            m_ring.insert(m_ring.begin(), std::move(*m_evicted));
+            m_evicted.reset();
+        }
+        m_commit_open = false;
     }
     /// After a call's kernels: the slots its tables used are free for
     /// reuse only after them.
@@ -1888,8 +2615,22 @@ private:
     SizeType m_filters;
     SizeType m_peak_count;
     std::unique_ptr<BoxcarDriver> m_driver;
-    /// Killed channel runs, zeroed in m_input_d / m_packed_input.
+    /// Killed channel runs: read as zero by the transform (m_keep_d) or
+    /// zeroed in m_input_d / m_packed_input.
     std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
+    bool m_keep_in_transform = false;
+    /// kKeepBrightest: max_cands_per_dm entries per (beam, row), the rows'
+    /// brighter() ranks, the selection state and histogram (0: kDropNew).
+    SizeType m_bright_q  = 0;
+    bool m_bright_select = false;
+    thrust::device_vector<BoxcarKeepEntry> m_bright_d;
+    thrust::device_vector<uint32_t> m_bright_rank_d;
+    thrust::device_vector<KeepSelect> m_bright_sel_d;
+    thrust::device_vector<uint64_t> m_bright_hist_d;
+    /// One byte per input row (beam, channel), for m_keep_runs.
+    thrust::device_vector<uint8_t> m_keep_d;
+    std::vector<uint8_t> m_keep_h;
+    std::vector<std::pair<SizeType, SizeType>> m_keep_runs;
     std::vector<LevelGroup> m_level_groups;
     thrust::device_vector<BoxcarRow> m_rows_d;
     thrust::device_vector<uint32_t> m_widths_d;
@@ -1901,6 +2642,16 @@ private:
     thrust::device_vector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
     int m_block_threads   = 256;
+    // FDMTEngineConfig::boxcar_shared_limit (0: the device's opt-in limit).
+    SizeType m_shared_limit = 0;
+    // Fallbacks taken to fit max_boxcar in shared memory (configure_shared).
+    bool m_screen_dropped = false;
+    bool m_block_shrunk   = false;
+    // kGlobalRing: rings of m_ring_batch blocks (uint64_t words, viewed as
+    // T), reused by each batch of a launch.
+    bool m_global_ring    = false;
+    SizeType m_ring_batch = 0;
+    thrust::device_vector<uint64_t> m_ring_d;
     thrust::device_vector<BoxcarScreenGroup> m_screen_groups_d;
     thrust::device_vector<float> m_screen_thresholds_d;
     thrust::device_vector<float> m_screen_m1_d; ///< packed: mean per sample
@@ -1936,6 +2687,9 @@ private:
     bool m_noise_on = false;
     std::vector<BlockNoise> m_ring; ///< oldest first, at most ring_size()
     std::optional<BlockNoise> m_pending;
+    /// The entry the last commit evicted, kept until its call completes.
+    std::optional<BlockNoise> m_evicted;
+    bool m_commit_open = false;
     std::vector<std::unique_ptr<TableSlot>> m_slots;
     thrust::device_vector<uint64_t> m_support_d;
     BlockTables m_block_tables{};

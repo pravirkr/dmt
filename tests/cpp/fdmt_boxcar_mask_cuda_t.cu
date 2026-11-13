@@ -177,6 +177,42 @@ TEST_CASE("GPU FDMTBoxcar per-call masks: calls queued without host sync",
     compare(run(false), synced);
 }
 
+TEST_CASE("GPU FDMTBoxcar masks device input without a block copy",
+          "[gpu][boxcar][kill][mask]") {
+    // 1024 channels x 65536 samples (256 MiB per block). The budget leaves
+    // less than half a block above the unmasked search, so a staging copy
+    // of the block (the 0.8.0 behaviour) could not fit; the transform reads
+    // killed rows as zero instead. Constructor and per-call masks.
+    const plans::FDMTPlan plan(1200.0F, 1500.0F, 1024, 65536, 0.000256F, 500);
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 16;
+    const SizeType block_bytes =
+        plan.get_nchans() * plan.get_nsamps() * sizeof(float);
+    const SizeType base =
+        FDMTBoxcar(plan, cfg, true, kGpu).get_memory_usage().budgeted();
+    const SizeType budget = base + (block_bytes / 2);
+    std::vector<float> host(plan.get_nchans() * plan.get_nsamps());
+    std::mt19937 rng(3);
+    std::uniform_int_distribution<int> dist(-4, 4);
+    for (auto& v : host) {
+        v = static_cast<float>(dist(rng));
+    }
+    const thrust::device_vector<float> buf(host.begin(), host.end());
+    const DeviceSpan<const float> span(thrust::raw_pointer_cast(buf.data()),
+                                       buf.size(), {kGpu.backend, 0});
+    const auto ctor_mask = gpu_random_mask(plan.get_nchans(), 5, 0.2);
+    FDMTBoxcar search(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
+                      budget, ctor_mask);
+    for (unsigned k = 0; k < 3; ++k) {
+        const auto mask = gpu_random_mask(plan.get_nchans(), 11 + k, 0.1);
+        REQUIRE_NOTHROW(search.execute(span, std::span<const uint8_t>(mask)));
+        (void)search.copy_result();
+    }
+    const auto usage = search.get_memory_usage();
+    CHECK(usage.staging == plan.get_nchans());
+    CHECK(usage.budgeted() <= budget);
+}
+
 TEST_CASE("GPU FDMTBoxcar per-call masks: memory is accounted",
           "[gpu][boxcar][kill][mask]") {
     const auto plan  = gpu_mask_plan(1);
@@ -196,8 +232,13 @@ TEST_CASE("GPU FDMTBoxcar per-call masks: memory is accounted",
     (void)search.execute(span, std::span<const uint8_t>(mask));
     (void)search.copy_result();
     const auto after = search.get_memory_usage();
-    CHECK(after.staging == input[0].size() * sizeof(float));
+    // Device input with a mask: no staging copy of the block, only one keep
+    // byte per channel read by the transform.
+    CHECK(after.staging == plan.get_nchans());
     CHECK(after.plan > before.plan);
     CHECK(after.workspace > before.workspace);
-    CHECK(after.total() <= algorithms::kFDMTDefaultMaxMemory);
+    // The noise model lives in host memory: reported, not budgeted.
+    CHECK(after.host > before.host);
+    CHECK(after.budgeted() + after.host == after.total());
+    CHECK(after.budgeted() <= algorithms::kFDMTDefaultMaxMemory);
 }

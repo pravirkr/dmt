@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "dmt/boxcar.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
@@ -27,12 +29,31 @@ bool finite(float x) {
 
 std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
                                                 float wtsp) {
-    if (max_width == 0 || max_width > 4096 || !finite(wtsp) || wtsp < 1.0F) {
+    // Up to 4096 the search is tuned (GPU: prefix ring in shared memory);
+    // wider boxes run correctly with no speed promise. The cap only guards
+    // against a mistyped width (2^20 samples is over a minute at 64 us).
+    constexpr SizeType kMaxWidth = SizeType{1} << 20;
+    if (max_width == 0 || max_width > kMaxWidth || !finite(wtsp) ||
+        wtsp < 1.0F) {
         throw std::invalid_argument(
-            "Boxcar: max_width must be 1..4096 and wtsp finite >= 1");
+            "Boxcar: max_width must be 1..1048576 and wtsp finite >= 1");
     }
+    // Per-row tables grow with the number of widths and are built before
+    // the memory budget is checked: at most 4096 widths, as when max_width
+    // itself was capped at 4096 (wide boxes need wtsp > 1). Checked while
+    // building, so a bad width fails before a long list is made.
+    constexpr SizeType kMaxTrials = 4096;
+    const auto too_many           = [&] {
+        return std::invalid_argument(fmt::format(
+            "Boxcar: max_width {} at wtsp {} gives more than {} widths; raise "
+            "wtsp",
+            max_width, wtsp, kMaxTrials));
+    };
     std::vector<uint32_t> widths;
     for (SizeType w = 1; w <= max_width;) {
+        if (widths.size() == kMaxTrials) {
+            throw too_many();
+        }
         widths.push_back(static_cast<uint32_t>(w));
         const double next = static_cast<double>(w) * wtsp;
         if (next > static_cast<double>(max_width)) {
@@ -43,6 +64,9 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
     // The bank ends on max_width: the widest box searched is the one asked
     // for, even when the geometric steps stop below it.
     if (widths.back() < max_width) {
+        if (widths.size() == kMaxTrials) {
+            throw too_many();
+        }
         widths.push_back(static_cast<uint32_t>(max_width));
     }
     return widths;
@@ -67,12 +91,25 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
         config.noise_sigma <= 0 || config.max_candidates == 0 ||
         static_cast<unsigned>(config.peak_mode) >
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
+        static_cast<unsigned>(config.overflow_policy) >
+            static_cast<unsigned>(OverflowPolicy::kKeepBrightest) ||
         plan.get_nchans() > UINT32_MAX ||
         (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(
             "FDMTBoxcar: invalid configuration (requires valid mode, positive "
             "finite threshold/sigma and capacity, kill mask of nchans "
             "entries)");
+    }
+    // kKeepBrightest keeps a store of max_cands_per_dm candidates per row:
+    // the default 4096 (meant for kDropNew) would cost GBs on a large search.
+    constexpr SizeType kMaxKeepPerDM = 1024;
+    if (config.overflow_policy == OverflowPolicy::kKeepBrightest &&
+        (config.max_cands_per_dm == 0 ||
+         config.max_cands_per_dm > kMaxKeepPerDM)) {
+        throw std::invalid_argument(fmt::format(
+            "FDMTBoxcar: kKeepBrightest needs max_cands_per_dm in 1..{} (a "
+            "per-row store; e.g. 16), got {}",
+            kMaxKeepPerDM, config.max_cands_per_dm));
     }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||

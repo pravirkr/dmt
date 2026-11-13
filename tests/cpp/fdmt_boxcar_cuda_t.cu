@@ -2,11 +2,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <random>
+#include <span>
+#include <string>
 #include <vector>
 
 #include <thrust/device_vector.h>
 
+#include "dmt/boxcar.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
@@ -123,6 +127,57 @@ TEST_CASE("FDMTBoxcar GPU supports width 4096 and bounded overflow",
     CHECK(limited.execute(loud).candidates.empty());
 }
 
+TEST_CASE("FDMTBoxcar GPU searches plans whose root plane exceeds 32 bits",
+          "[gpu][parity][boxcar]") {
+    // 1024 delay trials x 2,101,248 samples: the root plane has more than
+    // INT32_MAX elements. Standalone FDMT on the GPU rejects it (it writes
+    // that plane); FDMTBoxcar never materialises it and must match the CPU.
+    constexpr SizeType kNsamps = (SizeType{1} << 21) + 4096;
+    constexpr IndexType kDtMax = 1023;
+    static_assert(SizeType{kDtMax + 1} * kNsamps >
+                  SizeType{std::numeric_limits<int32_t>::max()});
+    CHECK_THROWS_AS(FDMT(1200.0F, 1500.0F, 4, kNsamps, 0.001F, kDtMax, 0, 1,
+                         true, "valid",
+                         {algorithms::detail::kGPUBackend, 1, 0}),
+                    std::invalid_argument);
+
+    const plans::FDMTPlan plan(1200.0F, 1500.0F, 4, kNsamps, 0.001F, kDtMax);
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> dist(-3, 3);
+    std::vector<float> block(plan.get_nchans() * kNsamps);
+    for (auto& v : block) {
+        v = static_cast<float>(dist(rng));
+    }
+    // A bright pulse at zero delay, late in the block (row offsets past the
+    // 32-bit range of the full-block root layout).
+    const SizeType t_pulse = kNsamps - 50000;
+    for (SizeType c = 0; c < plan.get_nchans(); ++c) {
+        for (SizeType t = t_pulse; t < t_pulse + 3; ++t) {
+            block[(c * kNsamps) + t] += 40.0F;
+        }
+    }
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 4;
+    cfg.detect_thresh    = 7.0F;
+    cfg.noise_sigma      = 2.0F;
+    cfg.peak_mode        = PeakFindingMode::kContiguousPeakAcrossWidths;
+    cfg.max_candidates   = SizeType{1} << 16;
+    cfg.max_cands_per_dm = 0;
+    FDMTBoxcar cpu(plan, cfg, true, {Backend::kCPU, 4, 0});
+    FDMTBoxcar gpu(plan, cfg, true, {algorithms::detail::kGPUBackend, 1, 0});
+    std::vector<RawCandidate> expected;
+    std::vector<RawCandidate> actual;
+    append(expected, cpu.execute(block));
+    append(expected, cpu.flush());
+    append(actual, gpu.execute(block));
+    append(actual, gpu.flush());
+    REQUIRE_FALSE(expected.empty());
+    CHECK(std::ranges::any_of(expected, [&](const RawCandidate& c) {
+        return c.peak_sample >= t_pulse && c.peak_sample < t_pulse + 8;
+    }));
+    compare(actual, expected);
+}
+
 TEST_CASE("FDMTBoxcar GPU accepts all 4096 integer width trials",
           "[gpu][boxcar]") {
     plans::FDMTPlan plan(700, 1200, 2, 17, 0.001F, 1);
@@ -135,6 +190,187 @@ TEST_CASE("FDMTBoxcar GPU accepts all 4096 integer width trials",
     CHECK(search.get_search_plans().front().widths.size() == 4096);
     CHECK(search.execute(zero).candidates.empty());
     CHECK(search.flush().candidates.empty());
+}
+
+TEST_CASE("FDMTBoxcar GPU fits wide boxes in small shared memory",
+          "[gpu][parity][boxcar]") {
+    // A scoring block holds a prefix ring of bit_ceil(max_boxcar + tile)
+    // entries, a second one with the width screen (dense widths), and
+    // per-thread run state. When that exceeds the shared memory per block,
+    // the screen is dropped, then the block shrinks (256 -> 128 -> 64
+    // threads); candidates stay the same. FDMTEngineConfig::
+    // boxcar_shared_limit stands in for a small-shared-memory GPU. For
+    // max_boxcar 4096, float rows need about 47 KB at 256 threads (80 KB
+    // with the screen), 40 KB at 128 and 36 KB at 64.
+    using namespace algorithms::detail; // NOLINT
+    const plans::FDMTPlan plan(700, 1200, 7, 2048, 0.001F,
+                               std::vector<IndexType>{-5, 0, 7, 40}, "valid",
+                               1);
+    const auto input = waterfalls(plan, 1, 4);
+    const auto run   = [&](const BoxcarConfig& box, SizeType limit,
+                           std::string& path) {
+        const SizeType root = plan.get_niters();
+        FDMTEngineConfig cfg{};
+        cfg.use_box_smearing    = true;
+        cfg.int_tree            = false;
+        cfg.exec                = {kGPUBackend, 1, 0};
+        cfg.max_fuse_levels     = root - 1;
+        cfg.search_upper_levels = true;
+        cfg.search_only         = true;
+        cfg.boxcar_shared_limit = limit;
+        auto engine             = make_fdmt_boxcar_gpu(
+            plan, box, make_boxcar_plans(plan, box, true), cfg,
+            make_boxcar_driver(make_fdmt_gpu(plan, cfg)));
+        path = engine->search_path();
+        std::vector<RawCandidate> out;
+        for (const auto& block : input) {
+            append(out, engine->execute(std::span<const float>(block)));
+        }
+        append(out, engine->flush());
+        return out;
+    };
+    BoxcarConfig box;
+    box.max_boxcar       = 4096;
+    box.detect_thresh    = 3;
+    box.max_cands_per_dm = 0;
+    box.max_candidates   = 1U << 20;
+    struct Case {
+        float wtsp;
+        SizeType limit;
+        const char* note; // nullptr: no fallback taken
+    };
+    for (const auto& c :
+         {Case{1.5F, 0, nullptr}, Case{1.5F, 44000, "128-thread blocks)"},
+          Case{1.5F, 38000, "64-thread blocks)"}, Case{1.02F, 0, nullptr},
+          Case{1.02F, 65536, "256-thread blocks, no width screen)"},
+          Case{1.02F, 38000, "64-thread blocks, no width screen)"}}) {
+        DYNAMIC_SECTION("wtsp " << c.wtsp << " limit " << c.limit) {
+            box.wtsp            = c.wtsp;
+            const auto expected = reference(plan, box, true, 1, input);
+            REQUIRE(expected.size() > 100);
+            std::string path;
+            const auto actual = run(box, c.limit, path);
+            INFO(path);
+            if (c.note == nullptr) {
+                CHECK(path.find("(boxcar:") == std::string::npos);
+            } else {
+                CHECK(path.ends_with(c.note));
+            }
+            compare(actual, expected);
+        }
+    }
+    // Below the 64-thread block's ring nothing fits in shared memory: the
+    // prefix rings move to device memory (no speed promise), and so do
+    // boxes wider than 4096 at any limit.
+    for (const auto& [width, limit] :
+         {std::pair<SizeType, SizeType>{4096, 30000}, {6000, 0}}) {
+        DYNAMIC_SECTION("device-memory ring, max_boxcar " << width << " limit "
+                                                          << limit) {
+            box.wtsp            = 1.5F;
+            box.max_boxcar      = width;
+            const auto expected = reference(plan, box, true, 1, input);
+            REQUIRE(expected.size() > 100);
+            std::string path;
+            const auto actual = run(box, limit, path);
+            INFO(path);
+            CHECK(path.ends_with("(boxcar: device-memory ring)"));
+            compare(actual, expected);
+        }
+    }
+}
+
+TEST_CASE("Packed FDMTBoxcar GPU searches boxes far wider than 4096",
+          "[gpu][parity][boxcar][packed]") {
+    // max_boxcar 65536 on 301 DM rows: each block's 1 MiB ring lives in
+    // device memory, and the rows run in batches of 256 blocks that reuse
+    // the rings. Exact against the CPU, across blocks shorter than the box.
+    const plans::FDMTPlan plan(700, 1200, 16, 1024, 0.001F, 300);
+    std::mt19937 random(11);
+    std::vector<std::vector<uint8_t>> input(3, std::vector<uint8_t>(16 * 1024));
+    for (auto& block : input) {
+        for (auto& x : block) {
+            x = static_cast<uint8_t>(random());
+        }
+    }
+    BoxcarConfig cfg;
+    cfg.input_nbits      = 8;
+    cfg.input_mean       = 127.5F;
+    cfg.noise_sigma      = std::sqrt(255.0F * 257.0F / 12.0F);
+    cfg.max_boxcar       = 65536;
+    cfg.wtsp             = 2;
+    cfg.detect_thresh    = 2.5F;
+    cfg.max_cands_per_dm = 0;
+    cfg.max_candidates   = 1U << 20;
+    const auto run       = [&](const Exec& exec) {
+        FDMTBoxcar search(plan, cfg, true, exec);
+        std::vector<RawCandidate> out;
+        for (const auto& block : input) {
+            append(out, search.execute(std::span<const uint8_t>(block)));
+        }
+        append(out, search.flush());
+        return out;
+    };
+    const auto expected = run(Exec::cpu(2));
+    REQUIRE(expected.size() > 100);
+    compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
+}
+
+TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",
+          "[gpu][parity][boxcar][packed]") {
+    // Packed rows keep 64-bit prefixes: with the width screen, max_boxcar
+    // 4096 needs about 145 KB per block, over the L40's 99 KB. The search
+    // drops the screen and matches the CPU exactly.
+    const plans::FDMTPlan plan(700, 1200, 7, 2048, 0.001F,
+                               std::vector<IndexType>{-5, 0, 7, 40}, "valid",
+                               1);
+    std::mt19937 random(7);
+    std::vector<std::vector<uint8_t>> input(4, std::vector<uint8_t>(7 * 2048));
+    for (auto& block : input) {
+        for (auto& x : block) {
+            x = static_cast<uint8_t>(random());
+        }
+    }
+    BoxcarConfig cfg;
+    cfg.input_nbits      = 8;
+    cfg.input_mean       = 127.5F;
+    cfg.noise_sigma      = std::sqrt(255.0F * 257.0F / 12.0F);
+    cfg.max_boxcar       = 4096;
+    cfg.wtsp             = 1.02F;
+    cfg.detect_thresh    = 2.5F;
+    cfg.max_cands_per_dm = 0;
+    cfg.max_candidates   = 1U << 20;
+    const auto run       = [&](const Exec& exec) {
+        FDMTBoxcar search(plan, cfg, true, exec);
+        std::vector<RawCandidate> out;
+        for (const auto& block : input) {
+            append(out, search.execute(std::span<const uint8_t>(block)));
+        }
+        append(out, search.flush());
+        return out;
+    };
+    const auto expected = run(Exec::cpu(2));
+    REQUIRE(expected.size() > 100);
+    compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
+
+    // Float rows at the same width: the GPU's float prefix rings against
+    // the CPU, within float rounding.
+    const auto floats    = waterfalls(plan, 1, 3);
+    BoxcarConfig fcfg    = cfg;
+    fcfg.input_nbits     = 32;
+    fcfg.input_mean      = 0.0F;
+    fcfg.noise_sigma     = 1.0F;
+    const auto run_float = [&](const Exec& exec) {
+        FDMTBoxcar search(plan, fcfg, true, exec);
+        std::vector<RawCandidate> out;
+        for (const auto& block : floats) {
+            append(out, search.execute(block));
+        }
+        append(out, search.flush());
+        return out;
+    };
+    const auto expected_f = run_float(Exec::cpu(2));
+    REQUIRE(expected_f.size() > 100);
+    compare(run_float({algorithms::detail::kGPUBackend, 1, 0}), expected_f);
 }
 
 TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",
@@ -311,9 +547,12 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                 }
             };
             check(g);
+            // Host input staging plus the transform's keep bytes (one per
+            // beam and channel); the mask needs no block copy of its own.
             CHECK(gpu_s.get_memory_usage().staging ==
                   (bits == 32 ? floats.front().size() * sizeof(float)
-                              : packed.front().size()));
+                              : packed.front().size()) +
+                      (plan.get_nchans() * gpu_s.get_nbeams()));
 
             cudaStream_t stream;
             gpu_utils::check_gpu_call(cudaStreamCreate(&stream));

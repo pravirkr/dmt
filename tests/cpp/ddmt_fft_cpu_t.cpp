@@ -22,6 +22,7 @@
 #include "dmt/nufft.hpp"
 
 #include "test_helpers.hpp"
+#include "test_random.hpp"
 
 namespace dmt {
 
@@ -38,13 +39,7 @@ constexpr float kTs    = 1.0E-3F;
 constexpr SizeType kNc = 16;
 
 std::vector<float> random_block(SizeType rows, SizeType nsamps, unsigned seed) {
-    std::mt19937 rng(seed);
-    std::normal_distribution<float> dist(0.0F, 1.0F);
-    std::vector<float> v(rows * nsamps);
-    for (auto& x : v) {
-        x = dist(rng);
-    }
-    return v;
+    return dmt::test_random::normal<float>(rows * nsamps, seed);
 }
 
 double rel_max_err(std::span<const float> a, std::span<const float> b) {
@@ -374,14 +369,9 @@ TEST_CASE("DDMTFFT packed, time-major, kill mask, beams and history",
     const SizeType nsamps = 800;
     const auto method = GENERATE(DDMTFFTMethod::kBrute, DDMTFFTMethod::kNUFFT);
     CAPTURE(algorithms::to_string(method));
-    std::mt19937 rng(9);
-    std::uniform_int_distribution<int> byte(0, 255);
-    std::vector<uint8_t> packed(kNc * nsamps);
-    std::vector<float> asfloat(kNc * nsamps);
-    for (SizeType i = 0; i < packed.size(); ++i) {
-        packed[i]  = static_cast<uint8_t>(byte(rng));
-        asfloat[i] = static_cast<float>(packed[i]);
-    }
+    const auto packed =
+        dmt::test_random::uniform_int<uint8_t>(kNc * nsamps, 9, 0, 255);
+    std::vector<float> asfloat(packed.begin(), packed.end());
 
     SECTION("packed == float") {
         DDMTFFT p8(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 8, {},
@@ -498,17 +488,18 @@ TEST_CASE("DDMTFFT packed low-bit streams match float", "[ddmt_fft_cpu][cpu]") {
                1, opts(DDMTFFTMethod::kAuto));
     DDMTFFT fl(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 32, {}, 1,
                opts(DDMTFFTMethod::kAuto));
-    std::mt19937 rng(21);
     const auto vmax = static_cast<int>(bit_pack_utils::max_sample_value(nbits));
-    std::uniform_int_distribution<int> val(0, vmax);
-    const auto ndm = pk.get_plan().get_dm_arr().size();
+    uint64_t seed   = 21;
+    const auto ndm  = pk.get_plan().get_dm_arr().size();
     for (const auto ns : blocks) {
         const auto rb = bit_pack_utils::packed_row_bytes(ns, nbits);
         std::vector<uint8_t> packed(kNc * rb, 0);
         std::vector<float> asfloat(kNc * ns);
+        const auto vals =
+            dmt::test_random::uniform_int<uint32_t>(kNc * ns, seed++, 0, vmax);
         for (SizeType c = 0; c < kNc; ++c) {
             for (SizeType t = 0; t < ns; ++t) {
-                const auto v          = static_cast<uint32_t>(val(rng));
+                const auto v          = vals[(c * ns) + t];
                 asfloat[(c * ns) + t] = static_cast<float>(v);
                 uint8_t* row          = packed.data() + (c * rb);
                 switch (nbits) {

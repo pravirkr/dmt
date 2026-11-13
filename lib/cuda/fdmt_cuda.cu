@@ -25,6 +25,7 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
     m_search_upper = cfg.search_upper_levels;
     m_max_memory   = cfg.max_memory_bytes;
     m_force_skewed = cfg.force_skewed_direct;
+    m_search_only  = cfg.search_only;
     m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
                                         cfg.chunk_nsamps, m_search_upper);
     // Automatic chunk: L2-resident state when it fits, else the budget
@@ -302,9 +303,21 @@ void FDMTCudaEngine::check_int32_extents() const {
         }
     };
     check(m_half_elems, "state level");
-    check(m_plan.get_dmt_size(), "output");
+    if (!m_search_only) {
+        // The search consumes chunk-sized levels; only a root-writing
+        // execute indexes the full-block output plane.
+        check(m_plan.get_dmt_size(), "output");
+    }
     check(m_plan.get_nchans() * m_plan.get_nsamps(), "waterfall");
     check(m_plan.get_history_size(), "level-0 history");
+}
+
+void FDMTCudaEngine::check_root_output() const {
+    if (m_search_only) {
+        throw std::logic_error(
+            "FDMT (cuda): this engine was built for the search only and "
+            "writes no root output");
+    }
 }
 
 void FDMTCudaEngine::check_tree_ring_extent(SizeType ring_elems) {

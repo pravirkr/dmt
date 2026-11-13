@@ -75,7 +75,7 @@ public:
                 static_cast<double>(fixed) / (1U << 30U),
                 static_cast<double>(max_memory) / (1U << 30U)));
         }
-        while (used.total() > max_memory) {
+        while (used.budgeted() > max_memory) {
             const SizeType n = std::min(geom.n_fft, engine->chunk_nsamps() +
                                                         discard + geom.guard);
             if (n / 2 < n_min) {
@@ -83,7 +83,7 @@ public:
                     "FDMTFFTBoxcar: this configuration needs {:.2f} GiB with "
                     "the shortest overlap-save segments tried ({} samples), "
                     "over max_memory_bytes ({:.2f} GiB)",
-                    static_cast<double>(used.total()) / (1U << 30U), n,
+                    static_cast<double>(used.budgeted()) / (1U << 30U), n,
                     static_cast<double>(max_memory) / (1U << 30U)));
             }
             const SizeType hop  = engine->chunk_nsamps();
@@ -91,7 +91,7 @@ public:
             engine.reset();
             engine = make_engine(fft_cfg);
             used   = engine->memory_usage();
-            if (used.total() > max_memory && engine->chunk_nsamps() >= hop) {
+            if (used.budgeted() > max_memory && engine->chunk_nsamps() >= hop) {
                 throw std::logic_error(
                     "FDMTFFTBoxcar: the segment cap did not shorten the "
                     "segments");

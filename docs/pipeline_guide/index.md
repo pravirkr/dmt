@@ -49,6 +49,13 @@ Several beams through one plan, on CPU and GPU.
 FDMT-FFT and DDMT-FFT, fractional delays, NUFFT options and FFT settings.
 :::
 
+:::{grid-item-card} DM grids
+:link: dm_grids
+:link-type: doc
+
+Generating trial DMs and delays, coherently dedispersed data, and the limits of the rules on very wide bands.
+:::
+
 ::::
 
 ```{toctree}
@@ -61,4 +68,5 @@ quirks_and_gotchas
 periodicity
 multibeam
 fourier_variants
+dm_grids
 ```

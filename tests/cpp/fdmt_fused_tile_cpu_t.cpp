@@ -18,6 +18,8 @@
 #include "dmt/fdmt_history.hpp"
 #include "dmt/modes.hpp"
 
+#include "test_random.hpp"
+
 // The CUDA backend's fused-level tile (lib/dmt/fdmt_fused_tile.hpp), run
 // sequentially on the host -- one "thread", barriers as no-ops -- over every
 // (group, tile) of a block, against FDMT's original level-by-level path.
@@ -56,14 +58,14 @@ struct Waterfall {
 };
 
 Waterfall random_ints(SizeType nchans, SizeType nsamps, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(0, 3);
+    const auto vals =
+        dmt::test_random::uniform_int<uint32_t>(nchans * nsamps, seed, 0, 3);
     const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, 2);
     Waterfall wf{.values = std::vector<float>(nchans * nsamps),
                  .packed = std::vector<uint8_t>(nchans * row_bytes, 0)};
     for (SizeType c = 0; c < nchans; ++c) {
         for (SizeType s = 0; s < nsamps; ++s) {
-            const auto v                = dis(gen);
+            const auto v                = vals[(c * nsamps) + s];
             wf.values[(c * nsamps) + s] = static_cast<float>(v);
             bit_pack_utils::write_packed_sample<2>(
                 wf.packed.data() + (c * row_bytes), s, v);
@@ -147,10 +149,11 @@ std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
                     HostBlock{}, in_f32, 0, out.data(), args, t, g, smem.data(),
                     hist0, thist_in, thist_out);
             }
-            // Nothing written past the advertised scratch size.
-            for (SizeType i = cap_a + cap_b; i < smem.size(); ++i) {
-                REQUIRE(smem[i] == kSentinel);
-            }
+            // Nothing written past the advertised scratch size (one
+            // assertion per tile: this runs for every tile of every case).
+            const auto guard = std::span(smem).subspan(cap_a + cap_b);
+            REQUIRE(std::ranges::all_of(
+                guard, [](float v) { return v == kSentinel; }));
         }
     }
     std::vector<float> level(out.size());
@@ -250,35 +253,40 @@ TEST_CASE("CUDA fused tile matches the original path (host emulation)",
     for (const auto& c : cases) {
         for (const std::string mode : {"full", "roll", "valid"}) {
             for (const bool smear : {true, false}) {
-                // Original level-by-level float path (stepper inspection).
-                FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
-                         c.dt_min, 1, smear, mode, Exec::cpu(1), 1, 0, false);
-                const auto& pc    = ref.get_plan().get_container();
-                const auto niters = ref.get_plan().get_niters();
-                const auto wf = random_ints(c.nchans, c.nsamps,
-                                            static_cast<unsigned>(c.nchans));
-                for (SizeType fuse = 1; fuse <= std::min<SizeType>(niters, 4);
-                     ++fuse) {
-                    ref.reset_history(); // first block of a stream
-                    const auto expected = reference_level(ref, wf.values, fuse);
-                    ref.reset_history();
-                    const auto expected_pk =
-                        reference_level_packed(ref, wf.packed, fuse);
-                    const auto plan =
-                        detail::build_fused_tile_plan(pc, niters, fuse);
-                    for (const int tile : {32, 96, 1024}) {
-                        DYNAMIC_SECTION(
-                            "nchans=" << c.nchans << " dt=[" << c.dt_min << ","
-                                      << c.dt_max << "] mode=" << mode
-                                      << " smear=" << smear << " fuse=" << fuse
-                                      << " tile=" << tile) {
+                // One section per (case, mode, smear), with the reference
+                // built inside it: Catch2 re-runs the test case from the top
+                // for every leaf section, so setup outside the section is
+                // repeated once per leaf.
+                DYNAMIC_SECTION("nchans=" << c.nchans << " dt=[" << c.dt_min
+                                          << "," << c.dt_max << "] mode="
+                                          << mode << " smear=" << smear) {
+                    // Original level-by-level float path (stepper inspection).
+                    FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max,
+                             c.dt_min, 1, smear, mode, Exec::cpu(1), 1, 0,
+                             false);
+                    const auto& pc    = ref.get_plan().get_container();
+                    const auto niters = ref.get_plan().get_niters();
+                    const auto wf     = random_ints(
+                        c.nchans, c.nsamps, static_cast<unsigned>(c.nchans));
+                    const auto box = box_tables(ref.get_plan());
+                    for (SizeType fuse = 1;
+                         fuse <= std::min<SizeType>(niters, 4); ++fuse) {
+                        ref.reset_history(); // first block of a stream
+                        const auto expected =
+                            reference_level(ref, wf.values, fuse);
+                        ref.reset_history();
+                        const auto expected_pk =
+                            reference_level_packed(ref, wf.packed, fuse);
+                        const auto plan =
+                            detail::build_fused_tile_plan(pc, niters, fuse);
+                        for (const int tile : {32, 96, 1024}) {
+                            CAPTURE(fuse, tile);
                             // Fresh (zero) history: first block of a stream.
                             std::vector<float> hist0(
                                 ref.get_plan().get_history_size(), 0.0F);
                             std::vector<float> thist_in(
                                 ref.get_plan().get_tree_history_size(), 0.0F);
                             std::vector<float> thist_out(thist_in.size(), 0.0F);
-                            const auto box = box_tables(ref.get_plan());
                             REQUIRE_THAT(run_tiles_dispatch<float>(
                                              parse_fdmt_mode(mode), smear, pc,
                                              plan, box, tile, wf, false,

@@ -308,6 +308,48 @@ DMT_HD void boxcar_integer_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
+/// One kept candidate of a row's kKeepBrightest store on a GPU (the row
+/// supplies the rest of its RawCandidate).
+struct BoxcarKeepEntry {
+    uint64_t peak   = 0;
+    uint64_t begin  = 0;
+    uint64_t end    = 0;
+    float snr       = 0.0F;
+    uint32_t filter = 0;
+};
+
+/// OverflowPolicy::kKeepBrightest order: higher S/N first; ties to the
+/// earlier peak, then beam, subband, DM row, width and begin sample. A
+/// strict total order on the candidates of one call (a row emits at most
+/// one candidate per peak sample and width).
+DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
+    if (a.snr != b.snr) {
+        return a.snr > b.snr;
+    }
+    if (a.peak_sample != b.peak_sample) {
+        return a.peak_sample < b.peak_sample;
+    }
+    if (a.beam_idx != b.beam_idx) {
+        return a.beam_idx < b.beam_idx;
+    }
+    if (a.subband_level != b.subband_level) {
+        return a.subband_level < b.subband_level;
+    }
+    if (a.subband_idx != b.subband_idx) {
+        return a.subband_idx < b.subband_idx;
+    }
+    if (a.staggered != b.staggered) {
+        return a.staggered < b.staggered;
+    }
+    if (a.dm_idx != b.dm_idx) {
+        return a.dm_idx < b.dm_idx;
+    }
+    if (a.filter_idx != b.filter_idx) {
+        return a.filter_idx < b.filter_idx;
+    }
+    return a.begin_sample < b.begin_sample;
+}
+
 /// The transform feeding a boxcar engine: FDMT (merged root rows) or
 /// FDMT-FFT (materialized root rows per overlap-save segment).
 class BoxcarDriver {
@@ -332,7 +374,10 @@ public:
                         Stream /*unused*/) {
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
-    virtual void reset(Stream)                                    = 0;
+    virtual void reset(Stream) = 0;
+    /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
+    /// transform itself, without a staging copy. False where unsupported.
+    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;

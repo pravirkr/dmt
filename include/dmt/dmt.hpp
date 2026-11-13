@@ -26,6 +26,7 @@
 // Import common types and constants
 #include "common/backend.hpp"    // IWYU pragma: export
 #include "common/build_info.hpp" // IWYU pragma: export
+#include "common/dm_grids.hpp"   // IWYU pragma: export
 #include "common/fft_config.hpp" // IWYU pragma: export
 #include "common/logging.hpp"    // IWYU pragma: export
 #include "common/plans.hpp"      // IWYU pragma: export

@@ -21,6 +21,7 @@
 #include "dmt/fdmt_fft_common.hpp"
 
 #include "test_helpers.hpp"
+#include "test_random.hpp"
 
 namespace dmt {
 
@@ -32,13 +33,8 @@ namespace {
 
 std::vector<float>
 random_waterfall(SizeType nchans, SizeType nsamps, unsigned seed = 42) {
-    std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> dist(1.0F, 10.0F);
-    std::vector<float> waterfall(nchans * nsamps);
-    for (auto& v : waterfall) {
-        v = dist(rng);
-    }
-    return waterfall;
+    return dmt::test_random::uniform_real<float>(nchans * nsamps, seed, 1.0F,
+                                                 10.0F);
 }
 
 // max |a - b| / max |b| over the first n values.
@@ -622,7 +618,10 @@ TEST_CASE("FDMTFFT fractional delays stream like one long block",
         }
     }
     CAPTURE(worst, scale);
-    CHECK(worst / scale < 5e-3);
+    // Float FFT rounding of the long transform: 3.6e-3 to 8.2e-3 of the
+    // scale over 20 random inputs (a stream that lost its history is off
+    // by O(1)).
+    CHECK(worst / scale < 1e-2);
 }
 
 // Band-limited pulses dispersed along the continuous FDMT delay law (bottom

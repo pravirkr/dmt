@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from dmtlib import BoxcarConfig, FDMTBoxcar, FDMTPlan, PeakFindingMode
+from dmtlib import BoxcarConfig, FDMTBoxcar, FDMTPlan, OverflowPolicy, PeakFindingMode
 
 
 def config(
@@ -537,3 +537,50 @@ def test_candidate_frontier(mode: PeakFindingMode) -> None:
     assert search.get_candidate_frontier() == search.searched_nsamps
     search.reset_history()
     assert search.get_candidate_frontier() == 0
+
+
+def test_keep_brightest_keeps_a_late_pulse_after_a_storm() -> None:
+    _keep_brightest_storm("cpu")
+
+
+def test_keep_brightest_storm_gpu(gpu_backend: str) -> None:
+    _keep_brightest_storm(gpu_backend)
+
+
+def _keep_brightest_storm(backend: str) -> None:
+    # An early broadband storm fills every row's quota and the global
+    # buffer under first come; KEEP_BRIGHTEST keeps the late bright pulse.
+    plan = FDMTPlan(1200, 1500, 64, 4096, 0.001, 63, subband_depth=1)
+    rng = np.random.default_rng(5)
+    data = rng.standard_normal((64, 4096), dtype=np.float32)
+    data[:, 100:1100] += 1.5
+    data[:, 3500:3503] += 12.0
+    cfg = BoxcarConfig(
+        16,
+        peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
+        max_candidates=400,
+        max_cands_per_dm=8,
+    )
+    assert cfg.overflow_policy == OverflowPolicy.DROP_NEW
+
+    def pulse(cands: np.ndarray) -> bool:
+        return bool(
+            np.any((cands["peak_sample"] >= 3500) & (cands["peak_sample"] < 3520))
+        )
+
+    first = FDMTBoxcar(plan, cfg, backend=backend).execute(data)
+    assert first.emitted_count < first.total_detected
+    assert not pulse(first.candidates)
+    cfg.overflow_policy = OverflowPolicy.KEEP_BRIGHTEST
+    kept = FDMTBoxcar(plan, cfg, backend=backend).execute(data)
+    assert kept.emitted_count == 400
+    assert pulse(kept.candidates)
+    best = kept.candidates[np.argmax(kept.candidates["snr"])]
+    assert 3500 <= best["peak_sample"] < 3520
+    with pytest.raises(ValueError, match="max_cands_per_dm"):
+        FDMTBoxcar(
+            plan,
+            BoxcarConfig(
+                16, max_cands_per_dm=0, overflow_policy=OverflowPolicy.KEEP_BRIGHTEST
+            ),
+        )

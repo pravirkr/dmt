@@ -41,6 +41,35 @@ including each subband's tree lineage.
 `FDMTPlan.get_effective_sigma_grid(width)` already gives sigma for the raw
 full-band sum, so **do not multiply it by the number of channels**.
 
+### Red noise and wide boxcars
+
+The sigma of a width-`W` box assumes white input noise. Slow variation
+that survives upstream (gain drift, baseline wander, zero-DM power, red
+noise from the receiver or RFI) is correlated over many samples, so a box's
+real variance grows faster than its sigma. The excess grows with `W`. At
+the widest widths, stretches of plain noise then cross the threshold at a
+high S/N in every DM row, and a pipeline sees a flood of wide candidates.
+
+The search cannot correct for this. It does not estimate a baseline or RMS
+from the dedispersed rows, and its running state per row is only the last
+`max_boxcar` samples, so it cannot see trends longer than the widest box.
+Correct for it upstream:
+
+- Detrend each channel on a timescale several times longer than the widest
+  box: subtract a running median or mean, or high-pass filter, before
+  normalizing. Zero-DM subtraction alone doesn't remove drifts that differ
+  between channels.
+- Keep `max_boxcar` at about 100 ms or less (in samples, `0.1 / tsamp`)
+  unless the input is known to be white on longer timescales. Bursts wider
+  than that are rare, and every extra width adds red-noise candidates.
+- To check, run the search on data without a burst and look at the S/N
+  distribution per width: on white input it follows the model at every
+  width; red noise shows up as a tail that grows with width.
+
+`OverflowPolicy.KEEP_BRIGHTEST` (below) doesn't help here. It keeps the
+highest S/N, and red-noise candidates at wide widths can have a higher S/N
+than a real burst, so they still take the quota.
+
 ### Kill mask
 
 Pass `kill_mask=` (Python, keyword-only; C++: the trailing
@@ -56,9 +85,12 @@ same: the noise model still counts them, so sigma is too high by
 `sqrt(N / (N - k))` (5% S/N for a 10% mask). Rows whose channels are all
 killed (a killed subband) have no noise and never detect.
 
-Each block is copied once into a staging buffer to zero the killed rows; it
-appears in `memory_usage.staging` and counts against `max_memory_bytes`.
-Without a mask there is no copy.
+On the CPU each block is copied once into a staging buffer to zero the
+killed rows; it appears in `memory_usage.staging` and counts against
+`max_memory_bytes`. On a GPU the FDMT reads killed rows as zero itself, from
+one byte per beam and channel, so there is no copy of the block (device
+input under a mask needs no extra block-sized memory). Without a mask there
+is no copy.
 
 #### A mask per block
 
@@ -92,9 +124,10 @@ C++ `std::invalid_argument`) without changing the stream if either fails:
 - the block is long enough for every window to span at most two blocks:
   `nsamps >= S_max + max_boxcar - 1` (`parkes_uwl` at depth 4 with 100 ms
   boxcars needs 255,452 samples);
-- the noise tables fit in `max_memory_bytes`: the noise model, a few table
-  sets of `rows x widths x 8` bytes, the staging block if the constructor
-  had no mask and, on GPUs, device and pinned copies of the tables.
+- the noise tables fit in `max_memory_bytes`: on the CPU the noise model, a
+  few table sets of `rows x widths x 8` bytes and the staging block if the
+  constructor had no mask; on GPUs the device copies of the tables (the
+  host-side model and tables are reported in `memory_usage.host`).
 
 The tables of a new mask are computed on the host when it first appears,
 with the instance's `nthreads` (also on GPUs, where it has no other use):
@@ -236,8 +269,23 @@ short of it (`max_boxcar=9, wtsp=2` searches 1, 2, 4, 8, 9), so the widest
 box searched is always `max_boxcar`. `wtsp=2` gives powers of two, `1.5` a
 denser geometric grid, and `1` every integer, each ending on `max_boxcar`.
 `dmtlib.generate_box_width_trials(max_boxcar, wtsp)` returns the bank.
-Widths 1–4096 are supported on both backends, without a 32-filter cap.
-Every trial is searched at the original time resolution.
+Every trial is searched at the original time resolution, without a
+32-filter cap.
+
+**How wide.** The search is tuned for `max_boxcar` up to 4096 samples
+(262 ms at 64 µs). Wider boxes, up to 2^20 samples, are searched exactly
+(the same candidates), with no speed promise, in banks of at most 4096
+widths (so `wtsp` must exceed 1 beyond 4096): on a GPU their prefix rings
+move from shared to device memory. The same happens below 4096 on GPUs
+with little shared memory per block, after the search first drops the
+width screen and then uses smaller blocks; the search path then ends in
+`(boxcar: ...)`. A wide box also costs memory per DM row (its carry holds
+`max_boxcar` samples, counted in the budget), and a per-call kill mask
+needs blocks of at least the row support plus `max_boxcar - 1` samples.
+For pulses much wider than about 100 ms, prefer downsampling the data in
+time and searching narrower boxes: it is much faster, and red noise (see
+[Red noise and wide boxcars](#red-noise-and-wide-boxcars)) grows with the
+width.
 
 **Trapezoid filters (`use_trapezoid=True`).** Each width `W >= 3` is searched
 with a trapezoid *instead of* the boxcar: an edge of `w_edge = (W + 1) // 4`
@@ -370,13 +418,38 @@ excursions (or points in all mode), including dropped candidates. A
 removes that cap. Global capacity is `max_candidates`. Counters satisfy
 `total_detected = emitted_count + dropped_per_dm + dropped_global`.
 Scanning and history updates continue after saturation. Parallel candidate
-order and the retained subset during overflow are unspecified.
+order is unspecified.
+
+What survives an overflow depends on `BoxcarConfig.overflow_policy`:
+
+- `OverflowPolicy.DROP_NEW` (default): first come. The retained subset is
+  unspecified, and in practice it is the earliest candidates of the call: an
+  RFI storm at the start of a block can fill the quotas and hide a bright
+  burst later in the same block.
+- `OverflowPolicy.KEEP_BRIGHTEST`: exactly the brightest. Each row keeps its
+  `max_cands_per_dm` highest-S/N candidates of the call, and the call keeps
+  the `max_candidates` highest of those (ties go to the earlier peak
+  sample, then beam, subband, DM row and width), so the retained set is
+  deterministic. Each row has a store of `max_cands_per_dm` candidates,
+  counted in `memory_usage.candidates` and the memory budget, so the cap
+  must be in 1..1024 and is best small (e.g. 16): the `DROP_NEW` default of
+  4096 per row would be about 20 GB on a UWL-sized search (on GPUs an entry takes 32 bytes, on the CPU a full
+  candidate). On GPUs the brightest are kept per row inside the scoring
+  kernel; when the stores can exceed `max_candidates`, a radix select on
+  the device picks the global brightest at the end of the call.
+
+Independently of the policy, `PeakFindingMode.CONTIGUOUS_PEAK_ACROSS_WIDTHS`
+emits one candidate per excursion instead of one per width, which cuts the
+count during a storm by about the number of widths.
 
 ### Memory budget and wide bands
 
 `FDMTBoxcar(..., max_memory_bytes=...)` (default 10 GiB, `FDMT` takes the
-same argument) bounds everything the instance allocates
-(`get_memory_usage().total()`, not the caller's input or output). The
+same argument) bounds what the instance allocates where it runs
+(`memory_usage.budgeted`, not the caller's input or output): everything on
+the CPU, device memory on a GPU. On a GPU the host plan copies, host result
+storage and the per-call mask noise model live in host memory; they are
+reported in `memory_usage.host` (included in `total`) but not budgeted. The
 boxcar's own buffers are fixed by the plan and config: each searched row
 keeps `max_boxcar` carried samples (float32, or uint32 for packed input
 when every tree value fits 32 bits) and its pending peaks. The FDMT takes
@@ -396,8 +469,7 @@ the fastest path that fits in the rest:
 On a GPU, host-memory input goes through a device staging block that is
 allocated by the first host-memory `execute()` and reused. The check at
 construction does not include it, since device-memory input never needs
-it; it shows in `memory_usage.staging` once allocated. A per-block kill
-mask counts it when the first mask arrives.
+it; it shows in `memory_usage.staging` once allocated.
 
 On the skewed path a subband search reads every searched row (tree,
 staggered, and delays the full-band grid does not use) from the full
@@ -562,7 +634,7 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   0.5% of the row peak), so a near-threshold point can move between blocked
   and unblocked runs; with integer delays they agree to float rounding.
 - **Memory.** `max_memory_bytes` (keyword-only, default 10 GiB) bounds
-  everything the instance allocates (`memory_usage`), as on `FDMTBoxcar`. Over
+  `memory_usage.budgeted`, as on `FDMTBoxcar` (device memory on a GPU). Over
   it the overlap-save segments are shortened (each try halves the transform
   length; `chunk_nsamps` reports the segment) until the instance fits, and
   construction raises `ValueError` with the memory at the shortest segment

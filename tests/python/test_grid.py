@@ -237,10 +237,19 @@ class TestGridGenerator:
             method="levin",
             tol=tol,
         )
+        # pulse_width is in samples here (default 1), in seconds in C++.
         expected = DDMTPlan.generate_levin_dm_grid(
-            0.0, dm_max, self.tsamp, 1.0, self.f_min, self.f_max, self.nchans, tol
+            0.0,
+            dm_max,
+            self.tsamp,
+            self.tsamp,
+            self.f_min,
+            self.f_max,
+            self.nchans,
+            tol,
         )
         np.testing.assert_allclose(grid_levin, expected)
+        assert len(grid_levin) > 10
 
         # dt grid via levin method
         dt_levin = generate_optimal_dt_grid(
@@ -278,3 +287,85 @@ class TestGridGenerator:
                 dm_max=50.0,
                 method="invalid",
             )
+
+
+class TestGridApi:
+    """The C++ generators (dmtlib.generate_dm_grid / generate_dt_grid)."""
+
+    band = (704.0, 4032.0, 6656, 64e-6)
+
+    def test_wrappers_match_the_cpp_generators(self) -> None:
+        from dmtlib import DMGridMethod, generate_dm_grid, generate_dt_grid
+
+        f_min, f_max, nchans, tsamp = self.band
+        # pulse_width: samples in the wrappers, seconds in the C++ API.
+        np.testing.assert_array_equal(
+            generate_optimal_dm_grid(
+                f_min, f_max, nchans, tsamp, 300.0, pulse_width=2.0
+            ),
+            generate_dm_grid(
+                f_min, f_max, nchans, tsamp, 0.0, 300.0, pulse_width=2.0 * tsamp
+            ),
+        )
+        np.testing.assert_array_equal(
+            generate_optimal_dm_grid(
+                f_min, f_max, nchans, tsamp, 300.0, method="levin", tol=1.2
+            ),
+            generate_dm_grid(
+                f_min,
+                f_max,
+                nchans,
+                tsamp,
+                0.0,
+                300.0,
+                method=DMGridMethod.LEVIN,
+                pulse_width=tsamp,
+                tol=1.2,
+            ),
+        )
+        np.testing.assert_array_equal(
+            generate_optimal_dt_grid(f_min, f_max, nchans, tsamp, 4000.0),
+            generate_dt_grid(
+                f_min, f_max, nchans, tsamp, 0.0, 4000.0, pulse_width=tsamp
+            ),
+        )
+
+    def test_chan_dm_makes_trials_denser_around_it(self) -> None:
+        f_min, f_max, nchans, tsamp = self.band
+        plain = generate_optimal_dm_grid(f_min, f_max, nchans, tsamp, 1100.0)
+        coh = generate_optimal_dm_grid(
+            f_min, f_max, nchans, tsamp, 1100.0, chan_dm=413.0
+        )
+
+        def step_at(g: np.ndarray, dm: float) -> float:
+            i = np.searchsorted(g, dm)
+            return float(g[i + 1] - g[i])
+
+        assert step_at(coh, 413.0) < 0.1 * step_at(plain, 413.0)
+        assert step_at(coh, 413.0) == pytest.approx(step_at(plain, 0.0), rel=0.01)
+        loss = calculate_snr_loss(
+            413.0, coh, f_min, f_max, nchans, tsamp, chan_dm=413.0
+        )
+        assert loss <= 0.05
+        # The legacy Levin rule keeps its classic formula.
+        with pytest.raises(ValueError, match="chan_dm"):
+            generate_optimal_dm_grid(
+                f_min, f_max, nchans, tsamp, 1100.0, method="levin", chan_dm=413.0
+            )
+
+    def test_tol_is_the_snr_loss_knob(self) -> None:
+        f_min, f_max, nchans, tsamp = self.band
+        by_loss = generate_optimal_dm_grid(
+            f_min, f_max, nchans, tsamp, 500.0, max_snr_loss=0.2
+        )
+        by_tol = generate_optimal_dm_grid(f_min, f_max, nchans, tsamp, 500.0, tol=1.25)
+        np.testing.assert_allclose(by_tol, by_loss, rtol=1e-12)
+
+    def test_levin_pulse_width_is_in_samples(self) -> None:
+        # The wrapper used to pass pulse_width (samples) on as seconds: one
+        # sample read as one second gave 3 trials for DM 0-2000 on UWL.
+        f_min, f_max, nchans, tsamp = self.band
+        grid = generate_optimal_dm_grid(
+            f_min, f_max, nchans, tsamp, 2000.0, method="levin"
+        )
+        assert len(grid) > 1000

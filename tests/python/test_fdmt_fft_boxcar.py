@@ -210,9 +210,10 @@ def test_memory_budget_shortens_segments(backend: str) -> None:
     config = BoxcarConfig(16, wtsp=1.5, detect_thresh=3.5, max_cands_per_dm=0)
     config.max_candidates = 20000
     unbounded = FDMTFFTBoxcar(plan, config, backend=backend)
-    budget = unbounded.memory_usage.total * 6 // 10
+    budget = unbounded.memory_usage.budgeted * 6 // 10
     capped = FDMTFFTBoxcar(plan, config, backend=backend, max_memory_bytes=budget)
-    assert capped.memory_usage.total <= budget
+    # The budget bounds device memory on a GPU (host storage is reported).
+    assert capped.memory_usage.budgeted <= budget
     assert capped.chunk_nsamps < unbounded.chunk_nsamps
     found = []
     for search in (unbounded, capped):
@@ -224,8 +225,10 @@ def test_memory_budget_shortens_segments(backend: str) -> None:
         found.append(np.concatenate([p.candidates for p in parts]))
     # Only GPU host-input staging is allocated lazily, outside the budget.
     usage = capped.memory_usage
-    assert usage.total - usage.staging <= budget
+    assert usage.budgeted - usage.staging <= budget
+    assert usage.budgeted + usage.host == usage.total
     if backend == "cpu":
+        assert usage.host == 0
         assert usage.total <= budget
     assert len(found[0]) > 100
     # Fractional delays: segment edges truncate the interpolation kernel as

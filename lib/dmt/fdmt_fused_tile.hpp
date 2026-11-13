@@ -52,8 +52,14 @@ inline constexpr int kMaxFusedLevels = 8;
 struct FDMTInputF32 {
     const float* data;
     int nsamps;
+    /// Optional device bytes, one per level-0 row (beam * nchans + channel):
+    /// rows with 0 read as zero (FDMTBoxcar kill masks). nullptr: all rows.
+    const uint8_t* keep = nullptr;
 
     DMT_HD float load(int64_t row, int t) const {
+        if (keep != nullptr && keep[row] == 0) {
+            return 0.0F;
+        }
         return data[(static_cast<size_t>(row) * nsamps) + t];
     }
 };
@@ -66,8 +72,13 @@ struct FDMTInputPacked {
     const uint8_t* data;
     int row_bytes;
     int nbits;
+    /// As FDMTInputF32::keep; killed rows read code 0.
+    const uint8_t* keep = nullptr;
 
     DMT_HD float load(int64_t row, int t) const {
+        if (keep != nullptr && keep[row] == 0) {
+            return 0.0F;
+        }
         const uint8_t* r = data + (static_cast<size_t>(row) * row_bytes);
         const auto st    = static_cast<SizeType>(t);
         switch (nbits) {
