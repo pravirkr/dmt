@@ -24,6 +24,12 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **`max_boxcar` above 4096.** Boxes up to 2^20 samples are accepted
+  (before: at most 4096). Up to 4096 the search is tuned as before. Wider
+  boxes are searched exactly but with no speed promise: on a GPU their
+  prefix rings live in device memory, which is also the fallback when a
+  narrower box doesn't fit a small GPU's shared memory.
+
 - **GPU memory budget.** On a GPU, `max_memory_bytes` of `FDMTBoxcar` and
   `FDMTFFTBoxcar` now bounds device memory only. Host-side allocations (host
   plan copies, host result storage, the per-call kill-mask noise model) are

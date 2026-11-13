@@ -269,8 +269,22 @@ short of it (`max_boxcar=9, wtsp=2` searches 1, 2, 4, 8, 9), so the widest
 box searched is always `max_boxcar`. `wtsp=2` gives powers of two, `1.5` a
 denser geometric grid, and `1` every integer, each ending on `max_boxcar`.
 `dmtlib.generate_box_width_trials(max_boxcar, wtsp)` returns the bank.
-Widths 1–4096 are supported on both backends, without a 32-filter cap.
-Every trial is searched at the original time resolution.
+Every trial is searched at the original time resolution, without a
+32-filter cap.
+
+**How wide.** The search is tuned for `max_boxcar` up to 4096 samples
+(262 ms at 64 µs). Wider boxes, up to 2^20 samples, are searched exactly
+(the same candidates), with no speed promise: on a GPU their prefix rings
+move from shared to device memory. The same happens below 4096 on GPUs
+with little shared memory per block, after the search first drops the
+width screen and then uses smaller blocks; the search path then ends in
+`(boxcar: ...)`. A wide box also costs memory per DM row (its carry holds
+`max_boxcar` samples, counted in the budget), and a per-call kill mask
+needs blocks of at least the row support plus `max_boxcar - 1` samples.
+For pulses much wider than about 100 ms, prefer downsampling the data in
+time and searching narrower boxes: it is much faster, and red noise (see
+[Red noise and wide boxcars](#red-noise-and-wide-boxcars)) grows with the
+width.
 
 **Trapezoid filters (`use_trapezoid=True`).** Each width `W >= 3` is searched
 with a trapezoid *instead of* the boxcar: an edge of `w_edge = (W + 1) // 4`

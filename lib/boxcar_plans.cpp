@@ -27,9 +27,14 @@ bool finite(float x) {
 
 std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
                                                 float wtsp) {
-    if (max_width == 0 || max_width > 4096 || !finite(wtsp) || wtsp < 1.0F) {
+    // Up to 4096 the search is tuned (GPU: prefix ring in shared memory);
+    // wider boxes run correctly with no speed promise. The cap only guards
+    // against a mistyped width (2^20 samples is over a minute at 64 us).
+    constexpr SizeType kMaxWidth = SizeType{1} << 20;
+    if (max_width == 0 || max_width > kMaxWidth || !finite(wtsp) ||
+        wtsp < 1.0F) {
         throw std::invalid_argument(
-            "Boxcar: max_width must be 1..4096 and wtsp finite >= 1");
+            "Boxcar: max_width must be 1..1048576 and wtsp finite >= 1");
     }
     std::vector<uint32_t> widths;
     for (SizeType w = 1; w <= max_width;) {

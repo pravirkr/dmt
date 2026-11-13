@@ -262,10 +262,62 @@ TEST_CASE("FDMTBoxcar GPU fits wide boxes in small shared memory",
             compare(actual, expected);
         }
     }
-    // Below the 64-thread block's ring nothing fits: a clear error.
-    box.wtsp = 1.5F;
-    std::string path;
-    CHECK_THROWS_AS(run(box, 30000, path), std::invalid_argument);
+    // Below the 64-thread block's ring nothing fits in shared memory: the
+    // prefix rings move to device memory (no speed promise), and so do
+    // boxes wider than 4096 at any limit.
+    for (const auto& [width, limit] :
+         {std::pair<SizeType, SizeType>{4096, 30000}, {6000, 0}}) {
+        DYNAMIC_SECTION("device-memory ring, max_boxcar " << width
+                                                          << " limit "
+                                                          << limit) {
+            box.wtsp            = 1.5F;
+            box.max_boxcar      = width;
+            const auto expected = reference(plan, box, true, 1, input);
+            REQUIRE(expected.size() > 100);
+            std::string path;
+            const auto actual = run(box, limit, path);
+            INFO(path);
+            CHECK(path.ends_with("(boxcar: device-memory ring)"));
+            compare(actual, expected);
+        }
+    }
+}
+
+TEST_CASE("Packed FDMTBoxcar GPU searches boxes far wider than 4096",
+          "[gpu][parity][boxcar][packed]") {
+    // max_boxcar 65536 on 301 DM rows: each block's 1 MiB ring lives in
+    // device memory, and the rows run in batches of 256 blocks that reuse
+    // the rings. Exact against the CPU, across blocks shorter than the box.
+    const plans::FDMTPlan plan(700, 1200, 16, 1024, 0.001F, 300);
+    std::mt19937 random(11);
+    std::vector<std::vector<uint8_t>> input(3,
+                                            std::vector<uint8_t>(16 * 1024));
+    for (auto& block : input) {
+        for (auto& x : block) {
+            x = static_cast<uint8_t>(random());
+        }
+    }
+    BoxcarConfig cfg;
+    cfg.input_nbits      = 8;
+    cfg.input_mean       = 127.5F;
+    cfg.noise_sigma      = std::sqrt(255.0F * 257.0F / 12.0F);
+    cfg.max_boxcar       = 65536;
+    cfg.wtsp             = 2;
+    cfg.detect_thresh    = 2.5F;
+    cfg.max_cands_per_dm = 0;
+    cfg.max_candidates   = 1U << 20;
+    const auto run       = [&](const Exec& exec) {
+        FDMTBoxcar search(plan, cfg, true, exec);
+        std::vector<RawCandidate> out;
+        for (const auto& block : input) {
+            append(out, search.execute(std::span<const uint8_t>(block)));
+        }
+        append(out, search.flush());
+        return out;
+    };
+    const auto expected = run(Exec::cpu(2));
+    REQUIRE(expected.size() > 100);
+    compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
 }
 
 TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",

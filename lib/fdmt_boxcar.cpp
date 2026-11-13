@@ -1,6 +1,7 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -168,9 +169,17 @@ public:
                                : bit_pack_utils::packed_row_bytes(
                                      plan.get_nsamps(), config.input_nbits));
         }
+        // Boxes wider than 4096 on a GPU: prefix rings in device memory, at
+        // most 256 MiB (launched in batches of blocks).
+        SizeType rings = 0;
+        if (ex.backend != Backend::kCPU && width > 4096) {
+            rings = std::min<SizeType>(
+                SizeType{256} << 20,
+                rows * std::bit_ceil(width + 1024) * sizeof(uint64_t));
+        }
         return (rows * width * carry_elem) +
                (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
-               row_table + staging;
+               row_table + staging + rings;
     }
     /**
      * One block with a per-call kill mask (empty: the constructor mask):

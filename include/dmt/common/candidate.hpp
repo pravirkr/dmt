@@ -63,7 +63,9 @@ struct BoxcarConfig {
           use_trapezoid(use_trapezoid),
           overflow_policy(overflow_policy) {}
 
-    /// Widest box searched, 1..4096; always the last width of the bank.
+    /// Widest box searched, 1..2^20 samples; always the last width of the
+    /// bank. Up to 4096 the search is tuned; wider boxes are searched
+    /// exactly but more slowly (on a GPU, prefix rings in device memory).
     SizeType max_boxcar = 4096;
     /// Width spacing >= 1: from 1, next = max(w + 1, ceil(w * wtsp)) while
     /// it is <= max_boxcar, then max_boxcar when the steps stop below it

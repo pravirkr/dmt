@@ -33,6 +33,13 @@ constexpr int kWarp = gpu_compat::kLogicalWarp; // a 64-lane wavefront holds two
 // Width and threshold tables are staged in shared memory up to this count;
 // longer tables are read through the cache.
 constexpr SizeType kSharedFilters = 512;
+// Widest boxcar of the fast path (prefix ring in shared memory); wider
+// boxes take the device-memory ring (kGlobalRing), with no speed promise.
+constexpr SizeType kFastMaxWidth = 4096;
+// Device memory of the kGlobalRing rings: blocks are launched in batches
+// whose rings fit it (at least one block).
+constexpr SizeType kGlobalRingBytes = SizeType{256} << 20;
+constexpr int kGlobalBlock          = 256;
 
 // Fixed part of the block's shared memory. The dynamic part follows it:
 // the prefix ring (a power of two of at least max_width + kBlockTile entries),
@@ -681,12 +688,18 @@ DMT_D inline int block_table(const BlockTables& bt,
 // state (it cost ~160 B of stack per thread and 15-50% of the run time).
 // kKeep: OverflowPolicy::kKeepBrightest (KeepWriter, per-row stores); a
 // separate instance, so kDropNew keeps its code and output.
+// kGlobalRing: the prefix ring lives in device memory (`ring_global`, one
+// ring of mask + 1 entries per block, blocks launched in batches from task
+// `task_base`) instead of shared memory: boxcars wider than the fast path
+// (kFastMaxWidth) or than the device's shared memory. No width screen and
+// no shared tables; same candidates, no speed promise.
 template <typename T,
           int kBlockThreads,
           bool kScreen,
           bool kBlockNoise = false,
           typename C       = T,
-          bool kKeep       = false>
+          bool kKeep       = false,
+          bool kGlobalRing = false>
 __global__ void __launch_bounds__(kBlockThreads, 4)
     kernel_fdmt_boxcar(FDMTSearchInput input,
                        const BoxcarRow* rows,
@@ -725,12 +738,16 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        BlockTables block_tables,
                        SizeType group_offset,
                        BoxcarKeepEntry* keep_all,
-                       SizeType keep_q) {
+                       SizeType keep_q,
+                       T* ring_global,
+                       SizeType task_base) {
     constexpr int kBlockTile = kBlockThreads * kItems;
+    const SizeType task =
+        kGlobalRing ? task_base + blockIdx.x : SizeType{blockIdx.x};
     // Lagged rows (skewed-window subband search): this row's own samples.
     if (input.row_lag != nullptr) {
         FDMTSearchInput lagged;
-        if (!lagged_row_input(input, rows[row_base + blockIdx.x % ndm].row,
+        if (!lagged_row_input(input, rows[row_base + task % ndm].row,
                               lagged)) {
             return;
         }
@@ -741,8 +758,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     }
     extern __shared__ __align__(16) unsigned char storage[];
     auto& shared = *reinterpret_cast<BoxcarShared<T, kBlockThreads>*>(storage);
-    T* ring      = reinterpret_cast<T*>(storage + sizeof(shared));
-    const SizeType task      = blockIdx.x;
+    T* ring      = kGlobalRing ? ring_global + (SizeType{blockIdx.x} *
+                                                (SizeType{mask} + 1))
+                               : reinterpret_cast<T*>(storage + sizeof(shared));
     const SizeType beam      = input.beam_begin + task / ndm;
     const SizeType d         = task % ndm;
     const SizeType row_index = row_base + d;
@@ -1888,6 +1906,7 @@ public:
                        m_integer_carry32.size() * sizeof(uint32_t),
             .peaks   = m_peaks_d.size() * sizeof(BoxcarPeak) + m_open_d.size(),
             .workspace = fdmt.workspace + m_per_dm_d.size() * sizeof(uint64_t) +
+                         m_ring_d.size() * sizeof(uint64_t) +
                          sizeof(CandidateCounts) + sizeof(uint64_t) +
                          (2 * sizeof(uint64_t)), // candidate frontier word
             .candidates = (m_candidates_d.size() + m_candidates_h.size()) *
@@ -1907,7 +1926,9 @@ public:
     }
     std::string search_path() const override {
         std::string path = m_driver->search_path();
-        if (m_screen_dropped || m_block_shrunk) {
+        if (m_global_ring) {
+            path += " (boxcar: device-memory ring)";
+        } else if (m_screen_dropped || m_block_shrunk) {
             path += fmt::format(" (boxcar: {}-thread blocks{})",
                                 m_block_threads,
                                 m_screen_dropped ? ", no width screen" : "");
@@ -1980,14 +2001,17 @@ private:
               bool kScreen,
               bool kBlockNoise,
               typename C,
-              bool kKeep>
+              bool kKeep,
+              bool kGlobalRing = false>
     void launch_score_args(const FDMTSearchInput& stopped,
                            const LevelGroup& g,
                            dim3 grid,
                            dim3 block,
                            C* carry,
-                           cudaStream_t stream) {
-        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, kKeep>
+                           cudaStream_t stream,
+                           SizeType task_base = 0) {
+        kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, kKeep,
+                           kGlobalRing>
             <<<grid, block, m_smem, stream>>>(
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
@@ -2002,7 +2026,35 @@ private:
                 static_cast<int>(m_screen_groups_d.size()),
                 raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
                 kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
-                raw(m_bright_d), m_bright_q);
+                raw(m_bright_d), m_bright_q,
+                kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr,
+                task_base);
+    }
+    /// kGlobalRing: the group's tasks in batches of m_ring_batch blocks,
+    /// each batch reusing the rings (stream order).
+    template <typename T, bool kBlockNoise, typename C>
+    void launch_score_global(const FDMTSearchInput& input,
+                             const LevelGroup& g,
+                             dim3 grid,
+                             dim3 block,
+                             C* carry) {
+        const auto stream = static_cast<cudaStream_t>(input.stream.native);
+        FDMTSearchInput stopped = input;
+        stopped.search_stop     = m_search_stop;
+        const SizeType tasks    = grid.x;
+        for (SizeType base = 0; base < tasks; base += m_ring_batch) {
+            const dim3 batch(
+                static_cast<unsigned>(std::min(m_ring_batch, tasks - base)));
+            if (m_bright_q != 0) {
+                launch_score_args<T, kGlobalBlock, false, kBlockNoise, C, true,
+                                  true>(stopped, g, batch, block, carry,
+                                        stream, base);
+            } else {
+                launch_score_args<T, kGlobalBlock, false, kBlockNoise, C,
+                                  false, true>(stopped, g, batch, block, carry,
+                                               stream, base);
+            }
+        }
     }
 
     template <typename T, typename C = T>
@@ -2011,6 +2063,17 @@ private:
                       dim3 grid,
                       dim3 block,
                       C* carry) {
+        if (m_global_ring) {
+            if constexpr (!std::is_integral_v<T>) {
+                if (m_block_tables.count > 0) {
+                    launch_score_global<T, true, C>(input, g, grid, block,
+                                                    carry);
+                    return;
+                }
+            }
+            launch_score_global<T, false, C>(input, g, grid, block, carry);
+            return;
+        }
         if (m_block_threads == 64) {
             launch_score_block<T, 64, C>(input, g, grid, block, carry);
         } else if (m_block_threads == 128) {
@@ -2078,13 +2141,16 @@ private:
               int kBlockThreads,
               bool kScreen,
               bool kBlockNoise,
-              typename C>
+              typename C,
+              bool kGlobalRing = false>
     void configure_variants() {
-        configure_kernel(
-            kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C>);
+        configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen,
+                                            kBlockNoise, C, false,
+                                            kGlobalRing>);
         if (m_bright_q != 0) {
             configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen,
-                                                kBlockNoise, C, true>);
+                                                kBlockNoise, C, true,
+                                                kGlobalRing>);
         }
     }
     /// kKeepBrightest, end of a call: the stores (or their max_candidates
@@ -2153,6 +2219,10 @@ private:
         int threads = eff_chunk <= 64 * kItems    ? 64
                       : eff_chunk <= 128 * kItems ? 128
                                                   : 256;
+        if (m_width > kFastMaxWidth) {
+            configure_global<T>(limit);
+            return;
+        }
         // Wide boxes on small-shared-memory GPUs: when the block's prefix
         // ring does not fit, drop the width screen (its second ring; the
         // screen only skips work, candidates are the same), then take
@@ -2173,6 +2243,11 @@ private:
             threads /= 2;
             m_block_shrunk = true;
         }
+        if (shared_need<T>(threads, screen) > limit) {
+            m_block_shrunk = false;
+            configure_global<T>(limit);
+            return;
+        }
         if (m_screen_dropped || m_block_shrunk) {
             logging::debug("FDMTBoxcar: max_boxcar {} in {} B of shared "
                            "memory: {}-thread blocks{}",
@@ -2185,6 +2260,53 @@ private:
             configure_shared_block<T, 128>(limit);
         } else {
             configure_shared_block<T, 256>(limit);
+        }
+    }
+    /// kGlobalRing: prefix rings in device memory, kGlobalBlock threads, no
+    /// width screen, tables read through the cache.
+    template <typename T> void configure_global(SizeType limit) {
+        if (!m_screen_groups_d.empty()) {
+            m_screen_groups_d.clear();
+            m_screen_thresholds_d.clear();
+            m_screen_m1_d.clear();
+            m_screen_groups_d.shrink_to_fit();
+            m_screen_thresholds_d.shrink_to_fit();
+            m_screen_m1_d.shrink_to_fit();
+            m_screen_dropped = true;
+        }
+        const SizeType ring =
+            std::bit_ceil(m_width + SizeType{kGlobalBlock * kItems});
+        m_global_ring   = true;
+        m_block_threads = kGlobalBlock;
+        m_mask          = static_cast<uint32_t>(ring - 1);
+        m_shared_tables = false;
+        m_screen_offset = 0;
+        m_group_offset  = 0;
+        m_smem          = sizeof(BoxcarShared<T, kGlobalBlock>);
+        if (m_smem > limit) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: the search needs {} B of shared memory per "
+                "block; the device allows {} B",
+                m_smem, limit));
+        }
+        SizeType tasks = 1;
+        for (const auto& g : m_level_groups) {
+            tasks = std::max(tasks, g.row_count * m_beams);
+        }
+        const SizeType ring_words = ring * sizeof(T) / sizeof(uint64_t);
+        m_ring_batch              = std::clamp<SizeType>(
+            kGlobalRingBytes / (ring_words * sizeof(uint64_t)), 1, tasks);
+        m_ring_d.resize(m_ring_batch * ring_words);
+        logging::debug("FDMTBoxcar: max_boxcar {}: prefix rings in device "
+                       "memory ({} blocks per batch, {} B)",
+                       m_width, m_ring_batch,
+                       m_ring_d.size() * sizeof(uint64_t));
+        configure_variants<T, kGlobalBlock, false, false, T, true>();
+        if constexpr (std::is_integral_v<T>) {
+            configure_variants<T, kGlobalBlock, false, false, uint32_t,
+                               true>();
+        } else {
+            configure_variants<T, kGlobalBlock, false, true, T, true>();
         }
     }
     /// Shared memory a block needs at the least (configure_shared_block):
@@ -2520,6 +2642,11 @@ private:
     // Fallbacks taken to fit max_boxcar in shared memory (configure_shared).
     bool m_screen_dropped = false;
     bool m_block_shrunk   = false;
+    // kGlobalRing: rings of m_ring_batch blocks (uint64_t words, viewed as
+    // T), reused by each batch of a launch.
+    bool m_global_ring    = false;
+    SizeType m_ring_batch = 0;
+    thrust::device_vector<uint64_t> m_ring_d;
     thrust::device_vector<BoxcarScreenGroup> m_screen_groups_d;
     thrust::device_vector<float> m_screen_thresholds_d;
     thrust::device_vector<float> m_screen_m1_d; ///< packed: mean per sample

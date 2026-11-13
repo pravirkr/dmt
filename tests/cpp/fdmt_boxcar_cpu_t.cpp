@@ -36,8 +36,34 @@ TEST_CASE("Boxcar width generation and validation", "[boxcar][cpu]") {
     }
     CHECK_THROWS_AS(plans::generate_box_width_trials(0, 2),
                     std::invalid_argument);
-    CHECK_THROWS_AS(plans::generate_box_width_trials(4097, 2),
+    CHECK(plans::generate_box_width_trials(4097, 2).back() == 4097);
+    CHECK(plans::generate_box_width_trials(1U << 20, 2).back() == 1U << 20);
+    CHECK_THROWS_AS(plans::generate_box_width_trials((1U << 20) + 1, 2),
                     std::invalid_argument);
+}
+
+TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096",
+          "[boxcar][cpu]") {
+    // Wider than a block: the carry spans blocks.
+    const plans::FDMTPlan plan(700, 1200, 7, 2048, 0.001F,
+                               std::vector<IndexType>{-5, 0, 7, 40}, "valid",
+                               1);
+    const auto input = waterfalls(plan, 1, 4);
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 6000;
+    cfg.wtsp             = 1.5F;
+    cfg.detect_thresh    = 3;
+    cfg.max_cands_per_dm = 0;
+    cfg.max_candidates   = 1U << 20;
+    const auto expected  = reference(plan, cfg, true, 1, input);
+    REQUIRE(expected.size() > 100);
+    FDMTBoxcar search(plan, cfg, true, Exec::cpu(2));
+    std::vector<RawCandidate> actual;
+    for (const auto& block : input) {
+        append(actual, search.execute(block));
+    }
+    append(actual, search.flush());
+    compare(actual, expected);
 }
 
 TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
