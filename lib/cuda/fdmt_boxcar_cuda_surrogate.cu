@@ -97,21 +97,27 @@ DMT_D inline void emit_surrogate_peak_gpu(const SurrogateEmitCtx& out,
                            peak.filter, width);
 }
 
-DMT_D inline const float* active_surrogate_table_tag(const BlockTables& bt,
-                                                     SizeType row_index,
-                                                     const uint32_t* widths,
-                                                     uint64_t sample,
-                                                     uint32_t filter_idx) {
-    if (bt.count == 0) {
+// Identity of the tables at `sample` for the filter's width, as the CPU's
+// `active_surrogate_table` resolves it (the oldest kept entry for older
+// samples).
+DMT_D inline const void* active_surrogate_table_tag(const BlockTables& bt,
+                                                    SizeType row_index,
+                                                    const uint32_t* widths,
+                                                    uint64_t sample,
+                                                    uint32_t filter_idx) {
+    if (bt.count == 0 || bt.tag_count == 0) {
         return nullptr;
     }
-    if (sample < bt.first[0]) {
-        return reinterpret_cast<const float*>(uintptr_t{1});
+    int i = bt.tag_count - 1;
+    while (i > 0 && bt.tag_first[i] > sample) {
+        --i;
     }
-    const int e             = block_entry(bt, sample);
-    const uint64_t row_supp = bt.support[row_index];
-    const int tbl = block_table(bt, e, sample, widths[filter_idx], row_supp);
-    return bt.inv[e][tbl];
+    if (bt.tag_transition[i] && sample < bt.tag_first[i] +
+                                             bt.support[row_index] +
+                                             widths[filter_idx] - 1) {
+        return bt.tag_tr[i];
+    }
+    return bt.tag_steady[i];
 }
 
 template <bool kBlockNoise>

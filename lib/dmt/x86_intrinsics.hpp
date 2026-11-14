@@ -8,7 +8,8 @@
  * GCC 12's AVX-512 headers build `_mm512_undefined_*()` from a
  * self-initialised variable (`__m512i __Y = __Y;`), so every inlined
  * intrinsic that takes one (`_mm512_cvtepu8_epi64`, `_mm512_srli_epi64`, ...)
- * raises a false `-Wmaybe-uninitialized` at -O2 and above. The warning is
+ * raises a false `-Wmaybe-uninitialized` (or `-Wuninitialized`) at -O2 and
+ * above. The warning is
  * located in the system header's lines, so it is silenced there only: our
  * own code keeps the warning.
  * This has to be the first inclusion of `<immintrin.h>` in the translation
@@ -19,6 +20,7 @@
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#pragma GCC diagnostic ignored "-Wuninitialized"
 #include <immintrin.h>
 #pragma GCC diagnostic pop
 #else

@@ -1105,6 +1105,21 @@ void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
             bt.inv[e][1]    = tr != nullptr ? tr + n : nullptr;
         }
     }
+    const auto add_tag = [&bt](const BlockNoise& r) {
+        const int i          = bt.tag_count++;
+        bt.tag_first[i]      = r.first_sample;
+        bt.tag_transition[i] = r.transition;
+        bt.tag_steady[i]     = r.steady.get();
+        bt.tag_tr[i]         = r.transition_tables.get();
+    };
+    if (m_evicted) {
+        add_tag(*m_evicted);
+    }
+    for (const auto& r : m_ring) {
+        if (bt.tag_count < BlockTables::kTagEntries) {
+            add_tag(r);
+        }
+    }
     m_block_tables = bt;
 }
 

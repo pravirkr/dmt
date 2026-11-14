@@ -90,13 +90,8 @@ struct KadaneSurrogateDeviceView {
         }
         const float* row_inv = box_inv_sigma + (row * n_filters);
         if (width < min_width) {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-            const float scale = sqrtf(static_cast<float>(min_width) /
-                                      static_cast<float>(width));
-#else
-            const float scale = std::sqrt(static_cast<float>(min_width) /
-                                          static_cast<float>(width));
-#endif
+            const float scale = surrogate_width_scale(
+                static_cast<float>(min_width), static_cast<float>(width));
             return row_inv[0] * scale;
         }
         if (width >= max_width) {
@@ -104,13 +99,8 @@ struct KadaneSurrogateDeviceView {
             if (width == max_width) {
                 return inv_max;
             }
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-            const float scale = sqrtf(static_cast<float>(max_width) /
-                                      static_cast<float>(width));
-#else
-            const float scale = std::sqrt(static_cast<float>(max_width) /
-                                          static_cast<float>(width));
-#endif
+            const float scale = surrogate_width_scale(
+                static_cast<float>(max_width), static_cast<float>(width));
             return inv_max * scale;
         }
         const uint32_t lo = w_bracket_lo[width];
@@ -121,11 +111,7 @@ struct KadaneSurrogateDeviceView {
         }
         const float inv_lo = row_inv[lo];
         const float inv_hi = row_inv[hi];
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-        return inv_lo * exp2f(t * log2f(inv_hi / inv_lo));
-#else
-        return inv_lo * std::exp2(t * std::log2(inv_hi / inv_lo));
-#endif
+        return surrogate_log_lerp(inv_lo, inv_hi, t);
     }
 
     [[nodiscard]] DMT_HD float

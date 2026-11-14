@@ -15,6 +15,13 @@
 #include "dmt/kadane_simd.hpp"
 #endif
 
+// Backend vector types as template arguments drop `may_alias`; harmless
+// (see kadane_simd.hpp).
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
+
 namespace dmt::kadane {
 
 /// Fixed-capacity `DMT_HD` array avoiding host-only `std::array::operator[]`
@@ -973,7 +980,9 @@ inline bool replay_surrogate_row(uint64_t tile_start_sample,
     if (!row_state.initialized ||
         row_state.synced_sample != tile_start_sample) {
         const KadaneSurrogateRowState prev_state = row_state;
-        for (SizeType k = 0; k < np; ++k) {
+        // `k < kMaxSurrogatePasses` is implied by `np`; spelled out for
+        // GCC 12's -Wstringop-overflow range tracking.
+        for (SizeType k = 0; k < np && k < kMaxSurrogatePasses; ++k) {
             const float c0 = checkpoint_c != nullptr ? checkpoint_c[k] : 0.0F;
             if (c0 <= 0.0F) {
                 row_state.passes[k] = KadaneSurrogatePassState{};
@@ -1152,3 +1161,7 @@ scan_surrogate_tile_f32(SizeType num_passes,
 #endif // !defined(__CUDACC__) && !defined(__HIPCC__)
 
 } // namespace dmt::kadane
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif

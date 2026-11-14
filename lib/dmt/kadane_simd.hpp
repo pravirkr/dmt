@@ -22,6 +22,14 @@
 
 #include "dmt/kadane_plan.hpp"
 
+// `std::array<__m512>` (and `__m256`, NEON vectors) drops the vector type's
+// `may_alias` attribute in the template argument; harmless here, as the
+// arrays only hold registers.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
+
 namespace dmt::kadane {
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -1145,8 +1153,11 @@ inline void convert_u32_to_f32(const uint32_t* __restrict__ src,
             Backend::loadu_i32(reinterpret_cast<const int32_t*>(src + i));
         Backend::storeu_f32(dst + i, Backend::cvt_u32_to_f32(vi));
     }
-    for (; i < count; ++i) {
-        dst[i] = static_cast<float>(src[i]);
+    // Tail as an offset count: GCC 12 otherwise derives a bogus 2^62 trip
+    // count once `count` is a known multiple of kLanes.
+    const SizeType rem = count - i;
+    for (SizeType j = 0; j < rem; ++j) {
+        dst[i + j] = static_cast<float>(src[i + j]);
     }
 }
 
@@ -1927,3 +1938,7 @@ scan_gate_tile_i32(SizeType num_buckets,
 } // namespace scalar
 
 } // namespace dmt::kadane
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif

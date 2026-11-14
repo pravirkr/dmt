@@ -93,9 +93,11 @@ inline void compare_near_threshold(std::vector<RawCandidate> actual,
         return std::tuple(c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
                           c.filter_idx);
     };
+    // Total order: kKadaneSurrogate can emit two runs of one row with the
+    // same begin (passes closing at different ends).
     const auto order = [&](const auto& a, const auto& b) {
-        return std::tuple(row(a), a.begin_sample) <
-               std::tuple(row(b), b.begin_sample);
+        return std::tuple(row(a), a.begin_sample, a.end_sample, a.peak_sample) <
+               std::tuple(row(b), b.begin_sample, b.end_sample, b.peak_sample);
     };
     std::sort(actual.begin(), actual.end(), order);
     std::sort(expected.begin(), expected.end(), order);

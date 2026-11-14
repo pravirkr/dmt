@@ -404,6 +404,16 @@ struct BlockTables {
     bool transition[2]{false, false};
     int count               = 0;
     const uint64_t* support = nullptr;
+    // Host table identities (null: the constructor tables) of the entry
+    // just evicted plus the ring, oldest first, as the CPU kKadaneSurrogate
+    // ring keeps them: whether an open excursion's earlier best sat under
+    // other tables is decided by identity, never dereferenced here.
+    static constexpr int kTagEntries = 3;
+    int tag_count                    = 0;
+    uint64_t tag_first[kTagEntries]{};
+    bool tag_transition[kTagEntries]{};
+    const void* tag_steady[kTagEntries]{};
+    const void* tag_tr[kTagEntries]{};
 };
 
 // The entry of stream sample `s` (the older one for samples before the

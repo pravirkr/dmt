@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -24,6 +25,34 @@ inline constexpr int32_t kKadaneInt32Cap =
 /// use edge width floor((width + 1) / 4) and core width `width - 2 * w_edge`.
 DMT_HD constexpr uint32_t trapezoid_edge_width(uint32_t width) noexcept {
     return width >= 3U ? (width + 1U) / 4U : 0U;
+}
+
+/// `sqrt(num / den)` with IEEE rounding on host and device alike (nvcc
+/// `-use_fast_math` would otherwise approximate both operations), so
+/// surrogate S/N matches bit for bit across backends.
+DMT_HD inline float surrogate_width_scale(float num, float den) noexcept {
+#if defined(__CUDA_ARCH__)
+    return __fsqrt_rn(__fdiv_rn(num, den));
+#elif defined(__HIP_DEVICE_COMPILE__)
+    return sqrtf(num / den);
+#else
+    return std::sqrt(num / den);
+#endif
+}
+
+/// Log-linear inverse-sigma interpolation `lo * (hi / lo)^t`, evaluated in
+/// double (untouched by fast-math on either backend) and rounded once.
+DMT_HD inline float
+surrogate_log_lerp(float inv_lo, float inv_hi, float t) noexcept {
+    const double lo = static_cast<double>(inv_lo);
+    const double l2 = static_cast<double>(t) *
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+                      ::log2(static_cast<double>(inv_hi) / lo);
+    return static_cast<float>(lo * ::exp2(l2));
+#else
+                      std::log2(static_cast<double>(inv_hi) / lo);
+    return static_cast<float>(lo * std::exp2(l2));
+#endif
 }
 
 /// Contiguous filter-index bucket [f_lo, f_hi) in `widths`.

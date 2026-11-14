@@ -957,8 +957,8 @@ float KadaneSurrogatePlan::interpolate_inv_sigma(
     const SizeType num_filters = widths.size();
     const float* row_inv       = box_inv_sigma_lut.data() + (row * num_filters);
     if (width < widths[0]) {
-        const float scale = std::sqrt(static_cast<float>(widths[0]) /
-                                      static_cast<float>(width));
+        const float scale = surrogate_width_scale(static_cast<float>(widths[0]),
+                                                  static_cast<float>(width));
         return row_inv[0] * scale;
     }
     if (width >= max_width) {
@@ -968,8 +968,8 @@ float KadaneSurrogatePlan::interpolate_inv_sigma(
         }
         // Extrapolate wide excursions > max_width with asymptotic 1/sqrt(w)
         // noise growth so uncapped excursions never overestimate S/N.
-        const float scale = std::sqrt(static_cast<float>(max_width) /
-                                      static_cast<float>(width));
+        const float scale = surrogate_width_scale(static_cast<float>(max_width),
+                                                  static_cast<float>(width));
         return inv_max * scale;
     }
     const uint32_t lo = width_bracket_lo[width];
@@ -980,7 +980,7 @@ float KadaneSurrogatePlan::interpolate_inv_sigma(
     }
     const float inv_lo = row_inv[lo];
     const float inv_hi = row_inv[hi];
-    return inv_lo * std::exp2(t * std::log2(inv_hi / inv_lo));
+    return surrogate_log_lerp(inv_lo, inv_hi, t);
 }
 
 float KadaneSurrogatePlan::eval_surrogate_snr(
