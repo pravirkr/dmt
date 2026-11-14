@@ -468,6 +468,24 @@ public:
     virtual void drop_block_noise() noexcept {}
 };
 
+/// BoxcarScreenMode::kAuto resolved for a backend: kKadane on the CPU (its
+/// gate beats the prefix screen there), kPrefix on a GPU (where the gate's
+/// Stage 2 latency outweighs the saved screen). Other modes pass through.
+[[nodiscard]] constexpr BoxcarScreenMode
+resolve_screen_mode(BoxcarScreenMode mode, bool gpu) noexcept {
+    if (mode != BoxcarScreenMode::kAuto) {
+        return mode;
+    }
+    return gpu ? BoxcarScreenMode::kPrefix : BoxcarScreenMode::kKadane;
+}
+
+/// `config` with its screen mode resolved (resolve_screen_mode).
+[[nodiscard]] constexpr BoxcarConfig resolve_screen_mode(BoxcarConfig config,
+                                                         bool gpu) noexcept {
+    config.screen_mode = resolve_screen_mode(config.screen_mode, gpu);
+    return config;
+}
+
 /// The boxcar engines own `driver`, which calls them back per chunk.
 /// Input rows of the `kill_runs` channels (boxcar_kill_runs()) are zeroed
 /// in a staging copy of each block before the driver reads it (FDMTBoxcar's

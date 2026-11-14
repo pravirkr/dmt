@@ -793,7 +793,8 @@ make_fdmt_boxcar_cpu(const plans::FDMTPlan& plan,
                      std::unique_ptr<BoxcarDriver> driver,
                      std::vector<std::pair<SizeType, SizeType>> kill_runs) {
     return std::make_unique<fdmt_boxcar_cpu::FDMTBoxcarCpuEngine>(
-        plan, config, planes, cfg, std::move(driver), std::move(kill_runs));
+        plan, resolve_screen_mode(config, false), planes, cfg,
+        std::move(driver), std::move(kill_runs));
 }
 
 } // namespace dmt::algorithms::detail

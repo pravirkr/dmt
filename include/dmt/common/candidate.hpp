@@ -34,7 +34,7 @@ enum class OverflowPolicy : uint8_t {
 
 /// Stage-1 tile screening / scoring mode for boxcar search.
 enum class BoxcarScreenMode : uint8_t {
-    /// Prefix-sum / range-minimum tile screen (default; max_boxcar 1..2^20).
+    /// Prefix-sum / range-minimum tile screen (max_boxcar 1..2^20).
     kPrefix,
     /// Lossless multi-bucket Kadane gate + Stage-2 scoring (max_boxcar
     /// 1..2^20).
@@ -45,6 +45,10 @@ enum class BoxcarScreenMode : uint8_t {
     /// Disable Stage-1 screening; score every tile directly (max_boxcar
     /// 1..2^20).
     kNone,
+    /// Default: the fastest exact mode of the backend, chosen when the
+    /// engine is built (kKadane on the CPU, kPrefix on a GPU). Candidates
+    /// are those of kPrefix / kKadane / kNone.
+    kAuto,
 };
 
 /// Analytical search of independent input noise of known common mean/sigma.
@@ -65,7 +69,7 @@ struct BoxcarConfig {
         float input_mean          = 0.0F,
         bool use_trapezoid        = false,
         OverflowPolicy overflow_policy = OverflowPolicy::kDropNew,
-        BoxcarScreenMode screen_mode   = BoxcarScreenMode::kPrefix) noexcept
+        BoxcarScreenMode screen_mode   = BoxcarScreenMode::kAuto) noexcept
         : max_boxcar(max_boxcar),
           wtsp(wtsp),
           detect_thresh(detect_thresh),
@@ -108,9 +112,9 @@ struct BoxcarConfig {
     bool use_trapezoid = false;
     /// Default kDropNew; see OverflowPolicy.
     OverflowPolicy overflow_policy = OverflowPolicy::kDropNew;
-    /// Default kPrefix; see BoxcarScreenMode (kKadaneSurrogate supports
-    /// max_boxcar up to 4096; kPrefix, kKadane and kNone support 1..2^20).
-    BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix;
+    /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate supports
+    /// max_boxcar up to 4096; the other modes support 1..2^20).
+    BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto;
 };
 
 /**

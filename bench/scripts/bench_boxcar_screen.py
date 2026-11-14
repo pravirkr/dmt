@@ -96,6 +96,7 @@ MODE_MAP: dict[str, BoxcarScreenMode] = {
     "kadane": BoxcarScreenMode.KADANE,
     "kadane_surrogate": BoxcarScreenMode.KADANE_SURROGATE,
     "none": BoxcarScreenMode.NONE,
+    "auto": BoxcarScreenMode.AUTO,
 }
 
 
@@ -292,7 +293,7 @@ def run_regime(
         if mname == "prefix":
             ref_cands = first_cands
             exact_ok = True
-        elif ref_cands is not None and mname in ("kadane", "none"):
+        elif ref_cands is not None and mname in ("kadane", "none", "auto"):
             exact_ok = _same_candidates(first_cands, ref_cands)
         results[mname] = ModeMeasurement(
             ms=med_ms,

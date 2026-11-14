@@ -94,7 +94,7 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
         static_cast<unsigned>(config.overflow_policy) >
             static_cast<unsigned>(OverflowPolicy::kKeepBrightest) ||
         static_cast<unsigned>(config.screen_mode) >
-            static_cast<unsigned>(BoxcarScreenMode::kNone) ||
+            static_cast<unsigned>(BoxcarScreenMode::kAuto) ||
         plan.get_nchans() > UINT32_MAX ||
         (!kill_mask.empty() && kill_mask.size() != plan.get_nchans())) {
         throw std::invalid_argument(

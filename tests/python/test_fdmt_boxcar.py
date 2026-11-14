@@ -596,12 +596,13 @@ def _keep_brightest_storm(backend: str) -> None:
 
 
 def test_boxcar_screen_mode_binding_defaults_and_roundtrip() -> None:
-    assert BoxcarConfig().screen_mode == dmtlib.BoxcarScreenMode.PREFIX
+    assert BoxcarConfig().screen_mode == dmtlib.BoxcarScreenMode.AUTO
     assert set(BoxcarScreenMode.__members__) == {
         "PREFIX",
         "KADANE",
         "KADANE_SURROGATE",
         "NONE",
+        "AUTO",
     }
     for screen in BoxcarScreenMode.__members__.values():
         cfg = BoxcarConfig(
@@ -954,6 +955,61 @@ def test_kadane_surrogate_packed_uint8() -> None:
     best_u8 = root_u8[np.argmax(root_u8["snr"])]
     assert abs(int(best_u8["dm_idx"]) - 12) <= 1
     assert abs(int(best_u8["peak_sample"]) - (nsamps + 500)) <= 6
+
+
+def _auto_case() -> tuple[FDMTPlan, list[np.ndarray]]:
+    rng = np.random.default_rng(91)
+    plan = FDMTPlan(
+        700, 1200, 7, 733, 0.001, dt_grid=[-73, -12, 0, 4, 97], subband_depth=1
+    )
+    # Unquantized floats: S/N bits depend on the exact summation order.
+    blocks = []
+    for _ in range(2):
+        data = rng.standard_normal((7, 733), dtype=np.float32)
+        data[:4, 320:336] += 4
+        blocks.append(data)
+    return plan, blocks
+
+
+def _auto_bytes(plan: FDMTPlan, screen: BoxcarScreenMode, **kw: object) -> int:
+    cfg = config()
+    cfg.screen_mode = screen
+    return FDMTBoxcar(plan, cfg, chunk_nsamps=64, **kw).memory_usage.total
+
+
+def _auto_run(
+    plan: FDMTPlan, blocks: list[np.ndarray], screen: BoxcarScreenMode, **kw: object
+) -> np.ndarray:
+    cfg = config()
+    cfg.screen_mode = screen
+    search = FDMTBoxcar(plan, cfg, chunk_nsamps=64, **kw)
+    assert search.config.screen_mode == screen
+    parts = [search.execute(b).candidates for b in blocks]
+    parts.append(search.drain().candidates)
+    return sorted_candidates(parts)
+
+
+def test_auto_screen_mode_is_kadane_on_cpu() -> None:
+    plan, blocks = _auto_case()
+    auto = _auto_run(plan, blocks, BoxcarScreenMode.AUTO)
+    kadane = _auto_run(plan, blocks, BoxcarScreenMode.KADANE)
+    assert len(auto) > 0
+    assert auto.tobytes() == kadane.tobytes()
+    # Exact modes emit the same candidates; the engine's buffers show which ran.
+    auto_b = _auto_bytes(plan, BoxcarScreenMode.AUTO)
+    assert auto_b == _auto_bytes(plan, BoxcarScreenMode.KADANE)
+    assert auto_b != _auto_bytes(plan, BoxcarScreenMode.PREFIX)
+
+
+def test_auto_screen_mode_is_prefix_on_gpu(gpu_backend: str) -> None:
+    plan, blocks = _auto_case()
+    auto = _auto_run(plan, blocks, BoxcarScreenMode.AUTO, backend=gpu_backend)
+    prefix = _auto_run(plan, blocks, BoxcarScreenMode.PREFIX, backend=gpu_backend)
+    assert len(auto) > 0
+    assert auto.tobytes() == prefix.tobytes()
+    auto_b = _auto_bytes(plan, BoxcarScreenMode.AUTO, backend=gpu_backend)
+    assert auto_b == _auto_bytes(plan, BoxcarScreenMode.PREFIX, backend=gpu_backend)
+    assert auto_b != _auto_bytes(plan, BoxcarScreenMode.KADANE, backend=gpu_backend)
 
 
 @pytest.mark.parametrize("screen", list(BoxcarScreenMode.__members__.values()))

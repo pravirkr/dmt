@@ -64,7 +64,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         mod, "BoxcarScreenMode",
         "Stage-1 tile screening / scoring mode for analytical boxcar search.")
         .value("PREFIX", BoxcarScreenMode::kPrefix,
-               "Prefix-sum / range-minimum tile screen (default, exact).")
+               "Prefix-sum / range-minimum tile screen (exact).")
         .value("KADANE", BoxcarScreenMode::kKadane,
                "Lossless multi-bucket Kadane tile gate + exact Stage-2 "
                "prefix-sum scoring.")
@@ -73,7 +73,10 @@ void bind_fdmt_boxcar(py::module_& mod) {
                "lookback replay (skips full-stream Stage-2 prefix scan).")
         .value("NONE", BoxcarScreenMode::kNone,
                "Disable Stage-1 screening and score every tile directly "
-               "(exact).");
+               "(exact).")
+        .value("AUTO", BoxcarScreenMode::kAuto,
+               "Default: the fastest exact mode of the backend (KADANE on "
+               "the CPU, PREFIX on a GPU).");
     py::class_<BoxcarConfig>(mod, "BoxcarConfig", R"doc(
         Analytical boxcar and trapezoid matched-filter search settings.
 
@@ -87,9 +90,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         (:class:`OverflowPolicy`, default ``DROP_NEW``) chooses between
         first-come overflow and exact ``KEEP_BRIGHTEST`` top-S/N selection.
         ``screen_mode`` selects the Stage-1 tile screening / scoring algorithm
-        (:class:`BoxcarScreenMode`, default ``BoxcarScreenMode.PREFIX``):
-        ``PREFIX``, ``KADANE``, and ``NONE`` produce identical exact
-        candidates; ``KADANE_SURROGATE`` replaces the full-stream prefix scan
+        (:class:`BoxcarScreenMode`, default ``BoxcarScreenMode.AUTO``):
+        ``PREFIX``, ``KADANE``, ``NONE`` and ``AUTO`` (``KADANE`` on the CPU,
+        ``PREFIX`` on a GPU) produce identical exact candidates; ``KADANE_SURROGATE`` replaces the full-stream prefix scan
         with multi-bias Kadane excursion screening and local replay.
         )doc")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
@@ -102,7 +105,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
              "input_mean"_a = 0.0F, "use_trapezoid"_a = false,
              "overflow_policy"_a = OverflowPolicy::kDropNew,
-             "screen_mode"_a     = BoxcarScreenMode::kPrefix)
+             "screen_mode"_a     = BoxcarScreenMode::kAuto)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -220,10 +223,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
         as zero, without a copy. :meth:`execute` also takes a mask per block
         (float32 input), ANDed with this one.
 
-        ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``PREFIX``)
+        ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``AUTO``)
         chooses the Stage-1 tile screening / scoring mode on both CPU and GPU:
-        ``PREFIX``, ``KADANE`` (lossless multi-bucket Kadane gate), and
-        ``NONE`` emit identical exact candidates; ``KADANE_SURROGATE`` uses
+        ``PREFIX``, ``KADANE`` (lossless multi-bucket Kadane gate), ``NONE``
+        and ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU) emit
+        identical exact candidates; ``KADANE_SURROGATE`` uses
         standalone multi-bias Kadane excursion detection with local replay.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,

@@ -124,6 +124,8 @@ public:
     }
     /// Carry, peaks and candidate storage of the search (bytes).
     [[nodiscard]] SizeType boxcar_bytes(bool smear, Exec ex) const {
+        const BoxcarScreenMode mode = detail::resolve_screen_mode(
+            config.screen_mode, ex.backend != Backend::kCPU);
         SizeType base_rows = 0;
         for (const auto& p : planes) {
             base_rows += p.dm_grid.size();
@@ -136,13 +138,11 @@ public:
             : detail::int_search_fits_u32(plan, smear, config.input_nbits)
                 ? sizeof(uint32_t)
                 : sizeof(uint64_t);
-        const SizeType carry =
-            config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
-                ? SizeType{0}
-                : rows * width * carry_elem;
+        const SizeType carry = mode == BoxcarScreenMode::kKadaneSurrogate
+                                   ? SizeType{0}
+                                   : rows * width * carry_elem;
         const SizeType peaks =
-            config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
-                ? SizeType{1}
+            mode == BoxcarScreenMode::kKadaneSurrogate ? SizeType{1}
             : config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
                 ? filters
                 : SizeType{1};
@@ -187,7 +187,7 @@ public:
                                            sizeof(uint64_t));
         }
         SizeType kadane_extra = 0;
-        if (config.screen_mode == BoxcarScreenMode::kKadane &&
+        if (mode == BoxcarScreenMode::kKadane &&
             (ex.backend == Backend::kCPU || width <= 4096)) {
             kadane_extra =
                 (rows * kadane::kMaxGateBuckets *
@@ -196,7 +196,7 @@ public:
                                        : 0))) +
                 (base_rows *
                  ((2 * kadane::kMaxGateBuckets * sizeof(float)) + 1));
-        } else if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
+        } else if (mode == BoxcarScreenMode::kKadaneSurrogate) {
             kadane_extra =
                 (rows *
                  (sizeof(kadane::KadaneSurrogateRowState) + sizeof(uint64_t))) +

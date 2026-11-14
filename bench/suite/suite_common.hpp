@@ -566,6 +566,8 @@ inline std::string_view screen_mode_name(BoxcarScreenMode mode) {
         return "kadane_surrogate";
     case BoxcarScreenMode::kNone:
         return "none";
+    case BoxcarScreenMode::kAuto:
+        return "auto";
     }
     return "unknown";
 }
@@ -583,9 +585,12 @@ inline BoxcarScreenMode parse_screen_mode(std::string_view token) {
     if (token == "none") {
         return BoxcarScreenMode::kNone;
     }
+    if (token == "auto") {
+        return BoxcarScreenMode::kAuto;
+    }
     throw std::invalid_argument(
         fmt::format("DMT_BENCH_SCREEN token '{}': expected prefix, kadane, "
-                    "kadane_surrogate, none or all",
+                    "kadane_surrogate, none, auto or all",
                     token));
 }
 

@@ -19,6 +19,7 @@
 #include "dmt/common/candidate.hpp"
 #include "dmt/common/plans.hpp"
 
+#include "dmt/boxcar.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 namespace dmt {
@@ -282,7 +283,7 @@ std::mt19937 make_seeded_rng(uint32_t seed) {
 
 } // namespace
 
-TEST_CASE("BoxcarConfig screen_mode defaults to kPrefix and coexists with "
+TEST_CASE("BoxcarConfig screen_mode defaults to kAuto and coexists with "
           "OverflowPolicy and wide boxcars",
           "[kadane_plan][kadane][boxcar][cpu]") {
     static_assert(kadane::trapezoid_edge_width(1) == 0U);
@@ -297,24 +298,36 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kPrefix and coexists with "
 
     const BoxcarConfig default_cfg{};
     CHECK(default_cfg.overflow_policy == OverflowPolicy::kDropNew);
-    CHECK(default_cfg.screen_mode == BoxcarScreenMode::kPrefix);
+    CHECK(default_cfg.screen_mode == BoxcarScreenMode::kAuto);
+    static_assert(algorithms::detail::resolve_screen_mode(
+                      BoxcarScreenMode::kAuto, false) ==
+                  BoxcarScreenMode::kKadane);
+    static_assert(algorithms::detail::resolve_screen_mode(
+                      BoxcarScreenMode::kAuto, true) ==
+                  BoxcarScreenMode::kPrefix);
+    static_assert(algorithms::detail::resolve_screen_mode(
+                      BoxcarScreenMode::kNone, false) ==
+                  BoxcarScreenMode::kNone);
+    static_assert(algorithms::detail::resolve_screen_mode(
+                      BoxcarScreenMode::kKadaneSurrogate, true) ==
+                  BoxcarScreenMode::kKadaneSurrogate);
 
     // 11-argument construction stays 100% source-compatible with kDropNew +
-    // kPrefix.
+    // the default screen mode (kAuto).
     const BoxcarConfig compat11_cfg(
         128, 1.5F, 6.0F, 1.0F, PeakFindingMode::kContiguousPeakAcrossWidths,
         8192, 256, true, 32, 0.0F, true);
     CHECK(compat11_cfg.overflow_policy == OverflowPolicy::kDropNew);
-    CHECK(compat11_cfg.screen_mode == BoxcarScreenMode::kPrefix);
+    CHECK(compat11_cfg.screen_mode == BoxcarScreenMode::kAuto);
     CHECK(compat11_cfg.use_trapezoid);
 
     // 12-argument construction stays 100% source-compatible with OverflowPolicy
-    // as the 12th parameter and screen_mode defaulting to kPrefix.
+    // as the 12th parameter and screen_mode defaulting to kAuto.
     const BoxcarConfig compat12_cfg(
         256, 2.0F, 6.0F, 1.0F, PeakFindingMode::kContiguousPeakPerWidth, 8192,
         16, true, 32, 0.0F, false, OverflowPolicy::kKeepBrightest);
     CHECK(compat12_cfg.overflow_policy == OverflowPolicy::kKeepBrightest);
-    CHECK(compat12_cfg.screen_mode == BoxcarScreenMode::kPrefix);
+    CHECK(compat12_cfg.screen_mode == BoxcarScreenMode::kAuto);
 
     // 13-argument construction sets both overflow_policy (12th) and
     // screen_mode (13th).
@@ -322,7 +335,8 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kPrefix and coexists with "
          {OverflowPolicy::kDropNew, OverflowPolicy::kKeepBrightest}) {
         for (const auto mode :
              {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-              BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone}) {
+              BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone,
+              BoxcarScreenMode::kAuto}) {
             const BoxcarConfig cfg(
                 256, 2.0F, 6.5F, 1.2F, PeakFindingMode::kContiguousPeakPerWidth,
                 4096, 16, false, 32, 0.0F, false, policy, mode);
