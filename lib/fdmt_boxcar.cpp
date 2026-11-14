@@ -16,6 +16,9 @@
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_drain.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/kadane_monoid.hpp"
+#include "dmt/kadane_plan.hpp"
+#include "dmt/kadane_surrogate.hpp"
 
 namespace dmt::algorithms {
 
@@ -121,11 +124,11 @@ public:
     }
     /// Carry, peaks and candidate storage of the search (bytes).
     [[nodiscard]] SizeType boxcar_bytes(bool smear, Exec ex) const {
-        SizeType rows = 0;
+        SizeType base_rows = 0;
         for (const auto& p : planes) {
-            rows += p.dm_grid.size();
+            base_rows += p.dm_grid.size();
         }
-        rows *= beams;
+        const SizeType rows    = base_rows * beams;
         const SizeType width   = planes.front().widths.back();
         const SizeType filters = planes.front().widths.size();
         const SizeType carry_elem =
@@ -133,10 +136,16 @@ public:
             : detail::int_search_fits_u32(plan, smear, config.input_nbits)
                 ? sizeof(uint32_t)
                 : sizeof(uint64_t);
+        const SizeType carry =
+            config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
+                ? SizeType{0}
+                : rows * width * carry_elem;
         const SizeType peaks =
-            config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
+            config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
+                ? SizeType{1}
+            : config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
                 ? filters
-                : 1;
+                : SizeType{1};
         // Budgeted bytes only: on a GPU the device copies (the host result
         // storage and host row table are reported, not budgeted).
         SizeType cands = config.max_candidates * sizeof(RawCandidate);
@@ -177,9 +186,27 @@ public:
                                        rows * std::bit_ceil(width + 1024) *
                                            sizeof(uint64_t));
         }
-        return (rows * width * carry_elem) +
-               (rows * peaks * sizeof(detail::BoxcarPeak)) + cands + luts +
-               row_table + staging + rings;
+        SizeType kadane_extra = 0;
+        if (config.screen_mode == BoxcarScreenMode::kKadane &&
+            (ex.backend == Backend::kCPU || width <= 4096)) {
+            kadane_extra =
+                (rows * kadane::kMaxGateBuckets *
+                 (sizeof(float) + (config.use_trapezoid
+                                       ? sizeof(kadane::LagWindow<float>)
+                                       : 0))) +
+                (base_rows *
+                 ((2 * kadane::kMaxGateBuckets * sizeof(float)) + 1));
+        } else if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
+            kadane_extra =
+                (rows *
+                 (sizeof(kadane::KadaneSurrogateRowState) + sizeof(uint64_t))) +
+                (base_rows *
+                 ((2 * kadane::kMaxSurrogatePasses * sizeof(float)) +
+                  (filters * sizeof(float)) + 1)) +
+                ((width + 1) * ((3 * sizeof(uint32_t)) + sizeof(float)));
+        }
+        return carry + (rows * peaks * sizeof(detail::BoxcarPeak)) + cands +
+               luts + row_table + staging + rings + kadane_extra;
     }
     /**
      * One block with a per-call kill mask (empty: the constructor mask):

@@ -242,3 +242,96 @@ TEST_CASE("GPU FDMTBoxcar per-call masks: memory is accounted",
     CHECK(after.budgeted() + after.host == after.total());
     CHECK(after.budgeted() <= algorithms::kFDMTDefaultMaxMemory);
 }
+
+TEST_CASE("GPU FDMTBoxcar per-call masks support kKadane, kNone, and "
+          "kKadaneSurrogate",
+          "[gpu][parity][boxcar][kill][mask][kadane]") {
+    const auto masks = gpu_masks();
+    const auto plan  = gpu_mask_plan(2);
+    const auto input = waterfalls(plan, 1, masks.size());
+    const auto ctor  = gpu_random_mask(32, 99, 0.25);
+
+    for (const auto screen :
+         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone,
+          BoxcarScreenMode::kKadaneSurrogate}) {
+        for (const bool trap : {false, true}) {
+            BoxcarConfig cfg;
+            cfg.max_boxcar       = 37;
+            cfg.wtsp             = 1.5F;
+            cfg.detect_thresh    = 2.9F;
+            cfg.peak_mode        = PeakFindingMode::kContiguousPeakAcrossWidths;
+            cfg.use_trapezoid    = trap;
+            cfg.screen_mode      = screen;
+            cfg.max_candidates   = 1U << 20;
+            cfg.max_cands_per_dm = 0;
+
+            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 1, 0, 64,
+                           algorithms::kFDMTDefaultMaxMemory, ctor);
+            FDMTBoxcar gpu(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse,
+                           64, algorithms::kFDMTDefaultMaxMemory, ctor);
+            std::vector<RawCandidate> expected;
+            std::vector<RawCandidate> actual;
+            for (SizeType k = 0; k < input.size(); ++k) {
+                append(expected,
+                       cpu.execute(std::span<const float>(input[k]),
+                                   std::span<const uint8_t>(masks[k])));
+                append(actual, gpu.execute(std::span<const float>(input[k]),
+                                           std::span<const uint8_t>(masks[k])));
+            }
+            append(expected, cpu.flush());
+            append(actual, gpu.flush());
+            if (screen == BoxcarScreenMode::kKadaneSurrogate) {
+                compare_near_threshold(actual, expected, cfg.detect_thresh);
+            } else {
+                compare(actual, expected);
+            }
+        }
+    }
+}
+
+TEST_CASE(
+    "GPU FDMTBoxcar zero-copy kill masks and budgeted() accounting across "
+    "Kadane modes",
+    "[gpu][boxcar][kill][mask][kadane]") {
+    const plans::FDMTPlan plan(1200.0F, 1500.0F, 1024, 65536, 0.000256F, 500);
+    const SizeType block_bytes =
+        plan.get_nchans() * plan.get_nsamps() * sizeof(float);
+    std::vector<float> host(plan.get_nchans() * plan.get_nsamps());
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> dist(-4, 4);
+    for (auto& v : host) {
+        v = static_cast<float>(dist(rng));
+    }
+    const thrust::device_vector<float> buf(host.begin(), host.end());
+    const DeviceSpan<const float> span(thrust::raw_pointer_cast(buf.data()),
+                                       buf.size(), {kGpu.backend, 0});
+    const auto ctor_mask = gpu_random_mask(plan.get_nchans(), 5, 0.2);
+
+    for (const auto screen :
+         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone,
+          BoxcarScreenMode::kKadaneSurrogate}) {
+        BoxcarConfig cfg;
+        cfg.max_boxcar    = 16;
+        cfg.use_trapezoid = true;
+        cfg.screen_mode   = screen;
+        const auto unmasked_usage =
+            FDMTBoxcar(plan, cfg, true, kGpu).get_memory_usage();
+        CHECK(unmasked_usage.budgeted() + unmasked_usage.host ==
+              unmasked_usage.total());
+        CHECK(unmasked_usage.host > 0);
+        const SizeType budget = unmasked_usage.budgeted() + (block_bytes / 2);
+
+        FDMTBoxcar search(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse,
+                          0, budget, ctor_mask);
+        for (unsigned k = 0; k < 2; ++k) {
+            const auto mask = gpu_random_mask(plan.get_nchans(), 21 + k, 0.1);
+            REQUIRE_NOTHROW(
+                search.execute(span, std::span<const uint8_t>(mask)));
+            (void)search.copy_result();
+        }
+        const auto usage = search.get_memory_usage();
+        CHECK(usage.staging == plan.get_nchans());
+        CHECK(usage.budgeted() + usage.host == usage.total());
+        CHECK(usage.budgeted() <= budget);
+    }
+}

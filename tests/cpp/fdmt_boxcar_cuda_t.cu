@@ -595,3 +595,318 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
         }
     }
 }
+
+TEST_CASE("FDMTBoxcar GPU kKadane and kNone match kPrefix bit-for-bit",
+          "[gpu][parity][boxcar][kadane]") {
+    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
+    const auto input = waterfalls(plan, 2, 3);
+    const Exec gpu_exec{algorithms::detail::kGPUBackend, 1, 0};
+
+    for (const bool trap : {false, true}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            BoxcarConfig base_cfg;
+            base_cfg.max_boxcar       = 64;
+            base_cfg.wtsp             = 1.5F;
+            base_cfg.detect_thresh    = 2.7F;
+            base_cfg.peak_mode        = mode;
+            base_cfg.use_trapezoid    = trap;
+            base_cfg.max_candidates   = 500000;
+            base_cfg.max_cands_per_dm = 0;
+
+            FDMTBoxcar ref_gpu(plan, base_cfg, true, gpu_exec, 2,
+                               algorithms::kFDMTAutoFuse, 64);
+            std::vector<RawCandidate> expected;
+            std::vector<uint64_t> expected_frontiers;
+            for (const auto& block : input) {
+                append(expected, ref_gpu.execute(block));
+                expected_frontiers.push_back(ref_gpu.get_candidate_frontier());
+            }
+            append(expected, ref_gpu.drain());
+
+            for (const auto screen :
+                 {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+                for (const SizeType chunk : {SizeType{64}, plan.get_nsamps()}) {
+                    BoxcarConfig cfg = base_cfg;
+                    cfg.screen_mode  = screen;
+                    FDMTBoxcar search(plan, cfg, true, gpu_exec, 2,
+                                      algorithms::kFDMTAutoFuse, chunk);
+                    std::vector<RawCandidate> actual;
+                    for (SizeType b = 0; b < input.size(); ++b) {
+                        append(actual, search.execute(input[b]));
+                        if (chunk == 64) {
+                            CHECK(search.get_candidate_frontier() ==
+                                  expected_frontiers[b]);
+                        }
+                    }
+                    append(actual, search.drain());
+                    compare(actual, expected);
+
+                    // Verify reset_history + async DeviceSpan stream execution
+                    cudaStream_t stream;
+                    gpu_utils::check_gpu_call(cudaStreamCreate(&stream));
+                    search.reset_history(Stream{stream});
+                    thrust::device_vector<float> dev_in(input.front().size());
+                    auto* ptr = thrust::raw_pointer_cast(dev_in.data());
+                    actual.clear();
+                    for (const auto& block : input) {
+                        gpu_utils::check_gpu_call(cudaMemcpyAsync(
+                            ptr, block.data(), block.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream));
+                        (void)search.execute(
+                            DeviceSpan<const float>(ptr, block.size(),
+                                                    {gpu_exec.backend, 0}),
+                            Stream{stream});
+                        append(actual, search.copy_result(Stream{stream}));
+                    }
+                    gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
+                    append(actual, search.drain());
+                    compare(actual, expected);
+                    gpu_utils::check_gpu_call(cudaStreamDestroy(stream));
+                }
+            }
+        }
+    }
+
+    // Width 4096 SMEM-lean Design C check
+    const plans::FDMTPlan wide_plan(700, 1200, 3, 1047, 0.001F,
+                                    std::vector<IndexType>{-5, 0, 7}, "valid",
+                                    1);
+    const auto wide_in = waterfalls(wide_plan, 1, 3);
+    BoxcarConfig pfx_cfg;
+    pfx_cfg.max_boxcar       = 4096;
+    pfx_cfg.wtsp             = 2.0F;
+    pfx_cfg.detect_thresh    = 3.8F;
+    pfx_cfg.max_cands_per_dm = 0;
+    BoxcarConfig kad_cfg     = pfx_cfg;
+    kad_cfg.screen_mode      = BoxcarScreenMode::kKadane;
+    FDMTBoxcar pfx_wide(wide_plan, pfx_cfg, true, gpu_exec, 1,
+                        algorithms::kFDMTAutoFuse, 128);
+    FDMTBoxcar kad_wide(wide_plan, kad_cfg, true, gpu_exec, 1,
+                        algorithms::kFDMTAutoFuse, 128);
+    std::vector<RawCandidate> pfx_cands;
+    std::vector<RawCandidate> kad_cands;
+    for (const auto& block : wide_in) {
+        append(pfx_cands, pfx_wide.execute(block));
+        append(kad_cands, kad_wide.execute(block));
+    }
+    append(pfx_cands, pfx_wide.flush());
+    append(kad_cands, kad_wide.flush());
+    compare(kad_cands, pfx_cands);
+}
+
+TEST_CASE("FDMTBoxcar GPU kKadane and kNone support wide boxcars and small "
+          "shared memory",
+          "[gpu][parity][boxcar][kadane]") {
+    using namespace algorithms::detail; // NOLINT
+    const Exec gpu_exec{kGPUBackend, 1, 0};
+    const plans::FDMTPlan plan(700, 1200, 7, 2048, 0.001F,
+                               std::vector<IndexType>{-5, 0, 7, 40}, "valid",
+                               1);
+    const auto input = waterfalls(plan, 1, 4);
+
+    for (const SizeType max_w : {SizeType{8192}, SizeType{16384}}) {
+        for (const auto screen :
+             {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+            BoxcarConfig cfg;
+            cfg.max_boxcar       = max_w;
+            cfg.wtsp             = 2.0F;
+            cfg.detect_thresh    = 3.0F;
+            cfg.screen_mode      = screen;
+            cfg.max_candidates   = 1U << 20;
+            cfg.max_cands_per_dm = 0;
+
+            const auto expected = reference(plan, cfg, true, 1, input);
+            REQUIRE_FALSE(expected.empty());
+            FDMTEngineConfig ecfg{};
+            ecfg.use_box_smearing    = true;
+            ecfg.int_tree            = false;
+            ecfg.exec                = gpu_exec;
+            ecfg.max_fuse_levels     = plan.get_niters() - 1;
+            ecfg.search_upper_levels = true;
+            ecfg.search_only         = true;
+            auto engine              = make_fdmt_boxcar_gpu(
+                plan, cfg, make_boxcar_plans(plan, cfg, true), ecfg,
+                make_boxcar_driver(make_fdmt_gpu(plan, ecfg)));
+            CHECK(engine->search_path().ends_with(
+                "(boxcar: device-memory ring)"));
+
+            FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 1,
+                           algorithms::kFDMTAutoFuse, 128);
+            std::vector<RawCandidate> actual;
+            for (const auto& block : input) {
+                append(actual, gpu.execute(block));
+            }
+            append(actual, gpu.flush());
+            compare(actual, expected);
+        }
+    }
+
+    // Small-SMEM block shrinking (38000 B -> 64-thread Kadane) and fallback
+    // (30000 B -> device-memory ring) on kKadane at max_boxcar = 4096.
+    BoxcarConfig box;
+    box.max_boxcar       = 4096;
+    box.wtsp             = 1.5F;
+    box.detect_thresh    = 3.0F;
+    box.screen_mode      = BoxcarScreenMode::kKadane;
+    box.max_candidates   = 1U << 20;
+    box.max_cands_per_dm = 0;
+    const auto expected  = reference(plan, box, true, 1, input);
+    REQUIRE(expected.size() > 100);
+
+    for (const auto& [limit, suffix] :
+         {std::pair<SizeType, const char*>{38000, "64-thread blocks)"},
+          {30000, "(boxcar: device-memory ring)"}}) {
+        FDMTEngineConfig cfg{};
+        cfg.use_box_smearing    = true;
+        cfg.int_tree            = false;
+        cfg.exec                = gpu_exec;
+        cfg.max_fuse_levels     = plan.get_niters() - 1;
+        cfg.search_upper_levels = true;
+        cfg.search_only         = true;
+        cfg.boxcar_shared_limit = limit;
+        auto engine             = make_fdmt_boxcar_gpu(
+            plan, box, make_boxcar_plans(plan, box, true), cfg,
+            make_boxcar_driver(make_fdmt_gpu(plan, cfg)));
+        CHECK(engine->search_path().ends_with(suffix));
+        std::vector<RawCandidate> actual;
+        for (const auto& block : input) {
+            append(actual, engine->execute(std::span<const float>(block)));
+        }
+        append(actual, engine->flush());
+        compare(actual, expected);
+    }
+}
+
+TEST_CASE("Packed FDMTBoxcar GPU kKadane and kNone match CPU across bit depths",
+          "[gpu][parity][boxcar][packed][kadane]") {
+    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
+    constexpr SizeType kBeams = 2;
+    const Exec gpu_exec{algorithms::detail::kGPUBackend, 1, 0};
+
+    for (const SizeType bits : {SizeType{4}, SizeType{8}, SizeType{16}}) {
+        const SizeType bytes = (plan.get_nsamps() * bits + 7) / 8;
+        std::mt19937 random(static_cast<uint32_t>(331 + bits));
+        std::vector<std::vector<uint8_t>> input(
+            4, std::vector<uint8_t>(kBeams * 7 * bytes));
+        for (auto& block : input) {
+            for (auto& x : block) {
+                x = static_cast<uint8_t>(random());
+            }
+        }
+        for (const bool trap : {false, true}) {
+            for (const auto screen :
+                 {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+                BoxcarConfig cfg;
+                cfg.input_nbits     = bits;
+                const uint32_t maxv = (1U << bits) - 1U;
+                cfg.input_mean      = static_cast<float>(maxv) * 0.5F;
+                cfg.noise_sigma =
+                    std::sqrt(static_cast<float>(maxv) * (maxv + 2.0F) / 12.0F);
+                cfg.max_boxcar       = 128;
+                cfg.detect_thresh    = 2.75F;
+                cfg.use_trapezoid    = trap;
+                cfg.screen_mode      = screen;
+                cfg.max_candidates   = 500000;
+                cfg.max_cands_per_dm = 0;
+
+                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), kBeams, 0, 64);
+                FDMTBoxcar gpu(plan, cfg, true, gpu_exec, kBeams,
+                               algorithms::kFDMTAutoFuse, 128);
+                std::vector<RawCandidate> expected;
+                std::vector<RawCandidate> actual;
+                for (const auto& block : input) {
+                    append(expected, cpu.execute(block));
+                    append(actual, gpu.execute(block));
+                }
+                append(expected, cpu.flush());
+                append(actual, gpu.flush());
+                compare(actual, expected);
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
+          "[gpu][parity][boxcar][kadane][surrogate]") {
+    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+                               std::vector<IndexType>{-73, -12, 0, 4, 97},
+                               "valid", 2);
+    const auto float_in = waterfalls(plan, 2, 4);
+    const Exec gpu_exec{algorithms::detail::kGPUBackend, 1, 0};
+
+    for (const bool trap : {false, true}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            BoxcarConfig cfg;
+            cfg.max_boxcar       = 64;
+            cfg.wtsp             = 1.5F;
+            cfg.detect_thresh    = 3.1F;
+            cfg.peak_mode        = mode;
+            cfg.use_trapezoid    = trap;
+            cfg.screen_mode      = BoxcarScreenMode::kKadaneSurrogate;
+            cfg.max_candidates   = 500000;
+            cfg.max_cands_per_dm = 0;
+
+            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 2, 0, 64);
+            FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 2,
+                           algorithms::kFDMTAutoFuse, 64);
+            std::vector<RawCandidate> expected;
+            std::vector<RawCandidate> actual;
+            for (const auto& block : float_in) {
+                append(expected, cpu.execute(block));
+                append(actual, gpu.execute(block));
+                CHECK(gpu.get_candidate_frontier() ==
+                      cpu.get_candidate_frontier());
+            }
+            append(expected, cpu.drain());
+            append(actual, gpu.drain());
+            CHECK(gpu.get_candidate_frontier() == cpu.get_candidate_frontier());
+            compare_near_threshold(actual, expected, cfg.detect_thresh);
+        }
+    }
+
+    // Packed 8-bit and 16-bit surrogate parity
+    for (const SizeType bits : {SizeType{8}, SizeType{16}}) {
+        const SizeType bytes = (plan.get_nsamps() * bits + 7) / 8;
+        std::mt19937 random(static_cast<uint32_t>(811 + bits));
+        std::vector<std::vector<uint8_t>> packed_in(
+            3, std::vector<uint8_t>(2 * 7 * bytes));
+        for (auto& block : packed_in) {
+            for (auto& x : block) {
+                x = static_cast<uint8_t>(random());
+            }
+        }
+        BoxcarConfig cfg;
+        cfg.input_nbits     = bits;
+        const uint32_t maxv = (1U << bits) - 1U;
+        cfg.input_mean      = static_cast<float>(maxv) * 0.5F;
+        cfg.noise_sigma =
+            std::sqrt(static_cast<float>(maxv) * (maxv + 2.0F) / 12.0F);
+        cfg.max_boxcar       = 64;
+        cfg.detect_thresh    = 3.0F;
+        cfg.peak_mode        = PeakFindingMode::kContiguousPeakAcrossWidths;
+        cfg.screen_mode      = BoxcarScreenMode::kKadaneSurrogate;
+        cfg.max_candidates   = 500000;
+        cfg.max_cands_per_dm = 0;
+
+        FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 2, 0, 64);
+        FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 2, algorithms::kFDMTAutoFuse,
+                       128);
+        std::vector<RawCandidate> expected;
+        std::vector<RawCandidate> actual;
+        for (const auto& block : packed_in) {
+            append(expected, cpu.execute(block));
+            append(actual, gpu.execute(block));
+        }
+        append(expected, cpu.flush());
+        append(actual, gpu.flush());
+        compare_near_threshold(actual, expected, cfg.detect_thresh);
+    }
+}

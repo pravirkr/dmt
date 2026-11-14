@@ -18,12 +18,9 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/fdmt_variance.hpp"
+#include "dmt/kadane_cuda.cuh"
 #include "dmt/kadane_plan.hpp"
 #include "dmt/kadane_simd.hpp"
-#if __has_include("dmt/kadane_cuda.cuh")
-#include "dmt/kadane_cuda.cuh"
-#define DMT_HAS_KADANE_CUDA_CUH 1
-#endif
 
 namespace dmt {
 namespace {
@@ -38,10 +35,8 @@ using kadane::kadane_identity_i64;
 using kadane::KadaneGatePlan;
 using kadane::KadaneSegF32;
 using kadane::KadaneSegI64;
-#if defined(DMT_HAS_KADANE_CUDA_CUH)
 using kadane::KadaneSurrogateDeviceView;
 using kadane::KadaneSurrogatePlan;
-#endif
 using kadane::kKadaneInt32Cap;
 using kadane::LagWindow;
 using kadane::make_kadane_seg_f32;
@@ -701,7 +696,6 @@ TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
             }
         }
 
-#if defined(DMT_HAS_KADANE_CUDA_CUH)
         // Surrogate device view S/N evaluator parity (float & integer)
         for (const bool packed : {false, true}) {
             const auto stbl = make_tables(widths, use_trap, 6.0F, 1.25F, specs,
@@ -749,7 +743,6 @@ TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
                 }
             }
         }
-#endif
     }
 }
 
