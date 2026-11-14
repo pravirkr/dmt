@@ -27,10 +27,28 @@
 namespace dmt::algorithms::detail::fdmt_boxcar_cuda {
 namespace {
 
+// kKadane block size for integer (exact-sum) inputs. A row whose tile
+// triggers runs Stage 2 alone in its block, and with one block per row a few
+// such blocks set the length of the whole launch: small blocks keep that
+// latency short and pack more blocks per SM (L40, uint8 input: 2-5% faster
+// than 128 threads).
+//
+// Float inputs keep the kPrefix block-size policy instead: the Stage 2
+// prefix sum is associated per block tile (threads * kItems), so only the
+// same tile as the kPrefix kernel gives bit-identical S/N.
+inline constexpr int kKadaneThreads = 64;
+
 template <typename T, typename SegT, int kBlockThreads>
 struct alignas(16) KadaneBlockShared {
+    using LagV = std::conditional_t<std::is_same_v<SegT, kadane::KadaneSegI64>,
+                                    int32_t,
+                                    float>;
     SegT warp_segs[kadane::kMaxGateBuckets][kBlockThreads / kWarp];
     float row_cuts[kadane::kMaxGateBuckets];
+    // Edge-lag windows of the leader thread: one per block in shared memory
+    // (per-thread arrays were zero-filled in local memory by every thread of
+    // every block, ~0.5 KB each, costing more than the whole gate).
+    kadane::LagWindow<LagV> lag[kadane::kMaxGateBuckets];
     BoxcarShared<T, kBlockThreads> boxcar;
 };
 
@@ -295,8 +313,15 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
 
     float c_state_f32[kadane::kMaxGateBuckets]{};
     int32_t c_state_i32[kadane::kMaxGateBuckets]{};
-    kadane::LagWindow<float> lag_state_f32[kadane::kMaxGateBuckets]{};
-    kadane::LagWindow<int32_t> lag_state_i32[kadane::kMaxGateBuckets]{};
+    using LagV = typename KadaneBlockShared<T, SegT, kBlockThreads>::LagV;
+    static_assert(std::is_same_v<LagV, int32_t> == kUseIntGate,
+                  "int32 gate pairs with the KadaneSegI64 monoid");
+    kadane::LagWindow<LagV>* lag_state = kshared.lag;
+    if (tid == kLeaderTid) {
+        for (SizeType k = 0; k < nb; ++k) {
+            lag_state[k].reset();
+        }
+    }
 
     if (tid == kLeaderTid && input.sample_begin > 0) {
         const SizeType state_off = index * nb;
@@ -304,12 +329,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             if constexpr (kUseIntGate) {
                 c_state_i32[k] = gate.state_ic[state_off + k];
                 if (gate.any_edge_lag) {
-                    lag_state_i32[k] = gate.lag_i32[state_off + k];
+                    lag_state[k] = gate.lag_i32[state_off + k];
                 }
             } else {
                 c_state_f32[k] = gate.state_fc[state_off + k];
                 if (gate.any_edge_lag) {
-                    lag_state_f32[k] = gate.lag_f32[state_off + k];
+                    lag_state[k] = gate.lag_f32[state_off + k];
                 }
             }
         }
@@ -415,9 +440,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                             const uint64_t w_beg =
                                 start > lag_len ? (start - lag_len) : 0ULL;
                             const auto lag_v = static_cast<int64_t>(
-                                lag_state_i32[k].query_and_prune(w_beg));
+                                lag_state[k].query_and_prune(w_beg));
                             eff_m = eff_m > lag_v ? eff_m : lag_v;
-                            lag_state_i32[k].push(
+                            lag_state[k].push(
                                 tile_end,
                                 kadane::clamp_kadane_i32(app.tile_max));
                         }
@@ -435,9 +460,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                             const uint64_t w_beg =
                                 start > lag_len ? (start - lag_len) : 0ULL;
                             const float lag_v =
-                                lag_state_f32[k].query_and_prune(w_beg);
+                                lag_state[k].query_and_prune(w_beg);
                             eff_m = kadane::monoid_max_f32(eff_m, lag_v);
-                            lag_state_f32[k].push(tile_end, app.tile_max);
+                            lag_state[k].push(tile_end, app.tile_max);
                         }
                         if (gate.disabled_row[row_index] == 0U &&
                             eff_m >= row_cuts_f32[k]) {
@@ -647,12 +672,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             if constexpr (kUseIntGate) {
                 gate.state_ic[state_off + k] = c_state_i32[k];
                 if (gate.any_edge_lag) {
-                    gate.lag_i32[state_off + k] = lag_state_i32[k];
+                    gate.lag_i32[state_off + k] = lag_state[k];
                 }
             } else {
                 gate.state_fc[state_off + k] = c_state_f32[k];
                 if (gate.any_edge_lag) {
-                    gate.lag_f32[state_off + k] = lag_state_f32[k];
+                    gate.lag_f32[state_off + k] = lag_state[k];
                 }
             }
         }
@@ -705,9 +730,13 @@ SizeType FDMTBoxcarCudaEngine::kadane_shared_need(int threads) const {
         return sizeof(KadaneBlockShared<T, SegT, kBlockThreads>) +
                (ring * sizeof(T));
     };
-    return threads == 64    ? need.template operator()<64>()
-           : threads == 128 ? need.template operator()<128>()
-                            : need.template operator()<256>();
+    if (threads == 64) {
+        return need.template operator()<64>();
+    }
+    if (threads == 128) {
+        return need.template operator()<128>();
+    }
+    return need.template operator()<256>();
 }
 
 template <typename T,
@@ -769,31 +798,43 @@ bool FDMTBoxcarCudaEngine::try_configure_shared_kadane() {
         m_shared_limit != 0
             ? std::min(m_shared_limit, static_cast<SizeType>(optin))
             : static_cast<SizeType>(optin);
-    const SizeType eff_chunk =
-        std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
-    int threads = eff_chunk <= 64 * kItems    ? 64
-                  : eff_chunk <= 128 * kItems ? 128
-                                              : 256;
-    while (threads > 64 && kadane_shared_need<T, SegT>(threads) > limit) {
-        threads /= 2;
-        m_block_shrunk = true;
-    }
-    if (kadane_shared_need<T, SegT>(threads) > limit) {
-        return false;
-    }
-    if (m_block_shrunk) {
-        logging::debug("FDMTBoxcar (kKadane): max_boxcar {} in {} B of shared "
-                       "memory: {}-thread blocks",
-                       m_width, limit, threads);
-    }
-    if (threads == 64) {
-        configure_shared_kadane_block<T, SegT, 64>(limit);
-    } else if (threads == 128) {
-        configure_shared_kadane_block<T, SegT, 128>(limit);
+    if constexpr (std::is_integral_v<T>) {
+        if (kadane_shared_need<T, SegT>(kKadaneThreads) > limit) {
+            return false;
+        }
+        configure_shared_kadane_block<T, SegT, kKadaneThreads>(limit);
+        return true;
     } else {
-        configure_shared_kadane_block<T, SegT, 256>(limit);
+        // Exactly the kPrefix kernel's block size (configure_shared: the
+        // width screen is dropped before any shrink, so the choice depends
+        // on the unscreened need only): bit-exact float S/N. Where the
+        // Kadane kernel does not fit at that size, fall back to kPrefix.
+        const SizeType eff_chunk =
+            std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
+        int threads = eff_chunk <= 64 * kItems    ? 64
+                      : eff_chunk <= 128 * kItems ? 128
+                                                  : 256;
+        while (threads > 64 && shared_need<T>(threads, false) > limit) {
+            threads /= 2;
+            m_block_shrunk = true;
+        }
+        if (kadane_shared_need<T, SegT>(threads) > limit) {
+            return false;
+        }
+        if (m_block_shrunk) {
+            logging::debug("FDMTBoxcar (kKadane): max_boxcar {} in {} B of "
+                           "shared memory: {}-thread blocks",
+                           m_width, limit, threads);
+        }
+        if (threads == 64) {
+            configure_shared_kadane_block<T, SegT, 64>(limit);
+        } else if (threads == 128) {
+            configure_shared_kadane_block<T, SegT, 128>(limit);
+        } else {
+            configure_shared_kadane_block<T, SegT, 256>(limit);
+        }
+        return true;
     }
-    return true;
 }
 
 void FDMTBoxcarCudaEngine::init_kadane(bool use_box_smearing,
@@ -969,8 +1010,9 @@ void FDMTBoxcarCudaEngine::launch_score_kadane(const FDMTSearchInput& input,
         constexpr bool kNoise      = decltype(noise_tag)::value;
         constexpr bool kKeep       = decltype(keep_tag)::value;
         const BlockTables bt       = kNoise ? m_block_tables : BlockTables{};
-        if (m_block_threads == 64) {
-            kernel_fdmt_boxcar_kadane<T, SegT, 64, kUseIntGate, kNoise, C,
+        const auto launch          = [&](auto threads_tag) {
+            constexpr int kThreads = decltype(threads_tag)::value;
+            kernel_fdmt_boxcar_kadane<T, SegT, kThreads, kUseIntGate, kNoise, C,
                                       kKeep><<<grid, block, m_smem, stream>>>(
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
@@ -981,30 +1023,15 @@ void FDMTBoxcarCudaEngine::launch_score_kadane(const FDMTSearchInput& input,
                 m_config.skip_cold_prefix, root, raw(m_integer_thresholds),
                 raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
                 m_config.use_trapezoid, gate, bt, raw(m_bright_d), m_bright_q);
+        };
+        if constexpr (std::is_integral_v<T>) {
+            launch(std::integral_constant<int, kKadaneThreads>{});
+        } else if (m_block_threads == 64) {
+            launch(std::integral_constant<int, 64>{});
         } else if (m_block_threads == 128) {
-            kernel_fdmt_boxcar_kadane<T, SegT, 128, kUseIntGate, kNoise, C,
-                                      kKeep><<<grid, block, m_smem, stream>>>(
-                stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
-                raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
-                raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
-                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
-                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
-                m_config.skip_cold_prefix, root, raw(m_integer_thresholds),
-                raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
-                m_config.use_trapezoid, gate, bt, raw(m_bright_d), m_bright_q);
+            launch(std::integral_constant<int, 128>{});
         } else {
-            kernel_fdmt_boxcar_kadane<T, SegT, 256, kUseIntGate, kNoise, C,
-                                      kKeep><<<grid, block, m_smem, stream>>>(
-                stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
-                raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
-                raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
-                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
-                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
-                m_config.skip_cold_prefix, root, raw(m_integer_thresholds),
-                raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
-                m_config.use_trapezoid, gate, bt, raw(m_bright_d), m_bright_q);
+            launch(std::integral_constant<int, 256>{});
         }
     };
 

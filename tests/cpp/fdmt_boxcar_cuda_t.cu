@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -6,6 +7,7 @@
 #include <random>
 #include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <thrust/device_vector.h>
@@ -778,6 +780,89 @@ TEST_CASE("FDMTBoxcar GPU kKadane and kNone support wide boxcars and small "
         }
         append(actual, engine->flush());
         compare(actual, expected);
+    }
+}
+
+TEST_CASE("FDMTBoxcar GPU float kKadane is bit-exact with kPrefix across "
+          "widths and shared-memory limits",
+          "[gpu][parity][boxcar][kadane]") {
+    using namespace algorithms::detail; // NOLINT
+    const Exec gpu_exec{kGPUBackend, 1, 0};
+    const plans::FDMTPlan plan(700, 1200, 7, 2048, 0.001F,
+                               std::vector<IndexType>{-5, 0, 7, 40}, "valid",
+                               1);
+    // waterfalls() rounds to 1/16 (exact float sums in any order); add
+    // unrounded noise so the summation order shows in the S/N bits.
+    auto input = waterfalls(plan, 1, 4);
+    for (SizeType k = 0; k < input.size(); ++k) {
+        const auto extra = test_random::normal<float>(input[k].size(), 7 + k);
+        for (SizeType i = 0; i < input[k].size(); ++i) {
+            input[k][i] += 0.37F * extra[i];
+        }
+    }
+
+    const auto run = [&](const BoxcarConfig& box, SizeType limit) {
+        FDMTEngineConfig cfg{};
+        cfg.use_box_smearing    = true;
+        cfg.int_tree            = false;
+        cfg.exec                = gpu_exec;
+        cfg.max_fuse_levels     = plan.get_niters() - 1;
+        cfg.search_upper_levels = true;
+        cfg.search_only         = true;
+        cfg.boxcar_shared_limit = limit;
+        auto engine             = make_fdmt_boxcar_gpu(
+            plan, box, make_boxcar_plans(plan, box, true), cfg,
+            make_boxcar_driver(make_fdmt_gpu(plan, cfg)));
+        std::vector<RawCandidate> out;
+        for (const auto& block : input) {
+            append(out, engine->execute(std::span<const float>(block)));
+        }
+        append(out, engine->flush());
+        const auto key = [](const RawCandidate& c) {
+            return std::tuple(c.beam_idx, c.dm_idx, c.subband_level,
+                              c.subband_idx, c.begin_sample, c.end_sample,
+                              c.peak_sample, c.filter_idx,
+                              std::bit_cast<uint32_t>(c.snr));
+        };
+        std::ranges::sort(
+            out, [&](const auto& a, const auto& b) { return key(a) < key(b); });
+        return out;
+    };
+
+    // The Stage 2 float prefix sum is associated per block tile, so kKadane
+    // must pick the kPrefix block size (or fall back to kPrefix) everywhere.
+    for (const SizeType max_w :
+         {SizeType{150}, SizeType{1024}, SizeType{2048}, SizeType{4096}}) {
+        for (const SizeType limit :
+             {SizeType{0}, SizeType{60000}, SizeType{45000}, SizeType{38000},
+              SizeType{30000}}) {
+            CAPTURE(max_w, limit);
+            BoxcarConfig box;
+            box.max_boxcar       = max_w;
+            box.wtsp             = 1.5F;
+            box.detect_thresh    = 3.0F;
+            box.max_candidates   = 1U << 20;
+            box.max_cands_per_dm = 0;
+            box.screen_mode      = BoxcarScreenMode::kPrefix;
+            const auto pfx       = run(box, limit);
+            box.screen_mode      = BoxcarScreenMode::kKadane;
+            const auto kad       = run(box, limit);
+            REQUIRE(pfx.size() > 10);
+            REQUIRE(kad.size() == pfx.size());
+            SizeType mismatched = 0;
+            for (SizeType i = 0; i < pfx.size(); ++i) {
+                const auto& a = pfx[i];
+                const auto& b = kad[i];
+                mismatched += static_cast<SizeType>(
+                    a.dm_idx != b.dm_idx || a.begin_sample != b.begin_sample ||
+                    a.end_sample != b.end_sample ||
+                    a.peak_sample != b.peak_sample ||
+                    a.filter_idx != b.filter_idx ||
+                    std::bit_cast<uint32_t>(a.snr) !=
+                        std::bit_cast<uint32_t>(b.snr));
+            }
+            CHECK(mismatched == 0);
+        }
     }
 }
 

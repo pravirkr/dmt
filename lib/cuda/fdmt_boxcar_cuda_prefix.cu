@@ -1178,6 +1178,7 @@ void FDMTBoxcarCudaEngine::launch_score(const FDMTSearchInput& input,
 }
 
 template void FDMTBoxcarCudaEngine::configure_shared<float>();
+template SizeType FDMTBoxcarCudaEngine::shared_need<float>(int, bool) const;
 template void FDMTBoxcarCudaEngine::configure_shared<uint64_t>();
 template void FDMTBoxcarCudaEngine::launch_score<float, float>(
     const FDMTSearchInput&, const LevelGroup&, dim3, dim3, float*);
