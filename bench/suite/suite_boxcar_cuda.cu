@@ -109,10 +109,15 @@ thrust::device_vector<uint8_t> make_packed_noise(SizeType n) {
     return v;
 }
 
-BoxcarConfig make_config(float wtsp, bool packed) {
+BoxcarConfig
+make_config(float wtsp,
+            bool packed,
+            BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+            bool trapezoid               = false) {
     return BoxcarConfig(max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
                         PeakFindingMode::kContiguousPeakPerWidth, 131072, 0,
-                        true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
+                        true, packed ? 8 : 32, packed ? 127.0F : 0.0F,
+                        trapezoid, OverflowPolicy::kDropNew, screen_mode);
 }
 
 /// DMT_BENCH_CHUNK overrides the automatic FDMT chunk length (tuning).
@@ -177,11 +182,14 @@ void bench_transform(benchmark::State& state) {
 }
 
 // FDMT into the plane, then the same GPU scorer over the materialised root.
-void bench_separate(benchmark::State& state, float wtsp) {
+void bench_separate(benchmark::State& state,
+                    float wtsp,
+                    BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                    bool trapezoid               = false) {
     GpuPeakMemory mem;
     mem.begin();
     const auto plan   = make_plan(ref_point());
-    const auto config = make_config(wtsp, false);
+    const auto config = make_config(wtsp, false, screen_mode, trapezoid);
     FDMT fdmt(kFMin, kFMax, kNchans, kNsampsRef, kTsamp, dm_grid(ref_point()),
               true, "valid", bench_gpu_exec());
     const auto planes =
@@ -225,6 +233,8 @@ void bench_separate(benchmark::State& state, float wtsp) {
                     transform + score + dmt.size() * sizeof(float) +
                         wf.size() * sizeof(float),
                     planes.front().widths.size());
+    state.counters["screen_mode"]   = static_cast<double>(screen_mode);
+    state.counters["use_trapezoid"] = trapezoid ? 1.0 : 0.0;
 }
 
 void bench_fft_transform(benchmark::State& state) {
@@ -250,11 +260,14 @@ void bench_fft_transform(benchmark::State& state) {
                     0);
 }
 
-void bench_fft_fused(benchmark::State& state, float wtsp) {
+void bench_fft_fused(benchmark::State& state,
+                     float wtsp,
+                     BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                     bool trapezoid               = false) {
     GpuPeakMemory mem;
     mem.begin();
     auto plan         = make_plan(ref_point());
-    const auto config = make_config(wtsp, false);
+    const auto config = make_config(wtsp, false, screen_mode, trapezoid);
     algorithms::FDMTFFTBoxcar search(std::move(plan), config, true,
                                      bench_gpu_exec());
     const auto wf = make_noise(kNchans * kNsampsRef);
@@ -279,6 +292,8 @@ void bench_fft_fused(benchmark::State& state, float wtsp) {
                     search.get_memory_usage().total() +
                         wf.size() * sizeof(float),
                     search.get_search_plans().front().widths.size());
+    state.counters["screen_mode"]   = static_cast<double>(screen_mode);
+    state.counters["use_trapezoid"] = trapezoid ? 1.0 : 0.0;
     state.counters["chunk_nsamps"] =
         static_cast<double>(search.get_chunk_nsamps());
     state.counters["candidates_per_block"] = static_cast<double>(emitted);
@@ -349,12 +364,15 @@ std::shared_ptr<GpuContext> gpu_context(const std::string& key,
 void bench_fused(benchmark::State& state,
                  float wtsp,
                  SizeType subband_depth,
-                 bool packed) {
+                 bool packed,
+                 BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                 bool trapezoid               = false) {
     auto plan         = make_plan(ref_point(), subband_depth);
-    const auto config = make_config(wtsp, packed);
-    auto ctx =
-        gpu_context(fmt::format("fused/{}/{}/{}", wtsp, subband_depth, packed),
-                    std::move(plan), config);
+    const auto config = make_config(wtsp, packed, screen_mode, trapezoid);
+    auto ctx          = gpu_context(
+        fmt::format("fused/{}/{}/{}/{}/{}", wtsp, subband_depth, packed,
+                    screen_mode_name(screen_mode), trapezoid),
+        std::move(plan), config);
     if (!ctx->error.empty()) {
         state.SkipWithError(ctx->error);
         return;
@@ -373,6 +391,8 @@ void bench_fused(benchmark::State& state,
                     search.get_search_plans().front().widths.size());
     state.counters["input_nbits"]   = packed ? 8 : 32;
     state.counters["subband_depth"] = static_cast<double>(subband_depth);
+    state.counters["screen_mode"]   = static_cast<double>(screen_mode);
+    state.counters["use_trapezoid"] = trapezoid ? 1.0 : 0.0;
     state.counters["chunk_nsamps"] =
         static_cast<double>(search.get_chunk_nsamps());
     state.counters["fuse_levels"] =
@@ -383,14 +403,21 @@ void bench_fused(benchmark::State& state,
 
 /// One real-time sweep point (suite_common.hpp rt_points()): FDMTBoxcar
 /// at depth 4, device-resident, default memory budget.
-void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
+void bench_rt(benchmark::State& state,
+              RtPoint p,
+              bool packed,
+              BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+              bool trapezoid               = false) {
     auto plan = make_rt_plan(p);
     const BoxcarConfig config(rt_max_boxcar(p), kRtWtsp, 6.0F,
                               packed ? 12.0F : 1.0F,
                               PeakFindingMode::kContiguousPeakPerWidth, 131072,
-                              0, true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
+                              0, true, packed ? 8 : 32, packed ? 127.0F : 0.0F,
+                              trapezoid, OverflowPolicy::kDropNew, screen_mode);
     auto ctx =
-        gpu_context(rt_name(DMT_GPU_NAME, p, packed), std::move(plan), config);
+        gpu_context(fmt::format("{}/{}/{}", rt_name(DMT_GPU_NAME, p, packed),
+                                screen_mode_name(screen_mode), trapezoid),
+                    std::move(plan), config);
     if (!ctx->error.empty()) {
         state.SkipWithError(ctx->error);
         return;
@@ -419,7 +446,9 @@ void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
     state.counters["max_boxcar"]    = static_cast<double>(rt_max_boxcar(p));
     state.counters["nwidths"] =
         static_cast<double>(search.get_search_plans().front().widths.size());
-    state.counters["input_nbits"] = packed ? 8 : 32;
+    state.counters["input_nbits"]   = packed ? 8 : 32;
+    state.counters["screen_mode"]   = static_cast<double>(screen_mode);
+    state.counters["use_trapezoid"] = trapezoid ? 1.0 : 0.0;
     state.counters["chunk_nsamps"] =
         static_cast<double>(search.get_chunk_nsamps());
     SizeType rows = 0;
@@ -433,7 +462,9 @@ void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
 }
 
 [[maybe_unused]] const bool kRegistered = [] {
-    const auto cfg = suite_config().name;
+    const auto cfg                              = suite_config().name;
+    const std::vector<BoxcarScreenMode> screens = boxcar_screen_modes();
+    const std::vector<bool> trapezoids          = boxcar_trapezoid_modes();
     // A transform that cannot fit the device (FDMT-FFT on UWL needs
     // 510k-sample segments) is reported as skipped, not aborted.
     const auto reg = [](std::string name, auto fn) {
@@ -454,11 +485,21 @@ void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
     reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fft_transform", cfg),
         [](benchmark::State& s) { bench_fft_transform(s); });
     for (const float wtsp : wtsp_sweep()) {
-        reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fft_fused/wtsp:{:g}", cfg,
-                        wtsp),
-            [wtsp](benchmark::State& s) { bench_fft_fused(s, wtsp); });
-        reg(fmt::format("BM_fdmt_boxcar_cuda/{}/separate/wtsp:{:g}", cfg, wtsp),
-            [wtsp](benchmark::State& s) { bench_separate(s, wtsp); });
+        for (const bool trap : trapezoids) {
+            for (const auto screen : screens) {
+                const auto suffix = boxcar_mode_suffix(screen, trap);
+                reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fft_fused/wtsp:{:g}{}",
+                                cfg, wtsp, suffix),
+                    [wtsp, screen, trap](benchmark::State& s) {
+                        bench_fft_fused(s, wtsp, screen, trap);
+                    });
+                reg(fmt::format("BM_fdmt_boxcar_cuda/{}/separate/wtsp:{:g}{}",
+                                cfg, wtsp, suffix),
+                    [wtsp, screen, trap](benchmark::State& s) {
+                        bench_separate(s, wtsp, screen, trap);
+                    });
+            }
+        }
         std::vector<SizeType> depths{0};
         if (suite_config().subband_depth != 0) {
             depths.push_back(suite_config().subband_depth);
@@ -471,26 +512,38 @@ void bench_rt(benchmark::State& state, RtPoint p, bool packed) {
             }
         }
         for (const auto sb : depths) {
-            reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}", cfg,
-                            wtsp, sb),
-                [wtsp, sb](benchmark::State& s) {
-                    bench_fused(s, wtsp, sb, false);
-                });
-            reg(fmt::format(
-                    "BM_fdmt_boxcar_cuda/{}/fused_uint8/wtsp:{:g}/sb:{}", cfg,
-                    wtsp, sb),
-                [wtsp, sb](benchmark::State& s) {
-                    bench_fused(s, wtsp, sb, true);
-                });
+            for (const bool trap : trapezoids) {
+                for (const auto screen : screens) {
+                    const auto suffix = boxcar_mode_suffix(screen, trap);
+                    reg(fmt::format(
+                            "BM_fdmt_boxcar_cuda/{}/fused/wtsp:{:g}/sb:{}{}",
+                            cfg, wtsp, sb, suffix),
+                        [wtsp, sb, screen, trap](benchmark::State& s) {
+                            bench_fused(s, wtsp, sb, false, screen, trap);
+                        });
+                    reg(fmt::format("BM_fdmt_boxcar_cuda/{}/fused_uint8/"
+                                    "wtsp:{:g}/sb:{}{}",
+                                    cfg, wtsp, sb, suffix),
+                        [wtsp, sb, screen, trap](benchmark::State& s) {
+                            bench_fused(s, wtsp, sb, true, screen, trap);
+                        });
+                }
+            }
         }
     }
     if (rt_sweep_enabled()) {
         for (const auto& p : rt_points()) {
             for (const bool packed : {true, false}) {
-                reg(rt_name(DMT_GPU_NAME, p, packed),
-                    [p, packed](benchmark::State& s) {
-                        bench_rt(s, p, packed);
-                    });
+                for (const bool trap : trapezoids) {
+                    for (const auto screen : screens) {
+                        reg(fmt::format("{}{}",
+                                        rt_name(DMT_GPU_NAME, p, packed),
+                                        boxcar_mode_suffix(screen, trap)),
+                            [p, packed, screen, trap](benchmark::State& s) {
+                                bench_rt(s, p, packed, screen, trap);
+                            });
+                    }
+                }
             }
         }
     }

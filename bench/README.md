@@ -90,7 +90,13 @@ packed 8-bit, with the default 10 GiB memory budget:
 
 They warm the search histories first and report the real-time factor,
 working memory, chunk length and candidates per block. `DMT_BENCH_CHUNK`
-overrides the automatic chunk length (tuning).
+overrides the automatic chunk length (tuning). `--screen-mode`
+(`DMT_BENCH_SCREEN`: comma-separated from `prefix`, `kadane`,
+`kadane_surrogate`, `none`, or `all`) and `--trapezoid`
+(`DMT_BENCH_TRAPEZOID`: `0`, `1` or `both`) sweep Stage-1 tile screening
+and `{1, 2, 1}` trapezoid filters on both CPU and GPU; for focused A/B
+timing and candidate-parity tables, run
+`python bench/scripts/bench_boxcar_screen.py`.
 
 **Peak memory** is measured next to every `main` and `boxcar` timing, in the
 same run (`bench/suite/suite_memory.hpp`, `suite_memory_gpu.cuh`):
@@ -195,6 +201,8 @@ smoke tests only.
 --no-cpu / --no-gpu (alias --no-cuda)
 --quick            1 repetition, short minimum time
 --filter REGEX     extra filter AND-ed with the suite (e.g. 'FDMT/')
+--screen-mode SPEC boxcar screen mode(s): prefix, kadane, kadane_surrogate, none, all
+--trapezoid MODE   boxcar trapezoid sweep: 0, 1, both
 ```
 
 The raw binary can also be run directly, e.g.

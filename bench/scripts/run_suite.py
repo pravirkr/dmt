@@ -40,6 +40,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BINARY = "dmt_bench_suite"
+SCREEN_MODES = ("prefix", "kadane", "kadane_surrogate", "none")
+
+
+def validate_screen_mode(spec: str) -> str:
+    spec = spec.strip()
+    if not spec or spec == "all":
+        return spec
+    tokens = [t.strip() for t in spec.split(",") if t.strip()]
+    bad = [t for t in tokens if t not in SCREEN_MODES]
+    if not tokens or bad:
+        sys.exit(
+            f"invalid --screen-mode {spec!r}: expected comma-separated values "
+            f"from {', '.join((*SCREEN_MODES, 'all'))}"
+        )
+    return ",".join(tokens)
 
 
 def compact_benchmark_json(path: Path) -> None:
@@ -114,7 +129,10 @@ def stale_reason(binary: Path) -> str:
     status = _run(["git", "status", "--porcelain", "-uall", "--", *SOURCE_PATHS])
     edited = [REPO / line[3:].split(" -> ")[-1] for line in status.splitlines()]
     if edited and not dirty:
-        return f"it was built from a clean tree; {len(edited)} source file(s) changed since"
+        return (
+            f"it was built from a clean tree; "
+            f"{len(edited)} source file(s) changed since"
+        )
     built = binary.stat().st_mtime
     newer = [p for p in edited if p.is_file() and p.stat().st_mtime > built]
     if newer:
@@ -204,7 +222,7 @@ def results_root(suite: str, config: str) -> Path:
     return REPO / "bench" / "results" / ("cfdmt" if suite == "cfdmt" else config)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument(
         "--machine",
@@ -262,6 +280,20 @@ def main() -> None:
     ap.add_argument("--quick", action="store_true", help="1 repetition, short runs")
     ap.add_argument("--filter", default="", help="extra regex AND-ed with the suite")
     ap.add_argument(
+        "--screen-mode",
+        default="",
+        help="Stage-1 screen mode(s) for --suite boxcar (sets DMT_BENCH_SCREEN): "
+        "comma-separated from prefix, kadane, kadane_surrogate, none, or 'all' "
+        "(default: prefix)",
+    )
+    ap.add_argument(
+        "--trapezoid",
+        default="",
+        choices=["", "0", "1", "both"],
+        help="trapezoid filter sweep for --suite boxcar (sets DMT_BENCH_TRAPEZOID: "
+        "0 boxcar only, 1 trapezoid only, both side by side)",
+    )
+    ap.add_argument(
         "--fftw-planner",
         default="measure",
         choices=["estimate", "measure", "patient"],
@@ -280,6 +312,7 @@ def main() -> None:
         "commit, or sources edited after the build); recorded in the results",
     )
     args = ap.parse_args()
+    screen_spec = validate_screen_mode(args.screen_mode)
 
     binary = find_binary(args.build_dir)
     stale = stale_reason(binary)
@@ -316,6 +349,11 @@ def main() -> None:
         "threads": args.threads.replace(",", " "),
         "fftw_planner": args.fftw_planner,
         "config": args.config if args.suite != "cfdmt" else "-",
+        "screen_mode": (
+            screen_spec or os.environ.get("DMT_BENCH_SCREEN", "prefix")
+            if args.suite == "boxcar"
+            else "-"
+        ),
         "placement": args.placement,
         "virtualized": virtualized(),
         # The binary's own identity (dmt_build_*) is added by the suite.
@@ -342,6 +380,8 @@ def main() -> None:
         "DMT_FFTW_PLANNER": args.fftw_planner,
         "DMT_FFTW_WISDOM": wisdom,
         "DMT_BENCH_CONFIG": args.config,
+        **({"DMT_BENCH_SCREEN": screen_spec} if screen_spec else {}),
+        **({"DMT_BENCH_TRAPEZOID": args.trapezoid} if args.trapezoid else {}),
     }
 
     if args.suite == "main" and args.config == "parkes_uwl":

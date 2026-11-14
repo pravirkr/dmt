@@ -24,6 +24,7 @@
 #include <fmt/format.h>
 
 #include "dmt/common/build_info.hpp"
+#include "dmt/common/candidate.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
@@ -553,6 +554,111 @@ std::shared_ptr<T> cached_context(const std::string& key, Make&& make) {
 inline std::vector<float> wtsp_sweep() {
     return suite_config().name == "parkes_uwl" ? std::vector<float>{1.5F, 2.0F}
                                                : std::vector<float>{1.0F, 1.5F};
+}
+
+inline std::string_view screen_mode_name(BoxcarScreenMode mode) {
+    switch (mode) {
+    case BoxcarScreenMode::kPrefix:
+        return "prefix";
+    case BoxcarScreenMode::kKadane:
+        return "kadane";
+    case BoxcarScreenMode::kKadaneSurrogate:
+        return "kadane_surrogate";
+    case BoxcarScreenMode::kNone:
+        return "none";
+    }
+    return "unknown";
+}
+
+inline BoxcarScreenMode parse_screen_mode(std::string_view token) {
+    if (token == "prefix") {
+        return BoxcarScreenMode::kPrefix;
+    }
+    if (token == "kadane") {
+        return BoxcarScreenMode::kKadane;
+    }
+    if (token == "kadane_surrogate") {
+        return BoxcarScreenMode::kKadaneSurrogate;
+    }
+    if (token == "none") {
+        return BoxcarScreenMode::kNone;
+    }
+    throw std::invalid_argument(
+        fmt::format("DMT_BENCH_SCREEN token '{}': expected prefix, kadane, "
+                    "kadane_surrogate, none or all",
+                    token));
+}
+
+/// True when DMT_BENCH_SCREEN was explicitly set in the environment.
+inline bool boxcar_screen_explicit() {
+    const char* env = std::getenv("DMT_BENCH_SCREEN"); // NOLINT
+    return env != nullptr && *env != '\0';
+}
+
+/// Boxcar Stage-1 screen modes: DMT_BENCH_SCREEN (comma-separated, or "all";
+/// default "prefix" so existing published suite names stay unchanged).
+inline std::vector<BoxcarScreenMode> boxcar_screen_modes() {
+    const char* env = std::getenv("DMT_BENCH_SCREEN"); // NOLINT
+    if (env == nullptr || *env == '\0') {
+        return {BoxcarScreenMode::kPrefix};
+    }
+    const std::string_view spec(env);
+    if (spec == "all") {
+        return {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
+                BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone};
+    }
+    std::vector<BoxcarScreenMode> modes;
+    std::size_t start = 0;
+    while (start < spec.size()) {
+        const auto end   = spec.find(',', start);
+        const auto token = spec.substr(start, end - start);
+        if (!token.empty()) {
+            const auto mode = parse_screen_mode(token);
+            if (std::find(modes.begin(), modes.end(), mode) == modes.end()) {
+                modes.push_back(mode);
+            }
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    if (modes.empty()) {
+        throw std::invalid_argument("DMT_BENCH_SCREEN must not be empty");
+    }
+    return modes;
+}
+
+/// Trapezoid filter toggle: DMT_BENCH_TRAPEZOID ("0", "1", or "both"/"0,1";
+/// default {false}).
+inline std::vector<bool> boxcar_trapezoid_modes() {
+    const char* env = std::getenv("DMT_BENCH_TRAPEZOID"); // NOLINT
+    if (env == nullptr || *env == '\0' || std::string_view(env) == "0" ||
+        std::string_view(env) == "false") {
+        return {false};
+    }
+    const std::string_view spec(env);
+    if (spec == "1" || spec == "true") {
+        return {true};
+    }
+    if (spec == "both" || spec == "0,1" || spec == "all") {
+        return {false, true};
+    }
+    throw std::invalid_argument(
+        fmt::format("DMT_BENCH_TRAPEZOID={}: expected 0, 1 or both", spec));
+}
+
+/// Name suffix for non-default or explicitly requested screen/trapezoid modes.
+inline std::string boxcar_mode_suffix(BoxcarScreenMode mode,
+                                      bool trapezoid = false) {
+    std::string suffix;
+    if (trapezoid) {
+        suffix += "/trapezoid";
+    }
+    if (boxcar_screen_explicit() || mode != BoxcarScreenMode::kPrefix) {
+        suffix += fmt::format("/screen:{}", screen_mode_name(mode));
+    }
+    return suffix;
 }
 
 } // namespace dmt::bench_suite

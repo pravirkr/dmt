@@ -6,6 +6,7 @@ import pytest
 import dmtlib
 from dmtlib import (
     BoxcarConfig,
+    BoxcarScreenMode,
     FDMTBoxcar,
     FDMTFFTBoxcar,
     FDMTPlan,
@@ -22,9 +23,9 @@ def backends() -> list[str]:
     # The GPU backend only with a device for it (conftest's probe), so these
     # cases skip, rather than fail, on a GPU build without a GPU.
     try:
-        from .conftest import _usable
+        from .conftest import _usable  # noqa: PLC0415
     except ImportError:
-        from conftest import _usable
+        from conftest import _usable  # noqa: PLC0415
     names = ["cpu"]
     names += [b for b in ("cuda", "hip") if _usable(b)]
     return names
@@ -84,10 +85,7 @@ def test_noise_follows_the_analytical_scale() -> None:
 def match_runs(
     got: np.ndarray, ref: np.ndarray, thresh: float, rtol: float, atol: float = 0.0
 ) -> None:
-    """Per row, runs of both sets whose extents overlap form a cluster (a
-    near-threshold point may split or join runs); each cluster's peak S/N
-    agrees within rtol (plus atol S/N units), and a cluster on one side only
-    is near threshold."""
+    """Compare overlapping excursion clusters per row within rtol + atol."""
     row = ("beam_idx", "dm_idx", "filter_idx")
     tagged = [(c, side) for side, cands in ((0, got), (1, ref)) for c in cands]
     tagged.sort(key=lambda x: (*(int(x[0][f]) for f in row), int(x[0]["begin_sample"])))
@@ -258,3 +256,138 @@ def test_candidate_frontier(backend: str) -> None:
     result = search.drain()
     assert np.all(result.candidates["begin_sample"] >= frontier)
     assert search.get_candidate_frontier() == search.searched_nsamps
+
+
+def _sorted_fft_cands(parts: list[np.ndarray]) -> np.ndarray:
+    data = np.concatenate(parts)
+    fields = [
+        "beam_idx",
+        "subband_level",
+        "subband_idx",
+        "dm_idx",
+        "filter_idx",
+        "begin_sample",
+        "end_sample",
+        "peak_sample",
+    ]
+    return np.sort(data, order=fields)
+
+
+@pytest.mark.parametrize("backend", backends())
+@pytest.mark.parametrize("frac", [False, True])
+@pytest.mark.parametrize("trapezoid", [False, True])
+def test_fft_boxcar_exact_screen_modes_parity(
+    backend: str, frac: bool, trapezoid: bool
+) -> None:
+    rng = np.random.default_rng(19)
+    plan = FDMTPlan(1100, 1500, 16, 512, 0.001, dt_grid=[0, 5, 17, 39])
+    kill = [1, 1, 0, 1] * 4
+    blocks = []
+    for k in range(3):
+        blk = np.round(rng.standard_normal((2, 16, 512), dtype=np.float32) * 8) / 8
+        if k == 1:
+            blk[:, :10, 200:216] += 3.0
+        blocks.append(blk)
+
+    results = {}
+    for screen in (
+        BoxcarScreenMode.PREFIX,
+        BoxcarScreenMode.KADANE,
+        BoxcarScreenMode.NONE,
+    ):
+        cfg = BoxcarConfig(
+            32,
+            wtsp=1.5,
+            detect_thresh=3.2,
+            max_cands_per_dm=0,
+            use_trapezoid=trapezoid,
+            screen_mode=screen,
+        )
+        eng = FDMTFFTBoxcar(
+            plan,
+            cfg,
+            nthreads=2,
+            nbeams=2,
+            fractional_delays=frac,
+            kill_mask=kill,
+            backend=backend,
+        )
+        assert eng.config.screen_mode == screen
+        parts = [eng.execute(b).candidates for b in blocks]
+        parts.append(eng.drain().candidates)
+        results[screen] = _sorted_fft_cands(parts)
+
+    ref = results[BoxcarScreenMode.PREFIX]
+    assert len(ref) > 0
+    for screen in (BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE):
+        got = results[screen]
+        assert len(got) == len(ref)
+        for name in ref.dtype.names:
+            np.testing.assert_array_equal(got[name], ref[name])
+    assert "BoxcarScreenMode" in dmtlib.FDMTFFTBoxcar.__doc__
+
+
+@pytest.mark.parametrize("backend", backends())
+@pytest.mark.parametrize("trapezoid", [False, True])
+def test_fft_boxcar_kadane_surrogate_pulse_and_quiet_noise(
+    backend: str, trapezoid: bool
+) -> None:
+    rng = np.random.default_rng(53)
+    plan = FDMTPlan(1100, 1500, NCHANS, NSAMPS, 0.001, dt_grid=GRID)
+    kill = np.ones(NCHANS, dtype=np.uint8)
+    kill[4:8] = 0
+
+    # Quiet noise stream at 6.5 sigma yields zero candidates.
+    quiet_cfg = BoxcarConfig(
+        64,
+        wtsp=1.5,
+        detect_thresh=6.5,
+        use_trapezoid=trapezoid,
+        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
+    )
+    quiet = FDMTFFTBoxcar(plan, quiet_cfg, nthreads=2, kill_mask=kill, backend=backend)
+    quiet_parts = [
+        quiet.execute(
+            rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32)
+        ).candidates
+        for _ in range(2)
+    ]
+    quiet_parts.append(quiet.drain().candidates)
+    assert len(np.concatenate(quiet_parts)) == 0
+
+    # Dispersed pulse arriving inside the final output_latency window, recovered
+    # via multi-block execute() + drain().
+    blocks = [rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32) for _ in range(2)]
+    add_frb_track(blocks[1], plan, 25, 3.2, NSAMPS - 18, 6)
+
+    found = {}
+    for screen in (BoxcarScreenMode.PREFIX, BoxcarScreenMode.KADANE_SURROGATE):
+        cfg = BoxcarConfig(
+            64,
+            wtsp=1.5,
+            detect_thresh=7.5,
+            use_trapezoid=trapezoid,
+            screen_mode=screen,
+        )
+        eng = FDMTFFTBoxcar(plan, cfg, nthreads=2, kill_mask=kill, backend=backend)
+        frontier = eng.get_candidate_frontier()
+        parts = []
+        for blk in blocks:
+            res = eng.execute(blk)
+            assert np.all(res.candidates["begin_sample"] >= frontier)
+            frontier = eng.get_candidate_frontier()
+            parts.append(res.candidates)
+        last = eng.drain()
+        assert np.all(last.candidates["begin_sample"] >= frontier)
+        assert eng.get_candidate_frontier() == eng.searched_nsamps
+        found[screen] = np.concatenate([*parts, last.candidates])
+
+    ref_best = best(found[BoxcarScreenMode.PREFIX])
+    sur_best = best(found[BoxcarScreenMode.KADANE_SURROGATE])
+    assert abs(int(sur_best["dm_idx"]) - int(ref_best["dm_idx"])) <= 1
+    assert abs(int(sur_best["peak_sample"]) - int(ref_best["peak_sample"])) <= 6
+    assert (
+        0.90 * float(ref_best["snr"])
+        <= float(sur_best["snr"])
+        <= (1.15 * float(ref_best["snr"]))
+    )

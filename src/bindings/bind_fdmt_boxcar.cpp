@@ -60,16 +60,49 @@ void bind_fdmt_boxcar(py::module_& mod) {
         )doc")
         .value("DROP_NEW", OverflowPolicy::kDropNew)
         .value("KEEP_BRIGHTEST", OverflowPolicy::kKeepBrightest);
-    py::class_<BoxcarConfig>(mod, "BoxcarConfig")
+    py::enum_<BoxcarScreenMode>(
+        mod, "BoxcarScreenMode",
+        "Stage-1 tile screening / scoring mode for analytical boxcar search.")
+        .value("PREFIX", BoxcarScreenMode::kPrefix,
+               "Prefix-sum / range-minimum tile screen (default, exact).")
+        .value("KADANE", BoxcarScreenMode::kKadane,
+               "Lossless multi-bucket Kadane tile gate + exact Stage-2 "
+               "prefix-sum scoring.")
+        .value("KADANE_SURROGATE", BoxcarScreenMode::kKadaneSurrogate,
+               "Standalone multi-bias Kadane excursion detector with exact "
+               "lookback replay (skips full-stream Stage-2 prefix scan).")
+        .value("NONE", BoxcarScreenMode::kNone,
+               "Disable Stage-1 screening and score every tile directly "
+               "(exact).");
+    py::class_<BoxcarConfig>(mod, "BoxcarConfig", R"doc(
+        Analytical boxcar and trapezoid matched-filter search settings.
+
+        ``max_boxcar`` (1..2^20, at most 4096 widths; 1..4096 for
+        ``KADANE_SURROGATE``) bounds the geometrically spaced width bank
+        generated with ``wtsp`` (:func:`generate_box_width_trials`). Set
+        ``use_trapezoid=True`` to replace widths >= 3 with ``{1, 2, 1}``
+        half-weight edge-tapered trapezoids. ``input_nbits`` selects float32
+        (32) or packed unsigned codes (1/2/4/8/16) calibrated by
+        ``input_mean`` and ``noise_sigma``. ``overflow_policy``
+        (:class:`OverflowPolicy`, default ``DROP_NEW``) chooses between
+        first-come overflow and exact ``KEEP_BRIGHTEST`` top-S/N selection.
+        ``screen_mode`` selects the Stage-1 tile screening / scoring algorithm
+        (:class:`BoxcarScreenMode`, default ``BoxcarScreenMode.PREFIX``):
+        ``PREFIX``, ``KADANE``, and ``NONE`` produce identical exact
+        candidates; ``KADANE_SURROGATE`` replaces the full-stream prefix scan
+        with multi-bias Kadane excursion screening and local replay.
+        )doc")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, bool, SizeType, float, bool, OverflowPolicy>(),
+                      SizeType, bool, SizeType, float, bool, OverflowPolicy,
+                      BoxcarScreenMode>(),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
              "max_candidates"_a = 131072, "max_cands_per_dm"_a = 4096,
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
              "input_mean"_a = 0.0F, "use_trapezoid"_a = false,
-             "overflow_policy"_a = OverflowPolicy::kDropNew)
+             "overflow_policy"_a = OverflowPolicy::kDropNew,
+             "screen_mode"_a     = BoxcarScreenMode::kPrefix)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -81,7 +114,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readwrite("max_candidates", &BoxcarConfig::max_candidates)
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)
         .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix)
-        .def_readwrite("overflow_policy", &BoxcarConfig::overflow_policy);
+        .def_readwrite("overflow_policy", &BoxcarConfig::overflow_policy)
+        .def_readwrite("screen_mode", &BoxcarConfig::screen_mode);
     py::class_<BoxcarResult>(mod, "BoxcarResult")
         .def_readonly("candidates", &BoxcarResult::candidates)
         .def_readonly("input_sample_begin", &BoxcarResult::input_sample_begin)
@@ -185,6 +219,12 @@ void bind_fdmt_boxcar(py::module_& mod) {
         block is copied once to zero them; on a GPU the transform reads them
         as zero, without a copy. :meth:`execute` also takes a mask per block
         (float32 input), ANDed with this one.
+
+        ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``PREFIX``)
+        chooses the Stage-1 tile screening / scoring mode on both CPU and GPU:
+        ``PREFIX``, ``KADANE`` (lossless multi-bucket Kadane gate), and
+        ``NONE`` emit identical exact candidates; ``KADANE_SURROGATE`` uses
+        standalone multi-bias Kadane excursion detection with local replay.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,
@@ -366,7 +406,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
         until it fits. Raises ``ValueError`` when even the shortest segment
         does not fit. GPU host-input staging is allocated lazily, outside
-        that check, as on FDMTBoxcar.
+        that check, as on FDMTBoxcar. ``config.screen_mode``
+        (:class:`BoxcarScreenMode`) applies to every segment's DM-row search
+        as on :class:`FDMTBoxcar`.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
