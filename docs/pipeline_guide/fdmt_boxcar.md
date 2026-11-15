@@ -303,20 +303,33 @@ the integer thresholds use the filter weight `2 (W - w_edge)`. Boxcar-only is
 the default; a mode that searches trapezoids alongside the boxcars would be
 added as a separate option.
 
-**Width screen.** With dense width grids, consecutive widths
-`[w_lo, w_hi]` with `w_hi < 2 w_lo` form a group. Before any width in a group
-is scored, one bound is checked per endpoint: the prefix sum at `t` minus the
-smallest prefix sum over `[t - w_hi, t - w_lo]` (a sparse-table range
-minimum). This bound is compared with the group's smallest threshold, and
-only the groups that pass are scored width by width. The screen is exact, so
-the candidates are the same with or without it. It is used only when it
-merges widths, i.e. when there are fewer than half as many groups plus
-range-minimum levels as widths. In practice that means `wtsp=1` grids
-(e.g. 195 widths in 8 groups). `wtsp>=1.5` grids are unaffected. On the
-CPU, the screen made `meerkat_lband` float32 at `wtsp=1` 4.4× faster. With
-`use_trapezoid`, the GPU turns the screen off, and the CPU finds no group
-worth screening (trapezoid widths stay single), so trapezoid searches pay
-the full per-width cost.
+**Width screen (`screen_mode`).** `BoxcarConfig.screen_mode`
+(`dmtlib.BoxcarScreenMode`, C++ `dmt::BoxcarScreenMode`) selects how quiet
+tiles are rejected before per-width scoring:
+
+- `AUTO` (default): picks the fastest lossless screen for the backend —
+  `KADANE` on the CPU and `PREFIX` on a GPU.
+- `KADANE` (lossless, `max_boxcar` up to $2^{20}$): partitions the width bank
+  into up to three convex-hull buckets and runs a biased Kadane scan per
+  bucket (plus a bounded `LagWindow` for `{1, 2, 1}` trapezoid edge lags). A
+  bucket that never reaches its cut cannot cross any filter threshold in that
+  bucket; quiet tiles skip Stage-2 prefix sums altogether. Unlike `PREFIX`,
+  `KADANE` screens sparse geometric banks (`wtsp >= 1.5`) and `use_trapezoid`
+  equally well, with identical candidates.
+- `PREFIX` (lossless, `max_boxcar` up to $2^{20}$): groups consecutive boxcar
+  widths $[w_{\mathrm{lo}}, w_{\mathrm{hi}}]$ with $w_{\mathrm{hi}} < 2 w_{\mathrm{lo}}$
+  and bounds all widths in a group by the running prefix sum at `t` minus a
+  sparse-table range minimum over $[t - w_{\mathrm{hi}}, t - w_{\mathrm{lo}}]$.
+  Used when groups plus range-minimum levels are fewer than half the widths
+  (dense `wtsp=1` grids); `wtsp >= 1.5` and `use_trapezoid` widths stay
+  ungrouped.
+- `KADANE_SURROGATE` (approximate, `max_boxcar` up to 4096): standalone
+  multi-bias Kadane excursion detector with local lookback replay, skipping
+  the full-stream Stage-2 prefix scan. Candidate counts and S/N are
+  approximate rather than exact.
+- `NONE` (lossless, `max_boxcar` up to $2^{20}$): disables Stage-1 screening
+  and scores every width on every tile directly (`AUTO`, `KADANE`, `PREFIX`
+  and `NONE` emit identical candidates).
 
 `CONTIGUOUS_PEAK_PER_WIDTH`
 : One peak per contiguous threshold excursion of each DM/width response.
@@ -495,24 +508,29 @@ Python's owned output copies.
 :::{dropdown} How the scorer works on CPU and GPU
 :icon: info
 
-Both backends score a row tile by tile from running prefix sums, and run the
-peak bookkeeping only for tiles that need it. A cheap pass first checks every
-width of the tile against its threshold. When no window crosses and no
-excursion is open, every peak mode leaves its state unchanged, so the tile is
-done; on noise that is nearly every tile, and the cost per window is one
-prefix difference and one comparison.
+Both backends score rows tile by tile and run full peak bookkeeping only on
+tiles with a threshold crossing or an open excursion; on noise, almost every
+tile stops after Stage 1.
 
-- CPU: double prefixes (uint64 for packed input), slid from tile to tile;
-  the carried samples are read once per call and written once at its end.
-  Tiles grow with the widest boxcar (1024 to 4096 samples, about four times
-  the lookback) so rebuilding the lookback per tile stays cheap, and every
-  row of a level's planes shares one dynamically scheduled loop.
-- GPU: one thread block per (beam, DM) row. The prefix of each 1024-sample
-  tile is a warp-shuffle scan into a float32 ring in shared memory (a power of
-  two of at least `max_boxcar + 1024` entries), rebased after every tile so
-  values stay near the magnitude of one tile. Width and threshold tables are
-  staged in shared memory. Tiles with a crossing or an open excursion run the
-  exact ordered run summaries.
+- CPU (`AUTO` $\to$ `KADANE`): batches of rows are transposed in SIMD
+  registers (`float32`, or exact clamped `int32` for packed input when
+  bounds fit) across 256-sample tiles and scanned by the multi-bucket Kadane
+  gate (with `LagWindow` tail tracking for `{1, 2, 1}` trapezoids). Quiet
+  tiles never build a Stage-2 prefix array; only rows whose gate fires or
+  that carry an open excursion build lazy `double` (`uint64` for packed
+  input) running prefixes and run exact `score_tile` bookkeeping. Explicit
+  `PREFIX` / `NONE` instead slide `double` / `uint64` prefixes across 1024–4096
+  sample tiles.
+- GPU (`AUTO` $\to$ `PREFIX`): one thread block per (beam, DM) row. The prefix
+  of each 1024-sample tile is a warp-shuffle scan into a float32 ring in
+  shared memory (a power of two of at least `max_boxcar + 1024` entries),
+  rebased after every tile so values stay near the magnitude of one tile,
+  with sparse range-minimum screening on dense banks. Width and threshold
+  tables are staged in shared memory, and tiles with a crossing or an open
+  excursion run the exact ordered run summaries. Explicit `KADANE` runs a
+  warp/block tropical-monoid Kadane gate before Stage-2 prefix scoring, and
+  `KADANE_SURROGATE` runs multi-strip Kadane excursion detection with local
+  replay.
 :::
 
 ```{note}

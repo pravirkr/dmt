@@ -104,7 +104,7 @@ void bench_fdmt_boxcar_stream(
     float wtsp,
     SizeType subband_depth,
     bool packed                  = false,
-    BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+    BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
     bool trapezoid               = false) {
     const auto& cfg = suite_config();
     const Point point{Sweep::kNdms, cfg.nsamps_ref, cfg.dm_max_ref,
@@ -172,7 +172,7 @@ void bench_rt_cpu(benchmark::State& state,
                   RtPoint p,
                   bool packed,
                   int threads,
-                  BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                  BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
                   bool trapezoid               = false) {
     auto plan = make_rt_plan(p);
     const BoxcarConfig config(

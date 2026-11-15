@@ -39,8 +39,8 @@ enum class BoxcarScreenMode : uint8_t {
     /// Lossless multi-bucket Kadane gate + Stage-2 scoring (max_boxcar
     /// 1..2^20).
     kKadane,
-    /// Multi-bias Kadane scorer, skipping Stage-2 prefix scan (max_boxcar
-    /// 1..4096).
+    /// Approximate multi-bias Kadane scorer, skipping Stage-2 prefix scan
+    /// (max_boxcar 1..4096).
     kKadaneSurrogate,
     /// Disable Stage-1 screening; score every tile directly (max_boxcar
     /// 1..2^20).
@@ -112,8 +112,9 @@ struct BoxcarConfig {
     bool use_trapezoid = false;
     /// Default kDropNew; see OverflowPolicy.
     OverflowPolicy overflow_policy = OverflowPolicy::kDropNew;
-    /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate supports
-    /// max_boxcar up to 4096; the other modes support 1..2^20).
+    /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate is approximate
+    /// and supports max_boxcar up to 4096; the other modes are exact and
+    /// support 1..2^20).
     BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto;
 };
 

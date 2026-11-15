@@ -379,8 +379,8 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kAuto and coexists with "
     }
 
     for (const auto wide_mode :
-         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-          BoxcarScreenMode::kNone}) {
+         {BoxcarScreenMode::kAuto, BoxcarScreenMode::kPrefix,
+          BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
         BoxcarConfig wide_cfg{};
         wide_cfg.max_boxcar       = 1048576;
         wide_cfg.wtsp             = 2.0F;

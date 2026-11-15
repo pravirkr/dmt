@@ -600,12 +600,15 @@ inline bool boxcar_screen_explicit() {
     return env != nullptr && *env != '\0';
 }
 
-/// Boxcar Stage-1 screen modes: DMT_BENCH_SCREEN (comma-separated, or "all";
-/// default "prefix" so existing published suite names stay unchanged).
+/// Boxcar Stage-1 screen modes: DMT_BENCH_SCREEN (comma-separated, or "all"
+/// for the four explicit modes {prefix, kadane, kadane_surrogate, none}).
+/// Unset defaults to {kAuto} (kKadane on CPU, kPrefix on GPU) with no name
+/// suffix so published suite names stay unchanged; "auto" runs kAuto with an
+/// explicit "/screen:auto" suffix.
 inline std::vector<BoxcarScreenMode> boxcar_screen_modes() {
     const char* env = std::getenv("DMT_BENCH_SCREEN"); // NOLINT
     if (env == nullptr || *env == '\0') {
-        return {BoxcarScreenMode::kPrefix};
+        return {BoxcarScreenMode::kAuto};
     }
     const std::string_view spec(env);
     if (spec == "all") {
@@ -660,7 +663,7 @@ inline std::string boxcar_mode_suffix(BoxcarScreenMode mode,
     if (trapezoid) {
         suffix += "/trapezoid";
     }
-    if (boxcar_screen_explicit() || mode != BoxcarScreenMode::kPrefix) {
+    if (boxcar_screen_explicit() || mode != BoxcarScreenMode::kAuto) {
         suffix += fmt::format("/screen:{}", screen_mode_name(mode));
     }
     return suffix;

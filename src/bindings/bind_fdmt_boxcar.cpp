@@ -69,8 +69,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
                "Lossless multi-bucket Kadane tile gate + exact Stage-2 "
                "prefix-sum scoring.")
         .value("KADANE_SURROGATE", BoxcarScreenMode::kKadaneSurrogate,
-               "Standalone multi-bias Kadane excursion detector with exact "
-               "lookback replay (skips full-stream Stage-2 prefix scan).")
+               "Approximate multi-bias Kadane excursion detector with local "
+               "lookback replay (skips full-stream Stage-2 prefix scan; "
+               "max_boxcar 1..4096).")
         .value("NONE", BoxcarScreenMode::kNone,
                "Disable Stage-1 screening and score every tile directly "
                "(exact).")
@@ -91,9 +92,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
         first-come overflow and exact ``KEEP_BRIGHTEST`` top-S/N selection.
         ``screen_mode`` selects the Stage-1 tile screening / scoring algorithm
         (:class:`BoxcarScreenMode`, default ``BoxcarScreenMode.AUTO``):
-        ``PREFIX``, ``KADANE``, ``NONE`` and ``AUTO`` (``KADANE`` on the CPU,
-        ``PREFIX`` on a GPU) produce identical exact candidates; ``KADANE_SURROGATE`` replaces the full-stream prefix scan
-        with multi-bias Kadane excursion screening and local replay.
+        ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU), ``KADANE``,
+        ``PREFIX`` and ``NONE`` are lossless and produce identical exact
+        candidates; ``KADANE_SURROGATE`` is an approximate multi-bias Kadane
+        scorer (``max_boxcar`` up to 4096) that skips the full-stream prefix
+        scan.
         )doc")
         .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
                       SizeType, bool, SizeType, float, bool, OverflowPolicy,
@@ -227,8 +230,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         chooses the Stage-1 tile screening / scoring mode on both CPU and GPU:
         ``PREFIX``, ``KADANE`` (lossless multi-bucket Kadane gate), ``NONE``
         and ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU) emit
-        identical exact candidates; ``KADANE_SURROGATE`` uses
-        standalone multi-bias Kadane excursion detection with local replay.
+        identical exact candidates; ``KADANE_SURROGATE`` uses approximate
+        multi-bias Kadane excursion detection with local replay
+        (``max_boxcar`` up to 4096).
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,

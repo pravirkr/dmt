@@ -109,11 +109,10 @@ thrust::device_vector<uint8_t> make_packed_noise(SizeType n) {
     return v;
 }
 
-BoxcarConfig
-make_config(float wtsp,
-            bool packed,
-            BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
-            bool trapezoid               = false) {
+BoxcarConfig make_config(float wtsp,
+                         bool packed,
+                         BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
+                         bool trapezoid               = false) {
     return BoxcarConfig(max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
                         PeakFindingMode::kContiguousPeakPerWidth, 131072, 0,
                         true, packed ? 8 : 32, packed ? 127.0F : 0.0F,
@@ -184,7 +183,7 @@ void bench_transform(benchmark::State& state) {
 // FDMT into the plane, then the same GPU scorer over the materialised root.
 void bench_separate(benchmark::State& state,
                     float wtsp,
-                    BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                    BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
                     bool trapezoid               = false) {
     GpuPeakMemory mem;
     mem.begin();
@@ -212,6 +211,7 @@ void bench_separate(benchmark::State& state,
             .nsamps            = kNsampsRef,
             .sample_begin      = position,
             .materialized_root = true,
+            .stream            = nullptr,
         };
         scorer->consume(plan.get_niters(), input);
         position += kNsampsRef;
@@ -262,7 +262,7 @@ void bench_fft_transform(benchmark::State& state) {
 
 void bench_fft_fused(benchmark::State& state,
                      float wtsp,
-                     BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                     BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
                      bool trapezoid               = false) {
     GpuPeakMemory mem;
     mem.begin();
@@ -365,7 +365,7 @@ void bench_fused(benchmark::State& state,
                  float wtsp,
                  SizeType subband_depth,
                  bool packed,
-                 BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+                 BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
                  bool trapezoid               = false) {
     auto plan         = make_plan(ref_point(), subband_depth);
     const auto config = make_config(wtsp, packed, screen_mode, trapezoid);
@@ -406,7 +406,7 @@ void bench_fused(benchmark::State& state,
 void bench_rt(benchmark::State& state,
               RtPoint p,
               bool packed,
-              BoxcarScreenMode screen_mode = BoxcarScreenMode::kPrefix,
+              BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
               bool trapezoid               = false) {
     auto plan = make_rt_plan(p);
     const BoxcarConfig config(rt_max_boxcar(p), kRtWtsp, 6.0F,

@@ -708,10 +708,12 @@ private:
     std::optional<BlockNoise> m_pending;
     /// The entry the last commit evicted, kept until its call completes.
     std::optional<BlockNoise> m_evicted;
+    std::optional<BlockNoise> m_prev_evicted;
     bool m_commit_open = false;
     std::vector<std::unique_ptr<TableSlot>> m_slots;
     thrust::device_vector<uint64_t> m_support_d;
     BlockTables m_block_tables{};
+    BlockTables m_prev_block_tables{};
 
     // --- Kadane gate (`kKadane`) plan & device state ---
     kadane::KadaneGatePlan m_kadane_plan;

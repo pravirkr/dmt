@@ -538,9 +538,15 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const float> waterfall, Stream queue) {
     // Before the table uploads, which go to the current device.
     gpu_utils::set_device(m_device);
     commit_block_noise(stream);
-    begin_result(m_plan.get_nsamps(), queue);
-    m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
+    try {
+        begin_result(m_plan.get_nsamps(), queue);
+        m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
+    } catch (...) {
+        undo_commit();
+        throw;
+    }
     m_commit_open = false;
+    m_prev_evicted.reset();
     m_position += m_plan.get_nsamps();
     finish_keep(stream);
     release_slots(stream);
@@ -1007,12 +1013,14 @@ SizeType FDMTBoxcarCudaEngine::table_floats() const noexcept {
 void FDMTBoxcarCudaEngine::reset_block_noise() {
     m_pending.reset();
     m_evicted.reset();
+    m_prev_evicted.reset();
     m_commit_open = false;
     m_ring.clear();
     BlockNoise first; // the constructor tables from stream sample 0
     first.kill_runs = m_kill_runs;
     m_ring.push_back(std::move(first));
-    m_block_tables = {};
+    m_block_tables      = {};
+    m_prev_block_tables = {};
 }
 
 const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
@@ -1026,6 +1034,11 @@ const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
         }
     }
     const auto in_ring = [&](uint64_t id) {
+        if (m_evicted && ((m_evicted->steady && m_evicted->steady->id == id) ||
+                          (m_evicted->transition_tables &&
+                           m_evicted->transition_tables->id == id))) {
+            return true;
+        }
         for (const auto& e : m_ring) {
             if ((e.steady && e.steady->id == id) ||
                 (e.transition_tables && e.transition_tables->id == id)) {
@@ -1079,7 +1092,9 @@ void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
         entry.steady    = m_ring.back().steady;
         entry.kill_runs = m_kill_runs;
     }
-    entry.first_sample = m_position;
+    entry.first_sample  = m_position;
+    m_prev_evicted      = std::move(m_evicted);
+    m_prev_block_tables = m_block_tables;
     m_evicted.reset();
     if (m_ring.size() == ring_size()) {
         m_evicted = std::move(m_ring.front());
@@ -1087,42 +1102,49 @@ void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
     }
     m_ring.push_back(std::move(entry));
     m_commit_open = true;
-    BlockTables bt;
-    const SizeType n   = table_floats();
-    const SizeType off = m_ring.size() > 2 ? m_ring.size() - 2 : 0;
-    bt.count           = static_cast<int>(m_ring.size() - off);
-    bt.support         = raw(m_support_d);
-    for (int e = 0; e < bt.count; ++e) {
-        const auto& r    = m_ring[off + e];
-        bt.first[e]      = r.first_sample;
-        bt.transition[e] = r.transition;
-        const float* st  = slot_of(r.steady.get(), stream);
-        bt.thr[e][0]     = st;
-        bt.inv[e][0]     = st != nullptr ? st + n : nullptr;
-        if (r.transition) {
-            const float* tr = slot_of(r.transition_tables.get(), stream);
-            bt.thr[e][1]    = tr;
-            bt.inv[e][1]    = tr != nullptr ? tr + n : nullptr;
+    try {
+        BlockTables bt;
+        const SizeType n   = table_floats();
+        const SizeType off = m_ring.size() > 2 ? m_ring.size() - 2 : 0;
+        bt.count           = static_cast<int>(m_ring.size() - off);
+        bt.support         = raw(m_support_d);
+        for (int e = 0; e < bt.count; ++e) {
+            const auto& r    = m_ring[off + e];
+            bt.first[e]      = r.first_sample;
+            bt.transition[e] = r.transition;
+            const float* st  = slot_of(r.steady.get(), stream);
+            bt.thr[e][0]     = st;
+            bt.inv[e][0]     = st != nullptr ? st + n : nullptr;
+            if (r.transition) {
+                const float* tr = slot_of(r.transition_tables.get(), stream);
+                bt.thr[e][1]    = tr;
+                bt.inv[e][1]    = tr != nullptr ? tr + n : nullptr;
+            }
         }
-    }
-    const auto add_tag = [&bt](const BlockNoise& r) {
-        const int i          = bt.tag_count++;
-        bt.tag_first[i]      = r.first_sample;
-        bt.tag_transition[i] = r.transition;
-        bt.tag_steady[i]     = r.steady.get();
-        bt.tag_tr[i]         = r.transition_tables.get();
-    };
-    if (m_evicted) {
-        add_tag(*m_evicted);
-    }
-    for (const auto& r : m_ring) {
-        if (bt.tag_count < BlockTables::kTagEntries) {
-            add_tag(r);
+        const auto add_tag = [&bt](const BlockNoise& r) {
+            const int i          = bt.tag_count++;
+            bt.tag_first[i]      = r.first_sample;
+            bt.tag_transition[i] = r.transition;
+            bt.tag_steady[i]     = r.steady.get();
+            bt.tag_tr[i]         = r.transition_tables.get();
+        };
+        if (m_evicted) {
+            add_tag(*m_evicted);
         }
+        for (const auto& r : m_ring) {
+            if (bt.tag_count < BlockTables::kTagEntries) {
+                add_tag(r);
+            }
+        }
+        m_block_tables = bt;
+    } catch (...) {
+        undo_commit();
+        throw;
     }
-    m_block_tables = bt;
 }
 
+// m_ring is pre-reserved to 3 in enable_block_noise().
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void FDMTBoxcarCudaEngine::undo_commit() noexcept {
     if (!m_commit_open) {
         return;
@@ -1130,9 +1152,10 @@ void FDMTBoxcarCudaEngine::undo_commit() noexcept {
     m_ring.pop_back();
     if (m_evicted) {
         m_ring.insert(m_ring.begin(), std::move(*m_evicted));
-        m_evicted.reset();
     }
-    m_commit_open = false;
+    m_evicted      = std::move(m_prev_evicted);
+    m_block_tables = m_prev_block_tables;
+    m_commit_open  = false;
 }
 
 void FDMTBoxcarCudaEngine::release_slots(cudaStream_t stream) {

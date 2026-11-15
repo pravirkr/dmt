@@ -28,15 +28,14 @@ DMT_HD constexpr uint32_t trapezoid_edge_width(uint32_t width) noexcept {
 }
 
 /// `sqrt(num / den)` with IEEE rounding on host and device alike (nvcc
-/// `-use_fast_math` would otherwise approximate both operations), so
-/// surrogate S/N matches bit for bit across backends.
+/// `-use_fast_math` and hip-clang `-ffast-math` would otherwise approximate
+/// float division and square root), so surrogate S/N matches across backends.
 DMT_HD inline float surrogate_width_scale(float num, float den) noexcept {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     return __fsqrt_rn(__fdiv_rn(num, den));
-#elif defined(__HIP_DEVICE_COMPILE__)
-    return sqrtf(num / den);
 #else
-    return std::sqrt(num / den);
+    return static_cast<float>(
+        ::sqrt(static_cast<double>(num) / static_cast<double>(den)));
 #endif
 }
 

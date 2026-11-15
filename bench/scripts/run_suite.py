@@ -40,7 +40,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BINARY = "dmt_bench_suite"
-SCREEN_MODES = ("prefix", "kadane", "kadane_surrogate", "none")
+SCREEN_MODES = ("auto", "prefix", "kadane", "kadane_surrogate", "none")
 
 
 def validate_screen_mode(spec: str) -> str:
@@ -283,8 +283,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "--screen-mode",
         default="",
         help="Stage-1 screen mode(s) for --suite boxcar (sets DMT_BENCH_SCREEN): "
-        "comma-separated from prefix, kadane, kadane_surrogate, none, or 'all' "
-        "(default: prefix)",
+        "comma-separated from auto, prefix, kadane, kadane_surrogate, none, or "
+        "'all' (unset runs auto without a /screen: name suffix)",
     )
     ap.add_argument(
         "--trapezoid",
@@ -350,7 +350,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "fftw_planner": args.fftw_planner,
         "config": args.config if args.suite != "cfdmt" else "-",
         "screen_mode": (
-            screen_spec or os.environ.get("DMT_BENCH_SCREEN", "prefix")
+            screen_spec or os.environ.get("DMT_BENCH_SCREEN") or "auto"
             if args.suite == "boxcar"
             else "-"
         ),
