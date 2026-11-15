@@ -319,9 +319,8 @@ struct BoxcarKeepEntry {
 };
 
 /// OverflowPolicy::kKeepBrightest order: higher S/N first; ties to the
-/// earlier peak, then beam, subband, DM row, width and begin sample. A
-/// strict total order on the candidates of one call (a row emits at most
-/// one candidate per peak sample and width).
+/// earlier peak, then beam, subband, DM row, width, begin sample and end
+/// sample. A strict total order on distinct candidates of one call.
 DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
     if (a.snr != b.snr) {
         return a.snr > b.snr;
@@ -347,7 +346,13 @@ DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
     if (a.filter_idx != b.filter_idx) {
         return a.filter_idx < b.filter_idx;
     }
-    return a.begin_sample < b.begin_sample;
+    if (a.begin_sample != b.begin_sample) {
+        return a.begin_sample < b.begin_sample;
+    }
+    if (a.end_sample != b.end_sample) {
+        return a.end_sample < b.end_sample;
+    }
+    return a.width < b.width;
 }
 
 /// The transform feeding a boxcar engine: FDMT (merged root rows) or
@@ -462,6 +467,24 @@ public:
     /// Drops an entry pushed for an execute() that threw.
     virtual void drop_block_noise() noexcept {}
 };
+
+/// BoxcarScreenMode::kAuto resolved for a backend: kKadane on the CPU (its
+/// gate beats the prefix screen there), kPrefix on a GPU (where the gate's
+/// Stage 2 latency outweighs the saved screen). Other modes pass through.
+[[nodiscard]] constexpr BoxcarScreenMode
+resolve_screen_mode(BoxcarScreenMode mode, bool gpu) noexcept {
+    if (mode != BoxcarScreenMode::kAuto) {
+        return mode;
+    }
+    return gpu ? BoxcarScreenMode::kPrefix : BoxcarScreenMode::kKadane;
+}
+
+/// `config` with its screen mode resolved (resolve_screen_mode).
+[[nodiscard]] constexpr BoxcarConfig resolve_screen_mode(BoxcarConfig config,
+                                                         bool gpu) noexcept {
+    config.screen_mode = resolve_screen_mode(config.screen_mode, gpu);
+    return config;
+}
 
 /// The boxcar engines own `driver`, which calls them back per chunk.
 /// Input rows of the `kill_runs` channels (boxcar_kill_runs()) are zeroed

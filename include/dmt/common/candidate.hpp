@@ -32,6 +32,25 @@ enum class OverflowPolicy : uint8_t {
     kKeepBrightest,
 };
 
+/// Stage-1 tile screening / scoring mode for boxcar search.
+enum class BoxcarScreenMode : uint8_t {
+    /// Prefix-sum / range-minimum tile screen (max_boxcar 1..2^20).
+    kPrefix,
+    /// Lossless multi-bucket Kadane gate + Stage-2 scoring (max_boxcar
+    /// 1..2^20).
+    kKadane,
+    /// Approximate multi-bias Kadane scorer, skipping Stage-2 prefix scan
+    /// (max_boxcar 1..4096).
+    kKadaneSurrogate,
+    /// Disable Stage-1 screening; score every tile directly (max_boxcar
+    /// 1..2^20).
+    kNone,
+    /// Default: the fastest exact mode of the backend, chosen when the
+    /// engine is built (kKadane on the CPU, kPrefix on a GPU). Candidates
+    /// are those of kPrefix / kKadane / kNone.
+    kAuto,
+};
+
 /// Analytical search of independent input noise of known common mean/sigma.
 /// The subband search depth is the plan's (FDMTPlan subband_depth).
 struct BoxcarConfig {
@@ -49,7 +68,8 @@ struct BoxcarConfig {
         SizeType input_nbits      = 32,
         float input_mean          = 0.0F,
         bool use_trapezoid        = false,
-        OverflowPolicy overflow_policy = OverflowPolicy::kDropNew) noexcept
+        OverflowPolicy overflow_policy = OverflowPolicy::kDropNew,
+        BoxcarScreenMode screen_mode   = BoxcarScreenMode::kAuto) noexcept
         : max_boxcar(max_boxcar),
           wtsp(wtsp),
           detect_thresh(detect_thresh),
@@ -61,11 +81,13 @@ struct BoxcarConfig {
           input_nbits(input_nbits),
           input_mean(input_mean),
           use_trapezoid(use_trapezoid),
-          overflow_policy(overflow_policy) {}
+          overflow_policy(overflow_policy),
+          screen_mode(screen_mode) {}
 
-    /// Widest box searched, 1..2^20 samples; always the last width of the
-    /// bank. Up to 4096 the search is tuned; wider boxes are searched
-    /// exactly but more slowly (on a GPU, prefix rings in device memory).
+    /// Widest box searched, 1..2^20 samples (1..4096 for kKadaneSurrogate);
+    /// always the last width of the bank. Up to 4096 the search is tuned;
+    /// wider boxes are searched exactly but more slowly (on a GPU, prefix
+    /// rings in device memory).
     SizeType max_boxcar = 4096;
     /// Width spacing >= 1: from 1, next = max(w + 1, ceil(w * wtsp)) while
     /// it is <= max_boxcar, then max_boxcar when the steps stop below it
@@ -90,6 +112,10 @@ struct BoxcarConfig {
     bool use_trapezoid = false;
     /// Default kDropNew; see OverflowPolicy.
     OverflowPolicy overflow_policy = OverflowPolicy::kDropNew;
+    /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate is approximate
+    /// and supports max_boxcar up to 4096; the other modes are exact and
+    /// support 1..2^20).
+    BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto;
 };
 
 /**

@@ -359,3 +359,162 @@ TEST_CASE("GPU FDMTFFTBoxcar kKeepBrightest keeps the brightest of each call",
     };
     CHECK(check_keep(run, cfg, {{4, 60}, {2, 10}}) > 400);
 }
+
+TEST_CASE("GPU FDMTBoxcar kKeepBrightest supports kKadane and kNone",
+          "[gpu][boxcar][overflow][kadane]") {
+    const Pairs pairs = {{3, 1U << 20}, {3, 120}, {1, 35}};
+    const plans::FDMTPlan plan(700, 1200, 16, 2048, 0.001F,
+                               std::vector<IndexType>{0, 3, 9, 20, 41}, "valid",
+                               1);
+    const auto input = waterfalls(plan, 2, 3);
+    const auto codes = to_codes(input, 16.0F, 64.0F);
+
+    for (const auto screen :
+         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+        for (const bool packed : {false, true}) {
+            for (const auto mode :
+                 {PeakFindingMode::kContiguousPeakPerWidth,
+                  PeakFindingMode::kContiguousPeakAcrossWidths,
+                  PeakFindingMode::kAllAboveThreshold}) {
+                DYNAMIC_SECTION("screen " << static_cast<int>(screen)
+                                          << " packed " << packed << " mode "
+                                          << static_cast<int>(mode)) {
+                    BoxcarConfig cfg;
+                    cfg.max_boxcar    = 12;
+                    cfg.wtsp          = 1.5F;
+                    cfg.detect_thresh = 2.0F;
+                    cfg.peak_mode     = mode;
+                    cfg.use_trapezoid = !packed;
+                    cfg.screen_mode   = screen;
+                    if (packed) {
+                        cfg.input_nbits = 8;
+                        cfg.input_mean  = 64.0F;
+                        cfg.noise_sigma = 16.0F;
+                    }
+                    const auto run = [&](const BoxcarConfig& c,
+                                         std::vector<CandidateCounts>* n) {
+                        FDMTBoxcar s(plan, c, true, kGpu, 2,
+                                     algorithms::kFDMTAutoFuse, 64);
+                        return packed ? run_calls(s, codes, n)
+                                      : run_calls(s, input, n);
+                    };
+                    CHECK(check_keep(run, cfg, pairs) > 400);
+
+                    // Bit-exact match with kPrefix on the GPU (and CPU when
+                    // packed).
+                    auto keep             = cfg;
+                    keep.overflow_policy  = OverflowPolicy::kKeepBrightest;
+                    keep.max_cands_per_dm = 3;
+                    keep.max_candidates   = 120;
+                    auto pfx_cfg          = keep;
+                    pfx_cfg.screen_mode   = BoxcarScreenMode::kPrefix;
+                    FDMTBoxcar pfx(plan, pfx_cfg, true, kGpu, 2,
+                                   algorithms::kFDMTAutoFuse, 64);
+                    const auto expected_gpu =
+                        packed ? run_calls(pfx, codes) : run_calls(pfx, input);
+                    const auto actual = run(keep, nullptr);
+                    for (SizeType i = 0; i < actual.size(); ++i) {
+                        require_same(actual[i], expected_gpu[i]);
+                    }
+                    if (packed) {
+                        FDMTBoxcar cpu(plan, keep, true, Exec::cpu(2), 2);
+                        const auto expected_cpu = run_calls(cpu, codes);
+                        for (SizeType i = 0; i < actual.size(); ++i) {
+                            require_same(actual[i], expected_cpu[i]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    SECTION("wide boxcar max_boxcar 6000 under kKadane and kNone") {
+        const plans::FDMTPlan wide_plan(700, 1200, 3, 4500, 0.001F,
+                                        std::vector<IndexType>{-5, 0, 7},
+                                        "valid", 1);
+        const auto wide_in = waterfalls(wide_plan, 1, 3);
+        for (const auto screen :
+             {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+            BoxcarConfig cfg;
+            cfg.max_boxcar    = 6000;
+            cfg.wtsp          = 2.0F;
+            cfg.detect_thresh = 2.0F;
+            cfg.screen_mode   = screen;
+            const auto run    = [&](const BoxcarConfig& c,
+                                    std::vector<CandidateCounts>* n) {
+                FDMTBoxcar s(wide_plan, c, true, kGpu, 1,
+                             algorithms::kFDMTAutoFuse, 128);
+                return run_calls(s, wide_in, n);
+            };
+            CHECK(check_keep(run, cfg, {{3, 40}, {1, 10}}) > 100);
+        }
+    }
+}
+
+TEST_CASE("GPU FDMTBoxcar kKeepBrightest supports kKadaneSurrogate",
+          "[gpu][boxcar][overflow][kadane][surrogate]") {
+    const Pairs pairs = {{3, 1U << 20}, {3, 80}, {1, 25}};
+    const plans::FDMTPlan plan(700, 1200, 16, 2048, 0.001F,
+                               std::vector<IndexType>{0, 3, 9, 20, 41}, "valid",
+                               1);
+    const auto input = waterfalls(plan, 2, 3);
+    const auto codes = to_codes(input, 16.0F, 64.0F);
+
+    for (const bool packed : {false, true}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            DYNAMIC_SECTION("packed " << packed << " mode "
+                                      << static_cast<int>(mode)) {
+                BoxcarConfig cfg;
+                cfg.max_boxcar    = 24;
+                cfg.wtsp          = 1.5F;
+                cfg.detect_thresh = 2.2F;
+                cfg.peak_mode     = mode;
+                cfg.screen_mode   = BoxcarScreenMode::kKadaneSurrogate;
+                if (packed) {
+                    cfg.input_nbits = 8;
+                    cfg.input_mean  = 64.0F;
+                    cfg.noise_sigma = 16.0F;
+                }
+                const auto run = [&](const BoxcarConfig& c,
+                                     std::vector<CandidateCounts>* n) {
+                    FDMTBoxcar s(plan, c, true, kGpu, 2,
+                                 algorithms::kFDMTAutoFuse, 64);
+                    return packed ? run_calls(s, codes, n)
+                                  : run_calls(s, input, n);
+                };
+                CHECK(check_keep(run, cfg, pairs) > 100);
+            }
+        }
+    }
+
+    SECTION("multi-beam identical block ties preserve exact surrogate widths") {
+        std::vector<uint8_t> block(2 * plan.get_nchans() * plan.get_nsamps(),
+                                   60);
+        for (SizeType b = 0; b < 2; ++b) {
+            for (SizeType c = 0; c < plan.get_nchans(); ++c) {
+                for (SizeType t = 300; t < 319; ++t) {
+                    block[((b * plan.get_nchans() + c) * plan.get_nsamps()) +
+                          t] = 100;
+                }
+            }
+        }
+        const std::vector<std::vector<uint8_t>> blocks(2, block);
+        BoxcarConfig cfg;
+        cfg.max_boxcar    = 32;
+        cfg.wtsp          = 2.0F;
+        cfg.detect_thresh = 3.0F;
+        cfg.input_nbits   = 8;
+        cfg.input_mean    = 60.0F;
+        cfg.noise_sigma   = 4.0F;
+        cfg.peak_mode     = PeakFindingMode::kAllAboveThreshold;
+        cfg.screen_mode   = BoxcarScreenMode::kKadaneSurrogate;
+        const auto run    = [&](const BoxcarConfig& c,
+                                std::vector<CandidateCounts>* n) {
+            FDMTBoxcar s(plan, c, true, kGpu, 2);
+            return run_calls(s, blocks, n);
+        };
+        CHECK(check_keep(run, cfg, {{10, 7}, {10, 15}, {2, 5}}) > 10);
+    }
+}
