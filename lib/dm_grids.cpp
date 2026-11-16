@@ -144,6 +144,7 @@ public:
     struct AtU {
         std::vector<double> width; // D_g
         std::array<double, kNumWidths> noise{};
+        std::array<double, kNumWidths> snr_w{}; // S/N of each width at 0
         double snr0{};
         double min_width{};
     };
@@ -175,7 +176,8 @@ public:
             for (SizeType g = 0; g < m; ++g) {
                 sig += m_n[g] * std::erf(0.5 * kWidths[w] / a.width[g]);
             }
-            a.snr0 = std::max(a.snr0, sig / a.noise[w]);
+            a.snr_w[w] = sig / a.noise[w];
+            a.snr0     = std::max(a.snr0, a.snr_w[w]);
         }
         return a;
     }
@@ -206,13 +208,61 @@ public:
         return best / a.snr0;
     }
 
+    /**
+     * ratio(a, delta) >= target (> target when @p strict), without the
+     * full maximum: a width whose S/N at delta = 0 is below the target
+     * cannot reach it at any tau (a centred window holds the most of a
+     * Gaussian), and the search stops at the first window that does.
+     */
+    bool reaches(const AtU& a, double delta, double target, bool strict) const {
+        std::array<double, kNumWidths> hw{};
+        std::array<double, kNumWidths> noise{};
+        SizeType nw = 0;
+        for (SizeType w = 0; w < kNumWidths; ++w) {
+            // Margin for rounding of the bound.
+            if (a.snr_w[w] >= target * a.snr0 * (1.0 - 1e-9)) {
+                hw[nw]    = 0.5 * kWidths[w];
+                noise[nw] = a.noise[w];
+                ++nw;
+            }
+        }
+        const SizeType m = m_n.size();
+        std::array<double, kMaxGroups> inv{};
+        std::array<double, kMaxGroups> hn{};
+        std::array<double, kMaxGroups> err{};
+        for (SizeType g = 0; g < m; ++g) {
+            inv[g] = 1.0 / a.width[g];
+            hn[g]  = 0.5 * m_n[g];
+        }
+        for (SizeType t = 0; t < kNumTaus; ++t) {
+            const double unit =
+                static_cast<double>(t) / static_cast<double>(kNumTaus - 1);
+            const double tau = delta * (m_r_min + (unit * m_span_r));
+            for (SizeType g = 0; g < m; ++g) {
+                err[g] = (delta * m_r[g]) - tau;
+            }
+            for (SizeType k = 0; k < nw; ++k) {
+                double sig = 0.0;
+                for (SizeType g = 0; g < m; ++g) {
+                    sig += hn[g] * (std::erf((err[g] + hw[k]) * inv[g]) -
+                                    std::erf((err[g] - hw[k]) * inv[g]));
+                }
+                const double r = (sig / noise[k]) / a.snr0;
+                if (strict ? r > target : r >= target) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /// DM offset at which ratio() falls to @p target (bisection), at most
     /// @p cap.
     double half_step(double u, double target, double cap) const {
         const auto a = at(u);
         double lo    = 0.0;
         double hi    = std::max(1e-5, 6.0 * a.min_width / m_span_r);
-        while (ratio(a, hi) > target) {
+        while (reaches(a, hi, target, true)) {
             hi *= 2.0;
             if (hi >= cap) {
                 return cap; // the pulse keeps its S/N across the range
@@ -220,7 +270,7 @@ public:
         }
         for (int i = 0; i < kBisections; ++i) {
             const double mid = 0.5 * (lo + hi);
-            if (ratio(a, mid) >= target) {
+            if (reaches(a, mid, target, false)) {
                 lo = mid;
             } else {
                 hi = mid;

@@ -445,7 +445,7 @@ on a GPU with 8-bit input:
 | Parkes UWL | 303,442 -> 99,433 | 7.77 -> 6.45 GiB | 1.64 -> 1.51 s |
 | MeerKAT L-band | 82,861 -> 36,914 | 0.63 -> 0.51 GiB | 94 -> 61 ms |
 
-Building the plan takes a few seconds longer (one grid per subband).
+Building the plan takes 0.2-0.5 s longer at depth 4 (one grid per subband).
 
 The subband grids inherit the grid model's limits (see
 [DM grids](dm_grids.md)): narrow subbands are dominated by intra-channel
