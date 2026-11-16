@@ -1010,6 +1010,115 @@ void fdmt_init_valid_row0_shift(const TS* __restrict__ wf_sub,
     }
 }
 
+/// Input sample x[i - k] of a level-0 channel, i - k < 0 taken from the
+/// history (kValid, `hist_sub` holds the last `hist_len` >= k samples), the
+/// wrapped block (kRoll) or zero (kFull).
+template <FDMTMode Mode, typename TAcc, typename TS>
+inline TAcc fdmt_init_before(const TS* __restrict__ wf_sub,
+                             const float* __restrict__ hist_sub,
+                             int64_t j,
+                             SizeType hist_len,
+                             SizeType nsamps) noexcept {
+    if constexpr (Mode == FDMTMode::kValid) {
+        return static_cast<TAcc>(hist_sub[static_cast<SizeType>(
+            static_cast<int64_t>(hist_len) + j)]);
+    } else if constexpr (Mode == FDMTMode::kRoll) {
+        const auto n = static_cast<int64_t>(nsamps);
+        return static_cast<TAcc>(
+            wf_sub[static_cast<SizeType>(((j % n) + n) % n)]);
+    } else {
+        return TAcc{0};
+    }
+}
+
+/**
+ * @brief acc[i] = x[i - k] (`first`) or acc[i] += x[i - k] for the whole
+ * chunk (boundary as in fdmt_init_before()).
+ */
+template <FDMTMode Mode, typename TAcc, typename TS>
+void fdmt_init_lag_pass(const TS* __restrict__ wf_sub,
+                        const float* __restrict__ hist_sub,
+                        TAcc* __restrict__ acc,
+                        SizeType k,
+                        SizeType hist_len,
+                        SizeType nsamps,
+                        bool first) noexcept {
+    const SizeType nb = std::min(k, nsamps);
+    for (SizeType i = 0; i < nb; ++i) {
+        const auto j = static_cast<int64_t>(i) - static_cast<int64_t>(k);
+        const auto v =
+            fdmt_init_before<Mode, TAcc>(wf_sub, hist_sub, j, hist_len, nsamps);
+        acc[i] = first ? v : fdmt_init_add<TAcc>(acc[i], v);
+    }
+    if (first) {
+#pragma omp simd
+        for (SizeType i = nb; i < nsamps; ++i) {
+            acc[i] = static_cast<TAcc>(wf_sub[i - k]);
+        }
+    } else {
+#pragma omp simd
+        for (SizeType i = nb; i < nsamps; ++i) {
+            acc[i] = fdmt_init_add<TAcc>(acc[i], wf_sub[i - k]);
+        }
+    }
+}
+
+/**
+ * @brief Box-smearing level-0 rows of one channel of a chan_dm plan:
+ * row r is the box mean of x[i - lag_r - s_r .. i - lag_r]. The rows are
+ * swept in the plan's (lag, s) order, so rows sharing a lag extend one
+ * running sum; every box is summed from its near end outward (x[i - lag],
+ * then + x[i - lag - 1], ...), the order of the GPU column helper, so CPU
+ * and GPU rows agree bit for bit.
+ */
+template <FDMTMode Mode,
+          typename TAcc,
+          typename TOut,
+          typename TS,
+          typename ScaleAt>
+void fdmt_init_subband_box_lag(const TS* __restrict__ wf_sub,
+                               const float* __restrict__ hist_sub,
+                               TOut* __restrict__ buf_base,
+                               const plans::FDMTLevel0Box* boxes,
+                               const int32_t* order,
+                               SizeType ndt,
+                               SizeType hist_len,
+                               SizeType nsamps,
+                               SizeType stride,
+                               TAcc* __restrict__ acc,
+                               const ScaleAt& scale_at) noexcept {
+    int64_t lag_prev = -1;
+    int64_t s_prev   = -1;
+    for (SizeType j = 0; j < ndt; ++j) {
+        const auto r    = static_cast<SizeType>(order[j]);
+        const auto& box = boxes[r];
+        const auto lag  = static_cast<int64_t>(box.lag);
+        const auto s    = static_cast<int64_t>(box.s);
+        int64_t d       = 0;
+        if (lag == lag_prev && s >= s_prev) {
+            d = s_prev + 1;
+        } else {
+            fdmt_init_lag_pass<Mode>(wf_sub, hist_sub, acc,
+                                     static_cast<SizeType>(lag), hist_len,
+                                     nsamps, true);
+            d = 1;
+        }
+        for (; d <= s; ++d) {
+            fdmt_init_lag_pass<Mode>(wf_sub, hist_sub, acc,
+                                     static_cast<SizeType>(lag + d), hist_len,
+                                     nsamps, false);
+        }
+        lag_prev         = lag;
+        s_prev           = s;
+        TOut* out        = buf_base + (r * stride);
+        const auto scale = scale_at(static_cast<SizeType>(s));
+#pragma omp simd
+        for (SizeType i = 0; i < nsamps; ++i) {
+            out[i] = scale(acc[i]);
+        }
+    }
+}
+
 /**
  * @brief Where one sub-band's level-0 rows come from and go to: its rows
  * (`buf_base`), its valid-mode input history (`hist_sub`, the last
@@ -1025,7 +1134,85 @@ struct FDMTLevel0Channel {
     SizeType stride;    ///< row stride of the level-0 rows
     std::byte* unpack;  ///< scratch row of nsamps samples (<= 4 bytes)
     std::byte* acc_row; ///< scratch row of nsamps samples (<= 8 bytes)
+    /// chan_dm plans only (else nullptr): the channel's level-0 boxes and
+    /// their sweep order (FDMTPlanContainer::level0_boxes / level0_order).
+    const plans::FDMTLevel0Box* boxes{nullptr};
+    const int32_t* order{nullptr};
 };
+
+/**
+ * @brief fdmt_init_channel() for a chan_dm plan: rows from the plan's
+ * level-0 boxes (box means with smearing, the single sample at the
+ * channel's arrival lag without), then the history update.
+ */
+template <FDMTMode Mode, bool UseBoxSmearing, typename TOut>
+void fdmt_init_channel_lag(const FDMTInput& input,
+                           TOut* __restrict__ buf_base,
+                           const FDMTLevel0Channel& ch,
+                           const FDMTBoxWeights& weights,
+                           SizeType round_bytes) noexcept {
+    const auto ndt    = ch.dt_grid->size();
+    const auto nsamps = ch.nsamps;
+    const auto finish = [&]([[maybe_unused]] const auto* wf) {
+        if constexpr (Mode == FDMTMode::kValid) {
+            fdmt_advance_history_window(wf, ch.hist_sub, nsamps, ch.hist_len);
+        }
+    };
+    if constexpr (UseBoxSmearing) {
+        if (input.packed != nullptr) {
+            const auto run = [&]<typename P>() {
+                using TS =
+                    std::conditional_t<sizeof(P) == 1, uint8_t, uint16_t>;
+                const auto* wf = input.row<TS>(
+                    ch.i_sub, nsamps, reinterpret_cast<TS*>(ch.unpack));
+                fdmt_init_subband_box_lag<Mode>(
+                    wf, ch.hist_sub, buf_base, ch.boxes, ch.order, ndt,
+                    ch.hist_len, nsamps, ch.stride,
+                    reinterpret_cast<P*>(ch.acc_row), [&](SizeType s) {
+                        return FDMTBoxScaleRound<TOut, P>{.r = weights.round[s],
+                                                          .unit = weights.unit};
+                    });
+                finish(wf);
+            };
+            if (round_bytes <= 1) {
+                run.template operator()<uint8_t>();
+            } else if (round_bytes <= 2) {
+                run.template operator()<uint16_t>();
+            } else if (round_bytes <= 4) {
+                run.template operator()<uint32_t>();
+            } else {
+                run.template operator()<uint64_t>();
+            }
+            return;
+        }
+        if constexpr (std::is_same_v<TOut, float>) {
+            const auto* wf = input.row<float>(ch.i_sub, nsamps, nullptr);
+            fdmt_init_subband_box_lag<Mode>(
+                wf, ch.hist_sub, buf_base, ch.boxes, ch.order, ndt, ch.hist_len,
+                nsamps, ch.stride, reinterpret_cast<float*>(ch.acc_row),
+                [&](SizeType s) {
+                    return FDMTBoxScaleF32{.w = weights.w_f32[s]};
+                });
+            finish(wf);
+        }
+    } else {
+        using TS = std::conditional_t<std::is_integral_v<TOut>, TOut, float>;
+        const auto* wf =
+            input.row<TS>(ch.i_sub, nsamps, reinterpret_cast<TS*>(ch.unpack));
+        for (SizeType i_dt = 0; i_dt < ndt; ++i_dt) {
+            const auto shift = static_cast<SizeType>(ch.boxes[i_dt].point);
+            TOut* row        = buf_base + (i_dt * ch.stride);
+            if constexpr (Mode == FDMTMode::kValid) {
+                fdmt_init_valid_row0_shift(wf, ch.hist_sub, row, shift,
+                                           ch.hist_len, nsamps);
+            } else {
+                fdmt_init_impl_row_shift<Mode == FDMTMode::kRoll>(
+                    wf, row, shift, nsamps);
+            }
+        }
+        finish(wf);
+    }
+}
 
 /**
  * @brief All level-0 rows of one sub-band, and in valid mode its input
@@ -1051,6 +1238,11 @@ void fdmt_init_channel(const FDMTInput& input,
             fdmt_advance_history_window(wf, ch.hist_sub, nsamps, ch.hist_len);
         }
     };
+    if (ch.boxes != nullptr) {
+        fdmt_init_channel_lag<Mode, UseBoxSmearing>(input, buf_base, ch,
+                                                    weights, round_bytes);
+        return;
+    }
     if constexpr (UseBoxSmearing) {
         if (input.packed != nullptr) {
             const auto run = [&]<typename P>() {
@@ -1531,6 +1723,12 @@ void FDMTCpuEngine::init_channel(const FDMTInput& input_b,
         .stride   = stride,
         .unpack   = m_ws.slice(tid),
         .acc_row  = m_ws.slice(tid) + m_ws.row_bytes,
+        .boxes    = pc.level0_boxes.empty()
+                        ? nullptr
+                        : pc.level0_boxes.data() + pc.grids[0][c].coord_offset,
+        .order    = pc.level0_order.empty()
+                        ? nullptr
+                        : pc.level0_order.data() + pc.grids[0][c].coord_offset,
     };
     const SizeType round_bytes =
         m_box_round_bytes[input_b.packed != nullptr ? input_b.nbits

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1758,6 +1759,9 @@ private:
         mix(m_chunk);
         mix(m_search_from);
         mix(m_smear ? 1 : 0);
+        if (const double cd = m_plan.get_chan_dm(); cd != 0.0) {
+            mix(std::bit_cast<uint64_t>(cd)); // other level-0 boxes
+        }
         mix(m_state_elem);
         mix(m_ring_f.size());
         for (SizeType c = 0; c < m_nchans; ++c) {

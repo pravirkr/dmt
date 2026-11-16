@@ -207,13 +207,23 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                                        uint64_t shift) -> void {
                     const auto& c = pc.coordinates[level][idx];
                     if (level == 0) {
-                        const auto dt    = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
-                        const SizeType s = static_cast<SizeType>(std::abs(dt));
+                        const auto dt  = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
+                        SizeType s     = static_cast<SizeType>(std::abs(dt));
+                        SizeType reach = s;
+                        if (!pc.level0_boxes.empty()) {
+                            // chan_dm plan: the box of s + 1 samples ends
+                            // `lag` samples back; without smearing the row
+                            // reads one sample at `point`.
+                            const auto& box = pc.level0_boxes[idx];
+                            s               = static_cast<SizeType>(box.s);
+                            reach = smear ? static_cast<SizeType>(box.lag) + s
+                                          : static_cast<SizeType>(box.point);
+                        }
                         // A killed channel adds no noise or signal (it reads as
                         // zero).
                         if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
                             lengths.push_back(smear ? s + 1 : 1);
-                            support = std::max(support, shift + s);
+                            support = std::max(support, shift + reach);
                         }
                     } else {
                         self(self, level - 1,

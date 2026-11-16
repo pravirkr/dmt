@@ -33,7 +33,8 @@ public:
          IndexType dt_min,
          SizeType dt_step,
          std::string_view mode,
-         SizeType subband_depth);
+         SizeType subband_depth,
+         double chan_dm = 0.0);
 
     Impl(float f_min,
          float f_max,
@@ -42,7 +43,8 @@ public:
          float tsamp,
          const std::vector<IndexType>& dt_grid,
          std::string_view mode,
-         SizeType subband_depth);
+         SizeType subband_depth,
+         double chan_dm = 0.0);
 
     Impl(float f_min,
          float f_max,
@@ -51,7 +53,8 @@ public:
          float tsamp,
          const std::vector<float>& dm_grid,
          std::string_view mode,
-         SizeType subband_depth);
+         SizeType subband_depth,
+         double chan_dm = 0.0);
 
     ~Impl()                                = default;
     Impl(Impl&& other) noexcept            = default;
@@ -226,8 +229,13 @@ public:
         return m_container.tree_history_size;
     }
     SizeType get_fft_overlap() const noexcept {
-        return static_cast<SizeType>(
+        const auto overlap = static_cast<SizeType>(
             std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
+        // chan_dm plans: the level-0 boxes reach further back (the causal
+        // delay), so the history must cover the whole support.
+        return m_container.level0_boxes.empty()
+                   ? overlap
+                   : std::max(overlap, m_fft_support);
     }
     SizeType get_fft_support() const noexcept { return m_fft_support; }
     SizeType get_fft_size() const noexcept { return m_fft_size; }
@@ -270,6 +278,7 @@ private:
     SizeType m_dt_step;
     FDMTMode m_mode;
     SizeType m_subband_depth{0};
+    double m_chan_dm{0.0};
     bool m_is_custom_grid{false};
     std::vector<IndexType> m_dt_grid_target;
 
@@ -315,6 +324,10 @@ private:
 
     void
     make_plan_iter0(const std::vector<std::vector<IndexType>>& active_level0);
+
+    /// chan_dm != 0: the level-0 boxes, their sweep order, the causal delay
+    /// and the level-0 extent (state_shape[0].dt_max).
+    void make_level0_boxes();
 
     void make_plan(SizeType i_iter,
                    const std::vector<std::vector<TreeNode>>& tree,

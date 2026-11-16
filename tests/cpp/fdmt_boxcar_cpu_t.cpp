@@ -73,49 +73,54 @@ TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096", "[boxcar][cpu]") {
 
 TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
           "[boxcar][cpu]") {
-    const plans::FDMTPlan plan(700, 1200, 7, 311, 0.001F,
-                               std::vector<IndexType>{-73, -12, 0, 4, 97},
-                               "valid", 2);
-    const auto input = waterfalls(plan, 2, 4);
-    for (const bool smear : {true, false}) {
-        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
-                                PeakFindingMode::kContiguousPeakAcrossWidths,
-                                PeakFindingMode::kAllAboveThreshold}) {
-            DYNAMIC_SECTION("smear=" << smear
-                                     << " mode=" << static_cast<int>(mode)) {
-                BoxcarConfig cfg;
-                cfg.max_boxcar       = 37;
-                cfg.wtsp             = 1.5F;
-                cfg.detect_thresh    = 2.7F;
-                cfg.peak_mode        = mode;
-                cfg.max_candidates   = 500000;
-                cfg.max_cands_per_dm = 0;
-                const auto expected =
-                    batched_reference(plan, cfg, smear, 2, input);
-                REQUIRE_FALSE(expected.empty());
-                for (const SizeType fuse :
-                     {SizeType{0}, algorithms::kFDMTAutoFuse}) {
-                    for (const SizeType chunk :
-                         {SizeType{64}, plan.get_nsamps()}) {
-                        FDMTBoxcar search(plan, cfg, smear, Exec::cpu(3), 2,
-                                          fuse, chunk);
-                        std::vector<RawCandidate> actual;
-                        for (SizeType k = 0; k < input.size(); ++k) {
-                            const auto result = search.execute(input[k]);
-                            CHECK(result.input_sample_begin ==
-                                  k * plan.get_nsamps());
-                            append(actual, result);
+    // chan_dm 20: coherently dedispersed channels (plan level-0 boxes).
+    for (const double chan_dm : {0.0, 20.0}) {
+        const plans::FDMTPlan plan(700, 1200, 7, 311, 0.001F,
+                                   std::vector<IndexType>{-73, -12, 0, 4, 97},
+                                   "valid", 2, chan_dm);
+        const auto input = waterfalls(plan, 2, 4);
+        for (const bool smear : {true, false}) {
+            for (const auto mode :
+                 {PeakFindingMode::kContiguousPeakPerWidth,
+                  PeakFindingMode::kContiguousPeakAcrossWidths,
+                  PeakFindingMode::kAllAboveThreshold}) {
+                DYNAMIC_SECTION("chan_dm=" << chan_dm << " smear=" << smear
+                                           << " mode="
+                                           << static_cast<int>(mode)) {
+                    BoxcarConfig cfg;
+                    cfg.max_boxcar       = 37;
+                    cfg.wtsp             = 1.5F;
+                    cfg.detect_thresh    = 2.7F;
+                    cfg.peak_mode        = mode;
+                    cfg.max_candidates   = 500000;
+                    cfg.max_cands_per_dm = 0;
+                    const auto expected =
+                        batched_reference(plan, cfg, smear, 2, input);
+                    REQUIRE_FALSE(expected.empty());
+                    for (const SizeType fuse :
+                         {SizeType{0}, algorithms::kFDMTAutoFuse}) {
+                        for (const SizeType chunk :
+                             {SizeType{64}, plan.get_nsamps()}) {
+                            FDMTBoxcar search(plan, cfg, smear, Exec::cpu(3), 2,
+                                              fuse, chunk);
+                            std::vector<RawCandidate> actual;
+                            for (SizeType k = 0; k < input.size(); ++k) {
+                                const auto result = search.execute(input[k]);
+                                CHECK(result.input_sample_begin ==
+                                      k * plan.get_nsamps());
+                                append(actual, result);
+                            }
+                            append(actual, search.flush());
+                            compare(actual, expected);
+                            CHECK(search.flush().candidates.empty());
+                            search.reset_history();
+                            std::vector<RawCandidate> repeated;
+                            for (const auto& block : input) {
+                                append(repeated, search.execute(block));
+                            }
+                            append(repeated, search.flush());
+                            compare(repeated, expected);
                         }
-                        append(actual, search.flush());
-                        compare(actual, expected);
-                        CHECK(search.flush().candidates.empty());
-                        search.reset_history();
-                        std::vector<RawCandidate> repeated;
-                        for (const auto& block : input) {
-                            append(repeated, search.execute(block));
-                        }
-                        append(repeated, search.flush());
-                        compare(repeated, expected);
                     }
                 }
             }
@@ -125,75 +130,81 @@ TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
 
 TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
           "[boxcar][cpu]") {
-    plans::FDMTPlan plan(700, 1200, 5, 128, 0.001F,
-                         std::vector<IndexType>{-90, 0, 7, 100}, "valid", 2);
-    for (const bool smear : {true, false}) {
-        BoxcarConfig cfg;
-        cfg.max_boxcar  = 32;
-        cfg.noise_sigma = 2.5F;
-        FDMTBoxcar search(plan, cfg, smear);
-        const auto& root = search.get_search_plans().back();
-        for (SizeType f = 0; f < root.widths.size(); ++f) {
-            const auto sigma =
-                plan.get_effective_sigma_grid(root.widths[f], smear);
-            for (SizeType d = 0; d < sigma.size(); ++d) {
-                CHECK_THAT(1.0F /
-                               root.inv_sigma_lut[d * root.widths.size() + f],
-                           Catch::Matchers::WithinRel(2.5F * sigma[d], 2e-6F));
+    // chan_dm 20: the noise tables and warm-up of plan level-0 boxes.
+    for (const double chan_dm : {0.0, 20.0}) {
+        plans::FDMTPlan plan(700, 1200, 5, 128, 0.001F,
+                             std::vector<IndexType>{-90, 0, 7, 100}, "valid", 2,
+                             chan_dm);
+        for (const bool smear : {true, false}) {
+            BoxcarConfig cfg;
+            cfg.max_boxcar  = 32;
+            cfg.noise_sigma = 2.5F;
+            FDMTBoxcar search(plan, cfg, smear);
+            const auto& root = search.get_search_plans().back();
+            for (SizeType f = 0; f < root.widths.size(); ++f) {
+                const auto sigma =
+                    plan.get_effective_sigma_grid(root.widths[f], smear);
+                for (SizeType d = 0; d < sigma.size(); ++d) {
+                    CHECK_THAT(
+                        1.0F / root.inv_sigma_lut[d * root.widths.size() + f],
+                        Catch::Matchers::WithinRel(2.5F * sigma[d], 2e-6F));
+                }
             }
-        }
-        // Impulse energy of the actual FDMT subband response. Boxcar sums
-        // are evaluated independently; each input channel is independent.
-        const SizeType samples = 512;
-        plans::FDMTPlan impulse_plan(700, 1200, 5, samples, 0.001F,
-                                     plan.get_dt_grid_final(), "valid", 2);
-        FDMTBoxcar impulse_meta(impulse_plan, cfg, smear);
-        const auto planes = impulse_meta.get_search_plans();
-        std::vector<std::vector<double>> energy;
-        std::vector<std::vector<SizeType>> last_support;
-        for (const auto& p : planes) {
-            energy.emplace_back(p.dm_grid.size() * p.widths.size(), 0.0);
-            last_support.emplace_back(p.dm_grid.size(), 0);
-        }
-        for (SizeType channel = 0; channel < 5; ++channel) {
-            FDMT fdmt(impulse_plan, smear, {}, 1, 0, false, samples);
-            std::vector<float> input(5 * samples);
-            input[channel * samples + 128] = 1;
-            std::vector<float> output(impulse_plan.get_dmt_size());
-            fdmt.reset(input, output);
-            for (SizeType p = 0; p < planes.size(); ++p) {
-                fdmt.advance_until_remaining(planes[p].subband_level);
-                const auto data = fdmt.view_subband(planes[p].subband_idx).data;
-                for (SizeType d = 0; d < planes[p].dm_grid.size(); ++d) {
-                    for (SizeType t = 128; t < samples; ++t) {
-                        if (data[d * samples + t] != 0) {
-                            last_support[p][d] =
-                                std::max(last_support[p][d], t - 128);
-                        }
-                    }
-                    for (SizeType f = 0; f < planes[p].widths.size(); ++f) {
-                        for (SizeType t = 0; t < samples; ++t) {
-                            double sum = 0;
-                            for (SizeType k = 0;
-                                 k < planes[p].widths[f] && k <= t; ++k) {
-                                sum += data[d * samples + t - k];
+            // Impulse energy of the actual FDMT subband response. Boxcar sums
+            // are evaluated independently; each input channel is independent.
+            const SizeType samples = 512;
+            plans::FDMTPlan impulse_plan(700, 1200, 5, samples, 0.001F,
+                                         plan.get_dt_grid_final(), "valid", 2,
+                                         chan_dm);
+            FDMTBoxcar impulse_meta(impulse_plan, cfg, smear);
+            const auto planes = impulse_meta.get_search_plans();
+            std::vector<std::vector<double>> energy;
+            std::vector<std::vector<SizeType>> last_support;
+            for (const auto& p : planes) {
+                energy.emplace_back(p.dm_grid.size() * p.widths.size(), 0.0);
+                last_support.emplace_back(p.dm_grid.size(), 0);
+            }
+            for (SizeType channel = 0; channel < 5; ++channel) {
+                FDMT fdmt(impulse_plan, smear, {}, 1, 0, false, samples);
+                std::vector<float> input(5 * samples);
+                input[channel * samples + 128] = 1;
+                std::vector<float> output(impulse_plan.get_dmt_size());
+                fdmt.reset(input, output);
+                for (SizeType p = 0; p < planes.size(); ++p) {
+                    fdmt.advance_until_remaining(planes[p].subband_level);
+                    const auto data =
+                        fdmt.view_subband(planes[p].subband_idx).data;
+                    for (SizeType d = 0; d < planes[p].dm_grid.size(); ++d) {
+                        for (SizeType t = 128; t < samples; ++t) {
+                            if (data[d * samples + t] != 0) {
+                                last_support[p][d] =
+                                    std::max(last_support[p][d], t - 128);
                             }
-                            energy[p][d * planes[p].widths.size() + f] +=
-                                sum * sum;
+                        }
+                        for (SizeType f = 0; f < planes[p].widths.size(); ++f) {
+                            for (SizeType t = 0; t < samples; ++t) {
+                                double sum = 0;
+                                for (SizeType k = 0;
+                                     k < planes[p].widths[f] && k <= t; ++k) {
+                                    sum += data[d * samples + t - k];
+                                }
+                                energy[p][d * planes[p].widths.size() + f] +=
+                                    sum * sum;
+                            }
                         }
                     }
                 }
+                fdmt.finalize();
             }
-            fdmt.finalize();
-        }
-        for (SizeType p = 0; p < planes.size(); ++p) {
-            for (SizeType d = 0; d < planes[p].dm_grid.size(); ++d) {
-                CHECK(planes[p].warmup_samples[d] == last_support[p][d]);
-            }
-            for (SizeType i = 0; i < energy[p].size(); ++i) {
-                const double sigma = 1.0 / planes[p].inv_sigma_lut[i];
-                CHECK_THAT(sigma * sigma, Catch::Matchers::WithinRel(
-                                              energy[p][i] * 6.25, 3e-6));
+            for (SizeType p = 0; p < planes.size(); ++p) {
+                for (SizeType d = 0; d < planes[p].dm_grid.size(); ++d) {
+                    CHECK(planes[p].warmup_samples[d] == last_support[p][d]);
+                }
+                for (SizeType i = 0; i < energy[p].size(); ++i) {
+                    const double sigma = 1.0 / planes[p].inv_sigma_lut[i];
+                    CHECK_THAT(sigma * sigma, Catch::Matchers::WithinRel(
+                                                  energy[p][i] * 6.25, 3e-6));
+                }
             }
         }
     }
@@ -943,15 +954,18 @@ TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
         SizeType nchans;
         SizeType depth;
         bool top;
+        double chan_dm{0.0}; ///< plan level-0 boxes (coherent channels)
     };
-    for (const Case cs : {Case{512, 0, true}, Case{512, 1, true},
-                          Case{512, 2, false}, Case{2048, 3, true}}) {
+    for (const Case cs :
+         {Case{512, 0, true}, Case{512, 1, true}, Case{512, 2, false},
+          Case{2048, 3, true}, Case{512, 1, true, 413.0}}) {
         const SizeType depth = cs.depth;
         const plans::FDMTPlan plan(1100.0F, 1714.0F, cs.nchans, 256, 455.6e-6F,
-                                   300, 0, 1, "valid", depth);
+                                   300, 0, 1, "valid", depth, cs.chan_dm);
         const SizeType size = kBeams * plan.get_nchans() * plan.get_nsamps();
         for (const SizeType bits : {SizeType{8}, SizeType{16}, SizeType{32}}) {
             DYNAMIC_SECTION("nchans=" << cs.nchans << " depth=" << depth
+                                      << " chan_dm=" << cs.chan_dm
                                       << " bits=" << bits) {
                 const uint32_t maximum = bits == 32 ? 0U : (1U << bits) - 1U;
                 const uint64_t seed    = 17 + depth + bits;

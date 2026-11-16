@@ -107,7 +107,7 @@ BoxTables box_tables(const plans::FDMTPlan& fplan) {
 // returns level `fuse` as float, in canonical units (integer level-F
 // storage is rescaled by 2^-b). `thist_out` receives the fused levels'
 // tree-history slots (valid mode).
-template <FDMTMode Mode, bool Smear, typename TOut>
+template <FDMTMode Mode, bool Smear, typename TOut, bool HasChanDM = false>
 std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
                              const detail::FDMTFusedTilePlan& plan,
                              const BoxTables& box,
@@ -123,7 +123,8 @@ std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
     const auto args      = detail::make_fused_tile_args(
         plan, tile, hist_len, plan.group_info.data(), plan.coords.data(),
         plan.dt_grid0.data(), plan.ndt0.data(), plan.coord_offset0.data(),
-        box.means(Smear));
+        box.means(Smear), plan.box0.empty() ? nullptr : plan.box0.data(),
+        plan.order0.empty() ? nullptr : plan.order0.data());
     const auto [cap_a, cap_b] = plan.smem_floats(tile);
     constexpr SizeType kGuard = 64;
     constexpr float kSentinel = -12345.0F;
@@ -141,11 +142,14 @@ std::vector<float> run_tiles(const plans::FDMTPlanContainer& pc,
         for (int t = 0; t < ntiles; ++t) {
             std::ranges::fill(smem, kSentinel);
             if (packed) {
-                detail::fdmt_fused_tile<Mode, Smear>(
+                detail::fdmt_fused_tile<Mode, Smear, HostBlock,
+                                        detail::FDMTInputPacked, TOut,
+                                        HasChanDM>(
                     HostBlock{}, in_pk, 0, out.data(), args, t, g, smem.data(),
                     hist0, thist_in, thist_out);
             } else {
-                detail::fdmt_fused_tile<Mode, Smear>(
+                detail::fdmt_fused_tile<Mode, Smear, HostBlock,
+                                        detail::FDMTInputF32, TOut, HasChanDM>(
                     HostBlock{}, in_f32, 0, out.data(), args, t, g, smem.data(),
                     hist0, thist_in, thist_out);
             }
@@ -374,6 +378,69 @@ TEST_CASE("CUDA fused tile valid-mode streaming (host emulation)",
                                          Catch::Matchers::Equals(expected));
                             REQUIRE_THAT(tree_out,
                                          Catch::Matchers::Equals(tree_after));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("CUDA fused tile with chan_dm level-0 boxes (host emulation)",
+          "[fdmt_fused_tile][cpu]") {
+    // Coherently dedispersed channels (plan chan_dm): the tile builds
+    // level 0 from the plan's boxes and must match the CPU tree path bit for
+    // bit (integer input), including the level-0 history across blocks
+    // shorter than the boxes' reach. A positive chan_dm and a negative one,
+    // mixed-sign delay grids.
+    const SizeType nchans = 32;
+    for (const double chan_dm : {300.0, -120.0}) {
+        for (const bool smear : {true, false}) {
+            for (const bool packed : {false, true}) {
+                for (const SizeType fuse : {1, 3}) {
+                    DYNAMIC_SECTION("chan_dm=" << chan_dm << " smear=" << smear
+                                               << " packed=" << packed
+                                               << " fuse=" << fuse) {
+                        const SizeType block = 24;
+                        std::vector<IndexType> grid;
+                        for (IndexType dt = -20; dt <= 60; dt += 3) {
+                            grid.push_back(dt);
+                        }
+                        const plans::FDMTPlan plan_h(kFMin, kFMax, nchans,
+                                                     block, kTsamp, grid,
+                                                     "valid", 0, chan_dm);
+                        REQUIRE(!plan_h.get_level0_boxes().empty());
+                        FDMT ref(plan_h, smear, Exec::cpu(1), 1, 0, false);
+                        const auto& pc  = ref.get_plan().get_container();
+                        const auto plan = detail::build_fused_tile_plan(
+                            pc, plan_h.get_niters(), fuse);
+                        REQUIRE(plan.box0.size() == 3 * pc.level0_boxes.size());
+                        const auto h0_size = plan_h.get_history_size();
+                        std::vector<float> before(ref.history_state_size());
+                        for (SizeType b = 0; b < 5; ++b) {
+                            ref.save_history(before);
+                            const auto wf = random_ints(
+                                nchans, block, static_cast<unsigned>(90 + b));
+                            const auto expected =
+                                packed ? reference_level_packed(ref, wf.packed,
+                                                                fuse)
+                                       : reference_level(ref, wf.values, fuse);
+                            const float* hist0 =
+                                before.data() + detail::kFDMTHistHeader;
+                            std::vector<float> tree_out(
+                                before.size() - detail::kFDMTHistHeader -
+                                h0_size);
+                            const auto run = [&]<bool S>() {
+                                return run_tiles<FDMTMode::kValid, S, float,
+                                                 true>(
+                                    pc, plan, box_tables(plan_h), 7, wf, packed,
+                                    hist0, hist0 + h0_size, tree_out.data());
+                            };
+                            const auto got =
+                                smear ? run.template operator()<true>()
+                                      : run.template operator()<false>();
+                            REQUIRE_THAT(got,
+                                         Catch::Matchers::Equals(expected));
                         }
                     }
                 }

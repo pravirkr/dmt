@@ -48,10 +48,33 @@ and the smearing elsewhere grows with `|DM - chan_dm|`. Pass that DM as
 `chan_dm` (S/N-loss rule): the trials then get dense around it, where
 pulses are sharpest. The Levin rules don't take it.
 
-FDMT's `use_box_smearing=True` (the default) also assumes ordinary data: it
-averages each channel over the smearing span at the trial DM. On coherently
-dedispersed data that dilutes sharp pulses near `chan_dm`, so use
-`use_box_smearing=False` there.
+FDMT's level-0 box smearing assumes ordinary data unless told otherwise: it
+averages each channel over the whole smearing span at the trial DM, which
+dilutes sharp pulses near `chan_dm`. Build the FDMT plan with the same DM,
+`FDMTPlan(..., chan_dm=413.0)`, and pass that plan to `FDMT`, `FDMTBoxcar`,
+`FDMTFFT` or `FDMTFFTBoxcar`. Each channel's box then covers only the
+residual sweep, about `|dt(DM) - dt(chan_dm)|` samples, centred on the
+channel's arrival, and the noise model follows. Outputs then lag the
+bottom-edge arrival by `plan.level0_causal_delay` samples (39 on Parkes UWL
+at 64 µs with `chan_dm` 413). It needs `mode="valid"`.
+
+Don't switch box smearing off instead: on simulated UWL bursts at
+`chan_dm` 413 that keeps less S/N than the default at every DM and width
+tried. Recovered S/N as a fraction of the ideal `sqrt(nchans * width)`, at
+DM 413:
+
+| Pulse width | `use_box_smearing=False` | default | `chan_dm` plan |
+|---:|---:|---:|---:|
+| 1 sample | 0.37 | 0.52 | 0.58 |
+| 4 samples | 0.64 | 0.80 | 0.89 |
+| 16 samples | 0.83 | 0.94 | 0.97 |
+
+The gain is largest near `chan_dm` and on wide bands. Far from it, or on
+narrower bands, the `chan_dm` plan can keep slightly less than the default
+(UWL at DM 100 and one sample: 0.50 against 0.51; CRYO-PAF L-band at DM 413
+and four samples: 0.87 against 0.90). Much of the remaining loss at one
+sample is the FDMT tree's integer delay rounding: on CRYO-PAF L-band,
+`FDMTFFT` with fractional delays raises it from 0.62 to 0.71.
 
 ## Very wide bands
 

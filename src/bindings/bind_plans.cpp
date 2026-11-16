@@ -149,6 +149,13 @@ void bind_plans(py::module_& mod) {
             stepper's ``view_subband`` and :class:`FDMTBoxcar` read them),
             and they cap level fusion at ``max_fuse_levels``. Use depth 0
             for plain dedispersion.
+        chan_dm : float, optional
+            DM (pc cm^-3) the channels were coherently dedispersed to
+            (default 0, ordinary filterbank data). Each level-0 box then
+            covers only the residual intra-channel sweep at the trial DM,
+            centred on the channel's arrival, in every engine built from
+            the plan, and outputs lag by :attr:`level0_causal_delay`
+            samples. Needs ``mode='valid'``.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
 
@@ -161,30 +168,35 @@ void bind_plans(py::module_& mod) {
         :meth:`get_subband_sigma_grid` gives the noise sigma of every row of
         any tree or staggered subband, for S/N on stepper views.
         )doc")
-        .def(py::init<float, float, SizeType, SizeType, float, IndexType,
-                      IndexType, SizeType, std::string_view, SizeType>(),
-             "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
-             "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
-             "subband_depth"_a = 0)
-        .def(py::init([](float f_min, float f_max, SizeType nchans,
-                         SizeType nsamps, float tsamp,
-                         const py::object& dt_grid, const py::object& dt_arr,
-                         const py::object& dm_grid, const py::object& dm_arr,
-                         std::string_view mode, SizeType subband_depth) {
-                 const auto [type, obj] =
-                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
-                 if (type == CustomGridType::kDt) {
-                     return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                     extract_dt_grid(obj), mode, subband_depth);
-                 }
-                 return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                 extract_dm_grid(obj), mode, subband_depth);
-             }),
-             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
-             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
-             py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
-             py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("mode") = "valid", py::arg("subband_depth") = 0)
+        .def(
+            py::init<float, float, SizeType, SizeType, float, IndexType,
+                     IndexType, SizeType, std::string_view, SizeType, double>(),
+            "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a, "dt_max"_a,
+            "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
+            "subband_depth"_a = 0, "chan_dm"_a = 0.0)
+        .def(
+            py::init([](float f_min, float f_max, SizeType nchans,
+                        SizeType nsamps, float tsamp, const py::object& dt_grid,
+                        const py::object& dt_arr, const py::object& dm_grid,
+                        const py::object& dm_arr, std::string_view mode,
+                        SizeType subband_depth, double chan_dm) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                if (type == CustomGridType::kDt) {
+                    return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                    extract_dt_grid(obj), mode, subband_depth,
+                                    chan_dm);
+                }
+                return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                extract_dm_grid(obj), mode, subband_depth,
+                                chan_dm);
+            }),
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("mode") = "valid", py::arg("subband_depth") = 0,
+            py::arg("chan_dm") = 0.0)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly(
@@ -207,6 +219,32 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("df", &FDMTPlan::get_df)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
         .def_property_readonly("subband_depth", &FDMTPlan::get_subband_depth)
+        .def_property_readonly(
+            "chan_dm", &FDMTPlan::get_chan_dm,
+            "DM the channels were coherently dedispersed to (0: ordinary "
+            "filterbank data).")
+        .def_property_readonly(
+            "level0_causal_delay", &FDMTPlan::get_level0_causal_delay,
+            "Samples every output lags the bottom-edge arrival (0 unless "
+            "chan_dm != 0).")
+        .def_property_readonly(
+            "level0_boxes",
+            [](const FDMTPlan& plan) {
+                const auto& boxes = plan.get_level0_boxes();
+                py::array_t<int32_t> out(
+                    {static_cast<py::ssize_t>(boxes.size()), py::ssize_t{3}});
+                auto v = out.mutable_unchecked<2>();
+                for (py::ssize_t i = 0; i < v.shape(0); ++i) {
+                    const auto& b = boxes[static_cast<SizeType>(i)];
+                    v(i, 0)       = b.lag;
+                    v(i, 1)       = b.s;
+                    v(i, 2)       = b.point;
+                }
+                return out;
+            },
+            "chan_dm != 0: (lag, s, point) of every level-0 coordinate; the "
+            "row reads input t - lag - s .. t - lag (box smearing) or t - "
+            "point (none). Empty (0, 3) when chan_dm == 0.")
         .def_property_readonly("max_fuse_levels",
                                &FDMTPlan::get_max_fuse_levels)
         .def_property_readonly("container", &FDMTPlan::get_container)
@@ -246,6 +284,9 @@ void bind_plans(py::module_& mod) {
             numpy.ndarray
                 Integer shifts of length ``nchans``, relative to the
                 unshifted reference channel. Used by :func:`add_frb_track`.
+                With ``chan_dm`` set they are each level-0 box's start;
+                engines without box smearing read about half a box later
+                (:attr:`level0_boxes`).
             )doc")
         .def(
             "get_effective_variance",

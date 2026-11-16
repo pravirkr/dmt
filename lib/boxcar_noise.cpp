@@ -62,6 +62,12 @@ BoxcarNoiseModel::BoxcarNoiseModel(const plans::FDMTPlan& plan,
             if (l == 0) {
                 const auto dt = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
                 level[i]      = static_cast<uint64_t>(std::abs(dt));
+                if (!pc.level0_boxes.empty()) {
+                    // chan_dm plan: the farthest read of the level-0 row.
+                    const auto& box = pc.level0_boxes[i];
+                    level[i] = static_cast<uint64_t>(smear ? box.lag + box.s
+                                                           : box.point);
+                }
                 continue;
             }
             const SizeType prev = pc.state_shape[l - 1].nsamps;
@@ -117,10 +123,14 @@ void BoxcarNoiseModel::fill(std::span<const uint8_t> mask, bool layout) {
             for (std::ptrdiff_t i = 0; i < n; ++i) {
                 const auto& c = coords[i];
                 const auto dt = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
-                const auto len =
-                    m_smear ? static_cast<uint32_t>(std::abs(dt)) + 1U : 1U;
-                const bool on = mask.empty() || mask[c.i_sub] != 0;
-                out[i]        = {len, on ? 1U : 0U};
+                const auto s =
+                    pc.level0_boxes.empty()
+                        ? static_cast<uint32_t>(std::abs(dt))
+                        : static_cast<uint32_t>(
+                              pc.level0_boxes[static_cast<SizeType>(i)].s);
+                const auto len = m_smear ? s + 1U : 1U;
+                const bool on  = mask.empty() || mask[c.i_sub] != 0;
+                out[i]         = {len, on ? 1U : 0U};
             }
         } else {
             const SizeType prev = pc.state_shape[l - 1].nsamps;

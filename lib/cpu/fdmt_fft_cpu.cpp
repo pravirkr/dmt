@@ -451,6 +451,9 @@ private:
     int m_nthreads;
     bool m_use_box_smearing;
     std::vector<float> m_box_wf; // level-0 box-mean weights by |dt|
+    // chan_dm plans: the distinct level-0 windows, which
+    // Level0Node::shift indexes (empty: shift = |dt|).
+    std::vector<plans::FDMTLevel0Box> m_l0_win;
     FDMTMode m_mode;
     bool m_frac;                 // exact merge delays
     std::vector<uint8_t> m_kill; // per channel, 1 = keep (empty: all)
@@ -607,7 +610,9 @@ private:
             ws.q.assign((m_q_max + 1) * kTileFl, 0.0F);
             ws.anchor.assign(m_frac ? m_frac_s.size() : 0, ComplexType{});
             ws.p.assign(kTileFl, 0.0F);
-            ws.w0.assign((m_dt0_max + 1) * kTileFl, 0.0F);
+            ws.w0.assign((m_l0_win.empty() ? m_dt0_max + 1 : m_l0_win.size()) *
+                             kTileFl,
+                         0.0F);
             ws.buf_a.assign(m_upper_max * kTileFl, 0.0F);
             ws.buf_b.assign(m_upper_max * kTileFl, 0.0F);
             ws.s0.assign(m_slice_max * kTileFl, 0.0F);
@@ -644,6 +649,14 @@ private:
             for (SizeType i = 0; i < g.ndt; ++i) {
                 const auto s = static_cast<SizeType>(std::abs(g.dt_grid[i]));
                 m_level0[g.coord_offset + i] = {to_u32(c), to_u32(s)};
+            }
+        }
+        {
+            // chan_dm plan: nodes index the distinct windows.
+            auto wins = fdmt_fft::level0_windows(plan_c, m_use_box_smearing);
+            m_l0_win  = std::move(wins.win);
+            for (SizeType i = 0; i < wins.node_win.size(); ++i) {
+                m_level0[i].shift = wins.node_win[i];
             }
         }
         m_levels.assign(niters + 1, LevelOps{});
@@ -990,6 +1003,29 @@ private:
             }
         }
         const float norm = 1.0F / static_cast<float>(g.n_fft);
+        if (!m_l0_win.empty()) {
+            // chan_dm plan: window u sums the phasors of shifts lag .. lag
+            // + s (one shift without box smearing), times the box mean.
+            for (SizeType u = 0; u < m_l0_win.size(); ++u) {
+                const auto& b = m_l0_win[u];
+                float* out    = w.w0.data() + (u * kTileFl);
+                const auto s  = static_cast<SizeType>(b.s);
+                const float scale =
+                    m_use_box_smearing ? norm * m_box_wf[s] : norm;
+                float sum[kTileFl]{};
+                for (SizeType d = 0; d <= s; ++d) {
+                    const float* qs =
+                        q + ((static_cast<SizeType>(b.lag) + d) * kTileFl);
+                    for (SizeType j = 0; j < kTileFl; ++j) {
+                        sum[j] += qs[j];
+                    }
+                }
+                for (SizeType j = 0; j < kTileFl; ++j) {
+                    out[j] = sum[j] * scale;
+                }
+            }
+            return;
+        }
         float acc[kTileFl]{};
         for (SizeType s = 0; s <= m_dt0_max; ++s) {
             const float* qs = q + (s * kTileFl);
@@ -1260,8 +1296,24 @@ private:
             const auto& node = m_level0[static_cast<SizeType>(i)];
             ComplexType* win = ws().cplx.data();
             // Window: W^(s k) (no smearing) or sum_{u <= s} W^(u k).
-            const auto s = static_cast<SizeType>(node.shift);
-            if (m_use_box_smearing) {
+            auto s = static_cast<SizeType>(node.shift);
+            if (!m_l0_win.empty()) {
+                // chan_dm plan: sum_{u = lag .. lag + s} W^(u k).
+                const auto& b = m_l0_win[s];
+                s             = static_cast<SizeType>(b.s);
+                std::fill_n(win, g.n_bins, ComplexType{});
+                for (SizeType d = 0; d <= s; ++d) {
+                    const SizeType u = static_cast<SizeType>(b.lag) + d;
+                    SizeType m       = 0;
+                    for (SizeType k = 0; k < g.n_bins; ++k) {
+                        win[k] += g.twiddle[m];
+                        m += u;
+                        while (m >= g.n_fft) {
+                            m -= g.n_fft;
+                        }
+                    }
+                }
+            } else if (m_use_box_smearing) {
                 std::fill_n(win, g.n_bins, ComplexType{});
                 for (SizeType u = 0; u <= s; ++u) {
                     SizeType m = 0;

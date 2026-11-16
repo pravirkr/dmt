@@ -8,6 +8,13 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
+  dedispersed channels: level-0 boxes cover the residual intra-channel sweep
+  at the trial DM, centred on each channel's arrival, in `FDMT`,
+  `FDMTBoxcar`, `FDMTFFT` and `FDMTFFTBoxcar` (CPU and GPU, float and packed
+  input), with the noise model to match. Outputs lag by the new
+  `get_level0_causal_delay()`; `get_level0_boxes()` lists the boxes. Valid
+  mode only. With `chan_dm` 0 every output is unchanged.
 - **C++ DM-grid generators**: `plans::generate_dm_grid` and
   `plans::generate_dt_grid` (Python `dmtlib.generate_dm_grid`,
   `generate_dt_grid`, `DMGridMethod`). `generate_optimal_dm_grid` and

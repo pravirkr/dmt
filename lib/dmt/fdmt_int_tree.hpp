@@ -59,7 +59,11 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     for (const auto& grid : pc.grids[0]) {
         for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {
             const auto len =
-                static_cast<SizeType>(std::abs(grid.dt_grid[i_dt])) + 1;
+                pc.level0_boxes.empty()
+                    ? static_cast<SizeType>(std::abs(grid.dt_grid[i_dt])) + 1
+                    : static_cast<SizeType>(
+                          pc.level0_boxes[grid.coord_offset + i_dt].s) +
+                          1;
             const auto box_max = static_cast<uint64_t>(maxval) * len;
             prev[grid.coord_offset + i_dt] =
                 use_box_smearing
@@ -116,7 +120,11 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     std::vector<uint64_t> prev(pc.state_shape[0].ncoords, 0U);
     for (const auto& grid : pc.grids[0]) {
         for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {
-            const auto s = static_cast<SizeType>(std::abs(grid.dt_grid[i_dt]));
+            const auto s =
+                pc.level0_boxes.empty()
+                    ? static_cast<SizeType>(std::abs(grid.dt_grid[i_dt]))
+                    : static_cast<SizeType>(
+                          pc.level0_boxes[grid.coord_offset + i_dt].s);
             prev[grid.coord_offset + i_dt] =
                 use_box_smearing
                     ? sat_mul(sat_mul(maxval, static_cast<uint64_t>(s + 1)),

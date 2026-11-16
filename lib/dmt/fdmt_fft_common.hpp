@@ -88,6 +88,15 @@ inline FractionalDelays fractional_delays(const plans::FDMTPlan& plan,
             const double dt0 = std::abs(static_cast<double>(gr.dt_grid[i]));
             prev[gr.coord_offset + i] = box ? Stat{1.0, 0.5 * dt0, 0.5 * w, dt0}
                                             : Stat{1.0, dt0, w, dt0};
+            if (!pc.level0_boxes.empty()) {
+                // chan_dm plan: the box (or the sample) sits on the
+                // channel's arrival, the smeared pulse's centroid (coherent
+                // dedispersion about the channel centre leaves it there).
+                const auto& b  = pc.level0_boxes[gr.coord_offset + i];
+                const double c = box ? b.lag + (0.5 * b.s) : b.point;
+                const double e = box ? b.lag + b.s : b.point;
+                prev[gr.coord_offset + i] = Stat{1.0, c, 0.5 * w, e};
+            }
         }
     }
     FractionalDelays out;

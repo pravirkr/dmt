@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -223,6 +224,25 @@ SizeType TreeDag::nops() const noexcept {
     return n;
 }
 
+Level0Windows level0_windows(const plans::FDMTPlanContainer& pc, bool box) {
+    Level0Windows out;
+    if (pc.level0_boxes.empty()) {
+        return out;
+    }
+    std::map<std::pair<std::int32_t, std::int32_t>, std::uint32_t> ids;
+    out.node_win.reserve(pc.level0_boxes.size());
+    for (const auto& b : pc.level0_boxes) {
+        const auto key = box ? std::pair{b.lag, b.s} : std::pair{b.point, 0};
+        const auto [it, fresh] =
+            ids.try_emplace(key, static_cast<std::uint32_t>(out.win.size()));
+        if (fresh) {
+            out.win.push_back({.lag = key.first, .s = key.second, .point = 0});
+        }
+        out.node_win.push_back(it->second);
+    }
+    return out;
+}
+
 TreeDag make_tree_dag(const plans::FDMTPlan& plan, bool fractional, bool box) {
     const auto& pc    = plan.get_container();
     const auto niters = plan.get_niters();
@@ -242,6 +262,14 @@ TreeDag make_tree_dag(const plans::FDMTPlan& plan, bool fractional, bool box) {
             dag.l0_shift[g.coord_offset + i] = to_u32(s);
             dag.dt0_max                      = std::max(dag.dt0_max, s);
         }
+    }
+    if (!pc.level0_boxes.empty()) {
+        // chan_dm plan: nodes index the distinct windows, which reach up to
+        // the level-0 extent.
+        auto wins    = level0_windows(pc, box);
+        dag.l0_shift = std::move(wins.node_win);
+        dag.l0_win   = std::move(wins.win);
+        dag.dt0_max  = std::max(dag.dt0_max, pc.state_shape[0].dt_max);
     }
     const auto frac =
         fractional ? fractional_delays(plan, box) : FractionalDelays{};

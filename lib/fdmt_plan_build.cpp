@@ -34,7 +34,8 @@ FDMTPlan::Impl::Impl(float f_min,
                      IndexType dt_min,
                      SizeType dt_step,
                      std::string_view mode,
-                     SizeType subband_depth)
+                     SizeType subband_depth,
+                     double chan_dm)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -44,7 +45,8 @@ FDMTPlan::Impl::Impl(float f_min,
       m_dt_min(dt_min),
       m_dt_step(dt_step),
       m_mode(parse_fdmt_mode(mode)),
-      m_subband_depth(subband_depth) {
+      m_subband_depth(subband_depth),
+      m_chan_dm(chan_dm) {
     validate_inputs();
     configure_plan();
 }
@@ -56,7 +58,8 @@ FDMTPlan::Impl::Impl(float f_min,
                      float tsamp,
                      const std::vector<IndexType>& dt_grid,
                      std::string_view mode,
-                     SizeType subband_depth)
+                     SizeType subband_depth,
+                     double chan_dm)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -67,6 +70,7 @@ FDMTPlan::Impl::Impl(float f_min,
       m_dt_step(0),
       m_mode(parse_fdmt_mode(mode)),
       m_subband_depth(subband_depth),
+      m_chan_dm(chan_dm),
       m_is_custom_grid(true),
       m_dt_grid_target(dt_grid) {
     if (m_dt_grid_target.empty()) {
@@ -89,7 +93,8 @@ FDMTPlan::Impl::Impl(float f_min,
                      float tsamp,
                      const std::vector<float>& dm_grid,
                      std::string_view mode,
-                     SizeType subband_depth)
+                     SizeType subband_depth,
+                     double chan_dm)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -100,6 +105,7 @@ FDMTPlan::Impl::Impl(float f_min,
       m_dt_step(0),
       m_mode(parse_fdmt_mode(mode)),
       m_subband_depth(subband_depth),
+      m_chan_dm(chan_dm),
       m_is_custom_grid(true) {
     if (dm_grid.empty()) {
         throw std::invalid_argument("FDMT: dm_grid must not be empty");
@@ -145,6 +151,9 @@ void FDMTPlan::Impl::validate_band() const {
         !utils::is_finite_bits(m_tsamp)) {
         throw std::invalid_argument(
             "FDMT: f_min, f_max and tsamp must be finite");
+    }
+    if (!utils::is_finite_bits(m_chan_dm)) {
+        throw std::invalid_argument("FDMT: chan_dm must be finite");
     }
     if (!(m_f_min > 0.0F)) {
         throw std::invalid_argument(
@@ -357,6 +366,7 @@ void FDMTPlan::Impl::configure_plan() {
 
     // Step 3: Populate grids and coordinates bottom-up using active sets
     make_plan_iter0(active_dts[0]);
+    make_level0_boxes();
     for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
         make_plan(i_iter, tree, active_dts[i_iter]);
     }
@@ -464,6 +474,98 @@ void FDMTPlan::Impl::make_plan_iter0(
     };
     m_container.dt_grid_sub_top[i_iter] =
         m_container.grids[i_iter].back().dt_grid;
+}
+
+void FDMTPlan::Impl::make_level0_boxes() {
+    m_container.chan_dm = m_chan_dm;
+    m_container.level0_boxes.clear();
+    m_container.level0_order.clear();
+    m_container.level0_causal_delay = 0;
+    if (m_chan_dm == 0.0) {
+        return;
+    }
+    if (m_mode != FDMTMode::kValid) {
+        throw std::invalid_argument(
+            "FDMT: chan_dm != 0 requires mode \"valid\"");
+    }
+    // Channel c = [f_lo, f_hi] was coherently dedispersed to chan_dm about
+    // its centre f_c, so a pulse of dispersion DM reaches frequency f of the
+    // channel at lag(f) = k/tsamp [DM (f_ref^-2 - f^-2) + chan_dm (f^-2 -
+    // f_c^-2)] behind the tree's reference: the bottom edge f_lo for dt >=
+    // 0 and the top edge f_hi for dt < 0 (the upper merges align it there).
+    // Its edges are, with l_lo = k chan_dm (f_lo^-2 - f_c^-2) / tsamp and
+    // l_hi = k chan_dm (f_c^-2 - f_hi^-2) / tsamp,
+    //   dt >= 0: e1 = l_lo,  e2 = dt - l_hi
+    //   dt <  0: e1 = -l_hi, e2 = |dt| + l_lo.
+    // The box spans s = round(|e2 - e1|) + 1 samples centred on (e1 + e2) /
+    // 2; rounding the span first keeps a residual sweep under half a sample
+    // to one sample. The centre lead is bounded by min(l_lo, -l_hi) - 1/4
+    // whatever dt, so the causal delay D below depends on the channels and
+    // chan_dm only, not on the delay grid.
+    const auto& grids0 = m_container.grids[0];
+    // k = 1 / 2.41e-4 (kDispConst, in double).
+    const double k_ts = (1.0 / 2.41e-4) / static_cast<double>(m_tsamp);
+    std::vector<double> l_lo(m_nchans);
+    std::vector<double> l_hi(m_nchans);
+    IndexType lead = 0;
+    for (SizeType c = 0; c < m_nchans; ++c) {
+        const auto f_lo = static_cast<double>(grids0[c].f_start);
+        const auto f_hi = static_cast<double>(grids0[c].f_end);
+        const auto f_c  = 0.5 * (f_lo + f_hi);
+        const auto g_c  = 1.0 / (f_c * f_c);
+        l_lo[c]         = k_ts * m_chan_dm * ((1.0 / (f_lo * f_lo)) - g_c);
+        l_hi[c]         = k_ts * m_chan_dm * (g_c - (1.0 / (f_hi * f_hi)));
+        const auto lo   = std::nearbyint(std::min(l_lo[c], -l_hi[c]) - 0.25);
+        lead            = std::max(lead, static_cast<IndexType>(-lo));
+    }
+    const auto causal   = static_cast<int64_t>(std::max<IndexType>(lead, 0));
+    const auto ncoords0 = m_container.state_shape[0].ncoords;
+    m_container.level0_boxes.resize(ncoords0);
+    m_container.level0_order.resize(ncoords0);
+    SizeType extent = 0;
+    for (SizeType c = 0; c < m_nchans; ++c) {
+        const auto& g = grids0[c];
+        for (SizeType i = 0; i < g.ndt; ++i) {
+            const auto dt     = static_cast<double>(g.dt_grid[i]);
+            const double e1   = dt >= 0.0 ? l_lo[c] : -l_hi[c];
+            const double e2   = dt >= 0.0 ? dt - l_hi[c] : -dt + l_lo[c];
+            const double span = std::nearbyint(std::abs(e2 - e1));
+            const double mid  = 0.5 * (e1 + e2);
+            const auto lo =
+                static_cast<int64_t>(std::nearbyint(mid - (0.5 * span)));
+            const auto pt = static_cast<int64_t>(std::nearbyint(mid));
+            const auto sp = static_cast<int64_t>(span);
+            if (lo + causal < 0 || pt + causal < 0 ||
+                lo + causal + sp > std::numeric_limits<int32_t>::max()) {
+                throw std::runtime_error(fmt::format(
+                    "FDMT: level-0 box of channel {} dt {} out of range "
+                    "(lag {}, span {}, causal delay {})",
+                    c, g.dt_grid[i], lo, sp, causal));
+            }
+            m_container.level0_boxes[g.coord_offset + i] = FDMTLevel0Box{
+                .lag   = static_cast<int32_t>(lo + causal),
+                .s     = static_cast<int32_t>(sp),
+                .point = static_cast<int32_t>(pt + causal),
+            };
+            extent = std::max({extent, static_cast<SizeType>(lo + causal + sp),
+                               static_cast<SizeType>(pt + causal)});
+        }
+        auto* order = m_container.level0_order.data() + g.coord_offset;
+        for (SizeType i = 0; i < g.ndt; ++i) {
+            order[i] = static_cast<int32_t>(i);
+        }
+        const auto* box = m_container.level0_boxes.data() + g.coord_offset;
+        std::stable_sort(order, order + g.ndt, [box](int32_t a, int32_t b) {
+            return box[a].lag != box[b].lag ? box[a].lag < box[b].lag
+                                            : box[a].s < box[b].s;
+        });
+    }
+    m_container.level0_causal_delay = static_cast<SizeType>(causal);
+    // Every consumer of the level-0 extent (raw input history, box weight
+    // tables, the integer scale, the Fourier support) needs the farthest
+    // read, which covers the widest box too.
+    auto& shape0  = m_container.state_shape[0];
+    shape0.dt_max = std::max(shape0.dt_max, extent);
 }
 
 void FDMTPlan::Impl::make_plan(
