@@ -46,7 +46,7 @@ float FDMTPlan::Impl::variance_from_smearing_row(
 
 std::vector<uint32_t> FDMTPlan::Impl::get_box_weights() const {
     const auto bits    = get_box_fraction_bits();
-    const auto box_max = m_container.state_shape[0].dt_max + 1;
+    const auto box_max = max_box_s() + 1;
     std::vector<uint32_t> weights(box_max);
     for (SizeType len = 1; len <= box_max; ++len) {
         weights[len - 1] = algorithms::detail::box_weight(len, bits);
@@ -180,11 +180,15 @@ std::vector<float> FDMTPlan::Impl::get_subband_variance_grid(
     // The level-0 box of every channel a row reaches (all of the
     // subband's channels, once each), as in get_smearing_grid_final().
     std::vector<float> smear(m_nchans, 0.0F);
-    const auto trace = [&](auto& self, SizeType l, SizeType idx) -> void {
+    const auto& boxes = m_container.level0_boxes;
+    const auto trace  = [&](auto& self, SizeType l, SizeType idx) -> void {
         const auto& c = m_container.coordinates[l][idx];
         if (l == 0) {
-            smear[c.i_sub] = std::abs(static_cast<float>(
-                m_container.grids[0][c.i_sub].dt_grid[c.i_dt]));
+            smear[c.i_sub] =
+                boxes.empty()
+                    ? std::abs(static_cast<float>(
+                          m_container.grids[0][c.i_sub].dt_grid[c.i_dt]))
+                    : static_cast<float>(boxes[idx].s);
             return;
         }
         self(self, l - 1, c.i_coord_tail);
@@ -196,7 +200,9 @@ std::vector<float> FDMTPlan::Impl::get_subband_variance_grid(
     const double inv = std::ldexp(1.0, -static_cast<int>(bits));
     for (SizeType d = 0; d < g.ndt; ++d) {
         if (level == 0) {
-            smear[subband] = std::abs(static_cast<float>(g.dt_grid[d]));
+            smear[subband] =
+                boxes.empty() ? std::abs(static_cast<float>(g.dt_grid[d]))
+                              : static_cast<float>(boxes[g.coord_offset + d].s);
         } else {
             trace(trace, level, g.coord_offset + d);
         }

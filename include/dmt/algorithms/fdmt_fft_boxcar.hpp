@@ -82,19 +82,21 @@ public:
      * ends the stream: execute() throws until reset_history().
      */
     [[nodiscard]] CandidateResultView drain();
-    /// Stream samples [0, n) whose trailing endpoints every row has searched
-    /// (after drain(), the whole stream).
+    /// FDMT output samples [0, n) whose trailing endpoints every row has
+    /// searched (after drain(), the whole stream; for a chan_dm plan this is
+    /// the raw FDMT count without subtracting
+    /// FDMTPlan::get_level0_causal_delay()).
     [[nodiscard]] uint64_t get_searched_nsamps() const noexcept;
     /**
      * Every candidate emitted by a later execute(), flush() or drain() has
      * begin_sample (hence peak_sample and end_sample) >= this value: the
      * smallest begin_sample of the excursions still open (any beam, row,
-     * width), or get_searched_nsamps() when none is open. Non-decreasing
-     * between reset_history() calls; get_searched_nsamps() after flush() or
-     * drain(), 0 after reset_history(). A pipeline can release candidate
-     * groups that end before it, however long an excursion stays open. A
-     * host call; after device calls, synchronize their stream first (as
-     * for reading a device result).
+     * width), or get_searched_nsamps() when none is open — for a chan_dm plan
+     * minus FDMTPlan::get_level0_causal_delay() clamped at 0, matching
+     * candidate times. Non-decreasing between reset_history() calls, 0 after
+     * reset_history(). A pipeline can release candidate groups that end before
+     * it, however long an excursion stays open. A host call; after device
+     * calls, synchronize their stream first (as for reading a device result).
      */
     [[nodiscard]] uint64_t get_candidate_frontier() const noexcept;
     [[nodiscard]] CandidateResultView copy_result(Stream stream = {});

@@ -8,11 +8,29 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
-- **C++ DM-grid generators**: `plans::generate_dm_grid` and
-  `plans::generate_dt_grid` (Python `dmtlib.generate_dm_grid`,
-  `generate_dt_grid`, `DMGridMethod`). `generate_optimal_dm_grid` and
-  `generate_optimal_dt_grid` now wrap them. The S/N-loss rule gains
-  `chan_dm` for coherently dedispersed data and accepts `tol`.
+- **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
+  dedispersed channels: level-0 boxes cover the residual intra-channel sweep
+  at the trial DM, centred on each channel's arrival, in `FDMT`,
+  `FDMTBoxcar`, `FDMTFFT` and `FDMTFFTBoxcar` (CPU and GPU, float and packed
+  input), with the noise model to match. FDMT output rows lag by the new
+  `get_level0_causal_delay()`, which `FDMTBoxcar` and `FDMTFFTBoxcar`
+  subtract from candidate times and `get_candidate_frontier()` (clamped at 0,
+  while `get_searched_nsamps()` stays in FDMT output samples);
+  `get_level0_boxes()` lists the boxes. Valid mode only. With `chan_dm` 0
+  every output is unchanged.
+- **Subband DM grids**: `FDMTPlan(..., subband_max_snr_loss=...)` (off at 0)
+  gives staggered subbands their own `generate_dm_grid` trials and has
+  `FDMTBoxcar` score only the tree-subband rows nearest such a grid, so deep
+  subband searches score 2-4x fewer rows (the full band is unchanged).
+  `BoxcarPlanePlan.coord_indices`, `FDMTCoordGrid::search_rows`, and
+  `FDMTSubDTGrid.search_rows` list the scored rows. The worst pulses can lose
+  up to about 1.5x the requested loss.
+- **DM-grid generators** (C++ `dmt/common/dm_grids.hpp`, Python `dmtlib`):
+  `generate_dm_grid` spaces trials so a pulse halfway between two keeps
+  `1 - max_snr_loss` (default 0.05) of its S/N after the boxcar search,
+  modelled over every channel, and takes `chan_dm`, `kill_mask`, `tol` and
+  `piecewise` (uniform segments for `DDMTFFT`). `generate_levin_dm_grid`
+  returns the Levin grids of `DDMTPlan` unchanged.
 - **`OverflowPolicy::kKeepBrightest`** for `FDMTBoxcar` and `FDMTFFTBoxcar`
   (CPU and GPU): on overflow each DM row keeps its `max_cands_per_dm`
   brightest candidates, and the call keeps the `max_candidates` brightest of
@@ -41,12 +59,18 @@ All notable changes to `dmt` are listed here. The format follows
   `memory_usage.host`, and `memory_usage.budgeted` is the part checked.
 - Tutorials 1-7 are MyST notebooks, executed by the docs build. The `docs`
   extra adds `ipykernel` and `jupyter-cache`.
+- `dmtlib.calculate_snr_loss` uses the model of `generate_dm_grid` (now in
+  C++ as `plans::calculate_snr_loss`). `pulse_width` is in seconds (default
+  0), and it, `chan_dm` and the new `kill_mask` are keyword-only.
+
+### Removed
+
+- `dmtlib.generate_optimal_dm_grid` and `generate_optimal_dt_grid`. Use
+  `generate_dm_grid` or `generate_levin_dm_grid`, and pass the DMs to
+  `FDMTPlan(..., dm_grid=...)` for delay grids.
 
 ### Fixed
 
-- The Levin grid methods of `generate_optimal_dm_grid` and
-  `generate_optimal_dt_grid` treated `pulse_width` (in samples) as seconds,
-  which gave nearly empty grids.
 - `FDMTBoxcar` on the GPU:
   - Wide boxes that don't fit shared memory no longer throw. The search
     falls back to smaller blocks or a device-memory ring, with the same

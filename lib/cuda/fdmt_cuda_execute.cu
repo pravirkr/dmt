@@ -25,7 +25,11 @@ namespace {
  * whichever of the +s / -s dt indices are actually present in this
  * sub-band's grid.
  */
-template <FDMTMode Mode, bool UseBoxSmearing, typename Input, typename TOut>
+template <FDMTMode Mode,
+          bool UseBoxSmearing,
+          typename Input,
+          typename TOut,
+          bool HasChanDM = false>
 __global__ void
 kernel_init_fdmt(const Input waterfall,
                  TOut* __restrict__ state,
@@ -38,7 +42,9 @@ kernel_init_fdmt(const Input waterfall,
                  int hist_len,
                  int state0_nelements,
                  const float* __restrict__ hist,
-                 const detail::FDMTBoxMeans box) {
+                 const detail::FDMTBoxMeans box,
+                 const int* __restrict__ box0   = nullptr,
+                 const int* __restrict__ order0 = nullptr) {
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto i_sub = static_cast<int>(blockIdx.y);
@@ -84,6 +90,32 @@ kernel_init_fdmt(const Input waterfall,
         state[buffer_offset + (static_cast<int64_t>(i_dt) * row_stride) +
               isamp] = static_cast<TOut>(val);
     };
+    if constexpr (HasChanDM) {
+        // chan_dm plan: rows from the plan's level-0 boxes.
+        const auto coff = grids0_coord_offset_ptr[i_sub];
+        const int* bx   = box0 + (detail::kFDMTBoxInts * coff);
+        const int* od   = order0 + coff;
+        const int ndt   = ndt_grid_sub;
+        (void)dt_first;
+        (void)dt_last;
+        if constexpr (detail::kFDMTPackedInput<Input> &&
+                      std::is_same_v<TOut, uint64_t>) {
+            detail::fdmt_init_column_lag<UseBoxSmearing, uint64_t>(
+                ndt, bx, od, isamp, get_sample, put, [&](int s, uint64_t sum) {
+                    return detail::box_round_apply<uint64_t>(sum, box.round[s]);
+                });
+        } else if constexpr (detail::kFDMTPackedInput<Input>) {
+            detail::fdmt_init_column_lag<UseBoxSmearing, uint32_t>(
+                ndt, bx, od, isamp, get_sample, put, [&](int s, uint32_t sum) {
+                    return box.of_packed(s, sum, std::is_integral_v<TOut>);
+                });
+        } else {
+            detail::fdmt_init_column_lag<UseBoxSmearing, float>(
+                ndt, bx, od, isamp, get_sample, put,
+                [&](int s, float sum) { return box.of_float(s, sum); });
+        }
+        return;
+    }
     if constexpr (detail::kFDMTPackedInput<Input> &&
                   std::is_same_v<TOut, uint64_t>) {
         detail::fdmt_init_column<UseBoxSmearing, uint64_t>(
@@ -252,7 +284,11 @@ struct DeviceBlock {
  * F, and in valid mode the fused levels' tree history, exactly as the
  * unfused kernels would.
  */
-template <FDMTMode Mode, bool UseBoxSmearing, typename Input, typename TOut>
+template <FDMTMode Mode,
+          bool UseBoxSmearing,
+          typename Input,
+          typename TOut,
+          bool HasChanDM = false>
 __global__ void kernel_fused_levels(const Input waterfall,
                                     TOut* __restrict__ state_out,
                                     const detail::FDMTFusedTileArgs args,
@@ -264,7 +300,8 @@ __global__ void kernel_fused_levels(const Input waterfall,
     extern __shared__ float smem[];
     const auto i_beam       = static_cast<int64_t>(blockIdx.z);
     const auto hist0_stride = static_cast<int64_t>(args.nsubs) * args.hist_len;
-    detail::fdmt_fused_tile<Mode, UseBoxSmearing>(
+    detail::fdmt_fused_tile<Mode, UseBoxSmearing, DeviceBlock, Input, TOut,
+                            HasChanDM>(
         DeviceBlock{}, waterfall, i_beam * args.nsubs,
         state_out + (i_beam * out_beam_stride), args,
         static_cast<int>(blockIdx.x), static_cast<int>(blockIdx.y), smem,
@@ -928,10 +965,31 @@ void FDMTCudaEngine::launch_fused_typed(const Input& input,
                                         TOut* out,
                                         cudaStream_t stream) {
     const auto& f = *m_fused;
+    if constexpr (Mode == FDMTMode::kValid) {
+        if (m_chan_dm) {
+            launch_fused_kernel<Mode, Smear, Input, TOut, true>(input, out,
+                                                                stream);
+            return;
+        }
+    }
+    launch_fused_kernel<Mode, Smear, Input, TOut, false>(input, out, stream);
+    (void)f;
+}
+
+template <FDMTMode Mode,
+          bool Smear,
+          typename Input,
+          typename TOut,
+          bool HasChanDM>
+void FDMTCudaEngine::launch_fused_kernel(const Input& input,
+                                         TOut* out,
+                                         cudaStream_t stream) {
+    const auto& f = *m_fused;
     if (f.smem_bytes > kDefaultSmemBytes) {
-        cudaFuncSetAttribute(kernel_fused_levels<Mode, Smear, Input, TOut>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(f.smem_bytes));
+        cudaFuncSetAttribute(
+            kernel_fused_levels<Mode, Smear, Input, TOut, HasChanDM>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(f.smem_bytes));
     }
     const bool valid = Mode == FDMTMode::kValid;
     // Valid mode: this chunk's samples only.
@@ -945,7 +1003,7 @@ void FDMTCudaEngine::launch_fused_typed(const Input& input,
     auto args   = f.args;
     args.box    = box_means_for(input);
     args.active = valid ? static_cast<int>(m_active) : 0;
-    kernel_fused_levels<Mode, Smear, Input, TOut>
+    kernel_fused_levels<Mode, Smear, Input, TOut, HasChanDM>
         <<<grid_size, block_size, f.smem_bytes, stream>>>(
             input, out, args,
             static_cast<int64_t>(level_beam_stride(f.args.fuse)),
@@ -1316,6 +1374,23 @@ void FDMTCudaEngine::launch_init(const Input& waterfall_d,
                                  dim3 block_size,
                                  cudaStream_t stream) {
     const auto& plan_c = m_plan.get_container();
+    if constexpr (Mode == FDMTMode::kValid) {
+        if (m_chan_dm) {
+            kernel_init_fdmt<Mode, Smear, Input, TOut, true>
+                <<<grid_size, block_size, 0, stream>>>(
+                    waterfall_d, state_d, m_plan_d.grids0.dt_grid.data().get(),
+                    m_plan_d.grids0.ndt.data().get(),
+                    m_plan_d.grids0.coord_offset.data().get(),
+                    static_cast<int>(plan_c.state_shape[0].nchans),
+                    static_cast<int>(m_active), static_cast<int>(m_row_len0),
+                    static_cast<int>(plan_c.state_shape[0].dt_max),
+                    level_beam_stride(0), m_level0_hist_in_ptr,
+                    box_means_for(waterfall_d),
+                    thrust::raw_pointer_cast(m_level0_box_d.data()),
+                    thrust::raw_pointer_cast(m_level0_order_d.data()));
+            return;
+        }
+    }
     kernel_init_fdmt<Mode, Smear, Input, TOut>
         <<<grid_size, block_size, 0, stream>>>(
             waterfall_d, state_d, m_plan_d.grids0.dt_grid.data().get(),

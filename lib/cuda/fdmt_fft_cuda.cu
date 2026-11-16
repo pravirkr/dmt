@@ -177,6 +177,34 @@ kernel_level0_windows(const unsigned long long* __restrict__ sfx,
     }
 }
 
+// chan_dm plans: window u = (box ? box_wf[s_u] * sum_{d <= s_u}
+// W^((lag_u + d) k) : W^(lag_u k)) / N, (lag_u, s_u) = win[2u], win[2u + 1].
+__global__ void
+kernel_level0_windows_lag(const unsigned long long* __restrict__ sfx,
+                          float2* __restrict__ w0,
+                          const int* __restrict__ win,
+                          int nwin,
+                          int nb,
+                          const float* __restrict__ box_wf,
+                          float norm) {
+    const auto k = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (k >= nb) {
+        return;
+    }
+    for (int u = 0; u < nwin; ++u) {
+        const int lag = win[2 * u];
+        const int sl  = win[(2 * u) + 1];
+        float2 acc{0.0F, 0.0F};
+        for (int d = 0; d <= sl; ++d) {
+            const float2 w = phasor(sfx[lag + d], static_cast<unsigned>(k));
+            acc.x += w.x;
+            acc.y += w.y;
+        }
+        const float scale = box_wf != nullptr ? norm * box_wf[sl] : norm;
+        w0[(static_cast<int64_t>(u) * nb) + k] = {acc.x * scale, acc.y * scale};
+    }
+}
+
 // One tree stage (fdmt_fft_tree.hpp): program blockIdx.x on bins
 // [32 * (blockIdx.y + tile0), + 32) of beam blockIdx.z. Warps take the ops
 // of a level in turn; intermediate levels live in shared memory (two
@@ -1127,11 +1155,32 @@ private:
             const auto weights = m_plan->get_box_weights();
             const float unit   = std::ldexp(
                 1.0F, -static_cast<int>(m_plan->get_box_fraction_bits()));
-            std::vector<float> box_wf(m_dag.dt0_max + 1);
-            for (SizeType s = 0; s <= m_dag.dt0_max; ++s) {
+            std::vector<float> box_wf(weights.size());
+            for (SizeType s = 0; s < weights.size(); ++s) {
                 box_wf[s] = static_cast<float>(weights[s]) * unit;
             }
             box_wf_d.upload(box_wf);
+        }
+        if (!m_dag.l0_win.empty()) {
+            // chan_dm plan: the distinct windows (lag, s).
+            std::vector<int> win;
+            win.reserve(2 * m_dag.l0_win.size());
+            for (const auto& b : m_dag.l0_win) {
+                win.push_back(b.lag);
+                win.push_back(b.s);
+            }
+            DevBuf<int> win_d;
+            win_d.upload(win);
+            g->w0.reserve(m_dag.l0_win.size() * g->nb);
+            kernel_level0_windows_lag<<<blocks_for(static_cast<int64_t>(g->nb)),
+                                        kBlock>>>(
+                s0_d.data(), g->w0.data(), win_d.data(),
+                static_cast<int>(m_dag.l0_win.size()), static_cast<int>(g->nb),
+                m_use_box_smearing ? box_wf_d.data() : nullptr,
+                1.0F / static_cast<float>(n));
+            gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
+                                      "FDMTFFT (cuda): level-0 windows");
+            return g;
         }
         g->w0.reserve((m_dag.dt0_max + 1) * g->nb);
         kernel_level0_windows<<<blocks_for(static_cast<int64_t>(g->nb)),

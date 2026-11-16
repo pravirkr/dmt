@@ -1,5 +1,6 @@
 #include "dmt/fdmt_history.hpp"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -65,6 +66,10 @@ uint64_t fdmt_tree_history_hash(const plans::FDMTPlan& plan,
     const auto& pc        = plan.get_container();
     const SizeType niters = plan.get_niters();
     hash.add(niters);
+    if (pc.chan_dm != 0.0) {
+        // chan_dm plans: the tree history holds other level-0 boxes.
+        hash.add(std::bit_cast<uint64_t>(pc.chan_dm));
+    }
     for (SizeType l = 1; l <= niters; ++l) {
         const auto& coords = pc.coordinates_sum[l];
         hash.add(coords.size());

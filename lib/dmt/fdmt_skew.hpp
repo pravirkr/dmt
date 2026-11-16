@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1038,7 +1039,10 @@ private:
                                                              .lshift = 0U}
                                               : box_round(s + 1, scale_f);
             }
-            const SizeType box_max = pc.state_shape[0].dt_max + 1;
+            const SizeType box_max =
+                (pc.level0_boxes.empty() ? pc.state_shape[0].dt_max
+                                         : pc.level0_max_box_s) +
+                1;
             for (const SizeType b : {1, 2, 4, 8, 16}) {
                 const SizeType maxval = (SizeType{1} << b) - 1;
                 m_prod_u32_by_nbits[b] =
@@ -1758,6 +1762,9 @@ private:
         mix(m_chunk);
         mix(m_search_from);
         mix(m_smear ? 1 : 0);
+        if (const double cd = m_plan.get_chan_dm(); cd != 0.0) {
+            mix(std::bit_cast<uint64_t>(cd)); // other level-0 boxes
+        }
         mix(m_state_elem);
         mix(m_ring_f.size());
         for (SizeType c = 0; c < m_nchans; ++c) {
@@ -1941,9 +1948,12 @@ private:
     /// difference is then the exact box sum): |x| < 2^31 / L_max, L_max
     /// the widest level-0 box.
     [[nodiscard]] bool integer_valued(const float* wf) const noexcept {
-        const SizeType n = m_nchans * m_nsamps;
-        const auto l_max = static_cast<float>(
-            m_plan.get_container().state_shape[0].dt_max + 1);
+        const SizeType n  = m_nchans * m_nsamps;
+        const auto& pc    = m_plan.get_container();
+        const auto l_max  = static_cast<float>((pc.level0_boxes.empty()
+                                                    ? pc.state_shape[0].dt_max
+                                                    : pc.level0_max_box_s) +
+                                               1);
         const float bound = 2147483648.0F / l_max;
         bool ok           = true;
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)              \

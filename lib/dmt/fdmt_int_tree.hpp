@@ -54,12 +54,19 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     };
 
     std::vector<FDMTLevelType> types(niters + 1, FDMTLevelType::kF32);
-    const SizeType scale_f = box_mean_bits(pc.state_shape[0].dt_max + 1);
+    const SizeType max_box_s = pc.level0_boxes.empty()
+                                   ? pc.state_shape[0].dt_max
+                                   : pc.level0_max_box_s;
+    const SizeType scale_f   = box_mean_bits(max_box_s + 1);
     std::vector<double> prev(pc.state_shape[0].ncoords, 0.0);
     for (const auto& grid : pc.grids[0]) {
         for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {
             const auto len =
-                static_cast<SizeType>(std::abs(grid.dt_grid[i_dt])) + 1;
+                pc.level0_boxes.empty()
+                    ? static_cast<SizeType>(std::abs(grid.dt_grid[i_dt])) + 1
+                    : static_cast<SizeType>(
+                          pc.level0_boxes[grid.coord_offset + i_dt].s) +
+                          1;
             const auto box_max = static_cast<uint64_t>(maxval) * len;
             prev[grid.coord_offset + i_dt] =
                 use_box_smearing
@@ -116,7 +123,11 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     std::vector<uint64_t> prev(pc.state_shape[0].ncoords, 0U);
     for (const auto& grid : pc.grids[0]) {
         for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {
-            const auto s = static_cast<SizeType>(std::abs(grid.dt_grid[i_dt]));
+            const auto s =
+                pc.level0_boxes.empty()
+                    ? static_cast<SizeType>(std::abs(grid.dt_grid[i_dt]))
+                    : static_cast<SizeType>(
+                          pc.level0_boxes[grid.coord_offset + i_dt].s);
             prev[grid.coord_offset + i_dt] =
                 use_box_smearing
                     ? sat_mul(sat_mul(maxval, static_cast<uint64_t>(s + 1)),

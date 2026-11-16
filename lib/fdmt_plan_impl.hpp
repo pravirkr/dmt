@@ -33,7 +33,9 @@ public:
          IndexType dt_min,
          SizeType dt_step,
          std::string_view mode,
-         SizeType subband_depth);
+         SizeType subband_depth,
+         double chan_dm             = 0.0,
+         float subband_max_snr_loss = 0.0F);
 
     Impl(float f_min,
          float f_max,
@@ -42,7 +44,9 @@ public:
          float tsamp,
          const std::vector<IndexType>& dt_grid,
          std::string_view mode,
-         SizeType subband_depth);
+         SizeType subband_depth,
+         double chan_dm             = 0.0,
+         float subband_max_snr_loss = 0.0F);
 
     Impl(float f_min,
          float f_max,
@@ -51,7 +55,9 @@ public:
          float tsamp,
          const std::vector<float>& dm_grid,
          std::string_view mode,
-         SizeType subband_depth);
+         SizeType subband_depth,
+         double chan_dm             = 0.0,
+         float subband_max_snr_loss = 0.0F);
 
     ~Impl()                                = default;
     Impl(Impl&& other) noexcept            = default;
@@ -165,13 +171,16 @@ public:
         const float* smearing_row,
         float w,
         std::span<const uint8_t> kill_mask) const noexcept;
+    SizeType max_box_s() const noexcept {
+        return m_container.level0_boxes.empty()
+                   ? m_container.state_shape[0].dt_max
+                   : m_container.level0_max_box_s;
+    }
     SizeType get_box_fraction_bits() const noexcept {
-        return algorithms::detail::box_fraction_bits(
-            m_container.state_shape[0].dt_max);
+        return algorithms::detail::box_fraction_bits(max_box_s());
     }
     SizeType get_box_mean_bits() const noexcept {
-        return algorithms::detail::box_mean_bits(
-            m_container.state_shape[0].dt_max + 1);
+        return algorithms::detail::box_mean_bits(max_box_s() + 1);
     }
     std::vector<uint32_t> get_box_weights() const;
     static bool is_active(std::span<const uint8_t> kill_mask,
@@ -226,8 +235,13 @@ public:
         return m_container.tree_history_size;
     }
     SizeType get_fft_overlap() const noexcept {
-        return static_cast<SizeType>(
+        const auto overlap = static_cast<SizeType>(
             std::max(std::abs(m_dt_min), std::abs(m_dt_max)));
+        // chan_dm plans: the level-0 boxes reach further back (the causal
+        // delay), so the history must cover the whole support.
+        return m_container.level0_boxes.empty()
+                   ? overlap
+                   : std::max(overlap, m_fft_support);
     }
     SizeType get_fft_support() const noexcept { return m_fft_support; }
     SizeType get_fft_size() const noexcept { return m_fft_size; }
@@ -270,6 +284,8 @@ private:
     SizeType m_dt_step;
     FDMTMode m_mode;
     SizeType m_subband_depth{0};
+    double m_chan_dm{0.0};
+    float m_subband_max_snr_loss{0.0F};
     bool m_is_custom_grid{false};
     std::vector<IndexType> m_dt_grid_target;
 
@@ -315,6 +331,11 @@ private:
 
     void
     make_plan_iter0(const std::vector<std::vector<IndexType>>& active_level0);
+
+    /// chan_dm != 0: the level-0 boxes, their sweep order, the causal delay
+    /// and the level-0 extent (state_shape[0].dt_max).
+    void make_level0_boxes();
+    void select_search_rows();
 
     void make_plan(SizeType i_iter,
                    const std::vector<std::vector<TreeNode>>& tree,

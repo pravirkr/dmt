@@ -3,369 +3,249 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import dmtlib
 from dmtlib import (
     FDMT,
+    DDMTPlan,
+    FDMTPlan,
     calculate_snr_loss,
-    compute_fdmt,
-    generate_optimal_dm_grid,
-    generate_optimal_dt_grid,
+    generate_dm_grid,
+    generate_levin_dm_grid,
+    grid,
 )
 
-try:
-    from ._dispersed_pulse import sweep_recovery
-except ImportError:
-    pass
+LBAND = (1100.0, 1714.0, 1152, 455.6e-6)
+UWL = (704.0, 4032.0, 6656, 64e-6)
 
 
-class TestGridGenerator:
-    f_min = 1000.0
-    f_max = 1500.0
-    nchans = 64
-    tsamp = 0.001
+def midpoints(grid: np.ndarray) -> np.ndarray:
+    return 0.5 * (grid[:-1] + grid[1:])
 
-    def test_dm_grid_monotonicity_and_endpoints(self) -> None:
-        dm_min = 0.0
-        dm_max = 100.0
-        grid = generate_optimal_dm_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dm_max=dm_max,
-            dm_min=dm_min,
-            max_snr_loss=0.05,
-        )
 
-        assert grid.ndim == 1
-        assert len(grid) > 1
-        assert np.isclose(grid[0], dm_min)
-        assert np.isclose(grid[-1], dm_max)
-        # Strictly monotonically increasing
+class TestGenerateDmGrid:
+    def test_endpoints_and_monotonic(self) -> None:
+        grid = generate_dm_grid(*LBAND, 0.0, 1000.0)
+        assert grid.dtype == np.float64
+        assert grid[0] == 0.0
+        assert grid[-1] == 1000.0
         assert np.all(np.diff(grid) > 0)
 
-    def test_dm_grid_single_point(self) -> None:
-        grid = generate_optimal_dm_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dm_max=10.0,
-            dm_min=10.0,
+    def test_single_point(self) -> None:
+        np.testing.assert_array_equal(generate_dm_grid(*LBAND, 5.0, 5.0), [5.0])
+
+    def test_reference_count(self) -> None:
+        # DM 0-2000, pulse_width one sample, 5% loss.
+        tsamp = UWL[3]
+        grid = generate_dm_grid(*UWL, 0.0, 2000.0, pulse_width=tsamp)
+        assert grid.size == 12209
+        coh = generate_dm_grid(*UWL, 0.0, 2000.0, pulse_width=tsamp, chan_dm=413.0)
+        assert coh.size == 17809
+
+    @pytest.mark.parametrize("max_snr_loss", [0.05, 0.2])
+    @pytest.mark.parametrize("chan_dm", [0.0, 413.0])
+    def test_midpoints_lose_max_snr_loss(
+        self, max_snr_loss: float, chan_dm: float
+    ) -> None:
+        grid = generate_dm_grid(
+            *LBAND, 0.0, 1000.0, max_snr_loss=max_snr_loss, chan_dm=chan_dm
         )
-        assert len(grid) == 1
-        assert np.isclose(grid[0], 10.0)
+        loss = calculate_snr_loss(midpoints(grid)[:-1], grid, *LBAND, chan_dm=chan_dm)
+        assert loss.max() <= max_snr_loss * 1.03
+        assert loss.min() >= max_snr_loss * 0.8
 
-    def test_negative_and_symmetric_dm_grid(self) -> None:
-        # Symmetric range [-50, 50]
-        sym_grid = generate_optimal_dm_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dm_max=50.0,
-            dm_min=-50.0,
-            max_snr_loss=0.05,
-        )
-        assert np.isclose(sym_grid[0], -50.0)
-        assert np.isclose(sym_grid[-1], 50.0)
-        assert np.any(np.isclose(sym_grid, 0.0))
-        assert np.all(np.diff(sym_grid) > 0)
-        # Symmetry check
-        np.testing.assert_allclose(sym_grid, -sym_grid[::-1], atol=1e-10)
+    def test_tol_overrides_max_snr_loss(self) -> None:
+        by_tol = generate_dm_grid(*LBAND, 0.0, 500.0, tol=1.25, max_snr_loss=0.5)
+        by_loss = generate_dm_grid(*LBAND, 0.0, 500.0, max_snr_loss=1 - 1 / 1.25)
+        np.testing.assert_array_equal(by_tol, by_loss)
 
-        # Strictly negative range [-100, -20]
-        neg_grid = generate_optimal_dm_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dm_max=-20.0,
-            dm_min=-100.0,
-            max_snr_loss=0.05,
-        )
-        assert np.isclose(neg_grid[0], -100.0)
-        assert np.isclose(neg_grid[-1], -20.0)
-        assert np.all(np.diff(neg_grid) > 0)
-
-    def test_dt_grid_generation(self) -> None:
-        dt_max = 128
-        # Integer grid
-        dt_grid_int = generate_optimal_dt_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dt_max=dt_max,
-            dt_min=0,
-            integer_grid=True,
-        )
-        assert np.issubdtype(dt_grid_int.dtype, np.integer)
-        assert dt_grid_int[0] == 0
-        assert dt_grid_int[-1] == dt_max
-        assert np.all(np.diff(dt_grid_int) > 0)
-
-        # Float grid
-        dt_grid_flt = generate_optimal_dt_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dt_max=dt_max,
-            dt_min=0,
-            integer_grid=False,
-        )
-        assert np.issubdtype(dt_grid_flt.dtype, np.floating)
-        assert np.isclose(dt_grid_flt[0], 0.0)
-        assert np.isclose(dt_grid_flt[-1], float(dt_max))
-        assert np.all(np.diff(dt_grid_flt) > 0)
-
-    def test_trial_reduction_and_snr_loss_bounding(self) -> None:
-        dm_max = 500.0
-        max_loss = 0.05
-        grid = generate_optimal_dm_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dm_max=dm_max,
-            dm_min=0.0,
-            max_snr_loss=max_loss,
-        )
-
-        # Uniform step dt=1 length across band
-        k_disp = 4.148808e3 * (self.f_min**-2 - self.f_max**-2) / self.tsamp
-        uniform_trials = int(np.ceil(dm_max * k_disp)) + 1
-
-        # Must reduce trials by at least 40%
-        assert len(grid) < uniform_trials * 0.6
-
-        # Test worst-case DM midpoints between trials
-        midpoints = (grid[:-1] + grid[1:]) / 2.0
-        losses = calculate_snr_loss(
-            midpoints,
-            grid,
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            pulse_width=1.0,
-        )
-        assert np.all(np.isfinite(losses))
-        # Midpoints should be bounded by max_loss (allowing numerical tolerance)
-        assert np.all(losses <= max_loss + 0.01)
-
-    def test_invalid_parameters_raise(self) -> None:
-        with pytest.raises(ValueError, match="max_snr_loss"):
-            generate_optimal_dm_grid(
-                self.f_min,
-                self.f_max,
-                self.nchans,
-                self.tsamp,
-                dm_max=10.0,
-                max_snr_loss=1.5,
-            )
-
-        with pytest.raises(ValueError, match="dm_max"):
-            generate_optimal_dm_grid(
-                self.f_min, self.f_max, self.nchans, self.tsamp, dm_max=0.0, dm_min=10.0
-            )
-
-        with pytest.raises(ValueError, match="frequency band"):
-            generate_optimal_dm_grid(
-                1500.0, 1000.0, self.nchans, self.tsamp, dm_max=10.0
-            )
-
-    def test_end_to_end_fdmt_execution_with_optimal_grid(self) -> None:
-        nsamps = 512
-        dt_max = 64
-        dt_grid = generate_optimal_dt_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dt_max=dt_max,
-            dt_min=0,
-            integer_grid=True,
-        )
-
-        fdmt = FDMT(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            nsamps,
-            self.tsamp,
-            dt_arr=dt_grid,
-        )
-
-        assert fdmt.plan.is_custom_grid
-        np.testing.assert_array_equal(fdmt.dt_grid_final, dt_grid)
-
-        rng = np.random.default_rng(12345)
-        wf = rng.standard_normal((self.nchans, nsamps), dtype=np.float32)
-
-        out_fdmt = fdmt.execute(wf)
-        assert out_fdmt.shape == (len(dt_grid), fdmt.plan.dmt_nsamps)
-        assert np.all(np.isfinite(out_fdmt))
-
-        # Also verify with compute_fdmt
-        out_buf, plan = compute_fdmt(
-            wf,
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            nsamps,
-            self.tsamp,
-            dt_arr=dt_grid,
-        )
-        assert plan.is_custom_grid
-        out_compute = out_buf[: plan.dmt_size].reshape(
-            plan.dt_grid_final.size, plan.dmt_nsamps
-        )
-        np.testing.assert_allclose(out_fdmt, out_compute, rtol=1e-5, atol=1e-5)
-
-    def test_levin_method_parametrization(self) -> None:
-        from dmtlib import DDMTPlan
-
-        dm_max = 50.0
-        tol = 1.25
-        grid_levin = generate_optimal_dm_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dm_max=dm_max,
-            method="levin",
-            tol=tol,
-        )
-        # pulse_width is in samples here (default 1), in seconds in C++.
-        expected = DDMTPlan.generate_levin_dm_grid(
-            0.0,
-            dm_max,
-            self.tsamp,
-            self.tsamp,
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            tol,
-        )
-        np.testing.assert_allclose(grid_levin, expected)
-        assert len(grid_levin) > 10
-
-        # dt grid via levin method
-        dt_levin = generate_optimal_dt_grid(
-            self.f_min,
-            self.f_max,
-            self.nchans,
-            self.tsamp,
-            dt_max=64,
-            method="levin",
-            tol=tol,
-        )
-        assert dt_levin[0] == 0
-        assert dt_levin[-1] == 64
-        assert np.all(np.diff(dt_levin) > 0)
-
-        # Negative DM under levin raises ValueError
-        with pytest.raises(ValueError, match="negative"):
-            generate_optimal_dm_grid(
-                self.f_min,
-                self.f_max,
-                self.nchans,
-                self.tsamp,
-                dm_max=50.0,
-                dm_min=-10.0,
-                method="levin",
-            )
-
-        # Unknown method raises ValueError
-        with pytest.raises(ValueError, match="Unknown"):
-            generate_optimal_dm_grid(
-                self.f_min,
-                self.f_max,
-                self.nchans,
-                self.tsamp,
-                dm_max=50.0,
-                method="invalid",
-            )
-
-
-class TestGridApi:
-    """The C++ generators (dmtlib.generate_dm_grid / generate_dt_grid)."""
-
-    band = (704.0, 4032.0, 6656, 64e-6)
-
-    def test_wrappers_match_the_cpp_generators(self) -> None:
-        from dmtlib import DMGridMethod, generate_dm_grid, generate_dt_grid
-
-        f_min, f_max, nchans, tsamp = self.band
-        # pulse_width: samples in the wrappers, seconds in the C++ API.
-        np.testing.assert_array_equal(
-            generate_optimal_dm_grid(
-                f_min, f_max, nchans, tsamp, 300.0, pulse_width=2.0
-            ),
-            generate_dm_grid(
-                f_min, f_max, nchans, tsamp, 0.0, 300.0, pulse_width=2.0 * tsamp
-            ),
-        )
-        np.testing.assert_array_equal(
-            generate_optimal_dm_grid(
-                f_min, f_max, nchans, tsamp, 300.0, method="levin", tol=1.2
-            ),
-            generate_dm_grid(
-                f_min,
-                f_max,
-                nchans,
-                tsamp,
-                0.0,
-                300.0,
-                method=DMGridMethod.LEVIN,
-                pulse_width=tsamp,
-                tol=1.2,
-            ),
-        )
-        np.testing.assert_array_equal(
-            generate_optimal_dt_grid(f_min, f_max, nchans, tsamp, 4000.0),
-            generate_dt_grid(
-                f_min, f_max, nchans, tsamp, 0.0, 4000.0, pulse_width=tsamp
-            ),
-        )
+    def test_wider_pulses_need_fewer_trials(self) -> None:
+        narrow = generate_dm_grid(*LBAND, 0.0, 1000.0)
+        wide = generate_dm_grid(*LBAND, 0.0, 1000.0, pulse_width=5e-3)
+        assert wide.size < narrow.size
 
     def test_chan_dm_makes_trials_denser_around_it(self) -> None:
-        f_min, f_max, nchans, tsamp = self.band
-        plain = generate_optimal_dm_grid(f_min, f_max, nchans, tsamp, 1100.0)
-        coh = generate_optimal_dm_grid(
-            f_min, f_max, nchans, tsamp, 1100.0, chan_dm=413.0
-        )
+        plain = generate_dm_grid(*UWL, 0.0, 1100.0)
+        coh = generate_dm_grid(*UWL, 0.0, 1100.0, chan_dm=413.0)
+        assert coh.size > plain.size
 
-        def step_at(g: np.ndarray, dm: float) -> float:
+        def step(g: np.ndarray, dm: float) -> float:
             i = np.searchsorted(g, dm)
             return float(g[i + 1] - g[i])
 
-        assert step_at(coh, 413.0) < 0.1 * step_at(plain, 413.0)
-        assert step_at(coh, 413.0) == pytest.approx(step_at(plain, 0.0), rel=0.01)
-        loss = calculate_snr_loss(
-            413.0, coh, f_min, f_max, nchans, tsamp, chan_dm=413.0
+        assert step(coh, 413.0) < 0.5 * step(plain, 413.0)
+        assert step(coh, 213.0) == pytest.approx(step(coh, 613.0), rel=0.05)
+
+    def test_negative_dms_mirror(self) -> None:
+        both = generate_dm_grid(*LBAND, -100.0, 100.0)
+        np.testing.assert_array_equal(both, -both[::-1])
+        assert 0.0 in both
+        pos = generate_dm_grid(*LBAND, 10.0, 300.0)
+        neg = generate_dm_grid(*LBAND, -300.0, -10.0)
+        np.testing.assert_array_equal(neg, -pos[::-1])
+        to_zero = generate_dm_grid(*LBAND, -100.0, 0.0)
+        assert to_zero[-1] == 0.0
+        assert not np.signbit(to_zero[-1])
+
+    def test_kill_mask(self) -> None:
+        nchans = LBAND[2]
+        plain = generate_dm_grid(*LBAND, 0.0, 1000.0)
+        keep = np.ones(nchans, dtype=bool)
+        np.testing.assert_array_equal(
+            generate_dm_grid(*LBAND, 0.0, 1000.0, kill_mask=keep), plain
         )
-        assert loss <= 0.05
-        # The legacy Levin rule keeps its classic formula.
-        with pytest.raises(ValueError, match="chan_dm"):
-            generate_optimal_dm_grid(
-                f_min, f_max, nchans, tsamp, 1100.0, method="levin", chan_dm=413.0
+        keep[: nchans // 2] = False
+        top = generate_dm_grid(*LBAND, 0.0, 1000.0, kill_mask=keep)
+        assert top.size < plain.size
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 0.0, 10.0, kill_mask=np.zeros(nchans, bool))
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 0.0, 10.0, kill_mask=np.ones(nchans - 1, bool))
+
+    @pytest.mark.parametrize("chan_dm", [0.0, 413.0])
+    def test_piecewise_runs_ddmt_fft_by_nufft(self, chan_dm: float) -> None:
+        f_min, f_max, nchans, tsamp = LBAND
+        cont = generate_dm_grid(*LBAND, 0.0, 2000.0, chan_dm=chan_dm)
+        pw = generate_dm_grid(
+            *LBAND, 0.0, 2000.0, chan_dm=chan_dm, piecewise=True, min_run=32
+        )
+        assert pw[0] == 0.0
+        assert pw[-1] >= 2000.0
+        # Never coarser than the continuous grid (up to its interpolation).
+        lc = calculate_snr_loss(midpoints(pw), cont, *LBAND, chan_dm=chan_dm)
+        lp = calculate_snr_loss(midpoints(pw), pw, *LBAND, chan_dm=chan_dm)
+        assert np.all(lp <= np.maximum(lc, 0.05 * 1.001))
+        steps = np.diff(pw)
+        segments = np.split(steps, np.nonzero(np.abs(np.diff(steps)) > 1e-9)[0] + 1)
+        assert all(s.size >= 32 for s in segments)
+        eng = dmtlib.DDMTFFT(f_min, f_max, nchans, tsamp, dm_arr=pw.astype(np.float32))
+        assert eng.method_used in ("nufft", "piecewise_nufft")
+
+    def test_invalid_parameters_raise(self) -> None:
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 10.0, 5.0)
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 0.0, np.nan)
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 0.0, 10.0, max_snr_loss=1.0)
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 0.0, 10.0, tol=0.9)
+        with pytest.raises(ValueError):
+            generate_dm_grid(*LBAND, 0.0, 10.0, pulse_width=-1.0)
+        with pytest.raises(TypeError):
+            generate_dm_grid(*LBAND, 0.0, 10.0, 1e-3)  # pulse_width is keyword-only
+
+    def test_fdmt_runs_on_the_grid(self) -> None:
+        f_min, f_max, nchans, tsamp = 1000.0, 1500.0, 64, 1e-3
+        dms = generate_dm_grid(f_min, f_max, nchans, tsamp, 0.0, 80.0)
+        plan = FDMTPlan(f_min, f_max, nchans, 512, tsamp, dm_grid=dms)
+        assert plan.is_custom_grid
+        fdmt = FDMT(plan)
+        wf = np.random.default_rng(1).standard_normal((nchans, 512), dtype=np.float32)
+        out = fdmt.execute(wf)
+        assert out.shape == (plan.dt_grid_final.size, plan.dmt_nsamps)
+        assert np.all(np.isfinite(out))
+
+
+class TestGenerateLevinDmGrid:
+    @pytest.mark.parametrize("piecewise", [False, True])
+    def test_matches_ddmt_plan(self, piecewise: bool) -> None:
+        args = (0.0, 2000.0, 6.4e-5, 1e-4, 1100.0, 1500.0, 1024, 1.2)
+        want = (
+            DDMTPlan.generate_levin_dm_grid_piecewise(*args)
+            if piecewise
+            else DDMTPlan.generate_levin_dm_grid(*args)
+        )
+        got = generate_levin_dm_grid(
+            1100.0,
+            1500.0,
+            1024,
+            6.4e-5,
+            0.0,
+            2000.0,
+            pulse_width=1e-4,
+            tol=1.2,
+            piecewise=piecewise,
+        )
+        assert got.dtype == np.float64
+        np.testing.assert_array_equal(got, np.asarray(want, dtype=np.float64))
+
+    def test_default_tol_and_limits(self) -> None:
+        grid = generate_levin_dm_grid(*LBAND, 0.0, 500.0)
+        np.testing.assert_array_equal(
+            grid, generate_levin_dm_grid(*LBAND, 0.0, 500.0, tol=1.25)
+        )
+        assert grid[-1] >= 500.0
+        assert generate_levin_dm_grid(*LBAND, 0.0, 500.0, tol=1.1).size > grid.size
+        with pytest.raises(ValueError):
+            generate_levin_dm_grid(*LBAND, -5.0, 500.0)
+
+
+class TestCalculateSnrLoss:
+    def test_scalar_and_array(self) -> None:
+        trials = np.array([100.0, 110.0])
+        assert calculate_snr_loss(100.0, trials, *LBAND) == 0.0
+        loss = calculate_snr_loss(105.0, trials, *LBAND)
+        assert isinstance(loss, float)
+        assert 0.0 < loss < 1.0
+        arr = calculate_snr_loss(
+            np.array([[101.0, 103.0], [105.0, 107.0]]), trials, *LBAND
+        )
+        assert arr.shape == (2, 2)
+        assert arr[0, 0] < arr[0, 1] < arr[1, 0]
+        assert arr[1, 1] == pytest.approx(arr[0, 1], abs=1e-3)
+
+    def test_wider_pulses_lose_less(self) -> None:
+        trials = np.array([100.0, 110.0])
+        narrow = calculate_snr_loss(105.0, trials, *LBAND)
+        wide = calculate_snr_loss(105.0, trials, *LBAND, pulse_width=5e-3)
+        assert wide < narrow
+
+    def test_invalid(self) -> None:
+        with pytest.raises(ValueError):
+            calculate_snr_loss(105.0, np.array([110.0, 100.0]), *LBAND)
+        with pytest.raises(ValueError):
+            calculate_snr_loss(105.0, np.array([100.0]), 1100.0, 1714.0, 1, 455.6e-6)
+        with pytest.raises(ValueError):
+            calculate_snr_loss(
+                105.0,
+                np.array([100.0]),
+                1100.0,
+                1714.0,
+                4,
+                455.6e-6,
+                kill_mask=[0, 1, 0, 0],
             )
+        with pytest.raises(TypeError):
+            calculate_snr_loss(105.0, np.array([100.0]), *LBAND, 1.0)  # keyword-only
 
-    def test_tol_is_the_snr_loss_knob(self) -> None:
-        f_min, f_max, nchans, tsamp = self.band
-        by_loss = generate_optimal_dm_grid(
-            f_min, f_max, nchans, tsamp, 500.0, max_snr_loss=0.2
-        )
-        by_tol = generate_optimal_dm_grid(f_min, f_max, nchans, tsamp, 500.0, tol=1.25)
-        np.testing.assert_allclose(by_tol, by_loss, rtol=1e-12)
 
-    def test_levin_pulse_width_is_in_samples(self) -> None:
-        # The wrapper used to pass pulse_width (samples) on as seconds: one
-        # sample read as one second gave 3 trials for DM 0-2000 on UWL.
-        f_min, f_max, nchans, tsamp = self.band
-        grid = generate_optimal_dm_grid(
-            f_min, f_max, nchans, tsamp, 2000.0, method="levin"
-        )
-        assert len(grid) > 1000
+def test_grid_edge_regressions() -> None:
+    with pytest.raises(ValueError):
+        generate_dm_grid(1100.0, 1714.0, 1, 455.6e-6, 0.0, 10.0)
+    with pytest.raises(ValueError):
+        generate_dm_grid(1100.0, 1714.0, 4, 455.6e-6, 0.0, 10.0, kill_mask=[0, 1, 0, 0])
+    with pytest.raises(ValueError):
+        generate_dm_grid(*LBAND, 0.0, 10.0, max_snr_loss=1e-18)
+
+    for dm_min in (0.0, -0.01):
+        pw = generate_dm_grid(*LBAND, dm_min, 200.0, piecewise=True, min_run=32)
+        assert pw[-1] >= 200.0
+        assert np.all(np.diff(pw.astype(np.float32)) > 0)
+
+    plan_coh = FDMTPlan(1100.0, 1714.0, 32, 512, 455.6e-6, 32, 0, 1, "valid", 0, 100.0)
+    with pytest.raises(ValueError, match="chan_dm == 0"):
+        dmtlib.sensitivity.fdmt_alignment_error(plan_coh, 0)
+
+
+def test_grid_module_and_removed_names() -> None:
+    assert grid.generate_dm_grid is generate_dm_grid
+    assert grid.generate_levin_dm_grid is generate_levin_dm_grid
+    assert grid.calculate_snr_loss is calculate_snr_loss
+    assert pytest.approx(1 / 2.41e-4) == grid.DM_CONSTANT
+    for name in (
+        "generate_optimal_dm_grid",
+        "generate_optimal_dt_grid",
+        "generate_dt_grid",
+        "DMGridMethod",
+    ):
+        assert not hasattr(dmtlib, name)

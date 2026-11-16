@@ -383,10 +383,12 @@ winning peak's width.
   beam, row or width), or `get_searched_nsamps()` when none is open. It
   never decreases between resets. Use it as the watermark for releasing
   grouped candidates instead of a fixed lag. With `ALL_ABOVE_THRESHOLD`
-  nothing stays open, so it is the searched position. After `flush()` or
-  `drain()` it equals `get_searched_nsamps()`, and `reset_history()` sets it
-  to 0. After device calls, synchronise their stream before reading it, as
-  for a device result. `FDMTFFTBoxcar` has the same method.
+  nothing stays open, so it equals `get_searched_nsamps()` (minus
+  `FDMTPlan::get_level0_causal_delay()` clamped at 0 when `chan_dm != 0`).
+  After `flush()` or `drain()` it reaches the full searched frontier, and
+  `reset_history()` sets it to 0. After device calls, synchronise their stream
+  before reading it, as for a device result. `FDMTFFTBoxcar` has the same
+  method.
 
 ## Subbands, overflow and memory
 
@@ -424,6 +426,35 @@ downstream (for example by time and DM, keeping the highest S/N).
 On the CPU and GPU the lower tree is still fused into channel groups, but
 only below the lowest level that holds staggered subbands
 (`plan.max_fuse_levels`), since a staggered merge crosses group boundaries.
+
+### Subband DM grids
+
+By default every subband searches the trials the tree computes for it, which
+are as dense as the full band's grid needs. A narrow subband sweeps less, so
+it needs fewer trials. `FDMTPlan(..., subband_max_snr_loss=0.1)` (off at 0)
+gives each staggered subband its own `generate_dm_grid` trials at that loss
+(one-sample pulses), and has the search score only the tree-subband rows
+nearest such a grid; the tree still computes every row its parents need.
+The full band is never pruned. Each plane lists the subband trials it scores
+in `coord_indices` (the plan grid's `search_rows`), and `dm_idx` indexes the
+plane's own `dm_grid`.
+
+At depth 4, with a full-band grid at 10% loss and `subband_max_snr_loss` 0.1,
+on a GPU with 8-bit input:
+
+| Preset | Scored rows | Memory (budgeted) | Time per 32768-sample block |
+|---|---:|---:|---:|
+| Parkes UWL | 303,442 -> 99,433 | 7.77 -> 6.45 GiB | 1.64 -> 1.51 s |
+| MeerKAT L-band | 82,861 -> 36,914 | 0.63 -> 0.51 GiB | 94 -> 61 ms |
+
+Building the plan takes 0.2-0.5 s longer at depth 4 (one grid per subband).
+
+The subband grids inherit the limits of `generate_dm_grid`'s S/N model: narrow
+subbands are dominated by intra-channel smearing, where it is optimistic.
+Pulses confined to one subband lose on average 1-4% more S/N than with every row
+searched, but the worst ones lose up to about 1.5 times `subband_max_snr_loss` (0.10-0.15 at 0.1, on CRYO-PAF,
+CRYO-PAF L-band and MeerKAT L-band). For a firm bound, ask for about 0.65
+times the loss you can accept.
 
 Counters reset per execute/flush call. `total_detected` counts closed
 excursions (or points in all mode), including dropped candidates. A

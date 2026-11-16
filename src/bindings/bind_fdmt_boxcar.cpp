@@ -150,6 +150,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("chan_end", &plans::BoxcarPlanePlan::chan_end)
         .def_readonly("f_low_mhz", &plans::BoxcarPlanePlan::f_low_mhz)
         .def_readonly("f_high_mhz", &plans::BoxcarPlanePlan::f_high_mhz)
+        .def_readonly("coord_indices", &plans::BoxcarPlanePlan::coord_indices)
         .def_readonly("widths", &plans::BoxcarPlanePlan::widths)
         .def_readonly("dm_grid", &plans::BoxcarPlanePlan::dm_grid)
         .def_readonly("warmup_samples", &plans::BoxcarPlanePlan::warmup_samples)
@@ -351,15 +352,19 @@ void bind_fdmt_boxcar(py::module_& mod) {
             :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
             ``end_sample``) at or after it. It is the smallest
             ``begin_sample`` of the excursions still open, or
-            :attr:`searched_nsamps` when none is open; it never decreases
-            until :meth:`reset_history` (then 0). Use it as the watermark
+            :attr:`searched_nsamps` when none is open — for a ``chan_dm``
+            plan minus :attr:`FDMTPlan.level0_causal_delay` clamped at 0,
+            matching candidate times. It never decreases until
+            :meth:`reset_history` (then 0). Use it as the watermark
             for releasing candidate groups, whatever the length of an
             excursion.
             )doc")
         .def_property_readonly(
             "searched_nsamps", &FDMTBoxcar::get_searched_nsamps,
-            "Stream samples [0, n) searched by every row so far (after "
-            ":meth:`drain`, the whole stream).")
+            "FDMT output samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream; for ``chan_dm != 0`` this is the "
+            "raw count without subtracting "
+            ":attr:`FDMTPlan.level0_causal_delay`).")
         .def_property_readonly(
             "search_latency", &FDMTBoxcar::get_search_latency,
             "Input samples a stream sample waits for before every searched "
@@ -492,15 +497,19 @@ void bind_fdmt_boxcar(py::module_& mod) {
             :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
             ``end_sample``) at or after it. It is the smallest
             ``begin_sample`` of the excursions still open, or
-            :attr:`searched_nsamps` when none is open; it never decreases
-            until :meth:`reset_history` (then 0). Use it as the watermark
+            :attr:`searched_nsamps` when none is open — for a ``chan_dm``
+            plan minus :attr:`FDMTPlan.level0_causal_delay` clamped at 0,
+            matching candidate times. It never decreases until
+            :meth:`reset_history` (then 0). Use it as the watermark
             for releasing candidate groups, whatever the length of an
             excursion.
             )doc")
         .def_property_readonly(
             "searched_nsamps", &FDMTFFTBoxcar::get_searched_nsamps,
-            "Stream samples [0, n) searched by every row so far (after "
-            ":meth:`drain`, the whole stream).")
+            "FDMT output samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream; for ``chan_dm != 0`` this is the "
+            "raw count without subtracting "
+            ":attr:`FDMTPlan.level0_causal_delay`).")
         .def("reset_history",
              [](FDMTFFTBoxcar& search) {
                  py::gil_scoped_release release;

@@ -250,8 +250,8 @@ public:
     /**
      * @brief Constructs an FDMT instance with a custom delay trial grid.
      *
-     * @param dt_grid Explicit list of delay trials in samples (e.g. from
-     * generate_optimal_dt_grid).
+     * @param dt_grid Explicit list of delay trials in samples (or pass DMs,
+     * e.g. from plans::generate_dm_grid(), to the plan).
      * @param f_min, f_max, nchans, nsamps, tsamp, use_box_smearing, mode,
      * exec, nbeams, fuse_levels, int_tree, chunk_nsamps, max_memory_bytes See
      * the first constructor.

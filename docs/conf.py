@@ -82,6 +82,7 @@ exclude_patterns = [
     # Written by conf.py and included from api/cpp_api.md. Not a standalone page.
     "api/_breathe_body.rst",
     # Kept in the repository but not published yet.
+    "pipeline_guide/dm_grids.md",
     "pipeline_guide/fdmt_boxcar.md",
     "pipeline_guide/skewed_window_fdmt.md",
     "pipeline_guide/coherent_hybrid.md",
@@ -576,6 +577,23 @@ Plans & Geometry (``dmt::plans``)
 .. doxygenstruct:: dmt::plans::FDMTCoord
    :project: dmt
    :members:
+
+.. doxygenstruct:: dmt::plans::FDMTLevel0Box
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::plans::DMGridConfig
+   :project: dmt
+   :members:
+
+.. doxygenfunction:: dmt::plans::generate_dm_grid
+   :project: dmt
+
+.. doxygenfunction:: dmt::plans::generate_levin_dm_grid
+   :project: dmt
+
+.. doxygenfunction:: dmt::plans::calculate_snr_loss
+   :project: dmt
 
 High-Level Convenience Functions
 --------------------------------

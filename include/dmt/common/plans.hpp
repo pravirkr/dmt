@@ -29,7 +29,9 @@ struct FDMTShape {
     SizeType ncoords_copy; ///< Coordinates that copy from the previous level
     SizeType nsamps;       ///< Time samples allocated per coordinate
     SizeType nelements;    ///< Buffer length in elements (ncoords * nsamps)
-    SizeType dt_max;       ///< Max subband delay (dt) at this level
+    /// Max subband delay (dt) at this level; at level 0 of a chan_dm plan,
+    /// the farthest level-0 read (max lag + s, point)
+    SizeType dt_max;
 
     static constexpr std::string_view header_fmt();
     std::string to_string() const;
@@ -85,6 +87,24 @@ struct FDMTCoordGrid {
     SizeType i_sub_tail{SIZE_MAX};  ///< Lower child at the previous level
     SizeType i_sub_head{SIZE_MAX};  ///< Upper child (SIZE_MAX: copy)
     bool staggered{false};          ///< Overlap subband, not merged further
+    /// Rows (indices into dt_grid) the subband search scores, ascending;
+    /// empty: all of them (see FDMTPlan's subband_max_snr_loss).
+    std::vector<uint32_t> search_rows{};
+};
+
+/**
+ * @brief Level-0 box of one channel and delay trial of a plan with
+ * chan_dm != 0 (coherently dedispersed channels).
+ *
+ * Output sample t of the row is the box mean of input samples
+ * t - lag - s .. t - lag (s + 1 samples) with box smearing, or the single
+ * sample t - point without it. lag, point >= 0 include the plan's causal
+ * delay (FDMTPlan::get_level0_causal_delay()).
+ */
+struct FDMTLevel0Box {
+    int32_t lag;   ///< Nearest input lag of the box (samples)
+    int32_t s;     ///< Box length - 1
+    int32_t point; ///< Lag of the channel's arrival (no box smearing)
 };
 
 /** @brief Precomputed FDMT execution graph and memory layout. */
@@ -96,6 +116,18 @@ struct FDMTPlanContainer {
     std::vector<std::vector<FDMTCoord>> coordinates_copy; ///< Copy ops per iter
     std::vector<std::vector<IndexType>> dt_grid_sub_top;  ///< Scratch dt grids
     SizeType tree_history_size{0}; ///< Floats needed for streaming tree history
+    /// chan_dm != 0 only (else empty): the level-0 box of every level-0
+    /// coordinate, in coordinate order.
+    std::vector<FDMTLevel0Box> level0_boxes;
+    /// chan_dm != 0 only (else empty): per level-0 coordinate slot, the
+    /// channel's rows (local i_dt) sorted by (lag, s), so rows sharing a lag
+    /// extend one running sum (slots aligned with the channel's
+    /// coord_offset).
+    std::vector<int32_t> level0_order;
+    double chan_dm{0.0};              ///< Coherent dedispersion DM
+    float subband_max_snr_loss{0.0F}; ///< Subband grid loss (0: unpruned)
+    SizeType level0_causal_delay{0};  ///< Lag added to every level-0 read
+    SizeType level0_max_box_s{0};     ///< Widest level-0 box span s
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
@@ -174,6 +206,22 @@ public:
      * overlapping ones. Must be at most niters - 1. It serves the stepper and
      * FDMTBoxcar; FDMT::execute() still computes the staggered merges (about
      * one merge level of extra work) and then discards them.
+     * @param chan_dm DM (pc cm^-3) the channels were coherently dedispersed
+     * to; 0 (default) for ordinary filterbank data. With chan_dm != 0 each
+     * level-0 box covers the pulse's residual intra-channel sweep at the
+     * trial DM, ~|dt(DM) - dt(chan_dm)| samples, centred on the channel's
+     * arrival time, instead of the full |dt| (see get_level0_boxes()). All
+     * outputs then lag by get_level0_causal_delay() samples. With 0 every
+     * output is unchanged.
+     * @param subband_max_snr_loss Subband DM grids for the subband search
+     * (subband_depth > 0): 0 (default) keeps every subband's trials as the
+     * tree needs them. A loss in (0, 1) gives each staggered subband its own
+     * generate_dm_grid() trials at that loss (one-sample pulses, chan_dm),
+     * and marks for FDMTBoxcar only the tree-subband rows closest to such a
+     * grid (FDMTCoordGrid::search_rows; the tree still computes every row its
+     * parents need). The full band is never pruned. The worst pulses can
+     * lose up to about 1.5x this loss (narrow subbands are dominated by
+     * intra-channel smearing).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -181,10 +229,12 @@ public:
              SizeType nsamps,
              float tsamp,
              IndexType dt_max,
-             IndexType dt_min       = 0,
-             SizeType dt_step       = 1,
-             std::string_view mode  = "valid",
-             SizeType subband_depth = 0);
+             IndexType dt_min           = 0,
+             SizeType dt_step           = 1,
+             std::string_view mode      = "valid",
+             SizeType subband_depth     = 0,
+             double chan_dm             = 0.0,
+             float subband_max_snr_loss = 0.0F);
 
     /**
      * @brief Constructs an FDMT plan with a custom delay trial grid.
@@ -198,10 +248,13 @@ public:
      * @param nchans Number of channels (any count >= 2).
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
-     * @param dt_grid Explicit list of delay trials in samples (e.g. from
-     * generate_optimal_dt_grid).
+     * @param dt_grid Explicit list of delay trials in samples (the DM-grid
+     * constructor takes generate_dm_grid() trials).
      * @param mode Transform mode: "valid", "full", or "roll".
      * @param subband_depth Subband search depth (see the first constructor).
+     * @param chan_dm Coherent dedispersion DM (see the first constructor).
+     * @param subband_max_snr_loss Subband grid loss (see the first
+     * constructor).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -209,8 +262,10 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<IndexType>& dt_grid,
-             std::string_view mode  = "valid",
-             SizeType subband_depth = 0);
+             std::string_view mode      = "valid",
+             SizeType subband_depth     = 0,
+             double chan_dm             = 0.0,
+             float subband_max_snr_loss = 0.0F);
 
     /**
      * @brief Constructs an FDMT plan with a custom physical DM trial grid.
@@ -229,6 +284,9 @@ public:
      * non-uniform spacing and negative DMs).
      * @param mode Transform mode: "valid", "full", or "roll".
      * @param subband_depth Subband search depth (see the first constructor).
+     * @param chan_dm Coherent dedispersion DM (see the first constructor).
+     * @param subband_max_snr_loss Subband grid loss (see the first
+     * constructor).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -236,8 +294,10 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<float>& dm_grid,
-             std::string_view mode  = "valid",
-             SizeType subband_depth = 0);
+             std::string_view mode      = "valid",
+             SizeType subband_depth     = 0,
+             double chan_dm             = 0.0,
+             float subband_max_snr_loss = 0.0F);
 
     // --- Rule of five: PIMPL ---
     ~FDMTPlan();
@@ -278,6 +338,32 @@ public:
     /// @brief Subband search depth: staggered subbands exist at levels
     /// niters - subband_depth .. niters - 1 (0: none)
     [[nodiscard]] SizeType get_subband_depth() const noexcept;
+    /// @brief DM the channels were coherently dedispersed to (pc cm^-3; 0:
+    /// ordinary filterbank data).
+    [[nodiscard]] double get_chan_dm() const noexcept;
+    /// @brief Target S/N loss of the subband DM grids (0: not pruned).
+    [[nodiscard]] float get_subband_max_snr_loss() const noexcept;
+    /**
+     * @brief Samples every output lags behind the bottom-edge arrival time
+     * (0 unless chan_dm != 0).
+     *
+     * With chan_dm != 0 a level-0 box is centred on the channel's arrival,
+     * so near DM = 0 it would read samples after t. Every level-0 read is
+     * shifted back by this one constant (the largest such lead over all
+     * channels and trials), which keeps the tree causal and its merges
+     * unchanged: output sample t refers to bottom-edge arrival at
+     * t - get_level0_causal_delay(). FDMTBoxcar and FDMTFFTBoxcar subtract
+     * it from candidate times (and the candidate frontier).
+     */
+    [[nodiscard]] SizeType get_level0_causal_delay() const noexcept;
+    /**
+     * @brief The level-0 boxes, one per level-0 coordinate (empty when
+     * chan_dm == 0, where the row of delay dt is the box of |dt| + 1
+     * samples ending at t, or the single sample t - |dt| without box
+     * smearing).
+     */
+    [[nodiscard]] const std::vector<FDMTLevel0Box>&
+    get_level0_boxes() const noexcept;
     /// @brief Deepest level an engine may compute in fused channel groups:
     /// niters without staggered subbands, else one below the lowest level
     /// that holds them (a staggered merge crosses group boundaries).
@@ -296,7 +382,8 @@ public:
     /**
      * @brief Common scale B of the level-0 box-mean weights
      * (use_box_smearing = true): B = ceil(log2(L_max)) + 2, where L_max is
-     * the widest level-0 box (largest |dt| + 1).
+     * the widest level-0 box (largest |dt| + 1, or largest s + 1 of
+     * get_level0_boxes() with chan_dm != 0).
      *
      * A level-0 box of L samples is averaged: its sum times the weight
      * round(2^b(L) / L) * 2^-b(L), b(L) = ceil(log2 L) + 2: within 1/8 of
@@ -328,6 +415,11 @@ public:
      *
      * Used by @ref dmt::algorithms::add_frb_track to inject a synthetic pulse
      * landing exactly on trial @p dm_idx at the tree output.
+     *
+     * With chan_dm != 0 the shifts are the start of each channel's level-0
+     * box. Engines without box smearing read the box's point sample instead,
+     * about half a box later (get_level0_boxes()), so a pulse narrower than
+     * the box injected here can miss them.
      *
      * @param dm_idx Index in the final DM trial grid (0 <= dm_idx <
      * get_dmt_ndms()).

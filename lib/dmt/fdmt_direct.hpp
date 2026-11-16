@@ -87,6 +87,20 @@ inline void collect_leaves(const plans::FDMTPlanContainer& pc,
                            std::vector<FDMTDirectLeaf>& out) {
     const auto& c = pc.coordinates[level][row];
     if (level == 0) {
+        if (!pc.level0_boxes.empty()) {
+            // chan_dm plan: the box of s + 1 samples ending `lag` back, or
+            // the single sample at the channel's arrival lag.
+            const auto& box = pc.level0_boxes[row];
+            if (smear) {
+                out.push_back({static_cast<int32_t>(c.i_sub), box.s,
+                               shift + box.lag,
+                               box_w[static_cast<SizeType>(box.s)]});
+            } else {
+                out.push_back({static_cast<int32_t>(c.i_sub), 0,
+                               shift + box.point, 1.0F});
+            }
+            return;
+        }
         const auto dt = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
         const auto s  = static_cast<int32_t>(dt < 0 ? -dt : dt);
         if (smear) {

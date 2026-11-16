@@ -1,3 +1,4 @@
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -54,6 +55,7 @@ void bind_plans(py::module_& mod) {
         .def_readonly("f_end", &FDMTCoordGrid::f_end)
         .def_readonly("chan_begin", &FDMTCoordGrid::chan_begin)
         .def_readonly("chan_end", &FDMTCoordGrid::chan_end)
+        .def_readonly("search_rows", &FDMTCoordGrid::search_rows)
         .def_property_readonly("i_sub_tail",
                                [](const FDMTCoordGrid& g) -> py::object {
                                    if (g.i_sub_tail == SIZE_MAX) {
@@ -149,6 +151,22 @@ void bind_plans(py::module_& mod) {
             stepper's ``view_subband`` and :class:`FDMTBoxcar` read them),
             and they cap level fusion at ``max_fuse_levels``. Use depth 0
             for plain dedispersion.
+        chan_dm : float, optional
+            DM (pc cm^-3) the channels were coherently dedispersed to
+            (default 0, ordinary filterbank data). Each level-0 box then
+            covers only the residual intra-channel sweep at the trial DM,
+            centred on the channel's arrival, in every engine built from
+            the plan, and outputs lag by :attr:`level0_causal_delay`
+            samples. Needs ``mode='valid'``.
+        subband_max_snr_loss : float, optional
+            Subband DM grids for the subband search (``subband_depth`` > 0).
+            0 (default) keeps every subband trial the tree needs. A loss in
+            (0, 1) gives each staggered subband its own
+            :func:`~dmtlib.grid.generate_dm_grid` trials at that loss (one-sample
+            pulses), and has :class:`FDMTBoxcar` score only the tree-subband
+            trials nearest such a grid
+            (``container.dt_grids[l][i].search_rows``). The full band is never
+            pruned. The worst pulses can lose up to about 1.5 times this loss.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
 
@@ -162,29 +180,35 @@ void bind_plans(py::module_& mod) {
         any tree or staggered subband, for S/N on stepper views.
         )doc")
         .def(py::init<float, float, SizeType, SizeType, float, IndexType,
-                      IndexType, SizeType, std::string_view, SizeType>(),
+                      IndexType, SizeType, std::string_view, SizeType, double,
+                      float>(),
              "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
              "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1, "mode"_a = "valid",
-             "subband_depth"_a = 0)
+             "subband_depth"_a = 0, "chan_dm"_a = 0.0,
+             "subband_max_snr_loss"_a = 0.0F)
         .def(py::init([](float f_min, float f_max, SizeType nchans,
                          SizeType nsamps, float tsamp,
                          const py::object& dt_grid, const py::object& dt_arr,
                          const py::object& dm_grid, const py::object& dm_arr,
-                         std::string_view mode, SizeType subband_depth) {
+                         std::string_view mode, SizeType subband_depth,
+                         double chan_dm, float subband_max_snr_loss) {
                  const auto [type, obj] =
                      resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                  if (type == CustomGridType::kDt) {
                      return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                     extract_dt_grid(obj), mode, subband_depth);
+                                     extract_dt_grid(obj), mode, subband_depth,
+                                     chan_dm, subband_max_snr_loss);
                  }
                  return FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
-                                 extract_dm_grid(obj), mode, subband_depth);
+                                 extract_dm_grid(obj), mode, subband_depth,
+                                 chan_dm, subband_max_snr_loss);
              }),
              py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
              py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
              py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
              py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
-             py::arg("mode") = "valid", py::arg("subband_depth") = 0)
+             py::arg("mode") = "valid", py::arg("subband_depth") = 0,
+             py::arg("chan_dm") = 0.0, py::arg("subband_max_snr_loss") = 0.0F)
         .def_property_readonly("f_min", &FDMTPlan::get_f_min)
         .def_property_readonly("f_max", &FDMTPlan::get_f_max)
         .def_property_readonly(
@@ -207,6 +231,36 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("df", &FDMTPlan::get_df)
         .def_property_readonly("niters", &FDMTPlan::get_niters)
         .def_property_readonly("subband_depth", &FDMTPlan::get_subband_depth)
+        .def_property_readonly(
+            "subband_max_snr_loss", &FDMTPlan::get_subband_max_snr_loss,
+            "Target S/N loss of the subband DM grids (0: not pruned).")
+        .def_property_readonly(
+            "chan_dm", &FDMTPlan::get_chan_dm,
+            "DM the channels were coherently dedispersed to (0: ordinary "
+            "filterbank data).")
+        .def_property_readonly(
+            "level0_causal_delay", &FDMTPlan::get_level0_causal_delay,
+            "Samples every FDMT output row lags the bottom-edge arrival (0 "
+            "unless chan_dm != 0). FDMTBoxcar and FDMTFFTBoxcar subtract it "
+            "from candidate times, which give the arrival.")
+        .def_property_readonly(
+            "level0_boxes",
+            [](const FDMTPlan& plan) {
+                const auto& boxes = plan.get_level0_boxes();
+                py::array_t<int32_t> out(
+                    {static_cast<py::ssize_t>(boxes.size()), py::ssize_t{3}});
+                auto v = out.mutable_unchecked<2>();
+                for (py::ssize_t i = 0; i < v.shape(0); ++i) {
+                    const auto& b = boxes[static_cast<SizeType>(i)];
+                    v(i, 0)       = b.lag;
+                    v(i, 1)       = b.s;
+                    v(i, 2)       = b.point;
+                }
+                return out;
+            },
+            "chan_dm != 0: (lag, s, point) of every level-0 coordinate; the "
+            "row reads input t - lag - s .. t - lag (box smearing) or t - "
+            "point (none). Empty (0, 3) when chan_dm == 0.")
         .def_property_readonly("max_fuse_levels",
                                &FDMTPlan::get_max_fuse_levels)
         .def_property_readonly("container", &FDMTPlan::get_container)
@@ -246,6 +300,9 @@ void bind_plans(py::module_& mod) {
             numpy.ndarray
                 Integer shifts of length ``nchans``, relative to the
                 unshifted reference channel. Used by :func:`add_frb_track`.
+                With ``chan_dm`` set they are each level-0 box's start;
+                engines without box smearing read about half a box later
+                (:attr:`level0_boxes`).
             )doc")
         .def(
             "get_effective_variance",
@@ -752,74 +809,194 @@ void bind_plans(py::module_& mod) {
                 return as_pyarray(plan.get_effective_sigma_grid());
             });
 
-    // Trial grids (dmt/common/dm_grids.hpp). dmtlib.grid wraps them with
-    // pulse widths in samples.
-    py::enum_<plans::DMGridMethod>(mod, "DMGridMethod",
-                                   "Spacing rule of generate_dm_grid().")
-        .value("SNR_LOSS", plans::DMGridMethod::kSnrLoss)
-        .value("LEVIN", plans::DMGridMethod::kLevin)
-        .value("LEVIN_PIECEWISE", plans::DMGridMethod::kLevinPiecewise);
-    const auto grid_config =
-        [](double f_min, double f_max, SizeType nchans, double tsamp,
-           plans::DMGridMethod method, double pulse_width, double chan_dm,
-           double max_snr_loss, double tol, SizeType min_run) {
-            plans::DMGridConfig c;
-            c.f_min        = f_min;
-            c.f_max        = f_max;
-            c.nchans       = nchans;
-            c.tsamp        = tsamp;
-            c.method       = method;
-            c.pulse_width  = pulse_width;
-            c.chan_dm      = chan_dm;
-            c.max_snr_loss = max_snr_loss;
-            c.tol          = tol;
-            c.min_run      = min_run;
-            return c;
-        };
+    // Trial grids (dmt/common/dm_grids.hpp).
+    const auto grid_config = [](double f_min, double f_max, SizeType nchans,
+                                double tsamp, double pulse_width) {
+        plans::DMGridConfig c;
+        c.f_min       = f_min;
+        c.f_max       = f_max;
+        c.nchans      = nchans;
+        c.tsamp       = tsamp;
+        c.pulse_width = pulse_width;
+        return c;
+    };
     mod.def(
         "generate_dm_grid",
         [grid_config](double f_min, double f_max, SizeType nchans, double tsamp,
-                      double dm_min, double dm_max, plans::DMGridMethod method,
-                      double pulse_width, double chan_dm, double max_snr_loss,
-                      double tol, SizeType min_run) {
-            return as_pyarray(plans::generate_dm_grid(
-                grid_config(f_min, f_max, nchans, tsamp, method, pulse_width,
-                            chan_dm, max_snr_loss, tol, min_run),
-                dm_min, dm_max));
+                      double dm_min, double dm_max, double pulse_width,
+                      double max_snr_loss, std::optional<double> tol,
+                      double chan_dm, const py::object& kill_mask,
+                      bool piecewise, SizeType min_run) {
+            auto c = grid_config(f_min, f_max, nchans, tsamp, pulse_width);
+            c.max_snr_loss = max_snr_loss;
+            c.tol          = tol.value_or(0.0);
+            c.chan_dm      = chan_dm;
+            c.kill_mask    = extract_kill_mask(kill_mask);
+            c.piecewise    = piecewise;
+            c.min_run      = min_run;
+            return as_pyarray(plans::generate_dm_grid(c, dm_min, dm_max));
         },
         "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_min"_a, "dm_max"_a,
-        py::kw_only(), "method"_a = plans::DMGridMethod::kSnrLoss,
-        "pulse_width"_a = 0.0, "chan_dm"_a = 0.0, "max_snr_loss"_a = 0.05,
-        "tol"_a = 0.0, "min_run"_a = 32,
+        py::kw_only(), "pulse_width"_a = 0.0, "max_snr_loss"_a = 0.05,
+        "tol"_a = py::none(), "chan_dm"_a = 0.0, "kill_mask"_a = py::none(),
+        "piecewise"_a = false, "min_run"_a = 32,
         R"doc(
-        Trial DMs (pc cm^-3) from dm_min to dm_max, ascending
-        (``dmt::plans::generate_dm_grid``). Frequencies in MHz, ``tsamp`` and
-        ``pulse_width`` in seconds; ``chan_dm`` is the DM the channels were
-        coherently dedispersed to (0: none; S/N-loss rule only). ``tol``
-        (> 1) is every rule's broadening tolerance; 0 takes the rule's
-        default (1.25 for Levin, 1 / (1 - max_snr_loss) for S/N loss). See
-        :func:`dmtlib.generate_optimal_dm_grid` for the rules.
+        Trial DMs (pc cm^-3) from ``dm_min`` to ``dm_max``, ascending, by
+        dmt's S/N-loss rule (``dmt::plans::generate_dm_grid``).
+
+        Trials are spaced so a pulse halfway between two keeps
+        ``1 - max_snr_loss`` of its S/N after the boxcar search, modelled over
+        every channel: dispersion misalignment, intra-channel and FDMT box
+        smearing at ``|DM - chan_dm|``, sampling, the boxcar widths and the
+        noise they add.
+
+        Parameters
+        ----------
+        f_min, f_max : float
+            Band edges (MHz).
+        nchans : int
+            Number of channels.
+        tsamp : float
+            Sampling interval (s).
+        dm_min, dm_max : float
+            DM range (pc cm^-3). Negative DMs are allowed; with ``chan_dm``
+            0 they mirror the positive trials.
+        pulse_width : float, optional
+            Intrinsic pulse width (s); 0 (default): only the sampling time
+            broadens the pulse.
+        max_snr_loss : float, optional
+            Largest fractional S/N loss between trials, in (0, 1) (default
+            0.05).
+        tol : float, optional
+            Broadening tolerance (> 1); when given,
+            ``max_snr_loss = 1 - 1 / tol``.
+        chan_dm : float, optional
+            DM the channels were coherently dedispersed to (default 0, none);
+            trials get denser around it.
+        kill_mask : array_like, optional
+            Channels in use (nonzero keep, 0 dead), ``nchans`` long.
+        piecewise : bool, optional
+            Piecewise-uniform segments for :class:`DDMTFFT` (split where the
+            step halves or doubles, never coarser than the plain grid).
+        min_run : int, optional
+            Shortest uniform segment when ``piecewise`` (default 32).
+
+        Returns
+        -------
+        numpy.ndarray
+            float64 trial DMs from ``dm_min`` to ``dm_max`` (a piecewise grid
+            may end just past ``dm_max``).
         )doc");
     mod.def(
-        "generate_dt_grid",
+        "generate_levin_dm_grid",
         [grid_config](double f_min, double f_max, SizeType nchans, double tsamp,
-                      double dt_min, double dt_max, plans::DMGridMethod method,
-                      double pulse_width, double chan_dm, double max_snr_loss,
-                      double tol, SizeType min_run) {
-            return as_pyarray(plans::generate_dt_grid(
-                grid_config(f_min, f_max, nchans, tsamp, method, pulse_width,
-                            chan_dm, max_snr_loss, tol, min_run),
-                dt_min, dt_max));
+                      double dm_min, double dm_max, double pulse_width,
+                      double tol, bool piecewise, SizeType min_run) {
+            auto c      = grid_config(f_min, f_max, nchans, tsamp, pulse_width);
+            c.tol       = tol;
+            c.piecewise = piecewise;
+            c.min_run   = min_run;
+            return as_pyarray(plans::generate_levin_dm_grid(c, dm_min, dm_max));
         },
-        "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dt_min"_a, "dt_max"_a,
-        py::kw_only(), "method"_a = plans::DMGridMethod::kSnrLoss,
-        "pulse_width"_a = 0.0, "chan_dm"_a = 0.0, "max_snr_loss"_a = 0.05,
-        "tol"_a = 0.0, "min_run"_a = 32,
+        "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_min"_a, "dm_max"_a,
+        py::kw_only(), "pulse_width"_a = 0.0, "tol"_a = 1.25,
+        "piecewise"_a = false, "min_run"_a = 32,
         R"doc(
-        Integer delay trials (samples across the band) from dt_min to dt_max
-        for an FDMT delay grid (``dmt::plans::generate_dt_grid``): the DM
-        grid of that range as delays, rounded half to even, deduplicated,
-        both ends kept. Units as :func:`generate_dm_grid`.
+        Trial DMs from ``dm_min`` (>= 0) to ``dm_max`` by the Levin (2012)
+        rule, as in Heimdall (``dmt::plans::generate_levin_dm_grid``).
+
+        Smearing and sweep from the band centre (a straight-line sweep, so
+        too sparse on very wide bands), broadening bounded by ``tol``
+        (default 1.25). Computed in float like
+        :meth:`DDMTPlan.generate_levin_dm_grid` (``piecewise``:
+        :meth:`DDMTPlan.generate_levin_dm_grid_piecewise`, at least
+        ``min_run`` trials per segment), and ends at the first trial at or
+        past ``dm_max``. Units as :func:`~dmtlib.grid.generate_dm_grid`.
+
+        Parameters
+        ----------
+        f_min, f_max : float
+            Band edges (MHz).
+        nchans : int
+            Number of channels.
+        tsamp : float
+            Sampling interval (s).
+        dm_min, dm_max : float
+            DM range (pc cm^-3), with ``dm_min >= 0``.
+        pulse_width : float, optional
+            Intrinsic pulse width (s); 0 (default): only the sampling time
+            broadens the pulse.
+        tol : float, optional
+            Broadening tolerance (> 1, default 1.25).
+        piecewise : bool, optional
+            Piecewise-uniform segments for :class:`DDMTFFT`.
+        min_run : int, optional
+            Shortest uniform segment when ``piecewise`` (default 32).
+
+        Returns
+        -------
+        numpy.ndarray
+            float64 trial DMs by the Levin (2012) rule.
+        )doc");
+    mod.def(
+        "calculate_snr_loss",
+        [grid_config](const py::object& dm_test, const py::object& trial_dms,
+                      double f_min, double f_max, SizeType nchans, double tsamp,
+                      double pulse_width, double chan_dm,
+                      const py::object& kill_mask) -> py::object {
+            auto c      = grid_config(f_min, f_max, nchans, tsamp, pulse_width);
+            c.chan_dm   = chan_dm;
+            c.kill_mask = extract_kill_mask(kill_mask);
+            using Arr =
+                py::array_t<double, py::array::c_style | py::array::forcecast>;
+            const auto trials = Arr::ensure(trial_dms);
+            const auto tests  = Arr::ensure(dm_test);
+            if (!trials || trials.ndim() != 1 || !tests) {
+                throw py::type_error(
+                    "calculate_snr_loss: trial_dms must be a 1-D array and "
+                    "dm_test a number or array of numbers");
+            }
+            const auto loss = plans::calculate_snr_loss(
+                c, {trials.data(), static_cast<SizeType>(trials.size())},
+                {tests.data(), static_cast<SizeType>(tests.size())});
+            if (tests.ndim() == 0) {
+                return py::float_(loss.front());
+            }
+            std::vector<py::ssize_t> shape(tests.shape(),
+                                           tests.shape() + tests.ndim());
+            Arr out(shape);
+            std::ranges::copy(loss, out.mutable_data());
+            return out;
+        },
+        "dm_test"_a, "trial_dms"_a, "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a,
+        py::kw_only(), "pulse_width"_a = 0.0, "chan_dm"_a = 0.0,
+        "kill_mask"_a = py::none(),
+        R"doc(
+        Expected fractional S/N loss of pulses at ``dm_test`` searched with
+        the trials ``trial_dms`` (sorted ascending), on the model of
+        :func:`generate_dm_grid` (``dmt::plans::calculate_snr_loss``):
+        ``1 - S/N at the nearest trial / S/N on a trial``.
+
+        Parameters
+        ----------
+        dm_test : float or array_like
+            True DM(s) of the pulse (pc cm^-3).
+        trial_dms : array_like
+            Sorted 1-D trial DMs.
+        f_min, f_max, nchans, tsamp
+            Band (MHz) and sampling (s), as :func:`generate_dm_grid`.
+        pulse_width : float, optional
+            Intrinsic pulse width (s); 0 (default): only the sampling time
+            broadens the pulse.
+        chan_dm : float, optional
+            DM the channels were coherently dedispersed to (default 0).
+        kill_mask : array_like, optional
+            Channels in use (nonzero keep, 0 dead).
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Loss in [0, 1) per test DM (0: no loss), shaped like ``dm_test``.
         )doc");
 }
 

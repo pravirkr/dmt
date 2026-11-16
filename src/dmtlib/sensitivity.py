@@ -595,7 +595,8 @@ def fdmt_alignment_error(plan: Any, row: int) -> np.ndarray:  # noqa: ANN401
     Parameters
     ----------
     plan : FDMTPlan
-        The plan of an FDMT engine (``fdmt.plan``).
+        The plan of an FDMT engine (``fdmt.plan``), with ``chan_dm`` 0 (it
+        compares against the whole sweep through each channel).
     row : int
         Index into the plan's final trial grid (non-negative delay).
 
@@ -604,6 +605,9 @@ def fdmt_alignment_error(plan: Any, row: int) -> np.ndarray:  # noqa: ANN401
     numpy.ndarray
         Error of every channel, in samples.
     """
+    if getattr(plan, "chan_dm", 0.0) != 0.0:
+        msg = "fdmt_alignment_error is defined only for plans with chan_dm == 0"
+        raise ValueError(msg)
     nchans = int(plan.nchans)
     f_min, f_max = float(plan.f_min), float(plan.f_max)
     delay = float(np.asarray(plan.dt_grid_final)[row])

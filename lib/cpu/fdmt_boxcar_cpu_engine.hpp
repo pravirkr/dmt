@@ -122,6 +122,7 @@ private:
     candidate_of(SizeType row, SizeType beam, const BoxcarPeak& peak) const;
     void keep(SizeType index, uint64_t& count, const RawCandidate& candidate);
     void finish_result();
+    void finish_keep_result();
     const float* tile_tables(const plans::BoxcarPlanePlan& plane,
                              SizeType dm,
                              SizeType row_idx,

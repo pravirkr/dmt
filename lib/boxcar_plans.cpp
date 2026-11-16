@@ -179,17 +179,28 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                 plan.get_f_min() + static_cast<float>(end) * plan.get_df();
             out.coord_offset = grid.coord_offset;
             out.widths       = widths;
+            // The rows the search scores: the plan's selection (subband
+            // DM grids), else every trial of the subband.
+            if (grid.search_rows.empty()) {
+                out.coord_indices.resize(grid.ndt);
+                for (SizeType d = 0; d < grid.ndt; ++d) {
+                    out.coord_indices[d] = static_cast<uint32_t>(d);
+                }
+            } else {
+                out.coord_indices = grid.search_rows;
+            }
+            const SizeType nsel = out.coord_indices.size();
             if (grid.ndt > UINT32_MAX || grid.ndt > SIZE_MAX / widths.size()) {
                 throw std::invalid_argument(
                     "FDMTBoxcar: trial table is too large");
             }
-            out.dm_grid.resize(grid.ndt);
-            out.warmup_samples.resize(grid.ndt);
-            out.inv_sigma_lut.resize(grid.ndt * widths.size());
-            out.raw_thresh_lut.resize(grid.ndt * widths.size());
+            out.dm_grid.resize(nsel);
+            out.warmup_samples.resize(nsel);
+            out.inv_sigma_lut.resize(nsel * widths.size());
+            out.raw_thresh_lut.resize(nsel * widths.size());
             if (packed) {
-                out.integer_mean_lut.resize(grid.ndt * widths.size());
-                out.integer_thresh_lut.resize(grid.ndt * widths.size());
+                out.integer_mean_lut.resize(nsel * widths.size());
+                out.integer_thresh_lut.resize(nsel * widths.size());
             }
             // Trace each actual intermediate coordinate, including copy
             // nodes and plan-specific pruning. Shift does not change energy
@@ -200,20 +211,31 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             std::vector<SizeType> lengths;
             std::vector<std::pair<SizeType, SizeType>> length_counts;
             lengths.reserve(end - begin);
-            for (SizeType d = 0; d < grid.ndt; ++d) {
+            for (SizeType k = 0; k < nsel; ++k) {
+                const SizeType d = out.coord_indices[k];
                 lengths.clear();
                 uint64_t support = 0;
                 const auto trace = [&](auto& self, SizeType level, SizeType idx,
                                        uint64_t shift) -> void {
                     const auto& c = pc.coordinates[level][idx];
                     if (level == 0) {
-                        const auto dt    = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
-                        const SizeType s = static_cast<SizeType>(std::abs(dt));
+                        const auto dt  = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
+                        SizeType s     = static_cast<SizeType>(std::abs(dt));
+                        SizeType reach = s;
+                        if (!pc.level0_boxes.empty()) {
+                            // chan_dm plan: the box of s + 1 samples ends
+                            // `lag` samples back; without smearing the row
+                            // reads one sample at `point`.
+                            const auto& box = pc.level0_boxes[idx];
+                            s               = static_cast<SizeType>(box.s);
+                            reach = smear ? static_cast<SizeType>(box.lag) + s
+                                          : static_cast<SizeType>(box.point);
+                        }
                         // A killed channel adds no noise or signal (it reads as
                         // zero).
                         if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
                             lengths.push_back(smear ? s + 1 : 1);
-                            support = std::max(support, shift + s);
+                            support = std::max(support, shift + reach);
                         }
                     } else {
                         self(self, level - 1,
@@ -238,17 +260,18 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     }
                     ++length_counts.back().second;
                 }
-                out.warmup_samples[d] = support + extra_warmup;
+                support = std::max<uint64_t>(support, pc.level0_causal_delay);
+                out.warmup_samples[k] = support + extra_warmup;
                 const double f0       = out.f_low_mhz;
                 const double f1       = out.f_high_mhz;
                 const double delay_per_dm =
                     kDispConst * (1.0 / (f0 * f0) - 1.0 / (f1 * f1));
-                out.dm_grid[d] =
+                out.dm_grid[k] =
                     static_cast<float>(static_cast<float>(grid.dt_grid[d]) *
                                        plan.get_tsamp() / delay_per_dm);
                 if (l == root) {
                     // Preserve the exact DM values of custom physical grids.
-                    out.dm_grid[d] = root_dm[d];
+                    out.dm_grid[k] = root_dm[d];
                 }
                 for (SizeType f = 0; f < widths.size(); ++f) {
                     const SizeType width = widths[f];
@@ -270,12 +293,12 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     }
                     if (variance == 0) {
                         // Every channel of the row is killed: never detect.
-                        out.inv_sigma_lut[d * widths.size() + f] = 0;
-                        out.raw_thresh_lut[d * widths.size() + f] =
+                        out.inv_sigma_lut[k * widths.size() + f] = 0;
+                        out.raw_thresh_lut[k * widths.size() + f] =
                             std::numeric_limits<float>::max();
                         if (packed) {
-                            out.integer_mean_lut[d * widths.size() + f] = 0;
-                            out.integer_thresh_lut[d * widths.size() + f] =
+                            out.integer_mean_lut[k * widths.size() + f] = 0;
+                            out.integer_thresh_lut[k * widths.size() + f] =
                                 UINT64_MAX;
                         }
                         continue;
@@ -291,8 +314,8 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                             "FDMTBoxcar: sigma/threshold is outside float32 "
                             "range");
                     }
-                    out.inv_sigma_lut[d * widths.size() + f]  = inv_sigma;
-                    out.raw_thresh_lut[d * widths.size() + f] = threshold;
+                    out.inv_sigma_lut[k * widths.size() + f]  = inv_sigma;
+                    out.raw_thresh_lut[k * widths.size() + f] = threshold;
                     if (packed) {
                         const double scale = smear ? 1.0 / unit : 1.0;
                         const double filter_weight =
@@ -307,8 +330,8 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                             throw std::invalid_argument(
                                 "FDMTBoxcar: integer threshold exceeds uint64");
                         }
-                        out.integer_mean_lut[d * widths.size() + f] = mean;
-                        out.integer_thresh_lut[d * widths.size() + f] =
+                        out.integer_mean_lut[k * widths.size() + f] = mean;
+                        out.integer_thresh_lut[k * widths.size() + f] =
                             static_cast<uint64_t>(cutoff);
                     }
                 }
@@ -337,11 +360,11 @@ make_boxcar_rows(const plans::FDMTPlan& plan,
         const bool unmat = (plane.level == root) || plane.staggered;
         for (SizeType d = 0; d < plane.dm_grid.size(); ++d) {
             BoxcarRow row;
-            row.row                     = plane.coord_offset + d;
-            row.warmup                  = plane.warmup_samples[d];
-            row.unmaterialized          = unmat;
-            row.candidate.dm            = plane.dm_grid[d];
-            row.candidate.dm_idx        = static_cast<uint32_t>(d);
+            row.row              = plane.coord_offset + plane.coord_indices[d];
+            row.warmup           = plane.warmup_samples[d];
+            row.unmaterialized   = unmat;
+            row.candidate.dm     = plane.dm_grid[d];
+            row.candidate.dm_idx = static_cast<uint32_t>(d);
             row.candidate.subband_level = plane.subband_level;
             row.candidate.subband_idx   = plane.subband_idx;
             row.candidate.staggered     = plane.staggered ? 1U : 0U;

@@ -145,8 +145,8 @@ def test_piecewise_grid_and_method_used():
     steps = np.diff(pw)
     idx = np.clip(np.searchsorted(levin, pw[:-1], side="right") - 1, 0, len(levin) - 2)
     assert np.all(steps <= np.diff(levin)[idx] * 1.0001)
-    grid = dmtlib.generate_optimal_dm_grid(
-        F_MIN, F_MAX, NCHANS, TSAMP, 30.0, method="levin_piecewise", tol=1.2
+    grid = dmtlib.generate_levin_dm_grid(
+        F_MIN, F_MAX, NCHANS, TSAMP, 0.0, 30.0, tol=1.2, piecewise=True
     )
     assert np.all(np.diff(grid) > 0)
     cfg = dmtlib.LevinConfig(0.0, 2000.0, 1e-4, 1.2, piecewise_uniform=True)

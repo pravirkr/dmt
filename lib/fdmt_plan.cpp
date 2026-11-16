@@ -82,6 +82,7 @@ SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
         mem_use += grid_iter.size() * sizeof(FDMTCoordGrid);
         for (const auto& grid : grid_iter) {
             mem_use += grid.dt_grid.size() * sizeof(IndexType);
+            mem_use += grid.search_rows.size() * sizeof(uint32_t);
         }
     }
     // coordinates, plus coordinates_sum and coordinates_copy (a partition of
@@ -92,6 +93,8 @@ SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
     for (const auto& dt_grid : dt_grid_sub_top) {
         mem_use += dt_grid.size() * sizeof(IndexType);
     }
+    mem_use += level0_boxes.size() * sizeof(FDMTLevel0Box);
+    mem_use += level0_order.size() * sizeof(int32_t);
     return mem_use;
 }
 
@@ -188,7 +191,10 @@ std::vector<float> FDMTPlan::Impl::get_smearing_grid_final() const noexcept {
                     const auto dt =
                         m_container.grids[0][chan].dt_grid[coord0.i_dt];
                     smearing_grid[(dm_idx * m_nchans) + chan] =
-                        std::abs(static_cast<float>(dt));
+                        m_container.level0_boxes.empty()
+                            ? std::abs(static_cast<float>(dt))
+                            : static_cast<float>(
+                                  m_container.level0_boxes[coord_idx].s);
                 }
             }
             return;
@@ -244,8 +250,14 @@ std::vector<IndexType> FDMTPlan::Impl::trace_dm(SizeType dm_idx) const {
                     coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
                     const auto dt0 =
                         m_container.grids[0][chan].dt_grid[coord0.i_dt];
-                    shifts[chan] =
-                        target - std::abs(static_cast<IndexType>(dt0));
+                    if (m_container.level0_boxes.empty()) {
+                        shifts[chan] =
+                            target - std::abs(static_cast<IndexType>(dt0));
+                    } else {
+                        // The box's farthest read of a chan_dm plan.
+                        const auto& box = m_container.level0_boxes[coord_idx];
+                        shifts[chan]    = target - box.lag - box.s;
+                    }
                 }
             }
             return;
@@ -280,10 +292,14 @@ std::vector<IndexType> FDMTPlan::Impl::trace_dm(SizeType dm_idx) const {
 SizeType FDMTPlan::Impl::compute_fft_support() const {
     const auto& grid0 = m_container.grids[0];
     std::vector<SizeType> span(m_container.state_shape[0].ncoords, 0);
+    const auto& boxes = m_container.level0_boxes;
     for (const auto& g : grid0) {
         for (SizeType i = 0; i < g.ndt; ++i) {
-            span[g.coord_offset + i] =
-                static_cast<SizeType>(std::abs(g.dt_grid[i]));
+            const auto k = g.coord_offset + i;
+            span[k] = boxes.empty()
+                          ? static_cast<SizeType>(std::abs(g.dt_grid[i]))
+                          : static_cast<SizeType>(std::max(
+                                boxes[k].lag + boxes[k].s, boxes[k].point));
         }
     }
     for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
@@ -392,7 +408,9 @@ FDMTPlan::FDMTPlan(float f_min,
                    IndexType dt_min,
                    SizeType dt_step,
                    std::string_view mode,
-                   SizeType subband_depth)
+                   SizeType subband_depth,
+                   double chan_dm,
+                   float subband_max_snr_loss)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -402,7 +420,9 @@ FDMTPlan::FDMTPlan(float f_min,
                                     dt_min,
                                     dt_step,
                                     mode,
-                                    subband_depth)) {}
+                                    subband_depth,
+                                    chan_dm,
+                                    subband_max_snr_loss)) {}
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
                    SizeType nchans,
@@ -410,9 +430,19 @@ FDMTPlan::FDMTPlan(float f_min,
                    float tsamp,
                    const std::vector<IndexType>& dt_grid,
                    std::string_view mode,
-                   SizeType subband_depth)
-    : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode, subband_depth)) {}
+                   SizeType subband_depth,
+                   double chan_dm,
+                   float subband_max_snr_loss)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dt_grid,
+                                    mode,
+                                    subband_depth,
+                                    chan_dm,
+                                    subband_max_snr_loss)) {}
 
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
@@ -421,9 +451,19 @@ FDMTPlan::FDMTPlan(float f_min,
                    float tsamp,
                    const std::vector<float>& dm_grid,
                    std::string_view mode,
-                   SizeType subband_depth)
-    : m_impl(std::make_unique<Impl>(
-          f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode, subband_depth)) {}
+                   SizeType subband_depth,
+                   double chan_dm,
+                   float subband_max_snr_loss)
+    : m_impl(std::make_unique<Impl>(f_min,
+                                    f_max,
+                                    nchans,
+                                    nsamps,
+                                    tsamp,
+                                    dm_grid,
+                                    mode,
+                                    subband_depth,
+                                    chan_dm,
+                                    subband_max_snr_loss)) {}
 
 FDMTPlan::~FDMTPlan()                              = default;
 FDMTPlan::FDMTPlan(FDMTPlan&&) noexcept            = default;
@@ -458,6 +498,18 @@ float FDMTPlan::get_df() const noexcept { return m_impl->get_df(); }
 SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
 SizeType FDMTPlan::get_subband_depth() const noexcept {
     return m_impl->get_subband_depth();
+}
+float FDMTPlan::get_subband_max_snr_loss() const noexcept {
+    return m_impl->get_container().subband_max_snr_loss;
+}
+double FDMTPlan::get_chan_dm() const noexcept {
+    return m_impl->get_container().chan_dm;
+}
+SizeType FDMTPlan::get_level0_causal_delay() const noexcept {
+    return m_impl->get_container().level0_causal_delay;
+}
+const std::vector<FDMTLevel0Box>& FDMTPlan::get_level0_boxes() const noexcept {
+    return m_impl->get_container().level0_boxes;
 }
 SizeType FDMTPlan::get_max_fuse_levels() const noexcept {
     return m_impl->get_max_fuse_levels();

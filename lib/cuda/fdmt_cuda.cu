@@ -68,6 +68,23 @@ void FDMTCudaEngine::init_device_structures(SizeType fuse_levels) {
                                                   niters, m_chunk)
                 : plans::FDMTPlanContainer{};
     gpu_utils::set_device(m_device_id);
+    {
+        // chan_dm plans: the level-0 boxes and their sweep order.
+        const auto& pc = m_plan.get_container();
+        m_chan_dm      = !pc.level0_boxes.empty();
+        if (m_chan_dm) {
+            std::vector<int> box0;
+            box0.reserve(detail::kFDMTBoxInts * pc.level0_boxes.size());
+            for (const auto& b : pc.level0_boxes) {
+                box0.push_back(b.lag);
+                box0.push_back(b.s);
+                box0.push_back(b.point);
+            }
+            m_level0_box_d   = box0;
+            m_level0_order_d = std::vector<int>(pc.level0_order.begin(),
+                                                pc.level0_order.end());
+        }
+    }
     if (m_use_box_smearing) {
         // Level-0 box means (fdmt_box_weights.hpp), by |dt|: dyadic float
         // weights, and the packed-input rounding recipes on 2^-F.
@@ -261,13 +278,15 @@ FDMTMemoryUsage FDMTCudaEngine::get_memory_usage() const noexcept {
         coord_bytes(m_plan_d.coordinates_copy) +
         ((sh.nchans.size() + sh.ncoords_sum.size() + sh.ncoords_copy.size() +
           sh.nsamps.size() + sh.dt_max.size() + g0.dt_grid.size() +
-          g0.ndt.size() + g0.coord_offset.size()) *
+          g0.ndt.size() + g0.coord_offset.size() + m_level0_box_d.size() +
+          m_level0_order_d.size()) *
          sizeof(int));
     SizeType fused_bytes = 0;
     if (m_fused) {
         fused_bytes = (m_fused->group_info.size() + m_fused->coords.size() +
                        m_fused->dt_grid0.size() + m_fused->ndt0.size() +
-                       m_fused->coord_offset0.size()) *
+                       m_fused->coord_offset0.size() + m_fused->box0.size() +
+                       m_fused->order0.size()) *
                       sizeof(int);
     }
     return {
@@ -408,6 +427,8 @@ void FDMTCudaEngine::adopt_fused_plan(const detail::FDMTFusedTilePlan& plan,
     fused->dt_grid0      = plan.dt_grid0;
     fused->ndt0          = plan.ndt0;
     fused->coord_offset0 = plan.coord_offset0;
+    fused->box0          = plan.box0;
+    fused->order0        = plan.order0;
     const auto hist_len =
         static_cast<int>(m_plan.get_container().state_shape[0].dt_max);
     fused->args = detail::make_fused_tile_args(
@@ -416,7 +437,11 @@ void FDMTCudaEngine::adopt_fused_plan(const detail::FDMTFusedTilePlan& plan,
         thrust::raw_pointer_cast(fused->coords.data()),
         thrust::raw_pointer_cast(fused->dt_grid0.data()),
         thrust::raw_pointer_cast(fused->ndt0.data()),
-        thrust::raw_pointer_cast(fused->coord_offset0.data()), box_means(0));
+        thrust::raw_pointer_cast(fused->coord_offset0.data()), box_means(0),
+        plan.box0.empty() ? nullptr
+                          : thrust::raw_pointer_cast(fused->box0.data()),
+        plan.order0.empty() ? nullptr
+                            : thrust::raw_pointer_cast(fused->order0.data()));
     const auto [cap_a, cap_b] = plan.smem_floats(tile);
     fused->smem_bytes         = (cap_a + cap_b) * sizeof(float);
     fused->tile               = tile;

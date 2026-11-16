@@ -423,8 +423,8 @@ reference_rows(const plans::FDMTPlan& plan,
             // halves include padding. Run separate references per beam.
             REQUIRE(beams == 1);
             for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
-                const SizeType offset =
-                    (p.coord_offset + d) * pc.state_shape[p.level].nsamps;
+                const SizeType offset = (p.coord_offset + p.coord_indices[d]) *
+                                        pc.state_shape[p.level].nsamps;
                 rows[index].insert(rows[index].end(), level.begin() + offset,
                                    level.begin() + offset + plan.get_nsamps());
                 ++index;
@@ -433,6 +433,19 @@ reference_rows(const plans::FDMTPlan& plan,
         fdmt.finalize();
     }
     return rows;
+}
+
+// Candidate times from FDMT row times: less the plan's level-0 causal delay
+// (chan_dm plans), saturating at 0, as the engines report them.
+inline std::vector<RawCandidate> to_arrival(const plans::FDMTPlan& plan,
+                                            std::vector<RawCandidate> cands) {
+    const uint64_t lag = plan.get_level0_causal_delay();
+    for (auto& c : cands) {
+        c.peak_sample  = c.peak_sample > lag ? c.peak_sample - lag : 0;
+        c.begin_sample = c.begin_sample > lag ? c.begin_sample - lag : 0;
+        c.end_sample   = c.end_sample > lag ? c.end_sample - lag : 0;
+    }
+    return cands;
 }
 
 inline std::vector<RawCandidate>
@@ -448,9 +461,11 @@ reference(const plans::FDMTPlan& plan,
     const auto planes = metadata.get_search_plans();
     const std::vector<std::vector<uint8_t>> block_kill(
         input.size(), std::vector<uint8_t>(kill.begin(), kill.end()));
-    return direct_windows(
-        planes, reference_rows(plan, smear, beams, planes, input, block_kill),
-        config);
+    return to_arrival(plan,
+                      direct_windows(planes,
+                                     reference_rows(plan, smear, beams, planes,
+                                                    input, block_kill),
+                                     config));
 }
 
 /**
@@ -549,6 +564,7 @@ masked_reference(const plans::FDMTPlan& plan,
             return std::pair{tab->thr[(row * nf) + f],
                              tab->inv[(row * nf) + f]};
         });
+    out.candidates = to_arrival(plan, std::move(out.candidates));
     return out;
 }
 
@@ -612,6 +628,6 @@ fft_reference(const plans::FDMTPlan& plan,
                   row.begin() + static_cast<std::ptrdiff_t>(
                                     std::min(latency, row.size())));
     }
-    return direct_windows(planes, rows, config);
+    return to_arrival(plan, direct_windows(planes, rows, config));
 }
 } // namespace boxcar_test

@@ -173,6 +173,61 @@ DMT_HD inline void fdmt_init_column(int dt_first,
 }
 
 /**
+ * @brief fdmt_init_column() for a chan_dm plan: every row of one
+ * channel at sample `t` from the plan's level-0 boxes.
+ *
+ * `box` holds kFDMTBoxInts ints per row (lag, s, point; see
+ * plans::FDMTLevel0Box), `order` the rows sorted by (lag, s). With box
+ * smearing row r is the box mean of samples t - lag_r - s_r .. t - lag_r,
+ * summed from the near end outward (get_sample(t - lag) first, then
+ * t - lag - 1, ...), rows of equal lag extending one running sum; the CPU
+ * tree path sums in the same order, so both agree bit for bit. Without it
+ * row r is the single sample t - point_r.
+ */
+inline constexpr int kFDMTBoxInts = 3;
+
+template <bool UseBoxSmearing,
+          typename TAcc,
+          typename GetSample,
+          typename WriteRow,
+          typename BoxMean>
+DMT_HD inline void fdmt_init_column_lag(int ndt,
+                                        const int* box,
+                                        const int* order,
+                                        int t,
+                                        GetSample&& get_sample,
+                                        WriteRow&& write_row,
+                                        BoxMean&& box_mean) {
+    if constexpr (UseBoxSmearing) {
+        int lag_prev = -1;
+        int s_prev   = -1;
+        TAcc sum     = 0;
+        for (int j = 0; j < ndt; ++j) {
+            const int r   = order[j];
+            const int lag = box[(kFDMTBoxInts * r)];
+            const int s   = box[(kFDMTBoxInts * r) + 1];
+            int d         = 1;
+            if (lag == lag_prev && s >= s_prev) {
+                d = s_prev + 1;
+            } else {
+                sum = static_cast<TAcc>(get_sample(t - lag));
+            }
+            for (; d <= s; ++d) {
+                sum += static_cast<TAcc>(get_sample(t - lag - d));
+            }
+            lag_prev = lag;
+            s_prev   = s;
+            write_row(r, box_mean(s, sum));
+        }
+    } else {
+        (void)order;
+        for (int r = 0; r < ndt; ++r) {
+            write_row(r, get_sample(t - box[(kFDMTBoxInts * r) + 2]));
+        }
+    }
+}
+
+/**
  * @brief The level-0 box means of one engine (fdmt_box_weights.hpp), by |dt|
  * = s: dyadic float weights `w_f32` for float input; for packed input the
  * integer rounding recipes on the common scale 2^-F (`unit` = 2^-F), with
@@ -239,6 +294,10 @@ struct FDMTFusedTileArgs {
     const int* dt_grid0;      ///< level-0 dt grids, flat (by coord offset)
     const int* ndt0;          ///< per channel
     const int* coord_offset0; ///< per channel
+    /// chan_dm plans only (HasChanDM): kFDMTBoxInts ints per level-0
+    /// coordinate and the per-channel sweep order (by coord offset).
+    const int* box0;
+    const int* order0;
 
     [[nodiscard]] DMT_HD int group_stride() const {
         return kGroupHeader + (kLevelInfo * (fuse + 1));
@@ -385,7 +444,8 @@ template <FDMTMode Mode,
           bool UseBoxSmearing,
           typename Block,
           typename Input,
-          typename TOut>
+          typename TOut,
+          bool HasChanDM = false>
 DMT_HD void fdmt_fused_tile(const Block& blk,
                             const Input& input,
                             int64_t row_base,
@@ -482,6 +542,24 @@ DMT_HD void fdmt_fused_tile(const Block& blk,
                 const auto put = [&](int i_dt, float v) {
                     dr[(i_dt * w0) + j] = v;
                 };
+                if constexpr (HasChanDM) {
+                    const int* bx = a.box0 + (kFDMTBoxInts * coff);
+                    const int* od = a.order0 + coff;
+                    if constexpr (kFDMTPackedInput<Input>) {
+                        fdmt_init_column_lag<UseBoxSmearing, uint32_t>(
+                            ndt, bx, od, t, get, put, [&](int s, uint32_t sum) {
+                                return a.box.of_packed(s, sum, kIntUnits);
+                            });
+                    } else {
+                        fdmt_init_column_lag<UseBoxSmearing, float>(
+                            ndt, bx, od, t, get, put, [&](int s, float sum) {
+                                return a.box.of_float(s, sum);
+                            });
+                    }
+                    (void)dt_lo;
+                    (void)dt_hi;
+                    return;
+                }
                 if constexpr (kFDMTPackedInput<Input>) {
                     fdmt_init_column<UseBoxSmearing, uint32_t>(
                         dt_lo, dt_hi, t, get, put, [&](int s, uint32_t sum) {
@@ -567,6 +645,8 @@ struct FDMTFusedTilePlan {
     std::vector<int> dt_grid0;
     std::vector<int> ndt0;
     std::vector<int> coord_offset0;
+    std::vector<int> box0;   ///< chan_dm plans: see FDMTFusedTileArgs::box0
+    std::vector<int> order0; ///< chan_dm plans: the sweep order
     std::array<int, kMaxFusedLevels + 1> level_nsamps{};
     std::array<int, kMaxFusedLevels + 1> coords_offset{};
     int ntiles_nsamps{0};   ///< level-F samples the tiles must cover (L_F)
@@ -710,6 +790,13 @@ inline FDMTFusedTilePlan build_fused_tile_plan(
             const auto& dts = grids0[c].dt_grid;
             s_halo = std::max({s_halo, static_cast<int>(std::abs(dts.front())),
                                static_cast<int>(std::abs(dts.back()))});
+            if (!pc.level0_boxes.empty()) {
+                // chan_dm plan: the farthest read of the channel's boxes.
+                for (SizeType i = 0; i < grids0[c].ndt; ++i) {
+                    const auto& b = pc.level0_boxes[grids0[c].coord_offset + i];
+                    s_halo        = std::max({s_halo, b.lag + b.s, b.point});
+                }
+            }
         }
         std::vector<int> halo(fuse + 1, 0);
         std::vector<int> max_delay(fuse + 1, 0);
@@ -732,6 +819,12 @@ inline FDMTFusedTilePlan build_fused_tile_plan(
         }
         p.max_level0_halo = std::max(p.max_level0_halo, halo[0] + s_halo);
     }
+    for (const auto& b : pc.level0_boxes) {
+        p.box0.push_back(b.lag);
+        p.box0.push_back(b.s);
+        p.box0.push_back(b.point);
+    }
+    p.order0.assign(pc.level0_order.begin(), pc.level0_order.end());
     return p;
 }
 
@@ -747,7 +840,9 @@ inline FDMTFusedTileArgs make_fused_tile_args(const FDMTFusedTilePlan& plan,
                                               const int* dt_grid0,
                                               const int* ndt0,
                                               const int* coord_offset0,
-                                              const FDMTBoxMeans& box) {
+                                              const FDMTBoxMeans& box,
+                                              const int* box0   = nullptr,
+                                              const int* order0 = nullptr) {
     FDMTFusedTileArgs a{};
     a.fuse        = plan.fuse;
     a.tile_nsamps = tile;
@@ -765,6 +860,8 @@ inline FDMTFusedTileArgs make_fused_tile_args(const FDMTFusedTilePlan& plan,
     a.dt_grid0      = dt_grid0;
     a.ndt0          = ndt0;
     a.coord_offset0 = coord_offset0;
+    a.box0          = box0;
+    a.order0        = order0;
     return a;
 }
 

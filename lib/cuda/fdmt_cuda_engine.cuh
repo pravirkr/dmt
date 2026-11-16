@@ -451,6 +451,8 @@ private:
         DeviceVector<int> dt_grid0;
         DeviceVector<int> ndt0;
         DeviceVector<int> coord_offset0;
+        DeviceVector<int> box0;   ///< chan_dm plans: level-0 boxes
+        DeviceVector<int> order0; ///< chan_dm plans: their sweep order
         detail::FDMTFusedTileArgs args{};
         int tile{0};
         int ntiles{0}; ///< for a whole row (valid-mode chunks: per launch)
@@ -458,6 +460,12 @@ private:
         SizeType smem_bytes{0};
     };
     std::unique_ptr<FusedLevelsD> m_fused;
+    // chan_dm plans: the level-0 boxes (detail::kFDMTBoxInts ints per
+    // level-0 coordinate) and their per-channel sweep order, for the
+    // unfused init kernel; empty when chan_dm == 0.
+    bool m_chan_dm{false};
+    DeviceVector<int> m_level0_box_d;
+    DeviceVector<int> m_level0_order_d;
     // Direct low levels (configure_direct()): the device tables, the input
     // window ping-pong (flipped with m_parity) and the per-chunk running
     // sums. Replaces m_fused when configured.
@@ -793,6 +801,13 @@ private:
 
     template <FDMTMode Mode, bool Smear, typename Input, typename TOut>
     void launch_fused_typed(const Input& input, TOut* out, cudaStream_t stream);
+    template <FDMTMode Mode,
+              bool Smear,
+              typename Input,
+              typename TOut,
+              bool HasChanDM>
+    void
+    launch_fused_kernel(const Input& input, TOut* out, cudaStream_t stream);
 
     // Levels 0..F in one kernel, straight into level F's buffer (stored as
     // that level's type), then the level-0 input history as usual.

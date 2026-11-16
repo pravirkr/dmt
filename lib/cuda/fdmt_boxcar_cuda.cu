@@ -176,6 +176,23 @@ kernel_keep_count(const uint64_t* per_dm, SizeType tasks, KeepSelect* sel) {
     }
 }
 
+// chan_dm plans: candidates report the bottom-edge arrival, the row's
+// sample less the plan's level-0 causal delay (saturating at 0).
+__global__ void kernel_shift_candidate_times(RawCandidate* candidates,
+                                             const CandidateCounts* counts,
+                                             SizeType capacity,
+                                             uint64_t lag) {
+    const auto n = static_cast<SizeType>(
+        counts->emitted_count < capacity ? counts->emitted_count : capacity);
+    for (SizeType i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n;
+         i += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        auto& c        = candidates[i];
+        c.peak_sample  = c.peak_sample > lag ? c.peak_sample - lag : 0;
+        c.begin_sample = c.begin_sample > lag ? c.begin_sample - lag : 0;
+        c.end_sample   = c.end_sample > lag ? c.end_sample - lag : 0;
+    }
+}
+
 __global__ void kernel_keep_init(KeepSelect* sel, SizeType capacity) {
     *sel   = KeepSelect{};
     sel->k = capacity;
@@ -549,6 +566,7 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const float> waterfall, Stream queue) {
     m_prev_evicted.reset();
     m_position += m_plan.get_nsamps();
     finish_keep(stream);
+    shift_candidate_times(stream);
     release_slots(stream);
     update_open_begin(stream);
     m_work.mark(stream);
@@ -582,6 +600,7 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const uint8_t> waterfall,
                      m_config.input_nbits, *this, queue);
     m_position += m_plan.get_nsamps();
     finish_keep(static_cast<cudaStream_t>(queue.native));
+    shift_candidate_times(static_cast<cudaStream_t>(queue.native));
     update_open_begin(static_cast<cudaStream_t>(queue.native));
     m_work.mark(static_cast<cudaStream_t>(queue.native));
     return device_view();
@@ -614,6 +633,7 @@ CandidateDeviceResultView FDMTBoxcarCudaEngine::flush_device(Stream queue) {
         gpu_utils::check_last_gpu_error("FDMTBoxcar flush failed");
     }
     finish_keep(stream);
+    shift_candidate_times(stream);
     update_open_begin(stream);
     m_work.mark(stream);
     return device_view();
@@ -942,6 +962,16 @@ void FDMTBoxcarCudaEngine::set_keep(
         m_keep_runs = runs;
     }
     (void)m_driver->set_search_keep(raw(m_keep_d));
+}
+
+void FDMTBoxcarCudaEngine::shift_candidate_times(cudaStream_t stream) {
+    const uint64_t lag = m_plan.get_level0_causal_delay();
+    if (lag == 0) {
+        return;
+    }
+    kernel_shift_candidate_times<<<256, 256, 0, stream>>>(
+        raw(m_candidates_d), raw(m_counts_d), m_config.max_candidates, lag);
+    gpu_utils::check_last_gpu_error("FDMTBoxcar candidate times failed");
 }
 
 void FDMTBoxcarCudaEngine::finish_keep(cudaStream_t stream) {

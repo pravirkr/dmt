@@ -48,9 +48,13 @@ struct TreeDag {
     std::vector<std::vector<TreeOp>> prod; // [l][node] for l >= 1 (global
                                            // indices of level l - 1)
     std::vector<std::uint32_t> l0_chan;    // level-0 node -> channel
-    std::vector<std::uint32_t> l0_shift;   // level-0 node -> |dt| (samples)
+    std::vector<std::uint32_t> l0_shift;   // level-0 node -> window (|dt|)
     std::vector<double> shift;             // merge shift (samples) per sid
     SizeType dt0_max{0};
+    /// chan_dm plans only (else empty): the level-0 windows l0_shift
+    /// indexes, each the box of shifts lag..lag+s (one shift, s = 0,
+    /// without box smearing); see level0_windows().
+    std::vector<plans::FDMTLevel0Box> l0_win;
     SizeType nchans{0};
 
     [[nodiscard]] SizeType levels() const noexcept {
@@ -58,6 +62,19 @@ struct TreeDag {
     }
     [[nodiscard]] SizeType nops() const noexcept;
 };
+
+/**
+ * @brief The distinct level-0 windows of a chan_dm plan: node i uses
+ * window node_win[i], which spans shifts win.lag .. win.lag + win.s (box
+ * smearing) or the single shift win.lag = point (s = 0, without). Empty for
+ * a plan with chan_dm == 0 (window = |dt|).
+ */
+struct Level0Windows {
+    std::vector<std::uint32_t> node_win;
+    std::vector<plans::FDMTLevel0Box> win;
+};
+[[nodiscard]] Level0Windows level0_windows(const plans::FDMTPlanContainer& pc,
+                                           bool box);
 
 /// @brief The plan's tree. With fractional delays every merge has its own
 /// shift (sid = merge op id, levels in order); otherwise sid is the plan's

@@ -137,9 +137,8 @@ std::vector<float> generate_fractional_delay_table(
  *
  * Note: This function generates continuous physical DM trials (pc cm^-3)
  * parameterised by pulse-broadening tolerance (tol > 1.0) and evaluated at band
- * center. For FDMT discrete integer delay trials (dt_arr) bounded by fractional
- * S/N loss (max_snr_loss < 1.0) evaluated at band edge f_min, see the Python
- * module `dmtlib.grid` (`generate_optimal_dt_grid`).
+ * center. The public entry point is plans::generate_levin_dm_grid();
+ * plans::generate_dm_grid() bounds the S/N loss over every channel instead.
  *
  * @param dm_start Starting DM (pc cm^-3).
  * @param dm_end Ending DM (pc cm^-3).

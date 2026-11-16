@@ -34,13 +34,13 @@ The `dmt` namespaces: backend selection, engines, plans and utilities.
 - `dmtlib`: engines, plans, candidate search and convenience functions (`FDMT`, `DDMT`, `SDMT`, `CohFDMT`, `FDMTFFT`, `DDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`, `compute_fdmt`, `FDMTPlan`, `available_backends`), and the CPU FFT planner controls (`set_fft_planner`, `import_fft_wisdom`, `export_fft_wisdom`).
 - `dmtlib.dedisperse`: one-call dedispersion of a whole waterfall into complete time series (`dedisperse`, `Dedispersed`, `dispersion_delay`, also exported from `dmtlib`).
 - `dmtlib.simulate`: pulse injection and dispersion modelling (`generate_frb`, `generate_pure_frb`, `generate_dispersed_periodic_signal`).
-- `dmtlib.grid`: smearing-aware sparse DM grid generators (`generate_optimal_dm_grid` with `method="snr_loss"`, `"levin"`, or the piecewise-uniform `"levin_piecewise"` for `DDMTFFT`), wrapping `generate_dm_grid` / `generate_dt_grid` (C++ `dmt/common/dm_grids.hpp`); see [DM grids](../pipeline_guide/dm_grids.md).
+- `dmtlib.grid`: DM grid generators (`generate_dm_grid` by S/N loss over every channel, `generate_levin_dm_grid` by the Levin rule, both optionally piecewise uniform for `DDMTFFT`) and `calculate_snr_loss`, from C++ `dmt/common/dm_grids.hpp`.
 
 ## C++ namespaces
 
 - `dmt`: backend selection (`Backend`, `Exec`, `DeviceSpan`, `Stream`, `available_backends`).
 - `dmt::algorithms`: engines (`FDMT`, `DDMT`, `SDMT`, `CohFDMT`, `FDMTFFT`, `DDMTFFT`); each runs on the backend chosen by its `Exec` argument.
 - `dmt::fft`: process-wide CPU FFT (FFTW) planner effort and wisdom (`set_planner`, `import_wisdom`, `export_wisdom`; `dmt/common/fft_config.hpp`).
-- `dmt::plans`: execution plans and coordinate containers (`FDMTPlan`, `DDMTPlan`, `CohFDMTPlan`).
+- `dmt::plans`: execution plans, coordinate containers and DM-grid generators (`FDMTPlan`, `DDMTPlan`, `CohFDMTPlan`, `DMGridConfig`, `generate_dm_grid`, `generate_levin_dm_grid`, `calculate_snr_loss`).
 - `dmt`: dispersion constants in the top-level namespace (`kDispConstLK`, `kDispConstMT`, `kDispConst`).
 - `dmt::utils`: simulation utilities.
