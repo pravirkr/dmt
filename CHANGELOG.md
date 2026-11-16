@@ -8,6 +8,12 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`FDMT::estimate_memory(...)`** (C++ and Python `FDMT.estimate_memory`),
+  one overload per constructor with the same arguments: the memory the
+  instance would allocate (`usage`, equal to its `get_memory_usage()`), its
+  `chunk_nsamps`, and on a GPU the `host_staging` bytes the first host-memory
+  call adds, all computed without allocating. A GPU backend reads the
+  device's limits but allocates no device memory.
 - **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
   dedispersed channels: level-0 boxes cover the residual intra-channel sweep
   at the trial DM, centred on each channel's arrival, in `FDMT`,
@@ -46,6 +52,10 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- `FDMT` construction no longer allocates while it chooses its path and
+  chunk: on a GPU the budget search sizes candidate engines without
+  allocating them (it could briefly hold more than `max_memory_bytes`), and
+  on the CPU the budget is checked before allocating.
 - **CPU boxcar default Stage-1 screen (`BoxcarScreenMode::kAuto`)**: CPU
   `FDMTBoxcar` and `FDMTFFTBoxcar` now default to `kKadane`, a lossless
   multi-bucket SIMD Kadane tile gate with exact `kPrefix` candidate parity

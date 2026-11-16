@@ -50,11 +50,40 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
             std::min(m_plan.get_nsamps(), std::max<SizeType>(64, m_chunk / 2));
     }
     m_requested_fuse = cfg.fuse_levels;
-    init_device_structures(m_search_nbits == 32 ? cfg.fuse_levels : 0);
+    {
+        // Deferred: every device buffer is sized here, allocated by
+        // allocate().
+        const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_pending
+                                                               : nullptr);
+        init_device_structures(m_search_nbits == 32 ? cfg.fuse_levels : 0);
+    }
     if (m_mode == FDMTMode::kValid && !skew_history()) {
         m_hist_hash = detail::fdmt_tree_history_hash(m_plan, m_nbeams,
                                                      m_use_box_smearing);
     }
+    if (!cfg.defer_allocation) {
+        m_allocated = true;
+    }
+}
+
+void FDMTCudaEngine::allocate() {
+    if (m_allocated) {
+        return;
+    }
+    gpu_utils::set_device(m_device_id);
+    const auto planned = get_memory_usage();
+    m_pending.materialize();
+    if (m_fused) {
+        bind_fused_pointers();
+    }
+    const auto got = get_memory_usage();
+    if (got.plan != planned.plan || got.state != planned.state ||
+        got.history != planned.history || got.workspace != planned.workspace) {
+        throw std::logic_error(
+            "FDMT (cuda): allocation differs from the planned sizes");
+    }
+    gpu_utils::check_last_gpu_error("FDMT (cuda): allocation failed");
+    m_allocated = true;
 }
 
 void FDMTCudaEngine::init_device_structures(SizeType fuse_levels) {
@@ -105,6 +134,7 @@ void FDMTCudaEngine::init_device_structures(SizeType fuse_levels) {
                                                       .rshift = 0,
                                                       .lshift = 0};
         }
+        m_box_w_h     = box_w;
         m_box_w_d     = box_w;
         m_box_round_d = box_round;
         for (const SizeType nbits : {1, 2, 4, 8, 16}) {
@@ -431,17 +461,9 @@ void FDMTCudaEngine::adopt_fused_plan(const detail::FDMTFusedTilePlan& plan,
     fused->order0        = plan.order0;
     const auto hist_len =
         static_cast<int>(m_plan.get_container().state_shape[0].dt_max);
+    // Pointers are bound below (bind_fused_pointers()).
     fused->args = detail::make_fused_tile_args(
-        plan, tile, hist_len,
-        thrust::raw_pointer_cast(fused->group_info.data()),
-        thrust::raw_pointer_cast(fused->coords.data()),
-        thrust::raw_pointer_cast(fused->dt_grid0.data()),
-        thrust::raw_pointer_cast(fused->ndt0.data()),
-        thrust::raw_pointer_cast(fused->coord_offset0.data()), box_means(0),
-        plan.box0.empty() ? nullptr
-                          : thrust::raw_pointer_cast(fused->box0.data()),
-        plan.order0.empty() ? nullptr
-                            : thrust::raw_pointer_cast(fused->order0.data()));
+        plan, tile, hist_len, nullptr, nullptr, nullptr, nullptr, nullptr, {});
     const auto [cap_a, cap_b] = plan.smem_floats(tile);
     fused->smem_bytes         = (cap_a + cap_b) * sizeof(float);
     fused->tile               = tile;
@@ -452,6 +474,22 @@ void FDMTCudaEngine::adopt_fused_plan(const detail::FDMTFusedTilePlan& plan,
                    "groups, {} B shared)",
                    plan.fuse, tile, plan.ngroups, fused->smem_bytes);
     m_fused = std::move(fused);
+    bind_fused_pointers();
+}
+
+void FDMTCudaEngine::bind_fused_pointers() {
+    auto& f        = *m_fused;
+    const auto ptr = [](const auto& v) {
+        return v.empty() ? nullptr : thrust::raw_pointer_cast(v.data());
+    };
+    f.args.group_info    = ptr(f.group_info);
+    f.args.coords        = ptr(f.coords);
+    f.args.dt_grid0      = ptr(f.dt_grid0);
+    f.args.ndt0          = ptr(f.ndt0);
+    f.args.coord_offset0 = ptr(f.coord_offset0);
+    f.args.box0          = ptr(f.box0);
+    f.args.order0        = ptr(f.order0);
+    f.args.box           = box_means(0);
 }
 
 void FDMTCudaEngine::configure_skewed_direct_and_mid(
@@ -1165,7 +1203,7 @@ namespace dmt::algorithms {
 
 std::unique_ptr<detail::FDMTEngine>
 detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
-                      const detail::FDMTEngineConfig& cfg) {
+                      const detail::FDMTEngineConfig& cfg_in) {
     // Memory budget (FDMTEngineConfig::max_memory_bytes). Construction is
     // cheap next to the plan (about 1 s on parkes_uwl), so the automatic
     // chunk is chosen by building and measuring: the windowed top (subband
@@ -1176,6 +1214,17 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
     // of chunk + spread samples, rings of reach + chunk; extrapolated from
     // two measured engines), so construction never holds more than the
     // budget to find out (it held 12 GiB at chunk 4096 for float32 UWL).
+    // Every engine of the search is built deferred (sized, not allocated);
+    // only the one returned is allocated, unless the caller asked for a
+    // deferred engine (memory estimates).
+    auto cfg             = cfg_in;
+    cfg.defer_allocation = true;
+    const auto finish    = [&](auto e) {
+        if (!cfg_in.defer_allocation) {
+            e->allocate();
+        }
+        return e;
+    };
     const auto fits = [&](const detail::fdmt_cuda::FDMTCudaEngine& e) {
         return e.get_memory_usage().total() <= cfg.max_memory_bytes;
     };
@@ -1192,7 +1241,7 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
         if (!fits(*engine)) {
             throw over(*engine);
         }
-        return engine;
+        return finish(std::move(engine));
     }
     const auto try_chunk =
         [&](SizeType c) -> std::unique_ptr<detail::fdmt_cuda::FDMTCudaEngine> {
@@ -1231,7 +1280,7 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
                 continue;
             }
             if (auto e = try_chunk(c)) {
-                return e;
+                return finish(std::move(e));
             }
         }
         engine = std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, cfg);
@@ -1248,7 +1297,7 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
         engine =
             std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, c_cfg);
     }
-    return engine;
+    return finish(std::move(engine));
 }
 
 } // namespace dmt::algorithms

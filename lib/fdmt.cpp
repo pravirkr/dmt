@@ -189,6 +189,115 @@ FDMT::FDMT(plans::FDMTPlan plan,
                                         chunk_nsamps, max_memory_bytes);
       }()) {}
 
+namespace {
+
+FDMTMemoryEstimate estimate_fdmt(const plans::FDMTPlan& plan,
+                                 bool use_box_smearing,
+                                 std::string_view mode,
+                                 Exec exec,
+                                 SizeType nbeams,
+                                 SizeType fuse_levels,
+                                 bool int_tree,
+                                 SizeType chunk_nsamps,
+                                 SizeType max_memory_bytes) {
+    const detail::FDMTEngineConfig cfg{
+        .use_box_smearing = use_box_smearing,
+        .mode             = parse_fdmt_mode(mode),
+        .nbeams           = nbeams,
+        .fuse_levels      = fuse_levels,
+        .int_tree         = int_tree,
+        .exec             = exec,
+        .chunk_nsamps     = chunk_nsamps,
+        .max_memory_bytes = max_memory_bytes,
+        .defer_allocation = true,
+    };
+    const auto engine = make_fdmt_engine(plan, cfg);
+    FDMTMemoryEstimate e{.usage        = engine->get_memory_usage(),
+                         .chunk_nsamps = engine->get_chunk_nsamps()};
+    if (exec.backend != Backend::kCPU) {
+        e.host_staging =
+            (nbeams * plan.get_nchans() * plan.get_nsamps() * sizeof(float)) +
+            e.usage.output;
+    }
+    return e;
+}
+
+} // namespace
+
+FDMTMemoryEstimate FDMT::estimate_memory(float f_min,
+                                         float f_max,
+                                         SizeType nchans,
+                                         SizeType nsamps,
+                                         float tsamp,
+                                         IndexType dt_max,
+                                         IndexType dt_min,
+                                         SizeType dt_step,
+                                         bool use_box_smearing,
+                                         std::string_view mode,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType fuse_levels,
+                                         bool int_tree,
+                                         SizeType chunk_nsamps,
+                                         SizeType max_memory_bytes) {
+    return estimate_fdmt(plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                         dt_max, dt_min, dt_step, mode),
+                         use_box_smearing, mode, exec, nbeams, fuse_levels,
+                         int_tree, chunk_nsamps, max_memory_bytes);
+}
+
+FDMTMemoryEstimate FDMT::estimate_memory(float f_min,
+                                         float f_max,
+                                         SizeType nchans,
+                                         SizeType nsamps,
+                                         float tsamp,
+                                         const std::vector<IndexType>& dt_grid,
+                                         bool use_box_smearing,
+                                         std::string_view mode,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType fuse_levels,
+                                         bool int_tree,
+                                         SizeType chunk_nsamps,
+                                         SizeType max_memory_bytes) {
+    return estimate_fdmt(
+        plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
+        use_box_smearing, mode, exec, nbeams, fuse_levels, int_tree,
+        chunk_nsamps, max_memory_bytes);
+}
+
+FDMTMemoryEstimate FDMT::estimate_memory(float f_min,
+                                         float f_max,
+                                         SizeType nchans,
+                                         SizeType nsamps,
+                                         float tsamp,
+                                         const std::vector<float>& dm_grid,
+                                         bool use_box_smearing,
+                                         std::string_view mode,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType fuse_levels,
+                                         bool int_tree,
+                                         SizeType chunk_nsamps,
+                                         SizeType max_memory_bytes) {
+    return estimate_fdmt(
+        plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
+        use_box_smearing, mode, exec, nbeams, fuse_levels, int_tree,
+        chunk_nsamps, max_memory_bytes);
+}
+
+FDMTMemoryEstimate FDMT::estimate_memory(const plans::FDMTPlan& plan,
+                                         bool use_box_smearing,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType fuse_levels,
+                                         bool int_tree,
+                                         SizeType chunk_nsamps,
+                                         SizeType max_memory_bytes) {
+    return estimate_fdmt(plan, use_box_smearing, plan.get_mode(), exec, nbeams,
+                         fuse_levels, int_tree, chunk_nsamps, max_memory_bytes);
+}
+
 FDMT::~FDMT()                                = default;
 FDMT::FDMT(FDMT&& other) noexcept            = default;
 FDMT& FDMT::operator=(FDMT&& other) noexcept = default;

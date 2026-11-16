@@ -37,6 +37,7 @@
 #include "dmt/fdmt_int_tree.hpp"
 #include "dmt/fdmt_skew_windows.hpp"
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/logging.hpp"
@@ -253,6 +254,7 @@ public:
     [[nodiscard]] std::string search_path() const override;
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override;
+    void allocate() override;
 
     void advance(SizeType levels, Stream stream_in) override;
 
@@ -342,8 +344,9 @@ private:
     // weights, packed-input rounding recipes on the scale 2^-F and whether
     // their products need 64 bits (by nbits), and the value 2^-F of one
     // integer state unit (1 without box smearing).
-    thrust::device_vector<float> m_box_w_d;
-    thrust::device_vector<detail::FDMTBoxRound> m_box_round_d;
+    gpu_utils::PlannedVector<float> m_box_w_d;
+    std::vector<float> m_box_w_h; ///< host copy of m_box_w_d
+    gpu_utils::PlannedVector<detail::FDMTBoxRound> m_box_round_d;
     std::array<bool, 17> m_box_round_u64{};
     float m_int_unit{1.0F};
 
@@ -382,11 +385,11 @@ private:
     SizeType m_active{0};
     plans::FDMTPlanContainerD m_plan_d; // re-laid out for m_chunk
     // The two state halves (see init_device_structures()).
-    thrust::device_vector<float> m_state_internal_d;
+    gpu_utils::PlannedVector<float> m_state_internal_d;
     // Level-0 history buffer for valid-mode streaming across FDMT blocks
     // (ping-pong pair)
-    thrust::device_vector<float> m_history_a_d;
-    thrust::device_vector<float> m_history_b_d;
+    gpu_utils::PlannedVector<float> m_history_a_d;
+    gpu_utils::PlannedVector<float> m_history_b_d;
     float* m_level0_hist_in_ptr{nullptr};
     float* m_level0_hist_out_ptr{nullptr};
     // Tree-level (level >= 1) cross-block history, per beam in the plan's
@@ -398,8 +401,8 @@ private:
     //   (head sample of stream time u at u mod delay): each chunk writes
     //   only its newest samples, and no history is shifted or doubled.
     // The level-0 input history and the FIFOs flip on m_parity per chunk.
-    std::array<thrust::device_vector<float>, 2> m_tree_fifo_d;
-    mutable thrust::device_vector<float> m_tree_ring_d;
+    std::array<gpu_utils::PlannedVector<float>, 2> m_tree_fifo_d;
+    mutable gpu_utils::PlannedVector<float> m_tree_ring_d;
     SizeType m_fifo_levels{0};
     SizeType m_fifo_size{0};
     mutable SizeType m_ring_size{0};
@@ -440,19 +443,20 @@ private:
         return (m_search_nbits != 32 && !m_search_u32) ? 2 : 1;
     }
     // Packed search: exact integer tree history, a ring at every level.
-    thrust::device_vector<uint64_t> m_integer_ring;
-    thrust::device_vector<uint32_t> m_integer32_ring;
+    gpu_utils::PlannedVector<uint64_t> m_integer_ring;
+    gpu_utils::PlannedVector<uint32_t> m_integer32_ring;
 
     // Level fusion (fuse_levels): the resolved depth's
     // device tables and launch geometry; empty when execute() is unfused.
     struct FusedLevelsD {
-        DeviceVector<int> group_info;
-        DeviceVector<int> coords;
-        DeviceVector<int> dt_grid0;
-        DeviceVector<int> ndt0;
-        DeviceVector<int> coord_offset0;
-        DeviceVector<int> box0;   ///< chan_dm plans: level-0 boxes
-        DeviceVector<int> order0; ///< chan_dm plans: their sweep order
+        gpu_utils::PlannedVector<int> group_info;
+        gpu_utils::PlannedVector<int> coords;
+        gpu_utils::PlannedVector<int> dt_grid0;
+        gpu_utils::PlannedVector<int> ndt0;
+        gpu_utils::PlannedVector<int> coord_offset0;
+        gpu_utils::PlannedVector<int> box0; ///< chan_dm plans: level-0 boxes
+        gpu_utils::PlannedVector<int>
+            order0; ///< chan_dm plans: their sweep order
         detail::FDMTFusedTileArgs args{};
         int tile{0};
         int ntiles{0}; ///< for a whole row (valid-mode chunks: per launch)
@@ -464,8 +468,8 @@ private:
     // level-0 coordinate) and their per-channel sweep order, for the
     // unfused init kernel; empty when chan_dm == 0.
     bool m_chan_dm{false};
-    DeviceVector<int> m_level0_box_d;
-    DeviceVector<int> m_level0_order_d;
+    gpu_utils::PlannedVector<int> m_level0_box_d;
+    gpu_utils::PlannedVector<int> m_level0_order_d;
     // Direct low levels (configure_direct()): the device tables, the input
     // window ping-pong (flipped with m_parity) and the per-chunk running
     // sums. Replaces m_fused when configured.
@@ -484,20 +488,20 @@ private:
         int64_t win_ring_size{0};
         std::vector<int32_t> row_off;
         std::vector<int32_t> batch_sub_off;
-        thrust::device_vector<detail::FDMTDirectSub> subs;
-        thrust::device_vector<int32_t> leaf_off;
-        thrust::device_vector<detail::FDMTDirectLeaf> leaves;
-        thrust::device_vector<detail::FDMTDirectLeaf> hist_leaves;
-        std::vector<thrust::device_vector<detail::FDMTDirectHistCoord>>
+        gpu_utils::PlannedVector<detail::FDMTDirectSub> subs;
+        gpu_utils::PlannedVector<int32_t> leaf_off;
+        gpu_utils::PlannedVector<detail::FDMTDirectLeaf> leaves;
+        gpu_utils::PlannedVector<detail::FDMTDirectLeaf> hist_leaves;
+        std::vector<gpu_utils::PlannedVector<detail::FDMTDirectHistCoord>>
             hist_coords;
         std::vector<int32_t> hist_max_delay;
-        std::array<thrust::device_vector<float>, 2> win;
-        thrust::device_vector<float> prefix;
-        thrust::device_vector<int32_t> chan_ring_len;
-        thrust::device_vector<int64_t> chan_ring_off;
-        thrust::device_vector<float> win_ring;
-        thrust::device_vector<uint8_t> win_ring_u8;
-        thrust::device_vector<uint16_t> win_ring_u16;
+        std::array<gpu_utils::PlannedVector<float>, 2> win;
+        gpu_utils::PlannedVector<float> prefix;
+        gpu_utils::PlannedVector<int32_t> chan_ring_len;
+        gpu_utils::PlannedVector<int64_t> chan_ring_off;
+        gpu_utils::PlannedVector<float> win_ring;
+        gpu_utils::PlannedVector<uint8_t> win_ring_u8;
+        gpu_utils::PlannedVector<uint16_t> win_ring_u16;
     };
     std::unique_ptr<DirectLevelsD> m_direct;
     bool m_direct_eligible{false};
@@ -517,27 +521,27 @@ private:
         int nrows{0};
         int max_ring{0};
         int64_t ring_size{0}; ///< per beam
-        thrust::device_vector<int32_t> out_row;
-        thrust::device_vector<int32_t> leaf_off;
-        thrust::device_vector<detail::FDMTDirectTopLeaf> leaves;
-        thrust::device_vector<int32_t> ring_len;
-        thrust::device_vector<int64_t> ring_off;
-        thrust::device_vector<float> ring;
-        thrust::device_vector<detail::FDMTDirectTopLeaf> hist_leaves;
-        std::vector<thrust::device_vector<detail::FDMTDirectHistCoord>>
+        gpu_utils::PlannedVector<int32_t> out_row;
+        gpu_utils::PlannedVector<int32_t> leaf_off;
+        gpu_utils::PlannedVector<detail::FDMTDirectTopLeaf> leaves;
+        gpu_utils::PlannedVector<int32_t> ring_len;
+        gpu_utils::PlannedVector<int64_t> ring_off;
+        gpu_utils::PlannedVector<float> ring;
+        gpu_utils::PlannedVector<detail::FDMTDirectTopLeaf> hist_leaves;
+        std::vector<gpu_utils::PlannedVector<detail::FDMTDirectHistCoord>>
             hist_coords;
         std::vector<int32_t> hist_max_delay;
-        thrust::device_vector<float> trials; ///< search: one chunk's trials
+        gpu_utils::PlannedVector<float> trials; ///< search: one chunk's trials
         /// Windowed top (subband search, configure_windowed_top): level
         /// `level` whole (words of top_words()), and per searched level the
         /// rows' emission offsets and lags (FDMTSearchInput::row_offset).
         bool windowed{false};
-        thrust::device_vector<float> win_top;
+        gpu_utils::PlannedVector<float> win_top;
         /// Rows of win_top with a carried spread: window start, spread.
-        thrust::device_vector<SizeType> carry_off;
-        thrust::device_vector<int32_t> carry_len;
-        std::vector<thrust::device_vector<SizeType>> emit_off;
-        std::vector<thrust::device_vector<uint64_t>> emit_lag;
+        gpu_utils::PlannedVector<SizeType> carry_off;
+        gpu_utils::PlannedVector<int32_t> carry_len;
+        std::vector<gpu_utils::PlannedVector<SizeType>> emit_off;
+        std::vector<gpu_utils::PlannedVector<uint64_t>> emit_lag;
         uint64_t max_lag{0}; ///< largest emit_lag (search_latency())
     };
     std::unique_ptr<DirectTopD> m_top;
@@ -582,13 +586,19 @@ private:
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
     // Host-memory execute() staging (see stage_to_device()).
-    thrust::device_vector<float> m_stage_wf_f32_d;
-    thrust::device_vector<uint8_t> m_stage_wf_packed_d;
-    thrust::device_vector<float> m_stage_dmt_d;
+    gpu_utils::PlannedVector<float> m_stage_wf_f32_d;
+    gpu_utils::PlannedVector<uint8_t> m_stage_wf_packed_d;
+    gpu_utils::PlannedVector<float> m_stage_dmt_d;
     // Host-memory stepper: the caller's dmt buffer (empty after a
     // device-memory reset) and the host snapshot behind the view_* methods.
     std::span<float> m_host_dmt;
     gpu_host::ChunkedStager m_host; // pinned pipeline of the host overloads
+    // Deferred construction (FDMTEngineConfig::defer_allocation): the device
+    // buffers sized but not yet allocated; allocate() materialises them.
+    // Declared last, so it is destroyed first, while the buffers it lists
+    // still exist.
+    gpu_utils::PendingList m_pending;
+    bool m_allocated{false};
     mutable std::vector<float> m_host_level;
     mutable bool m_host_level_valid{false};
 
@@ -668,7 +678,7 @@ private:
     [[nodiscard]] thrust::device_vector<float>& next_level0_history() {
         return m_parity ? m_history_b_d : m_history_a_d;
     }
-    [[nodiscard]] const thrust::device_vector<float>&
+    [[nodiscard]] const gpu_utils::PlannedVector<float>&
     next_level0_history() const {
         return m_parity ? m_history_b_d : m_history_a_d;
     }
@@ -798,6 +808,9 @@ private:
                           SizeType requested);
 
     void adopt_fused_plan(const detail::FDMTFusedTilePlan& plan, int tile);
+    /// Points m_fused->args at the fused tables and box weights (again
+    /// after a deferred allocation).
+    void bind_fused_pointers();
 
     template <FDMTMode Mode, bool Smear, typename Input, typename TOut>
     void launch_fused_typed(const Input& input, TOut* out, cudaStream_t stream);

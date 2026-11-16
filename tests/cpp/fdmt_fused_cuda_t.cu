@@ -14,6 +14,7 @@
 #include "dmt/algorithms/fdmt.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
 
 #include "test_helpers.hpp"
@@ -388,6 +389,91 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
     REQUIRE(small.current_level() == 0);
     REQUIRE_NOTHROW(small.view_level_data_device());
     small.finalize();
+}
+
+TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
+          "[fdmt_gpu][gpu][budget]") {
+    const auto gpu        = test::gpu_exec();
+    const auto free_bytes = [] {
+        size_t free  = 0;
+        size_t total = 0;
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+        REQUIRE(cudaMemGetInfo(&free, &total) == cudaSuccess);
+        return free;
+    };
+    struct Case {
+        plans::FDMTPlan plan;
+        SizeType fuse;
+        SizeType chunk;
+        SizeType budget;
+    };
+    const SizeType big = algorithms::kFDMTDefaultMaxMemory;
+    const std::vector<Case> cases{
+        {plans::FDMTPlan(1000.0F, 1500.0F, 256, 2048, 0.001F, 400),
+         kFDMTAutoFuse, 0, big},
+        {plans::FDMTPlan(1000.0F, 1500.0F, 256, 2048, 0.001F, 400), kUnfused,
+         256, big},
+        {plans::FDMTPlan(1000.0F, 1500.0F, 256, 2048, 0.001F, 400, 0, 1,
+                         "full"),
+         kFDMTAutoFuse, 0, big},
+        // Direct levels and a budget-chosen chunk.
+        {plans::FDMTPlan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, 2700),
+         kFDMTAutoFuse, 0, SizeType{70} << 20},
+        // A subband plan (skewed direct levels and windowed top).
+        {plans::FDMTPlan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, 2700, 0, 1,
+                         "valid", 2),
+         kFDMTAutoFuse, 0, big},
+    };
+    for (const auto& c : cases) {
+        INFO("nchans " << c.plan.get_nchans() << " fuse " << c.fuse << " chunk "
+                       << c.chunk << " budget " << c.budget);
+        // The context and the lazily loaded kernel modules exist before the
+        // measurement (a first estimate loads them).
+        (void)FDMT::estimate_memory(c.plan, true, gpu, 2, c.fuse, true, c.chunk,
+                                    c.budget);
+        const auto before = free_bytes();
+        const auto e = FDMT::estimate_memory(c.plan, true, gpu, 2, c.fuse, true,
+                                             c.chunk, c.budget);
+        CHECK(free_bytes() == before);
+        {
+            // A deferred engine holds no device memory until allocate(),
+            // which then takes its planned usage (to 2 MiB pages each).
+            const algorithms::detail::FDMTEngineConfig cfg{
+                .mode         = c.plan.get_mode() == std::string_view("valid")
+                                    ? FDMTMode::kValid
+                                    : FDMTMode::kFull,
+                .nbeams       = 2,
+                .fuse_levels  = c.fuse,
+                .exec         = gpu,
+                .chunk_nsamps = c.chunk,
+                .max_memory_bytes = c.budget,
+                .defer_allocation = true,
+            };
+            // The engine keeps a reference to the plan (c.plan outlives it).
+            auto deferred = algorithms::detail::make_fdmt_gpu(c.plan, cfg);
+            CHECK(free_bytes() == before);
+            deferred->allocate();
+            const auto taken = before - free_bytes();
+            CHECK(taken >= e.usage.total());
+            CHECK(taken <= e.usage.total() + (SizeType{64} << 21));
+        }
+        FDMT f(c.plan, true, gpu, 2, c.fuse, true, c.chunk, c.budget);
+        const auto got = f.get_memory_usage();
+        CHECK(e.usage.plan == got.plan);
+        CHECK(e.usage.state == got.state);
+        CHECK(e.usage.history == got.history);
+        CHECK(e.usage.workspace == got.workspace);
+        CHECK(e.usage.output == got.output);
+        CHECK(e.chunk_nsamps == f.get_chunk_nsamps());
+        if (c.plan.get_mode() == std::string_view("valid")) {
+            // The first host call stages what host_staging says.
+            std::vector<float> in(2 * c.plan.get_nchans() *
+                                  c.plan.get_nsamps());
+            std::vector<float> out(2 * c.plan.get_dmt_size());
+            f.execute(std::span<const float>(in), std::span<float>(out));
+            CHECK(f.get_memory_usage().total() == got.total() + e.host_staging);
+        }
+    }
 }
 
 } // namespace dmt

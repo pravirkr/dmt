@@ -90,6 +90,22 @@ struct FDMTMemoryUsage {
 };
 
 /**
+ * @brief What an FDMT built with the same arguments would allocate, without
+ * allocating it (FDMT::estimate_memory()).
+ */
+struct FDMTMemoryEstimate {
+    /// Equal to get_memory_usage() of that instance after construction.
+    FDMTMemoryUsage usage;
+    /// Its get_chunk_nsamps().
+    SizeType chunk_nsamps{0};
+    /// GPU backends: device bytes the first host-memory execute() or reset()
+    /// adds (float32 input block and output plane), outside the budget;
+    /// device-memory calls never allocate them (packed host input stages
+    /// its packed bytes instead of the float block). 0 on the CPU.
+    SizeType host_staging{0};
+};
+
+/**
  * @brief Fast Dispersion Measure Transform (FDMT).
  *
  * Runs on the backend chosen by the last constructor argument (`Exec`):
@@ -319,6 +335,74 @@ public:
                   bool int_tree             = true,
                   SizeType chunk_nsamps     = 0,
                   SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+
+    /**
+     * @brief Memory an instance built with these arguments would allocate,
+     * and its chunk, computed without allocating it: the constructor's
+     * decisions and tables, with every working buffer sized but not
+     * allocated (exact: the constructor allocates exactly these sizes).
+     * Throws as the constructor would when nothing fits max_memory_bytes.
+     * A GPU backend needs the device (it reads its shared memory and L2
+     * sizes) but allocates no device memory; the CUDA context, created on
+     * first use, is not counted (nor in get_memory_usage()).
+     * One overload per constructor, with the same arguments.
+     */
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    IndexType dt_max,
+                    IndexType dt_min          = 0,
+                    SizeType dt_step          = 1,
+                    bool use_box_smearing     = true,
+                    std::string_view mode     = "valid",
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    const std::vector<IndexType>& dt_grid,
+                    bool use_box_smearing     = true,
+                    std::string_view mode     = "valid",
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    const std::vector<float>& dm_grid,
+                    bool use_box_smearing     = true,
+                    std::string_view mode     = "valid",
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(const plans::FDMTPlan& plan,
+                    bool use_box_smearing     = true,
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     ~FDMT();
     FDMT(FDMT&&) noexcept;

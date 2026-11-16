@@ -95,6 +95,10 @@ struct FDMTEngineConfig {
     /// use, in bytes; 0 takes the device's opt-in limit. Tests lower it to
     /// reach the fallbacks of small-shared-memory GPUs.
     SizeType boxcar_shared_limit{0};
+    /// Private: build the engine's tables and size every working buffer
+    /// (get_memory_usage()), but allocate the buffers only on allocate().
+    /// Memory estimates and budget searches build engines this way.
+    bool defer_allocation{false};
 };
 
 class FDMTEngine {
@@ -190,7 +194,11 @@ public:
     [[nodiscard]] virtual SizeType get_fuse_levels() const noexcept  = 0;
     [[nodiscard]] virtual SizeType get_chunk_nsamps() const noexcept = 0;
     [[nodiscard]] virtual algorithms::FDMTMemoryUsage
-    get_memory_usage() const noexcept                 = 0;
+    get_memory_usage() const noexcept = 0;
+    /// Allocates the working buffers of an engine built with
+    /// FDMTEngineConfig::defer_allocation (a no-op once allocated). The
+    /// allocation equals get_memory_usage(), checked here.
+    virtual void allocate()                           = 0;
     [[nodiscard]] virtual std::string summary() const = 0;
     /// The search's transform path when it differs from the plain tree
     /// (GPU direct levels and direct top), e.g. "direct levels 0-3, direct

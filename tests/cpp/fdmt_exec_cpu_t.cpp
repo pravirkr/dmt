@@ -613,4 +613,64 @@ TEST_CASE("FDMT packed input errors and integer-level inspection",
     fdmt.finalize();
 }
 
+namespace {
+
+void check_estimate(const algorithms::FDMTMemoryEstimate& e, const FDMT& f) {
+    const auto got = f.get_memory_usage();
+    CHECK(e.usage.plan == got.plan);
+    CHECK(e.usage.state == got.state);
+    CHECK(e.usage.history == got.history);
+    CHECK(e.usage.workspace == got.workspace);
+    CHECK(e.usage.output == got.output);
+    CHECK(e.chunk_nsamps == f.get_chunk_nsamps());
+    CHECK(e.host_staging == 0);
+}
+
+} // namespace
+
+TEST_CASE("FDMT estimate_memory equals the constructed instance (cpu)",
+          "[fdmt_cpu][cpu][budget]") {
+    const auto cpu = Exec::cpu(3);
+    SECTION("tree path, fused and unfused, beams, modes") {
+        for (const char* mode : {"valid", "full"}) {
+            for (const SizeType fuse : {kFDMTAutoFuse, kUnfused}) {
+                for (const SizeType beams : {1, 3}) {
+                    INFO(mode << " fuse " << fuse << " beams " << beams);
+                    const auto e = FDMT::estimate_memory(
+                        kFMin, 1500.0F, 64, 512, kTsamp, 80, 0, 1, true, mode,
+                        cpu, beams, fuse);
+                    const FDMT f(kFMin, 1500.0F, 64, 512, kTsamp, 80, 0, 1,
+                                 true, mode, cpu, beams, fuse);
+                    check_estimate(e, f);
+                }
+            }
+        }
+    }
+    SECTION("explicit chunk, plan overload") {
+        const plans::FDMTPlan plan(kFMin, 1500.0F, 64, 1024, kTsamp, 80);
+        const auto e =
+            FDMT::estimate_memory(plan, true, cpu, 1, kFDMTAutoFuse, true, 256);
+        check_estimate(e, FDMT(plan, true, cpu, 1, kFDMTAutoFuse, true, 256));
+        CHECK(e.chunk_nsamps == 256);
+    }
+    SECTION("skewed path chosen by the budget") {
+        // The golden skewed configuration: the tree path needs more.
+        const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F,
+                                   2700);
+        const SizeType budget = SizeType{30} << 20;
+        const auto e = FDMT::estimate_memory(plan, true, cpu, 1, kFDMTAutoFuse,
+                                             true, 0, budget);
+        const FDMT f(plan, true, cpu, 1, kFDMTAutoFuse, true, 0, budget);
+        check_estimate(e, f);
+        CHECK(e.chunk_nsamps < plan.get_nsamps());
+        CHECK(e.usage.total() <= budget);
+    }
+    SECTION("over budget throws as the constructor does") {
+        const plans::FDMTPlan plan(kFMin, 1500.0F, 64, 512, kTsamp, 80);
+        CHECK_THROWS_AS(FDMT::estimate_memory(plan, true, cpu, 1, kFDMTAutoFuse,
+                                              true, 0, 1024),
+                        std::invalid_argument);
+    }
+}
+
 } // namespace dmt

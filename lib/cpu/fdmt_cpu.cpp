@@ -59,7 +59,7 @@ FDMTCpuEngine::FDMTCpuEngine(const plans::FDMTPlan& plan,
             std::min(m_plan.get_nsamps(), std::max<SizeType>(64, m_chunk / 2));
     }
     const bool skew = choose_skew(cfg);
-    allocate_working_memory(cfg.fuse_levels, cfg.max_fuse_levels, skew);
+    plan_working_memory(cfg.fuse_levels, cfg.max_fuse_levels, skew);
     if (m_mode == FDMTMode::kValid && !m_skew) {
         m_hist_hash = detail::fdmt_tree_history_hash(m_plan, m_nbeams,
                                                      m_use_box_smearing);
@@ -73,6 +73,44 @@ FDMTCpuEngine::FDMTCpuEngine(const plans::FDMTPlan& plan,
                         static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
                         skew ? "; use a shorter chunk_nsamps" : ""));
     }
+    if (!cfg.defer_allocation) {
+        allocate();
+    }
+}
+
+void FDMTCpuEngine::allocate() {
+    if (m_allocated) {
+        return;
+    }
+    if (m_skew) {
+        m_skew->allocate();
+        m_allocated = true;
+        return;
+    }
+    m_state_internal.assign(m_planned.state, m_nthreads);
+    if (m_mode == FDMTMode::kValid) {
+        m_history.assign(m_planned.history, 0.0F);
+        if (m_search_nbits == 32) {
+            m_tree_history.assign(m_planned.tree_history, m_nthreads);
+        } else if (m_search_u32) {
+            m_integer32_history.assign(m_planned.tree_history, m_nthreads);
+        } else {
+            m_integer_history.assign(m_planned.tree_history, m_nthreads);
+        }
+    }
+    m_workspace.assign(m_planned.workspace, std::byte{0});
+    m_ws.base = m_workspace.data();
+    // What was allocated must be what get_memory_usage() reported.
+    const SizeType history = (history_state_size() * sizeof(float)) +
+                             (m_integer_history.size() * sizeof(uint64_t)) +
+                             (m_integer32_history.size() * sizeof(uint32_t));
+    const auto planned     = get_memory_usage();
+    if (m_state_internal.size() != planned.state ||
+        history != planned.history || m_workspace.size() != planned.workspace) {
+        throw std::logic_error(
+            "FDMT (cpu): allocation differs from the planned sizes");
+    }
+    m_allocated = true;
 }
 
 std::string FDMTCpuEngine::summary() const {
@@ -110,13 +148,16 @@ FDMTMemoryUsage FDMTCpuEngine::get_memory_usage() const noexcept {
         };
     }
     return {
-        .plan      = m_plan.get_container().get_memory_usage() +
-                     (m_ops_elems * sizeof(FDMTMergeOp)),
-        .state     = m_state_internal.size(),
-        .history   = history_state_size() * sizeof(float) +
-                     m_integer_history.size() * sizeof(uint64_t) +
-                     m_integer32_history.size() * sizeof(uint32_t),
-        .workspace = m_workspace.size(),
+        .plan  = m_plan.get_container().get_memory_usage() +
+                 (m_ops_elems * sizeof(FDMTMergeOp)),
+        .state = m_planned.state,
+        // history_state_size() (with its header) plus the integer rings.
+        .history = planned_history_words() * sizeof(float) +
+                   (m_search_nbits != 32 ? m_planned.tree_history *
+                                               (m_search_u32 ? sizeof(uint32_t)
+                                                             : sizeof(uint64_t))
+                                         : 0),
+        .workspace = m_planned.workspace,
         .output    = m_nbeams * m_plan.get_dmt_size() * sizeof(float),
     };
 }
@@ -221,9 +262,9 @@ bool FDMTCpuEngine::choose_skew(const detail::FDMTEngineConfig& cfg) {
         static_cast<double>(tree_bytes) / (1 << 30)));
 }
 
-void FDMTCpuEngine::allocate_working_memory(SizeType fuse_levels,
-                                            SizeType max_fuse_levels,
-                                            bool skew) {
+void FDMTCpuEngine::plan_working_memory(SizeType fuse_levels,
+                                        SizeType max_fuse_levels,
+                                        bool skew) {
     const SizeType niters = m_plan.get_niters();
     if (skew) {
         const SizeType req_fuse =
@@ -232,7 +273,7 @@ void FDMTCpuEngine::allocate_working_memory(SizeType fuse_levels,
             m_plan, m_use_box_smearing, m_nthreads, m_chunk, SizeType{4},
             m_search_nbits, req_fuse, m_search_nbits != 32, m_search_u32,
             m_search_upper ? m_plan.get_subband_depth() : SizeType{0},
-            m_skew_leaf);
+            m_skew_leaf, /*defer_allocation=*/true); // see allocate()
         m_fuse_levels = m_skew->get_fuse_level();
         return;
     }
@@ -241,20 +282,10 @@ void FDMTCpuEngine::allocate_working_memory(SizeType fuse_levels,
     const SizeType state_elem = (m_search_nbits == 32 || m_search_u32)
                                     ? sizeof(uint32_t)
                                     : sizeof(uint64_t);
-    m_state_internal.assign(2 * m_nbeams * m_half_elems * state_elem,
-                            m_nthreads);
+    m_planned.state           = 2 * m_nbeams * m_half_elems * state_elem;
     if (m_mode == FDMTMode::kValid) {
-        m_history.assign(m_nbeams * m_plan.get_history_size(), 0.0F);
-        if (m_search_nbits == 32) {
-            m_tree_history.assign(m_nbeams * m_plan.get_tree_history_size(),
-                                  m_nthreads);
-        } else if (m_search_u32) {
-            m_integer32_history.assign(
-                m_nbeams * m_plan.get_tree_history_size(), m_nthreads);
-        } else {
-            m_integer_history.assign(m_nbeams * m_plan.get_tree_history_size(),
-                                     m_nthreads);
-        }
+        m_planned.history      = m_nbeams * m_plan.get_history_size();
+        m_planned.tree_history = m_nbeams * m_plan.get_tree_history_size();
     }
     if (m_use_box_smearing) {
         const auto weights = m_plan.get_box_weights();
@@ -321,10 +352,9 @@ void FDMTCpuEngine::allocate_working_memory(SizeType fuse_levels,
         (m_fuse_levels > 0)
             ? round_up_64(fused_scratch_bytes(m_fuse_levels, m_fuse_tile))
             : 0;
-    m_ws.stride   = (3 * m_ws.row_bytes) + (2 * m_ws.fused_bytes);
-    m_ws.nthreads = m_nthreads;
-    m_workspace.assign(m_nthreads * m_ws.stride, std::byte{0});
-    m_ws.base = m_workspace.data();
+    m_ws.stride         = (3 * m_ws.row_bytes) + (2 * m_ws.fused_bytes);
+    m_ws.nthreads       = m_nthreads;
+    m_planned.workspace = m_nthreads * m_ws.stride;
 }
 
 void FDMTCpuEngine::build_merge_ops() {

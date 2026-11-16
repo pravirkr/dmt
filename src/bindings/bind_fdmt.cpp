@@ -24,6 +24,7 @@
 namespace dmt {
 using algorithms::FDMT;
 using algorithms::FDMTFFT;
+using algorithms::FDMTMemoryEstimate;
 using algorithms::FDMTMemoryUsage;
 using algorithms::kFDMTAutoFuse;
 using algorithms::kFDMTDefaultMaxMemory;
@@ -192,6 +193,24 @@ void bind_fdmt(py::module_& mod) {
                 "FDMTMemoryUsage(plan={}, state={}, history={}, workspace={}, "
                 "total={}, output={})",
                 m.plan, m.state, m.history, m.workspace, m.total(), m.output);
+        });
+
+    py::class_<FDMTMemoryEstimate>(mod, "FDMTMemoryEstimate", R"doc(
+        What an instance built with the same arguments would allocate, from
+        ``estimate_memory`` (computed without allocating it).
+
+        ``usage`` equals that instance's ``memory_usage``; ``chunk_nsamps``
+        its ``chunk_nsamps``; ``host_staging`` (GPU backends) the device bytes
+        the first host-memory call adds outside ``max_memory_bytes`` (float32
+        input block and output plane; 0 on the CPU).
+        )doc")
+        .def_readonly("usage", &FDMTMemoryEstimate::usage)
+        .def_readonly("chunk_nsamps", &FDMTMemoryEstimate::chunk_nsamps)
+        .def_readonly("host_staging", &FDMTMemoryEstimate::host_staging)
+        .def("__repr__", [](const FDMTMemoryEstimate& e) {
+            return fmt::format("FDMTMemoryEstimate(total={}, chunk_nsamps={}, "
+                               "host_staging={})",
+                               e.usage.total(), e.chunk_nsamps, e.host_staging);
         });
 
     py::class_<FDMT>(mod, "FDMT", py::dynamic_attr(),
@@ -379,6 +398,95 @@ void bind_fdmt(py::module_& mod) {
              "Build from a prepared :class:`FDMTPlan` (its mode and, for "
              "``subband_depth > 0``, its staggered subbands, which the "
              "stepper's ``num_subbands``/``view_subband`` then include).")
+        .def_static(
+            "estimate_memory",
+            [](float f_min, float f_max, SizeType nchans, SizeType nsamps,
+               float tsamp, IndexType dt_max, IndexType dt_min,
+               SizeType dt_step, bool use_box_smearing, std::string_view mode,
+               int nthreads, SizeType nbeams,
+               std::optional<SizeType> fuse_levels, bool int_tree,
+               std::string_view backend, int device,
+               std::optional<SizeType> chunk_nsamps,
+               SizeType max_memory_bytes) {
+                return FDMT::estimate_memory(
+                    f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
+                    dt_step, use_box_smearing, mode,
+                    make_exec(backend, nthreads, device), nbeams,
+                    fuse_levels.value_or(kFDMTAutoFuse), int_tree,
+                    chunk_nsamps.value_or(0), max_memory_bytes);
+            },
+            "f_min"_a, "f_max"_a, "nchans"_a, "nsamps"_a, "tsamp"_a,
+            "dt_max"_a, "dt_min"_a = 0, "dt_step"_a = 1,
+            "use_box_smearing"_a = true, "mode"_a = "valid", "nthreads"_a = 1,
+            "nbeams"_a = 1, "fuse_levels"_a = py::none(), "int_tree"_a = true,
+            py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
+            "chunk_nsamps"_a     = py::none(),
+            "max_memory_bytes"_a = kFDMTDefaultMaxMemory,
+            R"doc(
+            Memory an ``FDMT`` built with the same arguments would allocate,
+            and its chunk, without allocating it (:class:`FDMTMemoryEstimate`).
+
+            Exact: the constructor's decisions and tables are computed and
+            every working buffer is sized, not allocated. Raises as the
+            constructor would when nothing fits ``max_memory_bytes``. GPU
+            backends read the device's limits (no device memory is allocated;
+            the CUDA context is not counted). One overload per constructor,
+            with the same arguments.
+            )doc")
+        .def_static(
+            "estimate_memory",
+            [](float f_min, float f_max, SizeType nchans, SizeType nsamps,
+               float tsamp, const py::object& dt_grid, const py::object& dt_arr,
+               const py::object& dm_grid, const py::object& dm_arr,
+               bool use_box_smearing, std::string_view mode, int nthreads,
+               SizeType nbeams, std::optional<SizeType> fuse_levels,
+               bool int_tree, std::string_view backend, int device,
+               std::optional<SizeType> chunk_nsamps,
+               SizeType max_memory_bytes) {
+                const auto [type, obj] =
+                    resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
+                const auto fuse  = fuse_levels.value_or(kFDMTAutoFuse);
+                const auto exec  = make_exec(backend, nthreads, device);
+                const auto chunk = chunk_nsamps.value_or(0);
+                if (type == CustomGridType::kDt) {
+                    return FDMT::estimate_memory(
+                        f_min, f_max, nchans, nsamps, tsamp,
+                        extract_dt_grid(obj), use_box_smearing, mode, exec,
+                        nbeams, fuse, int_tree, chunk, max_memory_bytes);
+                }
+                return FDMT::estimate_memory(
+                    f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
+                    use_box_smearing, mode, exec, nbeams, fuse, int_tree, chunk,
+                    max_memory_bytes);
+            },
+            py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
+            py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
+            py::arg("dt_grid") = py::none(), py::arg("dt_arr") = py::none(),
+            py::arg("dm_grid") = py::none(), py::arg("dm_arr") = py::none(),
+            py::arg("use_box_smearing") = true, py::arg("mode") = "valid",
+            py::arg("nthreads") = 1, py::arg("nbeams") = 1,
+            py::arg("fuse_levels") = py::none(), py::arg("int_tree") = true,
+            py::arg("backend") = "cpu", py::arg("device") = 0,
+            py::arg("chunk_nsamps")     = py::none(),
+            py::arg("max_memory_bytes") = kFDMTDefaultMaxMemory)
+        .def_static(
+            "estimate_memory",
+            [](const FDMTPlan& plan, bool use_box_smearing, int nthreads,
+               SizeType nbeams, std::optional<SizeType> fuse_levels,
+               bool int_tree, std::string_view backend, int device,
+               std::optional<SizeType> chunk_nsamps,
+               SizeType max_memory_bytes) {
+                return FDMT::estimate_memory(
+                    plan, use_box_smearing,
+                    make_exec(backend, nthreads, device), nbeams,
+                    fuse_levels.value_or(kFDMTAutoFuse), int_tree,
+                    chunk_nsamps.value_or(0), max_memory_bytes);
+            },
+            "plan"_a, py::kw_only(), "use_box_smearing"_a = true,
+            "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
+            "int_tree"_a = true, "backend"_a = "cpu", "device"_a = 0,
+            "chunk_nsamps"_a     = py::none(),
+            "max_memory_bytes"_a = kFDMTDefaultMaxMemory)
         .def_property_readonly(
             "plan", &FDMT::get_plan,
             "Get the FDMTPlan object containing transform details.")
