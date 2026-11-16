@@ -39,13 +39,23 @@ BoxcarNoiseModel::BoxcarNoiseModel(const plans::FDMTPlan& plan,
           plans::generate_box_width_trials(config.max_boxcar, config.wtsp)),
       m_live(std::make_shared<std::atomic<SizeType>>(0)) {
     const auto& pc = plan.get_container();
-    // Rows in make_boxcar_plans() order: searched levels, subbands, DMs.
+    // Rows in make_boxcar_plans() order: searched levels, subbands, the
+    // subband's searched trials (FDMTCoordGrid::search_rows; empty: all).
     for (SizeType l = m_first_searched; l <= m_root; ++l) {
         for (const auto& grid : pc.grids[l]) {
-            for (SizeType d = 0; d < grid.ndt; ++d) {
+            const auto add = [&](SizeType d) {
                 m_row_node.emplace_back(
                     static_cast<uint32_t>(l),
                     static_cast<uint32_t>(grid.coord_offset + d));
+            };
+            if (grid.search_rows.empty()) {
+                for (SizeType d = 0; d < grid.ndt; ++d) {
+                    add(d);
+                }
+            } else {
+                for (const auto d : grid.search_rows) {
+                    add(d);
+                }
             }
         }
     }

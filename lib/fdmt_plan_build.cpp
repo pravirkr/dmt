@@ -12,6 +12,7 @@
 
 #include <fmt/format.h>
 
+#include "dmt/common/dm_grids.hpp"
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
@@ -25,6 +26,49 @@
 
 namespace dmt::plans {
 
+namespace {
+
+/// Delay trials (samples across [f_start, f_end]) of generate_dm_grid() on
+/// a subband of nsub channels, over the delays [dt_lo, dt_hi] (both kept):
+/// one-sample pulses at the given loss. DMs convert to delays as
+/// BoxcarPlanePlan reports them (kDispConst).
+std::vector<IndexType> subband_dt_grid(float f_start,
+                                       float f_end,
+                                       SizeType nsub,
+                                       float tsamp,
+                                       double chan_dm,
+                                       float loss,
+                                       IndexType dt_lo,
+                                       IndexType dt_hi) {
+    const double f0     = f_start;
+    const double f1     = f_end;
+    const double per_dm = static_cast<double>(kDispConst) *
+                          ((1.0 / (f0 * f0)) - (1.0 / (f1 * f1))) /
+                          static_cast<double>(tsamp);
+    DMGridConfig c;
+    c.f_min        = f0;
+    c.f_max        = f1;
+    c.nchans       = nsub;
+    c.tsamp        = tsamp;
+    c.pulse_width  = tsamp;
+    c.chan_dm      = chan_dm;
+    c.max_snr_loss = loss;
+    const auto dms = generate_dm_grid(c, static_cast<double>(dt_lo) / per_dm,
+                                      static_cast<double>(dt_hi) / per_dm);
+    std::vector<IndexType> dts{dt_lo, dt_hi};
+    dts.reserve(dms.size() + 2);
+    for (const double dm : dms) {
+        const auto dt = static_cast<IndexType>(std::nearbyint(dm * per_dm));
+        dts.push_back(std::clamp(dt, dt_lo, dt_hi));
+    }
+    std::ranges::sort(dts);
+    const auto [first, last] = std::ranges::unique(dts);
+    dts.erase(first, last);
+    return dts;
+}
+
+} // namespace
+
 FDMTPlan::Impl::Impl(float f_min,
                      float f_max,
                      SizeType nchans,
@@ -35,7 +79,8 @@ FDMTPlan::Impl::Impl(float f_min,
                      SizeType dt_step,
                      std::string_view mode,
                      SizeType subband_depth,
-                     double chan_dm)
+                     double chan_dm,
+                     float subband_max_snr_loss)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -46,7 +91,8 @@ FDMTPlan::Impl::Impl(float f_min,
       m_dt_step(dt_step),
       m_mode(parse_fdmt_mode(mode)),
       m_subband_depth(subband_depth),
-      m_chan_dm(chan_dm) {
+      m_chan_dm(chan_dm),
+      m_subband_max_snr_loss(subband_max_snr_loss) {
     validate_inputs();
     configure_plan();
 }
@@ -59,7 +105,8 @@ FDMTPlan::Impl::Impl(float f_min,
                      const std::vector<IndexType>& dt_grid,
                      std::string_view mode,
                      SizeType subband_depth,
-                     double chan_dm)
+                     double chan_dm,
+                     float subband_max_snr_loss)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -71,6 +118,7 @@ FDMTPlan::Impl::Impl(float f_min,
       m_mode(parse_fdmt_mode(mode)),
       m_subband_depth(subband_depth),
       m_chan_dm(chan_dm),
+      m_subband_max_snr_loss(subband_max_snr_loss),
       m_is_custom_grid(true),
       m_dt_grid_target(dt_grid) {
     if (m_dt_grid_target.empty()) {
@@ -94,7 +142,8 @@ FDMTPlan::Impl::Impl(float f_min,
                      const std::vector<float>& dm_grid,
                      std::string_view mode,
                      SizeType subband_depth,
-                     double chan_dm)
+                     double chan_dm,
+                     float subband_max_snr_loss)
     : m_f_min(f_min),
       m_f_max(f_max),
       m_nchans(nchans),
@@ -106,6 +155,7 @@ FDMTPlan::Impl::Impl(float f_min,
       m_mode(parse_fdmt_mode(mode)),
       m_subband_depth(subband_depth),
       m_chan_dm(chan_dm),
+      m_subband_max_snr_loss(subband_max_snr_loss),
       m_is_custom_grid(true) {
     if (dm_grid.empty()) {
         throw std::invalid_argument("FDMT: dm_grid must not be empty");
@@ -154,6 +204,12 @@ void FDMTPlan::Impl::validate_band() const {
     }
     if (!utils::is_finite_bits(m_chan_dm)) {
         throw std::invalid_argument("FDMT: chan_dm must be finite");
+    }
+    if (!utils::is_finite_bits(m_subband_max_snr_loss) ||
+        !(m_subband_max_snr_loss >= 0.0F && m_subband_max_snr_loss < 1.0F)) {
+        throw std::invalid_argument(
+            fmt::format("FDMT: subband_max_snr_loss must be in [0, 1), got {}",
+                        m_subband_max_snr_loss));
     }
     if (!(m_f_min > 0.0F)) {
         throw std::invalid_argument(
@@ -301,6 +357,19 @@ FDMTPlan::Impl::determine_active_grids(
                 utils::cff(chan_freq(node.chan_begin), chan_freq(node.chan_end),
                            m_f_min, m_f_max);
             auto& dts = active_dts[l][i_sub];
+            if (m_subband_max_snr_loss > 0.0F && !root.empty()) {
+                // Its own trials at the subband loss over the same span.
+                const auto [lo, hi] = std::ranges::minmax(root);
+                dts                 = subband_dt_grid(
+                    chan_freq(node.chan_begin), chan_freq(node.chan_end),
+                    node.chan_end - node.chan_begin, m_tsamp, m_chan_dm,
+                    m_subband_max_snr_loss,
+                    static_cast<IndexType>(
+                        std::nearbyint(static_cast<float>(lo) * phi)),
+                    static_cast<IndexType>(
+                        std::nearbyint(static_cast<float>(hi) * phi)));
+                continue;
+            }
             for (const auto dt : root) {
                 dts.push_back(static_cast<IndexType>(
                     std::nearbyint(static_cast<float>(dt) * phi)));
@@ -370,6 +439,7 @@ void FDMTPlan::Impl::configure_plan() {
     for (SizeType i_iter = 1; i_iter <= m_niters; ++i_iter) {
         make_plan(i_iter, tree, active_dts[i_iter]);
     }
+    select_search_rows();
 
     // Step 4: Assign tree history offsets for valid-mode cross-block
     // streaming
@@ -393,6 +463,45 @@ void FDMTPlan::Impl::configure_plan() {
                    "niters={}, subband_depth={}",
                    m_df, m_dt_max, m_dt_min, m_dt_step, m_niters,
                    m_subband_depth);
+}
+
+void FDMTPlan::Impl::select_search_rows() {
+    m_container.subband_max_snr_loss = m_subband_max_snr_loss;
+    if (m_subband_max_snr_loss == 0.0F || m_subband_depth == 0) {
+        return;
+    }
+    // Tree subbands below the root keep every trial their parents need;
+    // the search scores only those nearest the subband's own grid. (The
+    // root is never pruned: its rows are dm_grid_final.)
+    for (SizeType l = m_niters - m_subband_depth; l < m_niters; ++l) {
+        for (auto& grid : m_container.grids[l]) {
+            const auto& g = grid.dt_grid;
+            if (grid.staggered || g.size() < 3) {
+                continue;
+            }
+            const auto want = subband_dt_grid(
+                grid.f_start, grid.f_end, grid.chan_end - grid.chan_begin,
+                m_tsamp, m_chan_dm, m_subband_max_snr_loss, g.front(),
+                g.back());
+            std::vector<uint32_t> rows;
+            rows.reserve(want.size());
+            for (const auto dt : want) {
+                auto it = std::ranges::lower_bound(g, dt);
+                if (it == g.end()) {
+                    --it;
+                } else if (it != g.begin() && (dt - *(it - 1)) <= (*it - dt)) {
+                    --it;
+                }
+                rows.push_back(static_cast<uint32_t>(it - g.begin()));
+            }
+            std::ranges::sort(rows);
+            const auto [first, last] = std::ranges::unique(rows);
+            rows.erase(first, last);
+            if (rows.size() < g.size()) {
+                grid.search_rows = std::move(rows);
+            }
+        }
+    }
 }
 
 void FDMTPlan::Impl::make_plan_iter0(

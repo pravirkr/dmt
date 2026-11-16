@@ -24,6 +24,10 @@ struct BoxcarPlanePlan {
     float f_low_mhz        = 0.0F;
     float f_high_mhz       = 0.0F;
     SizeType coord_offset  = 0;
+    /// Subband trial (index into the plan grid's dt_grid) of each row:
+    /// dm_grid[d] and the tables' row d belong to coordinate coord_offset +
+    /// coord_indices[d]. All of them unless the plan prunes subband rows.
+    std::vector<uint32_t> coord_indices;
     std::vector<uint32_t> widths;
     std::vector<float> dm_grid;
     std::vector<uint64_t> warmup_samples; ///< FDMT support before width-1.

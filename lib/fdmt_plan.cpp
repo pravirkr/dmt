@@ -406,7 +406,8 @@ FDMTPlan::FDMTPlan(float f_min,
                    SizeType dt_step,
                    std::string_view mode,
                    SizeType subband_depth,
-                   double chan_dm)
+                   double chan_dm,
+                   float subband_max_snr_loss)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -417,7 +418,8 @@ FDMTPlan::FDMTPlan(float f_min,
                                     dt_step,
                                     mode,
                                     subband_depth,
-                                    chan_dm)) {}
+                                    chan_dm,
+                                    subband_max_snr_loss)) {}
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
                    SizeType nchans,
@@ -426,7 +428,8 @@ FDMTPlan::FDMTPlan(float f_min,
                    const std::vector<IndexType>& dt_grid,
                    std::string_view mode,
                    SizeType subband_depth,
-                   double chan_dm)
+                   double chan_dm,
+                   float subband_max_snr_loss)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -435,7 +438,8 @@ FDMTPlan::FDMTPlan(float f_min,
                                     dt_grid,
                                     mode,
                                     subband_depth,
-                                    chan_dm)) {}
+                                    chan_dm,
+                                    subband_max_snr_loss)) {}
 
 FDMTPlan::FDMTPlan(float f_min,
                    float f_max,
@@ -445,7 +449,8 @@ FDMTPlan::FDMTPlan(float f_min,
                    const std::vector<float>& dm_grid,
                    std::string_view mode,
                    SizeType subband_depth,
-                   double chan_dm)
+                   double chan_dm,
+                   float subband_max_snr_loss)
     : m_impl(std::make_unique<Impl>(f_min,
                                     f_max,
                                     nchans,
@@ -454,7 +459,8 @@ FDMTPlan::FDMTPlan(float f_min,
                                     dm_grid,
                                     mode,
                                     subband_depth,
-                                    chan_dm)) {}
+                                    chan_dm,
+                                    subband_max_snr_loss)) {}
 
 FDMTPlan::~FDMTPlan()                              = default;
 FDMTPlan::FDMTPlan(FDMTPlan&&) noexcept            = default;
@@ -489,6 +495,9 @@ float FDMTPlan::get_df() const noexcept { return m_impl->get_df(); }
 SizeType FDMTPlan::get_niters() const noexcept { return m_impl->get_niters(); }
 SizeType FDMTPlan::get_subband_depth() const noexcept {
     return m_impl->get_subband_depth();
+}
+float FDMTPlan::get_subband_max_snr_loss() const noexcept {
+    return m_impl->get_container().subband_max_snr_loss;
 }
 double FDMTPlan::get_chan_dm() const noexcept {
     return m_impl->get_container().chan_dm;

@@ -6,6 +6,7 @@
 #include <limits>
 #include <random>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "dmt/boxcar.hpp"
@@ -73,19 +74,22 @@ TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096", "[boxcar][cpu]") {
 
 TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
           "[boxcar][cpu]") {
-    // chan_dm 20: coherently dedispersed channels (plan level-0 boxes).
-    for (const double chan_dm : {0.0, 20.0}) {
-        const plans::FDMTPlan plan(700, 1200, 7, 311, 0.001F,
-                                   std::vector<IndexType>{-73, -12, 0, 4, 97},
-                                   "valid", 2, chan_dm);
+    // chan_dm 20: coherently dedispersed channels (plan level-0 boxes);
+    // subband loss 0.3: subband DM grids (pruned tree-subband rows).
+    for (const auto [chan_dm, sub_loss] :
+         {std::pair{0.0, 0.0F}, std::pair{20.0, 0.0F}, std::pair{0.0, 0.3F}}) {
+        const plans::FDMTPlan plan(
+            700, 1200, 7, 311, 0.001F,
+            std::vector<IndexType>{-73, -12, -5, 0, 4, 9, 30, 60, 97}, "valid",
+            2, chan_dm, sub_loss);
         const auto input = waterfalls(plan, 2, 4);
         for (const bool smear : {true, false}) {
             for (const auto mode :
                  {PeakFindingMode::kContiguousPeakPerWidth,
                   PeakFindingMode::kContiguousPeakAcrossWidths,
                   PeakFindingMode::kAllAboveThreshold}) {
-                DYNAMIC_SECTION("chan_dm=" << chan_dm << " smear=" << smear
-                                           << " mode="
+                DYNAMIC_SECTION("chan_dm=" << chan_dm << " loss=" << sub_loss
+                                           << " smear=" << smear << " mode="
                                            << static_cast<int>(mode)) {
                     BoxcarConfig cfg;
                     cfg.max_boxcar       = 37;
@@ -130,11 +134,14 @@ TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
 
 TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
           "[boxcar][cpu]") {
-    // chan_dm 20: the noise tables and warm-up of plan level-0 boxes.
-    for (const double chan_dm : {0.0, 20.0}) {
-        plans::FDMTPlan plan(700, 1200, 5, 128, 0.001F,
-                             std::vector<IndexType>{-90, 0, 7, 100}, "valid", 2,
-                             chan_dm);
+    // chan_dm 20: the noise tables and warm-up of plan level-0 boxes;
+    // subband loss 0.3: the tables of the pruned subband rows.
+    for (const auto [chan_dm, sub_loss] :
+         {std::pair{0.0, 0.0F}, std::pair{20.0, 0.0F}, std::pair{0.0, 0.3F}}) {
+        plans::FDMTPlan plan(
+            700, 1200, 5, 128, 0.001F,
+            std::vector<IndexType>{-90, -30, 0, 7, 20, 45, 100}, "valid", 2,
+            chan_dm, sub_loss);
         for (const bool smear : {true, false}) {
             BoxcarConfig cfg;
             cfg.max_boxcar  = 32;
@@ -155,7 +162,7 @@ TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
             const SizeType samples = 512;
             plans::FDMTPlan impulse_plan(700, 1200, 5, samples, 0.001F,
                                          plan.get_dt_grid_final(), "valid", 2,
-                                         chan_dm);
+                                         chan_dm, sub_loss);
             FDMTBoxcar impulse_meta(impulse_plan, cfg, smear);
             const auto planes = impulse_meta.get_search_plans();
             std::vector<std::vector<double>> energy;
@@ -175,8 +182,9 @@ TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
                     const auto data =
                         fdmt.view_subband(planes[p].subband_idx).data;
                     for (SizeType d = 0; d < planes[p].dm_grid.size(); ++d) {
+                        const SizeType r = planes[p].coord_indices[d];
                         for (SizeType t = 128; t < samples; ++t) {
-                            if (data[d * samples + t] != 0) {
+                            if (data[r * samples + t] != 0) {
                                 last_support[p][d] =
                                     std::max(last_support[p][d], t - 128);
                             }
@@ -186,7 +194,7 @@ TEST_CASE("FDMTBoxcar sigma uses raw sum and actual subband lineage",
                                 double sum = 0;
                                 for (SizeType k = 0;
                                      k < planes[p].widths[f] && k <= t; ++k) {
-                                    sum += data[d * samples + t - k];
+                                    sum += data[r * samples + t - k];
                                 }
                                 energy[p][d * planes[p].widths.size() + f] +=
                                     sum * sum;

@@ -150,6 +150,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("chan_end", &plans::BoxcarPlanePlan::chan_end)
         .def_readonly("f_low_mhz", &plans::BoxcarPlanePlan::f_low_mhz)
         .def_readonly("f_high_mhz", &plans::BoxcarPlanePlan::f_high_mhz)
+        .def_readonly("coord_indices", &plans::BoxcarPlanePlan::coord_indices)
         .def_readonly("widths", &plans::BoxcarPlanePlan::widths)
         .def_readonly("dm_grid", &plans::BoxcarPlanePlan::dm_grid)
         .def_readonly("warmup_samples", &plans::BoxcarPlanePlan::warmup_samples)

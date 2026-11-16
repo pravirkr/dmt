@@ -423,8 +423,8 @@ reference_rows(const plans::FDMTPlan& plan,
             // halves include padding. Run separate references per beam.
             REQUIRE(beams == 1);
             for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
-                const SizeType offset =
-                    (p.coord_offset + d) * pc.state_shape[p.level].nsamps;
+                const SizeType offset = (p.coord_offset + p.coord_indices[d]) *
+                                        pc.state_shape[p.level].nsamps;
                 rows[index].insert(rows[index].end(), level.begin() + offset,
                                    level.begin() + offset + plan.get_nsamps());
                 ++index;

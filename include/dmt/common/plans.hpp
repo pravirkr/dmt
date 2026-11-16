@@ -87,6 +87,9 @@ struct FDMTCoordGrid {
     SizeType i_sub_tail{SIZE_MAX};  ///< Lower child at the previous level
     SizeType i_sub_head{SIZE_MAX};  ///< Upper child (SIZE_MAX: copy)
     bool staggered{false};          ///< Overlap subband, not merged further
+    /// Rows (indices into dt_grid) the subband search scores, ascending;
+    /// empty: all of them (see FDMTPlan's subband_max_snr_loss).
+    std::vector<uint32_t> search_rows;
 };
 
 /**
@@ -121,8 +124,9 @@ struct FDMTPlanContainer {
     /// extend one running sum (slots aligned with the channel's
     /// coord_offset).
     std::vector<int32_t> level0_order;
-    double chan_dm{0.0};             ///< Coherent dedispersion DM
-    SizeType level0_causal_delay{0}; ///< Lag added to every level-0 read
+    double chan_dm{0.0};              ///< Coherent dedispersion DM
+    float subband_max_snr_loss{0.0F}; ///< Subband grid loss (0: unpruned)
+    SizeType level0_causal_delay{0};  ///< Lag added to every level-0 read
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
@@ -208,6 +212,15 @@ public:
      * arrival time, instead of the full |dt| (see get_level0_boxes()). All
      * outputs then lag by get_level0_causal_delay() samples. With 0 every
      * output is unchanged.
+     * @param subband_max_snr_loss Subband DM grids for the subband search
+     * (subband_depth > 0): 0 (default) keeps every subband's trials as the
+     * tree needs them. A loss in (0, 1) gives each staggered subband its own
+     * generate_dm_grid() trials at that loss (one-sample pulses, chan_dm),
+     * and marks for FDMTBoxcar only the tree-subband rows closest to such a
+     * grid (FDMTCoordGrid::search_rows; the tree still computes every row its
+     * parents need). The full band is never pruned. The worst pulses can
+     * lose up to about 1.5x this loss (narrow subbands are dominated by
+     * intra-channel smearing; see the FDMTBoxcar guide).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -215,11 +228,12 @@ public:
              SizeType nsamps,
              float tsamp,
              IndexType dt_max,
-             IndexType dt_min       = 0,
-             SizeType dt_step       = 1,
-             std::string_view mode  = "valid",
-             SizeType subband_depth = 0,
-             double chan_dm         = 0.0);
+             IndexType dt_min           = 0,
+             SizeType dt_step           = 1,
+             std::string_view mode      = "valid",
+             SizeType subband_depth     = 0,
+             double chan_dm             = 0.0,
+             float subband_max_snr_loss = 0.0F);
 
     /**
      * @brief Constructs an FDMT plan with a custom delay trial grid.
@@ -245,9 +259,10 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<IndexType>& dt_grid,
-             std::string_view mode  = "valid",
-             SizeType subband_depth = 0,
-             double chan_dm         = 0.0);
+             std::string_view mode      = "valid",
+             SizeType subband_depth     = 0,
+             double chan_dm             = 0.0,
+             float subband_max_snr_loss = 0.0F);
 
     /**
      * @brief Constructs an FDMT plan with a custom physical DM trial grid.
@@ -274,9 +289,10 @@ public:
              SizeType nsamps,
              float tsamp,
              const std::vector<float>& dm_grid,
-             std::string_view mode  = "valid",
-             SizeType subband_depth = 0,
-             double chan_dm         = 0.0);
+             std::string_view mode      = "valid",
+             SizeType subband_depth     = 0,
+             double chan_dm             = 0.0,
+             float subband_max_snr_loss = 0.0F);
 
     // --- Rule of five: PIMPL ---
     ~FDMTPlan();
@@ -320,6 +336,8 @@ public:
     /// @brief DM the channels were coherently dedispersed to (pc cm^-3; 0:
     /// ordinary filterbank data).
     [[nodiscard]] double get_chan_dm() const noexcept;
+    /// @brief Target S/N loss of the subband DM grids (0: not pruned).
+    [[nodiscard]] float get_subband_max_snr_loss() const noexcept;
     /**
      * @brief Samples every output lags behind the bottom-edge arrival time
      * (0 unless chan_dm != 0).
