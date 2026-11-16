@@ -352,8 +352,10 @@ void bind_fdmt_boxcar(py::module_& mod) {
             :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
             ``end_sample``) at or after it. It is the smallest
             ``begin_sample`` of the excursions still open, or
-            :attr:`searched_nsamps` when none is open; it never decreases
-            until :meth:`reset_history` (then 0). Use it as the watermark
+            :attr:`searched_nsamps` when none is open (for a chan_dm plan,
+            both less :attr:`FDMTPlan.level0_causal_delay`, as candidate
+            times are); it never decreases until :meth:`reset_history`
+            (then 0). Use it as the watermark
             for releasing candidate groups, whatever the length of an
             excursion.
             )doc")
@@ -493,8 +495,10 @@ void bind_fdmt_boxcar(py::module_& mod) {
             :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
             ``end_sample``) at or after it. It is the smallest
             ``begin_sample`` of the excursions still open, or
-            :attr:`searched_nsamps` when none is open; it never decreases
-            until :meth:`reset_history` (then 0). Use it as the watermark
+            :attr:`searched_nsamps` when none is open (for a chan_dm plan,
+            both less :attr:`FDMTPlan.level0_causal_delay`, as candidate
+            times are); it never decreases until :meth:`reset_history`
+            (then 0). Use it as the watermark
             for releasing candidate groups, whatever the length of an
             excursion.
             )doc")

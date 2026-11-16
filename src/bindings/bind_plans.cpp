@@ -240,8 +240,9 @@ void bind_plans(py::module_& mod) {
             "filterbank data).")
         .def_property_readonly(
             "level0_causal_delay", &FDMTPlan::get_level0_causal_delay,
-            "Samples every output lags the bottom-edge arrival (0 unless "
-            "chan_dm != 0).")
+            "Samples every FDMT output row lags the bottom-edge arrival (0 "
+            "unless chan_dm != 0). FDMTBoxcar and FDMTFFTBoxcar subtract it "
+            "from candidate times, which give the arrival.")
         .def_property_readonly(
             "level0_boxes",
             [](const FDMTPlan& plan) {

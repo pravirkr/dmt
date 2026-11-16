@@ -121,7 +121,9 @@ struct BoxcarConfig {
 /**
  * @brief A raw matched-filter detection, without astrophysical selection.
  *
- * Sample indices are absolute stream indices of trailing-window endpoints;
+ * Sample indices are absolute stream indices of trailing-window endpoints
+ * (for a chan_dm plan, less FDMTPlan::get_level0_causal_delay(), so they
+ * refer to the bottom-edge arrival);
  * begin/end delimit an inclusive contiguous excursion. Channel extents are
  * half-open in FDMT input order (low frequency first); subband_level is the
  * search depth (0: full band) and subband_idx the subband's index at that

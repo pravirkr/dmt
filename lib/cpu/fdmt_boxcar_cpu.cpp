@@ -588,6 +588,24 @@ void FDMTBoxcarCpuEngine::keep(SizeType index,
 }
 
 void FDMTBoxcarCpuEngine::finish_result() {
+    finish_keep_result();
+    // chan_dm plans: rows lag the bottom-edge arrival by the plan's level-0
+    // causal delay; candidates report the arrival (saturating at 0).
+    const uint64_t lag = m_plan.get_level0_causal_delay();
+    if (lag == 0) {
+        return;
+    }
+    const auto n = static_cast<SizeType>(
+        std::min<uint64_t>(m_counts.emitted_count, m_candidates.size()));
+    for (SizeType i = 0; i < n; ++i) {
+        auto& c        = m_candidates[i];
+        c.peak_sample  = c.peak_sample > lag ? c.peak_sample - lag : 0;
+        c.begin_sample = c.begin_sample > lag ? c.begin_sample - lag : 0;
+        c.end_sample   = c.end_sample > lag ? c.end_sample - lag : 0;
+    }
+}
+
+void FDMTBoxcarCpuEngine::finish_keep_result() {
     if (!m_keep_open) {
         return;
     }

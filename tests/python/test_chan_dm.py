@@ -597,3 +597,34 @@ def test_boxcar_packed_matches_float(subband_depth: int, backend: str) -> None:
             np.testing.assert_allclose(a[name], b[name], rtol=2e-3)
         else:
             np.testing.assert_array_equal(a[name], b[name])
+
+
+@pytest.mark.parametrize("engine", ["fdmt", "fft"])
+@pytest.mark.parametrize("dm", [413.0, 250.0])
+def test_candidate_times_are_arrival_times(dm: float, engine: str, backend: str) -> None:
+    # Rows lag the bottom-edge arrival by level0_causal_delay; candidates
+    # report the arrival (the trailing endpoint of the 4-sample burst).
+    nsamps = 4096
+    plan = FDMTPlan(
+        704.0,
+        1216.0,
+        128,
+        nsamps,
+        256e-6,
+        dt_grid=np.arange(0, 10000, 4),
+        chan_dm=413.0,
+    )
+    assert plan.level0_causal_delay > 0
+    blocks = burst(plan, nsamps, 5, dm, 2 * AMP, 9)
+    cfg = boxcar_config(PeakFindingMode.CONTIGUOUS_PEAK_ACROSS_WIDTHS)
+    cfg.detect_thresh = 8
+    if engine == "fft":
+        search = FDMTFFTBoxcar(plan, cfg, backend=backend)
+    else:
+        search = FDMTBoxcar(plan, cfg, backend=backend)
+    cands = sorted_candidates(
+        [search.execute(b).candidates for b in blocks] + [search.flush().candidates]
+    )
+    best = cands[np.argmax(cands["snr"])]
+    arrival = 600 + K_DM * dm * (704.0**-2 - 1216.0**-2) / 256e-6
+    assert abs(int(best["peak_sample"]) - (arrival + 3)) <= 3

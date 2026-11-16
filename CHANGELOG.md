@@ -12,8 +12,9 @@ All notable changes to `dmt` are listed here. The format follows
   dedispersed channels: level-0 boxes cover the residual intra-channel sweep
   at the trial DM, centred on each channel's arrival, in `FDMT`,
   `FDMTBoxcar`, `FDMTFFT` and `FDMTFFTBoxcar` (CPU and GPU, float and packed
-  input), with the noise model to match. Outputs lag by the new
-  `get_level0_causal_delay()`; `get_level0_boxes()` lists the boxes. Valid
+  input), with the noise model to match. FDMT output rows lag by the new
+  `get_level0_causal_delay()`, which `FDMTBoxcar` and `FDMTFFTBoxcar`
+  subtract from candidate times; `get_level0_boxes()` lists the boxes. Valid
   mode only. With `chan_dm` 0 every output is unchanged.
 - **Subband DM grids**: `FDMTPlan(..., subband_max_snr_loss=...)` (off at 0)
   gives staggered subbands their own `generate_dm_grid` trials and has

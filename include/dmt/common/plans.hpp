@@ -347,7 +347,8 @@ public:
      * shifted back by this one constant (the largest such lead over all
      * channels and trials), which keeps the tree causal and its merges
      * unchanged: output sample t refers to bottom-edge arrival at
-     * t - get_level0_causal_delay().
+     * t - get_level0_causal_delay(). FDMTBoxcar and FDMTFFTBoxcar subtract
+     * it from candidate times (and the candidate frontier).
      */
     [[nodiscard]] SizeType get_level0_causal_delay() const noexcept;
     /**

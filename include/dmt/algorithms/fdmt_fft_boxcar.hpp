@@ -91,8 +91,10 @@ public:
      * smallest begin_sample of the excursions still open (any beam, row,
      * width), or get_searched_nsamps() when none is open. Non-decreasing
      * between reset_history() calls; get_searched_nsamps() after flush() or
-     * drain(), 0 after reset_history(). A pipeline can release candidate
-     * groups that end before it, however long an excursion stays open. A
+     * drain(), 0 after reset_history(); for a chan_dm plan each less
+     * FDMTPlan::get_level0_causal_delay(), as candidate times are. A
+     * pipeline can release candidate groups that end before it, however
+     * long an excursion stays open. A
      * host call; after device calls, synchronize their stream first (as
      * for reading a device result).
      */

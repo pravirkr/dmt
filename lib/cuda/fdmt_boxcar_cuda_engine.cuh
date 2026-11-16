@@ -617,6 +617,7 @@ private:
     void set_keep(const std::vector<std::pair<SizeType, SizeType>>& runs,
                   Stream queue);
     void finish_keep(cudaStream_t stream);
+    void shift_candidate_times(cudaStream_t stream);
     void update_open_begin(cudaStream_t stream);
     [[nodiscard]] SizeType ring_size() const noexcept;
     [[nodiscard]] SizeType slot_count() const noexcept;

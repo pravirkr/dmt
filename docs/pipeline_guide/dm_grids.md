@@ -61,9 +61,15 @@ dilutes sharp pulses near `chan_dm`. Build the FDMT plan with the same DM,
 `FDMTPlan(..., chan_dm=413.0)`, and pass that plan to `FDMT`, `FDMTBoxcar`,
 `FDMTFFT` or `FDMTFFTBoxcar`. Each channel's box then covers only the
 residual sweep, about `|dt(DM) - dt(chan_dm)|` samples, centred on the
-channel's arrival, and the noise model follows. Outputs then lag the
-bottom-edge arrival by `plan.level0_causal_delay` samples (39 on Parkes UWL
-at 64 µs with `chan_dm` 413). It needs `mode="valid"`.
+channel's arrival, and the noise model follows. It needs `mode="valid"`.
+
+The DM of a burst isn't known, so below `chan_dm` the coherent filter has
+over-corrected and part of each channel's energy arrives after the
+channel-centre time. To stay causal, every level-0 read is shifted back by
+one constant, `plan.level0_causal_delay` samples (39 on Parkes UWL at 64 µs
+with `chan_dm` 413). The FDMT output rows lag the bottom-edge arrival by
+that much; `FDMTBoxcar` and `FDMTFFTBoxcar` subtract it, so candidate times
+are the true arrival times.
 
 Don't switch box smearing off instead: on simulated UWL bursts at
 `chan_dm` 413 that keeps less S/N than the default at every DM and width
