@@ -601,7 +601,9 @@ def test_boxcar_packed_matches_float(subband_depth: int, backend: str) -> None:
 
 @pytest.mark.parametrize("engine", ["fdmt", "fft"])
 @pytest.mark.parametrize("dm", [413.0, 250.0])
-def test_candidate_times_are_arrival_times(dm: float, engine: str, backend: str) -> None:
+def test_candidate_times_are_arrival_times(
+    dm: float, engine: str, backend: str
+) -> None:
     # Rows lag the bottom-edge arrival by level0_causal_delay; candidates
     # report the arrival (the trailing endpoint of the 4-sample burst).
     nsamps = 4096
