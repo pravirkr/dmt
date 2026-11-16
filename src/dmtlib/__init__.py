@@ -8,11 +8,6 @@ except metadata.PackageNotFoundError:  # imported from a source tree, not instal
 from . import libdmt as _libdmt
 from . import sensitivity
 from .dedisperse import Dedispersed, dedisperse, dispersion_delay
-from .grid import (
-    calculate_snr_loss,
-    generate_optimal_dm_grid,
-    generate_optimal_dt_grid,
-)
 from .libdmt import (
     DDMT,
     DDMTFFT,
@@ -28,7 +23,6 @@ from .libdmt import (
     CohFDMTConfig,
     CohFDMTPlan,
     DDMTPlan,
-    DMGridMethod,
     FDMTBoxcar,
     FDMTBoxcarMemoryUsage,
     FDMTComplexity,
@@ -42,13 +36,14 @@ from .libdmt import (
     add_frb_track,
     available_backends,
     build_info,
+    calculate_snr_loss,
     compute_fdmt,
     compute_fdmt_fft,
     export_fft_wisdom,
     forget_fft_wisdom,
     generate_box_width_trials,
     generate_dm_grid,
-    generate_dt_grid,
+    generate_levin_dm_grid,
     get_fft_planner,
     import_fft_wisdom,
     pack_baseband,
@@ -98,7 +93,6 @@ __all__ = [
     "CohFDMTConfig",
     "CohFDMTPlan",
     "DDMTPlan",
-    "DMGridMethod",
     "Dedispersed",
     "FDMTBoxcar",
     "FDMTBoxcarMemoryUsage",
@@ -122,9 +116,7 @@ __all__ = [
     "forget_fft_wisdom",
     "generate_box_width_trials",
     "generate_dm_grid",
-    "generate_dt_grid",
-    "generate_optimal_dm_grid",
-    "generate_optimal_dt_grid",
+    "generate_levin_dm_grid",
     "get_fft_planner",
     "get_log_level",
     "import_fft_wisdom",

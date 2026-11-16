@@ -3,7 +3,7 @@
 Compares:
 1. Brute-force dedispersion: O(N_dt * N_chans)
 2. Dense FDMT: O(N_chans * log2(N_chans) + N_dt)
-3. S/N-Loss-Bounded Sparse FDMT (dmtlib.grid): optimal non-uniform spacing
+3. S/N-Loss-Bounded Sparse FDMT (dmtlib.generate_dm_grid): non-uniform spacing
 
 Usage:
     python bench/scripts/fdmt_operations_costs.py [--plot] [--out fdmt_operations_costs.png]
@@ -30,7 +30,7 @@ for p in (build_src, src_dir):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from dmtlib import FDMTPlan, generate_optimal_dt_grid
+from dmtlib import FDMTPlan, generate_dm_grid
 
 
 def run_cost_analysis(
@@ -70,10 +70,12 @@ def run_cost_analysis(
         dense_ops = dense_plan.total_operations
 
         # 2. Sparse Grid FDMT Plan (bounded to 5% max S/N loss)
-        sparse_dt = generate_optimal_dt_grid(
-            f_min, f_max, nchans, tsamp, dt_max=dt_max, max_snr_loss=0.05
+        # (the plan rounds the DMs to integer delays across the band)
+        dm_max = dt_max * tsamp * 2.41e-4 / (f_min**-2 - f_max**-2)
+        sparse_dm = generate_dm_grid(
+            f_min, f_max, nchans, tsamp, 0.0, dm_max, max_snr_loss=0.05
         )
-        sparse_plan = FDMTPlan(f_min, f_max, nchans, 1024, tsamp, dt_arr=sparse_dt)
+        sparse_plan = FDMTPlan(f_min, f_max, nchans, 1024, tsamp, dm_grid=sparse_dm)
         sparse_ops = sparse_plan.total_operations
 
         dense_sp = bf_ops / dense_ops if dense_ops > 0 else 1.0

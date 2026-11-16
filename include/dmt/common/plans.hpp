@@ -233,8 +233,8 @@ public:
      * @param nchans Number of channels (any count >= 2).
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
-     * @param dt_grid Explicit list of delay trials in samples (e.g. from
-     * generate_optimal_dt_grid).
+     * @param dt_grid Explicit list of delay trials in samples (the DM-grid
+     * constructor takes generate_dm_grid() trials).
      * @param mode Transform mode: "valid", "full", or "roll".
      * @param subband_depth Subband search depth (see the first constructor).
      * @param chan_dm Coherent dedispersion DM (see the first constructor).
