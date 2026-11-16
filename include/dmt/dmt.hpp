@@ -19,7 +19,9 @@
  * - Fourier-Shift direct dedispersion with exact fractional delays
  * (DDMT-FFT): @ref dmt::algorithms::DDMTFFT
  * - Execution Plans and Grid Generators: @ref dmt::plans::FDMTPlan, @ref
- * dmt::plans::DDMTPlan, @ref dmt::plans::CohFDMTPlan
+ * dmt::plans::DDMTPlan, @ref dmt::plans::CohFDMTPlan, @ref
+ * dmt::plans::generate_dm_grid, @ref dmt::plans::generate_levin_dm_grid, @ref
+ * dmt::plans::calculate_snr_loss
  * - Simulation utilities: @ref dmt::utils::generate_pure_frb
  */
 

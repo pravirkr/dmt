@@ -162,11 +162,11 @@ void bind_plans(py::module_& mod) {
             Subband DM grids for the subband search (``subband_depth`` > 0).
             0 (default) keeps every subband trial the tree needs. A loss in
             (0, 1) gives each staggered subband its own
-            :func:`generate_dm_grid` trials at that loss (one-sample pulses),
-            and has :class:`FDMTBoxcar` score only the tree-subband trials
-            nearest such a grid (``container.dt_grids[l][i].search_rows``).
-            The full band is never pruned. The worst pulses can lose up to
-            about 1.5 times this loss (see the FDMTBoxcar guide).
+            :func:`~dmtlib.grid.generate_dm_grid` trials at that loss (one-sample
+            pulses), and has :class:`FDMTBoxcar` score only the tree-subband
+            trials nearest such a grid
+            (``container.dt_grids[l][i].search_rows``). The full band is never
+            pruned. The worst pulses can lose up to about 1.5 times this loss.
         dt_grid, dt_arr, dm_grid, dm_arr : array_like, optional
             Keyword-only custom trial grid. Provide exactly one of these.
 
@@ -911,7 +911,32 @@ void bind_plans(py::module_& mod) {
         :meth:`DDMTPlan.generate_levin_dm_grid` (``piecewise``:
         :meth:`DDMTPlan.generate_levin_dm_grid_piecewise`, at least
         ``min_run`` trials per segment), and ends at the first trial at or
-        past ``dm_max``. Units as :func:`generate_dm_grid`.
+        past ``dm_max``. Units as :func:`~dmtlib.grid.generate_dm_grid`.
+
+        Parameters
+        ----------
+        f_min, f_max : float
+            Band edges (MHz).
+        nchans : int
+            Number of channels.
+        tsamp : float
+            Sampling interval (s).
+        dm_min, dm_max : float
+            DM range (pc cm^-3), with ``dm_min >= 0``.
+        pulse_width : float, optional
+            Intrinsic pulse width (s); 0 (default): only the sampling time
+            broadens the pulse.
+        tol : float, optional
+            Broadening tolerance (> 1, default 1.25).
+        piecewise : bool, optional
+            Piecewise-uniform segments for :class:`DDMTFFT`.
+        min_run : int, optional
+            Shortest uniform segment when ``piecewise`` (default 32).
+
+        Returns
+        -------
+        numpy.ndarray
+            float64 trial DMs by the Levin (2012) rule.
         )doc");
     mod.def(
         "calculate_snr_loss",

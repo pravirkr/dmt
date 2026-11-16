@@ -22,8 +22,7 @@
  * - generate_levin_dm_grid(): Levin (2012), the classic rule as in
  *   Heimdall, kept as it is (the benchmark grids).
  *
- * Both can be made piecewise uniform for DDMTFFT's NUFFT path. See the
- * pipeline guide's DM-grid page for choosing one.
+ * Both can be made piecewise uniform for DDMTFFT's NUFFT path.
  */
 
 namespace dmt::plans {
@@ -70,8 +69,9 @@ struct DMGridConfig {
  * at dm_max
  * (a piecewise grid at dm_max or just past it). Negative DMs mirror
  * positive ones when chan_dm is 0. Throws std::invalid_argument on invalid
- * input (non-finite values, an empty band, a kill_mask of the wrong length
- * or with every channel dead, ...).
+ * input (non-finite values, fewer than two active channels, a kill_mask of
+ * the wrong length, negative DM range when unordered, negative loss / tol <=
+ * 1).
  */
 [[nodiscard]] std::vector<double>
 generate_dm_grid(const DMGridConfig& config, double dm_min, double dm_max);

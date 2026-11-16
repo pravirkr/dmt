@@ -171,13 +171,16 @@ public:
         const float* smearing_row,
         float w,
         std::span<const uint8_t> kill_mask) const noexcept;
+    SizeType max_box_s() const noexcept {
+        return m_container.level0_boxes.empty()
+                   ? m_container.state_shape[0].dt_max
+                   : m_container.level0_max_box_s;
+    }
     SizeType get_box_fraction_bits() const noexcept {
-        return algorithms::detail::box_fraction_bits(
-            m_container.state_shape[0].dt_max);
+        return algorithms::detail::box_fraction_bits(max_box_s());
     }
     SizeType get_box_mean_bits() const noexcept {
-        return algorithms::detail::box_mean_bits(
-            m_container.state_shape[0].dt_max + 1);
+        return algorithms::detail::box_mean_bits(max_box_s() + 1);
     }
     std::vector<uint32_t> get_box_weights() const;
     static bool is_active(std::span<const uint8_t> kill_mask,

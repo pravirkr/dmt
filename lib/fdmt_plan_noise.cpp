@@ -46,7 +46,7 @@ float FDMTPlan::Impl::variance_from_smearing_row(
 
 std::vector<uint32_t> FDMTPlan::Impl::get_box_weights() const {
     const auto bits    = get_box_fraction_bits();
-    const auto box_max = m_container.state_shape[0].dt_max + 1;
+    const auto box_max = max_box_s() + 1;
     std::vector<uint32_t> weights(box_max);
     for (SizeType len = 1; len <= box_max; ++len) {
         weights[len - 1] = algorithms::detail::box_weight(len, bits);

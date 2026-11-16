@@ -383,10 +383,12 @@ winning peak's width.
   beam, row or width), or `get_searched_nsamps()` when none is open. It
   never decreases between resets. Use it as the watermark for releasing
   grouped candidates instead of a fixed lag. With `ALL_ABOVE_THRESHOLD`
-  nothing stays open, so it is the searched position. After `flush()` or
-  `drain()` it equals `get_searched_nsamps()`, and `reset_history()` sets it
-  to 0. After device calls, synchronise their stream before reading it, as
-  for a device result. `FDMTFFTBoxcar` has the same method.
+  nothing stays open, so it equals `get_searched_nsamps()` (minus
+  `FDMTPlan::get_level0_causal_delay()` clamped at 0 when `chan_dm != 0`).
+  After `flush()` or `drain()` it reaches the full searched frontier, and
+  `reset_history()` sets it to 0. After device calls, synchronise their stream
+  before reading it, as for a device result. `FDMTFFTBoxcar` has the same
+  method.
 
 ## Subbands, overflow and memory
 
@@ -447,11 +449,10 @@ on a GPU with 8-bit input:
 
 Building the plan takes 0.2-0.5 s longer at depth 4 (one grid per subband).
 
-The subband grids inherit the grid model's limits (see
-[DM grids](dm_grids.md)): narrow subbands are dominated by intra-channel
-smearing, where it is optimistic. Pulses confined to one subband lose on
-average 1-4% more S/N than with every row searched, but the worst ones lose
-up to about 1.5 times `subband_max_snr_loss` (0.10-0.15 at 0.1, on CRYO-PAF,
+The subband grids inherit the limits of `generate_dm_grid`'s S/N model: narrow
+subbands are dominated by intra-channel smearing, where it is optimistic.
+Pulses confined to one subband lose on average 1-4% more S/N than with every row
+searched, but the worst ones lose up to about 1.5 times `subband_max_snr_loss` (0.10-0.15 at 0.1, on CRYO-PAF,
 CRYO-PAF L-band and MeerKAT L-band). For a firm bound, ask for about 0.65
 times the loss you can accept.
 

@@ -260,6 +260,7 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     }
                     ++length_counts.back().second;
                 }
+                support = std::max<uint64_t>(support, pc.level0_causal_delay);
                 out.warmup_samples[k] = support + extra_warmup;
                 const double f0       = out.f_low_mhz;
                 const double f1       = out.f_high_mhz;

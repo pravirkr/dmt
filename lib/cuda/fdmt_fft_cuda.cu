@@ -1155,8 +1155,8 @@ private:
             const auto weights = m_plan->get_box_weights();
             const float unit   = std::ldexp(
                 1.0F, -static_cast<int>(m_plan->get_box_fraction_bits()));
-            std::vector<float> box_wf(m_dag.dt0_max + 1);
-            for (SizeType s = 0; s <= m_dag.dt0_max; ++s) {
+            std::vector<float> box_wf(weights.size());
+            for (SizeType s = 0; s < weights.size(); ++s) {
                 box_wf[s] = static_cast<float>(weights[s]) * unit;
             }
             box_wf_d.upload(box_wf);

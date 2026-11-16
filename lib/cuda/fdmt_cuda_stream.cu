@@ -1,3 +1,5 @@
+#include <bit>
+
 #include "fdmt_cuda_engine.cuh"
 
 // CUDA FDMT engine: the stepper and the stream history.
@@ -462,6 +464,9 @@ uint64_t FDMTCudaEngine::skew_layout_hash() const {
         }
     };
     mix(m_plan.get_nchans());
+    if (const double cd = m_plan.get_chan_dm(); cd != 0.0) {
+        mix(std::bit_cast<uint64_t>(cd));
+    }
     mix(m_nbeams);
     mix(m_chunk);
     mix(m_direct->levels);

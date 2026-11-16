@@ -13,7 +13,9 @@ Python:
 | `dmtlib.generate_dm_grid`, `dmtlib.generate_levin_dm_grid`, `dmtlib.calculate_snr_loss` | the same, from Python |
 
 All take frequencies in MHz and times (`tsamp`, `pulse_width`) in seconds,
-and return DMs in pc cm⁻³ (float64).
+and return DMs in pc cm⁻³ (float64). Notice the argument order on
+`calculate_snr_loss`: C++ takes `(config, trial_dms, dm_test)` while Python
+takes `(dm_test, trial_dms, ...)`.
 
 ## Two rules
 

@@ -53,8 +53,8 @@ You can pass your own non-uniform grid:
 The planner sorts the grid, removes duplicates, and maps it onto the tree.
 ```
 
-`dmtlib.generate_dm_grid` builds such a grid from a target S/N loss; see
-[DM grids](../pipeline_guide/dm_grids.md). This tutorial builds one by hand.
+`dmtlib.generate_dm_grid` builds such a grid from a target S/N loss. This
+tutorial builds one by hand.
 
 ```{code-cell} ipython3
 import numpy as np

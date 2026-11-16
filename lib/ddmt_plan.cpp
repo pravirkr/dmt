@@ -444,7 +444,7 @@ std::vector<float> levin_grid(float dm_start,
                               float tol,
                               bool piecewise,
                               SizeType min_run) {
-    if (!(tol > 1.0F)) {
+    if (!utils::is_finite_bits(tol) || !(tol > 1.0F)) {
         throw std::invalid_argument(
             fmt::format("Levin DM grid: tol must be > 1, got {}", tol));
     }

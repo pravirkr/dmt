@@ -476,7 +476,8 @@ void FDMTPlan::Impl::select_search_rows() {
     for (SizeType l = m_niters - m_subband_depth; l < m_niters; ++l) {
         for (auto& grid : m_container.grids[l]) {
             const auto& g = grid.dt_grid;
-            if (grid.staggered || g.size() < 3) {
+            if (grid.staggered || g.size() < 3 ||
+                grid.chan_end - grid.chan_begin < 2) {
                 continue;
             }
             const auto want = subband_dt_grid(
@@ -562,6 +563,7 @@ void FDMTPlan::Impl::make_plan_iter0(
             .f_end        = f_end,
             .chan_begin   = i_sub,
             .chan_end     = i_sub + 1,
+            .search_rows  = {},
         };
         ncoords += ndt_sub;
     }
@@ -590,6 +592,7 @@ void FDMTPlan::Impl::make_level0_boxes() {
     m_container.level0_boxes.clear();
     m_container.level0_order.clear();
     m_container.level0_causal_delay = 0;
+    m_container.level0_max_box_s    = m_container.state_shape[0].dt_max;
     if (m_chan_dm == 0.0) {
         return;
     }
@@ -631,7 +634,8 @@ void FDMTPlan::Impl::make_level0_boxes() {
     const auto ncoords0 = m_container.state_shape[0].ncoords;
     m_container.level0_boxes.resize(ncoords0);
     m_container.level0_order.resize(ncoords0);
-    SizeType extent = 0;
+    SizeType extent    = 0;
+    SizeType max_box_s = 0;
     for (SizeType c = 0; c < m_nchans; ++c) {
         const auto& g = grids0[c];
         for (SizeType i = 0; i < g.ndt; ++i) {
@@ -645,6 +649,7 @@ void FDMTPlan::Impl::make_level0_boxes() {
             const auto pt = static_cast<int64_t>(std::nearbyint(mid));
             const auto sp = static_cast<int64_t>(span);
             if (lo + causal < 0 || pt + causal < 0 ||
+                sp >= (int64_t{1} << 29) ||
                 lo + causal + sp > std::numeric_limits<int32_t>::max()) {
                 throw std::runtime_error(fmt::format(
                     "FDMT: level-0 box of channel {} dt {} out of range "
@@ -658,6 +663,7 @@ void FDMTPlan::Impl::make_level0_boxes() {
             };
             extent = std::max({extent, static_cast<SizeType>(lo + causal + sp),
                                static_cast<SizeType>(pt + causal)});
+            max_box_s = std::max(max_box_s, static_cast<SizeType>(sp));
         }
         auto* order = m_container.level0_order.data() + g.coord_offset;
         for (SizeType i = 0; i < g.ndt; ++i) {
@@ -670,9 +676,10 @@ void FDMTPlan::Impl::make_level0_boxes() {
         });
     }
     m_container.level0_causal_delay = static_cast<SizeType>(causal);
-    // Every consumer of the level-0 extent (raw input history, box weight
-    // tables, the integer scale, the Fourier support) needs the farthest
-    // read, which covers the widest box too.
+    m_container.level0_max_box_s    = max_box_s;
+    // Raw input history, Fourier support and level-0 window extent need the
+    // farthest read (`state_shape[0].dt_max`), while box-weight tables and
+    // integer box bounds use the widest box (`level0_max_box_s`).
     auto& shape0  = m_container.state_shape[0];
     shape0.dt_max = std::max(shape0.dt_max, extent);
 }
@@ -892,6 +899,7 @@ void FDMTPlan::Impl::make_plan(
             .i_sub_tail   = node.tail,
             .i_sub_head   = node.head,
             .staggered    = node.staggered,
+            .search_rows  = {},
         };
         ncoords += ndt_sub;
     }

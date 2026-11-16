@@ -54,7 +54,10 @@ inline std::vector<FDMTLevelType> int_tree_level_types(
     };
 
     std::vector<FDMTLevelType> types(niters + 1, FDMTLevelType::kF32);
-    const SizeType scale_f = box_mean_bits(pc.state_shape[0].dt_max + 1);
+    const SizeType max_box_s = pc.level0_boxes.empty()
+                                   ? pc.state_shape[0].dt_max
+                                   : pc.level0_max_box_s;
+    const SizeType scale_f   = box_mean_bits(max_box_s + 1);
     std::vector<double> prev(pc.state_shape[0].ncoords, 0.0);
     for (const auto& grid : pc.grids[0]) {
         for (SizeType i_dt = 0; i_dt < grid.ndt; ++i_dt) {

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -122,10 +123,11 @@ TEST_CASE("FDMTPlan chan_dm level-0 boxes", "[fdmt_chan_dm][cpu]") {
     REQUIRE_THROWS_AS(
         plans::FDMTPlan(kFMin, kFMax, 64, 256, kTsamp, g, "full", 0, 413.0),
         std::invalid_argument);
-    REQUIRE_THROWS_AS(plans::FDMTPlan(kFMin, kFMax, 64, 256, kTsamp, g, "valid",
-                                      0,
-                                      std::numeric_limits<double>::infinity()),
-                      std::invalid_argument);
+    const volatile std::uint64_t inf_bits = 0x7FF0000000000000ULL;
+    const double inf = std::bit_cast<double>(std::uint64_t{inf_bits});
+    REQUIRE_THROWS_AS(
+        plans::FDMTPlan(kFMin, kFMax, 64, 256, kTsamp, g, "valid", 0, inf),
+        std::invalid_argument);
 }
 
 TEST_CASE("FDMT chan_dm rows follow the box formula", "[fdmt_chan_dm][cpu]") {
@@ -267,6 +269,70 @@ TEST_CASE("FDMTBoxcar searches a chan_dm plan", "[fdmt_chan_dm][cpu]") {
     REQUIRE(best_snr > 36.0F);
     REQUIRE(best_snr < 52.0F);
     REQUIRE(std::abs(dms[best_row] - chan_dm) < 20.0);
+}
+
+TEST_CASE("FDMT chan_dm: box weights follow level0_max_box_s, not extent",
+          "[fdmt_chan_dm][cpu]") {
+    const plans::FDMTPlan plan(kFMin, kFMax, 64, 512, kTsamp,
+                               grid(2100, 2240, 8), "valid", 0, 100.0);
+    const auto& pc     = plan.get_container();
+    const auto weights = plan.get_box_weights();
+    REQUIRE(weights.size() == pc.level0_max_box_s + 1);
+    REQUIRE(weights.size() < pc.state_shape[0].dt_max + 1);
+}
+
+TEST_CASE("FDMTFFT fractional chan_dm keeps wide-channel coherent pulses sharp",
+          "[fdmt_chan_dm][cpu]") {
+    const SizeType nchans = 4;
+    const SizeType nsamps = 4096;
+    const float f_min     = 300.0F;
+    const float f_max     = 600.0F;
+    const float tsamp     = 1e-3F;
+    const double chan_dm  = 20.0;
+    const double k_ts     = (1.0 / 2.41e-4) / static_cast<double>(tsamp);
+    const SizeType dt_c   = static_cast<SizeType>(std::llround(
+        k_ts * chan_dm * ((1.0 / (f_min * f_min)) - (1.0 / (f_max * f_max)))));
+    const plans::FDMTPlan plan(f_min, f_max, nchans, nsamps, tsamp,
+                               grid(static_cast<IndexType>(dt_c - 8),
+                                    static_cast<IndexType>(dt_c + 8), 2),
+                               "valid", 0, chan_dm);
+    FDMTFFT fft(plan, true, Exec::cpu(1), 1, true);
+    std::vector<float> wf(nchans * nsamps, 0.0F);
+    const double df = static_cast<double>(f_max - f_min) / nchans;
+    for (SizeType c = 0; c < nchans; ++c) {
+        const double f_c = f_min + ((static_cast<double>(c) + 0.5) * df);
+        const double t =
+            1500.0 +
+            (k_ts * chan_dm * ((1.0 / (f_c * f_c)) - (1.0 / (f_max * f_max))));
+        for (SizeType i = 1400; i < 2300; ++i) {
+            const double d = (static_cast<double>(i) - t) / 1.5;
+            wf[(c * nsamps) + i] += static_cast<float>(std::exp(-0.5 * d * d));
+        }
+    }
+    std::vector<float> out(plan.get_dmt_size());
+    fft.execute(wf, out);
+    const auto dts     = plan.get_dt_grid_final();
+    SizeType best_row  = 0;
+    IndexType best_err = std::numeric_limits<IndexType>::max();
+    for (SizeType r = 0; r < dts.size(); ++r) {
+        const IndexType err = std::abs(dts[r] - static_cast<IndexType>(dt_c));
+        if (err < best_err) {
+            best_err = err;
+            best_row = r;
+        }
+    }
+    float peak = 0.0F;
+    for (SizeType i = plan.get_startup_samples(); i < nsamps; ++i) {
+        peak = std::max(peak, out[(best_row * nsamps) + i]);
+    }
+    REQUIRE(peak > 3.7F);
+}
+
+TEST_CASE("FDMTPlan subband pruning skips single-channel copy subbands",
+          "[grid][subband][cpu]") {
+    const plans::FDMTPlan plan(1000.0F, 1500.0F, 5, 256, 1e-3F, 16, 0, 1,
+                               "valid", 2, 0.0, 0.1F);
+    REQUIRE(plan.get_nchans() == 5);
 }
 
 } // namespace dmt

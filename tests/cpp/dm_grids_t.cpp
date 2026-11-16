@@ -3,6 +3,7 @@
 #include "dmt/common/dm_grids.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -279,7 +280,10 @@ TEST_CASE("calculate_snr_loss", "[grid][cpu]") {
 }
 
 TEST_CASE("generate_dm_grid: invalid input throws", "[grid][cpu]") {
-    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const volatile std::uint64_t nan_bits  = 0x7FF8000000000000ULL;
+    const volatile std::uint32_t nanf_bits = 0x7FC00000U;
+    const double nan = std::bit_cast<double>(std::uint64_t{nan_bits});
+    const float nanf = std::bit_cast<float>(std::uint32_t{nanf_bits});
     auto c           = uwl();
     CHECK_THROWS_AS(plans::generate_dm_grid(c, 10.0, 5.0),
                     std::invalid_argument);
@@ -297,11 +301,61 @@ TEST_CASE("generate_dm_grid: invalid input throws", "[grid][cpu]") {
     bad.max_snr_loss = 1.0;
     CHECK_THROWS_AS(plans::generate_dm_grid(bad, 0.0, 10.0),
                     std::invalid_argument);
+    bad              = c;
+    bad.max_snr_loss = 1e-18;
+    CHECK_THROWS_AS(plans::generate_dm_grid(bad, 0.0, 10.0),
+                    std::invalid_argument);
     bad             = c;
     bad.pulse_width = -1.0;
     CHECK_THROWS_AS(plans::generate_dm_grid(bad, 0.0, 10.0),
                     std::invalid_argument);
+    bad        = c;
+    bad.nchans = 1;
+    CHECK_THROWS_AS(plans::generate_dm_grid(bad, 0.0, 10.0),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(plans::calculate_snr_loss(bad, std::vector<double>{0.0},
+                                              std::vector<double>{0.0}),
+                    std::invalid_argument);
+    bad           = band(1100.0, 1714.0, 4, 455.6e-6);
+    bad.kill_mask = {0, 1, 0, 0};
+    CHECK_THROWS_AS(plans::generate_dm_grid(bad, 0.0, 10.0),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(plans::calculate_snr_loss(bad, std::vector<double>{0.0},
+                                              std::vector<double>{0.0}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        plans::calculate_snr_loss(c, std::vector<double>{0.0, nan, 1.0},
+                                  std::vector<double>{0.5}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(plans::DDMTPlan::generate_levin_dm_grid(
+                        0.0F, 10.0F, 1e-3F, 0.0F, 1000.0F, 1500.0F, 8, nanf),
+                    std::invalid_argument);
+    // Unused fields are ignored by calculate_snr_loss and
+    // generate_levin_dm_grid.
+    auto loose         = c;
+    loose.max_snr_loss = -1.0;
+    loose.tol          = 0.5;
+    CHECK(plans::calculate_snr_loss(loose, std::vector<double>{10.0},
+                                    std::vector<double>{10.0}) ==
+          std::vector<double>{0.0});
+    loose.tol = 1.25;
+    CHECK(plans::generate_levin_dm_grid(loose, 0.0, 100.0).size() > 1);
     CHECK(plans::generate_dm_grid(c, 5.0, 5.0) == std::vector<double>{5.0});
+}
+
+TEST_CASE("generate_dm_grid: piecewise end steps stay representable in float32",
+          "[grid][cpu]") {
+    auto c      = lband();
+    c.piecewise = true;
+    c.min_run   = 32;
+    for (const double dm_min : {0.0, -0.001}) {
+        const auto pw = plans::generate_dm_grid(c, dm_min, 200.0);
+        REQUIRE(pw.size() >= 2);
+        CHECK(pw.back() >= 200.0);
+        for (SizeType i = 0; i + 1 < pw.size(); ++i) {
+            CHECK(static_cast<float>(pw[i + 1]) > static_cast<float>(pw[i]));
+        }
+    }
 }
 
 } // namespace dmt

@@ -89,7 +89,7 @@ struct FDMTCoordGrid {
     bool staggered{false};          ///< Overlap subband, not merged further
     /// Rows (indices into dt_grid) the subband search scores, ascending;
     /// empty: all of them (see FDMTPlan's subband_max_snr_loss).
-    std::vector<uint32_t> search_rows;
+    std::vector<uint32_t> search_rows{};
 };
 
 /**
@@ -127,6 +127,7 @@ struct FDMTPlanContainer {
     double chan_dm{0.0};              ///< Coherent dedispersion DM
     float subband_max_snr_loss{0.0F}; ///< Subband grid loss (0: unpruned)
     SizeType level0_causal_delay{0};  ///< Lag added to every level-0 read
+    SizeType level0_max_box_s{0};     ///< Widest level-0 box span s
 
     FDMTPlanContainer() = default;
     explicit FDMTPlanContainer(SizeType niters);
@@ -220,7 +221,7 @@ public:
      * grid (FDMTCoordGrid::search_rows; the tree still computes every row its
      * parents need). The full band is never pruned. The worst pulses can
      * lose up to about 1.5x this loss (narrow subbands are dominated by
-     * intra-channel smearing; see the FDMTBoxcar guide).
+     * intra-channel smearing).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -252,6 +253,8 @@ public:
      * @param mode Transform mode: "valid", "full", or "roll".
      * @param subband_depth Subband search depth (see the first constructor).
      * @param chan_dm Coherent dedispersion DM (see the first constructor).
+     * @param subband_max_snr_loss Subband grid loss (see the first
+     * constructor).
      */
     FDMTPlan(float f_min,
              float f_max,
@@ -282,6 +285,8 @@ public:
      * @param mode Transform mode: "valid", "full", or "roll".
      * @param subband_depth Subband search depth (see the first constructor).
      * @param chan_dm Coherent dedispersion DM (see the first constructor).
+     * @param subband_max_snr_loss Subband grid loss (see the first
+     * constructor).
      */
     FDMTPlan(float f_min,
              float f_max,

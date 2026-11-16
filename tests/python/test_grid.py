@@ -203,8 +203,38 @@ class TestCalculateSnrLoss:
     def test_invalid(self) -> None:
         with pytest.raises(ValueError):
             calculate_snr_loss(105.0, np.array([110.0, 100.0]), *LBAND)
+        with pytest.raises(ValueError):
+            calculate_snr_loss(105.0, np.array([100.0]), 1100.0, 1714.0, 1, 455.6e-6)
+        with pytest.raises(ValueError):
+            calculate_snr_loss(
+                105.0,
+                np.array([100.0]),
+                1100.0,
+                1714.0,
+                4,
+                455.6e-6,
+                kill_mask=[0, 1, 0, 0],
+            )
         with pytest.raises(TypeError):
             calculate_snr_loss(105.0, np.array([100.0]), *LBAND, 1.0)  # keyword-only
+
+
+def test_grid_edge_regressions() -> None:
+    with pytest.raises(ValueError):
+        generate_dm_grid(1100.0, 1714.0, 1, 455.6e-6, 0.0, 10.0)
+    with pytest.raises(ValueError):
+        generate_dm_grid(1100.0, 1714.0, 4, 455.6e-6, 0.0, 10.0, kill_mask=[0, 1, 0, 0])
+    with pytest.raises(ValueError):
+        generate_dm_grid(*LBAND, 0.0, 10.0, max_snr_loss=1e-18)
+
+    for dm_min in (0.0, -0.01):
+        pw = generate_dm_grid(*LBAND, dm_min, 200.0, piecewise=True, min_run=32)
+        assert pw[-1] >= 200.0
+        assert np.all(np.diff(pw.astype(np.float32)) > 0)
+
+    plan_coh = FDMTPlan(1100.0, 1714.0, 32, 512, 455.6e-6, 32, 0, 1, "valid", 0, 100.0)
+    with pytest.raises(ValueError, match="chan_dm == 0"):
+        dmtlib.sensitivity.fdmt_alignment_error(plan_coh, 0)
 
 
 def test_grid_module_and_removed_names() -> None:

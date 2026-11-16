@@ -82,6 +82,7 @@ SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
         mem_use += grid_iter.size() * sizeof(FDMTCoordGrid);
         for (const auto& grid : grid_iter) {
             mem_use += grid.dt_grid.size() * sizeof(IndexType);
+            mem_use += grid.search_rows.size() * sizeof(uint32_t);
         }
     }
     // coordinates, plus coordinates_sum and coordinates_copy (a partition of
@@ -92,6 +93,8 @@ SizeType FDMTPlanContainer::get_memory_usage() const noexcept {
     for (const auto& dt_grid : dt_grid_sub_top) {
         mem_use += dt_grid.size() * sizeof(IndexType);
     }
+    mem_use += level0_boxes.size() * sizeof(FDMTLevel0Box);
+    mem_use += level0_order.size() * sizeof(int32_t);
     return mem_use;
 }
 

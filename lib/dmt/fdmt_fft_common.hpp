@@ -73,8 +73,9 @@ struct FractionalDelays {
  */
 inline FractionalDelays fractional_delays(const plans::FDMTPlan& plan,
                                           bool box) {
-    const auto& pc = plan.get_container();
-    const auto g   = [](double f) { return 1.0 / (f * f); };
+    const auto& pc    = plan.get_container();
+    const auto g      = [](double f) { return 1.0 / (f * f); };
+    const double k_ts = (1.0 / 2.41e-4) / static_cast<double>(plan.get_tsamp());
     struct Stat {
         double n{0.0};
         double s{0.0}; // mean path shift
@@ -83,19 +84,24 @@ inline FractionalDelays fractional_delays(const plans::FDMTPlan& plan,
     };
     std::vector<Stat> prev(pc.state_shape[0].ncoords);
     for (const auto& gr : pc.grids[0]) {
-        const double w = g(gr.f_start) - g(gr.f_end);
+        const double f0    = static_cast<double>(gr.f_start);
+        const double f1    = static_cast<double>(gr.f_end);
+        const double fc    = 0.5 * (f0 + f1);
+        const double g_bar = 0.5 * (g(f0) + g(f1));
+        const double w     = g(f0) - g(f1);
+        const double delta = k_ts * pc.chan_dm * (g_bar - g(fc));
         for (SizeType i = 0; i < gr.ndt; ++i) {
             const double dt0 = std::abs(static_cast<double>(gr.dt_grid[i]));
             prev[gr.coord_offset + i] = box ? Stat{1.0, 0.5 * dt0, 0.5 * w, dt0}
                                             : Stat{1.0, dt0, w, dt0};
             if (!pc.level0_boxes.empty()) {
                 // chan_dm plan: the box (or the sample) sits on the
-                // channel's arrival, the smeared pulse's centroid (coherent
-                // dedispersion about the channel centre leaves it there).
+                // channel's arrival, whose centroid in g is shifted by
+                // curvature (g_bar - g(f_c)) from coherent dedispersion at f_c.
                 const auto& b  = pc.level0_boxes[gr.coord_offset + i];
-                const double c = box ? b.lag + (0.5 * b.s) : b.point;
+                const double c = (box ? b.lag + (0.5 * b.s) : b.point) - delta;
                 const double e = box ? b.lag + b.s : b.point;
-                prev[gr.coord_offset + i] = Stat{1.0, c, 0.5 * w, e};
+                prev[gr.coord_offset + i] = Stat{1.0, c, g(f0) - g_bar, e};
             }
         }
     }

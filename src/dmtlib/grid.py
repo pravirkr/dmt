@@ -14,8 +14,7 @@ The C++ generators (``dmt/common/dm_grids.hpp``), re-exported:
   of :func:`generate_dm_grid`.
 
 Both generators take ``piecewise=True`` for :class:`DDMTFFT`'s NUFFT path.
-Frequencies are in MHz, times (``tsamp``, ``pulse_width``) in seconds. See
-the pipeline guide's DM-grid page for choosing one.
+Frequencies are in MHz, times (``tsamp``, ``pulse_width``) in seconds.
 """
 
 from __future__ import annotations

@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -34,33 +35,25 @@ constexpr double kWidthScale = 1.0;
 constexpr SizeType kNumNodes = 36;
 constexpr int kBisections    = 22;
 
-void validate(const DMGridConfig& c, double dm_min, double dm_max) {
+void validate_band(const DMGridConfig& c) {
     // Bit tests: -ffast-math may fold std::isfinite (dm_utils.hpp).
     const auto finite = [](double x) { return utils::is_finite_bits(x); };
     if (!finite(c.f_min) || !finite(c.f_max) || !finite(c.tsamp) ||
-        !finite(c.pulse_width) || !finite(c.chan_dm) || !finite(dm_min) ||
-        !finite(dm_max) || !finite(c.max_snr_loss) || !finite(c.tol)) {
-        throw std::invalid_argument("DM grid parameters must be finite");
+        !finite(c.pulse_width) || !finite(c.chan_dm)) {
+        throw std::invalid_argument("DM grid band parameters must be finite");
     }
     if (!(c.f_min > 0.0) || !(c.f_max > c.f_min)) {
         throw std::invalid_argument(
             fmt::format("DM grid: invalid frequency band f_min={}, f_max={}",
                         c.f_min, c.f_max));
     }
-    if (c.nchans == 0 || !(c.tsamp > 0.0)) {
-        throw std::invalid_argument(fmt::format(
-            "DM grid: invalid nchans={} or tsamp={}", c.nchans, c.tsamp));
+    if (c.nchans < 2 || !(c.tsamp > 0.0)) {
+        throw std::invalid_argument(
+            fmt::format("DM grid: invalid nchans={} (must be >= 2) or tsamp={}",
+                        c.nchans, c.tsamp));
     }
     if (c.pulse_width < 0.0) {
         throw std::invalid_argument("DM grid: pulse_width must be >= 0");
-    }
-    if (c.tol != 0.0 && !(c.tol > 1.0)) {
-        throw std::invalid_argument(
-            fmt::format("DM grid: tol must be > 1 (or 0), got {}", c.tol));
-    }
-    if (dm_max < dm_min) {
-        throw std::invalid_argument(fmt::format(
-            "DM grid: dm_max ({}) must be >= dm_min ({})", dm_max, dm_min));
     }
     if (!c.kill_mask.empty()) {
         if (c.kill_mask.size() != c.nchans) {
@@ -68,11 +61,23 @@ void validate(const DMGridConfig& c, double dm_min, double dm_max) {
                 fmt::format("DM grid: kill_mask has {} entries, expected {}",
                             c.kill_mask.size(), c.nchans));
         }
-        if (std::ranges::none_of(c.kill_mask,
-                                 [](uint8_t k) { return k != 0; })) {
-            throw std::invalid_argument(
-                "DM grid: kill_mask marks every channel dead");
+        const auto live = std::ranges::count_if(
+            c.kill_mask, [](uint8_t k) { return k != 0; });
+        if (live < 2) {
+            throw std::invalid_argument(fmt::format(
+                "DM grid: need at least 2 active channels (got {})", live));
         }
+    }
+}
+
+void validate_range(double dm_min, double dm_max) {
+    if (!utils::is_finite_bits(dm_min) || !utils::is_finite_bits(dm_max)) {
+        throw std::invalid_argument(
+            "DM grid: dm_min and dm_max must be finite");
+    }
+    if (dm_max < dm_min) {
+        throw std::invalid_argument(fmt::format(
+            "DM grid: dm_max ({}) must be >= dm_min ({})", dm_max, dm_min));
     }
 }
 
@@ -115,6 +120,10 @@ public:
         }
         // Contiguous groups of active channels, the first n % m one larger.
         const SizeType n = r_all.size();
+        if (n < 2) {
+            throw std::invalid_argument(fmt::format(
+                "DM grid: need at least 2 active channels (got {})", n));
+        }
         const SizeType m = std::min(n, kMaxGroups);
         SizeType start   = 0;
         for (SizeType g = 0; g < m; ++g) {
@@ -337,17 +346,27 @@ private:
     std::vector<double> m_h;
 };
 
+constexpr SizeType kMaxGridTrials = 10'000'000;
+
 /// Trials from a to b (a < b) by midpoint steps of h(|DM - chan_dm|).
-std::vector<double>
-step_grid(const HalfStep& h, double a, double b, double chan_dm) {
+std::vector<double> step_grid(
+    const HalfStep& h, double a, double b, double chan_dm, bool clamp_end) {
     std::vector<double> dms{a};
     double cur = a;
     while (cur < b) {
         const double h0  = h(std::abs(cur - chan_dm));
         const double hm  = h(std::abs(std::min(b, cur + h0) - chan_dm));
         const double nxt = cur + h0 + hm;
+        if (!(nxt > cur)) {
+            throw std::invalid_argument(
+                "DM grid: step underflowed floating-point precision");
+        }
+        if (dms.size() >= kMaxGridTrials) {
+            throw std::invalid_argument(fmt::format(
+                "DM grid: trial count exceeds maximum ({})", kMaxGridTrials));
+        }
         if (nxt >= b) {
-            dms.push_back(b);
+            dms.push_back(clamp_end ? b : nxt);
             break;
         }
         dms.push_back(nxt);
@@ -392,6 +411,9 @@ std::vector<double> piecewise_wrap(const std::vector<double>& dms,
             count = min_run;
         }
         count = std::max<SizeType>(count, 1);
+        while (a + (step * static_cast<double>(count)) < b) {
+            ++count;
+        }
         for (SizeType q = 0; q < count; ++q) {
             out.push_back(a + (step * static_cast<double>(q)));
         }
@@ -402,33 +424,58 @@ std::vector<double> piecewise_wrap(const std::vector<double>& dms,
 }
 
 double target_loss(const DMGridConfig& c) {
-    const double loss = c.tol != 0.0 ? 1.0 - (1.0 / c.tol) : c.max_snr_loss;
-    if (!(loss > 0.0 && loss < 1.0)) {
-        throw std::invalid_argument(fmt::format(
-            "DM grid: max_snr_loss must be in (0, 1), got {}", loss));
+    if (c.tol != 0.0) {
+        if (!utils::is_finite_bits(c.tol) || !(c.tol > 1.0)) {
+            throw std::invalid_argument(
+                fmt::format("DM grid: tol must be > 1 (or 0), got {}", c.tol));
+        }
+        const double loss = 1.0 - (1.0 / c.tol);
+        if (!(loss > 0.0 && loss < 1.0 && 1.0 - loss < 1.0)) {
+            throw std::invalid_argument(fmt::format(
+                "DM grid: tol ({}) produces an unusable target loss", c.tol));
+        }
+        return loss;
     }
-    return loss;
+    if (!utils::is_finite_bits(c.max_snr_loss) ||
+        !(c.max_snr_loss > 0.0 && c.max_snr_loss < 1.0) ||
+        !(1.0 - c.max_snr_loss < 1.0)) {
+        throw std::invalid_argument(fmt::format(
+            "DM grid: max_snr_loss must be in (0, 1) and resolve in float64, "
+            "got {}",
+            c.max_snr_loss));
+    }
+    return c.max_snr_loss;
 }
 
 } // namespace
 
 std::vector<double>
 generate_dm_grid(const DMGridConfig& config, double dm_min, double dm_max) {
-    validate(config, dm_min, dm_max);
+    validate_band(config);
+    validate_range(dm_min, dm_max);
     const double target = 1.0 - target_loss(config);
     if (dm_min == dm_max) {
         return {dm_min};
     }
-    const double cd = config.chan_dm;
+    const double cd   = config.chan_dm;
+    const double span = dm_max - dm_min;
+    const double d_lo = dm_min - cd;
+    const double d_hi = dm_max - cd;
+    if (!utils::is_finite_bits(span) || !utils::is_finite_bits(d_lo) ||
+        !utils::is_finite_bits(d_hi)) {
+        throw std::invalid_argument("DM grid: DM range overflows double");
+    }
     const LossModel model(config);
     // One step table for the whole range; a step never needs to exceed it.
-    const double u_max = std::max(std::abs(dm_min - cd), std::abs(dm_max - cd));
-    const double cap   = 2.0 * (dm_max - dm_min);
+    const double u_max       = std::max(std::abs(d_lo), std::abs(d_hi));
+    constexpr double kMaxCap = 0.25 * std::numeric_limits<double>::max();
+    const double cap         = span > 0.5 * kMaxCap ? kMaxCap : 2.0 * span;
     const HalfStep h(model, target, u_max, cap);
+    const bool clamp_end = !config.piecewise;
     std::vector<double> out;
     if (dm_max <= 0.0) {
         // Mirror (u = |DM - chan_dm| is unchanged with chan_dm mirrored).
-        const auto pos = step_grid(h, -dm_max, -dm_min, -cd);
+        const auto pos = step_grid(h, -dm_max, -dm_min, -cd, clamp_end);
         out.reserve(pos.size());
         for (auto it = pos.rbegin(); it != pos.rend(); ++it) {
             out.push_back(-*it);
@@ -440,15 +487,15 @@ generate_dm_grid(const DMGridConfig& config, double dm_min, double dm_max) {
         }
     } else if (dm_min < 0.0 && cd == 0.0) {
         // Negative trials mirror the positive ones exactly.
-        const auto neg = step_grid(h, 0.0, -dm_min, 0.0);
-        const auto pos = step_grid(h, 0.0, dm_max, 0.0);
+        const auto neg = step_grid(h, 0.0, -dm_min, 0.0, clamp_end);
+        const auto pos = step_grid(h, 0.0, dm_max, 0.0, clamp_end);
         out.reserve(neg.size() + pos.size() - 1);
         for (auto it = neg.rbegin(); it + 1 != neg.rend(); ++it) {
             out.push_back(-*it);
         }
         out.insert(out.end(), pos.begin(), pos.end());
     } else {
-        out = step_grid(h, dm_min, dm_max, cd);
+        out = step_grid(h, dm_min, dm_max, cd, clamp_end);
     }
     if (config.piecewise) {
         return piecewise_wrap(out, config.min_run);
@@ -459,7 +506,13 @@ generate_dm_grid(const DMGridConfig& config, double dm_min, double dm_max) {
 std::vector<double> generate_levin_dm_grid(const DMGridConfig& config,
                                            double dm_min,
                                            double dm_max) {
-    validate(config, dm_min, dm_max);
+    validate_band(config);
+    validate_range(dm_min, dm_max);
+    if (!utils::is_finite_bits(config.tol) ||
+        (config.tol != 0.0 && !(config.tol > 1.0))) {
+        throw std::invalid_argument(
+            fmt::format("DM grid: tol must be > 1 (or 0), got {}", config.tol));
+    }
     if (config.chan_dm != 0.0) {
         throw std::invalid_argument(
             "DM grid: the Levin rule does not take chan_dm (use "
@@ -493,19 +546,19 @@ std::vector<double> generate_levin_dm_grid(const DMGridConfig& config,
 std::vector<double> calculate_snr_loss(const DMGridConfig& config,
                                        std::span<const double> trial_dms,
                                        std::span<const double> dm_test) {
-    validate(config, 0.0, 0.0);
+    validate_band(config);
     if (trial_dms.empty()) {
         throw std::invalid_argument("calculate_snr_loss: no trial DMs");
-    }
-    if (!std::ranges::is_sorted(trial_dms)) {
-        throw std::invalid_argument(
-            "calculate_snr_loss: trial_dms must be sorted ascending");
     }
     for (const double x : trial_dms) {
         if (!utils::is_finite_bits(x)) {
             throw std::invalid_argument(
                 "calculate_snr_loss: trial DMs must be finite");
         }
+    }
+    if (!std::ranges::is_sorted(trial_dms)) {
+        throw std::invalid_argument(
+            "calculate_snr_loss: trial_dms must be sorted ascending");
     }
     const LossModel model(config);
     std::vector<double> loss;
@@ -521,9 +574,12 @@ std::vector<double> calculate_snr_loss(const DMGridConfig& config,
         if (it != trial_dms.begin()) {
             delta = std::min(delta, std::abs(dm - *(it - 1)));
         }
+        if (delta == 0.0) {
+            loss.push_back(0.0);
+            continue;
+        }
         const auto a = model.at(std::abs(dm - config.chan_dm));
-        loss.push_back(
-            delta == 0.0 ? 0.0 : std::max(0.0, 1.0 - model.ratio(a, delta)));
+        loss.push_back(std::max(0.0, 1.0 - model.ratio(a, delta)));
     }
     return loss;
 }

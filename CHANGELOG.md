@@ -14,14 +14,17 @@ All notable changes to `dmt` are listed here. The format follows
   `FDMTBoxcar`, `FDMTFFT` and `FDMTFFTBoxcar` (CPU and GPU, float and packed
   input), with the noise model to match. FDMT output rows lag by the new
   `get_level0_causal_delay()`, which `FDMTBoxcar` and `FDMTFFTBoxcar`
-  subtract from candidate times; `get_level0_boxes()` lists the boxes. Valid
-  mode only. With `chan_dm` 0 every output is unchanged.
+  subtract from candidate times and `get_candidate_frontier()` (clamped at 0,
+  while `get_searched_nsamps()` stays in FDMT output samples);
+  `get_level0_boxes()` lists the boxes. Valid mode only. With `chan_dm` 0
+  every output is unchanged.
 - **Subband DM grids**: `FDMTPlan(..., subband_max_snr_loss=...)` (off at 0)
   gives staggered subbands their own `generate_dm_grid` trials and has
   `FDMTBoxcar` score only the tree-subband rows nearest such a grid, so deep
   subband searches score 2-4x fewer rows (the full band is unchanged).
-  `BoxcarPlanePlan.coord_indices` and `FDMTSubDTGrid.search_rows` list the
-  scored rows. The worst pulses can lose up to about 1.5x the requested loss.
+  `BoxcarPlanePlan.coord_indices`, `FDMTCoordGrid::search_rows`, and
+  `FDMTSubDTGrid.search_rows` list the scored rows. The worst pulses can lose
+  up to about 1.5x the requested loss.
 - **DM-grid generators** (C++ `dmt/common/dm_grids.hpp`, Python `dmtlib`):
   `generate_dm_grid` spaces trials so a pulse halfway between two keeps
   `1 - max_snr_loss` (default 0.05) of its S/N after the boxcar search,
