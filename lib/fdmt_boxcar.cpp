@@ -32,7 +32,8 @@ public:
          SizeType fuse,
          SizeType chunk,
          SizeType max_memory,
-         std::span<const uint8_t> kill)
+         std::span<const uint8_t> kill,
+         bool estimate_only = false)
         : plan(std::move(plan)),
           config(config),
           exec(exec),
@@ -68,6 +69,8 @@ public:
             .search_nbits        = config.input_nbits,
         };
         cfg.search_only = true;
+        // Candidates are sized, not allocated: only the chosen one is.
+        cfg.defer_allocation = true;
         // The boxcar's own buffers are fixed by plan and config; the FDMT
         // takes its path within the rest of the budget.
         const SizeType fixed = boxcar_bytes(smear, exec);
@@ -102,6 +105,9 @@ public:
                 "max_memory_bytes ({:.2f} GiB)",
                 static_cast<double>(used) / (1 << 30),
                 static_cast<double>(max_memory) / (1 << 30)));
+        }
+        if (!estimate_only) {
+            engine->allocate();
         }
     }
     std::unique_ptr<detail::FDMTBoxcarEngine> make_engine(
@@ -393,6 +399,23 @@ FDMTBoxcar::FDMTBoxcar(plans::FDMTPlan plan,
                                     chunk_nsamps,
                                     max_memory_bytes,
                                     kill_mask)) {}
+FDMTBoxcarMemoryEstimate
+FDMTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
+                            BoxcarConfig config,
+                            bool use_box_smearing,
+                            Exec exec,
+                            SizeType nbeams,
+                            SizeType fuse_levels,
+                            SizeType chunk_nsamps,
+                            SizeType max_memory_bytes,
+                            std::span<const uint8_t> kill_mask) {
+    const Impl impl(plan, config, use_box_smearing, exec, nbeams, fuse_levels,
+                    chunk_nsamps, max_memory_bytes, kill_mask,
+                    /*estimate_only=*/true);
+    return {.usage        = impl.engine->memory_usage(),
+            .chunk_nsamps = impl.engine->chunk_nsamps(),
+            .host_staging = impl.engine->host_staging_bytes()};
+}
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;
 FDMTBoxcar& FDMTBoxcar::operator=(FDMTBoxcar&&) noexcept = default;

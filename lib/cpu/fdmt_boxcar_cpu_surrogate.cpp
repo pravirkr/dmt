@@ -44,7 +44,8 @@ void FDMTBoxcarCpuEngine::init_surrogate(bool use_box_smearing) {
             m_surrogate_plan    = kadane::make_kadane_surrogate_plan(
                 m_planes.front().widths, m_config.use_trapezoid, n_rows,
                 all_raw_thresh, all_inv_sigma, m_integer_means, m_integer_unit);
-            m_tile_u32.resize(static_cast<SizeType>(m_threads) * kGateTile);
+            m_deferred.resize(m_tile_u32,
+                              static_cast<SizeType>(m_threads) * kGateTile);
         } else {
             m_surrogate_int_u32 = false;
             populate_row_int_m1();
@@ -57,21 +58,21 @@ void FDMTBoxcarCpuEngine::init_surrogate(bool use_box_smearing) {
     const SizeType np   = m_surrogate_plan.num_passes;
     const SizeType rs   = m_surrogate_plan.row_stride;
     const SizeType rows = m_beams * n_rows;
-    m_surrogate_c.assign(m_beams * np * rs, 0.0F);
+    m_deferred.assign(m_surrogate_c, m_beams * np * rs, 0.0F);
     if (m_surrogate_plan.has_decimated) {
-        m_surrogate_dec.assign(m_beams * rs, 0.0F);
+        m_deferred.assign(m_surrogate_dec, m_beams * rs, 0.0F);
     }
-    m_surrogate_rows.resize(rows);
-    m_surrogate_open.assign(rows, uint8_t{0});
-    m_surrogate_pos.assign(rows, uint64_t{0});
-    m_tile_f32.resize(static_cast<SizeType>(m_threads) * kadane::kBatchRows *
-                      kGateTile);
-    m_surrogate_chk_c.resize(static_cast<SizeType>(m_threads) * np *
-                             kadane::kBatchRows);
-    m_surrogate_chk_dec.resize(static_cast<SizeType>(m_threads) *
-                               kadane::kBatchRows);
-    m_surrogate_lb.resize(static_cast<SizeType>(m_threads) *
-                          (m_surrogate_carry_ring - 1));
+    m_deferred.resize(m_surrogate_rows, rows);
+    m_deferred.assign(m_surrogate_open, rows, uint8_t{0});
+    m_deferred.assign(m_surrogate_pos, rows, uint64_t{0});
+    m_deferred.resize(m_tile_f32, static_cast<SizeType>(m_threads) *
+                                      kadane::kBatchRows * kGateTile);
+    m_deferred.resize(m_surrogate_chk_c, static_cast<SizeType>(m_threads) * np *
+                                             kadane::kBatchRows);
+    m_deferred.resize(m_surrogate_chk_dec,
+                      static_cast<SizeType>(m_threads) * kadane::kBatchRows);
+    m_deferred.resize(m_surrogate_lb, static_cast<SizeType>(m_threads) *
+                                          (m_surrogate_carry_ring - 1));
 }
 
 void FDMTBoxcarCpuEngine::emit_surrogate_raw(SizeType row,

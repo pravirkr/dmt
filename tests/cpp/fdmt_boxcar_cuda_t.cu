@@ -1064,3 +1064,48 @@ TEST_CASE("GPU host-memory calls stage one block outside the budget",
         CHECK(fdmt.get_memory_usage().total() == after.total());
     }
 }
+
+TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
+          "[boxcar][gpu][budget]") {
+    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const SizeType big = algorithms::kFDMTDefaultMaxMemory;
+    for (const auto& c : estimate_cases()) {
+        INFO(c.name << " beams " << c.beams);
+        const auto e = FDMTBoxcar::estimate_memory(
+            c.plan, c.config, true, gpu, c.beams, algorithms::kFDMTAutoFuse,
+            c.chunk, c.budget, c.kill);
+        FDMTBoxcar f(c.plan, c.config, true, gpu, c.beams,
+                     algorithms::kFDMTAutoFuse, c.chunk, c.budget, c.kill);
+        check_estimate(e, f);
+        CHECK(e.usage.budgeted() <= c.budget);
+        if (c.chunk != 0) {
+            CHECK(e.chunk_nsamps == c.chunk);
+        }
+        if (c.budget < big) {
+            CHECK(e.chunk_nsamps < c.plan.get_nsamps());
+        }
+        // The first host call adds exactly host_staging.
+        const SizeType rows = c.beams * c.plan.get_nchans();
+        const auto total    = f.get_memory_usage().total();
+        if (c.config.input_nbits == 32) {
+            std::vector<float> in(rows * c.plan.get_nsamps());
+            (void)f.execute(std::span<const float>(in));
+        } else {
+            std::vector<uint8_t> in(rows * c.plan.get_nsamps(), 127);
+            (void)f.execute(std::span<const uint8_t>(in));
+        }
+        CHECK(e.host_staging > 0);
+        CHECK(f.get_memory_usage().total() == total + e.host_staging);
+    }
+    SECTION("nothing is allocated") {
+        // A 2^40-candidate store (tens of TB) on the device and host: sized,
+        // never allocated (an allocation would throw).
+        const auto cases   = estimate_cases();
+        BoxcarConfig cfg   = cases.front().config;
+        cfg.max_candidates = SizeType{1} << 40;
+        const auto e       = FDMTBoxcar::estimate_memory(
+            cases.front().plan, cfg, true, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+            SIZE_MAX / 2);
+        CHECK(e.usage.candidates >= cfg.max_candidates * sizeof(RawCandidate));
+    }
+}

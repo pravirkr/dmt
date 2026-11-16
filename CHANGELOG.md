@@ -14,6 +14,10 @@ All notable changes to `dmt` are listed here. The format follows
   `chunk_nsamps`, and on a GPU the `host_staging` bytes the first host-memory
   call adds, all computed without allocating. A GPU backend reads the
   device's limits but allocates no device memory.
+- **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
+  `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
+  `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the
+  first host-memory call on a GPU), computed without allocating.
 - **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
   dedispersed channels: level-0 boxes cover the residual intra-channel sweep
   at the trial DM, centred on each channel's arrival, in `FDMT`,
@@ -56,6 +60,12 @@ All notable changes to `dmt` are listed here. The format follows
   chunk: on a GPU the budget search sizes candidate engines without
   allocating them (it could briefly hold more than `max_memory_bytes`), and
   on the CPU the budget is checked before allocating.
+- `FDMTBoxcar` construction likewise sizes the engines it tries for a chunk
+  and allocates only the one it keeps; on the CPU the budget is checked
+  before allocating.
+- GPU `FDMTBoxcar` with a kill mask allocates the transform's per-row flags
+  (one byte per beam and channel) at construction instead of on the first
+  call, so `get_memory_usage()` includes them from the start.
 - **CPU boxcar default Stage-1 screen (`BoxcarScreenMode::kAuto`)**: CPU
   `FDMTBoxcar` and `FDMTFFTBoxcar` now default to `kKadane`, a lossless
   multi-bucket SIMD Kadane tile gate with exact `kPrefix` candidate parity

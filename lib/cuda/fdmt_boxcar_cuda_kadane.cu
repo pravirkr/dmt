@@ -926,20 +926,14 @@ void FDMTBoxcarCudaEngine::init_kadane(bool use_box_smearing,
         m_kadane_icut_d  = m_kadane_plan.icut;
         m_kadane_ic_d.resize(tasks * nb, 0);
         if (m_any_edge_lag) {
-            m_lag_i32_d.resize(tasks * nb);
-            gpu_utils::check_gpu_call(cudaMemset(
-                raw(m_lag_i32_d), 0,
-                m_lag_i32_d.size() * sizeof(kadane::LagWindow<int32_t>)));
+            m_lag_i32_d.resize_zeroed(tasks * nb);
         }
     } else {
         m_kadane_bias_d = m_kadane_plan.bias;
         m_kadane_cut_d  = m_kadane_plan.cut;
         m_kadane_fc_d.resize(tasks * nb, 0.0F);
         if (m_any_edge_lag) {
-            m_lag_f32_d.resize(tasks * nb);
-            gpu_utils::check_gpu_call(cudaMemset(
-                raw(m_lag_f32_d), 0,
-                m_lag_f32_d.size() * sizeof(kadane::LagWindow<float>)));
+            m_lag_f32_d.resize_zeroed(tasks * nb);
         }
     }
 }

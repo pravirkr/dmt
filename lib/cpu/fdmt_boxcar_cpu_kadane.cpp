@@ -139,7 +139,7 @@ void FDMTBoxcarCpuEngine::init_kadane(bool use_box_smearing) {
     const SizeType nb   = m_kadane_plan.num_buckets;
     const SizeType rs   = m_kadane_plan.row_stride;
     const SizeType rows = m_beams * n_rows;
-    m_open.assign(rows, uint8_t{0});
+    m_deferred.assign(m_open, rows, uint8_t{0});
     m_any_edge_lag = false;
     for (SizeType k = 0; k < nb; ++k) {
         if (m_kadane_plan.max_edge_lag[k] > 0U) {
@@ -147,18 +147,18 @@ void FDMTBoxcarCpuEngine::init_kadane(bool use_box_smearing) {
         }
     }
     if (m_kadane_int32) {
-        m_kadane_ic.assign(m_beams * nb * rs, int32_t{0});
-        m_tile_u32.resize(static_cast<SizeType>(m_threads) *
-                          kadane::kBatchRows * kGateTile);
+        m_deferred.assign(m_kadane_ic, m_beams * nb * rs, int32_t{0});
+        m_deferred.resize(m_tile_u32, static_cast<SizeType>(m_threads) *
+                                          kadane::kBatchRows * kGateTile);
         if (m_any_edge_lag) {
-            m_lag_i32.resize(rows * nb);
+            m_deferred.resize(m_lag_i32, rows * nb);
         }
     } else {
-        m_kadane_fc.assign(m_beams * nb * rs, 0.0F);
-        m_tile_f32.resize(static_cast<SizeType>(m_threads) *
-                          kadane::kBatchRows * kGateTile);
+        m_deferred.assign(m_kadane_fc, m_beams * nb * rs, 0.0F);
+        m_deferred.resize(m_tile_f32, static_cast<SizeType>(m_threads) *
+                                          kadane::kBatchRows * kGateTile);
         if (m_any_edge_lag) {
-            m_lag_f32.resize(rows * nb);
+            m_deferred.resize(m_lag_f32, rows * nb);
         }
     }
 }

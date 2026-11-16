@@ -96,6 +96,7 @@ public:
         m_inner->search(in, nbits, sink, stream);
     }
     void reset(Stream stream) override { m_inner->reset(stream); }
+    void allocate() override { m_inner->allocate(); }
     bool set_search_keep(const uint8_t* keep) override {
         return m_inner->set_search_keep(keep);
     }

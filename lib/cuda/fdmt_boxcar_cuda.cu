@@ -384,6 +384,10 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
           int_search_fits_u32(plan, cfg.use_box_smearing, config.input_nbits)) {
     m_shared_limit = cfg.boxcar_shared_limit;
     gpu_utils::set_device(m_device);
+    // Deferred: the device buffers below are sized, not allocated, until
+    // allocate().
+    const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_deferred
+                                                           : nullptr);
     if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
         m_rows.size() > SIZE_MAX / m_beams / m_peak_count ||
         m_rows.size() * m_beams > static_cast<SizeType>(INT32_MAX)) {
@@ -395,6 +399,11 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     // FDMT reads killed rows as zero itself (one byte per row); other
     // drivers read a staging copy with the rows zeroed.
     m_keep_in_transform = m_driver->set_search_keep(nullptr);
+    if (!m_kill_runs.empty() && m_keep_in_transform) {
+        // The transform's row flags (one byte per beam and channel), filled
+        // by the first call.
+        m_keep_d.resize(m_beams * plan.get_nchans());
+    }
     if (!m_kill_runs.empty() && !m_keep_in_transform) {
         // The staging block the killed rows are zeroed in.
         if (config.input_nbits == 32) {
@@ -508,6 +517,42 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     m_oldest_d.resize(1, UINT64_MAX);
     m_oldest_h.reserve(1);
     *m_oldest_h.data() = UINT64_MAX;
+    m_allocated        = !cfg.defer_allocation;
+}
+
+void FDMTBoxcarCudaEngine::allocate() {
+    if (m_allocated) {
+        return;
+    }
+    gpu_utils::set_device(m_device);
+    const auto planned = memory_usage();
+    m_driver->allocate();
+    m_deferred.materialize();
+    const auto got = memory_usage();
+    if (got.total() != planned.total() || got.history != planned.history ||
+        got.peaks != planned.peaks || got.workspace != planned.workspace ||
+        got.candidates != planned.candidates ||
+        got.staging != planned.staging || got.host != planned.host) {
+        throw std::logic_error(
+            "FDMTBoxcar (cuda): allocation differs from the planned sizes");
+    }
+    gpu_utils::check_last_gpu_error("FDMTBoxcar (cuda): allocation failed");
+    m_allocated = true;
+}
+
+SizeType FDMTBoxcarCudaEngine::host_staging_bytes() const noexcept {
+    // execute(host span) sizes m_input_d (float) or m_packed_input (packed)
+    // to the block.
+    const SizeType rows = m_beams * m_plan.get_nchans();
+    if (m_config.input_nbits == 32) {
+        const SizeType need = rows * m_plan.get_nsamps();
+        return need > m_input_d.size()
+                   ? (need - m_input_d.size()) * sizeof(float)
+                   : 0;
+    }
+    const SizeType need = rows * bit_pack_utils::packed_row_bytes(
+                                     m_plan.get_nsamps(), m_config.input_nbits);
+    return need > m_packed_input.size() ? need - m_packed_input.size() : 0;
 }
 
 FDMTBoxcarCudaEngine::~FDMTBoxcarCudaEngine() {

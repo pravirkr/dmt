@@ -380,6 +380,8 @@ public:
         throw std::invalid_argument("boxcar search: packed input unsupported");
     }
     virtual void reset(Stream) = 0;
+    /// FDMTEngine::allocate(): the transform's deferred buffers.
+    virtual void allocate() = 0;
     /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
     /// transform itself, without a staging copy. False where unsupported.
     virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
@@ -428,9 +430,18 @@ public:
     virtual CandidateResultView copy_result(Stream)               = 0;
     virtual void reset_history(Stream)                            = 0;
     virtual FDMTBoxcarMemoryUsage memory_usage() const noexcept   = 0;
-    virtual SizeType chunk_nsamps() const noexcept                = 0;
-    virtual SizeType fuse_levels() const noexcept                 = 0;
-    virtual std::string search_path() const                       = 0;
+    /// Allocates what a construction with
+    /// FDMTEngineConfig::defer_allocation planned (the transform's too);
+    /// memory_usage() is unchanged. A no-op once allocated.
+    virtual void allocate() = 0;
+    /// Device bytes the first host-memory execute() adds (the staging block
+    /// of the input); 0 on the CPU.
+    [[nodiscard]] virtual SizeType host_staging_bytes() const noexcept {
+        return 0;
+    }
+    virtual SizeType chunk_nsamps() const noexcept = 0;
+    virtual SizeType fuse_levels() const noexcept  = 0;
+    virtual std::string search_path() const        = 0;
     /// drain(): endpoints at or after `stop` are not searched (UINT64_MAX:
     /// none); reset_history() clears it.
     virtual void set_search_stop(uint64_t stop) noexcept = 0;

@@ -46,6 +46,9 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
                        : 1),
       m_driver(std::move(driver)),
       m_kill_runs(std::move(kill_runs)) {
+    // Deferred: the buffers below are sized, not allocated, until
+    // allocate().
+    m_deferred.defer(cfg.defer_allocation);
     if (!m_kill_runs.empty()) {
         m_killed.assign(plan.get_nchans(), 0);
         for (const auto& [c0, c1] : m_kill_runs) {
@@ -53,11 +56,13 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
                       m_killed.begin() + static_cast<std::ptrdiff_t>(c1), 1);
         }
         if (config.input_nbits == 32) {
-            m_masked.resize(m_beams * plan.get_nchans() * plan.get_nsamps());
+            m_deferred.resize(m_masked,
+                              m_beams * plan.get_nchans() * plan.get_nsamps());
         } else {
-            m_masked_packed.resize(m_beams * plan.get_nchans() *
-                                   bit_pack_utils::packed_row_bytes(
-                                       plan.get_nsamps(), config.input_nbits));
+            m_deferred.resize(m_masked_packed,
+                              m_beams * plan.get_nchans() *
+                                  bit_pack_utils::packed_row_bytes(
+                                      plan.get_nsamps(), config.input_nbits));
         }
     }
     const SizeType carry_ring =
@@ -81,22 +86,22 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
         int_search_fits_u32(plan, cfg.use_box_smearing, config.input_nbits);
     if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate ||
         config.input_nbits == 32) {
-        m_carry.resize(rows * carry_ring);
+        m_deferred.resize(m_carry, rows * carry_ring);
     } else if (m_carry32) {
-        m_integer_carry32.resize(rows * m_width);
+        m_deferred.resize(m_integer_carry32, rows * m_width);
     } else {
-        m_integer_carry.resize(rows * m_width);
+        m_deferred.resize(m_integer_carry, rows * m_width);
     }
-    m_peaks.resize(rows * m_peak_count);
-    m_per_dm.resize(rows);
-    m_candidates.resize(config.max_candidates);
+    m_deferred.resize(m_peaks, rows * m_peak_count);
+    m_deferred.resize(m_per_dm, rows);
+    m_deferred.resize(m_candidates, config.max_candidates);
     if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
         // Each row's brightest max_cands_per_dm of the call (a heap).
         m_keep_q = config.max_cands_per_dm;
         if (m_keep_q > 0 && rows > SIZE_MAX / m_keep_q) {
             throw std::invalid_argument("FDMTBoxcar: keep-store size overflow");
         }
-        m_keep.resize(rows * m_keep_q);
+        m_deferred.resize(m_keep, rows * m_keep_q);
     }
     if (config.screen_mode != BoxcarScreenMode::kKadaneSurrogate) {
         m_kadane_exact_prefix_cap = std::min<SizeType>(
@@ -109,13 +114,16 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
                 : m_tile;
         m_prefix_stride = m_width + pref_tile + 1;
         if (config.input_nbits == 32) {
-            m_prefix.resize(static_cast<SizeType>(m_threads) * m_prefix_stride);
+            m_deferred.resize(m_prefix, static_cast<SizeType>(m_threads) *
+                                            m_prefix_stride);
         } else {
-            m_integer_prefix.resize(static_cast<SizeType>(m_threads) *
-                                    m_prefix_stride);
+            m_deferred.resize(m_integer_prefix,
+                              static_cast<SizeType>(m_threads) *
+                                  m_prefix_stride);
         }
-        m_best.resize(static_cast<SizeType>(m_threads) * m_tile);
-        m_best_filter.resize(static_cast<SizeType>(m_threads) * m_tile);
+        m_deferred.resize(m_best, static_cast<SizeType>(m_threads) * m_tile);
+        m_deferred.resize(m_best_filter,
+                          static_cast<SizeType>(m_threads) * m_tile);
     }
     if (config.screen_mode == BoxcarScreenMode::kPrefix) {
         make_screen_groups(planes.front().widths);
@@ -152,6 +160,25 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
     } else if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
         init_surrogate(cfg.use_box_smearing);
     }
+    m_allocated = !cfg.defer_allocation;
+}
+
+void FDMTBoxcarCpuEngine::allocate() {
+    if (m_allocated) {
+        return;
+    }
+    const auto planned = memory_usage();
+    m_driver->allocate();
+    m_deferred.materialize();
+    const auto got = memory_usage();
+    if (got.total() != planned.total() || got.history != planned.history ||
+        got.peaks != planned.peaks || got.workspace != planned.workspace ||
+        got.candidates != planned.candidates ||
+        got.staging != planned.staging) {
+        throw std::logic_error(
+            "FDMTBoxcar (cpu): allocation differs from the planned sizes");
+    }
+    m_allocated = true;
 }
 
 CandidateResultView
@@ -263,7 +290,7 @@ uint64_t FDMTBoxcarCpuEngine::open_begin_min() const noexcept {
 SizeType FDMTBoxcarCpuEngine::block_noise_bytes() const noexcept {
     // The staging block (when the constructor mask has none) and the
     // per-thread screen thresholds of tiles that mix tables.
-    const SizeType staging = m_masked.empty()
+    const SizeType staging = m_deferred.size(m_masked) == 0
                                  ? m_beams * m_plan.get_nchans() *
                                        m_plan.get_nsamps() * sizeof(float)
                                  : 0;
@@ -453,39 +480,47 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
                        sizeof(float));
     }
     const SizeType kadane_hist =
-        ((m_kadane_fc.size() + m_surrogate_c.size() + m_surrogate_dec.size()) *
+        ((m_deferred.size(m_kadane_fc) + m_deferred.size(m_surrogate_c) +
+          m_deferred.size(m_surrogate_dec)) *
          sizeof(float)) +
-        (m_kadane_ic.size() * sizeof(int32_t)) +
-        (m_lag_f32.size() * sizeof(LagWindow<float>)) +
-        (m_lag_i32.size() * sizeof(LagWindow<int32_t>)) +
-        ((m_open.size() + m_surrogate_open.size()) * sizeof(uint8_t)) +
-        (m_surrogate_rows.size() * sizeof(kadane::KadaneSurrogateRowState)) +
-        (m_surrogate_pos.size() * sizeof(uint64_t));
+        (m_deferred.size(m_kadane_ic) * sizeof(int32_t)) +
+        (m_deferred.size(m_lag_f32) * sizeof(LagWindow<float>)) +
+        (m_deferred.size(m_lag_i32) * sizeof(LagWindow<int32_t>)) +
+        ((m_deferred.size(m_open) + m_deferred.size(m_surrogate_open)) *
+         sizeof(uint8_t)) +
+        (m_deferred.size(m_surrogate_rows) *
+         sizeof(kadane::KadaneSurrogateRowState)) +
+        (m_deferred.size(m_surrogate_pos) * sizeof(uint64_t));
     const SizeType kadane_work =
-        ((m_tile_f32.size() + m_thread_cuts.size() + m_surrogate_chk_c.size() +
-          m_surrogate_chk_dec.size() + m_surrogate_lb.size()) *
+        ((m_deferred.size(m_tile_f32) + m_thread_cuts.size() +
+          m_deferred.size(m_surrogate_chk_c) +
+          m_deferred.size(m_surrogate_chk_dec) +
+          m_deferred.size(m_surrogate_lb)) *
          sizeof(float)) +
-        (m_tile_u32.size() * sizeof(uint32_t));
+        (m_deferred.size(m_tile_u32) * sizeof(uint32_t));
     return {
-        .plan    = fdmt.plan + plan_bytes,
-        .state   = fdmt.state,
-        .history = fdmt.history + (m_carry.size() * sizeof(float)) +
-                   (m_integer_carry.size() * sizeof(uint64_t)) +
-                   (m_integer_carry32.size() * sizeof(uint32_t)) + kadane_hist,
-        .peaks   = m_peaks.size() * sizeof(BoxcarPeak),
+        .plan      = fdmt.plan + plan_bytes,
+        .state     = fdmt.state,
+        .history   = fdmt.history + (m_deferred.size(m_carry) * sizeof(float)) +
+                     (m_deferred.size(m_integer_carry) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_integer_carry32) * sizeof(uint32_t)) +
+                     kadane_hist,
+        .peaks     = m_deferred.size(m_peaks) * sizeof(BoxcarPeak),
         .workspace = fdmt.workspace +
-                     ((m_prefix.size() + m_integer_means.size() +
+                     ((m_deferred.size(m_prefix) + m_integer_means.size() +
                        m_integer_scales.size() + m_range_min.size() +
                        m_group_thresh.size()) *
                       sizeof(double)) +
-                     (m_integer_prefix.size() * sizeof(uint64_t)) +
-                     (m_best.size() * sizeof(float)) +
-                     (m_best_filter.size() * sizeof(uint32_t)) +
-                     (m_per_dm.size() * sizeof(uint64_t)) +
+                     (m_deferred.size(m_integer_prefix) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_best) * sizeof(float)) +
+                     (m_deferred.size(m_best_filter) * sizeof(uint32_t)) +
+                     (m_deferred.size(m_per_dm) * sizeof(uint64_t)) +
                      (m_screen_thr.size() * sizeof(float)) + kadane_work,
         .candidates =
-            (m_candidates.size() + m_keep.size()) * sizeof(RawCandidate),
-        .staging = (m_masked.size() * sizeof(float)) + m_masked_packed.size()};
+            (m_deferred.size(m_candidates) + m_deferred.size(m_keep)) *
+            sizeof(RawCandidate),
+        .staging = (m_deferred.size(m_masked) * sizeof(float)) +
+                   m_deferred.size(m_masked_packed)};
 }
 
 SizeType FDMTBoxcarCpuEngine::chunk_nsamps() const noexcept {

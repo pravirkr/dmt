@@ -16,6 +16,7 @@ namespace dmt {
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
 using algorithms::FDMTBoxcar;
+using algorithms::FDMTBoxcarMemoryEstimate;
 using algorithms::FDMTBoxcarMemoryUsage;
 using algorithms::FDMTFFTBoxcar;
 
@@ -177,6 +178,24 @@ void bind_fdmt_boxcar(py::module_& mod) {
             "budgeted", &FDMTBoxcarMemoryUsage::budgeted,
             "The part of total that max_memory_bytes bounds: device memory "
             "on a GPU, everything on the CPU.");
+    py::class_<FDMTBoxcarMemoryEstimate>(mod, "FDMTBoxcarMemoryEstimate", R"doc(
+        What an instance built with the same arguments would allocate, from
+        :meth:`FDMTBoxcar.estimate_memory` (computed without allocating it).
+
+        ``usage`` equals that instance's ``memory_usage``; ``chunk_nsamps``
+        its ``chunk_nsamps``; ``host_staging`` (GPU backends) the device bytes
+        the first host-memory (NumPy) :meth:`FDMTBoxcar.execute` adds outside
+        ``max_memory_bytes`` (the staging block of the input; 0 on the CPU).
+        )doc")
+        .def_readonly("usage", &FDMTBoxcarMemoryEstimate::usage)
+        .def_readonly("chunk_nsamps", &FDMTBoxcarMemoryEstimate::chunk_nsamps)
+        .def_readonly("host_staging", &FDMTBoxcarMemoryEstimate::host_staging)
+        .def("__repr__", [](const FDMTBoxcarMemoryEstimate& e) {
+            return fmt::format(
+                "FDMTBoxcarMemoryEstimate(total={}, chunk_nsamps={}, "
+                "host_staging={})",
+                e.usage.total(), e.chunk_nsamps, e.host_staging);
+        });
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
             "max_width"_a, "wtsp"_a = 2.0F, R"doc(
         Boxcar widths searched for max_boxcar=max_width and this wtsp.
@@ -253,6 +272,36 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "device"_a           = 0,
              "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
              "kill_mask"_a        = py::none())
+        .def_static(
+            "estimate_memory",
+            [](const plans::FDMTPlan& plan, BoxcarConfig config, bool smear,
+               int nthreads, SizeType nbeams, std::optional<SizeType> fuse,
+               std::optional<SizeType> chunk, std::string_view backend,
+               int device, SizeType max_memory_bytes, const py::object& kill) {
+                const auto mask = extract_kill_mask(kill);
+                return FDMTBoxcar::estimate_memory(
+                    plan, config, smear, make_exec(backend, nthreads, device),
+                    nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
+                    chunk.value_or(0), max_memory_bytes, mask);
+            },
+            "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
+            "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
+            "chunk_nsamps"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
+            "device"_a           = 0,
+            "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+            "kill_mask"_a        = py::none(),
+            R"doc(
+            Memory an ``FDMTBoxcar`` built with the same arguments would
+            allocate, and its chunk, without allocating it
+            (:class:`FDMTBoxcarMemoryEstimate`).
+
+            Exact: the constructor's decisions and tables are computed and
+            every working buffer is sized, not allocated. Raises as the
+            constructor would when nothing fits ``max_memory_bytes``. GPU
+            backends read the device's limits (no device memory is allocated;
+            the CUDA context is not counted). Per-call kill masks add their
+            noise tables on first use (not included).
+            )doc")
         .def(
             "execute",
             [](FDMTBoxcar& search, const py::array& input,

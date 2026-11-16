@@ -1039,3 +1039,57 @@ def test_screen_modes_gpu_matches_cpu(
             np.testing.assert_allclose(result[name], expected[name], rtol=2e-5)
         else:
             np.testing.assert_array_equal(result[name], expected[name])
+
+
+def _boxcar_usage(u: dmtlib.FDMTBoxcarMemoryUsage) -> tuple:
+    return (
+        u.plan,
+        u.state,
+        u.history,
+        u.peaks,
+        u.workspace,
+        u.candidates,
+        u.staging,
+        u.host,
+    )
+
+
+def _check_boxcar_estimate(backend: str) -> None:
+    """FDMTBoxcar.estimate_memory equals the built instance."""
+    plan = FDMTPlan(1000.0, 1500.0, 128, 2048, 0.001, 200)
+    kill = np.ones(plan.nchans, dtype=bool)
+    kill[10:20] = False
+    for kwargs in (
+        {},
+        {"nbeams": 2, "kill_mask": kill},
+        {"chunk_nsamps": 256},
+    ):
+        est = FDMTBoxcar.estimate_memory(plan, config(), backend=backend, **kwargs)
+        search = FDMTBoxcar(plan, config(), backend=backend, **kwargs)
+        assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
+        assert est.chunk_nsamps == search.chunk_nsamps
+        assert (est.host_staging == 0) == (backend == "cpu")
+        assert "FDMTBoxcarMemoryEstimate(" in repr(est)
+
+    big = FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
+    budget = 70 << 20
+    est = FDMTBoxcar.estimate_memory(
+        big, config(), backend=backend, max_memory_bytes=budget
+    )
+    search = FDMTBoxcar(big, config(), backend=backend, max_memory_bytes=budget)
+    assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
+    assert est.chunk_nsamps == search.chunk_nsamps < big.nsamps
+    assert est.usage.budgeted <= budget
+
+    with pytest.raises(ValueError, match="max_memory_bytes"):
+        FDMTBoxcar.estimate_memory(
+            plan, config(), backend=backend, max_memory_bytes=1024
+        )
+
+
+def test_estimate_memory_matches_instance_cpu() -> None:
+    _check_boxcar_estimate("cpu")
+
+
+def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
+    _check_boxcar_estimate(gpu_backend)

@@ -15,6 +15,7 @@
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/kadane_cuda.cuh"
@@ -475,6 +476,8 @@ public:
     void drop_block_noise() noexcept override;
     void reset_history(Stream queue) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
+    void allocate() override;
+    [[nodiscard]] SizeType host_staging_bytes() const noexcept override;
     [[nodiscard]] FDMTBoxcarMemoryUsage memory_usage() const noexcept override;
     [[nodiscard]] SizeType chunk_nsamps() const noexcept override;
     [[nodiscard]] std::string search_path() const override;
@@ -651,23 +654,23 @@ private:
     /// brighter() ranks, the selection state and histogram (0: kDropNew).
     SizeType m_bright_q  = 0;
     bool m_bright_select = false;
-    thrust::device_vector<BoxcarKeepEntry> m_bright_d;
-    thrust::device_vector<uint32_t> m_bright_rank_d;
-    thrust::device_vector<KeepSelect> m_bright_sel_d;
-    thrust::device_vector<uint64_t> m_bright_hist_d;
+    gpu_utils::PlannedVector<BoxcarKeepEntry> m_bright_d;
+    gpu_utils::PlannedVector<uint32_t> m_bright_rank_d;
+    gpu_utils::PlannedVector<KeepSelect> m_bright_sel_d;
+    gpu_utils::PlannedVector<uint64_t> m_bright_hist_d;
     /// One byte per input row (beam, channel), for m_keep_runs.
-    thrust::device_vector<uint8_t> m_keep_d;
+    gpu_utils::PlannedVector<uint8_t> m_keep_d;
     std::vector<uint8_t> m_keep_h;
     std::vector<std::pair<SizeType, SizeType>> m_keep_runs;
     std::vector<LevelGroup> m_level_groups;
-    thrust::device_vector<BoxcarRow> m_rows_d;
-    thrust::device_vector<uint32_t> m_widths_d;
-    thrust::device_vector<float> m_thresholds_d, m_scales_d, m_carry_d,
+    gpu_utils::PlannedVector<BoxcarRow> m_rows_d;
+    gpu_utils::PlannedVector<uint32_t> m_widths_d;
+    gpu_utils::PlannedVector<float> m_thresholds_d, m_scales_d, m_carry_d,
         m_input_d;
-    thrust::device_vector<uint64_t> m_integer_carry, m_integer_thresholds;
-    thrust::device_vector<uint32_t> m_integer_carry32;
-    thrust::device_vector<double> m_integer_means;
-    thrust::device_vector<uint8_t> m_packed_input;
+    gpu_utils::PlannedVector<uint64_t> m_integer_carry, m_integer_thresholds;
+    gpu_utils::PlannedVector<uint32_t> m_integer_carry32;
+    gpu_utils::PlannedVector<double> m_integer_means;
+    gpu_utils::PlannedVector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
     int m_block_threads   = 256;
     // FDMTEngineConfig::boxcar_shared_limit (0: the device's opt-in limit).
@@ -680,20 +683,20 @@ private:
     // T), reused by each batch of a launch.
     bool m_global_ring    = false;
     SizeType m_ring_batch = 0;
-    thrust::device_vector<uint64_t> m_ring_d;
-    thrust::device_vector<BoxcarScreenGroup> m_screen_groups_d;
-    thrust::device_vector<float> m_screen_thresholds_d;
-    thrust::device_vector<float> m_screen_m1_d; ///< packed: mean per sample
+    gpu_utils::PlannedVector<uint64_t> m_ring_d;
+    gpu_utils::PlannedVector<BoxcarScreenGroup> m_screen_groups_d;
+    gpu_utils::PlannedVector<float> m_screen_thresholds_d;
+    gpu_utils::PlannedVector<float> m_screen_m1_d; ///< packed: mean per sample
     SizeType m_screen_offset = 0;
     uint32_t m_mask          = 0;
     bool m_shared_tables     = false;
     SizeType m_smem          = 0;
-    thrust::device_vector<BoxcarPeak> m_peaks_d;
-    thrust::device_vector<uint8_t> m_open_d; ///< any peak open, per task
-    thrust::device_vector<uint64_t> m_per_dm_d, m_slots_d;
-    thrust::device_vector<CandidateCounts> m_counts_d;
-    thrust::device_vector<RawCandidate> m_candidates_d;
-    std::vector<RawCandidate> m_candidates_h;
+    gpu_utils::PlannedVector<BoxcarPeak> m_peaks_d;
+    gpu_utils::PlannedVector<uint8_t> m_open_d; ///< any peak open, per task
+    gpu_utils::PlannedVector<uint64_t> m_per_dm_d, m_slots_d;
+    gpu_utils::PlannedVector<CandidateCounts> m_counts_d;
+    gpu_utils::PlannedVector<RawCandidate> m_candidates_d;
+    planned::PlannedHostVector<RawCandidate> m_candidates_h;
     CandidateCounts m_counts_h{};
     gpu_utils::DeviceWorkFence m_work;
     uint64_t m_position       = 0;
@@ -701,7 +704,7 @@ private:
     uint64_t m_result_begin   = 0;
     SizeType m_result_samples = 0;
     SizeType m_group_offset   = 0;
-    thrust::device_vector<uint64_t> m_oldest_d; ///< candidate frontier
+    gpu_utils::PlannedVector<uint64_t> m_oldest_d; ///< candidate frontier
     gpu_host::PinnedBuffer<uint64_t> m_oldest_h;
     // Per-call kill masks: off until the first one.
     bool m_noise_on = false;
@@ -712,7 +715,7 @@ private:
     std::optional<BlockNoise> m_prev_evicted;
     bool m_commit_open = false;
     std::vector<std::unique_ptr<TableSlot>> m_slots;
-    thrust::device_vector<uint64_t> m_support_d;
+    gpu_utils::PlannedVector<uint64_t> m_support_d;
     BlockTables m_block_tables{};
     BlockTables m_prev_block_tables{};
 
@@ -720,31 +723,36 @@ private:
     kadane::KadaneGatePlan m_kadane_plan;
     bool m_kadane_int32 = false;
     bool m_any_edge_lag = false;
-    thrust::device_vector<float> m_kadane_bias_d;
-    thrust::device_vector<float> m_kadane_cut_d;
-    thrust::device_vector<int32_t> m_kadane_ibias_d;
-    thrust::device_vector<int32_t> m_kadane_icut_d;
-    thrust::device_vector<uint8_t> m_kadane_disabled_d;
-    thrust::device_vector<double> m_row_int_m1_d;
-    thrust::device_vector<float> m_kadane_fc_d;
-    thrust::device_vector<int32_t> m_kadane_ic_d;
-    thrust::device_vector<kadane::LagWindow<float>> m_lag_f32_d;
-    thrust::device_vector<kadane::LagWindow<int32_t>> m_lag_i32_d;
+    gpu_utils::PlannedVector<float> m_kadane_bias_d;
+    gpu_utils::PlannedVector<float> m_kadane_cut_d;
+    gpu_utils::PlannedVector<int32_t> m_kadane_ibias_d;
+    gpu_utils::PlannedVector<int32_t> m_kadane_icut_d;
+    gpu_utils::PlannedVector<uint8_t> m_kadane_disabled_d;
+    gpu_utils::PlannedVector<double> m_row_int_m1_d;
+    gpu_utils::PlannedVector<float> m_kadane_fc_d;
+    gpu_utils::PlannedVector<int32_t> m_kadane_ic_d;
+    gpu_utils::PlannedVector<kadane::LagWindow<float>> m_lag_f32_d;
+    gpu_utils::PlannedVector<kadane::LagWindow<int32_t>> m_lag_i32_d;
 
     // --- Standalone surrogate (`kKadaneSurrogate`) plan & device state ---
     kadane::KadaneSurrogatePlan m_surrogate_plan;
     bool m_surrogate_int_u32 = false;
-    thrust::device_vector<float> m_surr_bias_d;
-    thrust::device_vector<float> m_surr_trig_d;
-    thrust::device_vector<float> m_surr_box_inv_d;
-    thrust::device_vector<double> m_surr_mean1_d;
-    thrust::device_vector<uint8_t> m_surr_disabled_d;
-    thrust::device_vector<uint32_t> m_surr_nearest_d;
-    thrust::device_vector<uint32_t> m_surr_blo_d;
-    thrust::device_vector<uint32_t> m_surr_bhi_d;
-    thrust::device_vector<float> m_surr_lerp_d;
-    thrust::device_vector<kadane::KadaneSurrogateRowState> m_surrogate_rows_d;
-    thrust::device_vector<uint64_t> m_surrogate_pos_d;
+    gpu_utils::PlannedVector<float> m_surr_bias_d;
+    gpu_utils::PlannedVector<float> m_surr_trig_d;
+    gpu_utils::PlannedVector<float> m_surr_box_inv_d;
+    gpu_utils::PlannedVector<double> m_surr_mean1_d;
+    gpu_utils::PlannedVector<uint8_t> m_surr_disabled_d;
+    gpu_utils::PlannedVector<uint32_t> m_surr_nearest_d;
+    gpu_utils::PlannedVector<uint32_t> m_surr_blo_d;
+    gpu_utils::PlannedVector<uint32_t> m_surr_bhi_d;
+    gpu_utils::PlannedVector<float> m_surr_lerp_d;
+    gpu_utils::PlannedVector<kadane::KadaneSurrogateRowState>
+        m_surrogate_rows_d;
+    gpu_utils::PlannedVector<uint64_t> m_surrogate_pos_d;
+    /// Buffers a deferred construction left for allocate() (declared last:
+    /// destroyed first, after nothing else refers to it).
+    gpu_utils::PendingList m_deferred;
+    bool m_allocated = false;
 };
 
 } // namespace dmt::algorithms::detail::fdmt_boxcar_cuda

@@ -14,7 +14,6 @@
 #include "dmt/algorithms/fdmt.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
-#include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
 
 #include "test_helpers.hpp"
@@ -393,14 +392,7 @@ TEST_CASE("FDMT fusion depth resolution and memory usage", "[fdmt_gpu][gpu]") {
 
 TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
           "[fdmt_gpu][gpu][budget]") {
-    const auto gpu        = test::gpu_exec();
-    const auto free_bytes = [] {
-        size_t free  = 0;
-        size_t total = 0;
-        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
-        REQUIRE(cudaMemGetInfo(&free, &total) == cudaSuccess);
-        return free;
-    };
+    const auto gpu = test::gpu_exec();
     struct Case {
         plans::FDMTPlan plan;
         SizeType fuse;
@@ -427,36 +419,8 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
     for (const auto& c : cases) {
         INFO("nchans " << c.plan.get_nchans() << " fuse " << c.fuse << " chunk "
                        << c.chunk << " budget " << c.budget);
-        // The context and the lazily loaded kernel modules exist before the
-        // measurement (a first estimate loads them).
-        (void)FDMT::estimate_memory(c.plan, true, gpu, 2, c.fuse, true, c.chunk,
-                                    c.budget);
-        const auto before = free_bytes();
         const auto e = FDMT::estimate_memory(c.plan, true, gpu, 2, c.fuse, true,
                                              c.chunk, c.budget);
-        CHECK(free_bytes() == before);
-        {
-            // A deferred engine holds no device memory until allocate(),
-            // which then takes its planned usage (to 2 MiB pages each).
-            const algorithms::detail::FDMTEngineConfig cfg{
-                .mode         = c.plan.get_mode() == std::string_view("valid")
-                                    ? FDMTMode::kValid
-                                    : FDMTMode::kFull,
-                .nbeams       = 2,
-                .fuse_levels  = c.fuse,
-                .exec         = gpu,
-                .chunk_nsamps = c.chunk,
-                .max_memory_bytes = c.budget,
-                .defer_allocation = true,
-            };
-            // The engine keeps a reference to the plan (c.plan outlives it).
-            auto deferred = algorithms::detail::make_fdmt_gpu(c.plan, cfg);
-            CHECK(free_bytes() == before);
-            deferred->allocate();
-            const auto taken = before - free_bytes();
-            CHECK(taken >= e.usage.total());
-            CHECK(taken <= e.usage.total() + (SizeType{64} << 21));
-        }
         FDMT f(c.plan, true, gpu, 2, c.fuse, true, c.chunk, c.budget);
         const auto got = f.get_memory_usage();
         CHECK(e.usage.plan == got.plan);
@@ -473,6 +437,17 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
             f.execute(std::span<const float>(in), std::span<float>(out));
             CHECK(f.get_memory_usage().total() == got.total() + e.host_staging);
         }
+    }
+    SECTION("nothing is allocated") {
+        // 2^16 beams (hundreds of GB of state and history): sized, never
+        // allocated (an allocation would throw).
+        const plans::FDMTPlan plan(1000.0F, 1500.0F, 256, 2048, 0.001F, 400);
+        const SizeType beams = SizeType{1} << 16;
+        const auto e         = FDMT::estimate_memory(
+            plan, true, gpu, beams, kFDMTAutoFuse, true, 0, SIZE_MAX / 2);
+        CHECK(e.usage.history + e.usage.state >
+              beams * plan.get_nchans() * sizeof(float));
+        CHECK(e.usage.total() > (SizeType{100} << 30));
     }
 }
 

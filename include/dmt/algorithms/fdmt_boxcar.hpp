@@ -34,6 +34,21 @@ struct FDMTBoxcarMemoryUsage {
 };
 
 /**
+ * @brief What an FDMTBoxcar built with the same arguments would allocate,
+ * without allocating it (FDMTBoxcar::estimate_memory()).
+ */
+struct FDMTBoxcarMemoryEstimate {
+    /// Equal to get_memory_usage() of that instance after construction.
+    FDMTBoxcarMemoryUsage usage;
+    /// Its get_chunk_nsamps().
+    SizeType chunk_nsamps{0};
+    /// GPU backends: device bytes the first host-memory execute() adds (the
+    /// staging block of the input), outside the budget; device-memory calls
+    /// never allocate it. 0 on the CPU.
+    SizeType host_staging{0};
+};
+
+/**
  * @brief Streaming valid-mode FDMT followed by analytical boxcar detection.
  *
  * Input is finite float32, (nbeams, nchans, nsamps), low frequency first,
@@ -130,6 +145,26 @@ public:
                         SizeType chunk_nsamps     = 0,
                         SizeType max_memory_bytes = kFDMTDefaultMaxMemory,
                         std::span<const uint8_t> kill_mask = {});
+    /**
+     * @brief Memory an instance built with these arguments would allocate,
+     * and its chunk, computed without allocating it: the constructor's
+     * decisions and tables, with every working buffer sized but not
+     * allocated (exact: the constructor allocates exactly these sizes).
+     * Throws as the constructor would when nothing fits max_memory_bytes.
+     * A GPU backend needs the device but allocates no device memory; the
+     * CUDA context is not counted (nor in get_memory_usage()). Per-call
+     * kill masks add their noise tables on first use (not included).
+     */
+    [[nodiscard]] static FDMTBoxcarMemoryEstimate
+    estimate_memory(const plans::FDMTPlan& plan,
+                    BoxcarConfig config                = {},
+                    bool use_box_smearing              = true,
+                    Exec exec                          = {},
+                    SizeType nbeams                    = 1,
+                    SizeType fuse_levels               = kFDMTAutoFuse,
+                    SizeType chunk_nsamps              = 0,
+                    SizeType max_memory_bytes          = kFDMTDefaultMaxMemory,
+                    std::span<const uint8_t> kill_mask = {});
     ~FDMTBoxcar();
     FDMTBoxcar(FDMTBoxcar&&) noexcept;
     FDMTBoxcar& operator=(FDMTBoxcar&&) noexcept;
