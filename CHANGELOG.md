@@ -81,6 +81,10 @@ All notable changes to `dmt` are listed here. The format follows
     UWL with fine DM grids).
 - A per-call kill mask whose call throws no longer leaves its noise tables
   in the stream history.
+- The `FDMT` docs no longer say that `execute()` never allocates: on a GPU
+  the first host-memory call allocates device copies of the input block and
+  output plane outside `max_memory_bytes`, as `FDMTBoxcar` and
+  `FDMTFFTBoxcar` already document for the input block.
 
 ## [0.8.0] - 2026-11-11
 

@@ -67,10 +67,11 @@ inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
 inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
 
 /**
- * @brief Memory an FDMT engine allocates at construction, in bytes (host
- * memory on the CPU backend, device memory on a GPU backend). execute()
- * allocates nothing further; the caller provides the input and the `output`
- * bytes of output buffer per call.
+ * @brief Memory an FDMT engine allocates, in bytes (host memory on the CPU
+ * backend, device memory on a GPU backend). Apart from the GPU staging of
+ * host-memory calls (in `workspace` once the first one allocates it),
+ * everything is allocated at construction; the caller provides the input
+ * and the `output` bytes of output buffer per call.
  */
 struct FDMTMemoryUsage {
     SizeType plan;      ///< Plan tables (coordinate DAG, sub-band grids)
@@ -105,12 +106,15 @@ struct FDMTMemoryUsage {
  * - Output: always float32, (nbeams, ndms, dmt_nsamps): pass at least
  *   nbeams * plan.get_dmt_size() floats. The engine owns all its working
  *   state; the output buffer is only written.
- * - Construct once per plan: the constructor allocates everything, and
- *   execute() allocates nothing. In mode "valid", call execute() on
- *   contiguous, non-overlapping blocks to get a contiguous output stream.
+ * - Construct once per plan: the constructor allocates the working state,
+ *   and device-memory execute() allocates nothing. In mode "valid", call
+ *   execute() on contiguous, non-overlapping blocks to get a contiguous
+ *   output stream.
  * - Host memory (`std::span`) works on every backend; a GPU backend stages
- *   it through device buffers allocated on the first host call and blocks
- *   until the result is on the host. Device memory (`DeviceSpan`) works on
+ *   it through device buffers for the whole input block and output plane,
+ *   allocated on the first host call outside max_memory_bytes (reported in
+ *   get_memory_usage().workspace once allocated), and blocks until the
+ *   result is on the host. Device memory (`DeviceSpan`) works on
  *   GPU backends only (the CPU backend throws std::invalid_argument) and is
  *   asynchronous on the given Stream.
  */
@@ -227,8 +231,10 @@ public:
      * that fits (on parkes_uwl faster than the tree path on both backends).
      * Throws std::invalid_argument when no path fits.
      *
-     * All working memory is allocated here (see get_memory_usage()); execute()
-     * performs no allocation.
+     * All working memory is allocated here (see get_memory_usage()). The
+     * only later allocation is the GPU staging of host-memory calls (the
+     * input block and output plane, on the first host execute() or reset()),
+     * which is outside this budget; device-memory calls never need it.
      */
     FDMT(float f_min,
          float f_max,
@@ -439,9 +445,9 @@ public:
     [[nodiscard]] SizeType get_chunk_nsamps() const noexcept;
 
     /**
-     * @brief Memory allocated at construction (host bytes on the CPU
-     * backend, device bytes on a GPU backend), plus the output buffer size
-     * each execute() call needs.
+     * @brief Memory allocated (host bytes on the CPU backend, device bytes
+     * on a GPU backend; GPU host-call staging once allocated), plus the
+     * output buffer size each execute() call needs.
      */
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
 

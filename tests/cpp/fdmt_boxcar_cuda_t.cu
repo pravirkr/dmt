@@ -995,3 +995,72 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
         compare_near_threshold(actual, expected, cfg.detect_thresh);
     }
 }
+
+TEST_CASE("GPU host-memory calls stage one block outside the budget",
+          "[gpu][boxcar][budget]") {
+    // The documented contract: on a GPU the first host-memory call
+    // allocates a device copy of the whole input block (and, for FDMT, of
+    // the output plane), outside max_memory_bytes; later calls reuse it and
+    // device-memory calls never allocate it.
+    const plans::FDMTPlan plan(1200.0F, 1500.0F, 64, 2048, 0.000256F, 200);
+    const SizeType beams = 2;
+    const SizeType block =
+        beams * plan.get_nchans() * plan.get_nsamps() * sizeof(float);
+    const auto input = waterfalls(plan, beams, 2);
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 16;
+
+    SECTION("FDMTBoxcar") {
+        FDMTBoxcar search(plan, cfg, true, exec, beams);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        (void)search.execute(std::span<const float>(input[0]));
+        const auto after = search.get_memory_usage();
+        CHECK(after.staging == block);
+        CHECK(after.budgeted() == before.budgeted() + block);
+        (void)search.execute(std::span<const float>(input[1]));
+        CHECK(search.get_memory_usage().budgeted() == after.budgeted());
+
+        FDMTBoxcar dev(plan, cfg, true, exec, beams);
+        const thrust::device_vector<float> buf(input[0].begin(),
+                                               input[0].end());
+        (void)dev.execute(
+            DeviceSpan<const float>(thrust::raw_pointer_cast(buf.data()),
+                                    buf.size(), {exec.backend, 0}));
+        (void)dev.copy_result();
+        CHECK(dev.get_memory_usage().staging == 0);
+    }
+    SECTION("FDMTBoxcar, packed 8-bit input") {
+        cfg.input_nbits = 8;
+        cfg.input_mean  = 2.0F;
+        FDMTBoxcar search(plan, cfg, true, exec, beams);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        const std::vector<uint8_t> packed(block / sizeof(float), 2);
+        (void)search.execute(std::span<const uint8_t>(packed));
+        const auto after = search.get_memory_usage();
+        CHECK(after.staging == packed.size());
+        CHECK(after.budgeted() == before.budgeted() + packed.size());
+    }
+    SECTION("FDMTFFTBoxcar") {
+        algorithms::FDMTFFTBoxcar search(plan, cfg, true, exec, beams);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        (void)search.execute(std::span<const float>(input[0]));
+        const auto after = search.get_memory_usage();
+        CHECK(after.staging == block);
+        CHECK(after.budgeted() == before.budgeted() + block);
+    }
+    SECTION("FDMT") {
+        FDMT fdmt(plan, true, exec, beams);
+        const auto before = fdmt.get_memory_usage();
+        std::vector<float> out(beams * plan.get_dmt_size());
+        fdmt.execute(std::span<const float>(input[0]), std::span<float>(out));
+        const auto after = fdmt.get_memory_usage();
+        CHECK(after.workspace ==
+              before.workspace + block + (out.size() * sizeof(float)));
+        fdmt.execute(std::span<const float>(input[1]), std::span<float>(out));
+        CHECK(fdmt.get_memory_usage().total() == after.total());
+    }
+}
