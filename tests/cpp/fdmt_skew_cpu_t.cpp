@@ -744,6 +744,55 @@ std::vector<std::vector<uint8_t>> changing_masks(SizeType nchans,
     return masks;
 }
 
+// drain() through the engine's zero blocks (no input block read, staged
+// or allocated) against drain() through host zero blocks pushed through
+// execute(): the same candidates, bit for bit, and no memory added.
+void check_zero_drain(const plans::FDMTPlan& plan,
+                      Exec exec,
+                      bool packed,
+                      SizeType leaf,
+                      const std::vector<std::vector<uint8_t>>* masks) {
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    const SizeType blocks = masks != nullptr ? masks->size() : 3;
+    const auto planes     = algorithms::detail::make_boxcar_plans(
+        plan, skew_search_test::search_config(packed), true);
+    const auto run = [&](bool zero) {
+        return run_subband_search(plan, exec, true, packed, blocks, 1024, leaf,
+                                  true, masks, 1.5F, &planes, SIZE_MAX, nullptr,
+                                  nullptr, zero);
+    };
+    const auto fresh = run(true);
+    const auto ref   = run(false);
+    REQUIRE(fresh.latency > 0);
+    REQUIRE(fresh.zero_blocks);
+    REQUIRE(fresh.searched == blocks * plan.get_nsamps());
+    REQUIRE(ref.searched == fresh.searched);
+    require_same_before(fresh.candidates, ref.candidates, UINT64_MAX);
+    CHECK(fresh.usage_after.total() == fresh.usage_before.total());
+    CHECK(fresh.usage_after.staging == fresh.usage_before.staging);
+}
+
+TEST_CASE("FDMTBoxcar skewed path: drain() pads without an input block",
+          "[fdmt_cpu][cpu][skew][boxcar][drain]") {
+    for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
+        const auto plan  = make_plan(kCryopafLband, 4096, 400.0F, depth);
+        const auto masks = changing_masks(plan.get_nchans(), 4);
+        for (const bool packed : {false, true}) {
+            for (const bool masked : {false, true}) {
+                if (packed && masked) {
+                    continue; // per-call masks need float input
+                }
+                DYNAMIC_SECTION("depth " << depth << " packed " << packed
+                                         << " masked " << masked) {
+                    check_zero_drain(plan, Exec::cpu(4), packed, packed ? 2 : 1,
+                                     masked ? &masks : nullptr);
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("FDMTBoxcar skewed path: per-call masks match the tree",
           "[fdmt_cpu][cpu][skew][boxcar][mask]") {
     // Lagged rows search endpoints of the previous block (and its
@@ -1045,6 +1094,27 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: drain() searches the lagged tail",
             }
             require_same_before(gpu.candidates, cpu.candidates, UINT64_MAX,
                                 packed ? 0.0F : 2e-5F);
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar (gpu) windowed top: drain() pads without an input "
+          "block",
+          "[fdmt_cuda][cuda][gpu][skew][boxcar][drain]") {
+    for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
+        const auto plan  = make_plan(kCryopafLband, 4096, 600.0F, depth);
+        const auto masks = changing_masks(plan.get_nchans(), 4);
+        for (const bool packed : {false, true}) {
+            for (const bool masked : {false, true}) {
+                if (packed && masked) {
+                    continue; // per-call masks need float input
+                }
+                DYNAMIC_SECTION("depth " << depth << " packed " << packed
+                                         << " masked " << masked) {
+                    check_zero_drain(plan, Exec::cuda(0), packed, 0,
+                                     masked ? &masks : nullptr);
+                }
+            }
         }
     }
 }

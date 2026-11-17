@@ -67,6 +67,8 @@ public:
     CandidateDeviceResultView flush_device(Stream stream) override;
     CandidateResultView copy_result(Stream stream) override;
     CandidateResultView flush() override;
+    [[nodiscard]] bool zero_blocks() const noexcept override;
+    CandidateResultView execute_zero() override;
     void set_search_stop(uint64_t stop) noexcept override;
     [[nodiscard]] uint64_t stream_position() const noexcept override;
     [[nodiscard]] uint64_t search_latency() const noexcept override;

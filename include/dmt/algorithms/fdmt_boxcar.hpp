@@ -196,6 +196,9 @@ public:
      * get_search_latency() samples are never searched. Endpoints after
      * the last sample are not searched; the padding pushed through the
      * transform does not change the rows before it (the FDMT is causal).
+     * The padding reads, stages and allocates no input block (on a GPU,
+     * device input never needs host memory or the host-input staging), so
+     * get_memory_usage() stays at its estimate.
      * A host call: after device calls, synchronize their stream first. It
      * ends the stream: execute() throws until reset_history().
      */

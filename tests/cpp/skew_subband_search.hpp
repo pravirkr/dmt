@@ -35,8 +35,12 @@ namespace dmt::skew_search_test {
 struct SearchRun {
     std::vector<RawCandidate> candidates;
     std::string path;
-    uint64_t latency{0};  ///< search_latency() of the engine
-    uint64_t searched{0}; ///< searched samples at the end (drain: all)
+    uint64_t latency{0};     ///< search_latency() of the engine
+    uint64_t searched{0};    ///< searched samples at the end (drain: all)
+    bool zero_blocks{false}; ///< the engine's zero_blocks()
+    /// memory_usage() before and after flush() / drain().
+    algorithms::FDMTBoxcarMemoryUsage usage_before{};
+    algorithms::FDMTBoxcarMemoryUsage usage_after{};
 };
 
 /// Integer-valued input (exact on every path): float samples v - 128 for
@@ -100,6 +104,13 @@ public:
     bool set_search_keep(const uint8_t* keep) override {
         return m_inner->set_search_keep(keep);
     }
+    [[nodiscard]] bool search_zero_supported() const noexcept override {
+        return m_inner->search_zero_supported();
+    }
+    void search_zero(algorithms::detail::FDMTSearchSink& sink) override {
+        trip();
+        m_inner->search_zero(sink);
+    }
     [[nodiscard]] algorithms::FDMTMemoryUsage memory() const noexcept override {
         return m_inner->memory();
     }
@@ -139,7 +150,8 @@ private:
 /// drop_block_noise() must leave the stream as if it never happened.
 /// `box_in`: the boxcar configuration instead of search_config(); with
 /// `per_call`, each call's candidates are appended there (and overflow is
-/// allowed).
+/// allowed). `zero_drain` false: drain() pushes host zero blocks through
+/// execute() (the reference for the zero-block drain).
 inline SearchRun run_subband_search(
     const plans::FDMTPlan& plan,
     Exec exec,
@@ -154,7 +166,8 @@ inline SearchRun run_subband_search(
     const std::vector<plans::BoxcarPlanePlan>* planes_in = nullptr,
     SizeType fail_at                                     = SIZE_MAX,
     const BoxcarConfig* box_in                           = nullptr,
-    std::vector<std::vector<RawCandidate>>* per_call     = nullptr) {
+    std::vector<std::vector<RawCandidate>>* per_call     = nullptr,
+    bool zero_drain                                      = true) {
     using namespace algorithms::detail; // NOLINT
     const auto box = box_in != nullptr ? *box_in : search_config(packed, wtsp);
     const auto planes =
@@ -266,17 +279,20 @@ inline SearchRun run_subband_search(
         add(packed ? engine->execute(std::span<const uint8_t>(blk.packed))
                    : engine->execute(std::span<const float>(blk.values)));
     }
-    run.latency = engine->search_latency();
+    run.latency      = engine->search_latency();
+    run.zero_blocks  = engine->zero_blocks();
+    run.usage_before = engine->memory_usage();
     if (drain) {
         DrainState state;
-        add(drain_stream(*engine, plan, 1, packed ? 8 : 32, run.latency,
-                         state));
+        add(drain_stream(*engine, plan, 1, packed ? 8 : 32, run.latency, state,
+                         zero_drain));
         run.searched = searched_nsamps(*engine, state, run.latency);
     } else {
         add(engine->flush());
         const uint64_t pos = engine->stream_position();
         run.searched       = pos > run.latency ? pos - run.latency : 0;
     }
+    run.usage_after = engine->memory_usage();
     return run;
 }
 

@@ -76,6 +76,14 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- `FDMTBoxcar::drain()` (Python `drain`) no longer builds a zero block of
+  the whole input in host memory (and, on a GPU, a device staging block)
+  to search the samples behind the search latency: it searches them without
+  any input block, so memory stays at `get_memory_usage()` and its estimate
+  through the end of the stream. Candidates are unchanged. On a GPU, a
+  subband search (plan `subband_depth` > 0) now reserves one byte per beam
+  and channel for this in `get_memory_usage().staging` (and in
+  `estimate_memory()`). `FDMTFFTBoxcar::drain()` is unchanged.
 - `FDMT` construction no longer allocates while it chooses its path and
   chunk: on a GPU the budget search sizes candidate engines without
   allocating them (it could briefly hold more than `max_memory_bytes`), and

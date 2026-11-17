@@ -385,6 +385,13 @@ public:
     /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
     /// transform itself, without a staging copy. False where unsupported.
     virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
+    /// FDMTEngine::execute_search_zero(): host search of one all-zero block.
+    [[nodiscard]] virtual bool search_zero_supported() const noexcept {
+        return false;
+    }
+    virtual void search_zero(FDMTSearchSink& /*unused*/) {
+        throw std::logic_error("boxcar search: no zero-block search here");
+    }
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
@@ -434,6 +441,14 @@ public:
     /// FDMTEngineConfig::defer_allocation planned (the transform's too);
     /// memory_usage() is unchanged. A no-op once allocated.
     virtual void allocate() = 0;
+    /// drain() padding: one block of zero input, searched without reading,
+    /// staging or allocating an input block (a host call; candidates as
+    /// execute() on zeros), where zero_blocks(). Otherwise drain() pushes a
+    /// zero block through the host execute().
+    [[nodiscard]] virtual bool zero_blocks() const noexcept { return false; }
+    virtual CandidateResultView execute_zero() {
+        throw std::logic_error("FDMTBoxcar: no zero-block execute here");
+    }
     /// Device bytes the first host-memory execute() adds (the staging block
     /// of the input); 0 on the CPU.
     [[nodiscard]] virtual SizeType host_staging_bytes() const noexcept {

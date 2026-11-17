@@ -227,7 +227,10 @@ TEST_CASE("GPU FDMTBoxcar per-call masks: memory is accounted",
     (void)search.execute(span);
     (void)search.copy_result();
     const auto before = search.get_memory_usage();
-    CHECK(before.staging == 0);
+    // A subband search reserves the keep bytes (one per channel) for
+    // drain()'s zero blocks from the start; the first mask reuses them.
+    REQUIRE(plan.get_subband_depth() > 0);
+    CHECK(before.staging == plan.get_nchans());
     const auto mask = gpu_random_mask(32, 3, 0.3);
     (void)search.execute(span, std::span<const uint8_t>(mask));
     (void)search.copy_result();

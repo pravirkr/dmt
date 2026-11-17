@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -140,6 +141,16 @@ public:
     /// queued kernels, so they must stay valid until those complete.
     /// Returns false (and ignores `keep`) where unsupported.
     virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
+    /// Host search of one all-zero input block of the search bit depth
+    /// (FDMTBoxcar::drain() padding) without reading or staging one, where
+    /// search_zero_supported(); the result equals execute_search() on such a
+    /// block.
+    [[nodiscard]] virtual bool search_zero_supported() const noexcept {
+        return false;
+    }
+    virtual void execute_search_zero(FDMTSearchSink& /*unused*/) {
+        throw std::logic_error("FDMT search: no zero-block search here");
+    }
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,

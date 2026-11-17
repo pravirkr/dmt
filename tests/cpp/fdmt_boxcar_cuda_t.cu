@@ -1151,3 +1151,103 @@ TEST_CASE("Device allocation errors nest by cause", "[gpu][budget]") {
     const std::string needs = "this configuration needs";
     CHECK(what.find(needs) == what.rfind(needs));
 }
+
+TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
+          "[gpu][boxcar][drain][memory]") {
+    // A subband search on the windowed (skewed) top has a search latency, so
+    // drain() pads the stream. Driven by device spans only, the instance
+    // never exceeds its estimate, drain() included, and finds what a
+    // host-driven instance finds.
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
+    const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 4096, tsamp, grid,
+                               "valid", 2);
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    constexpr SizeType kBlocks = 3;
+    const SizeType n           = plan.get_nchans() * plan.get_nsamps();
+    std::vector<std::vector<uint8_t>> bytes(kBlocks);
+    std::vector<std::vector<float>> values(kBlocks);
+    std::mt19937 gen(4242);
+    std::uniform_int_distribution<int> dist(0, 255);
+    for (SizeType b = 0; b < kBlocks; ++b) {
+        bytes[b].resize(n);
+        values[b].resize(n);
+        for (SizeType i = 0; i < n; ++i) {
+            bytes[b][i]  = static_cast<uint8_t>(dist(gen));
+            values[b][i] = static_cast<float>(bytes[b][i]) - 128.0F;
+        }
+    }
+    for (const bool packed : {false, true}) {
+        DYNAMIC_SECTION("packed " << packed) {
+            const BoxcarConfig cfg(
+                24, 1.5F, 4.2F, 73.9F, PeakFindingMode::kContiguousPeakPerWidth,
+                1U << 20, 0, true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
+            // The windowed top replaces the tree when the tree histories
+            // exceed the budget: try budgets around their size.
+            const SizeType hist =
+                (plan.get_history_size() + plan.get_tree_history_size()) *
+                sizeof(float);
+            SizeType budget  = 0;
+            uint64_t latency = 0;
+            for (const SizeType tenths : {10, 9, 8}) {
+                try {
+                    FDMTBoxcar probe(plan, cfg, true, exec, 1,
+                                     algorithms::kFDMTAutoFuse, 0,
+                                     hist * tenths / 10);
+                    if (probe.get_search_latency() > 0) {
+                        budget  = hist * tenths / 10;
+                        latency = probe.get_search_latency();
+                        break;
+                    }
+                } catch (const std::invalid_argument&) {
+                }
+            }
+            INFO("history " << hist << " B");
+            // Several blocks of padding.
+            REQUIRE(latency > plan.get_nsamps());
+            const auto est = FDMTBoxcar::estimate_memory(
+                plan, cfg, true, exec, 1, algorithms::kFDMTAutoFuse, 0, budget);
+            FDMTBoxcar device(plan, cfg, true, exec, 1,
+                              algorithms::kFDMTAutoFuse, 0, budget);
+            FDMTBoxcar host(plan, cfg, true, exec, 1, algorithms::kFDMTAutoFuse,
+                            0, budget);
+            INFO(device.summary());
+            REQUIRE(device.get_search_latency() == latency);
+            REQUIRE(device.get_memory_usage().total() == est.usage.total());
+            thrust::device_vector<float> fbuf(n);
+            thrust::device_vector<uint8_t> pbuf(n);
+            std::vector<RawCandidate> got;
+            std::vector<RawCandidate> want;
+            for (SizeType b = 0; b < kBlocks; ++b) {
+                if (packed) {
+                    thrust::copy(bytes[b].begin(), bytes[b].end(),
+                                 pbuf.begin());
+                    (void)device.execute(DeviceSpan<const uint8_t>(
+                        thrust::raw_pointer_cast(pbuf.data()), n,
+                        {exec.backend, 0}));
+                    append(want,
+                           host.execute(std::span<const uint8_t>(bytes[b])));
+                } else {
+                    thrust::copy(values[b].begin(), values[b].end(),
+                                 fbuf.begin());
+                    (void)device.execute(DeviceSpan<const float>(
+                        thrust::raw_pointer_cast(fbuf.data()), n,
+                        {exec.backend, 0}));
+                    append(want,
+                           host.execute(std::span<const float>(values[b])));
+                }
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
+                append(got, device.copy_result());
+                CHECK(device.get_memory_usage().total() == est.usage.total());
+            }
+            append(got, device.drain());
+            append(want, host.drain());
+            CHECK(device.get_memory_usage().total() == est.usage.total());
+            CHECK(device.get_memory_usage().staging == est.usage.staging);
+            CHECK(device.get_searched_nsamps() == kBlocks * plan.get_nsamps());
+            REQUIRE(want.size() > 100);
+            compare(got, want);
+        }
+    }
+}

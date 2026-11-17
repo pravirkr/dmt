@@ -264,6 +264,17 @@ public:
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_skew ? m_skew->max_emit_lag() : 0;
     }
+    /// Only the skewed path has a search latency, hence drain() padding.
+    [[nodiscard]] bool search_zero_supported() const noexcept override {
+        return m_skew != nullptr;
+    }
+    void execute_search_zero(detail::FDMTSearchSink& sink) override {
+        if (!m_skew) {
+            throw std::logic_error(
+                "FDMT: zero-block search needs the skewed path");
+        }
+        m_skew->execute_search_zero(sink);
+    }
     [[nodiscard]] std::string search_path() const override {
         if (m_skew) {
             return fmt::format(

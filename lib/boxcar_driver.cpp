@@ -37,6 +37,12 @@ public:
     bool set_search_keep(const uint8_t* keep) override {
         return m_fdmt->set_search_keep(keep);
     }
+    [[nodiscard]] bool search_zero_supported() const noexcept override {
+        return m_fdmt->search_zero_supported();
+    }
+    void search_zero(FDMTSearchSink& sink) override {
+        m_fdmt->execute_search_zero(sink);
+    }
     [[nodiscard]] FDMTMemoryUsage memory() const noexcept override {
         return m_fdmt->get_memory_usage();
     }

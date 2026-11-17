@@ -399,9 +399,12 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     // FDMT reads killed rows as zero itself (one byte per row); other
     // drivers read a staging copy with the rows zeroed.
     m_keep_in_transform = m_driver->set_search_keep(nullptr);
-    if (!m_kill_runs.empty() && m_keep_in_transform) {
+    // A subband search may have a search latency, so drain() may pad the
+    // stream: its zero blocks are read as killed rows (execute_zero()).
+    if ((!m_kill_runs.empty() || plan.get_subband_depth() > 0) &&
+        m_keep_in_transform) {
         // The transform's row flags (one byte per beam and channel), filled
-        // by the first call.
+        // by the first call that needs them.
         m_keep_d.resize(m_beams * plan.get_nchans());
     }
     if (!m_kill_runs.empty() && !m_keep_in_transform) {
@@ -666,6 +669,45 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const uint8_t> waterfall,
     update_open_begin(static_cast<cudaStream_t>(queue.native));
     m_work.mark(static_cast<cudaStream_t>(queue.native));
     return device_view();
+}
+
+bool FDMTBoxcarCudaEngine::zero_blocks() const noexcept {
+    return m_keep_in_transform &&
+           m_keep_d.size() == m_beams * m_plan.get_nchans();
+}
+
+CandidateResultView FDMTBoxcarCudaEngine::execute_zero() {
+    if (!zero_blocks()) {
+        throw std::logic_error("FDMTBoxcar (gpu): no zero-block execute");
+    }
+    gpu_utils::set_device(m_device);
+    m_work.wait();
+    // Any valid device address: every row is killed, so the transform reads
+    // no sample of the block (FDMTInputF32/FDMTInputPacked::load).
+    const SizeType rows = m_beams * m_plan.get_nchans();
+    m_zero_block        = true;
+    try {
+        if (m_config.input_nbits == 32) {
+            (void)execute(DeviceSpan<const float>(
+                              reinterpret_cast<const float*>(raw(m_keep_d)),
+                              rows * m_plan.get_nsamps(),
+                              {kGPUBackend, m_device}),
+                          {});
+        } else {
+            (void)execute(
+                DeviceSpan<const uint8_t>(
+                    raw(m_keep_d),
+                    rows * bit_pack_utils::packed_row_bytes(
+                               m_plan.get_nsamps(), m_config.input_nbits),
+                    {kGPUBackend, m_device}),
+                {});
+        }
+    } catch (...) {
+        m_zero_block = false;
+        throw;
+    }
+    m_zero_block = false;
+    return copy_result({});
 }
 
 CandidateResultView FDMTBoxcarCudaEngine::flush() {
@@ -968,6 +1010,13 @@ SizeType FDMTBoxcarCudaEngine::fuse_levels() const noexcept {
 template <typename T>
 DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
     DeviceSpan<const T> block, thrust::device_vector<T>& buffer, Stream queue) {
+    if (m_zero_block) {
+        // Every row killed; the transform never reads the block.
+        const std::vector<std::pair<SizeType, SizeType>> all{
+            {SizeType{0}, m_plan.get_nchans()}};
+        set_keep(all, queue);
+        return block;
+    }
     const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
     if (m_keep_in_transform) {
         set_keep(runs, queue);

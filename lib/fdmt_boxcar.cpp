@@ -174,6 +174,11 @@ public:
         // A kill mask: on the CPU its channels are zeroed in a staging copy
         // of each block; on a GPU the transform reads one byte per row.
         SizeType staging = 0;
+        if (ex.backend != Backend::kCPU && plan.get_subband_depth() > 0) {
+            // The row bytes also serve drain()'s zero blocks (a subband
+            // search may have a search latency).
+            staging = beams * plan.get_nchans();
+        }
         if (!kill_runs.empty()) {
             staging =
                 ex.backend != Backend::kCPU

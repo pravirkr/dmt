@@ -235,6 +235,28 @@ FDMTBoxcarCpuEngine::execute(DeviceSpan<const uint8_t> /*unused*/,
     throw_no_device_memory("FDMTBoxcar::execute", Backend::kCPU);
 }
 
+bool FDMTBoxcarCpuEngine::zero_blocks() const noexcept {
+    return m_driver->search_zero_supported();
+}
+
+CandidateResultView FDMTBoxcarCpuEngine::execute_zero() {
+    if (m_position > UINT64_MAX - m_plan.get_nsamps()) {
+        throw std::overflow_error("FDMTBoxcar: stream sample index overflow");
+    }
+    // As execute() on a zero block: killed rows of zeros are zeros, so the
+    // staging copy is skipped; the noise ring repeats the last tables.
+    if (m_config.input_nbits == 32) {
+        commit_block_noise();
+    }
+    begin_result(m_plan.get_nsamps());
+    m_driver->search_zero(*this);
+    m_commit_open = false;
+    m_position += m_plan.get_nsamps();
+    update_open_begin();
+    finish_result();
+    return view();
+}
+
 CandidateDeviceResultView FDMTBoxcarCpuEngine::flush_device(Stream /*unused*/) {
     throw_no_device_memory("FDMTBoxcar::flush_device", Backend::kCPU);
 }

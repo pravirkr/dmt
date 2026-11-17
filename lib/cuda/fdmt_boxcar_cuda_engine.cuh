@@ -462,6 +462,8 @@ public:
     CandidateDeviceResultView execute(DeviceSpan<const uint8_t> waterfall,
                                       Stream queue) override;
     CandidateResultView flush() override;
+    [[nodiscard]] bool zero_blocks() const noexcept override;
+    CandidateResultView execute_zero() override;
     CandidateDeviceResultView flush_device(Stream queue) override;
     CandidateResultView copy_result(Stream queue) override;
 
@@ -663,6 +665,8 @@ private:
     gpu_utils::PlannedVector<uint8_t> m_keep_d;
     std::vector<uint8_t> m_keep_h;
     std::vector<std::pair<SizeType, SizeType>> m_keep_runs;
+    /// execute_zero(): the block's input reads as zero (every row killed).
+    bool m_zero_block = false;
     std::vector<LevelGroup> m_level_groups;
     gpu_utils::PlannedVector<BoxcarRow> m_rows_d;
     gpu_utils::PlannedVector<uint32_t> m_widths_d;
