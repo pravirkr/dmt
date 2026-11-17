@@ -40,6 +40,8 @@ public:
     [[nodiscard]] SizeType block_nsamps() const noexcept;
     [[nodiscard]] SizeType input_size(SizeType igroup) const;
     [[nodiscard]] SizeType output_size() const noexcept;
+    /// Device bytes of the decode tables (planned while deferred).
+    [[nodiscard]] SizeType memory_bytes() const noexcept;
 
     /**
      * @param groups One device span per subband group, input_size(g) bytes.

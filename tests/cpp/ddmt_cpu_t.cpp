@@ -21,6 +21,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 
+#include "ddmt_estimate_cases.hpp"
 #include "test_random.hpp"
 
 namespace dmt {
@@ -1492,6 +1493,21 @@ TEST_CASE("SDMT reports its backend; unavailable backends throw",
     if (std::ranges::find(backends, Backend::kCUDA) == backends.end()) {
         CHECK_THROWS_AS(SDMT(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cuda(0)),
                         std::invalid_argument);
+    }
+}
+
+TEST_CASE("DDMT and SDMT estimate_memory equal the instance (cpu)",
+          "[ddmt_cpu][cpu][budget]") {
+    ddmt_estimate::check_host(Exec::cpu(2));
+    ddmt_estimate::check_sdmt_differs(Exec::cpu(2));
+    // The estimate allocates nothing: a history of over 2 TB (2^30 beams)
+    // is sized, never allocated (an allocation would throw). Estimate only,
+    // as ASan aborts on allocations that large instead of throwing.
+    const auto big = ddmt_estimate::many_beams(SizeType{1} << 30);
+    for (const bool sdmt : {false, true}) {
+        const auto e = ddmt_estimate::estimate(sdmt, big, Exec::cpu(2));
+        CHECK(e.usage.history > (SizeType{1} << 41));
+        CHECK(e.host_staging == 0);
     }
 }
 

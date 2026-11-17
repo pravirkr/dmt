@@ -20,6 +20,8 @@
 
 namespace dmt {
 using algorithms::DDMT;
+using algorithms::DDMTMemoryEstimate;
+using algorithms::DDMTMemoryUsage;
 using algorithms::SDMT;
 using plans::DDMTPlan;
 using plans::LevinConfig;
@@ -103,9 +105,79 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
              }),
              "plan"_a, "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
              "backend"_a = "cpu", "device"_a = 0);
+    cls.def_static(
+        "estimate_memory",
+        [](const DDMTPlan& plan, SizeType nsamps, int nthreads, SizeType nbeams,
+           SizeType gulp_size, std::string_view backend, int device) {
+            return T::estimate_memory(plan, nsamps,
+                                      make_exec(backend, nthreads, device),
+                                      nbeams, gulp_size);
+        },
+        "plan"_a, "nsamps"_a, "nthreads"_a = 1, "nbeams"_a = 1,
+        "gulp_size"_a = 0, py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
+        R"doc(
+        Memory an instance built from ``plan`` with these arguments (and
+        ``set_gulp_size(gulp_size)``) holds when making calls of ``nsamps``
+        input samples, without allocating it (:class:`DDMTMemoryEstimate`).
+
+        Exact: ``memory_usage`` of such an instance equals ``usage`` plus the
+        staging fields of the kind of call made. On the CPU nothing depends
+        on ``nsamps``; a GPU backend allocates nothing.
+        )doc");
 }
 
 void bind_ddmt(py::module_& mod) {
+    py::class_<DDMTMemoryUsage>(mod, "DDMTMemoryUsage", R"doc(
+        Memory a DDMT or SDMT instance holds, in bytes (host memory on the
+        CPU backend, device memory on a GPU backend; ``pinned`` is host
+        memory and not in ``total``). Plan tables and history are made at
+        construction; on a GPU the staging of host-memory and time-major
+        calls is made by the first such call and kept. Not counted: input
+        and output arrays and per-call temporaries.
+        )doc")
+        .def_readonly("plan", &DDMTMemoryUsage::plan)
+        .def_readonly("history", &DDMTMemoryUsage::history)
+        .def_readonly("staging", &DDMTMemoryUsage::staging)
+        .def_readonly("pinned", &DDMTMemoryUsage::pinned)
+        .def_property_readonly("total", &DDMTMemoryUsage::total)
+        .def("__repr__", [](const DDMTMemoryUsage& m) {
+            return fmt::format("DDMTMemoryUsage(plan={}, history={}, "
+                               "staging={}, pinned={}, total={})",
+                               m.plan, m.history, m.staging, m.pinned,
+                               m.total());
+        });
+
+    py::class_<DDMTMemoryEstimate>(mod, "DDMTMemoryEstimate", R"doc(
+        What a DDMT or SDMT making calls of one length would hold, from
+        ``estimate_memory`` (computed without allocating it).
+
+        ``usage`` equals that instance's ``memory_usage`` after
+        construction, and after any calls on the CPU or with channel-major
+        device arrays on a GPU. On a GPU, host-array calls add
+        ``host_staging`` device and ``host_pinned`` pinned bytes;
+        ``execute_time_major`` with host arrays adds ``time_major_staging``
+        and ``time_major_pinned``, with device arrays
+        ``device_time_major_staging`` (packed plans).
+        )doc")
+        .def_readonly("usage", &DDMTMemoryEstimate::usage)
+        .def_readonly("host_staging", &DDMTMemoryEstimate::host_staging)
+        .def_readonly("host_pinned", &DDMTMemoryEstimate::host_pinned)
+        .def_readonly("time_major_staging",
+                      &DDMTMemoryEstimate::time_major_staging)
+        .def_readonly("time_major_pinned",
+                      &DDMTMemoryEstimate::time_major_pinned)
+        .def_readonly("device_time_major_staging",
+                      &DDMTMemoryEstimate::device_time_major_staging)
+        .def("__repr__", [](const DDMTMemoryEstimate& e) {
+            return fmt::format("DDMTMemoryEstimate(total={}, host_staging={}, "
+                               "host_pinned={}, time_major_staging={}, "
+                               "time_major_pinned={}, "
+                               "device_time_major_staging={})",
+                               e.usage.total(), e.host_staging, e.host_pinned,
+                               e.time_major_staging, e.time_major_pinned,
+                               e.device_time_major_staging);
+        });
+
     py::class_<DDMT> ddmt_cls(mod, "DDMT",
                               R"doc(
         Direct Dispersion Measure Transform (DDMT) incoherent dedispersion.
@@ -190,6 +262,9 @@ void bind_ddmt(py::module_& mod) {
         .def_property_readonly("device", &DDMT::device)
         .def_property_readonly("plan", &DDMT::get_plan)
         .def_property_readonly("nbeams", &DDMT::get_nbeams)
+        .def_property_readonly(
+            "memory_usage", &DDMT::get_memory_usage,
+            "DDMTMemoryUsage: bytes held now (see estimate_memory).")
         .def(
             "execute",
             [](DDMT& ddmt,

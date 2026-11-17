@@ -639,15 +639,17 @@ private:
  * memory on the CPU backend, device memory on a GPU backend).
  */
 struct CohFDMTMemoryUsage {
-    SizeType spectrum;  ///< Unpacked, forward-transformed input block
-    SizeType waterfall; ///< One coarse trial's aligned waterfall
-    SizeType fdmt;      ///< Fine FDMT engine and its output buffer
-    SizeType workspace; ///< Tables and per-thread scratch
-    SizeType output;    ///< Caller-provided result per execute() (not
-                        ///< owned by the engine)
+    SizeType spectrum{0};  ///< Unpacked, forward-transformed input block
+    SizeType waterfall{0}; ///< One coarse trial's aligned waterfall
+    SizeType fdmt{0};      ///< Fine FDMT engine and its output buffer
+    SizeType workspace{0}; ///< Tables and scratch (CPU: per thread); on a GPU
+                           ///< also the cuFFT work areas and the device copies
+                           ///< of a host-memory call's input and result
+    SizeType output{0};    ///< Caller-provided result per execute() (not
+                           ///< owned by the engine)
 
     /// Total allocated by the engine (excludes `output`).
-    [[nodiscard]] SizeType total() const noexcept {
+    [[nodiscard]] constexpr SizeType total() const noexcept {
         return spectrum + waterfall + fdmt + workspace;
     }
 };
@@ -839,7 +841,9 @@ public:
 
     /// @brief Fine FDMT plan shared by all coarse trials
     [[nodiscard]] const FDMTPlan& get_fdmt_plan() const noexcept;
-    /// @brief Estimated engine memory (see CohFDMT::get_memory_usage())
+    /// @brief Rough engine memory from the plan alone: a lower bound
+    /// (omits per-thread scratch, power partials, the fine FDMT's own
+    /// buffers and GPU work areas). CohFDMT::estimate_memory() is exact.
     [[nodiscard]] CohFDMTMemoryUsage get_memory_estimate() const noexcept;
     /// @brief Human-readable summary of the search geometry
     [[nodiscard]] std::string summary() const;

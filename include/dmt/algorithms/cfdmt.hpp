@@ -99,6 +99,18 @@ public:
     [[nodiscard]] plans::CohFDMTMemoryUsage get_memory_usage() const noexcept;
 
     /**
+     * @brief Memory an instance built with these arguments would allocate,
+     * computed without allocating it: equal to that instance's
+     * get_memory_usage() after construction. A GPU backend reads the
+     * device's limits (L2 size, shared memory) but allocates no device
+     * buffers. Not included, as for FDMT: the 64 MiB of pinned host memory
+     * a GPU host-memory execute() takes when the result is 64 MiB or more.
+     * @throws std::invalid_argument as the constructor would.
+     */
+    [[nodiscard]] static plans::CohFDMTMemoryUsage
+    estimate_memory(const CohFDMTConfig& config, Exec exec = {});
+
+    /**
      * @brief Searches one block given as a single span (one subband group).
      *
      * @tparam DataType int8_t or uint8_t; the bytes are decoded per the

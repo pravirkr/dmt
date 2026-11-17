@@ -564,3 +564,31 @@ def test_kill_mask_takes_bool_and_any_integer_dtype() -> None:
         plan.kill_mask = None
     with pytest.raises(ValueError, match="1-D"):
         DDMT(*args, kill_mask=np.ones((2, 2), dtype=np.uint8))
+
+
+def _check_estimate(backend: str) -> None:
+    # After every call of a stream of equal calls, an instance holds the
+    # estimate plus the host-call staging (explicit gulp below the call).
+    for cls in (DDMT, SDMT):
+        for nbits, gulp in ((32, 0), (4, 300)):
+            plan = DDMTPlan(1200.0, 1600.0, 16, 1e-3, 20.0, 0.5, nbits=nbits)
+            est = cls.estimate_memory(plan, 1000, 2, gulp_size=gulp, backend=backend)
+            eng = cls(plan, 2, backend=backend)
+            eng.set_gulp_size(gulp)
+            dtype = np.float32 if nbits == 32 else np.uint8
+            nbytes = 1000 if nbits == 32 else 500
+            args = (np.zeros((16, nbytes), dtype),) + (() if nbits == 32 else (1000,))
+            for _ in range(2):
+                eng.execute(*args)
+                got, want = eng.memory_usage, est.usage
+                assert (got.plan, got.history) == (want.plan, want.history)
+                assert (got.staging, got.pinned) == (est.host_staging, est.host_pinned)
+            assert want.total > 0
+
+
+def test_estimate_memory_matches_instance_cpu() -> None:
+    _check_estimate("cpu")
+
+
+def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
+    _check_estimate(gpu_backend)

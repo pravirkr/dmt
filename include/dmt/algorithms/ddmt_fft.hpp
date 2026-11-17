@@ -48,6 +48,49 @@ struct DDMTFFTOptions {
     SizeType guard{64};
 };
 
+/**
+ * @brief Memory a DDMTFFT instance holds, in bytes: host memory on the CPU
+ * backend, device memory on a GPU backend. Buffers are created by the calls
+ * that need them and kept (see DDMTFFT::estimate_memory()). Not counted: the
+ * caller's input and output, the FFT libraries' plan objects (cuFFT work
+ * areas are counted), per-call temporaries, and on a GPU the 64 MiB pinned
+ * host staging of host-memory calls.
+ */
+struct DDMTFFTMemoryUsage {
+    SizeType plan{0};      ///< Delay and method tables (NUFFT plans)
+    SizeType history{0};   ///< Streaming history (two copies)
+    SizeType transform{0}; ///< Per transform length: channel and DM spectra
+                           ///< (GPU: also rows, NUFFT grids, phase tables and
+                           ///< cuFFT work areas)
+    SizeType workspace{0}; ///< CPU: per-thread rows and scratch
+    SizeType staging{0};   ///< Unpacked input, and on a GPU the device copies
+                           ///< of host input and output, for the calls made
+
+    /// Total held by the instance.
+    [[nodiscard]] constexpr SizeType total() const noexcept {
+        return plan + history + transform + workspace + staging;
+    }
+};
+
+/**
+ * @brief What a DDMTFFT streaming calls of a given length would hold,
+ * without allocating it (DDMTFFT::estimate_memory()).
+ */
+struct DDMTFFTMemoryEstimate {
+    /// get_memory_usage() once a cold stream of calls of that length is warm
+    /// (staging 0: CPU execute(), GPU device-memory execute() of float input).
+    DDMTFFTMemoryUsage usage{};
+    /// Staging such a stream of host-memory execute() calls adds (GPU; 0 on
+    /// the CPU).
+    SizeType host_staging{0};
+    /// Staging such a stream of execute_time_major() calls adds (packed
+    /// plans; 0 for float plans).
+    SizeType time_major_staging{0};
+    /// Staging such a stream of device-memory execute() calls on packed
+    /// input adds (GPU packed plans; 0 otherwise).
+    SizeType device_staging{0};
+};
+
 /// @brief Parses "auto", "brute" or "nufft".
 [[nodiscard]] DDMTFFTMethod parse_ddmt_fft_method(std::string_view name);
 /// @brief Name of a method ("auto", "brute", "nufft").
@@ -134,6 +177,30 @@ public:
                      SizeType nbeams        = 1,
                      DDMTFFTOptions options = {});
 
+    /**
+     * @brief Memory an instance built from @p plan with these arguments
+     * holds once a stream of calls of @p nsamps input samples each is warm,
+     * computed without allocating it.
+     *
+     * Buffers are made by the first calls that need them and kept: each
+     * transform length a call uses adds its spectra (and on a GPU its plans'
+     * tables and work areas), up to four lengths. A stream started cold
+     * (or after reset_history()) uses the steady-state length and, while it
+     * warms up, the lengths of its shorter first outputs; the estimate
+     * counts exactly those. A stream started with load_history() holds no
+     * more. Calls of other lengths hold what their own lengths need.
+     *
+     * Exact: get_memory_usage() of such an instance equals `usage`, plus
+     * the staging field of the calls made. A GPU backend makes its cuFFT
+     * plans (for their work-area sizes) but allocates nothing.
+     */
+    [[nodiscard]] static DDMTFFTMemoryEstimate
+    estimate_memory(const plans::DDMTPlan& plan,
+                    SizeType nsamps,
+                    Exec exec              = {},
+                    SizeType nbeams        = 1,
+                    DDMTFFTOptions options = {});
+
     ~DDMTFFT();
     DDMTFFT(DDMTFFT&&) noexcept;
     DDMTFFT& operator=(DDMTFFT&&) noexcept;
@@ -150,6 +217,8 @@ public:
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;
+    /// @brief Memory held now (see DDMTFFTMemoryUsage, estimate_memory()).
+    [[nodiscard]] DDMTFFTMemoryUsage get_memory_usage() const noexcept;
     /// @brief Options in effect (method resolved: never kAuto).
     [[nodiscard]] DDMTFFTOptions get_options() const noexcept;
     /// @brief How the channel sum runs: "nufft" (one uniform grid),

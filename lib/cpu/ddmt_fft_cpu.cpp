@@ -28,6 +28,7 @@
 #include "dmt/fft.hpp"
 #include "dmt/logging.hpp"
 #include "dmt/nufft.hpp"
+#include "dmt/planned_vector.hpp"
 #include "dmt/simd_math.hpp"
 
 #include "fdmt_fft_cpu_kernels.hpp"
@@ -83,13 +84,17 @@ struct Geometry {
     std::unique_ptr<utils::FFTWRowPlan> r2c;
     std::unique_ptr<utils::FFTWRowPlan> c2r;
 
-    explicit Geometry(SizeType n)
+    // Without plans: sizes only (estimate-only engines).
+    Geometry(SizeType n, bool make_plans)
         : n_fft(n),
           n_bins((n / 2) + 1),
           n_tiles((n_bins + kBins - 1) / kBins),
-          bins_stride(n_tiles * kBins),
-          r2c(std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kR2C, n)),
-          c2r(std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n)) {}
+          bins_stride(n_tiles * kBins) {
+        if (make_plans) {
+            r2c = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kR2C, n);
+            c2r = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n);
+        }
+    }
 };
 
 class DDMTFFTCpuEngine final : public detail::DDMTFFTEngine {
@@ -105,12 +110,13 @@ public:
           m_ndm(m_model.dm.size()),
           m_nact(m_model.active.size()),
           m_ctx(m_model.context()) {
+        m_deferred.defer(cfg.defer_allocation);
         m_seg_n = ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
         if (const auto cap = detail::fft_segment_cap(); cap > 0) {
             m_seg_n = std::min(m_seg_n, cap); // testing hook
         }
-        m_hist.assign(m_nbeams * m_nchans * m_ctx, 0.0F);
-        m_hist_next.assign(m_hist.size(), 0.0F);
+        m_deferred.assign(m_hist, history_state_size(), 0.0F);
+        m_deferred.assign(m_hist_next, history_state_size(), 0.0F);
         reset_history();
         m_ws.resize(static_cast<SizeType>(m_nthreads));
         logging::debug("DDMTFFT cpu: method={} ndm={} active chans={} "
@@ -141,6 +147,7 @@ public:
         }
         logging::debug("DDMTFFT cpu: {} NUFFT run(s), {} brute-force trials",
                        m_runs.size(), m_brute_dms.size());
+        size_thread_scratch();
     }
 
     // ---- streaming model ----
@@ -170,6 +177,59 @@ public:
     }
     [[nodiscard]] std::string_view method_used() const noexcept override {
         return detail::ddmt_fft_method_used(m_runs.size(), m_brute_dms.size());
+    }
+
+    [[nodiscard]] DDMTFFTMemoryUsage memory_usage() const noexcept override {
+        SizeType plan =
+            (m_model.dm.size() + m_model.rate.size()) * sizeof(double) +
+            (m_model.active.size() + m_brute_dms.size()) *
+                sizeof(std::uint32_t);
+        for (const auto& [n, p] : m_plans) {
+            plan += p->memory_bytes();
+        }
+        SizeType work = 0;
+        for (const auto& w : m_ws) {
+            work += (m_deferred.size(w.time) + m_deferred.size(w.acc) +
+                     m_deferred.size(w.turns) + m_deferred.size(w.ph_re) +
+                     m_deferred.size(w.ph_im)) *
+                        sizeof(float) +
+                    (m_deferred.size(w.batch) + m_deferred.size(w.nufft)) *
+                        sizeof(ComplexType);
+        }
+        return {.plan = plan,
+                .history =
+                    (m_deferred.size(m_hist) + m_deferred.size(m_hist_next)) *
+                    sizeof(float),
+                .transform = m_deferred.size(m_spectra) * sizeof(float) +
+                             m_deferred.size(m_out_spec) * sizeof(ComplexType),
+                .workspace = work,
+                .staging   = m_unpacked.capacity() * sizeof(float)};
+    }
+
+    [[nodiscard]] DDMTFFTMemoryEstimate estimate(SizeType nsamps) override {
+        // A cold stream (reset_history()) of calls of nsamps samples, until
+        // and including its first warm call: later calls repeat that one.
+        // Its calls are at history lengths guard + i * nsamps (capped at
+        // the context); those that output nothing prepare the same
+        // transforms, so one stands for all: at most three distinct calls.
+        const SizeType guard = m_model.guard;
+        if (nsamps == 0) {
+            prepare_call(guard, 0);
+        } else {
+            const SizeType silent = (m_ctx - guard) / nsamps;
+            if (silent > 0) {
+                prepare_call(guard, nsamps); // the calls with no output
+            }
+            const SizeType first = guard + (silent * nsamps); // first output
+            prepare_call(first, nsamps);
+            if (first < m_ctx) {
+                prepare_call(m_ctx, nsamps); // the first warm call
+            }
+        }
+        const bool packed = m_plan.get_nbits() != 32;
+        return {.usage = memory_usage(),
+                .time_major_staging =
+                    packed ? unpacked_size(nsamps) * sizeof(float) : 0};
     }
 
     void save_history(std::span<float> out) const override {
@@ -235,8 +295,7 @@ public:
                    "execute_time_major (input)");
         check_size(dmt.size(), m_nbeams * m_ndm * get_output_nsamps(nsamps),
                    "execute_time_major (output)");
-        const auto rows = m_nbeams * m_nchans;
-        m_unpacked.resize(rows * nsamps);
+        m_unpacked.resize(unpacked_size(nsamps));
         const auto nb = static_cast<std::int64_t>(m_nbeams * nsamps);
 #pragma omp parallel num_threads(m_nthreads)
         {
@@ -302,6 +361,50 @@ private:
     std::map<SizeType, std::unique_ptr<nufft::Type1Plan>> m_plans;
     std::vector<NufftRun> m_runs;           // trials summed by the NUFFT
     std::vector<std::uint32_t> m_brute_dms; // all other trials
+    // Buffer sizes recorded, not allocated, in estimate-only engines.
+    planned::HostPlan m_deferred;
+
+    [[nodiscard]] SizeType unpacked_size(SizeType nsamps) const noexcept {
+        return m_nbeams * m_nchans * nsamps;
+    }
+
+    // Per-thread scratch of fixed size, made up front for every thread (in
+    // a static loop: each thread touches its own first).
+    void size_thread_scratch() {
+        const bool brute = !m_brute_dms.empty();
+        const SizeType acc =
+            brute ? kDmBlock * 2 * (m_runs.empty() ? kBins : kNuTile) : 0;
+        const SizeType nph =
+            brute ? kChanGroup * kDmBlock * (kLanes + 1) : SizeType{0};
+        SizeType nu = 0;
+        for (const auto& r : m_runs) {
+            nu = std::max(nu, r.plan->scratch_size());
+        }
+        const auto nws = static_cast<std::int64_t>(m_ws.size());
+        if (m_deferred.deferring()) {
+            for (auto& w : m_ws) {
+                size_scratch(w, acc, nph, nu);
+            }
+            return;
+        }
+#pragma omp parallel for schedule(static, 1) num_threads(m_nthreads)
+        for (std::int64_t i = 0; i < nws; ++i) {
+            size_scratch(m_ws[static_cast<SizeType>(i)], acc, nph, nu);
+        }
+    }
+    void size_scratch(Workspace& w, SizeType acc, SizeType nph, SizeType nu) {
+        if (acc > 0) {
+            m_deferred.assign(w.acc, acc, 0.0F);
+        }
+        if (nph > 0) {
+            m_deferred.assign(w.turns, nph, 0.0F);
+            m_deferred.assign(w.ph_re, nph, 0.0F);
+            m_deferred.assign(w.ph_im, nph, 0.0F);
+        }
+        if (nu > 0) {
+            m_deferred.assign(w.nufft, nu, ComplexType{});
+        }
+    }
 
     void check_float(std::string_view what) const {
         if (m_plan.get_nbits() != 32) {
@@ -343,41 +446,60 @@ private:
         }
         auto& g = m_geos[n];
         if (!g) {
-            g = std::make_unique<Geometry>(n);
+            g = std::make_unique<Geometry>(n, !m_deferred.deferring());
         }
         const auto spec_floats = g->n_tiles * m_nact * kBinsFl;
-        if (m_spectra.size() < spec_floats) {
-            m_spectra.assign(spec_floats, 0.0F);
+        if (m_deferred.size(m_spectra) < spec_floats) {
+            m_deferred.assign(m_spectra, spec_floats, 0.0F);
         }
-        if (m_out_spec.size() < m_ndm * g->bins_stride) {
-            m_out_spec.assign(m_ndm * g->bins_stride, ComplexType{});
+        if (m_deferred.size(m_out_spec) < m_ndm * g->bins_stride) {
+            m_deferred.assign(m_out_spec, m_ndm * g->bins_stride,
+                              ComplexType{});
         }
         for (auto& w : m_ws) {
             const auto nt = utils::fft_row_stride<float>(n);
-            if (w.time.size() < nt) {
-                w.time.assign(nt, 0.0F);
+            if (m_deferred.size(w.time) < nt) {
+                m_deferred.assign(w.time, nt, 0.0F);
             }
-            if (w.batch.size() < kFwdBatch * g->bins_stride) {
-                w.batch.assign(kFwdBatch * g->bins_stride, ComplexType{});
+            if (m_deferred.size(w.batch) < kFwdBatch * g->bins_stride) {
+                m_deferred.assign(w.batch, kFwdBatch * g->bins_stride,
+                                  ComplexType{});
             }
         }
         return *g;
     }
 
-    // One streaming step (all beams): combined = history ++ block.
-    void core(const Source& data, float* out) {
-        const auto n_new = data.nsamps;
-        const auto total = m_hist_len + n_new;
-        const auto n_out = total > m_ctx ? total - m_ctx : 0;
+    struct CallPlan {
+        SizeType n_out{};
+        ddmt_fft::Segmentation seg;
+        Geometry* g{nullptr}; // null: nothing to transform
+    };
+
+    // The transforms of one call on `hist_len` history samples (execute()
+    // and estimate() alike).
+    CallPlan prepare_call(SizeType hist_len, SizeType n_new) {
+        const auto total = hist_len + n_new;
+        CallPlan c{.n_out = total > m_ctx ? total - m_ctx : 0, .seg = {}};
         // While the stream warms up, also prepare the steady-state
         // transform (n_new outputs per call) so the first warm call does not
         // pay for new FFT plans and first-touch of its buffers.
-        if (m_hist_len < m_ctx && n_new > 0) {
+        if (hist_len < m_ctx && n_new > 0) {
             geometry(ddmt_fft::plan_segments(n_new, m_ctx, m_seg_n).n_fft);
         }
-        if (n_out > 0 && m_ndm > 0) {
-            const auto seg  = ddmt_fft::plan_segments(n_out, m_ctx, m_seg_n);
-            auto& g         = geometry(seg.n_fft);
+        if (c.n_out > 0 && m_ndm > 0) {
+            c.seg = ddmt_fft::plan_segments(c.n_out, m_ctx, m_seg_n);
+            c.g   = &geometry(c.seg.n_fft);
+        }
+        return c;
+    }
+
+    // One streaming step (all beams): combined = history ++ block.
+    void core(const Source& data, float* out) {
+        const auto call  = prepare_call(m_hist_len, data.nsamps);
+        const auto n_out = call.n_out;
+        if (call.g != nullptr) {
+            const auto& seg = call.seg;
+            auto& g         = *call.g;
             const auto hop  = seg.hop;
             const auto nseg = seg.nseg;
             for (SizeType b = 0; b < m_nbeams; ++b) {

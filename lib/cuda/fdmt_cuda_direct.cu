@@ -194,7 +194,7 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
             box_w[i] = static_cast<float>(weights[i]);
         }
     } else {
-        thrust::copy(m_box_w_d.begin(), m_box_w_d.end(), box_w.begin());
+        std::copy(m_box_w_h.begin(), m_box_w_h.end(), box_w.begin());
     }
     auto plan = detail::build_fdmt_direct_plan(m_plan, levels,
                                                m_use_box_smearing, box_w);
@@ -476,7 +476,7 @@ void FDMTCudaEngine::build_skewed_direct_from_windows(
             box_w[i] = static_cast<float>(weights[i]);
         }
     } else {
-        thrust::copy(m_box_w_d.begin(), m_box_w_d.end(), box_w.begin());
+        std::copy(m_box_w_h.begin(), m_box_w_h.end(), box_w.begin());
     }
     auto dplan = detail::build_fdmt_direct_skewed_plan(
         m_plan, k, m_use_box_smearing, box_w, m_chunk, s_hi_k, sp_k,

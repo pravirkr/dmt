@@ -29,6 +29,7 @@
 #include "dmt/fft.hpp"
 #include "dmt/logging.hpp"
 #include "dmt/modes.hpp"
+#include "dmt/planned_vector.hpp"
 #include "dmt/simd_math.hpp"
 
 #include "fdmt_fft_cpu_kernels.hpp"
@@ -143,21 +144,38 @@ struct Geometry {
     std::unique_ptr<utils::FFTWRowPlan> r2c;
     std::unique_ptr<utils::FFTWRowPlan> c2r;
 
-    explicit Geometry(SizeType n)
+    // Without build: sizes only (a deferred construction); build() makes
+    // the twiddles and plans.
+    Geometry(SizeType n, bool build_now)
         : n_fft(n),
           n_bins((n / 2) + 1),
           n_tiles((n_bins + kTile - 1) / kTile),
           bins_stride(n_tiles * kTile) {
+        if (build_now) {
+            build();
+        }
+    }
+    explicit Geometry(SizeType n) : Geometry(n, true) {}
+
+    void build() {
+        if (r2c) {
+            return;
+        }
         // Twiddles in double, so every phasor is correctly rounded.
         twiddle.resize(n_fft);
-        const double step = -2.0 * std::numbers::pi / static_cast<double>(n);
+        const double step =
+            -2.0 * std::numbers::pi / static_cast<double>(n_fft);
         for (SizeType m = 0; m < n_fft; ++m) {
             const double a = step * static_cast<double>(m);
             twiddle[m]     = ComplexType(static_cast<float>(std::cos(a)),
                                          static_cast<float>(std::sin(a)));
         }
-        r2c = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kR2C, n);
-        c2r = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n);
+        r2c = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kR2C, n_fft);
+        c2r = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n_fft);
+    }
+    // Bytes of the twiddle table, built or not.
+    [[nodiscard]] SizeType twiddle_bytes() const noexcept {
+        return n_fft * sizeof(ComplexType);
     }
 };
 
@@ -176,7 +194,29 @@ public:
           m_max_segment(cfg.max_segment),
           m_search(cfg.search),
           m_plan(&plan) {
+        // Deferred: the working buffers are sized, not allocated, until
+        // allocate() (the plan tables are built).
+        m_deferred.defer(cfg.defer_allocation);
         initialize();
+        m_allocated = !cfg.defer_allocation;
+    }
+
+    void allocate() override {
+        if (m_allocated) {
+            return;
+        }
+        const auto planned = memory_usage();
+        m_deferred.materialize();
+        m_geo->build();
+        fill_tables();
+        const auto got = memory_usage();
+        if (got.plan != planned.plan || got.state != planned.state ||
+            got.history != planned.history ||
+            got.workspace != planned.workspace) {
+            throw std::logic_error(
+                "FDMTFFT (cpu): allocation differs from the planned sizes");
+        }
+        m_allocated = true;
     }
 
     void execute(std::span<const float> waterfall,
@@ -283,19 +323,25 @@ public:
         return m_seg_hop;
     }
     [[nodiscard]] FDMTMemoryUsage memory_usage() const noexcept override {
-        SizeType work = m_search_rows.size() * sizeof(float);
+        SizeType work = m_deferred.size(m_search_rows) * sizeof(float);
         for (const auto& w : m_ws) {
-            work += (w.time.size() + w.q.size() + w.w0.size() + w.buf_a.size() +
-                     w.buf_b.size() + w.s0.size() + w.s1.size() + w.p.size()) *
+            work += (m_deferred.size(w.time) + m_deferred.size(w.q) +
+                     m_deferred.size(w.w0) + m_deferred.size(w.buf_a) +
+                     m_deferred.size(w.buf_b) + m_deferred.size(w.s0) +
+                     m_deferred.size(w.s1) + m_deferred.size(w.p)) *
                         sizeof(float) +
-                    (w.cplx.size() + w.batch.size() + w.anchor.size()) *
+                    (m_deferred.size(w.cplx) + m_deferred.size(w.batch) +
+                     m_deferred.size(w.anchor)) *
                         sizeof(ComplexType);
         }
-        return {.plan  = (m_r_table.size() + m_frac_r.size()) * sizeof(float) +
-                         m_frac_s.size() * sizeof(double),
-                .state = m_spectra.size() * sizeof(float) +
-                         m_out_spec.size() * sizeof(ComplexType),
-                .history   = m_overlap.size() * sizeof(float),
+        return {.plan =
+                    (m_deferred.size(m_r_table) + m_deferred.size(m_frac_r)) *
+                        sizeof(float) +
+                    m_frac_s.size() * sizeof(double) +
+                    (m_geo ? m_geo->twiddle_bytes() : 0),
+                .state     = m_deferred.size(m_spectra) * sizeof(float) +
+                             m_deferred.size(m_out_spec) * sizeof(ComplexType),
+                .history   = m_deferred.size(m_overlap) * sizeof(float),
                 .workspace = work,
                 .output    = 0};
     }
@@ -509,6 +555,9 @@ private:
     std::vector<float> m_overlap;
     std::vector<float> m_unpacked; // time-major input, channel-major
     std::vector<Workspace> m_ws;
+    /// Working buffers a deferred construction sized for allocate().
+    planned::HostPlan m_deferred;
+    bool m_allocated{false};
 
     // Stepper state (lazy), at the plan's FFT length.
     std::unique_ptr<Geometry> m_step_geo;
@@ -561,10 +610,58 @@ private:
         logging::debug("FDMTFFT cpu: transform length {} x {} segment(s) "
                        "(single {}), tree group level {}, fractional {}",
                        m_seg_len, m_nseg, m_geom.n_fft, m_fuse, m_frac);
-        m_geo = std::make_unique<Geometry>(m_seg_len);
-
+        // Deferred: sizes only; allocate() builds the twiddles, the plans
+        // and the tables.
+        m_geo = std::make_unique<Geometry>(m_seg_len, !m_deferred.deferring());
         const auto& g = *m_geo;
-        m_r_table.assign((m_q_max + 1) * kTileFl, 0.0F);
+        m_deferred.assign(m_r_table, (m_q_max + 1) * kTileFl, 0.0F);
+        if (m_frac) {
+            m_deferred.assign(m_frac_r, m_frac_s.size() * kTileFl, 0.0F);
+        }
+        if (!m_deferred.deferring()) {
+            fill_tables();
+        }
+        m_deferred.assign(m_spectra, g.n_tiles * m_nchans * kTileFl, 0.0F);
+        m_deferred.assign(m_out_spec, m_ndms * g.bins_stride, ComplexType{});
+        if (m_mode == FDMTMode::kValid) {
+            m_deferred.assign(m_overlap, m_nbeams * m_nchans * m_overlap_len,
+                              0.0F);
+        }
+        if (m_search && m_mode == FDMTMode::kValid) {
+            // One segment of DM rows for execute_search(); counted by
+            // memory_usage() from construction (the boxcar's budget).
+            m_deferred.assign(m_search_rows, m_ndms * m_seg_hop, 0.0F);
+        }
+
+        // Pad bins [n_bins, bins_stride) of the per-thread rows are never
+        // written by FFTW and stay zero; tiles read them harmlessly.
+        m_ws.resize(static_cast<SizeType>(m_nthreads));
+        for (auto& ws : m_ws) {
+            m_deferred.assign(ws.time, utils::fft_row_stride<float>(g.n_fft),
+                              0.0F);
+            m_deferred.assign(ws.cplx, g.bins_stride, ComplexType{});
+            m_deferred.assign(ws.batch, kFwdBatch * g.bins_stride,
+                              ComplexType{});
+            m_deferred.assign(ws.q, (m_q_max + 1) * kTileFl, 0.0F);
+            m_deferred.assign(ws.anchor, m_frac ? m_frac_s.size() : 0,
+                              ComplexType{});
+            m_deferred.assign(ws.p, kTileFl, 0.0F);
+            m_deferred.assign(
+                ws.w0,
+                (m_l0_win.empty() ? m_dt0_max + 1 : m_l0_win.size()) * kTileFl,
+                0.0F);
+            m_deferred.assign(ws.buf_a, m_upper_max * kTileFl, 0.0F);
+            m_deferred.assign(ws.buf_b, m_upper_max * kTileFl, 0.0F);
+            m_deferred.assign(ws.s0, m_slice_max * kTileFl, 0.0F);
+            m_deferred.assign(ws.s1, m_slice_max * kTileFl, 0.0F);
+        }
+    }
+
+    SizeType m_seg_len{};
+
+    // The phasor tables of execute()'s transform length (built geometry).
+    void fill_tables() {
+        const auto& g = *m_geo;
         for (SizeType s = 0; s <= m_q_max; ++s) {
             float* r = &m_r_table[s * kTileFl];
             for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
@@ -573,54 +670,19 @@ private:
                 r[kTile + j] = w.imag();
             }
         }
-        if (m_frac) {
-            // Per merge: W^(s * j) for j < kTile, exact in double.
-            m_frac_r.assign(m_frac_s.size() * kTileFl, 0.0F);
-            for (SizeType op = 0; op < m_frac_s.size(); ++op) {
-                for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
-                    const double a =
-                        -2.0 * std::numbers::pi *
-                        simd::wrap_turns(m_frac_s[op] * static_cast<double>(j) /
-                                         static_cast<double>(g.n_fft));
-                    m_frac_r[(op * kTileFl) + j] =
-                        static_cast<float>(std::cos(a));
-                    m_frac_r[(op * kTileFl) + kTile + j] =
-                        static_cast<float>(std::sin(a));
-                }
+        // Per merge: W^(s * j) for j < kTile, exact in double.
+        for (SizeType op = 0; op < m_frac_r.size() / kTileFl; ++op) {
+            for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
+                const double a =
+                    -2.0 * std::numbers::pi *
+                    simd::wrap_turns(m_frac_s[op] * static_cast<double>(j) /
+                                     static_cast<double>(g.n_fft));
+                m_frac_r[(op * kTileFl) + j] = static_cast<float>(std::cos(a));
+                m_frac_r[(op * kTileFl) + kTile + j] =
+                    static_cast<float>(std::sin(a));
             }
         }
-        m_spectra.assign(g.n_tiles * m_nchans * kTileFl, 0.0F);
-        m_out_spec.assign(m_ndms * g.bins_stride, ComplexType{});
-        if (m_mode == FDMTMode::kValid) {
-            m_overlap.assign(m_nbeams * m_nchans * m_overlap_len, 0.0F);
-        }
-        if (m_search && m_mode == FDMTMode::kValid) {
-            // One segment of DM rows for execute_search(); counted by
-            // memory_usage() from construction (the boxcar's budget).
-            m_search_rows.assign(m_ndms * m_seg_hop, 0.0F);
-        }
-
-        // Pad bins [n_bins, bins_stride) of the per-thread rows are never
-        // written by FFTW and stay zero; tiles read them harmlessly.
-        m_ws.resize(static_cast<SizeType>(m_nthreads));
-        for (auto& ws : m_ws) {
-            ws.time.assign(utils::fft_row_stride<float>(g.n_fft), 0.0F);
-            ws.cplx.assign(g.bins_stride, ComplexType{});
-            ws.batch.assign(kFwdBatch * g.bins_stride, ComplexType{});
-            ws.q.assign((m_q_max + 1) * kTileFl, 0.0F);
-            ws.anchor.assign(m_frac ? m_frac_s.size() : 0, ComplexType{});
-            ws.p.assign(kTileFl, 0.0F);
-            ws.w0.assign((m_l0_win.empty() ? m_dt0_max + 1 : m_l0_win.size()) *
-                             kTileFl,
-                         0.0F);
-            ws.buf_a.assign(m_upper_max * kTileFl, 0.0F);
-            ws.buf_b.assign(m_upper_max * kTileFl, 0.0F);
-            ws.s0.assign(m_slice_max * kTileFl, 0.0F);
-            ws.s1.assign(m_slice_max * kTileFl, 0.0F);
-        }
     }
-
-    SizeType m_seg_len{};
 
     // Picks execute()'s transform length (fdmt_fft::choose_segments(), the
     // rule every engine shares).

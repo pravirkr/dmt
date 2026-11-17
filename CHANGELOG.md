@@ -8,6 +8,36 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`FDMT::estimate_memory(...)`** (C++ and Python `FDMT.estimate_memory`),
+  one overload per constructor with the same arguments: the memory the
+  instance would allocate (`usage`, equal to its `get_memory_usage()`), its
+  `chunk_nsamps`, and on a GPU the `host_staging` bytes the first host-memory
+  call adds, all computed without allocating. A GPU backend reads the
+  device's limits but allocates no device memory.
+- **`FDMTFFT::estimate_memory(...)`** (one overload per constructor) and
+  **`FDMTFFTBoxcar::estimate_memory(...)`**, C++ and Python: the same
+  estimate for the Fourier-domain engines (`chunk_nsamps` is the
+  overlap-save segment). Python `FDMTFFT` gains `memory_usage`.
+- **`CohFDMT::estimate_memory(config, exec)`** (C++ and Python
+  `CohFDMT.estimate_memory`): the memory a `CohFDMT` built with these
+  arguments would allocate, equal to its `get_memory_usage()`, computed
+  without allocating.
+- **`DDMTFFT::estimate_memory(plan, nsamps, exec, nbeams, options)`** (C++
+  and Python `DDMTFFT.estimate_memory`): the memory a `DDMTFFT` holds once a
+  stream of calls of `nsamps` samples is warm (`usage`), plus the staging
+  that host-memory, time-major and packed device-memory calls add, computed
+  without allocating. **`DDMTFFT::get_memory_usage()`** (Python
+  `memory_usage`) reports what an instance holds now.
+- **`DDMT::estimate_memory(plan, nsamps, exec, nbeams, gulp_size)`** and
+  **`SDMT::estimate_memory(...)`** (C++ and Python): the memory an instance
+  making calls of `nsamps` samples holds (`usage`), plus on a GPU the device
+  and pinned staging that host-memory and time-major calls add, computed
+  without allocating. **`DDMT::get_memory_usage()`** (Python
+  `memory_usage`) reports what an instance holds now.
+- **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
+  `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
+  `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the
+  first host-memory call on a GPU), computed without allocating.
 - **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
   dedispersed channels: level-0 boxes cover the residual intra-channel sweep
   at the trial DM, centred on each channel's arrival, in `FDMT`,
@@ -46,6 +76,43 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- `FDMT` construction no longer allocates while it chooses its path and
+  chunk: on a GPU the budget search sizes candidate engines without
+  allocating them (it could briefly hold more than `max_memory_bytes`), and
+  on the CPU the budget is checked before allocating.
+- `FDMTBoxcar` construction likewise sizes the engines it tries for a chunk
+  and allocates only the one it keeps; on the CPU the budget is checked
+  before allocating.
+- GPU `FDMTFFT` no longer shortens its overlap-save segments to fit the
+  device's free memory: memory follows the arguments alone, so the same
+  configuration behaves the same on any device. One that does not fit fails
+  at construction with a `std::bad_alloc` (Python `MemoryError`) saying
+  what it needs and what was free before it allocated (use shorter blocks
+  or fewer beams; `estimate_memory` gives the requirement); GPU `FDMT`,
+  `FDMTBoxcar`, `FDMTFFTBoxcar` and `CohFDMT` allocation failures carry the
+  same message (still `std::bad_alloc`).
+- A GPU device or pinned-host allocation that runs out of memory now
+  raises `std::bad_alloc` (Python `MemoryError`, was `RuntimeError`) with
+  the size that failed, for every engine (`DDMTFFT` included).
+- `CohFDMT::get_memory_usage()` now counts every buffer the engine owns:
+  the CPU per-channel power partials, and on a GPU the remaining tables and
+  the device copy of a host-memory call's result (in `workspace`, which
+  was reported as `output`; `output` is now the caller's result size on
+  both backends).
+- GPU `DDMTFFT` and `CohFDMT` likewise no longer size themselves from the
+  device's free memory: `DDMTFFT` keeps the CPU engine's segment length
+  (same segments on both backends), and the `CohFDMT` cuFFT path (channel
+  FFT lengths the fused kernel can't take) uses a fixed 1 GiB work buffer.
+  `FDMTFFT` and `FDMTFFTBoxcar` construction sizes the engines it tries and
+  allocates only the one it keeps.
+- The memory usage and estimate structs (`FDMTMemoryUsage`,
+  `DDMTMemoryUsage`, `DDMTFFTMemoryUsage`, `CohFDMTMemoryUsage` and their
+  estimates) start at zero when default-constructed.
+- CPU `FDMTFFT` and `FDMTFFTBoxcar` count the twiddle table they hold (8
+  bytes per transform sample) in `get_memory_usage().plan`.
+- GPU `FDMTBoxcar` with a kill mask allocates the transform's per-row flags
+  (one byte per beam and channel) at construction instead of on the first
+  call, so `get_memory_usage()` includes them from the start.
 - **CPU boxcar default Stage-1 screen (`BoxcarScreenMode::kAuto`)**: CPU
   `FDMTBoxcar` and `FDMTFFTBoxcar` now default to `kKadane`, a lossless
   multi-bucket SIMD Kadane tile gate with exact `kPrefix` candidate parity
@@ -71,6 +138,9 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Fixed
 
+- `FDMTFFTBoxcar` on a GPU no longer counts its host result storage
+  against `max_memory_bytes` when checking whether the boxcar buffers alone
+  fit, so budgets that fit the device memory build as documented.
 - `FDMTBoxcar` on the GPU:
   - Wide boxes that don't fit shared memory no longer throw. The search
     falls back to smaller blocks or a device-memory ring, with the same
@@ -81,6 +151,10 @@ All notable changes to `dmt` are listed here. The format follows
     UWL with fine DM grids).
 - A per-call kill mask whose call throws no longer leaves its noise tables
   in the stream history.
+- The `FDMT` docs no longer say that `execute()` never allocates: on a GPU
+  the first host-memory call allocates device copies of the input block and
+  output plane outside `max_memory_bytes`, as `FDMTBoxcar` and
+  `FDMTFFTBoxcar` already document for the input block.
 
 ## [0.8.0] - 2026-11-11
 

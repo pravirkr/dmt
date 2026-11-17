@@ -118,6 +118,9 @@ public:
     SizeType output_size() const noexcept {
         return m_nsub * m_nfft * 2 * m_nbin;
     }
+    SizeType memory_bytes() const noexcept {
+        return m_lut.bytes() + m_desc.bytes();
+    }
 
     void execute(std::span<const cuda::std::span<const uint8_t>> groups,
                  cuda::std::span<ComplexTypeGPU> out,
@@ -226,6 +229,9 @@ SizeType BasebandUnpackerCUDA::input_size(SizeType igroup) const {
 }
 SizeType BasebandUnpackerCUDA::output_size() const noexcept {
     return m_impl->output_size();
+}
+SizeType BasebandUnpackerCUDA::memory_bytes() const noexcept {
+    return m_impl->memory_bytes();
 }
 void BasebandUnpackerCUDA::execute(
     std::span<const cuda::std::span<const uint8_t>> groups,

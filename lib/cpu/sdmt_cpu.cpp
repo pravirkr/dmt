@@ -212,6 +212,16 @@ private:
     std::vector<Src> m_srcs;
     int m_nslots{1}; // slots any program uses
 
+public:
+    [[nodiscard]] SizeType memory_bytes() const noexcept {
+        return ((m_sub_start.capacity() + m_sub_chan.capacity()) *
+                sizeof(int)) +
+               (m_prog.capacity() * sizeof(uint32_t)) + m_group_end.capacity() +
+               (m_ops.capacity() * sizeof(Op)) +
+               (m_srcs.capacity() * sizeof(Src));
+    }
+
+private:
     /**
      * @brief Builds the per-(DM tile, subband) kernel programs.
      * @details

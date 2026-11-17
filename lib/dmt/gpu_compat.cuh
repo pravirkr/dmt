@@ -49,6 +49,7 @@ namespace cuda = ::thrust::hip;
 #define cudaSuccess hipSuccess
 #define cudaErrorInvalidDevice hipErrorInvalidDevice
 #define cudaErrorNotReady hipErrorNotReady
+#define cudaErrorMemoryAllocation hipErrorOutOfMemory
 #define cudaStream_t hipStream_t
 #define cudaEvent_t hipEvent_t
 #define cudaDeviceProp hipDeviceProp_t

@@ -276,6 +276,7 @@ public:
     [[nodiscard]] std::string summary() const override;
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override;
+    void allocate() override;
 
     void advance(SizeType levels, Stream /*stream*/) override;
 
@@ -328,6 +329,12 @@ public:
         const SizeType n = m_history.size() + m_tree_history.size();
         return n == 0 ? 0 : detail::kFDMTHistHeader + n;
     }
+    /// history_state_size() of the tree path once allocated.
+    [[nodiscard]] SizeType planned_history_words() const noexcept {
+        const SizeType n = m_planned.history +
+                           (m_search_nbits == 32 ? m_planned.tree_history : 0);
+        return n == 0 ? 0 : detail::kFDMTHistHeader + n;
+    }
 
     // Layout: the level-0 input history, then the tree history of every
     // beam with each coordinate's slot in FIFO order (oldest sample first),
@@ -353,8 +360,9 @@ private:
         SizeType beam_stride{0};
     };
 
-    // Everything below is allocated in the constructor (see
-    // allocate_working_memory()); execute() and the stepper only index it.
+    // Everything below is sized in the constructor (plan_working_memory())
+    // and allocated by allocate() (at construction unless deferred);
+    // execute() and the stepper only index it.
     bool m_use_box_smearing;
     bool m_int_tree;
     FDMTMode m_mode;
@@ -418,6 +426,15 @@ private:
     // Per-thread scratch (see FDMTWorkspace) and its layout.
     std::vector<std::byte> m_workspace;
     FDMTWorkspace m_ws;
+    // Tree path: the working-buffer sizes planned at construction
+    // (get_memory_usage()); allocate() allocates them.
+    struct Planned {
+        SizeType state{0};        ///< m_state_internal bytes
+        SizeType history{0};      ///< m_history floats
+        SizeType tree_history{0}; ///< tree-history elements (any type)
+        SizeType workspace{0};    ///< m_workspace bytes
+    } m_planned;
+    bool m_allocated{false};
 
     // Current block / chunk.
     std::vector<LevelBuf> m_levels;
@@ -582,9 +599,11 @@ private:
      */
     bool choose_skew(const detail::FDMTEngineConfig& cfg);
 
-    void allocate_working_memory(SizeType fuse_levels,
-                                 SizeType max_fuse_levels,
-                                 bool skew);
+    /// Builds the tables and sizes the working buffers (m_planned, or the
+    /// skewed engine's), without allocating them.
+    void plan_working_memory(SizeType fuse_levels,
+                             SizeType max_fuse_levels,
+                             bool skew);
 
     /**
      * The engine's merge ops, from the plan's coordinates. Levels below the

@@ -42,8 +42,11 @@ int main() {
 - **Streaming.** In `"valid"` mode the engine keeps the history, so
   consecutive blocks give one continuous output. `reset_history()` starts a
   new stream. See [streaming](../pipeline_guide/streaming_and_history.md).
-- **No allocation per call.** `execute()` only writes the output buffer;
-  `get_memory_usage()` reports what the constructor allocated.
+- **No allocation per call.** On the CPU `execute()` only writes the output
+  buffer; on a GPU the first call with host memory also allocates device
+  copies of the input and output, kept for later calls.
+  `get_memory_usage()` reports what the engine holds, and
+  `FDMT::estimate_memory()` gives it before construction.
 - **S/N.** The output is in box-mean units by default, with a different noise
   sigma per DM trial; see
   [noise calibration](../pipeline_guide/noise_calibration.md).

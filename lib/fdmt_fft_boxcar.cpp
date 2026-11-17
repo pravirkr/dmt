@@ -24,7 +24,8 @@ public:
          SizeType beams,
          bool frac,
          std::span<const uint8_t> kill,
-         SizeType max_memory)
+         SizeType max_memory,
+         bool estimate_only = false)
         : plan(std::move(plan)),
           config(config),
           exec(exec),
@@ -57,6 +58,8 @@ public:
             .fractional_delays = frac,
             .kill_mask         = std::vector<uint8_t>(kill.begin(), kill.end()),
             .search            = true,
+            // Candidates are sized, not allocated: only the chosen one is.
+            .defer_allocation = true,
         };
         engine = make_engine(fft_cfg);
         // Budget: shorten the overlap-save segments (halving the transform
@@ -66,7 +69,13 @@ public:
         const SizeType n_min =
             utils::next_fft_size((2 * (discard + geom.guard)) + 2);
         auto used = engine->memory_usage();
-        if (const SizeType fixed = used.peaks + used.candidates;
+        // Budgeted bytes only: on a GPU the host result storage
+        // (max_candidates) is reported, not budgeted.
+        const SizeType host_cands =
+            exec.backend == Backend::kCPU
+                ? SizeType{0}
+                : config.max_candidates * sizeof(RawCandidate);
+        if (const SizeType fixed = used.peaks + used.candidates - host_cands;
             fixed >= max_memory) {
             throw std::invalid_argument(fmt::format(
                 "FDMTFFTBoxcar: the boxcar buffers alone need {:.2f} GiB, "
@@ -97,6 +106,9 @@ public:
                     "segments");
             }
         }
+        if (!estimate_only) {
+            engine->allocate();
+        }
     }
     [[nodiscard]] std::unique_ptr<detail::FDMTBoxcarEngine>
     make_engine(const detail::FDMTFFTEngineConfig& fft_cfg) const {
@@ -105,6 +117,7 @@ public:
             .mode             = FDMTMode::kValid,
             .nbeams           = beams,
             .exec             = exec,
+            .defer_allocation = fft_cfg.defer_allocation,
         };
         if (exec.backend == Backend::kCPU) {
             return detail::make_fdmt_boxcar_cpu(
@@ -154,6 +167,22 @@ FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
                                     fractional_delays,
                                     kill_mask,
                                     max_memory_bytes)) {}
+FDMTBoxcarMemoryEstimate
+FDMTFFTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
+                               BoxcarConfig config,
+                               bool use_box_smearing,
+                               Exec exec,
+                               SizeType nbeams,
+                               bool fractional_delays,
+                               std::span<const uint8_t> kill_mask,
+                               SizeType max_memory_bytes) {
+    const Impl impl(plan, config, use_box_smearing, exec, nbeams,
+                    fractional_delays, kill_mask, max_memory_bytes,
+                    /*estimate_only=*/true);
+    return {.usage        = impl.engine->memory_usage(),
+            .chunk_nsamps = impl.engine->chunk_nsamps(),
+            .host_staging = impl.engine->host_staging_bytes()};
+}
 FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;
 FDMTFFTBoxcar::FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept            = default;
 FDMTFFTBoxcar& FDMTFFTBoxcar::operator=(FDMTFFTBoxcar&&) noexcept = default;

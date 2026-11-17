@@ -1365,3 +1365,45 @@ TEST_CASE("FDMTBoxcar kill mask keeps scores calibrated",
     CHECK_THAT(root_snr(unmasked.execute(zeroed)),
                Catch::Matchers::WithinRel(kAmp * (n - k) / std::sqrt(n), 1e-6));
 }
+
+TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (cpu)",
+          "[boxcar][cpu][budget]") {
+    const auto cpu = Exec::cpu(3);
+    for (const auto& c : estimate_cases()) {
+        INFO(c.name << " beams " << c.beams);
+        const auto e = FDMTBoxcar::estimate_memory(
+            c.plan, c.config, true, cpu, c.beams, algorithms::kFDMTAutoFuse,
+            c.chunk, c.budget, c.kill);
+        const FDMTBoxcar f(c.plan, c.config, true, cpu, c.beams,
+                           algorithms::kFDMTAutoFuse, c.chunk, c.budget,
+                           c.kill);
+        check_estimate(e, f);
+        CHECK(e.host_staging == 0);
+        CHECK(e.usage.budgeted() <= c.budget);
+        if (c.chunk != 0) {
+            CHECK(e.chunk_nsamps == c.chunk);
+        }
+        if (c.budget < algorithms::kFDMTDefaultMaxMemory) {
+            CHECK(e.chunk_nsamps < c.plan.get_nsamps());
+        }
+    }
+    SECTION("nothing is allocated") {
+        // A 2^40-candidate store (tens of TB): sized, never allocated (an
+        // allocation would throw std::bad_alloc).
+        const auto cases   = estimate_cases();
+        BoxcarConfig cfg   = cases.front().config;
+        cfg.max_candidates = SizeType{1} << 40;
+        const auto e       = FDMTBoxcar::estimate_memory(
+            cases.front().plan, cfg, true, cpu, 1, algorithms::kFDMTAutoFuse, 0,
+            SIZE_MAX / 2);
+        CHECK(e.usage.candidates >= cfg.max_candidates * sizeof(RawCandidate));
+    }
+    SECTION("over budget throws as the constructor does") {
+        const auto cases = estimate_cases();
+        const auto& c    = cases.front();
+        CHECK_THROWS_AS(
+            FDMTBoxcar::estimate_memory(c.plan, c.config, true, cpu, 1,
+                                        algorithms::kFDMTAutoFuse, 0, 1024),
+            std::invalid_argument);
+    }
+}

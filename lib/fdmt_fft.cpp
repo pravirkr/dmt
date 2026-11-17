@@ -64,7 +64,8 @@ public:
          Exec exec,
          SizeType nbeams,
          bool fractional_delays,
-         std::span<const uint8_t> kill_mask)
+         std::span<const uint8_t> kill_mask,
+         bool estimate_only = false)
         : m_plan(std::move(plan)),
           m_cfg{
               .use_box_smearing  = use_box_smearing,
@@ -73,10 +74,15 @@ public:
               .exec              = exec,
               .fractional_delays = fractional_delays,
               .kill_mask = checked_kill_mask(kill_mask, m_plan.get_nchans()),
+              // Sized first, then allocated (below) unless only estimated.
+              .defer_allocation = true,
           },
           m_geom(fdmt_fft::make_geometry(
               m_plan, m_cfg.mode, fractional_delays, use_box_smearing)),
           m_engine(make_fdmt_fft_engine(m_plan, m_cfg)) {
+        if (!estimate_only) {
+            m_engine->allocate();
+        }
         const auto ns = m_plan.get_nsamps();
         if (m_cfg.mode == FDMTMode::kValid && (2 * ns) < (3 * m_geom.overlap)) {
             logging::debug("FDMTFFT: blocks of {} samples against a {}-sample "
@@ -209,6 +215,84 @@ FDMTFFT::FDMTFFT(plans::FDMTPlan plan,
                                         exec, nbeams, fractional_delays,
                                         kill_mask);
       }()) {}
+
+FDMTMemoryEstimate
+FDMTFFT::estimate_memory(float f_min,
+                         float f_max,
+                         SizeType nchans,
+                         SizeType nsamps,
+                         float tsamp,
+                         IndexType dt_max,
+                         IndexType dt_min,
+                         SizeType dt_step,
+                         bool use_box_smearing,
+                         std::string_view mode,
+                         Exec exec,
+                         SizeType nbeams,
+                         bool fractional_delays,
+                         std::span<const uint8_t> kill_mask) {
+    return estimate_memory(plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp,
+                                           dt_max, dt_min, dt_step, mode),
+                           use_box_smearing, exec, nbeams, fractional_delays,
+                           kill_mask);
+}
+
+FDMTMemoryEstimate
+FDMTFFT::estimate_memory(float f_min,
+                         float f_max,
+                         SizeType nchans,
+                         SizeType nsamps,
+                         float tsamp,
+                         const std::vector<IndexType>& dt_grid,
+                         bool use_box_smearing,
+                         std::string_view mode,
+                         Exec exec,
+                         SizeType nbeams,
+                         bool fractional_delays,
+                         std::span<const uint8_t> kill_mask) {
+    return estimate_memory(
+        plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dt_grid, mode),
+        use_box_smearing, exec, nbeams, fractional_delays, kill_mask);
+}
+
+FDMTMemoryEstimate
+FDMTFFT::estimate_memory(float f_min,
+                         float f_max,
+                         SizeType nchans,
+                         SizeType nsamps,
+                         float tsamp,
+                         const std::vector<float>& dm_grid,
+                         bool use_box_smearing,
+                         std::string_view mode,
+                         Exec exec,
+                         SizeType nbeams,
+                         bool fractional_delays,
+                         std::span<const uint8_t> kill_mask) {
+    return estimate_memory(
+        plans::FDMTPlan(f_min, f_max, nchans, nsamps, tsamp, dm_grid, mode),
+        use_box_smearing, exec, nbeams, fractional_delays, kill_mask);
+}
+
+FDMTMemoryEstimate
+FDMTFFT::estimate_memory(const plans::FDMTPlan& plan,
+                         bool use_box_smearing,
+                         Exec exec,
+                         SizeType nbeams,
+                         bool fractional_delays,
+                         std::span<const uint8_t> kill_mask) {
+    const Impl impl(plan, use_box_smearing, plan.get_mode(), exec, nbeams,
+                    fractional_delays, kill_mask, /*estimate_only=*/true);
+    FDMTMemoryEstimate e{.usage        = impl.m_engine->memory_usage(),
+                         .chunk_nsamps = impl.m_engine->segment_nsamps()};
+    if (exec.backend != Backend::kCPU) {
+        // The float input block and the output plane, staged on the device.
+        e.host_staging =
+            nbeams *
+            ((plan.get_nchans() * plan.get_nsamps()) + plan.get_dmt_size()) *
+            sizeof(float);
+    }
+    return e;
+}
 
 FDMTFFT::~FDMTFFT()                                   = default;
 FDMTFFT::FDMTFFT(FDMTFFT&& other) noexcept            = default;

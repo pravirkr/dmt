@@ -25,6 +25,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
+#include "dmt/planned_vector.hpp"
 
 #include "ddmt_cpu_kernels.hpp"
 
@@ -218,6 +219,12 @@ struct Tiling {
     std::vector<int> base;    // [tile][active]
     std::vector<int> spreads; // [tile][active]
 
+    [[nodiscard]] SizeType memory_bytes() const noexcept {
+        return ((active.capacity() + base.capacity() + spreads.capacity()) *
+                sizeof(int)) +
+               (order.capacity() * sizeof(SizeType));
+    }
+
     Tiling(const plans::DDMTPlan& plan, int time_tile) {
         const auto& pc = plan.get_container();
         ndm            = pc.dm_arr.size();
@@ -331,14 +338,29 @@ public:
           m_nbeams(cfg.nbeams),
           m_tiling(plan, Algo::kTimeTile),
           m_algo(plan, m_tiling, m_nthreads, m_nbeams) {
+        m_deferred.defer(cfg.defer_allocation);
         const auto& pc   = m_plan.get_container();
         m_ndm            = pc.dm_arr.size();
         m_max_delay      = pc.delay_table.empty()
                                ? 0
                                : *std::ranges::max_element(pc.delay_table);
         m_hist_row_bytes = row_bytes_for(m_max_delay, pc.nbits);
-        m_hist.assign(m_nbeams * pc.nchans * m_hist_row_bytes, 0);
-        m_hist_next.assign(m_hist.size(), 0);
+        m_deferred.assign(m_hist, m_nbeams * pc.nchans * m_hist_row_bytes, 0);
+        m_deferred.assign(m_hist_next, m_nbeams * pc.nchans * m_hist_row_bytes,
+                          0);
+    }
+
+    // Per-call memory is temporary (time-major transpose, per-thread
+    // windows): what an instance holds is independent of the calls.
+    [[nodiscard]] DDMTMemoryUsage memory_usage() const noexcept override {
+        return {.plan = m_tiling.memory_bytes() + m_algo.memory_bytes(),
+                .history =
+                    m_deferred.size(m_hist) + m_deferred.size(m_hist_next),
+                .staging = 0,
+                .pinned  = 0};
+    }
+    [[nodiscard]] DDMTMemoryEstimate estimate(SizeType /*nsamps*/) override {
+        return {.usage = memory_usage()};
     }
 
     // Number of output samples execute() will produce for a block of
@@ -494,6 +516,8 @@ private:
     // m_hist_row_bytes; floats stored as bytes) and its double buffer.
     std::vector<uint8_t> m_hist;
     std::vector<uint8_t> m_hist_next;
+    // History sizes recorded, not allocated, in estimate-only engines.
+    planned::HostPlan m_deferred;
     SizeType m_hist_row_bytes{0};
     SizeType m_history_len{0};
 

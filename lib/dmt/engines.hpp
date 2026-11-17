@@ -16,6 +16,7 @@
 #include <string_view>
 #include <vector>
 
+#include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/common/backend.hpp"
@@ -95,6 +96,10 @@ struct FDMTEngineConfig {
     /// use, in bytes; 0 takes the device's opt-in limit. Tests lower it to
     /// reach the fallbacks of small-shared-memory GPUs.
     SizeType boxcar_shared_limit{0};
+    /// Private: build the engine's tables and size every working buffer
+    /// (get_memory_usage()), but allocate the buffers only on allocate().
+    /// Memory estimates and budget searches build engines this way.
+    bool defer_allocation{false};
 };
 
 class FDMTEngine {
@@ -190,7 +195,11 @@ public:
     [[nodiscard]] virtual SizeType get_fuse_levels() const noexcept  = 0;
     [[nodiscard]] virtual SizeType get_chunk_nsamps() const noexcept = 0;
     [[nodiscard]] virtual algorithms::FDMTMemoryUsage
-    get_memory_usage() const noexcept                 = 0;
+    get_memory_usage() const noexcept = 0;
+    /// Allocates the working buffers of an engine built with
+    /// FDMTEngineConfig::defer_allocation (a no-op once allocated). The
+    /// allocation equals get_memory_usage(), checked here.
+    virtual void allocate()                           = 0;
     [[nodiscard]] virtual std::string summary() const = 0;
     /// The search's transform path when it differs from the plain tree
     /// (GPU direct levels and direct top), e.g. "direct levels 0-3, direct
@@ -218,6 +227,8 @@ std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
 struct DDMTEngineConfig {
     SizeType nbeams{1};
     Exec exec{};
+    // Estimate-only engine: buffers are sized, never allocated (estimate()).
+    bool defer_allocation{false};
 };
 
 class DDMTEngine {
@@ -267,8 +278,11 @@ public:
 
     // Host-path chunk length in input samples (GPU; stored but unused on
     // the CPU). 0 restores the default.
-    virtual void set_gulp_size(SizeType gulp_size)                = 0;
-    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept = 0;
+    virtual void set_gulp_size(SizeType gulp_size)                      = 0;
+    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept       = 0;
+    [[nodiscard]] virtual DDMTMemoryUsage memory_usage() const noexcept = 0;
+    // Estimate-only engines: what calls of `nsamps` samples hold.
+    [[nodiscard]] virtual DDMTMemoryEstimate estimate(SizeType nsamps) = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
@@ -291,6 +305,8 @@ struct DDMTFFTEngineConfig {
     SizeType nbeams{1};
     Exec exec{};
     DDMTFFTOptions options{}; // method resolved by the facade (never kAuto)
+    // Estimate-only engine: buffers are sized, never allocated (estimate()).
+    bool defer_allocation{false};
 };
 
 class DDMTFFTEngine {
@@ -335,7 +351,11 @@ public:
     /// "nufft", "piecewise_nufft" or "brute": how the grid's trials are
     /// summed, the same on every backend (a GPU engine transforms a run
     /// too long for shared memory as equal NUFFT sub-runs).
-    [[nodiscard]] virtual std::string_view method_used() const noexcept = 0;
+    [[nodiscard]] virtual std::string_view method_used() const noexcept    = 0;
+    [[nodiscard]] virtual DDMTFFTMemoryUsage memory_usage() const noexcept = 0;
+    // Estimate-only engines: sizes what a cold stream of calls of `nsamps`
+    // holds once warm, replaying the calls' buffer requests.
+    [[nodiscard]] virtual DDMTFFTMemoryEstimate estimate(SizeType nsamps) = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
@@ -390,6 +410,9 @@ struct FDMTFFTEngineConfig {
     // search's row buffer at construction, so memory_usage() is complete
     // before the first block (the budget compares against it).
     bool search{false};
+    // Size every buffer (memory_usage() reports them) but allocate them
+    // only on allocate(): the memory estimate and the budget search.
+    bool defer_allocation{false};
 };
 
 /// The smaller of two segment caps, 0 meaning none.
@@ -430,6 +453,9 @@ public:
     [[nodiscard]] virtual FDMTMemoryUsage memory_usage() const noexcept {
         return {};
     }
+    /// Allocates what a construction with defer_allocation sized;
+    /// memory_usage() is unchanged. A no-op once allocated.
+    virtual void allocate() = 0;
     /// Output samples per overlap-save segment (the search chunk).
     [[nodiscard]] virtual SizeType segment_nsamps() const noexcept { return 0; }
 
@@ -512,8 +538,11 @@ enum class CohFDMTCoherentPath : uint8_t {
 struct CohFDMTEngineConfig {
     Exec exec{};
     CohFDMTCoherentPath coherent_path{CohFDMTCoherentPath::kAuto};
-    /// cuFFT path work-buffer budget in bytes (0 = sized from free memory).
+    /// cuFFT path work-buffer budget in bytes (0 = 1 GiB).
     SizeType work_bytes{0};
+    /// Size every working buffer (and the fine FDMT) without allocating;
+    /// allocate() allocates them (CohFDMT::estimate_memory()).
+    bool defer_allocation{false};
 };
 
 // Stateless: one self-contained block per execute(), one input span per
@@ -538,6 +567,9 @@ public:
 
     [[nodiscard]] virtual plans::CohFDMTMemoryUsage
     memory_usage() const noexcept = 0;
+
+    /// Allocates what a deferred construction sized (no-op otherwise).
+    virtual void allocate() = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

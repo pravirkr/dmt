@@ -569,7 +569,8 @@ public:
                 bool search_int       = false,
                 bool search_u32       = true,
                 SizeType search_depth = 0,
-                SizeType leaf         = 0)
+                SizeType leaf         = 0,
+                bool defer_allocation = false)
         : m_plan(plan),
           m_smear(use_box_smearing),
           m_nthreads(std::max(1, nthreads)),
@@ -615,7 +616,37 @@ public:
         m_loc_win =
             compute_local_skew_windows(plan, m_win, m_level, m_fuse_ring);
         build_tables();
-        allocate();
+        plan_buffers();
+        if (!defer_allocation) {
+            allocate();
+        }
+    }
+
+    /// Allocates the working buffers sized at construction (a no-op once
+    /// done). An engine built with defer_allocation reports its
+    /// memory_usage() without them until this is called.
+    void allocate() {
+        if (m_allocated) {
+            return;
+        }
+        const SizeType elem_scale = m_state_elem / sizeof(float);
+        m_state.assign((m_half0_len + m_half1_len) * elem_scale, m_nthreads);
+        m_ring_f.assign(m_ring_f_floats, 0.0F);
+        if (m_nbits != 32) {
+            m_ring.assign(m_chan_ring_off[m_nchans] * m_ring_elem, m_nthreads);
+        }
+        m_scratch.assign(static_cast<SizeType>(m_nthreads) *
+                             m_thread_scratch_bytes,
+                         m_nthreads);
+        // The sizes planned at construction are what memory_usage() reports.
+        if (m_scratch.size() != m_mem.stripes ||
+            m_state.size() * sizeof(float) != m_mem.state ||
+            m_ring_f.size() * sizeof(float) != m_mem.rings ||
+            (m_nbits != 32 && m_ring.size() != m_mem.ring)) {
+            throw std::logic_error(
+                "FDMT skew: allocation differs from the planned sizes");
+        }
+        m_allocated = true;
     }
 
     void execute(std::span<const float> waterfall, std::span<float> dmt) {
@@ -1117,7 +1148,7 @@ private:
                 m_ring_f_off[r] = off;
                 off += m_win.spread(f_ring, r);
             }
-            m_ring_f.assign(off * (m_state_elem / sizeof(float)), 0.0F);
+            m_ring_f_floats = off * (m_state_elem / sizeof(float));
         }
 
         // Local scratch row offsets for levels k .. f - 1 per fused group.
@@ -1594,11 +1625,12 @@ private:
         }
     }
 
-    void allocate() {
+    /// Sizes every working buffer (memory_usage()) without allocating.
+    void plan_buffers() {
         // The compact tables (Op, KRow, Leaf) hold 32-bit offsets.
         constexpr SizeType kU32 = UINT32_MAX;
         if (m_half0_len > kU32 || m_half1_len > kU32 ||
-            m_ring_f.size() > kU32 || m_group_a_elems > kU32 ||
+            m_ring_f_floats > kU32 || m_group_a_elems > kU32 ||
             m_group_b_elems > kU32 ||
             m_stripe_subs * m_sub_stripe_elems >
                 static_cast<SizeType>(INT32_MAX)) {
@@ -1619,17 +1651,13 @@ private:
             m_thread_scratch_bytes = m_stripe_bytes + group_bytes;
         }
         const SizeType elem_scale = m_state_elem / sizeof(float);
-        m_state.assign((m_half0_len + m_half1_len) * elem_scale, m_nthreads);
-        // m_ring_f is sized in build_tables() (already in float words).
-        if (m_nbits != 32) {
-            m_ring.assign(m_chan_ring_off[m_nchans] * m_ring_elem, m_nthreads);
-        }
-        m_scratch.assign(nt * m_thread_scratch_bytes, m_nthreads);
+        // The float ring of float-built engines is allocated by the first
+        // execute() (ensure_ring); it is counted here all the same.
         m_mem.ring    = m_chan_ring_off[m_nchans] * m_ring_elem;
-        m_mem.stripes = m_scratch.size();
-        m_mem.state   = m_state.size() * sizeof(float);
-        m_mem.rings   = m_ring_f.size() * sizeof(float);
-        m_stream_pos  = 0;
+        m_mem.stripes = nt * m_thread_scratch_bytes;
+        m_mem.state  = (m_half0_len + m_half1_len) * elem_scale * sizeof(float);
+        m_mem.rings  = m_ring_f_floats * sizeof(float);
+        m_stream_pos = 0;
     }
 
     /// Calls f(T{}) with the ring's sample type for element size `elem`.
@@ -2651,6 +2679,7 @@ private:
     std::vector<SizeType> m_level_len;
     std::vector<SizeType> m_ring_f_off;
     std::vector<float> m_ring_f;
+    SizeType m_ring_f_floats{0}; ///< m_ring_f's planned size
     std::vector<std::vector<Op>> m_ops;
 
     SizeType m_tile{0};
@@ -2671,6 +2700,7 @@ private:
     SizeType m_thread_scratch_bytes{0};
     SizeType m_stream_pos{0};
     Memory m_mem;
+    bool m_allocated{false};
     Profile m_prof;
 };
 

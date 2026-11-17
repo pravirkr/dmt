@@ -11,7 +11,9 @@
 #include "dmt/common/plans.hpp"
 
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_utils.cuh"
 
+#include "ddmt_estimate_cases.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -363,6 +365,82 @@ TEST_CASE("DDMT multi-beam float execute matches per-beam single-beam calls",
         for (SizeType i = 0; i < dmt_single.size(); ++i) {
             CHECK(beam_out[i] == Catch::Approx(dmt_single[i]));
         }
+    }
+}
+
+namespace {
+
+// A device-memory call of `nsamps` zero samples: channel-major or (packed)
+// time-major.
+void device_call(DDMT& eng, SizeType nsamps, SizeType out, bool time_major) {
+    const auto& plan  = eng.get_plan();
+    const auto nbits  = plan.get_nbits();
+    const auto nchans = plan.get_nchans();
+    const auto rows   = eng.get_nbeams() * nchans;
+    const auto nout   = eng.get_nbeams() * plan.get_dm_arr().size() * out;
+    if (nbits == 32) {
+        const thrust::device_vector<float> wf(rows * nsamps, 0.0F);
+        thrust::device_vector<float> dmt(nout);
+        eng.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()),
+                                            wf.size()),
+                    DeviceSpan<float>(thrust::raw_pointer_cast(dmt.data()),
+                                      dmt.size()));
+    } else {
+        const auto bytes =
+            time_major ? eng.get_nbeams() * nsamps *
+                             bit_pack_utils::packed_row_bytes(nchans, nbits)
+                       : rows * bit_pack_utils::packed_row_bytes(nsamps, nbits);
+        const thrust::device_vector<uint8_t> wf(bytes, 0);
+        thrust::device_vector<int32_t> dmt(nout);
+        const DeviceSpan<const uint8_t> in(thrust::raw_pointer_cast(wf.data()),
+                                           wf.size());
+        const DeviceSpan<int32_t> o(thrust::raw_pointer_cast(dmt.data()),
+                                    dmt.size());
+        if (time_major) {
+            eng.execute_time_major(in, nsamps, o);
+        } else {
+            eng.execute(in, nsamps, o);
+        }
+    }
+    cudaDeviceSynchronize();
+}
+
+} // namespace
+
+TEST_CASE("DDMT and SDMT (gpu) estimate_memory equal the instance",
+          "[ddmt_gpu][gpu][budget]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    const auto exec = test::gpu_exec();
+    ddmt_estimate::check_host(exec);
+    ddmt_estimate::check_sdmt_differs(exec);
+    for (const bool sdmt : {false, true}) {
+        for (const auto& c : ddmt_estimate::cases()) {
+            INFO((sdmt ? "SDMT " : "DDMT ") << c.name << " (device memory)");
+            const ddmt_estimate::AlwaysShared shared;
+            const auto e = ddmt_estimate::estimate(sdmt, c, exec);
+            for (const bool tm : {false, true}) {
+                if (tm && c.plan.get_nbits() == 32) {
+                    continue;
+                }
+                auto eng = ddmt_estimate::make(sdmt, c, exec);
+                ddmt_estimate::check_stream(
+                    *eng, c.nsamps, e, tm ? e.device_time_major_staging : 0, 0,
+                    [&](SizeType out) {
+                        device_call(*eng, c.nsamps, out, tm);
+                    });
+            }
+        }
+    }
+    // The estimate allocates nothing: one history copy alone (2^25 beams,
+    // about 50 GiB) is beyond the device; the estimate-only engine also
+    // checks it holds no device or pinned memory.
+    const auto& props = gpu_utils::device_properties(exec.device);
+    const auto big    = ddmt_estimate::many_beams(SizeType{1} << 25);
+    for (const bool sdmt : {false, true}) {
+        const auto e = ddmt_estimate::estimate(sdmt, big, exec);
+        CHECK(e.usage.history / 2 > props.totalGlobalMem);
     }
 }
 

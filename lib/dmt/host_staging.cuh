@@ -45,15 +45,16 @@ public:
             return;
         }
         release();
-        gpu_utils::check_gpu_call(
+        gpu_utils::check_allocation(
             cudaHostAlloc(reinterpret_cast<void**>(&m_ptr),
                           std::max<SizeType>(n, 1) * sizeof(T),
                           cudaHostAllocDefault),
-            "cudaHostAlloc failed");
+            n * sizeof(T), "pinned host allocation");
         m_capacity = n;
     }
     [[nodiscard]] T* data() noexcept { return m_ptr; }
     [[nodiscard]] const T* data() const noexcept { return m_ptr; }
+    [[nodiscard]] SizeType capacity() const noexcept { return m_capacity; }
 
 private:
     void release() noexcept {

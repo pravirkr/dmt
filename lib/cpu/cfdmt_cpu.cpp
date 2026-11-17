@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "dmt/cfdmt_common.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fft.hpp"
+#include "dmt/planned_vector.hpp"
 #include "dmt/simd_math.hpp"
 #include "dmt/unpacker.hpp"
 
@@ -47,20 +49,27 @@ public:
                 plan.get_nbin(),
                 plan.get_nbin()),
           m_mstride(utils::fft_row_stride<ComplexType>(plan.get_mbin())),
-          m_fdmt(plan.get_f_min(),
-                 plan.get_f_max(),
-                 plan.get_nchans(),
-                 plan.get_fdmt_nsamps(),
-                 plan.get_tsamp(),
-                 static_cast<IndexType>(plan.get_fine_dt_max()),
-                 -static_cast<IndexType>(plan.get_fine_dt_max()),
-                 plan.get_config().dt_step,
-                 true,
-                 "valid",
-                 Exec::cpu(m_nthreads)) {
+          m_fdmt_plan(plan.get_f_min(),
+                      plan.get_f_max(),
+                      plan.get_nchans(),
+                      plan.get_fdmt_nsamps(),
+                      plan.get_tsamp(),
+                      static_cast<IndexType>(plan.get_fine_dt_max()),
+                      -static_cast<IndexType>(plan.get_fine_dt_max()),
+                      plan.get_config().dt_step,
+                      "valid") {
+        // Deferred: the working buffers and the fine FDMT wait for
+        // allocate(); the tables (chirp phases, taper) are built.
+        m_deferred.defer(cfg.defer_allocation);
+        if (cfg.defer_allocation) {
+            m_fdmt_planned =
+                FDMT::estimate_memory(m_fdmt_plan, true, fdmt_exec()).usage;
+        } else {
+            m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+        }
         const auto nchans = plan.get_nchans();
         const auto mbin   = plan.get_mbin();
-        m_spec.resize(m_unpacker.output_size());
+        m_deferred.resize(m_spec, m_unpacker.output_size());
         m_phases          = cfdmt::make_chirp_phases(plan);
         const auto& taper = plan.get_channel_taper();
         const float scale = 1.0F / static_cast<float>(plan.get_nbin());
@@ -70,10 +79,11 @@ public:
         }
         m_mean.assign(nchans, 0.0F);
         m_inv_sigma.assign(nchans, 1.0F);
-        m_power.assign(plan.get_nsub() * plan.get_nfft() * plan.get_n_p() * 2,
-                       0.0F);
-        m_waterfall.resize(nchans * plan.get_fdmt_nsamps());
-        m_fdmt_out.resize(m_fdmt.get_plan().get_buffer_size());
+        m_deferred.assign(
+            m_power, plan.get_nsub() * plan.get_nfft() * plan.get_n_p() * 2,
+            0.0F);
+        m_deferred.resize(m_waterfall, nchans * plan.get_fdmt_nsamps());
+        m_deferred.resize(m_fdmt_out, m_fdmt_plan.get_buffer_size());
         // Inverse transforms of up to kChunk FFT blocks (both pols) per call.
         const auto lc   = mbin - (2 * (plan.get_noverlap() / plan.get_n_p()));
         const auto nwin = ((plan.get_fdmt_nsamps() + lc - 1) / lc) + 1;
@@ -83,7 +93,24 @@ public:
                                m_mstride, m_mstride);
         }
         // Per thread: chirp (mbin) + two pol rows (2 * mstride).
-        m_scratch.resize(static_cast<SizeType>(m_nthreads) * scratch_stride());
+        m_deferred.resize(m_scratch,
+                          static_cast<SizeType>(m_nthreads) * scratch_stride());
+    }
+
+    void allocate() override {
+        if (m_fdmt) {
+            return;
+        }
+        const auto planned = memory_usage();
+        m_deferred.materialize();
+        m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+        const auto got = memory_usage();
+        if (got.spectrum != planned.spectrum ||
+            got.waterfall != planned.waterfall || got.fdmt != planned.fdmt ||
+            got.workspace != planned.workspace) {
+            throw std::logic_error(
+                "CohFDMT (cpu): allocated memory differs from the plan");
+        }
     }
 
     void execute(std::span<const std::span<const uint8_t>> groups,
@@ -100,24 +127,26 @@ public:
             // No reset_history(): the FDMT window's lead-in keeps its
             // history out of every cropped output (see CohFDMTPlan).
             coherent_trial(k);
-            m_fdmt.execute(m_waterfall, m_fdmt_out);
+            m_fdmt->execute(m_waterfall, m_fdmt_out);
             crop_rows(k, dmt);
         }
     }
 
     [[nodiscard]] plans::CohFDMTMemoryUsage
     memory_usage() const noexcept override {
-        const auto fdmt_mem = m_fdmt.get_memory_usage();
-        return {.spectrum  = m_spec.size() * sizeof(ComplexType),
-                .waterfall = m_waterfall.size() * sizeof(float),
-                .fdmt = fdmt_mem.total() + (m_fdmt_out.size() * sizeof(float)),
-                .workspace =
-                    ((m_phases.base.size() + m_phases.inc.size()) *
-                     sizeof(uint64_t)) +
-                    (m_scratch.size() * sizeof(ComplexType)) +
-                    ((m_mean.size() + m_inv_sigma.size() + m_taper.size()) *
-                     sizeof(float)),
-                .output = m_plan.get_dmt_size() * sizeof(float)};
+        const auto fdmt_mem =
+            m_fdmt ? m_fdmt->get_memory_usage() : m_fdmt_planned;
+        const auto& d = m_deferred;
+        return {.spectrum  = d.size(m_spec) * sizeof(ComplexType),
+                .waterfall = d.size(m_waterfall) * sizeof(float),
+                .fdmt = fdmt_mem.total() + (d.size(m_fdmt_out) * sizeof(float)),
+                .workspace = ((m_phases.base.size() + m_phases.inc.size()) *
+                              sizeof(uint64_t)) +
+                             (d.size(m_scratch) * sizeof(ComplexType)) +
+                             ((d.size(m_power) + m_mean.size() +
+                               m_inv_sigma.size() + m_taper.size()) *
+                              sizeof(float)),
+                .output    = m_plan.get_dmt_size() * sizeof(float)};
     }
 
 protected:
@@ -133,7 +162,9 @@ private:
     utils::BasebandUnpackerCPU m_unpacker;
     utils::FFTWRowPlan m_fwd; // both pols of one FFT block
     SizeType m_mstride;
-    algorithms::FDMT m_fdmt;
+    plans::FDMTPlan m_fdmt_plan;            // the fine FDMT's
+    std::optional<algorithms::FDMT> m_fdmt; // built by allocate() if deferred
+    FDMTMemoryUsage m_fdmt_planned{};       // its estimate until then
     SizeType m_chunk{1};
     std::vector<utils::FFTWRowPlan> m_inv; // [n - 1]: 2 * n inverse rows
 
@@ -146,6 +177,12 @@ private:
     std::vector<float> m_waterfall; // (nchans, fdmt_nsamps)
     std::vector<float> m_fdmt_out;
     utils::FFTVector<ComplexType> m_scratch;
+    /// Working buffers a deferred construction sized for allocate().
+    planned::HostPlan m_deferred;
+
+    [[nodiscard]] Exec fdmt_exec() const noexcept {
+        return Exec::cpu(m_nthreads);
+    }
 
     [[nodiscard]] SizeType scratch_stride() const noexcept {
         return m_mstride * (1 + (2 * m_chunk));

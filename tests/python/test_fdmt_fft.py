@@ -437,3 +437,34 @@ class TestFDMTFFTInputs:
         block = rng.standard_normal((64, 512), dtype=np.float32)
         np.testing.assert_array_equal(a.execute(block), b.execute(block))
         assert FDMTFFT(*self.args, mode="roll").history_state_size() == 0
+
+
+def _fft_usage(u: libdmt.FDMTMemoryUsage) -> tuple:
+    return (u.plan, u.state, u.history, u.workspace, u.output)
+
+
+def _check_fft_estimate(backend: str) -> None:
+    """FDMTFFT.estimate_memory equals the built instance, for every overload."""
+    args = (1000.0, 1500.0, 64, 1024, 0.001, 80)
+    for mode in ("valid", "full", "roll"):
+        est = FDMTFFT.estimate_memory(*args, mode=mode, nbeams=2, backend=backend)
+        fft = FDMTFFT(*args, mode=mode, nbeams=2, backend=backend)
+        assert _fft_usage(est.usage) == _fft_usage(fft.memory_usage)
+        assert est.chunk_nsamps > 0
+        assert (est.host_staging == 0) == (backend == "cpu")
+    dms = np.linspace(0.0, 50.0, 20, dtype=np.float32)
+    est = FDMTFFT.estimate_memory(*args[:5], dm_grid=dms, backend=backend)
+    fft = FDMTFFT(*args[:5], dm_grid=dms, backend=backend)
+    assert _fft_usage(est.usage) == _fft_usage(fft.memory_usage)
+    plan = libdmt.FDMTPlan(*args)
+    est = FDMTFFT.estimate_memory(plan, backend=backend, fractional_delays=False)
+    fft = FDMTFFT(plan, backend=backend, fractional_delays=False)
+    assert _fft_usage(est.usage) == _fft_usage(fft.memory_usage)
+
+
+def test_estimate_memory_matches_instance_cpu() -> None:
+    _check_fft_estimate("cpu")
+
+
+def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
+    _check_fft_estimate(gpu_backend)

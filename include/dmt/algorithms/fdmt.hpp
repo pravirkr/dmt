@@ -67,25 +67,43 @@ inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
 inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
 
 /**
- * @brief Memory an FDMT engine allocates at construction, in bytes (host
- * memory on the CPU backend, device memory on a GPU backend). execute()
- * allocates nothing further; the caller provides the input and the `output`
- * bytes of output buffer per call.
+ * @brief Memory an FDMT engine allocates, in bytes (host memory on the CPU
+ * backend, device memory on a GPU backend). Apart from the GPU staging of
+ * host-memory calls (in `workspace` once the first one allocates it),
+ * everything is allocated at construction; the caller provides the input
+ * and the `output` bytes of output buffer per call.
  */
 struct FDMTMemoryUsage {
-    SizeType plan;      ///< Plan tables (coordinate DAG, sub-band grids)
-    SizeType state;     ///< Internal tree state (two levels of a chunk)
-    SizeType history;   ///< "valid"-mode streaming history
-    SizeType workspace; ///< CPU: per-thread fusion/unpack scratch;
-                        ///< GPU: fused-kernel index tables, plus the
-                        ///< host-memory call staging once allocated
-    SizeType output;    ///< Caller-provided dmt buffer per execute() (not
-                        ///< owned by the engine)
+    SizeType plan{0};      ///< Plan tables (coordinate DAG, sub-band grids)
+    SizeType state{0};     ///< Internal tree state (two levels of a chunk)
+    SizeType history{0};   ///< "valid"-mode streaming history
+    SizeType workspace{0}; ///< CPU: per-thread fusion/unpack scratch;
+                           ///< GPU: fused-kernel index tables, plus the
+                           ///< host-memory call staging once allocated
+    SizeType output{0};    ///< Caller-provided dmt buffer per execute() (not
+                           ///< owned by the engine)
 
     /// Total allocated by the engine (excludes `output`).
-    [[nodiscard]] SizeType total() const noexcept {
+    [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + state + history + workspace;
     }
+};
+
+/**
+ * @brief What an FDMT built with the same arguments would allocate, without
+ * allocating it (FDMT::estimate_memory()).
+ */
+struct FDMTMemoryEstimate {
+    /// Equal to get_memory_usage() of that instance after construction.
+    FDMTMemoryUsage usage{};
+    /// Its get_chunk_nsamps() (FDMTFFT::estimate_memory(): the output
+    /// samples per overlap-save segment of execute()).
+    SizeType chunk_nsamps{0};
+    /// GPU backends: device bytes the first host-memory execute() or reset()
+    /// adds (float32 input block and output plane), outside the budget;
+    /// device-memory calls never allocate them (packed host input stages
+    /// its packed bytes instead of the float block). 0 on the CPU.
+    SizeType host_staging{0};
 };
 
 /**
@@ -105,12 +123,15 @@ struct FDMTMemoryUsage {
  * - Output: always float32, (nbeams, ndms, dmt_nsamps): pass at least
  *   nbeams * plan.get_dmt_size() floats. The engine owns all its working
  *   state; the output buffer is only written.
- * - Construct once per plan: the constructor allocates everything, and
- *   execute() allocates nothing. In mode "valid", call execute() on
- *   contiguous, non-overlapping blocks to get a contiguous output stream.
+ * - Construct once per plan: the constructor allocates the working state,
+ *   and device-memory execute() allocates nothing. In mode "valid", call
+ *   execute() on contiguous, non-overlapping blocks to get a contiguous
+ *   output stream.
  * - Host memory (`std::span`) works on every backend; a GPU backend stages
- *   it through device buffers allocated on the first host call and blocks
- *   until the result is on the host. Device memory (`DeviceSpan`) works on
+ *   it through device buffers for the whole input block and output plane,
+ *   allocated on the first host call outside max_memory_bytes (reported in
+ *   get_memory_usage().workspace once allocated), and blocks until the
+ *   result is on the host. Device memory (`DeviceSpan`) works on
  *   GPU backends only (the CPU backend throws std::invalid_argument) and is
  *   asynchronous on the given Stream.
  */
@@ -227,8 +248,10 @@ public:
      * that fits (on parkes_uwl faster than the tree path on both backends).
      * Throws std::invalid_argument when no path fits.
      *
-     * All working memory is allocated here (see get_memory_usage()); execute()
-     * performs no allocation.
+     * All working memory is allocated here (see get_memory_usage()). The
+     * only later allocation is the GPU staging of host-memory calls (the
+     * input block and output plane, on the first host execute() or reset()),
+     * which is outside this budget; device-memory calls never need it.
      */
     FDMT(float f_min,
          float f_max,
@@ -313,6 +336,74 @@ public:
                   bool int_tree             = true,
                   SizeType chunk_nsamps     = 0,
                   SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+
+    /**
+     * @brief Memory an instance built with these arguments would allocate,
+     * and its chunk, computed without allocating it: the constructor's
+     * decisions and tables, with every working buffer sized but not
+     * allocated (exact: the constructor allocates exactly these sizes).
+     * Throws as the constructor would when nothing fits max_memory_bytes.
+     * A GPU backend needs the device (it reads its shared memory and L2
+     * sizes) but allocates no device memory; the CUDA context, created on
+     * first use, is not counted (nor in get_memory_usage()).
+     * One overload per constructor, with the same arguments.
+     */
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    IndexType dt_max,
+                    IndexType dt_min          = 0,
+                    SizeType dt_step          = 1,
+                    bool use_box_smearing     = true,
+                    std::string_view mode     = "valid",
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    const std::vector<IndexType>& dt_grid,
+                    bool use_box_smearing     = true,
+                    std::string_view mode     = "valid",
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    const std::vector<float>& dm_grid,
+                    bool use_box_smearing     = true,
+                    std::string_view mode     = "valid",
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(const plans::FDMTPlan& plan,
+                    bool use_box_smearing     = true,
+                    Exec exec                 = {},
+                    SizeType nbeams           = 1,
+                    SizeType fuse_levels      = kFDMTAutoFuse,
+                    bool int_tree             = true,
+                    SizeType chunk_nsamps     = 0,
+                    SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
 
     ~FDMT();
     FDMT(FDMT&&) noexcept;
@@ -439,9 +530,9 @@ public:
     [[nodiscard]] SizeType get_chunk_nsamps() const noexcept;
 
     /**
-     * @brief Memory allocated at construction (host bytes on the CPU
-     * backend, device bytes on a GPU backend), plus the output buffer size
-     * each execute() call needs.
+     * @brief Memory allocated (host bytes on the CPU backend, device bytes
+     * on a GPU backend; GPU host-call staging once allocated), plus the
+     * output buffer size each execute() call needs.
      */
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept;
 

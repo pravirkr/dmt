@@ -12,7 +12,10 @@
 #include "dmt/algorithms/ddmt_fft.hpp"
 
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
+#include "dmt/gpu_utils.cuh"
 
+#include "ddmt_fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -200,6 +203,83 @@ TEST_CASE("DDMTFFT GPU host packed, time-major and history reset",
         gpu.execute_time_major(tm, nsamps, c2);
         CHECK(rel_err(c2, a) < 2e-5);
     }
+}
+
+namespace {
+
+// A device-memory call of `nsamps` zero samples (float or packed).
+void device_call(DDMTFFT& eng, SizeType nsamps, SizeType out) {
+    const auto& plan = eng.get_plan();
+    const auto nbits = plan.get_nbits();
+    const auto rows  = eng.get_nbeams() * plan.get_nchans();
+    thrust::device_vector<float> dmt(eng.get_nbeams() *
+                                     plan.get_dm_arr().size() * out);
+    const DeviceSpan<float> out_d(thrust::raw_pointer_cast(dmt.data()),
+                                  dmt.size());
+    if (nbits == 32) {
+        const thrust::device_vector<float> wf(rows * nsamps, 0.0F);
+        eng.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()),
+                                            wf.size()),
+                    out_d);
+    } else {
+        const thrust::device_vector<uint8_t> wf(
+            rows * bit_pack_utils::packed_row_bytes(nsamps, nbits), 0);
+        eng.execute(DeviceSpan<const uint8_t>(
+                        thrust::raw_pointer_cast(wf.data()), wf.size()),
+                    nsamps, out_d);
+    }
+    cudaDeviceSynchronize();
+}
+
+} // namespace
+
+TEST_CASE("DDMTFFT (gpu) estimate_memory equals a warm stream",
+          "[ddmt_fft_gpu][gpu][budget]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    const auto exec = test::gpu_exec();
+    for (const auto& c : ddmt_fft_estimate::cases()) {
+        ddmt_fft_estimate::check_host(c, exec);
+        INFO(c.name << " (device memory)");
+        const ddmt_fft_estimate::SegmentCap cap(c.cap);
+        const auto e = DDMTFFT::estimate_memory(c.plan, c.nsamps, exec,
+                                                c.nbeams, c.options);
+        DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
+        ddmt_fft_estimate::check_stream(
+            eng, c.nsamps, e, e.device_staging,
+            [&](SizeType out) { device_call(eng, c.nsamps, out); });
+        if (c.plan.get_nbits() == 32) {
+            CHECK(e.device_staging == 0);
+        }
+    }
+    ddmt_fft_estimate::check_call_lengths(exec);
+    // The estimate allocates nothing: a history larger than the device
+    // (2^23 beams: two copies of 32 GiB) is sized; a buffer made outside the
+    // engine's own deferral scope would defer into this outer list instead.
+    gpu_utils::PendingList stray;
+    algorithms::DDMTFFTMemoryEstimate e{};
+    {
+        const gpu_utils::DeferScope outer(&stray);
+        const auto big = ddmt_fft_estimate::many_beams(SizeType{1} << 23);
+        e = DDMTFFT::estimate_memory(big.plan, big.nsamps, exec, big.nbeams,
+                                     big.options);
+    }
+    CHECK(stray.registered() == 0);
+    const auto& props = gpu_utils::device_properties(exec.device);
+    if (e.usage.total() <= props.totalGlobalMem) {
+        SKIP("device larger than the probe (" << props.totalGlobalMem
+                                              << " bytes)");
+    }
+    CHECK(e.usage.total() > props.totalGlobalMem);
+    // Building it fails with a std::bad_alloc (Python MemoryError) naming
+    // the buffer that did not fit.
+    const auto big = ddmt_fft_estimate::many_beams(SizeType{1} << 23);
+    CHECK_THROWS_MATCHES(
+        DDMTFFT(big.plan, exec, big.nbeams, big.options), std::bad_alloc,
+        Catch::Matchers::MessageMatches(
+            Catch::Matchers::ContainsSubstring("out of memory") &&
+            Catch::Matchers::ContainsSubstring("estimate_memory()")));
 }
 
 } // namespace dmt

@@ -524,6 +524,26 @@ Compute Engines (``dmt::algorithms``)
    :project: dmt
    :members:
 
+.. doxygenstruct:: dmt::algorithms::FDMTMemoryEstimate
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::DDMTMemoryUsage
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::DDMTMemoryEstimate
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::DDMTFFTMemoryUsage
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::DDMTFFTMemoryEstimate
+   :project: dmt
+   :members:
+
 .. doxygenvariable:: dmt::algorithms::kFDMTAutoFuse
    :project: dmt
 

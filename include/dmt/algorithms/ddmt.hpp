@@ -19,6 +19,50 @@
 namespace dmt::algorithms {
 
 /**
+ * @brief Memory a DDMT or SDMT instance holds, in bytes: host memory on the
+ * CPU backend, device memory on a GPU backend (`pinned` apart). Plan tables
+ * and history are made at construction; on a GPU the staging of
+ * host-memory and time-major calls is made by the first such call and
+ * kept. Not counted: the caller's input and output and per-call
+ * temporaries (on the CPU, the transposed copy of a time-major block and
+ * the per-thread windows).
+ */
+struct DDMTMemoryUsage {
+    SizeType plan{0};    ///< Delay tables and (SDMT) shared-sum programs
+    SizeType history{0}; ///< Streaming history (two copies)
+    SizeType staging{0}; ///< GPU: device buffers of the calls made (host-call
+                         ///< input/output double buffers, time-major transpose)
+    SizeType pinned{0};  ///< GPU: pinned host buffers of host-memory calls
+                         ///< (host memory, not in total())
+
+    /// Total held where the instance runs (excludes `pinned`).
+    [[nodiscard]] constexpr SizeType total() const noexcept {
+        return plan + history + staging;
+    }
+};
+
+/**
+ * @brief What a DDMT (or SDMT) making calls of a given length would hold,
+ * without allocating it (DDMT::estimate_memory(), SDMT::estimate_memory()).
+ */
+struct DDMTMemoryEstimate {
+    /// get_memory_usage() after construction, and after any calls on the
+    /// CPU or with device memory in channel-major order on a GPU (staging
+    /// and pinned 0).
+    DDMTMemoryUsage usage{};
+    /// GPU: staging and pinned bytes that host-memory execute() calls of
+    /// that length add (0 on the CPU).
+    SizeType host_staging{0};
+    SizeType host_pinned{0};
+    /// GPU, packed plans: the same for host-memory execute_time_major().
+    SizeType time_major_staging{0};
+    SizeType time_major_pinned{0};
+    /// GPU, packed plans: staging that device-memory execute_time_major()
+    /// calls of that length add.
+    SizeType device_time_major_staging{0};
+};
+
+/**
  * @brief Direct Dispersion Measure Transform (DDMT).
  *
  * Implements classical brute-force delay-and-sum incoherent dedispersion:
@@ -148,6 +192,25 @@ public:
                   Exec exec       = {},
                   SizeType nbeams = 1);
 
+    /**
+     * @brief Memory a DDMT built from @p plan with these arguments holds,
+     * with set_gulp_size(@p gulp_size), when making calls of @p nsamps
+     * input samples, computed without allocating it.
+     *
+     * Exact: get_memory_usage() of such an instance equals `usage` plus the
+     * staging and pinned fields of the kind of call made (calls of one
+     * kind; the host paths share their input and output buffers). It does
+     * not depend on how warm the stream is. On the CPU it does not depend
+     * on @p nsamps either. A GPU backend reads the device's limits but
+     * allocates nothing.
+     */
+    [[nodiscard]] static DDMTMemoryEstimate
+    estimate_memory(const plans::DDMTPlan& plan,
+                    SizeType nsamps,
+                    Exec exec          = {},
+                    SizeType nbeams    = 1,
+                    SizeType gulp_size = 0);
+
     virtual ~DDMT();
     DDMT(DDMT&&) noexcept;
     DDMT& operator=(DDMT&&) noexcept;
@@ -164,6 +227,8 @@ public:
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;
+    /// @brief Memory held now (see DDMTMemoryUsage, estimate_memory()).
+    [[nodiscard]] DDMTMemoryUsage get_memory_usage() const noexcept;
 
     /**
      * @brief Dedisperses a beam-major float32 waterfall (nbeams, nchans,
@@ -355,6 +420,13 @@ protected:
          Exec exec,
          SizeType nbeams,
          EngineKind kind);
+    [[nodiscard]] static DDMTMemoryEstimate
+    estimate_memory(const plans::DDMTPlan& plan,
+                    SizeType nsamps,
+                    Exec exec,
+                    SizeType nbeams,
+                    SizeType gulp_size,
+                    EngineKind kind);
 
 private:
     class Impl;

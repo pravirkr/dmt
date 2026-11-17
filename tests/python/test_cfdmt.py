@@ -205,3 +205,18 @@ class TestExecute:
                 np.zeros(coh.input_size(), dtype=np.uint8),
                 out=np.empty(coh.dmt_size - 1, dtype=np.float32),
             )
+
+
+def _check_estimate(backend: str) -> None:
+    for cfg in (small_config(), small_config(normalize=False)):
+        est = CohFDMT.estimate_memory(cfg, 2, backend=backend)
+        assert est == CohFDMT(cfg, 2, backend=backend).memory_usage()
+        assert est["total"] > 0
+
+
+def test_estimate_memory_matches_instance_cpu() -> None:
+    _check_estimate("cpu")
+
+
+def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
+    _check_estimate(gpu_backend)

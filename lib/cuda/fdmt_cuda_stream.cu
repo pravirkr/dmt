@@ -438,7 +438,7 @@ void FDMTCudaEngine::ensure_full_tree_history(cudaStream_t stream) const {
 std::vector<FDMTCudaEngine::SkewHistBuffer>
 FDMTCudaEngine::skew_hist_buffers() const {
     std::vector<SkewHistBuffer> v;
-    const auto add = [&](const thrust::device_vector<float>& b) {
+    const auto add = [&](const gpu_utils::PlannedVector<float>& b) {
         if (!b.empty()) {
             v.push_back({const_cast<float*>( // NOLINT
                              thrust::raw_pointer_cast(b.data())),

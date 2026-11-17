@@ -55,10 +55,14 @@ DeviceSpan<const uint8_t> as_bytes_view(DeviceSpan<const DataType> s) {
 
 class CohFDMT::Impl {
 public:
-    Impl(const CohFDMTConfig& config, Exec exec)
+    Impl(const CohFDMTConfig& config, Exec exec, bool estimate_only = false)
         : m_plan(config),
-          m_cfg{.exec = exec},
-          m_engine(make_cfdmt_engine(m_plan, m_cfg)) {}
+          m_cfg{.exec = exec, .defer_allocation = true},
+          m_engine(make_cfdmt_engine(m_plan, m_cfg)) {
+        if (!estimate_only) {
+            m_engine->allocate();
+        }
+    }
 
     // The engine holds a reference to m_plan; declaration order matters.
     plans::CohFDMTPlan m_plan;
@@ -108,6 +112,12 @@ SizeType CohFDMT::get_buffer_size() const noexcept {
 }
 plans::CohFDMTMemoryUsage CohFDMT::get_memory_usage() const noexcept {
     return m_impl->m_engine->memory_usage();
+}
+
+plans::CohFDMTMemoryUsage CohFDMT::estimate_memory(const CohFDMTConfig& config,
+                                                   Exec exec) {
+    const Impl impl(config, exec, true);
+    return impl.m_engine->memory_usage();
 }
 
 template <IntegralDataType DataType>

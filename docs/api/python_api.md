@@ -48,6 +48,26 @@
 .. autoclass:: dmtlib.FDMTMemoryUsage
    :members:
    :undoc-members:
+
+.. autoclass:: dmtlib.FDMTMemoryEstimate
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.DDMTMemoryUsage
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.DDMTMemoryEstimate
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.DDMTFFTMemoryUsage
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.DDMTFFTMemoryEstimate
+   :members:
+   :undoc-members:
 ```
 
 Every engine runs on the backend given by its keyword-only `backend=`
@@ -215,6 +235,10 @@ it with any result you publish.
    :undoc-members:
 
 .. autoclass:: dmtlib.FDMTBoxcarMemoryUsage
+   :members:
+   :undoc-members:
+
+.. autoclass:: dmtlib.FDMTBoxcarMemoryEstimate
    :members:
    :undoc-members:
 

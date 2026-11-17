@@ -4,18 +4,20 @@
     python bench/scripts/golden_outputs.py compare base.npz new.npz [--tol 0]
         [--only PATTERN] [--exclude PATTERN ...]
 
-`capture` runs a fixed set of FDMT, DDMT, FDMTFFT, CohFDMT and FDMTBoxcar
-configurations on one backend and stores every output (FDMTBoxcar candidate
-streams field by field, sorted; the CPU skewed-window path through a memory
-budget). Two data
-sets are used: integer-valued inputs, whose sums are exact on every backend
-(so a GPU capture must equal the CPU one bit for bit), and normal-distributed
+`capture` runs a fixed set of FDMT, DDMT, FDMTFFT, CohFDMT, FDMTBoxcar and
+FDMTFFTBoxcar configurations on one backend (including the FDMTBoxcar screen
+modes, keep-brightest, boxes wider than 4096, `chan_dm` and subband DM grids)
+and stores every output (FDMTBoxcar candidate streams field by field, sorted;
+the CPU skewed-window path through a memory budget). Two data sets are used:
+integer-valued inputs, whose sums are exact on every backend (so a GPU capture
+must equal the CPU one bit for bit), and normal-distributed
 float inputs (bitwise only between builds of the same backend). `compare`
 reports each differing key and exits non-zero on any mismatch beyond `--tol`
 (absolute), or when the key sets differ. Across backends, exclude the keys
 that differ by design: the skewed-window state (`--exclude skew/`, the GPU
-runs its direct path and the saved state is backend-specific) and the
-float-input FDMTBoxcar `snr` fields, which differ by rounding.
+runs its direct path and the saved state is backend-specific), the
+float-input FDMTBoxcar `snr` fields and the `kKadaneSurrogate` `snr`, which
+differ by rounding, and `boxcar_x/fft_boxcar/` (float FFT sums).
 """
 
 from __future__ import annotations
@@ -272,6 +274,148 @@ def _fdmt_boxcar(out: dict, backend: str) -> None:
     out["fdmt_boxcar/overflow/counts"] = np.asarray(counts, dtype=np.uint64)
 
 
+def _boxcar_features(out: dict, backend: str) -> None:
+    """FDMTBoxcar options added after 0.8.0, on integer input (exact sums).
+
+    Every screen mode on a screened configuration (wtsp 1, blocks of several
+    scoring tiles), `kKeepBrightest` under a candidate storm, a box wider than
+    4096 samples (the GPU's device-memory ring), `chan_dm` level-0 boxes
+    (FDMT output and candidates), subband DM grids, and FDMTFFTBoxcar.
+    """
+    rng = np.random.default_rng(4242)
+    nchans, nsamps, nblocks = 64, 512, 3
+    codes = rng.integers(0, 5, size=(nchans, nsamps * nblocks)).astype(np.int32)
+    codes[10:40, 700:712] += 2
+    codes[:, 1100:1103] += 1
+    ints = (codes - 2).astype(np.float32)
+    sigma = float(np.sqrt(2.0))
+    blocks = [
+        np.ascontiguousarray(ints[:, k * nsamps : (k + 1) * nsamps])
+        for k in range(nblocks)
+    ]
+    u8_blocks = [
+        np.ascontiguousarray(codes[:, k * nsamps : (k + 1) * nsamps].astype(np.uint8))
+        for k in range(nblocks)
+    ]
+    pw = dmtlib.PeakFindingMode.CONTIGUOUS_PEAK_PER_WIDTH
+    every = dmtlib.PeakFindingMode.ALL_ABOVE_THRESHOLD
+    screens = {
+        "auto": dmtlib.BoxcarScreenMode.AUTO,
+        "prefix": dmtlib.BoxcarScreenMode.PREFIX,
+        "kadane": dmtlib.BoxcarScreenMode.KADANE,
+        "none": dmtlib.BoxcarScreenMode.NONE,
+        "surrogate": dmtlib.BoxcarScreenMode.KADANE_SURROGATE,
+    }
+    plan = dmtlib.FDMTPlan(F_MIN, F_MAX, nchans, nsamps, TSAMP, 96, subband_depth=1)
+    for name, screen in screens.items():
+        for kind in ("float", "u8"):
+            cfg = dmtlib.BoxcarConfig(
+                32,
+                wtsp=1.0,
+                detect_thresh=4.0,
+                noise_sigma=sigma,
+                peak_mode=pw,
+                max_cands_per_dm=0,
+                screen_mode=screen,
+            )
+            if kind == "u8":
+                cfg.input_nbits = 8
+                cfg.input_mean = 2.0
+            search = dmtlib.FDMTBoxcar(plan, cfg, chunk_nsamps=128, backend=backend)
+            parts, counts = _run_search(
+                search, u8_blocks if kind == "u8" else blocks, "drain"
+            )
+            _store_candidates(out, f"boxcar_x/screen/{name}/{kind}", parts, counts)
+
+    # kKeepBrightest: a storm far above both quotas.
+    for depth in (0, 2):
+        plan = dmtlib.FDMTPlan(
+            F_MIN, F_MAX, nchans, nsamps, TSAMP, 96, subband_depth=depth
+        )
+        cfg = dmtlib.BoxcarConfig(
+            17,
+            wtsp=1.5,
+            detect_thresh=2.0,
+            noise_sigma=sigma,
+            peak_mode=every,
+            max_candidates=300,
+            max_cands_per_dm=3,
+            overflow_policy=dmtlib.OverflowPolicy.KEEP_BRIGHTEST,
+        )
+        search = dmtlib.FDMTBoxcar(plan, cfg, chunk_nsamps=128, backend=backend)
+        parts, counts = _run_search(search, blocks, "flush")
+        _store_candidates(out, f"boxcar_x/keep/d{depth}", parts, counts)
+
+    # A box wider than 4096 samples (few widths): long blocks, a wide burst.
+    # On the L40 (~100 KB of shared memory per block) the GPU runs it on the
+    # device-memory ring.
+    for width, long_n in ((5000, 6144),):
+        wide = rng.integers(0, 5, size=(nchans, 2 * long_n)).astype(np.int32)
+        wide[:, long_n // 2 : long_n // 2 + width] += 1
+        wide_f = (wide - 2).astype(np.float32)
+        plan = dmtlib.FDMTPlan(F_MIN, F_MAX, nchans, long_n, TSAMP, 96)
+        cfg = dmtlib.BoxcarConfig(
+            width, wtsp=4.0, detect_thresh=5.0, noise_sigma=sigma, peak_mode=pw
+        )
+        search = dmtlib.FDMTBoxcar(plan, cfg, backend=backend)
+        wide_blocks = [
+            np.ascontiguousarray(wide_f[:, k * long_n : (k + 1) * long_n])
+            for k in range(2)
+        ]
+        parts, counts = _run_search(search, wide_blocks, "drain")
+        _store_candidates(out, f"boxcar_x/wide{width}", parts, counts)
+        out[f"boxcar_x/wide{width}/widths"] = np.asarray(
+            search.search_plans[0].widths, dtype=np.int64
+        )
+
+    # chan_dm: level-0 boxes for coherently dedispersed channels.
+    plan = dmtlib.FDMTPlan(
+        F_MIN, F_MAX, nchans, nsamps, TSAMP, 96, subband_depth=1, chan_dm=30.0
+    )
+    f = dmtlib.FDMT(plan, backend=backend)
+    out["boxcar_x/chan_dm/fdmt/block0"] = f.execute(blocks[0])
+    out["boxcar_x/chan_dm/fdmt/block1"] = f.execute(blocks[1])
+    for kind in ("float", "u8"):
+        cfg = dmtlib.BoxcarConfig(
+            17, wtsp=1.5, detect_thresh=4.0, noise_sigma=sigma, peak_mode=pw
+        )
+        if kind == "u8":
+            cfg.input_nbits = 8
+            cfg.input_mean = 2.0
+        search = dmtlib.FDMTBoxcar(plan, cfg, chunk_nsamps=128, backend=backend)
+        parts, counts = _run_search(
+            search, u8_blocks if kind == "u8" else blocks, "drain"
+        )
+        _store_candidates(out, f"boxcar_x/chan_dm/{kind}", parts, counts)
+
+    # Subband DM grids: only the rows nearest each subband's own grid.
+    plan = dmtlib.FDMTPlan(
+        F_MIN,
+        F_MAX,
+        nchans,
+        nsamps,
+        TSAMP,
+        96,
+        subband_depth=2,
+        subband_max_snr_loss=0.1,
+    )
+    cfg = dmtlib.BoxcarConfig(
+        17, wtsp=1.5, detect_thresh=4.0, noise_sigma=sigma, peak_mode=pw
+    )
+    search = dmtlib.FDMTBoxcar(plan, cfg, chunk_nsamps=128, backend=backend)
+    parts, counts = _run_search(search, blocks, "drain")
+    _store_candidates(out, "boxcar_x/subgrid", parts, counts)
+
+    # FDMTFFTBoxcar, integer delays (bitwise within one backend).
+    plan = dmtlib.FDMTPlan(F_MIN, F_MAX, nchans, nsamps, TSAMP, 96)
+    cfg = dmtlib.BoxcarConfig(
+        17, wtsp=1.5, detect_thresh=4.0, noise_sigma=sigma, peak_mode=pw
+    )
+    search = dmtlib.FDMTFFTBoxcar(plan, cfg, fractional_delays=False, backend=backend)
+    parts, counts = _run_search(search, blocks, "drain")
+    _store_candidates(out, "boxcar_x/fft_boxcar", parts, counts)
+
+
 def _skewed(out: dict, backend: str) -> None:
     """Capture the CPU skewed-window path, forced by a memory budget.
 
@@ -346,6 +490,7 @@ def capture(path: str, backend: str) -> None:
     _ddmt_packed(out, backend, rng)
     _fft(out, backend, floats)
     _fdmt_boxcar(out, backend)
+    _boxcar_features(out, backend)
     _skewed(out, backend)
     np.savez_compressed(path, **{k: np.asarray(v) for k, v in out.items()})
     print(f"captured {len(out)} arrays on {backend} -> {path}")

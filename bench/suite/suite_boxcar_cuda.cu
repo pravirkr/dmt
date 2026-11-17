@@ -63,6 +63,7 @@ public:
             "separate bench scores a materialized DM-time plane");
     }
     void reset(Stream) override {}
+    void allocate() override {}
     [[nodiscard]] algorithms::FDMTMemoryUsage memory() const noexcept override {
         return {};
     }

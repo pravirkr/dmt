@@ -1369,3 +1369,43 @@ def test_subband_sigma_grid() -> None:
     np.testing.assert_allclose(stag, np.sqrt(12.0))
     with pytest.raises(IndexError):
         plan.get_subband_sigma_grid(level, 3)
+
+
+def _usage(u: libdmt.FDMTMemoryUsage) -> tuple:
+    return (u.plan, u.state, u.history, u.workspace, u.output)
+
+
+def _check_estimate(backend: str) -> None:
+    """FDMT.estimate_memory equals the built instance, for every overload."""
+    args = (1100.0, 1500.0, 128, 1024, 0.001, 100)
+    est = libdmt.FDMT.estimate_memory(*args, backend=backend, nbeams=2)
+    fdmt = libdmt.FDMT(*args, backend=backend, nbeams=2)
+    assert _usage(est.usage) == _usage(fdmt.memory_usage)
+    assert est.chunk_nsamps == fdmt.chunk_nsamps
+    assert (est.host_staging == 0) == (backend == "cpu")
+
+    plan = libdmt.FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
+    budget = 60 << 20
+    est = libdmt.FDMT.estimate_memory(plan, backend=backend, max_memory_bytes=budget)
+    fdmt = libdmt.FDMT(plan, backend=backend, max_memory_bytes=budget)
+    assert _usage(est.usage) == _usage(fdmt.memory_usage)
+    assert est.chunk_nsamps == fdmt.chunk_nsamps < plan.nsamps
+    assert est.usage.total <= budget
+
+    dms = np.linspace(0.0, 50.0, 40, dtype=np.float32)
+    est = libdmt.FDMT.estimate_memory(
+        1100.0, 1500.0, 128, 1024, 0.001, dm_grid=dms, backend=backend
+    )
+    fdmt = libdmt.FDMT(1100.0, 1500.0, 128, 1024, 0.001, dm_grid=dms, backend=backend)
+    assert _usage(est.usage) == _usage(fdmt.memory_usage)
+
+    with pytest.raises(ValueError, match="max_memory_bytes"):
+        libdmt.FDMT.estimate_memory(*args, backend=backend, max_memory_bytes=1024)
+
+
+def test_estimate_memory_matches_instance_cpu() -> None:
+    _check_estimate("cpu")
+
+
+def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
+    _check_estimate(gpu_backend)

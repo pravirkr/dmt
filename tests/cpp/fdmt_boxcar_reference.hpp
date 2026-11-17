@@ -630,4 +630,73 @@ fft_reference(const plans::FDMTPlan& plan,
     }
     return to_arrival(plan, direct_windows(planes, rows, config));
 }
+/// FDMTBoxcar::estimate_memory() cases: screens, packed input, keep stores,
+/// kill mask, beams, an explicit chunk, a budget-chosen chunk, subbands.
+struct EstimateCase {
+    const char* name;
+    plans::FDMTPlan plan;
+    BoxcarConfig config;
+    SizeType beams  = 1;
+    SizeType chunk  = 0;
+    SizeType budget = algorithms::kFDMTDefaultMaxMemory;
+    std::vector<uint8_t> kill{};
+};
+inline std::vector<EstimateCase> estimate_cases() {
+    const plans::FDMTPlan plan(1000.0F, 1500.0F, 128, 2048, 0.001F, 200);
+    std::vector<EstimateCase> cases;
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 64;
+    cases.push_back({"auto screen", plan, cfg, 1});
+    for (const auto mode :
+         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
+          BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone}) {
+        BoxcarConfig c = cfg;
+        c.screen_mode  = mode;
+        cases.push_back({"screen mode", plan, c, 2});
+    }
+    // Trapezoids: the Kadane gate's edge-lag windows.
+    BoxcarConfig trap  = cfg;
+    trap.screen_mode   = BoxcarScreenMode::kKadane;
+    trap.use_trapezoid = true;
+    cases.push_back({"kadane trapezoid", plan, trap, 2});
+    BoxcarConfig packed = cfg;
+    packed.input_nbits  = 8;
+    packed.input_mean   = 127;
+    packed.noise_sigma  = 3;
+    cases.push_back({"packed 8-bit", plan, packed, 2});
+    packed.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
+    cases.push_back({"packed surrogate", plan, packed, 1});
+    BoxcarConfig keep     = cfg;
+    keep.overflow_policy  = OverflowPolicy::kKeepBrightest;
+    keep.max_cands_per_dm = 4;
+    cases.push_back({"keep brightest", plan, keep, 2});
+    std::vector<uint8_t> kill(plan.get_nchans(), 1);
+    std::fill(kill.begin() + 10, kill.begin() + 20, 0);
+    cases.push_back({"kill mask", plan, cfg, 2, 0,
+                     algorithms::kFDMTDefaultMaxMemory, kill});
+    cases.push_back({"explicit chunk", plan, cfg, 1, 256});
+    // A budget the whole block does not fit: a shorter chunk.
+    cases.push_back(
+        {"budget chunk",
+         plans::FDMTPlan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, 2700), cfg, 1,
+         0, SizeType{70} << 20});
+    cases.push_back({"subbands",
+                     plans::FDMTPlan(1000.0F, 1500.0F, 128, 2048, 0.001F, 200,
+                                     0, 1, "valid", 1),
+                     cfg, 1});
+    return cases;
+}
+inline void check_estimate(const algorithms::FDMTBoxcarMemoryEstimate& e,
+                           const FDMTBoxcar& f) {
+    const auto got = f.get_memory_usage();
+    CHECK(e.usage.plan == got.plan);
+    CHECK(e.usage.state == got.state);
+    CHECK(e.usage.history == got.history);
+    CHECK(e.usage.peaks == got.peaks);
+    CHECK(e.usage.workspace == got.workspace);
+    CHECK(e.usage.candidates == got.candidates);
+    CHECK(e.usage.staging == got.staging);
+    CHECK(e.usage.host == got.host);
+    CHECK(e.chunk_nsamps == f.get_chunk_nsamps());
+}
 } // namespace boxcar_test

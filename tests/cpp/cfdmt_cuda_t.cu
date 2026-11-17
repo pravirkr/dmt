@@ -19,8 +19,11 @@
 
 #include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
+#include "dmt/gpu_utils.cuh"
 
 #include "cfdmt_behaviour.hpp"
+#include "cfdmt_estimate_cases.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -475,6 +478,69 @@ TEST_CASE("CohFDMT (gpu) spectrum beyond 2^31 elements",
     CHECK(std::abs(grid[idx / nout]) <= std::abs(grid[1] - grid[0]));
     CHECK(std::abs(static_cast<double>(idx % nout) - static_cast<double>(j)) <=
           1.0);
+}
+
+TEST_CASE("CohFDMT (gpu) estimate_memory equals the constructed instance",
+          "[cfdmt_gpu][gpu][budget]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    cfdmt_estimate::check_all(test::gpu_exec());
+    // The estimate allocates nothing: a configuration larger in all than
+    // the device is sized (an estimate that allocated it would fail). It is
+    // never built: no single buffer of it exceeds the device, so building
+    // would hold tens of GiB before failing.
+    // A device buffer made outside the engine's own deferral scope would
+    // defer into this outer list instead of allocating: none may.
+    gpu_utils::PendingList stray;
+    plans::CohFDMTMemoryUsage e{};
+    {
+        const gpu_utils::DeferScope outer(&stray);
+        e = CohFDMT::estimate_memory(cfdmt_estimate::beyond_device_config(),
+                                     test::gpu_exec());
+    }
+    CHECK(stray.registered() == 0);
+    const auto& props = gpu_utils::device_properties(test::gpu_exec().device);
+    if (e.total() <= props.totalGlobalMem) {
+        SKIP("device larger than the probe (" << props.totalGlobalMem
+                                              << " bytes)");
+    }
+    CHECK(e.total() > props.totalGlobalMem);
+}
+
+TEST_CASE("CohFDMT (gpu) deferred engines allocate what they planned",
+          "[cfdmt_gpu][gpu][budget]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    // Both coherent paths: a deferred engine plans the direct engine's
+    // memory, and once allocated computes the same output.
+    const auto cfg = many_trials_config();
+    const plans::CohFDMTPlan plan(cfg);
+    const auto in = make_block(cfg, plan.get_block_nsamps());
+    for (const auto path :
+         {CohFDMTCoherentPath::kFused, CohFDMTCoherentPath::kCuFFT}) {
+        INFO("cuFFT " << (path == CohFDMTCoherentPath::kCuFFT));
+        const CohFDMTEngineConfig direct_cfg{.exec          = test::gpu_exec(),
+                                             .coherent_path = path};
+        auto deferred_cfg             = direct_cfg;
+        deferred_cfg.defer_allocation = true;
+        const auto direct =
+            algorithms::detail::make_cfdmt_gpu(plan, direct_cfg);
+        const auto deferred =
+            algorithms::detail::make_cfdmt_gpu(plan, deferred_cfg);
+        cfdmt_estimate::check_usage(deferred->memory_usage(),
+                                    direct->memory_usage());
+        deferred->allocate();
+        cfdmt_estimate::check_usage(deferred->memory_usage(),
+                                    direct->memory_usage());
+        std::vector<float> a(plan.get_dmt_size());
+        std::vector<float> b(plan.get_dmt_size());
+        const std::span<const uint8_t> group(in);
+        direct->execute(std::span(&group, 1), a);
+        deferred->execute(std::span(&group, 1), b);
+        CHECK(a == b);
+    }
 }
 
 } // namespace dmt

@@ -16,6 +16,7 @@
 #include "dmt/utils/simulate.hpp"
 
 #include "cfdmt_behaviour.hpp"
+#include "cfdmt_estimate_cases.hpp"
 
 namespace dmt {
 
@@ -216,6 +217,12 @@ TEST_CASE("CohFDMT trimmed filter margin matches a 1e-6 margin",
 }
 TEST_CASE("CohFDMT concurrent calls on one engine", "[cfdmt][cpu]") {
     check_concurrent_calls(Exec::cpu(2));
+}
+
+TEST_CASE("CohFDMT estimate_memory equals the constructed instance (cpu)",
+          "[cfdmt][cpu][budget]") {
+    cfdmt_estimate::check_all(Exec::cpu(2));
+    cfdmt_estimate::check_impossible_cpu();
 }
 
 } // namespace dmt

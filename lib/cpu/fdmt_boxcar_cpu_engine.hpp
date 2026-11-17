@@ -24,6 +24,7 @@
 #include "dmt/kadane_plan.hpp"
 #include "dmt/kadane_simd.hpp"
 #include "dmt/kadane_surrogate.hpp"
+#include "dmt/planned_vector.hpp"
 
 namespace dmt::algorithms::detail::fdmt_boxcar_cpu {
 
@@ -77,6 +78,7 @@ public:
     void drop_block_noise() noexcept override;
     void reset_history(Stream stream) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
+    void allocate() override;
     [[nodiscard]] FDMTBoxcarMemoryUsage memory_usage() const noexcept override;
     [[nodiscard]] SizeType chunk_nsamps() const noexcept override;
     [[nodiscard]] std::string search_path() const override;
@@ -390,6 +392,9 @@ private:
     std::vector<float> m_tile_f32;
     std::vector<uint32_t> m_tile_u32;
     std::vector<float> m_thread_cuts;
+    /// Buffers a deferred construction sized for allocate().
+    planned::HostPlan m_deferred;
+    bool m_allocated = false;
 };
 
 } // namespace dmt::algorithms::detail::fdmt_boxcar_cpu

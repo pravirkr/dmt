@@ -168,6 +168,12 @@ py::object coh_execute(const CohFDMT& coh,
                               buf);
 }
 
+py::dict coh_memory_dict(const plans::CohFDMTMemoryUsage& m) {
+    return py::dict("spectrum"_a = m.spectrum, "waterfall"_a = m.waterfall,
+                    "fdmt"_a = m.fdmt, "workspace"_a = m.workspace,
+                    "output"_a = m.output, "total"_a = m.total());
+}
+
 } // namespace
 
 void bind_cfdmt(py::module_& mod) {
@@ -388,14 +394,22 @@ void bind_cfdmt(py::module_& mod) {
         .def(
             "memory_usage",
             [](const CohFDMT& coh) {
-                const auto m = coh.get_memory_usage();
-                return py::dict("spectrum"_a  = m.spectrum,
-                                "waterfall"_a = m.waterfall, "fdmt"_a = m.fdmt,
-                                "workspace"_a = m.workspace,
-                                "output"_a = m.output, "total"_a = m.total());
+                return coh_memory_dict(coh.get_memory_usage());
             },
             "Bytes allocated by the engine, by kind (``output`` is the "
             "caller's result buffer and not part of ``total``).")
+        .def_static(
+            "estimate_memory",
+            [](const CohFDMTConfig& config, int nthreads,
+               std::string_view backend, int device) {
+                return coh_memory_dict(CohFDMT::estimate_memory(
+                    config, make_exec(backend, nthreads, device)));
+            },
+            "config"_a, "nthreads"_a = 1, py::kw_only(), "backend"_a = "cpu",
+            "device"_a = 0,
+            "What ``CohFDMT(config, nthreads, backend=..., device=...)`` "
+            "would allocate, computed without allocating it: equal to that "
+            "instance's ``memory_usage()``.")
         .def("execute", &coh_execute, "data"_a, py::kw_only(),
              "out"_a = py::none(), "stream"_a = py::none(),
              R"doc(

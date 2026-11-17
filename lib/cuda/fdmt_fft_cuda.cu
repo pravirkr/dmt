@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -24,6 +25,7 @@
 #include "dmt/fft_cuda.cuh"
 #include "dmt/fourier_gpu.cuh"
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/logging.hpp"
@@ -474,7 +476,43 @@ public:
             throw std::invalid_argument("FDMTFFT: nbeams must be positive");
         }
         gpu_utils::set_device(m_device_id);
-        initialize(cfg.kill_mask);
+        {
+            // Deferred: every device buffer, table upload, level-0 window
+            // and cuFFT work area waits for allocate().
+            const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_deferred
+                                                                   : nullptr);
+            initialize(cfg.kill_mask);
+        }
+        if (!cfg.defer_allocation) {
+            m_allocated = true;
+        }
+    }
+
+    void allocate() override {
+        if (m_allocated) {
+            return;
+        }
+        gpu_utils::set_device(m_device_id);
+        const auto planned = memory_usage();
+        const auto before  = gpu_utils::device_memory_info();
+        try {
+            m_deferred.materialize();
+            for (const auto& fill : m_after_alloc) {
+                fill();
+            }
+        } catch (const std::exception& e) {
+            throw gpu_utils::allocation_failure("FDMTFFT (cuda)",
+                                                planned.total(), before, e);
+        }
+        m_after_alloc.clear();
+        const auto got = memory_usage();
+        if (got.plan != planned.plan || got.state != planned.state ||
+            got.history != planned.history ||
+            got.workspace != planned.workspace) {
+            throw std::logic_error(
+                "FDMTFFT (cuda): allocation differs from the planned sizes");
+        }
+        m_allocated = true;
     }
 
     ~FDMTFFTCudaEngine() override {
@@ -989,6 +1027,13 @@ private:
     mutable std::vector<float> m_view_h;
     mutable bool m_view_h_valid{false};
 
+    // Deferred construction (FDMTFFTEngineConfig::defer_allocation): the
+    // set-up kernels that wait for their buffers, and the buffers (declared
+    // last: destroyed first, while every buffer is still alive).
+    std::vector<std::function<void()>> m_after_alloc;
+    bool m_allocated{false};
+    gpu_utils::PendingList m_deferred;
+
     [[nodiscard]] Device device() const noexcept {
         return {.backend = detail::kGPUBackend, .id = m_device_id};
     }
@@ -1027,11 +1072,7 @@ private:
         m_hist_len = m_mode == FDMTMode::kValid ? m_geom.overlap : 0;
         if (m_hist_len > 0) {
             for (auto& h : m_hist) {
-                h.reserve(history_state_size());
-                gpu_utils::check_gpu_call(
-                    cudaMemset(h.data(), 0,
-                               history_state_size() * sizeof(float)),
-                    "FDMTFFT (cuda): history");
+                h.reserve_zeroed(history_state_size());
             }
         }
 
@@ -1082,39 +1123,12 @@ private:
                        m_seg.n_fft, m_seg.nseg, m_geom.n_fft, m_frac, split);
     }
 
-    // Segment length cap: the testing hook, the configured cap (memory
-    // budget), and device memory (execute() buffers per transform sample
-    // within half the free memory).
+    // Segment length cap: the testing hook and the configured cap (the
+    // FDMTFFTBoxcar memory budget). Memory follows the arguments alone: a
+    // configuration the device cannot hold fails in allocate().
     [[nodiscard]] SizeType segment_cap() const {
-        SizeType cap = detail::combine_segment_caps(detail::fft_segment_cap(),
-                                                    m_max_segment);
-        size_t free  = 0;
-        size_t total = 0;
-        gpu_utils::check_gpu_call(cudaMemGetInfo(&free, &total),
-                                  "FDMTFFT (cuda): cudaMemGetInfo");
-        const auto nstage = m_stages.stages.size();
-        const double per_sample =
-            static_cast<double>(m_nbeams) *
-            ((4.0 * static_cast<double>(std::max(m_nchans, m_ndms))) +
-             (4.3 * static_cast<double>(m_nchans + m_ndms)) +
-             (4.3 * static_cast<double>(m_mid_rows) *
-              static_cast<double>(std::min<SizeType>(nstage - 1, 2))) +
-             (4.0 * static_cast<double>(m_nchans + m_ndms))); // cuFFT work
-        const auto fit =
-            static_cast<SizeType>(0.5 * static_cast<double>(free) / per_sample);
-        if (fit < m_geom.n_fft) {
-            if (m_mode == FDMTMode::kRoll) {
-                throw std::runtime_error(fmt::format(
-                    "FDMTFFT (cuda): a roll-mode transform of {} samples needs "
-                    "more device memory than is free",
-                    m_geom.n_fft));
-            }
-            logging::debug("FDMTFFT (cuda): device memory caps the transform "
-                           "at {} samples (single transform {})",
-                           fit, m_geom.n_fft);
-            cap = cap == 0 ? fit : std::min(cap, fit);
-        }
-        return cap;
+        return detail::combine_segment_caps(detail::fft_segment_cap(),
+                                            m_max_segment);
     }
 
     [[nodiscard]] std::unique_ptr<utils::CUFFTManager>
@@ -1123,7 +1137,7 @@ private:
             utils::FFTKind::kR2C, n, m_nbeams * m_nchans, m_device_id, n, nb);
     }
 
-    [[nodiscard]] std::unique_ptr<Geo> make_geo(SizeType n) const {
+    [[nodiscard]] std::unique_ptr<Geo> make_geo(SizeType n) {
         auto g    = std::make_unique<Geo>();
         g->n_fft  = n;
         g->n_bins = (n / 2) + 1;
@@ -1147,50 +1161,61 @@ private:
         for (SizeType s = 0; s <= m_dag.dt0_max; ++s) {
             s0[s] = phase_fixed(static_cast<double>(s), n);
         }
-        DevBuf<unsigned long long> s0_d;
-        s0_d.upload(s0);
         // Box-mean weights w(s + 1) * 2^-b, the FDMT's own.
-        DevBuf<float> box_wf_d;
+        std::vector<float> box_wf;
         if (m_use_box_smearing) {
             const auto weights = m_plan->get_box_weights();
             const float unit   = std::ldexp(
                 1.0F, -static_cast<int>(m_plan->get_box_fraction_bits()));
-            std::vector<float> box_wf(weights.size());
+            box_wf.resize(weights.size());
             for (SizeType s = 0; s < weights.size(); ++s) {
                 box_wf[s] = static_cast<float>(weights[s]) * unit;
             }
-            box_wf_d.upload(box_wf);
         }
-        if (!m_dag.l0_win.empty()) {
-            // chan_dm plan: the distinct windows (lag, s).
-            std::vector<int> win;
-            win.reserve(2 * m_dag.l0_win.size());
-            for (const auto& b : m_dag.l0_win) {
-                win.push_back(b.lag);
-                win.push_back(b.s);
+        // chan_dm plan: the distinct windows (lag, s).
+        std::vector<int> win;
+        win.reserve(2 * m_dag.l0_win.size());
+        for (const auto& b : m_dag.l0_win) {
+            win.push_back(b.lag);
+            win.push_back(b.s);
+        }
+        g->w0.reserve((win.empty() ? m_dag.dt0_max + 1 : m_dag.l0_win.size()) *
+                      g->nb);
+        // The level-0 windows, computed on the device into w0 (with its
+        // inputs uploaded to temporaries): at once, or after allocate().
+        auto fill_w0 = [this, w0 = &g->w0, nb = g->nb, n, s0 = std::move(s0),
+                        box_wf = std::move(box_wf), win = std::move(win)] {
+            DevBuf<unsigned long long> s0_d;
+            s0_d.upload(s0);
+            DevBuf<float> box_wf_d;
+            if (m_use_box_smearing) {
+                box_wf_d.upload(box_wf);
             }
-            DevBuf<int> win_d;
-            win_d.upload(win);
-            g->w0.reserve(m_dag.l0_win.size() * g->nb);
-            kernel_level0_windows_lag<<<blocks_for(static_cast<int64_t>(g->nb)),
+            if (!win.empty()) {
+                DevBuf<int> win_d;
+                win_d.upload(win);
+                kernel_level0_windows_lag<<<
+                    blocks_for(static_cast<int64_t>(nb)), kBlock>>>(
+                    s0_d.data(), w0->data(), win_d.data(),
+                    static_cast<int>(win.size() / 2), static_cast<int>(nb),
+                    m_use_box_smearing ? box_wf_d.data() : nullptr,
+                    1.0F / static_cast<float>(n));
+            } else {
+                kernel_level0_windows<<<blocks_for(static_cast<int64_t>(nb)),
                                         kBlock>>>(
-                s0_d.data(), g->w0.data(), win_d.data(),
-                static_cast<int>(m_dag.l0_win.size()), static_cast<int>(g->nb),
-                m_use_box_smearing ? box_wf_d.data() : nullptr,
-                1.0F / static_cast<float>(n));
+                    s0_d.data(), w0->data(), static_cast<int>(m_dag.dt0_max),
+                    static_cast<int>(nb),
+                    m_use_box_smearing ? box_wf_d.data() : nullptr,
+                    1.0F / static_cast<float>(n));
+            }
             gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
                                       "FDMTFFT (cuda): level-0 windows");
-            return g;
+        };
+        if (g->w0.pending()) {
+            m_after_alloc.emplace_back(std::move(fill_w0));
+        } else {
+            fill_w0();
         }
-        g->w0.reserve((m_dag.dt0_max + 1) * g->nb);
-        kernel_level0_windows<<<blocks_for(static_cast<int64_t>(g->nb)),
-                                kBlock>>>(
-            s0_d.data(), g->w0.data(), static_cast<int>(m_dag.dt0_max),
-            static_cast<int>(g->nb),
-            m_use_box_smearing ? box_wf_d.data() : nullptr,
-            1.0F / static_cast<float>(n));
-        gpu_utils::check_gpu_call(cudaDeviceSynchronize(),
-                                  "FDMTFFT (cuda): level-0 windows");
         return g;
     }
 

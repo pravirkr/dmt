@@ -33,6 +33,7 @@ public:
         m_fdmt->execute_search(in, nbits, sink, stream);
     }
     void reset(Stream stream) override { m_fdmt->reset_search_history(stream); }
+    void allocate() override { m_fdmt->allocate(); }
     bool set_search_keep(const uint8_t* keep) override {
         return m_fdmt->set_search_keep(keep);
     }
@@ -70,6 +71,7 @@ public:
         m_fft->execute_search(in, sink, stream);
     }
     void reset(Stream stream) override { m_fft->reset_search_history(stream); }
+    void allocate() override { m_fft->allocate(); }
     [[nodiscard]] FDMTMemoryUsage memory() const noexcept override {
         return m_fft->memory_usage();
     }

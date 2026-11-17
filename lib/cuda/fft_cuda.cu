@@ -12,6 +12,7 @@
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/logging.hpp"
+#include "dmt/planned_vector.hpp"
 
 namespace dmt::utils {
 
@@ -36,7 +37,10 @@ void check_extent(SizeType count, SizeType stride, const char* what) {
 
 } // namespace
 
-class CUFFTManager::Impl {
+// The plan is made at construction (it gives the exact work-area size);
+// inside a planned::DeferScope the work area itself is allocated only when
+// the scope's list is materialised.
+class CUFFTManager::Impl : public planned::PlannedBase {
 public:
     Impl(FFTKind kind,
          SizeType length,
@@ -86,7 +90,11 @@ public:
                        m_workspace_size);
     }
 
-    ~Impl() {
+    ~Impl() override {
+        if (m_list != nullptr) {
+            m_list->replace(this, nullptr);
+            m_list = nullptr;
+        }
         try {
             gpu_utils::set_device(m_device_id);
         } catch (...) {
@@ -201,14 +209,32 @@ private:
                                 ostr, odist, type, howmany, &m_workspace_size),
             "CUFFTManager: cufftMakePlanMany64");
         if (m_workspace_size > 0) {
-            gpu_utils::check_gpu_call(
-                cudaMalloc(&m_workspace, m_workspace_size),
-                "CUFFTManager: cudaMalloc workspace");
-            gpu_utils::check_gpu_call(cufftSetWorkArea(m_plan, m_workspace),
-                                      "CUFFTManager: cufftSetWorkArea");
+            if (auto* list = planned::active_pending(); list != nullptr) {
+                m_list = list;
+                list->add(this);
+            } else {
+                allocate_workspace();
+            }
         }
     }
 
+    void allocate_workspace() {
+        gpu_utils::set_device(m_device_id);
+        gpu_utils::check_allocation(cudaMalloc(&m_workspace, m_workspace_size),
+                                    m_workspace_size,
+                                    "cuFFT work area allocation");
+        gpu_utils::check_gpu_call(cufftSetWorkArea(m_plan, m_workspace),
+                                  "CUFFTManager: cufftSetWorkArea");
+    }
+
+public:
+    void materialize() override {
+        m_list = nullptr;
+        allocate_workspace();
+    }
+    void detach() noexcept override { m_list = nullptr; }
+
+private:
     static cufftType real_type(FFTKind kind) {
         switch (kind) {
         case FFTKind::kC2CForward:
@@ -240,6 +266,7 @@ private:
     cufftHandle m_plan{0};
     void* m_workspace{nullptr};
     size_t m_workspace_size{0};
+    planned::PendingList* m_list{nullptr};
 };
 
 CUFFTManager::CUFFTManager(FFTKind kind,

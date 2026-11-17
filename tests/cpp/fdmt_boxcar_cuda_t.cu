@@ -10,6 +10,8 @@
 #include <tuple>
 #include <vector>
 
+#include <catch2/matchers/catch_matchers_exception.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <thrust/device_vector.h>
 
 #include "dmt/boxcar.hpp"
@@ -994,4 +996,158 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
         append(actual, gpu.flush());
         compare_near_threshold(actual, expected, cfg.detect_thresh);
     }
+}
+
+TEST_CASE("GPU host-memory calls stage one block outside the budget",
+          "[gpu][boxcar][budget]") {
+    // The documented contract: on a GPU the first host-memory call
+    // allocates a device copy of the whole input block (and, for FDMT, of
+    // the output plane), outside max_memory_bytes; later calls reuse it and
+    // device-memory calls never allocate it.
+    const plans::FDMTPlan plan(1200.0F, 1500.0F, 64, 2048, 0.000256F, 200);
+    const SizeType beams = 2;
+    const SizeType block =
+        beams * plan.get_nchans() * plan.get_nsamps() * sizeof(float);
+    const auto input = waterfalls(plan, beams, 2);
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    BoxcarConfig cfg;
+    cfg.max_boxcar = 16;
+
+    SECTION("FDMTBoxcar") {
+        FDMTBoxcar search(plan, cfg, true, exec, beams);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        (void)search.execute(std::span<const float>(input[0]));
+        const auto after = search.get_memory_usage();
+        CHECK(after.staging == block);
+        CHECK(after.budgeted() == before.budgeted() + block);
+        (void)search.execute(std::span<const float>(input[1]));
+        CHECK(search.get_memory_usage().budgeted() == after.budgeted());
+
+        FDMTBoxcar dev(plan, cfg, true, exec, beams);
+        const thrust::device_vector<float> buf(input[0].begin(),
+                                               input[0].end());
+        (void)dev.execute(
+            DeviceSpan<const float>(thrust::raw_pointer_cast(buf.data()),
+                                    buf.size(), {exec.backend, 0}));
+        (void)dev.copy_result();
+        CHECK(dev.get_memory_usage().staging == 0);
+    }
+    SECTION("FDMTBoxcar, packed 8-bit input") {
+        cfg.input_nbits = 8;
+        cfg.input_mean  = 2.0F;
+        FDMTBoxcar search(plan, cfg, true, exec, beams);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        const std::vector<uint8_t> packed(block / sizeof(float), 2);
+        (void)search.execute(std::span<const uint8_t>(packed));
+        const auto after = search.get_memory_usage();
+        CHECK(after.staging == packed.size());
+        CHECK(after.budgeted() == before.budgeted() + packed.size());
+    }
+    SECTION("FDMTFFTBoxcar") {
+        algorithms::FDMTFFTBoxcar search(plan, cfg, true, exec, beams);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        (void)search.execute(std::span<const float>(input[0]));
+        const auto after = search.get_memory_usage();
+        CHECK(after.staging == block);
+        CHECK(after.budgeted() == before.budgeted() + block);
+    }
+    SECTION("FDMT") {
+        FDMT fdmt(plan, true, exec, beams);
+        const auto before = fdmt.get_memory_usage();
+        std::vector<float> out(beams * plan.get_dmt_size());
+        fdmt.execute(std::span<const float>(input[0]), std::span<float>(out));
+        const auto after = fdmt.get_memory_usage();
+        CHECK(after.workspace ==
+              before.workspace + block + (out.size() * sizeof(float)));
+        fdmt.execute(std::span<const float>(input[1]), std::span<float>(out));
+        CHECK(fdmt.get_memory_usage().total() == after.total());
+    }
+}
+
+TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
+          "[boxcar][gpu][budget]") {
+    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const SizeType big = algorithms::kFDMTDefaultMaxMemory;
+    for (const auto& c : estimate_cases()) {
+        INFO(c.name << " beams " << c.beams);
+        const auto e = FDMTBoxcar::estimate_memory(
+            c.plan, c.config, true, gpu, c.beams, algorithms::kFDMTAutoFuse,
+            c.chunk, c.budget, c.kill);
+        FDMTBoxcar f(c.plan, c.config, true, gpu, c.beams,
+                     algorithms::kFDMTAutoFuse, c.chunk, c.budget, c.kill);
+        check_estimate(e, f);
+        CHECK(e.usage.budgeted() <= c.budget);
+        if (c.chunk != 0) {
+            CHECK(e.chunk_nsamps == c.chunk);
+        }
+        if (c.budget < big) {
+            CHECK(e.chunk_nsamps < c.plan.get_nsamps());
+        }
+        // The first host call adds exactly host_staging.
+        const SizeType rows = c.beams * c.plan.get_nchans();
+        const auto total    = f.get_memory_usage().total();
+        if (c.config.input_nbits == 32) {
+            std::vector<float> in(rows * c.plan.get_nsamps());
+            (void)f.execute(std::span<const float>(in));
+        } else {
+            std::vector<uint8_t> in(rows * c.plan.get_nsamps(), 127);
+            (void)f.execute(std::span<const uint8_t>(in));
+        }
+        CHECK(e.host_staging > 0);
+        CHECK(f.get_memory_usage().total() == total + e.host_staging);
+    }
+    SECTION("nothing is allocated") {
+        // A 2^40-candidate store (tens of TB) on the device and host: sized,
+        // never allocated (an allocation would throw).
+        const auto cases   = estimate_cases();
+        BoxcarConfig cfg   = cases.front().config;
+        cfg.max_candidates = SizeType{1} << 40;
+        const auto e       = FDMTBoxcar::estimate_memory(
+            cases.front().plan, cfg, true, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+            SIZE_MAX / 2);
+        CHECK(e.usage.candidates >= cfg.max_candidates * sizeof(RawCandidate));
+    }
+    SECTION("a transform the device cannot hold fails with the boxcar's need") {
+        // The FDMT allocates first; its failure reports FDMTBoxcar's total,
+        // not the FDMT's own message.
+        const auto c         = estimate_cases().front();
+        const SizeType beams = SizeType{1} << 14;
+        const auto e         = FDMTBoxcar::estimate_memory(
+            c.plan, c.config, true, gpu, beams, algorithms::kFDMTAutoFuse, 0,
+            SIZE_MAX / 2);
+        const auto& props = gpu_utils::device_properties(gpu.device);
+        if (e.usage.state + e.usage.history <= props.totalGlobalMem) {
+            SKIP("device larger than the probe");
+        }
+        CHECK_THROWS_MATCHES(
+            FDMTBoxcar(c.plan, c.config, true, gpu, beams,
+                       algorithms::kFDMTAutoFuse, 0, SIZE_MAX / 2),
+            std::bad_alloc,
+            Catch::Matchers::MessageMatches(
+                Catch::Matchers::StartsWith(
+                    "FDMTBoxcar (cuda): this configuration needs") &&
+                !Catch::Matchers::ContainsSubstring("FDMT (cuda): this")));
+    }
+}
+
+TEST_CASE("Device allocation errors nest by cause", "[gpu][budget]") {
+    const gpu_utils::DeviceMemoryInfo before{
+        .free = SizeType{3} << 30, .total = SizeType{8} << 30, .known = true};
+    const auto inner = gpu_utils::allocation_failure(
+        "FDMT (cuda)", SizeType{5} << 30, before,
+        std::runtime_error("device allocation: out of memory"));
+    CHECK(inner.cause() == "device allocation: out of memory");
+    const auto outer = gpu_utils::allocation_failure(
+        "CohFDMT (cuda)", SizeType{6} << 30, before, inner);
+    const std::string what = outer.what();
+    CHECK(what.starts_with("CohFDMT (cuda): this configuration needs 6.00 "
+                           "GiB of device memory and 3.00 GiB of 8.00 GiB "
+                           "was free"));
+    CHECK(what.ends_with(": device allocation: out of memory"));
+    // One message, not the FDMT's nested inside.
+    const std::string needs = "this configuration needs";
+    CHECK(what.find(needs) == what.rfind(needs));
 }

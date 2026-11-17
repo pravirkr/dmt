@@ -21,6 +21,7 @@
 #include "dmt/fft.hpp"
 #include "dmt/nufft.hpp"
 
+#include "ddmt_fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 #include "test_random.hpp"
 
@@ -643,6 +644,23 @@ TEST_CASE("NUFFT type 1 matches the direct sum", "[ddmt_fft_cpu][cpu]") {
     }
     CAPTURE(m, tol, worst);
     CHECK(worst < 3 * tol + 1e-6);
+}
+
+TEST_CASE("DDMTFFT estimate_memory equals a warm stream (cpu)",
+          "[ddmt_fft_cpu][cpu][budget]") {
+    for (const auto& c : ddmt_fft_estimate::cases()) {
+        ddmt_fft_estimate::check_host(c, Exec::cpu(2));
+    }
+    ddmt_fft_estimate::check_call_lengths(Exec::cpu(2));
+    // The estimate allocates nothing: a history of over 2 TB (2^29 beams) is
+    // sized, never allocated (an allocation would throw). Estimate only, as
+    // ASan aborts on allocations that large instead of throwing.
+    const auto big = ddmt_fft_estimate::many_beams(SizeType{1} << 29);
+    const auto e = DDMTFFT::estimate_memory(big.plan, big.nsamps, Exec::cpu(2),
+                                            big.nbeams, big.options);
+    CHECK(e.usage.history > (SizeType{1} << 41));
+    CHECK(e.time_major_staging == 0);
+    CHECK(e.host_staging == 0);
 }
 
 } // namespace dmt
