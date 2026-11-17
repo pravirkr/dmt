@@ -711,6 +711,9 @@ private:
             }
         });
 
+        if (m_estimate_only) {
+            return; // estimates create no streams or events
+        }
         gpu_utils::check_gpu_call(cudaStreamCreate(&m_htod_stream),
                                   "Failed to create H2D stream");
         gpu_utils::check_gpu_call(cudaStreamCreate(&m_exec_stream),

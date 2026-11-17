@@ -477,6 +477,7 @@ public:
     void reset_history(Stream queue) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
     void allocate() override;
+    void allocate_host();
     [[nodiscard]] SizeType host_staging_bytes() const noexcept override;
     [[nodiscard]] FDMTBoxcarMemoryUsage memory_usage() const noexcept override;
     [[nodiscard]] SizeType chunk_nsamps() const noexcept override;

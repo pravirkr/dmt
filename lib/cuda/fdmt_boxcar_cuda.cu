@@ -515,9 +515,16 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     m_slots_d.resize(1, 0);
     m_candidates_h.resize(config.max_candidates);
     m_oldest_d.resize(1, UINT64_MAX);
+    if (!cfg.defer_allocation) {
+        allocate_host();
+    }
+    m_allocated = !cfg.defer_allocation;
+}
+
+// Pinned host words (no pinned memory while deferred: estimates make none).
+void FDMTBoxcarCudaEngine::allocate_host() {
     m_oldest_h.reserve(1);
     *m_oldest_h.data() = UINT64_MAX;
-    m_allocated        = !cfg.defer_allocation;
 }
 
 void FDMTBoxcarCudaEngine::allocate() {
@@ -533,6 +540,7 @@ void FDMTBoxcarCudaEngine::allocate() {
         throw gpu_utils::DeviceAllocationError(gpu_utils::allocation_failure(
             "FDMTBoxcar (cuda)", planned.budgeted(), e.what()));
     }
+    allocate_host();
     const auto got = memory_usage();
     if (got.total() != planned.total() || got.history != planned.history ||
         got.peaks != planned.peaks || got.workspace != planned.workspace ||
@@ -724,7 +732,7 @@ uint64_t FDMTBoxcarCudaEngine::search_latency() const noexcept {
 }
 
 uint64_t FDMTBoxcarCudaEngine::open_begin_min() const noexcept {
-    return *m_oldest_h.data();
+    return m_oldest_h.data() != nullptr ? *m_oldest_h.data() : UINT64_MAX;
 }
 
 SizeType FDMTBoxcarCudaEngine::block_noise_bytes() const noexcept {

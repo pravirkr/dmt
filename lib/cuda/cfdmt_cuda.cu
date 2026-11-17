@@ -354,6 +354,7 @@ public:
             throw std::logic_error(
                 "CohFDMT (cuda): allocated memory differs from the plan");
         }
+        create_streams();
     }
 
     ~CohFDMTCudaEngine() override {
@@ -362,7 +363,9 @@ public:
             cudaStreamSynchronize(m_copy_stream);
         }
         for (auto* e : m_chunk_ready) {
-            cudaEventDestroy(e);
+            if (e != nullptr) {
+                cudaEventDestroy(e);
+            }
         }
         if (m_copy_stream != nullptr) {
             cudaStreamDestroy(m_copy_stream);
@@ -603,10 +606,17 @@ private:
             m_raw[g].reserve(m_plan.get_input_size(g));
         }
         m_out.reserve(m_plan.get_dmt_size());
+        if (!cfg.defer_allocation) {
+            create_streams();
+        }
+    }
+
+    // The host-call copy stream and its events (none in an estimate).
+    void create_streams() {
         gpu_utils::check_gpu_call(
             cudaStreamCreateWithFlags(&m_copy_stream, cudaStreamNonBlocking),
             "CohFDMT: copy stream creation failed");
-        m_chunk_ready.resize(m_chunks.size());
+        m_chunk_ready.assign(m_chunks.size(), nullptr);
         for (auto& e : m_chunk_ready) {
             gpu_utils::check_gpu_call(
                 cudaEventCreateWithFlags(&e, cudaEventDisableTiming),
