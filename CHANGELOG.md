@@ -109,6 +109,11 @@ All notable changes to `dmt` are listed here. The format follows
   subband search (plan `subband_depth` > 0) now reserves one byte per beam
   and channel for this in `get_memory_usage().staging` (and in
   `estimate_memory()`). `FDMTFFTBoxcar::drain()` is unchanged.
+- `FDMTBoxcar` and `FDMTFFTBoxcar` construction and `estimate_memory()` are
+  much faster on wide bands: the per-row noise tables and warm-up are built
+  once per FDMT tree node instead of tracing every row's subtree. Parkes
+  UWL (6656 channels, 4039 trials, GPU): 1.6 s to 0.55 s at subband depth
+  0, 3.9 s to 0.35 s at depth 2. The tables are bitwise unchanged.
 - `FDMT` construction no longer allocates while it chooses its path and
   chunk: on a GPU the budget search sizes candidate engines without
   allocating them (it could briefly hold more than `max_memory_bytes`), and

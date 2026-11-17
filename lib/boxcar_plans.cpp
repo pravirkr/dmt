@@ -76,6 +76,103 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
 
 namespace dmt::algorithms::detail {
 
+namespace {
+/// Every node of one FDMT level: the box lengths of the level-0 leaves it
+/// sums (killed channels excluded) as an ascending (length, count)
+/// histogram, and the largest shift + reach over those leaves (0 when it
+/// has none). A row's noise terms and support depend on its node's only.
+struct LeafLevel {
+    std::vector<SizeType> first{0}; ///< node i: entries [first[i], first[i+1])
+    std::vector<std::pair<uint32_t, uint32_t>> entries;
+    std::vector<uint64_t> reach;
+
+    void clear() {
+        first.assign(1, 0);
+        entries.clear();
+        reach.clear();
+    }
+    [[nodiscard]] std::span<const std::pair<uint32_t, uint32_t>>
+    hist(SizeType i) const {
+        return {entries.data() + first[i], entries.data() + first[i + 1]};
+    }
+};
+
+/// Level 0: one leaf per coordinate.
+void leaf_level(const plans::FDMTPlanContainer& pc,
+                bool smear,
+                std::span<const uint8_t> kill_mask,
+                LeafLevel& out) {
+    out.clear();
+    const auto& coords = pc.coordinates[0];
+    out.reach.resize(coords.size(), 0);
+    for (SizeType idx = 0; idx < coords.size(); ++idx) {
+        const auto& c  = coords[idx];
+        const auto dt  = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
+        SizeType s     = static_cast<SizeType>(std::abs(dt));
+        SizeType reach = s;
+        if (!pc.level0_boxes.empty()) {
+            // chan_dm plan: the box of s + 1 samples ends `lag` samples
+            // back; without smearing the row reads one sample at `point`.
+            const auto& box = pc.level0_boxes[idx];
+            s               = static_cast<SizeType>(box.s);
+            reach           = smear ? static_cast<SizeType>(box.lag) + s
+                                    : static_cast<SizeType>(box.point);
+        }
+        // A killed channel adds no noise or signal (it reads as zero).
+        if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
+            const SizeType len = smear ? s + 1 : 1;
+            if (len > UINT32_MAX) {
+                throw std::invalid_argument(
+                    "FDMTBoxcar: level-0 box is too long");
+            }
+            out.entries.emplace_back(static_cast<uint32_t>(len), 1U);
+            out.reach[idx] = reach;
+        }
+        out.first.push_back(out.entries.size());
+    }
+}
+
+/// Level `level` from level - 1: each node merges its tail and (shifted
+/// by its delay) head.
+void sum_level(const plans::FDMTPlanContainer& pc,
+               SizeType level,
+               const LeafLevel& prev,
+               LeafLevel& out) {
+    out.clear();
+    const auto& coords = pc.coordinates[level];
+    const auto nsamps  = pc.state_shape[level - 1].nsamps;
+    out.reach.resize(coords.size(), 0);
+    for (SizeType idx = 0; idx < coords.size(); ++idx) {
+        const auto& c  = coords[idx];
+        const auto a   = prev.hist(c.tail_buf_offset / nsamps);
+        uint64_t reach = a.empty() ? 0 : prev.reach[c.tail_buf_offset / nsamps];
+        std::span<const std::pair<uint32_t, uint32_t>> b;
+        if (c.i_coord_head != SIZE_MAX) {
+            const SizeType h = c.head_buf_offset / nsamps;
+            b                = prev.hist(h);
+            if (!b.empty()) {
+                reach = std::max<uint64_t>(reach, c.delay + prev.reach[h]);
+            }
+        }
+        SizeType i = 0;
+        SizeType j = 0;
+        while (i < a.size() || j < b.size()) {
+            if (j == b.size() || (i < a.size() && a[i].first < b[j].first)) {
+                out.entries.push_back(a[i++]);
+            } else if (i == a.size() || b[j].first < a[i].first) {
+                out.entries.push_back(b[j++]);
+            } else {
+                out.entries.emplace_back(a[i].first, a[i].second + b[j].second);
+                ++i;
+                ++j;
+            }
+        }
+        out.reach[idx] = reach;
+        out.first.push_back(out.entries.size());
+    }
+}
+} // namespace
+
 std::vector<plans::BoxcarPlanePlan>
 make_boxcar_plans(const plans::FDMTPlan& plan,
                   const BoxcarConfig& config,
@@ -159,9 +256,21 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
     const double unit =
         std::ldexp(1.0, -static_cast<int>(plan.get_box_fraction_bits()));
     std::vector<plans::BoxcarPlanePlan> planes;
+    // The leaves of every node, a level at a time (each row's trace over
+    // its subtree, shared by the rows that share nodes).
+    LeafLevel prev;
+    LeafLevel cur;
+    leaf_level(pc, smear, kill_mask, cur);
     // Every subband of the searched levels: the tree subbands and, below
     // the root, the staggered ones that straddle their boundaries.
-    for (SizeType l = root - depth; l <= root; ++l) {
+    for (SizeType l = 0; l <= root; ++l) {
+        if (l > 0) {
+            std::swap(prev, cur);
+            sum_level(pc, l, prev, cur);
+        }
+        if (l < root - depth) {
+            continue;
+        }
         for (SizeType band = 0; band < pc.grids[l].size(); ++band) {
             const auto& grid = pc.grids[l][band];
             const auto begin = grid.chan_begin;
@@ -202,64 +311,14 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                 out.integer_mean_lut.resize(nsel * widths.size());
                 out.integer_thresh_lut.resize(nsel * widths.size());
             }
-            // Trace each actual intermediate coordinate, including copy
-            // nodes and plan-specific pruning. Shift does not change energy
-            // between independent channels, but does determine cold support.
-            // Leaf lengths of a row, as a histogram: a row has one leaf per
-            // channel but only a few distinct box lengths, and the noise
-            // terms below depend on the length alone.
-            std::vector<SizeType> lengths;
-            std::vector<std::pair<SizeType, SizeType>> length_counts;
-            lengths.reserve(end - begin);
             for (SizeType k = 0; k < nsel; ++k) {
                 const SizeType d = out.coord_indices[k];
-                lengths.clear();
-                uint64_t support = 0;
-                const auto trace = [&](auto& self, SizeType level, SizeType idx,
-                                       uint64_t shift) -> void {
-                    const auto& c = pc.coordinates[level][idx];
-                    if (level == 0) {
-                        const auto dt  = pc.grids[0][c.i_sub].dt_grid[c.i_dt];
-                        SizeType s     = static_cast<SizeType>(std::abs(dt));
-                        SizeType reach = s;
-                        if (!pc.level0_boxes.empty()) {
-                            // chan_dm plan: the box of s + 1 samples ends
-                            // `lag` samples back; without smearing the row
-                            // reads one sample at `point`.
-                            const auto& box = pc.level0_boxes[idx];
-                            s               = static_cast<SizeType>(box.s);
-                            reach = smear ? static_cast<SizeType>(box.lag) + s
-                                          : static_cast<SizeType>(box.point);
-                        }
-                        // A killed channel adds no noise or signal (it reads as
-                        // zero).
-                        if (kill_mask.empty() || kill_mask[c.i_sub] != 0) {
-                            lengths.push_back(smear ? s + 1 : 1);
-                            support = std::max(support, shift + reach);
-                        }
-                    } else {
-                        self(self, level - 1,
-                             c.tail_buf_offset /
-                                 pc.state_shape[level - 1].nsamps,
-                             shift);
-                        if (c.i_coord_head != SIZE_MAX) {
-                            self(self, level - 1,
-                                 c.head_buf_offset /
-                                     pc.state_shape[level - 1].nsamps,
-                                 shift + c.delay);
-                        }
-                    }
-                };
-                trace(trace, l, grid.coord_offset + d, 0);
-                std::ranges::sort(lengths);
-                length_counts.clear();
-                for (const auto len : lengths) {
-                    if (length_counts.empty() ||
-                        length_counts.back().first != len) {
-                        length_counts.emplace_back(len, 0);
-                    }
-                    ++length_counts.back().second;
-                }
+                // Leaf lengths of the row, as a histogram: a row has one
+                // leaf per channel but only a few distinct box lengths, and
+                // the noise terms below depend on the length alone.
+                const SizeType node      = grid.coord_offset + d;
+                const auto length_counts = cur.hist(node);
+                uint64_t support         = cur.reach[node];
                 support = std::max<uint64_t>(support, pc.level0_causal_delay);
                 out.warmup_samples[k] = support + extra_warmup;
                 const double f0       = out.f_low_mhz;
