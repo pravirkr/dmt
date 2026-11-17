@@ -642,7 +642,9 @@ struct CohFDMTMemoryUsage {
     SizeType spectrum;  ///< Unpacked, forward-transformed input block
     SizeType waterfall; ///< One coarse trial's aligned waterfall
     SizeType fdmt;      ///< Fine FDMT engine and its output buffer
-    SizeType workspace; ///< Tables and per-thread scratch
+    SizeType workspace; ///< Tables and scratch (CPU: per thread); on a GPU
+                        ///< also the cuFFT work areas and the device copies
+                        ///< of a host-memory call's input and result
     SizeType output;    ///< Caller-provided result per execute() (not
                         ///< owned by the engine)
 

@@ -528,6 +528,9 @@ struct CohFDMTEngineConfig {
     CohFDMTCoherentPath coherent_path{CohFDMTCoherentPath::kAuto};
     /// cuFFT path work-buffer budget in bytes (0 = 1 GiB).
     SizeType work_bytes{0};
+    /// Size every working buffer (and the fine FDMT) without allocating;
+    /// allocate() allocates them (CohFDMT::estimate_memory()).
+    bool defer_allocation{false};
 };
 
 // Stateless: one self-contained block per execute(), one input span per
@@ -552,6 +555,9 @@ public:
 
     [[nodiscard]] virtual plans::CohFDMTMemoryUsage
     memory_usage() const noexcept = 0;
+
+    /// Allocates what a deferred construction sized (no-op otherwise).
+    virtual void allocate() = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

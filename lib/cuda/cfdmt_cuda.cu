@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <tuple>
@@ -23,6 +24,7 @@
 #include "dmt/fft_cuda.cuh"
 #include "dmt/fourier_gpu.cuh"
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/unpacker_cuda.cuh"
@@ -303,26 +305,55 @@ public:
                       const detail::CohFDMTEngineConfig& cfg)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
-          m_unpacker((gpu_utils::set_device(m_device_id), plan.get_format()),
-                     plan.get_subband_groups(),
-                     plan.get_nbin(),
-                     plan.get_nfft(),
-                     plan.get_noverlap(),
-                     m_device_id),
-          m_fdmt(plan.get_f_min(),
-                 plan.get_f_max(),
-                 plan.get_nchans(),
-                 plan.get_fdmt_nsamps(),
-                 plan.get_tsamp(),
-                 static_cast<IndexType>(plan.get_fine_dt_max()),
-                 -static_cast<IndexType>(plan.get_fine_dt_max()),
-                 plan.get_config().dt_step,
-                 true,
-                 "valid",
-                 Exec{.backend  = detail::kGPUBackend,
-                      .nthreads = 1,
-                      .device   = m_device_id}) {
-        initialise(cfg);
+          m_fdmt_plan(plan.get_f_min(),
+                      plan.get_f_max(),
+                      plan.get_nchans(),
+                      plan.get_fdmt_nsamps(),
+                      plan.get_tsamp(),
+                      static_cast<IndexType>(plan.get_fine_dt_max()),
+                      -static_cast<IndexType>(plan.get_fine_dt_max()),
+                      plan.get_config().dt_step,
+                      "valid") {
+        gpu_utils::set_device(m_device_id);
+        {
+            // Deferred: every device buffer, table upload and cuFFT work
+            // area, and the fine FDMT, wait for allocate().
+            const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_deferred
+                                                                   : nullptr);
+            m_unpacker.emplace(plan.get_format(), plan.get_subband_groups(),
+                               plan.get_nbin(), plan.get_nfft(),
+                               plan.get_noverlap(), m_device_id);
+            if (cfg.defer_allocation) {
+                m_fdmt_planned =
+                    FDMT::estimate_memory(m_fdmt_plan, true, fdmt_exec()).usage;
+            } else {
+                m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+            }
+            initialise(cfg);
+        }
+    }
+
+    void allocate() override {
+        if (m_fdmt) {
+            return;
+        }
+        gpu_utils::set_device(m_device_id);
+        const auto planned = memory_usage();
+        try {
+            m_deferred.materialize();
+            m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+        } catch (const std::exception& e) {
+            throw gpu_utils::DeviceAllocationError(
+                gpu_utils::allocation_failure("CohFDMT (cuda)", planned.total(),
+                                              e.what()));
+        }
+        const auto got = memory_usage();
+        if (got.spectrum != planned.spectrum ||
+            got.waterfall != planned.waterfall || got.fdmt != planned.fdmt ||
+            got.workspace != planned.workspace) {
+            throw std::logic_error(
+                "CohFDMT (cuda): allocated memory differs from the plan");
+        }
     }
 
     ~CohFDMTCudaEngine() override {
@@ -389,23 +420,23 @@ public:
 
     [[nodiscard]] plans::CohFDMTMemoryUsage
     memory_usage() const noexcept override {
-        const auto fdmt_mem = m_fdmt.get_memory_usage();
-        SizeType workspace  = (m_work.capacity() * sizeof(ComplexTypeGPU)) +
-                              (m_chirp.capacity() * sizeof(ComplexTypeGPU)) +
-                              (m_twiddle.capacity() * sizeof(ComplexTypeGPU)) +
-                              ((m_base.capacity() + m_inc.capacity()) *
-                               sizeof(unsigned long long)) +
-                              (m_power.capacity() * sizeof(float)) +
-                              (m_shifts.capacity() * sizeof(int64_t));
+        const auto fdmt_mem =
+            m_fdmt ? m_fdmt->get_memory_usage() : m_fdmt_planned;
+        SizeType workspace =
+            m_work.bytes() + m_chirp.bytes() + m_twiddle.bytes() +
+            m_base.bytes() + m_inc.bytes() + m_power.bytes() +
+            m_shifts.bytes() + m_offsets.bytes() + m_mean.bytes() +
+            m_inv_sigma.bytes() + m_taper.bytes() + m_unpacker->memory_bytes();
         for (const auto& f : m_fwd) {
             workspace += f->workspace_bytes();
         }
         if (m_inv) {
             workspace += m_inv->workspace_bytes();
         }
-        SizeType input = 0;
+        // Host entry point: device copies of the input and the result.
+        SizeType input = m_out.bytes();
         for (const auto& r : m_raw) {
-            input += r.capacity();
+            input += r.bytes();
         }
 
         return {.spectrum  = m_spec.capacity() * sizeof(ComplexTypeGPU),
@@ -413,7 +444,7 @@ public:
                 .fdmt =
                     fdmt_mem.total() + (m_fdmt_out.capacity() * sizeof(float)),
                 .workspace = workspace + input,
-                .output    = m_out.capacity() * sizeof(float)};
+                .output    = m_plan.get_dmt_size() * sizeof(float)};
     }
 
 protected:
@@ -430,8 +461,19 @@ private:
 
     const plans::CohFDMTPlan& m_plan; // owned by the CohFDMT facade
     int m_device_id;
-    utils::BasebandUnpackerCUDA m_unpacker;
-    algorithms::FDMT m_fdmt;
+    // Pending device buffers of a deferred construction (declared before
+    // them: a pending buffer leaves the list when it is destroyed).
+    gpu_utils::PendingList m_deferred;
+    std::optional<utils::BasebandUnpackerCUDA> m_unpacker;
+    plans::FDMTPlan m_fdmt_plan;            // the fine FDMT's
+    std::optional<algorithms::FDMT> m_fdmt; // built by allocate() if deferred
+    FDMTMemoryUsage m_fdmt_planned{};       // its estimate until then
+
+    [[nodiscard]] Exec fdmt_exec() const noexcept {
+        return Exec{.backend  = detail::kGPUBackend,
+                    .nthreads = 1,
+                    .device   = m_device_id};
+    }
 
     std::vector<Chunk> m_chunks;
     std::vector<std::unique_ptr<utils::CUFFTManager>> m_fwd; // per chunk size
@@ -520,10 +562,10 @@ private:
                 utils::BasebandAxis::kFreq);
         }
 
-        m_spec.reserve(m_unpacker.output_size());
+        m_spec.reserve(m_unpacker->output_size());
         m_power.reserve(nsub * nfft * n_p * 2);
         m_waterfall.reserve(nchans * m_plan.get_fdmt_nsamps());
-        m_fdmt_out.reserve(m_fdmt.get_plan().get_buffer_size());
+        m_fdmt_out.reserve(m_fdmt_plan.get_buffer_size());
         m_chirp.reserve(nchans * mbin);
 
         const auto ph = cfdmt::make_chirp_phases(m_plan);
@@ -706,8 +748,8 @@ private:
         const auto nbin = m_plan.get_nbin();
         const auto& ch  = m_chunks[ic];
         const cuda::std::span<ComplexTypeGPU> spec(m_spec.data(),
-                                                   m_unpacker.output_size());
-        m_unpacker.unpack(spec, ch.sub_begin, ch.sub_end, stream);
+                                                   m_unpacker->output_size());
+        m_unpacker->unpack(spec, ch.sub_begin, ch.sub_end, stream);
         const auto rows = SizeType{2} * nfft * nbin;
         ch.fwd->execute(spec.subspan(ch.sub_begin * rows,
                                      (ch.sub_end - ch.sub_begin) * rows),
@@ -729,7 +771,7 @@ private:
     void front_end(std::span<const cuda::std::span<const uint8_t>> d_groups,
                    std::span<const std::span<const uint8_t>> h_groups,
                    cudaStream_t stream) {
-        m_unpacker.prepare(d_groups, stream);
+        m_unpacker->prepare(d_groups, stream);
         if (h_groups.empty()) {
             for (SizeType ic = 0; ic < m_chunks.size(); ++ic) {
                 front_chunk(ic, stream);
@@ -863,10 +905,10 @@ private:
             gpu_utils::check_last_gpu_error("CohFDMT: coherent stage");
             // No reset_history(): the FDMT window's lead-in keeps its history
             // out of every cropped output (see CohFDMTPlan).
-            m_fdmt.execute(
+            m_fdmt->execute(
                 DeviceSpan<const float>(m_waterfall.data(), nchans * nf),
                 DeviceSpan<float>(m_fdmt_out.data(),
-                                  m_fdmt.get_plan().get_buffer_size()),
+                                  m_fdmt_plan.get_buffer_size()),
                 Stream{stream});
             crop_kernel<<<grid_for(nfine * nout), kBlock, 0, stream>>>(
                 m_fdmt_out.data(), m_offsets.data(), nfine, nf, nout,

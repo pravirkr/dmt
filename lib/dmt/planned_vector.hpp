@@ -47,6 +47,11 @@ public:
         return std::all_of(m_items.begin(), m_items.end(),
                            [](const PlannedBase* p) { return p == nullptr; });
     }
+    /// Vectors that deferred into the list since it was last materialised
+    /// (destroyed ones included).
+    [[nodiscard]] std::size_t registered() const noexcept {
+        return m_items.size();
+    }
 
 private:
     std::vector<PlannedBase*> m_items;

@@ -18,6 +18,10 @@ All notable changes to `dmt` are listed here. The format follows
   **`FDMTFFTBoxcar::estimate_memory(...)`**, C++ and Python: the same
   estimate for the Fourier-domain engines (`chunk_nsamps` is the
   overlap-save segment). Python `FDMTFFT` gains `memory_usage`.
+- **`CohFDMT::estimate_memory(config, exec)`** (C++ and Python
+  `CohFDMT.estimate_memory`): the memory a `CohFDMT` built with these
+  arguments would allocate, equal to its `get_memory_usage()`, computed
+  without allocating.
 - **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
   `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
   `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the
@@ -74,6 +78,11 @@ All notable changes to `dmt` are listed here. The format follows
   what it needs and what is free (use shorter blocks or fewer beams;
   `estimate_memory` gives the requirement); GPU `FDMT` and `FDMTBoxcar`
   allocation failures carry the same message (still `std::bad_alloc`).
+- `CohFDMT::get_memory_usage()` now counts every buffer the engine owns:
+  the CPU per-channel power partials, and on a GPU the remaining tables and
+  the device copy of a host-memory call's result (in `workspace`, which
+  was reported as `output`; `output` is now the caller's result size on
+  both backends).
 - GPU `DDMTFFT` and `CohFDMT` likewise no longer size themselves from the
   device's free memory: `DDMTFFT` keeps the CPU engine's segment length
   (same segments on both backends), and the `CohFDMT` cuFFT path (channel
