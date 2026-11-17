@@ -14,6 +14,7 @@
 
 #include "dmt/gpu_compat.cuh"
 
+#include "fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 
 namespace dmt {
@@ -244,6 +245,53 @@ TEST_CASE("FDMTFFT fractional delays parity", "[fdmt_fft_gpu][gpu][parity]") {
                 REQUIRE_THAT(b, Catch::Matchers::Approx(a).margin(2e-3));
             }
         }
+    }
+}
+
+TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (gpu)",
+          "[fdmt_fft_gpu][gpu][budget]") {
+    const auto gpu = test::gpu_exec();
+    fft_estimate::check_all(gpu);
+    SECTION("device calls allocate nothing; host calls add host_staging") {
+        const plans::FDMTPlan plan(1000.0F, 1500.0F, 64, 1024, 0.001F, 80);
+        const auto e = FDMTFFT::estimate_memory(plan, true, gpu, 2);
+        FDMTFFT f(plan, true, gpu, 2);
+        const auto total = f.get_memory_usage().total();
+        thrust::device_vector<float> in(2 * 64 * 1024, 1.0F);
+        thrust::device_vector<float> out(2 * plan.get_dmt_size());
+        f.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(in.data()),
+                                          in.size()),
+                  DeviceSpan<float>(thrust::raw_pointer_cast(out.data()),
+                                    out.size()));
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+        CHECK(f.get_memory_usage().total() == total);
+        std::vector<float> in_h(in.size(), 1.0F);
+        std::vector<float> out_h(out.size());
+        f.execute(std::span<const float>(in_h), std::span<float>(out_h));
+        CHECK(f.get_memory_usage().total() == total + e.host_staging);
+    }
+    SECTION("nothing is allocated") {
+        // 2^16 beams: hundreds of GB of buffers and cuFFT work areas, sized
+        // (the plans are made), never allocated (an allocation would throw).
+        const SizeType beams = SizeType{1} << 16;
+        const auto e =
+            FDMTFFT::estimate_memory(1000.0F, 1500.0F, 256, 4096, 0.001F, 400,
+                                     0, 1, true, "valid", gpu, beams);
+        INFO("state " << e.usage.state << " history " << e.usage.history
+                      << " workspace " << e.usage.workspace);
+        CHECK(e.usage.total() > (SizeType{100} << 30));
+    }
+    SECTION("a configuration the device cannot hold fails clearly") {
+        // Terabytes: the first large buffer fails, nothing large is held.
+        // A std::bad_alloc (Python MemoryError), with the requirement.
+        CHECK_THROWS_AS(FDMTFFT(1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1,
+                                true, "full", gpu, SizeType{1} << 16),
+                        std::bad_alloc);
+        CHECK_THROWS_WITH(
+            FDMTFFT(1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1, true,
+                    "full", gpu, SizeType{1} << 16),
+            Catch::Matchers::ContainsSubstring("this configuration needs") &&
+                Catch::Matchers::ContainsSubstring("estimate_memory()"));
     }
 }
 

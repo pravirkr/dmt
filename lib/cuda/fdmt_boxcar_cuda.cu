@@ -527,7 +527,12 @@ void FDMTBoxcarCudaEngine::allocate() {
     gpu_utils::set_device(m_device);
     const auto planned = memory_usage();
     m_driver->allocate();
-    m_deferred.materialize();
+    try {
+        m_deferred.materialize();
+    } catch (const std::exception& e) {
+        throw gpu_utils::DeviceAllocationError(gpu_utils::allocation_failure(
+            "FDMTBoxcar (cuda)", planned.budgeted(), e.what()));
+    }
     const auto got = memory_usage();
     if (got.total() != planned.total() || got.history != planned.history ||
         got.peaks != planned.peaks || got.workspace != planned.workspace ||

@@ -160,6 +160,66 @@ public:
                      bool fractional_delays             = true,
                      std::span<const uint8_t> kill_mask = {});
 
+    /**
+     * @brief Memory an instance built with these arguments would allocate,
+     * computed without allocating it: the constructor's decisions and
+     * tables, with every working buffer sized but not allocated (exact:
+     * the constructor allocates exactly these sizes). `chunk_nsamps` is the
+     * output samples per overlap-save segment of execute(). A GPU backend
+     * makes its cuFFT plans (for their exact work-area sizes) but allocates
+     * neither the work areas nor any buffer; the CUDA context is not
+     * counted (nor in get_memory_usage()). One overload per constructor,
+     * with the same arguments.
+     */
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    IndexType dt_max,
+                    IndexType dt_min                   = 0,
+                    SizeType dt_step                   = 1,
+                    bool use_box_smearing              = true,
+                    std::string_view mode              = "valid",
+                    Exec exec                          = {},
+                    SizeType nbeams                    = 1,
+                    bool fractional_delays             = true,
+                    std::span<const uint8_t> kill_mask = {});
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    const std::vector<IndexType>& dt_grid,
+                    bool use_box_smearing              = true,
+                    std::string_view mode              = "valid",
+                    Exec exec                          = {},
+                    SizeType nbeams                    = 1,
+                    bool fractional_delays             = true,
+                    std::span<const uint8_t> kill_mask = {});
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(float f_min,
+                    float f_max,
+                    SizeType nchans,
+                    SizeType nsamps,
+                    float tsamp,
+                    const std::vector<float>& dm_grid,
+                    bool use_box_smearing              = true,
+                    std::string_view mode              = "valid",
+                    Exec exec                          = {},
+                    SizeType nbeams                    = 1,
+                    bool fractional_delays             = true,
+                    std::span<const uint8_t> kill_mask = {});
+    [[nodiscard]] static FDMTMemoryEstimate
+    estimate_memory(const plans::FDMTPlan& plan,
+                    bool use_box_smearing              = true,
+                    Exec exec                          = {},
+                    SizeType nbeams                    = 1,
+                    bool fractional_delays             = true,
+                    std::span<const uint8_t> kill_mask = {});
+
     ~FDMTFFT();
     FDMTFFT(FDMTFFT&&) noexcept;
     FDMTFFT& operator=(FDMTFFT&&) noexcept;

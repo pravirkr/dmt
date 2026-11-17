@@ -398,6 +398,9 @@ struct FDMTFFTEngineConfig {
     // search's row buffer at construction, so memory_usage() is complete
     // before the first block (the budget compares against it).
     bool search{false};
+    // Size every buffer (memory_usage() reports them) but allocate them
+    // only on allocate(): the memory estimate and the budget search.
+    bool defer_allocation{false};
 };
 
 /// The smaller of two segment caps, 0 meaning none.
@@ -438,6 +441,9 @@ public:
     [[nodiscard]] virtual FDMTMemoryUsage memory_usage() const noexcept {
         return {};
     }
+    /// Allocates what a construction with defer_allocation sized;
+    /// memory_usage() is unchanged. A no-op once allocated.
+    virtual void allocate() = 0;
     /// Output samples per overlap-save segment (the search chunk).
     [[nodiscard]] virtual SizeType segment_nsamps() const noexcept { return 0; }
 

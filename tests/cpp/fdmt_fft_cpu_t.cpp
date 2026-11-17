@@ -20,6 +20,7 @@
 
 #include "dmt/fdmt_fft_common.hpp"
 
+#include "fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 #include "test_random.hpp"
 
@@ -818,6 +819,20 @@ TEST_CASE("FDMTFFT effective variance and sigma respect kill_mask",
                       plan.get_subband_sigma_grid(l, s, 2, smear, mask));
             }
         }
+    }
+}
+
+TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (cpu)",
+          "[fdmt_fft][cpu][budget]") {
+    fft_estimate::check_all(Exec::cpu(3));
+    SECTION("nothing is allocated") {
+        // 2^24 beams: a history of hundreds of GB, sized, never allocated
+        // (an allocation would throw std::bad_alloc).
+        const SizeType beams = SizeType{1} << 24;
+        const auto e =
+            FDMTFFT::estimate_memory(1000.0F, 1500.0F, 64, 1024, 0.001F, 80, 0,
+                                     1, true, "valid", Exec::cpu(3), beams);
+        CHECK(e.usage.history > (SizeType{700} << 30));
     }
 }
 

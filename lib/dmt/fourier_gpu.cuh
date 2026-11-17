@@ -14,12 +14,15 @@
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
+#include <vector>
 
 #include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
+#include "dmt/planned_vector.hpp"
 
 namespace dmt::fourier_gpu {
 
@@ -28,29 +31,36 @@ inline constexpr unsigned kMaxGridY = 65535;
 
 /// Grow-only raw device buffer: no default-stream work (unlike
 /// thrust::device_vector), contents undefined after a growth.
-template <typename T> class DevBuf {
+///
+/// Inside a planned::DeferScope, reserve() and upload() size the buffer
+/// (capacity() and bytes() report it) without allocating; data() is null
+/// until the scope's list is materialised, which allocates, uploads and
+/// zeroes (reserve_zeroed()) what was planned.
+template <typename T> class DevBuf : public planned::PlannedBase {
 public:
     DevBuf() = default;
-    ~DevBuf() { release(); }
+    ~DevBuf() override { release(); }
     DevBuf(const DevBuf&)            = delete;
     DevBuf& operator=(const DevBuf&) = delete;
-    DevBuf(DevBuf&& o) noexcept : m_ptr(o.m_ptr), m_cap(o.m_cap) {
-        o.m_ptr = nullptr;
-        o.m_cap = 0;
-    }
+    DevBuf(DevBuf&& o) noexcept : planned::PlannedBase() { take(o); }
     DevBuf& operator=(DevBuf&& o) noexcept {
         if (this != &o) {
             release();
-            m_ptr   = o.m_ptr;
-            m_cap   = o.m_cap;
-            o.m_ptr = nullptr;
-            o.m_cap = 0;
+            take(o);
         }
         return *this;
     }
 
     void reserve(SizeType n) {
         if (n <= m_cap) {
+            return;
+        }
+        if (auto* list = planned::active_pending();
+            list != nullptr || m_list != nullptr) {
+            defer(list != nullptr ? list : m_list);
+            m_host.clear();
+            m_zero = false;
+            m_cap  = n;
             return;
         }
         release();
@@ -60,9 +70,23 @@ public:
             "device allocation failed");
         m_cap = n;
     }
+    /// reserve(n), then every byte zero.
+    void reserve_zeroed(SizeType n) {
+        reserve(n);
+        if (m_list != nullptr) {
+            m_zero = true;
+        } else if (n > 0) {
+            gpu_utils::check_gpu_call(cudaMemset(m_ptr, 0, n * sizeof(T)),
+                                      "device memset failed");
+        }
+    }
     /// Synchronous upload (set-up only).
     void upload(std::span<const T> h) {
         reserve(h.size());
+        if (m_list != nullptr) {
+            m_host.assign(h.begin(), h.end());
+            return;
+        }
         if (!h.empty()) {
             gpu_utils::check_gpu_call(cudaMemcpy(m_ptr, h.data(),
                                                  h.size_bytes(),
@@ -73,7 +97,15 @@ public:
     [[nodiscard]] T* data() const noexcept { return m_ptr; }
     [[nodiscard]] SizeType capacity() const noexcept { return m_cap; }
     [[nodiscard]] SizeType bytes() const noexcept { return m_cap * sizeof(T); }
+    [[nodiscard]] bool pending() const noexcept { return m_list != nullptr; }
     void release() noexcept {
+        if (m_list != nullptr) {
+            m_list->replace(this, nullptr);
+            m_list = nullptr;
+            m_host.clear();
+            m_zero = false;
+            m_cap  = 0;
+        }
         if (m_ptr != nullptr) {
             cudaFree(m_ptr);
             m_ptr = nullptr;
@@ -81,9 +113,70 @@ public:
         }
     }
 
+    void materialize() override {
+        // Allocate now, even if a deferral scope is active.
+        const planned::DeferScope none(nullptr);
+        m_list          = nullptr;
+        const auto n    = m_cap;
+        auto host       = std::move(m_host);
+        const bool zero = m_zero;
+        m_host.clear();
+        m_zero = false;
+        m_cap  = 0;
+        reserve(n);
+        if (!host.empty()) {
+            gpu_utils::check_gpu_call(cudaMemcpy(m_ptr, host.data(),
+                                                 host.size() * sizeof(T),
+                                                 cudaMemcpyHostToDevice),
+                                      "device upload failed");
+        } else if (zero && n > 0) {
+            gpu_utils::check_gpu_call(cudaMemset(m_ptr, 0, n * sizeof(T)),
+                                      "device memset failed");
+        }
+    }
+    void detach() noexcept override {
+        m_list = nullptr;
+        m_host.clear();
+        m_zero = false;
+        m_cap  = 0;
+    }
+
 private:
+    void defer(planned::PendingList* list) {
+        if (m_list == nullptr) {
+            if (m_ptr != nullptr) {
+                // Grow-only: the old contents are undefined after a growth.
+                cudaFree(m_ptr);
+                m_ptr = nullptr;
+                m_cap = 0;
+            }
+            m_list = list;
+            list->add(this);
+        } else if (m_list != list) {
+            throw std::logic_error("DevBuf: two deferral scopes");
+        }
+    }
+    void take(DevBuf& o) noexcept {
+        m_ptr  = o.m_ptr;
+        m_cap  = o.m_cap;
+        m_list = o.m_list;
+        m_host = std::move(o.m_host);
+        m_zero = o.m_zero;
+        if (m_list != nullptr) {
+            m_list->replace(&o, this);
+        }
+        o.m_ptr  = nullptr;
+        o.m_cap  = 0;
+        o.m_list = nullptr;
+        o.m_host.clear();
+        o.m_zero = false;
+    }
+
     T* m_ptr{nullptr};
     SizeType m_cap{0};
+    planned::PendingList* m_list{nullptr};
+    std::vector<T> m_host;
+    bool m_zero{false};
 };
 
 /// -shift / n turns per bin modulo 1, in 0.64 fixed point (see file

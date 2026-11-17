@@ -14,6 +14,10 @@ All notable changes to `dmt` are listed here. The format follows
   `chunk_nsamps`, and on a GPU the `host_staging` bytes the first host-memory
   call adds, all computed without allocating. A GPU backend reads the
   device's limits but allocates no device memory.
+- **`FDMTFFT::estimate_memory(...)`** (one overload per constructor) and
+  **`FDMTFFTBoxcar::estimate_memory(...)`**, C++ and Python: the same
+  estimate for the Fourier-domain engines (`chunk_nsamps` is the
+  overlap-save segment). Python `FDMTFFT` gains `memory_usage`.
 - **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
   `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
   `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the
@@ -63,6 +67,15 @@ All notable changes to `dmt` are listed here. The format follows
 - `FDMTBoxcar` construction likewise sizes the engines it tries for a chunk
   and allocates only the one it keeps; on the CPU the budget is checked
   before allocating.
+- GPU `FDMTFFT` no longer shortens its overlap-save segments to fit the
+  device's free memory: memory follows the arguments alone, so the same
+  configuration behaves the same on any device. One that does not fit fails
+  at construction with a `std::bad_alloc` (Python `MemoryError`) saying
+  what it needs and what is free (use shorter blocks or fewer beams;
+  `estimate_memory` gives the requirement); GPU `FDMT` and `FDMTBoxcar`
+  allocation failures carry the same message (still `std::bad_alloc`).
+  `FDMTFFT` and `FDMTFFTBoxcar` construction sizes the engines it tries and
+  allocates only the one it keeps.
 - GPU `FDMTBoxcar` with a kill mask allocates the transform's per-row flags
   (one byte per beam and channel) at construction instead of on the first
   call, so `get_memory_usage()` includes them from the start.

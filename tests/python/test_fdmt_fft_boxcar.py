@@ -391,3 +391,30 @@ def test_fft_boxcar_kadane_surrogate_pulse_and_quiet_noise(
         <= float(sur_best["snr"])
         <= (1.15 * float(ref_best["snr"]))
     )
+
+
+def _usage(u: dmtlib.FDMTBoxcarMemoryUsage) -> tuple:
+    return (
+        u.plan,
+        u.state,
+        u.history,
+        u.peaks,
+        u.workspace,
+        u.candidates,
+        u.staging,
+        u.host,
+    )
+
+
+@pytest.mark.parametrize("backend", backends())
+def test_estimate_memory_matches_instance(backend: str) -> None:
+    """FDMTFFTBoxcar.estimate_memory equals the built instance."""
+    plan = FDMTPlan(1000.0, 1500.0, NCHANS, NSAMPS, 0.001, 80)
+    cfg = BoxcarConfig(max_boxcar=16, detect_thresh=6)
+    est = FDMTFFTBoxcar.estimate_memory(plan, cfg, nbeams=2, backend=backend)
+    search = FDMTFFTBoxcar(plan, cfg, nbeams=2, backend=backend)
+    assert _usage(est.usage) == _usage(search.memory_usage)
+    assert est.chunk_nsamps == search.chunk_nsamps
+    assert (est.host_staging == 0) == (backend == "cpu")
+    with pytest.raises(ValueError, match="max_memory_bytes"):
+        FDMTFFTBoxcar.estimate_memory(plan, cfg, backend=backend, max_memory_bytes=1024)

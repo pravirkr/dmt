@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <mutex>
+#include <new>
 #include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 #include <fmt/format.h>
 #include <thrust/complex.h>
@@ -170,6 +173,43 @@ inline void check_gpu_sync_error(
     std::source_location loc = std::source_location::current()) {
     check_gpu_call(cudaDeviceSynchronize(), "Synchronization failed", loc);
     check_last_gpu_error(msg, loc);
+}
+
+/// An engine's device buffers did not fit: a std::bad_alloc (Python
+/// MemoryError, as before) that says what the configuration needs.
+class DeviceAllocationError : public std::bad_alloc {
+public:
+    explicit DeviceAllocationError(std::string message)
+        : m_message(std::move(message)) {}
+    [[nodiscard]] const char* what() const noexcept override {
+        return m_message.c_str();
+    }
+
+private:
+    std::string m_message;
+};
+
+/// Message for an engine whose planned device buffers failed to allocate:
+/// what it needs and what the device has free (read for the message only;
+/// no engine sizes itself from free memory).
+[[nodiscard]] inline std::string allocation_failure(std::string_view what,
+                                                    std::size_t needed,
+                                                    std::string_view cause) {
+    (void)cudaGetLastError(); // clear the failed allocation's error
+    std::size_t free      = 0;
+    std::size_t total     = 0;
+    const bool known      = cudaMemGetInfo(&free, &total) == cudaSuccess;
+    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+    return fmt::format(
+        "{}: this configuration needs {:.2f} GiB of device memory{}; use "
+        "shorter blocks (nsamps) or fewer beams (estimate_memory() gives the "
+        "requirement): {}",
+        what, static_cast<double>(needed) / kGiB,
+        known ? fmt::format(" and {:.2f} GiB of {:.2f} GiB is free",
+                            static_cast<double>(free) / kGiB,
+                            static_cast<double>(total) / kGiB)
+              : std::string{},
+        cause);
 }
 
 [[nodiscard]] inline const cudaDeviceProp& device_properties(int device) {

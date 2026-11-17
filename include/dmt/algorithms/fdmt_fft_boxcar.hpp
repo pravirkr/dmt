@@ -61,6 +61,21 @@ public:
                            bool fractional_delays             = true,
                            std::span<const uint8_t> kill_mask = {},
                            SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+    /**
+     * @brief Memory an instance built with these arguments would allocate,
+     * and its chunk (the overlap-save segment), computed without allocating
+     * it, as FDMTBoxcar::estimate_memory(). Throws as the constructor would
+     * when nothing fits max_memory_bytes.
+     */
+    [[nodiscard]] static FDMTBoxcarMemoryEstimate
+    estimate_memory(const plans::FDMTPlan& plan,
+                    BoxcarConfig config                = {},
+                    bool use_box_smearing              = true,
+                    Exec exec                          = {},
+                    SizeType nbeams                    = 1,
+                    bool fractional_delays             = true,
+                    std::span<const uint8_t> kill_mask = {},
+                    SizeType max_memory_bytes          = kFDMTDefaultMaxMemory);
     ~FDMTFFTBoxcar();
     FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept;
     FDMTFFTBoxcar& operator=(FDMTFFTBoxcar&&) noexcept;

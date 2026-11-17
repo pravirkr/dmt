@@ -96,7 +96,8 @@ struct FDMTMemoryUsage {
 struct FDMTMemoryEstimate {
     /// Equal to get_memory_usage() of that instance after construction.
     FDMTMemoryUsage usage;
-    /// Its get_chunk_nsamps().
+    /// Its get_chunk_nsamps() (FDMTFFT::estimate_memory(): the output
+    /// samples per overlap-save segment of execute()).
     SizeType chunk_nsamps{0};
     /// GPU backends: device bytes the first host-memory execute() or reset()
     /// adds (float32 input block and output plane), outside the budget;

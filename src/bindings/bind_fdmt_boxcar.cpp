@@ -486,6 +486,28 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
              "device"_a           = 0,
              "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
+        .def_static(
+            "estimate_memory",
+            [](const plans::FDMTPlan& plan, BoxcarConfig config, bool smear,
+               int nthreads, SizeType nbeams, bool frac, const py::object& kill,
+               std::string_view backend, int device,
+               SizeType max_memory_bytes) {
+                const auto mask = extract_kill_mask(kill);
+                return FDMTFFTBoxcar::estimate_memory(
+                    plan, config, smear, make_exec(backend, nthreads, device),
+                    nbeams, frac, mask, max_memory_bytes);
+            },
+            "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
+            "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
+            "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
+            "device"_a           = 0,
+            "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+            R"doc(
+            Memory an ``FDMTFFTBoxcar`` built with the same arguments would
+            allocate, and its chunk (the overlap-save segment), without
+            allocating it (:class:`FDMTBoxcarMemoryEstimate`). Raises as the
+            constructor would when nothing fits ``max_memory_bytes``.
+            )doc")
         .def(
             "execute",
             [](FDMTFFTBoxcar& search, const py::array& input) {

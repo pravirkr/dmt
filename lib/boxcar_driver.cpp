@@ -71,8 +71,7 @@ public:
         m_fft->execute_search(in, sink, stream);
     }
     void reset(Stream stream) override { m_fft->reset_search_history(stream); }
-    // FDMTFFT engines allocate as they are built.
-    void allocate() override {}
+    void allocate() override { m_fft->allocate(); }
     [[nodiscard]] FDMTMemoryUsage memory() const noexcept override {
         return m_fft->memory_usage();
     }
