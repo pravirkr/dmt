@@ -253,6 +253,7 @@ TEST_CASE("DDMTFFT (gpu) estimate_memory equals a warm stream",
             CHECK(e.device_staging == 0);
         }
     }
+    ddmt_fft_estimate::check_call_lengths(exec);
     // The estimate allocates nothing: a history larger than the device
     // (2^23 beams: two copies of 32 GiB) is sized; a buffer made outside the
     // engine's own deferral scope would defer into this outer list instead.

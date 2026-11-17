@@ -597,14 +597,22 @@ public:
         const gpu_utils::DeferScope defer(&m_deferred);
         // A cold stream (reset_history()) of calls of nsamps samples, until
         // and including its first warm call: later calls repeat that one.
-        SizeType hist_len = m_model.guard;
-        while (true) {
-            const bool warm = hist_len == m_ctx;
-            prepare_call(hist_len, nsamps);
-            if (warm || nsamps == 0) {
-                break;
+        // Its calls are at history lengths guard + i * nsamps (capped at
+        // the context); those that output nothing prepare the same
+        // transforms, so one stands for all: at most three distinct calls.
+        const SizeType guard = m_model.guard;
+        if (nsamps == 0) {
+            prepare_call(guard, 0);
+        } else {
+            const SizeType silent = (m_ctx - guard) / nsamps;
+            if (silent > 0) {
+                prepare_call(guard, nsamps); // the calls with no output
             }
-            hist_len = std::min(hist_len + nsamps, m_ctx);
+            const SizeType first = guard + (silent * nsamps); // first output
+            prepare_call(first, nsamps);
+            if (first < m_ctx) {
+                prepare_call(m_ctx, nsamps); // the first warm call
+            }
         }
         // Staging of the warm calls (the first, colder ones need less).
         const auto rows = m_nbeams * m_nchans;

@@ -651,6 +651,7 @@ TEST_CASE("DDMTFFT estimate_memory equals a warm stream (cpu)",
     for (const auto& c : ddmt_fft_estimate::cases()) {
         ddmt_fft_estimate::check_host(c, Exec::cpu(2));
     }
+    ddmt_fft_estimate::check_call_lengths(Exec::cpu(2));
     // The estimate allocates nothing: a history of over 2 TB (2^29 beams) is
     // sized, never allocated (an allocation would throw). Estimate only, as
     // ASan aborts on allocations that large instead of throwing.

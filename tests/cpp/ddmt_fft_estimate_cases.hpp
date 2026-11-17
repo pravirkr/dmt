@@ -13,6 +13,7 @@
 #include "dmt/common/plans.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/ddmt_fft_common.hpp"
 #include "dmt/engines.hpp"
 
 namespace dmt::ddmt_fft_estimate {
@@ -92,7 +93,7 @@ void check_stream(DDMTFFT& eng,
                   const DDMTFFTMemoryEstimate& e,
                   SizeType staging,
                   const F& call) {
-    for (int i = 0; i < 1000; ++i) {
+    for (int i = 0; i < 4000; ++i) {
         const auto out = eng.get_output_nsamps(nsamps);
         call(out);
         if (out == nsamps) {
@@ -153,6 +154,56 @@ inline void check_host(const Case& c, const Exec& exec) {
     } else {
         CHECK(e.time_major_staging == 0);
     }
+}
+
+/// Call lengths around the warm-up span (the max delay): 1, a divisor of
+/// it, one off either side, the span itself and longer than the context,
+/// each a cold stream checked against its estimate; and a 0-sample
+/// estimate, which equals an unused instance.
+inline void check_call_lengths(const Exec& exec) {
+    const auto plan    = plan_of(200.0F, 32);
+    const auto options = with(DDMTFFTMethod::kBrute);
+    const auto span    = DDMTFFT(plan, exec, 1, options).get_max_delay();
+    REQUIRE(span > 8);
+    SizeType divisor = 2;
+    while (span % divisor != 0 && divisor < span) {
+        ++divisor;
+    }
+    for (const SizeType n : {SizeType{1}, SizeType{2}, divisor, span - 1, span,
+                             span + 1, (4 * span) + 50}) {
+        INFO("nsamps " << n << " (span " << span << ")");
+        const Case c{"call length", plan, 1, options, n};
+        check_host(c, exec);
+    }
+    // Under a segment cap, a first output call shorter than the warm ones
+    // can take one transform longer than their segments, and so set the
+    // memory: find such a call length (with output-free calls before it).
+    const SizeType ctx = span + options.guard;
+    bool found         = false;
+    for (SizeType cap = ctx + 2; cap < 4 * ctx && !found; ++cap) {
+        for (SizeType n = 2; n < span && !found; ++n) {
+            const SizeType silent = span / n;
+            const SizeType n_out  = options.guard + (silent * n) + n - ctx;
+            if (silent == 0 || n_out == 0 || n_out >= n) {
+                continue;
+            }
+            const auto first =
+                algorithms::ddmt_fft::plan_segments(n_out, ctx, cap).n_fft;
+            const auto warm =
+                algorithms::ddmt_fft::plan_segments(n, ctx, cap).n_fft;
+            if (first > warm && first <= cap) {
+                found = true;
+                INFO("first output call sets the memory: nsamps "
+                     << n << " cap " << cap);
+                check_host({"first output call", plan, 1, options, n, cap},
+                           exec);
+            }
+        }
+    }
+    CHECK(found);
+    const auto e = DDMTFFT::estimate_memory(plan, 0, exec, 1, options);
+    const DDMTFFT unused(plan, exec, 1, options);
+    check_usage(e.usage, 0, unused.get_memory_usage());
 }
 
 /// A configuration whose history alone (two copies of nbeams x 16 channels
