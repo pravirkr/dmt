@@ -57,17 +57,17 @@ struct DDMTFFTOptions {
  * host staging of host-memory calls.
  */
 struct DDMTFFTMemoryUsage {
-    SizeType plan;      ///< Delay and method tables (NUFFT plans)
-    SizeType history;   ///< Streaming history (two copies)
-    SizeType transform; ///< Per transform length: channel and DM spectra
-                        ///< (GPU: also rows, NUFFT grids, phase tables and
-                        ///< cuFFT work areas)
-    SizeType workspace; ///< CPU: per-thread rows and scratch
-    SizeType staging;   ///< Unpacked input, and on a GPU the device copies
-                        ///< of host input and output, for the calls made
+    SizeType plan{0};      ///< Delay and method tables (NUFFT plans)
+    SizeType history{0};   ///< Streaming history (two copies)
+    SizeType transform{0}; ///< Per transform length: channel and DM spectra
+                           ///< (GPU: also rows, NUFFT grids, phase tables and
+                           ///< cuFFT work areas)
+    SizeType workspace{0}; ///< CPU: per-thread rows and scratch
+    SizeType staging{0};   ///< Unpacked input, and on a GPU the device copies
+                           ///< of host input and output, for the calls made
 
     /// Total held by the instance.
-    [[nodiscard]] SizeType total() const noexcept {
+    [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + history + transform + workspace + staging;
     }
 };
@@ -79,7 +79,7 @@ struct DDMTFFTMemoryUsage {
 struct DDMTFFTMemoryEstimate {
     /// get_memory_usage() once a cold stream of calls of that length is warm
     /// (staging 0: CPU execute(), GPU device-memory execute() of float input).
-    DDMTFFTMemoryUsage usage;
+    DDMTFFTMemoryUsage usage{};
     /// Staging such a stream of host-memory execute() calls adds (GPU; 0 on
     /// the CPU).
     SizeType host_staging{0};

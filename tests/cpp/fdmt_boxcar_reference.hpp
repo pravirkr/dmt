@@ -639,7 +639,7 @@ struct EstimateCase {
     SizeType beams  = 1;
     SizeType chunk  = 0;
     SizeType budget = algorithms::kFDMTDefaultMaxMemory;
-    std::vector<uint8_t> kill;
+    std::vector<uint8_t> kill{};
 };
 inline std::vector<EstimateCase> estimate_cases() {
     const plans::FDMTPlan plan(1000.0F, 1500.0F, 128, 2048, 0.001F, 200);

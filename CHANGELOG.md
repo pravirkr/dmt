@@ -105,6 +105,9 @@ All notable changes to `dmt` are listed here. The format follows
   FFT lengths the fused kernel can't take) uses a fixed 1 GiB work buffer.
   `FDMTFFT` and `FDMTFFTBoxcar` construction sizes the engines it tries and
   allocates only the one it keeps.
+- The memory usage and estimate structs (`FDMTMemoryUsage`,
+  `DDMTMemoryUsage`, `DDMTFFTMemoryUsage`, `CohFDMTMemoryUsage` and their
+  estimates) start at zero when default-constructed.
 - CPU `FDMTFFT` and `FDMTFFTBoxcar` count the twiddle table they hold (8
   bytes per transform sample) in `get_memory_usage().plan`.
 - GPU `FDMTBoxcar` with a kill mask allocates the transform's per-row flags

@@ -675,17 +675,20 @@ private:
 
     // The ping-pong buffers the next chunk's start() reads as `in` (see the
     // parity swap there): the only live ones between chunks.
-    [[nodiscard]] thrust::device_vector<float>& next_level0_history() {
+    // PlannedVector, not thrust::device_vector: size() of a pending buffer
+    // is its planned size only through the PlannedVector.
+    [[nodiscard]] gpu_utils::PlannedVector<float>& next_level0_history() {
         return m_parity ? m_history_b_d : m_history_a_d;
     }
     [[nodiscard]] const gpu_utils::PlannedVector<float>&
     next_level0_history() const {
         return m_parity ? m_history_b_d : m_history_a_d;
     }
-    [[nodiscard]] thrust::device_vector<float>& next_tree_fifo() {
+    [[nodiscard]] gpu_utils::PlannedVector<float>& next_tree_fifo() {
         return m_tree_fifo_d[m_parity ? 1 : 0];
     }
-    [[nodiscard]] const thrust::device_vector<float>& next_tree_fifo() const {
+    [[nodiscard]] const gpu_utils::PlannedVector<float>&
+    next_tree_fifo() const {
         return m_tree_fifo_d[m_parity ? 1 : 0];
     }
 

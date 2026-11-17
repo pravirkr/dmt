@@ -39,7 +39,7 @@ struct FDMTBoxcarMemoryUsage {
  */
 struct FDMTBoxcarMemoryEstimate {
     /// Equal to get_memory_usage() of that instance after construction.
-    FDMTBoxcarMemoryUsage usage;
+    FDMTBoxcarMemoryUsage usage{};
     /// Its get_chunk_nsamps().
     SizeType chunk_nsamps{0};
     /// GPU backends: device bytes the first host-memory execute() adds (the

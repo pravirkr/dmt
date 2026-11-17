@@ -74,17 +74,17 @@ inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
  * and the `output` bytes of output buffer per call.
  */
 struct FDMTMemoryUsage {
-    SizeType plan;      ///< Plan tables (coordinate DAG, sub-band grids)
-    SizeType state;     ///< Internal tree state (two levels of a chunk)
-    SizeType history;   ///< "valid"-mode streaming history
-    SizeType workspace; ///< CPU: per-thread fusion/unpack scratch;
-                        ///< GPU: fused-kernel index tables, plus the
-                        ///< host-memory call staging once allocated
-    SizeType output;    ///< Caller-provided dmt buffer per execute() (not
-                        ///< owned by the engine)
+    SizeType plan{0};      ///< Plan tables (coordinate DAG, sub-band grids)
+    SizeType state{0};     ///< Internal tree state (two levels of a chunk)
+    SizeType history{0};   ///< "valid"-mode streaming history
+    SizeType workspace{0}; ///< CPU: per-thread fusion/unpack scratch;
+                           ///< GPU: fused-kernel index tables, plus the
+                           ///< host-memory call staging once allocated
+    SizeType output{0};    ///< Caller-provided dmt buffer per execute() (not
+                           ///< owned by the engine)
 
     /// Total allocated by the engine (excludes `output`).
-    [[nodiscard]] SizeType total() const noexcept {
+    [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + state + history + workspace;
     }
 };
@@ -95,7 +95,7 @@ struct FDMTMemoryUsage {
  */
 struct FDMTMemoryEstimate {
     /// Equal to get_memory_usage() of that instance after construction.
-    FDMTMemoryUsage usage;
+    FDMTMemoryUsage usage{};
     /// Its get_chunk_nsamps() (FDMTFFT::estimate_memory(): the output
     /// samples per overlap-save segment of execute()).
     SizeType chunk_nsamps{0};

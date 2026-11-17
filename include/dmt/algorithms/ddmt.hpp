@@ -28,15 +28,15 @@ namespace dmt::algorithms {
  * the per-thread windows).
  */
 struct DDMTMemoryUsage {
-    SizeType plan;    ///< Delay tables and (SDMT) shared-sum programs
-    SizeType history; ///< Streaming history (two copies)
-    SizeType staging; ///< GPU: device buffers of the calls made (host-call
-                      ///< input/output double buffers, time-major transpose)
-    SizeType pinned;  ///< GPU: pinned host buffers of host-memory calls
-                      ///< (host memory, not in total())
+    SizeType plan{0};    ///< Delay tables and (SDMT) shared-sum programs
+    SizeType history{0}; ///< Streaming history (two copies)
+    SizeType staging{0}; ///< GPU: device buffers of the calls made (host-call
+                         ///< input/output double buffers, time-major transpose)
+    SizeType pinned{0};  ///< GPU: pinned host buffers of host-memory calls
+                         ///< (host memory, not in total())
 
     /// Total held where the instance runs (excludes `pinned`).
-    [[nodiscard]] SizeType total() const noexcept {
+    [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + history + staging;
     }
 };
@@ -49,7 +49,7 @@ struct DDMTMemoryEstimate {
     /// get_memory_usage() after construction, and after any calls on the
     /// CPU or with device memory in channel-major order on a GPU (staging
     /// and pinned 0).
-    DDMTMemoryUsage usage;
+    DDMTMemoryUsage usage{};
     /// GPU: staging and pinned bytes that host-memory execute() calls of
     /// that length add (0 on the CPU).
     SizeType host_staging{0};

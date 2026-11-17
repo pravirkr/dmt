@@ -74,6 +74,7 @@ public:
     void reserve_zeroed(SizeType n) {
         reserve(n);
         if (m_list != nullptr) {
+            m_host.clear(); // zeroed, as allocated: no earlier upload
             m_zero = true;
         } else if (n > 0) {
             gpu_utils::check_gpu_call(cudaMemset(m_ptr, 0, n * sizeof(T)),

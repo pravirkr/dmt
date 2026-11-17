@@ -12,6 +12,7 @@
 // DeferScope a Planned<V> is a plain V.
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -161,12 +162,13 @@ public:
     ~Planned() override { drop(); }
 
     template <typename A> Planned& operator=(const std::vector<T, A>& host) {
-        if (auto* list = active_pending(); list != nullptr) {
-            defer(list);
+        if (auto* list = active_pending(); list != nullptr || pending()) {
+            defer(list != nullptr ? list : m_list);
             m_host.assign(host.begin(), host.end());
             m_fill.reset();
-            m_zero = false;
-            m_size = host.size();
+            m_assign = false;
+            m_zero   = false;
+            m_size   = host.size();
         } else {
             drop();
             Base::assign(host.begin(), host.end());
@@ -182,16 +184,17 @@ public:
             defer(list != nullptr ? list : m_list);
             m_host.clear();
             m_fill.reset();
-            m_size = n;
-            m_zero = true;
+            m_assign = false;
+            m_size   = n;
+            m_zero   = true;
         } else {
             Base::resize(n);
             ZeroBytes<Base>::apply(*this);
         }
     }
     void assign(std::size_t n, const T& v) {
-        if (auto* list = active_pending(); list != nullptr) {
-            defer(list);
+        if (auto* list = active_pending(); list != nullptr || pending()) {
+            defer(list != nullptr ? list : m_list);
             m_host.clear();
             m_fill   = v;
             m_size   = n;
@@ -254,13 +257,30 @@ private:
         defer(list);
         if (!m_host.empty()) {
             m_host.resize(n, v.value_or(T{}));
-        }
-        if (v && !m_assign && n > m_size) {
-            // resize() fills only the new tail; a deferred buffer is empty,
-            // so the whole of it is the new tail.
-            m_fill = v;
+        } else if (n > m_size) {
+            // resize() fills only the new tail. A plan holds one fill for
+            // the whole buffer: the tail's, if the buffer was empty, else
+            // it must match the fill already planned.
+            const T tail = v.value_or(T{});
+            if (m_size == 0) {
+                m_fill   = v;
+                m_assign = false;
+                m_zero   = false;
+            } else if (!same_value(tail, planned_fill())) {
+                throw std::logic_error(
+                    "Planned: deferred resize with a different fill");
+            }
         }
         m_size = n;
+    }
+    // The value every planned element gets (no host copy).
+    [[nodiscard]] T planned_fill() const { return m_fill.value_or(T{}); }
+    static bool same_value(const T& a, const T& b) {
+        if constexpr (std::equality_comparable<T>) {
+            return a == b;
+        } else {
+            return std::memcmp(&a, &b, sizeof(T)) == 0;
+        }
     }
     void defer(PendingList* list) {
         if (m_list == nullptr) {
@@ -369,8 +389,8 @@ public:
 
 private:
     struct Item {
-        const void* vec;
-        std::size_t size;
+        const void* vec{nullptr};
+        std::size_t size{0};
         std::function<void()> alloc;
     };
     void record(const void* vec, std::size_t n, std::function<void()> alloc) {
