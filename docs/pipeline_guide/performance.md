@@ -458,6 +458,32 @@ otherwise every call allocates and page-faults a new one (~10% of the
 runtime at 16K samples).
 ```
 
+### Estimating memory before construction
+
+Every engine has a static `estimate_memory(...)` that returns what an
+instance would hold, computed without allocating it, so a pipeline can
+check a configuration against a device before building it. It is exact:
+the instance's `memory_usage` (C++ `get_memory_usage()`) equals the
+estimate. Memory follows the arguments alone; no engine sizes itself to the
+free memory of the device.
+
+- `FDMT`, `FDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`: the constructor's
+  arguments; everything is allocated at construction. On a GPU,
+  `host_staging` is what the first host-memory call adds.
+- `CohFDMT`: the configuration and backend.
+- `DDMTFFT`, `DDMT`, `SDMT`: the plan plus the call length `nsamps` (and
+  `gulp_size` for DDMT and SDMT), because some buffers are made by the
+  first calls that need them and then kept. `usage` is what the instance
+  holds while making calls of that length; the extra buffers of host-memory,
+  time-major or packed calls are separate fields. `DDMTFFT` counts a stream
+  from a cold start: its first calls use a few extra transform lengths.
+
+```python
+plan = dmtlib.DDMTPlan(1200.0, 1600.0, 4096, 64e-6, 1000.0, 0.5)
+est = dmtlib.DDMTFFT.estimate_memory(plan, 65536, backend="cuda")
+print(est.usage.total + est.host_staging)  # bytes on the device
+```
+
 (chunked-execution)=
 ### Chunked execution (`chunk_nsamps`)
 
