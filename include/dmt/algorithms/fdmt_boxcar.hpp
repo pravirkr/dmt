@@ -46,6 +46,13 @@ struct FDMTBoxcarMemoryEstimate {
     /// staging block of the input), outside the budget; device-memory calls
     /// never allocate it. 0 on the CPU.
     SizeType host_staging{0};
+    /// The transform's path, as summary() shows it ("Transform: ..."; empty
+    /// for the tree path of FDMTBoxcar).
+    std::string search_path;
+    /// Its get_search_latency() (FDMTFFTBoxcar: get_output_latency()):
+    /// samples a stream sample waits for before every row has searched it,
+    /// and what drain() pads (in whole blocks).
+    uint64_t search_latency{0};
 };
 
 /**
@@ -127,6 +134,11 @@ struct FDMTBoxcarMemoryEstimate {
  * blocks) and the memory for the noise tables within max_memory_bytes
  * (on a GPU: their device copies);
  * either failure throws std::invalid_argument before any state changes.
+ * With BoxcarConfig::per_call_masks the requirements and the memory are
+ * checked at construction instead (and by estimate_memory()), the memory
+ * reserved before the transform's path is chosen, and get_memory_usage()
+ * reports the reserved table sets (2 per block a call reaches back over,
+ * plus 3 cached) from the start, so it stays at its estimate.
  * The noise tables of a new mask are computed on the host with
  * exec.nthreads threads (on GPUs too); the last three masks are cached.
  * skip_cold_prefix keeps the constructor mask's warm-up. reset_history()
@@ -153,7 +165,9 @@ public:
      * Throws as the constructor would when nothing fits max_memory_bytes.
      * A GPU backend needs the device but allocates no device memory; the
      * CUDA context is not counted (nor in get_memory_usage()). Per-call
-     * kill masks add their noise tables on first use (not included).
+     * kill masks are included when declared (BoxcarConfig::per_call_masks);
+     * otherwise the first per-call mask adds its noise model, tables and
+     * buffers then (not included).
      */
     [[nodiscard]] static FDMTBoxcarMemoryEstimate
     estimate_memory(const plans::FDMTPlan& plan,

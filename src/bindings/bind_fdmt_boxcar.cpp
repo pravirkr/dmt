@@ -97,11 +97,25 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``PREFIX`` and ``NONE`` are lossless and produce identical exact
         candidates; ``KADANE_SURROGATE`` is an approximate multi-bias Kadane
         scorer (``max_boxcar`` up to 4096) that skips the full-stream prefix
-        scan.
+        scan. ``per_call_masks=True`` declares that :class:`FDMTBoxcar` will
+        get per-call kill masks: their requirements and memory are checked
+        and reserved at construction (and in ``estimate_memory``) instead of
+        at the first masked call.
         )doc")
-        .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, bool, SizeType, float, bool, OverflowPolicy,
-                      BoxcarScreenMode>(),
+        .def(py::init([](SizeType max_boxcar, float wtsp, float detect_thresh,
+                         float noise_sigma, PeakFindingMode peak_mode,
+                         SizeType max_candidates, SizeType max_cands_per_dm,
+                         bool skip_cold_prefix, SizeType input_nbits,
+                         float input_mean, bool use_trapezoid,
+                         OverflowPolicy overflow_policy,
+                         BoxcarScreenMode screen_mode, bool per_call_masks) {
+                 BoxcarConfig c(max_boxcar, wtsp, detect_thresh, noise_sigma,
+                                peak_mode, max_candidates, max_cands_per_dm,
+                                skip_cold_prefix, input_nbits, input_mean,
+                                use_trapezoid, overflow_policy, screen_mode);
+                 c.per_call_masks = per_call_masks;
+                 return c;
+             }),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
@@ -109,7 +123,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
              "input_mean"_a = 0.0F, "use_trapezoid"_a = false,
              "overflow_policy"_a = OverflowPolicy::kDropNew,
-             "screen_mode"_a     = BoxcarScreenMode::kAuto)
+             "screen_mode"_a     = BoxcarScreenMode::kAuto,
+             "per_call_masks"_a  = false)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -122,7 +137,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)
         .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix)
         .def_readwrite("overflow_policy", &BoxcarConfig::overflow_policy)
-        .def_readwrite("screen_mode", &BoxcarConfig::screen_mode);
+        .def_readwrite("screen_mode", &BoxcarConfig::screen_mode)
+        .def_readwrite("per_call_masks", &BoxcarConfig::per_call_masks);
     py::class_<BoxcarResult>(mod, "BoxcarResult")
         .def_readonly("candidates", &BoxcarResult::candidates)
         .def_readonly("input_sample_begin", &BoxcarResult::input_sample_begin)
@@ -185,16 +201,23 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``usage`` equals that instance's ``memory_usage``; ``chunk_nsamps``
         its ``chunk_nsamps``; ``host_staging`` (GPU backends) the device bytes
         the first host-memory (NumPy) :meth:`FDMTBoxcar.execute` adds outside
-        ``max_memory_bytes`` (the staging block of the input; 0 on the CPU).
+        ``max_memory_bytes`` (the staging block of the input; 0 on the CPU);
+        ``search_path`` the transform's path (the ``Transform:`` line of
+        ``summary()``; empty for the tree path) and ``search_latency`` its
+        ``search_latency``.
         )doc")
         .def_readonly("usage", &FDMTBoxcarMemoryEstimate::usage)
         .def_readonly("chunk_nsamps", &FDMTBoxcarMemoryEstimate::chunk_nsamps)
         .def_readonly("host_staging", &FDMTBoxcarMemoryEstimate::host_staging)
+        .def_readonly("search_path", &FDMTBoxcarMemoryEstimate::search_path)
+        .def_readonly("search_latency",
+                      &FDMTBoxcarMemoryEstimate::search_latency)
         .def("__repr__", [](const FDMTBoxcarMemoryEstimate& e) {
             return fmt::format(
                 "FDMTBoxcarMemoryEstimate(total={}, chunk_nsamps={}, "
-                "host_staging={})",
-                e.usage.total(), e.chunk_nsamps, e.host_staging);
+                "host_staging={}, search_latency={}, search_path='{}')",
+                e.usage.total(), e.chunk_nsamps, e.host_staging,
+                e.search_latency, e.search_path);
         });
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
             "max_width"_a, "wtsp"_a = 2.0F, R"doc(

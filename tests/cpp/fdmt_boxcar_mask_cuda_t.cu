@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <random>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <thrust/device_vector.h>
@@ -337,4 +338,94 @@ TEST_CASE(
         CHECK(usage.budgeted() + usage.host == usage.total());
         CHECK(usage.budgeted() <= budget);
     }
+}
+
+TEST_CASE("GPU FDMTBoxcar declared per-call masks: reserved at construction, "
+          "usage fixed",
+          "[gpu][boxcar][kill][mask][memory]") {
+    const auto masks = gpu_masks();
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        DYNAMIC_SECTION("depth " << depth) {
+            const auto plan  = gpu_mask_plan(depth);
+            const auto input = waterfalls(plan, 1, masks.size());
+            BoxcarConfig cfg;
+            cfg.max_boxcar          = 37;
+            cfg.wtsp                = 1.5F;
+            cfg.detect_thresh       = 2.7F;
+            cfg.max_candidates      = 1U << 20;
+            cfg.max_cands_per_dm    = 0;
+            auto declared           = cfg;
+            declared.per_call_masks = true;
+            const auto est =
+                FDMTBoxcar::estimate_memory(plan, declared, true, kGpu);
+            const auto lazy_est =
+                FDMTBoxcar::estimate_memory(plan, cfg, true, kGpu);
+            // Device table slots and row supports, up front.
+            CHECK(est.usage.budgeted() > lazy_est.usage.budgeted());
+            CHECK(est.usage.host > lazy_est.usage.host);
+            FDMTBoxcar search(plan, declared, true, kGpu);
+            FDMTBoxcar lazy(plan, cfg, true, kGpu);
+            const auto same = [&](const algorithms::FDMTBoxcarMemoryUsage& u) {
+                CHECK(u.plan == est.usage.plan);
+                CHECK(u.history == est.usage.history);
+                CHECK(u.workspace == est.usage.workspace);
+                CHECK(u.candidates == est.usage.candidates);
+                CHECK(u.staging == est.usage.staging);
+                CHECK(u.host == est.usage.host);
+                CHECK(u.total() == est.usage.total());
+            };
+            same(search.get_memory_usage());
+            CHECK(est.search_latency == search.get_search_latency());
+            // Device input only, a mask per call.
+            thrust::device_vector<float> buf(input[0].size());
+            std::vector<RawCandidate> got;
+            std::vector<RawCandidate> want;
+            for (SizeType k = 0; k < input.size(); ++k) {
+                thrust::copy(input[k].begin(), input[k].end(), buf.begin());
+                const DeviceSpan<const float> span(
+                    thrust::raw_pointer_cast(buf.data()), buf.size(),
+                    {kGpu.backend, 0});
+                (void)search.execute(span, std::span<const uint8_t>(masks[k]));
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
+                append(got, search.copy_result());
+                append(want, lazy.execute(std::span<const float>(input[k]),
+                                          std::span<const uint8_t>(masks[k])));
+                same(search.get_memory_usage());
+            }
+            append(got, search.drain());
+            append(want, lazy.drain());
+            same(search.get_memory_usage());
+            REQUIRE_FALSE(want.empty());
+            compare(got, want);
+        }
+    }
+}
+
+TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
+          "block is rejected at construction",
+          "[gpu][boxcar][kill][mask]") {
+    // The windowed top of a 4096-channel subband search at DM 2000 on
+    // 4096-sample blocks waits several blocks; the estimate reports it.
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
+    const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 4096, tsamp, grid,
+                               "valid", 2);
+    BoxcarConfig cfg(24);
+    const SizeType budget =
+        (plan.get_history_size() + plan.get_tree_history_size()) *
+        sizeof(float) * 8 / 10;
+    const auto est = FDMTBoxcar::estimate_memory(
+        plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0, budget);
+    INFO(est.search_path);
+    REQUIRE(est.search_path.find("windowed") != std::string::npos);
+    REQUIRE(est.search_latency > plan.get_nsamps());
+    cfg.per_call_masks = true;
+    CHECK_THROWS_AS(FDMTBoxcar(plan, cfg, true, kGpu, 1,
+                               algorithms::kFDMTAutoFuse, 0, budget),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(FDMTBoxcar::estimate_memory(plan, cfg, true, kGpu, 1,
+                                                algorithms::kFDMTAutoFuse, 0,
+                                                budget),
+                    std::invalid_argument);
 }

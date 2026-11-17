@@ -116,6 +116,14 @@ struct BoxcarConfig {
     /// and supports max_boxcar up to 4096; the other modes are exact and
     /// support 1..2^20).
     BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto;
+    /// FDMTBoxcar, float32 input: the stream will pass per-call kill masks.
+    /// Default false: their noise model, tables and buffers are made by the
+    /// first such call, which can throw then (block too short, budget, GPU
+    /// search latency over one block). True: all of that is checked and
+    /// reserved at construction (and in estimate_memory()), before the
+    /// transform's path is chosen within the rest of the budget, so no
+    /// per-call mask throws later for those reasons.
+    bool per_call_masks = false;
 };
 
 /**

@@ -626,6 +626,8 @@ private:
     void shift_candidate_times(cudaStream_t stream);
     void update_open_begin(cudaStream_t stream);
     [[nodiscard]] SizeType ring_size() const noexcept;
+    /// A table slot's device and pinned buffers and events.
+    void allocate_slot(TableSlot& slot);
     [[nodiscard]] SizeType slot_count() const noexcept;
     [[nodiscard]] SizeType table_floats() const noexcept;
     void reset_block_noise();

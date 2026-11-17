@@ -1093,3 +1093,38 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_boxcar_estimate(gpu_backend)
+
+
+def _check_declared_masks(backend: str) -> None:
+    """per_call_masks=True: checked and reserved at construction."""
+    plan, blocks, masks = mask_blocks()
+    lazy_cfg = config()
+    cfg = config()
+    cfg.per_call_masks = True
+    assert BoxcarConfig(17, per_call_masks=True).per_call_masks
+    est = FDMTBoxcar.estimate_memory(plan, cfg, backend=backend)
+    lazy_est = FDMTBoxcar.estimate_memory(plan, lazy_cfg, backend=backend)
+    assert est.usage.total > lazy_est.usage.total
+    search = FDMTBoxcar(plan, cfg, backend=backend)
+    assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
+    assert est.search_latency == search.search_latency
+    assert isinstance(est.search_path, str)
+    lazy = FDMTBoxcar(plan, lazy_cfg, backend=backend)
+    assert_same(
+        masked_stream(search, blocks, masks), masked_stream(lazy, blocks, masks)
+    )
+    # Masks add nothing; host (NumPy) input on a GPU adds its staging block.
+    after = search.memory_usage
+    assert after.total == est.usage.total + est.host_staging
+    assert after.staging == est.usage.staging + est.host_staging
+    packed = BoxcarConfig(17, input_nbits=8, input_mean=127.5, per_call_masks=True)
+    with pytest.raises(ValueError, match="float32"):
+        FDMTBoxcar(plan, packed, backend=backend)
+
+
+def test_declared_per_call_masks_cpu() -> None:
+    _check_declared_masks("cpu")
+
+
+def test_declared_per_call_masks_gpu(gpu_backend: str) -> None:
+    _check_declared_masks(gpu_backend)

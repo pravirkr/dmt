@@ -71,9 +71,17 @@ public:
         cfg.search_only = true;
         // Candidates are sized, not allocated: only the chosen one is.
         cfg.defer_allocation = true;
+        // Declared per-call masks: their model is checked and its buffers
+        // reserved before the FDMT chooses its path.
+        std::unique_ptr<detail::BoxcarNoiseModel> model;
+        if (config.per_call_masks) {
+            model = make_noise_model();
+        }
         // The boxcar's own buffers are fixed by plan and config; the FDMT
         // takes its path within the rest of the budget.
-        const SizeType fixed = boxcar_bytes(smear, exec);
+        const SizeType fixed =
+            boxcar_bytes(smear, exec) +
+            (model ? mask_bytes_bound(*model, exec) : SizeType{0});
         if (fixed >= max_memory) {
             throw std::invalid_argument(fmt::format(
                 "FDMTBoxcar: the boxcar buffers alone need {:.2f} GiB, over "
@@ -84,10 +92,21 @@ public:
                 static_cast<double>(max_memory) / (1 << 30)));
         }
         cfg.max_memory_bytes = max_memory - fixed;
-        engine               = make_engine(cfg, smear, exec);
+        // The engine, with the declared masks' buffers sized (deferred), and
+        // the budgeted bytes of both.
+        const auto build = [&] {
+            engine = make_engine(cfg, smear, exec);
+            if (model) {
+                engine->enable_block_noise(model->support());
+            }
+            return engine->memory_usage().budgeted() +
+                   (model && exec.backend == Backend::kCPU
+                        ? model_bytes(*model, ring_size())
+                        : SizeType{0});
+        };
         // The fixed part is an estimate: with an automatic chunk, step it
         // down while the measured total is over the budget.
-        SizeType used = engine->memory_usage().budgeted();
+        SizeType used = build();
         while (used > max_memory && chunk == 0 &&
                cfg.mode == FDMTMode::kValid && engine->chunk_nsamps() > 256) {
             const SizeType over  = used - max_memory;
@@ -96,8 +115,7 @@ public:
                                        ? cfg.max_memory_bytes - over
                                        : cfg.max_memory_bytes;
             engine.reset();
-            engine = make_engine(cfg, smear, exec);
-            used   = engine->memory_usage().budgeted();
+            used = build();
         }
         if (used > max_memory) {
             throw std::invalid_argument(fmt::format(
@@ -109,6 +127,107 @@ public:
         if (!estimate_only) {
             engine->allocate();
         }
+        if (model) {
+            noise           = std::move(model);
+            reserved_tables = table_sets(ring_size());
+            prev_mask       = ctor_mask;
+            prev_runs       = kill_runs;
+        }
+    }
+    /// get_memory_usage() (and the estimate): the engine's, plus the
+    /// per-call masks' model. Declared masks report their reserved table
+    /// sets, so the usage is fixed from construction; otherwise the table
+    /// sets alive.
+    [[nodiscard]] FDMTBoxcarMemoryUsage usage() const noexcept {
+        auto u = engine->memory_usage();
+        if (noise) {
+            const SizeType tables = reserved_tables > 0
+                                        ? reserved_tables * noise->table_bytes()
+                                        : noise->live_table_bytes();
+            const SizeType plan_bytes = noise->plan_bytes() + tables;
+            u.plan += plan_bytes;
+            u.workspace += noise->workspace_bytes();
+            if (exec.backend != Backend::kCPU) {
+                u.host += plan_bytes + noise->workspace_bytes();
+            }
+        }
+        return u;
+    }
+    /// Blocks a call's endpoints reach back over: 1 + ceil(latency / nsamps).
+    [[nodiscard]] SizeType ring_size() const noexcept {
+        const uint64_t ns = plan.get_nsamps();
+        return 1 +
+               static_cast<SizeType>((engine->search_latency() + ns - 1) / ns);
+    }
+    /// Table sets alive at once: steady and transition of each ring entry,
+    /// plus the mask cache.
+    [[nodiscard]] static SizeType table_sets(SizeType ring) noexcept {
+        return (2 * ring) + kCacheMasks;
+    }
+    /// Host bytes of the noise model with its table sets.
+    [[nodiscard]] static SizeType
+    model_bytes(const detail::BoxcarNoiseModel& model, SizeType ring) noexcept {
+        return model.plan_bytes() + model.workspace_bytes() +
+               (table_sets(ring) * model.table_bytes());
+    }
+    /// The per-call mask model, after the checks a first per-call mask
+    /// makes: float input, and blocks long enough that every endpoint's
+    /// input spans at most two blocks.
+    [[nodiscard]] std::unique_ptr<detail::BoxcarNoiseModel>
+    make_noise_model() const {
+        if (config.input_nbits != 32) {
+            throw std::invalid_argument(
+                "FDMTBoxcar: per-call kill masks need float32 input "
+                "(input_nbits 32)");
+        }
+        auto model = std::make_unique<detail::BoxcarNoiseModel>(
+            plan, config, smear, std::max(1, exec.nthreads));
+        const SizeType max_width = planes.front().widths.back();
+        const uint64_t need      = model->max_support() + max_width - 1;
+        if (plan.get_nsamps() < need) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: a per-call kill mask needs blocks of at least "
+                "{} samples (largest row support {} + max_boxcar {} - 1), so "
+                "that every endpoint's input spans at most two blocks; this "
+                "plan has {}",
+                need, model->max_support(), max_width, plan.get_nsamps()));
+        }
+        return model;
+    }
+    /// Budgeted bytes declared per-call masks add, before the path (hence
+    /// the search latency) is known: the latency is at most the plan's
+    /// largest delay, and a GPU accepts at most one block of it.
+    [[nodiscard]] SizeType mask_bytes_bound(const detail::BoxcarNoiseModel& m,
+                                            Exec ex) const {
+        SizeType base_rows = 0;
+        for (const auto& p : planes) {
+            base_rows += p.dm_grid.size();
+        }
+        const SizeType rows    = base_rows * beams;
+        const SizeType filters = planes.front().widths.size();
+        const auto threads = static_cast<SizeType>(std::max(1, ex.nthreads));
+        const uint64_t ns  = plan.get_nsamps();
+        if (ex.backend == Backend::kCPU) {
+            const SizeType ring =
+                1 +
+                static_cast<SizeType>(
+                    (static_cast<uint64_t>(plan.get_dt_max()) + ns - 1) / ns);
+            const SizeType staging = kill_runs.empty()
+                                         ? beams * plan.get_nchans() *
+                                               plan.get_nsamps() * sizeof(float)
+                                         : 0;
+            return staging + model_bytes(m, ring) +
+                   (threads * filters * sizeof(float)) +
+                   (threads * kadane::kMaxGateBuckets * kadane::kMaxBatchRows *
+                    sizeof(float));
+        }
+        // GPU: row supports and (2 * 2 + 2) table slots of 2 tables.
+        const SizeType keep =
+            (kill_runs.empty() && plan.get_subband_depth() == 0)
+                ? beams * plan.get_nchans()
+                : 0;
+        return keep + (rows * sizeof(uint64_t)) +
+               (6 * 2 * rows * filters * sizeof(float));
     }
     std::unique_ptr<detail::FDMTBoxcarEngine> make_engine(
         const detail::FDMTEngineConfig& cfg, bool /*smear*/, Exec ex) const {
@@ -313,31 +432,12 @@ public:
     /// the noise model and the engine's block ring. Throws before any
     /// state change.
     void enable_block_noise() {
-        auto model = std::make_unique<detail::BoxcarNoiseModel>(
-            plan, config, smear, std::max(1, exec.nthreads));
-        const SizeType max_width = planes.front().widths.back();
-        const uint64_t need      = model->max_support() + max_width - 1;
-        if (plan.get_nsamps() < need) {
-            throw std::invalid_argument(fmt::format(
-                "FDMTBoxcar: a per-call kill mask needs blocks of at least "
-                "{} samples (largest row support {} + max_boxcar {} - 1), so "
-                "that every endpoint's input spans at most two blocks; this "
-                "plan has {}",
-                need, model->max_support(), max_width, plan.get_nsamps()));
-        }
-        // Table sets alive at once: steady and transition of each ring
-        // entry, plus the mask cache.
-        const uint64_t latency = engine->search_latency();
-        const SizeType ring =
-            1 + static_cast<SizeType>((latency + plan.get_nsamps() - 1) /
-                                      plan.get_nsamps());
+        auto model = make_noise_model();
         // The noise model and its table sets live in host memory: budgeted
         // on the CPU only (on a GPU, max_memory_bytes bounds device memory).
-        const SizeType model_bytes =
-            model->plan_bytes() + model->workspace_bytes() +
-            ((2 * ring + kCacheMasks) * model->table_bytes());
         const SizeType extra =
-            (exec.backend == Backend::kCPU ? model_bytes : 0) +
+            (exec.backend == Backend::kCPU ? model_bytes(*model, ring_size())
+                                           : 0) +
             engine->block_noise_bytes();
         const SizeType used = engine->memory_usage().budgeted();
         if (used + extra > max_memory) {
@@ -381,6 +481,9 @@ public:
     std::vector<uint8_t> effective;
     std::vector<uint8_t> union_mask;
     std::unique_ptr<detail::BoxcarNoiseModel> noise;
+    /// BoxcarConfig::per_call_masks: the table sets reserved (0: undeclared,
+    /// the live sets are reported).
+    SizeType reserved_tables = 0;
     std::vector<std::pair<std::vector<uint8_t>,
                           std::shared_ptr<const detail::NoiseTables>>>
         cache;
@@ -417,9 +520,11 @@ FDMTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
     const Impl impl(plan, config, use_box_smearing, exec, nbeams, fuse_levels,
                     chunk_nsamps, max_memory_bytes, kill_mask,
                     /*estimate_only=*/true);
-    return {.usage        = impl.engine->memory_usage(),
-            .chunk_nsamps = impl.engine->chunk_nsamps(),
-            .host_staging = impl.engine->host_staging_bytes()};
+    return {.usage          = impl.usage(),
+            .chunk_nsamps   = impl.engine->chunk_nsamps(),
+            .host_staging   = impl.engine->host_staging_bytes(),
+            .search_path    = impl.engine->search_path(),
+            .search_latency = impl.engine->search_latency()};
 }
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;
@@ -524,18 +629,7 @@ int FDMTBoxcar::nthreads() const noexcept {
     return backend() == Backend::kCPU ? std::max(1, m_impl->exec.nthreads) : 1;
 }
 FDMTBoxcarMemoryUsage FDMTBoxcar::get_memory_usage() const noexcept {
-    auto usage = m_impl->engine->memory_usage();
-    if (m_impl->noise) {
-        // The per-call mask's model and the tables alive (ring and cache).
-        const SizeType plan_bytes =
-            m_impl->noise->plan_bytes() + m_impl->noise->live_table_bytes();
-        usage.plan += plan_bytes;
-        usage.workspace += m_impl->noise->workspace_bytes();
-        if (backend() != Backend::kCPU) {
-            usage.host += plan_bytes + m_impl->noise->workspace_bytes();
-        }
-    }
-    return usage;
+    return m_impl->usage();
 }
 std::string FDMTBoxcar::summary() const {
     const auto path = m_impl->engine->search_path();

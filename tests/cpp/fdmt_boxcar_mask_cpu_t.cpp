@@ -11,6 +11,7 @@
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "dmt/boxcar.hpp"
@@ -614,4 +615,134 @@ TEST_CASE("FDMTBoxcar per-call mask: scores stay calibrated on white noise",
     CHECK(std::abs(sigma_steady - 1.0) < 0.04);
     CHECK(sigma_trans < 1.0);
     CHECK(sigma_trans > 0.7);
+}
+
+namespace {
+
+// Every field of two memory usages.
+void check_same_usage(const algorithms::FDMTBoxcarMemoryUsage& a,
+                      const algorithms::FDMTBoxcarMemoryUsage& b) {
+    CHECK(a.plan == b.plan);
+    CHECK(a.state == b.state);
+    CHECK(a.history == b.history);
+    CHECK(a.peaks == b.peaks);
+    CHECK(a.workspace == b.workspace);
+    CHECK(a.candidates == b.candidates);
+    CHECK(a.staging == b.staging);
+    CHECK(a.host == b.host);
+}
+
+} // namespace
+
+TEST_CASE("FDMTBoxcar declared per-call masks are checked and reserved at "
+          "construction",
+          "[boxcar][kill][mask][cpu][memory]") {
+    const Masks masks{random_mask(32, 21, 0.2),
+                      random_mask(32, 22, 0.4),
+                      {},
+                      random_mask(32, 23, 0.3),
+                      random_mask(32, 21, 0.2)};
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        DYNAMIC_SECTION("depth " << depth) {
+            const auto plan  = mask_plan(depth);
+            const auto input = waterfalls(plan, 2, masks.size());
+            const auto cfg =
+                mask_config(PeakFindingMode::kContiguousPeakPerWidth);
+            auto declared           = cfg;
+            declared.per_call_masks = true;
+            const Exec exec         = Exec::cpu(3);
+            const auto est =
+                FDMTBoxcar::estimate_memory(plan, declared, true, exec, 2);
+            const auto lazy_est =
+                FDMTBoxcar::estimate_memory(plan, cfg, true, exec, 2);
+            // The staging block, the model and its tables, up front.
+            CHECK(est.usage.staging > lazy_est.usage.staging);
+            CHECK(est.usage.plan > lazy_est.usage.plan);
+            auto search = make_search(plan, declared, 2);
+            check_same_usage(search.get_memory_usage(), est.usage);
+            CHECK(est.search_latency == search.get_search_latency());
+            CHECK(est.chunk_nsamps == search.get_chunk_nsamps());
+            if (!est.search_path.empty()) {
+                CHECK(search.summary().find(est.search_path) !=
+                      std::string::npos);
+            }
+            // Candidates as without the declaration; the usage stays put.
+            auto lazy    = make_search(plan, cfg, 2);
+            const auto a = run(search, input, masks);
+            compare_exact(a, run(lazy, input, masks));
+            check_same_usage(search.get_memory_usage(), est.usage);
+            CHECK(lazy.get_memory_usage().total() <= est.usage.total());
+            // A budget of exactly the estimate builds the same instance,
+            // whose masks never throw.
+            auto tight = make_search(plan, declared, 2, est.chunk_nsamps, {},
+                                     est.usage.budgeted());
+            check_same_usage(tight.get_memory_usage(), est.usage);
+            compare_exact(run(tight, input, masks), a);
+            // The budget of the undeclared instance: it fails at its first
+            // per-call mask, the declared one at construction.
+            auto short_lazy = make_search(plan, cfg, 2, lazy_est.chunk_nsamps,
+                                          {}, lazy_est.usage.budgeted());
+            CHECK_THROWS_AS(
+                (void)short_lazy.execute(std::span<const float>(input[0]),
+                                         std::span<const uint8_t>(masks[0])),
+                std::invalid_argument);
+            CHECK_THROWS_AS(make_search(plan, declared, 2,
+                                        lazy_est.chunk_nsamps, {},
+                                        lazy_est.usage.budgeted()),
+                            std::invalid_argument);
+            CHECK_THROWS_AS(
+                FDMTBoxcar::estimate_memory(
+                    plan, declared, true, exec, 2, algorithms::kFDMTAutoFuse,
+                    lazy_est.chunk_nsamps, lazy_est.usage.budgeted()),
+                std::invalid_argument);
+        }
+    }
+    SECTION("what a first per-call mask would reject, rejected up front") {
+        const auto plan = mask_plan(1);
+        auto packed     = mask_config(PeakFindingMode::kContiguousPeakPerWidth);
+        packed.input_nbits    = 8;
+        packed.input_mean     = 127.5F;
+        packed.per_call_masks = true;
+        CHECK_THROWS_AS(make_search(plan, packed), std::invalid_argument);
+        // Supports up to ~120 samples + 300 - 1 > 400-sample blocks.
+        auto wide = mask_config(PeakFindingMode::kContiguousPeakPerWidth, 300);
+        CHECK_NOTHROW(make_search(plan, wide));
+        wide.per_call_masks = true;
+        CHECK_THROWS_AS(make_search(plan, wide), std::invalid_argument);
+        CHECK_THROWS_AS(
+            FDMTBoxcar::estimate_memory(plan, wide, true, Exec::cpu(3)),
+            std::invalid_argument);
+    }
+}
+
+TEST_CASE("FDMTBoxcar declared per-call masks are reserved before the "
+          "transform's path is chosen",
+          "[boxcar][kill][mask][cpu][memory]") {
+    // A budget the tree path fills without masks: declared masks leave the
+    // transform the rest, so it takes a smaller (skewed) path and fits,
+    // instead of failing once the masks' staging block is added.
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 400.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 4096, tsamp, grid,
+                               "valid", 1);
+    auto cfg = mask_config(PeakFindingMode::kContiguousPeakPerWidth, 24);
+    cfg.max_candidates      = 1U << 16;
+    auto declared           = cfg;
+    declared.per_call_masks = true;
+    const Exec exec         = Exec::cpu(3);
+    const auto tree = FDMTBoxcar::estimate_memory(plan, cfg, true, exec);
+    INFO("tree path: '" << tree.search_path << "', " << tree.usage.budgeted()
+                        << " B");
+    REQUIRE(tree.search_path.empty());
+    const SizeType budget = tree.usage.budgeted();
+    const auto est        = FDMTBoxcar::estimate_memory(
+        plan, declared, true, exec, 1, algorithms::kFDMTAutoFuse, 0, budget);
+    INFO("declared path: '" << est.search_path << "', " << est.usage.budgeted()
+                            << " B");
+    CHECK_FALSE(est.search_path.empty());
+    CHECK(est.usage.budgeted() <= budget);
+    FDMTBoxcar search(plan, declared, true, exec, 1, algorithms::kFDMTAutoFuse,
+                      0, budget);
+    CHECK(search.get_memory_usage().total() == est.usage.total());
 }

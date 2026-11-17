@@ -8,6 +8,18 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`BoxcarConfig::per_call_masks`** (Python `per_call_masks=`, default
+  false): declares that an `FDMTBoxcar` stream will pass per-call kill
+  masks. Their requirements (float32 input, blocks long enough, on a GPU a
+  search latency of at most one block) are checked and their memory
+  reserved at construction and in `estimate_memory()`, before the
+  transform's path is chosen, so a per-call mask no longer fails mid-run
+  for those reasons, and `get_memory_usage()` stays at the estimate.
+  Candidates are unchanged. `FDMTFFTBoxcar` rejects it.
+- **`FDMTBoxcarMemoryEstimate::search_path` and `search_latency`** (C++ and
+  Python): the transform's path and the search latency of the instance the
+  estimate describes.
+
 - **`FDMT::estimate_memory(...)`** (C++ and Python `FDMT.estimate_memory`),
   one overload per constructor with the same arguments: the memory the
   instance would allocate (`usage`, equal to its `get_memory_usage()`), its

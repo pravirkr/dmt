@@ -332,13 +332,20 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
         throw std::logic_error(
             "FDMTBoxcar (cpu): per-call kill masks need float input");
     }
-    m_masked.resize(m_beams * m_plan.get_nchans() * m_plan.get_nsamps());
+    // Sized, not allocated, while the construction is deferred
+    // (BoxcarConfig::per_call_masks): allocate() makes them.
+    const SizeType full = m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
+    if (m_deferred.size(m_masked) < full) {
+        m_deferred.resize(m_masked, full);
+    }
     m_killed.resize(m_plan.get_nchans());
-    m_screen_thr.resize(static_cast<SizeType>(m_threads) * m_filters);
+    m_deferred.resize(m_screen_thr,
+                      static_cast<SizeType>(m_threads) * m_filters);
     if (m_config.screen_mode == BoxcarScreenMode::kKadane ||
         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        m_thread_cuts.resize(static_cast<SizeType>(m_threads) *
-                             kadane::kMaxGateBuckets * kadane::kMaxBatchRows);
+        m_deferred.resize(m_thread_cuts, static_cast<SizeType>(m_threads) *
+                                             kadane::kMaxGateBuckets *
+                                             kadane::kMaxBatchRows);
     }
     m_support         = std::move(support);
     const uint64_t ns = m_plan.get_nsamps();
@@ -514,35 +521,36 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
          sizeof(kadane::KadaneSurrogateRowState)) +
         (m_deferred.size(m_surrogate_pos) * sizeof(uint64_t));
     const SizeType kadane_work =
-        ((m_deferred.size(m_tile_f32) + m_thread_cuts.size() +
+        ((m_deferred.size(m_tile_f32) + m_deferred.size(m_thread_cuts) +
           m_deferred.size(m_surrogate_chk_c) +
           m_deferred.size(m_surrogate_chk_dec) +
           m_deferred.size(m_surrogate_lb)) *
          sizeof(float)) +
         (m_deferred.size(m_tile_u32) * sizeof(uint32_t));
-    return {
-        .plan      = fdmt.plan + plan_bytes,
-        .state     = fdmt.state,
-        .history   = fdmt.history + (m_deferred.size(m_carry) * sizeof(float)) +
-                     (m_deferred.size(m_integer_carry) * sizeof(uint64_t)) +
-                     (m_deferred.size(m_integer_carry32) * sizeof(uint32_t)) +
-                     kadane_hist,
-        .peaks     = m_deferred.size(m_peaks) * sizeof(BoxcarPeak),
-        .workspace = fdmt.workspace +
-                     ((m_deferred.size(m_prefix) + m_integer_means.size() +
-                       m_integer_scales.size() + m_range_min.size() +
-                       m_group_thresh.size()) *
-                      sizeof(double)) +
-                     (m_deferred.size(m_integer_prefix) * sizeof(uint64_t)) +
-                     (m_deferred.size(m_best) * sizeof(float)) +
-                     (m_deferred.size(m_best_filter) * sizeof(uint32_t)) +
-                     (m_deferred.size(m_per_dm) * sizeof(uint64_t)) +
-                     (m_screen_thr.size() * sizeof(float)) + kadane_work,
-        .candidates =
-            (m_deferred.size(m_candidates) + m_deferred.size(m_keep)) *
-            sizeof(RawCandidate),
-        .staging = (m_deferred.size(m_masked) * sizeof(float)) +
-                   m_deferred.size(m_masked_packed)};
+    return {.plan    = fdmt.plan + plan_bytes,
+            .state   = fdmt.state,
+            .history = fdmt.history +
+                       (m_deferred.size(m_carry) * sizeof(float)) +
+                       (m_deferred.size(m_integer_carry) * sizeof(uint64_t)) +
+                       (m_deferred.size(m_integer_carry32) * sizeof(uint32_t)) +
+                       kadane_hist,
+            .peaks   = m_deferred.size(m_peaks) * sizeof(BoxcarPeak),
+            .workspace =
+                fdmt.workspace +
+                ((m_deferred.size(m_prefix) + m_integer_means.size() +
+                  m_integer_scales.size() + m_range_min.size() +
+                  m_group_thresh.size()) *
+                 sizeof(double)) +
+                (m_deferred.size(m_integer_prefix) * sizeof(uint64_t)) +
+                (m_deferred.size(m_best) * sizeof(float)) +
+                (m_deferred.size(m_best_filter) * sizeof(uint32_t)) +
+                (m_deferred.size(m_per_dm) * sizeof(uint64_t)) +
+                (m_deferred.size(m_screen_thr) * sizeof(float)) + kadane_work,
+            .candidates =
+                (m_deferred.size(m_candidates) + m_deferred.size(m_keep)) *
+                sizeof(RawCandidate),
+            .staging = (m_deferred.size(m_masked) * sizeof(float)) +
+                       m_deferred.size(m_masked_packed)};
 }
 
 SizeType FDMTBoxcarCpuEngine::chunk_nsamps() const noexcept {

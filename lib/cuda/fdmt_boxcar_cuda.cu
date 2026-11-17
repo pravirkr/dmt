@@ -548,6 +548,17 @@ void FDMTBoxcarCudaEngine::allocate() {
                                             planned.budgeted(), before, e);
     }
     allocate_host();
+    try {
+        // Table slots of per-call masks enabled during the construction.
+        for (auto& slot : m_slots) {
+            if (slot->copied == nullptr) {
+                allocate_slot(*slot);
+            }
+        }
+    } catch (const std::bad_alloc& e) {
+        throw gpu_utils::allocation_failure("FDMTBoxcar (cuda)",
+                                            planned.budgeted(), before, e);
+    }
     const auto got = memory_usage();
     if (got.total() != planned.total() || got.history != planned.history ||
         got.peaks != planned.peaks || got.workspace != planned.workspace ||
@@ -812,26 +823,43 @@ void FDMTBoxcarCudaEngine::enable_block_noise(
     gpu_utils::set_device(m_device);
     const SizeType full = m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
     if (!m_keep_in_transform && m_input_d.size() < full) {
+        if (!m_allocated) {
+            throw std::logic_error("FDMTBoxcar (gpu): per-call masks declared "
+                                   "on a driver without kept rows");
+        }
         m_work.wait(); // the staging buffer may still be read
         m_input_d.resize(full);
     }
-    m_support_d = *support;
+    {
+        // Sized, not allocated, while the construction is deferred
+        // (BoxcarConfig::per_call_masks): allocate() makes them.
+        const gpu_utils::DeferScope defer(m_allocated ? nullptr : &m_deferred);
+        if (m_keep_in_transform && m_keep_d.size() == 0) {
+            m_keep_d.resize(m_beams * m_plan.get_nchans());
+        }
+        m_support_d = *support;
+    }
     m_slots.clear();
     for (SizeType i = 0; i < slot_count(); ++i) {
-        auto slot = std::make_unique<TableSlot>();
-        slot->device.resize(2 * table_floats());
-        slot->host.reserve(2 * table_floats());
-        gpu_utils::check_gpu_call(
-            cudaEventCreateWithFlags(&slot->copied, cudaEventDisableTiming),
-            "FDMTBoxcar: event creation failed");
-        gpu_utils::check_gpu_call(
-            cudaEventCreateWithFlags(&slot->released, cudaEventDisableTiming),
-            "FDMTBoxcar: event creation failed");
-        m_slots.push_back(std::move(slot));
+        m_slots.push_back(std::make_unique<TableSlot>());
+        if (m_allocated) {
+            allocate_slot(*m_slots.back());
+        }
     }
     m_ring.reserve(3);
     m_noise_on = true;
     reset_block_noise();
+}
+
+void FDMTBoxcarCudaEngine::allocate_slot(TableSlot& slot) {
+    slot.device.resize(2 * table_floats());
+    slot.host.reserve(2 * table_floats());
+    gpu_utils::check_gpu_call(
+        cudaEventCreateWithFlags(&slot.copied, cudaEventDisableTiming),
+        "FDMTBoxcar: event creation failed");
+    gpu_utils::check_gpu_call(
+        cudaEventCreateWithFlags(&slot.released, cudaEventDisableTiming),
+        "FDMTBoxcar: event creation failed");
 }
 
 void FDMTBoxcarCudaEngine::push_block_noise(BlockNoise entry) {

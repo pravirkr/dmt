@@ -176,6 +176,10 @@ TEST_CASE("FDMTFFTBoxcar validates its configuration", "[boxcar][cpu]") {
     packed.max_boxcar  = 8;
     packed.input_nbits = 8;
     CHECK_THROWS_AS(FDMTFFTBoxcar(plan, packed), std::invalid_argument);
+    BoxcarConfig masks;
+    masks.max_boxcar     = 8;
+    masks.per_call_masks = true; // FDMTBoxcar only
+    CHECK_THROWS_AS(FDMTFFTBoxcar(plan, masks), std::invalid_argument);
     BoxcarConfig cfg;
     cfg.max_boxcar = 8;
     CHECK_THROWS_AS(FDMTFFTBoxcar(plan, cfg, true, Exec::cpu(), 1, true,
