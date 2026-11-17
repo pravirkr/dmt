@@ -52,9 +52,12 @@ public:
     Impl(plans::DDMTPlan plan,
          Exec exec,
          SizeType nbeams,
-         bool shared_sums = false)
+         bool shared_sums   = false,
+         bool estimate_only = false)
         : m_plan(std::move(plan)),
-          m_cfg{.nbeams = require_nbeams(nbeams, shared_sums), .exec = exec},
+          m_cfg{.nbeams           = require_nbeams(nbeams, shared_sums),
+                .exec             = exec,
+                .defer_allocation = estimate_only},
           m_engine(make_ddmt_engine(m_plan, m_cfg, shared_sums)) {
         // The engine has already cached the mask. Later writes through the
         // aliased Python plan must fail instead of desynchronising variance.
@@ -140,6 +143,27 @@ DDMT::DDMT(const plans::DDMTPlan& plan,
     : m_impl(std::make_unique<Impl>(
           plan, exec, nbeams, kind == EngineKind::kSharedSums)) {}
 
+DDMTMemoryEstimate DDMT::estimate_memory(const plans::DDMTPlan& plan,
+                                         SizeType nsamps,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType gulp_size) {
+    return estimate_memory(plan, nsamps, exec, nbeams, gulp_size,
+                           EngineKind::kDirect);
+}
+
+DDMTMemoryEstimate DDMT::estimate_memory(const plans::DDMTPlan& plan,
+                                         SizeType nsamps,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType gulp_size,
+                                         EngineKind kind) {
+    Impl impl(plan, exec, nbeams, kind == EngineKind::kSharedSums,
+              /*estimate_only=*/true);
+    impl.m_engine->set_gulp_size(gulp_size);
+    return impl.m_engine->estimate(nsamps);
+}
+
 DDMT::~DDMT()                                = default;
 DDMT::DDMT(DDMT&& other) noexcept            = default;
 DDMT& DDMT::operator=(DDMT&& other) noexcept = default;
@@ -155,6 +179,9 @@ int DDMT::nthreads() const noexcept {
 }
 int DDMT::device() const noexcept {
     return backend() == Backend::kCPU ? -1 : m_impl->m_cfg.exec.device;
+}
+DDMTMemoryUsage DDMT::get_memory_usage() const noexcept {
+    return m_impl->m_engine->memory_usage();
 }
 
 void DDMT::execute(std::span<const float> waterfall, std::span<float> dmt) {

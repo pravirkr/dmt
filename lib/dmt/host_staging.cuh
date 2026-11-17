@@ -54,6 +54,7 @@ public:
     }
     [[nodiscard]] T* data() noexcept { return m_ptr; }
     [[nodiscard]] const T* data() const noexcept { return m_ptr; }
+    [[nodiscard]] SizeType capacity() const noexcept { return m_capacity; }
 
 private:
     void release() noexcept {

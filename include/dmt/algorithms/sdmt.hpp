@@ -83,6 +83,15 @@ public:
     explicit SDMT(const plans::DDMTPlan& plan,
                   Exec exec       = {},
                   SizeType nbeams = 1);
+
+    /// @brief DDMT::estimate_memory() for an SDMT (its shared-sum
+    /// programs).
+    [[nodiscard]] static DDMTMemoryEstimate
+    estimate_memory(const plans::DDMTPlan& plan,
+                    SizeType nsamps,
+                    Exec exec          = {},
+                    SizeType nbeams    = 1,
+                    SizeType gulp_size = 0);
 };
 
 } // namespace dmt::algorithms

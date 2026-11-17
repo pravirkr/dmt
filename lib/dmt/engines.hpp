@@ -16,6 +16,7 @@
 #include <string_view>
 #include <vector>
 
+#include "dmt/algorithms/ddmt.hpp"
 #include "dmt/algorithms/ddmt_fft.hpp"
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/common/backend.hpp"
@@ -226,6 +227,8 @@ std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
 struct DDMTEngineConfig {
     SizeType nbeams{1};
     Exec exec{};
+    // Estimate-only engine: buffers are sized, never allocated (estimate()).
+    bool defer_allocation{false};
 };
 
 class DDMTEngine {
@@ -275,8 +278,11 @@ public:
 
     // Host-path chunk length in input samples (GPU; stored but unused on
     // the CPU). 0 restores the default.
-    virtual void set_gulp_size(SizeType gulp_size)                = 0;
-    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept = 0;
+    virtual void set_gulp_size(SizeType gulp_size)                      = 0;
+    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept       = 0;
+    [[nodiscard]] virtual DDMTMemoryUsage memory_usage() const noexcept = 0;
+    // Estimate-only engines: what calls of `nsamps` samples hold.
+    [[nodiscard]] virtual DDMTMemoryEstimate estimate(SizeType nsamps) = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

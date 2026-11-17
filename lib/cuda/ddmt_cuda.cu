@@ -110,6 +110,7 @@ public:
     [[nodiscard]] const uint8_t* data() const noexcept {
         return thrust::raw_pointer_cast(m_buf.data());
     }
+    [[nodiscard]] SizeType bytes() const noexcept { return m_buf.capacity(); }
 
 private:
     thrust::device_vector<uint8_t> m_buf;
@@ -168,7 +169,8 @@ public:
         : m_plan(plan),
           m_device_id(cfg.exec.device),
           m_nbeams(cfg.nbeams),
-          m_shared_sums(shared_sums) {
+          m_shared_sums(shared_sums),
+          m_estimate_only(cfg.defer_allocation) {
         init();
     }
 
@@ -202,6 +204,33 @@ public:
     }
     [[nodiscard]] SizeType get_gulp_size() const noexcept override {
         return m_gulp;
+    }
+
+    [[nodiscard]] DDMTMemoryUsage memory_usage() const noexcept override {
+        return m_estimate_only ? m_planned : held();
+    }
+
+    [[nodiscard]] DDMTMemoryEstimate estimate(SizeType nsamps) override {
+        DDMTMemoryEstimate e{.usage = memory_usage()};
+        const auto nbits = m_plan.get_nbits();
+        dispatch_nbits(nbits, [&]<unsigned NBITS>() {
+            const auto c   = host_caps<NBITS>(nsamps, 0);
+            e.host_staging = 2 * (c.in + c.out);
+            e.host_pinned  = 2 * (c.in + c.out);
+            if constexpr (NBITS != 32) {
+                const auto t =
+                    host_caps<NBITS>(nsamps, bit_pack_utils::packed_row_bytes(
+                                                 m_plan.get_nchans(), NBITS));
+                e.time_major_staging        = 2 * (t.in + t.out + t.cm);
+                e.time_major_pinned         = 2 * (t.in + t.out);
+                e.device_time_major_staging = tm_scratch_bytes(nsamps);
+            }
+        });
+        if (const auto h = held(); h.total() + h.pinned != 0) {
+            throw std::logic_error(
+                "DDMT (gpu): an estimate-only engine allocated memory");
+        }
+        return e;
     }
 
     // ---- History snapshots -----------------------------------------------
@@ -329,7 +358,7 @@ public:
         // The transpose scratch is reused by the next call: order this
         // call after the previous one's reads of it.
         gpu_utils::check_gpu_call(cudaStreamWaitEvent(s, m_hist_ready, 0));
-        m_tm_scratch.reserve(m_nbeams * nchans * row_bytes);
+        m_tm_scratch.reserve(tm_scratch_bytes(nsamps));
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
             if constexpr (NBITS != 32) {
                 launch_transpose<NBITS>(d_filterbank_packed.data(), samp_bytes,
@@ -449,6 +478,10 @@ private:
     int m_device_id;
     SizeType m_nbeams;
     bool m_shared_sums; // SDMT: use the shared-sum kernel when it pays
+    // Estimate-only: plan tables and history are sized into m_planned,
+    // never uploaded.
+    bool m_estimate_only;
+    DDMTMemoryUsage m_planned{};
     SizeType m_max_delay{0};
     SizeType m_ndm{0};
     SizeType m_gulp{kDefaultGulpSamples};
@@ -495,6 +528,77 @@ private:
     DeviceBytes m_d_in[2];
     DeviceBytes m_d_cm[2]; // channel-major staging for time-major input
     DeviceBytes m_d_out[2];
+
+    // Memory the device buffers hold now.
+    [[nodiscard]] DDMTMemoryUsage held() const noexcept {
+        DDMTMemoryUsage u{
+            .plan    = (m_delay_d.capacity() + m_active_d.capacity() +
+                        m_base_d.capacity() + m_sdmt_tile_sub_d.capacity() +
+                        m_sdmt_trials_d.capacity()) *
+                           sizeof(int) +
+                       (m_offs_d.capacity() * sizeof(int16_t)) +
+                       (m_sdmt_subs_d.capacity() * sizeof(sdmt_gpu::SubProg)) +
+                       (m_sdmt_wins_d.capacity() * sizeof(sdmt_gpu::Window)) +
+                       (m_sdmt_nodes_d.capacity() * sizeof(sdmt_gpu::Node)),
+            .history = m_hist[0].bytes() + m_hist[1].bytes(),
+            .staging = m_tm_scratch.bytes(),
+            .pinned  = 0};
+        for (int i = 0; i < 2; ++i) {
+            u.staging +=
+                m_d_in[i].bytes() + m_d_cm[i].bytes() + m_d_out[i].bytes();
+            u.pinned += m_h_in[i].capacity() + m_h_out[i].capacity();
+        }
+        return u;
+    }
+
+    // Plan-table upload (sized only in estimate-only engines).
+    template <typename T, typename It>
+    void upload(thrust::device_vector<T>& d, It first, It last) {
+        if (m_estimate_only) {
+            m_planned.plan +=
+                static_cast<SizeType>(std::distance(first, last)) * sizeof(T);
+            return;
+        }
+        d.assign(first, last);
+    }
+
+    // Device scratch of a device-memory time-major call.
+    [[nodiscard]] SizeType tm_scratch_bytes(SizeType nsamps) const noexcept {
+        return m_nbeams * m_plan.get_nchans() *
+               bit_pack_utils::packed_row_bytes(nsamps, m_plan.get_nbits());
+    }
+
+    // Host-path chunk and per-buffer bytes of a call of nsamps samples
+    // (samp_bytes > 0: time-major input, transposed on the device).
+    struct HostCaps {
+        SizeType chunk{};
+        SizeType in{};  // pinned and device input
+        SizeType out{}; // pinned and device output
+        SizeType cm{};  // device channel-major copy (time-major input)
+    };
+    template <unsigned NBITS>
+    [[nodiscard]] HostCaps host_caps(SizeType nsamps,
+                                     SizeType samp_bytes) const noexcept {
+        const auto rows = m_nbeams * m_plan.get_nchans();
+        // With the default gulp, split large inputs into >= 3 chunks (so
+        // copies overlap the kernels) as long as each keeps >= 16384
+        // samples (so each kernel still fills the device). Chunks start on
+        // multiples of 8 samples: byte-aligned when packed.
+        auto gulp = m_gulp;
+        if (m_gulp_is_default) {
+            gulp =
+                std::clamp<SizeType>((nsamps + 2) / 3, kMinAutoChunk, m_gulp);
+        }
+        HostCaps c;
+        c.chunk           = std::max<SizeType>(8, (gulp + 7) / 8 * 8);
+        const auto n      = std::min(c.chunk, nsamps);
+        const auto cm_row = row_bytes_for(n, NBITS);
+        c.in = samp_bytes > 0 ? m_nbeams * n * samp_bytes : rows * cm_row;
+        // A chunk of n new samples yields at most n outputs per DM.
+        c.out = m_nbeams * m_ndm * n * sizeof(DDMTAcc<NBITS>);
+        c.cm  = samp_bytes > 0 ? rows * cm_row : 0;
+        return c;
+    }
 
     [[nodiscard]] const uint8_t* hist_cur() const noexcept {
         return m_hist[m_hist_idx].data();
@@ -580,13 +684,17 @@ private:
         const auto nbits  = pc.nbits;
         m_hist_row_bytes  = row_bytes_for(m_max_delay, nbits);
         for (auto& h : m_hist) {
-            h.reserve(m_nbeams * nchans * m_hist_row_bytes);
+            if (m_estimate_only) {
+                m_planned.history += m_nbeams * nchans * m_hist_row_bytes;
+            } else {
+                h.reserve(m_nbeams * nchans * m_hist_row_bytes);
+            }
         }
 
         std::vector<int> delays(pc.delay_table.size());
         std::ranges::transform(pc.delay_table, delays.begin(),
                                [](SizeType v) { return static_cast<int>(v); });
-        m_delay_d.assign(delays.begin(), delays.end());
+        upload(m_delay_d, delays.begin(), delays.end());
         std::vector<int> active;
         for (SizeType c = 0; c < nchans; ++c) {
             if (pc.kill_mask[c] != 0) {
@@ -594,7 +702,7 @@ private:
             }
         }
         m_nact = static_cast<int>(active.size());
-        m_active_d.assign(active.begin(), active.end());
+        upload(m_active_d, active.begin(), active.end());
 
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
             select_kernel<NBITS>(delays, active);
@@ -693,8 +801,8 @@ private:
                 }
             }
         }
-        m_base_d.assign(base.begin(), base.end());
-        m_offs_d.assign(offs.begin(), offs.end());
+        upload(m_base_d, base.begin(), base.end());
+        upload(m_offs_d, offs.begin(), offs.end());
     }
 
     /// Picks the kernel for this plan: the widest DM tile whose shared
@@ -826,11 +934,11 @@ private:
         m_sdmt_max_nodes = best->max_nodes;
         m_sdmt_smem = sdmt_gpu::smem_bytes<NBITS>(best->tdm, best->max_nodes,
                                                   best->arena);
-        m_sdmt_tile_sub_d.assign(best->tile_sub.begin(), best->tile_sub.end());
-        m_sdmt_subs_d.assign(best->subs.begin(), best->subs.end());
-        m_sdmt_wins_d.assign(best->wins.begin(), best->wins.end());
-        m_sdmt_nodes_d.assign(best->nodes.begin(), best->nodes.end());
-        m_sdmt_trials_d.assign(best->trials.begin(), best->trials.end());
+        upload(m_sdmt_tile_sub_d, best->tile_sub.begin(), best->tile_sub.end());
+        upload(m_sdmt_subs_d, best->subs.begin(), best->subs.end());
+        upload(m_sdmt_wins_d, best->wins.begin(), best->wins.end());
+        upload(m_sdmt_nodes_d, best->nodes.begin(), best->nodes.end());
+        upload(m_sdmt_trials_d, best->trials.begin(), best->trials.end());
         with_sdmt_cfg(best_cfg, [&]<class Cfg>() {
             gpu_utils::check_gpu_call(
                 cudaFuncSetAttribute(
@@ -1038,32 +1146,17 @@ private:
                   Stage&& stage,
                   SizeType samp_bytes = 0) {
         using Acc          = DDMTAcc<NBITS>;
-        const auto rows    = m_nbeams * m_plan.get_nchans();
         const auto n_total = get_output_nsamps(nsamps);
-        // With the default gulp, split large inputs into >= 3 chunks (so
-        // copies overlap the kernels) as long as each keeps >= 16384
-        // samples (so each kernel still fills the device). Chunks start on
-        // multiples of 8 samples: byte-aligned when packed.
-        auto gulp = m_gulp;
-        if (m_gulp_is_default) {
-            gulp =
-                std::clamp<SizeType>((nsamps + 2) / 3, kMinAutoChunk, m_gulp);
-        }
-        const auto chunk  = std::max<SizeType>(8, (gulp + 7) / 8 * 8);
-        const auto nchunk = (nsamps + chunk - 1) / chunk;
-        const auto cm_row = row_bytes_for(std::min(chunk, nsamps), NBITS);
-        const auto in_cap =
-            samp_bytes > 0 ? m_nbeams * std::min(chunk, nsamps) * samp_bytes
-                           : rows * cm_row;
-        // A chunk of n new samples yields at most n outputs per DM.
-        const auto out_cap = m_nbeams * m_ndm * std::min(chunk, nsamps);
+        const auto caps    = host_caps<NBITS>(nsamps, samp_bytes);
+        const auto chunk   = caps.chunk;
+        const auto nchunk  = (nsamps + chunk - 1) / chunk;
         for (int i = 0; i < 2; ++i) {
-            m_h_in[i].reserve(in_cap);
-            m_d_in[i].reserve(in_cap);
-            m_h_out[i].reserve(out_cap * sizeof(Acc));
-            m_d_out[i].reserve(out_cap * sizeof(Acc));
+            m_h_in[i].reserve(caps.in);
+            m_d_in[i].reserve(caps.in);
+            m_h_out[i].reserve(caps.out);
+            m_d_out[i].reserve(caps.out);
             if (samp_bytes > 0) {
-                m_d_cm[i].reserve(rows * cm_row);
+                m_d_cm[i].reserve(caps.cm);
             }
         }
         gpu_utils::check_gpu_call(

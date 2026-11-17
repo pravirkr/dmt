@@ -170,6 +170,11 @@ private:
     int m_nthreads;
     SizeType m_nbeams;
     std::vector<uint16_t> m_offs; // [tile slot][active]: delay - base
+
+public:
+    [[nodiscard]] SizeType memory_bytes() const noexcept {
+        return m_offs.capacity() * sizeof(uint16_t);
+    }
 };
 
 } // namespace

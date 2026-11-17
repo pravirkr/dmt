@@ -28,6 +28,12 @@ All notable changes to `dmt` are listed here. The format follows
   that host-memory, time-major and packed device-memory calls add, computed
   without allocating. **`DDMTFFT::get_memory_usage()`** (Python
   `memory_usage`) reports what an instance holds now.
+- **`DDMT::estimate_memory(plan, nsamps, exec, nbeams, gulp_size)`** and
+  **`SDMT::estimate_memory(...)`** (C++ and Python): the memory an instance
+  making calls of `nsamps` samples holds (`usage`), plus on a GPU the device
+  and pinned staging that host-memory and time-major calls add, computed
+  without allocating. **`DDMT::get_memory_usage()`** (Python
+  `memory_usage`) reports what an instance holds now.
 - **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
   `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
   `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the

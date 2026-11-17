@@ -70,4 +70,13 @@ SDMT::SDMT(float f_min,
 SDMT::SDMT(const plans::DDMTPlan& plan, Exec exec, SizeType nbeams)
     : DDMT(plan, exec, nbeams, EngineKind::kSharedSums) {}
 
+DDMTMemoryEstimate SDMT::estimate_memory(const plans::DDMTPlan& plan,
+                                         SizeType nsamps,
+                                         Exec exec,
+                                         SizeType nbeams,
+                                         SizeType gulp_size) {
+    return DDMT::estimate_memory(plan, nsamps, exec, nbeams, gulp_size,
+                                 EngineKind::kSharedSums);
+}
+
 } // namespace dmt::algorithms
