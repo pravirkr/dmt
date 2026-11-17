@@ -179,37 +179,90 @@ inline void check_gpu_sync_error(
 /// MemoryError, as before) that says what the configuration needs.
 class DeviceAllocationError : public std::bad_alloc {
 public:
-    explicit DeviceAllocationError(std::string message)
-        : m_message(std::move(message)) {}
+    explicit DeviceAllocationError(std::string message, std::string cause = {})
+        : m_message(std::move(message)),
+          m_cause(std::move(cause)) {}
     [[nodiscard]] const char* what() const noexcept override {
         return m_message.c_str();
     }
+    /// The failed allocation itself (empty: what() is all there is).
+    [[nodiscard]] const std::string& cause() const noexcept { return m_cause; }
 
 private:
     std::string m_message;
+    std::string m_cause;
 };
 
-/// Message for an engine whose planned device buffers failed to allocate:
-/// what it needs and what the device has free (read for the message only;
-/// no engine sizes itself from free memory).
-[[nodiscard]] inline std::string allocation_failure(std::string_view what,
-                                                    std::size_t needed,
-                                                    std::string_view cause) {
+/// The device's free and total memory, if it can be read.
+struct DeviceMemoryInfo {
+    std::size_t free{0};
+    std::size_t total{0};
+    bool known{false};
+};
+
+/// Free device memory now (read for messages only; no engine sizes itself
+/// from it). Engines read it before allocating, so a failure message
+/// reports what was free before their own partial allocations.
+[[nodiscard]] inline DeviceMemoryInfo device_memory_info() noexcept {
+    DeviceMemoryInfo m;
+    m.known = cudaMemGetInfo(&m.free, &m.total) == cudaSuccess;
+    if (!m.known) {
+        (void)cudaGetLastError();
+    }
+    return m;
+}
+
+/// The underlying failure of an allocation exception: a nested engine's
+/// DeviceAllocationError contributes its cause, not its whole message.
+[[nodiscard]] inline std::string allocation_cause(const std::exception& e) {
+    if (const auto* d = dynamic_cast<const DeviceAllocationError*>(&e);
+        d != nullptr && !d->cause().empty()) {
+        return d->cause();
+    }
+    return e.what();
+}
+
+/// The error for an engine whose planned device buffers failed to
+/// allocate: what it needs and what the device had free before it
+/// allocated (`before`, from device_memory_info()).
+[[nodiscard]] inline DeviceAllocationError
+allocation_failure(std::string_view what,
+                   std::size_t needed,
+                   const DeviceMemoryInfo& before,
+                   const std::exception& e) {
     (void)cudaGetLastError(); // clear the failed allocation's error
-    std::size_t free      = 0;
-    std::size_t total     = 0;
-    const bool known      = cudaMemGetInfo(&free, &total) == cudaSuccess;
     constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
-    return fmt::format(
+    auto cause            = allocation_cause(e);
+    auto message          = fmt::format(
         "{}: this configuration needs {:.2f} GiB of device memory{}; use "
         "shorter blocks (nsamps) or fewer beams (estimate_memory() gives the "
         "requirement): {}",
         what, static_cast<double>(needed) / kGiB,
-        known ? fmt::format(" and {:.2f} GiB of {:.2f} GiB is free",
-                            static_cast<double>(free) / kGiB,
-                            static_cast<double>(total) / kGiB)
-              : std::string{},
+        before.known ? fmt::format(" and {:.2f} GiB of {:.2f} GiB was free",
+                                   static_cast<double>(before.free) / kGiB,
+                                   static_cast<double>(before.total) / kGiB)
+                     : std::string{},
         cause);
+    return DeviceAllocationError(std::move(message), std::move(cause));
+}
+
+/// check_gpu_call() for an allocation of `bytes`: out of memory throws a
+/// DeviceAllocationError (std::bad_alloc, Python MemoryError) naming the
+/// size; other errors throw GPUException as usual.
+inline void
+check_allocation(cudaError_t result,
+                 std::size_t bytes,
+                 std::string_view msg,
+                 std::source_location loc = std::source_location::current()) {
+    if (result == cudaErrorMemoryAllocation) {
+        (void)cudaGetLastError();
+        auto cause = fmt::format("{} ({:.3f} GiB): out of memory", msg,
+                                 static_cast<double>(bytes) /
+                                     (1024.0 * 1024.0 * 1024.0));
+        throw DeviceAllocationError(
+            cause + "; estimate_memory() gives an engine's requirement", cause);
+    }
+    check_gpu_call(result, msg, loc);
 }
 
 [[nodiscard]] inline const cudaDeviceProp& device_properties(int device) {

@@ -271,6 +271,14 @@ TEST_CASE("DDMTFFT (gpu) estimate_memory equals a warm stream",
                                               << " bytes)");
     }
     CHECK(e.usage.total() > props.totalGlobalMem);
+    // Building it fails with a std::bad_alloc (Python MemoryError) naming
+    // the buffer that did not fit.
+    const auto big = ddmt_fft_estimate::many_beams(SizeType{1} << 23);
+    CHECK_THROWS_MATCHES(
+        DDMTFFT(big.plan, exec, big.nbeams, big.options), std::bad_alloc,
+        Catch::Matchers::MessageMatches(
+            Catch::Matchers::ContainsSubstring("out of memory") &&
+            Catch::Matchers::ContainsSubstring("estimate_memory()")));
 }
 
 } // namespace dmt

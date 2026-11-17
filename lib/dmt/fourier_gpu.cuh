@@ -64,10 +64,10 @@ public:
             return;
         }
         release();
-        gpu_utils::check_gpu_call(
+        gpu_utils::check_allocation(
             cudaMalloc(reinterpret_cast<void**>(&m_ptr),
                        std::max<SizeType>(n, 1) * sizeof(T)),
-            "device allocation failed");
+            n * sizeof(T), "device allocation");
         m_cap = n;
     }
     /// reserve(n), then every byte zero.

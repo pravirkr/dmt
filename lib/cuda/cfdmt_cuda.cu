@@ -339,13 +339,16 @@ public:
         }
         gpu_utils::set_device(m_device_id);
         const auto planned = memory_usage();
+        const auto before  = gpu_utils::device_memory_info();
         try {
             m_deferred.materialize();
             m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+        } catch (const std::logic_error&) {
+            throw; // a plan check, not an allocation
         } catch (const std::exception& e) {
-            throw gpu_utils::DeviceAllocationError(
-                gpu_utils::allocation_failure("CohFDMT (cuda)", planned.total(),
-                                              e.what()));
+            // A failing fine FDMT contributes its cause, not its message.
+            throw gpu_utils::allocation_failure("CohFDMT (cuda)",
+                                                planned.total(), before, e);
         }
         const auto got = memory_usage();
         if (got.spectrum != planned.spectrum ||

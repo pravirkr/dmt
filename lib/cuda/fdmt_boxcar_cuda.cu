@@ -533,12 +533,16 @@ void FDMTBoxcarCudaEngine::allocate() {
     }
     gpu_utils::set_device(m_device);
     const auto planned = memory_usage();
-    m_driver->allocate();
+    const auto before  = gpu_utils::device_memory_info();
     try {
+        // The transform first: its failure reports this engine's need.
+        m_driver->allocate();
         m_deferred.materialize();
+    } catch (const std::logic_error&) {
+        throw; // the transform's own plan check, not an allocation
     } catch (const std::exception& e) {
-        throw gpu_utils::DeviceAllocationError(gpu_utils::allocation_failure(
-            "FDMTBoxcar (cuda)", planned.budgeted(), e.what()));
+        throw gpu_utils::allocation_failure("FDMTBoxcar (cuda)",
+                                            planned.budgeted(), before, e);
     }
     allocate_host();
     const auto got = memory_usage();

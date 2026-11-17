@@ -87,9 +87,13 @@ All notable changes to `dmt` are listed here. The format follows
   device's free memory: memory follows the arguments alone, so the same
   configuration behaves the same on any device. One that does not fit fails
   at construction with a `std::bad_alloc` (Python `MemoryError`) saying
-  what it needs and what is free (use shorter blocks or fewer beams;
-  `estimate_memory` gives the requirement); GPU `FDMT` and `FDMTBoxcar`
-  allocation failures carry the same message (still `std::bad_alloc`).
+  what it needs and what was free before it allocated (use shorter blocks
+  or fewer beams; `estimate_memory` gives the requirement); GPU `FDMT`,
+  `FDMTBoxcar`, `FDMTFFTBoxcar` and `CohFDMT` allocation failures carry the
+  same message (still `std::bad_alloc`).
+- A GPU device or pinned-host allocation that runs out of memory now
+  raises `std::bad_alloc` (Python `MemoryError`, was `RuntimeError`) with
+  the size that failed, for every engine (`DDMTFFT` included).
 - `CohFDMT::get_memory_usage()` now counts every buffer the engine owns:
   the CPU per-channel power partials, and on a GPU the remaining tables and
   the device copy of a host-memory call's result (in `workspace`, which

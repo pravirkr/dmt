@@ -10,6 +10,8 @@
 #include <tuple>
 #include <vector>
 
+#include <catch2/matchers/catch_matchers_exception.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <thrust/device_vector.h>
 
 #include "dmt/boxcar.hpp"
@@ -1108,4 +1110,44 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
             SIZE_MAX / 2);
         CHECK(e.usage.candidates >= cfg.max_candidates * sizeof(RawCandidate));
     }
+    SECTION("a transform the device cannot hold fails with the boxcar's need") {
+        // The FDMT allocates first; its failure reports FDMTBoxcar's total,
+        // not the FDMT's own message.
+        const auto c         = estimate_cases().front();
+        const SizeType beams = SizeType{1} << 14;
+        const auto e         = FDMTBoxcar::estimate_memory(
+            c.plan, c.config, true, gpu, beams, algorithms::kFDMTAutoFuse, 0,
+            SIZE_MAX / 2);
+        const auto& props = gpu_utils::device_properties(gpu.device);
+        if (e.usage.state + e.usage.history <= props.totalGlobalMem) {
+            SKIP("device larger than the probe");
+        }
+        CHECK_THROWS_MATCHES(
+            FDMTBoxcar(c.plan, c.config, true, gpu, beams,
+                       algorithms::kFDMTAutoFuse, 0, SIZE_MAX / 2),
+            std::bad_alloc,
+            Catch::Matchers::MessageMatches(
+                Catch::Matchers::StartsWith(
+                    "FDMTBoxcar (cuda): this configuration needs") &&
+                !Catch::Matchers::ContainsSubstring("FDMT (cuda): this")));
+    }
+}
+
+TEST_CASE("Device allocation errors nest by cause", "[gpu][budget]") {
+    const gpu_utils::DeviceMemoryInfo before{
+        .free = SizeType{3} << 30, .total = SizeType{8} << 30, .known = true};
+    const auto inner = gpu_utils::allocation_failure(
+        "FDMT (cuda)", SizeType{5} << 30, before,
+        std::runtime_error("device allocation: out of memory"));
+    CHECK(inner.cause() == "device allocation: out of memory");
+    const auto outer = gpu_utils::allocation_failure(
+        "CohFDMT (cuda)", SizeType{6} << 30, before, inner);
+    const std::string what = outer.what();
+    CHECK(what.starts_with("CohFDMT (cuda): this configuration needs 6.00 "
+                           "GiB of device memory and 3.00 GiB of 8.00 GiB "
+                           "was free"));
+    CHECK(what.ends_with(": device allocation: out of memory"));
+    // One message, not the FDMT's nested inside.
+    const std::string needs = "this configuration needs";
+    CHECK(what.find(needs) == what.rfind(needs));
 }

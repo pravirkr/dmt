@@ -494,15 +494,15 @@ public:
         }
         gpu_utils::set_device(m_device_id);
         const auto planned = memory_usage();
+        const auto before  = gpu_utils::device_memory_info();
         try {
             m_deferred.materialize();
             for (const auto& fill : m_after_alloc) {
                 fill();
             }
         } catch (const std::exception& e) {
-            throw gpu_utils::DeviceAllocationError(
-                gpu_utils::allocation_failure("FDMTFFT (cuda)", planned.total(),
-                                              e.what()));
+            throw gpu_utils::allocation_failure("FDMTFFT (cuda)",
+                                                planned.total(), before, e);
         }
         m_after_alloc.clear();
         const auto got = memory_usage();

@@ -220,8 +220,9 @@ private:
 
     void allocate_workspace() {
         gpu_utils::set_device(m_device_id);
-        gpu_utils::check_gpu_call(cudaMalloc(&m_workspace, m_workspace_size),
-                                  "CUFFTManager: cudaMalloc workspace");
+        gpu_utils::check_allocation(cudaMalloc(&m_workspace, m_workspace_size),
+                                    m_workspace_size,
+                                    "cuFFT work area allocation");
         gpu_utils::check_gpu_call(cufftSetWorkArea(m_plan, m_workspace),
                                   "CUFFTManager: cufftSetWorkArea");
     }
