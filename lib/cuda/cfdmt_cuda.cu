@@ -67,8 +67,9 @@ unsigned grid_for(uint64_t n) {
 // FFT's passes and the channel powers of a chunk then run out of L2, and the
 // host path's upload overlaps with the front end chunk by chunk.
 constexpr double kChunkL2Share = 0.25;
-// Share of the free device memory the cuFFT path's work buffer may take.
-constexpr double kWorkShare = 0.25;
+// Default cuFFT-path work buffer (a fixed size: memory depends on the
+// arguments only, never on the device's free memory).
+constexpr SizeType kWorkBytes = SizeType{1} << 30;
 
 // Per (subband, FFT block, channel) cell in [cell0, cell0 + gridDim.x):
 // filtered power of each polarisation, sum_b |c_b|^2 |X_p(b)|^2 (see the
@@ -645,12 +646,7 @@ private:
         const auto mbin         = m_plan.get_mbin();
         const SizeType per_chan = m_nwin * 2 * mbin * sizeof(ComplexTypeGPU);
         if (work_bytes == 0) {
-            std::size_t free_bytes  = 0;
-            std::size_t total_bytes = 0;
-            gpu_utils::check_gpu_call(cudaMemGetInfo(&free_bytes, &total_bytes),
-                                      "CohFDMT: memory query failed");
-            work_bytes = static_cast<SizeType>(kWorkShare *
-                                               static_cast<double>(free_bytes));
+            work_bytes = kWorkBytes;
         }
         // Channels per chunk: the grid's y extent (<= kMaxGridY) and the
         // work buffer budget.

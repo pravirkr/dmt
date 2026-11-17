@@ -50,8 +50,8 @@
 //
 // A uniform run whose fine grid would not fit shared memory is transformed
 // as a few equal sub-runs (still NUFFT; method_used() reports the grid's
-// runs, as on the CPU). The transform length follows the CPU engine's rule,
-// capped further only by the device's free memory. Host-memory calls stage
+// runs, as on the CPU). The transform length follows the CPU engine's rule
+// (memory depends on the arguments only). Host-memory calls stage
 // through device buffers and block; device-memory calls run asynchronously
 // on the given stream, ordered after the engine's previous work.
 
@@ -850,28 +850,12 @@ private:
     }
 
     // Longest transform: the CPU engine's (same segments, same result
-    // bits), capped by the testing hook and by half the free device memory
-    // for the per-segment buffers (bytes per transform sample below).
+    // bits), capped only by the testing hook.
     [[nodiscard]] SizeType segment_cap() const {
         auto cap =
             ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
         if (const auto hook = detail::fft_segment_cap(); hook > 0) {
             cap = std::min(cap, hook);
-        }
-        std::size_t free_b  = 0;
-        std::size_t total_b = 0;
-        gpu_utils::check_gpu_call(cudaMemGetInfo(&free_b, &total_b),
-                                  "DDMTFFT (gpu): memory info");
-        // rows/time (max), spectra, DM spectra, NUFFT grids, cuFFT work.
-        const SizeType per_sample =
-            (4 * std::max(m_nact, m_ndm)) + (4 * m_nact) + (4 * m_ndm) +
-            (4 * m_nf_max) + (4 * (m_nact + m_ndm + m_nf_max)) + 1;
-        const auto fit = static_cast<SizeType>(free_b) / 2 / per_sample;
-        if (fit < cap) {
-            logging::debug("DDMTFFT (gpu): device memory caps the transform at "
-                           "{} samples (engine rule {})",
-                           fit, cap);
-            cap = std::max<SizeType>(fit, utils::next_fft_size(2 * m_ctx + 2));
         }
         return cap;
     }

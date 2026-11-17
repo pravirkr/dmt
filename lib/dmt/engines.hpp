@@ -526,7 +526,7 @@ enum class CohFDMTCoherentPath : uint8_t {
 struct CohFDMTEngineConfig {
     Exec exec{};
     CohFDMTCoherentPath coherent_path{CohFDMTCoherentPath::kAuto};
-    /// cuFFT path work-buffer budget in bytes (0 = sized from free memory).
+    /// cuFFT path work-buffer budget in bytes (0 = 1 GiB).
     SizeType work_bytes{0};
 };
 

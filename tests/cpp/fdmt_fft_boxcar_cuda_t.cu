@@ -171,6 +171,25 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
         std::invalid_argument);
 }
 
+TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
+          "[gpu][boxcar][budget]") {
+    // Host result storage is as large as the device candidates; a budget
+    // that fits the device memory only must still build the instance.
+    const plans::FDMTPlan plan(1000.0F, 1500.0F, 64, 2048, 0.001F, 80);
+    BoxcarConfig cfg;
+    cfg.max_boxcar     = 32;
+    cfg.max_candidates = SizeType{1} << 22;
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const FDMTFFTBoxcar open(plan, cfg, true, exec);
+    const auto usage          = open.get_memory_usage();
+    const SizeType host_cands = cfg.max_candidates * sizeof(RawCandidate);
+    REQUIRE(usage.peaks + usage.candidates >= usage.budgeted());
+    REQUIRE(usage.host >= host_cands);
+    const FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, {},
+                               usage.budgeted());
+    CHECK(capped.get_memory_usage().budgeted() == usage.budgeted());
+}
+
 namespace {
 /// FDMTFFTBoxcar::estimate_memory() equals the built instance on `exec`.
 void check_fft_boxcar_estimates(const Exec& exec) {

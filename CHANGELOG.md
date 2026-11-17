@@ -74,6 +74,10 @@ All notable changes to `dmt` are listed here. The format follows
   what it needs and what is free (use shorter blocks or fewer beams;
   `estimate_memory` gives the requirement); GPU `FDMT` and `FDMTBoxcar`
   allocation failures carry the same message (still `std::bad_alloc`).
+- GPU `DDMTFFT` and `CohFDMT` likewise no longer size themselves from the
+  device's free memory: `DDMTFFT` keeps the CPU engine's segment length
+  (same segments on both backends), and the `CohFDMT` cuFFT path (channel
+  FFT lengths the fused kernel can't take) uses a fixed 1 GiB work buffer.
   `FDMTFFT` and `FDMTFFTBoxcar` construction sizes the engines it tries and
   allocates only the one it keeps.
 - GPU `FDMTBoxcar` with a kill mask allocates the transform's per-row flags
@@ -104,6 +108,9 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Fixed
 
+- `FDMTFFTBoxcar` on a GPU no longer counts its host result storage
+  against `max_memory_bytes` when checking whether the boxcar buffers alone
+  fit, so budgets that fit the device memory build as documented.
 - `FDMTBoxcar` on the GPU:
   - Wide boxes that don't fit shared memory no longer throw. The search
     falls back to smaller blocks or a device-memory ring, with the same

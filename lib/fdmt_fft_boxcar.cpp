@@ -69,7 +69,13 @@ public:
         const SizeType n_min =
             utils::next_fft_size((2 * (discard + geom.guard)) + 2);
         auto used = engine->memory_usage();
-        if (const SizeType fixed = used.peaks + used.candidates;
+        // Budgeted bytes only: on a GPU the host result storage
+        // (max_candidates) is reported, not budgeted.
+        const SizeType host_cands =
+            exec.backend == Backend::kCPU
+                ? SizeType{0}
+                : config.max_candidates * sizeof(RawCandidate);
+        if (const SizeType fixed = used.peaks + used.candidates - host_cands;
             fixed >= max_memory) {
             throw std::invalid_argument(fmt::format(
                 "FDMTFFTBoxcar: the boxcar buffers alone need {:.2f} GiB, "
