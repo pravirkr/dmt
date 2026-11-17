@@ -376,6 +376,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        SizeType group_offset,
                        BoxcarKeepEntry* keep_all,
                        SizeType keep_q,
+                       uint64_t* detected_all,
+                       uint64_t* plane_slots,
+                       SizeType plane_cap,
                        T* ring_global,
                        SizeType task_base,
                        bool bypass_screen) {
@@ -407,8 +410,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     BoxcarPeak* peaks        = peaks_all + index * peak_count;
     RawCandidate prototype   = row.candidate;
     prototype.beam_idx       = static_cast<uint32_t>(beam);
-    CandidateWriter writer{candidates, counts,    slots,    per_dm_all + index,
-                           widths,     prototype, capacity, dm_cap};
+    const PlaneShare share =
+        plane_share(slots, capacity, plane_slots, plane_cap, row.plane);
+    CandidateWriter writer{candidates,         counts, share.slots,
+                           per_dm_all + index, widths, prototype,
+                           share.capacity,     dm_cap};
+    writer.base    = share.base;
     writer.means   = means ? means + row_index * nfilters : nullptr;
     writer.scales  = inv_sigma + row_index * nfilters;
     writer.unit    = unit;
@@ -422,6 +429,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         keeper = KeepWriter{counts,
                             keep_all + (index * keep_q),
                             per_dm_all + index,
+                            detected_all + index,
                             keep_q,
                             &pending,
                             writer.means,
@@ -1064,15 +1072,16 @@ void FDMTBoxcarCudaEngine::launch_score_args(const FDMTSearchInput& stopped,
         stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
         raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
         raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d), m_peak_count,
-        raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
-        m_config.max_candidates, m_config.max_cands_per_dm, m_config.peak_mode,
+        candidate_out(), raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
+        m_config.max_candidates, dm_cap(), m_config.peak_mode,
         m_config.skip_cold_prefix, g.level == m_plan.get_niters(),
         raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit, m_mask,
         m_shared_tables, m_config.use_trapezoid, raw(m_screen_groups_d),
         static_cast<int>(m_screen_groups_d.size()), raw(m_screen_thresholds_d),
         raw(m_screen_m1_d), m_screen_offset,
         kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
-        raw(m_bright_d), m_bright_q,
+        raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
+        raw(m_plane_slots_d), m_plane_cap,
         kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr, task_base,
         m_config.screen_mode == BoxcarScreenMode::kNone);
 }

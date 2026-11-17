@@ -95,6 +95,18 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
     m_deferred.resize(m_peaks, rows * m_peak_count);
     m_deferred.resize(m_per_dm, rows);
     m_deferred.resize(m_candidates, config.max_candidates);
+    m_level_offsets = boxcar_level_offsets(planes);
+    m_plane_counts.resize(planes.size());
+    m_dm_cap =
+        config.max_cands_per_dm == 0 ? UINT64_MAX : config.max_cands_per_dm;
+    m_plane_cap = config.max_candidates_per_plane;
+    if (m_plane_cap != 0) {
+        check_plane_share(config, planes.size());
+        m_plane_next.resize(planes.size());
+        if (config.overflow_policy != OverflowPolicy::kKeepBrightest) {
+            m_deferred.resize(m_plane_scratch, planes.size() * m_plane_cap);
+        }
+    }
     if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
         // Each row's brightest max_cands_per_dm of the call (a heap).
         m_keep_q = config.max_cands_per_dm;
@@ -102,6 +114,7 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
             throw std::invalid_argument("FDMTBoxcar: keep-store size overflow");
         }
         m_deferred.resize(m_keep, rows * m_keep_q);
+        m_deferred.resize(m_row_detected, rows);
     }
     if (config.screen_mode != BoxcarScreenMode::kKadaneSurrogate) {
         m_kadane_exact_prefix_cap = std::min<SizeType>(
@@ -527,30 +540,34 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
           m_deferred.size(m_surrogate_lb)) *
          sizeof(float)) +
         (m_deferred.size(m_tile_u32) * sizeof(uint32_t));
-    return {.plan    = fdmt.plan + plan_bytes,
-            .state   = fdmt.state,
-            .history = fdmt.history +
-                       (m_deferred.size(m_carry) * sizeof(float)) +
-                       (m_deferred.size(m_integer_carry) * sizeof(uint64_t)) +
-                       (m_deferred.size(m_integer_carry32) * sizeof(uint32_t)) +
-                       kadane_hist,
-            .peaks   = m_deferred.size(m_peaks) * sizeof(BoxcarPeak),
-            .workspace =
-                fdmt.workspace +
-                ((m_deferred.size(m_prefix) + m_integer_means.size() +
-                  m_integer_scales.size() + m_range_min.size() +
-                  m_group_thresh.size()) *
-                 sizeof(double)) +
-                (m_deferred.size(m_integer_prefix) * sizeof(uint64_t)) +
-                (m_deferred.size(m_best) * sizeof(float)) +
-                (m_deferred.size(m_best_filter) * sizeof(uint32_t)) +
-                (m_deferred.size(m_per_dm) * sizeof(uint64_t)) +
-                (m_deferred.size(m_screen_thr) * sizeof(float)) + kadane_work,
-            .candidates =
-                (m_deferred.size(m_candidates) + m_deferred.size(m_keep)) *
-                sizeof(RawCandidate),
-            .staging = (m_deferred.size(m_masked) * sizeof(float)) +
-                       m_deferred.size(m_masked_packed)};
+    return {
+        .plan      = fdmt.plan + plan_bytes,
+        .state     = fdmt.state,
+        .history   = fdmt.history + (m_deferred.size(m_carry) * sizeof(float)) +
+                     (m_deferred.size(m_integer_carry) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_integer_carry32) * sizeof(uint32_t)) +
+                     kadane_hist,
+        .peaks     = m_deferred.size(m_peaks) * sizeof(BoxcarPeak),
+        .workspace = fdmt.workspace +
+                     ((m_deferred.size(m_prefix) + m_integer_means.size() +
+                       m_integer_scales.size() + m_range_min.size() +
+                       m_group_thresh.size()) *
+                      sizeof(double)) +
+                     (m_deferred.size(m_integer_prefix) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_best) * sizeof(float)) +
+                     (m_deferred.size(m_best_filter) * sizeof(uint32_t)) +
+                     (m_deferred.size(m_per_dm) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_row_detected) * sizeof(uint64_t)) +
+                     (m_plane_counts.size() * sizeof(CandidateCounts)) +
+                     (m_plane_next.size() * sizeof(uint64_t)) +
+                     (m_level_offsets.size() * sizeof(uint32_t)) +
+                     (m_deferred.size(m_screen_thr) * sizeof(float)) +
+                     kadane_work,
+        .candidates = (m_deferred.size(m_candidates) + m_deferred.size(m_keep) +
+                       m_deferred.size(m_plane_scratch)) *
+                      sizeof(RawCandidate),
+        .staging    = (m_deferred.size(m_masked) * sizeof(float)) +
+                      m_deferred.size(m_masked_packed)};
 }
 
 SizeType FDMTBoxcarCpuEngine::chunk_nsamps() const noexcept {
@@ -570,6 +587,9 @@ void FDMTBoxcarCpuEngine::begin_result(SizeType samples) {
     m_keep_open = m_keep_q != 0;
     m_next_slot.store(0, std::memory_order_relaxed);
     std::ranges::fill(m_per_dm, 0);
+    std::ranges::fill(m_row_detected, 0);
+    std::ranges::fill(m_plane_counts, CandidateCounts{});
+    std::ranges::fill(m_plane_next, 0);
     m_result_begin   = m_position;
     m_result_samples = samples;
 }
@@ -579,7 +599,8 @@ CandidateResultView FDMTBoxcarCpuEngine::view() const {
         m_counts,
         {m_candidates.data(), static_cast<SizeType>(m_counts.emitted_count)},
         m_result_begin,
-        m_result_samples};
+        m_result_samples,
+        m_plane_counts};
 }
 
 void FDMTBoxcarCpuEngine::emit(SizeType row,
@@ -589,14 +610,19 @@ void FDMTBoxcarCpuEngine::emit(SizeType row,
     ++m_counts.total_detected;
     auto& count = m_per_dm[(beam * m_rows.size()) + row];
     if (m_keep_q != 0) {
+        ++m_row_detected[(beam * m_rows.size()) + row];
         keep((beam * m_rows.size()) + row, count,
              candidate_of(row, beam, peak));
         return;
     }
-    if (m_config.max_cands_per_dm != 0 &&
-        count++ >= m_config.max_cands_per_dm) {
+    // Every detection counts in its row (per-plane counts).
+    if (count++ >= m_dm_cap) {
 #pragma omp atomic
         ++m_counts.dropped_per_dm;
+        return;
+    }
+    if (m_plane_cap != 0) {
+        emit_to_plane(row, candidate_of(row, beam, peak));
         return;
     }
     const auto slot = m_next_slot.fetch_add(1, std::memory_order_relaxed);
@@ -606,6 +632,22 @@ void FDMTBoxcarCpuEngine::emit(SizeType row,
         return;
     }
     m_candidates[slot] = candidate_of(row, beam, peak);
+#pragma omp atomic
+    ++m_counts.emitted_count;
+}
+
+void FDMTBoxcarCpuEngine::emit_to_plane(SizeType row,
+                                        const RawCandidate& candidate) {
+    const SizeType p = m_rows[row].plane;
+    uint64_t slot    = 0;
+#pragma omp atomic capture
+    slot = m_plane_next[p]++;
+    if (slot >= m_plane_cap) {
+#pragma omp atomic
+        ++m_counts.dropped_global;
+        return;
+    }
+    m_plane_scratch[(p * m_plane_cap) + slot] = candidate;
 #pragma omp atomic
     ++m_counts.emitted_count;
 }
@@ -654,6 +696,20 @@ void FDMTBoxcarCpuEngine::keep(SizeType index,
 
 void FDMTBoxcarCpuEngine::finish_result() {
     finish_keep_result();
+    if (m_plane_cap != 0 && m_keep_q == 0) {
+        // The planes' shares, in plane order, to the front.
+        SizeType off = 0;
+        for (SizeType p = 0; p < m_plane_next.size(); ++p) {
+            const auto n = static_cast<SizeType>(
+                std::min<uint64_t>(m_plane_next[p], m_plane_cap));
+            const auto* from = m_plane_scratch.data() + (p * m_plane_cap);
+            std::copy_n(from, n,
+                        m_candidates.begin() +
+                            static_cast<std::ptrdiff_t>(off));
+            off += n;
+        }
+    }
+    finish_plane_counts();
     // chan_dm plans: rows lag the bottom-edge arrival by the plan's level-0
     // causal delay; candidates report the arrival (saturating at 0).
     const uint64_t lag = m_plan.get_level0_causal_delay();
@@ -667,6 +723,36 @@ void FDMTBoxcarCpuEngine::finish_result() {
         c.peak_sample  = c.peak_sample > lag ? c.peak_sample - lag : 0;
         c.begin_sample = c.begin_sample > lag ? c.begin_sample - lag : 0;
         c.end_sample   = c.end_sample > lag ? c.end_sample - lag : 0;
+    }
+}
+
+void FDMTBoxcarCpuEngine::finish_plane_counts() {
+    // Detections and per-row drops from the rows' counters (kDropNew:
+    // m_per_dm counts every detection, drops past the cap; kKeepBrightest:
+    // m_row_detected, with m_per_dm the kept ones), emitted from the call's
+    // candidates.
+    const auto plane_of = [&](const RawCandidate& c) -> CandidateCounts& {
+        return m_plane_counts[m_level_offsets[c.subband_level] + c.subband_idx];
+    };
+    for (SizeType i = 0; i < m_per_dm.size(); ++i) {
+        auto& out        = plane_of(m_rows[i % m_rows.size()].candidate);
+        const uint64_t n = m_per_dm[i];
+        if (m_keep_q != 0) {
+            out.total_detected += m_row_detected[i];
+            out.dropped_per_dm += m_row_detected[i] - n;
+        } else {
+            out.total_detected += n;
+            out.dropped_per_dm += n > m_dm_cap ? n - m_dm_cap : 0;
+        }
+    }
+    const auto emitted = static_cast<SizeType>(
+        std::min<uint64_t>(m_counts.emitted_count, m_candidates.size()));
+    for (SizeType j = 0; j < emitted; ++j) {
+        ++plane_of(m_candidates[j]).emitted_count;
+    }
+    for (auto& p : m_plane_counts) {
+        p.dropped_global =
+            p.total_detected - p.dropped_per_dm - p.emitted_count;
     }
 }
 
@@ -686,13 +772,44 @@ void FDMTBoxcarCpuEngine::finish_keep_result() {
         }
         n += count;
     }
-    const SizeType kept = std::min(n, m_candidates.size());
-    if (kept < n) {
-        std::nth_element(
-            m_keep.begin(), m_keep.begin() + static_cast<std::ptrdiff_t>(kept),
-            m_keep.begin() + static_cast<std::ptrdiff_t>(n), brighter);
+    const auto first = m_keep.begin();
+    if (m_plane_cap == 0) {
+        const SizeType kept = std::min(n, m_candidates.size());
+        if (kept < n) {
+            std::nth_element(first, first + static_cast<std::ptrdiff_t>(kept),
+                             first + static_cast<std::ptrdiff_t>(n), brighter);
+        }
+        std::copy_n(first, kept, m_candidates.begin());
+        m_counts.emitted_count  = kept;
+        m_counts.dropped_global = n - kept;
+        return;
     }
-    std::copy_n(m_keep.begin(), kept, m_candidates.begin());
+    // Each plane's brightest share: group the entries by plane, then
+    // select within each group.
+    const auto plane_of = [&](const RawCandidate& c) {
+        return m_level_offsets[c.subband_level] + c.subband_idx;
+    };
+    std::sort(first, first + static_cast<std::ptrdiff_t>(n),
+              [&](const RawCandidate& a, const RawCandidate& b) {
+                  return plane_of(a) < plane_of(b);
+              });
+    SizeType kept = 0;
+    for (SizeType b = 0; b < n;) {
+        SizeType e = b + 1;
+        while (e < n && plane_of(m_keep[e]) == plane_of(m_keep[b])) {
+            ++e;
+        }
+        const SizeType take = std::min(e - b, m_plane_cap);
+        const auto lo       = first + static_cast<std::ptrdiff_t>(b);
+        if (take < e - b) {
+            std::nth_element(lo, lo + static_cast<std::ptrdiff_t>(take),
+                             first + static_cast<std::ptrdiff_t>(e), brighter);
+        }
+        std::copy_n(lo, take,
+                    m_candidates.begin() + static_cast<std::ptrdiff_t>(kept));
+        kept += take;
+        b = e;
+    }
     m_counts.emitted_count  = kept;
     m_counts.dropped_global = n - kept;
 }

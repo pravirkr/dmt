@@ -111,8 +111,44 @@ struct BoxcarRow {
     SizeType hist       = 0;
     uint64_t warmup     = 0;
     bool unmaterialized = false;
+    uint32_t plane      = 0; ///< index of the row's search plane
     RawCandidate candidate{};
 };
+
+/// BoxcarConfig::max_candidates_per_plane: the planes' shares must fit
+/// max_candidates.
+inline void check_plane_share(const BoxcarConfig& config, SizeType nplanes) {
+    const SizeType cap = config.max_candidates_per_plane;
+    if (cap != 0 && (nplanes > config.max_candidates / cap)) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: max_candidates_per_plane times the number of "
+            "searched planes (" +
+            std::to_string(nplanes) + ") must not exceed max_candidates");
+    }
+}
+
+/// Per-plane counts: the first plane of each subband_level, so that a
+/// candidate's plane is offsets[subband_level] + subband_idx. Planes come
+/// grouped by subband_level with subband_idx 0, 1, ... (make_boxcar_plans);
+/// anything else is a logic error.
+[[nodiscard]] inline std::vector<uint32_t>
+boxcar_level_offsets(std::span<const plans::BoxcarPlanePlan> planes) {
+    std::vector<uint32_t> offsets;
+    for (SizeType i = 0; i < planes.size(); ++i) {
+        const auto& p = planes[i];
+        if (p.subband_level >= offsets.size()) {
+            offsets.resize(p.subband_level + 1, UINT32_MAX);
+        }
+        if (offsets[p.subband_level] == UINT32_MAX) {
+            offsets[p.subband_level] = static_cast<uint32_t>(i);
+        }
+        if (offsets[p.subband_level] + p.subband_idx != i) {
+            throw std::logic_error(
+                "FDMTBoxcar: search planes out of (level, subband) order");
+        }
+    }
+    return offsets;
+}
 
 [[nodiscard]] std::vector<BoxcarRow>
 make_boxcar_rows(const plans::FDMTPlan& plan,

@@ -1128,3 +1128,44 @@ def test_declared_per_call_masks_cpu() -> None:
 
 def test_declared_per_call_masks_gpu(gpu_backend: str) -> None:
     _check_declared_masks(gpu_backend)
+
+
+def _check_plane_counts(backend: str) -> None:
+    """plane_counts add up; a per-plane share keeps each plane's brightest."""
+    rng = np.random.default_rng(3)
+    plan = FDMTPlan(
+        700, 1200, 16, 512, 0.001, dt_grid=[0, 3, 9, 20, 41], subband_depth=1
+    )
+    blocks = [rng.standard_normal((16, 512), dtype=np.float32) for _ in range(2)]
+    cfg = config()
+    nplanes = len(FDMTBoxcar(plan, cfg, backend=backend).search_plans)
+    full = FDMTBoxcar(plan, cfg, backend=backend).execute(blocks[0])
+    planes = full.plane_counts
+    assert planes.shape == (nplanes,)
+    for name in ("emitted_count", "total_detected", "dropped_global", "dropped_per_dm"):
+        assert int(planes[name].sum()) == getattr(full, name)
+    shared = BoxcarConfig(
+        17,
+        wtsp=1.5,
+        detect_thresh=2,
+        max_cands_per_dm=1024,
+        overflow_policy=dmtlib.OverflowPolicy.KEEP_BRIGHTEST,
+        max_candidates=4 * nplanes,
+        max_candidates_per_plane=4,
+    )
+    assert shared.max_candidates_per_plane == 4
+    res = FDMTBoxcar(plan, shared, backend=backend).execute(blocks[0])
+    assert np.all(
+        res.plane_counts["emitted_count"] == np.minimum(4, planes["total_detected"])
+    )
+    shared.max_candidates = 4 * nplanes - 1
+    with pytest.raises(ValueError, match="max_candidates_per_plane"):
+        FDMTBoxcar(plan, shared, backend=backend)
+
+
+def test_plane_counts_cpu() -> None:
+    _check_plane_counts("cpu")
+
+
+def test_plane_counts_gpu(gpu_backend: str) -> None:
+    _check_plane_counts(gpu_backend)

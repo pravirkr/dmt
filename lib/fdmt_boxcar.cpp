@@ -281,6 +281,15 @@ public:
                 rows * config.max_cands_per_dm *
                 (ex.backend == Backend::kCPU ? sizeof(RawCandidate)
                                              : sizeof(detail::BoxcarKeepEntry));
+            cands += rows * sizeof(uint64_t); // detections per row
+        }
+        if (config.max_candidates_per_plane != 0) {
+            // Per-plane counters; under kDropNew the shares' staging.
+            cands += planes.size() * sizeof(uint64_t);
+            if (config.overflow_policy != OverflowPolicy::kKeepBrightest) {
+                cands += planes.size() * config.max_candidates_per_plane *
+                         sizeof(RawCandidate);
+            }
         }
         // Per row and width: threshold and inverse sigma (float), plus the
         // integer mean and cutoff of packed input; the row table.

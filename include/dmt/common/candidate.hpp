@@ -28,7 +28,9 @@ enum class OverflowPolicy : uint8_t {
     /// peak sample, then beam, subband, DM row and width. A store of
     /// max_cands_per_dm candidates per row counts in the memory budget, so
     /// max_cands_per_dm must be in 1..1024 (and is meant to be small, e.g.
-    /// 16). The surviving set is deterministic.
+    /// 16). The surviving set is deterministic. With
+    /// BoxcarConfig::max_candidates_per_plane, each plane keeps its own
+    /// brightest share instead of competing for max_candidates.
     kKeepBrightest,
 };
 
@@ -112,6 +114,13 @@ struct BoxcarConfig {
     bool use_trapezoid = false;
     /// Default kDropNew; see OverflowPolicy.
     OverflowPolicy overflow_policy = OverflowPolicy::kDropNew;
+    /// Each searched plane's share of a call's candidates; 0 (default): no
+    /// share, the planes compete for max_candidates. Otherwise a plane
+    /// keeps at most this many (under kDropNew its first ones, under
+    /// kKeepBrightest exactly its brightest), so a plane flooded with
+    /// detections cannot crowd out the others; the planes' shares must fit
+    /// max_candidates (number of planes x this <= max_candidates).
+    SizeType max_candidates_per_plane = 0;
     /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate is approximate
     /// and supports max_boxcar up to 4096; the other modes are exact and
     /// support 1..2^20).
@@ -175,6 +184,10 @@ struct CandidateResultView : CandidateCounts {
     std::span<const RawCandidate> candidates;
     uint64_t input_sample_begin = 0;
     SizeType input_nsamps       = 0; ///< 0 for flush().
+    /// The counters of each searched plane, in get_search_plans() order;
+    /// they sum to the call's counters. A plane's dropped_global includes
+    /// what its max_candidates_per_plane share dropped.
+    std::span<const CandidateCounts> plane_counts;
 };
 
 /// Asynchronous result: synchronize the supplied stream before reading.
@@ -183,6 +196,8 @@ struct CandidateDeviceResultView {
     DeviceSpan<const CandidateCounts> counts;  ///< One device object.
     uint64_t input_sample_begin = 0;
     SizeType input_nsamps       = 0;
+    /// One device object per searched plane (CandidateResultView).
+    DeviceSpan<const CandidateCounts> plane_counts;
 };
 
 } // namespace dmt

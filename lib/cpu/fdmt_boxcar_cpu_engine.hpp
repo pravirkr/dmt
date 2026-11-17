@@ -333,6 +333,22 @@ private:
     std::vector<float> m_carry;
     std::vector<BoxcarPeak> m_peaks;
     std::vector<uint64_t> m_per_dm;
+    /// Per-plane counts: kKeepBrightest's detections per (beam, row), the
+    /// first plane of each subband level (boxcar_level_offsets), and the
+    /// call's counters per plane.
+    std::vector<uint64_t> m_row_detected;
+    std::vector<uint32_t> m_level_offsets;
+    std::vector<CandidateCounts> m_plane_counts;
+    /// max_cands_per_dm, or UINT64_MAX when 0 (no cap).
+    uint64_t m_dm_cap = UINT64_MAX;
+    void finish_plane_counts();
+    /// BoxcarConfig::max_candidates_per_plane (0: off): each plane's
+    /// counter and, under kDropNew, the staging buffer of the shares.
+    SizeType m_plane_cap = 0;
+    std::vector<uint64_t> m_plane_next;
+    std::vector<RawCandidate> m_plane_scratch;
+    /// kDropNew with plane shares: `candidate` into its plane's share.
+    void emit_to_plane(SizeType row, const RawCandidate& candidate);
     /// kKeepBrightest: per row, a heap of max_cands_per_dm candidates
     /// (m_per_dm entries used); m_keep_q 0 under kDropNew.
     std::vector<RawCandidate> m_keep;

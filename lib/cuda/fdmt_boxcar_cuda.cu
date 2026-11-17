@@ -52,7 +52,10 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
                                     double unit,
                                     bool integer,
                                     BoxcarKeepEntry* keep_all,
-                                    SizeType keep_q) {
+                                    SizeType keep_q,
+                                    uint64_t* detected_all,
+                                    uint64_t* plane_slots,
+                                    SizeType plane_cap) {
     const SizeType index =
         static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= tasks) {
@@ -65,6 +68,7 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
             auto& peak = peaks[index * peak_count + f];
             if (peak.open) {
                 increment(&counts->total_detected);
+                increment(detected_all + index);
                 const float snr =
                     integer ? static_cast<float>(
                                   (static_cast<double>(peak.raw_sum) -
@@ -85,8 +89,12 @@ __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
     const SizeType row_index = index % nrows;
     auto prototype           = rows[row_index].candidate;
     prototype.beam_idx       = static_cast<uint32_t>(index / nrows);
-    CandidateWriter writer{candidates, counts,    slots,    per_dm + index,
-                           widths,     prototype, capacity, dm_cap};
+    const PlaneShare share   = plane_share(slots, capacity, plane_slots,
+                                           plane_cap, rows[row_index].plane);
+    CandidateWriter writer{candidates,     counts, share.slots,
+                           per_dm + index, widths, prototype,
+                           share.capacity, dm_cap};
+    writer.base    = share.base;
     writer.means   = means ? means + row_index * nfilters : nullptr;
     writer.scales  = scales + row_index * nfilters;
     writer.unit    = unit;
@@ -161,14 +169,29 @@ DMT_D inline bool keep_selected(const BoxcarKeepEntry& e,
     return true;
 }
 
-// After kernel_keep_init: the entries in the stores.
-__global__ void
-kernel_keep_count(const uint64_t* per_dm, SizeType tasks, KeepSelect* sel) {
+// Rows of one plane (BoxcarConfig::max_candidates_per_plane), or all.
+constexpr uint32_t kAllPlanes = UINT32_MAX;
+DMT_D inline bool in_plane(const BoxcarRow* rows,
+                           SizeType nrows,
+                           SizeType index,
+                           uint32_t plane) {
+    return plane == kAllPlanes || rows[index % nrows].plane == plane;
+}
+
+// After kernel_keep_init: the entries in the stores (of `plane`).
+__global__ void kernel_keep_count(const uint64_t* per_dm,
+                                  SizeType tasks,
+                                  KeepSelect* sel,
+                                  const BoxcarRow* rows,
+                                  SizeType nrows,
+                                  uint32_t plane) {
     uint64_t local = 0;
     for (SizeType i =
              static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
          i < tasks; i += static_cast<SizeType>(gridDim.x) * blockDim.x) {
-        local += per_dm[i];
+        if (in_plane(rows, nrows, i, plane)) {
+            local += per_dm[i];
+        }
     }
     if (local != 0) {
         atomicAdd(reinterpret_cast<unsigned long long*>(&sel->n),
@@ -213,7 +236,9 @@ __global__ void kernel_keep_hist(const BoxcarKeepEntry* keep_all,
                                  SizeType q,
                                  const KeepSelect* sel,
                                  uint64_t* hist,
-                                 int d) {
+                                 int d,
+                                 const BoxcarRow* rows,
+                                 uint32_t plane) {
     __shared__ uint32_t local[256];
     if (sel->resolved != 0) {
         return;
@@ -229,7 +254,7 @@ __global__ void kernel_keep_hist(const BoxcarKeepEntry* keep_all,
          s < total; s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
         const SizeType index = s / q;
         const SizeType rem   = s % q;
-        if (rem >= per_dm[index]) {
+        if (rem >= per_dm[index] || !in_plane(rows, nrows, index, plane)) {
             continue;
         }
         const BoxcarKeepEntry& e = keep_all[s];
@@ -290,14 +315,15 @@ __global__ void kernel_keep_emit(const BoxcarKeepEntry* keep_all,
                                  const KeepSelect* sel,
                                  RawCandidate* candidates,
                                  CandidateCounts* counts,
-                                 uint64_t* slots) {
+                                 uint64_t* slots,
+                                 uint32_t plane) {
     const SizeType total = tasks * q;
     for (SizeType s =
              static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
          s < total; s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
         const SizeType index = s / q;
         const SizeType rem   = s % q;
-        if (rem >= per_dm[index]) {
+        if (rem >= per_dm[index] || !in_plane(rows, nrows, index, plane)) {
             continue;
         }
         const BoxcarKeepEntry& e = keep_all[s];
@@ -326,6 +352,90 @@ __global__ void kernel_keep_emit(const BoxcarKeepEntry* keep_all,
 __global__ void kernel_keep_finish(const KeepSelect* sel,
                                    CandidateCounts* counts) {
     counts->dropped_global = sel->n - counts->emitted_count;
+}
+
+// BoxcarConfig::max_candidates_per_plane, kDropNew: the planes' shares of
+// the staging buffer, in plane order, to the front of the candidates.
+__global__ void kernel_plane_compact(const RawCandidate* staged,
+                                     const uint64_t* plane_slots,
+                                     SizeType nplanes,
+                                     SizeType cap,
+                                     RawCandidate* candidates) {
+    const SizeType total = nplanes * cap;
+    for (SizeType s =
+             static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
+         s < total; s += static_cast<SizeType>(gridDim.x) * blockDim.x) {
+        const SizeType p = s / cap;
+        const SizeType i = s % cap;
+        const auto taken = [&](SizeType q) {
+            return plane_slots[q] < cap ? plane_slots[q] : cap;
+        };
+        if (i >= taken(p)) {
+            continue;
+        }
+        SizeType off = 0;
+        for (SizeType q = 0; q < p; ++q) {
+            off += taken(q);
+        }
+        candidates[off + i] = staged[s];
+    }
+}
+
+DMT_D inline void add_count(uint64_t* to, uint64_t v) {
+    if (v != 0) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(to),
+                  static_cast<unsigned long long>(v));
+    }
+}
+
+// Per-plane counters of a call (zeroed before): detections and per-row
+// drops from the rows' counters (kDropNew: per_dm counts every detection,
+// drops past dm_cap; kKeepBrightest: detected per row, per_dm the kept
+// ones), emitted from the call's candidates.
+__global__ void kernel_plane_counts(const BoxcarRow* rows,
+                                    SizeType nrows,
+                                    SizeType tasks,
+                                    const uint64_t* per_dm,
+                                    const uint64_t* detected,
+                                    SizeType dm_cap,
+                                    const RawCandidate* candidates,
+                                    const CandidateCounts* counts,
+                                    SizeType capacity,
+                                    const uint32_t* level_offset,
+                                    CandidateCounts* plane) {
+    const SizeType stride = static_cast<SizeType>(gridDim.x) * blockDim.x;
+    const SizeType first =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    for (SizeType i = first; i < tasks; i += stride) {
+        const RawCandidate& c = rows[i % nrows].candidate;
+        CandidateCounts& out =
+            plane[level_offset[c.subband_level] + c.subband_idx];
+        const uint64_t n = per_dm[i];
+        if (detected != nullptr) {
+            add_count(&out.total_detected, detected[i]);
+            add_count(&out.dropped_per_dm, detected[i] - n);
+        } else {
+            add_count(&out.total_detected, n);
+            add_count(&out.dropped_per_dm, n > dm_cap ? n - dm_cap : 0);
+        }
+    }
+    const SizeType emitted =
+        counts->emitted_count < capacity ? counts->emitted_count : capacity;
+    for (SizeType j = first; j < emitted; j += stride) {
+        const RawCandidate& c = candidates[j];
+        add_count(
+            &plane[level_offset[c.subband_level] + c.subband_idx].emitted_count,
+            1);
+    }
+}
+
+__global__ void kernel_plane_counts_finish(CandidateCounts* plane,
+                                           SizeType nplanes) {
+    for (SizeType p = threadIdx.x; p < nplanes; p += blockDim.x) {
+        plane[p].dropped_global = plane[p].total_detected -
+                                  plane[p].dropped_per_dm -
+                                  plane[p].emitted_count;
+    }
 }
 
 // Candidate frontier: the smallest begin sample of the open excursions,
@@ -461,6 +571,17 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     m_peaks_d.resize(tasks * m_peak_count);
     m_open_d.resize(tasks, 0);
     m_per_dm_d.resize(tasks, 0);
+    m_level_offset_d = boxcar_level_offsets(planes);
+    m_plane_counts_d.resize(planes.size());
+    m_plane_counts_h.resize(planes.size());
+    m_plane_cap = config.max_candidates_per_plane;
+    if (m_plane_cap != 0) {
+        check_plane_share(config, planes.size());
+        m_plane_slots_d.resize(planes.size(), 0);
+        if (config.overflow_policy != OverflowPolicy::kKeepBrightest) {
+            m_plane_scratch_d.resize(planes.size() * m_plane_cap);
+        }
+    }
 
     // Initialize kKeepBrightest state BEFORE kernel shared-memory configuration
     // so configure_variants / configure_kadane_variants opt in the kKeep=true
@@ -468,6 +589,7 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
         m_bright_q = config.max_cands_per_dm;
         m_bright_d.resize(tasks * m_bright_q);
+        m_row_detected_d.resize(tasks, 0);
         // Each row's place in brighter() order among the rows (equal
         // S/N, sample and beam): the key's row rank.
         std::vector<uint32_t> order(m_rows.size());
@@ -480,10 +602,11 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
             rank[order[i]] = static_cast<uint32_t>(i);
         }
         m_bright_rank_d = rank;
-        m_bright_sel_d.resize(1);
+        m_bright_sel_d.resize(m_plane_cap != 0 ? 2 : 1);
         m_bright_hist_d.resize(256, 0);
         // A selection is needed only when the stores can exceed it.
-        m_bright_select = tasks * m_bright_q > config.max_candidates;
+        m_bright_select =
+            tasks * m_bright_q > config.max_candidates || m_plane_cap != 0;
     }
 
     if (config.screen_mode != BoxcarScreenMode::kKadaneSurrogate) {
@@ -642,6 +765,7 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const float> waterfall, Stream queue) {
     m_prev_evicted.reset();
     m_position += m_plan.get_nsamps();
     finish_keep(stream);
+    plane_counts(stream);
     shift_candidate_times(stream);
     release_slots(stream);
     update_open_begin(stream);
@@ -676,6 +800,7 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const uint8_t> waterfall,
                      m_config.input_nbits, *this, queue);
     m_position += m_plan.get_nsamps();
     finish_keep(static_cast<cudaStream_t>(queue.native));
+    plane_counts(static_cast<cudaStream_t>(queue.native));
     shift_candidate_times(static_cast<cudaStream_t>(queue.native));
     update_open_begin(static_cast<cudaStream_t>(queue.native));
     m_work.mark(static_cast<cudaStream_t>(queue.native));
@@ -737,17 +862,19 @@ CandidateDeviceResultView FDMTBoxcarCudaEngine::flush_device(Stream queue) {
     } else {
         kernel_flush_boxcar<<<(tasks + 127) / 128, 128, 0, stream>>>(
             raw(m_rows_d), m_rows.size(), m_peak_count, raw(m_peaks_d),
-            raw(m_open_d), raw(m_widths_d), raw(m_candidates_d),
-            raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
-            m_config.max_candidates, m_config.max_cands_per_dm, tasks,
-            raw(m_integer_means), raw(m_scales_d), m_filters, m_integer_unit,
+            raw(m_open_d), raw(m_widths_d), candidate_out(), raw(m_counts_d),
+            raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates, dm_cap(),
+            tasks, raw(m_integer_means), raw(m_scales_d), m_filters,
+            m_integer_unit,
             m_config.input_nbits != 32 &&
                 m_config.peak_mode !=
                     PeakFindingMode::kContiguousPeakAcrossWidths,
-            raw(m_bright_d), m_bright_q);
+            raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
+            raw(m_plane_slots_d), m_plane_cap);
         gpu_utils::check_last_gpu_error("FDMTBoxcar flush failed");
     }
     finish_keep(stream);
+    plane_counts(stream);
     shift_candidate_times(stream);
     update_open_begin(stream);
     m_work.mark(stream);
@@ -761,6 +888,10 @@ CandidateResultView FDMTBoxcarCudaEngine::copy_result(Stream queue) {
     gpu_utils::check_gpu_call(cudaMemcpyAsync(&m_counts_h, raw(m_counts_d),
                                               sizeof(CandidateCounts),
                                               cudaMemcpyDeviceToHost, stream));
+    gpu_utils::check_gpu_call(
+        cudaMemcpyAsync(m_plane_counts_h.data(), raw(m_plane_counts_d),
+                        m_plane_counts_h.size() * sizeof(CandidateCounts),
+                        cudaMemcpyDeviceToHost, stream));
     gpu_utils::check_gpu_call(cudaStreamSynchronize(stream));
     if (m_counts_h.emitted_count > 0) {
         gpu_utils::check_gpu_call(
@@ -773,7 +904,8 @@ CandidateResultView FDMTBoxcarCudaEngine::copy_result(Stream queue) {
             {m_candidates_h.data(),
              static_cast<SizeType>(m_counts_h.emitted_count)},
             m_result_begin,
-            m_result_samples};
+            m_result_samples,
+            m_plane_counts_h};
 }
 
 void FDMTBoxcarCudaEngine::set_search_stop(uint64_t stop) noexcept {
@@ -992,7 +1124,7 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCudaEngine::memory_usage() const noexcept {
                 ((m_thresholds_d.size() + m_scales_d.size()) * sizeof(float)) +
                 (m_support_d.size() * sizeof(uint64_t)) +
                 (m_slots.size() * 4 * table_floats() * sizeof(float)) +
-                kadane_plan_d,
+                (m_level_offset_d.size() * sizeof(uint32_t)) + kadane_plan_d,
             .state   = fdmt.state,
             .history = fdmt.history + (m_carry_d.size() * sizeof(float)) +
                        (m_integer_carry.size() * sizeof(uint64_t)) +
@@ -1002,9 +1134,14 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCudaEngine::memory_usage() const noexcept {
             .workspace =
                 fdmt.workspace + (m_per_dm_d.size() * sizeof(uint64_t)) +
                 (m_ring_d.size() * sizeof(uint64_t)) + sizeof(CandidateCounts) +
-                sizeof(uint64_t) + (2 * sizeof(uint64_t)), // candidate frontier
-            .candidates = ((m_candidates_d.size() + m_candidates_h.size()) *
+                (m_row_detected_d.size() * sizeof(uint64_t)) +
+                (m_plane_counts_d.size() * sizeof(CandidateCounts)) +
+                (m_plane_slots_d.size() * sizeof(uint64_t)) + sizeof(uint64_t) +
+                (2 * sizeof(uint64_t)), // candidate frontier
+            .candidates = ((m_candidates_d.size() + m_candidates_h.size() +
+                            m_plane_scratch_d.size()) *
                            sizeof(RawCandidate)) +
+                          (m_plane_counts_h.size() * sizeof(CandidateCounts)) +
                           (m_bright_d.size() * sizeof(BoxcarKeepEntry)) +
                           (m_bright_rank_d.size() * sizeof(uint32_t)) +
                           (sizeof(KeepSelect) * m_bright_sel_d.size()) +
@@ -1013,7 +1150,8 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCudaEngine::memory_usage() const noexcept {
                           m_packed_input.size() + m_keep_d.size(),
             .host = host_plan +
                     (m_slots.size() * 2 * table_floats() * sizeof(float)) +
-                    (m_candidates_h.size() * sizeof(RawCandidate))};
+                    (m_candidates_h.size() * sizeof(RawCandidate)) +
+                    (m_plane_counts_h.size() * sizeof(CandidateCounts))};
 }
 
 SizeType FDMTBoxcarCudaEngine::chunk_nsamps() const noexcept {
@@ -1113,6 +1251,31 @@ void FDMTBoxcarCudaEngine::shift_candidate_times(cudaStream_t stream) {
     gpu_utils::check_last_gpu_error("FDMTBoxcar candidate times failed");
 }
 
+void FDMTBoxcarCudaEngine::plane_counts(cudaStream_t stream) {
+    if (m_plane_cap != 0 && m_bright_q == 0) {
+        // kDropNew planes' shares: staged, compacted in plane order.
+        const SizeType total = m_planes.size() * m_plane_cap;
+        kernel_plane_compact<<<static_cast<unsigned>(std::min<SizeType>(
+                                   (total + 255) / 256, 1024)),
+                               256, 0, stream>>>(
+            raw(m_plane_scratch_d), raw(m_plane_slots_d), m_planes.size(),
+            m_plane_cap, raw(m_candidates_d));
+    }
+    // begin_result() zeroed the counters.
+    const SizeType tasks = m_rows.size() * m_beams;
+    const SizeType work  = std::max(tasks, m_config.max_candidates);
+    const auto blocks =
+        static_cast<unsigned>(std::min<SizeType>((work + 255) / 256, 1024));
+    kernel_plane_counts<<<blocks, 256, 0, stream>>>(
+        raw(m_rows_d), m_rows.size(), tasks, raw(m_per_dm_d),
+        m_row_detected_d.size() > 0 ? raw(m_row_detected_d) : nullptr, dm_cap(),
+        raw(m_candidates_d), raw(m_counts_d), m_config.max_candidates,
+        raw(m_level_offset_d), raw(m_plane_counts_d));
+    kernel_plane_counts_finish<<<1, 32, 0, stream>>>(raw(m_plane_counts_d),
+                                                     m_plane_counts_d.size());
+    gpu_utils::check_last_gpu_error("FDMTBoxcar plane counts failed");
+}
+
 void FDMTBoxcarCudaEngine::finish_keep(cudaStream_t stream) {
     if (m_bright_q == 0) {
         return;
@@ -1122,28 +1285,49 @@ void FDMTBoxcarCudaEngine::finish_keep(cudaStream_t stream) {
     const auto grid        = static_cast<unsigned>(std::min<SizeType>(
         (tasks * m_bright_q + kThreads - 1) / kThreads, 4096));
     KeepSelect* sel        = raw(m_bright_sel_d);
-    kernel_keep_init<<<1, 1, 0, stream>>>(sel, m_config.max_candidates);
-    kernel_keep_count<<<std::min<SizeType>((tasks + 255) / 256, 1024), 256, 0,
-                        stream>>>(raw(m_per_dm_d), tasks, sel);
-    kernel_keep_resolve_all<<<1, 1, 0, stream>>>(sel);
-    if (m_bright_select) {
-        const int key_bytes =
-            m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
-                ? kKeepSurrogateKeyBytes
-                : kKeepBaseKeyBytes;
-        for (int d = 0; d < key_bytes; ++d) {
-            kernel_keep_hist<<<grid, kThreads, 0, stream>>>(
-                raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
-                m_rows.size(), tasks, m_bright_q, sel, raw(m_bright_hist_d), d);
-            kernel_keep_pick<<<1, 1, 0, stream>>>(sel, raw(m_bright_hist_d), d,
-                                                  key_bytes);
+    const auto count_blocks =
+        static_cast<unsigned>(std::min<SizeType>((tasks + 255) / 256, 1024));
+    // The brightest `k` entries of `plane`'s stores (kAllPlanes: all).
+    const auto select = [&](KeepSelect* s, SizeType k, uint32_t plane) {
+        kernel_keep_init<<<1, 1, 0, stream>>>(s, k);
+        kernel_keep_count<<<count_blocks, 256, 0, stream>>>(
+            raw(m_per_dm_d), tasks, s, raw(m_rows_d), m_rows.size(), plane);
+        kernel_keep_resolve_all<<<1, 1, 0, stream>>>(s);
+        if (m_bright_select) {
+            const int key_bytes =
+                m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
+                    ? kKeepSurrogateKeyBytes
+                    : kKeepBaseKeyBytes;
+            for (int d = 0; d < key_bytes; ++d) {
+                kernel_keep_hist<<<grid, kThreads, 0, stream>>>(
+                    raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
+                    m_rows.size(), tasks, m_bright_q, s, raw(m_bright_hist_d),
+                    d, raw(m_rows_d), plane);
+                kernel_keep_pick<<<1, 1, 0, stream>>>(s, raw(m_bright_hist_d),
+                                                      d, key_bytes);
+            }
         }
+        kernel_keep_emit<<<grid, kThreads, 0, stream>>>(
+            raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d),
+            raw(m_rows_d), raw(m_widths_d), m_rows.size(), tasks, m_bright_q, s,
+            raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d), plane);
+    };
+    if (m_plane_cap == 0) {
+        select(sel, m_config.max_candidates, kAllPlanes);
+        kernel_keep_finish<<<1, 1, 0, stream>>>(sel, raw(m_counts_d));
+    } else {
+        // Each plane's brightest share; the second selector counts all
+        // stored entries for dropped_global.
+        KeepSelect* all = sel + 1;
+        kernel_keep_init<<<1, 1, 0, stream>>>(all, 0);
+        kernel_keep_count<<<count_blocks, 256, 0, stream>>>(
+            raw(m_per_dm_d), tasks, all, raw(m_rows_d), m_rows.size(),
+            kAllPlanes);
+        for (SizeType p = 0; p < m_planes.size(); ++p) {
+            select(sel, m_plane_cap, static_cast<uint32_t>(p));
+        }
+        kernel_keep_finish<<<1, 1, 0, stream>>>(all, raw(m_counts_d));
     }
-    kernel_keep_emit<<<grid, kThreads, 0, stream>>>(
-        raw(m_bright_d), raw(m_per_dm_d), raw(m_bright_rank_d), raw(m_rows_d),
-        raw(m_widths_d), m_rows.size(), tasks, m_bright_q, sel,
-        raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d));
-    kernel_keep_finish<<<1, 1, 0, stream>>>(sel, raw(m_counts_d));
     gpu_utils::check_last_gpu_error("FDMTBoxcar keep-brightest failed");
 }
 
@@ -1371,6 +1555,19 @@ void FDMTBoxcarCudaEngine::begin_result(SizeType samples, Stream queue) {
         cudaMemsetAsync(raw(m_slots_d), 0, sizeof(uint64_t), stream));
     gpu_utils::check_gpu_call(cudaMemsetAsync(
         raw(m_per_dm_d), 0, m_per_dm_d.size() * sizeof(uint64_t), stream));
+    if (m_row_detected_d.size() > 0) {
+        gpu_utils::check_gpu_call(cudaMemsetAsync(
+            raw(m_row_detected_d), 0,
+            m_row_detected_d.size() * sizeof(uint64_t), stream));
+    }
+    gpu_utils::check_gpu_call(cudaMemsetAsync(
+        raw(m_plane_counts_d), 0,
+        m_plane_counts_d.size() * sizeof(CandidateCounts), stream));
+    if (m_plane_slots_d.size() > 0) {
+        gpu_utils::check_gpu_call(
+            cudaMemsetAsync(raw(m_plane_slots_d), 0,
+                            m_plane_slots_d.size() * sizeof(uint64_t), stream));
+    }
     m_result_begin   = m_position;
     m_result_samples = samples;
 }
@@ -1380,7 +1577,9 @@ CandidateDeviceResultView FDMTBoxcarCudaEngine::device_view() {
     return {DeviceSpan<const RawCandidate>(raw(m_candidates_d),
                                            m_candidates_d.size(), device),
             DeviceSpan<const CandidateCounts>(raw(m_counts_d), 1, device),
-            m_result_begin, m_result_samples};
+            m_result_begin, m_result_samples,
+            DeviceSpan<const CandidateCounts>(raw(m_plane_counts_d),
+                                              m_plane_counts_d.size(), device)};
 }
 
 } // namespace dmt::algorithms::detail::fdmt_boxcar_cuda

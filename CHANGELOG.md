@@ -16,6 +16,19 @@ All notable changes to `dmt` are listed here. The format follows
   transform's path is chosen, so a per-call mask no longer fails mid-run
   for those reasons, and `get_memory_usage()` stays at the estimate.
   Candidates are unchanged. `FDMTFFTBoxcar` rejects it.
+- **Per-plane candidate counts:** `CandidateResultView::plane_counts`
+  (Python `plane_counts`, a structured array) and
+  `CandidateDeviceResultView::plane_counts` give each searched plane's
+  `emitted_count`, `total_detected`, `dropped_global` and `dropped_per_dm`
+  for the call, in `get_search_plans()` order (`FDMTBoxcar`,
+  `FDMTFFTBoxcar`); they sum to the call's counters, so a pipeline can tell
+  which subband lost candidates.
+- **`BoxcarConfig::max_candidates_per_plane`** (Python
+  `max_candidates_per_plane=`, default 0: off): each searched plane keeps at
+  most this many candidates per call, its first ones under `kDropNew` and
+  exactly its brightest under `kKeepBrightest`, so a plane flooded with
+  detections (RFI in one subband) cannot crowd the others out of
+  `max_candidates`. The planes' shares must fit `max_candidates`.
 - **`FDMTBoxcarMemoryEstimate::search_path` and `search_latency`** (C++ and
   Python): the transform's path and the search latency of the instance the
   estimate describes.

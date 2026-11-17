@@ -26,6 +26,7 @@ struct BoxcarResult {
     CandidateCounts counts;
     uint64_t input_sample_begin;
     SizeType input_nsamps;
+    py::array_t<CandidateCounts> plane_counts;
 };
 BoxcarResult own_result(CandidateResultView view) {
     py::array_t<RawCandidate> array(
@@ -34,7 +35,14 @@ BoxcarResult own_result(CandidateResultView view) {
         std::memcpy(array.mutable_data(), view.candidates.data(),
                     view.candidates.size_bytes());
     }
-    return {std::move(array), view, view.input_sample_begin, view.input_nsamps};
+    py::array_t<CandidateCounts> planes(
+        static_cast<py::ssize_t>(view.plane_counts.size()));
+    if (!view.plane_counts.empty()) {
+        std::memcpy(planes.mutable_data(), view.plane_counts.data(),
+                    view.plane_counts.size_bytes());
+    }
+    return {std::move(array), view, view.input_sample_begin, view.input_nsamps,
+            std::move(planes)};
 }
 } // namespace
 
@@ -43,6 +51,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          snr, dm, dm_idx, filter_idx, width, beam_idx,
                          subband_level, subband_idx, chan_begin, chan_end,
                          f_low_mhz, f_high_mhz, staggered);
+    PYBIND11_NUMPY_DTYPE(CandidateCounts, emitted_count, total_detected,
+                         dropped_global, dropped_per_dm);
     py::enum_<PeakFindingMode>(mod, "PeakFindingMode")
         .value("CONTIGUOUS_PEAK_PER_WIDTH",
                PeakFindingMode::kContiguousPeakPerWidth)
@@ -100,7 +110,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
         scan. ``per_call_masks=True`` declares that :class:`FDMTBoxcar` will
         get per-call kill masks: their requirements and memory are checked
         and reserved at construction (and in ``estimate_memory``) instead of
-        at the first masked call.
+        at the first masked call. ``max_candidates_per_plane`` (0: off)
+        gives each searched plane its own share of a call's candidates (its
+        first ones under ``DROP_NEW``, its brightest under
+        ``KEEP_BRIGHTEST``), so a flooded plane cannot crowd out the others;
+        planes x share must not exceed ``max_candidates``.
         )doc")
         .def(py::init([](SizeType max_boxcar, float wtsp, float detect_thresh,
                          float noise_sigma, PeakFindingMode peak_mode,
@@ -108,12 +122,14 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          bool skip_cold_prefix, SizeType input_nbits,
                          float input_mean, bool use_trapezoid,
                          OverflowPolicy overflow_policy,
-                         BoxcarScreenMode screen_mode, bool per_call_masks) {
+                         BoxcarScreenMode screen_mode, bool per_call_masks,
+                         SizeType max_candidates_per_plane) {
                  BoxcarConfig c(max_boxcar, wtsp, detect_thresh, noise_sigma,
                                 peak_mode, max_candidates, max_cands_per_dm,
                                 skip_cold_prefix, input_nbits, input_mean,
                                 use_trapezoid, overflow_policy, screen_mode);
-                 c.per_call_masks = per_call_masks;
+                 c.per_call_masks           = per_call_masks;
+                 c.max_candidates_per_plane = max_candidates_per_plane;
                  return c;
              }),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
@@ -124,7 +140,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "input_mean"_a = 0.0F, "use_trapezoid"_a = false,
              "overflow_policy"_a = OverflowPolicy::kDropNew,
              "screen_mode"_a     = BoxcarScreenMode::kAuto,
-             "per_call_masks"_a  = false)
+             "per_call_masks"_a = false, "max_candidates_per_plane"_a = 0)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -138,11 +154,20 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix)
         .def_readwrite("overflow_policy", &BoxcarConfig::overflow_policy)
         .def_readwrite("screen_mode", &BoxcarConfig::screen_mode)
-        .def_readwrite("per_call_masks", &BoxcarConfig::per_call_masks);
+        .def_readwrite("per_call_masks", &BoxcarConfig::per_call_masks)
+        .def_readwrite("max_candidates_per_plane",
+                       &BoxcarConfig::max_candidates_per_plane);
     py::class_<BoxcarResult>(mod, "BoxcarResult")
         .def_readonly("candidates", &BoxcarResult::candidates)
         .def_readonly("input_sample_begin", &BoxcarResult::input_sample_begin)
         .def_readonly("input_nsamps", &BoxcarResult::input_nsamps)
+        .def_readonly("plane_counts", &BoxcarResult::plane_counts,
+                      R"doc(
+            Structured array of the counters of each searched plane
+            (``emitted_count``, ``total_detected``, ``dropped_global``,
+            ``dropped_per_dm``), in ``search_plans`` order; they sum to the
+            call's counters.
+            )doc")
         .def_property_readonly(
             "emitted_count",
             [](const BoxcarResult& r) { return r.counts.emitted_count; })

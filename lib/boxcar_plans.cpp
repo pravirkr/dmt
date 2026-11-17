@@ -356,10 +356,12 @@ make_boxcar_rows(const plans::FDMTPlan& plan,
                 c.hist_offset;
         }
     }
-    for (const auto& plane : planes) {
-        const bool unmat = (plane.level == root) || plane.staggered;
+    for (SizeType pi = 0; pi < planes.size(); ++pi) {
+        const auto& plane = planes[pi];
+        const bool unmat  = (plane.level == root) || plane.staggered;
         for (SizeType d = 0; d < plane.dm_grid.size(); ++d) {
             BoxcarRow row;
+            row.plane            = static_cast<uint32_t>(pi);
             row.row              = plane.coord_offset + plane.coord_indices[d];
             row.warmup           = plane.warmup_samples[d];
             row.unmaterialized   = unmat;

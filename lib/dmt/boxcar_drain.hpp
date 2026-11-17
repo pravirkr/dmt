@@ -24,11 +24,13 @@ struct DrainState {
     bool drained{false};
     uint64_t end{0}; ///< Stream samples searched, once drained
     std::vector<RawCandidate> candidates;
+    std::vector<CandidateCounts> plane_counts; ///< summed over drain()'s calls
 
     void reset() noexcept {
         drained = false;
         end     = 0;
         candidates.clear();
+        plane_counts.clear();
     }
     /// execute() and drain() after drain() are rejected until reset_history().
     void check_open(const char* what) const {
@@ -73,14 +75,22 @@ inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
     state.check_open("drain");
     const uint64_t end = engine.stream_position();
     state.candidates.clear();
+    state.plane_counts.clear();
     CandidateCounts counts{};
+    const auto add = [](CandidateCounts& to, const CandidateCounts& v) {
+        to.emitted_count += v.emitted_count;
+        to.total_detected += v.total_detected;
+        to.dropped_global += v.dropped_global;
+        to.dropped_per_dm += v.dropped_per_dm;
+    };
     const auto append = [&](const CandidateResultView& v) {
         state.candidates.insert(state.candidates.end(), v.candidates.begin(),
                                 v.candidates.end());
-        counts.emitted_count += v.emitted_count;
-        counts.total_detected += v.total_detected;
-        counts.dropped_global += v.dropped_global;
-        counts.dropped_per_dm += v.dropped_per_dm;
+        add(counts, v);
+        state.plane_counts.resize(v.plane_counts.size());
+        for (SizeType p = 0; p < v.plane_counts.size(); ++p) {
+            add(state.plane_counts[p], v.plane_counts[p]);
+        }
     };
     engine.set_search_stop(end);
     if (end > 0 && latency > 0) {
@@ -113,6 +123,7 @@ inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
     CandidateResultView view;
     static_cast<CandidateCounts&>(view) = counts;
     view.candidates                     = state.candidates;
+    view.plane_counts                   = state.plane_counts;
     view.input_sample_begin             = end;
     view.input_nsamps                   = 0;
     return view;

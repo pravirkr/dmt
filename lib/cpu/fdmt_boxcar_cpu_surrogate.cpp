@@ -99,13 +99,18 @@ void FDMTBoxcarCpuEngine::emit_surrogate_raw(SizeType row,
     ++m_counts.total_detected;
     auto& count = m_per_dm[(beam * m_rows.size()) + row];
     if (m_keep_q != 0) {
+        ++m_row_detected[(beam * m_rows.size()) + row];
         keep((beam * m_rows.size()) + row, count, make_candidate());
         return;
     }
-    if (m_config.max_cands_per_dm != 0 &&
-        count++ >= m_config.max_cands_per_dm) {
+    // Every detection counts in its row (per-plane counts).
+    if (count++ >= m_dm_cap) {
 #pragma omp atomic
         ++m_counts.dropped_per_dm;
+        return;
+    }
+    if (m_plane_cap != 0) {
+        emit_to_plane(row, make_candidate());
         return;
     }
     const auto slot = m_next_slot.fetch_add(1, std::memory_order_relaxed);

@@ -85,6 +85,25 @@ keep_surrogate_width(const BoxcarKeepEntry& e) noexcept {
     return e.filter >> 16U;
 }
 
+/// Where a row's candidates go (kDropNew): the call's slots, or with
+/// BoxcarConfig::max_candidates_per_plane its plane's counter and share of
+/// a staging buffer (compacted after the call).
+struct PlaneShare {
+    uint64_t* slots;
+    SizeType capacity;
+    SizeType base;
+};
+DMT_HD inline PlaneShare plane_share(uint64_t* slots,
+                                     SizeType capacity,
+                                     uint64_t* plane_slots,
+                                     SizeType plane_cap,
+                                     uint32_t plane) {
+    if (plane_cap == 0) {
+        return {slots, capacity, 0};
+    }
+    return {plane_slots + plane, plane_cap, plane * plane_cap};
+}
+
 struct CandidateWriter {
     RawCandidate* candidates;
     CandidateCounts* counts;
@@ -94,6 +113,7 @@ struct CandidateWriter {
     RawCandidate prototype;
     SizeType capacity;
     SizeType dm_cap;
+    SizeType base       = 0; ///< first slot (a plane's share), else 0
     const double* means = nullptr;
     const float* scales = nullptr;
     double unit         = 1;
@@ -101,7 +121,9 @@ struct CandidateWriter {
 
     DMT_D void operator()(const BoxcarPeak& peak) const {
         increment(&counts->total_detected);
-        if (dm_cap != 0 && increment(per_dm) >= dm_cap) {
+        // Every detection counts in its row (per-plane counts); dm_cap is
+        // SIZE_MAX when max_cands_per_dm is 0.
+        if (increment(per_dm) >= dm_cap) {
             increment(&counts->dropped_per_dm);
             return;
         }
@@ -119,9 +141,9 @@ struct CandidateWriter {
                                           means[peak.filter]) *
                                          (scales[peak.filter] * unit))
                     : peak.snr;
-        candidate.filter_idx = peak.filter;
-        candidate.width      = widths[peak.filter];
-        candidates[slot]     = candidate;
+        candidate.filter_idx    = peak.filter;
+        candidate.width         = widths[peak.filter];
+        candidates[base + slot] = candidate;
         increment(&counts->emitted_count);
     }
 };
@@ -213,6 +235,7 @@ struct KeepWriter {
     CandidateCounts* counts;
     BoxcarKeepEntry* store; // this row's q entries
     uint64_t* count;        // entries in the store
+    uint64_t* detected;     // the row's detections (per-plane counts)
     SizeType q;
     KeepPending* pending;
     const double* means = nullptr;
@@ -222,6 +245,7 @@ struct KeepWriter {
 
     DMT_D void operator()(const BoxcarPeak& peak) const {
         increment(&counts->total_detected);
+        increment(detected);
         const float snr =
             integer ? static_cast<float>((static_cast<double>(peak.raw_sum) -
                                           means[peak.filter]) *
@@ -626,6 +650,14 @@ private:
     void shift_candidate_times(cudaStream_t stream);
     void update_open_begin(cudaStream_t stream);
     [[nodiscard]] SizeType ring_size() const noexcept;
+    /// max_cands_per_dm for the writers: SIZE_MAX when 0 (no cap).
+    [[nodiscard]] SizeType dm_cap() const noexcept {
+        return m_config.max_cands_per_dm == 0 ? SIZE_MAX
+                                              : m_config.max_cands_per_dm;
+    }
+    /// The call's counters per plane, from the rows' counters and the
+    /// emitted candidates (after the call's candidates are final).
+    void plane_counts(cudaStream_t stream);
     /// A table slot's device and pinned buffers and events.
     void allocate_slot(TableSlot& slot);
     [[nodiscard]] SizeType slot_count() const noexcept;
@@ -705,6 +737,24 @@ private:
     gpu_utils::PlannedVector<RawCandidate> m_candidates_d;
     planned::PlannedHostVector<RawCandidate> m_candidates_h;
     CandidateCounts m_counts_h{};
+    /// Per-plane counts: kKeepBrightest's detections per (beam, row), the
+    /// first plane of each subband level (boxcar_level_offsets), and the
+    /// call's counters per plane (device; host after copy_result()).
+    gpu_utils::PlannedVector<uint64_t> m_row_detected_d;
+    gpu_utils::PlannedVector<uint32_t> m_level_offset_d;
+    gpu_utils::PlannedVector<CandidateCounts> m_plane_counts_d;
+    std::vector<CandidateCounts> m_plane_counts_h;
+    /// BoxcarConfig::max_candidates_per_plane (0: off): each plane's
+    /// counter and, under kDropNew, the staging buffer of the shares.
+    SizeType m_plane_cap = 0;
+    gpu_utils::PlannedVector<uint64_t> m_plane_slots_d;
+    gpu_utils::PlannedVector<RawCandidate> m_plane_scratch_d;
+    /// Where the writers put candidates: the staging buffer of the planes'
+    /// shares, or the call's candidates.
+    [[nodiscard]] RawCandidate* candidate_out() {
+        return m_plane_scratch_d.size() > 0 ? raw(m_plane_scratch_d)
+                                            : raw(m_candidates_d);
+    }
     gpu_utils::DeviceWorkFence m_work;
     uint64_t m_position       = 0;
     uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
