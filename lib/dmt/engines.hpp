@@ -299,6 +299,8 @@ struct DDMTFFTEngineConfig {
     SizeType nbeams{1};
     Exec exec{};
     DDMTFFTOptions options{}; // method resolved by the facade (never kAuto)
+    // Estimate-only engine: buffers are sized, never allocated (estimate()).
+    bool defer_allocation{false};
 };
 
 class DDMTFFTEngine {
@@ -343,7 +345,11 @@ public:
     /// "nufft", "piecewise_nufft" or "brute": how the grid's trials are
     /// summed, the same on every backend (a GPU engine transforms a run
     /// too long for shared memory as equal NUFFT sub-runs).
-    [[nodiscard]] virtual std::string_view method_used() const noexcept = 0;
+    [[nodiscard]] virtual std::string_view method_used() const noexcept    = 0;
+    [[nodiscard]] virtual DDMTFFTMemoryUsage memory_usage() const noexcept = 0;
+    // Estimate-only engines: sizes what a cold stream of calls of `nsamps`
+    // holds once warm, replaying the calls' buffer requests.
+    [[nodiscard]] virtual DDMTFFTMemoryEstimate estimate(SizeType nsamps) = 0;
 
 protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;

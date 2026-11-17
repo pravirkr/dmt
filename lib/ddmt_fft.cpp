@@ -89,11 +89,13 @@ public:
     Impl(plans::DDMTPlan plan,
          Exec exec,
          SizeType nbeams,
-         DDMTFFTOptions options)
+         DDMTFFTOptions options,
+         bool estimate_only = false)
         : m_plan(std::move(plan)),
-          m_cfg{.nbeams  = require_nbeams(nbeams),
-                .exec    = exec,
-                .options = resolve_options(m_plan, options)},
+          m_cfg{.nbeams           = require_nbeams(nbeams),
+                .exec             = exec,
+                .options          = resolve_options(m_plan, options),
+                .defer_allocation = estimate_only},
           m_engine(make_engine(m_plan, m_cfg)) {
         m_plan.seal();
     }
@@ -199,6 +201,15 @@ DDMTFFT::DDMTFFT(const plans::DDMTPlan& plan,
                  DDMTFFTOptions options)
     : m_impl(std::make_unique<Impl>(plan, exec, nbeams, options)) {}
 
+DDMTFFTMemoryEstimate DDMTFFT::estimate_memory(const plans::DDMTPlan& plan,
+                                               SizeType nsamps,
+                                               Exec exec,
+                                               SizeType nbeams,
+                                               DDMTFFTOptions options) {
+    Impl impl(plan, exec, nbeams, options, /*estimate_only=*/true);
+    return impl.m_engine->estimate(nsamps);
+}
+
 DDMTFFT::~DDMTFFT()                                   = default;
 DDMTFFT::DDMTFFT(DDMTFFT&& other) noexcept            = default;
 DDMTFFT& DDMTFFT::operator=(DDMTFFT&& other) noexcept = default;
@@ -214,6 +225,9 @@ int DDMTFFT::nthreads() const noexcept {
 }
 int DDMTFFT::device() const noexcept {
     return backend() == Backend::kCPU ? -1 : m_impl->m_cfg.exec.device;
+}
+DDMTFFTMemoryUsage DDMTFFT::get_memory_usage() const noexcept {
+    return m_impl->m_engine->memory_usage();
 }
 DDMTFFTOptions DDMTFFT::get_options() const noexcept {
     return m_impl->m_cfg.options;

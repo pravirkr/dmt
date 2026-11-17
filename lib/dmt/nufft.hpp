@@ -44,6 +44,8 @@ public:
 
     /// @brief Complex scratch values execute() needs (64-byte aligned).
     [[nodiscard]] SizeType scratch_size() const noexcept;
+    /// @brief Bytes of the plan's own tables (not its FFTW plan object).
+    [[nodiscard]] SizeType memory_bytes() const noexcept;
     [[nodiscard]] SizeType modes() const noexcept;
     [[nodiscard]] SizeType fine_grid() const noexcept;
     [[nodiscard]] int width() const noexcept;

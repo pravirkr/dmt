@@ -20,6 +20,8 @@
 
 namespace dmt {
 using algorithms::DDMTFFT;
+using algorithms::DDMTFFTMemoryEstimate;
+using algorithms::DDMTFFTMemoryUsage;
 using algorithms::DDMTFFTOptions;
 using plans::DDMTPlan;
 using plans::LevinConfig;
@@ -79,6 +81,52 @@ void bind_ddmt_fft(py::module_& mod) {
             "Save the FFTW wisdom of this process; returns True on success.");
     mod.def("forget_fft_wisdom", &fft::forget_wisdom,
             "Discard all accumulated FFTW wisdom.");
+
+    py::class_<DDMTFFTMemoryUsage>(mod, "DDMTFFTMemoryUsage", R"doc(
+        Memory a DDMTFFT instance holds, in bytes (host memory on the CPU
+        backend, device memory on a GPU backend). Buffers are made by the
+        calls that need them and kept (see ``DDMTFFT.estimate_memory``). Not
+        counted: input and output arrays, the FFT libraries' plan objects
+        (cuFFT work areas are counted), per-call temporaries and the GPU's
+        64 MiB pinned host staging.
+        )doc")
+        .def_readonly("plan", &DDMTFFTMemoryUsage::plan)
+        .def_readonly("history", &DDMTFFTMemoryUsage::history)
+        .def_readonly("transform", &DDMTFFTMemoryUsage::transform)
+        .def_readonly("workspace", &DDMTFFTMemoryUsage::workspace)
+        .def_readonly("staging", &DDMTFFTMemoryUsage::staging)
+        .def_property_readonly("total", &DDMTFFTMemoryUsage::total)
+        .def("__repr__", [](const DDMTFFTMemoryUsage& m) {
+            return fmt::format("DDMTFFTMemoryUsage(plan={}, history={}, "
+                               "transform={}, workspace={}, staging={}, "
+                               "total={})",
+                               m.plan, m.history, m.transform, m.workspace,
+                               m.staging, m.total());
+        });
+
+    py::class_<DDMTFFTMemoryEstimate>(mod, "DDMTFFTMemoryEstimate", R"doc(
+        What a DDMTFFT streaming calls of one length would hold, from
+        ``DDMTFFT.estimate_memory`` (computed without allocating it).
+
+        ``usage`` equals that instance's ``memory_usage`` once a cold stream
+        of such calls is warm (``staging`` 0: CPU calls, GPU calls on float
+        device arrays). The staging calls of another kind add:
+        ``host_staging`` for host arrays (GPU; 0 on the CPU),
+        ``time_major_staging`` for ``execute_time_major`` (packed plans) and
+        ``device_staging`` for packed device arrays (GPU).
+        )doc")
+        .def_readonly("usage", &DDMTFFTMemoryEstimate::usage)
+        .def_readonly("host_staging", &DDMTFFTMemoryEstimate::host_staging)
+        .def_readonly("time_major_staging",
+                      &DDMTFFTMemoryEstimate::time_major_staging)
+        .def_readonly("device_staging", &DDMTFFTMemoryEstimate::device_staging)
+        .def("__repr__", [](const DDMTFFTMemoryEstimate& e) {
+            return fmt::format("DDMTFFTMemoryEstimate(total={}, "
+                               "host_staging={}, time_major_staging={}, "
+                               "device_staging={})",
+                               e.usage.total(), e.host_staging,
+                               e.time_major_staging, e.device_staging);
+        });
 
     py::class_<DDMTFFT> cls(mod, "DDMTFFT",
                             R"doc(
@@ -184,6 +232,36 @@ void bind_ddmt_fft(py::module_& mod) {
              "plan"_a, "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
              "method"_a = "auto", "tolerance"_a = 1e-6, "guard"_a = 64,
              "backend"_a = "cpu", "device"_a = 0)
+        .def_static(
+            "estimate_memory",
+            [](const DDMTPlan& plan, SizeType nsamps, int nthreads,
+               SizeType nbeams, std::string_view method, double tolerance,
+               SizeType guard, std::string_view backend, int device) {
+                return DDMTFFT::estimate_memory(
+                    plan, nsamps, make_exec(backend, nthreads, device), nbeams,
+                    make_options(method, tolerance, guard));
+            },
+            "plan"_a, "nsamps"_a, "nthreads"_a = 1, "nbeams"_a = 1,
+            py::kw_only(), "method"_a = "auto", "tolerance"_a = 1e-6,
+            "guard"_a = 64, "backend"_a = "cpu", "device"_a = 0,
+            R"doc(
+            Memory a ``DDMTFFT(plan, nthreads, nbeams, ...)`` would hold once
+            a stream of calls of ``nsamps`` input samples each is warm,
+            without allocating it (:class:`DDMTFFTMemoryEstimate`).
+
+            Buffers are made by the first calls that need them and kept: each
+            transform length a call uses adds its spectra, up to four
+            lengths. A stream started cold (or after ``reset_history``) uses
+            the steady-state length and those of its shorter first outputs;
+            the estimate counts exactly those. Exact: ``memory_usage`` of
+            such an instance equals ``usage`` plus the staging of the calls
+            made. GPU backends make their cuFFT plans (for their work-area
+            sizes) but allocate nothing.
+            )doc")
+        .def_property_readonly(
+            "memory_usage", &DDMTFFT::get_memory_usage,
+            "DDMTFFTMemoryUsage: bytes held now (buffers are made by the "
+            "calls that need them; see estimate_memory).")
         .def_property_readonly("backend",
                                [](const DDMTFFT& e) {
                                    return std::string(to_string(e.backend()));

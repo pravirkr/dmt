@@ -22,6 +22,7 @@
 #include "dmt/fft_cuda.cuh"
 #include "dmt/fourier_gpu.cuh"
 #include "dmt/gpu_compat.cuh"
+#include "dmt/gpu_planned_vector.cuh"
 #include "dmt/gpu_utils.cuh"
 #include "dmt/host_staging.cuh"
 #include "dmt/logging.hpp"
@@ -511,13 +512,13 @@ public:
           m_nact(m_model.active.size()),
           m_ctx(m_model.context()) {
         gpu_utils::set_device(m_device_id);
+        // Estimate-only: every buffer is sized, none allocated.
+        const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_deferred
+                                                               : nullptr);
         setup_methods();
         m_seg_n = segment_cap();
         for (auto& h : m_hist) {
-            h.reserve(history_state_size());
-            gpu_utils::check_gpu_call(
-                cudaMemset(h.data(), 0, history_state_size() * sizeof(float)),
-                "DDMTFFT (gpu): history");
+            h.reserve_zeroed(history_state_size());
         }
         m_hist_len = m_model.guard;
         std::vector<unsigned> act(m_model.active.begin(), m_model.active.end());
@@ -565,6 +566,61 @@ public:
     }
     [[nodiscard]] std::string_view method_used() const noexcept override {
         return detail::ddmt_fft_method_used(m_nruns_model, m_brute_rows.size());
+    }
+
+    [[nodiscard]] DDMTFFTMemoryUsage memory_usage() const noexcept override {
+        SizeType plan = m_active_d.bytes() + m_brute_rows_d.bytes();
+        for (const auto& r : m_runs) {
+            plan += r->inv_psi.bytes() + r->coef.bytes();
+        }
+        SizeType transform = m_rows_d.bytes() + m_spec_d.bytes() +
+                             m_out_spec_d.bytes() + m_grids_d.bytes();
+        for (const auto& [n, g] : m_geos) {
+            transform += g.r2c->workspace_bytes() + g.c2r->workspace_bytes() +
+                         g.brute.bytes();
+            for (const auto& [nf, p] : g.nu) {
+                transform += p->workspace_bytes();
+            }
+            for (SizeType i = 0; i < g.xr.size(); ++i) {
+                transform += g.xr[i].bytes() + g.sr[i].bytes();
+            }
+        }
+        return {.plan      = plan,
+                .history   = m_hist[0].bytes() + m_hist[1].bytes(),
+                .transform = transform,
+                .workspace = 0,
+                .staging   = m_in_d.bytes() + m_packed_d.bytes() +
+                             m_unpacked_d.bytes() + m_out_d.bytes()};
+    }
+
+    [[nodiscard]] DDMTFFTMemoryEstimate estimate(SizeType nsamps) override {
+        const gpu_utils::DeferScope defer(&m_deferred);
+        // A cold stream (reset_history()) of calls of nsamps samples, until
+        // and including its first warm call: later calls repeat that one.
+        SizeType hist_len = m_model.guard;
+        while (true) {
+            const bool warm = hist_len == m_ctx;
+            prepare_call(hist_len, nsamps);
+            if (warm || nsamps == 0) {
+                break;
+            }
+            hist_len = std::min(hist_len + nsamps, m_ctx);
+        }
+        // Staging of the warm calls (the first, colder ones need less).
+        const auto rows = m_nbeams * m_nchans;
+        const auto out  = m_nbeams * m_ndm * nsamps * sizeof(float);
+        DDMTFFTMemoryEstimate e{.usage = memory_usage()};
+        if (m_plan.get_nbits() == 32) {
+            e.host_staging = (rows * nsamps * sizeof(float)) + out;
+        } else {
+            const auto unpacked = rows * nsamps * sizeof(float);
+            e.host_staging =
+                packed_bytes(nsamps, /*time_major=*/false) + unpacked + out;
+            e.time_major_staging =
+                packed_bytes(nsamps, /*time_major=*/true) + unpacked + out;
+            e.device_staging = unpacked;
+        }
+        return e;
     }
 
     // ---- history ----
@@ -717,6 +773,9 @@ private:
     mutable gpu_utils::DeviceWorkFence m_device_work;
     gpu_host::ChunkedStager m_host;
 
+    // Estimate-only engines: the buffers sized, not allocated (declared
+    // before every device buffer, which deregisters from it).
+    gpu_utils::PendingList m_deferred;
     // Methods: NUFFT sub-runs (plans per distinct length) and the trials
     // left to brute force (their output rows and exact delays).
     std::map<SizeType, std::unique_ptr<nufft::Type1Plan>> m_plans;
@@ -903,6 +962,16 @@ private:
         }
         return size / rows;
     }
+    // Packed host input of a call: channel-major rows or time-major spectra.
+    [[nodiscard]] SizeType packed_bytes(SizeType nsamps,
+                                        bool time_major) const noexcept {
+        const auto nbits = m_plan.get_nbits();
+        return time_major
+                   ? m_nbeams * nsamps *
+                         bit_pack_utils::packed_row_bytes(m_nchans, nbits)
+                   : m_nbeams * m_nchans *
+                         bit_pack_utils::packed_row_bytes(nsamps, nbits);
+    }
     [[nodiscard]] SizeType out_size(SizeType nsamps) const noexcept {
         return m_nbeams * m_ndm * get_output_nsamps(nsamps);
     }
@@ -967,6 +1036,31 @@ private:
         return g;
     }
 
+    struct CallPlan {
+        SizeType n_out{};
+        ddmt_fft::Segmentation seg;
+        GpuGeometry* g{nullptr}; // null: nothing to transform
+    };
+
+    // The transforms of one call on `hist_len` history samples (execute()
+    // and estimate() alike).
+    CallPlan prepare_call(SizeType hist_len, SizeType n_new) {
+        const auto total = hist_len + n_new;
+        CallPlan c{.n_out = total > m_ctx ? total - m_ctx : 0, .seg = {}};
+        const bool work = m_ndm > 0 && m_nact > 0;
+        // While the stream warms up, also prepare the steady-state
+        // transform (n_new outputs per call) so the first warm call does not
+        // pay for new FFT plans and first-touch of its buffers.
+        if (work && hist_len < m_ctx && n_new > 0) {
+            geometry(ddmt_fft::plan_segments(n_new, m_ctx, m_seg_n).n_fft);
+        }
+        if (c.n_out > 0 && work) {
+            c.seg = ddmt_fft::plan_segments(c.n_out, m_ctx, m_seg_n);
+            c.g   = &geometry(c.seg.n_fft);
+        }
+        return c;
+    }
+
     // Host calls run on the stager's stream, after earlier device calls.
     cudaStream_t host_begin() {
         const auto st = m_host.stream();
@@ -1019,18 +1113,11 @@ private:
                 "DDMTFFT: reset history");
             m_hist_zero = false;
         }
-        const auto total = m_hist_len + n_new;
-        const auto n_out = total > m_ctx ? total - m_ctx : 0;
-        const bool work  = m_ndm > 0 && m_nact > 0;
-        // While the stream warms up, also prepare the steady-state
-        // transform (n_new outputs per call) so the first warm call does not
-        // pay for new FFT plans and first-touch of its buffers.
-        if (work && m_hist_len < m_ctx && n_new > 0) {
-            geometry(ddmt_fft::plan_segments(n_new, m_ctx, m_seg_n).n_fft);
-        }
-        if (n_out > 0 && work) {
-            const auto seg = ddmt_fft::plan_segments(n_out, m_ctx, m_seg_n);
-            auto& g        = geometry(seg.n_fft);
+        const auto call  = prepare_call(m_hist_len, n_new);
+        const auto n_out = call.n_out;
+        if (call.g != nullptr) {
+            const auto& seg = call.seg;
+            auto& g         = *call.g;
             for (SizeType b = 0; b < m_nbeams; ++b) {
                 for (SizeType s = 0; s < seg.nseg; ++s) {
                     const auto p0  = s * seg.hop;

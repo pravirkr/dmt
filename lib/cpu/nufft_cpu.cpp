@@ -460,6 +460,11 @@ Type1Plan& Type1Plan::operator=(Type1Plan&& other) noexcept = default;
 SizeType Type1Plan::scratch_size() const noexcept {
     return m_impl->points_scratch_size();
 }
+SizeType Type1Plan::memory_bytes() const noexcept {
+    return (m_impl->m_cheb.size() + m_impl->m_coef_t.size() +
+            m_impl->m_inv_psi.size()) *
+           sizeof(float);
+}
 SizeType Type1Plan::modes() const noexcept { return m_impl->m_modes; }
 SizeType Type1Plan::fine_grid() const noexcept { return m_impl->m_nf; }
 int Type1Plan::width() const noexcept { return m_impl->m_w; }

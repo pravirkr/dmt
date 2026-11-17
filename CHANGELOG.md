@@ -22,6 +22,12 @@ All notable changes to `dmt` are listed here. The format follows
   `CohFDMT.estimate_memory`): the memory a `CohFDMT` built with these
   arguments would allocate, equal to its `get_memory_usage()`, computed
   without allocating.
+- **`DDMTFFT::estimate_memory(plan, nsamps, exec, nbeams, options)`** (C++
+  and Python `DDMTFFT.estimate_memory`): the memory a `DDMTFFT` holds once a
+  stream of calls of `nsamps` samples is warm (`usage`), plus the staging
+  that host-memory, time-major and packed device-memory calls add, computed
+  without allocating. **`DDMTFFT::get_memory_usage()`** (Python
+  `memory_usage`) reports what an instance holds now.
 - **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
   `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
   `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the

@@ -154,3 +154,35 @@ def test_piecewise_grid_and_method_used():
     eng = dmtlib.DDMTFFT(F_MIN, F_MAX, 1024, 6.4e-5, cfg)
     assert eng.method_used == "piecewise_nufft"
     assert eng.plan.dm_arr.size == pw.size
+
+
+def _check_estimate(backend: str) -> None:
+    # A cold stream of equal calls, run until warm, holds the estimate (plus
+    # the host-call staging); short calls take several warm-up calls.
+    for dm_max, nbits, nsamps in ((20.0, 32, 800), (200.0, 32, 100), (20.0, 8, 700)):
+        plan = dmtlib.DDMTPlan(F_MIN, F_MAX, NCHANS, TSAMP, dm_max, 0.5, nbits=nbits)
+        kw = dict(nthreads=2, guard=16, backend=backend)
+        est = dmtlib.DDMTFFT.estimate_memory(plan, nsamps, **kw)
+        eng = dmtlib.DDMTFFT(plan, **kw)
+        dtype = np.float32 if nbits == 32 else np.uint8
+        block = np.zeros((NCHANS, nsamps), dtype)
+        args = (block,) if nbits == 32 else (block, nsamps)
+        while True:
+            warm = eng.get_output_nsamps(nsamps) == nsamps
+            eng.execute(*args)
+            if warm:
+                break
+        got, want = eng.memory_usage, est.usage
+        fields = ("plan", "history", "transform", "workspace")
+        assert [getattr(got, f) for f in fields] == [getattr(want, f) for f in fields]
+        assert want.staging == 0
+        assert got.staging == est.host_staging
+        assert want.total > 0
+
+
+def test_estimate_memory_matches_warm_stream_cpu() -> None:
+    _check_estimate("cpu")
+
+
+def test_estimate_memory_matches_warm_stream_gpu(gpu_backend: str) -> None:
+    _check_estimate(gpu_backend)
