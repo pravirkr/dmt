@@ -42,8 +42,10 @@ state, so your buffer is written, never used as scratch.
   are accepted; only the leading part is written.
 - **Layout.** $(N_{\text{beams}}, N_{\text{DM}}, N_{\text{times}})$ row-major;
   beam $b$ starts at $b \cdot$ `dmt_size`.
-- **Reuse.** Allocate once and pass it to every `execute()`. The engine
-  allocates nothing per call.
+- **Reuse.** Allocate once and pass it to every `execute()`. On the CPU the
+  engine allocates nothing per call; on a GPU the first call with host
+  memory allocates device copies of the input and output, kept for later
+  calls.
 
 ```cpp
 std::vector<float> buf(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size());

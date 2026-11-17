@@ -135,7 +135,9 @@ most when there are few coarse trials, and memory grows with the block:
 | waterfall | `nchans` × `plan.fdmt_nsamps` floats (one coarse trial) |
 | result | `plan.ndm` × `plan.output_nsamps` floats (your buffer) |
 
-`plan.memory_estimate()` and `search.memory_usage()` give the actual numbers.
+`CohFDMT.estimate_memory(config, backend=...)` gives the exact numbers before
+construction and `search.memory_usage()` after it (`plan.memory_estimate()` is
+only a rough lower bound).
 The automatic choice aims for four times as many valid samples as the sweep
 costs, within 1 GiB of spectrum.
 

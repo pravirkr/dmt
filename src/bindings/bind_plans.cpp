@@ -621,7 +621,9 @@ void bind_plans(py::module_& mod) {
                                 "workspace"_a = m.workspace,
                                 "output"_a = m.output, "total"_a = m.total());
             },
-            "Estimated engine memory in bytes, by kind.")
+            "Rough engine memory in bytes, by kind, from the plan alone: a "
+            "lower bound. ``CohFDMT.estimate_memory(config)`` gives the "
+            "exact figure for a backend.")
         .def("summary", &CohFDMTPlan::summary,
              "Human-readable summary of the CohFDMT plan.");
 

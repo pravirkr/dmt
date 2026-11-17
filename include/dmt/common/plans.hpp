@@ -841,7 +841,9 @@ public:
 
     /// @brief Fine FDMT plan shared by all coarse trials
     [[nodiscard]] const FDMTPlan& get_fdmt_plan() const noexcept;
-    /// @brief Estimated engine memory (see CohFDMT::get_memory_usage())
+    /// @brief Rough engine memory from the plan alone: a lower bound
+    /// (omits per-thread scratch, power partials, the fine FDMT's own
+    /// buffers and GPU work areas). CohFDMT::estimate_memory() is exact.
     [[nodiscard]] CohFDMTMemoryUsage get_memory_estimate() const noexcept;
     /// @brief Human-readable summary of the search geometry
     [[nodiscard]] std::string summary() const;

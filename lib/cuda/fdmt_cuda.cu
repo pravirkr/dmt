@@ -1271,8 +1271,9 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
         const SizeType c0 = c_auto;
         const auto m0 = static_cast<double>(engine->get_memory_usage().total());
         const auto budget = static_cast<double>(cfg.max_memory_bytes);
-        // Free the device memory before each build. The second point is a
-        // shorter chunk, which fits whenever c0 does.
+        // Drop the sized engine before the next one (estimates hold no
+        // device memory). The second point is a shorter chunk, which fits
+        // whenever c0 does.
         engine.reset();
         const SizeType c1 = c0 / 2;
         double slope      = 0.0;

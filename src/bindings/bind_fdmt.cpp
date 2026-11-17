@@ -177,10 +177,13 @@ py::array_t<float, py::array::c_style> fft_output(const FDMTFFT& fdmt,
 
 void bind_fdmt(py::module_& mod) {
     py::class_<FDMTMemoryUsage>(mod, "FDMTMemoryUsage", R"doc(
-        Memory an FDMT engine allocates at construction, in bytes (host
-        memory on the CPU backend, device memory on a GPU backend). ``execute`` allocates
-        nothing further; ``output`` is the caller-side output buffer per call
-        (managed automatically in Python) and is not part of ``total``.
+        Memory an FDMT engine holds, in bytes (host memory on the CPU
+        backend, device memory on a GPU backend). The constructor allocates
+        it; on a GPU the first host-memory ``execute`` adds device copies of
+        the input block and output plane (``FDMT.estimate_memory`` reports
+        them as ``host_staging``). ``output`` is the caller-side output buffer
+        per call (managed automatically in Python) and is not part of
+        ``total``.
         )doc")
         .def_readonly("plan", &FDMTMemoryUsage::plan)
         .def_readonly("state", &FDMTMemoryUsage::state)
@@ -315,9 +318,11 @@ void bind_fdmt(py::module_& mod) {
         CPU tree are bit-identical. Automatic GPU direct levels agree within
         float rounding.
 
-        All working memory is allocated by the constructor (see
-        :attr:`memory_usage`); ``execute`` allocates only its output array,
-        and nothing when ``out=`` is given.
+        Working memory is allocated by the constructor (see
+        :attr:`memory_usage` and :meth:`estimate_memory`). ``execute``
+        allocates its output array (nothing when ``out=`` is given); on a GPU
+        the first call with host arrays also allocates device copies of the
+        input block and output plane, kept for later calls.
 
         See also
         --------
@@ -522,8 +527,9 @@ void bind_fdmt(py::module_& mod) {
             "blocks); resolves the automatic default for this plan.")
         .def_property_readonly(
             "memory_usage", &FDMT::get_memory_usage,
-            "FDMTMemoryUsage: bytes allocated at construction (host memory on "
-            "the CPU backend, device memory on a GPU).")
+            "FDMTMemoryUsage: bytes held (host memory on the CPU backend, "
+            "device memory on a GPU, including the staging of host-memory "
+            "calls once made).")
         .def("summary", &FDMT::summary,
              "Human-readable summary: plan, engine configuration and memory.")
         .def_property_readonly(

@@ -26,7 +26,7 @@ fdmt.fuse_levels       # depth chosen for this plan (fuse_levels=None default)
 fdmt = FDMT(704.0, 1216.0, 4096, 16384, 8.192e-5, 2048,
                fuse_levels=4, int_tree=True)  # explicit depth (advanced)
 fdmt.chunk_nsamps         # chunk length chosen for this plan (chunk_nsamps=None)
-print(fdmt.memory_usage)  # bytes allocated at construction
+print(fdmt.memory_usage)  # bytes the engine holds
 ```
 :::
 :::{tab-item} C++
@@ -434,11 +434,11 @@ construct the engine with `int_tree=False`.
   length (see
   {ref}`below <chunked-execution>`).
 - **Construction and memory:** the constructor computes the plan and
-  allocates *all* working memory: the tree state (two levels of one chunk),
+  allocates the working memory: the tree state (two levels of one chunk),
   the streaming history, and the per-thread fusion/unpack scratch (on CUDA:
   device state, history, the plan and the fused-kernel tables; ~70 ms for
-  `cryopaf_low` and ~150 ms for `meerkat_lband` on the L40S node). `execute()`
-  then allocates nothing (on the CPU a test enforces this), so a streaming
+  `cryopaf_low` and ~150 ms for `meerkat_lband` on the L40S node). On the CPU
+  `execute()` then allocates nothing (a test enforces this), so a streaming
   pipeline constructs once and calls `execute()` block after block.
   `fdmt.memory_usage` (Python) / `get_memory_usage()` (C++) reports the
   bytes per category and the output buffer each call needs
@@ -464,8 +464,15 @@ Every engine has a static `estimate_memory(...)` that returns what an
 instance would hold, computed without allocating it, so a pipeline can
 check a configuration against a device before building it. It is exact:
 the instance's `memory_usage` (C++ `get_memory_usage()`) equals the
-estimate. Memory follows the arguments alone; no engine sizes itself to the
-free memory of the device.
+estimate's `usage` (for `CohFDMT`, whose `memory_usage()` and estimate are
+dicts, the two dicts are equal). Memory follows the arguments alone; no
+engine sizes itself to the free memory of the device.
+
+An estimate raises what the constructor would raise, including the error
+of a configuration over `max_memory_bytes` (its message gives the
+requirement; pass a larger budget to get the full estimate). On a GPU an
+estimate makes the cuFFT plans, but not their work areas, to know their
+exact size.
 
 - `FDMT`, `FDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`: the constructor's
   arguments; everything is allocated at construction. On a GPU,
