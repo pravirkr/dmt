@@ -144,21 +144,38 @@ struct Geometry {
     std::unique_ptr<utils::FFTWRowPlan> r2c;
     std::unique_ptr<utils::FFTWRowPlan> c2r;
 
-    explicit Geometry(SizeType n)
+    // Without build: sizes only (a deferred construction); build() makes
+    // the twiddles and plans.
+    Geometry(SizeType n, bool build_now)
         : n_fft(n),
           n_bins((n / 2) + 1),
           n_tiles((n_bins + kTile - 1) / kTile),
           bins_stride(n_tiles * kTile) {
+        if (build_now) {
+            build();
+        }
+    }
+    explicit Geometry(SizeType n) : Geometry(n, true) {}
+
+    void build() {
+        if (r2c) {
+            return;
+        }
         // Twiddles in double, so every phasor is correctly rounded.
         twiddle.resize(n_fft);
-        const double step = -2.0 * std::numbers::pi / static_cast<double>(n);
+        const double step =
+            -2.0 * std::numbers::pi / static_cast<double>(n_fft);
         for (SizeType m = 0; m < n_fft; ++m) {
             const double a = step * static_cast<double>(m);
             twiddle[m]     = ComplexType(static_cast<float>(std::cos(a)),
                                          static_cast<float>(std::sin(a)));
         }
-        r2c = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kR2C, n);
-        c2r = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n);
+        r2c = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kR2C, n_fft);
+        c2r = std::make_unique<utils::FFTWRowPlan>(utils::FFTKind::kC2R, n_fft);
+    }
+    // Bytes of the twiddle table, built or not.
+    [[nodiscard]] SizeType twiddle_bytes() const noexcept {
+        return n_fft * sizeof(ComplexType);
     }
 };
 
@@ -190,6 +207,8 @@ public:
         }
         const auto planned = memory_usage();
         m_deferred.materialize();
+        m_geo->build();
+        fill_tables();
         const auto got = memory_usage();
         if (got.plan != planned.plan || got.state != planned.state ||
             got.history != planned.history ||
@@ -315,10 +334,13 @@ public:
                      m_deferred.size(w.anchor)) *
                         sizeof(ComplexType);
         }
-        return {.plan  = (m_r_table.size() + m_frac_r.size()) * sizeof(float) +
-                         m_frac_s.size() * sizeof(double),
-                .state = m_deferred.size(m_spectra) * sizeof(float) +
-                         m_deferred.size(m_out_spec) * sizeof(ComplexType),
+        return {.plan =
+                    (m_deferred.size(m_r_table) + m_deferred.size(m_frac_r)) *
+                        sizeof(float) +
+                    m_frac_s.size() * sizeof(double) +
+                    (m_geo ? m_geo->twiddle_bytes() : 0),
+                .state     = m_deferred.size(m_spectra) * sizeof(float) +
+                             m_deferred.size(m_out_spec) * sizeof(ComplexType),
                 .history   = m_deferred.size(m_overlap) * sizeof(float),
                 .workspace = work,
                 .output    = 0};
@@ -588,33 +610,16 @@ private:
         logging::debug("FDMTFFT cpu: transform length {} x {} segment(s) "
                        "(single {}), tree group level {}, fractional {}",
                        m_seg_len, m_nseg, m_geom.n_fft, m_fuse, m_frac);
-        m_geo = std::make_unique<Geometry>(m_seg_len);
-
+        // Deferred: sizes only; allocate() builds the twiddles, the plans
+        // and the tables.
+        m_geo = std::make_unique<Geometry>(m_seg_len, !m_deferred.deferring());
         const auto& g = *m_geo;
-        m_r_table.assign((m_q_max + 1) * kTileFl, 0.0F);
-        for (SizeType s = 0; s <= m_q_max; ++s) {
-            float* r = &m_r_table[s * kTileFl];
-            for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
-                const auto w = g.twiddle[(s * j) % g.n_fft];
-                r[j]         = w.real();
-                r[kTile + j] = w.imag();
-            }
-        }
+        m_deferred.assign(m_r_table, (m_q_max + 1) * kTileFl, 0.0F);
         if (m_frac) {
-            // Per merge: W^(s * j) for j < kTile, exact in double.
-            m_frac_r.assign(m_frac_s.size() * kTileFl, 0.0F);
-            for (SizeType op = 0; op < m_frac_s.size(); ++op) {
-                for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
-                    const double a =
-                        -2.0 * std::numbers::pi *
-                        simd::wrap_turns(m_frac_s[op] * static_cast<double>(j) /
-                                         static_cast<double>(g.n_fft));
-                    m_frac_r[(op * kTileFl) + j] =
-                        static_cast<float>(std::cos(a));
-                    m_frac_r[(op * kTileFl) + kTile + j] =
-                        static_cast<float>(std::sin(a));
-                }
-            }
+            m_deferred.assign(m_frac_r, m_frac_s.size() * kTileFl, 0.0F);
+        }
+        if (!m_deferred.deferring()) {
+            fill_tables();
         }
         m_deferred.assign(m_spectra, g.n_tiles * m_nchans * kTileFl, 0.0F);
         m_deferred.assign(m_out_spec, m_ndms * g.bins_stride, ComplexType{});
@@ -653,6 +658,31 @@ private:
     }
 
     SizeType m_seg_len{};
+
+    // The phasor tables of execute()'s transform length (built geometry).
+    void fill_tables() {
+        const auto& g = *m_geo;
+        for (SizeType s = 0; s <= m_q_max; ++s) {
+            float* r = &m_r_table[s * kTileFl];
+            for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
+                const auto w = g.twiddle[(s * j) % g.n_fft];
+                r[j]         = w.real();
+                r[kTile + j] = w.imag();
+            }
+        }
+        // Per merge: W^(s * j) for j < kTile, exact in double.
+        for (SizeType op = 0; op < m_frac_r.size() / kTileFl; ++op) {
+            for (SizeType j = 0; j < static_cast<SizeType>(kTile); ++j) {
+                const double a =
+                    -2.0 * std::numbers::pi *
+                    simd::wrap_turns(m_frac_s[op] * static_cast<double>(j) /
+                                     static_cast<double>(g.n_fft));
+                m_frac_r[(op * kTileFl) + j] = static_cast<float>(std::cos(a));
+                m_frac_r[(op * kTileFl) + kTile + j] =
+                    static_cast<float>(std::sin(a));
+            }
+        }
+    }
 
     // Picks execute()'s transform length (fdmt_fft::choose_segments(), the
     // rule every engine shares).

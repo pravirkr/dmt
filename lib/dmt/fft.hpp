@@ -86,6 +86,11 @@ private:
 /// Alignment (bytes) of every array a FFTWRowPlan executes on.
 inline constexpr std::size_t kFFTAlignment = 64;
 
+/// Testing hook: FFTAllocator allocations made so far in this process (so a
+/// test can check that a memory estimate allocates no FFT storage).
+void note_fft_allocation() noexcept;
+[[nodiscard]] std::size_t fft_allocation_count() noexcept;
+
 /// @brief Allocator giving kFFTAlignment-aligned storage (FFTW SIMD codelets
 /// and whole-cache-line rows).
 template <typename T> struct FFTAllocator {
@@ -102,6 +107,7 @@ template <typename T> struct FFTAllocator {
         if (ptr == nullptr) {
             throw std::bad_alloc();
         }
+        note_fft_allocation();
         return static_cast<T*>(ptr);
     }
     void deallocate(T* ptr, std::size_t /*n*/) noexcept {

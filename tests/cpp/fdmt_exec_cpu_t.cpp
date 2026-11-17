@@ -665,6 +665,17 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (cpu)",
         CHECK(e.chunk_nsamps < plan.get_nsamps());
         CHECK(e.usage.total() <= budget);
     }
+    SECTION("nothing is allocated") {
+        // 2^24 beams: hundreds of GB of state and history, sized, never
+        // allocated (an allocation would throw std::bad_alloc).
+        const SizeType beams = SizeType{1} << 24;
+        const auto tree      = FDMT::estimate_memory(
+            kFMin, 1500.0F, 64, 512, kTsamp, 80, 0, 1, true, "valid", cpu,
+            beams, kFDMTAutoFuse, true, 0, SIZE_MAX / 2);
+        CHECK(tree.usage.total() > (SizeType{500} << 30));
+        // (The skewed path runs with one beam only, so its buffers cannot
+        // be scaled past the host this way.)
+    }
     SECTION("over budget throws as the constructor does") {
         const plans::FDMTPlan plan(kFMin, 1500.0F, 64, 512, kTsamp, 80);
         CHECK_THROWS_AS(FDMT::estimate_memory(plan, true, cpu, 1, kFDMTAutoFuse,

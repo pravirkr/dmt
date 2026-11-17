@@ -7,6 +7,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "dmt/engines.hpp"
+#include "dmt/fft.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
 #include "test_random.hpp"
@@ -494,4 +495,16 @@ void check_fft_boxcar_estimates(const Exec& exec) {
 TEST_CASE("FDMTFFTBoxcar estimate_memory equals the constructed instance (cpu)",
           "[boxcar][cpu][budget]") {
     check_fft_boxcar_estimates(Exec::cpu(3));
+    // No FFT storage, twiddles or phasor tables, including the engines
+    // the segment search builds and drops under a tight budget.
+    const plans::FDMTPlan plan(1000.0F, 1500.0F, 256, 32768, 0.001F, 400);
+    BoxcarConfig cfg;
+    cfg.max_candidates = 1024;
+    const auto full =
+        FDMTFFTBoxcar::estimate_memory(plan, cfg, true, Exec::cpu(3), 4);
+    const auto before = utils::fft_allocation_count();
+    const auto e      = FDMTFFTBoxcar::estimate_memory(
+        plan, cfg, true, Exec::cpu(3), 4, true, {}, full.usage.budgeted() - 1);
+    CHECK(utils::fft_allocation_count() == before);
+    CHECK(e.chunk_nsamps < full.chunk_nsamps);
 }

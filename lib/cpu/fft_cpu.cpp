@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,19 @@
 #include "dmt/logging.hpp"
 
 namespace dmt::utils {
+
+namespace {
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<std::size_t> g_fft_allocations{0};
+} // namespace
+
+void note_fft_allocation() noexcept {
+    g_fft_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::size_t fft_allocation_count() noexcept {
+    return g_fft_allocations.load(std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -422,14 +436,27 @@ double r2c_cost_per_nlogn(SizeType n) {
         return 1.0;
     }
     const int ni = to_fftw_int(n, "length");
-    FFTVector<float> in(n);
-    FFTVector<ComplexType> out((n / 2) + 1);
+    // Planning scratch with FFTVector's alignment, not an FFTVector: memory
+    // estimates call this, and fft_allocation_count() counts engine storage.
+    const auto scratch = [](std::size_t bytes) {
+        const std::size_t padded =
+            (bytes + kFFTAlignment - 1) / kFFTAlignment * kFFTAlignment;
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc,hicpp-no-malloc)
+        void* p = std::aligned_alloc(kFFTAlignment, padded);
+        if (p == nullptr) {
+            throw std::bad_alloc();
+        }
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc,hicpp-no-malloc)
+        return std::unique_ptr<void, decltype(&std::free)>(p, &std::free);
+    };
+    const auto in  = scratch(n * sizeof(float));
+    const auto out = scratch(((n / 2) + 1) * sizeof(ComplexType));
     fftwf_plan raw = nullptr;
     {
         const std::scoped_lock lock(fftw_planner_mutex());
-        raw = fftwf_plan_dft_r2c_1d(
-            ni, in.data(), reinterpret_cast<fftwf_complex*>(out.data()),
-            FFTW_ESTIMATE);
+        raw = fftwf_plan_dft_r2c_1d(ni, static_cast<float*>(in.get()),
+                                    static_cast<fftwf_complex*>(out.get()),
+                                    FFTW_ESTIMATE);
     }
     if (raw == nullptr) {
         return 1.0;
