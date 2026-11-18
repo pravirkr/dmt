@@ -246,11 +246,8 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
     d->pitch = d->window + static_cast<int>(m_chunk) + 1;
     d->prefix.resize(rows * static_cast<SizeType>(d->pitch));
     const auto opt_in = [&](auto kernel) {
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(d->smem)),
-            "FDMT (cuda): direct levels shared-memory opt-in");
+        gpu_utils::raise_dynamic_smem(
+            kernel, d->smem, "FDMT (cuda): direct levels shared-memory opt-in");
     };
     if (!packed) {
         opt_in(detail::kernel_direct_level<>);
@@ -516,10 +513,8 @@ void FDMTCudaEngine::build_skewed_direct_from_windows(
         d->win_ring_u16.resize(total_ring, 0);
     }
     const auto opt_in = [&](auto kernel) {
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(d->smem)),
+        gpu_utils::raise_dynamic_smem(
+            kernel, d->smem,
             "FDMT (cuda): skewed direct levels shared-memory opt-in");
     };
     if (!packed) {

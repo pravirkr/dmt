@@ -539,11 +539,8 @@ private:
 
     template <typename Kernel>
     void configure_kernel(Kernel kernel, SizeType smem = 0) const {
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(smem != 0 ? smem : m_smem)),
-            "FDMTBoxcar: shared-memory opt-in");
+        gpu_utils::raise_dynamic_smem(kernel, smem != 0 ? smem : m_smem,
+                                      "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
         // Several resident rows per SM need the shared-memory carveout.
         gpu_utils::check_gpu_call(

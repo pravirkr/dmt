@@ -1251,3 +1251,91 @@ TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
         }
     }
 }
+
+TEST_CASE("GPU engines with different shared-memory needs coexist",
+          "[gpu][boxcar]") {
+    // A kernel's dynamic shared-memory limit is shared by every engine in
+    // the process: an engine built later with a smaller need must not lower
+    // it under one built earlier (whose launches then failed with "invalid
+    // argument"). Each engine built first runs as when built alone.
+    const auto blocks = [](SizeType n, SizeType count) {
+        std::mt19937 gen(5);
+        std::normal_distribution<float> nd;
+        std::vector<std::vector<uint8_t>> out(count, std::vector<uint8_t>(n));
+        for (auto& b : out) {
+            for (auto& v : b) {
+                v = static_cast<uint8_t>(std::clamp(
+                    std::round(128.0F + (10.0F * nd(gen))), 0.0F, 255.0F));
+            }
+        }
+        return out;
+    };
+    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const auto run = [](FDMTBoxcar& s,
+                        const std::vector<std::vector<uint8_t>>& in) {
+        std::vector<RawCandidate> out;
+        for (const auto& b : in) {
+            append(out, s.execute(std::span<const uint8_t>(b)));
+        }
+        append(out, s.drain());
+        return out;
+    };
+    SECTION("FDMT direct levels: box smearing, then none") {
+        // The skewed direct levels of the smeared transform need more
+        // shared memory than the unsmeared one's.
+        const float tsamp = 455.6e-6F;
+        const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+            0.0F, 600.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+        const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 128, tsamp, grid,
+                                   "valid", 3);
+        BoxcarConfig cfg(24);
+        cfg.detect_thresh     = 3.75F;
+        cfg.noise_sigma       = 10.0F;
+        cfg.input_nbits       = 8;
+        cfg.input_mean        = 128.0F;
+        cfg.skip_cold_prefix  = false;
+        cfg.per_call_masks    = true;
+        cfg.max_candidates    = 1U << 20;
+        const SizeType budget = 113372721; // the skewed path
+        const auto in         = blocks(1152 * 128, 6);
+        std::vector<RawCandidate> first;
+        {
+            FDMTBoxcar a(plan, cfg, true, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+                         budget);
+            FDMTBoxcar b(plan, cfg, false, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+                         budget);
+            first = run(a, in);
+            (void)run(b, in);
+        }
+        FDMTBoxcar alone(plan, cfg, true, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+                         budget);
+        REQUIRE(first.size() > 20);
+        compare(first, run(alone, in));
+    }
+    SECTION("FDMTBoxcar kernels: a wide boxcar, then a narrow one") {
+        // 8-bit rows keep a uint64 prefix ring of the boxcar's width in
+        // shared memory: 4000 needs over the 48 KiB default, 37 far less.
+        const plans::FDMTPlan plan(700, 1200, 32, 400, 0.001F,
+                                   std::vector<IndexType>{0, 3, 9, 20, 41},
+                                   "valid", 0);
+        BoxcarConfig wide(4000);
+        wide.detect_thresh  = 3.0F;
+        wide.noise_sigma    = 10.0F;
+        wide.input_nbits    = 8;
+        wide.input_mean     = 128.0F;
+        wide.max_candidates = 1U << 20;
+        auto narrow         = wide;
+        narrow.max_boxcar   = 37;
+        const auto in       = blocks(32 * 400, 8);
+        std::vector<RawCandidate> first;
+        {
+            FDMTBoxcar a(plan, wide, true, gpu);
+            FDMTBoxcar b(plan, narrow, true, gpu);
+            first = run(a, in);
+            (void)run(b, in);
+        }
+        FDMTBoxcar alone(plan, wide, true, gpu);
+        REQUIRE(first.size() > 20);
+        compare(first, run(alone, in));
+    }
+}

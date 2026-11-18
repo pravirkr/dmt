@@ -836,11 +836,8 @@ private:
             if (!m_runs.empty()) {
                 const auto smem = m_nf_max * sizeof(float2);
                 const auto set  = [&](auto kernel) {
-                    gpu_utils::check_gpu_call(
-                        cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                            static_cast<int>(smem)),
-                        "DDMTFFT (gpu): NUFFT shared memory");
+                    gpu_utils::raise_dynamic_smem(
+                        kernel, smem, "DDMTFFT (gpu): NUFFT shared memory");
                 };
                 dispatch_width(m_width, [&](auto w) {
                     set(kernel_nufft_spread<decltype(w)::value>);

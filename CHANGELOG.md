@@ -216,6 +216,12 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Fixed
 
+- **GPU engines with different settings in one process** (`FDMTBoxcar`,
+  and the FDMT direct levels and `DDMTFFT` NUFFT kernels under it): a
+  kernel's shared-memory limit is shared by the whole process, and each
+  engine set it to its own need, so one built later with a smaller need
+  (box smearing off, a narrower `max_boxcar`) made the earlier one fail
+  with "invalid argument". The limit is now only ever raised.
 - `FDMTFFTBoxcar` on a GPU no longer counts its host result storage
   against `max_memory_bytes` when checking whether the boxcar buffers alone
   fit, so budgets that fit the device memory build as documented.

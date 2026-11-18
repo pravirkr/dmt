@@ -159,6 +159,28 @@ check_gpu_call(cufftResult result,
     }
 }
 
+/// Lets `kernel` launch with up to `bytes` of dynamic shared memory on the
+/// current device. The limit is the kernel's, shared by every engine in the
+/// process: it is only ever raised, so an engine built later with a smaller
+/// need never lowers it under an engine that needs more.
+template <typename Kernel>
+inline void
+raise_dynamic_smem(Kernel kernel,
+                   std::size_t bytes,
+                   std::string_view msg     = "",
+                   std::source_location loc = std::source_location::current()) {
+    static std::mutex lock;
+    const std::scoped_lock guard(lock);
+    cudaFuncAttributes attr{};
+    check_gpu_call(cudaFuncGetAttributes(&attr, kernel), msg, loc);
+    if (static_cast<std::size_t>(attr.maxDynamicSharedSizeBytes) < bytes) {
+        check_gpu_call(cudaFuncSetAttribute(
+                           kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           static_cast<int>(bytes)),
+                       msg, loc);
+    }
+}
+
 inline void check_last_gpu_error(
     std::string_view msg     = "",
     std::source_location loc = std::source_location::current()) {
