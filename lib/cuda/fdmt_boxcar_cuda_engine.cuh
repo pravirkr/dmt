@@ -681,6 +681,7 @@ private:
     [[nodiscard]] SizeType slot_floats() const noexcept;
     /// Open packed per-width peaks take their S/N (the first per-call mask).
     void sync_peak_snr();
+    void sync_surrogate_snr();
     void reset_block_noise();
     const float* slot_of(const NoiseTables* tables, cudaStream_t stream);
     void commit_block_noise(cudaStream_t stream);

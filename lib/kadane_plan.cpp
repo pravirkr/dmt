@@ -13,6 +13,8 @@
 
 #include <fmt/format.h>
 
+#include "dmt/kadane_monoid.hpp"
+
 namespace dmt::kadane {
 
 namespace {
@@ -647,37 +649,13 @@ void KadaneGatePlan::recompute_row_icuts(SizeType row,
         throw std::invalid_argument(
             "KadaneGatePlan::recompute_row_icuts: invalid row or span sizes");
     }
-    constexpr int64_t kQuarter =
-        static_cast<int64_t>(std::numeric_limits<int32_t>::max()) / 4;
     for (SizeType k = 0; k < num_buckets; ++k) {
-        const auto& bkt = buckets[k];
-        if (disabled_row[row] != 0U) {
-            out_cuts[k] = std::numeric_limits<int32_t>::max();
-            continue;
-        }
-        const auto b_int = static_cast<int64_t>(row_ibias(k, row));
-        int64_t min_cut  = std::numeric_limits<int64_t>::max();
-        for (uint32_t f = bkt.f_lo; f < bkt.f_hi; ++f) {
-            // Cutoffs too large to shift never fire within int32 sums.
-            if (int_thr[f] > (UINT64_MAX >> (int_shift + 1U))) {
-                continue;
-            }
-            const uint32_t w_edge =
-                use_trapezoid ? trapezoid_edge_width(widths[f]) : 0U;
-            const uint32_t tilde_w = widths[f] - w_edge;
-            const uint64_t raw_t   = int_thr[f] << int_shift;
-            const uint64_t eff_t = w_edge == 0U ? raw_t : (raw_t + 1ULL) / 2ULL;
-            const int64_t c_val =
-                eff_t > static_cast<uint64_t>(INT64_MAX / 2)
-                    ? kQuarter
-                    : static_cast<int64_t>(eff_t) -
-                          (b_int * static_cast<int64_t>(tilde_w));
-            min_cut = std::min(min_cut, c_val);
-        }
-        out_cuts[k] = min_cut == std::numeric_limits<int64_t>::max()
+        out_cuts[k] = disabled_row[row] != 0U
                           ? std::numeric_limits<int32_t>::max()
-                          : static_cast<int32_t>(
-                                std::clamp<int64_t>(min_cut, 0, kQuarter));
+                          : compute_bucket_icut_hd(
+                                buckets[k], widths.data(), use_trapezoid,
+                                int_shift, row_ibias(k, row),
+                                [&](SizeType f) { return int_thr[f]; });
     }
 }
 

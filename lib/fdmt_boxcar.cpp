@@ -263,16 +263,7 @@ public:
     /// mean (`reference`).
     [[nodiscard]] std::unique_ptr<detail::BoxcarNoiseModel>
     make_noise_model() const {
-        const bool packed           = config.input_nbits != 32;
-        const BoxcarScreenMode mode = detail::resolve_screen_mode(
-            config.screen_mode, exec.backend != Backend::kCPU);
-        if (packed && exec.backend != Backend::kCPU &&
-            mode != BoxcarScreenMode::kPrefix &&
-            mode != BoxcarScreenMode::kNone) {
-            throw std::invalid_argument(
-                "FDMTBoxcar: per-call kill masks on packed input on a GPU "
-                "need screen_mode kPrefix or kNone");
-        }
+        const bool packed = config.input_nbits != 32;
         return std::make_unique<detail::BoxcarNoiseModel>(
             plan, config, smear, std::max(1, exec.nthreads),
             packed ? std::span<const uint8_t>(ctor_mask)

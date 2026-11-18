@@ -976,12 +976,9 @@ SizeType FDMTBoxcarCudaEngine::block_noise_bytes() const noexcept {
 
 void FDMTBoxcarCudaEngine::enable_block_noise(
     std::shared_ptr<const std::vector<uint64_t>> support) {
-    if (m_config.input_nbits != 32 &&
-        (!m_keep_in_transform ||
-         m_config.screen_mode == BoxcarScreenMode::kKadane ||
-         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)) {
+    if (m_config.input_nbits != 32 && !m_keep_in_transform) {
         throw std::logic_error("FDMTBoxcar (gpu): per-call kill masks on "
-                               "packed input need kPrefix or kNone");
+                               "packed input need a driver with kept rows");
     }
     gpu_utils::set_device(m_device);
     const SizeType full = m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
@@ -1012,9 +1009,14 @@ void FDMTBoxcarCudaEngine::enable_block_noise(
     m_ring.reserve(3);
     m_noise_on = true;
     reset_block_noise();
-    if (m_allocated && m_config.input_nbits != 32 &&
-        m_config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth) {
-        sync_peak_snr();
+    // Packed rows: S/N of what is open when the masks start.
+    if (m_allocated && m_config.input_nbits != 32) {
+        if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
+            sync_surrogate_snr();
+        } else if (m_config.peak_mode ==
+                   PeakFindingMode::kContiguousPeakPerWidth) {
+            sync_peak_snr();
+        }
     }
 }
 

@@ -147,17 +147,15 @@ warm-up. `reset_history()` clears the mask state, and `drain()` pads with
 the last block's mask. `search_plans` (`get_search_plans()`) shows the
 constructor mask's tables only.
 
-**Packed input** (C++ `execute(waterfall, kill_mask)`, host or device
-input; every screen on the CPU, `kPrefix` and `kNone` on a GPU so far;
-other GPU screens raise at the first mask or, with `per_call_masks`, at
-construction):
-channels the block's mask kills, but the constructor's keeps, read the code
-`input_mean` instead of 0, so `input_mean` must be an integer. Every
-window's expected sum is then the constructor plan's, exactly, and only the
-cutoffs and S/N scales change with the mask, by the same rules as on
-float32 input. Without box smearing the candidates equal those of the
-float32 search on `code - input_mean`. Per-width peaks whose samples use
-different tables are ranked by S/N, then by the raw sum as before.
+**Packed input** (C++ `execute(waterfall, kill_mask)`, host or device input,
+CPU and GPU, every screen): channels the block's mask kills, but the
+constructor's keeps, read the code `input_mean` instead of 0, so
+`input_mean` must be an integer. Every window's expected sum is then the
+constructor plan's, exactly, and only the cutoffs and S/N scales change with
+the mask, by the same rules as on float32 input. Without box smearing the
+candidates equal those of the float32 search on `code - input_mean`.
+Per-width peaks whose samples use different tables are ranked by S/N, then
+by the raw sum as before.
 
 ## Packed integer input
 
