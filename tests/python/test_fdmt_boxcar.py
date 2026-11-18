@@ -1169,3 +1169,68 @@ def test_plane_counts_cpu() -> None:
 
 def test_plane_counts_gpu(gpu_backend: str) -> None:
     _check_plane_counts(gpu_backend)
+
+
+def _check_time_reference(backend: str) -> None:
+    # A dispersed pulse: every plane's brightest candidate has peak_sample at
+    # the pulse's arrival at that plane's own lower edge f_low_mhz (channel
+    # edges, f_min = lower edge of channel 0). With chan_dm (channels
+    # coherently dedispersed, each referenced to its centre) the plan's
+    # level-0 causal delay (here 23 samples) is already removed on every
+    # plane.
+    f_min, f_max, nchans, tsamp, nsamps, nblocks = 1200.0, 1600.0, 64, 1e-3, 4096, 4
+    dm, t_inf = 1510.0, 2.5 * nsamps * tsamp
+    df = (f_max - f_min) / nchans
+    grid = np.linspace(1460.0, 1560.0, 201).astype(np.float32)
+    for chan_dm in (0.0, 1500.0):
+        plan = FDMTPlan(
+            f_min,
+            f_max,
+            nchans,
+            nsamps,
+            tsamp,
+            dm_grid=grid,
+            subband_depth=1,
+            chan_dm=chan_dm,
+        )
+        assert (plan.level0_causal_delay > 20) == (chan_dm > 0)
+        flat = np.zeros((nchans, nblocks * nsamps), np.float32)
+        for c in range(nchans):
+            lo, hi = f_min + c * df, f_min + (c + 1) * df
+            if chan_dm == 0:
+                a = dmtlib.dispersion_delay(dm, hi, np.inf) + t_inf
+                b = dmtlib.dispersion_delay(dm, lo, np.inf) + t_inf
+            else:
+                mid = dmtlib.dispersion_delay(dm, 0.5 * (lo + hi), np.inf) + t_inf
+                half = 0.5 * dmtlib.dispersion_delay(dm - chan_dm, lo, hi)
+                a, b = mid - half, mid + half
+            i, j = int(a / tsamp), int(b / tsamp)
+            flat[c, i : j + 1] += 20.0 / (j - i + 1)
+        cfg = BoxcarConfig(16, detect_thresh=8.0, max_cands_per_dm=0)
+        search = FDMTBoxcar(plan, cfg, backend=backend)
+        blocks = [
+            np.ascontiguousarray(flat[:, k * nsamps : (k + 1) * nsamps])
+            for k in range(nblocks)
+        ]
+        parts = [search.execute(b).candidates for b in blocks]
+        parts.append(search.drain().candidates)
+        cands = np.concatenate(parts)
+        planes = {(int(c["subband_level"]), int(c["subband_idx"])) for c in cands}
+        assert len(planes) == 4  # full band, two halves, the staggered one
+        for level, idx in planes:
+            sel = cands[
+                (cands["subband_level"] == level) & (cands["subband_idx"] == idx)
+            ]
+            best = sel[np.argmax(sel["snr"])]
+            want = (
+                dmtlib.dispersion_delay(dm, float(best["f_low_mhz"]), np.inf) + t_inf
+            ) / tsamp
+            assert abs(int(best["peak_sample"]) - want) <= 2, (chan_dm, level, idx)
+
+
+def test_time_reference() -> None:
+    _check_time_reference("cpu")
+
+
+def test_time_reference_gpu(gpu_backend: str) -> None:
+    _check_time_reference(gpu_backend)

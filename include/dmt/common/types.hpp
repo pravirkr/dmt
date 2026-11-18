@@ -29,6 +29,24 @@ inline constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 inline constexpr float kDispConst   = kDispConstMT;
 
 /**
+ * @brief Dispersion delay in seconds of `f_lo_mhz` behind `f_hi_mhz`.
+ *
+ * Uses the library's constant (1 / 2.41e-4 s MHz^2 cm^3 / pc, the TEMPO2
+ * convention of kDispConst), in double precision, as Python's
+ * `dmtlib.dispersion_delay`. `f_hi_mhz` = +infinity gives the delay from
+ * infinite frequency. FDMTPlan frequencies are channel edges: a candidate's
+ * f_low_mhz / f_high_mhz are its subband's lower and upper edges.
+ */
+[[nodiscard]] constexpr double
+dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
+    constexpr double kConst = 1.0 / 2.41e-4;
+    // 1 / inf^2 is 0 in IEEE arithmetic (also under -ffast-math: the
+    // division is not folded for a runtime argument).
+    return kConst * dm *
+           ((1.0 / (f_lo_mhz * f_lo_mhz)) - (1.0 / (f_hi_mhz * f_hi_mhz)));
+}
+
+/**
  * @brief POSIX aligned memory allocator for SIMD vectorization and cache
  * alignment.
  * @tparam T Value type to allocate.

@@ -58,9 +58,12 @@ struct FDMTBoxcarMemoryEstimate {
 /**
  * @brief Streaming valid-mode FDMT followed by analytical boxcar detection.
  *
- * Input is finite float32, (nbeams, nchans, nsamps), low frequency first,
- * normalized to zero mean and known common noise sigma. Analytical S/N
- * assumes independent channel/time noise before the modeled FDMT filtering;
+ * Input is finite float32, (nbeams, nchans, nsamps), low frequency first.
+ * FDMTBoxcar does no preprocessing: the noise model needs each channel
+ * normalized to zero mean and the common noise sigma (noise_sigma, 1 by
+ * default), and white in time over at least max_boxcar samples. Analytical
+ * S/N assumes independent channel/time noise before the modeled FDMT
+ * filtering;
  * masking other than kill_mask (below) or additional correlations require
  * upstream calibration. Red noise (slow drifts correlated over many
  * samples) inflates the S/N of wide boxes, and the search keeps no

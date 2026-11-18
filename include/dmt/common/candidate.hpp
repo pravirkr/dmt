@@ -138,9 +138,17 @@ struct BoxcarConfig {
 /**
  * @brief A raw matched-filter detection, without astrophysical selection.
  *
- * Sample indices are absolute stream indices of trailing-window endpoints
- * (for a chan_dm plan, less FDMTPlan::get_level0_causal_delay(), so they
- * refer to the bottom-edge arrival);
+ * Times: sample indices are absolute stream indices (from the stream's
+ * first sample) of the trailing end of the boxcar window, at the pulse's
+ * arrival at the lower edge f_low_mhz of the candidate's own plane:
+ * FDMTPlan frequencies are channel edges (channel c spans f_min + c * df to
+ * f_min + (c + 1) * df), and every plane's delays and DMs are between its
+ * subband's edges f_low_mhz and f_high_mhz. A full-band candidate refers to
+ * f_min; a subband candidate to its subband's f_low_mhz, i.e.
+ * dispersion_delay(dm, f_min, f_low_mhz) / tsamp samples earlier than the
+ * full band. For a chan_dm plan (channels coherently dedispersed, each
+ * referenced to its centre frequency) FDMTPlan::get_level0_causal_delay()
+ * is already subtracted on every plane (saturating at 0).
  * begin/end delimit an inclusive contiguous excursion. Channel extents are
  * half-open in FDMT input order (low frequency first); subband_level is the
  * search depth (0: full band) and subband_idx the subband's index at that

@@ -8,6 +8,16 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`dmt::dispersion_delay(dm, f_lo_mhz, f_hi_mhz)`** (C++,
+  `dmt/common/types.hpp`): the dispersion delay in seconds, as Python's
+  `dmtlib.dispersion_delay` (TEMPO2 constant 1 / 2.41e-4; `f_hi_mhz` =
+  infinity for the delay from infinite frequency).
+- Documented time conventions of `RawCandidate`: `peak_sample` is the
+  trailing end of the window at the arrival at the lower edge of the
+  candidate's own plane (`f_low_mhz`; plan frequencies are channel edges);
+  a `chan_dm` plan's level-0 causal delay is subtracted on every plane. And
+  `FDMTBoxcar`'s input contract: no preprocessing; each channel zero mean,
+  common sigma, white in time over at least `max_boxcar` samples.
 - **`BoxcarConfig::per_call_masks`** (Python `per_call_masks=`, default
   false): declares that an `FDMTBoxcar` stream will pass per-call kill
   masks. Their requirements (float32 input, blocks long enough, on a GPU a
