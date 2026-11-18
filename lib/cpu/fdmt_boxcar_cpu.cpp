@@ -340,25 +340,28 @@ SizeType FDMTBoxcarCpuEngine::block_noise_bytes() const noexcept {
     const SizeType fill = packed ? row + (static_cast<SizeType>(m_threads) *
                                           m_filters * sizeof(uint64_t))
                                  : 0;
+    // Packed Kadane: the int32 gate's cuts, or the float gate's cutoffs.
+    SizeType gate = 0;
+    if (packed && m_config.screen_mode == BoxcarScreenMode::kKadane) {
+        gate =
+            m_kadane_int32
+                ? static_cast<SizeType>(m_threads) * kadane::kMaxGateBuckets *
+                      kadane::kMaxBatchRows * sizeof(int32_t)
+                : static_cast<SizeType>(m_threads) * m_filters * sizeof(float);
+    }
     const SizeType cuts =
         (m_config.screen_mode == BoxcarScreenMode::kKadane ||
          m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)
             ? (static_cast<SizeType>(m_threads) * kadane::kMaxGateBuckets *
                kadane::kMaxBatchRows * sizeof(float))
             : 0;
-    return staging + fill + cuts +
+    return staging + fill + gate + cuts +
            (static_cast<SizeType>(m_threads) * m_filters * sizeof(float));
 }
 
 void FDMTBoxcarCpuEngine::enable_block_noise(
     std::shared_ptr<const std::vector<uint64_t>> support) {
     const bool packed = m_config.input_nbits != 32;
-    if (packed &&
-        (m_config.screen_mode == BoxcarScreenMode::kKadane ||
-         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)) {
-        throw std::logic_error("FDMTBoxcar (cpu): per-call kill masks on "
-                               "packed input need kPrefix or kNone");
-    }
     // Sized, not allocated, while the construction is deferred
     // (BoxcarConfig::per_call_masks): allocate() makes them.
     if (packed) {
@@ -397,6 +400,17 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
         }
         m_deferred.resize(m_screen_ithr,
                           static_cast<SizeType>(m_threads) * m_filters);
+        if (m_config.screen_mode == BoxcarScreenMode::kKadane) {
+            if (m_kadane_int32) {
+                m_deferred.resize(m_thread_icuts,
+                                  static_cast<SizeType>(m_threads) *
+                                      kadane::kMaxGateBuckets *
+                                      kadane::kMaxBatchRows);
+            } else {
+                m_deferred.resize(m_screen_eff,
+                                  static_cast<SizeType>(m_threads) * m_filters);
+            }
+        }
     } else {
         const SizeType full =
             m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
@@ -670,6 +684,8 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
                      (m_level_offsets.size() * sizeof(uint32_t)) +
                      (m_deferred.size(m_screen_thr) * sizeof(float)) +
                      (m_deferred.size(m_screen_ithr) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_thread_icuts) * sizeof(int32_t)) +
+                     (m_deferred.size(m_screen_eff) * sizeof(float)) +
                      kadane_work,
         .candidates = (m_deferred.size(m_candidates) + m_deferred.size(m_keep) +
                        m_deferred.size(m_plane_scratch)) *

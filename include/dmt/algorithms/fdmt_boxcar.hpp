@@ -126,7 +126,7 @@ struct FDMTBoxcarMemoryEstimate {
  *
  * Per-call kill mask: execute(waterfall, kill_mask) also takes a mask for
  * that block (same format and convention; nonzero is active). Packed input
- * (CPU backend, kPrefix and kNone screens so far): channels it kills but
+ * (CPU backend so far, every screen): channels it kills but
  * the constructor mask keeps read the code input_mean (which must be an
  * integer), so the expected sums stay the constructor plan's and only the
  * cutoffs and S/N scales follow the rules below; per-width peaks spanning

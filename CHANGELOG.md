@@ -25,8 +25,8 @@ All notable changes to `dmt` are listed here. The format follows
   `FDMTBoxcar`'s input contract: no preprocessing; each channel zero mean,
   common sigma, white in time over at least `max_boxcar` samples.
 - **`FDMTBoxcar` per-call kill masks on packed input** (C++
-  `execute(std::span<const uint8_t> waterfall, kill_mask)`; CPU backend,
-  `kPrefix` and `kNone` screens so far): channels a per-call mask kills
+  `execute(std::span<const uint8_t> waterfall, kill_mask)`; CPU backend
+  so far, every screen): channels a per-call mask kills
   read the code `input_mean`, which must then be an integer. The
   constructor plan's integer means stay exact, so only the per-mask
   cutoffs and S/N scales change, as on float input (without box smearing

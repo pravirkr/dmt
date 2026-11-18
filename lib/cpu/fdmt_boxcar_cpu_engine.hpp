@@ -239,7 +239,7 @@ private:
     void save_row_carry(SizeType row_idx,
                         SizeType beam,
                         const FDMTSearchInput& in) noexcept;
-    template <typename T, typename C>
+    template <typename T, typename C, bool kNoise = false>
     void lazy_score_tile(SizeType row_idx,
                          SizeType beam,
                          const FDMTSearchInput& in,
@@ -445,6 +445,10 @@ private:
     std::vector<float> m_tile_f32;
     std::vector<uint32_t> m_tile_u32;
     std::vector<float> m_thread_cuts;
+    /// Packed per-call masks: per-thread int32 gate cuts and the float
+    /// gate's centred cutoffs of a row.
+    std::vector<int32_t> m_thread_icuts;
+    std::vector<float> m_screen_eff;
     /// Buffers a deferred construction sized for allocate().
     planned::HostPlan m_deferred;
     bool m_allocated = false;

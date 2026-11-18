@@ -148,8 +148,8 @@ the last block's mask. `search_plans` (`get_search_plans()`) shows the
 constructor mask's tables only.
 
 **Packed input** (C++ `execute(std::span<const uint8_t>, kill_mask)`; so
-far the CPU backend with the `kPrefix` and `kNone` screens, other cases
-raise at the first mask or, with `per_call_masks`, at construction):
+far the CPU backend, every screen; a GPU raises at the first mask or, with
+`per_call_masks`, at construction):
 channels the block's mask kills, but the constructor's keeps, read the code
 `input_mean` instead of 0, so `input_mean` must be an integer. Every
 window's expected sum is then the constructor plan's, exactly, and only the

@@ -269,14 +269,6 @@ public:
                 "FDMTBoxcar: per-call kill masks on packed input need the "
                 "CPU backend");
         }
-        const BoxcarScreenMode mode = detail::resolve_screen_mode(
-            config.screen_mode, exec.backend != Backend::kCPU);
-        if (packed && (mode == BoxcarScreenMode::kKadane ||
-                       mode == BoxcarScreenMode::kKadaneSurrogate)) {
-            throw std::invalid_argument(
-                "FDMTBoxcar: per-call kill masks on packed input need "
-                "screen_mode kPrefix or kNone");
-        }
         return std::make_unique<detail::BoxcarNoiseModel>(
             plan, config, smear, std::max(1, exec.nthreads),
             packed ? std::span<const uint8_t>(ctor_mask)
@@ -306,8 +298,21 @@ public:
                        : plan.get_nsamps() * sizeof(float);
             const SizeType staging =
                 kill_runs.empty() ? beams * plan.get_nchans() * row : 0;
+            // Packed Kadane: per-thread int32 cuts or float cutoffs (the
+            // larger; the gate kind is known only to the engine).
+            const bool kadane_gate =
+                detail::resolve_screen_mode(config.screen_mode, false) ==
+                BoxcarScreenMode::kKadane;
             const SizeType fill =
-                packed ? row + (threads * filters * sizeof(uint64_t)) : 0;
+                packed ? row + (threads * filters * sizeof(uint64_t)) +
+                             (kadane_gate
+                                  ? threads * std::max<SizeType>(
+                                                  kadane::kMaxGateBuckets *
+                                                      kadane::kMaxBatchRows *
+                                                      sizeof(int32_t),
+                                                  filters * sizeof(float))
+                                  : 0)
+                       : 0;
             return staging + fill + model_bytes(m, ring) +
                    (threads * filters * sizeof(float)) +
                    (threads * kadane::kMaxGateBuckets * kadane::kMaxBatchRows *
