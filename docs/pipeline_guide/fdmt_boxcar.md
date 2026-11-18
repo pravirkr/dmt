@@ -95,7 +95,7 @@ is no copy.
 #### A mask per block
 
 A real-time pipeline flags RFI per gulp, so `execute()` also takes a mask
-for its block (float32 input): `search.execute(block, kill_mask=mask)` in
+for its block: `search.execute(block, kill_mask=mask)` in
 Python, `execute(waterfall, kill_mask)` in C++ (host or device waterfall;
 the mask is a host span, read before the call returns). The format and
 convention are the constructor's: one value per channel, nonzero active.
@@ -133,8 +133,8 @@ the tables of new masks (below) costs time per call.
 The first per-call mask checks that its noise tables fit in
 `max_memory_bytes` and raises (`ValueError`; C++ `std::invalid_argument`)
 without changing the stream if not: on the CPU the noise model, a few table
-sets of `rows x widths x 8` bytes and the staging block if the constructor
-had no mask; on GPUs the device copies of the tables (the host-side model
+sets of `rows x widths x 8` bytes (16 for packed input) and the staging
+block if the constructor had no mask; on GPUs the device copies of the tables (the host-side model
 and tables are reported in `memory_usage.host`).
 
 The tables of a new mask are computed on the host when it first appears,
@@ -145,7 +145,18 @@ mask and, unless it only kills or only revives channels, one for the OR;
 the last three masks are cached. `skip_cold_prefix` keeps the constructor mask's
 warm-up. `reset_history()` clears the mask state, and `drain()` pads with
 the last block's mask. `search_plans` (`get_search_plans()`) shows the
-constructor mask's tables only. Packed input takes no per-call mask.
+constructor mask's tables only.
+
+**Packed input** (C++ `execute(std::span<const uint8_t>, kill_mask)`; so
+far the CPU backend with the `kPrefix` and `kNone` screens, other cases
+raise at the first mask or, with `per_call_masks`, at construction):
+channels the block's mask kills, but the constructor's keeps, read the code
+`input_mean` instead of 0, so `input_mean` must be an integer. Every
+window's expected sum is then the constructor plan's, exactly, and only the
+cutoffs and S/N scales change with the mask, by the same rules as on
+float32 input. Without box smearing the candidates equal those of the
+float32 search on `code - input_mean`. Per-width peaks whose samples use
+different tables are ranked by S/N, then by the raw sum as before.
 
 ## Packed integer input
 

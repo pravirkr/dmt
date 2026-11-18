@@ -234,9 +234,12 @@ FDMTBoxcarCpuEngine::execute(std::span<const uint8_t> waterfall) {
     if (m_position > UINT64_MAX - m_plan.get_nsamps()) {
         throw std::overflow_error("FDMTBoxcar: stream sample index overflow");
     }
+    commit_block_noise();
     begin_result(m_plan.get_nsamps());
     m_driver->search(masked(waterfall, m_masked_packed), m_config.input_nbits,
                      *this);
+    m_commit_open = false;
+    m_catch_undo  = {};
     m_position += m_plan.get_nsamps();
     update_open_begin();
     finish_result();
@@ -259,9 +262,7 @@ CandidateResultView FDMTBoxcarCpuEngine::execute_zero() {
     }
     // As execute() on a zero block: killed rows of zeros are zeros, so the
     // staging copy is skipped; the noise ring repeats the last tables.
-    if (m_config.input_nbits == 32) {
-        commit_block_noise();
-    }
+    commit_block_noise();
     begin_result(m_plan.get_nsamps());
     m_driver->search_zero(*this);
     m_commit_open = false;
@@ -327,9 +328,17 @@ uint64_t FDMTBoxcarCpuEngine::open_begin_min() const noexcept {
 SizeType FDMTBoxcarCpuEngine::block_noise_bytes() const noexcept {
     // The staging block (when the constructor mask has none) and the
     // per-thread screen thresholds of tiles that mix tables.
-    const SizeType staging = m_deferred.size(m_masked) == 0
-                                 ? m_beams * m_plan.get_nchans() *
-                                       m_plan.get_nsamps() * sizeof(float)
+    const bool packed      = m_config.input_nbits != 32;
+    const SizeType row     = packed ? bit_pack_utils::packed_row_bytes(
+                                          m_plan.get_nsamps(), m_config.input_nbits)
+                                    : m_plan.get_nsamps() * sizeof(float);
+    const SizeType staging = (packed ? m_deferred.size(m_masked_packed)
+                                     : m_deferred.size(m_masked)) == 0
+                                 ? m_beams * m_plan.get_nchans() * row
+                                 : 0;
+    // Packed: the fill row and the per-thread integer screen cutoffs.
+    const SizeType fill = packed ? row + (static_cast<SizeType>(m_threads) *
+                                          m_filters * sizeof(uint64_t))
                                  : 0;
     const SizeType cuts =
         (m_config.screen_mode == BoxcarScreenMode::kKadane ||
@@ -337,21 +346,63 @@ SizeType FDMTBoxcarCpuEngine::block_noise_bytes() const noexcept {
             ? (static_cast<SizeType>(m_threads) * kadane::kMaxGateBuckets *
                kadane::kMaxBatchRows * sizeof(float))
             : 0;
-    return staging + cuts +
+    return staging + fill + cuts +
            (static_cast<SizeType>(m_threads) * m_filters * sizeof(float));
 }
 
 void FDMTBoxcarCpuEngine::enable_block_noise(
     std::shared_ptr<const std::vector<uint64_t>> support) {
-    if (m_config.input_nbits != 32) {
-        throw std::logic_error(
-            "FDMTBoxcar (cpu): per-call kill masks need float input");
+    const bool packed = m_config.input_nbits != 32;
+    if (packed &&
+        (m_config.screen_mode == BoxcarScreenMode::kKadane ||
+         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)) {
+        throw std::logic_error("FDMTBoxcar (cpu): per-call kill masks on "
+                               "packed input need kPrefix or kNone");
     }
     // Sized, not allocated, while the construction is deferred
     // (BoxcarConfig::per_call_masks): allocate() makes them.
-    const SizeType full = m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
-    if (m_deferred.size(m_masked) < full) {
-        m_deferred.resize(m_masked, full);
+    if (packed) {
+        const SizeType row = bit_pack_utils::packed_row_bytes(
+            m_plan.get_nsamps(), m_config.input_nbits);
+        const SizeType full = m_beams * m_plan.get_nchans() * row;
+        if (m_deferred.size(m_masked_packed) < full) {
+            m_deferred.resize(m_masked_packed, full);
+        }
+        // Channels a per-call mask kills read the code input_mean (an
+        // integer code, checked by the noise model).
+        m_fill_row.assign(row, uint8_t{0});
+        const auto code = static_cast<uint32_t>(m_config.input_mean);
+        const auto fill = [&]<unsigned NB>() {
+            for (SizeType t = 0; t < m_plan.get_nsamps(); ++t) {
+                bit_pack_utils::write_packed_sample<NB>(m_fill_row.data(), t,
+                                                        code);
+            }
+        };
+        switch (m_config.input_nbits) {
+        case 1:
+            fill.template operator()<1>();
+            break;
+        case 2:
+            fill.template operator()<2>();
+            break;
+        case 4:
+            fill.template operator()<4>();
+            break;
+        case 8:
+            fill.template operator()<8>();
+            break;
+        default:
+            fill.template operator()<16>();
+            break;
+        }
+        m_deferred.resize(m_screen_ithr,
+                          static_cast<SizeType>(m_threads) * m_filters);
+    } else {
+        const SizeType full =
+            m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
+        if (m_deferred.size(m_masked) < full) {
+            m_deferred.resize(m_masked, full);
+        }
     }
     m_killed.resize(m_plan.get_nchans());
     m_deferred.resize(m_screen_thr,
@@ -382,6 +433,22 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
     m_ring.reserve(m_ring_size + 1);
     m_noise_on = true;
     reset_block_noise();
+    // Packed per-width peaks rank by S/N from now on: give the open ones
+    // theirs (the constructor's tables so far).
+    if (packed &&
+        m_config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth) {
+        const SizeType nrows = m_rows.size();
+        for (SizeType idx = 0; idx < m_peaks.size(); ++idx) {
+            auto& peak = m_peaks[idx];
+            if (peak.open) {
+                const SizeType i =
+                    (((idx / m_peak_count) % nrows) * m_filters) + peak.filter;
+                peak.snr = static_cast<float>(
+                    (static_cast<double>(peak.raw_sum) - m_integer_means[i]) *
+                    m_integer_scales[i]);
+            }
+        }
+    }
     if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
         const SizeType np = m_surrogate_plan.num_passes;
         for (SizeType idx = 0; idx < m_surrogate_rows.size(); ++idx) {
@@ -515,6 +582,14 @@ void FDMTBoxcarCpuEngine::consume(SizeType level,
         const FDMTSearchInput* in = &row_in;
         if (m_config.input_nbits == 32) {
             score<float, float>(m_planes[p], row_idx, d, beam, *in);
+        } else if (m_noise_on) {
+            if (m_carry32) {
+                score<uint64_t, uint32_t, true>(m_planes[p], row_idx, d, beam,
+                                                *in);
+            } else {
+                score<uint64_t, uint64_t, true>(m_planes[p], row_idx, d, beam,
+                                                *in);
+            }
         } else if (m_carry32) {
             score<uint64_t, uint32_t>(m_planes[p], row_idx, d, beam, *in);
         } else {
@@ -594,12 +669,13 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
                      (m_plane_next.size() * sizeof(uint64_t)) +
                      (m_level_offsets.size() * sizeof(uint32_t)) +
                      (m_deferred.size(m_screen_thr) * sizeof(float)) +
+                     (m_deferred.size(m_screen_ithr) * sizeof(uint64_t)) +
                      kadane_work,
         .candidates = (m_deferred.size(m_candidates) + m_deferred.size(m_keep) +
                        m_deferred.size(m_plane_scratch)) *
                       sizeof(RawCandidate),
         .staging    = (m_deferred.size(m_masked) * sizeof(float)) +
-                      m_deferred.size(m_masked_packed)};
+                      m_deferred.size(m_masked_packed) + m_fill_row.size()};
 }
 
 SizeType FDMTBoxcarCpuEngine::chunk_nsamps() const noexcept {
@@ -693,7 +769,8 @@ RawCandidate FDMTBoxcarCpuEngine::candidate_of(SizeType row,
     candidate.begin_sample = peak.begin;
     candidate.end_sample   = peak.end;
     candidate.snr          = peak.snr;
-    if (m_config.input_nbits != 32 &&
+    // Packed peaks under per-call masks carry the S/N of their table.
+    if (m_config.input_nbits != 32 && !m_noise_on &&
         m_config.peak_mode != PeakFindingMode::kContiguousPeakAcrossWidths) {
         const SizeType i = (row * m_filters) + peak.filter;
         candidate.snr    = static_cast<float>(
@@ -885,17 +962,38 @@ FDMTBoxcarCpuEngine::tile_tables(const plans::BoxcarPlanePlan& plane,
     }
     const float* plane_thr = plane.raw_thresh_lut.data() + (dm * m_filters);
     const float* plane_inv = plane.inv_sigma_lut.data() + (dm * m_filters);
+    const bool packed      = m_config.input_nbits != 32;
+    const uint64_t* plane_ithr =
+        packed ? plane.integer_thresh_lut.data() + (dm * m_filters) : nullptr;
     if (count == 1) {
         tables.thr   = table_thr(in_play[0], plane_thr, row_idx, m_filters);
         tables.inv   = table_inv(in_play[0], plane_inv, row_idx, m_filters);
         tables.mixed = false;
+        if (packed) {
+            tables.ithr =
+                table_ithr(in_play[0], plane_ithr, row_idx, m_filters);
+            tables.screen_ithr = tables.ithr;
+        }
         return tables.thr;
     }
     tables.thr     = plane_thr;
     tables.inv     = plane_inv;
     tables.mixed   = true;
     tables.support = support;
-    float* screen  = m_screen_thr.data() + (tid * m_filters);
+    if (packed) {
+        tables.ithr       = plane_ithr;
+        uint64_t* iscreen = m_screen_ithr.data() + (tid * m_filters);
+        for (SizeType f = 0; f < m_filters; ++f) {
+            uint64_t th = UINT64_MAX;
+            for (int j = 0; j < count; ++j) {
+                th = std::min(th, table_ithr(in_play[j], plane_ithr, row_idx,
+                                             m_filters)[f]);
+            }
+            iscreen[f] = th;
+        }
+        tables.screen_ithr = iscreen;
+    }
+    float* screen = m_screen_thr.data() + (tid * m_filters);
     for (SizeType f = 0; f < m_filters; ++f) {
         float th = std::numeric_limits<float>::max();
         for (int j = 0; j < count; ++j) {
@@ -931,11 +1029,21 @@ std::span<const T> FDMTBoxcarCpuEngine::masked(std::span<const T> block,
         return block;
     }
     if (m_noise_on) {
+        // Packed: channels only the per-call mask kills read the mean code
+        // (2); the constructor's read zero (1).
+        const uint8_t call_killed = std::is_same_v<T, float> ? 1 : 2;
         std::ranges::fill(m_killed, uint8_t{0});
         for (const auto& [c0, c1] : runs) {
             std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
                       m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
-                      uint8_t{1});
+                      call_killed);
+        }
+        if (call_killed == 2) {
+            for (const auto& [c0, c1] : m_kill_runs) {
+                std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
+                          m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
+                          uint8_t{1});
+            }
         }
     }
     const SizeType nchans = m_plan.get_nchans();
@@ -945,7 +1053,12 @@ std::span<const T> FDMTBoxcarCpuEngine::masked(std::span<const T> block,
     T* dst                = buffer.data();
 #pragma omp parallel for num_threads(m_threads) schedule(static)
     for (SizeType r = 0; r < rows; ++r) {
-        if (m_killed[r % nchans] != 0) {
+        const uint8_t k = m_killed[r % nchans];
+        if (k == 2) {
+            if constexpr (std::is_same_v<T, uint8_t>) {
+                std::copy_n(m_fill_row.data(), row, dst + (r * row));
+            }
+        } else if (k != 0) {
             std::fill_n(dst + (r * row), row, T{0});
         } else {
             std::copy_n(src + (r * row), row, dst + (r * row));

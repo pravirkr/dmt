@@ -258,16 +258,29 @@ public:
                (table_sets(ring) * model.table_bytes());
     }
     /// The per-call mask model, after the checks a first per-call mask
-    /// makes (float input).
+    /// makes. Packed input: channels a per-call mask kills read the code
+    /// input_mean (an integer), so the model keeps the constructor mask's
+    /// mean (`reference`).
     [[nodiscard]] std::unique_ptr<detail::BoxcarNoiseModel>
     make_noise_model() const {
-        if (config.input_nbits != 32) {
+        const bool packed = config.input_nbits != 32;
+        if (packed && exec.backend != Backend::kCPU) {
             throw std::invalid_argument(
-                "FDMTBoxcar: per-call kill masks need float32 input "
-                "(input_nbits 32)");
+                "FDMTBoxcar: per-call kill masks on packed input need the "
+                "CPU backend");
+        }
+        const BoxcarScreenMode mode = detail::resolve_screen_mode(
+            config.screen_mode, exec.backend != Backend::kCPU);
+        if (packed && (mode == BoxcarScreenMode::kKadane ||
+                       mode == BoxcarScreenMode::kKadaneSurrogate)) {
+            throw std::invalid_argument(
+                "FDMTBoxcar: per-call kill masks on packed input need "
+                "screen_mode kPrefix or kNone");
         }
         return std::make_unique<detail::BoxcarNoiseModel>(
-            plan, config, smear, std::max(1, exec.nthreads));
+            plan, config, smear, std::max(1, exec.nthreads),
+            packed ? std::span<const uint8_t>(ctor_mask)
+                   : std::span<const uint8_t>{});
     }
     /// Budgeted bytes declared per-call masks add, before the path (hence
     /// the search latency) is known: the latency is at most the plan's
@@ -284,11 +297,18 @@ public:
         if (ex.backend == Backend::kCPU) {
             const auto ring = this->ring(
                 static_cast<uint64_t>(plan.get_dt_max()), reach(m), ex);
-            const SizeType staging = kill_runs.empty()
-                                         ? beams * plan.get_nchans() *
-                                               plan.get_nsamps() * sizeof(float)
-                                         : 0;
-            return staging + model_bytes(m, ring) +
+            // The staging block (when the constructor mask has none);
+            // packed: the fill row and the integer screen cutoffs.
+            const bool packed = config.input_nbits != 32;
+            const SizeType row =
+                packed ? bit_pack_utils::packed_row_bytes(plan.get_nsamps(),
+                                                          config.input_nbits)
+                       : plan.get_nsamps() * sizeof(float);
+            const SizeType staging =
+                kill_runs.empty() ? beams * plan.get_nchans() * row : 0;
+            const SizeType fill =
+                packed ? row + (threads * filters * sizeof(uint64_t)) : 0;
+            return staging + fill + model_bytes(m, ring) +
                    (threads * filters * sizeof(float)) +
                    (threads * kadane::kMaxGateBuckets * kadane::kMaxBatchRows *
                     sizeof(float));
@@ -445,14 +465,17 @@ public:
             if (mask.empty()) {
                 return call();
             }
-            if (config.input_nbits != 32) {
+            const SizeType row =
+                config.input_nbits == 32
+                    ? plan.get_nsamps()
+                    : bit_pack_utils::packed_row_bytes(plan.get_nsamps(),
+                                                       config.input_nbits);
+            if (waterfall_size != beams * plan.get_nchans() * row) {
                 throw std::invalid_argument(
-                    "FDMTBoxcar: per-call kill masks need float32 input "
-                    "(input_nbits 32)");
-            }
-            if (waterfall_size !=
-                beams * plan.get_nchans() * plan.get_nsamps()) {
-                throw std::invalid_argument("FDMTBoxcar: wrong waterfall size");
+                    config.input_nbits == 32
+                        ? "FDMTBoxcar: wrong waterfall size"
+                        : "FDMTBoxcar: packed input size or bit depth "
+                          "mismatch");
             }
             enable_block_noise();
         }
@@ -725,8 +748,14 @@ FDMTBoxcar::execute(DeviceSpan<const float> waterfall,
     });
 }
 CandidateResultView FDMTBoxcar::execute(std::span<const uint8_t> waterfall) {
+    return execute(waterfall, std::span<const uint8_t>{});
+}
+CandidateResultView FDMTBoxcar::execute(std::span<const uint8_t> waterfall,
+                                        std::span<const uint8_t> kill_mask) {
     m_impl->drain_state.check_open("FDMTBoxcar::execute");
-    return m_impl->engine->execute(waterfall);
+    return m_impl->run_masked(kill_mask, waterfall.size(), [&] {
+        return m_impl->engine->execute(waterfall);
+    });
 }
 CandidateDeviceResultView
 FDMTBoxcar::execute(DeviceSpan<const uint8_t> waterfall, Stream stream) {

@@ -344,6 +344,52 @@ DMT_HD void boxcar_integer_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
+/// Packed input under per-call masks: S/N first (its sum's own table), then
+/// today's raw-sum order. Within one table the S/N is monotone in the sum,
+/// so the order equals boxcar_integer_better()'s.
+DMT_HD inline bool boxcar_integer_snr_better(float snr,
+                                             uint64_t sum,
+                                             uint64_t sample,
+                                             uint32_t filter,
+                                             const BoxcarPeak& peak) noexcept {
+    return !peak.open || snr > peak.snr ||
+           (snr == peak.snr &&
+            (sum > peak.raw_sum ||
+             (sum == peak.raw_sum &&
+              (sample < peak.peak ||
+               (sample == peak.peak && filter < peak.filter)))));
+}
+
+template <typename Emit>
+DMT_HD void boxcar_integer_snr_peak_step(BoxcarPeak& peak,
+                                         bool above,
+                                         float snr,
+                                         uint64_t sum,
+                                         uint64_t sample,
+                                         uint32_t filter,
+                                         Emit emit) {
+    if (!above) {
+        if (peak.open) {
+            emit(peak);
+            peak.open = false;
+        }
+        return;
+    }
+    const bool better =
+        boxcar_integer_snr_better(snr, sum, sample, filter, peak);
+    if (!peak.open) {
+        peak.begin = sample;
+    }
+    peak.end = sample;
+    if (better) {
+        peak.snr     = snr;
+        peak.raw_sum = sum;
+        peak.peak    = sample;
+        peak.filter  = filter;
+    }
+    peak.open = true;
+}
+
 /// One kept candidate of a row's kKeepBrightest store on a GPU (the row
 /// supplies the rest of its RawCandidate).
 struct BoxcarKeepEntry {

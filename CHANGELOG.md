@@ -24,9 +24,17 @@ All notable changes to `dmt` are listed here. The format follows
   a `chan_dm` plan's level-0 causal delay is subtracted on every plane. And
   `FDMTBoxcar`'s input contract: no preprocessing; each channel zero mean,
   common sigma, white in time over at least `max_boxcar` samples.
+- **`FDMTBoxcar` per-call kill masks on packed input** (C++
+  `execute(std::span<const uint8_t> waterfall, kill_mask)`; CPU backend,
+  `kPrefix` and `kNone` screens so far): channels a per-call mask kills
+  read the code `input_mean`, which must then be an integer. The
+  constructor plan's integer means stay exact, so only the per-mask
+  cutoffs and S/N scales change, as on float input (without box smearing
+  the candidates equal the float search on `code - input_mean`). Per-width
+  peaks across a change of tables are ranked by S/N.
 - **`BoxcarConfig::per_call_masks`** (Python `per_call_masks=`, default
   false): declares that an `FDMTBoxcar` stream will pass per-call kill
-  masks. Their requirements (float32 input) are checked and their memory
+  masks. Their requirements are checked and their memory
   reserved at construction and in `estimate_memory()`, before the
   transform's path is chosen, so a per-call mask no longer fails mid-run
   for those reasons, and `get_memory_usage()` stays at the estimate.

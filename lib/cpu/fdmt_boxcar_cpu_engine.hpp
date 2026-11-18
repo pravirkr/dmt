@@ -97,6 +97,11 @@ private:
         const float* inv = nullptr;
         bool mixed       = false;
         uint64_t support = 0;
+        /// Packed input: integer cutoffs of the row (one table), and the
+        /// screen's per-width minimum over the tile's tables (equal to
+        /// `ithr` unless `mixed`).
+        const uint64_t* ithr        = nullptr;
+        const uint64_t* screen_ithr = nullptr;
     };
 
     /// Under mixed tables: the table of endpoint `sample` for width
@@ -117,6 +122,13 @@ private:
                                                 SizeType row,
                                                 SizeType filters) noexcept {
         return t == nullptr ? plane_row : t->inv_sigma.data() + (row * filters);
+    }
+    [[nodiscard]] static const uint64_t* table_ithr(const NoiseTables* t,
+                                                    const uint64_t* plane_row,
+                                                    SizeType row,
+                                                    SizeType filters) noexcept {
+        return t == nullptr ? plane_row
+                            : t->integer_thresh.data() + (row * filters);
     }
 
     // Core result, noise-ring, and staging helpers (fdmt_boxcar_cpu.cpp)
@@ -159,7 +171,9 @@ private:
                             SizeType t0,
                             SizeType n,
                             Prefix* out) noexcept;
-    template <typename T, typename C>
+    /// `kNoise` (packed input under per-call masks): per-tile integer
+    /// cutoffs and S/N-ranked peaks; false is the unmasked code.
+    template <typename T, typename C, bool kNoise = false>
     void score(const plans::BoxcarPlanePlan& plane,
                SizeType row_idx,
                SizeType dm,
@@ -177,6 +191,7 @@ private:
                                    double* range_min) const;
     [[nodiscard]] bool screen_tile_int(const plans::BoxcarPlanePlan& plane,
                                        SizeType dm,
+                                       const uint64_t* ithr_row,
                                        const BoxcarRow& row,
                                        const uint64_t* prefix,
                                        SizeType lookback,
@@ -185,7 +200,7 @@ private:
                                        bool cold,
                                        const double* group_thresh,
                                        double* range_min) const;
-    template <typename T, typename Prefix>
+    template <typename T, typename Prefix, bool kNoise = false>
     void score_tile(const plans::BoxcarPlanePlan& plane,
                     SizeType dm,
                     const BoxcarRow& row,
@@ -324,9 +339,12 @@ private:
     std::unique_ptr<BoxcarDriver> m_driver;
     /// Killed channel runs and the staging block they are zeroed in.
     std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
-    std::vector<uint8_t> m_killed; ///< per channel, 1 = killed
+    /// Per channel: 0 live, 1 killed (zero), 2 killed by a per-call mask
+    /// only (packed input: reads the code input_mean, m_fill_row).
+    std::vector<uint8_t> m_killed;
     std::vector<float> m_masked;
     std::vector<uint8_t> m_masked_packed;
+    std::vector<uint8_t> m_fill_row;
     std::vector<SizeType> m_offsets;
     /// Row range [first, second) of each level's planes, and each row's plane.
     std::vector<std::pair<SizeType, SizeType>> m_level_rows;
@@ -401,6 +419,7 @@ private:
     };
     CatchUndo m_catch_undo;
     std::vector<float> m_screen_thr; ///< per thread: min thresholds of a tile
+    std::vector<uint64_t> m_screen_ithr; ///< packed: min integer cutoffs
     SizeType m_kadane_exact_prefix_cap = kKadaneExactPrefixCap;
     SizeType m_prefix_stride           = 0;
     SizeType m_surrogate_carry_ring    = 0;

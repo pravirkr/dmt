@@ -415,8 +415,11 @@ void FDMTBoxcarCpuEngine::lazy_score_tile(
     }
 
     TileTables local_tables{
-        .thr = plane.raw_thresh_lut.data() + (dm * m_filters),
-        .inv = plane.inv_sigma_lut.data() + (dm * m_filters),
+        .thr  = plane.raw_thresh_lut.data() + (dm * m_filters),
+        .inv  = plane.inv_sigma_lut.data() + (dm * m_filters),
+        .ithr = std::is_integral_v<T>
+                    ? plane.integer_thresh_lut.data() + (dm * m_filters)
+                    : nullptr,
     };
     const TileTables* tables_ptr = &local_tables;
     if constexpr (!std::is_integral_v<T>) {

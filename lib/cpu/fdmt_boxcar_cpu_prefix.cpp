@@ -107,7 +107,7 @@ void FDMTBoxcarCpuEngine::prefix_tile(const FDMTSearchInput& input,
     }
 }
 
-template <typename T, typename C>
+template <typename T, typename C, bool kNoise>
 void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
                                 SizeType row_idx,
                                 SizeType dm,
@@ -176,13 +176,37 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
     // Float rows: the thresholds of the row (TileTables), per tile under
     // per-call masks; the screen's per-width thresholds and the group
     // minima follow them.
+    // Packed rows under per-call masks (kNoise): the integer cutoffs of
+    // the tile's tables likewise.
     TileTables tables{
-        .thr = plane.raw_thresh_lut.data() + (dm * m_filters),
-        .inv = plane.inv_sigma_lut.data() + (dm * m_filters),
+        .thr         = plane.raw_thresh_lut.data() + (dm * m_filters),
+        .inv         = plane.inv_sigma_lut.data() + (dm * m_filters),
+        .ithr        = std::is_integral_v<T>
+                           ? plane.integer_thresh_lut.data() + (dm * m_filters)
+                           : nullptr,
+        .screen_ithr = std::is_integral_v<T>
+                           ? plane.integer_thresh_lut.data() + (dm * m_filters)
+                           : nullptr,
     };
-    const float* screen_thr = tables.thr;
-    const float* groups_for = nullptr; // thresholds group_thresh holds
-    const auto set_groups   = [&](const float* thr) {
+    const float* screen_thr     = tables.thr;
+    const float* groups_for     = nullptr; // thresholds group_thresh holds
+    const uint64_t* igroups_for = tables.screen_ithr;
+    const auto set_igroups      = [&](const uint64_t* ithr) {
+        // Mean-centred cutoffs: integer cutoff minus the width's mean
+        // (screen_tile_int()). Set above any centred cutoff without
+        // relying on Inf under -ffast-math.
+        for (SizeType g = 0; g < m_groups.size(); ++g) {
+            double th = std::numeric_limits<double>::max();
+            for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi; ++f) {
+                th = std::min(th,
+                              static_cast<double>(ithr[f]) -
+                                  plane.integer_mean_lut[(dm * m_filters) + f]);
+            }
+            group_thresh[g] = th;
+        }
+        igroups_for = ithr;
+    };
+    const auto set_groups = [&](const float* thr) {
         if (thr == groups_for) {
             return;
         }
@@ -232,13 +256,20 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
                     groups_for = nullptr;
                 }
             }
+        } else if constexpr (kNoise) {
+            (void)tile_tables(plane, dm, row_idx, start, n, tid, tables);
+            if (!m_groups.empty() &&
+                (tables.mixed || tables.screen_ithr != igroups_for)) {
+                set_igroups(tables.screen_ithr);
+            }
         }
         bool hit      = m_config.screen_mode == BoxcarScreenMode::kNone;
         bool screened = hit;
         if (!m_groups.empty() && !open) {
             if constexpr (std::is_integral_v<T>) {
-                hit = screen_tile_int(plane, dm, row, prefix, lookback, start,
-                                      n, cold, group_thresh, range_min);
+                hit = screen_tile_int(plane, dm, tables.screen_ithr, row,
+                                      prefix, lookback, start, n, cold,
+                                      group_thresh, range_min);
             } else {
                 set_groups(screen_thr);
                 hit = screen_tile(plane, screen_thr, row, prefix, lookback,
@@ -255,7 +286,7 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
             const Prefix* hi      = prefix + lookback + 1;
             const auto threshold  = [&] {
                 if constexpr (std::is_integral_v<T>) {
-                    return plane.integer_thresh_lut[(dm * m_filters) + f];
+                    return tables.screen_ithr[f];
                 } else {
                     return static_cast<Prefix>(screen_thr[f]);
                 }
@@ -279,8 +310,9 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
             }
         }
         if (hit || open) {
-            score_tile<T>(plane, dm, row, beam, prefix, lookback, start, n,
-                          peaks, row_idx, tables);
+            score_tile<T, Prefix, kNoise>(plane, dm, row, beam, prefix,
+                                          lookback, start, n, peaks, row_idx,
+                                          tables);
             open = any_open();
         }
         // Slide the last lookback prefixes in front of the next tile.
@@ -380,6 +412,7 @@ bool FDMTBoxcarCpuEngine::screen_tile(const plans::BoxcarPlanePlan& plane,
 
 bool FDMTBoxcarCpuEngine::screen_tile_int(const plans::BoxcarPlanePlan& plane,
                                           SizeType dm,
+                                          const uint64_t* ithr_row,
                                           const BoxcarRow& row,
                                           const uint64_t* prefix,
                                           SizeType lookback,
@@ -440,8 +473,8 @@ bool FDMTBoxcarCpuEngine::screen_tile_int(const plans::BoxcarPlanePlan& plane,
             const SizeType width = plane.widths[f];
             const SizeType w_edge =
                 m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
-            const uint64_t* lo = prefix + lookback + 1 - width;
-            const uint64_t th  = plane.integer_thresh_lut[(dm * m_filters) + f];
+            const uint64_t* lo         = prefix + lookback + 1 - width;
+            const uint64_t th          = ithr_row[f];
             const uint64_t first_valid = row.warmup + width - 1;
             bool hit                   = false;
             if (w_edge == 0) {
@@ -469,7 +502,7 @@ bool FDMTBoxcarCpuEngine::screen_tile_int(const plans::BoxcarPlanePlan& plane,
     return false;
 }
 
-template <typename T, typename Prefix>
+template <typename T, typename Prefix, bool kNoise>
 void FDMTBoxcarCpuEngine::score_tile(const plans::BoxcarPlanePlan& plane,
                                      SizeType dm,
                                      const BoxcarRow& row,
@@ -495,24 +528,27 @@ void FDMTBoxcarCpuEngine::score_tile(const plans::BoxcarPlanePlan& plane,
         const SizeType width = plane.widths[f];
         const SizeType w_edge =
             m_config.use_trapezoid ? trapezoid_edge_width(plane.widths[f]) : 0;
-        // Float rows take the tile's tables; packed rows the planes' (no
-        // per-call masks). Mixed tiles go in runs of samples with one
-        // table each; otherwise the tile is one run. The per-sample body
-        // stays inline here: moved into a lambda the scorer ran 35%
-        // slower, even forced inline.
+        // Float rows and packed rows under per-call masks (kNoise) take
+        // the tile's tables; other packed rows the planes'. Mixed tiles go
+        // in runs of samples with one table each; otherwise the tile is one
+        // run. The per-sample body stays inline here: moved into a lambda
+        // the scorer ran 35% slower, even forced inline.
+        constexpr bool kInt = std::is_integral_v<T>;
         const float* thr_row =
-            std::is_integral_v<T>
-                ? plane.raw_thresh_lut.data() + (dm * m_filters)
-                : tables.thr;
+            kInt && !kNoise ? plane.raw_thresh_lut.data() + (dm * m_filters)
+                            : tables.thr;
         const float* inv_row =
-            std::is_integral_v<T>
-                ? plane.inv_sigma_lut.data() + (dm * m_filters)
-                : tables.inv;
-        const bool mixed = !std::is_integral_v<T> && tables.mixed;
+            kInt && !kNoise ? plane.inv_sigma_lut.data() + (dm * m_filters)
+                            : tables.inv;
+        const bool mixed = (!kInt || kNoise) && tables.mixed;
         for (SizeType t_run = 0; t_run < n;) {
-            SizeType t_end  = n;
-            float threshold = thr_row[f];
-            float inv_sigma = inv_row[f];
+            SizeType t_end      = n;
+            float threshold     = thr_row[f];
+            float inv_sigma     = inv_row[f];
+            uint64_t ithreshold = 0;
+            if constexpr (kInt) {
+                ithreshold = tables.ithr[f];
+            }
             if (mixed) {
                 const auto [table, until] =
                     sample_table(start + t_run, width, tables.support);
@@ -520,6 +556,10 @@ void FDMTBoxcarCpuEngine::score_tile(const plans::BoxcarPlanePlan& plane,
                                           : n;
                 threshold = table_thr(table, tables.thr, row_idx, m_filters)[f];
                 inv_sigma = table_inv(table, tables.inv, row_idx, m_filters)[f];
+                if constexpr (kNoise) {
+                    ithreshold =
+                        table_ithr(table, tables.ithr, row_idx, m_filters)[f];
+                }
             }
             for (SizeType t = t_run; t < t_end; ++t) {
                 const uint64_t sample = start + t;
@@ -532,13 +572,12 @@ void FDMTBoxcarCpuEngine::score_tile(const plans::BoxcarPlanePlan& plane,
                                    sample >= row.warmup + width - 1;
                 bool above       = false;
                 float snr        = 0;
-                if constexpr (std::is_integral_v<T>) {
-                    above =
-                        valid &&
-                        sum >= plane.integer_thresh_lut[(dm * m_filters) + f];
+                if constexpr (kInt) {
+                    above = valid && sum >= ithreshold;
                     if (above &&
-                        m_config.peak_mode ==
-                            PeakFindingMode::kContiguousPeakAcrossWidths) {
+                        (kNoise ||
+                         m_config.peak_mode ==
+                             PeakFindingMode::kContiguousPeakAcrossWidths)) {
                         snr = static_cast<float>(
                             (static_cast<double>(sum) -
                              plane.integer_mean_lut[(dm * m_filters) + f]) *
@@ -569,7 +608,11 @@ void FDMTBoxcarCpuEngine::score_tile(const plans::BoxcarPlanePlan& plane,
                         emit_peak(peak);
                     }
                 } else {
-                    if constexpr (std::is_integral_v<T>) {
+                    if constexpr (kNoise) {
+                        boxcar_integer_snr_peak_step(
+                            peaks[f], above, snr, sum, sample,
+                            static_cast<uint32_t>(f), emit_peak);
+                    } else if constexpr (kInt) {
                         boxcar_integer_peak_step(peaks[f], above, sum, sample,
                                                  static_cast<uint32_t>(f),
                                                  emit_peak);
@@ -627,6 +670,18 @@ FDMTBoxcarCpuEngine::score<uint64_t, uint64_t>(const plans::BoxcarPlanePlan&,
                                                SizeType,
                                                SizeType,
                                                const FDMTSearchInput&);
+template void FDMTBoxcarCpuEngine::score<uint64_t, uint32_t, true>(
+    const plans::BoxcarPlanePlan&,
+    SizeType,
+    SizeType,
+    SizeType,
+    const FDMTSearchInput&);
+template void FDMTBoxcarCpuEngine::score<uint64_t, uint64_t, true>(
+    const plans::BoxcarPlanePlan&,
+    SizeType,
+    SizeType,
+    SizeType,
+    const FDMTSearchInput&);
 
 template void
 FDMTBoxcarCpuEngine::score_tile<float, double>(const plans::BoxcarPlanePlan&,
@@ -641,6 +696,18 @@ FDMTBoxcarCpuEngine::score_tile<float, double>(const plans::BoxcarPlanePlan&,
                                                SizeType,
                                                const TileTables&);
 template void FDMTBoxcarCpuEngine::score_tile<uint64_t, uint64_t>(
+    const plans::BoxcarPlanePlan&,
+    SizeType,
+    const BoxcarRow&,
+    SizeType,
+    const uint64_t*,
+    SizeType,
+    uint64_t,
+    SizeType,
+    BoxcarPeak*,
+    SizeType,
+    const TileTables&);
+template void FDMTBoxcarCpuEngine::score_tile<uint64_t, uint64_t, true>(
     const plans::BoxcarPlanePlan&,
     SizeType,
     const BoxcarRow&,

@@ -1117,8 +1117,10 @@ def _check_declared_masks(backend: str) -> None:
     after = search.memory_usage
     assert after.total == est.usage.total + est.host_staging
     assert after.staging == est.usage.staging + est.host_staging
+    # Packed input: CPU and the kPrefix / kNone screens so far, and an
+    # integer input_mean (killed channels read that code).
     packed = BoxcarConfig(17, input_nbits=8, input_mean=127.5, per_call_masks=True)
-    with pytest.raises(ValueError, match="float32"):
+    with pytest.raises(ValueError, match=r"packed input|integer input_mean"):
         FDMTBoxcar(plan, packed, backend=backend)
 
 
