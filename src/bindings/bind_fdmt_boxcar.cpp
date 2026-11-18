@@ -229,7 +229,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``max_memory_bytes`` (the staging block of the input; 0 on the CPU);
         ``search_path`` the transform's path (the ``Transform:`` line of
         ``summary()``; empty for the tree path) and ``search_latency`` its
-        ``search_latency``.
+        ``search_latency``; ``max_memory_bytes`` the budget it was made with
+        (from :meth:`FDMTBoxcar.estimate_minimum_memory`: the smallest that
+        builds, at least ``usage.budgeted``).
         )doc")
         .def_readonly("usage", &FDMTBoxcarMemoryEstimate::usage)
         .def_readonly("chunk_nsamps", &FDMTBoxcarMemoryEstimate::chunk_nsamps)
@@ -237,12 +239,15 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readonly("search_path", &FDMTBoxcarMemoryEstimate::search_path)
         .def_readonly("search_latency",
                       &FDMTBoxcarMemoryEstimate::search_latency)
+        .def_readonly("max_memory_bytes",
+                      &FDMTBoxcarMemoryEstimate::max_memory_bytes)
         .def("__repr__", [](const FDMTBoxcarMemoryEstimate& e) {
             return fmt::format(
                 "FDMTBoxcarMemoryEstimate(total={}, chunk_nsamps={}, "
-                "host_staging={}, search_latency={}, search_path='{}')",
+                "host_staging={}, search_latency={}, search_path='{}', "
+                "max_memory_bytes={})",
                 e.usage.total(), e.chunk_nsamps, e.host_staging,
-                e.search_latency, e.search_path);
+                e.search_latency, e.search_path, e.max_memory_bytes);
         });
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
             "max_width"_a, "wtsp"_a = 2.0F, R"doc(
@@ -347,8 +352,33 @@ void bind_fdmt_boxcar(py::module_& mod) {
             every working buffer is sized, not allocated. Raises as the
             constructor would when nothing fits ``max_memory_bytes``. GPU
             backends read the device's limits (no device memory is allocated;
-            the CUDA context is not counted). Per-call kill masks add their
-            noise tables on first use (not included).
+            the CUDA context is not counted). Per-call kill masks are
+            included when declared (``BoxcarConfig.per_call_masks``);
+            otherwise they add their noise tables on first use.
+            )doc")
+        .def_static(
+            "estimate_minimum_memory",
+            [](const plans::FDMTPlan& plan, BoxcarConfig config, bool smear,
+               int nthreads, SizeType nbeams, std::optional<SizeType> fuse,
+               std::optional<SizeType> chunk, std::string_view backend,
+               int device, const py::object& kill) {
+                const auto mask = extract_kill_mask(kill);
+                return FDMTBoxcar::estimate_minimum_memory(
+                    plan, config, smear, make_exec(backend, nthreads, device),
+                    nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
+                    chunk.value_or(0), mask);
+            },
+            "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
+            "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
+            "chunk_nsamps"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
+            "device"_a = 0, "kill_mask"_a = py::none(),
+            R"doc(
+            The smallest configuration of these arguments: what
+            :meth:`estimate_memory` returns at the smallest
+            ``max_memory_bytes`` an ``FDMTBoxcar`` can be built with (the
+            result's ``max_memory_bytes``; one byte less raises). A few
+            estimates long. Raises as :meth:`estimate_memory` for anything
+            but the budget.
             )doc")
         .def(
             "execute",

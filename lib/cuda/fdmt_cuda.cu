@@ -1207,9 +1207,10 @@ SizeType FDMTCudaEngine::direct_workspace_bytes() const noexcept {
 
 namespace dmt::algorithms {
 
+namespace {
 std::unique_ptr<detail::FDMTEngine>
-detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
-                      const detail::FDMTEngineConfig& cfg_in) {
+make_fdmt_gpu_within(const plans::FDMTPlan& plan,
+                     const detail::FDMTEngineConfig& cfg_in) {
     // Memory budget (FDMTEngineConfig::max_memory_bytes). Construction is
     // cheap next to the plan (about 1 s on parkes_uwl), so the automatic
     // chunk is chosen by building and measuring: the windowed top (subband
@@ -1235,11 +1236,15 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
         return e.get_memory_usage().total() <= cfg.max_memory_bytes;
     };
     const auto over = [&](const detail::fdmt_cuda::FDMTCudaEngine& e) {
-        return std::invalid_argument(fmt::format(
-            "FDMT (cuda): this configuration needs {:.2f} GiB, over "
-            "max_memory_bytes ({:.2f} GiB)",
-            static_cast<double>(e.get_memory_usage().total()) / (1 << 30),
-            static_cast<double>(cfg.max_memory_bytes) / (1 << 30)));
+        return detail::BudgetError(
+            fmt::format(
+                "FDMT (cuda): this configuration needs {:.2f} GiB, over "
+                "max_memory_bytes ({:.2f} GiB)",
+                static_cast<double>(e.get_memory_usage().total()) / (1 << 30),
+                static_cast<double>(cfg.max_memory_bytes) / (1 << 30)),
+            e.get_memory_usage().total(),
+            /*smaller_path=*/e.search_path().find("skewed") ==
+                std::string::npos);
     };
     auto engine =
         std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, cfg);
@@ -1305,6 +1310,32 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
             std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, c_cfg);
     }
     return finish(std::move(engine));
+}
+} // namespace
+
+std::unique_ptr<detail::FDMTEngine>
+detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
+                      const detail::FDMTEngineConfig& cfg) {
+    try {
+        return make_fdmt_gpu_within(plan, cfg);
+    } catch (const detail::BudgetError& first) {
+        // The path is chosen from the tree history against the budget; when
+        // that path is over the budget at every chunk, the skewed direct
+        // levels (windowed top for a subband search) may still fit.
+        if (cfg.force_skewed_direct || !first.smaller_path()) {
+            throw;
+        }
+        auto skewed                = cfg;
+        skewed.force_skewed_direct = true;
+        try {
+            return make_fdmt_gpu_within(plan, skewed);
+        } catch (const detail::BudgetError& e) {
+            if (e.needed() < first.needed()) {
+                throw;
+            }
+            throw first;
+        }
+    }
 }
 
 } // namespace dmt::algorithms

@@ -1234,3 +1234,32 @@ def test_time_reference() -> None:
 
 def test_time_reference_gpu(gpu_backend: str) -> None:
     _check_time_reference(gpu_backend)
+
+
+def _check_minimum_memory(backend: str) -> None:
+    grid = dmtlib.generate_levin_dm_grid(
+        1200.0, 1600.0, 256, 1e-4, 0.0, 600.0, pulse_width=1e-4
+    )
+    plan = FDMTPlan(1200.0, 1600.0, 256, 4096, 1e-4, dm_grid=grid, subband_depth=1)
+    cfg = BoxcarConfig(64)
+    m = FDMTBoxcar.estimate_minimum_memory(plan, cfg, backend=backend)
+    assert m.max_memory_bytes >= m.usage.budgeted
+    e = FDMTBoxcar.estimate_memory(
+        plan, cfg, backend=backend, max_memory_bytes=m.max_memory_bytes
+    )
+    assert e.max_memory_bytes == m.max_memory_bytes
+    assert e.usage.budgeted == m.usage.budgeted
+    assert e.chunk_nsamps == m.chunk_nsamps
+    with pytest.raises(ValueError, match="FDMTBoxcar: this configuration needs"):
+        FDMTBoxcar.estimate_memory(
+            plan, cfg, backend=backend, max_memory_bytes=m.max_memory_bytes - 1
+        )
+    assert "max_memory_bytes=" in repr(m)
+
+
+def test_minimum_memory() -> None:
+    _check_minimum_memory("cpu")
+
+
+def test_minimum_memory_gpu(gpu_backend: str) -> None:
+    _check_minimum_memory(gpu_backend)

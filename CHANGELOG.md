@@ -8,6 +8,12 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`FDMTBoxcar::estimate_minimum_memory(...)`** (C++ and Python): the
+  estimate at the smallest `max_memory_bytes` the search can be built with
+  (same arguments as `estimate_memory()`, no budget), and
+  `FDMTBoxcarMemoryEstimate::max_memory_bytes`, the budget an estimate was
+  made with (for the minimum: the smallest that builds; one byte less
+  raises).
 - **`dmt::dispersion_delay(dm, f_lo_mhz, f_hi_mhz)`** (C++,
   `dmt/common/types.hpp`): the dispersion delay in seconds, as Python's
   `dmtlib.dispersion_delay` (TEMPO2 constant 1 / 2.41e-4; `f_hi_mhz` =
@@ -111,6 +117,14 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- `FDMT`, `FDMTBoxcar`: a budget no longer fails where a smaller path
+  fits. The tree path (CPU) or unskewed direct levels (GPU) were chosen
+  when the budget looked large enough and then turned out over it, so some
+  budgets above a working one failed (Parkes UWL subband depth 4: 6.5-7.2
+  GiB on the GPU while 3.6 GiB worked). The smaller path is now taken
+  instead; budgets that worked choose as before.
+- An `FDMTBoxcar` over its budget now reports what the whole search needs
+  (it reported the FDMT's share). Python: still `ValueError`.
 - `FDMTBoxcar::drain()` (Python `drain`) no longer builds a zero block of
   the whole input in host memory (and, on a GPU, a device staging block)
   to search the samples behind the search latency: it searches them without

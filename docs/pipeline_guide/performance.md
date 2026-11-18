@@ -491,6 +491,15 @@ est = dmtlib.DDMTFFT.estimate_memory(plan, 65536, backend="cuda")
 print(est.usage.total + est.host_staging)  # bytes on the device
 ```
 
+`FDMTBoxcar.estimate_minimum_memory(...)` (same arguments, no budget)
+returns the estimate at the smallest `max_memory_bytes` the search can be
+built with (`est.max_memory_bytes`; one byte less raises), in a few
+estimates' time. Every larger budget builds too: when the faster path a
+budget suggests is over it, the engine takes the smaller path instead.
+The minimum is the boxcar's buffers (mostly rows × `max_boxcar` of carry)
+plus the FDMT's smallest path at its shortest chunk; `max_boxcar` is the
+main lever.
+
 (chunked-execution)=
 ### Chunked execution (`chunk_nsamps`)
 

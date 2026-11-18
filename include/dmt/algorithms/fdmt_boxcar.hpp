@@ -53,6 +53,10 @@ struct FDMTBoxcarMemoryEstimate {
     /// samples a stream sample waits for before every row has searched it,
     /// and what drain() pads (in whole blocks).
     uint64_t search_latency{0};
+    /// The max_memory_bytes it was made with; from
+    /// FDMTBoxcar::estimate_minimum_memory(), the smallest that builds (at
+    /// least usage.budgeted(): CPU path choices keep some headroom).
+    SizeType max_memory_bytes{0};
 };
 
 /**
@@ -182,6 +186,26 @@ public:
                     SizeType chunk_nsamps              = 0,
                     SizeType max_memory_bytes          = kFDMTDefaultMaxMemory,
                     std::span<const uint8_t> kill_mask = {});
+    /**
+     * @brief The smallest configuration of these arguments: estimate_memory()
+     * at the smallest max_memory_bytes an instance can be built with (the
+     * result's max_memory_bytes; one byte less throws). A few estimates
+     * long. The minimum is set by the boxcar's buffers (rows x
+     * max_boxcar carry, peaks, candidates) and the FDMT's smallest path at
+     * its shortest chunk; any larger budget also builds. Throws as
+     * estimate_memory() for anything but the budget (a configuration that
+     * is invalid at its smallest path, e.g. per-call masks whose search
+     * latency exceeds one block on a GPU, throws here too).
+     */
+    [[nodiscard]] static FDMTBoxcarMemoryEstimate
+    estimate_minimum_memory(const plans::FDMTPlan& plan,
+                            BoxcarConfig config                = {},
+                            bool use_box_smearing              = true,
+                            Exec exec                          = {},
+                            SizeType nbeams                    = 1,
+                            SizeType fuse_levels               = kFDMTAutoFuse,
+                            SizeType chunk_nsamps              = 0,
+                            std::span<const uint8_t> kill_mask = {});
     ~FDMTBoxcar();
     FDMTBoxcar(FDMTBoxcar&&) noexcept;
     FDMTBoxcar& operator=(FDMTBoxcar&&) noexcept;

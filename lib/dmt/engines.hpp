@@ -28,6 +28,28 @@
 
 namespace dmt::algorithms::detail {
 
+/// A configuration over its memory budget (max_memory_bytes). `needed` is
+/// the smallest budget the configuration tried would need: a lower bound of
+/// what fits, so a caller can raise the budget to it and try again
+/// (FDMTBoxcar::estimate_minimum_memory()). Public type: invalid_argument.
+class BudgetError : public std::invalid_argument {
+public:
+    BudgetError(const std::string& what,
+                SizeType needed,
+                bool smaller_path = false)
+        : std::invalid_argument(what),
+          m_needed(needed),
+          m_smaller_path(smaller_path) {}
+    [[nodiscard]] SizeType needed() const noexcept { return m_needed; }
+    /// The failing engine took its larger path (CPU tree, GPU unskewed
+    /// direct levels): a smaller path may fit the budget.
+    [[nodiscard]] bool smaller_path() const noexcept { return m_smaller_path; }
+
+private:
+    SizeType m_needed;
+    bool m_smaller_path;
+};
+
 // The backend lib/cuda/ is compiled for: DMT_ENABLE_CUDA (nvcc) or
 // DMT_ENABLE_HIP (hip-clang, through dmt/gpu_compat.cuh); DMT_ENABLE_GPU is
 // set with either.
@@ -81,6 +103,9 @@ struct FDMTEngineConfig {
     /// threshold in bytes above which it is taken (tests: 0 forces it,
     /// SIZE_MAX forbids it).
     static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
+    /// As kSkewHistoryAuto but never the tree path: the fallback when the
+    /// tree path was chosen and its engine is over the budget.
+    static constexpr SizeType kSkewHistoryNoTree = SIZE_MAX - 2;
     SizeType skew_history_bytes{kSkewHistoryAuto};
     /// Private (CPU, tests): leaf level of a skewed engine forced by
     /// skew_history_bytes (0: automatic). Budget-chosen engines take the

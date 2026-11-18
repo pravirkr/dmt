@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -33,7 +34,8 @@ public:
          SizeType chunk,
          SizeType max_memory,
          std::span<const uint8_t> kill,
-         bool estimate_only = false)
+         bool estimate_only                               = false,
+         const std::vector<plans::BoxcarPlanePlan>* known = nullptr)
         : plan(std::move(plan)),
           config(config),
           exec(exec),
@@ -41,7 +43,9 @@ public:
           smear(smear),
           max_memory(max_memory),
           // Validates the mask's size; killed channels leave the noise model.
-          planes(detail::make_boxcar_plans(this->plan, config, smear, kill)),
+          planes(known != nullptr ? *known
+                                  : detail::make_boxcar_plans(
+                                        this->plan, config, smear, kill)),
           kill_runs(detail::boxcar_kill_runs(kill)),
           ctor_mask(this->plan.get_nchans(), 1) {
         for (SizeType c = 0; c < kill.size(); ++c) {
@@ -83,13 +87,17 @@ public:
             boxcar_bytes(smear, exec) +
             (model ? mask_bytes_bound(*model, exec) : SizeType{0});
         if (fixed >= max_memory) {
-            throw std::invalid_argument(fmt::format(
-                "FDMTBoxcar: the boxcar buffers alone need {:.2f} GiB, over "
-                "max_memory_bytes ({:.2f} GiB); lower max_boxcar or "
-                "max_candidates (or max_cands_per_dm with kKeepBrightest), or "
-                "raise the budget",
-                static_cast<double>(fixed) / (1 << 30),
-                static_cast<double>(max_memory) / (1 << 30)));
+            throw detail::BudgetError(
+                fmt::format(
+                    "FDMTBoxcar: the boxcar buffers alone need {:.2f} GiB, "
+                    "over "
+                    "max_memory_bytes ({:.2f} GiB); lower max_boxcar or "
+                    "max_candidates (or max_cands_per_dm with kKeepBrightest), "
+                    "or "
+                    "raise the budget",
+                    static_cast<double>(fixed) / (1 << 30),
+                    static_cast<double>(max_memory) / (1 << 30)),
+                fixed + 1);
         }
         cfg.max_memory_bytes = max_memory - fixed;
         // The engine, with the declared masks' buffers sized (deferred), and
@@ -105,24 +113,72 @@ public:
                         : SizeType{0});
         };
         // The fixed part is an estimate: with an automatic chunk, step it
-        // down while the measured total is over the budget.
-        SizeType used = build();
-        while (used > max_memory && chunk == 0 &&
-               cfg.mode == FDMTMode::kValid && engine->chunk_nsamps() > 256) {
-            const SizeType over  = used - max_memory;
-            cfg.chunk_nsamps     = engine->chunk_nsamps() / 2;
-            cfg.max_memory_bytes = cfg.max_memory_bytes > over
-                                       ? cfg.max_memory_bytes - over
-                                       : cfg.max_memory_bytes;
+        // down while the measured total is over the budget. An FDMT over
+        // its share reports what the whole engine would need.
+        const auto over = [&](SizeType needed, bool smaller_path) {
+            return detail::BudgetError(
+                fmt::format("FDMTBoxcar: this configuration needs {:.2f} GiB, "
+                            "over max_memory_bytes ({:.2f} GiB)",
+                            static_cast<double>(needed) / (1 << 30),
+                            static_cast<double>(max_memory) / (1 << 30)),
+                needed, smaller_path);
+        };
+        const auto select = [&](const detail::FDMTEngineConfig& start) {
+            cfg           = start;
+            SizeType used = 0;
+            try {
+                used = build();
+                while (used > max_memory && chunk == 0 &&
+                       cfg.mode == FDMTMode::kValid &&
+                       engine->chunk_nsamps() > 256) {
+                    const SizeType excess = used - max_memory;
+                    cfg.chunk_nsamps      = engine->chunk_nsamps() / 2;
+                    cfg.max_memory_bytes  = cfg.max_memory_bytes > excess
+                                                ? cfg.max_memory_bytes - excess
+                                                : cfg.max_memory_bytes;
+                    engine.reset();
+                    used = build();
+                }
+            } catch (const detail::BudgetError& e) {
+                throw over(std::max(max_memory + 1, fixed + e.needed()), false);
+            }
+            if (used > max_memory) {
+                // The FDMT fit its share on its larger path (CPU tree, GPU
+                // unskewed direct levels), the whole engine did not.
+                throw over(used, engine->search_path().find("skewed") ==
+                                     std::string::npos);
+            }
+            return used;
+        };
+        // Over the budget on the larger path: the smaller path may fit.
+        const auto first_cfg = cfg;
+        try {
+            select(first_cfg);
+        } catch (const detail::BudgetError& first) {
+            auto smaller = first_cfg;
+            if (exec.backend == Backend::kCPU) {
+                smaller.skew_history_bytes =
+                    detail::FDMTEngineConfig::kSkewHistoryNoTree;
+            } else {
+                smaller.force_skewed_direct = true;
+            }
+            if (!first.smaller_path() ||
+                first_cfg.skew_history_bytes !=
+                    detail::FDMTEngineConfig::kSkewHistoryAuto ||
+                first_cfg.force_skewed_direct) {
+                throw;
+            }
             engine.reset();
-            used = build();
-        }
-        if (used > max_memory) {
-            throw std::invalid_argument(fmt::format(
-                "FDMTBoxcar: this configuration needs {:.2f} GiB, over "
-                "max_memory_bytes ({:.2f} GiB)",
-                static_cast<double>(used) / (1 << 30),
-                static_cast<double>(max_memory) / (1 << 30)));
+            try {
+                select(smaller);
+            } catch (const detail::BudgetError& e) {
+                if (e.needed() < first.needed()) {
+                    throw;
+                }
+                throw first;
+            } catch (const std::invalid_argument&) {
+                throw first; // the smaller path is not available here
+            }
         }
         if (!estimate_only) {
             engine->allocate();
@@ -133,6 +189,15 @@ public:
             prev_mask       = ctor_mask;
             prev_runs       = kill_runs;
         }
+    }
+    /// estimate_memory()'s result for this (estimate-only) instance.
+    [[nodiscard]] FDMTBoxcarMemoryEstimate estimate() const {
+        return {.usage            = usage(),
+                .chunk_nsamps     = engine->chunk_nsamps(),
+                .host_staging     = engine->host_staging_bytes(),
+                .search_path      = engine->search_path(),
+                .search_latency   = engine->search_latency(),
+                .max_memory_bytes = max_memory};
     }
     /// get_memory_usage() (and the estimate): the engine's, plus the
     /// per-call masks' model. Declared masks report their reserved table
@@ -529,11 +594,84 @@ FDMTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
     const Impl impl(plan, config, use_box_smearing, exec, nbeams, fuse_levels,
                     chunk_nsamps, max_memory_bytes, kill_mask,
                     /*estimate_only=*/true);
-    return {.usage          = impl.usage(),
-            .chunk_nsamps   = impl.engine->chunk_nsamps(),
-            .host_staging   = impl.engine->host_staging_bytes(),
-            .search_path    = impl.engine->search_path(),
-            .search_latency = impl.engine->search_latency()};
+    return impl.estimate();
+}
+FDMTBoxcarMemoryEstimate
+FDMTBoxcar::estimate_minimum_memory(const plans::FDMTPlan& plan,
+                                    BoxcarConfig config,
+                                    bool use_box_smearing,
+                                    Exec exec,
+                                    SizeType nbeams,
+                                    SizeType fuse_levels,
+                                    SizeType chunk_nsamps,
+                                    std::span<const uint8_t> kill_mask) {
+    // Raise the budget to what each failed build says it needs (a lower
+    // bound of the smallest budget that builds) until one builds: the
+    // boxcar's fixed bytes first, then the FDMT's smallest path.
+    // The row tables do not depend on the budget: made (and the
+    // configuration validated) once.
+    const auto planes =
+        detail::make_boxcar_plans(plan, config, use_box_smearing, kill_mask);
+    const auto build = [&](SizeType budget) {
+        return Impl(plan, config, use_box_smearing, exec, nbeams, fuse_levels,
+                    chunk_nsamps, budget, kill_mask, /*estimate_only=*/true,
+                    &planes)
+            .estimate();
+    };
+    // Each failure's `needed` is exact for the path it tried, except when
+    // the boxcar's chunk loop shrank the FDMT's share: then step up (at
+    // least 1 MiB) and, once a budget builds, narrow it down below.
+    SizeType budget = 1;
+    SizeType failed = 0; // largest budget known not to build
+    bool stepped    = false;
+    std::optional<FDMTBoxcarMemoryEstimate> found;
+    for (int attempt = 0; attempt < 64 && !found; ++attempt) {
+        try {
+            found = build(budget);
+        } catch (const detail::BudgetError& e) {
+            failed = budget;
+            if (e.needed() > budget) {
+                budget = e.needed();
+            } else {
+                stepped = true;
+                budget += std::max<SizeType>(budget / 1024, 1 << 20);
+            }
+        }
+    }
+    if (!found) {
+        throw std::logic_error("FDMTBoxcar::estimate_minimum_memory: the "
+                               "budget search did not converge");
+    }
+    // A failure's `needed` adds the boxcar's estimated bytes to the FDMT's
+    // need, so the budget found can exceed the minimum (GPU). Its own
+    // configuration's usage is then usually the minimum; on the CPU the
+    // path choice keeps headroom, so the usage does not build and the
+    // budget found (exact there) stands, unless the search stepped: then
+    // bisect between the last failure and the budget found.
+    const SizeType usage = found->usage.budgeted();
+    if (found->max_memory_bytes == usage ||
+        (exec.backend == Backend::kCPU && !stepped)) {
+        return *found;
+    }
+    try {
+        return build(usage);
+    } catch (const detail::BudgetError&) {
+        if (!stepped) {
+            return *found;
+        }
+    }
+    SizeType hi = found->max_memory_bytes;
+    SizeType lo = std::max(failed, usage);
+    while (hi - lo > 1) {
+        const SizeType mid = lo + ((hi - lo) / 2);
+        try {
+            found = build(mid);
+            hi    = mid;
+        } catch (const detail::BudgetError&) {
+            lo = mid;
+        }
+    }
+    return *found;
 }
 FDMTBoxcar::~FDMTBoxcar()                                = default;
 FDMTBoxcar::FDMTBoxcar(FDMTBoxcar&&) noexcept            = default;

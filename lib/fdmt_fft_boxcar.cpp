@@ -184,11 +184,12 @@ FDMTFFTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
     const Impl impl(plan, config, use_box_smearing, exec, nbeams,
                     fractional_delays, kill_mask, max_memory_bytes,
                     /*estimate_only=*/true);
-    return {.usage          = impl.engine->memory_usage(),
-            .chunk_nsamps   = impl.engine->chunk_nsamps(),
-            .host_staging   = impl.engine->host_staging_bytes(),
-            .search_path    = impl.engine->search_path(),
-            .search_latency = impl.latency};
+    return {.usage            = impl.engine->memory_usage(),
+            .chunk_nsamps     = impl.engine->chunk_nsamps(),
+            .host_staging     = impl.engine->host_staging_bytes(),
+            .search_path      = impl.engine->search_path(),
+            .search_latency   = impl.latency,
+            .max_memory_bytes = max_memory_bytes};
 }
 FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;
 FDMTFFTBoxcar::FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept            = default;
