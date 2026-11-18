@@ -177,6 +177,120 @@ TEST_CASE("Boxcar noise model equals make_boxcar_plans for any mask",
     }
 }
 
+TEST_CASE("Boxcar noise model packed cutoffs equal make_boxcar_plans",
+          "[boxcar][kill][mask][packed][cpu]") {
+    // Killed channels read as the code input_mean, so a mask's integer
+    // cutoff is make_boxcar_plans()'s for that mask moved by the exact
+    // difference of the reference (constructor) mean and the mask's mean;
+    // the float tables stay the mask's own.
+    using algorithms::detail::BoxcarNoiseModel;
+    using algorithms::detail::make_boxcar_plans;
+    const plans::FDMTPlan chan_dm_plan(1100, 1500, 32, 400, 0.001F,
+                                       std::vector<IndexType>{0, 3, 9, 20, 41},
+                                       "valid", 1, 40.0);
+    for (const SizeType depth : {SizeType{0}, SizeType{2}, SizeType{9}}) {
+        const auto plan = depth == 9 ? chan_dm_plan : mask_plan(depth);
+        for (const bool smear : {true, false}) {
+            for (const bool trap : {false, true}) {
+                for (const int nbits : {2, 8}) {
+                    DYNAMIC_SECTION("plan " << depth << " smear " << smear
+                                            << " trapezoid " << trap
+                                            << " nbits " << nbits) {
+                        auto cfg = mask_config(
+                            PeakFindingMode::kContiguousPeakPerWidth);
+                        cfg.use_trapezoid = trap;
+                        cfg.input_nbits   = nbits;
+                        cfg.input_mean    = nbits == 8 ? 128.0F : 1.0F;
+                        cfg.noise_sigma   = nbits == 8 ? 10.0F : 0.9F;
+                        for (const unsigned ref_seed : {0U, 7U}) {
+                            const auto reference =
+                                ref_seed == 0 ? std::vector<uint8_t>(32, 1)
+                                              : random_mask(32, ref_seed, 0.3);
+                            BoxcarNoiseModel model(plan, cfg, smear, 2,
+                                                   reference);
+                            const auto ref_planes =
+                                make_boxcar_plans(plan, cfg, smear, reference);
+                            // Masks within the reference: itself, all
+                            // killed, random subsets, half the band.
+                            Masks masks = {reference,
+                                           std::vector<uint8_t>(32, 0)};
+                            for (const unsigned seed : {1U, 2U, 3U}) {
+                                auto m = random_mask(32, seed, 0.4);
+                                for (SizeType c = 0; c < 32; ++c) {
+                                    m[c] = reference[c] != 0 ? m[c] : 0;
+                                }
+                                masks.push_back(m);
+                            }
+                            masks.push_back(reference);
+                            std::fill_n(masks.back().begin(), 16, 0);
+                            for (SizeType mi = 0; mi < masks.size(); ++mi) {
+                                const auto& m = masks[mi];
+                                const auto planes =
+                                    make_boxcar_plans(plan, cfg, smear, m);
+                                const auto t = model.compute(m);
+                                REQUIRE(t->integer_thresh.size() ==
+                                        t->thresh.size());
+                                SizeType k = 0;
+                                for (SizeType pi = 0; pi < planes.size();
+                                     ++pi) {
+                                    const auto& p = planes[pi];
+                                    const auto& q = ref_planes[pi];
+                                    for (SizeType i = 0;
+                                         i < p.raw_thresh_lut.size();
+                                         ++i, ++k) {
+                                        REQUIRE(std::bit_cast<uint32_t>(
+                                                    p.raw_thresh_lut[i]) ==
+                                                std::bit_cast<uint32_t>(
+                                                    t->thresh[k]));
+                                        REQUIRE(std::bit_cast<uint32_t>(
+                                                    p.inv_sigma_lut[i]) ==
+                                                std::bit_cast<uint32_t>(
+                                                    t->inv_sigma[k]));
+                                        const double shift =
+                                            q.integer_mean_lut[i] -
+                                            p.integer_mean_lut[i];
+                                        REQUIRE(shift == std::floor(shift));
+                                        const uint64_t want =
+                                            p.integer_thresh_lut[i] ==
+                                                    UINT64_MAX
+                                                ? UINT64_MAX
+                                                : p.integer_thresh_lut[i] +
+                                                      static_cast<uint64_t>(
+                                                          q.integer_mean_lut
+                                                              [i] -
+                                                          p.integer_mean_lut
+                                                              [i]);
+                                        REQUIRE(t->integer_thresh[k] == want);
+                                        if (mi == 0) {
+                                            // The reference itself: the
+                                            // constructor plan's bits.
+                                            REQUIRE(t->integer_thresh[k] ==
+                                                    q.integer_thresh_lut[i]);
+                                        }
+                                    }
+                                }
+                                REQUIRE(k == t->thresh.size());
+                                REQUIRE(t->bytes() == model.table_bytes());
+                            }
+                            if (ref_seed != 0) {
+                                // A mask reviving a channel the reference
+                                // kills would need a mean it lacks.
+                                const std::vector<uint8_t> all(32, 1);
+                                REQUIRE_THROWS_AS(model.compute(all),
+                                                  std::invalid_argument);
+                            }
+                        }
+                        // The substitution is exact only for integer codes.
+                        cfg.input_mean = nbits == 8 ? 127.5F : 1.5F;
+                        REQUIRE_THROWS_AS(BoxcarNoiseModel(plan, cfg, smear, 2),
+                                          std::invalid_argument);
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("FDMTBoxcar per-call mask: empty or all-ones is the old overload",
           "[boxcar][kill][mask][cpu]") {
     for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
