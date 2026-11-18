@@ -5,6 +5,7 @@
 #include <random>
 #include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -822,6 +823,139 @@ TEST_CASE("FDMTBoxcar skewed path: per-call masks match the tree",
                                    1024, 0, true, nullptr, 1.5F, &planes);
             REQUIRE(plain.candidates.size() != tree.candidates.size());
         }
+    }
+}
+
+TEST_CASE("FDMTBoxcar skewed path: per-call masks on short blocks use the "
+          "catch-all",
+          "[fdmt_cpu][cpu][skew][boxcar][mask]") {
+    // Blocks much shorter than the search latency: the ring keeps the
+    // entries blocks of the largest reach would need, and the oldest kept
+    // entry stands for the evicted blocks with the catch-all (every
+    // channel live in their endpoints' reach). Exact against the
+    // reference given each row's recorded lag.
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    for (const auto [depth, ns, mode] :
+         {std::tuple{SizeType{1}, SizeType{128}, BoxcarScreenMode::kAuto},
+          std::tuple{SizeType{3}, SizeType{128}, BoxcarScreenMode::kAuto},
+          std::tuple{SizeType{3}, SizeType{512}, BoxcarScreenMode::kAuto},
+          std::tuple{SizeType{3}, SizeType{128}, BoxcarScreenMode::kPrefix}}) {
+        {
+            DYNAMIC_SECTION("depth " << depth << " block " << ns << " screen "
+                                     << static_cast<int>(mode)) {
+                const auto plan   = make_plan(kCryopafLband, ns, 400.0F, depth);
+                const SizeType nb = 12288 / ns;
+                // First half: the low 30% of the band killed, every 5th
+                // block also 50-60%; second half: the top 30% killed, every
+                // 3rd block also the low 10%. The catch-all's mask changes
+                // across the stream (a stale one would differ).
+                const SizeType nc = plan.get_nchans();
+                std::vector<std::vector<uint8_t>> masks;
+                for (SizeType b = 0; b < nb; ++b) {
+                    std::vector<uint8_t> m(nc, 1);
+                    const auto kill = [&](double lo, double hi) {
+                        for (auto c = static_cast<SizeType>(lo * nc);
+                             c < static_cast<SizeType>(hi * nc); ++c) {
+                            m[c] = 0;
+                        }
+                    };
+                    if (b < nb / 2) {
+                        kill(0.0, 0.3);
+                        if (b % 5 == 0) {
+                            kill(0.5, 0.6);
+                        }
+                    } else {
+                        kill(0.7, 1.0);
+                        if (b % 3 == 0) {
+                            kill(0.0, 0.1);
+                        }
+                    }
+                    masks.push_back(std::move(m));
+                }
+                auto box          = skew_search_test::search_config(false);
+                box.detect_thresh = 3.5F; // enough candidates on a short stream
+                box.screen_mode   = mode;
+                const auto planes =
+                    algorithms::detail::make_boxcar_plans(plan, box, true);
+                std::vector<uint64_t> lags;
+                const auto skew = run_subband_search(
+                    plan, Exec::cpu(4), true, false, nb, 64, 1, true, &masks,
+                    1.5F, &planes, SIZE_MAX, &box, nullptr, true, &lags);
+                REQUIRE(skew.latency > ns);
+                REQUIRE(lags.size() > 0);
+                // The engine's ring: entries blocks of the largest reach
+                // need, of the 1 + ceil(latency / ns) these need.
+                const algorithms::detail::BoxcarNoiseModel model(plan, box,
+                                                                 true, 4);
+                const uint64_t reach =
+                    model.max_support() + planes.front().widths.back() - 1;
+                const SizeType needed =
+                    1 + static_cast<SizeType>((skew.latency + ns - 1) / ns);
+                const SizeType ring =
+                    1 +
+                    static_cast<SizeType>((skew.latency + reach - 1) / reach);
+                REQUIRE(needed > ring);
+                std::vector<std::vector<float>> input;
+                for (SizeType b = 0; b < nb; ++b) {
+                    input.push_back(skew_search_test::search_block(
+                                        plan.get_nchans() * ns,
+                                        900 + static_cast<unsigned>(b))
+                                        .values);
+                }
+                const auto expected = boxcar_test::masked_reference(
+                    plan, box, true, input, {}, masks, lags, ring, needed);
+                require_same_before(skew.candidates, expected.candidates,
+                                    UINT64_MAX);
+                // A call failing after its commit (the catch-all replaced
+                // the front) leaves the stream unchanged.
+                const auto failed = run_subband_search(
+                    plan, Exec::cpu(4), true, false, nb, 64, 1, true, &masks,
+                    1.5F, &planes, nb / 2 + 1, &box);
+                require_same_before(failed.candidates, skew.candidates,
+                                    UINT64_MAX);
+                // ... and so does one right before drain().
+                const auto last = run_subband_search(
+                    plan, Exec::cpu(4), true, false, nb, 64, 1, true, &masks,
+                    1.5F, &planes, nb, &box);
+                require_same_before(last.candidates, skew.candidates,
+                                    UINT64_MAX);
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar skewed path: the surrogate screen with the catch-all",
+          "[fdmt_cpu][cpu][skew][boxcar][mask]") {
+    // kKadaneSurrogate is approximate, so no direct reference (with
+    // per-call masks its result also moves slightly with the block length,
+    // catch-all or not). With the catch-all active and changing masks,
+    // drain() through zero blocks equals drain() through host zero blocks.
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    auto box          = skew_search_test::search_config(false);
+    box.detect_thresh = 3.5F;
+    box.screen_mode   = BoxcarScreenMode::kKadaneSurrogate;
+    const auto masks  = changing_masks(1152, 2);
+    SECTION("changing masks: zero-block drain equals host-block drain") {
+        const SizeType ns = 128;
+        const auto plan   = make_plan(kCryopafLband, ns, 400.0F, 3);
+        const SizeType nb = 6144 / ns;
+        std::vector<std::vector<uint8_t>> changing;
+        for (SizeType b = 0; b < nb; ++b) {
+            changing.push_back((b / 7) % 2 == 0 ? masks[0] : masks[1]);
+        }
+        const auto planes =
+            algorithms::detail::make_boxcar_plans(plan, box, true);
+        const auto zero =
+            run_subband_search(plan, Exec::cpu(4), true, false, nb, 64, 1, true,
+                               &changing, 1.5F, &planes, SIZE_MAX, &box);
+        const auto host = run_subband_search(
+            plan, Exec::cpu(4), true, false, nb, 64, 1, true, &changing, 1.5F,
+            &planes, SIZE_MAX, &box, nullptr, false);
+        REQUIRE(zero.latency > ns);
+        REQUIRE(zero.zero_blocks);
+        require_same_before(zero.candidates, host.candidates, UINT64_MAX);
     }
 }
 

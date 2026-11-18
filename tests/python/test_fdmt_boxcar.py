@@ -493,12 +493,12 @@ def test_per_call_kill_mask_validation() -> None:
         np.testing.assert_array_equal(
             search.execute(block).candidates, reference.execute(block).candidates
         )
-    # Blocks shorter than the largest support plus max_boxcar - 1.
+    # Blocks shorter than the largest support plus max_boxcar - 1 work
+    # (windows reaching over several blocks use the history mask).
     short = FDMTPlan(700, 1200, 16, 60, 0.001, dt_grid=[0, 4, 20, 60])
-    with pytest.raises(ValueError, match="at least"):
-        FDMTBoxcar(short, config()).execute(
-            np.zeros((16, 60), dtype=np.float32), kill_mask=np.ones(16, np.uint8)
-        )
+    FDMTBoxcar(short, config()).execute(
+        np.zeros((16, 60), dtype=np.float32), kill_mask=np.ones(16, np.uint8)
+    )
     # Packed input takes no per-call mask.
     cfg = config()
     cfg.input_nbits = 8

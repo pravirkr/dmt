@@ -447,10 +447,20 @@ make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
  * Endpoints of the block (stream samples from first_sample to the next
  * block's) use the `steady` tables, except, when `transition` is set, the
  * first S_r + W - 1 of each row r and width W (S_r: the row's support with
- * every channel active), whose input windows also reach the previous block:
- * they use `transition_tables`, the variance of the OR of both blocks'
- * masks. A null table pointer means the constructor tables (the search
- * planes). The block's input rows of the `kill_runs` channels are zeroed.
+ * every channel active), whose input windows also reach earlier blocks:
+ * they use `transition_tables`, the variance of the history mask (the
+ * block's channels and every channel live within the largest reach before
+ * it; for blocks at least that long, the OR of this and the previous
+ * block's masks). A null table pointer means the constructor tables (the
+ * search planes). The block's input rows of the `kill_runs` channels are
+ * zeroed.
+ *
+ * `catch_all`: set when blocks are shorter than the engine's ring needs
+ * (FDMTBoxcarEngine::noise_catch_all_begin()). The engine keeps the latest
+ * one and gives it, as steady and transition tables, to the oldest entry
+ * of a full ring, which then also stands for the evicted blocks still
+ * searched. It covers every channel live from that oldest endpoint's reach
+ * up to this block's end, so it stays valid for drain() padding.
  */
 struct BlockNoise {
     uint64_t first_sample = 0;
@@ -458,6 +468,8 @@ struct BlockNoise {
     bool transition = false;
     std::shared_ptr<const NoiseTables> transition_tables;
     std::vector<std::pair<SizeType, SizeType>> kill_runs;
+    bool has_catch_all = false; ///< catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> catch_all;
 };
 
 class FDMTBoxcarEngine : public FDMTSearchSink {
@@ -528,6 +540,13 @@ public:
     }
     /// Drops an entry pushed for an execute() that threw.
     virtual void drop_block_noise() noexcept {}
+    /// With blocks too short for the engine's ring: the first stream sample
+    /// the catch-all of the next block must cover (the oldest endpoint
+    /// still searched once that block is in); UINT64_MAX when the ring
+    /// holds every block it needs.
+    [[nodiscard]] virtual uint64_t noise_catch_all_begin() const noexcept {
+        return UINT64_MAX;
+    }
 };
 
 /// BoxcarScreenMode::kAuto resolved for a backend: kKadane on the CPU (its

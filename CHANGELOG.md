@@ -26,8 +26,7 @@ All notable changes to `dmt` are listed here. The format follows
   common sigma, white in time over at least `max_boxcar` samples.
 - **`BoxcarConfig::per_call_masks`** (Python `per_call_masks=`, default
   false): declares that an `FDMTBoxcar` stream will pass per-call kill
-  masks. Their requirements (float32 input, blocks long enough, on a GPU a
-  search latency of at most one block) are checked and their memory
+  masks. Their requirements (float32 input) are checked and their memory
   reserved at construction and in `estimate_memory()`, before the
   transform's path is chosen, so a per-call mask no longer fails mid-run
   for those reasons, and `get_memory_usage()` stays at the estimate.
@@ -117,6 +116,15 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **`FDMTBoxcar` per-call kill masks work with any block length** (they
+  needed blocks of at least the largest row support plus `max_boxcar - 1`
+  samples, and on a GPU a search latency of at most one block). Windows
+  that reach back before their block use the variance of the history mask:
+  the block's channels and every channel live within that reach (one
+  timestamp per channel). When blocks are shorter than the search latency
+  needs, the oldest kept block stands for the older ones with one
+  conservative catch-all table, so the masks' memory stays fixed whatever
+  the block length. Results with blocks at least that long are unchanged.
 - `FDMT`, `FDMTBoxcar`: a budget no longer fails where a smaller path
   fits. The tree path (CPU) or unskewed direct levels (GPU) were chosen
   when the budget looked large enough and then turned out over it, so some

@@ -107,27 +107,35 @@ The stream keeps its FDMT history, boxcar carry and open excursions across
 mask changes; samples keep the mask they were read with.
 
 While the mask stays the same, S/N is calibrated exactly as with that mask
-given to the constructor. When it changes between blocks, the endpoints
-whose input windows reach back into the previous block, the first
-`S + W - 1` of each row (`S` the row's FDMT support with every channel
-active, `W` the boxcar width), mix samples read under both masks. Those
-endpoints use the variance of the **OR** of the two masks, an upper bound
-of their true variance: a change adds no false alarms, and S/N there is low
-by at most `sqrt(V_or / V_true)` (about `1 - k / 2G` when `k` of `G` similar
-channels flip). A wholly killed block still closes the excursions of the
-block before it. At most `(dt_max + max_boxcar) / nsamps` of the stream is
-affected per change, and none while the mask is unchanged.
+given to the constructor. When it changes, the endpoints whose input
+windows reach back before their block, the first `S + W - 1` of each row
+(`S` the row's FDMT support with every channel active, `W` the boxcar
+width), mix samples read under several masks. Those endpoints use the
+variance of the **history mask**: the block's channels and every channel
+live within `R = S_max + max_boxcar - 1` samples before it (for blocks of at
+least `R` samples, simply the OR of the previous and the current mask). It
+is an upper bound of their true variance: a change adds no false alarms,
+and S/N there is low by at most `sqrt(V_history / V_true)` (about
+`1 - k / 2G` when `k` of `G` similar channels flip). A wholly killed block
+still closes the excursions of the block before it.
 
-The first per-call mask checks two things and raises (`ValueError`;
-C++ `std::invalid_argument`) without changing the stream if either fails:
+Any block length works, down to one sample, and the memory of the masks
+does not grow with the number of blocks a window spans: one timestamp per
+channel records when it was last live. Paths with a search latency (the
+skewed subband search) keep the blocks a call still searches; when the
+blocks are shorter than that needs, the oldest block kept stands for the
+older ones with a single **catch-all** table (every channel live within
+`R` samples before the oldest endpoint still searched), again an upper
+bound. Short blocks with masks that change often therefore score most
+high-DM endpoints with the history or catch-all variance, and computing
+the tables of new masks (below) costs time per call.
 
-- the block is long enough for every window to span at most two blocks:
-  `nsamps >= S_max + max_boxcar - 1` (`parkes_uwl` at depth 4 with 100 ms
-  boxcars needs 255,452 samples);
-- the noise tables fit in `max_memory_bytes`: on the CPU the noise model, a
-  few table sets of `rows x widths x 8` bytes and the staging block if the
-  constructor had no mask; on GPUs the device copies of the tables (the
-  host-side model and tables are reported in `memory_usage.host`).
+The first per-call mask checks that its noise tables fit in
+`max_memory_bytes` and raises (`ValueError`; C++ `std::invalid_argument`)
+without changing the stream if not: on the CPU the noise model, a few table
+sets of `rows x widths x 8` bytes and the staging block if the constructor
+had no mask; on GPUs the device copies of the tables (the host-side model
+and tables are reported in `memory_usage.host`).
 
 The tables of a new mask are computed on the host when it first appears,
 with the instance's `nthreads` (also on GPUs, where it has no other use):
@@ -280,8 +288,7 @@ move from shared to device memory. The same happens below 4096 on GPUs
 with little shared memory per block, after the search first drops the
 width screen and then uses smaller blocks; the search path then ends in
 `(boxcar: ...)`. A wide box also costs memory per DM row (its carry holds
-`max_boxcar` samples, counted in the budget), and a per-call kill mask
-needs blocks of at least the row support plus `max_boxcar - 1` samples.
+`max_boxcar` samples, counted in the budget).
 For pulses much wider than about 100 ms, prefer downsampling the data in
 time and searching narrower boxes: it is much faster, and red noise (see
 [Red noise and wide boxcars](#red-noise-and-wide-boxcars)) grows with the

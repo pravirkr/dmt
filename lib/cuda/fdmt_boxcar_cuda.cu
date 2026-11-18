@@ -762,6 +762,7 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const float> waterfall, Stream queue) {
         throw;
     }
     m_commit_open = false;
+    m_catch_undo  = {};
     m_prev_evicted.reset();
     m_position += m_plan.get_nsamps();
     finish_keep(stream);
@@ -943,14 +944,6 @@ void FDMTBoxcarCudaEngine::enable_block_noise(
     if (m_config.input_nbits != 32) {
         throw std::logic_error(
             "FDMTBoxcar (gpu): per-call kill masks need float input");
-    }
-    if (ring_size() > 2) {
-        // A call's endpoints reach at most two blocks only when the
-        // search latency is at most one block.
-        throw std::invalid_argument(fmt::format(
-            "FDMTBoxcar (gpu): per-call kill masks need a search latency "
-            "of at most one block ({} > {} samples)",
-            search_latency(), m_plan.get_nsamps()));
     }
     gpu_utils::set_device(m_device);
     const SizeType full = m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
@@ -1350,13 +1343,30 @@ void FDMTBoxcarCudaEngine::update_open_begin(cudaStream_t stream) {
                                               cudaMemcpyDeviceToHost, stream));
 }
 
-SizeType FDMTBoxcarCudaEngine::ring_size() const noexcept {
+SizeType FDMTBoxcarCudaEngine::ring_needed() const noexcept {
     const uint64_t ns = m_plan.get_nsamps();
     return 1 + static_cast<SizeType>((search_latency() + ns - 1) / ns);
 }
 
+SizeType FDMTBoxcarCudaEngine::ring_size() const noexcept {
+    // The kernels read two entries; older blocks share the catch-all.
+    return std::min<SizeType>(ring_needed(), 2);
+}
+
+uint64_t FDMTBoxcarCudaEngine::noise_catch_all_begin() const noexcept {
+    if (!m_noise_on || ring_needed() <= ring_size()) {
+        return UINT64_MAX;
+    }
+    // The first sample of the oldest block the next call still searches.
+    const uint64_t back = (ring_needed() - 1) * m_plan.get_nsamps();
+    return m_position > back ? m_position - back : 0;
+}
+
 SizeType FDMTBoxcarCudaEngine::slot_count() const noexcept {
-    return (2 * ring_size()) + 2;
+    // With the catch-all: one more, for the replaced front's tables kept
+    // until the call completes (an evicted entry, the replaced front's two,
+    // the catch-all and the newest entry's two).
+    return (2 * ring_size()) + 2 + (ring_needed() > ring_size() ? 1 : 0);
 }
 
 SizeType FDMTBoxcarCudaEngine::table_floats() const noexcept {
@@ -1374,6 +1384,9 @@ void FDMTBoxcarCudaEngine::reset_block_noise() {
     m_ring.push_back(std::move(first));
     m_block_tables      = {};
     m_prev_block_tables = {};
+    m_has_catch_all     = false;
+    m_catch_all.reset();
+    m_catch_undo = {};
 }
 
 const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
@@ -1398,7 +1411,12 @@ const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
                 return true;
             }
         }
-        return false;
+        // The tables the catch-all replaced: an undo restores them (and
+        // m_prev_block_tables points at their slots).
+        const auto& u = m_catch_undo;
+        return u.front_set &&
+               ((u.steady && u.steady->id == id) ||
+                (u.transition_tables && u.transition_tables->id == id));
     };
     for (auto& slot : m_slots) {
         if (slot->id != 0 && in_ring(slot->id)) {
@@ -1448,12 +1466,30 @@ void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
     entry.first_sample  = m_position;
     m_prev_evicted      = std::move(m_evicted);
     m_prev_block_tables = m_block_tables;
+    m_catch_undo = {.has_catch_all = m_has_catch_all, .catch_all = m_catch_all};
+    if (entry.has_catch_all) {
+        m_catch_all         = std::move(entry.catch_all);
+        m_has_catch_all     = true;
+        entry.has_catch_all = false;
+    }
     m_evicted.reset();
     if (m_ring.size() == ring_size()) {
         m_evicted = std::move(m_ring.front());
         m_ring.erase(m_ring.begin());
     }
     m_ring.push_back(std::move(entry));
+    // A short block evicted an entry still searched: the oldest kept one
+    // stands for it with the catch-all.
+    if (m_evicted && ring_needed() > ring_size() && m_has_catch_all) {
+        auto& front                    = m_ring.front();
+        m_catch_undo.front_set         = true;
+        m_catch_undo.steady            = front.steady;
+        m_catch_undo.transition_tables = front.transition_tables;
+        m_catch_undo.transition        = front.transition;
+        front.steady                   = m_catch_all;
+        front.transition_tables        = m_catch_all;
+        front.transition               = true;
+    }
     m_commit_open = true;
     try {
         BlockTables bt;
@@ -1502,6 +1538,16 @@ void FDMTBoxcarCudaEngine::undo_commit() noexcept {
     if (!m_commit_open) {
         return;
     }
+    auto& u = m_catch_undo;
+    if (u.front_set) {
+        auto& front             = m_ring.front();
+        front.steady            = std::move(u.steady);
+        front.transition_tables = std::move(u.transition_tables);
+        front.transition        = u.transition;
+    }
+    m_has_catch_all = u.has_catch_all;
+    m_catch_all     = std::move(u.catch_all);
+    u               = {};
     m_ring.pop_back();
     if (m_evicted) {
         m_ring.insert(m_ring.begin(), std::move(*m_evicted));

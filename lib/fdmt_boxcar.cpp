@@ -109,7 +109,7 @@ public:
             }
             return engine->memory_usage().budgeted() +
                    (model && exec.backend == Backend::kCPU
-                        ? model_bytes(*model, ring_size())
+                        ? model_bytes(*model, ring(*model))
                         : SizeType{0});
         };
         // The fixed part is an estimate: with an automatic chunk, step it
@@ -185,9 +185,10 @@ public:
         }
         if (model) {
             noise           = std::move(model);
-            reserved_tables = table_sets(ring_size());
+            reserved_tables = table_sets(ring(*noise));
             prev_mask       = ctor_mask;
             prev_runs       = kill_runs;
+            live.reset(ctor_mask, 0);
         }
     }
     /// estimate_memory()'s result for this (estimate-only) instance.
@@ -218,26 +219,46 @@ public:
         }
         return u;
     }
-    /// Blocks a call's endpoints reach back over: 1 + ceil(latency / nsamps).
-    [[nodiscard]] SizeType ring_size() const noexcept {
+    /// Samples a window reaches back over at most: the largest row support
+    /// plus the widest box, less one.
+    [[nodiscard]] SizeType reach(const detail::BoxcarNoiseModel& m) const {
+        return m.max_support() + planes.front().widths.back() - 1;
+    }
+    /// Block entries the engine keeps for `latency`: the blocks a call's
+    /// endpoints lie in (1 + ceil(latency / nsamps)), capped at their count
+    /// for blocks of `reach` samples (a GPU: 2). Shorter blocks fold the
+    /// oldest entries into one catch-all (BlockNoise::catch_all).
+    [[nodiscard]] std::pair<SizeType, bool>
+    ring(uint64_t latency, uint64_t reach, Exec ex) const noexcept {
         const uint64_t ns = plan.get_nsamps();
-        return 1 +
-               static_cast<SizeType>((engine->search_latency() + ns - 1) / ns);
+        const auto blocks = [&](uint64_t n) {
+            return 1 + static_cast<SizeType>((latency + n - 1) / n);
+        };
+        const SizeType all = blocks(ns);
+        const SizeType cap = ex.backend == Backend::kCPU
+                                 ? blocks(std::max<uint64_t>(reach, 1))
+                                 : SizeType{2};
+        return {std::min(all, cap), all > cap};
+    }
+    [[nodiscard]] std::pair<SizeType, bool>
+    ring(const detail::BoxcarNoiseModel& m) const noexcept {
+        return ring(engine->search_latency(), reach(m), exec);
     }
     /// Table sets alive at once: steady and transition of each ring entry,
-    /// plus the mask cache.
-    [[nodiscard]] static SizeType table_sets(SizeType ring) noexcept {
-        return (2 * ring) + kCacheMasks;
+    /// the mask cache, and the latest catch-all.
+    [[nodiscard]] static SizeType
+    table_sets(std::pair<SizeType, bool> ring) noexcept {
+        return (2 * ring.first) + kCacheMasks + (ring.second ? 1 : 0);
     }
     /// Host bytes of the noise model with its table sets.
     [[nodiscard]] static SizeType
-    model_bytes(const detail::BoxcarNoiseModel& model, SizeType ring) noexcept {
+    model_bytes(const detail::BoxcarNoiseModel& model,
+                std::pair<SizeType, bool> ring) noexcept {
         return model.plan_bytes() + model.workspace_bytes() +
                (table_sets(ring) * model.table_bytes());
     }
     /// The per-call mask model, after the checks a first per-call mask
-    /// makes: float input, and blocks long enough that every endpoint's
-    /// input spans at most two blocks.
+    /// makes (float input).
     [[nodiscard]] std::unique_ptr<detail::BoxcarNoiseModel>
     make_noise_model() const {
         if (config.input_nbits != 32) {
@@ -245,19 +266,8 @@ public:
                 "FDMTBoxcar: per-call kill masks need float32 input "
                 "(input_nbits 32)");
         }
-        auto model = std::make_unique<detail::BoxcarNoiseModel>(
+        return std::make_unique<detail::BoxcarNoiseModel>(
             plan, config, smear, std::max(1, exec.nthreads));
-        const SizeType max_width = planes.front().widths.back();
-        const uint64_t need      = model->max_support() + max_width - 1;
-        if (plan.get_nsamps() < need) {
-            throw std::invalid_argument(fmt::format(
-                "FDMTBoxcar: a per-call kill mask needs blocks of at least "
-                "{} samples (largest row support {} + max_boxcar {} - 1), so "
-                "that every endpoint's input spans at most two blocks; this "
-                "plan has {}",
-                need, model->max_support(), max_width, plan.get_nsamps()));
-        }
-        return model;
     }
     /// Budgeted bytes declared per-call masks add, before the path (hence
     /// the search latency) is known: the latency is at most the plan's
@@ -271,12 +281,9 @@ public:
         const SizeType rows    = base_rows * beams;
         const SizeType filters = planes.front().widths.size();
         const auto threads = static_cast<SizeType>(std::max(1, ex.nthreads));
-        const uint64_t ns  = plan.get_nsamps();
         if (ex.backend == Backend::kCPU) {
-            const SizeType ring =
-                1 +
-                static_cast<SizeType>(
-                    (static_cast<uint64_t>(plan.get_dt_max()) + ns - 1) / ns);
+            const auto ring = this->ring(
+                static_cast<uint64_t>(plan.get_dt_max()), reach(m), ex);
             const SizeType staging = kill_runs.empty()
                                          ? beams * plan.get_nchans() *
                                                plan.get_nsamps() * sizeof(float)
@@ -286,13 +293,19 @@ public:
                    (threads * kadane::kMaxGateBuckets * kadane::kMaxBatchRows *
                     sizeof(float));
         }
-        // GPU: row supports and (2 * 2 + 2) table slots of 2 tables.
+        // GPU: row supports and (2 * 2 + 2) table slots of 2 tables, one
+        // more when blocks may be short for the latency (the catch-all).
         const SizeType keep =
             (kill_runs.empty() && plan.get_subband_depth() == 0)
                 ? beams * plan.get_nchans()
                 : 0;
+        const SizeType slots =
+            6 +
+            (ring(static_cast<uint64_t>(plan.get_dt_max()), reach(m), ex).second
+                 ? 1
+                 : 0);
         return keep + (rows * sizeof(uint64_t)) +
-               (6 * 2 * rows * filters * sizeof(float));
+               (slots * 2 * rows * filters * sizeof(float));
     }
     std::unique_ptr<detail::FDMTBoxcarEngine> make_engine(
         const detail::FDMTEngineConfig& cfg, bool /*smear*/, Exec ex) const {
@@ -448,17 +461,22 @@ public:
             effective[c] = (ctor_mask[c] != 0 && mask[c] != 0) ? 1 : 0;
         }
         detail::BlockNoise entry;
-        entry.first_sample = engine->stream_position();
-        entry.steady       = tables_for(effective);
-        const bool changed = effective != prev_mask;
-        // The first block of a stream has no previous block to straddle.
-        if (entry.first_sample > 0 && changed) {
-            union_mask.resize(effective.size());
-            for (SizeType c = 0; c < effective.size(); ++c) {
-                union_mask[c] = effective[c] | prev_mask[c];
-            }
+        const uint64_t first = engine->stream_position();
+        entry.first_sample   = first;
+        entry.steady         = tables_for(effective);
+        const bool changed   = effective != prev_mask;
+        // Windows that reach before the block: the history mask; blocks
+        // shorter than the search latency needs: the catch-all of the
+        // entries older than the engine keeps (detail::block_masks()).
+        detail::block_masks(live, effective, prev_mask, first, reach(*noise),
+                            engine->noise_catch_all_begin(), block);
+        if (block.transition) {
             entry.transition        = true;
-            entry.transition_tables = tables_for(union_mask);
+            entry.transition_tables = tables_for(block.history);
+        }
+        if (block.catch_all) {
+            entry.catch_all     = tables_for(block.catch_mask);
+            entry.has_catch_all = true;
         }
         // An unchanged mask reuses its kill runs instead of rebuilding them.
         if (changed) {
@@ -468,6 +486,7 @@ public:
         engine->push_block_noise(std::move(entry));
         try {
             auto view = call();
+            live.update(effective, first + plan.get_nsamps());
             if (changed) {
                 prev_mask.swap(effective);
                 prev_runs.swap(next_runs);
@@ -510,7 +529,7 @@ public:
         // The noise model and its table sets live in host memory: budgeted
         // on the CPU only (on a GPU, max_memory_bytes bounds device memory).
         const SizeType extra =
-            (exec.backend == Backend::kCPU ? model_bytes(*model, ring_size())
+            (exec.backend == Backend::kCPU ? model_bytes(*model, ring(*model))
                                            : 0) +
             engine->block_noise_bytes();
         const SizeType used = engine->memory_usage().budgeted();
@@ -527,6 +546,9 @@ public:
         prev_mask = ctor_mask;
         prev_runs = kill_runs;
         cache.clear();
+        // Enabled mid-stream: the constructor mask's channels were live in
+        // every earlier block.
+        live.reset(ctor_mask, engine->stream_position());
     }
     void check_stream(Stream stream) const {
         if (exec.backend == Backend::kCPU && stream.native != nullptr) {
@@ -553,7 +575,8 @@ public:
     /// Kill runs of prev_mask, and of a changed mask until its call ends.
     std::vector<std::pair<SizeType, SizeType>> prev_runs, next_runs;
     std::vector<uint8_t> effective;
-    std::vector<uint8_t> union_mask;
+    detail::BlockMasks block;
+    detail::LiveHistory live;
     std::unique_ptr<detail::BoxcarNoiseModel> noise;
     /// BoxcarConfig::per_call_masks: the table sets reserved (0: undeclared,
     /// the live sets are reported).
@@ -728,6 +751,7 @@ void FDMTBoxcar::reset_history(Stream stream) {
     if (m_impl->noise) {
         m_impl->prev_mask = m_impl->ctor_mask; // same size: no allocation
         m_impl->prev_runs = m_impl->kill_runs;
+        m_impl->live.reset(m_impl->ctor_mask, 0);
     }
 }
 CandidateResultView FDMTBoxcar::drain() {

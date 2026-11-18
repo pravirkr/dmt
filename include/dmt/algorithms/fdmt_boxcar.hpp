@@ -130,22 +130,29 @@ struct FDMTBoxcarMemoryEstimate {
  * with the constructor mask; an empty mask, or the overloads without one,
  * mean the constructor mask alone. The mask is read before the call
  * returns (device calls stay asynchronous). Killed input never reaches the
- * transform, and samples keep the mask they were ingested with. When the
- * mask changes, the endpoints whose input windows reach back into the
- * previous block (the first S + W - 1 of each row, S its FDMT support with
- * every channel active, W the width) are thresholded and scored with the
- * variance of the OR of both masks: no extra false alarms, S/N there
- * slightly low (at most sqrt(V_or / V_true)). Elsewhere S/N is exact for
- * the block's mask. The first per-call mask requires blocks of at least
- * max(S) + max_boxcar - 1 samples (so that a window spans at most two
- * blocks) and the memory for the noise tables within max_memory_bytes
- * (on a GPU: their device copies);
- * either failure throws std::invalid_argument before any state changes.
- * With BoxcarConfig::per_call_masks the requirements and the memory are
- * checked at construction instead (and by estimate_memory()), the memory
- * reserved before the transform's path is chosen, and get_memory_usage()
- * reports the reserved table sets (2 per block a call reaches back over,
- * plus 3 cached) from the start, so it stays at its estimate.
+ * transform, and samples keep the mask they were ingested with. Endpoints
+ * whose input windows reach back before their block (the first S + W - 1
+ * of each row, S its FDMT support with every channel active, W the width)
+ * are thresholded and scored with the variance of the history mask when
+ * it differs from the block's: the block's channels and every channel
+ * live within R = max(S) + max_boxcar - 1 samples before it (for blocks of
+ * at least R samples, the OR of this and the previous block's masks). No
+ * extra false alarms; S/N there slightly low (at most
+ * sqrt(V_history / V_true)). Elsewhere S/N is exact for the block's mask.
+ * Any block length works: the masks' memory does not grow with the number
+ * of blocks a window or the search latency spans. When blocks are shorter
+ * than the latency needs (more than the blocks of R samples would), the
+ * oldest entry kept stands for the older blocks still searched with one
+ * catch-all table: every channel live within R samples before the oldest
+ * endpoint still searched, up to the newest block (conservative, as the
+ * history mask). The first per-call mask requires the memory for the
+ * noise tables within max_memory_bytes (on a GPU: their device copies),
+ * else throws std::invalid_argument before any state changes.
+ * With BoxcarConfig::per_call_masks the memory is checked at construction
+ * instead (and by estimate_memory()), reserved before the transform's path
+ * is chosen, and get_memory_usage() reports the reserved table sets (2 per
+ * block kept, plus 3 cached, plus a catch-all when blocks are short) from
+ * the start, so it stays at its estimate.
  * The noise tables of a new mask are computed on the host with
  * exec.nthreads threads (on GPUs too); the last three masks are cached.
  * skip_cold_prefix keeps the constructor mask's warm-up. reset_history()

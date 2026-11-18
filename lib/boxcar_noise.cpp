@@ -372,7 +372,9 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
 SizeType BoxcarNoiseModel::plan_bytes() const noexcept {
     return (m_row_node.size() * sizeof(m_row_node[0])) +
            (m_support->size() * sizeof(uint64_t)) +
-           (m_reference_mean.size() * sizeof(double)) + m_reference.size();
+           (m_reference_mean.size() * sizeof(double)) + m_reference.size() +
+           // FDMTBoxcar's LiveHistory (one timestamp per channel).
+           (m_plan.get_nchans() * sizeof(uint64_t));
 }
 
 SizeType BoxcarNoiseModel::workspace_bytes() const noexcept {

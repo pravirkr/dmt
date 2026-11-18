@@ -78,6 +78,7 @@ public:
         std::shared_ptr<const std::vector<uint64_t>> support) override;
     void push_block_noise(BlockNoise entry) override;
     void drop_block_noise() noexcept override;
+    [[nodiscard]] uint64_t noise_catch_all_begin() const noexcept override;
     void reset_history(Stream stream) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
     void allocate() override;
@@ -384,6 +385,21 @@ private:
     std::optional<BlockNoise> m_evicted;
     bool m_commit_open   = false;
     SizeType m_ring_size = 1;
+    /// Entries the search latency needs (1 + ceil(latency / nsamps), plus
+    /// the surrogate's); above m_ring_size the oldest kept entry takes the
+    /// latest catch-all tables (BlockNoise::catch_all).
+    SizeType m_ring_needed = 1;
+    bool m_has_catch_all   = false; ///< m_catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> m_catch_all;
+    /// What the open commit replaced (restored if its call throws).
+    struct CatchUndo {
+        bool has_catch_all = false;
+        std::shared_ptr<const NoiseTables> catch_all;
+        bool front_set = false;
+        std::shared_ptr<const NoiseTables> steady, transition_tables;
+        bool transition = false;
+    };
+    CatchUndo m_catch_undo;
     std::vector<float> m_screen_thr; ///< per thread: min thresholds of a tile
     SizeType m_kadane_exact_prefix_cap = kKadaneExactPrefixCap;
     SizeType m_prefix_stride           = 0;

@@ -208,6 +208,7 @@ FDMTBoxcarCpuEngine::execute(std::span<const float> waterfall) {
     begin_result(m_plan.get_nsamps());
     m_driver->search(masked(waterfall, m_masked), *this);
     m_commit_open = false;
+    m_catch_undo  = {};
     m_position += m_plan.get_nsamps();
     update_open_begin();
     finish_result();
@@ -264,6 +265,7 @@ CandidateResultView FDMTBoxcarCpuEngine::execute_zero() {
     begin_result(m_plan.get_nsamps());
     m_driver->search_zero(*this);
     m_commit_open = false;
+    m_catch_undo  = {};
     m_position += m_plan.get_nsamps();
     update_open_begin();
     finish_result();
@@ -364,8 +366,19 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
     const uint64_t ns = m_plan.get_nsamps();
     const SizeType extra_ring =
         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate ? 1 : 0;
-    m_ring_size = 1 + extra_ring +
-                  static_cast<SizeType>((search_latency() + ns - 1) / ns);
+    // Blocks shorter than the largest reach: at most the entries blocks of
+    // that reach would need; older blocks share the catch-all.
+    uint64_t reach = 0;
+    for (const uint64_t s : *m_support) {
+        reach = std::max(reach, s);
+    }
+    reach += m_width - 1;
+    const auto blocks = [&](uint64_t n) {
+        return 1 + extra_ring +
+               static_cast<SizeType>((search_latency() + n - 1) / n);
+    };
+    m_ring_needed = blocks(ns);
+    m_ring_size = std::min(m_ring_needed, blocks(std::max<uint64_t>(reach, 1)));
     m_ring.reserve(m_ring_size + 1);
     m_noise_on = true;
     reset_block_noise();
@@ -397,6 +410,16 @@ void FDMTBoxcarCpuEngine::drop_block_noise() noexcept {
     m_pending.reset();
     // A call that threw after its commit: restore the ring.
     if (m_commit_open) {
+        auto& u = m_catch_undo;
+        if (u.front_set) {
+            auto& front             = m_ring.front();
+            front.steady            = std::move(u.steady);
+            front.transition_tables = std::move(u.transition_tables);
+            front.transition        = u.transition;
+        }
+        m_has_catch_all = u.has_catch_all;
+        m_catch_all     = std::move(u.catch_all);
+        u               = {};
         m_ring.pop_back();
         if (m_evicted) {
             m_ring.insert(m_ring.begin(), std::move(*m_evicted));
@@ -404,6 +427,15 @@ void FDMTBoxcarCpuEngine::drop_block_noise() noexcept {
         }
         m_commit_open = false;
     }
+}
+
+uint64_t FDMTBoxcarCpuEngine::noise_catch_all_begin() const noexcept {
+    if (!m_noise_on || m_ring_needed <= m_ring_size) {
+        return UINT64_MAX;
+    }
+    // The first sample of the oldest block the next call still searches.
+    const uint64_t back = (m_ring_needed - 1) * m_plan.get_nsamps();
+    return m_position > back ? m_position - back : 0;
 }
 
 void FDMTBoxcarCpuEngine::reset_history(Stream /*unused*/) {
@@ -944,7 +976,10 @@ void FDMTBoxcarCpuEngine::update_open_begin() {
 void FDMTBoxcarCpuEngine::reset_block_noise() {
     m_pending.reset();
     m_evicted.reset();
-    m_commit_open = false;
+    m_commit_open   = false;
+    m_has_catch_all = false;
+    m_catch_all.reset();
+    m_catch_undo = {};
     m_ring.clear();
     BlockNoise first; // the constructor tables from stream sample 0
     first.kill_runs = m_kill_runs;
@@ -964,12 +999,30 @@ void FDMTBoxcarCpuEngine::commit_block_noise() {
         entry.kill_runs = m_kill_runs;
     }
     entry.first_sample = m_position;
+    m_catch_undo = {.has_catch_all = m_has_catch_all, .catch_all = m_catch_all};
+    if (entry.has_catch_all) {
+        m_catch_all         = std::move(entry.catch_all);
+        m_has_catch_all     = true;
+        entry.has_catch_all = false;
+    }
     m_evicted.reset();
     if (m_ring.size() == m_ring_size) {
         m_evicted = std::move(m_ring.front());
         m_ring.erase(m_ring.begin());
     }
     m_ring.push_back(std::move(entry));
+    // A short block evicted an entry still searched: the oldest kept one
+    // stands for it with the catch-all.
+    if (m_evicted && m_ring_needed > m_ring_size && m_has_catch_all) {
+        auto& front                    = m_ring.front();
+        m_catch_undo.front_set         = true;
+        m_catch_undo.steady            = front.steady;
+        m_catch_undo.transition_tables = front.transition_tables;
+        m_catch_undo.transition        = front.transition;
+        front.steady                   = m_catch_all;
+        front.transition_tables        = m_catch_all;
+        front.transition               = true;
+    }
     m_commit_open = true;
 }
 

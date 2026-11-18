@@ -16,6 +16,7 @@
 #include "dmt/gpu_utils.cuh"
 
 #include "fdmt_boxcar_reference.hpp"
+#include "skew_subband_search.hpp"
 
 using namespace boxcar_test;
 
@@ -47,6 +48,30 @@ Masks gpu_masks() {
 }
 
 const Exec kGpu{algorithms::detail::kGPUBackend, 1, 0};
+
+// The stream of `blocks` (one beam, nchans rows of `ns` samples each) cut
+// into blocks of `short_ns` samples (the tail that fills no block dropped).
+std::vector<std::vector<float>>
+gpu_reblock(const std::vector<std::vector<float>>& blocks,
+            SizeType nchans,
+            SizeType ns,
+            SizeType short_ns) {
+    const SizeType total = blocks.size() * ns;
+    std::vector<std::vector<float>> out(total / short_ns,
+                                        std::vector<float>(nchans * short_ns));
+    for (SizeType t = 0; t < (total / short_ns) * short_ns; ++t) {
+        for (SizeType c = 0; c < nchans; ++c) {
+            out[t / short_ns][(c * short_ns) + (t % short_ns)] =
+                blocks[t / ns][(c * ns) + (t % ns)];
+        }
+    }
+    return out;
+}
+
+void copy_device_lags(uint64_t* dst, const uint64_t* src, SizeType n) {
+    gpu_utils::check_gpu_call(
+        cudaMemcpy(dst, src, n * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+}
 
 } // namespace
 
@@ -402,10 +427,12 @@ TEST_CASE("GPU FDMTBoxcar declared per-call masks: reserved at construction, "
 }
 
 TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
-          "block is rejected at construction",
+          "block builds, at its estimate",
           "[gpu][boxcar][kill][mask]") {
     // The windowed top of a 4096-channel subband search at DM 2000 on
-    // 4096-sample blocks waits several blocks; the estimate reports it.
+    // 4096-sample blocks waits several blocks; the estimate reports it. The
+    // older blocks share the catch-all, so declared masks build (they were
+    // rejected while the GPU kept two whole blocks only).
     const float tsamp = 455.6e-6F;
     const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
         0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
@@ -420,12 +447,187 @@ TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
     INFO(est.search_path);
     REQUIRE(est.search_path.find("windowed") != std::string::npos);
     REQUIRE(est.search_latency > plan.get_nsamps());
-    cfg.per_call_masks = true;
-    CHECK_THROWS_AS(FDMTBoxcar(plan, cfg, true, kGpu, 1,
-                               algorithms::kFDMTAutoFuse, 0, budget),
-                    std::invalid_argument);
-    CHECK_THROWS_AS(FDMTBoxcar::estimate_memory(plan, cfg, true, kGpu, 1,
-                                                algorithms::kFDMTAutoFuse, 0,
-                                                budget),
-                    std::invalid_argument);
+    cfg.per_call_masks  = true;
+    const auto declared = FDMTBoxcar::estimate_memory(
+        plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0, budget);
+    const FDMTBoxcar search(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse,
+                            0, budget);
+    CHECK(search.get_memory_usage().total() == declared.usage.total());
+    CHECK(search.get_search_latency() > plan.get_nsamps());
+}
+
+TEST_CASE("GPU FDMTBoxcar per-call masks on blocks shorter than a window",
+          "[gpu][parity][boxcar][kill][mask]") {
+    // As the CPU test: windows reach over several blocks and use the
+    // history mask; search latency 0 (no catch-all).
+    const plans::FDMTPlan long_plan(
+        700, 1200, 32, 400, 0.001F,
+        std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120}, "valid", 0);
+    const auto stream = waterfalls(long_plan, 1, 2);
+    BoxcarConfig cfg;
+    cfg.max_boxcar       = 37;
+    cfg.wtsp             = 1.5F;
+    cfg.detect_thresh    = 2.7F;
+    cfg.max_candidates   = 1U << 20;
+    cfg.max_cands_per_dm = 0;
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        for (const SizeType ns : {SizeType{1}, SizeType{7}, SizeType{64}}) {
+            DYNAMIC_SECTION("depth " << depth << " block " << ns) {
+                const plans::FDMTPlan plan(
+                    700, 1200, 32, ns, 0.001F,
+                    std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120}, "valid",
+                    depth);
+                const auto input = gpu_reblock(stream, 32, 400, ns);
+                Masks masks;
+                std::mt19937 gen(7);
+                const auto pool = gpu_masks();
+                while (masks.size() < input.size()) {
+                    const auto& m = pool[gen() % pool.size()];
+                    for (SizeType i = 0;
+                         i < 1 + (gen() % 6) && masks.size() < input.size();
+                         ++i) {
+                        masks.push_back(m);
+                    }
+                }
+                const auto expected =
+                    masked_reference(plan, cfg, true, input, {}, masks);
+                REQUIRE(expected.candidates.size() > 20);
+                FDMTBoxcar search(plan, cfg, true, kGpu);
+                REQUIRE(search.get_search_latency() == 0);
+                std::vector<RawCandidate> out;
+                for (SizeType k = 0; k < input.size(); ++k) {
+                    append(out,
+                           search.execute(std::span<const float>(input[k]),
+                                          std::span<const uint8_t>(masks[k])));
+                }
+                append(out, search.drain());
+                compare(out, expected.candidates);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU FDMTBoxcar windowed top: short blocks use the catch-all",
+          "[gpu][parity][skew][boxcar][kill][mask]") {
+    // Blocks much shorter than the search latency: the two kept entries
+    // are the newest block and the catch-all, which stands for every older
+    // block still searched. Exact (to float rounding) against the CPU
+    // reference given each row's recorded lag.
+    using skew_search_test::require_same_before;
+    using skew_search_test::run_subband_search;
+    skew_search_test::g_copy_device_lags = copy_device_lags;
+    for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
+        for (const SizeType ns : {SizeType{128}, SizeType{512}}) {
+            DYNAMIC_SECTION("depth " << depth << " block " << ns) {
+                const auto grid =
+                    plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+                        0.0F, 600.0F, 455.6e-6F, 455.6e-6F, 1100.0F, 1714.0F,
+                        1152, 1.1F);
+                const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, ns,
+                                           455.6e-6F, grid, "valid", depth);
+                const SizeType nb = 12288 / ns;
+                const SizeType nc = plan.get_nchans();
+                Masks masks;
+                for (SizeType b = 0; b < nb; ++b) {
+                    std::vector<uint8_t> m(nc, 1);
+                    const auto kill = [&](double lo, double hi) {
+                        for (auto c = static_cast<SizeType>(lo * nc);
+                             c < static_cast<SizeType>(hi * nc); ++c) {
+                            m[c] = 0;
+                        }
+                    };
+                    if (b < nb / 2) {
+                        kill(0.0, 0.3);
+                        if (b % 5 == 0) {
+                            kill(0.5, 0.6);
+                        }
+                    } else {
+                        kill(0.7, 1.0);
+                        if (b % 3 == 0) {
+                            kill(0.0, 0.1);
+                        }
+                    }
+                    masks.push_back(std::move(m));
+                }
+                auto box          = skew_search_test::search_config(false);
+                box.detect_thresh = 3.5F;
+                const auto planes =
+                    algorithms::detail::make_boxcar_plans(plan, box, true);
+                std::vector<uint64_t> lags;
+                const auto gpu = run_subband_search(
+                    plan, kGpu, true, false, nb, 128, 0, true, &masks, 1.5F,
+                    &planes, SIZE_MAX, &box, nullptr, true, &lags);
+                INFO("gpu path: " << gpu.path);
+                REQUIRE(gpu.latency > ns);
+                const SizeType needed =
+                    1 + static_cast<SizeType>((gpu.latency + ns - 1) / ns);
+                REQUIRE(needed > 2);
+                std::vector<std::vector<float>> input;
+                for (SizeType b = 0; b < nb; ++b) {
+                    input.push_back(skew_search_test::search_block(
+                                        nc * ns, 900 + static_cast<unsigned>(b))
+                                        .values);
+                }
+                const auto expected = masked_reference(
+                    plan, box, true, input, {}, masks, lags, 2, needed);
+                require_same_before(gpu.candidates, expected.candidates,
+                                    UINT64_MAX, 2e-5F);
+                // A call failing after its commit leaves the stream as it
+                // was (the replaced front and its slots restored).
+                const auto failed = run_subband_search(
+                    plan, kGpu, true, false, nb, 128, 0, true, &masks, 1.5F,
+                    &planes, nb / 2 + 1, &box);
+                require_same_before(failed.candidates, gpu.candidates,
+                                    UINT64_MAX);
+                // ... and so does one right before drain().
+                const auto last =
+                    run_subband_search(plan, kGpu, true, false, nb, 128, 0,
+                                       true, &masks, 1.5F, &planes, nb, &box);
+                require_same_before(last.candidates, gpu.candidates,
+                                    UINT64_MAX);
+            }
+        }
+    }
+    skew_search_test::g_copy_device_lags = nullptr;
+}
+
+TEST_CASE("GPU FDMTBoxcar per-call mask: the catch-all through the facade",
+          "[gpu][boxcar][kill][mask]") {
+    // The windowed top of a 4096-channel DM 2000 subband search on
+    // 256-sample blocks waits ~66 blocks: the facade asks for the
+    // catch-all. A constant mask gives the same tables everywhere, so the
+    // result is the constructor mask's (no cold-prefix skip).
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
+    const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 256, tsamp, grid, "valid",
+                               2);
+    BoxcarConfig cfg(24);
+    cfg.detect_thresh    = 4.5F;
+    cfg.skip_cold_prefix = false;
+    cfg.per_call_masks   = true;
+    const auto min = FDMTBoxcar::estimate_minimum_memory(plan, cfg, true, kGpu);
+    INFO(min.search_path);
+    REQUIRE(min.search_latency > 2 * plan.get_nsamps());
+    FDMTBoxcar call(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
+                    min.max_memory_bytes);
+    REQUIRE(call.get_search_latency() > 2 * plan.get_nsamps());
+    const SizeType nb   = 90;
+    const SizeType size = 4096 * 256;
+    const auto m        = gpu_random_mask(4096, 7, 0.3);
+    cfg.per_call_masks  = false;
+    FDMTBoxcar ctor(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
+                    min.max_memory_bytes, m);
+    std::vector<RawCandidate> base;
+    std::vector<RawCandidate> out;
+    for (SizeType k = 0; k < nb; ++k) {
+        const auto block = test_random::normal<float>(size, 300 + k);
+        append(base, ctor.execute(std::span<const float>(block)));
+        append(out, call.execute(std::span<const float>(block),
+                                 std::span<const uint8_t>(m)));
+    }
+    append(base, ctor.drain());
+    append(out, call.drain());
+    REQUIRE(base.size() > 50);
+    compare(out, base);
 }

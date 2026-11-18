@@ -440,12 +440,12 @@ void bind_fdmt_boxcar(py::module_& mod) {
             frequency first (0 = killed), for this block only (float32
             input). It is ANDed with the constructor's mask; ``None`` means
             the constructor's mask alone. When the mask changes, the
-            endpoints whose input reaches back into the previous block are
-            scored with the variance of the OR of both masks (no extra false
-            alarms, S/N there slightly low). The first mask needs blocks of
-            at least the largest row support plus ``max_boxcar - 1`` samples
-            and its noise tables within ``max_memory_bytes``; otherwise
-            ``ValueError``, with the stream unchanged.
+            endpoints whose input reaches back before the block are scored
+            with the variance of every channel live in their reach (no
+            extra false alarms, S/N there slightly low); any block length
+            works. The first mask needs its noise tables within
+            ``max_memory_bytes``; otherwise ``ValueError``, with the stream
+            unchanged.
             )doc")
         .def("flush",
              [](FDMTBoxcar& search) {

@@ -5,6 +5,7 @@
 // make_boxcar_plans() computes for a constructor mask, recomputed for any
 // mask without tracing every row.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -104,8 +105,9 @@ public:
         return rows() * m_widths.size() *
                ((2 * sizeof(float)) + (m_packed ? sizeof(uint64_t) : 0));
     }
-    /// Bytes the model keeps: the row supports and node table (plan) and
-    /// the histogram layout and counts (workspace).
+    /// Bytes the model keeps: the row supports and node table, and the
+    /// LiveHistory its owner keeps (plan); the histogram layout and counts
+    /// (workspace).
     [[nodiscard]] SizeType plan_bytes() const noexcept;
     [[nodiscard]] SizeType workspace_bytes() const noexcept;
     /// Bytes of the table sets returned by compute() still alive.
@@ -150,5 +152,89 @@ private:
     std::shared_ptr<std::atomic<SizeType>> m_live;
     uint64_t m_next_id = 1;
 };
+
+/**
+ * @brief When each channel was last live, for the history masks of
+ * FDMTBoxcar's per-call kill masks: one past the last stream sample a
+ * channel was live in (0: never), nchans entries whatever the stream.
+ */
+class LiveHistory {
+public:
+    /// The history at stream position `position`: the channels `mask`
+    /// keeps were live in every earlier sample (none at position 0).
+    void reset(std::span<const uint8_t> mask, uint64_t position) {
+        m_until.assign(mask.size(), 0);
+        if (position > 0) {
+            for (SizeType c = 0; c < mask.size(); ++c) {
+                m_until[c] = mask[c] != 0 ? position : 0;
+            }
+        }
+    }
+    /// `out` = `mask` OR every channel live at or after sample `from`.
+    void since(std::span<const uint8_t> mask,
+               uint64_t from,
+               std::vector<uint8_t>& out) const {
+        out.resize(mask.size());
+        for (SizeType c = 0; c < mask.size(); ++c) {
+            out[c] = (mask[c] != 0 || m_until[c] > from) ? 1 : 0;
+        }
+    }
+    /// A block ending before sample `end` kept the channels of `mask`.
+    void update(std::span<const uint8_t> mask, uint64_t end) {
+        for (SizeType c = 0; c < mask.size(); ++c) {
+            if (mask[c] != 0) {
+                m_until[c] = end;
+            }
+        }
+    }
+    [[nodiscard]] SizeType bytes() const noexcept {
+        return m_until.capacity() * sizeof(uint64_t);
+    }
+
+private:
+    std::vector<uint64_t> m_until;
+};
+
+/// The masks of a block's noise entry (FDMTBoxcar's per-call kill masks).
+struct BlockMasks {
+    bool transition = false;      ///< windows before the block need history
+    std::vector<uint8_t> history; ///< their mask (when `transition`)
+    bool catch_all = false;       ///< the engine asked for a catch-all
+    std::vector<uint8_t> catch_mask;
+};
+
+/**
+ * The masks of the block at stream sample `first` with effective mask
+ * `mask` (`prev`: the previous block's), from the live history `live`:
+ * - history: `mask` OR every channel live within `reach` samples before
+ *   `first` (for blocks of at least `reach` samples, OR the previous
+ *   block's mask); used when the mask changed or the history differs
+ *   (never for the first block of a stream);
+ * - catch-all (`catch_begin` != UINT64_MAX, from
+ *   FDMTBoxcarEngine::noise_catch_all_begin()): `mask` OR every channel
+ *   live from `catch_begin - reach` on.
+ */
+inline void block_masks(const LiveHistory& live,
+                        std::span<const uint8_t> mask,
+                        std::span<const uint8_t> prev,
+                        uint64_t first,
+                        uint64_t reach,
+                        uint64_t catch_begin,
+                        BlockMasks& out) {
+    out.transition = false;
+    out.catch_all  = false;
+    if (first > 0) {
+        live.since(mask, first > reach ? first - reach : 0, out.history);
+        out.transition =
+            !std::equal(mask.begin(), mask.end(), prev.begin(), prev.end()) ||
+            !std::equal(mask.begin(), mask.end(), out.history.begin(),
+                        out.history.end());
+    }
+    if (catch_begin != UINT64_MAX) {
+        live.since(mask, catch_begin > reach ? catch_begin - reach : 0,
+                   out.catch_mask);
+        out.catch_all = true;
+    }
+}
 
 } // namespace dmt::algorithms::detail

@@ -500,6 +500,7 @@ public:
         std::shared_ptr<const std::vector<uint64_t>> support) override;
     void push_block_noise(BlockNoise entry) override;
     void drop_block_noise() noexcept override;
+    [[nodiscard]] uint64_t noise_catch_all_begin() const noexcept override;
     void reset_history(Stream queue) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
     void allocate() override;
@@ -650,6 +651,9 @@ private:
     void shift_candidate_times(cudaStream_t stream);
     void update_open_begin(cudaStream_t stream);
     [[nodiscard]] SizeType ring_size() const noexcept;
+    /// Entries the search latency needs: 1 + ceil(latency / nsamps); over
+    /// ring_size() (2) the oldest kept entry takes the catch-all.
+    [[nodiscard]] SizeType ring_needed() const noexcept;
     /// max_cands_per_dm for the writers: SIZE_MAX when 0 (no cap).
     [[nodiscard]] SizeType dm_cap() const noexcept {
         return m_config.max_cands_per_dm == 0 ? SIZE_MAX
@@ -775,6 +779,17 @@ private:
     gpu_utils::PlannedVector<uint64_t> m_support_d;
     BlockTables m_block_tables{};
     BlockTables m_prev_block_tables{};
+    bool m_has_catch_all = false; ///< m_catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> m_catch_all;
+    /// What the open commit replaced (restored by undo_commit()).
+    struct CatchUndo {
+        bool has_catch_all = false;
+        std::shared_ptr<const NoiseTables> catch_all;
+        bool front_set = false;
+        std::shared_ptr<const NoiseTables> steady, transition_tables;
+        bool transition = false;
+    };
+    CatchUndo m_catch_undo;
 
     // --- Kadane gate (`kKadane`) plan & device state ---
     kadane::KadaneGatePlan m_kadane_plan;
