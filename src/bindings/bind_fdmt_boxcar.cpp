@@ -414,15 +414,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
                 CandidateResultView view;
                 {
                     py::gil_scoped_release release;
-                    if (packed && !kill.is_none()) {
-                        throw std::invalid_argument(
-                            "FDMTBoxcar: per-call kill masks need float32 "
-                            "input");
-                    }
                     if (packed) {
                         view = search.execute(
                             std::span(static_cast<const uint8_t*>(input.data()),
-                                      static_cast<SizeType>(input.size())));
+                                      static_cast<SizeType>(input.size())),
+                            std::span<const uint8_t>(mask));
                     } else {
                         view = search.execute(
                             std::span(static_cast<const float*>(input.data()),
@@ -437,9 +433,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
             Search one block and return its candidates.
 
             ``kill_mask``: ``None`` or one bool/integer per channel, low
-            frequency first (0 = killed), for this block only (float32
-            input). It is ANDed with the constructor's mask; ``None`` means
-            the constructor's mask alone. When the mask changes, the
+            frequency first (0 = killed), for this block only. It is ANDed
+            with the constructor's mask; ``None`` means the constructor's
+            mask alone. On packed input, channels it kills (and the
+            constructor's mask keeps) read the code ``input_mean``, which
+            must then be a whole number (else ``ValueError``): the expected
+            sums stay the constructor's, and only the thresholds and S/N
+            scales follow the mask. When the mask changes, the
             endpoints whose input reaches back before the block are scored
             with the variance of every channel live in their reach (no
             extra false alarms, S/N there slightly low); any block length

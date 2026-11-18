@@ -453,6 +453,22 @@ def mask_blocks(seed: int = 5) -> tuple[FDMTPlan, list, list]:
     return plan, blocks, masks
 
 
+def packed_codes(blocks: list) -> list:
+    """8-bit codes round(128 + 10 x) of float blocks."""
+    return [np.clip(np.round(128 + 10 * b), 0, 255).astype(np.uint8) for b in blocks]
+
+
+def packed_config(screen: BoxcarScreenMode = BoxcarScreenMode.PREFIX) -> BoxcarConfig:
+    # 2.75 is exact in binary: float and integer cutoffs agree at the edge.
+    cfg = config()
+    cfg.detect_thresh = 2.75
+    cfg.noise_sigma = 10.0
+    cfg.input_nbits = 8
+    cfg.input_mean = 128.0
+    cfg.screen_mode = screen
+    return cfg
+
+
 def test_per_call_kill_mask() -> None:
     plan, blocks, masks = mask_blocks()
     cfg = config()
@@ -499,15 +515,57 @@ def test_per_call_kill_mask_validation() -> None:
     FDMTBoxcar(short, config()).execute(
         np.zeros((16, 60), dtype=np.float32), kill_mask=np.ones(16, np.uint8)
     )
-    # Packed input takes no per-call mask.
+    # Packed input: killed channels read the code input_mean, which must be
+    # a whole number; the rejected call leaves the stream as it was.
     cfg = config()
     cfg.input_nbits = 8
-    cfg.input_mean = 1.0
+    cfg.input_mean = 127.5
+    codes = packed_codes(blocks)
     packed = FDMTBoxcar(plan, cfg)
-    with pytest.raises(ValueError, match="float32"):
-        packed.execute(
-            np.zeros((16, 300), dtype=np.uint8), kill_mask=np.ones(16, np.uint8)
+    packed_ref = FDMTBoxcar(plan, cfg)
+    with pytest.raises(ValueError, match="input_mean"):
+        packed.execute(codes[0], kill_mask=np.ones(16, np.uint8))
+    for block in codes:
+        np.testing.assert_array_equal(
+            packed.execute(block).candidates, packed_ref.execute(block).candidates
         )
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [BoxcarScreenMode.PREFIX, BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE],
+)
+def test_per_call_kill_mask_packed(screen: BoxcarScreenMode) -> None:
+    # Killed channels read the mean code: on codes minus the mean as float32
+    # they read zero, so without box smearing the packed search equals the
+    # float32 one bit for bit.
+    plan, blocks, masks = mask_blocks(7)
+    codes = packed_codes(blocks)
+    centred = [c.astype(np.float32) - 128 for c in codes]
+    cfg = packed_config(screen)
+    fl = config()
+    fl.detect_thresh = cfg.detect_thresh
+    fl.noise_sigma = cfg.noise_sigma
+    fl.screen_mode = screen
+    got = masked_stream(FDMTBoxcar(plan, cfg, use_box_smearing=False), codes, masks)
+    want = masked_stream(FDMTBoxcar(plan, fl, use_box_smearing=False), centred, masks)
+    assert len(want) > 0
+    assert_same(got, want)
+
+
+def test_per_call_kill_mask_packed_gpu_matches_cpu(gpu_backend: str) -> None:
+    plan, blocks, masks = mask_blocks(9)
+    codes = packed_codes(blocks)
+    for screen in (
+        BoxcarScreenMode.PREFIX,
+        BoxcarScreenMode.KADANE,
+        BoxcarScreenMode.NONE,
+    ):
+        cfg = packed_config(screen)
+        cpu = masked_stream(FDMTBoxcar(plan, cfg), codes, masks)
+        gpu = masked_stream(FDMTBoxcar(plan, cfg, backend=gpu_backend), codes, masks)
+        assert len(cpu) > 0
+        assert_same(gpu, cpu)
 
 
 def test_per_call_kill_mask_gpu_matches_cpu(gpu_backend: str) -> None:
@@ -1117,11 +1175,25 @@ def _check_declared_masks(backend: str) -> None:
     after = search.memory_usage
     assert after.total == est.usage.total + est.host_staging
     assert after.staging == est.usage.staging + est.host_staging
-    # Packed input: CPU and the kPrefix / kNone screens so far, and an
-    # integer input_mean (killed channels read that code).
+    # Packed input: an integer input_mean (killed channels read that code).
     packed = BoxcarConfig(17, input_nbits=8, input_mean=127.5, per_call_masks=True)
-    with pytest.raises(ValueError, match=r"packed input|integer input_mean"):
+    with pytest.raises(ValueError, match="input_mean"):
         FDMTBoxcar(plan, packed, backend=backend)
+    lazy_pk = packed_config()
+    lazy_pk.screen_mode = BoxcarScreenMode.AUTO
+    decl_pk = packed_config()
+    decl_pk.screen_mode = BoxcarScreenMode.AUTO
+    decl_pk.per_call_masks = True
+    est = FDMTBoxcar.estimate_memory(plan, decl_pk, backend=backend)
+    search = FDMTBoxcar(plan, decl_pk, backend=backend)
+    assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
+    codes = packed_codes(blocks)
+    assert_same(
+        masked_stream(search, codes, masks),
+        masked_stream(FDMTBoxcar(plan, lazy_pk, backend=backend), codes, masks),
+    )
+    after = search.memory_usage
+    assert after.total == est.usage.total + est.host_staging
 
 
 def test_declared_per_call_masks_cpu() -> None:

@@ -147,8 +147,9 @@ warm-up. `reset_history()` clears the mask state, and `drain()` pads with
 the last block's mask. `search_plans` (`get_search_plans()`) shows the
 constructor mask's tables only.
 
-**Packed input** (C++ `execute(waterfall, kill_mask)`, host or device input,
-CPU and GPU, every screen): channels the block's mask kills, but the
+**Packed input** (Python `search.execute(codes, kill_mask=mask)` with
+uint8 bytes; C++ `execute(waterfall, kill_mask)`, host or device input; CPU
+and GPU, every screen): channels the block's mask kills, but the
 constructor's keeps, read the code `input_mean` instead of 0, so
 `input_mean` must be an integer. Every window's expected sum is then the
 constructor plan's, exactly, and only the cutoffs and S/N scales change with
