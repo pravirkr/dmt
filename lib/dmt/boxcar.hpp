@@ -466,7 +466,9 @@ public:
     virtual void allocate() = 0;
     /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
     /// transform itself, without a staging copy. False where unsupported.
-    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
+    virtual bool set_search_keep(const uint8_t* /*keep*/, float /*fill*/ = 0) {
+        return false;
+    }
     /// FDMTEngine::execute_search_zero(): host search of one all-zero block.
     [[nodiscard]] virtual bool search_zero_supported() const noexcept {
         return false;

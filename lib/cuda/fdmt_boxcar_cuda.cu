@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -32,6 +33,26 @@
 
 namespace dmt::algorithms::detail::fdmt_boxcar_cuda {
 namespace {
+
+// Packed per-width peaks open when per-call masks start: their S/N from
+// the constructor's tables (as CandidateWriter computes it at emission).
+__global__ void kernel_sync_peak_snr(BoxcarPeak* peaks,
+                                     SizeType count,
+                                     SizeType peak_count,
+                                     SizeType nrows,
+                                     SizeType nfilters,
+                                     const double* means,
+                                     const float* scales,
+                                     double unit) {
+    const SizeType i = blockIdx.x * SizeType{blockDim.x} + threadIdx.x;
+    if (i >= count || !peaks[i].open) {
+        return;
+    }
+    BoxcarPeak& peak = peaks[i];
+    const SizeType k = (((i / peak_count) % nrows) * nfilters) + peak.filter;
+    peak.snr         = static_cast<float>(
+        (static_cast<double>(peak.raw_sum) - means[k]) * (scales[k] * unit));
+}
 
 __global__ void kernel_flush_boxcar(const BoxcarRow* rows,
                                     SizeType nrows,
@@ -796,15 +817,28 @@ CandidateDeviceResultView
 FDMTBoxcarCudaEngine::execute(DeviceSpan<const uint8_t> waterfall,
                               Stream queue) {
     validate_packed(waterfall.size());
-    begin_result(m_plan.get_nsamps(), queue);
-    m_driver->search(masked(waterfall, m_packed_input, queue),
-                     m_config.input_nbits, *this, queue);
+    const auto stream = static_cast<cudaStream_t>(queue.native);
+    // Before the table uploads, which go to the current device.
+    gpu_utils::set_device(m_device);
+    commit_block_noise(stream);
+    try {
+        begin_result(m_plan.get_nsamps(), queue);
+        m_driver->search(masked(waterfall, m_packed_input, queue),
+                         m_config.input_nbits, *this, queue);
+    } catch (...) {
+        undo_commit();
+        throw;
+    }
+    m_commit_open = false;
+    m_catch_undo  = {};
+    m_prev_evicted.reset();
     m_position += m_plan.get_nsamps();
-    finish_keep(static_cast<cudaStream_t>(queue.native));
-    plane_counts(static_cast<cudaStream_t>(queue.native));
-    shift_candidate_times(static_cast<cudaStream_t>(queue.native));
-    update_open_begin(static_cast<cudaStream_t>(queue.native));
-    m_work.mark(static_cast<cudaStream_t>(queue.native));
+    finish_keep(stream);
+    plane_counts(stream);
+    shift_candidate_times(stream);
+    release_slots(stream);
+    update_open_begin(stream);
+    m_work.mark(stream);
     return device_view();
 }
 
@@ -867,7 +901,8 @@ CandidateDeviceResultView FDMTBoxcarCudaEngine::flush_device(Stream queue) {
             raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates, dm_cap(),
             tasks, raw(m_integer_means), raw(m_scales_d), m_filters,
             m_integer_unit,
-            m_config.input_nbits != 32 &&
+            // Packed peaks under per-call masks carry their own S/N.
+            m_config.input_nbits != 32 && !m_noise_on &&
                 m_config.peak_mode !=
                     PeakFindingMode::kContiguousPeakAcrossWidths,
             raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
@@ -936,14 +971,17 @@ SizeType FDMTBoxcarCudaEngine::block_noise_bytes() const noexcept {
                                   : 0;
     // Device bytes only (the host halves of the slots are not budgeted).
     return staging + (m_rows.size() * sizeof(uint64_t)) +
-           (slot_count() * 2 * table_floats() * sizeof(float));
+           (slot_count() * slot_floats() * sizeof(float));
 }
 
 void FDMTBoxcarCudaEngine::enable_block_noise(
     std::shared_ptr<const std::vector<uint64_t>> support) {
-    if (m_config.input_nbits != 32) {
-        throw std::logic_error(
-            "FDMTBoxcar (gpu): per-call kill masks need float input");
+    if (m_config.input_nbits != 32 &&
+        (!m_keep_in_transform ||
+         m_config.screen_mode == BoxcarScreenMode::kKadane ||
+         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)) {
+        throw std::logic_error("FDMTBoxcar (gpu): per-call kill masks on "
+                               "packed input need kPrefix or kNone");
     }
     gpu_utils::set_device(m_device);
     const SizeType full = m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
@@ -974,11 +1012,15 @@ void FDMTBoxcarCudaEngine::enable_block_noise(
     m_ring.reserve(3);
     m_noise_on = true;
     reset_block_noise();
+    if (m_allocated && m_config.input_nbits != 32 &&
+        m_config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth) {
+        sync_peak_snr();
+    }
 }
 
 void FDMTBoxcarCudaEngine::allocate_slot(TableSlot& slot) {
-    slot.device.resize(2 * table_floats());
-    slot.host.reserve(2 * table_floats());
+    slot.device.resize(slot_floats());
+    slot.host.reserve(slot_floats());
     gpu_utils::check_gpu_call(
         cudaEventCreateWithFlags(&slot.copied, cudaEventDisableTiming),
         "FDMTBoxcar: event creation failed");
@@ -1106,45 +1148,44 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCudaEngine::memory_usage() const noexcept {
         (m_lag_i32_d.size() * sizeof(kadane::LagWindow<int32_t>)) +
         (m_surrogate_rows_d.size() * sizeof(kadane::KadaneSurrogateRowState)) +
         (m_surrogate_pos_d.size() * sizeof(uint64_t));
-    return {.plan =
-                fdmt.plan + host_plan + (m_rows_d.size() * sizeof(BoxcarRow)) +
-                (m_widths_d.size() * sizeof(uint32_t)) +
-                (m_screen_groups_d.size() * sizeof(BoxcarScreenGroup)) +
-                ((m_screen_thresholds_d.size() + m_screen_m1_d.size()) *
-                 sizeof(float)) +
-                (m_integer_means.size() * sizeof(double)) +
-                (m_integer_thresholds.size() * sizeof(uint64_t)) +
-                ((m_thresholds_d.size() + m_scales_d.size()) * sizeof(float)) +
-                (m_support_d.size() * sizeof(uint64_t)) +
-                (m_slots.size() * 4 * table_floats() * sizeof(float)) +
-                (m_level_offset_d.size() * sizeof(uint32_t)) + kadane_plan_d,
-            .state   = fdmt.state,
-            .history = fdmt.history + (m_carry_d.size() * sizeof(float)) +
-                       (m_integer_carry.size() * sizeof(uint64_t)) +
-                       (m_integer_carry32.size() * sizeof(uint32_t)) +
-                       kadane_hist_d,
-            .peaks = (m_peaks_d.size() * sizeof(BoxcarPeak)) + m_open_d.size(),
-            .workspace =
-                fdmt.workspace + (m_per_dm_d.size() * sizeof(uint64_t)) +
-                (m_ring_d.size() * sizeof(uint64_t)) + sizeof(CandidateCounts) +
-                (m_row_detected_d.size() * sizeof(uint64_t)) +
-                (m_plane_counts_d.size() * sizeof(CandidateCounts)) +
-                (m_plane_slots_d.size() * sizeof(uint64_t)) + sizeof(uint64_t) +
-                (2 * sizeof(uint64_t)), // candidate frontier
-            .candidates = ((m_candidates_d.size() + m_candidates_h.size() +
-                            m_plane_scratch_d.size()) *
-                           sizeof(RawCandidate)) +
-                          (m_plane_counts_h.size() * sizeof(CandidateCounts)) +
-                          (m_bright_d.size() * sizeof(BoxcarKeepEntry)) +
-                          (m_bright_rank_d.size() * sizeof(uint32_t)) +
-                          (sizeof(KeepSelect) * m_bright_sel_d.size()) +
-                          (m_bright_hist_d.size() * sizeof(uint64_t)),
-            .staging    = (m_input_d.size() * sizeof(float)) +
-                          m_packed_input.size() + m_keep_d.size(),
-            .host = host_plan +
-                    (m_slots.size() * 2 * table_floats() * sizeof(float)) +
-                    (m_candidates_h.size() * sizeof(RawCandidate)) +
-                    (m_plane_counts_h.size() * sizeof(CandidateCounts))};
+    return {
+        .plan  = fdmt.plan + host_plan + (m_rows_d.size() * sizeof(BoxcarRow)) +
+                 (m_widths_d.size() * sizeof(uint32_t)) +
+                 (m_screen_groups_d.size() * sizeof(BoxcarScreenGroup)) +
+                 ((m_screen_thresholds_d.size() + m_screen_m1_d.size()) *
+                  sizeof(float)) +
+                 (m_integer_means.size() * sizeof(double)) +
+                 (m_integer_thresholds.size() * sizeof(uint64_t)) +
+                 ((m_thresholds_d.size() + m_scales_d.size()) * sizeof(float)) +
+                 (m_support_d.size() * sizeof(uint64_t)) +
+                 (m_slots.size() * 2 * slot_floats() * sizeof(float)) +
+                 (m_level_offset_d.size() * sizeof(uint32_t)) + kadane_plan_d,
+        .state = fdmt.state,
+        .history = fdmt.history + (m_carry_d.size() * sizeof(float)) +
+                   (m_integer_carry.size() * sizeof(uint64_t)) +
+                   (m_integer_carry32.size() * sizeof(uint32_t)) +
+                   kadane_hist_d,
+        .peaks   = (m_peaks_d.size() * sizeof(BoxcarPeak)) + m_open_d.size(),
+        .workspace =
+            fdmt.workspace + (m_per_dm_d.size() * sizeof(uint64_t)) +
+            (m_ring_d.size() * sizeof(uint64_t)) + sizeof(CandidateCounts) +
+            (m_row_detected_d.size() * sizeof(uint64_t)) +
+            (m_plane_counts_d.size() * sizeof(CandidateCounts)) +
+            (m_plane_slots_d.size() * sizeof(uint64_t)) + sizeof(uint64_t) +
+            (2 * sizeof(uint64_t)), // candidate frontier
+        .candidates = ((m_candidates_d.size() + m_candidates_h.size() +
+                        m_plane_scratch_d.size()) *
+                       sizeof(RawCandidate)) +
+                      (m_plane_counts_h.size() * sizeof(CandidateCounts)) +
+                      (m_bright_d.size() * sizeof(BoxcarKeepEntry)) +
+                      (m_bright_rank_d.size() * sizeof(uint32_t)) +
+                      (sizeof(KeepSelect) * m_bright_sel_d.size()) +
+                      (m_bright_hist_d.size() * sizeof(uint64_t)),
+        .staging = (m_input_d.size() * sizeof(float)) + m_packed_input.size() +
+                   m_keep_d.size(),
+        .host = host_plan + (m_slots.size() * slot_floats() * sizeof(float)) +
+                (m_candidates_h.size() * sizeof(RawCandidate)) +
+                (m_plane_counts_h.size() * sizeof(CandidateCounts))};
 }
 
 SizeType FDMTBoxcarCudaEngine::chunk_nsamps() const noexcept {
@@ -1178,7 +1219,7 @@ DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
     }
     const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
     if (m_keep_in_transform) {
-        set_keep(runs, queue);
+        set_keep(runs, queue, m_noise_on && m_config.input_nbits != 32);
         return block;
     }
     if (runs.empty()) {
@@ -1205,19 +1246,31 @@ DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
 }
 
 void FDMTBoxcarCudaEngine::set_keep(
-    const std::vector<std::pair<SizeType, SizeType>>& runs, Stream queue) {
+    const std::vector<std::pair<SizeType, SizeType>>& runs,
+    Stream queue,
+    bool call_fill) {
     if (runs.empty()) {
         (void)m_driver->set_search_keep(nullptr);
         return;
     }
-    if (m_keep_d.empty() || runs != m_keep_runs) {
+    if (m_keep_d.empty() || runs != m_keep_runs || call_fill != m_keep_fill) {
         const SizeType nchans = m_plan.get_nchans();
         m_keep_h.assign(m_beams * nchans, 1);
+        // Packed per-call masks: the call's kills read the mean code (2),
+        // the constructor's read zero (0).
+        const uint8_t killed = call_fill ? 2 : 0;
         for (SizeType b = 0; b < m_beams; ++b) {
             for (const auto& [c0, c1] : runs) {
                 std::fill_n(m_keep_h.begin() +
                                 static_cast<std::ptrdiff_t>(b * nchans + c0),
-                            c1 - c0, uint8_t{0});
+                            c1 - c0, killed);
+            }
+            if (call_fill) {
+                for (const auto& [c0, c1] : m_kill_runs) {
+                    std::fill_n(m_keep_h.begin() + static_cast<std::ptrdiff_t>(
+                                                       b * nchans + c0),
+                                c1 - c0, uint8_t{0});
+                }
             }
         }
         if (m_keep_d.empty()) {
@@ -1230,8 +1283,9 @@ void FDMTBoxcarCudaEngine::set_keep(
             cudaMemcpyAsync(raw(m_keep_d), m_keep_h.data(), m_keep_h.size(),
                             cudaMemcpyHostToDevice, stream));
         m_keep_runs = runs;
+        m_keep_fill = call_fill;
     }
-    (void)m_driver->set_search_keep(raw(m_keep_d));
+    (void)m_driver->set_search_keep(raw(m_keep_d), m_config.input_mean);
 }
 
 void FDMTBoxcarCudaEngine::shift_candidate_times(cudaStream_t stream) {
@@ -1373,6 +1427,25 @@ SizeType FDMTBoxcarCudaEngine::table_floats() const noexcept {
     return m_rows.size() * m_filters;
 }
 
+void FDMTBoxcarCudaEngine::sync_peak_snr() {
+    // Queued calls may still update the peaks: after them, before the next.
+    m_work.wait();
+    const SizeType count = m_peaks_d.size();
+    if (count == 0) {
+        return;
+    }
+    kernel_sync_peak_snr<<<(count + 255) / 256, 256>>>(
+        raw(m_peaks_d), count, m_peak_count, m_rows.size(), m_filters,
+        raw(m_integer_means), raw(m_scales_d), m_integer_unit);
+    gpu_utils::check_last_gpu_error("FDMTBoxcar: peak S/N sync failed");
+    gpu_utils::check_gpu_call(cudaStreamSynchronize(nullptr),
+                              "FDMTBoxcar: peak S/N sync failed");
+}
+
+SizeType FDMTBoxcarCudaEngine::slot_floats() const noexcept {
+    return (m_config.input_nbits != 32 ? 4 : 2) * table_floats();
+}
+
 void FDMTBoxcarCudaEngine::reset_block_noise() {
     m_pending.reset();
     m_evicted.reset();
@@ -1432,6 +1505,11 @@ const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
         const SizeType n = table_floats();
         std::copy_n(tables->thresh.data(), n, slot->host.data());
         std::copy_n(tables->inv_sigma.data(), n, slot->host.data() + n);
+        if (m_config.input_nbits != 32) {
+            // The integer cutoffs after them (8-byte aligned: 2n floats).
+            std::memcpy(slot->host.data() + (2 * n),
+                        tables->integer_thresh.data(), n * sizeof(uint64_t));
+        }
         if (slot->release_pending) {
             gpu_utils::check_gpu_call(
                 cudaStreamWaitEvent(stream, slot->released, 0),
@@ -1439,8 +1517,8 @@ const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
         }
         gpu_utils::check_gpu_call(
             cudaMemcpyAsync(raw(slot->device), slot->host.data(),
-                            2 * n * sizeof(float), cudaMemcpyHostToDevice,
-                            stream),
+                            slot_floats() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
             "FDMTBoxcar: table upload failed");
         gpu_utils::check_gpu_call(cudaEventRecord(slot->copied, stream),
                                   "FDMTBoxcar: event record failed");
@@ -1498,16 +1576,24 @@ void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
         bt.count           = static_cast<int>(m_ring.size() - off);
         bt.support         = raw(m_support_d);
         for (int e = 0; e < bt.count; ++e) {
-            const auto& r    = m_ring[off + e];
-            bt.first[e]      = r.first_sample;
-            bt.transition[e] = r.transition;
-            const float* st  = slot_of(r.steady.get(), stream);
-            bt.thr[e][0]     = st;
-            bt.inv[e][0]     = st != nullptr ? st + n : nullptr;
+            const auto& r     = m_ring[off + e];
+            bt.first[e]       = r.first_sample;
+            bt.transition[e]  = r.transition;
+            const bool packed = m_config.input_nbits != 32;
+            const auto ithr   = [&](const float* t) -> const uint64_t* {
+                return packed && t != nullptr
+                           ? reinterpret_cast<const uint64_t*>(t + (2 * n))
+                           : nullptr;
+            };
+            const float* st = slot_of(r.steady.get(), stream);
+            bt.thr[e][0]    = st;
+            bt.inv[e][0]    = st != nullptr ? st + n : nullptr;
+            bt.ithr[e][0]   = ithr(st);
             if (r.transition) {
                 const float* tr = slot_of(r.transition_tables.get(), stream);
                 bt.thr[e][1]    = tr;
                 bt.inv[e][1]    = tr != nullptr ? tr + n : nullptr;
+                bt.ithr[e][1]   = ithr(tr);
             }
         }
         const auto add_tag = [&bt](const BlockNoise& r) {

@@ -12,9 +12,12 @@ struct BoxcarRunSummary {
     bool all = true;
 };
 
+/// Peak order of the runs (`kind`): 0 float S/N, 1 integer raw sum
+/// (boxcar_integer_better), 2 integer by S/N first (packed input under
+/// per-call masks, boxcar_integer_snr_better).
 DMT_HD inline BoxcarRunSummary boxcar_join(BoxcarRunSummary left,
                                            BoxcarRunSummary right,
-                                           bool integer = false) noexcept {
+                                           int kind = 0) noexcept {
     if (!right.all) {
         return right;
     }
@@ -24,7 +27,11 @@ DMT_HD inline BoxcarRunSummary boxcar_join(BoxcarRunSummary left,
     } else if (left.trailing.open) {
         const uint64_t end = right.trailing.end;
         const bool better =
-            integer
+            kind == 2
+                ? boxcar_integer_snr_better(
+                      right.trailing.snr, right.trailing.raw_sum,
+                      right.trailing.peak, right.trailing.filter, left.trailing)
+            : kind == 1
                 ? boxcar_integer_better(right.trailing.raw_sum,
                                         right.trailing.peak,
                                         right.trailing.filter, left.trailing)

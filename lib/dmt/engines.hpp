@@ -165,7 +165,10 @@ public:
     /// device input; nullptr reads every row. The bytes are read by the
     /// queued kernels, so they must stay valid until those complete.
     /// Returns false (and ignores `keep`) where unsupported.
-    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
+    /// `fill`: the code packed rows flagged 2 read (FDMTInputPacked).
+    virtual bool set_search_keep(const uint8_t* /*keep*/, float /*fill*/ = 0) {
+        return false;
+    }
     /// Host search of one all-zero input block of the search bit depth
     /// (FDMTBoxcar::drain() padding) without reading or staging one, where
     /// search_zero_supported(); the result equals execute_search() on such a

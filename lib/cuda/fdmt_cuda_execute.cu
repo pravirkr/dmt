@@ -432,7 +432,8 @@ void FDMTCudaEngine::execute_search(DeviceSpan<const uint8_t> waterfall,
         .row_bytes = static_cast<int>(
             bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits)),
         .nbits = static_cast<int>(nbits),
-        .keep  = m_search_keep};
+        .keep  = m_search_keep,
+        .fill  = m_search_fill};
     if (m_search_u32) {
         execute_search_int_typed<uint32_t>(
             full, thrust::raw_pointer_cast(m_integer32_ring.data()), sink,

@@ -183,8 +183,8 @@ public:
     }
     void reset(Stream stream) override { m_inner->reset(stream); }
     void allocate() override { m_inner->allocate(); }
-    bool set_search_keep(const uint8_t* keep) override {
-        return m_inner->set_search_keep(keep);
+    bool set_search_keep(const uint8_t* keep, float fill) override {
+        return m_inner->set_search_keep(keep, fill);
     }
     [[nodiscard]] bool search_zero_supported() const noexcept override {
         return m_inner->search_zero_supported();

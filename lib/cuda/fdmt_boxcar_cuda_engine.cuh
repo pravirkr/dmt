@@ -363,7 +363,7 @@ DMT_D inline void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                               BoxcarPeak* persistent,
                               const Writer& writer,
                               const uint64_t (&raw_sum)[kItems],
-                              bool integer) {
+                              int integer) {
     const int tid   = static_cast<int>(threadIdx.x);
     const int first = tid * kItems;
     BoxcarRunSummary summary;
@@ -373,7 +373,11 @@ DMT_D inline void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
             summary.trailing.open = false;
         } else {
             const auto ignore = [] DMT_D(const BoxcarPeak&) {};
-            if (integer) {
+            if (integer == 2) {
+                boxcar_integer_snr_peak_step(summary.trailing, true, snr[j],
+                                             raw_sum[j], start + first + j,
+                                             filters[j], ignore);
+            } else if (integer == 1) {
                 boxcar_integer_peak_step(summary.trailing, true, raw_sum[j],
                                          start + first + j, filters[j], ignore);
             } else {
@@ -399,7 +403,10 @@ DMT_D inline void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
         tid == 0 ? carried.trailing
                  : boxcar_join(carried, shared.runs[tid - 1], integer).trailing;
     for (int j = 0; j < kItems && first + j < n; ++j) {
-        if (integer) {
+        if (integer == 2) {
+            boxcar_integer_snr_peak_step(incoming, above[j], snr[j], raw_sum[j],
+                                         start + first + j, filters[j], writer);
+        } else if (integer == 1) {
             boxcar_integer_peak_step(incoming, above[j], raw_sum[j],
                                      start + first + j, filters[j], writer);
         } else {
@@ -426,6 +433,8 @@ struct BlockTables {
     uint64_t first[2]{0, 0};
     const float* thr[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
     const float* inv[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
+    /// Packed rows: the integer cutoffs (null: the constructor's).
+    const uint64_t* ithr[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
     bool transition[2]{false, false};
     int count               = 0;
     const uint64_t* support = nullptr;
@@ -528,11 +537,12 @@ private:
         bool release_pending = false;
     };
 
-    template <typename Kernel> void configure_kernel(Kernel kernel) const {
+    template <typename Kernel>
+    void configure_kernel(Kernel kernel, SizeType smem = 0) const {
         gpu_utils::check_gpu_call(
             cudaFuncSetAttribute(kernel,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(m_smem)),
+                                 static_cast<int>(smem != 0 ? smem : m_smem)),
             "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
         // Several resident rows per SM need the shared-memory carveout.
@@ -645,8 +655,11 @@ private:
     DeviceSpan<const T> masked(DeviceSpan<const T> block,
                                thrust::device_vector<T>& buffer,
                                Stream queue);
+    /// `call_fill`: packed input under per-call masks; rows the runs kill
+    /// but the constructor keeps read input_mean (flag 2).
     void set_keep(const std::vector<std::pair<SizeType, SizeType>>& runs,
-                  Stream queue);
+                  Stream queue,
+                  bool call_fill = false);
     void finish_keep(cudaStream_t stream);
     void shift_candidate_times(cudaStream_t stream);
     void update_open_begin(cudaStream_t stream);
@@ -666,6 +679,11 @@ private:
     void allocate_slot(TableSlot& slot);
     [[nodiscard]] SizeType slot_count() const noexcept;
     [[nodiscard]] SizeType table_floats() const noexcept;
+    /// Floats of one table set on the device: thresholds and inverse
+    /// sigmas, plus the integer cutoffs (as pairs of floats) when packed.
+    [[nodiscard]] SizeType slot_floats() const noexcept;
+    /// Open packed per-width peaks take their S/N (the first per-call mask).
+    void sync_peak_snr();
     void reset_block_noise();
     const float* slot_of(const NoiseTables* tables, cudaStream_t stream);
     void commit_block_noise(cudaStream_t stream);
@@ -703,6 +721,7 @@ private:
     gpu_utils::PlannedVector<uint8_t> m_keep_d;
     std::vector<uint8_t> m_keep_h;
     std::vector<std::pair<SizeType, SizeType>> m_keep_runs;
+    bool m_keep_fill = false; ///< m_keep_d holds flag 2 (call_fill)
     /// execute_zero(): the block's input reads as zero (every row killed).
     bool m_zero_block = false;
     std::vector<LevelGroup> m_level_groups;
@@ -734,6 +753,9 @@ private:
     uint32_t m_mask          = 0;
     bool m_shared_tables     = false;
     SizeType m_smem          = 0;
+    /// Shared bytes of the prefix kernel's per-call mask instances: m_smem
+    /// plus the group bounds (float rows include them in m_smem as well).
+    SizeType m_smem_noise = 0;
     gpu_utils::PlannedVector<BoxcarPeak> m_peaks_d;
     gpu_utils::PlannedVector<uint8_t> m_open_d; ///< any peak open, per task
     gpu_utils::PlannedVector<uint64_t> m_per_dm_d, m_slots_d;

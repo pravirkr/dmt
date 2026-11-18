@@ -72,12 +72,14 @@ struct FDMTInputPacked {
     const uint8_t* data;
     int row_bytes;
     int nbits;
-    /// As FDMTInputF32::keep; killed rows read code 0.
+    /// As FDMTInputF32::keep; killed rows (0) read code 0, rows 2 (killed
+    /// by a per-call mask only) read the code `fill` (input_mean).
     const uint8_t* keep = nullptr;
+    float fill          = 0.0F;
 
     DMT_HD float load(int64_t row, int t) const {
-        if (keep != nullptr && keep[row] == 0) {
-            return 0.0F;
+        if (keep != nullptr && keep[row] != 1) {
+            return keep[row] == 0 ? 0.0F : fill;
         }
         const uint8_t* r = data + (static_cast<size_t>(row) * row_bytes);
         const auto st    = static_cast<SizeType>(t);

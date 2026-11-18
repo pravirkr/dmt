@@ -126,15 +126,16 @@ struct FDMTBoxcarMemoryEstimate {
  *
  * Per-call kill mask: execute(waterfall, kill_mask) also takes a mask for
  * that block (same format and convention; nonzero is active). Packed input
- * (CPU backend so far, every screen): channels it kills but
- * the constructor mask keeps read the code input_mean (which must be an
- * integer), so the expected sums stay the constructor plan's and only the
- * cutoffs and S/N scales follow the rules below; per-width peaks spanning
- * a change of tables are ranked by S/N. It applies to every beam and sample of
- * the block and is ANDed with the constructor mask; an empty mask, or the
- * overloads without one, mean the constructor mask alone. The mask is read
- * before the call returns (device calls stay asynchronous). Killed input never
- * reaches the transform, and samples keep the mask they were ingested with.
+ * (every screen on the CPU; kPrefix and kNone on a GPU so far): channels
+ * it kills but the constructor mask keeps read the code input_mean (which
+ * must be an integer), so the expected sums stay the constructor plan's
+ * and only the cutoffs and S/N scales follow the rules below; per-width
+ * peaks spanning a change of tables are ranked by S/N. It applies to every
+ * beam and sample of the block and is ANDed with the constructor mask; an
+ * empty mask, or the overloads without one, mean the constructor mask
+ * alone. The mask is read before the call returns (device calls stay
+ * asynchronous). Killed input never reaches the transform, and samples
+ * keep the mask they were ingested with.
  * Endpoints whose input windows reach back before their block (the first S + W
  * - 1 of each row, S its FDMT support with every channel active, W the width)
  * are thresholded and scored with the variance of the history mask when
@@ -238,11 +239,16 @@ public:
     /// Packed rows follow FDMT byte order and have independent byte padding.
     [[nodiscard]] CandidateResultView
     execute(std::span<const uint8_t> waterfall);
-    /// Packed input with a per-call kill mask (CPU backend, kPrefix or
-    /// kNone screen): channels it kills read the code input_mean.
+    /// Packed input with a per-call kill mask (every screen on the CPU,
+    /// kPrefix or kNone on a GPU): channels it kills read the code
+    /// input_mean.
     [[nodiscard]] CandidateResultView
     execute(std::span<const uint8_t> waterfall,
             std::span<const uint8_t> kill_mask);
+    [[nodiscard]] CandidateDeviceResultView
+    execute(DeviceSpan<const uint8_t> waterfall,
+            std::span<const uint8_t> kill_mask,
+            Stream stream = {});
     [[nodiscard]] CandidateDeviceResultView
     execute(DeviceSpan<const uint8_t> waterfall, Stream stream = {});
     [[nodiscard]] CandidateResultView flush();

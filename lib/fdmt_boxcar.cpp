@@ -263,11 +263,15 @@ public:
     /// mean (`reference`).
     [[nodiscard]] std::unique_ptr<detail::BoxcarNoiseModel>
     make_noise_model() const {
-        const bool packed = config.input_nbits != 32;
-        if (packed && exec.backend != Backend::kCPU) {
+        const bool packed           = config.input_nbits != 32;
+        const BoxcarScreenMode mode = detail::resolve_screen_mode(
+            config.screen_mode, exec.backend != Backend::kCPU);
+        if (packed && exec.backend != Backend::kCPU &&
+            mode != BoxcarScreenMode::kPrefix &&
+            mode != BoxcarScreenMode::kNone) {
             throw std::invalid_argument(
-                "FDMTBoxcar: per-call kill masks on packed input need the "
-                "CPU backend");
+                "FDMTBoxcar: per-call kill masks on packed input on a GPU "
+                "need screen_mode kPrefix or kNone");
         }
         return std::make_unique<detail::BoxcarNoiseModel>(
             plan, config, smear, std::max(1, exec.nthreads),
@@ -318,8 +322,9 @@ public:
                    (threads * kadane::kMaxGateBuckets * kadane::kMaxBatchRows *
                     sizeof(float));
         }
-        // GPU: row supports and (2 * 2 + 2) table slots of 2 tables, one
-        // more when blocks may be short for the latency (the catch-all).
+        // GPU: row supports and (2 * 2 + 2) table slots of 2 tables (4 for
+        // packed input: the integer cutoffs), one more when blocks may be
+        // short for the latency (the catch-all).
         const SizeType keep =
             (kill_runs.empty() && plan.get_subband_depth() == 0)
                 ? beams * plan.get_nchans()
@@ -330,7 +335,8 @@ public:
                  ? 1
                  : 0);
         return keep + (rows * sizeof(uint64_t)) +
-               (slots * 2 * rows * filters * sizeof(float));
+               (slots * (config.input_nbits != 32 ? 4 : 2) * rows * filters *
+                sizeof(float));
     }
     std::unique_ptr<detail::FDMTBoxcarEngine> make_engine(
         const detail::FDMTEngineConfig& cfg, bool /*smear*/, Exec ex) const {
@@ -764,10 +770,18 @@ CandidateResultView FDMTBoxcar::execute(std::span<const uint8_t> waterfall,
 }
 CandidateDeviceResultView
 FDMTBoxcar::execute(DeviceSpan<const uint8_t> waterfall, Stream stream) {
+    return execute(waterfall, std::span<const uint8_t>{}, stream);
+}
+CandidateDeviceResultView
+FDMTBoxcar::execute(DeviceSpan<const uint8_t> waterfall,
+                    std::span<const uint8_t> kill_mask,
+                    Stream stream) {
     m_impl->drain_state.check_open("FDMTBoxcar::execute");
     detail::check_device(waterfall.device, backend(), device(),
                          "FDMTBoxcar::execute");
-    return m_impl->engine->execute(waterfall, stream);
+    return m_impl->run_masked(kill_mask, waterfall.size(), [&] {
+        return m_impl->engine->execute(waterfall, stream);
+    });
 }
 CandidateResultView FDMTBoxcar::flush() { return m_impl->engine->flush(); }
 CandidateDeviceResultView FDMTBoxcar::flush_device(Stream stream) {

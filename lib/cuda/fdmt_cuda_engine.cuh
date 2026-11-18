@@ -73,8 +73,9 @@ public:
                         detail::FDMTSearchSink& sink,
                         Stream queue) override;
 
-    bool set_search_keep(const uint8_t* keep) override {
+    bool set_search_keep(const uint8_t* keep, float fill) override {
         m_search_keep = keep;
+        m_search_fill = fill;
         return true;
     }
 
@@ -156,7 +157,8 @@ public:
         return {.data = in.data + ((t0 * static_cast<SizeType>(in.nbits)) / 8),
                 .row_bytes = in.row_bytes,
                 .nbits     = in.nbits,
-                .keep      = in.keep};
+                .keep      = in.keep,
+                .fill      = in.fill};
     }
 
     void execute(std::span<const uint8_t> waterfall_h,
@@ -551,6 +553,7 @@ private:
     bool m_search_only{false};  // FDMTEngineConfig::search_only
     // set_search_keep(): level-0 rows the search reads as zero.
     const uint8_t* m_search_keep{nullptr};
+    float m_search_fill{0.0F}; // packed rows flagged 2 read this code
     bool m_top_chunk{false};
     // Samples of the rings' reach streamed since a load_history().
     SizeType m_top_filled{0};
