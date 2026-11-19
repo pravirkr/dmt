@@ -111,9 +111,13 @@ struct FDMTEngineConfig {
     /// skew_history_bytes (0: automatic). Budget-chosen engines take the
     /// fastest leaf level that fits (FDMTCpuEngine::skew_candidates).
     SizeType skew_leaf{0};
-    /// Private (GPU): take the skewed direct levels and target-ring top
-    /// even when the unskewed direct top fits its ring budget (tests).
-    bool force_skewed_direct{false};
+    /// Private (GPU): path of a direct-eligible engine. kAuto takes the
+    /// skewed path (windowed top of a subband search, skewed direct top)
+    /// when the tree history is over max_memory_bytes; kSkewed takes it
+    /// even when the unskewed direct top fits its ring budget; kDirect
+    /// never takes it by choice (FDMTBoxcar's ordered list, tests).
+    enum class GPUPath : uint8_t { kAuto, kDirect, kSkewed };
+    GPUPath gpu_path{GPUPath::kAuto};
     /// Private (GPU): the engine only runs execute_search() (FDMTBoxcar),
     /// which never writes a full-block root plane, so the root output is
     /// exempt from the 32-bit extent check; root-writing calls then throw.
@@ -258,6 +262,10 @@ std::unique_ptr<FDMTEngine> make_fdmt_cpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
 std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
+/// GPU: the automatic chunk whose two state halves fit the device's L2
+/// (fdmt_cache_chunk()) for this plan and config; 0 when none fits.
+SizeType fdmt_gpu_cache_chunk(const plans::FDMTPlan& plan,
+                              const FDMTEngineConfig& cfg);
 
 // ---------------------------------------------------------------------------
 // DDMT

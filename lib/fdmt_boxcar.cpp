@@ -17,6 +17,7 @@
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_drain.hpp"
 #include "dmt/fdmt_int_tree.hpp"
+#include "dmt/gpu_search_list.hpp"
 #include "dmt/kadane_monoid.hpp"
 #include "dmt/kadane_plan.hpp"
 #include "dmt/kadane_surrogate.hpp"
@@ -150,22 +151,74 @@ public:
             }
             return used;
         };
+        // GPU subband search with an automatic chunk: the first
+        // configuration that fits of a simple ordered rule
+        // (detail::gpu_search_list). Each candidate is built deferred with
+        // its path and chunk fixed, so nothing it decides depends on the
+        // budget; the facade compares the whole engine's bytes.
+        const bool listed = exec.backend != Backend::kCPU && chunk == 0 &&
+                            cfg.mode == FDMTMode::kValid &&
+                            cfg.search_upper_levels;
+        const auto select_listed = [&] {
+            const auto base = cfg;
+#ifdef DMT_ENABLE_GPU
+            const SizeType cache =
+                detail::fdmt_gpu_cache_chunk(this->plan, base);
+#else
+            const SizeType cache = 0; // no GPU engine (make_engine throws)
+#endif
+            const auto list = detail::gpu_search_list(cache, config.max_boxcar);
+            std::optional<detail::GPUSearchEntry> last; // the engine built
+            SizeType last_bytes = 0;
+            const auto build_at = [&](const detail::GPUSearchEntry& e) {
+                cfg                  = base;
+                cfg.chunk_nsamps     = e.chunk;
+                cfg.gpu_path         = e.path;
+                cfg.max_memory_bytes = std::numeric_limits<SizeType>::max();
+                engine.reset();
+                last.reset();
+                last_bytes = build();
+                last       = e;
+                return last_bytes;
+            };
+            const auto measure = [&](const detail::GPUSearchEntry& e)
+                -> std::optional<SizeType> { return build_at(e); };
+            const auto choice = detail::choose_gpu_search(
+                list, max_memory, this->plan.get_nsamps(), measure);
+            if (!choice.index) {
+                throw over(std::max(max_memory + 1, choice.min_needed), false);
+            }
+            auto pick  = list[*choice.index];
+            pick.chunk = std::min(pick.chunk, this->plan.get_nsamps());
+            if (last != pick && build_at(pick) > max_memory) {
+                throw std::logic_error(
+                    "FDMTBoxcar: the chosen configuration grew on rebuild");
+            }
+        };
         // Over the budget on the larger path: the smaller path may fit.
         const auto first_cfg = cfg;
         try {
-            select(first_cfg);
+            if (listed) {
+                select_listed();
+            } else {
+                select(first_cfg);
+            }
         } catch (const detail::BudgetError& first) {
+            if (listed) {
+                throw; // the list already holds the smaller path
+            }
             auto smaller = first_cfg;
             if (exec.backend == Backend::kCPU) {
                 smaller.skew_history_bytes =
                     detail::FDMTEngineConfig::kSkewHistoryNoTree;
             } else {
-                smaller.force_skewed_direct = true;
+                smaller.gpu_path = detail::FDMTEngineConfig::GPUPath::kSkewed;
             }
             if (!first.smaller_path() ||
                 first_cfg.skew_history_bytes !=
                     detail::FDMTEngineConfig::kSkewHistoryAuto ||
-                first_cfg.force_skewed_direct) {
+                first_cfg.gpu_path !=
+                    detail::FDMTEngineConfig::GPUPath::kAuto) {
                 throw;
             }
             engine.reset();

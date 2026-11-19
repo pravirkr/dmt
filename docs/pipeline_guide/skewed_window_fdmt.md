@@ -195,9 +195,8 @@ float and packed, CPU and GPU.
 
 ## Memory budget and chunk length
 
-`FDMT` and `FDMTBoxcar` take the tree path when it fits `max_memory_bytes`
-(10 GiB by default) and the skewed path otherwise, at the longest chunk
-that fits:
+`FDMT` and `FDMTBoxcar` choose their path and chunk within
+`max_memory_bytes` (10 GiB by default):
 
 - **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), with a
   tenth of headroom for the merge tables; the allocation is then checked.
@@ -218,14 +217,29 @@ that fits:
   packed configuration (`BoxcarConfig` input bits). A bare `FDMT` is built
   for float input and keeps the float choice ($K = 1$) when it is later fed
   packed blocks: 4.76 s per block on 8-bit `parkes_uwl` instead of 4.08 s.
-- **GPU:** by building the engine (about 1 s) and measuring it. The
-  windowed top tries 4096 and 2048 first, but only builds a longer chunk
-  that is predicted to fit: its memory is affine in the chunk (rows of
-  chunk + spread samples, rings of reach + chunk), so two measured engines
-  (the automatic chunk and half of it) extrapolate exactly. Construction
-  thus never holds more than the budget (it used to build the 12 GiB
-  float32 engine at chunk 4096 to find it over). Any other path keeps its
-  automatic chunk and halves it while over budget.
+- **GPU:** by building engines (deferred: sized, not allocated) and
+  measuring them. A subband search (`FDMTBoxcar`, `subband_depth > 0`)
+  takes the first that fits of (`detail::gpu_search_list`,
+  `lib/dmt/gpu_search_list.hpp`): direct at the plan's L2-cache chunk when
+  it has one; direct from chunk 4096 down to `max_boxcar / 8` (at least
+  256); skewed from 4096 down to 256; shorter direct chunks. A simple rule,
+  not an optimum: on the UWL plans measured it takes the fastest
+  configuration that fits at 10 GiB and stays within about 30% of it at any
+  budget (narrow windows where a larger budget first fits a short direct
+  chunk are the worst; L40, UWL depth 4, 8-bit, x real time):
+
+  | plan | direct 256 / 1024 / 4096 | skewed 1024 / 4096 |
+  | :--- | :--- | :--- |
+  | DM 100-1100, `max_boxcar` 4096 | 0.92 / 2.71 / 3.64 (9.9-13.8 GiB) | 1.53 / 2.79 (4.6 / 7.8 GiB) |
+  | DM 0-2000, dmt grid, `max_boxcar` 1562 | 2.68 / 3.06 / 3.44 (10.8-18.1 GiB) | 0.95 / 1.85 (4.3 / 10.1 GiB) |
+
+  Each path's memory grows with the chunk (not linearly: a longer chunk can
+  move the direct top's level), so the list is walked in runs of one path:
+  one engine rejects a run whose shortest chunk does not fit, else a
+  bisection finds its longest fitting chunk (one to about five engines in
+  all). Full-band searches and plain `FDMT` keep the automatic chunk
+  (L2-resident state, else 1024: fastest there) and halve it while over
+  budget.
 - **FDMTBoxcar** gives the FDMT the budget minus its own carry, peak,
   candidate and threshold buffers, and halves an automatic chunk again if
   the measured total is still over.

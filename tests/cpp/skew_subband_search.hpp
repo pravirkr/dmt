@@ -279,7 +279,8 @@ inline SearchRun run_subband_search(
     cfg.search_upper_levels = plan.get_subband_depth() > 0;
     cfg.search_nbits        = packed ? 8 : 32;
     cfg.skew_history_bytes  = skew ? 0 : SIZE_MAX;
-    cfg.force_skewed_direct = skew;
+    cfg.gpu_path            = skew ? FDMTEngineConfig::GPUPath::kSkewed
+                                   : FDMTEngineConfig::GPUPath::kAuto;
     cfg.skew_leaf           = leaf;
     const bool cpu          = exec.backend == Backend::kCPU;
     bool armed              = false;

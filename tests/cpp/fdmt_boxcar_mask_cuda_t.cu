@@ -1124,34 +1124,39 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
             sp.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
             auto sf        = fl;
             sf.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-            const auto min =
-                FDMTBoxcar::estimate_minimum_memory(plan, pk, false, kGpu);
+            // The skewed path (search latency) on every engine: an explicit
+            // (shortest) chunk keeps the path the budget gives (an automatic
+            // one takes the faster direct path where it fits).
+            const SizeType chunk = 256;
+            const auto minimum   = [&](const BoxcarConfig& c, bool smear) {
+                return FDMTBoxcar::estimate_minimum_memory(
+                    plan, c, smear, kGpu, 1, algorithms::kFDMTAutoFuse, chunk);
+            };
+            const auto min  = minimum(pk, false);
             SizeType budget = 0;
             for (const auto& [c, smear] :
                  {std::pair{pk, false}, std::pair{fl, false},
                   std::pair{kd, false}, std::pair{kd, true},
                   std::pair{sp, false}, std::pair{sf, false},
                   std::pair{pf, true}}) {
-                budget = std::max(budget, FDMTBoxcar::estimate_minimum_memory(
-                                              plan, c, smear, kGpu)
-                                              .max_memory_bytes);
+                budget = std::max(budget, minimum(c, smear).max_memory_bytes);
             }
-            FDMTBoxcar a(plan, pk, false, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
-                         budget);
-            FDMTBoxcar b(plan, fl, false, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
-                         budget);
+            FDMTBoxcar a(plan, pk, false, kGpu, 1, algorithms::kFDMTAutoFuse,
+                         chunk, budget);
+            FDMTBoxcar b(plan, fl, false, kGpu, 1, algorithms::kFDMTAutoFuse,
+                         chunk, budget);
             FDMTBoxcar sa(plan, sp, false, kGpu, 1, algorithms::kFDMTAutoFuse,
-                          0, budget);
+                          chunk, budget);
             FDMTBoxcar sb(plan, sf, false, kGpu, 1, algorithms::kFDMTAutoFuse,
-                          0, budget);
+                          chunk, budget);
             // The Kadane gate's catch-all cuts: exact against the prefix
             // screen (both exact searches), with box smearing too.
             FDMTBoxcar ka(plan, kd, false, kGpu, 1, algorithms::kFDMTAutoFuse,
-                          0, budget);
-            FDMTBoxcar ks(plan, kd, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
-                          budget);
-            FDMTBoxcar ps(plan, pf, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0,
-                          budget);
+                          chunk, budget);
+            FDMTBoxcar ks(plan, kd, true, kGpu, 1, algorithms::kFDMTAutoFuse,
+                          chunk, budget);
+            FDMTBoxcar ps(plan, pf, true, kGpu, 1, algorithms::kFDMTAutoFuse,
+                          chunk, budget);
             REQUIRE(sa.get_search_latency() == sb.get_search_latency());
             REQUIRE(sa.get_search_latency() > ns);
             INFO(min.search_path);

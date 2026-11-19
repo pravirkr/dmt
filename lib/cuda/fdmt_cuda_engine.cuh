@@ -549,8 +549,10 @@ private:
     std::unique_ptr<DirectTopD> m_top;
     bool m_search_upper{false};
     SizeType m_max_memory{kFDMTDefaultMaxMemory}; // FDMTEngineConfig
-    bool m_force_skewed{false}; // FDMTEngineConfig::force_skewed_direct
-    bool m_search_only{false};  // FDMTEngineConfig::search_only
+    // FDMTEngineConfig::gpu_path
+    detail::FDMTEngineConfig::GPUPath m_path{
+        detail::FDMTEngineConfig::GPUPath::kAuto};
+    bool m_search_only{false}; // FDMTEngineConfig::search_only
     // set_search_keep(): level-0 rows the search reads as zero.
     const uint8_t* m_search_keep{nullptr};
     float m_search_fill{0.0F}; // packed rows flagged 2 read this code

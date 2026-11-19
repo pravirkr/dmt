@@ -20,7 +20,7 @@
 // Skewed-window GPU path (fdmt_cuda_direct.cu: skewed direct levels, batched
 // mid levels and the target-ring direct top). Small plans take the unskewed
 // direct top, so the engines here force the skewed path
-// (FDMTEngineConfig::force_skewed_direct) and check that they took it.
+// (FDMTEngineConfig::gpu_path) and check that they took it.
 
 namespace dmt {
 
@@ -54,12 +54,14 @@ struct SkewRig {
     [[nodiscard]] std::unique_ptr<algorithms::detail::FDMTEngine>
     gpu(bool skewed, SizeType ch = 0) const {
         algorithms::detail::FDMTEngineConfig cfg{};
-        cfg.exec                = test::gpu_exec();
-        cfg.nbeams              = nbeams;
-        cfg.chunk_nsamps        = ch == 0 ? chunk : ch;
-        cfg.fuse_levels         = skewed ? kFDMTAutoFuse : 0;
-        cfg.force_skewed_direct = skewed;
-        auto e                  = algorithms::detail::make_fdmt_gpu(plan, cfg);
+        cfg.exec         = test::gpu_exec();
+        cfg.nbeams       = nbeams;
+        cfg.chunk_nsamps = ch == 0 ? chunk : ch;
+        cfg.fuse_levels  = skewed ? kFDMTAutoFuse : 0;
+        cfg.gpu_path =
+            skewed ? algorithms::detail::FDMTEngineConfig::GPUPath::kSkewed
+                   : algorithms::detail::FDMTEngineConfig::GPUPath::kAuto;
+        auto e = algorithms::detail::make_fdmt_gpu(plan, cfg);
         INFO("path: " << e->search_path());
         REQUIRE(e->search_path().starts_with("skewed direct levels") == skewed);
         return e;

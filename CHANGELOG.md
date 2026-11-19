@@ -124,6 +124,29 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **GPU `FDMTBoxcar` subband searches choose path and chunk by a simple
+  rule** (`subband_depth > 0`, automatic chunk). They took the unskewed
+  direct path whenever it fit at any chunk and halved the chunk until it
+  did, so a larger budget could be slower: Parkes UWL depth 4 with
+  `max_boxcar` 4096 at the default 10 GiB ran direct at chunk 256 (0.92x
+  real time on an L40, 8-bit) where the skewed path at chunk 4096 fits in
+  7.8 GiB (2.79x). Now: the chunk whose state fits the L2 cache when the
+  plan has one (as before), else the direct path at the longest chunk from
+  4096 down to `max_boxcar / 8` (at least 256) that fits, else the skewed
+  path at the longest chunk that fits, else shorter direct chunks. Longer
+  chunks are faster on either path; short direct chunks lose to long skewed
+  ones only when `max_boxcar` is wide. A simple rule, not an optimum: on
+  the UWL plans measured the choice is the fastest that fits at the default
+  budget and within about 30% of it at any budget; in narrow windows a
+  larger budget can still be slower (UWL above at 10.2 GiB: direct chunk
+  512, 1.94x, against 2.79x at 10 GiB). Visible: that UWL configuration moves to the skewed path, so
+  `search_latency` goes from 0 to about 139k samples (8.9 s) and its
+  candidates agree with the direct path's to float precision, not bitwise;
+  UWL depths 1-3 move from chunk 1024 to longer chunks (11-25% faster at
+  10 GiB); the `parkes_uwl` preset (DM 0-2000, `max_boxcar` 100 ms, float)
+  at a 9 GiB budget moves from skewed chunk 1024 to direct chunk 256 (about
+  2x faster, `search_latency` 0). Full-band searches, plain
+  `FDMT` and an explicit `chunk_nsamps` are unchanged.
 - **`FDMTBoxcar` per-call kill masks work with any block length** (they
   needed blocks of at least the largest row support plus `max_boxcar - 1`
   samples, and on a GPU a search latency of at most one block). Windows

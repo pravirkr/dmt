@@ -636,8 +636,8 @@ TEST_CASE("FDMTBoxcar kKadane matches kPrefix bit-for-bit on skewed-window "
                                 root - 1, root - plan.get_subband_depth()),
                             .search_upper_levels = true,
                             .search_nbits = packed ? SizeType{8} : SizeType{32},
-                            .skew_history_bytes  = 0,
-                            .force_skewed_direct = true,
+                            .skew_history_bytes = 0,
+                            .gpu_path = FDMTEngineConfig::GPUPath::kSkewed,
                         };
                         auto engine = make_fdmt_boxcar_cpu(
                             plan, cfg, planes, ecfg,
