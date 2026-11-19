@@ -141,7 +141,12 @@ public:
                     used = build();
                 }
             } catch (const detail::BudgetError& e) {
-                throw over(std::max(max_memory + 1, fixed + e.needed()), false);
+                // SIZE_MAX: no configuration of that path fits at all.
+                const SizeType need =
+                    e.needed() > std::numeric_limits<SizeType>::max() - fixed
+                        ? std::numeric_limits<SizeType>::max()
+                        : fixed + e.needed();
+                throw over(std::max(max_memory + 1, need), false);
             }
             if (used > max_memory) {
                 // The FDMT fit its share on its larger path (CPU tree, GPU
@@ -181,11 +186,31 @@ public:
                 last       = e;
                 return last_bytes;
             };
+            // An entry this plan cannot run (e.g. a 32-bit extent limit of
+            // its path or chunk) is skipped, as on the automatic path.
+            std::optional<std::invalid_argument> unavailable;
             const auto measure = [&](const detail::GPUSearchEntry& e)
-                -> std::optional<SizeType> { return build_at(e); };
+                -> std::optional<SizeType> {
+                try {
+                    return build_at(e);
+                } catch (const detail::BudgetError&) {
+                    throw;
+                } catch (const std::invalid_argument& err) {
+                    engine.reset();
+                    last.reset();
+                    if (!unavailable) {
+                        unavailable.emplace(err);
+                    }
+                    return std::nullopt;
+                }
+            };
             const auto choice = detail::choose_gpu_search(
                 list, max_memory, this->plan.get_nsamps(), measure);
             if (!choice.index) {
+                if (choice.min_needed == std::numeric_limits<SizeType>::max() &&
+                    unavailable) {
+                    throw *unavailable; // no listed entry can run
+                }
                 throw over(std::max(max_memory + 1, choice.min_needed), false);
             }
             auto pick  = list[*choice.index];
@@ -323,7 +348,7 @@ public:
     }
     /// Budgeted bytes declared per-call masks add, before the path (hence
     /// the search latency) is known: the latency is at most the plan's
-    /// largest delay, and a GPU accepts at most one block of it.
+    /// largest delay.
     [[nodiscard]] SizeType mask_bytes_bound(const detail::BoxcarNoiseModel& m,
                                             Exec ex) const {
         SizeType base_rows = 0;
@@ -436,6 +461,7 @@ public:
             cands += rows * sizeof(uint64_t); // detections per row
         }
         if (config.max_candidates_per_plane != 0) {
+            detail::check_plane_share(config, planes.size());
             // Per-plane counters; under kDropNew the shares' staging.
             cands += planes.size() * sizeof(uint64_t);
             if (config.overflow_policy != OverflowPolicy::kKeepBrightest) {
@@ -598,7 +624,7 @@ public:
         }
         return tables;
     }
-    /// First per-call mask: block-size requirement and memory budget, then
+    /// First per-call mask: memory budget, then
     /// the noise model and the engine's block ring. Throws before any
     /// state change.
     void enable_block_noise() {

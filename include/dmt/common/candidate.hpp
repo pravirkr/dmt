@@ -128,8 +128,8 @@ struct BoxcarConfig {
     /// FDMTBoxcar (float or packed input): the stream will pass per-call
     /// kill masks.
     /// Default false: their noise model, tables and buffers are made by the
-    /// first such call, which can throw then (block too short, budget, GPU
-    /// search latency over one block). True: all of that is checked and
+    /// first such call, which can throw then (over the memory budget).
+    /// True: all of that is checked and
     /// reserved at construction (and in estimate_memory()), before the
     /// transform's path is chosen within the rest of the budget, so no
     /// per-call mask throws later for those reasons.

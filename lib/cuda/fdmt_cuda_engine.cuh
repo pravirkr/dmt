@@ -827,9 +827,6 @@ private:
 
     [[nodiscard]] SizeType max_optin_smem_bytes() const;
 
-    /// The device's L2 size in bytes (0 if the query fails).
-    [[nodiscard]] SizeType l2_bytes() const;
-
     /// Shared memory per fused block for kAutoBlocksPerSM resident blocks
     /// (less the ~1 KiB the runtime reserves per block), at most the
     /// no-opt-in limit.

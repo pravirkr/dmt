@@ -5,6 +5,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -123,7 +124,6 @@ void check_backend(Exec exec) {
     SECTION("declared per-call masks") {
         auto cfg           = small_config();
         cfg.per_call_masks = true;
-        // Blocks of at least the row support + max_boxcar - 1 samples.
         check_minimum(grid_plan(256, 8192, 600, 1), cfg, exec);
     }
     SECTION("explicit chunk") {
@@ -153,6 +153,26 @@ TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (CPU)",
                                 m.max_memory_bytes);
         CHECK(search.get_memory_usage().budgeted() == m.usage.budgeted());
         CHECK(search.get_chunk_nsamps() == m.chunk_nsamps);
+    }
+}
+
+TEST_CASE("FDMTBoxcar minimum memory on short blocks (CPU)",
+          "[boxcar][memory][cpu]") {
+    // Blocks of 256 samples or fewer: no skewed chunk is shorter than the
+    // block, so the smaller path is unavailable and the tree sets the
+    // minimum (plans the skewed path could otherwise take).
+    for (const SizeType nsamps : {128, 256}) {
+        for (const auto& [nchans, depth] :
+             {std::pair<SizeType, SizeType>{32, 0},
+              {64, 1},
+              {128, 2},
+              {128, 3}}) {
+            DYNAMIC_SECTION(nchans << " channels, depth " << depth << ", "
+                                   << nsamps << " samples") {
+                check_minimum(grid_plan(nchans, nsamps, 10, depth),
+                              small_config(), Exec::cpu(2));
+            }
+        }
     }
 }
 

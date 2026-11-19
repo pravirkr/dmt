@@ -409,16 +409,6 @@ SizeType FDMTCudaEngine::max_optin_smem_bytes() const {
     return static_cast<SizeType>(bytes);
 }
 
-SizeType FDMTCudaEngine::l2_bytes() const {
-    int bytes = 0;
-    if (cudaDeviceGetAttribute(&bytes, cudaDevAttrL2CacheSize, m_device_id) !=
-            cudaSuccess ||
-        bytes <= 0) {
-        return 0;
-    }
-    return static_cast<SizeType>(bytes);
-}
-
 SizeType FDMTCudaEngine::auto_smem_bytes() const {
     constexpr SizeType kReserved = 1024;
     int per_sm                   = 0;

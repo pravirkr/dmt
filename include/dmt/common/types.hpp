@@ -6,6 +6,7 @@
  * memory utilities.
  */
 
+#include <bit>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -40,10 +41,14 @@ inline constexpr float kDispConst   = kDispConstMT;
 [[nodiscard]] constexpr double
 dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
     constexpr double kConst = 1.0 / 2.41e-4;
-    // 1 / inf^2 is 0 in IEEE arithmetic (also under -ffast-math: the
-    // division is not folded for a runtime argument).
-    return kConst * dm *
-           ((1.0 / (f_lo_mhz * f_lo_mhz)) - (1.0 / (f_hi_mhz * f_hi_mhz)));
+    // An infinite f_hi_mhz is recognised by its bits: under -ffast-math
+    // (-ffinite-math-only) arithmetic on an infinity is undefined.
+    constexpr uint64_t kAbs = 0x7FFFFFFFFFFFFFFFULL;
+    constexpr uint64_t kInf = 0x7FF0000000000000ULL;
+    const double inv_hi     = (std::bit_cast<uint64_t>(f_hi_mhz) & kAbs) == kInf
+                                  ? 0.0
+                                  : 1.0 / (f_hi_mhz * f_hi_mhz);
+    return kConst * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
 }
 
 /**

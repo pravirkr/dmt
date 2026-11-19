@@ -13,8 +13,8 @@ other algorithms are unchanged.
 | Fused into the search | the root merge (root rows are never stored) | each overlap-save segment's inverse transform |
 | Input | float32, or packed 1/2/4/8/16-bit | float32 |
 | Subband search | plan `subband_depth` (any depth below the root), with staggered subbands | full band only |
-| Kill mask | yes, in the noise model of every subband row; also per block (float32) | yes |
-| Latency | none | `output_latency` samples (64 with fractional delays) |
+| Kill mask | yes, in the noise model of every subband row; also per block | yes |
+| Latency | none, or `search_latency` samples for subband rows on the skewed path | `output_latency` samples (64 with fractional delays) |
 
 ## Input and statistical contract
 

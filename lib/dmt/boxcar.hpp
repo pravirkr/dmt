@@ -566,7 +566,8 @@ public:
     /// completed.
     [[nodiscard]] virtual uint64_t open_begin_min() const noexcept = 0;
 
-    // Per-call kill masks (FDMTBoxcar, float input). Until enabled, every
+    // Per-call kill masks (FDMTBoxcar, float or packed input). Until
+    // enabled, every
     // block uses the constructor tables and kill runs.
     /// Bytes that enable_block_noise() would add to memory_usage().
     [[nodiscard]] virtual SizeType block_noise_bytes() const noexcept {

@@ -284,8 +284,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         skewed-window path, as does packed input on the CPU with blocks over
         2048 samples (faster there); their subband rows are then searched with a fixed
         per-row latency of up to the dispersion delay to the bottom of the
-        band, so the final such samples of a stream are searched only if it
-        continues. Raises ``ValueError`` when nothing fits. On a GPU host
+        band, so the final such samples of a stream are searched by a later
+        call or by :meth:`drain`. Raises ``ValueError`` when nothing fits. On a GPU host
         (NumPy) input is copied one chunk at a time into a buffer reserved
         inside that budget, so :meth:`execute` allocates nothing.
 

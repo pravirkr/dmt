@@ -9,6 +9,8 @@
 #include <tuple>
 #include <vector>
 
+#include <catch2/matchers/catch_matchers_string.hpp>
+
 #include "dmt/boxcar.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
@@ -226,6 +228,11 @@ void check_share(Exec exec) {
                     std::invalid_argument);
     cfg.max_candidates = 40;
     CHECK_NOTHROW(FDMTBoxcar(plan, cfg, true, exec));
+    // A share over max_candidates: its own error, not a budget's.
+    cfg.max_candidates_per_plane = SizeType{1} << 32;
+    CHECK_THROWS_WITH(
+        FDMTBoxcar::estimate_memory(plan, cfg, true, exec),
+        Catch::Matchers::ContainsSubstring("max_candidates_per_plane"));
 }
 
 } // namespace

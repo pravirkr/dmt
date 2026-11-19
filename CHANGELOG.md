@@ -281,6 +281,9 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Fixed
 
+- **GPU `FDMTBoxcar.reset_history()` on the windowed (skewed) path** left
+  the abandoned stream's carried top-level samples in place, so the next
+  stream's first windows could include them. They are now cleared.
 - **GPU engines with different settings in one process** (`FDMTBoxcar`,
   and the FDMT direct levels and `DDMTFFT` NUFFT kernels under it): a
   kernel's shared-memory limit is shared by the whole process, and each

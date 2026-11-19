@@ -214,8 +214,7 @@ public:
      * max_boxcar carry, peaks, candidates) and the FDMT's smallest path at
      * its shortest chunk; any larger budget also builds. Throws as
      * estimate_memory() for anything but the budget (a configuration that
-     * is invalid at its smallest path, e.g. per-call masks whose search
-     * latency exceeds one block on a GPU, throws here too).
+     * is invalid at its smallest path throws here too).
      */
     [[nodiscard]] static FDMTBoxcarMemoryEstimate
     estimate_minimum_memory(const plans::FDMTPlan& plan,

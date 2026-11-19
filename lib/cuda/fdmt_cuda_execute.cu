@@ -1103,10 +1103,9 @@ void FDMTCudaEngine::launch_fused_kernel(const Input& input,
                                          cudaStream_t stream) {
     const auto& f = *m_fused;
     if (f.smem_bytes > kDefaultSmemBytes) {
-        cudaFuncSetAttribute(
+        gpu_utils::raise_dynamic_smem(
             kernel_fused_levels<Mode, Smear, Input, TOut, HasChanDM>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(f.smem_bytes));
+            f.smem_bytes, "FDMT (cuda): fused levels shared-memory opt-in");
     }
     const bool valid = Mode == FDMTMode::kValid;
     // Valid mode: this chunk's samples only.

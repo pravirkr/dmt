@@ -1440,6 +1440,42 @@ TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
             CHECK(device.get_searched_nsamps() == kBlocks * plan.get_nsamps());
             REQUIRE(want.size() > 100);
             compare(got, want);
+            // reset_history() starts a new stream: an abandoned stream's
+            // carried windowed-top spreads must not reach it. They would sit
+            // in the cold prefix, so search it.
+            auto cold             = cfg;
+            cold.skip_cold_prefix = false;
+            FDMTBoxcar fresh(plan, cold, true, exec, 1,
+                             algorithms::kFDMTAutoFuse, 0, budget);
+            FDMTBoxcar reused(plan, cold, true, exec, 1,
+                              algorithms::kFDMTAutoFuse, 0, budget);
+            REQUIRE(reused.get_search_latency() == latency);
+            const auto run = [&](FDMTBoxcar& s, SizeType b) {
+                return packed ? s.execute(std::span<const uint8_t>(bytes[b]))
+                              : s.execute(std::span<const float>(values[b]));
+            };
+            // An abandoned loud stream (bright enough to show any carry).
+            std::vector<float> loud(values[2]);
+            for (auto& v : loud) {
+                v *= 1000.0F;
+            }
+            const std::vector<uint8_t> loud_codes(n, 255);
+            for (int k = 0; k < 3; ++k) {
+                (void)(packed ? reused.execute(
+                                    std::span<const uint8_t>(loud_codes))
+                              : reused.execute(std::span<const float>(loud)));
+            }
+            reused.reset_history();
+            std::vector<RawCandidate> first;
+            std::vector<RawCandidate> again;
+            for (SizeType b = 0; b < kBlocks; ++b) {
+                append(first, run(fresh, b));
+                append(again, run(reused, b));
+            }
+            append(first, fresh.drain());
+            append(again, reused.drain());
+            REQUIRE(first.size() > 100);
+            compare(again, first);
         }
     }
 }
@@ -1529,5 +1565,31 @@ TEST_CASE("GPU engines with different shared-memory needs coexist",
         FDMTBoxcar alone(plan, wide, true, gpu);
         REQUIRE(first.size() > 20);
         compare(first, run(alone, in));
+    }
+}
+
+TEST_CASE("GPU subband searches skip paths beyond the 32-bit index range",
+          "[gpu][boxcar][budget]") {
+    // UWL to DM 2000 at subband depth 2: the tree history exceeds the CUDA
+    // backend's 32-bit index, so the direct entries cannot run and the
+    // windowed (skewed) path is taken at any budget.
+    const float tsamp = 64e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 2000.0F, tsamp, tsamp, 704.0F, 4032.0F, 6656, 1.1F);
+    const plans::FDMTPlan plan(704.0F, 4032.0F, 6656, 4096, tsamp, grid,
+                               "valid", 2);
+    REQUIRE(plan.get_tree_history_size() >
+            std::numeric_limits<uint32_t>::max());
+    const BoxcarConfig cfg(1562, 1.5F, 6.0F, 12.0F,
+                           PeakFindingMode::kContiguousPeakPerWidth, 1U << 20,
+                           0, true, 8, 127.0F);
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    for (const SizeType gib : {10, 40}) {
+        INFO(gib << " GiB");
+        const auto est = FDMTBoxcar::estimate_memory(plan, cfg, true, exec, 1,
+                                                     algorithms::kFDMTAutoFuse,
+                                                     0, SizeType{gib} << 30);
+        CHECK(est.search_path.find("windowed") != std::string::npos);
+        CHECK(est.search_latency > 0);
     }
 }

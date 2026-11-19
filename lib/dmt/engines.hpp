@@ -166,8 +166,9 @@ public:
                                backend());
     }
     /// Device search only: level-0 rows (beam * nchans + channel) whose
-    /// byte in `keep` is 0 read as zero in later execute_search() calls on
-    /// device input; nullptr reads every row. The bytes are read by the
+    /// byte in `keep` is 0 read as zero in later execute_search() calls
+    /// (device input, and host input staged per chunk); nullptr reads
+    /// every row. The bytes are read by the
     /// queued kernels, so they must stay valid until those complete.
     /// Returns false (and ignores `keep`) where unsupported.
     /// `fill`: the code packed rows flagged 2 read (FDMTInputPacked).

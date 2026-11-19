@@ -1083,7 +1083,8 @@ void FDMTBoxcarCudaEngine::sync_surrogate_snr() {
         m_rows.size(), tasks, raw(m_widths_d), m_filters, raw(m_thresholds_d),
         raw(m_scales_d), make_surrogate_view());
     gpu_utils::check_last_gpu_error("FDMTBoxcar surrogate S/N cache failed");
-    gpu_utils::check_gpu_call(cudaDeviceSynchronize());
+    gpu_utils::check_gpu_call(cudaStreamSynchronize(nullptr),
+                              "FDMTBoxcar surrogate S/N cache failed");
 }
 
 void FDMTBoxcarCudaEngine::launch_open_begin_surrogate(cudaStream_t stream) {
