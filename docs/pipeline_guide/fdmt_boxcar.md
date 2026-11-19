@@ -276,8 +276,8 @@ result-changing operations. Python arrays own copies.
 Order operations on one stream. Synchronize before changing streams on an
 instance; instances are not safe for concurrent calls. CPU device calls reject
 the operation. Host execute/flush calls block; GPU `reset_history()` is ordered
-asynchronously on its supplied stream. GPU input staging is allocated lazily and
-reused. Warm CPU execution and flush allocate no working memory.
+asynchronously on its supplied stream. GPU host-input staging is reserved at
+construction. Warm CPU execution and flush allocate no working memory.
 
 ## Widths, excursions and boundaries
 
@@ -711,8 +711,8 @@ CPU it scores one beam's segment from a buffer of `ndm × segment` samples.
   length; `chunk_nsamps` reports the segment) until the instance fits, and
   construction raises `ValueError` with the memory at the shortest segment
   when nothing does. Shorter segments change the rows as blocking does (see
-  Streaming). GPU host-input staging is allocated lazily, outside this
-  check, as on `FDMTBoxcar`. On `parkes_uwl` the CPU instance needs 19.45
+  Streaming). On a GPU the device copy of a host-memory block is reserved
+  inside this budget at construction, so host calls allocate nothing. On `parkes_uwl` the CPU instance needs 19.45
   GiB even at the shortest segment, so the default budget raises; pass a
   larger `max_memory_bytes`.
 - **Limits.** Float32 input only and plan `subband_depth=0`: subband rows exist

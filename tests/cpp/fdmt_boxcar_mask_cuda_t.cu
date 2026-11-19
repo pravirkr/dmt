@@ -661,12 +661,23 @@ gpu_pack(const std::vector<std::vector<float>>& input,
                                              (scale * block[(r * ns) + t]));
                 const auto code = static_cast<uint32_t>(
                     std::clamp(v, 0.0F, static_cast<float>(top)));
-                if (nbits == 16) {
-                    bit_pack_utils::write_packed_sample<16>(p.data() + (r * rb),
-                                                            t, code);
-                } else {
-                    bit_pack_utils::write_packed_sample<8>(p.data() + (r * rb),
-                                                           t, code);
+                uint8_t* row = p.data() + (r * rb);
+                switch (nbits) {
+                case 1:
+                    bit_pack_utils::write_packed_sample<1>(row, t, code);
+                    break;
+                case 2:
+                    bit_pack_utils::write_packed_sample<2>(row, t, code);
+                    break;
+                case 4:
+                    bit_pack_utils::write_packed_sample<4>(row, t, code);
+                    break;
+                case 8:
+                    bit_pack_utils::write_packed_sample<8>(row, t, code);
+                    break;
+                default:
+                    bit_pack_utils::write_packed_sample<16>(row, t, code);
+                    break;
                 }
             }
         }
@@ -840,34 +851,46 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
     }
 }
 
-TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks, keep-brightest, "
-          "wide boxes and 16-bit",
+TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
+          "keep-brightest, wide boxes and 16-bit",
           "[gpu][parity][boxcar][kill][mask][packed]") {
     const auto ctor = gpu_random_mask(32, 99, 0.25);
-    SECTION("blocks shorter than a window") {
+    SECTION("blocks shorter than a window, 1-8 bits") {
         const auto long_plan = gpu_mask_plan(0);
         const auto stream    = waterfalls(long_plan, 1, 2);
-        for (const SizeType ns : {SizeType{7}, SizeType{64}}) {
-            DYNAMIC_SECTION("block " << ns) {
-                const plans::FDMTPlan plan(
-                    700, 1200, 32, ns, 0.001F,
-                    std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120}, "valid",
-                    0);
-                const auto blocks = gpu_reblock(stream, 32, 400, ns);
-                const auto input  = gpu_pack(blocks, 32, ns, 8, 128, 10.0F);
-                Masks masks;
-                const auto pool = gpu_masks();
-                for (SizeType k = 0; k < input.size(); ++k) {
-                    masks.push_back(pool[(k / 5) % pool.size()]);
+        struct Depth {
+            unsigned nbits;
+            uint32_t mean;
+            float scale;
+        };
+        // The mean code of each depth (1-bit: 0), as the CPU test.
+        for (const Depth d : {Depth{1, 0, 1.0F}, Depth{2, 1, 1.0F},
+                              Depth{4, 8, 2.0F}, Depth{8, 128, 10.0F}}) {
+            for (const SizeType ns : {SizeType{7}, SizeType{64}}) {
+                DYNAMIC_SECTION("nbits " << d.nbits << " block " << ns) {
+                    const plans::FDMTPlan plan(
+                        700, 1200, 32, ns, 0.001F,
+                        std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120},
+                        "valid", 0);
+                    const auto blocks = gpu_reblock(stream, 32, 400, ns);
+                    const auto input =
+                        gpu_pack(blocks, 32, ns, d.nbits, d.mean, d.scale);
+                    Masks masks;
+                    const auto pool = gpu_masks();
+                    for (SizeType k = 0; k < input.size(); ++k) {
+                        masks.push_back(pool[(k / 5) % pool.size()]);
+                    }
+                    auto cfg = packed_cfg(
+                        PeakFindingMode::kContiguousPeakPerWidth, d.nbits);
+                    cfg.input_mean  = static_cast<float>(d.mean);
+                    cfg.noise_sigma = d.scale;
+                    auto cpu = make_packed(plan, cfg, Exec::cpu(3), ctor);
+                    auto gpu = make_packed(plan, cfg, kGpu, ctor);
+                    REQUIRE(gpu.get_search_latency() == 0);
+                    const auto want = host_run(cpu, input, masks);
+                    REQUIRE(want.size() > 20);
+                    same_exact(host_run(gpu, input, masks), want);
                 }
-                const auto cfg =
-                    packed_cfg(PeakFindingMode::kContiguousPeakPerWidth);
-                auto cpu = make_packed(plan, cfg, Exec::cpu(3), ctor);
-                auto gpu = make_packed(plan, cfg, kGpu, ctor);
-                REQUIRE(gpu.get_search_latency() == 0);
-                const auto want = host_run(cpu, input, masks);
-                REQUIRE(want.size() > 20);
-                same_exact(host_run(gpu, input, masks), want);
             }
         }
     }

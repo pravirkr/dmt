@@ -295,7 +295,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         S/N stays calibrated on the remaining channels. On the CPU each
         block is copied once to zero them; on a GPU the transform reads them
         as zero, without a copy. :meth:`execute` also takes a mask per block
-        (float32 input), ANDed with this one.
+        (float or packed input), ANDed with this one.
 
         ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``AUTO``)
         chooses the Stage-1 tile screening / scoring mode on both CPU and GPU:

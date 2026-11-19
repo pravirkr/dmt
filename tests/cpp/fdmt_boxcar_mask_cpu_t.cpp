@@ -1287,6 +1287,76 @@ TEST_CASE("FDMTBoxcar packed per-call masks at every bit depth and on short "
     }
 }
 
+TEST_CASE("FDMTBoxcar packed per-call masks: the catch-all",
+          "[boxcar][kill][mask][packed][cpu]") {
+    // The skewed path's search latency (over a 1024-sample block) makes the
+    // facade keep the catch-all tables; killed channels read the mean code,
+    // so without box smearing the packed search equals the float one on
+    // centred codes bit for bit. Packed input takes the skewed path first
+    // on the CPU; the float search gets the same path at the larger of the
+    // two minimum budgets (asserted through the latency).
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 400.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 1024, tsamp, grid,
+                               "valid", 3);
+    const SizeType nc          = plan.get_nchans();
+    const SizeType ns          = plan.get_nsamps();
+    constexpr SizeType kBlocks = 8;
+    const auto noise = test_random::normal<float>(nc * ns * kBlocks, 321);
+    std::vector<std::vector<float>> blocks;
+    for (SizeType k = 0; k < kBlocks; ++k) {
+        blocks.emplace_back(
+            noise.begin() + static_cast<std::ptrdiff_t>(k * nc * ns),
+            noise.begin() + static_cast<std::ptrdiff_t>((k + 1) * nc * ns));
+    }
+    const auto input = pack_stream(blocks, nc, ns, kDepth8);
+    Masks masks;
+    for (SizeType k = 0; k < kBlocks; ++k) {
+        masks.push_back(k == 0 || k == 4
+                            ? std::vector<uint8_t>{}
+                            : random_mask(nc, static_cast<unsigned>(40 + k),
+                                          k < kBlocks / 2 ? 0.3 : 0.6));
+    }
+    for (const auto screen :
+         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kPrefix}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            DYNAMIC_SECTION("screen " << static_cast<int>(screen) << " mode "
+                                      << static_cast<int>(mode)) {
+                // Cold windows skipped (the default): with skip_cold_prefix
+                // false the packed and float searches differ there.
+                BoxcarConfig base(24, 1.5F, 4.2F, 1.0F, mode, 1U << 20, 0,
+                                  true);
+                base.screen_mode    = screen;
+                base.per_call_masks = true;
+                // As the GPU catch-all test: a threshold that keeps the
+                // candidate count moderate (at kExactThresh, ~10^6 sums sit
+                // on a cutoff, where the float and integer cutoffs of this
+                // plan's row variances can disagree).
+                auto pk            = with_depth(base, kDepth8);
+                auto fl            = float_twin(base, kDepth8);
+                pk.detect_thresh   = 4.75F;
+                fl.detect_thresh   = 4.75F;
+                const auto minimum = [&](const BoxcarConfig& c) {
+                    return FDMTBoxcar::estimate_minimum_memory(plan, c, false,
+                                                               Exec::cpu(3));
+                };
+                const SizeType budget = std::max(minimum(pk).max_memory_bytes,
+                                                 minimum(fl).max_memory_bytes);
+                auto a = make_search(plan, pk, 1, 0, {}, budget, false);
+                auto b = make_search(plan, fl, 1, 0, {}, budget, false);
+                INFO(a.summary());
+                REQUIRE(a.get_search_latency() > ns);
+                REQUIRE(b.get_search_latency() == a.get_search_latency());
+                const auto want = run(b, input.centred, masks, true);
+                REQUIRE(want.size() > 50);
+                compare_exact(run_packed(a, input.packed, masks, true), want);
+            }
+        }
+    }
+}
+
 TEST_CASE("FDMTBoxcar packed per-call masks: the Kadane gate equals the "
           "prefix screen",
           "[boxcar][kill][mask][packed][cpu]") {
