@@ -256,25 +256,28 @@ float and packed, CPU and GPU.
 ## Memory
 
 `parkes_uwl` (32768-sample blocks, DM 0–2000, 4749 trials), FDMTBoxcar with
-boxcars to 100 ms at wtsp 1.5, default budget; working memory is
-`get_memory_usage().total()` plus the input block (GiB = $2^{30}$ bytes):
+boxcars to 100 ms at wtsp 1.5, default budget (10 GiB); working memory is
+`get_memory_usage().total()` plus the input block (GiB = $2^{30}$ bytes), from
+`estimate_memory()`:
 
-| search | backend | chunk | working memory | tree path |
-| :--- | :--- | ---: | ---: | ---: |
-| full band, uint8 | CPU, 8 threads | 4096 | 5.2 GiB | 12–16 GB |
-| full band, float32 | CPU, 8 threads | 4096 | 9.9 GiB | 12–16 GB |
-| depth 4, uint8 | CPU, 8 threads | 4096 | 6.2 GiB | 17.4 GB |
-| depth 4, float32 | CPU, 8 threads | 2048 | 9.2 GiB | 17.4 GB |
-| full band, uint8 | GPU | 1024 | 2.1 GiB | 9–15 GB |
-| full band, float32 | GPU | 1024 | 2.7 GiB | 9–15 GB |
-| depth 4, uint8 | GPU | 4096 | 9.4 GiB | 15.0 GB |
-| depth 4, float32 | GPU | 2048 | 10.8 GiB (9.96 engine) | 14.0 GB |
-| depth 5, uint8 | GPU | 2048 | 8.1 GB engine | 16.3 GB |
+| search | backend | chunk | path | search latency | working memory |
+| :--- | :--- | ---: | :--- | ---: | ---: |
+| full band, uint8 | CPU, 8 threads | 4096 | skewed | 0 | 5.2 GiB |
+| full band, float32 | CPU, 8 threads | 4096 | skewed | 0 | 9.9 GiB |
+| depth 4, uint8 | CPU, 8 threads | 4096 | skewed | 252888 | 6.6 GiB |
+| depth 4, float32 | CPU, 8 threads | 2048 | skewed | 252888 | 9.7 GiB |
+| full band, uint8 | GPU | 1024 | direct | 0 | 2.1 GiB |
+| full band, float32 | GPU | 1024 | direct | 0 | 2.8 GiB |
+| depth 4, uint8 | GPU | 4096 | skewed | 252888 | 9.8 GiB |
+| depth 4, float32 | GPU | 1024 | skewed | 252888 | 9.6 GiB |
+| depth 5, uint8 | GPU | 2048 | skewed | 253132 | 8.5 GiB |
 
-The largest parts are the raw input ring (each channel's dispersion reach
-plus a chunk: about 1 GB at 1 byte per sample, 4 GB for float input) and,
-for a subband search, the boxcar's carried samples (`max_boxcar` per row:
-218k rows at depth 4, 1.4 GB in float or uint32).
+The GPU direct path for the depth-4 searches needs more than the default
+budget here: with 64 GiB they take it at chunk 4096 (17.7 GiB uint8,
+18.4 GiB float32, no search latency), and the CPU float32 depth-4 search
+takes the tree path (16.6 GiB). `estimate_memory()` shows the parts: the
+streaming history (`usage.history`) is the largest, 7.4 of the GPU float32
+depth-4 search's 8.8 GiB.
 
 ## Throughput
 

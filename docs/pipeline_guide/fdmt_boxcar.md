@@ -504,6 +504,94 @@ Independently of the policy, `PeakFindingMode.CONTIGUOUS_PEAK_ACROSS_WIDTHS`
 emits one candidate per excursion instead of one per width, which cuts the
 count during a storm by about the number of widths.
 
+### Planning memory: block length, budget and chunk
+
+Three constructor arguments touch memory, each with one job:
+
+- **`nsamps`** (the plan's block length) is your pipeline's I/O unit: it
+  sets your input memory, your latency, and the per-call units
+  (`max_candidates`, per-call kill masks). It is not a memory setting for
+  an `FDMTBoxcar` search: the FDMT's memory does not depend on it (Parkes
+  UWL depth 4 holds the same 3.86 GiB at 65536 and at 262144 samples), and
+  any length works, since histories carry across calls. Two exceptions
+  scale with the block: a kill mask on the CPU copies the block into a
+  budgeted staging buffer, and the FDMT-FFT engines transform whole
+  blocks (`FDMTFFTBoxcar` also reserves a device copy of one).
+- **`max_memory_bytes`** is the only memory setting. The default is a
+  fixed 10 GiB; set it to what you give dmt on your machine or card. A
+  larger budget can buy a faster configuration.
+- **`chunk_nsamps`** is an expert override for benchmarks and unusual
+  plans. Leave it at 0 (automatic). Forcing a chunk can raise where the
+  automatic choice fits.
+
+What dmt promises for `FDMTBoxcar`, on CPU and GPU (`FDMT` and the FDMT-FFT
+engines follow the same rules, except where noted):
+
+1. **dmt counts what it allocates, and only that.** `memory_usage` and the
+   estimates report the instance's own buffers, including (for
+   `FDMTBoxcar` and `FDMTFFTBoxcar`) the device copy it makes of host
+   (NumPy) input. Your input block and anything else your pipeline holds
+   are yours to plan.
+2. **It fits or raises at construction.** Nothing allocates during the
+   stream. The error states what the configuration needs. (Exception:
+   plain `FDMT` and `FDMTFFT` on a GPU still copy a host block and output
+   plane on their first host call, outside the budget; their estimates
+   report it as `host_staging`.)
+3. **A fast configuration that fits.** dmt picks the path and chunk from a
+   short list in measured speed order, by a simple rule that is close to
+   the fastest that fits (not an exhaustive search: planning stays cheap).
+   There is no timing trial at construction. A larger budget is not
+   always faster: in narrow windows a budget first fits a short chunk of
+   the faster path (see the table below).
+4. **Every budget from the minimum up builds.**
+   `estimate_minimum_memory()` reports the minimum.
+5. **The same candidates on every configuration**, to float precision: a
+   budget that moves the search to another path or chunk changes float
+   rounding only. (`FDMTFFTBoxcar` with fractional delays: shorter
+   segments also move rows by a few hundredths of sigma; see below.)
+6. **Memory follows the arguments only.** On a GPU, construction (never an
+   estimate) also checks the chosen configuration against the device's
+   free memory and raises `MemoryError` (`std::bad_alloc`) before
+   allocating anything when it does not fit; free memory never changes
+   the choice.
+
+To plan, estimate before you build (nothing is allocated):
+
+```python
+est = dmtlib.FDMTBoxcar.estimate_memory(
+    plan, config, backend="cuda", max_memory_bytes=budget)
+est.usage.budgeted   # what dmt holds on the device
+est.chunk_nsamps, est.search_path, est.search_latency
+low = dmtlib.FDMTBoxcar.estimate_minimum_memory(plan, config, backend="cuda")
+low.max_memory_bytes # the smallest budget that builds
+```
+
+Your pipeline's total is `est.usage.budgeted` plus its own input blocks
+(and, on a GPU, `est.usage.host` of host memory). Parkes UWL depth 4 (6656
+channels at 64 µs, DM 100–1100, `max_boxcar` 4096, 8-bit input,
+65536-sample blocks; L40):
+
+| `max_memory_bytes` | path, chunk | budgeted | `search_latency` |
+| :--- | :--- | :--- | :--- |
+| minimum | skewed, 256 | 3.86 GiB | 138833 samples (8.9 s) |
+| 6 GiB | skewed, 2048 | 5.69 GiB | 138833 |
+| 8–10 GiB | skewed, 4096 (2.8x real time) | 7.79 GiB | 138833 |
+| 10.2–10.6 GiB | direct, 512 (1.9x) | 10.14 GiB | 0 |
+| 11–11.5 GiB | direct, 1024 (2.7x) | 10.66 GiB | 0 |
+| 12 GiB | direct, 2048 (3.2x) | 11.71 GiB | 0 |
+
+`max_boxcar` and `subband_max_snr_loss` are the other levers: with
+`max_boxcar` 1536 the minimum is 2.26 GiB, and with
+`subband_max_snr_loss` 0.2 as well 1.63 GiB. Both change what is searched.
+Float input needs more (minimum 6.04 GiB here).
+
+A **search latency** above 0 means the skewed path: subband rows return
+their candidates up to that many samples later, and the end of a stream
+needs `drain()` (not `flush()`) to search them. GPU subband searches take
+the skewed path when the budget gives it, and CPU subband searches on packed
+input with blocks over 2048 samples take it first (it is faster there), so
+plan for `drain()` whenever `est.search_latency > 0`.
+
 ### Memory budget and wide bands
 
 `FDMTBoxcar(..., max_memory_bytes=...)` (default 10 GiB, `FDMT` takes the
@@ -515,7 +603,7 @@ reported in `memory_usage.host` (included in `total`) but not budgeted. The
 boxcar's own buffers are fixed by the plan and config: each searched row
 keeps `max_boxcar` carried samples (float32, or uint32 for packed input
 when every tree value fits 32 bits) and its pending peaks. The FDMT takes
-the fastest path that fits in the rest:
+a fast path that fits in the rest (rule 3 above):
 
 - **The tree path** when its streaming history fits: every preset except
   `parkes_uwl`. Exception: on the CPU, packed input with blocks longer
@@ -529,6 +617,11 @@ the fastest path that fits in the rest:
   own dispersion reach and recomputes the upper levels over short per-row
   windows ([](skewed_window_fdmt.md)), at the longest automatic chunk
   (4096 down to 256 samples) that fits; a longer chunk is faster.
+- **GPU subband searches** (`subband_depth > 0`) take the first that fits
+  of a short list: the plan's L2-cache chunk on the direct path, the direct
+  path at chunks 4096 down to `max_boxcar / 8`, the skewed path at 4096
+  down to 256, then shorter direct chunks
+  ([details](skewed_window_fdmt.md#memory-budget-and-chunk-length)).
 - Construction raises `ValueError` (`std::invalid_argument`) when nothing
   fits.
 
@@ -556,7 +649,7 @@ searched in their existing FDMT buffers before the next merge. FDMT state,
 sample histories, pending peaks, candidate buffers and bounded scoring
 workspace remain allocated; fusion does not mean zero scratch memory.
 `memory_usage` reports these categories and includes GPU host candidate
-storage and lazily allocated input staging. It excludes caller input and
+storage and the host-input staging buffer. It excludes caller input and
 Python's owned output copies.
 
 :::{dropdown} How the scorer works on CPU and GPU

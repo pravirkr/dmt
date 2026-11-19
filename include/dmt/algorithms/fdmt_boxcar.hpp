@@ -92,15 +92,28 @@ struct FDMTBoxcarMemoryEstimate {
  * GPU reset_history() is also ordered asynchronously on its supplied stream.
  * An instance is not safe for concurrent calls. CPU device calls throw.
  *
- * Memory: max_memory_bytes (default kFDMTDefaultMaxMemory, 10 GiB) bounds
- * what the instance allocates where it runs (get_memory_usage().budgeted()):
- * everything on the CPU; device memory on a GPU, where the host plan
- * copies, host result storage and per-call mask noise model are reported
- * (get_memory_usage().host) but not budgeted. The boxcar carry, peaks and
- * candidate buffers are fixed by the plan and config; the FDMT takes its
- * fastest path within the rest (see FDMT). Construction throws
- * std::invalid_argument when nothing fits. On a GPU, host-memory input is
- * copied to the device one chunk at a time into a buffer reserved at
+ * Memory: max_memory_bytes is the only memory setting (the block length
+ * nsamps is the caller's I/O unit and does not change the FDMT's memory,
+ * though a CPU kill mask copies the block into budgeted staging;
+ * chunk_nsamps is an expert override, 0 = automatic, and a forced
+ * chunk can throw where the automatic one fits). Plan with
+ * estimate_memory() (usage, chunk, path and search latency of a budget)
+ * and estimate_minimum_memory() (the smallest budget that builds); they
+ * report what the instance owns, so add the caller's input blocks. A
+ * larger budget can buy a faster configuration (a simple measured rule,
+ * close to the fastest that fits, not faster at every budget); every budget
+ * from the minimum up builds, with the same candidates to float precision. On a
+ * GPU, construction also checks the chosen configuration against the device's
+ * free memory and throws std::bad_alloc before allocating when it does not fit
+ * (the choice never depends on free memory). max_memory_bytes (default
+ * kFDMTDefaultMaxMemory, 10 GiB) bounds what the instance allocates where it
+ * runs (get_memory_usage().budgeted()): everything on the CPU; device memory on
+ * a GPU, where the host plan copies, host result storage and per-call mask
+ * noise model are reported (get_memory_usage().host) but not budgeted. The
+ * boxcar carry, peaks and candidate buffers are fixed by the plan and config;
+ * the FDMT takes a fast path within the rest (see FDMT). Construction
+ * throws std::invalid_argument when nothing fits. On a GPU, host-memory input
+ * is copied to the device one chunk at a time into a buffer reserved at
  * construction inside that budget (a few MiB to ~100 MiB, held whether
  * or not host input is used), so host calls allocate nothing. On the
  * skewed-window path (plans whose tree history exceeds the budget; on the
@@ -158,8 +171,7 @@ struct FDMTBoxcarMemoryEstimate {
  * exec.nthreads threads (on GPUs too); the last three masks are cached.
  * skip_cold_prefix keeps the constructor mask's warm-up. reset_history()
  * clears the mask state; drain() pads with the last block's mask.
- * get_search_plans() shows the constructor mask's tables only. Packed
- * input takes no per-call mask.
+ * get_search_plans() shows the constructor mask's tables only.
  */
 class FDMTBoxcar {
 public:
