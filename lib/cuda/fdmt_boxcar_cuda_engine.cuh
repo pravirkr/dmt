@@ -648,6 +648,14 @@ private:
     void launch_open_begin_surrogate(cudaStream_t stream);
 
     // Common helpers (fdmt_boxcar_cuda.cu).
+    /// One block's search (`search()` runs the driver) between the block
+    /// noise commit and the result bookkeeping, on `queue`.
+    template <typename Search>
+    CandidateDeviceResultView run_search(Stream queue, const Search& search);
+    /// Killed rows read as zero by the transform itself (FDMT drivers, or
+    /// a zero block): flags set for this block, true. False: the driver
+    /// reads a staging copy with the rows zeroed (masked()).
+    bool keep_rows(Stream queue);
     template <typename T>
     DeviceSpan<const T> masked(DeviceSpan<const T> block,
                                thrust::device_vector<T>& buffer,

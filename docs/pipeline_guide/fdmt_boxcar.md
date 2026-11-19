@@ -532,10 +532,11 @@ the fastest path that fits in the rest:
 - Construction raises `ValueError` (`std::invalid_argument`) when nothing
   fits.
 
-On a GPU, host-memory input goes through a device staging block that is
-allocated by the first host-memory `execute()` and reused. The check at
-construction does not include it, since device-memory input never needs
-it; it shows in `memory_usage.staging` once allocated.
+On a GPU, host-memory input is copied to the device one chunk at a time,
+into a `beams x nchans x chunk` buffer reserved at construction and
+counted in `max_memory_bytes` (Parkes UWL, 8-bit, chunk 4096: 27 MiB;
+float32: 109 MiB). Host calls allocate nothing, and the buffer is held
+whether or not host input is used.
 
 On the skewed path a subband search reads every searched row (tree,
 staggered, and delays the full-band grid does not use) from the full

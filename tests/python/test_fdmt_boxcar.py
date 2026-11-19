@@ -1130,7 +1130,8 @@ def _check_boxcar_estimate(backend: str) -> None:
         search = FDMTBoxcar(plan, config(), backend=backend, **kwargs)
         assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
         assert est.chunk_nsamps == search.chunk_nsamps
-        assert (est.host_staging == 0) == (backend == "cpu")
+        # GPU host (NumPy) input is staged inside the usage.
+        assert est.host_staging == 0
         assert "FDMTBoxcarMemoryEstimate(" in repr(est)
 
     big = FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)

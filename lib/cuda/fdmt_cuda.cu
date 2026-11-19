@@ -255,6 +255,17 @@ void FDMTCudaEngine::init_device_structures(SizeType fuse_levels) {
         } else {
             m_integer_ring.resize(m_nbeams * m_ring_size, 0);
         }
+        if (m_search_only) {
+            // Host-memory execute_search() stages one chunk at a time.
+            const SizeType rows = m_nbeams * m_plan.get_nchans();
+            if (m_search_nbits == 32) {
+                m_search_in_f32_d.resize(rows * m_chunk);
+            } else {
+                m_search_in_packed_d.resize(
+                    rows *
+                    bit_pack_utils::packed_row_bytes(m_chunk, m_search_nbits));
+            }
+        }
     }
     gpu_utils::check_last_gpu_error("FDMT (gpu): constructor failed");
 }
@@ -335,10 +346,12 @@ FDMTMemoryUsage FDMTCudaEngine::get_memory_usage() const noexcept {
                    windowed_top_bytes() + direct_window_bytes() +
                    m_integer_ring.size() * sizeof(uint64_t) +
                    m_integer32_ring.size() * sizeof(uint32_t),
-        // Fused or direct tables, plus the host-execute() staging once
-        // allocated.
+        // Fused or direct tables, the host execute_search() chunk, plus the
+        // host-execute() staging once allocated.
         .workspace =
             fused_bytes + direct_workspace_bytes() + top_workspace_bytes() +
+            (m_search_in_f32_d.size() * sizeof(float)) +
+            m_search_in_packed_d.size() +
             (m_stage_wf_f32_d.size() * sizeof(float)) +
             m_stage_wf_packed_d.size() + (m_stage_dmt_d.size() * sizeof(float)),
         .output = m_nbeams * m_plan.get_dmt_size() * sizeof(float),

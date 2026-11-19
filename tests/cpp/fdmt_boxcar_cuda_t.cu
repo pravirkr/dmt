@@ -14,6 +14,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <thrust/device_vector.h>
 
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
@@ -551,12 +552,11 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                 }
             };
             check(g);
-            // Host input staging plus the transform's keep bytes (one per
-            // beam and channel); the mask needs no block copy of its own.
+            // The transform's keep bytes (one per beam and channel): the
+            // mask needs no block copy of its own, and host input is staged
+            // chunk by chunk inside the transform.
             CHECK(gpu_s.get_memory_usage().staging ==
-                  (bits == 32 ? floats.front().size() * sizeof(float)
-                              : packed.front().size()) +
-                      (plan.get_nchans() * gpu_s.get_nbeams()));
+                  plan.get_nchans() * gpu_s.get_nbeams());
 
             cudaStream_t stream;
             gpu_utils::check_gpu_call(cudaStreamCreate(&stream));
@@ -998,12 +998,12 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
     }
 }
 
-TEST_CASE("GPU host-memory calls stage one block outside the budget",
+TEST_CASE("GPU host-memory calls stage inside the budget",
           "[gpu][boxcar][budget]") {
-    // The documented contract: on a GPU the first host-memory call
-    // allocates a device copy of the whole input block (and, for FDMT, of
-    // the output plane), outside max_memory_bytes; later calls reuse it and
-    // device-memory calls never allocate it.
+    // FDMTBoxcar copies a host block chunk by chunk into a buffer reserved
+    // at construction (part of the budgeted usage): host calls allocate
+    // nothing. FDMTFFTBoxcar and FDMT still copy the whole block on the
+    // first host call, outside the budget.
     const plans::FDMTPlan plan(1200.0F, 1500.0F, 64, 2048, 0.000256F, 200);
     const SizeType beams = 2;
     const SizeType block =
@@ -1015,35 +1015,26 @@ TEST_CASE("GPU host-memory calls stage one block outside the budget",
 
     SECTION("FDMTBoxcar") {
         FDMTBoxcar search(plan, cfg, true, exec, beams);
+        const auto e =
+            FDMTBoxcar::estimate_memory(plan, cfg, true, exec, beams);
+        CHECK(e.host_staging == 0);
         const auto before = search.get_memory_usage();
+        CHECK(before.total() == e.usage.total());
         CHECK(before.staging == 0);
         (void)search.execute(std::span<const float>(input[0]));
-        const auto after = search.get_memory_usage();
-        CHECK(after.staging == block);
-        CHECK(after.budgeted() == before.budgeted() + block);
         (void)search.execute(std::span<const float>(input[1]));
-        CHECK(search.get_memory_usage().budgeted() == after.budgeted());
-
-        FDMTBoxcar dev(plan, cfg, true, exec, beams);
-        const thrust::device_vector<float> buf(input[0].begin(),
-                                               input[0].end());
-        (void)dev.execute(
-            DeviceSpan<const float>(thrust::raw_pointer_cast(buf.data()),
-                                    buf.size(), {exec.backend, 0}));
-        (void)dev.copy_result();
-        CHECK(dev.get_memory_usage().staging == 0);
+        CHECK(search.get_memory_usage().total() == before.total());
+        CHECK(search.get_memory_usage().staging == 0);
     }
     SECTION("FDMTBoxcar, packed 8-bit input") {
         cfg.input_nbits = 8;
         cfg.input_mean  = 2.0F;
         FDMTBoxcar search(plan, cfg, true, exec, beams);
         const auto before = search.get_memory_usage();
-        CHECK(before.staging == 0);
         const std::vector<uint8_t> packed(block / sizeof(float), 2);
         (void)search.execute(std::span<const uint8_t>(packed));
-        const auto after = search.get_memory_usage();
-        CHECK(after.staging == packed.size());
-        CHECK(after.budgeted() == before.budgeted() + packed.size());
+        CHECK(search.get_memory_usage().total() == before.total());
+        CHECK(search.get_memory_usage().staging == 0);
     }
     SECTION("FDMTFFTBoxcar") {
         algorithms::FDMTFFTBoxcar search(plan, cfg, true, exec, beams);
@@ -1067,6 +1058,167 @@ TEST_CASE("GPU host-memory calls stage one block outside the budget",
     }
 }
 
+TEST_CASE("FDMTBoxcar GPU host input staged per chunk equals device input",
+          "[gpu][boxcar][budget][parity]") {
+    // Host blocks are copied chunk by chunk (rows `chunk` apart) into the
+    // transform's reserved buffer. Every search path reads them as it reads
+    // a device block: identical candidates, bit for bit, over several
+    // blocks and drain(), and no memory beyond the estimate.
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const float tsamp = 455.6e-6F;
+    struct Case {
+        std::string name;
+        plans::FDMTPlan plan;
+        SizeType nbits;
+        SizeType beams;
+        SizeType chunk;  // 0: automatic
+        SizeType budget; // 0: default; 1: the minimum
+        bool ctor_mask;
+        bool call_masks;
+        SizeType fuse;    // kFDMTAutoFuse: direct levels where eligible
+        std::string path; // in search_path ("" : the tree)
+    };
+    const SizeType kAuto = algorithms::kFDMTAutoFuse;
+    const plans::FDMTPlan small(1200.0F, 1500.0F, 64, 2500, 0.000256F, 200);
+    const plans::FDMTPlan sub(1100.0F, 1714.0F, 1152, 4096, tsamp, 2700, 0, 1,
+                              "valid", 2);
+    const plans::FDMTPlan chan_dm(1100.0F, 1714.0F, 256, 2048, tsamp, 600, 0, 1,
+                                  "valid", 1, 150.0);
+    // Blocks that are not a multiple of the chunk (2500 samples), two
+    // beams, constructor and per-call masks, float and 1-8 bits. The
+    // skewed path on packed input is compared host vs device by the
+    // drain() test below.
+    const std::vector<Case> cases{
+        {"tree f32", small, 32, 2, 1024, 0, true, false, 0, ""},
+        {"tree 4-bit", small, 4, 2, 1024, 0, false, true, 0, ""},
+        {"fused f32", small, 32, 1, 512, 0, false, true, 2, ""},
+        {"direct f32", small, 32, 2, 1024, 0, true, false, kAuto,
+         "direct levels"},
+        {"direct 1-bit", small, 1, 1, 512, 0, true, false, kAuto,
+         "direct levels"},
+        {"subband direct f32", sub, 32, 1, 0, 0, false, true, kAuto,
+         "direct top"},
+        {"subband direct 8-bit", sub, 8, 1, 0, 0, true, false, kAuto,
+         "direct top"},
+        {"subband minimum f32", sub, 32, 1, 0, 1, true, false, kAuto,
+         "skewed direct levels"},
+        {"subband minimum 8-bit", sub, 8, 2, 0, 1, false, true, kAuto,
+         "direct levels"},
+        {"chan_dm 8-bit", chan_dm, 8, 1, 0, 0, true, true, kAuto,
+         "direct levels"},
+    };
+    for (const auto& c : cases) {
+        DYNAMIC_SECTION(c.name) {
+            const auto& plan = c.plan;
+            BoxcarConfig cfg;
+            cfg.max_boxcar = 24;
+            cfg.wtsp       = 1.5F;
+            // Enough candidates on the 64-channel plan, few enough elsewhere.
+            cfg.detect_thresh    = plan.get_nchans() < 256 ? 3.5F : 4.5F;
+            cfg.max_candidates   = 1U << 20;
+            cfg.max_cands_per_dm = 0;
+            cfg.input_nbits      = c.nbits;
+            const int top        = c.nbits == 32 ? 255 : (1 << c.nbits) - 1;
+            cfg.input_mean = c.nbits == 32 ? 0.0F : static_cast<float>(top / 2);
+            // Uniform codes 0..top (float: shifted by -127.5).
+            cfg.noise_sigma = static_cast<float>(
+                std::sqrt((((top + 1.0) * (top + 1.0)) - 1.0) / 12.0));
+            cfg.per_call_masks    = c.call_masks;
+            const SizeType nchans = plan.get_nchans();
+            std::vector<uint8_t> ctor_mask;
+            if (c.ctor_mask) {
+                ctor_mask.assign(nchans, 1);
+                for (SizeType ch = 3; ch < nchans; ch += 7) {
+                    ctor_mask[ch] = 0;
+                }
+            }
+            SizeType budget = algorithms::kFDMTDefaultMaxMemory;
+            if (c.budget == 1) {
+                budget = FDMTBoxcar::estimate_minimum_memory(
+                             plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
+                             ctor_mask)
+                             .max_memory_bytes;
+            }
+            const auto est =
+                FDMTBoxcar::estimate_memory(plan, cfg, true, exec, c.beams,
+                                            c.fuse, c.chunk, budget, ctor_mask);
+            CHECK(est.host_staging == 0);
+            FDMTBoxcar host(plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
+                            budget, ctor_mask);
+            FDMTBoxcar device(plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
+                              budget, ctor_mask);
+            INFO(host.summary());
+            INFO("path '" << est.search_path << "'");
+            if (c.path.empty()) {
+                CHECK(est.search_path.empty());
+            } else {
+                CHECK(est.search_path.find(c.path) != std::string::npos);
+            }
+            const SizeType per_block = c.beams * nchans * plan.get_nsamps();
+            const SizeType bytes = c.nbits == 32
+                                       ? per_block
+                                       : c.beams * nchans *
+                                             bit_pack_utils::packed_row_bytes(
+                                                 plan.get_nsamps(), c.nbits);
+            std::mt19937 gen(97);
+            std::uniform_int_distribution<int> code(0, top);
+            thrust::device_vector<float> fbuf(per_block);
+            thrust::device_vector<uint8_t> pbuf(bytes);
+            std::vector<RawCandidate> got;
+            std::vector<RawCandidate> want;
+            constexpr SizeType kBlocks = 3;
+            for (SizeType b = 0; b < kBlocks; ++b) {
+                std::vector<uint8_t> mask(nchans, 1);
+                for (SizeType ch = b; ch < nchans; ch += 5) {
+                    mask[ch] = 0;
+                }
+                const std::span<const uint8_t> call_mask =
+                    c.call_masks ? std::span<const uint8_t>(mask)
+                                 : std::span<const uint8_t>{};
+                if (c.nbits == 32) {
+                    std::vector<float> v(per_block);
+                    for (auto& x : v) {
+                        x = static_cast<float>(code(gen)) - 127.5F;
+                    }
+                    thrust::copy(v.begin(), v.end(), fbuf.begin());
+                    const DeviceSpan<const float> d(
+                        thrust::raw_pointer_cast(fbuf.data()), per_block,
+                        {exec.backend, 0});
+                    (void)device.execute(d, call_mask);
+                    append(want, device.copy_result());
+                    append(got,
+                           host.execute(std::span<const float>(v), call_mask));
+                } else {
+                    std::vector<uint8_t> v(bytes);
+                    for (auto& x : v) {
+                        x = static_cast<uint8_t>(code(gen) & 0xFF);
+                        if (c.nbits < 8) {
+                            x = static_cast<uint8_t>(
+                                std::uniform_int_distribution<int>(0,
+                                                                   255)(gen));
+                        }
+                    }
+                    thrust::copy(v.begin(), v.end(), pbuf.begin());
+                    const DeviceSpan<const uint8_t> d(
+                        thrust::raw_pointer_cast(pbuf.data()), bytes,
+                        {exec.backend, 0});
+                    (void)device.execute(d, call_mask);
+                    append(want, device.copy_result());
+                    append(got, host.execute(std::span<const uint8_t>(v),
+                                             call_mask));
+                }
+                CHECK(host.get_memory_usage().total() == est.usage.total());
+                CHECK(host.get_memory_usage().staging == est.usage.staging);
+            }
+            append(got, host.drain());
+            append(want, device.drain());
+            CHECK(host.get_memory_usage().total() == est.usage.total());
+            REQUIRE(want.size() > 50);
+            compare(got, want);
+        }
+    }
+}
+
 TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
           "[boxcar][gpu][budget]") {
     const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
@@ -1086,7 +1238,7 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
         if (c.budget < big) {
             CHECK(e.chunk_nsamps < c.plan.get_nsamps());
         }
-        // The first host call adds exactly host_staging.
+        // Host calls stage inside the estimate: they add nothing.
         const SizeType rows = c.beams * c.plan.get_nchans();
         const auto total    = f.get_memory_usage().total();
         if (c.config.input_nbits == 32) {
@@ -1096,8 +1248,8 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
             std::vector<uint8_t> in(rows * c.plan.get_nsamps(), 127);
             (void)f.execute(std::span<const uint8_t>(in));
         }
-        CHECK(e.host_staging > 0);
-        CHECK(f.get_memory_usage().total() == total + e.host_staging);
+        CHECK(e.host_staging == 0);
+        CHECK(f.get_memory_usage().total() == total);
     }
     SECTION("nothing is allocated") {
         // A 2^40-candidate store (tens of TB) on the device and host: sized,

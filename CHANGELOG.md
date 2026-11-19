@@ -124,6 +124,21 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **GPU `FDMTBoxcar` stages host-memory input inside `max_memory_bytes`.**
+  A host (NumPy) block was copied whole to the device on the first host
+  `execute()`, outside the budget (UWL 6656 channels: +0.44 GiB per
+  65536-sample 8-bit block, +1.7 GiB float). Now each chunk is copied into
+  a `beams x nchans x chunk` buffer reserved at construction and counted
+  in the budget (UWL 8-bit at chunk 4096: 27 MiB; float 109 MiB), so host
+  calls allocate nothing and `estimate_memory().host_staging` is 0 for
+  `FDMTBoxcar`. Device-input callers hold that buffer too. Every GPU
+  estimate grows by it, so a configuration exactly at a budget
+  breakpoint may take the next shorter chunk. Candidates are unchanged
+  (bitwise, host vs device input, on every path). Host-input speed on an
+  L40: Parkes UWL within 2% (8-bit and float), packed input unchanged;
+  fast float plans are slower (MeerKAT L-band float 291x -> 224x real
+  time: per-chunk copies get about half the bandwidth of one block copy).
+  Device input is unchanged.
 - **GPU engines check the device's free memory before allocating.** GPU
   `FDMT`, `FDMTBoxcar`, `FDMTFFTBoxcar`, `FDMTFFT` and `CohFDMT` compare
   the configuration they chose (from `max_memory_bytes` and the other

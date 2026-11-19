@@ -34,6 +34,9 @@ public:
     }
     void reset(Stream stream) override { m_fdmt->reset_search_history(stream); }
     void allocate() override { m_fdmt->allocate(); }
+    [[nodiscard]] bool stages_host_input() const noexcept override {
+        return true;
+    }
     bool set_search_keep(const uint8_t* keep, float fill) override {
         return m_fdmt->set_search_keep(keep, fill);
     }

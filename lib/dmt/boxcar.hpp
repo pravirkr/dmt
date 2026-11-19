@@ -464,6 +464,12 @@ public:
     virtual void reset(Stream) = 0;
     /// FDMTEngine::allocate(): the transform's deferred buffers.
     virtual void allocate() = 0;
+    /// GPU: the host-memory search() overloads stage the input inside the
+    /// transform's own (budgeted) memory, chunk by chunk. Otherwise the
+    /// boxcar engine copies the block to the device first.
+    [[nodiscard]] virtual bool stages_host_input() const noexcept {
+        return false;
+    }
     /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
     /// transform itself, without a staging copy. False where unsupported.
     virtual bool set_search_keep(const uint8_t* /*keep*/, float /*fill*/ = 0) {

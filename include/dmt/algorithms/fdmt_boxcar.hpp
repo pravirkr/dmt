@@ -42,9 +42,10 @@ struct FDMTBoxcarMemoryEstimate {
     FDMTBoxcarMemoryUsage usage{};
     /// Its get_chunk_nsamps().
     SizeType chunk_nsamps{0};
-    /// GPU backends: device bytes the first host-memory execute() adds (the
-    /// staging block of the input), outside the budget; device-memory calls
-    /// never allocate it. 0 on the CPU.
+    /// FDMTFFTBoxcar on a GPU: device bytes the first host-memory execute()
+    /// adds (the staging block of the input), outside the budget;
+    /// device-memory calls never allocate it. 0 for FDMTBoxcar (host input
+    /// is staged inside usage) and on the CPU.
     SizeType host_staging{0};
     /// The transform's path, as summary() shows it ("Transform: ..."; empty
     /// for the tree path of FDMTBoxcar).
@@ -103,10 +104,10 @@ struct FDMTBoxcarMemoryEstimate {
  * (get_memory_usage().host) but not budgeted. The boxcar carry, peaks and
  * candidate buffers are fixed by the plan and config; the FDMT takes its
  * fastest path within the rest (see FDMT). Construction throws
- * std::invalid_argument when nothing fits. On a GPU the staging block for
- * host-memory input is allocated by the first host execute() and is not
- * part of that check (device input never needs it);
- * get_memory_usage().staging reports it once allocated. On the
+ * std::invalid_argument when nothing fits. On a GPU, host-memory input is
+ * copied to the device one chunk at a time into a buffer reserved at
+ * construction inside that budget (a few MiB to ~100 MiB, held whether
+ * or not host input is used), so host calls allocate nothing. On the
  * skewed-window path (plans whose tree history exceeds the budget; on the
  * CPU also packed input with blocks over 2048 samples) the rows
  * of a subband search are searched with a fixed per-row latency of up to

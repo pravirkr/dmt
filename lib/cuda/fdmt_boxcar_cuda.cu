@@ -720,8 +720,12 @@ void FDMTBoxcarCudaEngine::allocate() {
 }
 
 SizeType FDMTBoxcarCudaEngine::host_staging_bytes() const noexcept {
+    // FDMT drivers stage host input inside their budgeted memory; otherwise
     // execute(host span) sizes m_input_d (float) or m_packed_input (packed)
     // to the block.
+    if (m_driver->stages_host_input()) {
+        return 0;
+    }
     const SizeType rows = m_beams * m_plan.get_nchans();
     if (m_config.input_nbits == 32) {
         const SizeType need = rows * m_plan.get_nsamps();
@@ -757,6 +761,17 @@ FDMTBoxcarCudaEngine::execute(std::span<const float> waterfall) {
     validate_input(waterfall.size());
     gpu_utils::set_device(m_device);
     m_work.wait();
+    if (m_driver->stages_host_input()) {
+        // The transform copies each chunk into its own reserved buffer.
+        (void)run_search({}, [&] {
+            if (!keep_rows({})) {
+                throw std::logic_error("FDMTBoxcar (gpu): host staging "
+                                       "without kept rows");
+            }
+            m_driver->search(waterfall, *this);
+        });
+        return copy_result({});
+    }
     if (m_input_d.size() != waterfall.size()) {
         m_input_d.resize(waterfall.size());
     }
@@ -775,13 +790,21 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const float> waterfall, Stream queue) {
         throw std::invalid_argument("FDMTBoxcar: expected packed uint8 input");
     }
     validate_input(waterfall.size());
+    return run_search(queue, [&] {
+        m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
+    });
+}
+
+template <typename Search>
+CandidateDeviceResultView
+FDMTBoxcarCudaEngine::run_search(Stream queue, const Search& search) {
     const auto stream = static_cast<cudaStream_t>(queue.native);
     // Before the table uploads, which go to the current device.
     gpu_utils::set_device(m_device);
     commit_block_noise(stream);
     try {
         begin_result(m_plan.get_nsamps(), queue);
-        m_driver->search(masked(waterfall, m_input_d, queue), *this, queue);
+        search();
     } catch (...) {
         undo_commit();
         throw;
@@ -804,6 +827,16 @@ FDMTBoxcarCudaEngine::execute(std::span<const uint8_t> waterfall) {
     validate_packed(waterfall.size());
     gpu_utils::set_device(m_device);
     m_work.wait();
+    if (m_driver->stages_host_input()) {
+        (void)run_search({}, [&] {
+            if (!keep_rows({})) {
+                throw std::logic_error("FDMTBoxcar (gpu): host staging "
+                                       "without kept rows");
+            }
+            m_driver->search(waterfall, m_config.input_nbits, *this);
+        });
+        return copy_result({});
+    }
     if (m_packed_input.size() != waterfall.size()) {
         m_packed_input.resize(waterfall.size());
     }
@@ -821,29 +854,10 @@ CandidateDeviceResultView
 FDMTBoxcarCudaEngine::execute(DeviceSpan<const uint8_t> waterfall,
                               Stream queue) {
     validate_packed(waterfall.size());
-    const auto stream = static_cast<cudaStream_t>(queue.native);
-    // Before the table uploads, which go to the current device.
-    gpu_utils::set_device(m_device);
-    commit_block_noise(stream);
-    try {
-        begin_result(m_plan.get_nsamps(), queue);
+    return run_search(queue, [&] {
         m_driver->search(masked(waterfall, m_packed_input, queue),
                          m_config.input_nbits, *this, queue);
-    } catch (...) {
-        undo_commit();
-        throw;
-    }
-    m_commit_open = false;
-    m_catch_undo  = {};
-    m_prev_evicted.reset();
-    m_position += m_plan.get_nsamps();
-    finish_keep(stream);
-    plane_counts(stream);
-    shift_candidate_times(stream);
-    release_slots(stream);
-    update_open_begin(stream);
-    m_work.mark(stream);
-    return device_view();
+    });
 }
 
 bool FDMTBoxcarCudaEngine::zero_blocks() const noexcept {
@@ -1213,21 +1227,29 @@ SizeType FDMTBoxcarCudaEngine::fuse_levels() const noexcept {
     return m_driver->fuse_levels();
 }
 
-template <typename T>
-DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
-    DeviceSpan<const T> block, thrust::device_vector<T>& buffer, Stream queue) {
+bool FDMTBoxcarCudaEngine::keep_rows(Stream queue) {
     if (m_zero_block) {
         // Every row killed; the transform never reads the block.
         const std::vector<std::pair<SizeType, SizeType>> all{
             {SizeType{0}, m_plan.get_nchans()}};
         set_keep(all, queue);
+        return true;
+    }
+    if (m_keep_in_transform) {
+        const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
+        set_keep(runs, queue, m_noise_on && m_config.input_nbits != 32);
+        return true;
+    }
+    return false;
+}
+
+template <typename T>
+DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
+    DeviceSpan<const T> block, thrust::device_vector<T>& buffer, Stream queue) {
+    if (keep_rows(queue)) {
         return block;
     }
     const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
-    if (m_keep_in_transform) {
-        set_keep(runs, queue, m_noise_on && m_config.input_nbits != 32);
-        return block;
-    }
     if (runs.empty()) {
         return block;
     }

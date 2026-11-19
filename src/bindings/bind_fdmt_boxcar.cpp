@@ -224,9 +224,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         :meth:`FDMTBoxcar.estimate_memory` (computed without allocating it).
 
         ``usage`` equals that instance's ``memory_usage``; ``chunk_nsamps``
-        its ``chunk_nsamps``; ``host_staging`` (GPU backends) the device bytes
-        the first host-memory (NumPy) :meth:`FDMTBoxcar.execute` adds outside
-        ``max_memory_bytes`` (the staging block of the input; 0 on the CPU);
+        its ``chunk_nsamps``; ``host_staging`` 0 (host (NumPy) input is
+        staged chunk by chunk inside ``usage`` on a GPU);
         ``search_path`` the transform's path (the ``Transform:`` line of
         ``summary()``; empty for the tree path) and ``search_latency`` its
         ``search_latency``; ``max_memory_bytes`` the budget it was made with

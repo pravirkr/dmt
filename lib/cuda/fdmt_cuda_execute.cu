@@ -313,23 +313,90 @@ __global__ void kernel_fused_levels(const Input waterfall,
 
 } // namespace
 
+namespace {
+// Host rows -> device rows `dpitch` apart, in calls of at most about 2 MiB.
+// Pageable pitched copies reach about half the bandwidth of one contiguous
+// copy (L40); larger calls were slower still (meerkat L-band float search
+// on host input: 291x real time with a whole-block copy, 209x with 8 MiB
+// calls, 224x with 2 MiB calls). UWL plans lose <= 2%, packed input none.
+void copy_rows_to_device(void* dst,
+                         SizeType dpitch,
+                         const void* src,
+                         SizeType spitch,
+                         SizeType width,
+                         SizeType rows,
+                         cudaStream_t stream) {
+    constexpr SizeType kCallBytes = SizeType{2} << 20;
+    const SizeType per_call       = std::max<SizeType>(1, kCallBytes / width);
+    for (SizeType r0 = 0; r0 < rows; r0 += per_call) {
+        const SizeType n = std::min(per_call, rows - r0);
+        gpu_utils::check_gpu_call(
+            cudaMemcpy2DAsync(
+                static_cast<std::byte*>(dst) + (r0 * dpitch), dpitch,
+                static_cast<const std::byte*>(src) + (r0 * spitch), spitch,
+                width, n, cudaMemcpyHostToDevice, stream),
+            "FDMT (cuda): host search input copy failed");
+    }
+}
+} // namespace
+
 void FDMTCudaEngine::execute_search(DeviceSpan<const float> waterfall,
                                     detail::FDMTSearchSink& sink,
                                     Stream queue) {
     check_inputs(waterfall.size(), m_nbeams * m_plan.get_dmt_size());
+    const detail::FDMTInputF32 input{.data = waterfall.data(),
+                                     .nsamps =
+                                         static_cast<int>(m_plan.get_nsamps()),
+                                     .keep = m_search_keep};
+    search_float(
+        [&](SizeType t0, SizeType /*active*/, cudaStream_t /*stream*/) {
+            return chunk_input(input, t0);
+        },
+        sink, queue);
+}
+
+void FDMTCudaEngine::execute_search(std::span<const float> waterfall,
+                                    detail::FDMTSearchSink& sink) {
+    check_inputs(waterfall.size(), m_nbeams * m_plan.get_dmt_size());
+    if (!m_search_only || m_search_nbits != 32) {
+        throw std::logic_error(
+            "FDMT (cuda): host search needs a float search-only engine");
+    }
+    gpu_utils::set_device(m_device_id);
+    // Default stream, as the host overloads of FDMTBoxcar.
+    const Stream queue{};
+    m_device_work.order(to_cuda(queue));
+    const SizeType ns   = m_plan.get_nsamps();
+    const SizeType rows = m_nbeams * m_plan.get_nchans();
+    float* staged       = thrust::raw_pointer_cast(m_search_in_f32_d.data());
+    search_float(
+        [&](SizeType t0, SizeType active, cudaStream_t stream) {
+            // Rows of the chunk, m_chunk apart; the previous chunk's
+            // kernels are ahead of the copy on the same stream.
+            copy_rows_to_device(staged, m_chunk * sizeof(float),
+                                waterfall.data() + t0, ns * sizeof(float),
+                                active * sizeof(float), rows, stream);
+            return detail::FDMTInputF32{.data   = staged,
+                                        .nsamps = static_cast<int>(m_chunk),
+                                        .keep   = m_search_keep};
+        },
+        sink, queue);
+}
+
+template <typename Source>
+void FDMTCudaEngine::search_float(const Source& chunk_at,
+                                  detail::FDMTSearchSink& sink,
+                                  Stream queue) {
     const SizeType root = m_plan.get_niters();
     if (m_mode != FDMTMode::kValid || get_fuse_levels() >= root) {
         throw std::logic_error(
             "FDMT search requires valid mode and a separate root");
     }
     const auto stream = to_cuda(queue);
-    const detail::FDMTInputF32 input{.data = waterfall.data(),
-                                     .nsamps =
-                                         static_cast<int>(m_plan.get_nsamps()),
-                                     .keep = m_search_keep};
     for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
-        start(chunk_input(input, t0), m_float_levels, nullptr,
-              std::min(m_chunk, m_plan.get_nsamps() - t0), stream, true);
+        const SizeType active = std::min(m_chunk, m_plan.get_nsamps() - t0);
+        start(chunk_at(t0, active, stream), m_float_levels, nullptr, active,
+              stream, true);
         const auto consume = [&](SizeType l, SizeType source) {
             const auto hist = tree_history(l);
             sink.consume(
@@ -425,8 +492,6 @@ void FDMTCudaEngine::execute_search(DeviceSpan<const uint8_t> waterfall,
     check_packed_inputs(waterfall.size(), nbits,
                         m_nbeams * m_plan.get_dmt_size());
     gpu_utils::set_device(m_device_id);
-    const auto stream   = to_cuda(queue);
-    const SizeType root = m_plan.get_niters();
     const FDMTInputPacked full{
         .data      = waterfall.data(),
         .row_bytes = static_cast<int>(
@@ -434,20 +499,71 @@ void FDMTCudaEngine::execute_search(DeviceSpan<const uint8_t> waterfall,
         .nbits = static_cast<int>(nbits),
         .keep  = m_search_keep,
         .fill  = m_search_fill};
+    search_packed(
+        [&](SizeType t0, SizeType /*active*/, cudaStream_t /*stream*/) {
+            return chunk_input(full, t0);
+        },
+        nbits, sink, queue);
+}
+
+void FDMTCudaEngine::execute_search(std::span<const uint8_t> waterfall,
+                                    SizeType nbits,
+                                    detail::FDMTSearchSink& sink) {
+    if (nbits == 32 || nbits != m_search_nbits) {
+        throw std::invalid_argument(
+            "FDMT integer search: input bit depth mismatch");
+    }
+    check_packed_inputs(waterfall.size(), nbits,
+                        m_nbeams * m_plan.get_dmt_size());
+    if (!m_search_only) {
+        throw std::logic_error(
+            "FDMT (cuda): host search needs a search-only engine");
+    }
+    gpu_utils::set_device(m_device_id);
+    const Stream queue{};
+    m_device_work.order(to_cuda(queue));
+    const SizeType rows = m_nbeams * m_plan.get_nchans();
+    const SizeType row_bytes =
+        bit_pack_utils::packed_row_bytes(m_plan.get_nsamps(), nbits);
+    const SizeType staged_row =
+        bit_pack_utils::packed_row_bytes(m_chunk, nbits);
+    uint8_t* staged = thrust::raw_pointer_cast(m_search_in_packed_d.data());
+    search_packed(
+        [&](SizeType t0, SizeType active, cudaStream_t stream) {
+            // Chunks start on a whole byte (multiples of 64 samples).
+            copy_rows_to_device(
+                staged, staged_row, waterfall.data() + ((t0 * nbits) / 8),
+                row_bytes, bit_pack_utils::packed_row_bytes(active, nbits),
+                rows, stream);
+            return FDMTInputPacked{.data      = staged,
+                                   .row_bytes = static_cast<int>(staged_row),
+                                   .nbits     = static_cast<int>(nbits),
+                                   .keep      = m_search_keep,
+                                   .fill      = m_search_fill};
+        },
+        nbits, sink, queue);
+}
+
+template <typename Source>
+void FDMTCudaEngine::search_packed(const Source& chunk_at,
+                                   SizeType /*nbits*/,
+                                   detail::FDMTSearchSink& sink,
+                                   Stream queue) {
+    const auto stream = to_cuda(queue);
     if (m_search_u32) {
         execute_search_int_typed<uint32_t>(
-            full, thrust::raw_pointer_cast(m_integer32_ring.data()), sink,
+            chunk_at, thrust::raw_pointer_cast(m_integer32_ring.data()), sink,
             queue, stream);
     } else {
         execute_search_int_typed<uint64_t>(
-            full, thrust::raw_pointer_cast(m_integer_ring.data()), sink, queue,
-            stream);
+            chunk_at, thrust::raw_pointer_cast(m_integer_ring.data()), sink,
+            queue, stream);
     }
     m_device_work.mark(stream);
 }
 
-template <typename TInt>
-void FDMTCudaEngine::execute_search_int_typed(const FDMTInputPacked& full,
+template <typename TInt, typename Source>
+void FDMTCudaEngine::execute_search_int_typed(const Source& chunk_at,
                                               TInt* ring,
                                               detail::FDMTSearchSink& sink,
                                               Stream queue,
@@ -455,7 +571,7 @@ void FDMTCudaEngine::execute_search_int_typed(const FDMTInputPacked& full,
     const SizeType root = m_plan.get_niters();
     const auto tree     = static_cast<int64_t>(m_plan.get_tree_history_size());
     if (m_direct) {
-        execute_search_int_direct<TInt>(full, ring, sink, queue, stream);
+        execute_search_int_direct<TInt>(chunk_at, ring, sink, queue, stream);
         return;
     }
     for (SizeType t0 = 0; t0 < m_plan.get_nsamps(); t0 += m_chunk) {
@@ -472,7 +588,7 @@ void FDMTCudaEngine::execute_search_int_typed(const FDMTInputPacked& full,
         const auto level_ptr = [&](SizeType l) {
             return state + (l % 2) * m_nbeams * m_half_elems;
         };
-        initialise_device<FDMTInputPacked, TInt>(chunk_input(full, t0),
+        initialise_device<FDMTInputPacked, TInt>(chunk_at(t0, m_active, stream),
                                                  level_ptr(0), stream);
         for (SizeType l = 0; l <= root; ++l) {
             const auto& shape = m_plan.get_container().state_shape[l];
@@ -542,8 +658,8 @@ void FDMTCudaEngine::execute_search_int_typed(const FDMTInputPacked& full,
     }
 }
 
-template <typename TInt>
-void FDMTCudaEngine::execute_search_int_direct(const FDMTInputPacked& full,
+template <typename TInt, typename Source>
+void FDMTCudaEngine::execute_search_int_direct(const Source& chunk_at,
                                                TInt* ring,
                                                detail::FDMTSearchSink& sink,
                                                Stream queue,
@@ -642,8 +758,8 @@ void FDMTCudaEngine::execute_search_int_direct(const FDMTInputPacked& full,
             m_direct_win_out =
                 thrust::raw_pointer_cast(m_direct->win[1 - in].data());
         }
-        m_parity         = !m_parity;
-        const auto input = chunk_input(full, t0);
+        m_parity                    = !m_parity;
+        const FDMTInputPacked input = chunk_at(t0, m_active, stream);
         launch_direct_int<TInt>(input, level_ptr(levels), stream);
         advance_direct_window(input, stream);
         SizeType level = (m_skew_nbatches > 1 && m_top) ? m_top->level : levels;
