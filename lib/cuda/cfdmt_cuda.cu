@@ -340,6 +340,8 @@ public:
         gpu_utils::set_device(m_device_id);
         const auto planned = memory_usage();
         const auto before  = gpu_utils::device_memory_info();
+        gpu_utils::check_free_memory("CohFDMT (cuda)", planned.total(), before,
+                                     gpu_utils::kAdviceBlocks);
         try {
             m_deferred.materialize();
             m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
@@ -348,7 +350,8 @@ public:
         } catch (const std::exception& e) {
             // A failing fine FDMT contributes its cause, not its message.
             throw gpu_utils::allocation_failure("CohFDMT (cuda)",
-                                                planned.total(), before, e);
+                                                planned.total(), before, e,
+                                                gpu_utils::kAdviceBlocks);
         }
         const auto got = memory_usage();
         if (got.spectrum != planned.spectrum ||

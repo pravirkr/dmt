@@ -681,6 +681,8 @@ void FDMTBoxcarCudaEngine::allocate() {
     gpu_utils::set_device(m_device);
     const auto planned = memory_usage();
     const auto before  = gpu_utils::device_memory_info();
+    gpu_utils::check_free_memory("FDMTBoxcar (cuda)", planned.budgeted(),
+                                 before, gpu_utils::kAdviceBoxcar);
     try {
         // The transform first: its failure reports this engine's need.
         m_driver->allocate();
@@ -689,7 +691,8 @@ void FDMTBoxcarCudaEngine::allocate() {
         throw; // the transform's own plan check, not an allocation
     } catch (const std::exception& e) {
         throw gpu_utils::allocation_failure("FDMTBoxcar (cuda)",
-                                            planned.budgeted(), before, e);
+                                            planned.budgeted(), before, e,
+                                            gpu_utils::kAdviceBoxcar);
     }
     allocate_host();
     try {
@@ -701,7 +704,8 @@ void FDMTBoxcarCudaEngine::allocate() {
         }
     } catch (const std::bad_alloc& e) {
         throw gpu_utils::allocation_failure("FDMTBoxcar (cuda)",
-                                            planned.budgeted(), before, e);
+                                            planned.budgeted(), before, e,
+                                            gpu_utils::kAdviceBoxcar);
     }
     const auto got = memory_usage();
     if (got.total() != planned.total() || got.history != planned.history ||

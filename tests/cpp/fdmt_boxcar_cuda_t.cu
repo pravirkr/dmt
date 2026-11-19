@@ -1122,6 +1122,8 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
         if (e.usage.state + e.usage.history <= props.totalGlobalMem) {
             SKIP("device larger than the probe");
         }
+        // Checked against the free memory before anything is allocated
+        // (the check's own wording), with the budget advice.
         CHECK_THROWS_MATCHES(
             FDMTBoxcar(c.plan, c.config, true, gpu, beams,
                        algorithms::kFDMTAutoFuse, 0, SIZE_MAX / 2),
@@ -1129,7 +1131,43 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
             Catch::Matchers::MessageMatches(
                 Catch::Matchers::StartsWith(
                     "FDMTBoxcar (cuda): this configuration needs") &&
+                Catch::Matchers::ContainsSubstring(
+                    "is free on the device (nothing allocated)") &&
+                Catch::Matchers::ContainsSubstring("max_memory_bytes") &&
+                Catch::Matchers::ContainsSubstring(
+                    "estimate_minimum_memory()") &&
+                !Catch::Matchers::ContainsSubstring("nsamps") &&
                 !Catch::Matchers::ContainsSubstring("FDMT (cuda): this")));
+    }
+}
+
+TEST_CASE("The free-memory check fails early and only when over",
+          "[gpu][budget]") {
+    // Synthetic device figures: the check reads nothing itself.
+    constexpr SizeType kGiB = SizeType{1} << 30;
+    const gpu_utils::DeviceMemoryInfo dev{
+        .free = 3 * kGiB, .total = 8 * kGiB, .known = true};
+    CHECK_NOTHROW(gpu_utils::check_free_memory("X", 3 * kGiB, dev,
+                                               gpu_utils::kAdviceBudget));
+    CHECK_NOTHROW(
+        gpu_utils::check_free_memory("X", kGiB, dev, gpu_utils::kAdviceBudget));
+    // Unknown free memory: nothing to check against (the allocation
+    // reports a failure).
+    CHECK_NOTHROW(gpu_utils::check_free_memory("X", 100 * kGiB,
+                                               gpu_utils::DeviceMemoryInfo{},
+                                               gpu_utils::kAdviceBudget));
+    try {
+        gpu_utils::check_free_memory("FDMT (cuda)", (3 * kGiB) + 1, dev,
+                                     gpu_utils::kAdviceBudget);
+        FAIL("one byte over the free memory did not throw");
+    } catch (const gpu_utils::DeviceAllocationError& e) {
+        const std::string what = e.what();
+        CHECK(what.starts_with("FDMT (cuda): this configuration needs 3.00 "
+                               "GiB of device memory and only 3.00 GiB of "
+                               "8.00 GiB is free on the device (nothing "
+                               "allocated); "));
+        CHECK(what.ends_with(gpu_utils::kAdviceBudget));
+        CHECK(e.cause() == "3.00 GiB needed, 3.00 GiB free");
     }
 }
 
@@ -1138,14 +1176,16 @@ TEST_CASE("Device allocation errors nest by cause", "[gpu][budget]") {
         .free = SizeType{3} << 30, .total = SizeType{8} << 30, .known = true};
     const auto inner = gpu_utils::allocation_failure(
         "FDMT (cuda)", SizeType{5} << 30, before,
-        std::runtime_error("device allocation: out of memory"));
+        std::runtime_error("device allocation: out of memory"),
+        gpu_utils::kAdviceBudget);
     CHECK(inner.cause() == "device allocation: out of memory");
-    const auto outer = gpu_utils::allocation_failure(
-        "CohFDMT (cuda)", SizeType{6} << 30, before, inner);
+    const auto outer =
+        gpu_utils::allocation_failure("CohFDMT (cuda)", SizeType{6} << 30,
+                                      before, inner, gpu_utils::kAdviceBlocks);
     const std::string what = outer.what();
     CHECK(what.starts_with("CohFDMT (cuda): this configuration needs 6.00 "
                            "GiB of device memory and 3.00 GiB of 8.00 GiB "
-                           "was free"));
+                           "was free; use shorter blocks"));
     CHECK(what.ends_with(": device allocation: out of memory"));
     // One message, not the FDMT's nested inside.
     const std::string needs = "this configuration needs";

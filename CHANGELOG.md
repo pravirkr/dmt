@@ -124,6 +124,16 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **GPU engines check the device's free memory before allocating.** GPU
+  `FDMT`, `FDMTBoxcar`, `FDMTFFTBoxcar`, `FDMTFFT` and `CohFDMT` compare
+  the configuration they chose (from `max_memory_bytes` and the other
+  arguments only; free memory never changes the choice) with the device's
+  free memory at construction, and raise `std::bad_alloc` (Python
+  `MemoryError`) with what they need and what is free before allocating
+  anything. Estimates do not read free memory. The advice in these errors
+  now names `max_memory_bytes` for the engines that have one (`FDMT`,
+  `FDMTBoxcar`, `FDMTFFTBoxcar`; with `estimate_minimum_memory()` for
+  the boxcar searches) instead of shorter blocks.
 - **GPU `FDMTBoxcar` subband searches choose path and chunk by a simple
   rule** (`subband_depth > 0`, automatic chunk). They took the unskewed
   direct path whenever it fit at any chunk and halved the chunk until it

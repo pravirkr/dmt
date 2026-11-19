@@ -70,11 +70,14 @@ void FDMTCudaEngine::allocate() {
     gpu_utils::set_device(m_device_id);
     const auto planned = get_memory_usage();
     const auto before  = gpu_utils::device_memory_info();
+    gpu_utils::check_free_memory("FDMT (cuda)", planned.total(), before,
+                                 gpu_utils::kAdviceBudget);
     try {
         m_pending.materialize();
     } catch (const std::exception& e) {
         throw gpu_utils::allocation_failure("FDMT (cuda)", planned.total(),
-                                            before, e);
+                                            before, e,
+                                            gpu_utils::kAdviceBudget);
     }
     if (m_fused) {
         bind_fused_pointers();

@@ -222,9 +222,10 @@ struct DeviceMemoryInfo {
     bool known{false};
 };
 
-/// Free device memory now (read for messages only; no engine sizes itself
-/// from it). Engines read it before allocating, so a failure message
-/// reports what was free before their own partial allocations.
+/// Free device memory now (read only to fail early and for messages; no
+/// engine sizes itself from it). Engines read it before allocating
+/// (check_free_memory()), so a failure message reports what was free
+/// before their own partial allocations.
 [[nodiscard]] inline DeviceMemoryInfo device_memory_info() noexcept {
     DeviceMemoryInfo m;
     m.known = cudaMemGetInfo(&m.free, &m.total) == cudaSuccess;
@@ -244,27 +245,68 @@ struct DeviceMemoryInfo {
     return e.what();
 }
 
+/// What an engine's memory error tells the user to change: engines with a
+/// max_memory_bytes lower it (nsamps is not a memory knob for them); the
+/// others take shorter blocks.
+inline constexpr std::string_view kAdviceBudget =
+    "lower max_memory_bytes or use fewer beams (estimate_memory() gives what "
+    "a budget needs)";
+inline constexpr std::string_view kAdviceBoxcar =
+    "lower max_memory_bytes or use fewer beams (estimate_memory() gives what "
+    "a budget needs, FDMTBoxcar::estimate_minimum_memory() the smallest "
+    "budget)";
+inline constexpr std::string_view kAdviceBlocks =
+    "use shorter blocks (nsamps) or fewer beams (estimate_memory() gives the "
+    "requirement)";
+
+/// Construction's check of the chosen configuration against the device,
+/// before anything is allocated: throws a DeviceAllocationError
+/// (std::bad_alloc, Python MemoryError) when `needed` is over the free
+/// memory in `before` (device_memory_info()). The check never changes
+/// which configuration is chosen (max_memory_bytes alone does); the
+/// allocation itself can still fail (fragmentation, another process), and
+/// allocation_failure() then reports it.
+inline void check_free_memory(std::string_view what,
+                              std::size_t needed,
+                              const DeviceMemoryInfo& before,
+                              std::string_view advice) {
+    if (!before.known || needed <= before.free) {
+        return;
+    }
+    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+    auto cause = fmt::format("{:.2f} GiB needed, {:.2f} GiB free",
+                             static_cast<double>(needed) / kGiB,
+                             static_cast<double>(before.free) / kGiB);
+    throw DeviceAllocationError(
+        fmt::format("{}: this configuration needs {:.2f} GiB of device "
+                    "memory and only {:.2f} GiB of {:.2f} GiB is free on "
+                    "the device (nothing allocated); {}",
+                    what, static_cast<double>(needed) / kGiB,
+                    static_cast<double>(before.free) / kGiB,
+                    static_cast<double>(before.total) / kGiB, advice),
+        std::move(cause));
+}
+
 /// The error for an engine whose planned device buffers failed to
 /// allocate: what it needs and what the device had free before it
-/// allocated (`before`, from device_memory_info()).
+/// allocated (`before`, from device_memory_info()), and `advice`.
 [[nodiscard]] inline DeviceAllocationError
 allocation_failure(std::string_view what,
                    std::size_t needed,
                    const DeviceMemoryInfo& before,
-                   const std::exception& e) {
+                   const std::exception& e,
+                   std::string_view advice) {
     (void)cudaGetLastError(); // clear the failed allocation's error
     constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
     auto cause            = allocation_cause(e);
     auto message          = fmt::format(
-        "{}: this configuration needs {:.2f} GiB of device memory{}; use "
-        "shorter blocks (nsamps) or fewer beams (estimate_memory() gives the "
-        "requirement): {}",
+        "{}: this configuration needs {:.2f} GiB of device memory{}; {}: {}",
         what, static_cast<double>(needed) / kGiB,
         before.known ? fmt::format(" and {:.2f} GiB of {:.2f} GiB was free",
                                    static_cast<double>(before.free) / kGiB,
                                    static_cast<double>(before.total) / kGiB)
                      : std::string{},
-        cause);
+        advice, cause);
     return DeviceAllocationError(std::move(message), std::move(cause));
 }
 
