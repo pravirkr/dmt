@@ -518,7 +518,11 @@ when every tree value fits 32 bits) and its pending peaks. The FDMT takes
 the fastest path that fits in the rest:
 
 - **The tree path** when its streaming history fits: every preset except
-  `parkes_uwl`, which is unchanged.
+  `parkes_uwl`. Exception: on the CPU, packed input with blocks longer
+  than 2048 samples takes the skewed-window path first where it applies
+  (2.7-4x faster on 8-bit UWL subband searches, as fast or faster on small
+  plans; see
+  [memory budget](skewed_window_fdmt.md#memory-budget-and-chunk-length)).
 - **The skewed-window path** otherwise (a wide band at fine time
   resolution with a long DM sweep: 6656 channels at 64 µs to DM 2000 keeps
   10–14 GB of tree history). It keeps only the raw input of each channel's

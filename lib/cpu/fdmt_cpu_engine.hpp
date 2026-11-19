@@ -236,6 +236,18 @@ public:
     static std::vector<std::pair<SizeType, SizeType>>
     skew_candidates(SizeType ring_elem);
 
+    /**
+     * Shortest skewed chunk that packed (integer search) input takes before
+     * the tree path. 8-bit input, u32 state, 32768-sample blocks, EPYC 9334
+     * (2026-11-19, x real time, tree vs skewed): UWL subband plans with a
+     * 2.7-6.6 GiB tree 0.18-0.65 vs 0.73-1.73 (also depth 4: 0.12 vs 0.33);
+     * cryopaf and meerkat (1.4 and 2.0 GiB tree) skewed 4096 1.0-1.25x the
+     * tree, and skewed 2048 on 4096-sample blocks 0.95-1.35x. Float keeps
+     * the tree first (faster there on small plans). Chunks below 2048 were
+     * not timed against the tree, so they come after it.
+     */
+    static constexpr SizeType kSkewFirstMinChunk = 2048;
+
     FDMTCpuEngine(const FDMTCpuEngine&)            = delete;
     FDMTCpuEngine& operator=(const FDMTCpuEngine&) = delete;
     FDMTCpuEngine(FDMTCpuEngine&&)                 = delete;
@@ -603,11 +615,14 @@ private:
 
     /**
      * Tree path or skewed-window engine (fdmt_skew.hpp), under the memory
-     * budget: the tree path (fastest) when its history and state fit
+     * budget. Float input: the tree path when its history and state fit
      * max_memory_bytes, else the skewed engine at the fastest (chunk, leaf
-     * level) of skew_candidates() whose estimate fits (an explicit
-     * chunk_nsamps is kept, with the fastest leaf level that fits it).
-     * Sets m_chunk and m_skew_leaf. Throws when nothing fits.
+     * level) of skew_candidates() whose estimate fits. Packed input with an
+     * automatic chunk: the skewed chunks of at least kSkewFirstMinChunk,
+     * then the tree, then the shorter chunks. An explicit chunk_nsamps
+     * takes the tree when it fits, else the skewed engine at that chunk
+     * with the fastest leaf level that fits it. Sets m_chunk and
+     * m_skew_leaf. Throws when nothing fits.
      */
     bool choose_skew(const detail::FDMTEngineConfig& cfg);
 

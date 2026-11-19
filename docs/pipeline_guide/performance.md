@@ -243,7 +243,9 @@ not fit the memory budget (`max_memory_bytes`, 10 GiB by default;
 `FDMTBoxcar`, valid mode, `nbeams=1`, automatic fusion, any subband depth
 that leaves the fused levels below it, 8-bit through float32 input)
 automatically switches to the [skewed-window engine](skewed_window_fdmt.md).
-It replaces the tree history with per-channel raw input rings and compact
+An `FDMTBoxcar` on packed input takes it first even when the tree fits
+(blocks longer than 2048 samples): 2.7-4x faster on 8-bit UWL subband
+searches, as fast or faster on small plans. It replaces the tree history with per-channel raw input rings and compact
 per-row causal rings, evaluates level 4 from per-subband running-sum
 stripes, and fuses levels 4–8 inside each 256-channel group before merging
 the upper levels. It takes the longest chunk (4096 to 256) whose estimate

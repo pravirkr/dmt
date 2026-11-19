@@ -217,7 +217,11 @@ bool FDMTCpuEngine::choose_skew(const detail::FDMTEngineConfig& cfg) {
     const SizeType tree_bytes = (hist_floats * state_elem) +
                                 (2 * max_rows * m_chunk * state_elem) +
                                 plan_bytes;
-    if (allow_tree && tree_bytes <= cfg.max_memory_bytes) {
+    const bool tree_fits = allow_tree && tree_bytes <= cfg.max_memory_bytes;
+    // Packed input with an automatic chunk takes the long skewed chunks
+    // before the tree (see skew_candidates()); float takes the tree first.
+    const bool skew_first = m_search_nbits != 32 && cfg.chunk_nsamps == 0;
+    if (tree_fits && !skew_first) {
         return false;
     }
     const SizeType ring_elem = m_search_nbits == 32   ? sizeof(float)
@@ -256,6 +260,9 @@ bool FDMTCpuEngine::choose_skew(const detail::FDMTEngineConfig& cfg) {
     }
     SizeType smallest = allow_tree ? tree_bytes : SIZE_MAX;
     for (const auto& [c, leaf] : skew_candidates(ring_elem)) {
+        if (tree_fits && c < kSkewFirstMinChunk) {
+            return false; // the tree before the short skewed chunks
+        }
         if (c < nsamps && fits(c, leaf)) {
             m_chunk     = c;
             m_skew_leaf = leaf;
@@ -264,6 +271,9 @@ bool FDMTCpuEngine::choose_skew(const detail::FDMTEngineConfig& cfg) {
         if (c < nsamps) {
             smallest = std::min(smallest, need(c, leaf));
         }
+    }
+    if (tree_fits) {
+        return false;
     }
     throw detail::BudgetError(
         fmt::format(

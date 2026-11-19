@@ -99,8 +99,9 @@ struct FDMTEngineConfig {
     SizeType max_memory_bytes{algorithms::kFDMTDefaultMaxMemory};
     /// Private (CPU): kSkewHistoryAuto (default) takes the skewed-window
     /// engine (fdmt_skew.hpp) when the tree path does not fit
-    /// max_memory_bytes; any other value is a level-0 + tree history
-    /// threshold in bytes above which it is taken (tests: 0 forces it,
+    /// max_memory_bytes, or first for packed input (see
+    /// FDMTCpuEngine::choose_skew()); any other value is a level-0 + tree
+    /// history threshold in bytes above which it is taken (tests: 0 forces it,
     /// SIZE_MAX forbids it).
     static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
     /// As kSkewHistoryAuto but never the tree path: the fallback when the

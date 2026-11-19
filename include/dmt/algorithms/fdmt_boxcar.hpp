@@ -107,7 +107,8 @@ struct FDMTBoxcarMemoryEstimate {
  * host-memory input is allocated by the first host execute() and is not
  * part of that check (device input never needs it);
  * get_memory_usage().staging reports it once allocated. On the
- * skewed-window path (plans whose tree history exceeds the budget) the rows
+ * skewed-window path (plans whose tree history exceeds the budget; on the
+ * CPU also packed input with blocks over 2048 samples) the rows
  * of a subband search are searched with a fixed per-row latency of up to
  * the dispersion delay from the subband to the bottom of the band (that of
  * the full-band search, get_search_latency()); flush() adds no samples,

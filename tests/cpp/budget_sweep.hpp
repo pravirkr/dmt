@@ -31,10 +31,10 @@ inline void check_budget_sweep(const plans::FDMTPlan& plan,
     const auto min = FDMTBoxcar::estimate_minimum_memory(plan, cfg, true, exec);
     const auto top = FDMTBoxcar::estimate_memory(
         plan, cfg, true, exec, 1, algorithms::kFDMTAutoFuse, 0, SIZE_MAX / 2);
-    // The smallest budget that builds (CPU path choices keep headroom over
-    // the usage).
+    // From the smallest budget that builds to one the unlimited choice fits
+    // (CPU skewed choices keep a tenth of headroom over the usage).
     const auto lo = static_cast<double>(min.max_memory_bytes);
-    const auto hi = static_cast<double>(top.usage.budgeted()) * 1.05;
+    const auto hi = static_cast<double>(top.usage.budgeted()) * 1.15;
     REQUIRE(lo <= hi);
     std::optional<SizeType> prev;
     for (int i = 0; i <= steps; ++i) {

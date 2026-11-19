@@ -267,7 +267,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         channel row has ceil(samples * nbits / 8) bytes, LSB-first; 16-bit
         samples are little-endian. Root DM-time output is never materialized.
         execute() returns owned structured candidate arrays. Contiguous
-        peaks cross blocks; call flush() at end of stream. Sample indices
+        peaks cross blocks; call drain() at end of stream (flush() does not
+        search the samples a skewed-path subband row lags). Sample indices
         are absolute trailing-window endpoints, not filter centers.
         Host calls on GPU backends block and return candidates only.
 
@@ -283,7 +284,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         CPU, device memory on a GPU (host copies and result storage are
         reported in ``memory_usage.host``, not budgeted). Plans whose FDMT tree
         history does not fit (UWL-like bands at high time resolution) run the
-        skewed-window path; their subband rows are then searched with a fixed
+        skewed-window path, as does packed input on the CPU with blocks over
+        2048 samples (faster there); their subband rows are then searched with a fixed
         per-row latency of up to the dispersion delay to the bottom of the
         band, so the final such samples of a stream are searched only if it
         continues. Raises ``ValueError`` when nothing fits. On a GPU the

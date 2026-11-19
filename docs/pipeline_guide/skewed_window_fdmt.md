@@ -8,7 +8,8 @@ the `parkes_uwl` boxcar suite. Both `FDMT` and `FDMTBoxcar` automatically
 select this path on the CPU (and its device counterpart in
 `lib/dmt/fdmt_direct.hpp` / `lib/cuda/fdmt_direct.cuh` on CUDA) when the
 tree path does not fit the memory budget (`max_memory_bytes`, 10 GiB by
-default; `parkes_uwl`), and it supports the subband search
+default; `parkes_uwl`) and, on the CPU, first for packed `FDMTBoxcar`
+input (see below), and it supports the subband search
 (`subband_depth > 0`) as well as the full band.
 
 ## The problem
@@ -200,9 +201,17 @@ float and packed, CPU and GPU.
 
 - **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), with a
   tenth of headroom for the merge tables; the allocation is then checked.
-  It takes the first (chunk, leaf level) that fits from a list in measured
-  speed order (`FDMTCpuEngine::skew_candidates`; `parkes_uwl`, 8 threads,
-  s per 2.1 s block):
+  Float input takes the tree path when it fits. Packed input (an
+  `FDMTBoxcar` with input bits) and an automatic chunk takes the skewed
+  chunks 4096 and 2048 first, then the tree, then the shorter chunks: on
+  8-bit input the tree path is 2.7-4x slower on the UWL subband plans and
+  ties or is up to 1.35x slower on small ones (EPYC 9334, x real time,
+  tree vs skewed: UWL, tree 2.7-6.6 GiB, 0.18-0.65 vs 0.73-1.73; cryopaf
+  and meerkat 24-47 vs 32-55, skewed 2048 on 4096-sample blocks included).
+  Shorter skewed chunks were not timed against the tree, so blocks of 2048
+  samples or fewer keep the tree. The skewed path takes the first (chunk, leaf level) that fits from
+  a list in measured speed order (`FDMTCpuEngine::skew_candidates`;
+  `parkes_uwl`, 8 threads, s per 2.1 s block):
 
   | ring | chunk 4096 | chunk 2048 |
   | :--- | :--- | :--- |

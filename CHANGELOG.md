@@ -147,6 +147,21 @@ All notable changes to `dmt` are listed here. The format follows
   at a 9 GiB budget moves from skewed chunk 1024 to direct chunk 256 (about
   2x faster, `search_latency` 0). Full-band searches, plain
   `FDMT` and an explicit `chunk_nsamps` are unchanged.
+- **CPU `FDMTBoxcar` on packed input takes the skewed-window path first**
+  (automatic chunk, where the skewed path applies). It took the tree path
+  whenever it fit, which on 8-bit input is 2.7-4x slower on the UWL subband
+  plans (EPYC 9334, x real time, tree vs skewed: 0.18-0.65 vs 0.73-1.73
+  with a 2.7-6.6 GiB tree) and ties or is up to 1.35x slower on small
+  plans (cryopaf, meerkat).
+  Now: skewed chunks 4096 and 2048, then the tree, then shorter skewed
+  chunks; blocks of 2048 samples or fewer keep the tree. Float input
+  (tree first) and an explicit `chunk_nsamps` are unchanged. Visible:
+  `cryopaf_lband`, `cryopaf_low` and `meerkat_lband` packed searches move
+  to the skewed path at chunk 4096 with 34-76% less memory; a packed
+  subband search now has `search_latency` > 0 (`cryopaf_lband`: 5861
+  samples), so a stream must end with `drain()`, not `flush()`, to search
+  its last samples; candidates are the tree path's, bit for bit. Only
+  8-bit input was timed (16-bit follows the same rule).
 - **`FDMTBoxcar` per-call kill masks work with any block length** (they
   needed blocks of at least the largest row support plus `max_boxcar - 1`
   samples, and on a GPU a search latency of at most one block). Windows

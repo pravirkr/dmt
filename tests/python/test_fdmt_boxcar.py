@@ -384,7 +384,9 @@ def test_drain_searches_the_skewed_tail() -> None:
                 search.execute(blocks[0])
             search.reset_history()
             assert search.searched_nsamps == 0
-    tree = FDMTBoxcar(plan, cfg, nthreads=4)
+    # An explicit chunk keeps the tree path when it fits (packed input
+    # otherwise takes the skewed path first).
+    tree = FDMTBoxcar(plan, cfg, nthreads=4, chunk_nsamps=nsamps)
     assert tree.search_latency == 0
     expected = run(tree, blocks)
     assert_same(found["drain"], expected)
@@ -420,7 +422,9 @@ def test_drain_contract_on_the_gpu(gpu_backend: str) -> None:
         gpu.execute(blocks[0])
     gpu.reset_history()
     assert gpu.searched_nsamps == 0
-    expected = run(FDMTBoxcar(plan, cfg, nthreads=4), blocks)
+    tree = FDMTBoxcar(plan, cfg, nthreads=4, chunk_nsamps=nsamps)
+    assert tree.search_latency == 0
+    expected = run(tree, blocks)
     assert len(expected) > 0
     assert_same(sorted_candidates(parts), expected)
 

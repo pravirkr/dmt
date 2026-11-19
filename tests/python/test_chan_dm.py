@@ -584,12 +584,14 @@ def test_boxcar_packed_matches_float(subband_depth: int, backend: str) -> None:
     cfg.input_nbits = 32
     cfg.input_mean = 0.0
     floating = FDMTBoxcar(plan, cfg, backend=backend)
+    # drain(): the packed CPU search takes the skewed path, whose subband
+    # rows lag (search_latency); the float one the tree path.
     a = sorted_candidates(
-        [packed.execute(c).candidates for c in codes] + [packed.flush().candidates]
+        [packed.execute(c).candidates for c in codes] + [packed.drain().candidates]
     )
     b = sorted_candidates(
         [floating.execute(c.astype(np.float32) - 127.5).candidates for c in codes]
-        + [floating.flush().candidates]
+        + [floating.drain().candidates]
     )
     assert len(a) > 0
     for name in a.dtype.names:
