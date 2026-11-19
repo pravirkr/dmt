@@ -1378,7 +1378,6 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (cpu)",
                            algorithms::kFDMTAutoFuse, c.chunk, c.budget,
                            c.kill);
         check_estimate(e, f);
-        CHECK(e.host_staging == 0);
         CHECK(e.usage.budgeted() <= c.budget);
         if (c.chunk != 0) {
             CHECK(e.chunk_nsamps == c.chunk);

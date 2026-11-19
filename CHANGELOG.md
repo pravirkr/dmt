@@ -84,8 +84,7 @@ All notable changes to `dmt` are listed here. The format follows
   `memory_usage`) reports what an instance holds now.
 - **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
   `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
-  `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the
-  first host-memory call on a GPU), computed without allocating.
+  `usage` and `chunk_nsamps`, computed without allocating.
 - **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
   dedispersed channels: level-0 boxes cover the residual intra-channel sweep
   at the trial DM, centred on each channel's arrival, in `FDMT`,
@@ -124,14 +123,17 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
-- **GPU `FDMTBoxcar` stages host-memory input inside `max_memory_bytes`.**
-  A host (NumPy) block was copied whole to the device on the first host
-  `execute()`, outside the budget (UWL 6656 channels: +0.44 GiB per
-  65536-sample 8-bit block, +1.7 GiB float). Now each chunk is copied into
-  a `beams x nchans x chunk` buffer reserved at construction and counted
-  in the budget (UWL 8-bit at chunk 4096: 27 MiB; float 109 MiB), so host
-  calls allocate nothing and `estimate_memory().host_staging` is 0 for
-  `FDMTBoxcar`. Device-input callers hold that buffer too. Every GPU
+- **GPU `FDMTBoxcar` and `FDMTFFTBoxcar` stage host-memory input inside
+  `max_memory_bytes`.** A host (NumPy) block was copied whole to the
+  device on the first host `execute()`, outside the budget (UWL 6656
+  channels: +0.44 GiB per 65536-sample 8-bit block, +1.7 GiB float).
+  `FDMTBoxcar` now copies each chunk into a `beams x nchans x chunk`
+  buffer reserved at construction and counted in the budget (UWL 8-bit at
+  chunk 4096: 27 MiB; float 109 MiB); `FDMTFFTBoxcar` reserves the whole
+  float block at construction (its overlap-save segment usually spans the
+  block). Host calls allocate nothing, and
+  `FDMTBoxcarMemoryEstimate.host_staging` is gone (it was new in this
+  release). Device-input callers hold the buffer too. Every GPU
   estimate grows by it, so a configuration exactly at a budget
   breakpoint may take the next shorter chunk. Candidates are unchanged
   (bitwise, host vs device input, on every path). Host-input speed on an

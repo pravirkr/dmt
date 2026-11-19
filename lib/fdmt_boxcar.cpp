@@ -248,7 +248,6 @@ public:
     [[nodiscard]] FDMTBoxcarMemoryEstimate estimate() const {
         return {.usage            = usage(),
                 .chunk_nsamps     = engine->chunk_nsamps(),
-                .host_staging     = engine->host_staging_bytes(),
                 .search_path      = engine->search_path(),
                 .search_latency   = engine->search_latency(),
                 .max_memory_bytes = max_memory};

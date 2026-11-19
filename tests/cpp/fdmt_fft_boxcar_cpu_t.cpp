@@ -465,7 +465,6 @@ void check_fft_boxcar_estimates(const Exec& exec) {
         const FDMTFFTBoxcar f(plan, c.config, true, exec, c.beams, true,
                               c.kill);
         check(e, f);
-        CHECK((e.host_staging == 0) == (exec.backend == Backend::kCPU));
     }
     // A budget the full segment does not fit: shorter segments (a long
     // block, so the transform dominates the boxcar buffers).

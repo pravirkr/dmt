@@ -551,11 +551,6 @@ public:
     virtual CandidateResultView execute_zero() {
         throw std::logic_error("FDMTBoxcar: no zero-block execute here");
     }
-    /// Device bytes the first host-memory execute() adds (the staging block
-    /// of the input); 0 on the CPU.
-    [[nodiscard]] virtual SizeType host_staging_bytes() const noexcept {
-        return 0;
-    }
     virtual SizeType chunk_nsamps() const noexcept = 0;
     virtual SizeType fuse_levels() const noexcept  = 0;
     virtual std::string search_path() const        = 0;

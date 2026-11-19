@@ -148,8 +148,11 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     cfg.max_cands_per_dm = 0;
     const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
     FDMTFFTBoxcar open(plan, cfg, true, exec);
-    const SizeType full   = open.get_memory_usage().budgeted();
-    const SizeType budget = full / 2;
+    // Half of what the segments take: the input block reserved for host
+    // calls (staging) does not shrink with them.
+    const auto open_usage = open.get_memory_usage();
+    const SizeType budget =
+        open_usage.staging + ((open_usage.budgeted() - open_usage.staging) / 2);
     FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, {}, budget);
     INFO(open.summary() << capped.summary());
     // On a GPU the budget bounds device memory; host storage is reported.
@@ -230,7 +233,6 @@ void check_fft_boxcar_estimates(const Exec& exec) {
         const FDMTFFTBoxcar f(plan, c.config, true, exec, c.beams, true,
                               c.kill);
         check(e, f);
-        CHECK((e.host_staging == 0) == (exec.backend == Backend::kCPU));
     }
     // A budget the full segment does not fit: shorter segments (a long
     // block, so the transform dominates the boxcar buffers).

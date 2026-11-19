@@ -1001,9 +1001,10 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
 TEST_CASE("GPU host-memory calls stage inside the budget",
           "[gpu][boxcar][budget]") {
     // FDMTBoxcar copies a host block chunk by chunk into a buffer reserved
-    // at construction (part of the budgeted usage): host calls allocate
-    // nothing. FDMTFFTBoxcar and FDMT still copy the whole block on the
-    // first host call, outside the budget.
+    // at construction, FDMTFFTBoxcar the whole block (both part of the
+    // budgeted usage): host calls allocate nothing. Plain FDMT still copies
+    // the block and output plane on the first host call, outside its
+    // budget.
     const plans::FDMTPlan plan(1200.0F, 1500.0F, 64, 2048, 0.000256F, 200);
     const SizeType beams = 2;
     const SizeType block =
@@ -1017,7 +1018,6 @@ TEST_CASE("GPU host-memory calls stage inside the budget",
         FDMTBoxcar search(plan, cfg, true, exec, beams);
         const auto e =
             FDMTBoxcar::estimate_memory(plan, cfg, true, exec, beams);
-        CHECK(e.host_staging == 0);
         const auto before = search.get_memory_usage();
         CHECK(before.total() == e.usage.total());
         CHECK(before.staging == 0);
@@ -1038,12 +1038,14 @@ TEST_CASE("GPU host-memory calls stage inside the budget",
     }
     SECTION("FDMTFFTBoxcar") {
         algorithms::FDMTFFTBoxcar search(plan, cfg, true, exec, beams);
+        const auto e = algorithms::FDMTFFTBoxcar::estimate_memory(
+            plan, cfg, true, exec, beams);
         const auto before = search.get_memory_usage();
-        CHECK(before.staging == 0);
+        CHECK(before.total() == e.usage.total());
+        CHECK(before.staging == block);
         (void)search.execute(std::span<const float>(input[0]));
-        const auto after = search.get_memory_usage();
-        CHECK(after.staging == block);
-        CHECK(after.budgeted() == before.budgeted() + block);
+        (void)search.execute(std::span<const float>(input[1]));
+        CHECK(search.get_memory_usage().total() == before.total());
     }
     SECTION("FDMT") {
         FDMT fdmt(plan, true, exec, beams);
@@ -1142,7 +1144,6 @@ TEST_CASE("FDMTBoxcar GPU host input staged per chunk equals device input",
             const auto est =
                 FDMTBoxcar::estimate_memory(plan, cfg, true, exec, c.beams,
                                             c.fuse, c.chunk, budget, ctor_mask);
-            CHECK(est.host_staging == 0);
             FDMTBoxcar host(plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
                             budget, ctor_mask);
             FDMTBoxcar device(plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
@@ -1248,7 +1249,6 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
             std::vector<uint8_t> in(rows * c.plan.get_nsamps(), 127);
             (void)f.execute(std::span<const uint8_t>(in));
         }
-        CHECK(e.host_staging == 0);
         CHECK(f.get_memory_usage().total() == total);
     }
     SECTION("nothing is allocated") {

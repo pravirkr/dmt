@@ -478,8 +478,9 @@ exact size.
 
 - `FDMT`, `FDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`: the constructor's
   arguments; everything is allocated at construction. On a GPU,
-  `host_staging` is what the first host-memory call adds (0 for
-  `FDMTBoxcar`, which stages host input inside its budget).
+  `FDMT.estimate_memory(...).host_staging` and `FDMTFFT`'s are what the
+  first host-memory call adds; `FDMTBoxcar` and `FDMTFFTBoxcar` stage host
+  input inside their budget (`usage`), so host calls add nothing.
 - `CohFDMT`: the configuration and backend.
 - `DDMTFFT`, `DDMT`, `SDMT`: the plan plus the call length `nsamps` (and
   `gulp_size` for DDMT and SDMT), because some buffers are made by the

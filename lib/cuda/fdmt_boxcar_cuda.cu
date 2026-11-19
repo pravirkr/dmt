@@ -538,8 +538,10 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
         // by the first call that needs them.
         m_keep_d.resize(m_beams * plan.get_nchans());
     }
-    if (!m_kill_runs.empty() && !m_keep_in_transform) {
-        // The staging block the killed rows are zeroed in.
+    if (!m_keep_in_transform &&
+        (config.input_nbits == 32 || !m_kill_runs.empty())) {
+        // The block the driver reads (FDMT-FFT segments): host input is
+        // copied here and killed rows are zeroed here, inside the budget.
         if (config.input_nbits == 32) {
             m_input_d.resize(m_beams * plan.get_nchans() * plan.get_nsamps());
         } else {
@@ -717,25 +719,6 @@ void FDMTBoxcarCudaEngine::allocate() {
     }
     gpu_utils::check_last_gpu_error("FDMTBoxcar (cuda): allocation failed");
     m_allocated = true;
-}
-
-SizeType FDMTBoxcarCudaEngine::host_staging_bytes() const noexcept {
-    // FDMT drivers stage host input inside their budgeted memory; otherwise
-    // execute(host span) sizes m_input_d (float) or m_packed_input (packed)
-    // to the block.
-    if (m_driver->stages_host_input()) {
-        return 0;
-    }
-    const SizeType rows = m_beams * m_plan.get_nchans();
-    if (m_config.input_nbits == 32) {
-        const SizeType need = rows * m_plan.get_nsamps();
-        return need > m_input_d.size()
-                   ? (need - m_input_d.size()) * sizeof(float)
-                   : 0;
-    }
-    const SizeType need = rows * bit_pack_utils::packed_row_bytes(
-                                     m_plan.get_nsamps(), m_config.input_nbits);
-    return need > m_packed_input.size() ? need - m_packed_input.size() : 0;
 }
 
 FDMTBoxcarCudaEngine::~FDMTBoxcarCudaEngine() {

@@ -42,11 +42,6 @@ struct FDMTBoxcarMemoryEstimate {
     FDMTBoxcarMemoryUsage usage{};
     /// Its get_chunk_nsamps().
     SizeType chunk_nsamps{0};
-    /// FDMTFFTBoxcar on a GPU: device bytes the first host-memory execute()
-    /// adds (the staging block of the input), outside the budget;
-    /// device-memory calls never allocate it. 0 for FDMTBoxcar (host input
-    /// is staged inside usage) and on the CPU.
-    SizeType host_staging{0};
     /// The transform's path, as summary() shows it ("Transform: ..."; empty
     /// for the tree path of FDMTBoxcar).
     std::string search_path;

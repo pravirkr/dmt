@@ -1130,8 +1130,6 @@ def _check_boxcar_estimate(backend: str) -> None:
         search = FDMTBoxcar(plan, config(), backend=backend, **kwargs)
         assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
         assert est.chunk_nsamps == search.chunk_nsamps
-        # GPU host (NumPy) input is staged inside the usage.
-        assert est.host_staging == 0
         assert "FDMTBoxcarMemoryEstimate(" in repr(est)
 
     big = FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
@@ -1176,10 +1174,10 @@ def _check_declared_masks(backend: str) -> None:
     assert_same(
         masked_stream(search, blocks, masks), masked_stream(lazy, blocks, masks)
     )
-    # Masks add nothing; host (NumPy) input on a GPU adds its staging block.
+    # Masks and host (NumPy) input add nothing.
     after = search.memory_usage
-    assert after.total == est.usage.total + est.host_staging
-    assert after.staging == est.usage.staging + est.host_staging
+    assert after.total == est.usage.total
+    assert after.staging == est.usage.staging
     # Packed input: an integer input_mean (killed channels read that code).
     packed = BoxcarConfig(17, input_nbits=8, input_mean=127.5, per_call_masks=True)
     with pytest.raises(ValueError, match="input_mean"):
@@ -1198,7 +1196,7 @@ def _check_declared_masks(backend: str) -> None:
         masked_stream(FDMTBoxcar(plan, lazy_pk, backend=backend), codes, masks),
     )
     after = search.memory_usage
-    assert after.total == est.usage.total + est.host_staging
+    assert after.total == est.usage.total
 
 
 def test_declared_per_call_masks_cpu() -> None:

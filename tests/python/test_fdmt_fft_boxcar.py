@@ -208,7 +208,10 @@ def test_memory_budget_shortens_segments(backend: str) -> None:
     config = BoxcarConfig(16, wtsp=1.5, detect_thresh=3.5, max_cands_per_dm=0)
     config.max_candidates = 20000
     unbounded = FDMTFFTBoxcar(plan, config, backend=backend)
-    budget = unbounded.memory_usage.budgeted * 6 // 10
+    # 60% of what the segments take (the GPU's reserved host-input block,
+    # in staging, does not shrink with them).
+    used = unbounded.memory_usage
+    budget = used.staging + (used.budgeted - used.staging) * 6 // 10
     capped = FDMTFFTBoxcar(plan, config, backend=backend, max_memory_bytes=budget)
     # The budget bounds device memory on a GPU (host storage is reported).
     assert capped.memory_usage.budgeted <= budget
@@ -415,6 +418,9 @@ def test_estimate_memory_matches_instance(backend: str) -> None:
     search = FDMTFFTBoxcar(plan, cfg, nbeams=2, backend=backend)
     assert _usage(est.usage) == _usage(search.memory_usage)
     assert est.chunk_nsamps == search.chunk_nsamps
-    assert (est.host_staging == 0) == (backend == "cpu")
+    assert not hasattr(est, "host_staging")
+    # Host (NumPy) input adds nothing on any backend.
+    search.execute(np.zeros((2, plan.nchans, plan.nsamps), dtype=np.float32))
+    assert _usage(search.memory_usage) == _usage(est.usage)
     with pytest.raises(ValueError, match="max_memory_bytes"):
         FDMTFFTBoxcar.estimate_memory(plan, cfg, backend=backend, max_memory_bytes=1024)

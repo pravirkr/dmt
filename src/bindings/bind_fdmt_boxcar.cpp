@@ -224,8 +224,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         :meth:`FDMTBoxcar.estimate_memory` (computed without allocating it).
 
         ``usage`` equals that instance's ``memory_usage``; ``chunk_nsamps``
-        its ``chunk_nsamps``; ``host_staging`` 0 (host (NumPy) input is
-        staged chunk by chunk inside ``usage`` on a GPU);
+        its ``chunk_nsamps`` (on a GPU the staging of host (NumPy) input is
+        part of ``usage``);
         ``search_path`` the transform's path (the ``Transform:`` line of
         ``summary()``; empty for the tree path) and ``search_latency`` its
         ``search_latency``; ``max_memory_bytes`` the budget it was made with
@@ -234,7 +234,6 @@ void bind_fdmt_boxcar(py::module_& mod) {
         )doc")
         .def_readonly("usage", &FDMTBoxcarMemoryEstimate::usage)
         .def_readonly("chunk_nsamps", &FDMTBoxcarMemoryEstimate::chunk_nsamps)
-        .def_readonly("host_staging", &FDMTBoxcarMemoryEstimate::host_staging)
         .def_readonly("search_path", &FDMTBoxcarMemoryEstimate::search_path)
         .def_readonly("search_latency",
                       &FDMTBoxcarMemoryEstimate::search_latency)
@@ -243,10 +242,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def("__repr__", [](const FDMTBoxcarMemoryEstimate& e) {
             return fmt::format(
                 "FDMTBoxcarMemoryEstimate(total={}, chunk_nsamps={}, "
-                "host_staging={}, search_latency={}, search_path='{}', "
-                "max_memory_bytes={})",
-                e.usage.total(), e.chunk_nsamps, e.host_staging,
-                e.search_latency, e.search_path, e.max_memory_bytes);
+                "search_latency={}, search_path='{}', max_memory_bytes={})",
+                e.usage.total(), e.chunk_nsamps, e.search_latency,
+                e.search_path, e.max_memory_bytes);
         });
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
             "max_width"_a, "wtsp"_a = 2.0F, R"doc(
@@ -287,10 +285,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
         2048 samples (faster there); their subband rows are then searched with a fixed
         per-row latency of up to the dispersion delay to the bottom of the
         band, so the final such samples of a stream are searched only if it
-        continues. Raises ``ValueError`` when nothing fits. On a GPU the
-        staging block for host (NumPy) input is allocated by the first such
-        :meth:`execute`, outside that check; ``memory_usage.staging`` shows
-        it once allocated.
+        continues. Raises ``ValueError`` when nothing fits. On a GPU host
+        (NumPy) input is copied one chunk at a time into a buffer reserved
+        inside that budget, so :meth:`execute` allocates nothing.
 
         ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
@@ -546,8 +543,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         GPU):
         over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
         until it fits. Raises ``ValueError`` when even the shortest segment
-        does not fit. GPU host-input staging is allocated lazily, outside
-        that check, as on FDMTBoxcar. ``config.screen_mode``
+        does not fit. On a GPU the device copy of a host (NumPy) block is
+        reserved inside that budget at construction. ``config.screen_mode``
         (:class:`BoxcarScreenMode`) applies to every segment's DM-row search
         as on :class:`FDMTBoxcar`.
         )doc")
