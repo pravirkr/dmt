@@ -177,6 +177,11 @@ cmake --build --preset release
 ctest --preset release
 ```
 
+Every test runs on one thread; ctest runs them in parallel. The `ci`, `asan`
+and `coverage` test presets run the CPU tests at small sizes and skip the
+full-size versions of the expensive ones (label `slow`), which a plain
+`ctest` or `ctest --preset release` also runs.
+
 (find-package)=
 ### Using `find_package(dmt)`
 

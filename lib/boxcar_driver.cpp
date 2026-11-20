@@ -34,8 +34,17 @@ public:
     }
     void reset(Stream stream) override { m_fdmt->reset_search_history(stream); }
     void allocate() override { m_fdmt->allocate(); }
-    bool set_search_keep(const uint8_t* keep) override {
-        return m_fdmt->set_search_keep(keep);
+    [[nodiscard]] bool stages_host_input() const noexcept override {
+        return true;
+    }
+    bool set_search_keep(const uint8_t* keep, float fill) override {
+        return m_fdmt->set_search_keep(keep, fill);
+    }
+    [[nodiscard]] bool search_zero_supported() const noexcept override {
+        return m_fdmt->search_zero_supported();
+    }
+    void search_zero(FDMTSearchSink& sink) override {
+        m_fdmt->execute_search_zero(sink);
     }
     [[nodiscard]] FDMTMemoryUsage memory() const noexcept override {
         return m_fdmt->get_memory_usage();

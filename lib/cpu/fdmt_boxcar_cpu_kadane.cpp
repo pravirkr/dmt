@@ -328,7 +328,7 @@ void FDMTBoxcarCpuEngine::save_row_carry(SizeType row_idx,
     }
 }
 
-template <typename T, typename C>
+template <typename T, typename C, bool kNoise>
 void FDMTBoxcarCpuEngine::lazy_score_tile(
     SizeType row_idx,
     SizeType beam,
@@ -415,11 +415,15 @@ void FDMTBoxcarCpuEngine::lazy_score_tile(
     }
 
     TileTables local_tables{
-        .thr = plane.raw_thresh_lut.data() + (dm * m_filters),
-        .inv = plane.inv_sigma_lut.data() + (dm * m_filters),
+        .thr  = plane.raw_thresh_lut.data() + (dm * m_filters),
+        .inv  = plane.inv_sigma_lut.data() + (dm * m_filters),
+        .ithr = std::is_integral_v<T>
+                    ? plane.integer_thresh_lut.data() + (dm * m_filters)
+                    : nullptr,
     };
+    local_tables.screen_ithr     = local_tables.ithr;
     const TileTables* tables_ptr = &local_tables;
-    if constexpr (!std::is_integral_v<T>) {
+    if constexpr (!std::is_integral_v<T> || kNoise) {
         if (precomputed_tables != nullptr) {
             tables_ptr = precomputed_tables;
         } else if (m_noise_on) {
@@ -428,8 +432,8 @@ void FDMTBoxcarCpuEngine::lazy_score_tile(
     }
 
     auto* peaks = m_peaks.data() + (index * m_peak_count);
-    score_tile<T>(plane, dm, row, beam, tile_prefix, lookback, start, n, peaks,
-                  row_idx, *tables_ptr);
+    score_tile<T, Prefix, kNoise>(plane, dm, row, beam, tile_prefix, lookback,
+                                  start, n, peaks, row_idx, *tables_ptr);
     bool any_open = false;
     if (m_config.peak_mode != PeakFindingMode::kAllAboveThreshold) {
         any_open = std::any_of(peaks, peaks + m_peak_count,
@@ -538,13 +542,58 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                         }
                     }
 
+                    // Per-call masks: the tile's integer cutoffs give the
+                    // lanes' cuts at the plan's fixed biases.
+                    std::array<TileTables, kBatch> lane_tables{};
+                    const int32_t* icut_ptr = m_kadane_plan.icut.data() + r_off;
+                    SizeType icut_stride    = rs;
+                    if (m_noise_on) {
+                        int32_t* thr_icuts = m_thread_icuts.data() +
+                                             (tid * kadane::kMaxGateBuckets *
+                                              kadane::kMaxBatchRows);
+                        bool any_custom    = false;
+                        std::array<int32_t, kadane::kMaxGateBuckets> r_cuts{};
+                        for (SizeType l = 0; l < sub_n; ++l) {
+                            const SizeType r  = r_off + l;
+                            const SizeType p  = m_row_plane[r];
+                            const SizeType dm = r - m_offsets[p];
+                            const uint64_t s0 =
+                                lane_in[q0 + l].sample_begin + t0;
+                            (void)tile_tables(m_planes[p], dm, r, s0, n, tid,
+                                              lane_tables[l]);
+                            const uint64_t* ctor_ithr =
+                                m_planes[p].integer_thresh_lut.data() +
+                                (dm * m_filters);
+                            if (lane_tables[l].screen_ithr != ctor_ithr) {
+                                any_custom = true;
+                                m_kadane_plan.recompute_row_icuts(
+                                    r, {lane_tables[l].screen_ithr, m_filters},
+                                    r_cuts);
+                                for (SizeType k = 0; k < nb; ++k) {
+                                    thr_icuts[(k * kBatch) + l] = r_cuts[k];
+                                }
+                            } else {
+                                for (SizeType k = 0; k < nb; ++k) {
+                                    thr_icuts[(k * kBatch) + l] =
+                                        m_kadane_plan.row_icut(k, r);
+                                }
+                            }
+                        }
+                        if (any_custom) {
+                            icut_ptr    = thr_icuts;
+                            icut_stride = kBatch;
+                        }
+                    }
+
                     int32_t* state_base =
                         m_kadane_ic.data() + (beam * nb * rs) + r_off;
                     const uint32_t hit_mask = kadane::scan_gate_tile_i32(
-                        m_kadane_plan, r_off, sub_n, n, ptrs.data(), state_base,
-                        rs, fv_ptr, m_any_edge_lag ? lag_in.data() : nullptr,
-                        kBatch, m_any_edge_lag ? max_out.data() : nullptr,
-                        kBatch);
+                        nb, std::min(sub_n, m_kadane_plan.n_rows - r_off), n,
+                        ptrs.data(), m_kadane_plan.int_shift,
+                        m_kadane_plan.ibias.data() + r_off, rs, icut_ptr,
+                        icut_stride, state_base, rs, fv_ptr,
+                        m_any_edge_lag ? lag_in.data() : nullptr, kBatch,
+                        m_any_edge_lag ? max_out.data() : nullptr, kBatch);
 
                     if (m_any_edge_lag) {
                         for (SizeType k = 0; k < nb; ++k) {
@@ -567,8 +616,14 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                         const bool hit =
                             ((hit_mask >> static_cast<uint32_t>(l)) & 1U) != 0U;
                         if (hit || m_open[idx] != 0U) {
-                            lazy_score_tile<uint64_t, uint32_t>(
-                                r, beam, lane_in[q0 + l], t0, n, nullptr);
+                            if (m_noise_on) {
+                                lazy_score_tile<uint64_t, uint32_t, true>(
+                                    r, beam, lane_in[q0 + l], t0, n,
+                                    &lane_tables[l]);
+                            } else {
+                                lazy_score_tile<uint64_t, uint32_t>(
+                                    r, beam, lane_in[q0 + l], t0, n, nullptr);
+                            }
                         }
                     }
                 } else {
@@ -609,6 +664,31 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                                 (dm * m_filters);
                             if (screen_thr != ctor_thr) {
                                 any_custom = true;
+                                if (m_config.input_nbits != 32) {
+                                    // Packed rows staged centred: the float
+                                    // cut is at most the centred integer
+                                    // one (as init_kadane()).
+                                    float* eff =
+                                        m_screen_eff.data() + (tid * m_filters);
+                                    const uint64_t* ithr =
+                                        lane_tables[l].screen_ithr;
+                                    for (SizeType f = 0; f < m_filters; ++f) {
+                                        eff[f] = screen_thr[f];
+                                        if (ithr[f] != UINT64_MAX) {
+                                            const double centred =
+                                                (static_cast<double>(ithr[f]) -
+                                                 m_integer_means
+                                                     [(r * m_filters) + f]) *
+                                                m_integer_unit;
+                                            if (centred > 0.0) {
+                                                eff[f] = std::min(
+                                                    eff[f], static_cast<float>(
+                                                                centred));
+                                            }
+                                        }
+                                    }
+                                    screen_thr = eff;
+                                }
                                 m_kadane_plan.recompute_row_cuts(
                                     r, {screen_thr, m_filters}, r_cuts);
                                 for (SizeType k = 0; k < nb; ++k) {
@@ -685,6 +765,16 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                                 lazy_score_tile<float, float>(
                                     r, beam, lane_in[q0 + l], t0, n,
                                     m_noise_on ? &lane_tables[l] : nullptr);
+                            } else if (m_noise_on) {
+                                if (m_carry32) {
+                                    lazy_score_tile<uint64_t, uint32_t, true>(
+                                        r, beam, lane_in[q0 + l], t0, n,
+                                        &lane_tables[l]);
+                                } else {
+                                    lazy_score_tile<uint64_t, uint64_t, true>(
+                                        r, beam, lane_in[q0 + l], t0, n,
+                                        &lane_tables[l]);
+                                }
                             } else if (m_carry32) {
                                 lazy_score_tile<uint64_t, uint32_t>(
                                     r, beam, lane_in[q0 + l], t0, n, nullptr);

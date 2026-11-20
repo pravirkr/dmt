@@ -293,10 +293,11 @@ void bind_fdmt(py::module_& mod) {
             rounded up to a multiple of 64. The stepper needs ``chunk_nsamps >= nsamps``.
         max_memory_bytes : int, optional
             Keyword-only. Budget for everything the instance allocates
-            (:attr:`memory_usage`; default 10 GiB). The fastest streaming
-            path that fits is taken; a valid-mode plan whose tree history
-            does not fit (e.g. 6656 channels at 64 us to DM 2000) runs the
-            skewed-window path with the longest automatic chunk that fits.
+            (:attr:`memory_usage`; default 10 GiB). A fast streaming path
+            that fits is taken (close to the fastest); a valid-mode plan
+            whose tree history does not fit (e.g. 6656 channels at 64 us to
+            DM 2000) runs the skewed-window path with the longest automatic
+            chunk that fits.
             Raises ``ValueError`` when nothing fits.
         backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``). See

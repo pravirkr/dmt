@@ -13,6 +13,8 @@
 
 #include <fmt/format.h>
 
+#include "dmt/kadane_monoid.hpp"
+
 namespace dmt::kadane {
 
 namespace {
@@ -636,6 +638,24 @@ void KadaneGatePlan::recompute_row_cuts(SizeType row,
     for (SizeType k = 0; k < num_buckets; ++k) {
         out_cuts[k] = compute_bucket_cut_f32(buckets[k], widths, use_trapezoid,
                                              row_bias(k, row), min_thr);
+    }
+}
+
+void KadaneGatePlan::recompute_row_icuts(SizeType row,
+                                         std::span<const uint64_t> int_thr,
+                                         std::span<int32_t> out_cuts) const {
+    if (!has_int32 || row >= n_rows || int_thr.size() != widths.size() ||
+        out_cuts.size() < num_buckets) {
+        throw std::invalid_argument(
+            "KadaneGatePlan::recompute_row_icuts: invalid row or span sizes");
+    }
+    for (SizeType k = 0; k < num_buckets; ++k) {
+        out_cuts[k] = disabled_row[row] != 0U
+                          ? std::numeric_limits<int32_t>::max()
+                          : compute_bucket_icut_hd(
+                                buckets[k], widths.data(), use_trapezoid,
+                                int_shift, row_ibias(k, row),
+                                [&](SizeType f) { return int_thr[f]; });
     }
 }
 

@@ -60,7 +60,7 @@ TEST_CASE("DDMTFFT GPU matches CPU", "[ddmt_fft_gpu][gpu][parity]") {
         std::vector<uint8_t> mask(nchans, 1);
         mask[5] = 0;
         DDMTFFT cpu(1100.0F, 1500.0F, nchans, 1e-3F, 40.0F, 0.4F, 0.0F,
-                    Exec::cpu(4), 32, mask, 2, opts);
+                    Exec::cpu(), 32, mask, 2, opts);
         DDMTFFT gpu(1100.0F, 1500.0F, nchans, 1e-3F, 40.0F, 0.4F, 0.0F,
                     test::gpu_exec(), 32, mask, 2, opts);
         CHECK(gpu.get_max_delay() == cpu.get_max_delay());
@@ -94,8 +94,8 @@ TEST_CASE("DDMTFFT GPU device memory and packed input",
     for (auto& v : packed) {
         v = static_cast<uint8_t>(byte(rng));
     }
-    DDMTFFT cpu(1100.0F, 1500.0F, nchans, 1e-3F, 20.0F, 0.5F, 0.0F,
-                Exec::cpu(2), 8);
+    DDMTFFT cpu(1100.0F, 1500.0F, nchans, 1e-3F, 20.0F, 0.5F, 0.0F, Exec::cpu(),
+                8);
     DDMTFFT gpu(1100.0F, 1500.0F, nchans, 1e-3F, 20.0F, 0.5F, 0.0F,
                 test::gpu_exec(), 8);
     const auto n =
@@ -131,7 +131,7 @@ TEST_CASE("DDMTFFT GPU piecewise-uniform grid matches CPU",
     }
     const SizeType nchans = 48;
     const SizeType nsamps = 2500;
-    DDMTFFT cpu(1100.0F, 1500.0F, nchans, 1e-3F, dms, Exec::cpu(4));
+    DDMTFFT cpu(1100.0F, 1500.0F, nchans, 1e-3F, dms, Exec::cpu());
     DDMTFFT gpu(1100.0F, 1500.0F, nchans, 1e-3F, dms, test::gpu_exec());
     CHECK(cpu.method_used() == "piecewise_nufft");
     CHECK(gpu.method_used() == cpu.method_used());
@@ -172,7 +172,7 @@ TEST_CASE("DDMTFFT GPU host packed, time-major and history reset",
             }
         }
         DDMTFFT cpu(1100.0F, 1500.0F, nchans, 1e-3F, 20.0F, 0.5F, 0.0F,
-                    Exec::cpu(2), nbits);
+                    Exec::cpu(), nbits);
         DDMTFFT gpu(1100.0F, 1500.0F, nchans, 1e-3F, 20.0F, 0.5F, 0.0F,
                     test::gpu_exec(), nbits);
         const auto n =

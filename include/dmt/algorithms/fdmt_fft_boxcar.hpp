@@ -42,8 +42,9 @@ namespace dmt::algorithms {
  * (each try halves the transform length; get_chunk_nsamps() reports the
  * segment) until the instance fits. Construction throws std::invalid_argument,
  * naming the budget and the memory at the shortest segment, when nothing fits.
- * GPU host-input staging is allocated by the first host execute(), outside that
- * check, as on FDMTBoxcar. Shorter
+ * On a GPU the device copy of a host-memory block is reserved at
+ * construction inside that budget (held whether or not host input is used),
+ * so host calls allocate nothing. Shorter
  * segments change the rows as the block size does: by float rounding with
  * integer delays; with fractional delays every segment still keeps the
  * support behind and the 64-sample guard ahead of each output, and only the

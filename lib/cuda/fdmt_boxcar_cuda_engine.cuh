@@ -85,6 +85,25 @@ keep_surrogate_width(const BoxcarKeepEntry& e) noexcept {
     return e.filter >> 16U;
 }
 
+/// Where a row's candidates go (kDropNew): the call's slots, or with
+/// BoxcarConfig::max_candidates_per_plane its plane's counter and share of
+/// a staging buffer (compacted after the call).
+struct PlaneShare {
+    uint64_t* slots;
+    SizeType capacity;
+    SizeType base;
+};
+DMT_HD inline PlaneShare plane_share(uint64_t* slots,
+                                     SizeType capacity,
+                                     uint64_t* plane_slots,
+                                     SizeType plane_cap,
+                                     uint32_t plane) {
+    if (plane_cap == 0) {
+        return {slots, capacity, 0};
+    }
+    return {plane_slots + plane, plane_cap, plane * plane_cap};
+}
+
 struct CandidateWriter {
     RawCandidate* candidates;
     CandidateCounts* counts;
@@ -94,6 +113,7 @@ struct CandidateWriter {
     RawCandidate prototype;
     SizeType capacity;
     SizeType dm_cap;
+    SizeType base       = 0; ///< first slot (a plane's share), else 0
     const double* means = nullptr;
     const float* scales = nullptr;
     double unit         = 1;
@@ -101,7 +121,9 @@ struct CandidateWriter {
 
     DMT_D void operator()(const BoxcarPeak& peak) const {
         increment(&counts->total_detected);
-        if (dm_cap != 0 && increment(per_dm) >= dm_cap) {
+        // Every detection counts in its row (per-plane counts); dm_cap is
+        // SIZE_MAX when max_cands_per_dm is 0.
+        if (increment(per_dm) >= dm_cap) {
             increment(&counts->dropped_per_dm);
             return;
         }
@@ -119,9 +141,9 @@ struct CandidateWriter {
                                           means[peak.filter]) *
                                          (scales[peak.filter] * unit))
                     : peak.snr;
-        candidate.filter_idx = peak.filter;
-        candidate.width      = widths[peak.filter];
-        candidates[slot]     = candidate;
+        candidate.filter_idx    = peak.filter;
+        candidate.width         = widths[peak.filter];
+        candidates[base + slot] = candidate;
         increment(&counts->emitted_count);
     }
 };
@@ -213,6 +235,7 @@ struct KeepWriter {
     CandidateCounts* counts;
     BoxcarKeepEntry* store; // this row's q entries
     uint64_t* count;        // entries in the store
+    uint64_t* detected;     // the row's detections (per-plane counts)
     SizeType q;
     KeepPending* pending;
     const double* means = nullptr;
@@ -222,6 +245,7 @@ struct KeepWriter {
 
     DMT_D void operator()(const BoxcarPeak& peak) const {
         increment(&counts->total_detected);
+        increment(detected);
         const float snr =
             integer ? static_cast<float>((static_cast<double>(peak.raw_sum) -
                                           means[peak.filter]) *
@@ -339,7 +363,7 @@ DMT_D inline void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
                               BoxcarPeak* persistent,
                               const Writer& writer,
                               const uint64_t (&raw_sum)[kItems],
-                              bool integer) {
+                              int integer) {
     const int tid   = static_cast<int>(threadIdx.x);
     const int first = tid * kItems;
     BoxcarRunSummary summary;
@@ -349,7 +373,11 @@ DMT_D inline void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
             summary.trailing.open = false;
         } else {
             const auto ignore = [] DMT_D(const BoxcarPeak&) {};
-            if (integer) {
+            if (integer == 2) {
+                boxcar_integer_snr_peak_step(summary.trailing, true, snr[j],
+                                             raw_sum[j], start + first + j,
+                                             filters[j], ignore);
+            } else if (integer == 1) {
                 boxcar_integer_peak_step(summary.trailing, true, raw_sum[j],
                                          start + first + j, filters[j], ignore);
             } else {
@@ -375,7 +403,10 @@ DMT_D inline void reduce_runs(BoxcarShared<T, kBlockThreads>& shared,
         tid == 0 ? carried.trailing
                  : boxcar_join(carried, shared.runs[tid - 1], integer).trailing;
     for (int j = 0; j < kItems && first + j < n; ++j) {
-        if (integer) {
+        if (integer == 2) {
+            boxcar_integer_snr_peak_step(incoming, above[j], snr[j], raw_sum[j],
+                                         start + first + j, filters[j], writer);
+        } else if (integer == 1) {
             boxcar_integer_peak_step(incoming, above[j], raw_sum[j],
                                      start + first + j, filters[j], writer);
         } else {
@@ -402,6 +433,8 @@ struct BlockTables {
     uint64_t first[2]{0, 0};
     const float* thr[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
     const float* inv[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
+    /// Packed rows: the integer cutoffs (null: the constructor's).
+    const uint64_t* ithr[2][2]{{nullptr, nullptr}, {nullptr, nullptr}};
     bool transition[2]{false, false};
     int count               = 0;
     const uint64_t* support = nullptr;
@@ -462,6 +495,8 @@ public:
     CandidateDeviceResultView execute(DeviceSpan<const uint8_t> waterfall,
                                       Stream queue) override;
     CandidateResultView flush() override;
+    [[nodiscard]] bool zero_blocks() const noexcept override;
+    CandidateResultView execute_zero() override;
     CandidateDeviceResultView flush_device(Stream queue) override;
     CandidateResultView copy_result(Stream queue) override;
 
@@ -474,11 +509,11 @@ public:
         std::shared_ptr<const std::vector<uint64_t>> support) override;
     void push_block_noise(BlockNoise entry) override;
     void drop_block_noise() noexcept override;
+    [[nodiscard]] uint64_t noise_catch_all_begin() const noexcept override;
     void reset_history(Stream queue) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
     void allocate() override;
     void allocate_host();
-    [[nodiscard]] SizeType host_staging_bytes() const noexcept override;
     [[nodiscard]] FDMTBoxcarMemoryUsage memory_usage() const noexcept override;
     [[nodiscard]] SizeType chunk_nsamps() const noexcept override;
     [[nodiscard]] std::string search_path() const override;
@@ -501,12 +536,10 @@ private:
         bool release_pending = false;
     };
 
-    template <typename Kernel> void configure_kernel(Kernel kernel) const {
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(m_smem)),
-            "FDMTBoxcar: shared-memory opt-in");
+    template <typename Kernel>
+    void configure_kernel(Kernel kernel, SizeType smem = 0) const {
+        gpu_utils::raise_dynamic_smem(kernel, smem != 0 ? smem : m_smem,
+                                      "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
         // Several resident rows per SM need the shared-memory carveout.
         gpu_utils::check_gpu_call(
@@ -614,18 +647,48 @@ private:
     void launch_open_begin_surrogate(cudaStream_t stream);
 
     // Common helpers (fdmt_boxcar_cuda.cu).
+    /// One block's search (`search()` runs the driver) between the block
+    /// noise commit and the result bookkeeping, on `queue`.
+    template <typename Search>
+    CandidateDeviceResultView run_search(Stream queue, const Search& search);
+    /// Killed rows read as zero by the transform itself (FDMT drivers, or
+    /// a zero block): flags set for this block, true. False: the driver
+    /// reads a staging copy with the rows zeroed (masked()).
+    bool keep_rows(Stream queue);
     template <typename T>
     DeviceSpan<const T> masked(DeviceSpan<const T> block,
                                thrust::device_vector<T>& buffer,
                                Stream queue);
+    /// `call_fill`: packed input under per-call masks; rows the runs kill
+    /// but the constructor keeps read input_mean (flag 2).
     void set_keep(const std::vector<std::pair<SizeType, SizeType>>& runs,
-                  Stream queue);
+                  Stream queue,
+                  bool call_fill = false);
     void finish_keep(cudaStream_t stream);
     void shift_candidate_times(cudaStream_t stream);
     void update_open_begin(cudaStream_t stream);
     [[nodiscard]] SizeType ring_size() const noexcept;
+    /// Entries the search latency needs: 1 + ceil(latency / nsamps); over
+    /// ring_size() (2) the oldest kept entry takes the catch-all.
+    [[nodiscard]] SizeType ring_needed() const noexcept;
+    /// max_cands_per_dm for the writers: SIZE_MAX when 0 (no cap).
+    [[nodiscard]] SizeType dm_cap() const noexcept {
+        return m_config.max_cands_per_dm == 0 ? SIZE_MAX
+                                              : m_config.max_cands_per_dm;
+    }
+    /// The call's counters per plane, from the rows' counters and the
+    /// emitted candidates (after the call's candidates are final).
+    void plane_counts(cudaStream_t stream);
+    /// A table slot's device and pinned buffers and events.
+    void allocate_slot(TableSlot& slot);
     [[nodiscard]] SizeType slot_count() const noexcept;
     [[nodiscard]] SizeType table_floats() const noexcept;
+    /// Floats of one table set on the device: thresholds and inverse
+    /// sigmas, plus the integer cutoffs (as pairs of floats) when packed.
+    [[nodiscard]] SizeType slot_floats() const noexcept;
+    /// Open packed per-width peaks take their S/N (the first per-call mask).
+    void sync_peak_snr();
+    void sync_surrogate_snr();
     void reset_block_noise();
     const float* slot_of(const NoiseTables* tables, cudaStream_t stream);
     void commit_block_noise(cudaStream_t stream);
@@ -663,6 +726,9 @@ private:
     gpu_utils::PlannedVector<uint8_t> m_keep_d;
     std::vector<uint8_t> m_keep_h;
     std::vector<std::pair<SizeType, SizeType>> m_keep_runs;
+    bool m_keep_fill = false; ///< m_keep_d holds flag 2 (call_fill)
+    /// execute_zero(): the block's input reads as zero (every row killed).
+    bool m_zero_block = false;
     std::vector<LevelGroup> m_level_groups;
     gpu_utils::PlannedVector<BoxcarRow> m_rows_d;
     gpu_utils::PlannedVector<uint32_t> m_widths_d;
@@ -692,6 +758,9 @@ private:
     uint32_t m_mask          = 0;
     bool m_shared_tables     = false;
     SizeType m_smem          = 0;
+    /// Shared bytes of the prefix kernel's per-call mask instances: m_smem
+    /// plus the group bounds (float rows include them in m_smem as well).
+    SizeType m_smem_noise = 0;
     gpu_utils::PlannedVector<BoxcarPeak> m_peaks_d;
     gpu_utils::PlannedVector<uint8_t> m_open_d; ///< any peak open, per task
     gpu_utils::PlannedVector<uint64_t> m_per_dm_d, m_slots_d;
@@ -699,6 +768,24 @@ private:
     gpu_utils::PlannedVector<RawCandidate> m_candidates_d;
     planned::PlannedHostVector<RawCandidate> m_candidates_h;
     CandidateCounts m_counts_h{};
+    /// Per-plane counts: kKeepBrightest's detections per (beam, row), the
+    /// first plane of each subband level (boxcar_level_offsets), and the
+    /// call's counters per plane (device; host after copy_result()).
+    gpu_utils::PlannedVector<uint64_t> m_row_detected_d;
+    gpu_utils::PlannedVector<uint32_t> m_level_offset_d;
+    gpu_utils::PlannedVector<CandidateCounts> m_plane_counts_d;
+    std::vector<CandidateCounts> m_plane_counts_h;
+    /// BoxcarConfig::max_candidates_per_plane (0: off): each plane's
+    /// counter and, under kDropNew, the staging buffer of the shares.
+    SizeType m_plane_cap = 0;
+    gpu_utils::PlannedVector<uint64_t> m_plane_slots_d;
+    gpu_utils::PlannedVector<RawCandidate> m_plane_scratch_d;
+    /// Where the writers put candidates: the staging buffer of the planes'
+    /// shares, or the call's candidates.
+    [[nodiscard]] RawCandidate* candidate_out() {
+        return m_plane_scratch_d.size() > 0 ? raw(m_plane_scratch_d)
+                                            : raw(m_candidates_d);
+    }
     gpu_utils::DeviceWorkFence m_work;
     uint64_t m_position       = 0;
     uint64_t m_search_stop    = UINT64_MAX; // drain(): end of stream
@@ -719,6 +806,17 @@ private:
     gpu_utils::PlannedVector<uint64_t> m_support_d;
     BlockTables m_block_tables{};
     BlockTables m_prev_block_tables{};
+    bool m_has_catch_all = false; ///< m_catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> m_catch_all;
+    /// What the open commit replaced (restored by undo_commit()).
+    struct CatchUndo {
+        bool has_catch_all = false;
+        std::shared_ptr<const NoiseTables> catch_all;
+        bool front_set = false;
+        std::shared_ptr<const NoiseTables> steady, transition_tables;
+        bool transition = false;
+    };
+    CatchUndo m_catch_undo;
 
     // --- Kadane gate (`kKadane`) plan & device state ---
     kadane::KadaneGatePlan m_kadane_plan;

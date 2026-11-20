@@ -121,7 +121,7 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest keeps the brightest of each call",
                                 OverflowPolicy::kKeepBrightest;
                             keep.max_cands_per_dm = 3;
                             keep.max_candidates   = 150;
-                            FDMTBoxcar cpu(plan, keep, true, Exec::cpu(3), 2);
+                            FDMTBoxcar cpu(plan, keep, true, Exec::cpu(), 2);
                             const auto expected = run_calls(cpu, codes);
                             const auto actual   = run(keep, nullptr);
                             for (SizeType i = 0; i < actual.size(); ++i) {
@@ -215,7 +215,7 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest: screen, masks, wide and 16-bit "
         auto open             = cfg;
         open.max_candidates   = SizeType{1} << 20;
         open.max_cands_per_dm = 0;
-        FDMTBoxcar cpu(plan, open, true, Exec::cpu(3), 2);
+        FDMTBoxcar cpu(plan, open, true, Exec::cpu(), 2);
         const auto expected = run_calls(cpu, input);
         const auto actual   = run(open, nullptr);
         REQUIRE(actual.size() == expected.size());
@@ -251,7 +251,7 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest: screen, masks, wide and 16-bit "
         auto open             = cfg;
         open.max_candidates   = SizeType{1} << 20;
         open.max_cands_per_dm = 0;
-        FDMTBoxcar cpu(plan, open, true, Exec::cpu(3));
+        FDMTBoxcar cpu(plan, open, true, Exec::cpu());
         const auto expected = run_calls_masked(cpu, input, masks);
         const auto actual   = run(open, nullptr);
         REQUIRE(actual.size() == expected.size());
@@ -333,7 +333,7 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest cuts ties across beams and rows "
         keep.overflow_policy  = OverflowPolicy::kKeepBrightest;
         keep.max_cands_per_dm = q;
         keep.max_candidates   = k;
-        FDMTBoxcar cpu(plan, keep, true, Exec::cpu(3), 2);
+        FDMTBoxcar cpu(plan, keep, true, Exec::cpu(), 2);
         const auto expected = run_calls(cpu, blocks);
         const auto actual   = run(keep, nullptr);
         for (SizeType i = 0; i < actual.size(); ++i) {
@@ -417,7 +417,7 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest supports kKadane and kNone",
                         require_same(actual[i], expected_gpu[i]);
                     }
                     if (packed) {
-                        FDMTBoxcar cpu(plan, keep, true, Exec::cpu(2), 2);
+                        FDMTBoxcar cpu(plan, keep, true, Exec::cpu(), 2);
                         const auto expected_cpu = run_calls(cpu, codes);
                         for (SizeType i = 0; i < actual.size(); ++i) {
                             require_same(actual[i], expected_cpu[i]);

@@ -265,7 +265,7 @@ TEST_CASE("FDMT direct low levels stream exactly like the tree",
                                 1, true, "valid", exec, nbeams, fuse,
                                 kFloatTree, c);
                 };
-                FDMT cpu     = make(Exec::cpu(2), kUnfused, 0);
+                FDMT cpu     = make(Exec::cpu(), kUnfused, 0);
                 FDMT direct  = make(test::gpu_exec(), kFDMTAutoFuse, chunk);
                 FDMT tree    = make(test::gpu_exec(), kUnfused, chunk);
                 FDMT stepper = make(test::gpu_exec(), kFDMTAutoFuse, block);
@@ -448,6 +448,23 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
         CHECK(e.usage.history + e.usage.state >
               beams * plan.get_nchans() * sizeof(float));
         CHECK(e.usage.total() > (SizeType{100} << 30));
+    }
+    SECTION("a configuration the device cannot hold fails before allocating") {
+        // The same hundreds of GB under a budget that admits them: the
+        // free-memory check throws (std::bad_alloc, Python MemoryError)
+        // with the budget advice, before any buffer is allocated.
+        const plans::FDMTPlan plan(1000.0F, 1500.0F, 256, 2048, 0.001F, 400);
+        CHECK_THROWS_MATCHES(
+            FDMT(plan, true, gpu, SizeType{1} << 16, kFDMTAutoFuse, true, 0,
+                 SIZE_MAX / 2),
+            std::bad_alloc,
+            Catch::Matchers::MessageMatches(
+                Catch::Matchers::StartsWith(
+                    "FDMT (cuda): this configuration needs") &&
+                Catch::Matchers::ContainsSubstring(
+                    "is free on the device (nothing allocated)") &&
+                Catch::Matchers::ContainsSubstring("max_memory_bytes") &&
+                !Catch::Matchers::ContainsSubstring("nsamps")));
     }
 }
 

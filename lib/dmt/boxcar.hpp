@@ -111,8 +111,44 @@ struct BoxcarRow {
     SizeType hist       = 0;
     uint64_t warmup     = 0;
     bool unmaterialized = false;
+    uint32_t plane      = 0; ///< index of the row's search plane
     RawCandidate candidate{};
 };
+
+/// BoxcarConfig::max_candidates_per_plane: the planes' shares must fit
+/// max_candidates.
+inline void check_plane_share(const BoxcarConfig& config, SizeType nplanes) {
+    const SizeType cap = config.max_candidates_per_plane;
+    if (cap != 0 && (nplanes > config.max_candidates / cap)) {
+        throw std::invalid_argument(
+            "FDMTBoxcar: max_candidates_per_plane times the number of "
+            "searched planes (" +
+            std::to_string(nplanes) + ") must not exceed max_candidates");
+    }
+}
+
+/// Per-plane counts: the first plane of each subband_level, so that a
+/// candidate's plane is offsets[subband_level] + subband_idx. Planes come
+/// grouped by subband_level with subband_idx 0, 1, ... (make_boxcar_plans);
+/// anything else is a logic error.
+[[nodiscard]] inline std::vector<uint32_t>
+boxcar_level_offsets(std::span<const plans::BoxcarPlanePlan> planes) {
+    std::vector<uint32_t> offsets;
+    for (SizeType i = 0; i < planes.size(); ++i) {
+        const auto& p = planes[i];
+        if (p.subband_level >= offsets.size()) {
+            offsets.resize(p.subband_level + 1, UINT32_MAX);
+        }
+        if (offsets[p.subband_level] == UINT32_MAX) {
+            offsets[p.subband_level] = static_cast<uint32_t>(i);
+        }
+        if (offsets[p.subband_level] + p.subband_idx != i) {
+            throw std::logic_error(
+                "FDMTBoxcar: search planes out of (level, subband) order");
+        }
+    }
+    return offsets;
+}
 
 [[nodiscard]] std::vector<BoxcarRow>
 make_boxcar_rows(const plans::FDMTPlan& plan,
@@ -308,6 +344,52 @@ DMT_HD void boxcar_integer_peak_step(BoxcarPeak& peak,
     peak.open = true;
 }
 
+/// Packed input under per-call masks: S/N first (its sum's own table), then
+/// today's raw-sum order. Within one table the S/N is monotone in the sum,
+/// so the order equals boxcar_integer_better()'s.
+DMT_HD inline bool boxcar_integer_snr_better(float snr,
+                                             uint64_t sum,
+                                             uint64_t sample,
+                                             uint32_t filter,
+                                             const BoxcarPeak& peak) noexcept {
+    return !peak.open || snr > peak.snr ||
+           (snr == peak.snr &&
+            (sum > peak.raw_sum ||
+             (sum == peak.raw_sum &&
+              (sample < peak.peak ||
+               (sample == peak.peak && filter < peak.filter)))));
+}
+
+template <typename Emit>
+DMT_HD void boxcar_integer_snr_peak_step(BoxcarPeak& peak,
+                                         bool above,
+                                         float snr,
+                                         uint64_t sum,
+                                         uint64_t sample,
+                                         uint32_t filter,
+                                         Emit emit) {
+    if (!above) {
+        if (peak.open) {
+            emit(peak);
+            peak.open = false;
+        }
+        return;
+    }
+    const bool better =
+        boxcar_integer_snr_better(snr, sum, sample, filter, peak);
+    if (!peak.open) {
+        peak.begin = sample;
+    }
+    peak.end = sample;
+    if (better) {
+        peak.snr     = snr;
+        peak.raw_sum = sum;
+        peak.peak    = sample;
+        peak.filter  = filter;
+    }
+    peak.open = true;
+}
+
 /// One kept candidate of a row's kKeepBrightest store on a GPU (the row
 /// supplies the rest of its RawCandidate).
 struct BoxcarKeepEntry {
@@ -382,9 +464,24 @@ public:
     virtual void reset(Stream) = 0;
     /// FDMTEngine::allocate(): the transform's deferred buffers.
     virtual void allocate() = 0;
+    /// GPU: the host-memory search() overloads stage the input inside the
+    /// transform's own (budgeted) memory, chunk by chunk. Otherwise the
+    /// boxcar engine copies the block to the device first.
+    [[nodiscard]] virtual bool stages_host_input() const noexcept {
+        return false;
+    }
     /// FDMTEngine::set_search_keep(): kill-mask rows read as zero by the
     /// transform itself, without a staging copy. False where unsupported.
-    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
+    virtual bool set_search_keep(const uint8_t* /*keep*/, float /*fill*/ = 0) {
+        return false;
+    }
+    /// FDMTEngine::execute_search_zero(): host search of one all-zero block.
+    [[nodiscard]] virtual bool search_zero_supported() const noexcept {
+        return false;
+    }
+    virtual void search_zero(FDMTSearchSink& /*unused*/) {
+        throw std::logic_error("boxcar search: no zero-block search here");
+    }
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
@@ -404,10 +501,20 @@ make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
  * Endpoints of the block (stream samples from first_sample to the next
  * block's) use the `steady` tables, except, when `transition` is set, the
  * first S_r + W - 1 of each row r and width W (S_r: the row's support with
- * every channel active), whose input windows also reach the previous block:
- * they use `transition_tables`, the variance of the OR of both blocks'
- * masks. A null table pointer means the constructor tables (the search
- * planes). The block's input rows of the `kill_runs` channels are zeroed.
+ * every channel active), whose input windows also reach earlier blocks:
+ * they use `transition_tables`, the variance of the history mask (the
+ * block's channels and every channel live within the largest reach before
+ * it; for blocks at least that long, the OR of this and the previous
+ * block's masks). A null table pointer means the constructor tables (the
+ * search planes). The block's input rows of the `kill_runs` channels are
+ * zeroed.
+ *
+ * `catch_all`: set when blocks are shorter than the engine's ring needs
+ * (FDMTBoxcarEngine::noise_catch_all_begin()). The engine keeps the latest
+ * one and gives it, as steady and transition tables, to the oldest entry
+ * of a full ring, which then also stands for the evicted blocks still
+ * searched. It covers every channel live from that oldest endpoint's reach
+ * up to this block's end, so it stays valid for drain() padding.
  */
 struct BlockNoise {
     uint64_t first_sample = 0;
@@ -415,6 +522,8 @@ struct BlockNoise {
     bool transition = false;
     std::shared_ptr<const NoiseTables> transition_tables;
     std::vector<std::pair<SizeType, SizeType>> kill_runs;
+    bool has_catch_all = false; ///< catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> catch_all;
 };
 
 class FDMTBoxcarEngine : public FDMTSearchSink {
@@ -434,10 +543,13 @@ public:
     /// FDMTEngineConfig::defer_allocation planned (the transform's too);
     /// memory_usage() is unchanged. A no-op once allocated.
     virtual void allocate() = 0;
-    /// Device bytes the first host-memory execute() adds (the staging block
-    /// of the input); 0 on the CPU.
-    [[nodiscard]] virtual SizeType host_staging_bytes() const noexcept {
-        return 0;
+    /// drain() padding: one block of zero input, searched without reading,
+    /// staging or allocating an input block (a host call; candidates as
+    /// execute() on zeros), where zero_blocks(). Otherwise drain() pushes a
+    /// zero block through the host execute().
+    [[nodiscard]] virtual bool zero_blocks() const noexcept { return false; }
+    virtual CandidateResultView execute_zero() {
+        throw std::logic_error("FDMTBoxcar: no zero-block execute here");
     }
     virtual SizeType chunk_nsamps() const noexcept = 0;
     virtual SizeType fuse_levels() const noexcept  = 0;
@@ -454,7 +566,8 @@ public:
     /// completed.
     [[nodiscard]] virtual uint64_t open_begin_min() const noexcept = 0;
 
-    // Per-call kill masks (FDMTBoxcar, float input). Until enabled, every
+    // Per-call kill masks (FDMTBoxcar, float or packed input). Until
+    // enabled, every
     // block uses the constructor tables and kill runs.
     /// Bytes that enable_block_noise() would add to memory_usage().
     [[nodiscard]] virtual SizeType block_noise_bytes() const noexcept {
@@ -477,6 +590,13 @@ public:
     }
     /// Drops an entry pushed for an execute() that threw.
     virtual void drop_block_noise() noexcept {}
+    /// With blocks too short for the engine's ring: the first stream sample
+    /// the catch-all of the next block must cover (the oldest endpoint
+    /// still searched once that block is in); UINT64_MAX when the ring
+    /// holds every block it needs.
+    [[nodiscard]] virtual uint64_t noise_catch_all_begin() const noexcept {
+        return UINT64_MAX;
+    }
 };
 
 /// BoxcarScreenMode::kAuto resolved for a backend: kKadane on the CPU (its

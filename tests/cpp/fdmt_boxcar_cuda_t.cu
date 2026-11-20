@@ -14,6 +14,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <thrust/device_vector.h>
 
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
@@ -314,7 +315,7 @@ TEST_CASE("Packed FDMTBoxcar GPU searches boxes far wider than 4096",
         append(out, search.flush());
         return out;
     };
-    const auto expected = run(Exec::cpu(2));
+    const auto expected = run(Exec::cpu());
     REQUIRE(expected.size() > 100);
     compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
 }
@@ -352,7 +353,7 @@ TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",
         append(out, search.flush());
         return out;
     };
-    const auto expected = run(Exec::cpu(2));
+    const auto expected = run(Exec::cpu());
     REQUIRE(expected.size() > 100);
     compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
 
@@ -372,7 +373,7 @@ TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",
         append(out, search.flush());
         return out;
     };
-    const auto expected_f = run_float(Exec::cpu(2));
+    const auto expected_f = run_float(Exec::cpu());
     REQUIRE(expected_f.size() > 100);
     compare(run_float({algorithms::detail::kGPUBackend, 1, 0}), expected_f);
 }
@@ -411,8 +412,7 @@ TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",
                     cfg.peak_mode      = mode;
                     cfg.max_candidates = 500000;
                     cfg.max_cands_per_dm = 0;
-                    FDMTBoxcar cpu(plan, cfg, smear, Exec::cpu(2), beams, 0,
-                                   64);
+                    FDMTBoxcar cpu(plan, cfg, smear, Exec::cpu(), beams, 0, 64);
                     std::vector<RawCandidate> expected;
                     for (const auto& block : input) {
                         append(expected, cpu.execute(block));
@@ -513,7 +513,7 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                 cfg.noise_sigma = std::sqrt(static_cast<float>(maximum) *
                                             (maximum + 2.0F) / 12.0F);
             }
-            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(4), kBeams,
+            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(), kBeams,
                              algorithms::kFDMTAutoFuse, 64,
                              algorithms::kFDMTDefaultMaxMemory, kill);
             const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
@@ -551,12 +551,11 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                 }
             };
             check(g);
-            // Host input staging plus the transform's keep bytes (one per
-            // beam and channel); the mask needs no block copy of its own.
+            // The transform's keep bytes (one per beam and channel): the
+            // mask needs no block copy of its own, and host input is staged
+            // chunk by chunk inside the transform.
             CHECK(gpu_s.get_memory_usage().staging ==
-                  (bits == 32 ? floats.front().size() * sizeof(float)
-                              : packed.front().size()) +
-                      (plan.get_nchans() * gpu_s.get_nbeams()));
+                  plan.get_nchans() * gpu_s.get_nbeams());
 
             cudaStream_t stream;
             gpu_utils::check_gpu_call(cudaStreamCreate(&stream));
@@ -902,7 +901,7 @@ TEST_CASE("Packed FDMTBoxcar GPU kKadane and kNone match CPU across bit depths",
                 cfg.max_candidates   = 500000;
                 cfg.max_cands_per_dm = 0;
 
-                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), kBeams, 0, 64);
+                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), kBeams, 0, 64);
                 FDMTBoxcar gpu(plan, cfg, true, gpu_exec, kBeams,
                                algorithms::kFDMTAutoFuse, 128);
                 std::vector<RawCandidate> expected;
@@ -941,7 +940,7 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
             cfg.max_candidates   = 500000;
             cfg.max_cands_per_dm = 0;
 
-            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 2, 0, 64);
+            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), 2, 0, 64);
             FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 2,
                            algorithms::kFDMTAutoFuse, 64);
             std::vector<RawCandidate> expected;
@@ -983,7 +982,7 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
         cfg.max_candidates   = 500000;
         cfg.max_cands_per_dm = 0;
 
-        FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 2, 0, 64);
+        FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), 2, 0, 64);
         FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 2, algorithms::kFDMTAutoFuse,
                        128);
         std::vector<RawCandidate> expected;
@@ -998,12 +997,13 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
     }
 }
 
-TEST_CASE("GPU host-memory calls stage one block outside the budget",
+TEST_CASE("GPU host-memory calls stage inside the budget",
           "[gpu][boxcar][budget]") {
-    // The documented contract: on a GPU the first host-memory call
-    // allocates a device copy of the whole input block (and, for FDMT, of
-    // the output plane), outside max_memory_bytes; later calls reuse it and
-    // device-memory calls never allocate it.
+    // FDMTBoxcar copies a host block chunk by chunk into a buffer reserved
+    // at construction, FDMTFFTBoxcar the whole block (both part of the
+    // budgeted usage): host calls allocate nothing. Plain FDMT still copies
+    // the block and output plane on the first host call, outside its
+    // budget.
     const plans::FDMTPlan plan(1200.0F, 1500.0F, 64, 2048, 0.000256F, 200);
     const SizeType beams = 2;
     const SizeType block =
@@ -1015,44 +1015,36 @@ TEST_CASE("GPU host-memory calls stage one block outside the budget",
 
     SECTION("FDMTBoxcar") {
         FDMTBoxcar search(plan, cfg, true, exec, beams);
+        const auto e =
+            FDMTBoxcar::estimate_memory(plan, cfg, true, exec, beams);
         const auto before = search.get_memory_usage();
+        CHECK(before.total() == e.usage.total());
         CHECK(before.staging == 0);
         (void)search.execute(std::span<const float>(input[0]));
-        const auto after = search.get_memory_usage();
-        CHECK(after.staging == block);
-        CHECK(after.budgeted() == before.budgeted() + block);
         (void)search.execute(std::span<const float>(input[1]));
-        CHECK(search.get_memory_usage().budgeted() == after.budgeted());
-
-        FDMTBoxcar dev(plan, cfg, true, exec, beams);
-        const thrust::device_vector<float> buf(input[0].begin(),
-                                               input[0].end());
-        (void)dev.execute(
-            DeviceSpan<const float>(thrust::raw_pointer_cast(buf.data()),
-                                    buf.size(), {exec.backend, 0}));
-        (void)dev.copy_result();
-        CHECK(dev.get_memory_usage().staging == 0);
+        CHECK(search.get_memory_usage().total() == before.total());
+        CHECK(search.get_memory_usage().staging == 0);
     }
     SECTION("FDMTBoxcar, packed 8-bit input") {
         cfg.input_nbits = 8;
         cfg.input_mean  = 2.0F;
         FDMTBoxcar search(plan, cfg, true, exec, beams);
         const auto before = search.get_memory_usage();
-        CHECK(before.staging == 0);
         const std::vector<uint8_t> packed(block / sizeof(float), 2);
         (void)search.execute(std::span<const uint8_t>(packed));
-        const auto after = search.get_memory_usage();
-        CHECK(after.staging == packed.size());
-        CHECK(after.budgeted() == before.budgeted() + packed.size());
+        CHECK(search.get_memory_usage().total() == before.total());
+        CHECK(search.get_memory_usage().staging == 0);
     }
     SECTION("FDMTFFTBoxcar") {
         algorithms::FDMTFFTBoxcar search(plan, cfg, true, exec, beams);
+        const auto e = algorithms::FDMTFFTBoxcar::estimate_memory(
+            plan, cfg, true, exec, beams);
         const auto before = search.get_memory_usage();
-        CHECK(before.staging == 0);
+        CHECK(before.total() == e.usage.total());
+        CHECK(before.staging == block);
         (void)search.execute(std::span<const float>(input[0]));
-        const auto after = search.get_memory_usage();
-        CHECK(after.staging == block);
-        CHECK(after.budgeted() == before.budgeted() + block);
+        (void)search.execute(std::span<const float>(input[1]));
+        CHECK(search.get_memory_usage().total() == before.total());
     }
     SECTION("FDMT") {
         FDMT fdmt(plan, true, exec, beams);
@@ -1064,6 +1056,166 @@ TEST_CASE("GPU host-memory calls stage one block outside the budget",
               before.workspace + block + (out.size() * sizeof(float)));
         fdmt.execute(std::span<const float>(input[1]), std::span<float>(out));
         CHECK(fdmt.get_memory_usage().total() == after.total());
+    }
+}
+
+TEST_CASE("FDMTBoxcar GPU host input staged per chunk equals device input",
+          "[gpu][boxcar][budget][parity]") {
+    // Host blocks are copied chunk by chunk (rows `chunk` apart) into the
+    // transform's reserved buffer. Every search path reads them as it reads
+    // a device block: identical candidates, bit for bit, over several
+    // blocks and drain(), and no memory beyond the estimate.
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const float tsamp = 455.6e-6F;
+    struct Case {
+        std::string name;
+        plans::FDMTPlan plan;
+        SizeType nbits;
+        SizeType beams;
+        SizeType chunk;  // 0: automatic
+        SizeType budget; // 0: default; 1: the minimum
+        bool ctor_mask;
+        bool call_masks;
+        SizeType fuse;    // kFDMTAutoFuse: direct levels where eligible
+        std::string path; // in search_path ("" : the tree)
+    };
+    const SizeType kAuto = algorithms::kFDMTAutoFuse;
+    const plans::FDMTPlan small(1200.0F, 1500.0F, 64, 2500, 0.000256F, 200);
+    const plans::FDMTPlan sub(1100.0F, 1714.0F, 1152, 4096, tsamp, 2700, 0, 1,
+                              "valid", 2);
+    const plans::FDMTPlan chan_dm(1100.0F, 1714.0F, 256, 2048, tsamp, 600, 0, 1,
+                                  "valid", 1, 150.0);
+    // Blocks that are not a multiple of the chunk (2500 samples), two
+    // beams, constructor and per-call masks, float and 1-8 bits. The
+    // skewed path on packed input is compared host vs device by the
+    // drain() test below.
+    const std::vector<Case> cases{
+        {"tree f32", small, 32, 2, 1024, 0, true, false, 0, ""},
+        {"tree 4-bit", small, 4, 2, 1024, 0, false, true, 0, ""},
+        {"fused f32", small, 32, 1, 512, 0, false, true, 2, ""},
+        {"direct f32", small, 32, 2, 1024, 0, true, false, kAuto,
+         "direct levels"},
+        {"direct 1-bit", small, 1, 1, 512, 0, true, false, kAuto,
+         "direct levels"},
+        {"subband direct f32", sub, 32, 1, 0, 0, false, true, kAuto,
+         "direct top"},
+        {"subband direct 8-bit", sub, 8, 1, 0, 0, true, false, kAuto,
+         "direct top"},
+        {"subband minimum f32", sub, 32, 1, 0, 1, true, false, kAuto,
+         "skewed direct levels"},
+        {"subband minimum 8-bit", sub, 8, 2, 0, 1, false, true, kAuto,
+         "direct levels"},
+        {"chan_dm 8-bit", chan_dm, 8, 1, 0, 0, true, true, kAuto,
+         "direct levels"},
+    };
+    for (const auto& c : cases) {
+        DYNAMIC_SECTION(c.name) {
+            const auto& plan = c.plan;
+            BoxcarConfig cfg;
+            cfg.max_boxcar = 24;
+            cfg.wtsp       = 1.5F;
+            // Enough candidates on the 64-channel plan, few enough elsewhere.
+            cfg.detect_thresh    = plan.get_nchans() < 256 ? 3.5F : 4.5F;
+            cfg.max_candidates   = 1U << 20;
+            cfg.max_cands_per_dm = 0;
+            cfg.input_nbits      = c.nbits;
+            const int top        = c.nbits == 32 ? 255 : (1 << c.nbits) - 1;
+            cfg.input_mean = c.nbits == 32 ? 0.0F : static_cast<float>(top / 2);
+            // Uniform codes 0..top (float: shifted by -127.5).
+            cfg.noise_sigma = static_cast<float>(
+                std::sqrt((((top + 1.0) * (top + 1.0)) - 1.0) / 12.0));
+            cfg.per_call_masks    = c.call_masks;
+            const SizeType nchans = plan.get_nchans();
+            std::vector<uint8_t> ctor_mask;
+            if (c.ctor_mask) {
+                ctor_mask.assign(nchans, 1);
+                for (SizeType ch = 3; ch < nchans; ch += 7) {
+                    ctor_mask[ch] = 0;
+                }
+            }
+            SizeType budget = algorithms::kFDMTDefaultMaxMemory;
+            if (c.budget == 1) {
+                budget = FDMTBoxcar::estimate_minimum_memory(
+                             plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
+                             ctor_mask)
+                             .max_memory_bytes;
+            }
+            const auto est =
+                FDMTBoxcar::estimate_memory(plan, cfg, true, exec, c.beams,
+                                            c.fuse, c.chunk, budget, ctor_mask);
+            FDMTBoxcar host(plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
+                            budget, ctor_mask);
+            FDMTBoxcar device(plan, cfg, true, exec, c.beams, c.fuse, c.chunk,
+                              budget, ctor_mask);
+            INFO(host.summary());
+            INFO("path '" << est.search_path << "'");
+            if (c.path.empty()) {
+                CHECK(est.search_path.empty());
+            } else {
+                CHECK(est.search_path.find(c.path) != std::string::npos);
+            }
+            const SizeType per_block = c.beams * nchans * plan.get_nsamps();
+            const SizeType bytes = c.nbits == 32
+                                       ? per_block
+                                       : c.beams * nchans *
+                                             bit_pack_utils::packed_row_bytes(
+                                                 plan.get_nsamps(), c.nbits);
+            std::mt19937 gen(97);
+            std::uniform_int_distribution<int> code(0, top);
+            thrust::device_vector<float> fbuf(per_block);
+            thrust::device_vector<uint8_t> pbuf(bytes);
+            std::vector<RawCandidate> got;
+            std::vector<RawCandidate> want;
+            constexpr SizeType kBlocks = 3;
+            for (SizeType b = 0; b < kBlocks; ++b) {
+                std::vector<uint8_t> mask(nchans, 1);
+                for (SizeType ch = b; ch < nchans; ch += 5) {
+                    mask[ch] = 0;
+                }
+                const std::span<const uint8_t> call_mask =
+                    c.call_masks ? std::span<const uint8_t>(mask)
+                                 : std::span<const uint8_t>{};
+                if (c.nbits == 32) {
+                    std::vector<float> v(per_block);
+                    for (auto& x : v) {
+                        x = static_cast<float>(code(gen)) - 127.5F;
+                    }
+                    thrust::copy(v.begin(), v.end(), fbuf.begin());
+                    const DeviceSpan<const float> d(
+                        thrust::raw_pointer_cast(fbuf.data()), per_block,
+                        {exec.backend, 0});
+                    (void)device.execute(d, call_mask);
+                    append(want, device.copy_result());
+                    append(got,
+                           host.execute(std::span<const float>(v), call_mask));
+                } else {
+                    std::vector<uint8_t> v(bytes);
+                    for (auto& x : v) {
+                        x = static_cast<uint8_t>(code(gen) & 0xFF);
+                        if (c.nbits < 8) {
+                            x = static_cast<uint8_t>(
+                                std::uniform_int_distribution<int>(0,
+                                                                   255)(gen));
+                        }
+                    }
+                    thrust::copy(v.begin(), v.end(), pbuf.begin());
+                    const DeviceSpan<const uint8_t> d(
+                        thrust::raw_pointer_cast(pbuf.data()), bytes,
+                        {exec.backend, 0});
+                    (void)device.execute(d, call_mask);
+                    append(want, device.copy_result());
+                    append(got, host.execute(std::span<const uint8_t>(v),
+                                             call_mask));
+                }
+                CHECK(host.get_memory_usage().total() == est.usage.total());
+                CHECK(host.get_memory_usage().staging == est.usage.staging);
+            }
+            append(got, host.drain());
+            append(want, device.drain());
+            CHECK(host.get_memory_usage().total() == est.usage.total());
+            REQUIRE(want.size() > 50);
+            compare(got, want);
+        }
     }
 }
 
@@ -1086,7 +1238,7 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
         if (c.budget < big) {
             CHECK(e.chunk_nsamps < c.plan.get_nsamps());
         }
-        // The first host call adds exactly host_staging.
+        // Host calls stage inside the estimate: they add nothing.
         const SizeType rows = c.beams * c.plan.get_nchans();
         const auto total    = f.get_memory_usage().total();
         if (c.config.input_nbits == 32) {
@@ -1096,8 +1248,7 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
             std::vector<uint8_t> in(rows * c.plan.get_nsamps(), 127);
             (void)f.execute(std::span<const uint8_t>(in));
         }
-        CHECK(e.host_staging > 0);
-        CHECK(f.get_memory_usage().total() == total + e.host_staging);
+        CHECK(f.get_memory_usage().total() == total);
     }
     SECTION("nothing is allocated") {
         // A 2^40-candidate store (tens of TB) on the device and host: sized,
@@ -1122,6 +1273,8 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
         if (e.usage.state + e.usage.history <= props.totalGlobalMem) {
             SKIP("device larger than the probe");
         }
+        // Checked against the free memory before anything is allocated
+        // (the check's own wording), with the budget advice.
         CHECK_THROWS_MATCHES(
             FDMTBoxcar(c.plan, c.config, true, gpu, beams,
                        algorithms::kFDMTAutoFuse, 0, SIZE_MAX / 2),
@@ -1129,7 +1282,43 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
             Catch::Matchers::MessageMatches(
                 Catch::Matchers::StartsWith(
                     "FDMTBoxcar (cuda): this configuration needs") &&
+                Catch::Matchers::ContainsSubstring(
+                    "is free on the device (nothing allocated)") &&
+                Catch::Matchers::ContainsSubstring("max_memory_bytes") &&
+                Catch::Matchers::ContainsSubstring(
+                    "estimate_minimum_memory()") &&
+                !Catch::Matchers::ContainsSubstring("nsamps") &&
                 !Catch::Matchers::ContainsSubstring("FDMT (cuda): this")));
+    }
+}
+
+TEST_CASE("The free-memory check fails early and only when over",
+          "[gpu][budget]") {
+    // Synthetic device figures: the check reads nothing itself.
+    constexpr SizeType kGiB = SizeType{1} << 30;
+    const gpu_utils::DeviceMemoryInfo dev{
+        .free = 3 * kGiB, .total = 8 * kGiB, .known = true};
+    CHECK_NOTHROW(gpu_utils::check_free_memory("X", 3 * kGiB, dev,
+                                               gpu_utils::kAdviceBudget));
+    CHECK_NOTHROW(
+        gpu_utils::check_free_memory("X", kGiB, dev, gpu_utils::kAdviceBudget));
+    // Unknown free memory: nothing to check against (the allocation
+    // reports a failure).
+    CHECK_NOTHROW(gpu_utils::check_free_memory("X", 100 * kGiB,
+                                               gpu_utils::DeviceMemoryInfo{},
+                                               gpu_utils::kAdviceBudget));
+    try {
+        gpu_utils::check_free_memory("FDMT (cuda)", (3 * kGiB) + 1, dev,
+                                     gpu_utils::kAdviceBudget);
+        FAIL("one byte over the free memory did not throw");
+    } catch (const gpu_utils::DeviceAllocationError& e) {
+        const std::string what = e.what();
+        CHECK(what.starts_with("FDMT (cuda): this configuration needs 3.00 "
+                               "GiB of device memory and only 3.00 GiB of "
+                               "8.00 GiB is free on the device (nothing "
+                               "allocated); "));
+        CHECK(what.ends_with(gpu_utils::kAdviceBudget));
+        CHECK(e.cause() == "3.00 GiB needed, 3.00 GiB free");
     }
 }
 
@@ -1138,16 +1327,268 @@ TEST_CASE("Device allocation errors nest by cause", "[gpu][budget]") {
         .free = SizeType{3} << 30, .total = SizeType{8} << 30, .known = true};
     const auto inner = gpu_utils::allocation_failure(
         "FDMT (cuda)", SizeType{5} << 30, before,
-        std::runtime_error("device allocation: out of memory"));
+        std::runtime_error("device allocation: out of memory"),
+        gpu_utils::kAdviceBudget);
     CHECK(inner.cause() == "device allocation: out of memory");
-    const auto outer = gpu_utils::allocation_failure(
-        "CohFDMT (cuda)", SizeType{6} << 30, before, inner);
+    const auto outer =
+        gpu_utils::allocation_failure("CohFDMT (cuda)", SizeType{6} << 30,
+                                      before, inner, gpu_utils::kAdviceBlocks);
     const std::string what = outer.what();
     CHECK(what.starts_with("CohFDMT (cuda): this configuration needs 6.00 "
                            "GiB of device memory and 3.00 GiB of 8.00 GiB "
-                           "was free"));
+                           "was free; use shorter blocks"));
     CHECK(what.ends_with(": device allocation: out of memory"));
     // One message, not the FDMT's nested inside.
     const std::string needs = "this configuration needs";
     CHECK(what.find(needs) == what.rfind(needs));
+}
+
+TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
+          "[gpu][boxcar][drain][memory]") {
+    // A subband search on the windowed (skewed) top has a search latency, so
+    // drain() pads the stream. Driven by device spans only, the instance
+    // never exceeds its estimate, drain() included, and finds what a
+    // host-driven instance finds.
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
+    const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 4096, tsamp, grid,
+                               "valid", 2);
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    constexpr SizeType kBlocks = 3;
+    const SizeType n           = plan.get_nchans() * plan.get_nsamps();
+    std::vector<std::vector<uint8_t>> bytes(kBlocks);
+    std::vector<std::vector<float>> values(kBlocks);
+    std::mt19937 gen(4242);
+    std::uniform_int_distribution<int> dist(0, 255);
+    for (SizeType b = 0; b < kBlocks; ++b) {
+        bytes[b].resize(n);
+        values[b].resize(n);
+        for (SizeType i = 0; i < n; ++i) {
+            bytes[b][i]  = static_cast<uint8_t>(dist(gen));
+            values[b][i] = static_cast<float>(bytes[b][i]) - 128.0F;
+        }
+    }
+    for (const bool packed : {false, true}) {
+        DYNAMIC_SECTION("packed " << packed) {
+            const BoxcarConfig cfg(
+                24, 1.5F, 4.2F, 73.9F, PeakFindingMode::kContiguousPeakPerWidth,
+                1U << 20, 0, true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
+            // The windowed top replaces the tree when the tree histories
+            // exceed the budget: try budgets around their size.
+            const SizeType hist =
+                (plan.get_history_size() + plan.get_tree_history_size()) *
+                sizeof(float);
+            SizeType budget  = 0;
+            uint64_t latency = 0;
+            for (const SizeType tenths : {10, 9, 8}) {
+                try {
+                    FDMTBoxcar probe(plan, cfg, true, exec, 1,
+                                     algorithms::kFDMTAutoFuse, 0,
+                                     hist * tenths / 10);
+                    if (probe.get_search_latency() > 0) {
+                        budget  = hist * tenths / 10;
+                        latency = probe.get_search_latency();
+                        break;
+                    }
+                } catch (const std::invalid_argument&) {
+                }
+            }
+            INFO("history " << hist << " B");
+            // Several blocks of padding.
+            REQUIRE(latency > plan.get_nsamps());
+            const auto est = FDMTBoxcar::estimate_memory(
+                plan, cfg, true, exec, 1, algorithms::kFDMTAutoFuse, 0, budget);
+            FDMTBoxcar device(plan, cfg, true, exec, 1,
+                              algorithms::kFDMTAutoFuse, 0, budget);
+            FDMTBoxcar host(plan, cfg, true, exec, 1, algorithms::kFDMTAutoFuse,
+                            0, budget);
+            INFO(device.summary());
+            REQUIRE(device.get_search_latency() == latency);
+            REQUIRE(device.get_memory_usage().total() == est.usage.total());
+            thrust::device_vector<float> fbuf(n);
+            thrust::device_vector<uint8_t> pbuf(n);
+            std::vector<RawCandidate> got;
+            std::vector<RawCandidate> want;
+            for (SizeType b = 0; b < kBlocks; ++b) {
+                if (packed) {
+                    thrust::copy(bytes[b].begin(), bytes[b].end(),
+                                 pbuf.begin());
+                    (void)device.execute(DeviceSpan<const uint8_t>(
+                        thrust::raw_pointer_cast(pbuf.data()), n,
+                        {exec.backend, 0}));
+                    append(want,
+                           host.execute(std::span<const uint8_t>(bytes[b])));
+                } else {
+                    thrust::copy(values[b].begin(), values[b].end(),
+                                 fbuf.begin());
+                    (void)device.execute(DeviceSpan<const float>(
+                        thrust::raw_pointer_cast(fbuf.data()), n,
+                        {exec.backend, 0}));
+                    append(want,
+                           host.execute(std::span<const float>(values[b])));
+                }
+                gpu_utils::check_gpu_call(cudaDeviceSynchronize());
+                append(got, device.copy_result());
+                CHECK(device.get_memory_usage().total() == est.usage.total());
+            }
+            append(got, device.drain());
+            append(want, host.drain());
+            CHECK(device.get_memory_usage().total() == est.usage.total());
+            CHECK(device.get_memory_usage().staging == est.usage.staging);
+            CHECK(device.get_searched_nsamps() == kBlocks * plan.get_nsamps());
+            REQUIRE(want.size() > 100);
+            compare(got, want);
+            // reset_history() starts a new stream: an abandoned stream's
+            // carried windowed-top spreads must not reach it. They would sit
+            // in the cold prefix, so search it.
+            auto cold             = cfg;
+            cold.skip_cold_prefix = false;
+            FDMTBoxcar fresh(plan, cold, true, exec, 1,
+                             algorithms::kFDMTAutoFuse, 0, budget);
+            FDMTBoxcar reused(plan, cold, true, exec, 1,
+                              algorithms::kFDMTAutoFuse, 0, budget);
+            REQUIRE(reused.get_search_latency() == latency);
+            const auto run = [&](FDMTBoxcar& s, SizeType b) {
+                return packed ? s.execute(std::span<const uint8_t>(bytes[b]))
+                              : s.execute(std::span<const float>(values[b]));
+            };
+            // An abandoned loud stream (bright enough to show any carry).
+            std::vector<float> loud(values[2]);
+            for (auto& v : loud) {
+                v *= 1000.0F;
+            }
+            const std::vector<uint8_t> loud_codes(n, 255);
+            for (int k = 0; k < 3; ++k) {
+                (void)(packed ? reused.execute(
+                                    std::span<const uint8_t>(loud_codes))
+                              : reused.execute(std::span<const float>(loud)));
+            }
+            reused.reset_history();
+            std::vector<RawCandidate> first;
+            std::vector<RawCandidate> again;
+            for (SizeType b = 0; b < kBlocks; ++b) {
+                append(first, run(fresh, b));
+                append(again, run(reused, b));
+            }
+            append(first, fresh.drain());
+            append(again, reused.drain());
+            REQUIRE(first.size() > 100);
+            compare(again, first);
+        }
+    }
+}
+
+TEST_CASE("GPU engines with different shared-memory needs coexist",
+          "[gpu][boxcar]") {
+    // A kernel's dynamic shared-memory limit is shared by every engine in
+    // the process: an engine built later with a smaller need must not lower
+    // it under one built earlier (whose launches then failed with "invalid
+    // argument"). Each engine built first runs as when built alone.
+    const auto blocks = [](SizeType n, SizeType count) {
+        std::mt19937 gen(5);
+        std::normal_distribution<float> nd;
+        std::vector<std::vector<uint8_t>> out(count, std::vector<uint8_t>(n));
+        for (auto& b : out) {
+            for (auto& v : b) {
+                v = static_cast<uint8_t>(std::clamp(
+                    std::round(128.0F + (10.0F * nd(gen))), 0.0F, 255.0F));
+            }
+        }
+        return out;
+    };
+    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const auto run = [](FDMTBoxcar& s,
+                        const std::vector<std::vector<uint8_t>>& in) {
+        std::vector<RawCandidate> out;
+        for (const auto& b : in) {
+            append(out, s.execute(std::span<const uint8_t>(b)));
+        }
+        append(out, s.drain());
+        return out;
+    };
+    SECTION("FDMT direct levels: box smearing, then none") {
+        // The skewed direct levels of the smeared transform need more
+        // shared memory than the unsmeared one's.
+        const float tsamp = 455.6e-6F;
+        const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+            0.0F, 600.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+        const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 128, tsamp, grid,
+                                   "valid", 3);
+        BoxcarConfig cfg(24);
+        cfg.detect_thresh     = 3.75F;
+        cfg.noise_sigma       = 10.0F;
+        cfg.input_nbits       = 8;
+        cfg.input_mean        = 128.0F;
+        cfg.skip_cold_prefix  = false;
+        cfg.per_call_masks    = true;
+        cfg.max_candidates    = 1U << 20;
+        const SizeType budget = 113372721; // the skewed path
+        const auto in         = blocks(1152 * 128, 6);
+        std::vector<RawCandidate> first;
+        {
+            FDMTBoxcar a(plan, cfg, true, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+                         budget);
+            FDMTBoxcar b(plan, cfg, false, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+                         budget);
+            first = run(a, in);
+            (void)run(b, in);
+        }
+        FDMTBoxcar alone(plan, cfg, true, gpu, 1, algorithms::kFDMTAutoFuse, 0,
+                         budget);
+        REQUIRE(first.size() > 20);
+        compare(first, run(alone, in));
+    }
+    SECTION("FDMTBoxcar kernels: a wide boxcar, then a narrow one") {
+        // 8-bit rows keep a uint64 prefix ring of the boxcar's width in
+        // shared memory: 4000 needs over the 48 KiB default, 37 far less.
+        const plans::FDMTPlan plan(700, 1200, 32, 400, 0.001F,
+                                   std::vector<IndexType>{0, 3, 9, 20, 41},
+                                   "valid", 0);
+        BoxcarConfig wide(4000);
+        wide.detect_thresh  = 3.0F;
+        wide.noise_sigma    = 10.0F;
+        wide.input_nbits    = 8;
+        wide.input_mean     = 128.0F;
+        wide.max_candidates = 1U << 20;
+        auto narrow         = wide;
+        narrow.max_boxcar   = 37;
+        const auto in       = blocks(32 * 400, 8);
+        std::vector<RawCandidate> first;
+        {
+            FDMTBoxcar a(plan, wide, true, gpu);
+            FDMTBoxcar b(plan, narrow, true, gpu);
+            first = run(a, in);
+            (void)run(b, in);
+        }
+        FDMTBoxcar alone(plan, wide, true, gpu);
+        REQUIRE(first.size() > 20);
+        compare(first, run(alone, in));
+    }
+}
+
+TEST_CASE("GPU subband searches skip paths beyond the 32-bit index range",
+          "[gpu][boxcar][budget]") {
+    // UWL to DM 2000 at subband depth 2: the tree history exceeds the CUDA
+    // backend's 32-bit index, so the direct entries cannot run and the
+    // windowed (skewed) path is taken at any budget.
+    const float tsamp = 64e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 2000.0F, tsamp, tsamp, 704.0F, 4032.0F, 6656, 1.1F);
+    const plans::FDMTPlan plan(704.0F, 4032.0F, 6656, 4096, tsamp, grid,
+                               "valid", 2);
+    REQUIRE(plan.get_tree_history_size() >
+            std::numeric_limits<uint32_t>::max());
+    const BoxcarConfig cfg(1562, 1.5F, 6.0F, 12.0F,
+                           PeakFindingMode::kContiguousPeakPerWidth, 1U << 20,
+                           0, true, 8, 127.0F);
+    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    for (const SizeType gib : {10, 40}) {
+        INFO(gib << " GiB");
+        const auto est = FDMTBoxcar::estimate_memory(plan, cfg, true, exec, 1,
+                                                     algorithms::kFDMTAutoFuse,
+                                                     0, SizeType{gib} << 30);
+        CHECK(est.search_path.find("windowed") != std::string::npos);
+        CHECK(est.search_latency > 0);
+    }
 }

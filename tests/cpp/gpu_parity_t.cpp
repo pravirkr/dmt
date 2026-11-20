@@ -143,7 +143,7 @@ TEST_CASE("parity: FDMT on every GPU backend matches the CPU bitwise",
                                                 << " int_tree=" << int_tree) {
                                     FDMT cpu(1000.0F, 1500.0F, kNchans, kNsamps,
                                              0.001F, kDtMax, 0, 1, smear, mode,
-                                             Exec::cpu(2), nbeams, fuse,
+                                             Exec::cpu(), nbeams, fuse,
                                              int_tree);
                                     FDMT gpu(1000.0F, 1500.0F, kNchans, kNsamps,
                                              0.001F, kDtMax, 0, 1, smear, mode,
@@ -299,8 +299,8 @@ TEST_CASE("parity: FDMT plain-tree history moves CPU -> GPU -> CPU",
                 return FDMT(1000.0F, 1500.0F, nchans, nsamps, 0.001F, dt_max, 0,
                             1, true, "valid", exec, nbeams);
             };
-            FDMT ref        = make(Exec::cpu(2));
-            FDMT cpu_a      = make(Exec::cpu(2));
+            FDMT ref        = make(Exec::cpu());
+            FDMT cpu_a      = make(Exec::cpu());
             FDMT gpu        = make(exec_of(backend));
             FDMT cpu_b      = make(Exec::cpu(1));
             const auto n    = nbeams * ref.get_plan().get_dmt_size();
@@ -322,7 +322,7 @@ TEST_CASE("parity: FDMT plain-tree history moves CPU -> GPU -> CPU",
             gpu.execute(wf[1], got);
             test::require_exact(dmt_result(gpu, got), dmt_result(ref, want[1]));
             gpu.save_history(h);
-            FDMT ref2 = make(Exec::cpu(2));
+            FDMT ref2 = make(Exec::cpu());
             ref2.execute(wf[0], got);
             ref2.execute(wf[1], got);
             ref2.save_history(h_ref);

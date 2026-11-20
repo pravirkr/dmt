@@ -182,46 +182,43 @@ TEST_CASE("CohFDMTPlan rejects invalid configurations", "[cfdmt][cpu]") {
 }
 
 TEST_CASE("CohFDMT recovers an injected dispersed impulse", "[cfdmt][cpu]") {
-    check_impulse_recovery(Exec::cpu(4));
+    check_impulse_recovery(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT impulse response does not depend on position in the block",
           "[cfdmt][cpu]") {
-    check_position_independence(Exec::cpu(4));
+    check_position_independence(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT skipback blocks tile one long block", "[cfdmt][cpu]") {
-    check_skipback_tiling(Exec::cpu(4));
+    check_skipback_tiling(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT normalised noise matches the variance grid",
           "[cfdmt][cpu]") {
-    check_noise_statistics(Exec::cpu(4));
+    check_noise_statistics(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT output is independent of layout, encoding and grouping",
           "[cfdmt][cpu]") {
-    check_layout_independence(Exec::cpu(4));
+    check_layout_independence(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT 4-bit input and dt_step recover the pulse", "[cfdmt][cpu]") {
-    check_4bit_dt_step(Exec::cpu(4));
+    check_4bit_dt_step(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT execute validates buffers", "[cfdmt][cpu]") {
-    check_validation(Exec::cpu(4));
+    check_validation(Exec::cpu());
 }
 TEST_CASE("CohFDMT trimmed filter margin matches a 1e-6 margin",
           "[cfdmt][cpu]") {
-    check_filter_leakage(Exec::cpu(4));
-}
-TEST_CASE("CohFDMT concurrent calls on one engine", "[cfdmt][cpu]") {
-    check_concurrent_calls(Exec::cpu(2));
+    check_filter_leakage(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT estimate_memory equals the constructed instance (cpu)",
           "[cfdmt][cpu][budget]") {
-    cfdmt_estimate::check_all(Exec::cpu(2));
+    cfdmt_estimate::check_all(Exec::cpu());
     cfdmt_estimate::check_impossible_cpu();
 }
 

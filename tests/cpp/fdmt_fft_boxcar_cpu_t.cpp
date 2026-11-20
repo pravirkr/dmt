@@ -53,7 +53,7 @@ TEST_CASE("FDMTFFTBoxcar matches materialized FDMTFFT and direct windows",
                     cfg.peak_mode        = mode;
                     cfg.max_candidates   = 500000;
                     cfg.max_cands_per_dm = 0;
-                    FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(2), 1,
+                    FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1,
                                          frac);
                     CHECK(search.get_output_latency() == (frac ? 64U : 0U));
                     std::vector<RawCandidate> actual;
@@ -88,7 +88,7 @@ TEST_CASE("FDMTFFTBoxcar beams and kill mask match per-beam references",
     cfg.wtsp             = 1.5F;
     cfg.detect_thresh    = 2.7F;
     cfg.max_cands_per_dm = 0;
-    FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(3), 2, true, kill);
+    FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(), 2, true, kill);
     std::vector<RawCandidate> actual;
     for (const auto& block : input) {
         append(actual, search.execute(block));
@@ -176,6 +176,10 @@ TEST_CASE("FDMTFFTBoxcar validates its configuration", "[boxcar][cpu]") {
     packed.max_boxcar  = 8;
     packed.input_nbits = 8;
     CHECK_THROWS_AS(FDMTFFTBoxcar(plan, packed), std::invalid_argument);
+    BoxcarConfig masks;
+    masks.max_boxcar     = 8;
+    masks.per_call_masks = true; // FDMTBoxcar only
+    CHECK_THROWS_AS(FDMTFFTBoxcar(plan, masks), std::invalid_argument);
     BoxcarConfig cfg;
     cfg.max_boxcar = 8;
     CHECK_THROWS_AS(FDMTFFTBoxcar(plan, cfg, true, Exec::cpu(), 1, true,
@@ -315,7 +319,7 @@ TEST_CASE("FDMTFFTBoxcar drain() searches the last latency samples",
     cfg.max_cands_per_dm = 0;
     for (const bool frac : {true, false}) {
         CAPTURE(frac);
-        FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(2), 1, frac);
+        FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(), 1, frac);
         const uint64_t latency = search.get_output_latency();
         CHECK(latency == (frac ? 64U : 0U));
         std::vector<RawCandidate> drained;
@@ -335,7 +339,7 @@ TEST_CASE("FDMTFFTBoxcar drain() searches the last latency samples",
         CHECK_THROWS_AS(search.drain(), std::logic_error);
 
         // Reference: the stream continued with zero blocks, cut at the end.
-        FDMTFFTBoxcar longer(plan, cfg, true, Exec::cpu(2), 1, frac);
+        FDMTFFTBoxcar longer(plan, cfg, true, Exec::cpu(), 1, frac);
         std::vector<RawCandidate> expected;
         for (const auto& block : input) {
             append(expected, longer.execute(block));
@@ -390,10 +394,10 @@ TEST_CASE("FDMTFFTBoxcar memory budget shortens the segments",
     cfg.max_cands_per_dm = 0;
     for (const bool frac : {true, false}) {
         DYNAMIC_SECTION("fractional=" << frac) {
-            FDMTFFTBoxcar open(plan, cfg, true, Exec::cpu(2), 1, frac);
+            FDMTFFTBoxcar open(plan, cfg, true, Exec::cpu(), 1, frac);
             const SizeType full   = open.get_memory_usage().total();
             const SizeType budget = full * 6 / 10;
-            FDMTFFTBoxcar capped(plan, cfg, true, Exec::cpu(2), 1, frac, {},
+            FDMTFFTBoxcar capped(plan, cfg, true, Exec::cpu(), 1, frac, {},
                                  budget);
             CHECK(capped.get_memory_usage().total() <= budget);
             CHECK(capped.get_chunk_nsamps() < open.get_chunk_nsamps());
@@ -461,7 +465,6 @@ void check_fft_boxcar_estimates(const Exec& exec) {
         const FDMTFFTBoxcar f(plan, c.config, true, exec, c.beams, true,
                               c.kill);
         check(e, f);
-        CHECK((e.host_staging == 0) == (exec.backend == Backend::kCPU));
     }
     // A budget the full segment does not fit: shorter segments (a long
     // block, so the transform dominates the boxcar buffers).
@@ -494,17 +497,17 @@ void check_fft_boxcar_estimates(const Exec& exec) {
 
 TEST_CASE("FDMTFFTBoxcar estimate_memory equals the constructed instance (cpu)",
           "[boxcar][cpu][budget]") {
-    check_fft_boxcar_estimates(Exec::cpu(3));
+    check_fft_boxcar_estimates(Exec::cpu());
     // No FFT storage, twiddles or phasor tables, including the engines
     // the segment search builds and drops under a tight budget.
     const plans::FDMTPlan plan(1000.0F, 1500.0F, 256, 32768, 0.001F, 400);
     BoxcarConfig cfg;
     cfg.max_candidates = 1024;
     const auto full =
-        FDMTFFTBoxcar::estimate_memory(plan, cfg, true, Exec::cpu(3), 4);
+        FDMTFFTBoxcar::estimate_memory(plan, cfg, true, Exec::cpu(), 4);
     const auto before = utils::fft_allocation_count();
     const auto e      = FDMTFFTBoxcar::estimate_memory(
-        plan, cfg, true, Exec::cpu(3), 4, true, {}, full.usage.budgeted() - 1);
+        plan, cfg, true, Exec::cpu(), 4, true, {}, full.usage.budgeted() - 1);
     CHECK(utils::fft_allocation_count() == before);
     CHECK(e.chunk_nsamps < full.chunk_nsamps);
 }

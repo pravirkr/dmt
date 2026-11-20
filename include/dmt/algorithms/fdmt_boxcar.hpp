@@ -42,18 +42,28 @@ struct FDMTBoxcarMemoryEstimate {
     FDMTBoxcarMemoryUsage usage{};
     /// Its get_chunk_nsamps().
     SizeType chunk_nsamps{0};
-    /// GPU backends: device bytes the first host-memory execute() adds (the
-    /// staging block of the input), outside the budget; device-memory calls
-    /// never allocate it. 0 on the CPU.
-    SizeType host_staging{0};
+    /// The transform's path, as summary() shows it ("Transform: ..."; empty
+    /// for the tree path of FDMTBoxcar).
+    std::string search_path;
+    /// Its get_search_latency() (FDMTFFTBoxcar: get_output_latency()):
+    /// samples a stream sample waits for before every row has searched it,
+    /// and what drain() pads (in whole blocks).
+    uint64_t search_latency{0};
+    /// The max_memory_bytes it was made with; from
+    /// FDMTBoxcar::estimate_minimum_memory(), the smallest that builds (at
+    /// least usage.budgeted(): CPU path choices keep some headroom).
+    SizeType max_memory_bytes{0};
 };
 
 /**
  * @brief Streaming valid-mode FDMT followed by analytical boxcar detection.
  *
- * Input is finite float32, (nbeams, nchans, nsamps), low frequency first,
- * normalized to zero mean and known common noise sigma. Analytical S/N
- * assumes independent channel/time noise before the modeled FDMT filtering;
+ * Input is finite float32, (nbeams, nchans, nsamps), low frequency first.
+ * FDMTBoxcar does no preprocessing: the noise model needs each channel
+ * normalized to zero mean and the common noise sigma (noise_sigma, 1 by
+ * default), and white in time over at least max_boxcar samples. Analytical
+ * S/N assumes independent channel/time noise before the modeled FDMT
+ * filtering;
  * masking other than kill_mask (below) or additional correlations require
  * upstream calibration. Red noise (slow drifts correlated over many
  * samples) inflates the S/N of wide boxes, and the search keeps no
@@ -82,18 +92,32 @@ struct FDMTBoxcarMemoryEstimate {
  * GPU reset_history() is also ordered asynchronously on its supplied stream.
  * An instance is not safe for concurrent calls. CPU device calls throw.
  *
- * Memory: max_memory_bytes (default kFDMTDefaultMaxMemory, 10 GiB) bounds
- * what the instance allocates where it runs (get_memory_usage().budgeted()):
- * everything on the CPU; device memory on a GPU, where the host plan
- * copies, host result storage and per-call mask noise model are reported
- * (get_memory_usage().host) but not budgeted. The boxcar carry, peaks and
- * candidate buffers are fixed by the plan and config; the FDMT takes its
- * fastest path within the rest (see FDMT). Construction throws
- * std::invalid_argument when nothing fits. On a GPU the staging block for
- * host-memory input is allocated by the first host execute() and is not
- * part of that check (device input never needs it);
- * get_memory_usage().staging reports it once allocated. On the
- * skewed-window path (plans whose tree history exceeds the budget) the rows
+ * Memory: max_memory_bytes is the only memory setting (the block length
+ * nsamps is the caller's I/O unit and does not change the FDMT's memory,
+ * though a CPU kill mask copies the block into budgeted staging;
+ * chunk_nsamps is an expert override, 0 = automatic, and a forced
+ * chunk can throw where the automatic one fits). Plan with
+ * estimate_memory() (usage, chunk, path and search latency of a budget)
+ * and estimate_minimum_memory() (the smallest budget that builds); they
+ * report what the instance owns, so add the caller's input blocks. A
+ * larger budget can buy a faster configuration (a simple measured rule,
+ * close to the fastest that fits, not faster at every budget); every budget
+ * from the minimum up builds, with the same candidates to float precision. On a
+ * GPU, construction also checks the chosen configuration against the device's
+ * free memory and throws std::bad_alloc before allocating when it does not fit
+ * (the choice never depends on free memory). max_memory_bytes (default
+ * kFDMTDefaultMaxMemory, 10 GiB) bounds what the instance allocates where it
+ * runs (get_memory_usage().budgeted()): everything on the CPU; device memory on
+ * a GPU, where the host plan copies, host result storage and per-call mask
+ * noise model are reported (get_memory_usage().host) but not budgeted. The
+ * boxcar carry, peaks and candidate buffers are fixed by the plan and config;
+ * the FDMT takes a fast path within the rest (see FDMT). Construction
+ * throws std::invalid_argument when nothing fits. On a GPU, host-memory input
+ * is copied to the device one chunk at a time into a buffer reserved at
+ * construction inside that budget (a few MiB to ~100 MiB, held whether
+ * or not host input is used), so host calls allocate nothing. On the
+ * skewed-window path (plans whose tree history exceeds the budget; on the
+ * CPU also packed input with blocks over 2048 samples) the rows
  * of a subband search are searched with a fixed per-row latency of up to
  * the dispersion delay from the subband to the bottom of the band (that of
  * the full-band search, get_search_latency()); flush() adds no samples,
@@ -110,29 +134,44 @@ struct FDMTBoxcarMemoryEstimate {
  * transform reads killed rows as zero (one byte per beam and channel, no
  * copy of the block).
  *
- * Per-call kill mask (float32 input): execute(waterfall, kill_mask) also
- * takes a mask for that block (same format and convention; nonzero is
- * active). It applies to every beam and sample of the block and is ANDed
- * with the constructor mask; an empty mask, or the overloads without one,
- * mean the constructor mask alone. The mask is read before the call
- * returns (device calls stay asynchronous). Killed input never reaches the
- * transform, and samples keep the mask they were ingested with. When the
- * mask changes, the endpoints whose input windows reach back into the
- * previous block (the first S + W - 1 of each row, S its FDMT support with
- * every channel active, W the width) are thresholded and scored with the
- * variance of the OR of both masks: no extra false alarms, S/N there
- * slightly low (at most sqrt(V_or / V_true)). Elsewhere S/N is exact for
- * the block's mask. The first per-call mask requires blocks of at least
- * max(S) + max_boxcar - 1 samples (so that a window spans at most two
- * blocks) and the memory for the noise tables within max_memory_bytes
- * (on a GPU: their device copies);
- * either failure throws std::invalid_argument before any state changes.
+ * Per-call kill mask: execute(waterfall, kill_mask) also takes a mask for that
+ * block (same format and convention; nonzero is active). Packed input (CPU and
+ * GPU, every screen): channels it kills but the constructor mask keeps read the
+ * code input_mean (which must be an integer), so the expected sums stay the
+ * constructor plan's and only the cutoffs and S/N scales follow the rules
+ * below; per-width peaks spanning a change of tables are ranked by S/N. It
+ * applies to every beam and sample of the block and is ANDed with the
+ * constructor mask; an empty mask, or the overloads without one, mean the
+ * constructor mask alone. The mask is read before the call returns (device
+ * calls stay asynchronous). Killed input never reaches the transform, and
+ * samples keep the mask they were ingested with.
+ * Endpoints whose input windows reach back before their block (the first S + W
+ * - 1 of each row, S its FDMT support with every channel active, W the width)
+ * are thresholded and scored with the variance of the history mask when
+ * it differs from the block's: the block's channels and every channel
+ * live within R = max(S) + max_boxcar - 1 samples before it (for blocks of
+ * at least R samples, the OR of this and the previous block's masks). No
+ * extra false alarms; S/N there slightly low (at most
+ * sqrt(V_history / V_true)). Elsewhere S/N is exact for the block's mask.
+ * Any block length works: the masks' memory does not grow with the number
+ * of blocks a window or the search latency spans. When blocks are shorter
+ * than the latency needs (more than the blocks of R samples would), the
+ * oldest entry kept stands for the older blocks still searched with one
+ * catch-all table: every channel live within R samples before the oldest
+ * endpoint still searched, up to the newest block (conservative, as the
+ * history mask). The first per-call mask requires the memory for the
+ * noise tables within max_memory_bytes (on a GPU: their device copies),
+ * else throws std::invalid_argument before any state changes.
+ * With BoxcarConfig::per_call_masks the memory is checked at construction
+ * instead (and by estimate_memory()), reserved before the transform's path
+ * is chosen, and get_memory_usage() reports the reserved table sets (2 per
+ * block kept, plus 3 cached, plus a catch-all when blocks are short) from
+ * the start, so it stays at its estimate.
  * The noise tables of a new mask are computed on the host with
  * exec.nthreads threads (on GPUs too); the last three masks are cached.
  * skip_cold_prefix keeps the constructor mask's warm-up. reset_history()
  * clears the mask state; drain() pads with the last block's mask.
- * get_search_plans() shows the constructor mask's tables only. Packed
- * input takes no per-call mask.
+ * get_search_plans() shows the constructor mask's tables only.
  */
 class FDMTBoxcar {
 public:
@@ -153,7 +192,9 @@ public:
      * Throws as the constructor would when nothing fits max_memory_bytes.
      * A GPU backend needs the device but allocates no device memory; the
      * CUDA context is not counted (nor in get_memory_usage()). Per-call
-     * kill masks add their noise tables on first use (not included).
+     * kill masks are included when declared (BoxcarConfig::per_call_masks);
+     * otherwise the first per-call mask adds its noise model, tables and
+     * buffers then (not included).
      */
     [[nodiscard]] static FDMTBoxcarMemoryEstimate
     estimate_memory(const plans::FDMTPlan& plan,
@@ -165,6 +206,25 @@ public:
                     SizeType chunk_nsamps              = 0,
                     SizeType max_memory_bytes          = kFDMTDefaultMaxMemory,
                     std::span<const uint8_t> kill_mask = {});
+    /**
+     * @brief The smallest configuration of these arguments: estimate_memory()
+     * at the smallest max_memory_bytes an instance can be built with (the
+     * result's max_memory_bytes; one byte less throws). A few estimates
+     * long. The minimum is set by the boxcar's buffers (rows x
+     * max_boxcar carry, peaks, candidates) and the FDMT's smallest path at
+     * its shortest chunk; any larger budget also builds. Throws as
+     * estimate_memory() for anything but the budget (a configuration that
+     * is invalid at its smallest path throws here too).
+     */
+    [[nodiscard]] static FDMTBoxcarMemoryEstimate
+    estimate_minimum_memory(const plans::FDMTPlan& plan,
+                            BoxcarConfig config                = {},
+                            bool use_box_smearing              = true,
+                            Exec exec                          = {},
+                            SizeType nbeams                    = 1,
+                            SizeType fuse_levels               = kFDMTAutoFuse,
+                            SizeType chunk_nsamps              = 0,
+                            std::span<const uint8_t> kill_mask = {});
     ~FDMTBoxcar();
     FDMTBoxcar(FDMTBoxcar&&) noexcept;
     FDMTBoxcar& operator=(FDMTBoxcar&&) noexcept;
@@ -186,6 +246,15 @@ public:
     /// Packed rows follow FDMT byte order and have independent byte padding.
     [[nodiscard]] CandidateResultView
     execute(std::span<const uint8_t> waterfall);
+    /// Packed input with a per-call kill mask (CPU and GPU, every screen):
+    /// channels it kills read the code input_mean.
+    [[nodiscard]] CandidateResultView
+    execute(std::span<const uint8_t> waterfall,
+            std::span<const uint8_t> kill_mask);
+    [[nodiscard]] CandidateDeviceResultView
+    execute(DeviceSpan<const uint8_t> waterfall,
+            std::span<const uint8_t> kill_mask,
+            Stream stream = {});
     [[nodiscard]] CandidateDeviceResultView
     execute(DeviceSpan<const uint8_t> waterfall, Stream stream = {});
     [[nodiscard]] CandidateResultView flush();
@@ -196,6 +265,9 @@ public:
      * get_search_latency() samples are never searched. Endpoints after
      * the last sample are not searched; the padding pushed through the
      * transform does not change the rows before it (the FDMT is causal).
+     * The padding reads, stages and allocates no input block (on a GPU,
+     * device input never needs host memory or the host-input staging), so
+     * get_memory_usage() stays at its estimate.
      * A host call: after device calls, synchronize their stream first. It
      * ends the stream: execute() throws until reset_history().
      */

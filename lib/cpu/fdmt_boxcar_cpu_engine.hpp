@@ -67,6 +67,8 @@ public:
     CandidateDeviceResultView flush_device(Stream stream) override;
     CandidateResultView copy_result(Stream stream) override;
     CandidateResultView flush() override;
+    [[nodiscard]] bool zero_blocks() const noexcept override;
+    CandidateResultView execute_zero() override;
     void set_search_stop(uint64_t stop) noexcept override;
     [[nodiscard]] uint64_t stream_position() const noexcept override;
     [[nodiscard]] uint64_t search_latency() const noexcept override;
@@ -76,6 +78,7 @@ public:
         std::shared_ptr<const std::vector<uint64_t>> support) override;
     void push_block_noise(BlockNoise entry) override;
     void drop_block_noise() noexcept override;
+    [[nodiscard]] uint64_t noise_catch_all_begin() const noexcept override;
     void reset_history(Stream stream) override;
     void consume(SizeType level, const FDMTSearchInput& input) override;
     void allocate() override;
@@ -94,6 +97,11 @@ private:
         const float* inv = nullptr;
         bool mixed       = false;
         uint64_t support = 0;
+        /// Packed input: integer cutoffs of the row (one table), and the
+        /// screen's per-width minimum over the tile's tables (equal to
+        /// `ithr` unless `mixed`).
+        const uint64_t* ithr        = nullptr;
+        const uint64_t* screen_ithr = nullptr;
     };
 
     /// Under mixed tables: the table of endpoint `sample` for width
@@ -114,6 +122,13 @@ private:
                                                 SizeType row,
                                                 SizeType filters) noexcept {
         return t == nullptr ? plane_row : t->inv_sigma.data() + (row * filters);
+    }
+    [[nodiscard]] static const uint64_t* table_ithr(const NoiseTables* t,
+                                                    const uint64_t* plane_row,
+                                                    SizeType row,
+                                                    SizeType filters) noexcept {
+        return t == nullptr ? plane_row
+                            : t->integer_thresh.data() + (row * filters);
     }
 
     // Core result, noise-ring, and staging helpers (fdmt_boxcar_cpu.cpp)
@@ -156,7 +171,9 @@ private:
                             SizeType t0,
                             SizeType n,
                             Prefix* out) noexcept;
-    template <typename T, typename C>
+    /// `kNoise` (packed input under per-call masks): per-tile integer
+    /// cutoffs and S/N-ranked peaks; false is the unmasked code.
+    template <typename T, typename C, bool kNoise = false>
     void score(const plans::BoxcarPlanePlan& plane,
                SizeType row_idx,
                SizeType dm,
@@ -174,6 +191,7 @@ private:
                                    double* range_min) const;
     [[nodiscard]] bool screen_tile_int(const plans::BoxcarPlanePlan& plane,
                                        SizeType dm,
+                                       const uint64_t* ithr_row,
                                        const BoxcarRow& row,
                                        const uint64_t* prefix,
                                        SizeType lookback,
@@ -182,7 +200,7 @@ private:
                                        bool cold,
                                        const double* group_thresh,
                                        double* range_min) const;
-    template <typename T, typename Prefix>
+    template <typename T, typename Prefix, bool kNoise = false>
     void score_tile(const plans::BoxcarPlanePlan& plane,
                     SizeType dm,
                     const BoxcarRow& row,
@@ -221,7 +239,7 @@ private:
     void save_row_carry(SizeType row_idx,
                         SizeType beam,
                         const FDMTSearchInput& in) noexcept;
-    template <typename T, typename C>
+    template <typename T, typename C, bool kNoise = false>
     void lazy_score_tile(SizeType row_idx,
                          SizeType beam,
                          const FDMTSearchInput& in,
@@ -321,9 +339,12 @@ private:
     std::unique_ptr<BoxcarDriver> m_driver;
     /// Killed channel runs and the staging block they are zeroed in.
     std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
-    std::vector<uint8_t> m_killed; ///< per channel, 1 = killed
+    /// Per channel: 0 live, 1 killed (zero), 2 killed by a per-call mask
+    /// only (packed input: reads the code input_mean, m_fill_row).
+    std::vector<uint8_t> m_killed;
     std::vector<float> m_masked;
     std::vector<uint8_t> m_masked_packed;
+    std::vector<uint8_t> m_fill_row;
     std::vector<SizeType> m_offsets;
     /// Row range [first, second) of each level's planes, and each row's plane.
     std::vector<std::pair<SizeType, SizeType>> m_level_rows;
@@ -331,6 +352,22 @@ private:
     std::vector<float> m_carry;
     std::vector<BoxcarPeak> m_peaks;
     std::vector<uint64_t> m_per_dm;
+    /// Per-plane counts: kKeepBrightest's detections per (beam, row), the
+    /// first plane of each subband level (boxcar_level_offsets), and the
+    /// call's counters per plane.
+    std::vector<uint64_t> m_row_detected;
+    std::vector<uint32_t> m_level_offsets;
+    std::vector<CandidateCounts> m_plane_counts;
+    /// max_cands_per_dm, or UINT64_MAX when 0 (no cap).
+    uint64_t m_dm_cap = UINT64_MAX;
+    void finish_plane_counts();
+    /// BoxcarConfig::max_candidates_per_plane (0: off): each plane's
+    /// counter and, under kDropNew, the staging buffer of the shares.
+    SizeType m_plane_cap = 0;
+    std::vector<uint64_t> m_plane_next;
+    std::vector<RawCandidate> m_plane_scratch;
+    /// kDropNew with plane shares: `candidate` into its plane's share.
+    void emit_to_plane(SizeType row, const RawCandidate& candidate);
     /// kKeepBrightest: per row, a heap of max_cands_per_dm candidates
     /// (m_per_dm entries used); m_keep_q 0 under kDropNew.
     std::vector<RawCandidate> m_keep;
@@ -366,7 +403,23 @@ private:
     std::optional<BlockNoise> m_evicted;
     bool m_commit_open   = false;
     SizeType m_ring_size = 1;
+    /// Entries the search latency needs (1 + ceil(latency / nsamps), plus
+    /// the surrogate's); above m_ring_size the oldest kept entry takes the
+    /// latest catch-all tables (BlockNoise::catch_all).
+    SizeType m_ring_needed = 1;
+    bool m_has_catch_all   = false; ///< m_catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> m_catch_all;
+    /// What the open commit replaced (restored if its call throws).
+    struct CatchUndo {
+        bool has_catch_all = false;
+        std::shared_ptr<const NoiseTables> catch_all;
+        bool front_set = false;
+        std::shared_ptr<const NoiseTables> steady, transition_tables;
+        bool transition = false;
+    };
+    CatchUndo m_catch_undo;
     std::vector<float> m_screen_thr; ///< per thread: min thresholds of a tile
+    std::vector<uint64_t> m_screen_ithr; ///< packed: min integer cutoffs
     SizeType m_kadane_exact_prefix_cap = kKadaneExactPrefixCap;
     SizeType m_prefix_stride           = 0;
     SizeType m_surrogate_carry_ring    = 0;
@@ -392,6 +445,10 @@ private:
     std::vector<float> m_tile_f32;
     std::vector<uint32_t> m_tile_u32;
     std::vector<float> m_thread_cuts;
+    /// Packed per-call masks: per-thread int32 gate cuts and the float
+    /// gate's centred cutoffs of a row.
+    std::vector<int32_t> m_thread_icuts;
+    std::vector<float> m_screen_eff;
     /// Buffers a deferred construction sized for allocate().
     planned::HostPlan m_deferred;
     bool m_allocated = false;

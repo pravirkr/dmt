@@ -15,6 +15,7 @@
 
 #include "fdmt_boxcar_reference.hpp"
 #include "test_random.hpp"
+#include "test_sized.hpp"
 
 using namespace boxcar_test;
 
@@ -63,7 +64,7 @@ TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096", "[boxcar][cpu]") {
     cfg.max_candidates   = 1U << 20;
     const auto expected  = reference(plan, cfg, true, 1, input);
     REQUIRE(expected.size() > 100);
-    FDMTBoxcar search(plan, cfg, true, Exec::cpu(2));
+    FDMTBoxcar search(plan, cfg, true, Exec::cpu());
     std::vector<RawCandidate> actual;
     for (const auto& block : input) {
         append(actual, search.execute(block));
@@ -72,8 +73,8 @@ TEST_CASE("FDMTBoxcar CPU searches boxes wider than 4096", "[boxcar][cpu]") {
     compare(actual, expected);
 }
 
-TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
-          "[boxcar][cpu]") {
+DMT_SIZED_TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
+                    "[boxcar][cpu]") {
     // chan_dm 20: coherently dedispersed channels (plan level-0 boxes);
     // subband loss 0.3: subband DM grids (pruned tree-subband rows).
     for (const auto [chan_dm, sub_loss] :
@@ -84,6 +85,10 @@ TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
             2, chan_dm, sub_loss);
         const auto input = waterfalls(plan, 2, 4);
         for (const bool smear : {true, false}) {
+            // Small: no box smearing on the plain plan only.
+            if (!full && !smear && (chan_dm != 0.0 || sub_loss != 0.0F)) {
+                continue;
+            }
             for (const auto mode :
                  {PeakFindingMode::kContiguousPeakPerWidth,
                   PeakFindingMode::kContiguousPeakAcrossWidths,
@@ -105,7 +110,7 @@ TEST_CASE("FDMTBoxcar matches materialized FDMT and direct windows",
                          {SizeType{0}, algorithms::kFDMTAutoFuse}) {
                         for (const SizeType chunk :
                              {SizeType{64}, plan.get_nsamps()}) {
-                            FDMTBoxcar search(plan, cfg, smear, Exec::cpu(3), 2,
+                            FDMTBoxcar search(plan, cfg, smear, Exec::cpu(), 2,
                                               fuse, chunk);
                             std::vector<RawCandidate> actual;
                             for (SizeType k = 0; k < input.size(); ++k) {
@@ -362,7 +367,7 @@ TEST_CASE("FDMTBoxcar scores whole blocks over multiple prefix tiles",
         cfg.detect_thresh    = 2.7F;
         cfg.peak_mode        = mode;
         cfg.max_cands_per_dm = 0;
-        FDMTBoxcar search(plan, cfg, true, Exec::cpu(2), 1, 0,
+        FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 1, 0,
                           plan.get_nsamps());
         std::vector<RawCandidate> actual;
         for (const auto& block : input) {
@@ -595,7 +600,7 @@ TEST_CASE("Packed FDMTBoxcar agrees with centered float reference",
                     cfg.input_mean  = mean;
                     for (const SizeType chunk :
                          {SizeType{64}, plan.get_nsamps()}) {
-                        FDMTBoxcar search(plan, cfg, smear, Exec::cpu(3), beams,
+                        FDMTBoxcar search(plan, cfg, smear, Exec::cpu(), beams,
                                           algorithms::kFDMTAutoFuse, chunk);
                         std::vector<RawCandidate> actual;
                         for (const auto& input : packed) {
@@ -625,7 +630,7 @@ TEST_CASE("Packed FDMTBoxcar mean and input validation",
     cfg.input_mean  = 127;
     cfg.noise_sigma = 3;
     cfg.max_boxcar  = 4096;
-    FDMTBoxcar search(plan, cfg, true, Exec::cpu(2));
+    FDMTBoxcar search(plan, cfg, true, Exec::cpu());
     std::vector<uint8_t> input(plan.get_nchans() * plan.get_nsamps(), 127);
     for (int i = 0; i < 260; ++i) {
         CHECK(search.execute(input).total_detected == 0);
@@ -656,7 +661,7 @@ TEST_CASE("Packed FDMTBoxcar wide windows exceed uint32 safely",
     const BoxcarConfig cfg(4096, 2.0F, 0.1F, 1.0F,
                            PeakFindingMode::kAllAboveThreshold, 10000, 0, true,
                            16, 65534.0F);
-    FDMTBoxcar search(plan, cfg, true, Exec::cpu(2), 1, 0, 64);
+    FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 1, 0, 64);
     std::vector<uint8_t> input(7 * 257 * 2, 255);
     bool found = false;
     for (int k = 0; k < 17; ++k) {
@@ -811,7 +816,7 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
                 cfg.input_mean  = 128.0F;
                 cfg.noise_sigma = 16.0F;
             }
-            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(2), 1, 0, 64);
+            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(), 1, 0, 64);
             FDMTBoxcar gpu_s(plan, cfg, true,
                              Exec{algorithms::detail::kGPUBackend, 0}, 1, 0,
                              64);
@@ -913,7 +918,7 @@ TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
                 REQUIRE_FALSE(expected_packed.empty());
                 pcfg.input_nbits = 8;
                 pcfg.input_mean  = 127.5F;
-                std::vector<Exec> execs{Exec::cpu(3)};
+                std::vector<Exec> execs{Exec::cpu()};
 #ifdef DMT_ENABLE_GPU
                 execs.push_back(Exec{algorithms::detail::kGPUBackend, 0});
 #endif
@@ -1008,7 +1013,7 @@ TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
                                                 (maximum + 2.0F) / 12.0F);
                 }
                 for (const SizeType chunk : {SizeType{64}, SizeType{0}}) {
-                    FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(4), kBeams,
+                    FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(), kBeams,
                                      algorithms::kFDMTAutoFuse, chunk);
                     FDMTBoxcar gpu_s(plan, cfg, true,
                                      Exec{algorithms::detail::kGPUBackend, 0},
@@ -1072,8 +1077,8 @@ TEST_CASE("FDMTBoxcar drain() ends the stream", "[boxcar][cpu]") {
     cfg.detect_thresh    = 2.7F;
     cfg.max_candidates   = 500000;
     cfg.max_cands_per_dm = 0;
-    FDMTBoxcar flushed(plan, cfg, true, Exec::cpu(2));
-    FDMTBoxcar drained(plan, cfg, true, Exec::cpu(2));
+    FDMTBoxcar flushed(plan, cfg, true, Exec::cpu());
+    FDMTBoxcar drained(plan, cfg, true, Exec::cpu());
     CHECK(drained.get_search_latency() == 0);
     std::vector<RawCandidate> a;
     std::vector<RawCandidate> b;
@@ -1149,7 +1154,7 @@ TEST_CASE("FDMTBoxcar kill mask reads killed channels as zero",
                 batched_reference(plan, cfg, true, 2, input, kill);
             REQUIRE_FALSE(expected.empty());
             for (const SizeType chunk : {SizeType{32}, SizeType{0}}) {
-                FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 2,
+                FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 2,
                                   algorithms::kFDMTAutoFuse, chunk,
                                   algorithms::kFDMTDefaultMaxMemory, kill);
                 std::vector<RawCandidate> actual;
@@ -1259,7 +1264,7 @@ TEST_CASE("Packed FDMTBoxcar kill mask reads killed channels as code zero",
             REQUIRE_FALSE(expected.empty());
             cfg.input_nbits = bits;
             cfg.input_mean  = mean;
-            FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), beams,
+            FDMTBoxcar search(plan, cfg, true, Exec::cpu(), beams,
                               algorithms::kFDMTAutoFuse, 64,
                               algorithms::kFDMTDefaultMaxMemory, kill);
             std::vector<RawCandidate> actual;
@@ -1368,7 +1373,7 @@ TEST_CASE("FDMTBoxcar kill mask keeps scores calibrated",
 
 TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (cpu)",
           "[boxcar][cpu][budget]") {
-    const auto cpu = Exec::cpu(3);
+    const auto cpu = Exec::cpu();
     for (const auto& c : estimate_cases()) {
         INFO(c.name << " beams " << c.beams);
         const auto e = FDMTBoxcar::estimate_memory(
@@ -1378,7 +1383,6 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (cpu)",
                            algorithms::kFDMTAutoFuse, c.chunk, c.budget,
                            c.kill);
         check_estimate(e, f);
-        CHECK(e.host_staging == 0);
         CHECK(e.usage.budgeted() <= c.budget);
         if (c.chunk != 0) {
             CHECK(e.chunk_nsamps == c.chunk);

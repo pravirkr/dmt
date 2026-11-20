@@ -11,14 +11,18 @@
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "dmt/bit_pack_utils.hpp"
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_noise.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 #include "fdmt_boxcar_reference.hpp"
 #include "test_random.hpp"
+#include "test_sized.hpp"
 
 using namespace boxcar_test;
 
@@ -114,11 +118,101 @@ FDMTBoxcar make_search(const plans::FDMTPlan& plan,
                        SizeType max_memory           = 0,
                        bool smear                    = true) {
     return FDMTBoxcar(
-        plan, cfg, smear, Exec::cpu(3), beams, algorithms::kFDMTAutoFuse, chunk,
+        plan, cfg, smear, Exec::cpu(), beams, algorithms::kFDMTAutoFuse, chunk,
         max_memory == 0 ? algorithms::kFDMTDefaultMaxMemory : max_memory, ctor);
 }
 
+// The stream of `blocks` (one beam, nchans rows of `ns` samples each) cut
+// into blocks of `short_ns` samples (the tail that fills no block dropped).
+std::vector<std::vector<float>>
+reblock(const std::vector<std::vector<float>>& blocks,
+        SizeType nchans,
+        SizeType ns,
+        SizeType short_ns) {
+    const SizeType total = blocks.size() * ns;
+    std::vector<std::vector<float>> out(total / short_ns,
+                                        std::vector<float>(nchans * short_ns));
+    for (SizeType t = 0; t < (total / short_ns) * short_ns; ++t) {
+        for (SizeType c = 0; c < nchans; ++c) {
+            out[t / short_ns][(c * short_ns) + (t % short_ns)] =
+                blocks[t / ns][(c * ns) + (t % ns)];
+        }
+    }
+    return out;
+}
+
+// Per-block masks for `n` blocks: runs of 1..`max_run` blocks drawn from a
+// small pool (killing, reviving and swapping channels, an omitted mask).
+Masks mask_runs(SizeType n, SizeType max_run, unsigned seed) {
+    const Masks pool = {random_mask(32, 21, 0.2),
+                        random_mask(32, 22, 0.5),
+                        {},
+                        random_mask(32, 23, 0.1),
+                        std::vector<uint8_t>(32, 0)};
+    std::mt19937 gen(seed);
+    Masks out;
+    while (out.size() < n) {
+        const auto& m        = pool[gen() % pool.size()];
+        const SizeType run_n = 1 + (gen() % max_run);
+        for (SizeType i = 0; i < run_n && out.size() < n; ++i) {
+            out.push_back(m);
+        }
+    }
+    return out;
+}
+
 } // namespace
+
+TEST_CASE("Boxcar live history equals per-sample liveness",
+          "[boxcar][kill][mask][cpu]") {
+    // The history mask of a block at B: its own channels OR every channel
+    // live in [B - reach, B), from per-sample masks; for any block length
+    // (around the reach too) and a history seeded mid-stream.
+    using algorithms::detail::LiveHistory;
+    const SizeType nchans = 16;
+    const uint64_t reach  = 23;
+    for (const SizeType ns : {SizeType{1}, SizeType{5}, SizeType{22},
+                              SizeType{23}, SizeType{24}, SizeType{60}}) {
+        for (const uint64_t seed_at : {uint64_t{0}, uint64_t{3}}) {
+            DYNAMIC_SECTION("block " << ns << " seeded at block " << seed_at) {
+                const auto ctor = random_mask(nchans, 5, 0.3);
+                // Per-sample liveness: before the seed, the constructor mask.
+                std::vector<std::vector<uint8_t>> sample;
+                for (uint64_t t = 0; t < seed_at * ns; ++t) {
+                    std::vector<uint8_t> m(nchans);
+                    for (SizeType c = 0; c < nchans; ++c) {
+                        m[c] = ctor[c] != 0 ? 1 : 0;
+                    }
+                    sample.push_back(m);
+                }
+                LiveHistory live;
+                live.reset(ctor, seed_at * ns);
+                std::mt19937 gen(static_cast<unsigned>(ns));
+                std::vector<uint8_t> h;
+                for (SizeType k = seed_at; k < seed_at + 40; ++k) {
+                    auto m =
+                        random_mask(nchans, static_cast<unsigned>(gen()), 0.4);
+                    for (auto& v : m) {
+                        v = v != 0 ? 1 : 0;
+                    }
+                    const uint64_t b = k * ns;
+                    live.since(m, b > reach ? b - reach : 0, h);
+                    std::vector<uint8_t> want = m;
+                    for (uint64_t t = b > reach ? b - reach : 0; t < b; ++t) {
+                        for (SizeType c = 0; c < nchans; ++c) {
+                            want[c] = want[c] | sample[t][c];
+                        }
+                    }
+                    REQUIRE(h == want);
+                    live.update(m, b + ns);
+                    for (SizeType t = 0; t < ns; ++t) {
+                        sample.push_back(m);
+                    }
+                }
+            }
+        }
+    }
+}
 
 TEST_CASE("Boxcar noise model equals make_boxcar_plans for any mask",
           "[boxcar][kill][mask][cpu]") {
@@ -133,7 +227,7 @@ TEST_CASE("Boxcar noise model equals make_boxcar_plans for any mask",
                     auto cfg =
                         mask_config(PeakFindingMode::kContiguousPeakPerWidth);
                     cfg.use_trapezoid = trap;
-                    BoxcarNoiseModel model(plan, cfg, smear, 2);
+                    BoxcarNoiseModel model(plan, cfg, smear, 1);
                     std::vector<std::vector<uint8_t>> masks = {
                         std::vector<uint8_t>(32, 1),
                         std::vector<uint8_t>(32, 0),
@@ -176,9 +270,127 @@ TEST_CASE("Boxcar noise model equals make_boxcar_plans for any mask",
     }
 }
 
-TEST_CASE("FDMTBoxcar per-call mask: empty or all-ones is the old overload",
-          "[boxcar][kill][mask][cpu]") {
+TEST_CASE("Boxcar noise model packed cutoffs equal make_boxcar_plans",
+          "[boxcar][kill][mask][packed][cpu]") {
+    // Killed channels read as the code input_mean, so a mask's integer
+    // cutoff is make_boxcar_plans()'s for that mask moved by the exact
+    // difference of the reference (constructor) mean and the mask's mean;
+    // the float tables stay the mask's own.
+    using algorithms::detail::BoxcarNoiseModel;
+    using algorithms::detail::make_boxcar_plans;
+    const plans::FDMTPlan chan_dm_plan(1100, 1500, 32, 400, 0.001F,
+                                       std::vector<IndexType>{0, 3, 9, 20, 41},
+                                       "valid", 1, 40.0);
+    for (const SizeType depth : {SizeType{0}, SizeType{2}, SizeType{9}}) {
+        const auto plan = depth == 9 ? chan_dm_plan : mask_plan(depth);
+        for (const bool smear : {true, false}) {
+            for (const bool trap : {false, true}) {
+                for (const int nbits : {2, 8}) {
+                    DYNAMIC_SECTION("plan " << depth << " smear " << smear
+                                            << " trapezoid " << trap
+                                            << " nbits " << nbits) {
+                        auto cfg = mask_config(
+                            PeakFindingMode::kContiguousPeakPerWidth);
+                        cfg.use_trapezoid = trap;
+                        cfg.input_nbits   = nbits;
+                        cfg.input_mean    = nbits == 8 ? 128.0F : 1.0F;
+                        cfg.noise_sigma   = nbits == 8 ? 10.0F : 0.9F;
+                        for (const unsigned ref_seed : {0U, 7U}) {
+                            const auto reference =
+                                ref_seed == 0 ? std::vector<uint8_t>(32, 1)
+                                              : random_mask(32, ref_seed, 0.3);
+                            BoxcarNoiseModel model(plan, cfg, smear, 1,
+                                                   reference);
+                            const auto ref_planes =
+                                make_boxcar_plans(plan, cfg, smear, reference);
+                            // Masks within the reference: itself, all
+                            // killed, random subsets, half the band.
+                            Masks masks = {reference,
+                                           std::vector<uint8_t>(32, 0)};
+                            for (const unsigned seed : {1U, 2U, 3U}) {
+                                auto m = random_mask(32, seed, 0.4);
+                                for (SizeType c = 0; c < 32; ++c) {
+                                    m[c] = reference[c] != 0 ? m[c] : 0;
+                                }
+                                masks.push_back(m);
+                            }
+                            masks.push_back(reference);
+                            std::fill_n(masks.back().begin(), 16, 0);
+                            for (SizeType mi = 0; mi < masks.size(); ++mi) {
+                                const auto& m = masks[mi];
+                                const auto planes =
+                                    make_boxcar_plans(plan, cfg, smear, m);
+                                const auto t = model.compute(m);
+                                REQUIRE(t->integer_thresh.size() ==
+                                        t->thresh.size());
+                                SizeType k = 0;
+                                for (SizeType pi = 0; pi < planes.size();
+                                     ++pi) {
+                                    const auto& p = planes[pi];
+                                    const auto& q = ref_planes[pi];
+                                    for (SizeType i = 0;
+                                         i < p.raw_thresh_lut.size();
+                                         ++i, ++k) {
+                                        REQUIRE(std::bit_cast<uint32_t>(
+                                                    p.raw_thresh_lut[i]) ==
+                                                std::bit_cast<uint32_t>(
+                                                    t->thresh[k]));
+                                        REQUIRE(std::bit_cast<uint32_t>(
+                                                    p.inv_sigma_lut[i]) ==
+                                                std::bit_cast<uint32_t>(
+                                                    t->inv_sigma[k]));
+                                        const double shift =
+                                            q.integer_mean_lut[i] -
+                                            p.integer_mean_lut[i];
+                                        REQUIRE(shift == std::floor(shift));
+                                        const uint64_t want =
+                                            p.integer_thresh_lut[i] ==
+                                                    UINT64_MAX
+                                                ? UINT64_MAX
+                                                : p.integer_thresh_lut[i] +
+                                                      static_cast<uint64_t>(
+                                                          q.integer_mean_lut
+                                                              [i] -
+                                                          p.integer_mean_lut
+                                                              [i]);
+                                        REQUIRE(t->integer_thresh[k] == want);
+                                        if (mi == 0) {
+                                            // The reference itself: the
+                                            // constructor plan's bits.
+                                            REQUIRE(t->integer_thresh[k] ==
+                                                    q.integer_thresh_lut[i]);
+                                        }
+                                    }
+                                }
+                                REQUIRE(k == t->thresh.size());
+                                REQUIRE(t->bytes() == model.table_bytes());
+                            }
+                            if (ref_seed != 0) {
+                                // A mask reviving a channel the reference
+                                // kills would need a mean it lacks.
+                                const std::vector<uint8_t> all(32, 1);
+                                REQUIRE_THROWS_AS(model.compute(all),
+                                                  std::invalid_argument);
+                            }
+                        }
+                        // The substitution is exact only for integer codes.
+                        cfg.input_mean = nbits == 8 ? 127.5F : 1.5F;
+                        REQUIRE_THROWS_AS(BoxcarNoiseModel(plan, cfg, smear, 1),
+                                          std::invalid_argument);
+                    }
+                }
+            }
+        }
+    }
+}
+
+DMT_SIZED_TEST_CASE(
+    "FDMTBoxcar per-call mask: empty or all-ones is the old overload",
+    "[boxcar][kill][mask][cpu]") {
     for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        if (!full && depth == 0) {
+            continue; // small: the subband plan only
+        }
         const auto plan  = mask_plan(depth);
         const auto input = waterfalls(plan, 2, 4);
         for (const SizeType width : {SizeType{1}, SizeType{37}}) {
@@ -247,13 +459,56 @@ TEST_CASE("FDMTBoxcar per-call mask: a constant mask is the constructor mask",
     }
 }
 
-TEST_CASE("FDMTBoxcar per-call masks changing every block match the reference",
+TEST_CASE("FDMTBoxcar per-call mask: the catch-all through the facade",
           "[boxcar][kill][mask][cpu]") {
+    // Declared masks at the smallest budget take the skewed path, whose
+    // search latency (1641) exceeds the 1024-sample blocks: the facade asks
+    // for the catch-all. A constant mask gives the same tables everywhere,
+    // so the result is the constructor mask's (no cold-prefix skip).
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 400.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 1024, tsamp, grid,
+                               "valid", 3);
+    BoxcarConfig cfg(24, 1.5F, 4.2F, 1.0F,
+                     PeakFindingMode::kContiguousPeakPerWidth, 1U << 20, 0,
+                     false);
+    cfg.per_call_masks = true;
+    const auto min =
+        FDMTBoxcar::estimate_minimum_memory(plan, cfg, true, Exec::cpu());
+    INFO(min.search_path);
+    REQUIRE(min.search_latency > plan.get_nsamps());
+    auto call = make_search(plan, cfg, 1, 0, {}, min.max_memory_bytes);
+    REQUIRE(call.get_search_latency() > plan.get_nsamps());
+    REQUIRE(call.get_memory_usage().total() == min.usage.total());
+    const auto input = test_random::normal<float>(1152 * 1024 * 6, 77);
+    std::vector<std::vector<float>> blocks;
+    for (SizeType k = 0; k < 6; ++k) {
+        blocks.emplace_back(input.begin() + (k * 1152 * 1024),
+                            input.begin() + ((k + 1) * 1152 * 1024));
+    }
+    const auto m       = random_mask(1152, 7, 0.3);
+    cfg.per_call_masks = false;
+    // The same budget: the same (skewed) path.
+    auto ctor = make_search(plan, cfg, 1, 0, m, min.max_memory_bytes);
+    REQUIRE(ctor.get_search_latency() == call.get_search_latency());
+    const auto base = run(ctor, blocks, Masks(blocks.size()), true);
+    REQUIRE(base.size() > 50);
+    compare_exact(run(call, blocks, Masks(blocks.size(), m), true), base);
+    REQUIRE(call.get_memory_usage().total() == min.usage.total());
+}
+
+DMT_SIZED_TEST_CASE(
+    "FDMTBoxcar per-call masks changing every block match the reference",
+    "[boxcar][kill][mask][cpu]") {
     // Changes that kill, revive and swap channels (inside the dispersion
     // sweep and the boxcars of the pulses at every block boundary), an
     // omitted mask (the constructor mask alone), a wholly killed block, and
     // the constructor mask ANDed with all of them.
     for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        if (!full && depth == 0) {
+            continue; // small: the subband plan only
+        }
         const auto plan  = mask_plan(depth);
         const auto input = waterfalls(plan, 1, 8);
         Masks masks      = {
@@ -291,6 +546,51 @@ TEST_CASE("FDMTBoxcar per-call masks changing every block match the reference",
                             compare(run(search, input, masks, true),
                                     expected.candidates);
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar per-call masks on blocks shorter than a window",
+          "[boxcar][kill][mask][cpu]") {
+    // Blocks shorter than the largest support + max_boxcar - 1 (157): a
+    // window reaches back over several blocks and uses the history mask
+    // (its block's channels and every channel live in its reach). Masks
+    // change in runs of 1-6 blocks; the stream is the same 800 samples
+    // for every block length. Search latency 0 (no catch-all).
+    const auto long_plan = mask_plan(0);
+    const auto stream    = waterfalls(long_plan, 1, 2);
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        for (const SizeType ns : {SizeType{1}, SizeType{7}, SizeType{64},
+                                  SizeType{156}, SizeType{157}}) {
+            const plans::FDMTPlan plan(
+                700, 1200, 32, ns, 0.001F,
+                std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120}, "valid",
+                depth);
+            const auto input = reblock(stream, 32, 400, ns);
+            const auto masks = mask_runs(input.size(), 6, 7);
+            for (const bool with_ctor : {false, true}) {
+                const auto ctor = with_ctor ? random_mask(32, 99, 0.25)
+                                            : std::vector<uint8_t>{};
+                for (const auto mode :
+                     {PeakFindingMode::kContiguousPeakPerWidth,
+                      PeakFindingMode::kContiguousPeakAcrossWidths}) {
+                    DYNAMIC_SECTION("depth " << depth << " block " << ns
+                                             << " ctor " << with_ctor
+                                             << " mode "
+                                             << static_cast<int>(mode)) {
+                        const auto cfg      = mask_config(mode);
+                        const auto expected = masked_reference(
+                            plan, cfg, true, input, ctor, masks);
+                        REQUIRE(expected.candidates.size() > 20);
+                        auto search = make_search(plan, cfg, 1, 0, ctor);
+                        REQUIRE(search.get_search_latency() == 0);
+                        compare(run(search, input, masks), expected.candidates);
+                        search.reset_history();
+                        compare(run(search, input, masks, true),
+                                expected.candidates);
                     }
                 }
             }
@@ -379,24 +679,6 @@ TEST_CASE("FDMTBoxcar per-call mask: rejected calls leave the stream unchanged",
         }
         append(out, search.flush());
         compare(out, expected.candidates);
-    }
-
-    SECTION("a block shorter than the support needs") {
-        // 100-sample blocks: the largest support plus max_boxcar - 1 does
-        // not fit; the old overload keeps working.
-        const plans::FDMTPlan short_plan(
-            700, 1200, 32, 100, 0.001F,
-            std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120}, "valid", 1);
-        const auto blocks = waterfalls(short_plan, 1, 3);
-        auto search       = make_search(short_plan, cfg);
-        auto fresh        = make_search(short_plan, cfg);
-        const auto before = search.get_memory_usage().total();
-        CHECK_THROWS_AS(search.execute(std::span<const float>(blocks[0]),
-                                       std::span<const uint8_t>(masks[0])),
-                        std::invalid_argument);
-        CHECK(search.get_memory_usage().total() == before);
-        compare_exact(run(search, blocks, Masks(3)),
-                      run(fresh, blocks, Masks(3)));
     }
 
     SECTION("the memory budget") {
@@ -570,7 +852,7 @@ TEST_CASE("FDMTBoxcar per-call mask: scores stay calibrated on white noise",
     const FDMTBoxcar meta(plan, cfg, true, Exec::cpu());
     const auto planes = meta.get_search_plans();
     const auto widths = planes.front().widths;
-    algorithms::detail::BoxcarNoiseModel model(plan, cfg, true, 2);
+    algorithms::detail::BoxcarNoiseModel model(plan, cfg, true, 1);
     std::vector<std::shared_ptr<const algorithms::detail::NoiseTables>> steady,
         trans;
     for (SizeType k = 0; k < nb; ++k) {
@@ -614,4 +896,649 @@ TEST_CASE("FDMTBoxcar per-call mask: scores stay calibrated on white noise",
     CHECK(std::abs(sigma_steady - 1.0) < 0.04);
     CHECK(sigma_trans < 1.0);
     CHECK(sigma_trans > 0.7);
+}
+
+namespace {
+
+// Every field of two memory usages.
+void check_same_usage(const algorithms::FDMTBoxcarMemoryUsage& a,
+                      const algorithms::FDMTBoxcarMemoryUsage& b) {
+    CHECK(a.plan == b.plan);
+    CHECK(a.state == b.state);
+    CHECK(a.history == b.history);
+    CHECK(a.peaks == b.peaks);
+    CHECK(a.workspace == b.workspace);
+    CHECK(a.candidates == b.candidates);
+    CHECK(a.staging == b.staging);
+    CHECK(a.host == b.host);
+}
+
+} // namespace
+
+TEST_CASE("FDMTBoxcar declared per-call masks are checked and reserved at "
+          "construction",
+          "[boxcar][kill][mask][cpu][memory]") {
+    const Masks masks{random_mask(32, 21, 0.2),
+                      random_mask(32, 22, 0.4),
+                      {},
+                      random_mask(32, 23, 0.3),
+                      random_mask(32, 21, 0.2)};
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        DYNAMIC_SECTION("depth " << depth) {
+            const auto plan  = mask_plan(depth);
+            const auto input = waterfalls(plan, 2, masks.size());
+            const auto cfg =
+                mask_config(PeakFindingMode::kContiguousPeakPerWidth);
+            auto declared           = cfg;
+            declared.per_call_masks = true;
+            const Exec exec         = Exec::cpu();
+            const auto est =
+                FDMTBoxcar::estimate_memory(plan, declared, true, exec, 2);
+            const auto lazy_est =
+                FDMTBoxcar::estimate_memory(plan, cfg, true, exec, 2);
+            // The staging block, the model and its tables, up front.
+            CHECK(est.usage.staging > lazy_est.usage.staging);
+            CHECK(est.usage.plan > lazy_est.usage.plan);
+            auto search = make_search(plan, declared, 2);
+            check_same_usage(search.get_memory_usage(), est.usage);
+            CHECK(est.search_latency == search.get_search_latency());
+            CHECK(est.chunk_nsamps == search.get_chunk_nsamps());
+            if (!est.search_path.empty()) {
+                CHECK(search.summary().find(est.search_path) !=
+                      std::string::npos);
+            }
+            // Candidates as without the declaration; the usage stays put.
+            auto lazy    = make_search(plan, cfg, 2);
+            const auto a = run(search, input, masks);
+            compare_exact(a, run(lazy, input, masks));
+            check_same_usage(search.get_memory_usage(), est.usage);
+            CHECK(lazy.get_memory_usage().total() <= est.usage.total());
+            // A budget of exactly the estimate builds the same instance,
+            // whose masks never throw.
+            auto tight = make_search(plan, declared, 2, est.chunk_nsamps, {},
+                                     est.usage.budgeted());
+            check_same_usage(tight.get_memory_usage(), est.usage);
+            compare_exact(run(tight, input, masks), a);
+            // The budget of the undeclared instance: it fails at its first
+            // per-call mask, the declared one at construction.
+            auto short_lazy = make_search(plan, cfg, 2, lazy_est.chunk_nsamps,
+                                          {}, lazy_est.usage.budgeted());
+            CHECK_THROWS_AS(
+                (void)short_lazy.execute(std::span<const float>(input[0]),
+                                         std::span<const uint8_t>(masks[0])),
+                std::invalid_argument);
+            CHECK_THROWS_AS(make_search(plan, declared, 2,
+                                        lazy_est.chunk_nsamps, {},
+                                        lazy_est.usage.budgeted()),
+                            std::invalid_argument);
+            CHECK_THROWS_AS(
+                FDMTBoxcar::estimate_memory(
+                    plan, declared, true, exec, 2, algorithms::kFDMTAutoFuse,
+                    lazy_est.chunk_nsamps, lazy_est.usage.budgeted()),
+                std::invalid_argument);
+        }
+    }
+    SECTION("what a first per-call mask would reject, rejected up front") {
+        const auto plan = mask_plan(1);
+        auto packed     = mask_config(PeakFindingMode::kContiguousPeakPerWidth);
+        packed.input_nbits    = 8;
+        packed.input_mean     = 127.5F;
+        packed.per_call_masks = true;
+        CHECK_THROWS_AS(make_search(plan, packed), std::invalid_argument);
+        // Supports up to ~120 samples + 300 - 1 > 400-sample blocks: fine
+        // since windows may reach over several blocks.
+        auto wide = mask_config(PeakFindingMode::kContiguousPeakPerWidth, 300);
+        wide.per_call_masks = true;
+        CHECK_NOTHROW(make_search(plan, wide));
+        CHECK(FDMTBoxcar::estimate_memory(plan, wide, true, Exec::cpu())
+                  .usage.total() ==
+              make_search(plan, wide).get_memory_usage().total());
+    }
+}
+
+TEST_CASE("FDMTBoxcar declared per-call masks are reserved before the "
+          "transform's path is chosen",
+          "[boxcar][kill][mask][cpu][memory]") {
+    // A budget the tree path fills without masks: declared masks leave the
+    // transform the rest, so it takes a smaller (skewed) path and fits,
+    // instead of failing once the masks' staging block is added.
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 400.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 4096, tsamp, grid,
+                               "valid", 1);
+    auto cfg = mask_config(PeakFindingMode::kContiguousPeakPerWidth, 24);
+    cfg.max_candidates      = 1U << 16;
+    auto declared           = cfg;
+    declared.per_call_masks = true;
+    const Exec exec         = Exec::cpu();
+    const auto tree = FDMTBoxcar::estimate_memory(plan, cfg, true, exec);
+    INFO("tree path: '" << tree.search_path << "', " << tree.usage.budgeted()
+                        << " B");
+    REQUIRE(tree.search_path.empty());
+    const SizeType budget = tree.usage.budgeted();
+    const auto est        = FDMTBoxcar::estimate_memory(
+        plan, declared, true, exec, 1, algorithms::kFDMTAutoFuse, 0, budget);
+    INFO("declared path: '" << est.search_path << "', " << est.usage.budgeted()
+                            << " B");
+    CHECK_FALSE(est.search_path.empty());
+    CHECK(est.usage.budgeted() <= budget);
+    FDMTBoxcar search(plan, declared, true, exec, 1, algorithms::kFDMTAutoFuse,
+                      0, budget);
+    CHECK(search.get_memory_usage().total() == est.usage.total());
+}
+
+// --- Packed input (8-bit and other depths) under per-call masks ---------
+
+namespace {
+
+// Codes of a float stream (round(mean + scale x), clamped to the depth),
+// packed per row, and the same codes minus the mean as float32: the float
+// engine on the latter is the packed engine's exact counterpart (killed
+// channels read the mean code there, zero here).
+struct PackedStream {
+    std::vector<std::vector<uint8_t>> packed;
+    std::vector<std::vector<float>> centred;
+};
+
+struct Depth {
+    unsigned nbits;
+    uint32_t mean;
+    float scale;
+};
+
+constexpr Depth kDepth8{8, 128, 10.0F};
+
+template <unsigned NB> void put_code(uint8_t* row, SizeType t, uint32_t code) {
+    bit_pack_utils::write_packed_sample<NB>(row, t, code);
+}
+
+PackedStream pack_stream(const std::vector<std::vector<float>>& input,
+                         SizeType rows,
+                         SizeType ns,
+                         Depth d) {
+    const uint32_t top = d.nbits == 16 ? 65535U : (1U << d.nbits) - 1U;
+    const SizeType rb  = bit_pack_utils::packed_row_bytes(ns, d.nbits);
+    PackedStream out;
+    for (const auto& block : input) {
+        std::vector<uint8_t> p(rows * rb, 0);
+        std::vector<float> c(rows * ns);
+        for (SizeType r = 0; r < rows; ++r) {
+            for (SizeType t = 0; t < ns; ++t) {
+                const float v   = std::round(static_cast<float>(d.mean) +
+                                             (d.scale * block[(r * ns) + t]));
+                const auto code = static_cast<uint32_t>(
+                    std::clamp(v, 0.0F, static_cast<float>(top)));
+                uint8_t* row = p.data() + (r * rb);
+                switch (d.nbits) {
+                case 1:
+                    put_code<1>(row, t, code);
+                    break;
+                case 2:
+                    put_code<2>(row, t, code);
+                    break;
+                case 4:
+                    put_code<4>(row, t, code);
+                    break;
+                case 8:
+                    put_code<8>(row, t, code);
+                    break;
+                default:
+                    put_code<16>(row, t, code);
+                    break;
+                }
+                c[(r * ns) + t] =
+                    static_cast<float>(code) - static_cast<float>(d.mean);
+            }
+        }
+        out.packed.push_back(std::move(p));
+        out.centred.push_back(std::move(c));
+    }
+    return out;
+}
+
+// A threshold exact in binary: the float cutoff (rounded to float) and the
+// integer one (the ceiling of the exact value) then agree on integer sums.
+constexpr float kExactThresh = 2.75F;
+
+BoxcarConfig with_depth(BoxcarConfig cfg, Depth d) {
+    cfg.input_nbits   = static_cast<int>(d.nbits);
+    cfg.input_mean    = static_cast<float>(d.mean);
+    cfg.noise_sigma   = d.scale;
+    cfg.detect_thresh = kExactThresh;
+    return cfg;
+}
+
+BoxcarConfig float_twin(BoxcarConfig cfg, Depth d) {
+    cfg.noise_sigma   = d.scale;
+    cfg.detect_thresh = kExactThresh;
+    return cfg;
+}
+
+std::vector<RawCandidate>
+run_packed(FDMTBoxcar& search,
+           const std::vector<std::vector<uint8_t>>& input,
+           const Masks& masks,
+           bool drain         = false,
+           bool old_for_empty = true) {
+    std::vector<RawCandidate> out;
+    for (SizeType k = 0; k < input.size(); ++k) {
+        const auto& m = masks[k];
+        if (m.empty() && old_for_empty) {
+            append(out, search.execute(std::span<const uint8_t>(input[k])));
+        } else {
+            append(out, search.execute(std::span<const uint8_t>(input[k]),
+                                       std::span<const uint8_t>(m)));
+        }
+    }
+    append(out, drain ? search.drain() : search.flush());
+    return out;
+}
+
+} // namespace
+
+DMT_SIZED_TEST_CASE(
+    "FDMTBoxcar packed per-call mask: empty or all-ones is the old "
+    "overload",
+    "[boxcar][kill][mask][packed][cpu]") {
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        if (!full && depth == 0) {
+            continue; // small: the subband plan only
+        }
+        const auto plan = mask_plan(depth);
+        const auto input =
+            pack_stream(waterfalls(plan, 2, 4), 64, 400, kDepth8);
+        for (const auto screen :
+             {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kNone,
+              BoxcarScreenMode::kKadane}) {
+            for (const auto mode :
+                 {PeakFindingMode::kContiguousPeakPerWidth,
+                  PeakFindingMode::kContiguousPeakAcrossWidths,
+                  PeakFindingMode::kAllAboveThreshold}) {
+                for (const bool trap : {false, true}) {
+                    DYNAMIC_SECTION("depth "
+                                    << depth << " screen "
+                                    << static_cast<int>(screen) << " mode "
+                                    << static_cast<int>(mode) << " trapezoid "
+                                    << trap) {
+                        auto cfg = with_depth(mask_config(mode), kDepth8);
+                        cfg.use_trapezoid = trap;
+                        cfg.screen_mode   = screen;
+                        auto old          = make_search(plan, cfg, 2);
+                        const auto base =
+                            run_packed(old, input.packed, Masks(4));
+                        REQUIRE(base.size() > 20);
+                        auto empty = make_search(plan, cfg, 2);
+                        compare_exact(run_packed(empty, input.packed, Masks(4),
+                                                 false, false),
+                                      base);
+                        auto ones = make_search(plan, cfg, 2);
+                        const Masks all(4, std::vector<uint8_t>(32, 1));
+                        compare_exact(run_packed(ones, input.packed, all),
+                                      base);
+                        Masks mixed(4);
+                        mixed[1] = all[1];
+                        mixed[3] = all[3];
+                        ones.reset_history();
+                        compare_exact(run_packed(ones, input.packed, mixed),
+                                      base);
+                    }
+                }
+            }
+        }
+    }
+}
+
+DMT_SIZED_TEST_CASE(
+    "FDMTBoxcar packed per-call masks equal float on centred codes",
+    "[boxcar][kill][mask][packed][cpu]") {
+    // Killed channels read the mean code: on codes minus the mean as float
+    // they read zero, so the packed search (integer sums and cutoffs, the
+    // same tables) equals the float one bit for bit (no box smearing, so
+    // the float sums are exact). Masks kill, revive and swap channels at
+    // every block boundary (pulses cross each one), the first block takes
+    // the old overload (per-call masks start with peaks open), and an
+    // omitted mask and a wholly killed block are included.
+    const Masks masks = {
+        {},
+        random_mask(32, 11, 0.2),
+        random_mask(32, 12, 0.5),
+        {},
+        std::vector<uint8_t>(32, 0),
+        random_mask(32, 13, 0.1),
+        std::vector<uint8_t>(32, 1),
+        random_mask(32, 14, 0.6),
+    };
+    for (const SizeType depth : {SizeType{0}, SizeType{2}}) {
+        if (!full && depth == 0) {
+            continue; // small: the subband plan only
+        }
+        const auto plan   = mask_plan(depth);
+        const auto stream = waterfalls(plan, 1, 8);
+        for (const bool with_ctor : {false, true}) {
+            const auto ctor =
+                with_ctor ? random_mask(32, 99, 0.25) : std::vector<uint8_t>{};
+            for (const auto screen :
+                 {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kNone,
+                  BoxcarScreenMode::kKadane}) {
+                for (const auto mode :
+                     {PeakFindingMode::kContiguousPeakPerWidth,
+                      PeakFindingMode::kContiguousPeakAcrossWidths,
+                      PeakFindingMode::kAllAboveThreshold}) {
+                    for (const bool trap : {false, true}) {
+                        DYNAMIC_SECTION(
+                            "depth " << depth << " ctor " << with_ctor
+                                     << " screen " << static_cast<int>(screen)
+                                     << " mode " << static_cast<int>(mode)
+                                     << " trapezoid " << trap) {
+                            auto base          = mask_config(mode);
+                            base.use_trapezoid = trap;
+                            base.screen_mode   = screen;
+                            const auto input =
+                                pack_stream(stream, 32, 400, kDepth8);
+                            for (const SizeType chunk :
+                                 {SizeType{64}, plan.get_nsamps()}) {
+                                auto fl =
+                                    make_search(plan, float_twin(base, kDepth8),
+                                                1, chunk, ctor, 0, false);
+                                const auto want = run(fl, input.centred, masks);
+                                REQUIRE(want.size() > 50);
+                                auto pk =
+                                    make_search(plan, with_depth(base, kDepth8),
+                                                1, chunk, ctor, 0, false);
+                                compare_exact(
+                                    run_packed(pk, input.packed, masks), want);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar packed per-call masks at every bit depth and on short "
+          "blocks",
+          "[boxcar][kill][mask][packed][cpu]") {
+    // The mean code of each depth (1-bit: 0; 16-bit: two bytes), against
+    // the float search on centred codes; blocks shorter than a window
+    // (history masks over several blocks) and 400-sample blocks.
+    const auto long_plan = mask_plan(0);
+    const auto stream    = waterfalls(long_plan, 1, 2);
+    const auto ctor      = random_mask(32, 99, 0.25);
+    for (const Depth d :
+         {Depth{1, 0, 1.0F}, Depth{2, 1, 1.0F}, Depth{4, 8, 2.0F}, kDepth8,
+          Depth{16, 1000, 100.0F}}) {
+        for (const SizeType ns : {SizeType{7}, SizeType{64}, SizeType{400}}) {
+            const plans::FDMTPlan plan(
+                700, 1200, 32, ns, 0.001F,
+                std::vector<IndexType>{0, 3, 9, 20, 41, 77, 120}, "valid", 0);
+            const auto blocks = reblock(stream, 32, 400, ns);
+            const auto input  = pack_stream(blocks, 32, ns, d);
+            const auto masks  = mask_runs(blocks.size(), 6, 7);
+            for (const auto [mode, screen] :
+                 {std::pair{PeakFindingMode::kContiguousPeakPerWidth,
+                            BoxcarScreenMode::kPrefix},
+                  std::pair{PeakFindingMode::kAllAboveThreshold,
+                            BoxcarScreenMode::kPrefix},
+                  std::pair{PeakFindingMode::kContiguousPeakPerWidth,
+                            BoxcarScreenMode::kKadane},
+                  std::pair{PeakFindingMode::kAllAboveThreshold,
+                            BoxcarScreenMode::kKadane}}) {
+                DYNAMIC_SECTION("nbits " << d.nbits << " block " << ns
+                                         << " mode " << static_cast<int>(mode)
+                                         << " screen "
+                                         << static_cast<int>(screen)) {
+                    auto base        = mask_config(mode);
+                    base.screen_mode = screen;
+                    auto fl = make_search(plan, float_twin(base, d), 1, 0, ctor,
+                                          0, false);
+                    const auto want = run(fl, input.centred, masks);
+                    REQUIRE(want.size() > 10);
+                    auto pk = make_search(plan, with_depth(base, d), 1, 0, ctor,
+                                          0, false);
+                    compare_exact(run_packed(pk, input.packed, masks), want);
+                }
+            }
+        }
+    }
+}
+
+DMT_SIZED_TEST_CASE("FDMTBoxcar packed per-call masks: the catch-all",
+                    "[boxcar][kill][mask][packed][cpu]") {
+    // The skewed path's search latency (over a 1024-sample block) makes the
+    // facade keep the catch-all tables; killed channels read the mean code,
+    // so without box smearing the packed search equals the float one on
+    // centred codes bit for bit. Packed input takes the skewed path first
+    // on the CPU; the float search gets the same path at the larger of the
+    // two minimum budgets (asserted through the latency).
+    const float tsamp = 455.6e-6F;
+    const auto grid   = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 400.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 1024, tsamp, grid,
+                               "valid", 3);
+    const SizeType nc      = plan.get_nchans();
+    const SizeType ns      = plan.get_nsamps();
+    const SizeType kBlocks = full ? 8 : 6;
+    const auto noise       = test_random::normal<float>(nc * ns * kBlocks, 321);
+    std::vector<std::vector<float>> blocks;
+    for (SizeType k = 0; k < kBlocks; ++k) {
+        blocks.emplace_back(
+            noise.begin() + static_cast<std::ptrdiff_t>(k * nc * ns),
+            noise.begin() + static_cast<std::ptrdiff_t>((k + 1) * nc * ns));
+    }
+    const auto input = pack_stream(blocks, nc, ns, kDepth8);
+    Masks masks;
+    for (SizeType k = 0; k < kBlocks; ++k) {
+        masks.push_back(k == 0 || k == 4
+                            ? std::vector<uint8_t>{}
+                            : random_mask(nc, static_cast<unsigned>(40 + k),
+                                          k < kBlocks / 2 ? 0.3 : 0.6));
+    }
+    for (const auto screen :
+         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kPrefix}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            // Small: two of the four pairs.
+            if (!full && ((screen == BoxcarScreenMode::kKadane) !=
+                          (mode == PeakFindingMode::kContiguousPeakPerWidth))) {
+                continue;
+            }
+            DYNAMIC_SECTION("screen " << static_cast<int>(screen) << " mode "
+                                      << static_cast<int>(mode)) {
+                // Cold windows skipped (the default): with skip_cold_prefix
+                // false the packed and float searches differ there.
+                BoxcarConfig base(24, 1.5F, 4.2F, 1.0F, mode, 1U << 20, 0,
+                                  true);
+                base.screen_mode    = screen;
+                base.per_call_masks = true;
+                // As the GPU catch-all test: a threshold that keeps the
+                // candidate count moderate (at kExactThresh, ~10^6 sums sit
+                // on a cutoff, where the float and integer cutoffs of this
+                // plan's row variances can disagree).
+                auto pk            = with_depth(base, kDepth8);
+                auto fl            = float_twin(base, kDepth8);
+                pk.detect_thresh   = 4.75F;
+                fl.detect_thresh   = 4.75F;
+                const auto minimum = [&](const BoxcarConfig& c) {
+                    return FDMTBoxcar::estimate_minimum_memory(plan, c, false,
+                                                               Exec::cpu());
+                };
+                const SizeType budget = std::max(minimum(pk).max_memory_bytes,
+                                                 minimum(fl).max_memory_bytes);
+                auto a = make_search(plan, pk, 1, 0, {}, budget, false);
+                auto b = make_search(plan, fl, 1, 0, {}, budget, false);
+                INFO(a.summary());
+                REQUIRE(a.get_search_latency() > ns);
+                REQUIRE(b.get_search_latency() == a.get_search_latency());
+                const auto want = run(b, input.centred, masks, true);
+                REQUIRE(want.size() > 50);
+                compare_exact(run_packed(a, input.packed, masks, true), want);
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar packed per-call masks: the Kadane gate equals the "
+          "prefix screen",
+          "[boxcar][kill][mask][packed][cpu]") {
+    // Both screens are exact, so with box smearing too (where the float
+    // twin is not) the gate must pass every hit of the per-call tables:
+    // 16-bit smeared sums exceed the exact int32 gate, which leaves the
+    // float gate on centred codes.
+    const auto plan   = mask_plan(2);
+    const auto stream = waterfalls(plan, 1, 8);
+    const Masks masks = {
+        {},
+        random_mask(32, 11, 0.2),
+        random_mask(32, 12, 0.5),
+        {},
+        std::vector<uint8_t>(32, 0),
+        random_mask(32, 13, 0.1),
+        std::vector<uint8_t>(32, 1),
+        random_mask(32, 14, 0.6),
+    };
+    const auto ctor = random_mask(32, 99, 0.25);
+    for (const Depth d : {kDepth8, Depth{16, 30000, 3000.0F}}) {
+        const auto input = pack_stream(stream, 32, 400, d);
+        for (const bool smear : {false, true}) {
+            for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                    PeakFindingMode::kAllAboveThreshold}) {
+                DYNAMIC_SECTION("nbits " << d.nbits << " smear " << smear
+                                         << " mode "
+                                         << static_cast<int>(mode)) {
+                    auto cfg        = with_depth(mask_config(mode), d);
+                    cfg.screen_mode = BoxcarScreenMode::kPrefix;
+                    auto prefix = make_search(plan, cfg, 1, 0, ctor, 0, smear);
+                    const auto want = run_packed(prefix, input.packed, masks);
+                    REQUIRE(want.size() > 50);
+                    cfg.screen_mode = BoxcarScreenMode::kKadane;
+                    auto gate = make_search(plan, cfg, 1, 0, ctor, 0, smear);
+                    compare_exact(run_packed(gate, input.packed, masks), want);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar packed per-call mask: a constant mask with box smearing",
+          "[boxcar][kill][mask][packed][cpu]") {
+    // Smeared sums are not exact in float; instead a constant per-call
+    // mask over a constructor mask keeps one table everywhere but the
+    // stream's first windows, so it equals itself under any blocking and
+    // a reset, and keeps candidates of the masked-out channels' pulses
+    // out (their codes never reach the sums).
+    const auto plan   = mask_plan(2);
+    const auto stream = waterfalls(plan, 1, 4);
+    auto loud         = stream;
+    const auto m      = random_mask(32, 7, 0.4);
+    for (auto& block : loud) {
+        for (SizeType c = 0; c < 32; ++c) {
+            if (m[c] == 0) {
+                for (SizeType t = 0; t < 400; ++t) {
+                    block[(c * 400) + t] = 12.0F; // clamps at 255
+                }
+            }
+        }
+    }
+    const auto quiet = pack_stream(stream, 32, 400, kDepth8);
+    const auto noisy = pack_stream(loud, 32, 400, kDepth8);
+    for (const auto screen :
+         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
+          BoxcarScreenMode::kKadaneSurrogate}) {
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            DYNAMIC_SECTION("screen " << static_cast<int>(screen) << " mode "
+                                      << static_cast<int>(mode)) {
+                auto cfg        = with_depth(mask_config(mode), kDepth8);
+                cfg.screen_mode = screen;
+                auto a          = make_search(plan, cfg);
+                const auto base = run_packed(a, quiet.packed, Masks(4, m));
+                REQUIRE(base.size() > 20);
+                auto b = make_search(plan, cfg);
+                compare_exact(run_packed(b, noisy.packed, Masks(4, m)), base);
+                a.reset_history();
+                b.reset_history();
+                compare_exact(run_packed(b, noisy.packed, Masks(4, m), true),
+                              run_packed(a, quiet.packed, Masks(4, m), true));
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMTBoxcar packed per-call mask: rejected calls and memory",
+          "[boxcar][kill][mask][packed][cpu]") {
+    const auto plan   = mask_plan(1);
+    const auto stream = waterfalls(plan, 1, 4);
+    const auto input  = pack_stream(stream, 32, 400, kDepth8);
+    auto base         = mask_config(PeakFindingMode::kContiguousPeakPerWidth);
+    base.screen_mode  = BoxcarScreenMode::kPrefix;
+    const Masks masks = {random_mask(32, 3, 0.3),
+                         random_mask(32, 4, 0.3),
+                         {},
+                         random_mask(32, 5, 0.5)};
+    auto fl = make_search(plan, float_twin(base, kDepth8), 1, 0, {}, 0, false);
+    const auto want = run(fl, input.centred, masks);
+    REQUIRE(want.size() > 20);
+    const auto cfg = with_depth(base, kDepth8);
+
+    SECTION("wrong mask length or waterfall size") {
+        auto search = make_search(plan, cfg, 1, 0, {}, 0, false);
+        std::vector<RawCandidate> out;
+        for (SizeType k = 0; k < input.packed.size(); ++k) {
+            const std::vector<uint8_t> short_mask(31, 1);
+            CHECK_THROWS_AS(
+                search.execute(std::span<const uint8_t>(input.packed[k]),
+                               std::span<const uint8_t>(short_mask)),
+                std::invalid_argument);
+            const std::span<const uint8_t> part(input.packed[k].data(), 100);
+            CHECK_THROWS_AS(
+                search.execute(part, std::span<const uint8_t>(masks[0])),
+                std::invalid_argument);
+            const auto& m = masks[k];
+            append(
+                out,
+                m.empty()
+                    ? search.execute(std::span<const uint8_t>(input.packed[k]))
+                    : search.execute(std::span<const uint8_t>(input.packed[k]),
+                                     std::span<const uint8_t>(m)));
+        }
+        append(out, search.flush());
+        compare_exact(out, want);
+    }
+
+    SECTION("a non-integer input_mean") {
+        // Killed channels read the code input_mean: only a whole code
+        // keeps the means exact. The first mask (or declaring masks)
+        // raises; the stream goes on as before.
+        auto other       = cfg;
+        other.input_mean = 127.5F;
+        auto search      = make_search(plan, other, 1, 0, {}, 0, false);
+        auto fresh       = make_search(plan, other, 1, 0, {}, 0, false);
+        CHECK_THROWS_AS(
+            search.execute(std::span<const uint8_t>(input.packed[0]),
+                           std::span<const uint8_t>(masks[0])),
+            std::invalid_argument);
+        compare_exact(run_packed(search, input.packed, Masks(4)),
+                      run_packed(fresh, input.packed, Masks(4)));
+        other.per_call_masks = true;
+        CHECK_THROWS_AS(make_search(plan, other), std::invalid_argument);
+    }
+
+    SECTION("memory is accounted") {
+        auto search       = make_search(plan, cfg, 1, 0, {}, 0, false);
+        const auto before = search.get_memory_usage();
+        CHECK(before.staging == 0);
+        (void)search.execute(std::span<const uint8_t>(input.packed[0]),
+                             std::span<const uint8_t>(masks[0]));
+        const auto after = search.get_memory_usage();
+        // The staging block and the mean-code row.
+        CHECK(after.staging == (32 * 400) + 400);
+        CHECK(after.workspace > before.workspace);
+        search.reset_history();
+        compare_exact(run_packed(search, input.packed, masks), want);
+        CHECK(search.get_memory_usage().total() <=
+              after.total() + (8 * 1024 * 1024));
+    }
 }

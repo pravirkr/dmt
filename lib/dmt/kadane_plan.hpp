@@ -138,6 +138,20 @@ struct KadaneGatePlan {
                             std::span<const float> min_thr,
                             std::span<float> out_cuts) const;
 
+    /**
+     * @brief Integer counterpart of recompute_row_cuts() for the exact
+     * int32 gate (`has_int32`): bucket cuts of `row` at its fixed `ibias`
+     * and `int_shift` against alternate integer cutoffs `int_thr` (same
+     * units as the plan's integer_thresh_lut; UINT64_MAX = never). Lossless
+     * for any cutoffs; clamped to [0, INT32_MAX / 4] (a lower cut only
+     * triggers more often), INT32_MAX when no width of a bucket can fire.
+     * Valid because the row's mean (hence the bias' negative drift) is the
+     * plan's.
+     */
+    void recompute_row_icuts(SizeType row,
+                             std::span<const uint64_t> int_thr,
+                             std::span<int32_t> out_cuts) const;
+
     [[nodiscard]] SizeType memory_bytes() const noexcept {
         return (widths.size() * sizeof(uint32_t)) +
                ((bias.size() + cut.size()) * sizeof(float)) +

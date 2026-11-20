@@ -49,6 +49,8 @@ struct SurrogateEmitCtx {
     uint32_t max_width;
     BoxcarKeepEntry* keep_store;
     SizeType keep_q;
+    uint64_t* detected; ///< the row's detections (kKeepBrightest)
+    SizeType base = 0;  ///< first slot (PlaneShare)
 };
 
 DMT_D inline void emit_surrogate_raw_gpu(const SurrogateEmitCtx& out,
@@ -62,13 +64,14 @@ DMT_D inline void emit_surrogate_raw_gpu(const SurrogateEmitCtx& out,
     const uint32_t clamped_w = w_lo > out.max_width ? out.max_width : w_lo;
     increment(&out.counts->total_detected);
     if (out.keep_q != 0) {
+        increment(out.detected);
         keep_insert(out.keep_store, out.per_dm, out.keep_q,
                     {peak_sample, begin_sample, end_sample, snr,
                      pack_keep_filter(filter_idx, clamped_w)},
                     out.counts);
         return;
     }
-    if (out.dm_cap != 0 && increment(out.per_dm) >= out.dm_cap) {
+    if (increment(out.per_dm) >= out.dm_cap) { // SIZE_MAX: no cap
         increment(&out.counts->dropped_per_dm);
         return;
     }
@@ -77,14 +80,14 @@ DMT_D inline void emit_surrogate_raw_gpu(const SurrogateEmitCtx& out,
         increment(&out.counts->dropped_global);
         return;
     }
-    RawCandidate candidate = out.prototype;
-    candidate.peak_sample  = peak_sample;
-    candidate.begin_sample = begin_sample;
-    candidate.end_sample   = end_sample;
-    candidate.snr          = snr;
-    candidate.filter_idx   = filter_idx;
-    candidate.width        = clamped_w;
-    out.candidates[slot]   = candidate;
+    RawCandidate candidate          = out.prototype;
+    candidate.peak_sample           = peak_sample;
+    candidate.begin_sample          = begin_sample;
+    candidate.end_sample            = end_sample;
+    candidate.snr                   = snr;
+    candidate.filter_idx            = filter_idx;
+    candidate.width                 = clamped_w;
+    out.candidates[out.base + slot] = candidate;
     increment(&out.counts->emitted_count);
 }
 
@@ -459,7 +462,10 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
                                  kadane::KadaneSurrogateDeviceView surr,
                                  BlockTables block_tables,
                                  BoxcarKeepEntry* keep_all,
-                                 SizeType keep_q) {
+                                 SizeType keep_q,
+                                 uint64_t* detected_all,
+                                 uint64_t* plane_slots,
+                                 SizeType plane_cap) {
     const int tid_in_block = static_cast<int>(threadIdx.x);
     const int lane         = tid_in_block % kWarp;
     const SizeType task =
@@ -510,13 +516,16 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
 
     RawCandidate prototype = row.candidate;
     prototype.beam_idx     = static_cast<uint32_t>(beam);
+    const PlaneShare share =
+        plane_share(slots, capacity, plane_slots, plane_cap, row.plane);
     const SurrogateEmitCtx out_ctx{
-        candidates, counts,
-        slots,      per_dm_all + index,
-        capacity,   dm_cap,
-        prototype,  widths,
-        max_width,  keep_q != 0 ? keep_all + (index * keep_q) : nullptr,
-        keep_q};
+        candidates,     counts,
+        share.slots,    per_dm_all + index,
+        share.capacity, dm_cap,
+        prototype,      widths,
+        max_width,      keep_q != 0 ? keep_all + (index * keep_q) : nullptr,
+        keep_q,         keep_q != 0 ? detected_all + index : nullptr,
+        share.base};
     BoxcarPeak pending{};
     kadane::KadaneSurrogateRowState row_st{};
     if (lane == 0) {
@@ -534,7 +543,7 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
     // mixed/split.
     SurrogateSubrangeTables chunk_tbl{plane_thr, plane_inv, false};
     bool need_per_tile_triggers = false;
-    if constexpr (kBlockNoise && !kIsPacked) {
+    if constexpr (kBlockNoise) {
         if (block_tables.count > 0) {
             const uint64_t chunk_s0 = input.sample_begin;
             const uint64_t chunk_s1 = chunk_s0 + input.nsamps - 1ULL;
@@ -579,7 +588,7 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
         while (cur_s < s_end) {
             uint64_t cur_end                = s_end;
             SurrogateSubrangeTables sub_tbl = chunk_tbl;
-            if constexpr (kBlockNoise && !kIsPacked) {
+            if constexpr (kBlockNoise) {
                 if (block_tables.count == 2 && cur_s < block_tables.first[1] &&
                     block_tables.first[1] < s_end) {
                     cur_end = block_tables.first[1];
@@ -602,7 +611,7 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
                     const bool is_valid = !skip_cold || gt >= row.warmup;
                     const auto emit_fn =
                         [&] DMT_D(kadane::SurrogateExcursion ex) {
-                            if constexpr (kBlockNoise && !kIsPacked) {
+                            if constexpr (kBlockNoise) {
                                 if (!ex.has_snr) {
                                     uint32_t filt = 0U;
                                     const float snr =
@@ -631,8 +640,7 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
                                     }
                                 }
                             }
-                            handle_surrogate_excursion_gpu<kBlockNoise &&
-                                                           !kIsPacked>(
+                            handle_surrogate_excursion_gpu<kBlockNoise>(
                                 surr, row_index, nfilters, detect_thresh, mode,
                                 plane_thr, plane_inv, block_tables, &sub_tbl,
                                 cur_s, cur_end, out_ctx, pending, row_st, ex);
@@ -643,7 +651,7 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
                 }
             }
 
-            if constexpr (kBlockNoise && !kIsPacked) {
+            if constexpr (kBlockNoise) {
                 if (lane == 0 && block_tables.count > 0) {
                     for (SizeType k = 0; k < np; ++k) {
                         cache_surrogate_pass_snr_gpu<true>(
@@ -714,7 +722,10 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
                            kadane::KadaneSurrogateDeviceView surr,
                            BlockTables block_tables,
                            BoxcarKeepEntry* keep_all,
-                           SizeType keep_q) {
+                           SizeType keep_q,
+                           uint64_t* detected_all,
+                           uint64_t* plane_slots,
+                           SizeType plane_cap) {
     const int tid_in_block = static_cast<int>(threadIdx.x);
     const int lane         = tid_in_block % kWarp;
     const SizeType index =
@@ -761,13 +772,16 @@ __global__ void __launch_bounds__(kSurrBlockThreads, 4)
     if (lane == 0) {
         RawCandidate prototype = rows[row_index].candidate;
         prototype.beam_idx     = static_cast<uint32_t>(beam);
+        const PlaneShare share = plane_share(slots, capacity, plane_slots,
+                                             plane_cap, rows[row_index].plane);
         const SurrogateEmitCtx out_ctx{
-            candidates, counts,
-            slots,      per_dm_all + index,
-            capacity,   dm_cap,
-            prototype,  widths,
-            max_width,  keep_q != 0 ? keep_all + (index * keep_q) : nullptr,
-            keep_q};
+            candidates,     counts,
+            share.slots,    per_dm_all + index,
+            share.capacity, dm_cap,
+            prototype,      widths,
+            max_width,      keep_q != 0 ? keep_all + (index * keep_q) : nullptr,
+            keep_q,         keep_q != 0 ? detected_all + index : nullptr,
+            share.base};
         BoxcarPeak pending = peaks_all[index * peak_count];
         auto row_st        = surr.row_states[index];
         if (!row_st.initialized) {
@@ -970,15 +984,20 @@ void FDMTBoxcarCudaEngine::launch_score_surrogate(const FDMTSearchInput& input,
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 total_tasks, raw(m_widths_d), m_filters, max_w,
                 m_config.detect_thresh, raw(m_thresholds_d), raw(m_scales_d),
-                raw(m_peaks_d), raw(m_open_d), m_peak_count,
-                raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d),
-                raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
+                raw(m_peaks_d), raw(m_open_d), m_peak_count, candidate_out(),
+                raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
+                m_config.max_candidates, dm_cap(), m_config.peak_mode,
                 m_config.skip_cold_prefix, root, surr_view, bt, raw(m_bright_d),
-                m_bright_q);
+                m_bright_q, raw(m_row_detected_d), raw(m_plane_slots_d),
+                m_plane_cap);
     };
     if (m_config.input_nbits != 32) {
-        launch.template operator()<true, false>(BlockTables{});
+        // Per-call mask tables take their own kernel instance.
+        if (m_block_tables.count > 0) {
+            launch.template operator()<true, true>(m_block_tables);
+        } else {
+            launch.template operator()<true, false>(BlockTables{});
+        }
     } else if (m_block_tables.count > 0) {
         launch.template operator()<false, true>(m_block_tables);
     } else {
@@ -1003,17 +1022,69 @@ void FDMTBoxcarCudaEngine::launch_flush_surrogate(cudaStream_t stream) {
             raw(m_rows_d), m_rows.size(), total_tasks, m_peak_count,
             raw(m_peaks_d), raw(m_open_d), raw(m_widths_d), m_filters, max_w,
             m_config.detect_thresh, m_config.peak_mode, raw(m_thresholds_d),
-            raw(m_scales_d), raw(m_candidates_d), raw(m_counts_d),
-            raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-            m_config.max_cands_per_dm, surr_view, bt, raw(m_bright_d),
-            m_bright_q);
+            raw(m_scales_d), candidate_out(), raw(m_counts_d), raw(m_slots_d),
+            raw(m_per_dm_d), m_config.max_candidates, dm_cap(), surr_view, bt,
+            raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
+            raw(m_plane_slots_d), m_plane_cap);
     };
-    if (m_block_tables.count > 0 && m_config.input_nbits == 32) {
+    if (m_block_tables.count > 0) {
         launch_fl.template operator()<true>(m_block_tables);
     } else {
         launch_fl.template operator()<false>(BlockTables{});
     }
     gpu_utils::check_last_gpu_error("FDMTBoxcar surrogate flush failed");
+}
+
+namespace {
+
+// Packed rows when per-call masks start: the constructor tables' S/N of
+// open excursions, as the float kernel caches at the end of every call
+// (the packed one does not, so the unmasked path stays as it was).
+__global__ void
+kernel_cache_surrogate_snr(SizeType nrows,
+                           SizeType tasks,
+                           const uint32_t* widths,
+                           SizeType nfilters,
+                           const float* thresholds,
+                           const float* inv_sigma,
+                           kadane::KadaneSurrogateDeviceView surr) {
+    const SizeType idx =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (idx >= tasks) {
+        return;
+    }
+    const SizeType r = idx % nrows;
+    if (surr.disabled_row[r] != 0U || surr.row_pos[idx] == 0ULL) {
+        return;
+    }
+    auto& st = surr.row_states[idx];
+    if (!st.initialized) {
+        return;
+    }
+    for (SizeType k = 0; k < surr.num_passes; ++k) {
+        cache_surrogate_pass_snr_gpu<false>(
+            surr, r, widths, nfilters, thresholds + (r * nfilters),
+            inv_sigma + (r * nfilters), BlockTables{}, nullptr, 0, 0,
+            st.passes[k], static_cast<uint32_t>(k), nullptr);
+    }
+}
+
+} // namespace
+
+void FDMTBoxcarCudaEngine::sync_surrogate_snr() {
+    // Queued calls may still update the states: after them, before the next.
+    m_work.wait();
+    const SizeType tasks = m_rows.size() * m_beams;
+    if (tasks == 0 || m_surrogate_rows_d.empty()) {
+        return;
+    }
+    const auto blocks = static_cast<unsigned>((tasks + 255) / 256);
+    kernel_cache_surrogate_snr<<<blocks, 256>>>(
+        m_rows.size(), tasks, raw(m_widths_d), m_filters, raw(m_thresholds_d),
+        raw(m_scales_d), make_surrogate_view());
+    gpu_utils::check_last_gpu_error("FDMTBoxcar surrogate S/N cache failed");
+    gpu_utils::check_gpu_call(cudaStreamSynchronize(nullptr),
+                              "FDMTBoxcar surrogate S/N cache failed");
 }
 
 void FDMTBoxcarCudaEngine::launch_open_begin_surrogate(cudaStream_t stream) {

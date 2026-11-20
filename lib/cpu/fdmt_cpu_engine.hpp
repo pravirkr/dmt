@@ -221,7 +221,33 @@ public:
     FDMTCpuEngine(const plans::FDMTPlan& plan,
                   const detail::FDMTEngineConfig& cfg);
 
-    ~FDMTCpuEngine() override                      = default;
+    ~FDMTCpuEngine() override = default;
+
+    /**
+     * (chunk, leaf level) candidates of the skewed-window engine, fastest
+     * first. Measured on parkes_uwl (6656 channels, 8 threads one per CCD
+     * on an EPYC 9654, s per 2.1 s block): float ring K=1 4.96 at chunk
+     * 4096 and 7.4 at 2048, K=2 6.6 / 9.4, K=3 8.8 / 11.1, K=4 13.3 /
+     * 15.3, K=1 13.6 at 1024 (levels 1..K-1 of a direct leaf cost double
+     * running-sum gathers, the binary merges above them are cheap); 8-bit
+     * ring K=2 4.08, K=3 4.38, K=4 4.69, K=1 4.77 at 4096, K=4 5.99 and
+     * K=2 6.28 at 2048. Leaf 0: the automatic level (<= 4).
+     */
+    static std::vector<std::pair<SizeType, SizeType>>
+    skew_candidates(SizeType ring_elem);
+
+    /**
+     * Shortest skewed chunk that packed (integer search) input takes before
+     * the tree path. 8-bit input, u32 state, 32768-sample blocks, EPYC 9334
+     * (2026-11-19, x real time, tree vs skewed): UWL subband plans with a
+     * 2.7-6.6 GiB tree 0.18-0.65 vs 0.73-1.73 (also depth 4: 0.12 vs 0.33);
+     * cryopaf and meerkat (1.4 and 2.0 GiB tree) skewed 4096 1.0-1.25x the
+     * tree, and skewed 2048 on 4096-sample blocks 0.95-1.35x. Float keeps
+     * the tree first (faster there on small plans). Chunks below 2048 were
+     * not timed against the tree, so they come after it.
+     */
+    static constexpr SizeType kSkewFirstMinChunk = 2048;
+
     FDMTCpuEngine(const FDMTCpuEngine&)            = delete;
     FDMTCpuEngine& operator=(const FDMTCpuEngine&) = delete;
     FDMTCpuEngine(FDMTCpuEngine&&)                 = delete;
@@ -263,6 +289,17 @@ public:
 
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_skew ? m_skew->max_emit_lag() : 0;
+    }
+    /// Only the skewed path has a search latency, hence drain() padding.
+    [[nodiscard]] bool search_zero_supported() const noexcept override {
+        return m_skew != nullptr;
+    }
+    void execute_search_zero(detail::FDMTSearchSink& sink) override {
+        if (!m_skew) {
+            throw std::logic_error(
+                "FDMT: zero-block search needs the skewed path");
+        }
+        m_skew->execute_search_zero(sink);
     }
     [[nodiscard]] std::string search_path() const override {
         if (m_skew) {
@@ -577,25 +614,15 @@ private:
                                              SizeType max_fuse_levels) const;
 
     /**
-     * (chunk, leaf level) candidates of the skewed-window engine, fastest
-     * first. Measured on parkes_uwl (6656 channels, 8 threads one per CCD
-     * on an EPYC 9654, s per 2.1 s block): float ring K=1 4.96 at chunk
-     * 4096 and 7.4 at 2048, K=2 6.6 / 9.4, K=3 8.8 / 11.1, K=4 13.3 /
-     * 15.3, K=1 13.6 at 1024 (levels 1..K-1 of a direct leaf cost double
-     * running-sum gathers, the binary merges above them are cheap); 8-bit
-     * ring K=2 4.08, K=3 4.38, K=4 4.69, K=1 4.77 at 4096, K=4 5.99 and
-     * K=2 6.28 at 2048. Leaf 0: the automatic level (<= 4).
-     */
-    static std::vector<std::pair<SizeType, SizeType>>
-    skew_candidates(SizeType ring_elem);
-
-    /**
      * Tree path or skewed-window engine (fdmt_skew.hpp), under the memory
-     * budget: the tree path (fastest) when its history and state fit
+     * budget. Float input: the tree path when its history and state fit
      * max_memory_bytes, else the skewed engine at the fastest (chunk, leaf
-     * level) of skew_candidates() whose estimate fits (an explicit
-     * chunk_nsamps is kept, with the fastest leaf level that fits it).
-     * Sets m_chunk and m_skew_leaf. Throws when nothing fits.
+     * level) of skew_candidates() whose estimate fits. Packed input with an
+     * automatic chunk: the skewed chunks of at least kSkewFirstMinChunk,
+     * then the tree, then the shorter chunks. An explicit chunk_nsamps
+     * takes the tree when it fits, else the skewed engine at that chunk
+     * with the fastest leaf level that fits it. Sets m_chunk and
+     * m_skew_leaf. Throws when nothing fits.
      */
     bool choose_skew(const detail::FDMTEngineConfig& cfg);
 

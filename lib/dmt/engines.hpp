@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,28 @@
 #include "dmt/fdmt_search.hpp"
 
 namespace dmt::algorithms::detail {
+
+/// A configuration over its memory budget (max_memory_bytes). `needed` is
+/// the smallest budget the configuration tried would need: a lower bound of
+/// what fits, so a caller can raise the budget to it and try again
+/// (FDMTBoxcar::estimate_minimum_memory()). Public type: invalid_argument.
+class BudgetError : public std::invalid_argument {
+public:
+    BudgetError(const std::string& what,
+                SizeType needed,
+                bool smaller_path = false)
+        : std::invalid_argument(what),
+          m_needed(needed),
+          m_smaller_path(smaller_path) {}
+    [[nodiscard]] SizeType needed() const noexcept { return m_needed; }
+    /// The failing engine took its larger path (CPU tree, GPU unskewed
+    /// direct levels): a smaller path may fit the budget.
+    [[nodiscard]] bool smaller_path() const noexcept { return m_smaller_path; }
+
+private:
+    SizeType m_needed;
+    bool m_smaller_path;
+};
 
 // The backend lib/cuda/ is compiled for: DMT_ENABLE_CUDA (nvcc) or
 // DMT_ENABLE_HIP (hip-clang, through dmt/gpu_compat.cuh); DMT_ENABLE_GPU is
@@ -76,18 +99,26 @@ struct FDMTEngineConfig {
     SizeType max_memory_bytes{algorithms::kFDMTDefaultMaxMemory};
     /// Private (CPU): kSkewHistoryAuto (default) takes the skewed-window
     /// engine (fdmt_skew.hpp) when the tree path does not fit
-    /// max_memory_bytes; any other value is a level-0 + tree history
-    /// threshold in bytes above which it is taken (tests: 0 forces it,
+    /// max_memory_bytes, or first for packed input (see
+    /// FDMTCpuEngine::choose_skew()); any other value is a level-0 + tree
+    /// history threshold in bytes above which it is taken (tests: 0 forces it,
     /// SIZE_MAX forbids it).
     static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
+    /// As kSkewHistoryAuto but never the tree path: the fallback when the
+    /// tree path was chosen and its engine is over the budget.
+    static constexpr SizeType kSkewHistoryNoTree = SIZE_MAX - 2;
     SizeType skew_history_bytes{kSkewHistoryAuto};
     /// Private (CPU, tests): leaf level of a skewed engine forced by
     /// skew_history_bytes (0: automatic). Budget-chosen engines take the
     /// fastest leaf level that fits (FDMTCpuEngine::skew_candidates).
     SizeType skew_leaf{0};
-    /// Private (GPU): take the skewed direct levels and target-ring top
-    /// even when the unskewed direct top fits its ring budget (tests).
-    bool force_skewed_direct{false};
+    /// Private (GPU): path of a direct-eligible engine. kAuto takes the
+    /// skewed path (windowed top of a subband search, skewed direct top)
+    /// when the tree history is over max_memory_bytes; kSkewed takes it
+    /// even when the unskewed direct top fits its ring budget; kDirect
+    /// never takes it by choice (FDMTBoxcar's ordered list, tests).
+    enum class GPUPath : uint8_t { kAuto, kDirect, kSkewed };
+    GPUPath gpu_path{GPUPath::kAuto};
     /// Private (GPU): the engine only runs execute_search() (FDMTBoxcar),
     /// which never writes a full-block root plane, so the root output is
     /// exempt from the 32-bit extent check; root-writing calls then throw.
@@ -135,11 +166,25 @@ public:
                                backend());
     }
     /// Device search only: level-0 rows (beam * nchans + channel) whose
-    /// byte in `keep` is 0 read as zero in later execute_search() calls on
-    /// device input; nullptr reads every row. The bytes are read by the
+    /// byte in `keep` is 0 read as zero in later execute_search() calls
+    /// (device input, and host input staged per chunk); nullptr reads
+    /// every row. The bytes are read by the
     /// queued kernels, so they must stay valid until those complete.
     /// Returns false (and ignores `keep`) where unsupported.
-    virtual bool set_search_keep(const uint8_t* /*keep*/) { return false; }
+    /// `fill`: the code packed rows flagged 2 read (FDMTInputPacked).
+    virtual bool set_search_keep(const uint8_t* /*keep*/, float /*fill*/ = 0) {
+        return false;
+    }
+    /// Host search of one all-zero input block of the search bit depth
+    /// (FDMTBoxcar::drain() padding) without reading or staging one, where
+    /// search_zero_supported(); the result equals execute_search() on such a
+    /// block.
+    [[nodiscard]] virtual bool search_zero_supported() const noexcept {
+        return false;
+    }
+    virtual void execute_search_zero(FDMTSearchSink& /*unused*/) {
+        throw std::logic_error("FDMT search: no zero-block search here");
+    }
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,
@@ -219,6 +264,10 @@ std::unique_ptr<FDMTEngine> make_fdmt_cpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
 std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
+/// GPU: the automatic chunk whose two state halves fit the device's L2
+/// (fdmt_cache_chunk()) for this plan and config; 0 when none fits.
+SizeType fdmt_gpu_cache_chunk(const plans::FDMTPlan& plan,
+                              const FDMTEngineConfig& cfg);
 
 // ---------------------------------------------------------------------------
 // DDMT

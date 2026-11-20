@@ -96,9 +96,9 @@ TEST_CASE("Constructing on a backend missing from the build throws",
 TEST_CASE("The CPU backend rejects device memory and streams",
           "[backend][cpu]") {
     FDMT fdmt(1000.0F, 1500.0F, 16, 64, 0.001F, 8, 0, 1, true, "roll",
-              Exec::cpu(2));
+              Exec::cpu());
     CHECK(fdmt.backend() == Backend::kCPU);
-    CHECK(fdmt.nthreads() == 2);
+    CHECK(fdmt.nthreads() == 1);
     CHECK(fdmt.device() == -1);
 
     std::vector<float> wf(SizeType{16} * 64, 1.0F);
@@ -154,9 +154,9 @@ TEST_CASE("DeviceSpan::subspan keeps the handle and advances the offset",
 }
 
 TEST_CASE("Exec replaces the old nthreads / device_id slot", "[backend][cpu]") {
-    constexpr auto kCpu = Exec::cpu(4);
+    constexpr auto kCpu = Exec::cpu();
     STATIC_REQUIRE(kCpu.backend == Backend::kCPU);
-    STATIC_REQUIRE(kCpu.nthreads == 4);
+    STATIC_REQUIRE(kCpu.nthreads == 1);
     constexpr auto kGPU = Exec::cuda(1);
     STATIC_REQUIRE(kGPU.backend == Backend::kCUDA);
     STATIC_REQUIRE(kGPU.device == 1);

@@ -73,13 +73,39 @@ public:
                         detail::FDMTSearchSink& sink,
                         Stream queue) override;
 
-    bool set_search_keep(const uint8_t* keep) override {
+    /// Host-memory search (search-only engines): each chunk's columns of the
+    /// block are copied into a chunk-sized device buffer reserved at
+    /// construction (inside max_memory_bytes), on the default stream, and
+    /// searched as the device overloads search them.
+    void execute_search(std::span<const float> waterfall,
+                        detail::FDMTSearchSink& sink) override;
+    void execute_search(std::span<const uint8_t> waterfall,
+                        SizeType nbits,
+                        detail::FDMTSearchSink& sink) override;
+
+    bool set_search_keep(const uint8_t* keep, float fill) override {
         m_search_keep = keep;
+        m_search_fill = fill;
         return true;
     }
 
-    template <typename TInt>
-    void execute_search_int_typed(const FDMTInputPacked& full,
+    /// The float search; `chunk_at(t0, active, stream)` gives the input of
+    /// the chunk at block sample t0 (device: the caller's block; host: the
+    /// staged chunk).
+    template <typename Source>
+    void search_float(const Source& chunk_at,
+                      detail::FDMTSearchSink& sink,
+                      Stream queue);
+
+    /// The packed search, input as search_float().
+    template <typename Source>
+    void search_packed(const Source& chunk_at,
+                       SizeType nbits,
+                       detail::FDMTSearchSink& sink,
+                       Stream queue);
+
+    template <typename TInt, typename Source>
+    void execute_search_int_typed(const Source& chunk_at,
                                   TInt* ring,
                                   detail::FDMTSearchSink& sink,
                                   Stream queue,
@@ -95,8 +121,8 @@ public:
      * histories of the levels they replace are never read (the integer
      * search keeps no stepper, history export or tree fallback).
      */
-    template <typename TInt>
-    void execute_search_int_direct(const FDMTInputPacked& full,
+    template <typename TInt, typename Source>
+    void execute_search_int_direct(const Source& chunk_at,
                                    TInt* ring,
                                    detail::FDMTSearchSink& sink,
                                    Stream queue,
@@ -156,7 +182,8 @@ public:
         return {.data = in.data + ((t0 * static_cast<SizeType>(in.nbits)) / 8),
                 .row_bytes = in.row_bytes,
                 .nbits     = in.nbits,
-                .keep      = in.keep};
+                .keep      = in.keep,
+                .fill      = in.fill};
     }
 
     void execute(std::span<const uint8_t> waterfall_h,
@@ -547,10 +574,13 @@ private:
     std::unique_ptr<DirectTopD> m_top;
     bool m_search_upper{false};
     SizeType m_max_memory{kFDMTDefaultMaxMemory}; // FDMTEngineConfig
-    bool m_force_skewed{false}; // FDMTEngineConfig::force_skewed_direct
-    bool m_search_only{false};  // FDMTEngineConfig::search_only
+    // FDMTEngineConfig::gpu_path
+    detail::FDMTEngineConfig::GPUPath m_path{
+        detail::FDMTEngineConfig::GPUPath::kAuto};
+    bool m_search_only{false}; // FDMTEngineConfig::search_only
     // set_search_keep(): level-0 rows the search reads as zero.
     const uint8_t* m_search_keep{nullptr};
+    float m_search_fill{0.0F}; // packed rows flagged 2 read this code
     bool m_top_chunk{false};
     // Samples of the rings' reach streamed since a load_history().
     SizeType m_top_filled{0};
@@ -585,6 +615,11 @@ private:
     mutable gpu_utils::DeviceWorkFence m_device_work;
     std::vector<int> m_coords_sum_offsets;
     std::vector<int> m_coords_copy_offsets;
+    // Host-memory execute_search() input of one chunk, rows (beam,
+    // channel) of m_chunk samples (float) or packed_row_bytes(m_chunk)
+    // bytes; sized at construction of a search-only engine.
+    gpu_utils::PlannedVector<float> m_search_in_f32_d;
+    gpu_utils::PlannedVector<uint8_t> m_search_in_packed_d;
     // Host-memory execute() staging (see stage_to_device()).
     gpu_utils::PlannedVector<float> m_stage_wf_f32_d;
     gpu_utils::PlannedVector<uint8_t> m_stage_wf_packed_d;
@@ -791,9 +826,6 @@ private:
     }
 
     [[nodiscard]] SizeType max_optin_smem_bytes() const;
-
-    /// The device's L2 size in bytes (0 if the query fails).
-    [[nodiscard]] SizeType l2_bytes() const;
 
     /// Shared memory per fused block for kAutoBlocksPerSM resident blocks
     /// (less the ~1 KiB the runtime reserves per block), at most the

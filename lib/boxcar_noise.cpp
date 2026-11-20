@@ -28,10 +28,12 @@ bool finite(float x) {
 BoxcarNoiseModel::BoxcarNoiseModel(const plans::FDMTPlan& plan,
                                    const BoxcarConfig& config,
                                    bool smear,
-                                   int nthreads)
+                                   int nthreads,
+                                   std::span<const uint8_t> reference)
     : m_plan(plan),
       m_config(config),
       m_smear(smear),
+      m_packed(config.input_nbits != 32),
       m_threads(std::max(1, nthreads)),
       m_root(plan.get_niters()),
       m_first_searched(plan.get_niters() - plan.get_subband_depth()),
@@ -102,6 +104,49 @@ BoxcarNoiseModel::BoxcarNoiseModel(const plans::FDMTPlan& plan,
     m_searched.resize(m_root - m_first_searched + 1);
     m_offsets.resize(m_root + 1);
     fill({}, true);
+    if (m_packed) {
+        // Killed channels read as the code input_mean: exact only for an
+        // integer code (the dyadic leaf weights keep every mean an integer).
+        if (!(std::floor(m_config.input_mean) == m_config.input_mean)) {
+            throw std::invalid_argument(
+                "FDMTBoxcar: per-call kill masks on packed input need an "
+                "integer input_mean (killed channels read as that code)");
+        }
+        if (!reference.empty() && reference.size() != plan.get_nchans()) {
+            throw std::invalid_argument("FDMTBoxcar: kill mask size mismatch");
+        }
+        m_reference.assign(plan.get_nchans(), 1);
+        for (SizeType c = 0; c < reference.size(); ++c) {
+            m_reference[c] = reference[c] != 0 ? 1 : 0;
+        }
+        fill(m_reference, false);
+        m_reference_mean.resize(rows());
+        for (SizeType r = 0; r < rows(); ++r) {
+            m_reference_mean[r] = mean_weight(r);
+        }
+    }
+}
+
+double BoxcarNoiseModel::mean_weight(SizeType r) const noexcept {
+    const auto [l, node] = m_row_node[r];
+    const auto& b   = l >= m_first_searched ? m_searched[l - m_first_searched]
+                                            : m_below[l % 2];
+    const auto& off = m_offsets[l];
+    const double unit =
+        std::ldexp(1.0, -static_cast<int>(m_plan.get_box_fraction_bits()));
+    double sum = 0;
+    for (SizeType i = off[node]; i < off[node + 1]; ++i) {
+        const Bin& e = b[i];
+        if (e.count == 0) {
+            continue;
+        }
+        const SizeType len = e.len;
+        const double weight =
+            m_smear ? box_weight(len, m_plan.get_box_fraction_bits()) * unit
+                    : 1.0;
+        sum += static_cast<double>(e.count) * static_cast<double>(len) * weight;
+    }
+    return sum;
 }
 
 std::vector<BoxcarNoiseModel::Bin>&
@@ -212,6 +257,15 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
     if (mask.size() != m_plan.get_nchans()) {
         throw std::invalid_argument("FDMTBoxcar: kill mask size mismatch");
     }
+    if (m_packed) {
+        for (SizeType c = 0; c < mask.size(); ++c) {
+            if (mask[c] != 0 && m_reference[c] == 0) {
+                throw std::invalid_argument(
+                    "FDMTBoxcar: a packed per-call mask keeps a channel the "
+                    "constructor mask kills");
+            }
+        }
+    }
     // The bins below the searched levels are rebuilt level by level into
     // the two alternating buffers: resize within their reserved capacity.
     fill(mask, false);
@@ -219,6 +273,9 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
     auto tables       = std::make_shared<NoiseTables>();
     tables->thresh.resize(rows() * nf);
     tables->inv_sigma.resize(rows() * nf);
+    if (m_packed) {
+        tables->integer_thresh.resize(rows() * nf);
+    }
     const double unit =
         std::ldexp(1.0, -static_cast<int>(m_plan.get_box_fraction_bits()));
     bool ok          = true;
@@ -231,6 +288,9 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
         const auto& off      = m_offsets[l];
         const Bin* h         = b.data() + off[node];
         const Bin* he        = b.data() + off[node + 1];
+        // Packed: the row's mean weight under this mask and the reference.
+        const double mw     = m_packed ? mean_weight(r) : 0.0;
+        const double mw_ref = m_packed ? m_reference_mean[r] : 0.0;
         // The arithmetic and order of make_boxcar_plans(): ascending
         // length over the lengths present (nonzero counts).
         for (SizeType f = 0; f < nf; ++f) {
@@ -255,6 +315,9 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
             if (variance == 0) {
                 tables->inv_sigma[k] = 0;
                 tables->thresh[k]    = std::numeric_limits<float>::max();
+                if (m_packed) {
+                    tables->integer_thresh[k] = UINT64_MAX;
+                }
                 continue;
             }
             const double sigma    = m_config.noise_sigma * std::sqrt(variance);
@@ -265,11 +328,40 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
                  inv_sigma > 0 && threshold > 0;
             tables->inv_sigma[k] = inv_sigma;
             tables->thresh[k]    = threshold;
+            if (m_packed) {
+                // make_boxcar_plans()'s cutoff for this mask, then moved by
+                // the exact difference of the reference mean and this
+                // mask's (killed channels add input_mean each).
+                const double scale = m_smear ? 1.0 / unit : 1.0;
+                const double filter_weight =
+                    w_edge == 0 ? static_cast<double>(width)
+                                : static_cast<double>(2 * (width - w_edge));
+                const double mean =
+                    m_config.input_mean * mw * filter_weight * scale;
+                const double mean_ref =
+                    m_config.input_mean * mw_ref * filter_weight * scale;
+                const double cutoff =
+                    std::ceil(mean + (m_config.detect_thresh * sigma * scale));
+                const double shift = mean_ref - mean;
+                // A whole number (integer mean code, dyadic weights).
+                const bool fits = cutoff < std::ldexp(1.0, 64) && shift >= 0 &&
+                                  shift < std::ldexp(1.0, 63) &&
+                                  shift == std::floor(shift);
+                ok              = ok && fits;
+                if (fits) {
+                    const auto c0             = static_cast<uint64_t>(cutoff);
+                    const auto sh             = static_cast<uint64_t>(shift);
+                    ok                        = ok && c0 <= UINT64_MAX - sh;
+                    tables->integer_thresh[k] = c0 + sh;
+                }
+            }
         }
     }
     if (!ok) {
         throw std::invalid_argument(
-            "FDMTBoxcar: sigma/threshold is outside float32 range");
+            m_packed ? "FDMTBoxcar: sigma/threshold is outside float32 range "
+                       "or the integer threshold exceeds uint64"
+                     : "FDMTBoxcar: sigma/threshold is outside float32 range");
     }
     tables->live = m_live;
     tables->id   = m_next_id++;
@@ -279,7 +371,10 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
 
 SizeType BoxcarNoiseModel::plan_bytes() const noexcept {
     return (m_row_node.size() * sizeof(m_row_node[0])) +
-           (m_support->size() * sizeof(uint64_t));
+           (m_support->size() * sizeof(uint64_t)) +
+           (m_reference_mean.size() * sizeof(double)) + m_reference.size() +
+           // FDMTBoxcar's LiveHistory (one timestamp per channel).
+           (m_plan.get_nchans() * sizeof(uint64_t));
 }
 
 SizeType BoxcarNoiseModel::workspace_bytes() const noexcept {

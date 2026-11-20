@@ -168,7 +168,7 @@ TEST_CASE("FDMTFFT GPU matches CPU on varied grids and plans",
             CAPTURE(c.nchans, c.dt_max, c.dt_min, c.box, c.mode, frac);
             const SizeType ns = 1024;
             FDMTFFT cpu(kFMin, kFMax, c.nchans, ns, kTsamp, c.dt_max, c.dt_min,
-                        1, c.box, c.mode, Exec::cpu(4), 1, frac);
+                        1, c.box, c.mode, Exec::cpu(), 1, frac);
             FDMTFFT gpu(kFMin, kFMax, c.nchans, ns, kTsamp, c.dt_max, c.dt_min,
                         1, c.box, c.mode, test::gpu_exec(), 1, frac);
             const auto n = cpu.get_plan().get_dmt_size();
@@ -203,7 +203,7 @@ TEST_CASE("FDMTFFT GPU stepper and level views match the CPU",
         for (const bool frac : {true, false}) {
             CAPTURE(mode, frac);
             FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 40, 0, 1, true, mode,
-                        Exec::cpu(2), 2, frac);
+                        Exec::cpu(), 2, frac);
             FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 40, 0, 1, true, mode,
                         test::gpu_exec(), 2, frac);
             FDMTFFT gpu_exec(kFMin, kFMax, nch, ns, kTsamp, 40, 0, 1, true,
@@ -255,7 +255,7 @@ TEST_CASE("FDMTFFT GPU streams like one long call",
     FDMTFFT stream(kFMin, kFMax, nch, blk, kTsamp, 40, 0, 1, true, "valid",
                    test::gpu_exec());
     FDMTFFT cpu_stream(kFMin, kFMax, nch, blk, kTsamp, 40, 0, 1, true, "valid",
-                       Exec::cpu(2));
+                       Exec::cpu());
     std::vector<float> cpu_out(one.get_plan().get_dmt_ndms() * blk);
     REQUIRE(stream.get_output_latency() == one.get_output_latency());
     const auto ndm = one.get_plan().get_dmt_ndms();
@@ -289,7 +289,7 @@ TEST_CASE("FDMTFFT GPU streams, history and stepper interleaving",
     const SizeType ns  = 512;
     const NonBlockingStream nb;
     FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 40, 0, 1, true, "valid",
-                Exec::cpu(2));
+                Exec::cpu());
     FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 40, 0, 1, true, "valid",
                 test::gpu_exec());
     const auto n = cpu.get_plan().get_dmt_size();
@@ -374,7 +374,7 @@ TEST_CASE("FDMTFFT GPU packed, time-major, kill mask and history",
         const auto packed    = pack_rows(vals, 2 * nch, ns, nbits);
         const auto tm_packed = pack_rows(tm, 2 * ns, nch, nbits);
         FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
-                    Exec::cpu(2), 2, true, mask);
+                    Exec::cpu(), 2, true, mask);
         FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
                     test::gpu_exec(), 2, true, mask);
         FDMTFFT gpu_tm(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
@@ -415,7 +415,7 @@ TEST_CASE("FDMTFFT GPU forced segments match the CPU",
             CAPTURE(mode, frac);
             const SegmentCap cap(1024);
             FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, mode,
-                        Exec::cpu(2), 1, frac);
+                        Exec::cpu(), 1, frac);
             FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, mode,
                         test::gpu_exec(), 1, frac);
             const auto n = cpu.get_plan().get_dmt_size();
@@ -471,7 +471,7 @@ TEST_CASE("DDMTFFT GPU edge cases", "[ddmt_fft_gpu][gpu][parity]") {
             CAPTURE(algorithms::to_string(method));
             const DDMTFFTOptions opts{.method = method, .guard = 16};
             DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
-                        Exec::cpu(2), 32, {}, 1, opts);
+                        Exec::cpu(), 32, {}, 1, opts);
             DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
                         test::gpu_exec(), 32, {}, 1, opts);
             const auto ndm = cpu.get_plan().get_dm_arr().size();
@@ -527,7 +527,7 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
     const SizeType nch = 16;
     const SizeType ns  = 3000;
     const DDMTFFTOptions opts{.method = DDMTFFTMethod::kNUFFT};
-    DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F, Exec::cpu(4), 32,
+    DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F, Exec::cpu(), 32,
                 {}, 1, opts);
     DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 50.0F, 0.01F, 0.0F, test::gpu_exec(),
                 32, {}, 1, opts);
@@ -542,7 +542,7 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
     CHECK(max_rel(b, a) < 2e-5);
 
     const SegmentCap cap(1024);
-    DDMTFFT cpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(2));
+    DDMTFFT cpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu());
     DDMTFFT gpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F,
                   test::gpu_exec());
     const auto ns2 = SizeType{6000};
@@ -561,7 +561,7 @@ TEST_CASE("DDMTFFT GPU device input, device history and streams",
     const SizeType nch = 32;
     const SizeType ns  = 1500;
     const NonBlockingStream nb;
-    DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 32,
+    DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32,
                 {}, 2);
     DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, test::gpu_exec(),
                 32, {}, 2);
@@ -615,7 +615,7 @@ TEST_CASE("DDMTFFT GPU packed 1 and 4 bits, time-major with beams",
         }
         const auto packed    = pack_rows(vals, 2 * nch, ns, nbits);
         const auto tm_packed = pack_rows(tm, 2 * ns, nch, nbits);
-        DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(2),
+        DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(),
                     nbits, {}, 2);
         DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
                     test::gpu_exec(), nbits, {}, 2);

@@ -141,7 +141,7 @@ TEST_CASE("FDMT chan_dm rows follow the box formula", "[fdmt_chan_dm][cpu]") {
                 const plans::FDMTPlan plan(kFMin, kFMax, nchans, block, kTsamp,
                                            grid(-40, 300, 3), "valid", 0,
                                            chan_dm);
-                FDMT fdmt(plan, true, Exec::cpu(2), 1,
+                FDMT fdmt(plan, true, Exec::cpu(), 1,
                           fuse == 0 ? algorithms::kFDMTAutoFuse : fuse);
                 std::vector<float> x(nchans * total);
                 test_random::fill_normal<float>(x, 99);
@@ -228,7 +228,7 @@ TEST_CASE("FDMTBoxcar searches a chan_dm plan", "[fdmt_chan_dm][cpu]") {
     cfg.wtsp          = 1.5;
     cfg.detect_thresh = 8.0F;
     cfg.peak_mode     = PeakFindingMode::kContiguousPeakAcrossWidths;
-    FDMTBoxcar search(plan, cfg, true, Exec::cpu(2));
+    FDMTBoxcar search(plan, cfg, true, Exec::cpu());
     const SizeType total = block * blocks;
     std::vector<float> x(nchans * total);
     test_random::fill_normal<float>(x, 5);

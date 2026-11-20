@@ -75,20 +75,39 @@ endif()
 dmt_enable_coverage(${TARGET_TESTS})
 
 # Device tests are tagged [gpu] (or [parity]); they run on this build's GPU
-# backend and are labelled `gpu` plus the backend name, so `ctest -LE gpu`
-# runs the host tests only.
+# backend (test names prefixed with it) and are labelled `gpu`, so
+# `ctest -LE gpu` runs the host tests only. Full-size versions of the
+# expensive host tests are tagged [slow] and labelled `slow` instead of `cpu`
+# (test_sized.hpp); the CI test presets skip them. One label each:
+# catch_discover_tests does not pass a label list through. Every test runs
+# on one thread (OMP_NUM_THREADS=1): ctest runs tests in parallel, one per
+# core.
 include(Catch)
 if(DMT_GPU_BACKEND)
   string(TOLOWER ${DMT_GPU_BACKEND} _dmt_gpu_name)
   catch_discover_tests(
     ${TARGET_TESTS}
     TEST_SPEC
-    "~[gpu]"
+    "~[gpu]~[slow]"
     TEST_PREFIX
     "cpu:"
     PROPERTIES
     LABELS
     "cpu"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
+  )
+  catch_discover_tests(
+    ${TARGET_TESTS}
+    TEST_SPEC
+    "[slow]~[gpu]"
+    TEST_PREFIX
+    "cpu:"
+    PROPERTIES
+    LABELS
+    "slow"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
   )
   catch_discover_tests(
     ${TARGET_TESTS}
@@ -98,15 +117,29 @@ if(DMT_GPU_BACKEND)
     "${_dmt_gpu_name}:"
     PROPERTIES
     LABELS
-    "gpu;${_dmt_gpu_name}"
+    "gpu"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
   )
 else()
   catch_discover_tests(
     ${TARGET_TESTS}
     TEST_SPEC
-    "~[gpu]"
+    "~[gpu]~[slow]"
     PROPERTIES
     LABELS
     "cpu"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
+  )
+  catch_discover_tests(
+    ${TARGET_TESTS}
+    TEST_SPEC
+    "[slow]~[gpu]"
+    PROPERTIES
+    LABELS
+    "slow"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
   )
 endif()

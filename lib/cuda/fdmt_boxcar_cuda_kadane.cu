@@ -92,7 +92,10 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                               kadane::KadaneGateDeviceView gate,
                               BlockTables block_tables,
                               BoxcarKeepEntry* keep_all,
-                              SizeType keep_q) {
+                              SizeType keep_q,
+                              uint64_t* detected_all,
+                              uint64_t* plane_slots,
+                              SizeType plane_cap) {
     constexpr int kBlockTile  = kBlockThreads * kItems;
     constexpr int kBlockWarps = kBlockThreads / kWarp;
     constexpr int kLeaderTid  = kBlockWarps - 1;
@@ -137,12 +140,17 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     BoxcarPeak* peaks      = peaks_all + (index * peak_count);
     RawCandidate prototype = row.candidate;
     prototype.beam_idx     = static_cast<uint32_t>(beam);
-    CandidateWriter writer{candidates, counts,    slots,    per_dm_all + index,
-                           widths,     prototype, capacity, dm_cap};
+    const PlaneShare share =
+        plane_share(slots, capacity, plane_slots, plane_cap, row.plane);
+    CandidateWriter writer{candidates,         counts, share.slots,
+                           per_dm_all + index, widths, prototype,
+                           share.capacity,     dm_cap};
+    writer.base   = share.base;
     writer.means  = means != nullptr ? means + (row_index * nfilters) : nullptr;
     writer.scales = inv_sigma + (row_index * nfilters);
     writer.unit   = unit;
-    writer.integer = std::is_integral_v<T> &&
+    // Packed rows under per-call masks carry their S/N in the peak.
+    writer.integer = std::is_integral_v<T> && !kBlockNoise &&
                      mode != PeakFindingMode::kContiguousPeakAcrossWidths;
 
     struct NoKeep {};
@@ -152,6 +160,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         keeper = KeepWriter{counts,
                             keep_all + (index * keep_q),
                             per_dm_all + index,
+                            detected_all + index,
                             keep_q,
                             &pending,
                             writer.means,
@@ -172,11 +181,18 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     const float* plane_inv = inv_sigma + (row_index * nfilters);
     const float* inv_row   = plane_inv;
     const float* thr_float = plane_thr;
+    // Packed rows: the integer cutoffs likewise.
+    const uint64_t* plane_ithr = nullptr;
+    if constexpr (std::is_integral_v<T>) {
+        plane_ithr = integer_thresholds + (row_index * nfilters);
+    }
+    const uint64_t* thr_int = plane_ithr;
     const float* in_play[4][2];
+    const uint64_t* in_play_i[4];
     int n_play           = 0;
     bool mixed           = false;
     uint64_t row_support = 0;
-    if constexpr (kBlockNoise && !std::is_integral_v<T>) {
+    if constexpr (kBlockNoise) {
         if (block_tables.count > 0) {
             row_support       = block_tables.support[row_index];
             const uint64_t s0 = input.sample_begin;
@@ -184,10 +200,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             const int e0      = block_entry(block_tables, s0);
             const int e1      = block_entry(block_tables, s1);
             const auto add    = [&](int e, int k) {
-                const float* t = block_tables.thr[e][k];
-                const float* v = block_tables.inv[e][k];
-                t = t != nullptr ? t + (row_index * nfilters) : plane_thr;
-                v = v != nullptr ? v + (row_index * nfilters) : plane_inv;
+                const float* t     = block_tables.thr[e][k];
+                const float* v     = block_tables.inv[e][k];
+                const uint64_t* it = block_tables.ithr[e][k];
+                t  = t != nullptr ? t + (row_index * nfilters) : plane_thr;
+                v  = v != nullptr ? v + (row_index * nfilters) : plane_inv;
+                it = it != nullptr ? it + (row_index * nfilters) : plane_ithr;
                 for (int j = 0; j < n_play; ++j) {
                     if (in_play[j][0] == t) {
                         return;
@@ -195,6 +213,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 }
                 in_play[n_play][0] = t;
                 in_play[n_play][1] = v;
+                in_play_i[n_play]  = it;
                 ++n_play;
             };
             for (int e = e0; e <= e1; ++e) {
@@ -215,15 +234,18 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             if (n_play == 1) {
                 thr_float = in_play[0][0];
                 inv_row   = in_play[0][1];
+                thr_int   = in_play_i[0];
             } else {
                 mixed = true;
             }
         }
     }
+    // Tables other than the constructor's (one, or several).
+    [[maybe_unused]] const bool custom = mixed || thr_float != plane_thr;
 
     const T* thr_row = [&] {
         if constexpr (std::is_integral_v<T>) {
-            return integer_thresholds + (row_index * nfilters);
+            return thr_int;
         } else {
             return thr_float;
         }
@@ -237,11 +259,18 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     const auto stage_shared_tables = [&] {
         for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
             T th = thr_row[f];
-            if constexpr (!std::is_integral_v<T>) {
+            if constexpr (kBlockNoise) {
                 if (mixed) {
-                    th = in_play[0][0][f];
-                    for (int j = 1; j < n_play; ++j) {
-                        th = th < in_play[j][0][f] ? th : in_play[j][0][f];
+                    if constexpr (std::is_integral_v<T>) {
+                        th = in_play_i[0][f];
+                        for (int j = 1; j < n_play; ++j) {
+                            th = th < in_play_i[j][f] ? th : in_play_i[j][f];
+                        }
+                    } else {
+                        th = in_play[0][0][f];
+                        for (int j = 1; j < n_play; ++j) {
+                            th = th < in_play[j][0][f] ? th : in_play[j][0][f];
+                        }
                     }
                 }
             }
@@ -257,51 +286,92 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     int32_t row_ibias[kadane::kMaxGateBuckets]{};
     int32_t row_icut[kadane::kMaxGateBuckets]{};
 
+    // Smallest cutoff of the tables in play at filter f: integer (packed
+    // rows) and the float one the gate compares (packed rows run the float
+    // gate on centred sums: at most the centred integer cutoff, as
+    // init_kadane()).
+    [[maybe_unused]] const auto min_ithr_at = [&](SizeType f) -> uint64_t {
+        if (!mixed) {
+            return thr_int[f];
+        }
+        uint64_t th = in_play_i[0][f];
+        for (int j = 1; j < n_play; ++j) {
+            th = th < in_play_i[j][f] ? th : in_play_i[j][f];
+        }
+        return th;
+    };
+    [[maybe_unused]] const auto min_thr_at = [&](SizeType f) -> float {
+        float th = thr_float[f];
+        if (mixed) {
+            th = in_play[0][0][f];
+            for (int j = 1; j < n_play; ++j) {
+                th = th < in_play[j][0][f] ? th : in_play[j][0][f];
+            }
+        }
+        if constexpr (std::is_integral_v<T>) {
+            const uint64_t it = min_ithr_at(f);
+            if (it != std::numeric_limits<uint64_t>::max()) {
+                const double centred = (static_cast<double>(it) -
+                                        means[(row_index * nfilters) + f]) *
+                                       unit;
+                if (centred > 0.0) {
+                    const auto c = static_cast<float>(centred);
+                    th           = c < th ? c : th;
+                }
+            }
+        }
+        return th;
+    };
+
     if constexpr (kUseIntGate) {
         for (SizeType k = 0; k < nb; ++k) {
             row_ibias[k] = gate.ibias[(k * gate.row_stride) + row_index];
             row_icut[k]  = gate.icut[(k * gate.row_stride) + row_index];
+        }
+        if constexpr (kBlockNoise) {
+            // Per-call tables: the row's cuts at its fixed bias, as
+            // KadaneGatePlan::recompute_row_icuts (the minimum over the
+            // tables in play is the cut of their per-width minimum).
+            if (custom) {
+                if (static_cast<SizeType>(tid) < nb) {
+                    const auto k = static_cast<SizeType>(tid);
+                    const int32_t c =
+                        gate.disabled_row[row_index] != 0U
+                            ? std::numeric_limits<int32_t>::max()
+                            : kadane::compute_bucket_icut_hd(
+                                  gate.buckets[k], widths, use_trapezoid,
+                                  gate.int_shift, row_ibias[k], min_ithr_at);
+                    kshared.row_cuts[k] = __int_as_float(c);
+                }
+                __syncthreads();
+                for (SizeType k = 0; k < nb; ++k) {
+                    row_icut[k] = __float_as_int(kshared.row_cuts[k]);
+                }
+                __syncthreads();
+            }
         }
     } else {
         for (SizeType k = 0; k < nb; ++k) {
             row_biases_f32[k] = gate.bias[(k * gate.row_stride) + row_index];
             row_cuts_f32[k]   = gate.cut[(k * gate.row_stride) + row_index];
         }
-        if constexpr (kBlockNoise && !std::is_integral_v<T>) {
-            if (thr_float != plane_thr || mixed) {
-                if (shared_tables) {
-                    stage_shared_tables();
-                    __syncthreads();
-                }
+        if constexpr (kBlockNoise) {
+            if (custom) {
                 if (static_cast<SizeType>(tid) < nb) {
                     const auto k = static_cast<SizeType>(tid);
                     if (gate.disabled_row[row_index] != 0U) {
                         kshared.row_cuts[k] = std::numeric_limits<float>::max();
                     } else {
-                        const auto min_thr_at = [&](SizeType f) -> float {
-                            if (shared_tables) {
-                                return s_thr[f];
-                            }
-                            if (!mixed) {
-                                return thr_float[f];
-                            }
-                            float th = in_play[0][0][f];
-                            for (int j = 1; j < n_play; ++j) {
-                                th = th < in_play[j][0][f] ? th
-                                                           : in_play[j][0][f];
-                            }
-                            return th;
-                        };
                         kshared.row_cuts[k] = kadane::compute_bucket_cut_hd_f32(
-                            gate.buckets[k], shared_tables ? s_widths : widths,
-                            nfilters, use_trapezoid, row_biases_f32[k],
-                            min_thr_at);
+                            gate.buckets[k], widths, nfilters, use_trapezoid,
+                            row_biases_f32[k], min_thr_at);
                     }
                 }
                 __syncthreads();
                 for (SizeType k = 0; k < nb; ++k) {
                     row_cuts_f32[k] = kshared.row_cuts[k];
                 }
+                __syncthreads();
             }
         }
     }
@@ -569,16 +639,23 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 for (int j = 0; j < kItems; ++j) {
                     const uint32_t local  = (tid * kItems) + j;
                     const uint64_t sample = start + local;
-                    if constexpr (!std::is_integral_v<T>) {
+                    if constexpr (kBlockNoise) {
                         if (mixed) {
                             const int e = block_entry(block_tables, sample);
                             const int k = block_table(block_tables, e, sample,
                                                       width, row_support);
-                            const float* t = block_tables.thr[e][k];
                             const float* v = block_tables.inv[e][k];
-                            threshold      = t != nullptr
-                                                 ? t[(row_index * nfilters) + f]
-                                                 : plane_thr[f];
+                            if constexpr (std::is_integral_v<T>) {
+                                const uint64_t* it = block_tables.ithr[e][k];
+                                threshold = it != nullptr
+                                                ? it[(row_index * nfilters) + f]
+                                                : plane_ithr[f];
+                            } else {
+                                const float* t = block_tables.thr[e][k];
+                                threshold = t != nullptr
+                                                ? t[(row_index * nfilters) + f]
+                                                : plane_thr[f];
+                            }
                             scale = v != nullptr ? v[(row_index * nfilters) + f]
                                                  : plane_inv[f];
                         }
@@ -598,8 +675,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     if constexpr (std::is_integral_v<T>) {
                         raw_sums[j] = sum;
                         if (above[j] &&
-                            mode ==
-                                PeakFindingMode::kContiguousPeakAcrossWidths) {
+                            (kBlockNoise ||
+                             mode == PeakFindingMode::
+                                         kContiguousPeakAcrossWidths)) {
                             snr[j] = static_cast<float>(
                                 (static_cast<double>(sum) -
                                  means[(row_index * nfilters) + f]) *
@@ -628,7 +706,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     __syncthreads_or(f_hit || peaks[f].open) != 0) {
                     reduce_runs<T, kBlockThreads>(
                         shared, above, snr, filters, start, n, peaks + f, out,
-                        raw_sums, std::is_integral_v<T>);
+                        raw_sums,
+                        std::is_integral_v<T> ? (kBlockNoise ? 2 : 1) : 0);
                     if constexpr (kKeep) {
                         keep_drain(shared, pending, keeper);
                     }
@@ -778,12 +857,12 @@ void FDMTBoxcarCudaEngine::configure_shared_kadane_block(SizeType limit) {
             m_width, m_smem, limit));
     }
     configure_kadane_variants<T, SegT, kBlockThreads, kUseIntGate, false, T>();
+    configure_kadane_variants<T, SegT, kBlockThreads, kUseIntGate, true, T>();
     if constexpr (std::is_integral_v<T>) {
         configure_kadane_variants<T, SegT, kBlockThreads, kUseIntGate, false,
                                   uint32_t>();
-    } else {
         configure_kadane_variants<T, SegT, kBlockThreads, kUseIntGate, true,
-                                  T>();
+                                  uint32_t>();
     }
 }
 
@@ -1011,12 +1090,13 @@ void FDMTBoxcarCudaEngine::launch_score_kadane(const FDMTSearchInput& input,
                 stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
                 raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
                 raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d),
-                m_peak_count, raw(m_candidates_d), raw(m_counts_d),
-                raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates,
-                m_config.max_cands_per_dm, m_config.peak_mode,
-                m_config.skip_cold_prefix, root, raw(m_integer_thresholds),
-                raw(m_integer_means), m_integer_unit, m_mask, m_shared_tables,
-                m_config.use_trapezoid, gate, bt, raw(m_bright_d), m_bright_q);
+                m_peak_count, candidate_out(), raw(m_counts_d), raw(m_slots_d),
+                raw(m_per_dm_d), m_config.max_candidates, dm_cap(),
+                m_config.peak_mode, m_config.skip_cold_prefix, root,
+                raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
+                m_mask, m_shared_tables, m_config.use_trapezoid, gate, bt,
+                raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
+                raw(m_plane_slots_d), m_plane_cap);
         };
         if constexpr (std::is_integral_v<T>) {
             launch(std::integral_constant<int, kKadaneThreads>{});
@@ -1041,9 +1121,19 @@ void FDMTBoxcarCudaEngine::launch_score_kadane(const FDMTSearchInput& input,
     };
 
     if constexpr (std::is_integral_v<T>) {
+        // Per-call mask tables take their own kernel instance.
+        const bool noise = m_block_tables.count > 0;
         if (m_kadane_int32) {
-            dispatch_threads(kadane::KadaneSegI64{}, cuda::std::true_type{},
-                             cuda::std::false_type{});
+            if (noise) {
+                dispatch_threads(kadane::KadaneSegI64{}, cuda::std::true_type{},
+                                 cuda::std::true_type{});
+            } else {
+                dispatch_threads(kadane::KadaneSegI64{}, cuda::std::true_type{},
+                                 cuda::std::false_type{});
+            }
+        } else if (noise) {
+            dispatch_threads(kadane::KadaneSegF32{}, cuda::std::false_type{},
+                             cuda::std::true_type{});
         } else {
             dispatch_threads(kadane::KadaneSegF32{}, cuda::std::false_type{},
                              cuda::std::false_type{});

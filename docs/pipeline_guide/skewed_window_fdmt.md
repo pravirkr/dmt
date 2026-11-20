@@ -8,7 +8,8 @@ the `parkes_uwl` boxcar suite. Both `FDMT` and `FDMTBoxcar` automatically
 select this path on the CPU (and its device counterpart in
 `lib/dmt/fdmt_direct.hpp` / `lib/cuda/fdmt_direct.cuh` on CUDA) when the
 tree path does not fit the memory budget (`max_memory_bytes`, 10 GiB by
-default; `parkes_uwl`), and it supports the subband search
+default; `parkes_uwl`) and, on the CPU, first for packed `FDMTBoxcar`
+input (see below), and it supports the subband search
 (`subband_depth > 0`) as well as the full band.
 
 ## The problem
@@ -195,15 +196,22 @@ float and packed, CPU and GPU.
 
 ## Memory budget and chunk length
 
-`FDMT` and `FDMTBoxcar` take the tree path when it fits `max_memory_bytes`
-(10 GiB by default) and the skewed path otherwise, at the longest chunk
-that fits:
+`FDMT` and `FDMTBoxcar` choose their path and chunk within
+`max_memory_bytes` (10 GiB by default):
 
 - **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), with a
   tenth of headroom for the merge tables; the allocation is then checked.
-  It takes the first (chunk, leaf level) that fits from a list in measured
-  speed order (`FDMTCpuEngine::skew_candidates`; `parkes_uwl`, 8 threads,
-  s per 2.1 s block):
+  Float input takes the tree path when it fits. Packed input (an
+  `FDMTBoxcar` with input bits) and an automatic chunk takes the skewed
+  chunks 4096 and 2048 first, then the tree, then the shorter chunks: on
+  8-bit input the tree path is 2.7-4x slower on the UWL subband plans and
+  ties or is up to 1.35x slower on small ones (EPYC 9334, x real time,
+  tree vs skewed: UWL, tree 2.7-6.6 GiB, 0.18-0.65 vs 0.73-1.73; cryopaf
+  and meerkat 24-47 vs 32-55, skewed 2048 on 4096-sample blocks included).
+  Shorter skewed chunks were not timed against the tree, so blocks of 2048
+  samples or fewer keep the tree. The skewed path takes the first (chunk, leaf level) that fits from
+  a list in measured speed order (`FDMTCpuEngine::skew_candidates`;
+  `parkes_uwl`, 8 threads, s per 2.1 s block):
 
   | ring | chunk 4096 | chunk 2048 |
   | :--- | :--- | :--- |
@@ -218,14 +226,29 @@ that fits:
   packed configuration (`BoxcarConfig` input bits). A bare `FDMT` is built
   for float input and keeps the float choice ($K = 1$) when it is later fed
   packed blocks: 4.76 s per block on 8-bit `parkes_uwl` instead of 4.08 s.
-- **GPU:** by building the engine (about 1 s) and measuring it. The
-  windowed top tries 4096 and 2048 first, but only builds a longer chunk
-  that is predicted to fit: its memory is affine in the chunk (rows of
-  chunk + spread samples, rings of reach + chunk), so two measured engines
-  (the automatic chunk and half of it) extrapolate exactly. Construction
-  thus never holds more than the budget (it used to build the 12 GiB
-  float32 engine at chunk 4096 to find it over). Any other path keeps its
-  automatic chunk and halves it while over budget.
+- **GPU:** by building engines (deferred: sized, not allocated) and
+  measuring them. A subband search (`FDMTBoxcar`, `subband_depth > 0`)
+  takes the first that fits of (`detail::gpu_search_list`,
+  `lib/dmt/gpu_search_list.hpp`): direct at the plan's L2-cache chunk when
+  it has one; direct from chunk 4096 down to `max_boxcar / 8` (at least
+  256); skewed from 4096 down to 256; shorter direct chunks. A simple rule,
+  not an optimum: on the UWL plans measured it takes the fastest
+  configuration that fits at 10 GiB and stays within about 30% of it at any
+  budget (narrow windows where a larger budget first fits a short direct
+  chunk are the worst; L40, UWL depth 4, 8-bit, x real time):
+
+  | plan | direct 256 / 1024 / 4096 | skewed 1024 / 4096 |
+  | :--- | :--- | :--- |
+  | DM 100-1100, `max_boxcar` 4096 | 0.92 / 2.71 / 3.64 (9.9-13.8 GiB) | 1.53 / 2.79 (4.6 / 7.8 GiB) |
+  | DM 0-2000, dmt grid, `max_boxcar` 1562 | 2.68 / 3.06 / 3.44 (10.8-18.1 GiB) | 0.95 / 1.85 (4.3 / 10.1 GiB) |
+
+  Each path's memory grows with the chunk (not linearly: a longer chunk can
+  move the direct top's level), so the list is walked in runs of one path:
+  one engine rejects a run whose shortest chunk does not fit, else a
+  bisection finds its longest fitting chunk (one to about five engines in
+  all). Full-band searches and plain `FDMT` keep the automatic chunk
+  (L2-resident state, else 1024: fastest there) and halve it while over
+  budget.
 - **FDMTBoxcar** gives the FDMT the budget minus its own carry, peak,
   candidate and threshold buffers, and halves an automatic chunk again if
   the measured total is still over.
@@ -233,25 +256,28 @@ that fits:
 ## Memory
 
 `parkes_uwl` (32768-sample blocks, DM 0–2000, 4749 trials), FDMTBoxcar with
-boxcars to 100 ms at wtsp 1.5, default budget; working memory is
-`get_memory_usage().total()` plus the input block (GiB = $2^{30}$ bytes):
+boxcars to 100 ms at wtsp 1.5, default budget (10 GiB); working memory is
+`get_memory_usage().total()` plus the input block (GiB = $2^{30}$ bytes), from
+`estimate_memory()`:
 
-| search | backend | chunk | working memory | tree path |
-| :--- | :--- | ---: | ---: | ---: |
-| full band, uint8 | CPU, 8 threads | 4096 | 5.2 GiB | 12–16 GB |
-| full band, float32 | CPU, 8 threads | 4096 | 9.9 GiB | 12–16 GB |
-| depth 4, uint8 | CPU, 8 threads | 4096 | 6.2 GiB | 17.4 GB |
-| depth 4, float32 | CPU, 8 threads | 2048 | 9.2 GiB | 17.4 GB |
-| full band, uint8 | GPU | 1024 | 2.1 GiB | 9–15 GB |
-| full band, float32 | GPU | 1024 | 2.7 GiB | 9–15 GB |
-| depth 4, uint8 | GPU | 4096 | 9.4 GiB | 15.0 GB |
-| depth 4, float32 | GPU | 2048 | 10.8 GiB (9.96 engine) | 14.0 GB |
-| depth 5, uint8 | GPU | 2048 | 8.1 GB engine | 16.3 GB |
+| search | backend | chunk | path | search latency | working memory |
+| :--- | :--- | ---: | :--- | ---: | ---: |
+| full band, uint8 | CPU, 8 threads | 4096 | skewed | 0 | 5.2 GiB |
+| full band, float32 | CPU, 8 threads | 4096 | skewed | 0 | 9.9 GiB |
+| depth 4, uint8 | CPU, 8 threads | 4096 | skewed | 252888 | 6.6 GiB |
+| depth 4, float32 | CPU, 8 threads | 2048 | skewed | 252888 | 9.7 GiB |
+| full band, uint8 | GPU | 1024 | direct | 0 | 2.1 GiB |
+| full band, float32 | GPU | 1024 | direct | 0 | 2.8 GiB |
+| depth 4, uint8 | GPU | 4096 | skewed | 252888 | 9.8 GiB |
+| depth 4, float32 | GPU | 1024 | skewed | 252888 | 9.6 GiB |
+| depth 5, uint8 | GPU | 2048 | skewed | 253132 | 8.5 GiB |
 
-The largest parts are the raw input ring (each channel's dispersion reach
-plus a chunk: about 1 GB at 1 byte per sample, 4 GB for float input) and,
-for a subband search, the boxcar's carried samples (`max_boxcar` per row:
-218k rows at depth 4, 1.4 GB in float or uint32).
+The GPU direct path for the depth-4 searches needs more than the default
+budget here: with 64 GiB they take it at chunk 4096 (17.7 GiB uint8,
+18.4 GiB float32, no search latency), and the CPU float32 depth-4 search
+takes the tree path (16.6 GiB). `estimate_memory()` shows the parts: the
+streaming history (`usage.history`) is the largest, 7.4 of the GPU float32
+depth-4 search's 8.8 GiB.
 
 ## Throughput
 

@@ -42,5 +42,5 @@ The `dmt` namespaces: backend selection, engines, plans and utilities.
 - `dmt::algorithms`: engines (`FDMT`, `DDMT`, `SDMT`, `CohFDMT`, `FDMTFFT`, `DDMTFFT`); each runs on the backend chosen by its `Exec` argument.
 - `dmt::fft`: process-wide CPU FFT (FFTW) planner effort and wisdom (`set_planner`, `import_wisdom`, `export_wisdom`; `dmt/common/fft_config.hpp`).
 - `dmt::plans`: execution plans, coordinate containers and DM-grid generators (`FDMTPlan`, `DDMTPlan`, `CohFDMTPlan`, `DMGridConfig`, `generate_dm_grid`, `generate_levin_dm_grid`, `calculate_snr_loss`).
-- `dmt`: dispersion constants in the top-level namespace (`kDispConstLK`, `kDispConstMT`, `kDispConst`).
+- `dmt`: dispersion constants in the top-level namespace (`kDispConstLK`, `kDispConstMT`, `kDispConst`) and `dispersion_delay(dm, f_lo_mhz, f_hi_mhz)` (seconds, as `dmtlib.dispersion_delay`).
 - `dmt::utils`: simulation utilities.

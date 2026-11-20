@@ -8,6 +8,54 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
+- **`FDMTBoxcar::estimate_minimum_memory(...)`** (C++ and Python): the
+  estimate at the smallest `max_memory_bytes` the search can be built with
+  (same arguments as `estimate_memory()`, no budget), and
+  `FDMTBoxcarMemoryEstimate::max_memory_bytes`, the budget an estimate was
+  made with (for the minimum: the smallest that builds; one byte less
+  raises).
+- **`dmt::dispersion_delay(dm, f_lo_mhz, f_hi_mhz)`** (C++,
+  `dmt/common/types.hpp`): the dispersion delay in seconds, as Python's
+  `dmtlib.dispersion_delay` (TEMPO2 constant 1 / 2.41e-4; `f_hi_mhz` =
+  infinity for the delay from infinite frequency).
+- Documented time conventions of `RawCandidate`: `peak_sample` is the
+  trailing end of the window at the arrival at the lower edge of the
+  candidate's own plane (`f_low_mhz`; plan frequencies are channel edges);
+  a `chan_dm` plan's level-0 causal delay is subtracted on every plane. And
+  `FDMTBoxcar`'s input contract: no preprocessing; each channel zero mean,
+  common sigma, white in time over at least `max_boxcar` samples.
+- **`FDMTBoxcar` per-call kill masks on packed input** (Python
+  `execute(codes, kill_mask=...)`; C++ `execute(waterfall, kill_mask)`, host
+  or device input; CPU and GPU, every screen): channels a per-call mask
+  kills read the code `input_mean`, which must then be an integer. The
+  constructor plan's integer means stay exact, so only the per-mask cutoffs
+  and S/N scales change, as on float input (without box smearing the
+  candidates equal the float search on `code - input_mean`). Per-width
+  peaks across a change of tables are ranked by S/N.
+- **`BoxcarConfig::per_call_masks`** (Python `per_call_masks=`, default
+  false): declares that an `FDMTBoxcar` stream will pass per-call kill
+  masks. Their requirements are checked and their memory
+  reserved at construction and in `estimate_memory()`, before the
+  transform's path is chosen, so a per-call mask no longer fails mid-run
+  for those reasons, and `get_memory_usage()` stays at the estimate.
+  Candidates are unchanged. `FDMTFFTBoxcar` rejects it.
+- **Per-plane candidate counts:** `CandidateResultView::plane_counts`
+  (Python `plane_counts`, a structured array) and
+  `CandidateDeviceResultView::plane_counts` give each searched plane's
+  `emitted_count`, `total_detected`, `dropped_global` and `dropped_per_dm`
+  for the call, in `get_search_plans()` order (`FDMTBoxcar`,
+  `FDMTFFTBoxcar`); they sum to the call's counters, so a pipeline can tell
+  which subband lost candidates.
+- **`BoxcarConfig::max_candidates_per_plane`** (Python
+  `max_candidates_per_plane=`, default 0: off): each searched plane keeps at
+  most this many candidates per call, its first ones under `kDropNew` and
+  exactly its brightest under `kKeepBrightest`, so a plane flooded with
+  detections (RFI in one subband) cannot crowd the others out of
+  `max_candidates`. The planes' shares must fit `max_candidates`.
+- **`FDMTBoxcarMemoryEstimate::search_path` and `search_latency`** (C++ and
+  Python): the transform's path and the search latency of the instance the
+  estimate describes.
+
 - **`FDMT::estimate_memory(...)`** (C++ and Python `FDMT.estimate_memory`),
   one overload per constructor with the same arguments: the memory the
   instance would allocate (`usage`, equal to its `get_memory_usage()`), its
@@ -36,8 +84,7 @@ All notable changes to `dmt` are listed here. The format follows
   `memory_usage`) reports what an instance holds now.
 - **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
   `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
-  `usage`, `chunk_nsamps` and `host_staging` (the input staging block of the
-  first host-memory call on a GPU), computed without allocating.
+  `usage` and `chunk_nsamps`, computed without allocating.
 - **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
   dedispersed channels: level-0 boxes cover the residual intra-channel sweep
   at the trial DM, centred on each channel's arrival, in `FDMT`,
@@ -76,6 +123,102 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **GPU `FDMTBoxcar` and `FDMTFFTBoxcar` stage host-memory input inside
+  `max_memory_bytes`.** A host (NumPy) block was copied whole to the
+  device on the first host `execute()`, outside the budget (UWL 6656
+  channels: +0.44 GiB per 65536-sample 8-bit block, +1.7 GiB float).
+  `FDMTBoxcar` now copies each chunk into a `beams x nchans x chunk`
+  buffer reserved at construction and counted in the budget (UWL 8-bit at
+  chunk 4096: 27 MiB; float 109 MiB); `FDMTFFTBoxcar` reserves the whole
+  float block at construction (its overlap-save segment usually spans the
+  block). Host calls allocate nothing, and
+  `FDMTBoxcarMemoryEstimate.host_staging` is gone (it was new in this
+  release). Device-input callers hold the buffer too. Every GPU
+  estimate grows by it, so a configuration exactly at a budget
+  breakpoint may take the next shorter chunk. Candidates are unchanged
+  (bitwise, host vs device input, on every path). Host-input speed on an
+  L40: Parkes UWL within 2% (8-bit and float), packed input unchanged;
+  fast float plans are slower (MeerKAT L-band float 291x -> 224x real
+  time: per-chunk copies get about half the bandwidth of one block copy).
+  Device input is unchanged.
+- **GPU engines check the device's free memory before allocating.** GPU
+  `FDMT`, `FDMTBoxcar`, `FDMTFFTBoxcar`, `FDMTFFT` and `CohFDMT` compare
+  the configuration they chose (from `max_memory_bytes` and the other
+  arguments only; free memory never changes the choice) with the device's
+  free memory at construction, and raise `std::bad_alloc` (Python
+  `MemoryError`) with what they need and what is free before allocating
+  anything. Estimates do not read free memory. The advice in these errors
+  now names `max_memory_bytes` for the engines that have one (`FDMT`,
+  `FDMTBoxcar`, `FDMTFFTBoxcar`; with `estimate_minimum_memory()` for
+  the boxcar searches) instead of shorter blocks.
+- **GPU `FDMTBoxcar` subband searches choose path and chunk by a simple
+  rule** (`subband_depth > 0`, automatic chunk). They took the unskewed
+  direct path whenever it fit at any chunk and halved the chunk until it
+  did, so a larger budget could be slower: Parkes UWL depth 4 with
+  `max_boxcar` 4096 at the default 10 GiB ran direct at chunk 256 (0.92x
+  real time on an L40, 8-bit) where the skewed path at chunk 4096 fits in
+  7.8 GiB (2.79x). Now: the chunk whose state fits the L2 cache when the
+  plan has one (as before), else the direct path at the longest chunk from
+  4096 down to `max_boxcar / 8` (at least 256) that fits, else the skewed
+  path at the longest chunk that fits, else shorter direct chunks. Longer
+  chunks are faster on either path; short direct chunks lose to long skewed
+  ones only when `max_boxcar` is wide. A simple rule, not an optimum: on
+  the UWL plans measured the choice is the fastest that fits at the default
+  budget and within about 30% of it at any budget; in narrow windows a
+  larger budget can still be slower (UWL above at 10.2 GiB: direct chunk
+  512, 1.94x, against 2.79x at 10 GiB). Visible: that UWL configuration moves to the skewed path, so
+  `search_latency` goes from 0 to about 139k samples (8.9 s) and its
+  candidates agree with the direct path's to float precision, not bitwise;
+  UWL depths 1-3 move from chunk 1024 to longer chunks (11-25% faster at
+  10 GiB); the `parkes_uwl` preset (DM 0-2000, `max_boxcar` 100 ms, float)
+  at a 9 GiB budget moves from skewed chunk 1024 to direct chunk 256 (about
+  2x faster, `search_latency` 0). Full-band searches, plain
+  `FDMT` and an explicit `chunk_nsamps` are unchanged.
+- **CPU `FDMTBoxcar` on packed input takes the skewed-window path first**
+  (automatic chunk, where the skewed path applies). It took the tree path
+  whenever it fit, which on 8-bit input is 2.7-4x slower on the UWL subband
+  plans (EPYC 9334, x real time, tree vs skewed: 0.18-0.65 vs 0.73-1.73
+  with a 2.7-6.6 GiB tree) and ties or is up to 1.35x slower on small
+  plans (cryopaf, meerkat).
+  Now: skewed chunks 4096 and 2048, then the tree, then shorter skewed
+  chunks; blocks of 2048 samples or fewer keep the tree. Float input
+  (tree first) and an explicit `chunk_nsamps` are unchanged. Visible:
+  `cryopaf_lband`, `cryopaf_low` and `meerkat_lband` packed searches move
+  to the skewed path at chunk 4096 with 34-76% less memory; a packed
+  subband search now has `search_latency` > 0 (`cryopaf_lband`: 5861
+  samples), so a stream must end with `drain()`, not `flush()`, to search
+  its last samples; candidates are the tree path's, bit for bit. Only
+  8-bit input was timed (16-bit follows the same rule).
+- **`FDMTBoxcar` per-call kill masks work with any block length** (they
+  needed blocks of at least the largest row support plus `max_boxcar - 1`
+  samples, and on a GPU a search latency of at most one block). Windows
+  that reach back before their block use the variance of the history mask:
+  the block's channels and every channel live within that reach (one
+  timestamp per channel). When blocks are shorter than the search latency
+  needs, the oldest kept block stands for the older ones with one
+  conservative catch-all table, so the masks' memory stays fixed whatever
+  the block length. Results with blocks at least that long are unchanged.
+- `FDMT`, `FDMTBoxcar`: a budget no longer fails where a smaller path
+  fits. The tree path (CPU) or unskewed direct levels (GPU) were chosen
+  when the budget looked large enough and then turned out over it, so some
+  budgets above a working one failed (Parkes UWL subband depth 4: 6.5-7.2
+  GiB on the GPU while 3.6 GiB worked). The smaller path is now taken
+  instead; budgets that worked choose as before.
+- An `FDMTBoxcar` over its budget now reports what the whole search needs
+  (it reported the FDMT's share). Python: still `ValueError`.
+- `FDMTBoxcar::drain()` (Python `drain`) no longer builds a zero block of
+  the whole input in host memory (and, on a GPU, a device staging block)
+  to search the samples behind the search latency: it searches them without
+  any input block, so memory stays at `get_memory_usage()` and its estimate
+  through the end of the stream. Candidates are unchanged. On a GPU, a
+  subband search (plan `subband_depth` > 0) now reserves one byte per beam
+  and channel for this in `get_memory_usage().staging` (and in
+  `estimate_memory()`). `FDMTFFTBoxcar::drain()` is unchanged.
+- `FDMTBoxcar` and `FDMTFFTBoxcar` construction and `estimate_memory()` are
+  much faster on wide bands: the per-row noise tables and warm-up are built
+  once per FDMT tree node instead of tracing every row's subtree. Parkes
+  UWL (6656 channels, 4039 trials, GPU): 1.6 s to 0.55 s at subband depth
+  0, 3.9 s to 0.35 s at depth 2. The tables are bitwise unchanged.
 - `FDMT` construction no longer allocates while it chooses its path and
   chunk: on a GPU the budget search sizes candidate engines without
   allocating them (it could briefly hold more than `max_memory_bytes`), and
@@ -138,6 +281,15 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Fixed
 
+- **GPU `FDMTBoxcar.reset_history()` on the windowed (skewed) path** left
+  the abandoned stream's carried top-level samples in place, so the next
+  stream's first windows could include them. They are now cleared.
+- **GPU engines with different settings in one process** (`FDMTBoxcar`,
+  and the FDMT direct levels and `DDMTFFT` NUFFT kernels under it): a
+  kernel's shared-memory limit is shared by the whole process, and each
+  engine set it to its own need, so one built later with a smaller need
+  (box smearing off, a narrower `max_boxcar`) made the earlier one fail
+  with "invalid argument". The limit is now only ever raised.
 - `FDMTFFTBoxcar` on a GPU no longer counts its host result storage
   against `max_memory_bytes` when checking whether the boxcar buffers alone
   fit, so budgets that fit the device memory build as documented.
@@ -153,8 +305,7 @@ All notable changes to `dmt` are listed here. The format follows
   in the stream history.
 - The `FDMT` docs no longer say that `execute()` never allocates: on a GPU
   the first host-memory call allocates device copies of the input block and
-  output plane outside `max_memory_bytes`, as `FDMTBoxcar` and
-  `FDMTFFTBoxcar` already document for the input block.
+  output plane outside `max_memory_bytes`.
 
 ## [0.8.0] - 2026-11-11
 

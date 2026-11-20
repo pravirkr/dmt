@@ -95,6 +95,18 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
     m_deferred.resize(m_peaks, rows * m_peak_count);
     m_deferred.resize(m_per_dm, rows);
     m_deferred.resize(m_candidates, config.max_candidates);
+    m_level_offsets = boxcar_level_offsets(planes);
+    m_plane_counts.resize(planes.size());
+    m_dm_cap =
+        config.max_cands_per_dm == 0 ? UINT64_MAX : config.max_cands_per_dm;
+    m_plane_cap = config.max_candidates_per_plane;
+    if (m_plane_cap != 0) {
+        check_plane_share(config, planes.size());
+        m_plane_next.resize(planes.size());
+        if (config.overflow_policy != OverflowPolicy::kKeepBrightest) {
+            m_deferred.resize(m_plane_scratch, planes.size() * m_plane_cap);
+        }
+    }
     if (config.overflow_policy == OverflowPolicy::kKeepBrightest) {
         // Each row's brightest max_cands_per_dm of the call (a heap).
         m_keep_q = config.max_cands_per_dm;
@@ -102,6 +114,7 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
             throw std::invalid_argument("FDMTBoxcar: keep-store size overflow");
         }
         m_deferred.resize(m_keep, rows * m_keep_q);
+        m_deferred.resize(m_row_detected, rows);
     }
     if (config.screen_mode != BoxcarScreenMode::kKadaneSurrogate) {
         m_kadane_exact_prefix_cap = std::min<SizeType>(
@@ -195,6 +208,7 @@ FDMTBoxcarCpuEngine::execute(std::span<const float> waterfall) {
     begin_result(m_plan.get_nsamps());
     m_driver->search(masked(waterfall, m_masked), *this);
     m_commit_open = false;
+    m_catch_undo  = {};
     m_position += m_plan.get_nsamps();
     update_open_begin();
     finish_result();
@@ -220,9 +234,12 @@ FDMTBoxcarCpuEngine::execute(std::span<const uint8_t> waterfall) {
     if (m_position > UINT64_MAX - m_plan.get_nsamps()) {
         throw std::overflow_error("FDMTBoxcar: stream sample index overflow");
     }
+    commit_block_noise();
     begin_result(m_plan.get_nsamps());
     m_driver->search(masked(waterfall, m_masked_packed), m_config.input_nbits,
                      *this);
+    m_commit_open = false;
+    m_catch_undo  = {};
     m_position += m_plan.get_nsamps();
     update_open_begin();
     finish_result();
@@ -233,6 +250,27 @@ CandidateDeviceResultView
 FDMTBoxcarCpuEngine::execute(DeviceSpan<const uint8_t> /*unused*/,
                              Stream /*unused*/) {
     throw_no_device_memory("FDMTBoxcar::execute", Backend::kCPU);
+}
+
+bool FDMTBoxcarCpuEngine::zero_blocks() const noexcept {
+    return m_driver->search_zero_supported();
+}
+
+CandidateResultView FDMTBoxcarCpuEngine::execute_zero() {
+    if (m_position > UINT64_MAX - m_plan.get_nsamps()) {
+        throw std::overflow_error("FDMTBoxcar: stream sample index overflow");
+    }
+    // As execute() on a zero block: killed rows of zeros are zeros, so the
+    // staging copy is skipped; the noise ring repeats the last tables.
+    commit_block_noise();
+    begin_result(m_plan.get_nsamps());
+    m_driver->search_zero(*this);
+    m_commit_open = false;
+    m_catch_undo  = {};
+    m_position += m_plan.get_nsamps();
+    update_open_begin();
+    finish_result();
+    return view();
 }
 
 CandidateDeviceResultView FDMTBoxcarCpuEngine::flush_device(Stream /*unused*/) {
@@ -290,43 +328,141 @@ uint64_t FDMTBoxcarCpuEngine::open_begin_min() const noexcept {
 SizeType FDMTBoxcarCpuEngine::block_noise_bytes() const noexcept {
     // The staging block (when the constructor mask has none) and the
     // per-thread screen thresholds of tiles that mix tables.
-    const SizeType staging = m_deferred.size(m_masked) == 0
-                                 ? m_beams * m_plan.get_nchans() *
-                                       m_plan.get_nsamps() * sizeof(float)
+    const bool packed      = m_config.input_nbits != 32;
+    const SizeType row     = packed ? bit_pack_utils::packed_row_bytes(
+                                          m_plan.get_nsamps(), m_config.input_nbits)
+                                    : m_plan.get_nsamps() * sizeof(float);
+    const SizeType staging = (packed ? m_deferred.size(m_masked_packed)
+                                     : m_deferred.size(m_masked)) == 0
+                                 ? m_beams * m_plan.get_nchans() * row
                                  : 0;
+    // Packed: the fill row and the per-thread integer screen cutoffs.
+    const SizeType fill = packed ? row + (static_cast<SizeType>(m_threads) *
+                                          m_filters * sizeof(uint64_t))
+                                 : 0;
+    // Packed Kadane: the int32 gate's cuts, or the float gate's cutoffs.
+    SizeType gate = 0;
+    if (packed && m_config.screen_mode == BoxcarScreenMode::kKadane) {
+        gate =
+            m_kadane_int32
+                ? static_cast<SizeType>(m_threads) * kadane::kMaxGateBuckets *
+                      kadane::kMaxBatchRows * sizeof(int32_t)
+                : static_cast<SizeType>(m_threads) * m_filters * sizeof(float);
+    }
     const SizeType cuts =
         (m_config.screen_mode == BoxcarScreenMode::kKadane ||
          m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)
             ? (static_cast<SizeType>(m_threads) * kadane::kMaxGateBuckets *
                kadane::kMaxBatchRows * sizeof(float))
             : 0;
-    return staging + cuts +
+    return staging + fill + gate + cuts +
            (static_cast<SizeType>(m_threads) * m_filters * sizeof(float));
 }
 
 void FDMTBoxcarCpuEngine::enable_block_noise(
     std::shared_ptr<const std::vector<uint64_t>> support) {
-    if (m_config.input_nbits != 32) {
-        throw std::logic_error(
-            "FDMTBoxcar (cpu): per-call kill masks need float input");
+    const bool packed = m_config.input_nbits != 32;
+    // Sized, not allocated, while the construction is deferred
+    // (BoxcarConfig::per_call_masks): allocate() makes them.
+    if (packed) {
+        const SizeType row = bit_pack_utils::packed_row_bytes(
+            m_plan.get_nsamps(), m_config.input_nbits);
+        const SizeType full = m_beams * m_plan.get_nchans() * row;
+        if (m_deferred.size(m_masked_packed) < full) {
+            m_deferred.resize(m_masked_packed, full);
+        }
+        // Channels a per-call mask kills read the code input_mean (an
+        // integer code, checked by the noise model).
+        m_fill_row.assign(row, uint8_t{0});
+        const auto code = static_cast<uint32_t>(m_config.input_mean);
+        const auto fill = [&]<unsigned NB>() {
+            for (SizeType t = 0; t < m_plan.get_nsamps(); ++t) {
+                bit_pack_utils::write_packed_sample<NB>(m_fill_row.data(), t,
+                                                        code);
+            }
+        };
+        switch (m_config.input_nbits) {
+        case 1:
+            fill.template operator()<1>();
+            break;
+        case 2:
+            fill.template operator()<2>();
+            break;
+        case 4:
+            fill.template operator()<4>();
+            break;
+        case 8:
+            fill.template operator()<8>();
+            break;
+        default:
+            fill.template operator()<16>();
+            break;
+        }
+        m_deferred.resize(m_screen_ithr,
+                          static_cast<SizeType>(m_threads) * m_filters);
+        if (m_config.screen_mode == BoxcarScreenMode::kKadane) {
+            if (m_kadane_int32) {
+                m_deferred.resize(m_thread_icuts,
+                                  static_cast<SizeType>(m_threads) *
+                                      kadane::kMaxGateBuckets *
+                                      kadane::kMaxBatchRows);
+            } else {
+                m_deferred.resize(m_screen_eff,
+                                  static_cast<SizeType>(m_threads) * m_filters);
+            }
+        }
+    } else {
+        const SizeType full =
+            m_beams * m_plan.get_nchans() * m_plan.get_nsamps();
+        if (m_deferred.size(m_masked) < full) {
+            m_deferred.resize(m_masked, full);
+        }
     }
-    m_masked.resize(m_beams * m_plan.get_nchans() * m_plan.get_nsamps());
     m_killed.resize(m_plan.get_nchans());
-    m_screen_thr.resize(static_cast<SizeType>(m_threads) * m_filters);
+    m_deferred.resize(m_screen_thr,
+                      static_cast<SizeType>(m_threads) * m_filters);
     if (m_config.screen_mode == BoxcarScreenMode::kKadane ||
         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        m_thread_cuts.resize(static_cast<SizeType>(m_threads) *
-                             kadane::kMaxGateBuckets * kadane::kMaxBatchRows);
+        m_deferred.resize(m_thread_cuts, static_cast<SizeType>(m_threads) *
+                                             kadane::kMaxGateBuckets *
+                                             kadane::kMaxBatchRows);
     }
     m_support         = std::move(support);
     const uint64_t ns = m_plan.get_nsamps();
     const SizeType extra_ring =
         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate ? 1 : 0;
-    m_ring_size = 1 + extra_ring +
-                  static_cast<SizeType>((search_latency() + ns - 1) / ns);
+    // Blocks shorter than the largest reach: at most the entries blocks of
+    // that reach would need; older blocks share the catch-all.
+    uint64_t reach = 0;
+    for (const uint64_t s : *m_support) {
+        reach = std::max(reach, s);
+    }
+    reach += m_width - 1;
+    const auto blocks = [&](uint64_t n) {
+        return 1 + extra_ring +
+               static_cast<SizeType>((search_latency() + n - 1) / n);
+    };
+    m_ring_needed = blocks(ns);
+    m_ring_size = std::min(m_ring_needed, blocks(std::max<uint64_t>(reach, 1)));
     m_ring.reserve(m_ring_size + 1);
     m_noise_on = true;
     reset_block_noise();
+    // Packed per-width peaks rank by S/N from now on: give the open ones
+    // theirs (the constructor's tables so far).
+    if (packed &&
+        m_config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth) {
+        const SizeType nrows = m_rows.size();
+        for (SizeType idx = 0; idx < m_peaks.size(); ++idx) {
+            auto& peak = m_peaks[idx];
+            if (peak.open) {
+                const SizeType i =
+                    (((idx / m_peak_count) % nrows) * m_filters) + peak.filter;
+                peak.snr = static_cast<float>(
+                    (static_cast<double>(peak.raw_sum) - m_integer_means[i]) *
+                    m_integer_scales[i]);
+            }
+        }
+    }
     if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
         const SizeType np = m_surrogate_plan.num_passes;
         for (SizeType idx = 0; idx < m_surrogate_rows.size(); ++idx) {
@@ -355,6 +491,16 @@ void FDMTBoxcarCpuEngine::drop_block_noise() noexcept {
     m_pending.reset();
     // A call that threw after its commit: restore the ring.
     if (m_commit_open) {
+        auto& u = m_catch_undo;
+        if (u.front_set) {
+            auto& front             = m_ring.front();
+            front.steady            = std::move(u.steady);
+            front.transition_tables = std::move(u.transition_tables);
+            front.transition        = u.transition;
+        }
+        m_has_catch_all = u.has_catch_all;
+        m_catch_all     = std::move(u.catch_all);
+        u               = {};
         m_ring.pop_back();
         if (m_evicted) {
             m_ring.insert(m_ring.begin(), std::move(*m_evicted));
@@ -362,6 +508,15 @@ void FDMTBoxcarCpuEngine::drop_block_noise() noexcept {
         }
         m_commit_open = false;
     }
+}
+
+uint64_t FDMTBoxcarCpuEngine::noise_catch_all_begin() const noexcept {
+    if (!m_noise_on || m_ring_needed <= m_ring_size) {
+        return UINT64_MAX;
+    }
+    // The first sample of the oldest block the next call still searches.
+    const uint64_t back = (m_ring_needed - 1) * m_plan.get_nsamps();
+    return m_position > back ? m_position - back : 0;
 }
 
 void FDMTBoxcarCpuEngine::reset_history(Stream /*unused*/) {
@@ -441,6 +596,14 @@ void FDMTBoxcarCpuEngine::consume(SizeType level,
         const FDMTSearchInput* in = &row_in;
         if (m_config.input_nbits == 32) {
             score<float, float>(m_planes[p], row_idx, d, beam, *in);
+        } else if (m_noise_on) {
+            if (m_carry32) {
+                score<uint64_t, uint32_t, true>(m_planes[p], row_idx, d, beam,
+                                                *in);
+            } else {
+                score<uint64_t, uint64_t, true>(m_planes[p], row_idx, d, beam,
+                                                *in);
+            }
         } else if (m_carry32) {
             score<uint64_t, uint32_t>(m_planes[p], row_idx, d, beam, *in);
         } else {
@@ -492,7 +655,7 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
          sizeof(kadane::KadaneSurrogateRowState)) +
         (m_deferred.size(m_surrogate_pos) * sizeof(uint64_t));
     const SizeType kadane_work =
-        ((m_deferred.size(m_tile_f32) + m_thread_cuts.size() +
+        ((m_deferred.size(m_tile_f32) + m_deferred.size(m_thread_cuts) +
           m_deferred.size(m_surrogate_chk_c) +
           m_deferred.size(m_surrogate_chk_dec) +
           m_deferred.size(m_surrogate_lb)) *
@@ -515,12 +678,20 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
                      (m_deferred.size(m_best) * sizeof(float)) +
                      (m_deferred.size(m_best_filter) * sizeof(uint32_t)) +
                      (m_deferred.size(m_per_dm) * sizeof(uint64_t)) +
-                     (m_screen_thr.size() * sizeof(float)) + kadane_work,
-        .candidates =
-            (m_deferred.size(m_candidates) + m_deferred.size(m_keep)) *
-            sizeof(RawCandidate),
-        .staging = (m_deferred.size(m_masked) * sizeof(float)) +
-                   m_deferred.size(m_masked_packed)};
+                     (m_deferred.size(m_row_detected) * sizeof(uint64_t)) +
+                     (m_plane_counts.size() * sizeof(CandidateCounts)) +
+                     (m_plane_next.size() * sizeof(uint64_t)) +
+                     (m_level_offsets.size() * sizeof(uint32_t)) +
+                     (m_deferred.size(m_screen_thr) * sizeof(float)) +
+                     (m_deferred.size(m_screen_ithr) * sizeof(uint64_t)) +
+                     (m_deferred.size(m_thread_icuts) * sizeof(int32_t)) +
+                     (m_deferred.size(m_screen_eff) * sizeof(float)) +
+                     kadane_work,
+        .candidates = (m_deferred.size(m_candidates) + m_deferred.size(m_keep) +
+                       m_deferred.size(m_plane_scratch)) *
+                      sizeof(RawCandidate),
+        .staging    = (m_deferred.size(m_masked) * sizeof(float)) +
+                      m_deferred.size(m_masked_packed) + m_fill_row.size()};
 }
 
 SizeType FDMTBoxcarCpuEngine::chunk_nsamps() const noexcept {
@@ -540,6 +711,9 @@ void FDMTBoxcarCpuEngine::begin_result(SizeType samples) {
     m_keep_open = m_keep_q != 0;
     m_next_slot.store(0, std::memory_order_relaxed);
     std::ranges::fill(m_per_dm, 0);
+    std::ranges::fill(m_row_detected, 0);
+    std::ranges::fill(m_plane_counts, CandidateCounts{});
+    std::ranges::fill(m_plane_next, 0);
     m_result_begin   = m_position;
     m_result_samples = samples;
 }
@@ -549,7 +723,8 @@ CandidateResultView FDMTBoxcarCpuEngine::view() const {
         m_counts,
         {m_candidates.data(), static_cast<SizeType>(m_counts.emitted_count)},
         m_result_begin,
-        m_result_samples};
+        m_result_samples,
+        m_plane_counts};
 }
 
 void FDMTBoxcarCpuEngine::emit(SizeType row,
@@ -559,14 +734,19 @@ void FDMTBoxcarCpuEngine::emit(SizeType row,
     ++m_counts.total_detected;
     auto& count = m_per_dm[(beam * m_rows.size()) + row];
     if (m_keep_q != 0) {
+        ++m_row_detected[(beam * m_rows.size()) + row];
         keep((beam * m_rows.size()) + row, count,
              candidate_of(row, beam, peak));
         return;
     }
-    if (m_config.max_cands_per_dm != 0 &&
-        count++ >= m_config.max_cands_per_dm) {
+    // Every detection counts in its row (per-plane counts).
+    if (count++ >= m_dm_cap) {
 #pragma omp atomic
         ++m_counts.dropped_per_dm;
+        return;
+    }
+    if (m_plane_cap != 0) {
+        emit_to_plane(row, candidate_of(row, beam, peak));
         return;
     }
     const auto slot = m_next_slot.fetch_add(1, std::memory_order_relaxed);
@@ -580,6 +760,22 @@ void FDMTBoxcarCpuEngine::emit(SizeType row,
     ++m_counts.emitted_count;
 }
 
+void FDMTBoxcarCpuEngine::emit_to_plane(SizeType row,
+                                        const RawCandidate& candidate) {
+    const SizeType p = m_rows[row].plane;
+    uint64_t slot    = 0;
+#pragma omp atomic capture
+    slot = m_plane_next[p]++;
+    if (slot >= m_plane_cap) {
+#pragma omp atomic
+        ++m_counts.dropped_global;
+        return;
+    }
+    m_plane_scratch[(p * m_plane_cap) + slot] = candidate;
+#pragma omp atomic
+    ++m_counts.emitted_count;
+}
+
 RawCandidate FDMTBoxcarCpuEngine::candidate_of(SizeType row,
                                                SizeType beam,
                                                const BoxcarPeak& peak) const {
@@ -589,7 +785,8 @@ RawCandidate FDMTBoxcarCpuEngine::candidate_of(SizeType row,
     candidate.begin_sample = peak.begin;
     candidate.end_sample   = peak.end;
     candidate.snr          = peak.snr;
-    if (m_config.input_nbits != 32 &&
+    // Packed peaks under per-call masks carry the S/N of their table.
+    if (m_config.input_nbits != 32 && !m_noise_on &&
         m_config.peak_mode != PeakFindingMode::kContiguousPeakAcrossWidths) {
         const SizeType i = (row * m_filters) + peak.filter;
         candidate.snr    = static_cast<float>(
@@ -624,6 +821,20 @@ void FDMTBoxcarCpuEngine::keep(SizeType index,
 
 void FDMTBoxcarCpuEngine::finish_result() {
     finish_keep_result();
+    if (m_plane_cap != 0 && m_keep_q == 0) {
+        // The planes' shares, in plane order, to the front.
+        SizeType off = 0;
+        for (SizeType p = 0; p < m_plane_next.size(); ++p) {
+            const auto n = static_cast<SizeType>(
+                std::min<uint64_t>(m_plane_next[p], m_plane_cap));
+            const auto* from = m_plane_scratch.data() + (p * m_plane_cap);
+            std::copy_n(from, n,
+                        m_candidates.begin() +
+                            static_cast<std::ptrdiff_t>(off));
+            off += n;
+        }
+    }
+    finish_plane_counts();
     // chan_dm plans: rows lag the bottom-edge arrival by the plan's level-0
     // causal delay; candidates report the arrival (saturating at 0).
     const uint64_t lag = m_plan.get_level0_causal_delay();
@@ -637,6 +848,36 @@ void FDMTBoxcarCpuEngine::finish_result() {
         c.peak_sample  = c.peak_sample > lag ? c.peak_sample - lag : 0;
         c.begin_sample = c.begin_sample > lag ? c.begin_sample - lag : 0;
         c.end_sample   = c.end_sample > lag ? c.end_sample - lag : 0;
+    }
+}
+
+void FDMTBoxcarCpuEngine::finish_plane_counts() {
+    // Detections and per-row drops from the rows' counters (kDropNew:
+    // m_per_dm counts every detection, drops past the cap; kKeepBrightest:
+    // m_row_detected, with m_per_dm the kept ones), emitted from the call's
+    // candidates.
+    const auto plane_of = [&](const RawCandidate& c) -> CandidateCounts& {
+        return m_plane_counts[m_level_offsets[c.subband_level] + c.subband_idx];
+    };
+    for (SizeType i = 0; i < m_per_dm.size(); ++i) {
+        auto& out        = plane_of(m_rows[i % m_rows.size()].candidate);
+        const uint64_t n = m_per_dm[i];
+        if (m_keep_q != 0) {
+            out.total_detected += m_row_detected[i];
+            out.dropped_per_dm += m_row_detected[i] - n;
+        } else {
+            out.total_detected += n;
+            out.dropped_per_dm += n > m_dm_cap ? n - m_dm_cap : 0;
+        }
+    }
+    const auto emitted = static_cast<SizeType>(
+        std::min<uint64_t>(m_counts.emitted_count, m_candidates.size()));
+    for (SizeType j = 0; j < emitted; ++j) {
+        ++plane_of(m_candidates[j]).emitted_count;
+    }
+    for (auto& p : m_plane_counts) {
+        p.dropped_global =
+            p.total_detected - p.dropped_per_dm - p.emitted_count;
     }
 }
 
@@ -656,13 +897,44 @@ void FDMTBoxcarCpuEngine::finish_keep_result() {
         }
         n += count;
     }
-    const SizeType kept = std::min(n, m_candidates.size());
-    if (kept < n) {
-        std::nth_element(
-            m_keep.begin(), m_keep.begin() + static_cast<std::ptrdiff_t>(kept),
-            m_keep.begin() + static_cast<std::ptrdiff_t>(n), brighter);
+    const auto first = m_keep.begin();
+    if (m_plane_cap == 0) {
+        const SizeType kept = std::min(n, m_candidates.size());
+        if (kept < n) {
+            std::nth_element(first, first + static_cast<std::ptrdiff_t>(kept),
+                             first + static_cast<std::ptrdiff_t>(n), brighter);
+        }
+        std::copy_n(first, kept, m_candidates.begin());
+        m_counts.emitted_count  = kept;
+        m_counts.dropped_global = n - kept;
+        return;
     }
-    std::copy_n(m_keep.begin(), kept, m_candidates.begin());
+    // Each plane's brightest share: group the entries by plane, then
+    // select within each group.
+    const auto plane_of = [&](const RawCandidate& c) {
+        return m_level_offsets[c.subband_level] + c.subband_idx;
+    };
+    std::sort(first, first + static_cast<std::ptrdiff_t>(n),
+              [&](const RawCandidate& a, const RawCandidate& b) {
+                  return plane_of(a) < plane_of(b);
+              });
+    SizeType kept = 0;
+    for (SizeType b = 0; b < n;) {
+        SizeType e = b + 1;
+        while (e < n && plane_of(m_keep[e]) == plane_of(m_keep[b])) {
+            ++e;
+        }
+        const SizeType take = std::min(e - b, m_plane_cap);
+        const auto lo       = first + static_cast<std::ptrdiff_t>(b);
+        if (take < e - b) {
+            std::nth_element(lo, lo + static_cast<std::ptrdiff_t>(take),
+                             first + static_cast<std::ptrdiff_t>(e), brighter);
+        }
+        std::copy_n(lo, take,
+                    m_candidates.begin() + static_cast<std::ptrdiff_t>(kept));
+        kept += take;
+        b = e;
+    }
     m_counts.emitted_count  = kept;
     m_counts.dropped_global = n - kept;
 }
@@ -706,17 +978,38 @@ FDMTBoxcarCpuEngine::tile_tables(const plans::BoxcarPlanePlan& plane,
     }
     const float* plane_thr = plane.raw_thresh_lut.data() + (dm * m_filters);
     const float* plane_inv = plane.inv_sigma_lut.data() + (dm * m_filters);
+    const bool packed      = m_config.input_nbits != 32;
+    const uint64_t* plane_ithr =
+        packed ? plane.integer_thresh_lut.data() + (dm * m_filters) : nullptr;
     if (count == 1) {
         tables.thr   = table_thr(in_play[0], plane_thr, row_idx, m_filters);
         tables.inv   = table_inv(in_play[0], plane_inv, row_idx, m_filters);
         tables.mixed = false;
+        if (packed) {
+            tables.ithr =
+                table_ithr(in_play[0], plane_ithr, row_idx, m_filters);
+            tables.screen_ithr = tables.ithr;
+        }
         return tables.thr;
     }
     tables.thr     = plane_thr;
     tables.inv     = plane_inv;
     tables.mixed   = true;
     tables.support = support;
-    float* screen  = m_screen_thr.data() + (tid * m_filters);
+    if (packed) {
+        tables.ithr       = plane_ithr;
+        uint64_t* iscreen = m_screen_ithr.data() + (tid * m_filters);
+        for (SizeType f = 0; f < m_filters; ++f) {
+            uint64_t th = UINT64_MAX;
+            for (int j = 0; j < count; ++j) {
+                th = std::min(th, table_ithr(in_play[j], plane_ithr, row_idx,
+                                             m_filters)[f]);
+            }
+            iscreen[f] = th;
+        }
+        tables.screen_ithr = iscreen;
+    }
+    float* screen = m_screen_thr.data() + (tid * m_filters);
     for (SizeType f = 0; f < m_filters; ++f) {
         float th = std::numeric_limits<float>::max();
         for (int j = 0; j < count; ++j) {
@@ -752,11 +1045,21 @@ std::span<const T> FDMTBoxcarCpuEngine::masked(std::span<const T> block,
         return block;
     }
     if (m_noise_on) {
+        // Packed: channels only the per-call mask kills read the mean code
+        // (2); the constructor's read zero (1).
+        const uint8_t call_killed = std::is_same_v<T, float> ? 1 : 2;
         std::ranges::fill(m_killed, uint8_t{0});
         for (const auto& [c0, c1] : runs) {
             std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
                       m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
-                      uint8_t{1});
+                      call_killed);
+        }
+        if (call_killed == 2) {
+            for (const auto& [c0, c1] : m_kill_runs) {
+                std::fill(m_killed.begin() + static_cast<std::ptrdiff_t>(c0),
+                          m_killed.begin() + static_cast<std::ptrdiff_t>(c1),
+                          uint8_t{1});
+            }
         }
     }
     const SizeType nchans = m_plan.get_nchans();
@@ -766,7 +1069,12 @@ std::span<const T> FDMTBoxcarCpuEngine::masked(std::span<const T> block,
     T* dst                = buffer.data();
 #pragma omp parallel for num_threads(m_threads) schedule(static)
     for (SizeType r = 0; r < rows; ++r) {
-        if (m_killed[r % nchans] != 0) {
+        const uint8_t k = m_killed[r % nchans];
+        if (k == 2) {
+            if constexpr (std::is_same_v<T, uint8_t>) {
+                std::copy_n(m_fill_row.data(), row, dst + (r * row));
+            }
+        } else if (k != 0) {
             std::fill_n(dst + (r * row), row, T{0});
         } else {
             std::copy_n(src + (r * row), row, dst + (r * row));
@@ -797,7 +1105,10 @@ void FDMTBoxcarCpuEngine::update_open_begin() {
 void FDMTBoxcarCpuEngine::reset_block_noise() {
     m_pending.reset();
     m_evicted.reset();
-    m_commit_open = false;
+    m_commit_open   = false;
+    m_has_catch_all = false;
+    m_catch_all.reset();
+    m_catch_undo = {};
     m_ring.clear();
     BlockNoise first; // the constructor tables from stream sample 0
     first.kill_runs = m_kill_runs;
@@ -817,12 +1128,30 @@ void FDMTBoxcarCpuEngine::commit_block_noise() {
         entry.kill_runs = m_kill_runs;
     }
     entry.first_sample = m_position;
+    m_catch_undo = {.has_catch_all = m_has_catch_all, .catch_all = m_catch_all};
+    if (entry.has_catch_all) {
+        m_catch_all         = std::move(entry.catch_all);
+        m_has_catch_all     = true;
+        entry.has_catch_all = false;
+    }
     m_evicted.reset();
     if (m_ring.size() == m_ring_size) {
         m_evicted = std::move(m_ring.front());
         m_ring.erase(m_ring.begin());
     }
     m_ring.push_back(std::move(entry));
+    // A short block evicted an entry still searched: the oldest kept one
+    // stands for it with the catch-all.
+    if (m_evicted && m_ring_needed > m_ring_size && m_has_catch_all) {
+        auto& front                    = m_ring.front();
+        m_catch_undo.front_set         = true;
+        m_catch_undo.steady            = front.steady;
+        m_catch_undo.transition_tables = front.transition_tables;
+        m_catch_undo.transition        = front.transition;
+        front.steady                   = m_catch_all;
+        front.transition_tables        = m_catch_all;
+        front.transition               = true;
+    }
     m_commit_open = true;
 }
 

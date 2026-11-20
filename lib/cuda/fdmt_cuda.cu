@@ -24,7 +24,7 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
         std::min(cfg.max_fuse_levels, m_plan.get_max_fuse_levels());
     m_search_upper = cfg.search_upper_levels;
     m_max_memory   = cfg.max_memory_bytes;
-    m_force_skewed = cfg.force_skewed_direct;
+    m_path         = cfg.gpu_path;
     m_search_only  = cfg.search_only;
     m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
                                         cfg.chunk_nsamps, m_search_upper);
@@ -34,10 +34,7 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
                               ? sizeof(uint32_t)
                               : sizeof(uint64_t);
     const SizeType cached =
-        (m_mode == FDMTMode::kValid && cfg.chunk_nsamps == 0)
-            ? detail::fdmt_cache_chunk(m_plan, m_nbeams, elem, l2_bytes(),
-                                       m_search_upper)
-            : 0;
+        cfg.chunk_nsamps == 0 ? detail::fdmt_gpu_cache_chunk(m_plan, cfg) : 0;
     if (cached != 0) {
         m_chunk = cached;
     } else if (m_mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
@@ -73,11 +70,14 @@ void FDMTCudaEngine::allocate() {
     gpu_utils::set_device(m_device_id);
     const auto planned = get_memory_usage();
     const auto before  = gpu_utils::device_memory_info();
+    gpu_utils::check_free_memory("FDMT (cuda)", planned.total(), before,
+                                 gpu_utils::kAdviceBudget);
     try {
         m_pending.materialize();
     } catch (const std::exception& e) {
         throw gpu_utils::allocation_failure("FDMT (cuda)", planned.total(),
-                                            before, e);
+                                            before, e,
+                                            gpu_utils::kAdviceBudget);
     }
     if (m_fused) {
         bind_fused_pointers();
@@ -255,6 +255,17 @@ void FDMTCudaEngine::init_device_structures(SizeType fuse_levels) {
         } else {
             m_integer_ring.resize(m_nbeams * m_ring_size, 0);
         }
+        if (m_search_only) {
+            // Host-memory execute_search() stages one chunk at a time.
+            const SizeType rows = m_nbeams * m_plan.get_nchans();
+            if (m_search_nbits == 32) {
+                m_search_in_f32_d.resize(rows * m_chunk);
+            } else {
+                m_search_in_packed_d.resize(
+                    rows *
+                    bit_pack_utils::packed_row_bytes(m_chunk, m_search_nbits));
+            }
+        }
     }
     gpu_utils::check_last_gpu_error("FDMT (gpu): constructor failed");
 }
@@ -335,10 +346,12 @@ FDMTMemoryUsage FDMTCudaEngine::get_memory_usage() const noexcept {
                    windowed_top_bytes() + direct_window_bytes() +
                    m_integer_ring.size() * sizeof(uint64_t) +
                    m_integer32_ring.size() * sizeof(uint32_t),
-        // Fused or direct tables, plus the host-execute() staging once
-        // allocated.
+        // Fused or direct tables, the host execute_search() chunk, plus the
+        // host-execute() staging once allocated.
         .workspace =
             fused_bytes + direct_workspace_bytes() + top_workspace_bytes() +
+            (m_search_in_f32_d.size() * sizeof(float)) +
+            m_search_in_packed_d.size() +
             (m_stage_wf_f32_d.size() * sizeof(float)) +
             m_stage_wf_packed_d.size() + (m_stage_dmt_d.size() * sizeof(float)),
         .output = m_nbeams * m_plan.get_dmt_size() * sizeof(float),
@@ -392,16 +405,6 @@ SizeType FDMTCudaEngine::max_optin_smem_bytes() const {
                                m_device_id) != cudaSuccess ||
         bytes <= 0) {
         return kDefaultSmemBytes;
-    }
-    return static_cast<SizeType>(bytes);
-}
-
-SizeType FDMTCudaEngine::l2_bytes() const {
-    int bytes = 0;
-    if (cudaDeviceGetAttribute(&bytes, cudaDevAttrL2CacheSize, m_device_id) !=
-            cudaSuccess ||
-        bytes <= 0) {
-        return 0;
     }
     return static_cast<SizeType>(bytes);
 }
@@ -1021,12 +1024,15 @@ void FDMTCudaEngine::configure_top(plans::FDMTPlanContainer& relaid) {
     // the windowed top (no tree history above the direct levels).
     // The tree levels' history (all levels: the subband search reads
     // them) over the budget.
+    using Path = detail::FDMTEngineConfig::GPUPath;
     const bool big_history =
+        m_path == Path::kAuto &&
         (m_plan.get_history_size() + m_plan.get_tree_history_size()) *
-            sizeof(float) * top_words() >
-        m_max_memory;
+                sizeof(float) * top_words() >
+            m_max_memory;
     if (m_search_upper && m_nbeams == 1 && m_direct_eligible &&
-        (big_history || m_force_skewed) && sub_depth + k_direct + 2 <= root) {
+        (big_history || m_path == Path::kSkewed) &&
+        sub_depth + k_direct + 2 <= root) {
         const SizeType top_k =
             std::min(k_direct + (pc.state_shape[0].nchans > 4096 ? 3 : 2),
                      root - sub_depth - 1);
@@ -1067,7 +1073,7 @@ void FDMTCudaEngine::configure_top(plans::FDMTPlanContainer& relaid) {
     constexpr SizeType kMaxRingBytes = SizeType{2} << 30;
     const SizeType step              = target < root ? 2 : 1;
     detail::FDMTDirectTopPlan plan;
-    bool use_skewed = !m_direct || m_force_skewed;
+    bool use_skewed = !m_direct || m_path == Path::kSkewed;
     if (!use_skewed) {
         plan = detail::build_fdmt_direct_top(m_plan, level, target, false);
         while (m_nbeams * static_cast<SizeType>(plan.ring_size) *
@@ -1207,19 +1213,34 @@ SizeType FDMTCudaEngine::direct_workspace_bytes() const noexcept {
 
 namespace dmt::algorithms {
 
+SizeType detail::fdmt_gpu_cache_chunk(const plans::FDMTPlan& plan,
+                                      const detail::FDMTEngineConfig& cfg) {
+    if (cfg.mode != FDMTMode::kValid) {
+        return 0;
+    }
+    const bool u32 = detail::int_search_fits_u32(plan, cfg.use_box_smearing,
+                                                 cfg.search_nbits);
+    const SizeType elem =
+        (cfg.search_nbits == 32 || u32) ? sizeof(uint32_t) : sizeof(uint64_t);
+    int l2 = 0;
+    if (cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, cfg.exec.device) !=
+            cudaSuccess ||
+        l2 <= 0) {
+        return 0;
+    }
+    return detail::fdmt_cache_chunk(plan, cfg.nbeams, elem,
+                                    static_cast<SizeType>(l2),
+                                    cfg.search_upper_levels);
+}
+
+namespace {
 std::unique_ptr<detail::FDMTEngine>
-detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
-                      const detail::FDMTEngineConfig& cfg_in) {
-    // Memory budget (FDMTEngineConfig::max_memory_bytes). Construction is
-    // cheap next to the plan (about 1 s on parkes_uwl), so the automatic
-    // chunk is chosen by building and measuring: the windowed top (subband
-    // search on the skewed path) runs faster at longer chunks, so it takes
-    // the longest that fits; any other path keeps its automatic chunk and
-    // halves it while over budget. A longer windowed-top chunk is only
-    // built when predicted to fit (its memory is affine in the chunk: rows
-    // of chunk + spread samples, rings of reach + chunk; extrapolated from
-    // two measured engines), so construction never holds more than the
-    // budget to find out (it held 12 GiB at chunk 4096 for float32 UWL).
+make_fdmt_gpu_within(const plans::FDMTPlan& plan,
+                     const detail::FDMTEngineConfig& cfg_in) {
+    // Memory budget (FDMTEngineConfig::max_memory_bytes). An explicit chunk
+    // (or a mode other than "valid") fits or throws; an automatic chunk is
+    // halved while over the budget. (FDMTBoxcar's subband searches pass an
+    // explicit chunk and path from their ordered list, lib/fdmt_boxcar.cpp.)
     // Every engine of the search is built deferred (sized, not allocated);
     // only the one returned is allocated, unless the caller asked for a
     // deferred engine (memory estimates).
@@ -1235,11 +1256,15 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
         return e.get_memory_usage().total() <= cfg.max_memory_bytes;
     };
     const auto over = [&](const detail::fdmt_cuda::FDMTCudaEngine& e) {
-        return std::invalid_argument(fmt::format(
-            "FDMT (cuda): this configuration needs {:.2f} GiB, over "
-            "max_memory_bytes ({:.2f} GiB)",
-            static_cast<double>(e.get_memory_usage().total()) / (1 << 30),
-            static_cast<double>(cfg.max_memory_bytes) / (1 << 30)));
+        return detail::BudgetError(
+            fmt::format(
+                "FDMT (cuda): this configuration needs {:.2f} GiB, over "
+                "max_memory_bytes ({:.2f} GiB)",
+                static_cast<double>(e.get_memory_usage().total()) / (1 << 30),
+                static_cast<double>(cfg.max_memory_bytes) / (1 << 30)),
+            e.get_memory_usage().total(),
+            /*smaller_path=*/e.search_path().find("skewed") ==
+                std::string::npos);
     };
     auto engine =
         std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, cfg);
@@ -1248,49 +1273,6 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
             throw over(*engine);
         }
         return finish(std::move(engine));
-    }
-    const auto try_chunk =
-        [&](SizeType c) -> std::unique_ptr<detail::fdmt_cuda::FDMTCudaEngine> {
-        auto c_cfg         = cfg;
-        c_cfg.chunk_nsamps = c;
-        try {
-            auto e = std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan,
-                                                                         c_cfg);
-            return fits(*e) ? std::move(e) : nullptr;
-        } catch (const std::bad_alloc&) {
-            return nullptr;
-        } catch (const thrust::system_error&) {
-            return nullptr;
-        }
-    };
-    const SizeType nsamps = plan.get_nsamps();
-    const SizeType c_auto = engine->get_chunk_nsamps();
-    if (engine->search_path().find("windowed") != std::string::npos &&
-        fits(*engine) && c_auto >= 512 &&
-        c_auto < std::min<SizeType>(4096, nsamps)) {
-        const SizeType c0 = c_auto;
-        const auto m0 = static_cast<double>(engine->get_memory_usage().total());
-        const auto budget = static_cast<double>(cfg.max_memory_bytes);
-        // Drop the sized engine before the next one (estimates hold no
-        // device memory). The second point is a shorter chunk, which fits
-        // whenever c0 does.
-        engine.reset();
-        const SizeType c1 = c0 / 2;
-        double slope      = 0.0;
-        if (auto e1 = try_chunk(c1)) {
-            const auto m1 = static_cast<double>(e1->get_memory_usage().total());
-            slope         = (m0 - m1) / static_cast<double>(c0 - c1);
-        }
-        for (const SizeType c : {4096, 2048}) {
-            if (c <= c0 || c > nsamps || slope <= 0.0 ||
-                m0 + (slope * static_cast<double>(c - c0)) > budget) {
-                continue;
-            }
-            if (auto e = try_chunk(c)) {
-                return finish(std::move(e));
-            }
-        }
-        engine = std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, cfg);
     }
     SizeType chunk = engine->get_chunk_nsamps();
     while (!fits(*engine)) {
@@ -1305,6 +1287,34 @@ detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
             std::make_unique<detail::fdmt_cuda::FDMTCudaEngine>(plan, c_cfg);
     }
     return finish(std::move(engine));
+}
+} // namespace
+
+std::unique_ptr<detail::FDMTEngine>
+detail::make_fdmt_gpu(const plans::FDMTPlan& plan,
+                      const detail::FDMTEngineConfig& cfg) {
+    using Path = detail::FDMTEngineConfig::GPUPath;
+    try {
+        return make_fdmt_gpu_within(plan, cfg);
+    } catch (const detail::BudgetError& first) {
+        // The path is chosen from the tree history against the budget; when
+        // that path is over the budget at every chunk, the skewed direct
+        // levels (windowed top for a subband search) may still fit. A path
+        // the caller fixed is not changed.
+        if (cfg.gpu_path != Path::kAuto || !first.smaller_path()) {
+            throw;
+        }
+        auto skewed     = cfg;
+        skewed.gpu_path = Path::kSkewed;
+        try {
+            return make_fdmt_gpu_within(plan, skewed);
+        } catch (const detail::BudgetError& e) {
+            if (e.needed() < first.needed()) {
+                throw;
+            }
+            throw first;
+        }
+    }
 }
 
 } // namespace dmt::algorithms

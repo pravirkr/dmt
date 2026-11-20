@@ -28,7 +28,9 @@ enum class OverflowPolicy : uint8_t {
     /// peak sample, then beam, subband, DM row and width. A store of
     /// max_cands_per_dm candidates per row counts in the memory budget, so
     /// max_cands_per_dm must be in 1..1024 (and is meant to be small, e.g.
-    /// 16). The surviving set is deterministic.
+    /// 16). The surviving set is deterministic. With
+    /// BoxcarConfig::max_candidates_per_plane, each plane keeps its own
+    /// brightest share instead of competing for max_candidates.
     kKeepBrightest,
 };
 
@@ -112,18 +114,42 @@ struct BoxcarConfig {
     bool use_trapezoid = false;
     /// Default kDropNew; see OverflowPolicy.
     OverflowPolicy overflow_policy = OverflowPolicy::kDropNew;
+    /// Each searched plane's share of a call's candidates; 0 (default): no
+    /// share, the planes compete for max_candidates. Otherwise a plane
+    /// keeps at most this many (under kDropNew its first ones, under
+    /// kKeepBrightest exactly its brightest), so a plane flooded with
+    /// detections cannot crowd out the others; the planes' shares must fit
+    /// max_candidates (number of planes x this <= max_candidates).
+    SizeType max_candidates_per_plane = 0;
     /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate is approximate
     /// and supports max_boxcar up to 4096; the other modes are exact and
     /// support 1..2^20).
     BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto;
+    /// FDMTBoxcar (float or packed input): the stream will pass per-call
+    /// kill masks.
+    /// Default false: their noise model, tables and buffers are made by the
+    /// first such call, which can throw then (over the memory budget).
+    /// True: all of that is checked and
+    /// reserved at construction (and in estimate_memory()), before the
+    /// transform's path is chosen within the rest of the budget, so no
+    /// per-call mask throws later for those reasons.
+    bool per_call_masks = false;
 };
 
 /**
  * @brief A raw matched-filter detection, without astrophysical selection.
  *
- * Sample indices are absolute stream indices of trailing-window endpoints
- * (for a chan_dm plan, less FDMTPlan::get_level0_causal_delay(), so they
- * refer to the bottom-edge arrival);
+ * Times: sample indices are absolute stream indices (from the stream's
+ * first sample) of the trailing end of the boxcar window, at the pulse's
+ * arrival at the lower edge f_low_mhz of the candidate's own plane:
+ * FDMTPlan frequencies are channel edges (channel c spans f_min + c * df to
+ * f_min + (c + 1) * df), and every plane's delays and DMs are between its
+ * subband's edges f_low_mhz and f_high_mhz. A full-band candidate refers to
+ * f_min; a subband candidate to its subband's f_low_mhz, i.e.
+ * dispersion_delay(dm, f_min, f_low_mhz) / tsamp samples earlier than the
+ * full band. For a chan_dm plan (channels coherently dedispersed, each
+ * referenced to its centre frequency) FDMTPlan::get_level0_causal_delay()
+ * is already subtracted on every plane (saturating at 0).
  * begin/end delimit an inclusive contiguous excursion. Channel extents are
  * half-open in FDMT input order (low frequency first); subband_level is the
  * search depth (0: full band) and subband_idx the subband's index at that
@@ -167,6 +193,10 @@ struct CandidateResultView : CandidateCounts {
     std::span<const RawCandidate> candidates;
     uint64_t input_sample_begin = 0;
     SizeType input_nsamps       = 0; ///< 0 for flush().
+    /// The counters of each searched plane, in get_search_plans() order;
+    /// they sum to the call's counters. A plane's dropped_global includes
+    /// what its max_candidates_per_plane share dropped.
+    std::span<const CandidateCounts> plane_counts;
 };
 
 /// Asynchronous result: synchronize the supplied stream before reading.
@@ -175,6 +205,8 @@ struct CandidateDeviceResultView {
     DeviceSpan<const CandidateCounts> counts;  ///< One device object.
     uint64_t input_sample_begin = 0;
     SizeType input_nsamps       = 0;
+    /// One device object per searched plane (CandidateResultView).
+    DeviceSpan<const CandidateCounts> plane_counts;
 };
 
 } // namespace dmt

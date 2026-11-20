@@ -54,7 +54,7 @@ def test_streamed_matches_monolithic(mode: PeakFindingMode) -> None:
     large = FDMTPlan(
         700, 1200, 7, samples * blocks, 0.001, dt_grid=grid, subband_depth=2
     )
-    streamed = FDMTBoxcar(small, config(mode), nthreads=2, nbeams=2, chunk_nsamps=64)
+    streamed = FDMTBoxcar(small, config(mode), nthreads=1, nbeams=2, chunk_nsamps=64)
     whole = FDMTBoxcar(large, config(mode), nbeams=2)
     parts = []
     for k in range(blocks):
@@ -177,7 +177,7 @@ def test_packed_streaming_and_centered_reference(
     cfg.detect_thresh = 2.713
     grid = [-73, -12, 0, 4, 97]
     plan = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid, subband_depth=2)
-    packed = FDMTBoxcar(plan, cfg, nbeams=2, nthreads=2, chunk_nsamps=64)
+    packed = FDMTBoxcar(plan, cfg, nbeams=2, nthreads=1, chunk_nsamps=64)
     cfg.input_nbits = 32
     cfg.input_mean = 0
     floating = FDMTBoxcar(plan, cfg, nbeams=2)
@@ -370,7 +370,7 @@ def test_drain_searches_the_skewed_tail() -> None:
     )
     found = {}
     for end in ("flush", "drain"):
-        search = FDMTBoxcar(plan, cfg, nthreads=4, max_memory_bytes=75 << 20)
+        search = FDMTBoxcar(plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
         latency = search.search_latency
         assert latency > 0
         parts = [search.execute(block).candidates for block in blocks]
@@ -384,7 +384,9 @@ def test_drain_searches_the_skewed_tail() -> None:
                 search.execute(blocks[0])
             search.reset_history()
             assert search.searched_nsamps == 0
-    tree = FDMTBoxcar(plan, cfg, nthreads=4)
+    # An explicit chunk keeps the tree path when it fits (packed input
+    # otherwise takes the skewed path first).
+    tree = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=nsamps)
     assert tree.search_latency == 0
     expected = run(tree, blocks)
     assert_same(found["drain"], expected)
@@ -420,7 +422,9 @@ def test_drain_contract_on_the_gpu(gpu_backend: str) -> None:
         gpu.execute(blocks[0])
     gpu.reset_history()
     assert gpu.searched_nsamps == 0
-    expected = run(FDMTBoxcar(plan, cfg, nthreads=4), blocks)
+    tree = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=nsamps)
+    assert tree.search_latency == 0
+    expected = run(tree, blocks)
     assert len(expected) > 0
     assert_same(sorted_candidates(parts), expected)
 
@@ -451,6 +455,22 @@ def mask_blocks(seed: int = 5) -> tuple[FDMTPlan, list, list]:
         np.ones(16, dtype=np.uint8),
     ]
     return plan, blocks, masks
+
+
+def packed_codes(blocks: list) -> list:
+    """8-bit codes round(128 + 10 x) of float blocks."""
+    return [np.clip(np.round(128 + 10 * b), 0, 255).astype(np.uint8) for b in blocks]
+
+
+def packed_config(screen: BoxcarScreenMode = BoxcarScreenMode.PREFIX) -> BoxcarConfig:
+    # 2.75 is exact in binary: float and integer cutoffs agree at the edge.
+    cfg = config()
+    cfg.detect_thresh = 2.75
+    cfg.noise_sigma = 10.0
+    cfg.input_nbits = 8
+    cfg.input_mean = 128.0
+    cfg.screen_mode = screen
+    return cfg
 
 
 def test_per_call_kill_mask() -> None:
@@ -493,21 +513,63 @@ def test_per_call_kill_mask_validation() -> None:
         np.testing.assert_array_equal(
             search.execute(block).candidates, reference.execute(block).candidates
         )
-    # Blocks shorter than the largest support plus max_boxcar - 1.
+    # Blocks shorter than the largest support plus max_boxcar - 1 work
+    # (windows reaching over several blocks use the history mask).
     short = FDMTPlan(700, 1200, 16, 60, 0.001, dt_grid=[0, 4, 20, 60])
-    with pytest.raises(ValueError, match="at least"):
-        FDMTBoxcar(short, config()).execute(
-            np.zeros((16, 60), dtype=np.float32), kill_mask=np.ones(16, np.uint8)
-        )
-    # Packed input takes no per-call mask.
+    FDMTBoxcar(short, config()).execute(
+        np.zeros((16, 60), dtype=np.float32), kill_mask=np.ones(16, np.uint8)
+    )
+    # Packed input: killed channels read the code input_mean, which must be
+    # a whole number; the rejected call leaves the stream as it was.
     cfg = config()
     cfg.input_nbits = 8
-    cfg.input_mean = 1.0
+    cfg.input_mean = 127.5
+    codes = packed_codes(blocks)
     packed = FDMTBoxcar(plan, cfg)
-    with pytest.raises(ValueError, match="float32"):
-        packed.execute(
-            np.zeros((16, 300), dtype=np.uint8), kill_mask=np.ones(16, np.uint8)
+    packed_ref = FDMTBoxcar(plan, cfg)
+    with pytest.raises(ValueError, match="input_mean"):
+        packed.execute(codes[0], kill_mask=np.ones(16, np.uint8))
+    for block in codes:
+        np.testing.assert_array_equal(
+            packed.execute(block).candidates, packed_ref.execute(block).candidates
         )
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [BoxcarScreenMode.PREFIX, BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE],
+)
+def test_per_call_kill_mask_packed(screen: BoxcarScreenMode) -> None:
+    # Killed channels read the mean code: on codes minus the mean as float32
+    # they read zero, so without box smearing the packed search equals the
+    # float32 one bit for bit.
+    plan, blocks, masks = mask_blocks(7)
+    codes = packed_codes(blocks)
+    centred = [c.astype(np.float32) - 128 for c in codes]
+    cfg = packed_config(screen)
+    fl = config()
+    fl.detect_thresh = cfg.detect_thresh
+    fl.noise_sigma = cfg.noise_sigma
+    fl.screen_mode = screen
+    got = masked_stream(FDMTBoxcar(plan, cfg, use_box_smearing=False), codes, masks)
+    want = masked_stream(FDMTBoxcar(plan, fl, use_box_smearing=False), centred, masks)
+    assert len(want) > 0
+    assert_same(got, want)
+
+
+def test_per_call_kill_mask_packed_gpu_matches_cpu(gpu_backend: str) -> None:
+    plan, blocks, masks = mask_blocks(9)
+    codes = packed_codes(blocks)
+    for screen in (
+        BoxcarScreenMode.PREFIX,
+        BoxcarScreenMode.KADANE,
+        BoxcarScreenMode.NONE,
+    ):
+        cfg = packed_config(screen)
+        cpu = masked_stream(FDMTBoxcar(plan, cfg), codes, masks)
+        gpu = masked_stream(FDMTBoxcar(plan, cfg, backend=gpu_backend), codes, masks)
+        assert len(cpu) > 0
+        assert_same(gpu, cpu)
 
 
 def test_per_call_kill_mask_gpu_matches_cpu(gpu_backend: str) -> None:
@@ -649,7 +711,7 @@ def test_keep_brightest_with_screen_modes() -> None:
             overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
             screen_mode=screen,
         )
-        res = FDMTBoxcar(plan, cfg, nthreads=2, chunk_nsamps=256).execute(data)
+        res = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256).execute(data)
         assert res.emitted_count == 200
         assert res.overflowed
         exact[screen] = res
@@ -674,7 +736,7 @@ def test_keep_brightest_with_screen_modes() -> None:
         overflow_policy=OverflowPolicy.DROP_NEW,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    sur_drop = FDMTBoxcar(plan, sur_drop_cfg, nthreads=2, chunk_nsamps=256).execute(
+    sur_drop = FDMTBoxcar(plan, sur_drop_cfg, nthreads=1, chunk_nsamps=256).execute(
         data
     )
     assert sur_drop.overflowed
@@ -689,7 +751,7 @@ def test_keep_brightest_with_screen_modes() -> None:
         overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    sur_keep = FDMTBoxcar(plan, sur_keep_cfg, nthreads=2, chunk_nsamps=256).execute(
+    sur_keep = FDMTBoxcar(plan, sur_keep_cfg, nthreads=1, chunk_nsamps=256).execute(
         data
     )
     assert sur_keep.overflowed
@@ -732,7 +794,7 @@ def test_exact_screen_modes_parity_float_and_packed(
         cfg.use_trapezoid = trapezoid
         cfg.screen_mode = screen
         got = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=2, nbeams=2, chunk_nsamps=64), f_blocks
+            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), f_blocks
         )
         assert_same(got, ref)
 
@@ -760,7 +822,7 @@ def test_exact_screen_modes_parity_float_and_packed(
             screen_mode=screen,
         )
         u8_results[screen] = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=2, nbeams=2, chunk_nsamps=64), u8_blocks
+            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), u8_blocks
         )
     assert len(u8_results[BoxcarScreenMode.PREFIX]) > 0
     assert_same(
@@ -825,7 +887,7 @@ def test_exact_screen_modes_kill_mask_and_skewed_drain() -> None:
             input_mean=107.5,
             screen_mode=screen,
         )
-        eng = FDMTBoxcar(skew_plan, cfg, nthreads=2, max_memory_bytes=75 << 20)
+        eng = FDMTBoxcar(skew_plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
         assert eng.search_latency > 0
         parts = [eng.execute(b).candidates for b in skew_blocks]
         parts.append(eng.drain().candidates)
@@ -854,7 +916,7 @@ def test_kadane_surrogate_end_to_end_pulse_and_quiet_noise() -> None:
             use_trapezoid=use_trap,
             screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
         )
-        quiet_eng = FDMTBoxcar(plan, quiet_cfg, nthreads=2, kill_mask=kill)
+        quiet_eng = FDMTBoxcar(plan, quiet_cfg, nthreads=1, kill_mask=kill)
         quiet_cands = []
         for _ in range(2):
             blk = rng.standard_normal((nchans, nsamps), dtype=np.float32)
@@ -879,7 +941,7 @@ def test_kadane_surrogate_end_to_end_pulse_and_quiet_noise() -> None:
                 use_trapezoid=use_trap,
                 screen_mode=screen,
             )
-            eng = FDMTBoxcar(plan, cfg, nthreads=2, chunk_nsamps=256, kill_mask=kill)
+            eng = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256, kill_mask=kill)
             frontier = eng.get_candidate_frontier()
             parts = []
             for blk in blocks:
@@ -945,7 +1007,7 @@ def test_kadane_surrogate_packed_uint8() -> None:
         input_mean=128.0,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    sur_u8 = FDMTBoxcar(plan, sur_u8_cfg, nthreads=2, chunk_nsamps=256)
+    sur_u8 = FDMTBoxcar(plan, sur_u8_cfg, nthreads=1, chunk_nsamps=256)
     assert len(sur_u8.execute(u8_noise).candidates) == 0
     cands_u8 = np.concatenate(
         [sur_u8.execute(u8_sig).candidates, sur_u8.drain().candidates]
@@ -1068,7 +1130,6 @@ def _check_boxcar_estimate(backend: str) -> None:
         search = FDMTBoxcar(plan, config(), backend=backend, **kwargs)
         assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
         assert est.chunk_nsamps == search.chunk_nsamps
-        assert (est.host_staging == 0) == (backend == "cpu")
         assert "FDMTBoxcarMemoryEstimate(" in repr(est)
 
     big = FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
@@ -1093,3 +1154,189 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_boxcar_estimate(gpu_backend)
+
+
+def _check_declared_masks(backend: str) -> None:
+    """per_call_masks=True: checked and reserved at construction."""
+    plan, blocks, masks = mask_blocks()
+    lazy_cfg = config()
+    cfg = config()
+    cfg.per_call_masks = True
+    assert BoxcarConfig(17, per_call_masks=True).per_call_masks
+    est = FDMTBoxcar.estimate_memory(plan, cfg, backend=backend)
+    lazy_est = FDMTBoxcar.estimate_memory(plan, lazy_cfg, backend=backend)
+    assert est.usage.total > lazy_est.usage.total
+    search = FDMTBoxcar(plan, cfg, backend=backend)
+    assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
+    assert est.search_latency == search.search_latency
+    assert isinstance(est.search_path, str)
+    lazy = FDMTBoxcar(plan, lazy_cfg, backend=backend)
+    assert_same(
+        masked_stream(search, blocks, masks), masked_stream(lazy, blocks, masks)
+    )
+    # Masks and host (NumPy) input add nothing.
+    after = search.memory_usage
+    assert after.total == est.usage.total
+    assert after.staging == est.usage.staging
+    # Packed input: an integer input_mean (killed channels read that code).
+    packed = BoxcarConfig(17, input_nbits=8, input_mean=127.5, per_call_masks=True)
+    with pytest.raises(ValueError, match="input_mean"):
+        FDMTBoxcar(plan, packed, backend=backend)
+    lazy_pk = packed_config()
+    lazy_pk.screen_mode = BoxcarScreenMode.AUTO
+    decl_pk = packed_config()
+    decl_pk.screen_mode = BoxcarScreenMode.AUTO
+    decl_pk.per_call_masks = True
+    est = FDMTBoxcar.estimate_memory(plan, decl_pk, backend=backend)
+    search = FDMTBoxcar(plan, decl_pk, backend=backend)
+    assert _boxcar_usage(est.usage) == _boxcar_usage(search.memory_usage)
+    codes = packed_codes(blocks)
+    assert_same(
+        masked_stream(search, codes, masks),
+        masked_stream(FDMTBoxcar(plan, lazy_pk, backend=backend), codes, masks),
+    )
+    after = search.memory_usage
+    assert after.total == est.usage.total
+
+
+def test_declared_per_call_masks_cpu() -> None:
+    _check_declared_masks("cpu")
+
+
+def test_declared_per_call_masks_gpu(gpu_backend: str) -> None:
+    _check_declared_masks(gpu_backend)
+
+
+def _check_plane_counts(backend: str) -> None:
+    """plane_counts add up; a per-plane share keeps each plane's brightest."""
+    rng = np.random.default_rng(3)
+    plan = FDMTPlan(
+        700, 1200, 16, 512, 0.001, dt_grid=[0, 3, 9, 20, 41], subband_depth=1
+    )
+    blocks = [rng.standard_normal((16, 512), dtype=np.float32) for _ in range(2)]
+    cfg = config()
+    nplanes = len(FDMTBoxcar(plan, cfg, backend=backend).search_plans)
+    full = FDMTBoxcar(plan, cfg, backend=backend).execute(blocks[0])
+    planes = full.plane_counts
+    assert planes.shape == (nplanes,)
+    for name in ("emitted_count", "total_detected", "dropped_global", "dropped_per_dm"):
+        assert int(planes[name].sum()) == getattr(full, name)
+    shared = BoxcarConfig(
+        17,
+        wtsp=1.5,
+        detect_thresh=2,
+        max_cands_per_dm=1024,
+        overflow_policy=dmtlib.OverflowPolicy.KEEP_BRIGHTEST,
+        max_candidates=4 * nplanes,
+        max_candidates_per_plane=4,
+    )
+    assert shared.max_candidates_per_plane == 4
+    res = FDMTBoxcar(plan, shared, backend=backend).execute(blocks[0])
+    assert np.all(
+        res.plane_counts["emitted_count"] == np.minimum(4, planes["total_detected"])
+    )
+    shared.max_candidates = 4 * nplanes - 1
+    with pytest.raises(ValueError, match="max_candidates_per_plane"):
+        FDMTBoxcar(plan, shared, backend=backend)
+
+
+def test_plane_counts_cpu() -> None:
+    _check_plane_counts("cpu")
+
+
+def test_plane_counts_gpu(gpu_backend: str) -> None:
+    _check_plane_counts(gpu_backend)
+
+
+def _check_time_reference(backend: str) -> None:
+    # A dispersed pulse: every plane's brightest candidate has peak_sample at
+    # the pulse's arrival at that plane's own lower edge f_low_mhz (channel
+    # edges, f_min = lower edge of channel 0). With chan_dm (channels
+    # coherently dedispersed, each referenced to its centre) the plan's
+    # level-0 causal delay (here 23 samples) is already removed on every
+    # plane.
+    f_min, f_max, nchans, tsamp, nsamps, nblocks = 1200.0, 1600.0, 64, 1e-3, 4096, 4
+    dm, t_inf = 1510.0, 2.5 * nsamps * tsamp
+    df = (f_max - f_min) / nchans
+    grid = np.linspace(1460.0, 1560.0, 201).astype(np.float32)
+    for chan_dm in (0.0, 1500.0):
+        plan = FDMTPlan(
+            f_min,
+            f_max,
+            nchans,
+            nsamps,
+            tsamp,
+            dm_grid=grid,
+            subband_depth=1,
+            chan_dm=chan_dm,
+        )
+        assert (plan.level0_causal_delay > 20) == (chan_dm > 0)
+        flat = np.zeros((nchans, nblocks * nsamps), np.float32)
+        for c in range(nchans):
+            lo, hi = f_min + c * df, f_min + (c + 1) * df
+            if chan_dm == 0:
+                a = dmtlib.dispersion_delay(dm, hi, np.inf) + t_inf
+                b = dmtlib.dispersion_delay(dm, lo, np.inf) + t_inf
+            else:
+                mid = dmtlib.dispersion_delay(dm, 0.5 * (lo + hi), np.inf) + t_inf
+                half = 0.5 * dmtlib.dispersion_delay(dm - chan_dm, lo, hi)
+                a, b = mid - half, mid + half
+            i, j = int(a / tsamp), int(b / tsamp)
+            flat[c, i : j + 1] += 20.0 / (j - i + 1)
+        cfg = BoxcarConfig(16, detect_thresh=8.0, max_cands_per_dm=0)
+        search = FDMTBoxcar(plan, cfg, backend=backend)
+        blocks = [
+            np.ascontiguousarray(flat[:, k * nsamps : (k + 1) * nsamps])
+            for k in range(nblocks)
+        ]
+        parts = [search.execute(b).candidates for b in blocks]
+        parts.append(search.drain().candidates)
+        cands = np.concatenate(parts)
+        planes = {(int(c["subband_level"]), int(c["subband_idx"])) for c in cands}
+        assert len(planes) == 4  # full band, two halves, the staggered one
+        for level, idx in planes:
+            sel = cands[
+                (cands["subband_level"] == level) & (cands["subband_idx"] == idx)
+            ]
+            best = sel[np.argmax(sel["snr"])]
+            want = (
+                dmtlib.dispersion_delay(dm, float(best["f_low_mhz"]), np.inf) + t_inf
+            ) / tsamp
+            assert abs(int(best["peak_sample"]) - want) <= 2, (chan_dm, level, idx)
+
+
+def test_time_reference() -> None:
+    _check_time_reference("cpu")
+
+
+def test_time_reference_gpu(gpu_backend: str) -> None:
+    _check_time_reference(gpu_backend)
+
+
+def _check_minimum_memory(backend: str) -> None:
+    grid = dmtlib.generate_levin_dm_grid(
+        1200.0, 1600.0, 256, 1e-4, 0.0, 600.0, pulse_width=1e-4
+    )
+    plan = FDMTPlan(1200.0, 1600.0, 256, 4096, 1e-4, dm_grid=grid, subband_depth=1)
+    cfg = BoxcarConfig(64)
+    m = FDMTBoxcar.estimate_minimum_memory(plan, cfg, backend=backend)
+    assert m.max_memory_bytes >= m.usage.budgeted
+    e = FDMTBoxcar.estimate_memory(
+        plan, cfg, backend=backend, max_memory_bytes=m.max_memory_bytes
+    )
+    assert e.max_memory_bytes == m.max_memory_bytes
+    assert e.usage.budgeted == m.usage.budgeted
+    assert e.chunk_nsamps == m.chunk_nsamps
+    with pytest.raises(ValueError, match="FDMTBoxcar: this configuration needs"):
+        FDMTBoxcar.estimate_memory(
+            plan, cfg, backend=backend, max_memory_bytes=m.max_memory_bytes - 1
+        )
+    assert "max_memory_bytes=" in repr(m)
+
+
+def test_minimum_memory() -> None:
+    _check_minimum_memory("cpu")
+
+
+def test_minimum_memory_gpu(gpu_backend: str) -> None:
+    _check_minimum_memory(gpu_backend)

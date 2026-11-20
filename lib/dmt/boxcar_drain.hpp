@@ -24,11 +24,13 @@ struct DrainState {
     bool drained{false};
     uint64_t end{0}; ///< Stream samples searched, once drained
     std::vector<RawCandidate> candidates;
+    std::vector<CandidateCounts> plane_counts; ///< summed over drain()'s calls
 
     void reset() noexcept {
         drained = false;
         end     = 0;
         candidates.clear();
+        plane_counts.clear();
     }
     /// execute() and drain() after drain() are rejected until reset_history().
     void check_open(const char* what) const {
@@ -55,7 +57,10 @@ inline uint64_t searched_nsamps(const FDMTBoxcarEngine& engine,
  * Ends the stream at its current position `end`: endpoints at or after `end`
  * are never searched (FDMTSearchInput::search_stop), ceil(latency / nsamps)
  * blocks of padding move every row's search up to `end`, and the open
- * excursions are emitted. The FDMT is causal in its f_min reference, so its
+ * excursions are emitted. FDMTBoxcar's engines search the padding without
+ * an input block (FDMTBoxcarEngine::zero_blocks()); others push a zero block
+ * through the host execute() (as do all with `zero_blocks` false, which tests
+ * use as the reference). The FDMT is causal in its f_min reference, so its
  * rows before `end` do not depend on the padding (zero codes are used for
  * packed input); with fractional FFT delays the padding is zero signal, the
  * band-limited interpolation of a stream that ends.
@@ -65,24 +70,38 @@ inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
                                         SizeType nbeams,
                                         SizeType nbits,
                                         uint64_t latency,
-                                        DrainState& state) {
+                                        DrainState& state,
+                                        bool zero_blocks = true) {
     state.check_open("drain");
     const uint64_t end = engine.stream_position();
     state.candidates.clear();
+    state.plane_counts.clear();
     CandidateCounts counts{};
+    const auto add = [](CandidateCounts& to, const CandidateCounts& v) {
+        to.emitted_count += v.emitted_count;
+        to.total_detected += v.total_detected;
+        to.dropped_global += v.dropped_global;
+        to.dropped_per_dm += v.dropped_per_dm;
+    };
     const auto append = [&](const CandidateResultView& v) {
         state.candidates.insert(state.candidates.end(), v.candidates.begin(),
                                 v.candidates.end());
-        counts.emitted_count += v.emitted_count;
-        counts.total_detected += v.total_detected;
-        counts.dropped_global += v.dropped_global;
-        counts.dropped_per_dm += v.dropped_per_dm;
+        add(counts, v);
+        state.plane_counts.resize(v.plane_counts.size());
+        for (SizeType p = 0; p < v.plane_counts.size(); ++p) {
+            add(state.plane_counts[p], v.plane_counts[p]);
+        }
     };
     engine.set_search_stop(end);
     if (end > 0 && latency > 0) {
         const SizeType nsamps = plan.get_nsamps();
         const uint64_t blocks = (latency + nsamps - 1) / nsamps;
-        if (nbits == 32) {
+        if (zero_blocks && engine.zero_blocks()) {
+            // No input block is read, staged or allocated.
+            for (uint64_t b = 0; b < blocks; ++b) {
+                append(engine.execute_zero());
+            }
+        } else if (nbits == 32) {
             const std::vector<float> zeros(nbeams * plan.get_nchans() * nsamps,
                                            0.0F);
             for (uint64_t b = 0; b < blocks; ++b) {
@@ -104,6 +123,7 @@ inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
     CandidateResultView view;
     static_cast<CandidateCounts&>(view) = counts;
     view.candidates                     = state.candidates;
+    view.plane_counts                   = state.plane_counts;
     view.input_sample_begin             = end;
     view.input_nsamps                   = 0;
     return view;

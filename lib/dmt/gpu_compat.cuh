@@ -113,9 +113,16 @@ func_set_attribute(Kernel kernel, hipFuncAttribute attr, int value) {
     return hipFuncSetAttribute(reinterpret_cast<const void*>(kernel), attr,
                                value);
 }
+template <typename Kernel>
+inline hipError_t func_get_attributes(hipFuncAttributes* attr, Kernel kernel) {
+    return hipFuncGetAttributes(attr, reinterpret_cast<const void*>(kernel));
+}
 } // namespace dmt::gpu_compat
 #define cudaFuncSetAttribute(...)                                              \
     ::dmt::gpu_compat::func_set_attribute(__VA_ARGS__)
+#define cudaFuncAttributes hipFuncAttributes
+#define cudaFuncGetAttributes(...)                                             \
+    ::dmt::gpu_compat::func_get_attributes(__VA_ARGS__)
 
 // cuFFT -> hipFFT (same API, hipfft/HIPFFT_ prefix)
 #define cufftResult hipfftResult

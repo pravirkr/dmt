@@ -23,6 +23,7 @@
 
 #include "ddmt_estimate_cases.hpp"
 #include "test_random.hpp"
+#include "test_sized.hpp"
 
 namespace dmt {
 
@@ -134,11 +135,11 @@ TEST_CASE("DDMT output sample k is f_ref arrival at input k + time_offset",
                 std::unique_ptr<DDMT> eng;
                 if (sdmt) {
                     eng = std::make_unique<SDMT>(
-                        f_min, f_max, nchans, tsamp, dms, Exec::cpu(2), 32,
+                        f_min, f_max, nchans, tsamp, dms, Exec::cpu(), 32,
                         std::span<const uint8_t>{}, 1, f_ref);
                 } else {
                     eng = std::make_unique<DDMT>(
-                        f_min, f_max, nchans, tsamp, dms, Exec::cpu(2), 32,
+                        f_min, f_max, nchans, tsamp, dms, Exec::cpu(), 32,
                         std::span<const uint8_t>{}, 1, f_ref);
                 }
                 const auto& plan  = eng->get_plan();
@@ -584,7 +585,7 @@ TEST_CASE("DDMTPlan and DDMT with LevinConfig", "[ddmt][cpu]") {
     DDMT ddmt(f_min, f_max, nchans, tsamp, levin);
     REQUIRE_THAT(ddmt.get_plan().get_dm_arr(), Catch::Matchers::Equals(grid));
 
-    DDMT ddmt_from_plan(plan, Exec::cpu(2));
+    DDMT ddmt_from_plan(plan, Exec::cpu());
     REQUIRE_THAT(ddmt_from_plan.get_plan().get_dm_arr(),
                  Catch::Matchers::Equals(grid));
 }
@@ -1380,14 +1381,14 @@ void check_against_reference(DDMT& ddmt,
 
 } // namespace
 
-TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
-          "[ddmt][sdmt][cpu]") {
+DMT_SIZED_TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
+                    "[ddmt][sdmt][cpu]") {
     const float f_min     = 1000.0F;
     const float f_max     = 1500.0F;
     const SizeType nchans = 300;
     const float tsamp     = 0.001F;
     const SizeType nbeams = 2;
-    const SizeType nsamps = 2000;
+    const SizeType nsamps = full ? 2000 : 1000;
 
     std::mt19937 gen(1234);
     std::vector<uint8_t> mask(nchans, 1);
@@ -1427,13 +1428,12 @@ TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
                 DYNAMIC_SECTION((shared ? "SDMT, " : "DDMT, ")
                                 << name << ", nbits = " << nbits) {
                     std::unique_ptr<DDMT> engine =
-                        shared
-                            ? std::make_unique<SDMT>(f_min, f_max, nchans,
-                                                     tsamp, dms, Exec::cpu(4),
-                                                     nbits, mask, nbeams)
-                            : std::make_unique<DDMT>(f_min, f_max, nchans,
-                                                     tsamp, dms, Exec::cpu(4),
-                                                     nbits, mask, nbeams);
+                        shared ? std::make_unique<SDMT>(f_min, f_max, nchans,
+                                                        tsamp, dms, Exec::cpu(),
+                                                        nbits, mask, nbeams)
+                               : std::make_unique<DDMT>(f_min, f_max, nchans,
+                                                        tsamp, dms, Exec::cpu(),
+                                                        nbits, mask, nbeams);
                     DDMT& ddmt      = *engine;
                     const auto maxd = *std::ranges::max_element(
                         ddmt.get_plan().get_container().delay_table);
@@ -1449,8 +1449,11 @@ TEST_CASE("DDMT and SDMT match a naive delay-and-sum reference",
                                   nvals, seed, 0,
                                   static_cast<int64_t>((1U << nbits) - 1));
                     // Uneven chunks, one shorter than the maximum delay.
-                    check_against_reference(ddmt, values, nbeams, nsamps,
-                                            {700, 37, 900, nsamps - 1637});
+                    const SizeType c0 = nsamps * 7 / 20;
+                    const SizeType c2 = nsamps * 9 / 20;
+                    check_against_reference(
+                        ddmt, values, nbeams, nsamps,
+                        {c0, 37, c2, nsamps - c0 - c2 - 37});
                 }
             }
         }
@@ -1467,8 +1470,8 @@ TEST_CASE("SDMT integer output equals DDMT exactly", "[sdmt][cpu]") {
     for (SizeType i = 0; i < dms.size(); ++i) {
         dms[i] = 0.4F * static_cast<float>(i);
     }
-    DDMT ddmt(1000.0F, 1500.0F, nchans, tsamp, dms, Exec::cpu(4), 8);
-    SDMT sdmt(1000.0F, 1500.0F, nchans, tsamp, dms, Exec::cpu(4), 8);
+    DDMT ddmt(1000.0F, 1500.0F, nchans, tsamp, dms, Exec::cpu(), 8);
+    SDMT sdmt(1000.0F, 1500.0F, nchans, tsamp, dms, Exec::cpu(), 8);
     std::mt19937 gen(99);
     std::vector<uint8_t> in(nchans * nsamps);
     for (auto& v : in) {
@@ -1486,9 +1489,9 @@ TEST_CASE("SDMT integer output equals DDMT exactly", "[sdmt][cpu]") {
 TEST_CASE("SDMT reports its backend; unavailable backends throw",
           "[sdmt][cpu]") {
     const std::vector<float> dms = {0.0F, 5.0F};
-    const SDMT sdmt(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cpu(2));
+    const SDMT sdmt(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cpu());
     CHECK(sdmt.backend() == Backend::kCPU);
-    CHECK(sdmt.nthreads() == 2);
+    CHECK(sdmt.nthreads() == 1);
     const auto backends = available_backends();
     if (std::ranges::find(backends, Backend::kCUDA) == backends.end()) {
         CHECK_THROWS_AS(SDMT(1000.0F, 1500.0F, 16, 0.001F, dms, Exec::cuda(0)),
@@ -1498,14 +1501,14 @@ TEST_CASE("SDMT reports its backend; unavailable backends throw",
 
 TEST_CASE("DDMT and SDMT estimate_memory equal the instance (cpu)",
           "[ddmt_cpu][cpu][budget]") {
-    ddmt_estimate::check_host(Exec::cpu(2));
-    ddmt_estimate::check_sdmt_differs(Exec::cpu(2));
+    ddmt_estimate::check_host(Exec::cpu());
+    ddmt_estimate::check_sdmt_differs(Exec::cpu());
     // The estimate allocates nothing: a history of over 2 TB (2^30 beams)
     // is sized, never allocated (an allocation would throw). Estimate only,
     // as ASan aborts on allocations that large instead of throwing.
     const auto big = ddmt_estimate::many_beams(SizeType{1} << 30);
     for (const bool sdmt : {false, true}) {
-        const auto e = ddmt_estimate::estimate(sdmt, big, Exec::cpu(2));
+        const auto e = ddmt_estimate::estimate(sdmt, big, Exec::cpu());
         CHECK(e.usage.history > (SizeType{1} << 41));
         CHECK(e.host_staging == 0);
     }

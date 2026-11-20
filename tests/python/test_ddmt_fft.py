@@ -36,7 +36,7 @@ def test_method_resolution_and_properties():
 
 
 def test_nufft_matches_brute_and_shapes():
-    kw = dict(dm_min=0.0, nthreads=2, guard=16)
+    kw = dict(dm_min=0.0, nthreads=1, guard=16)
     brute = dmtlib.DDMTFFT(F_MIN, F_MAX, NCHANS, TSAMP, 40.0, 0.5, method="brute", **kw)
     nufft = dmtlib.DDMTFFT(F_MIN, F_MAX, NCHANS, TSAMP, 40.0, 0.5, method="nufft", **kw)
     wf = _noise((NCHANS, 1500))
@@ -161,7 +161,7 @@ def _check_estimate(backend: str) -> None:
     # the host-call staging); short calls take several warm-up calls.
     for dm_max, nbits, nsamps in ((20.0, 32, 800), (200.0, 32, 100), (20.0, 8, 700)):
         plan = dmtlib.DDMTPlan(F_MIN, F_MAX, NCHANS, TSAMP, dm_max, 0.5, nbits=nbits)
-        kw = dict(nthreads=2, guard=16, backend=backend)
+        kw = dict(nthreads=1, guard=16, backend=backend)
         est = dmtlib.DDMTFFT.estimate_memory(plan, nsamps, **kw)
         eng = dmtlib.DDMTFFT(plan, **kw)
         dtype = np.float32 if nbits == 32 else np.uint8

@@ -6,6 +6,7 @@
  * memory utilities.
  */
 
+#include <bit>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,28 @@ inline constexpr float kDispConstMT =
     1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
 inline constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 inline constexpr float kDispConst   = kDispConstMT;
+
+/**
+ * @brief Dispersion delay in seconds of `f_lo_mhz` behind `f_hi_mhz`.
+ *
+ * Uses the library's constant (1 / 2.41e-4 s MHz^2 cm^3 / pc, the TEMPO2
+ * convention of kDispConst), in double precision, as Python's
+ * `dmtlib.dispersion_delay`. `f_hi_mhz` = +infinity gives the delay from
+ * infinite frequency. FDMTPlan frequencies are channel edges: a candidate's
+ * f_low_mhz / f_high_mhz are its subband's lower and upper edges.
+ */
+[[nodiscard]] constexpr double
+dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
+    constexpr double kConst = 1.0 / 2.41e-4;
+    // An infinite f_hi_mhz is recognised by its bits: under -ffast-math
+    // (-ffinite-math-only) arithmetic on an infinity is undefined.
+    constexpr uint64_t kAbs = 0x7FFFFFFFFFFFFFFFULL;
+    constexpr uint64_t kInf = 0x7FF0000000000000ULL;
+    const double inv_hi     = (std::bit_cast<uint64_t>(f_hi_mhz) & kAbs) == kInf
+                                  ? 0.0
+                                  : 1.0 / (f_hi_mhz * f_hi_mhz);
+    return kConst * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
+}
 
 /**
  * @brief POSIX aligned memory allocator for SIMD vectorization and cache

@@ -26,6 +26,7 @@ struct BoxcarResult {
     CandidateCounts counts;
     uint64_t input_sample_begin;
     SizeType input_nsamps;
+    py::array_t<CandidateCounts> plane_counts;
 };
 BoxcarResult own_result(CandidateResultView view) {
     py::array_t<RawCandidate> array(
@@ -34,7 +35,14 @@ BoxcarResult own_result(CandidateResultView view) {
         std::memcpy(array.mutable_data(), view.candidates.data(),
                     view.candidates.size_bytes());
     }
-    return {std::move(array), view, view.input_sample_begin, view.input_nsamps};
+    py::array_t<CandidateCounts> planes(
+        static_cast<py::ssize_t>(view.plane_counts.size()));
+    if (!view.plane_counts.empty()) {
+        std::memcpy(planes.mutable_data(), view.plane_counts.data(),
+                    view.plane_counts.size_bytes());
+    }
+    return {std::move(array), view, view.input_sample_begin, view.input_nsamps,
+            std::move(planes)};
 }
 } // namespace
 
@@ -43,6 +51,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          snr, dm, dm_idx, filter_idx, width, beam_idx,
                          subband_level, subband_idx, chan_begin, chan_end,
                          f_low_mhz, f_high_mhz, staggered);
+    PYBIND11_NUMPY_DTYPE(CandidateCounts, emitted_count, total_detected,
+                         dropped_global, dropped_per_dm);
     py::enum_<PeakFindingMode>(mod, "PeakFindingMode")
         .value("CONTIGUOUS_PEAK_PER_WIDTH",
                PeakFindingMode::kContiguousPeakPerWidth)
@@ -97,11 +107,31 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``PREFIX`` and ``NONE`` are lossless and produce identical exact
         candidates; ``KADANE_SURROGATE`` is an approximate multi-bias Kadane
         scorer (``max_boxcar`` up to 4096) that skips the full-stream prefix
-        scan.
+        scan. ``per_call_masks=True`` declares that :class:`FDMTBoxcar` will
+        get per-call kill masks: their requirements and memory are checked
+        and reserved at construction (and in ``estimate_memory``) instead of
+        at the first masked call. ``max_candidates_per_plane`` (0: off)
+        gives each searched plane its own share of a call's candidates (its
+        first ones under ``DROP_NEW``, its brightest under
+        ``KEEP_BRIGHTEST``), so a flooded plane cannot crowd out the others;
+        planes x share must not exceed ``max_candidates``.
         )doc")
-        .def(py::init<SizeType, float, float, float, PeakFindingMode, SizeType,
-                      SizeType, bool, SizeType, float, bool, OverflowPolicy,
-                      BoxcarScreenMode>(),
+        .def(py::init([](SizeType max_boxcar, float wtsp, float detect_thresh,
+                         float noise_sigma, PeakFindingMode peak_mode,
+                         SizeType max_candidates, SizeType max_cands_per_dm,
+                         bool skip_cold_prefix, SizeType input_nbits,
+                         float input_mean, bool use_trapezoid,
+                         OverflowPolicy overflow_policy,
+                         BoxcarScreenMode screen_mode, bool per_call_masks,
+                         SizeType max_candidates_per_plane) {
+                 BoxcarConfig c(max_boxcar, wtsp, detect_thresh, noise_sigma,
+                                peak_mode, max_candidates, max_cands_per_dm,
+                                skip_cold_prefix, input_nbits, input_mean,
+                                use_trapezoid, overflow_policy, screen_mode);
+                 c.per_call_masks           = per_call_masks;
+                 c.max_candidates_per_plane = max_candidates_per_plane;
+                 return c;
+             }),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
              "peak_mode"_a      = PeakFindingMode::kContiguousPeakPerWidth,
@@ -109,7 +139,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
              "skip_cold_prefix"_a = true, "input_nbits"_a = 32,
              "input_mean"_a = 0.0F, "use_trapezoid"_a = false,
              "overflow_policy"_a = OverflowPolicy::kDropNew,
-             "screen_mode"_a     = BoxcarScreenMode::kAuto)
+             "screen_mode"_a     = BoxcarScreenMode::kAuto,
+             "per_call_masks"_a = false, "max_candidates_per_plane"_a = 0)
         .def_readwrite("max_boxcar", &BoxcarConfig::max_boxcar)
         .def_readwrite("wtsp", &BoxcarConfig::wtsp)
         .def_readwrite("detect_thresh", &BoxcarConfig::detect_thresh)
@@ -122,11 +153,21 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .def_readwrite("max_cands_per_dm", &BoxcarConfig::max_cands_per_dm)
         .def_readwrite("skip_cold_prefix", &BoxcarConfig::skip_cold_prefix)
         .def_readwrite("overflow_policy", &BoxcarConfig::overflow_policy)
-        .def_readwrite("screen_mode", &BoxcarConfig::screen_mode);
+        .def_readwrite("screen_mode", &BoxcarConfig::screen_mode)
+        .def_readwrite("per_call_masks", &BoxcarConfig::per_call_masks)
+        .def_readwrite("max_candidates_per_plane",
+                       &BoxcarConfig::max_candidates_per_plane);
     py::class_<BoxcarResult>(mod, "BoxcarResult")
         .def_readonly("candidates", &BoxcarResult::candidates)
         .def_readonly("input_sample_begin", &BoxcarResult::input_sample_begin)
         .def_readonly("input_nsamps", &BoxcarResult::input_nsamps)
+        .def_readonly("plane_counts", &BoxcarResult::plane_counts,
+                      R"doc(
+            Structured array of the counters of each searched plane
+            (``emitted_count``, ``total_detected``, ``dropped_global``,
+            ``dropped_per_dm``), in ``search_plans`` order; they sum to the
+            call's counters.
+            )doc")
         .def_property_readonly(
             "emitted_count",
             [](const BoxcarResult& r) { return r.counts.emitted_count; })
@@ -183,18 +224,27 @@ void bind_fdmt_boxcar(py::module_& mod) {
         :meth:`FDMTBoxcar.estimate_memory` (computed without allocating it).
 
         ``usage`` equals that instance's ``memory_usage``; ``chunk_nsamps``
-        its ``chunk_nsamps``; ``host_staging`` (GPU backends) the device bytes
-        the first host-memory (NumPy) :meth:`FDMTBoxcar.execute` adds outside
-        ``max_memory_bytes`` (the staging block of the input; 0 on the CPU).
+        its ``chunk_nsamps`` (on a GPU the staging of host (NumPy) input is
+        part of ``usage``);
+        ``search_path`` the transform's path (the ``Transform:`` line of
+        ``summary()``; empty for the tree path) and ``search_latency`` its
+        ``search_latency``; ``max_memory_bytes`` the budget it was made with
+        (from :meth:`FDMTBoxcar.estimate_minimum_memory`: the smallest that
+        builds, at least ``usage.budgeted``).
         )doc")
         .def_readonly("usage", &FDMTBoxcarMemoryEstimate::usage)
         .def_readonly("chunk_nsamps", &FDMTBoxcarMemoryEstimate::chunk_nsamps)
-        .def_readonly("host_staging", &FDMTBoxcarMemoryEstimate::host_staging)
+        .def_readonly("search_path", &FDMTBoxcarMemoryEstimate::search_path)
+        .def_readonly("search_latency",
+                      &FDMTBoxcarMemoryEstimate::search_latency)
+        .def_readonly("max_memory_bytes",
+                      &FDMTBoxcarMemoryEstimate::max_memory_bytes)
         .def("__repr__", [](const FDMTBoxcarMemoryEstimate& e) {
             return fmt::format(
                 "FDMTBoxcarMemoryEstimate(total={}, chunk_nsamps={}, "
-                "host_staging={})",
-                e.usage.total(), e.chunk_nsamps, e.host_staging);
+                "search_latency={}, search_path='{}', max_memory_bytes={})",
+                e.usage.total(), e.chunk_nsamps, e.search_latency,
+                e.search_path, e.max_memory_bytes);
         });
     mod.def("generate_box_width_trials", &plans::generate_box_width_trials,
             "max_width"_a, "wtsp"_a = 2.0F, R"doc(
@@ -214,7 +264,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         channel row has ceil(samples * nbits / 8) bytes, LSB-first; 16-bit
         samples are little-endian. Root DM-time output is never materialized.
         execute() returns owned structured candidate arrays. Contiguous
-        peaks cross blocks; call flush() at end of stream. Sample indices
+        peaks cross blocks; call drain() at end of stream (flush() does not
+        search the samples a skewed-path subband row lags). Sample indices
         are absolute trailing-window endpoints, not filter centers.
         Host calls on GPU backends block and return candidates only.
 
@@ -230,13 +281,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
         CPU, device memory on a GPU (host copies and result storage are
         reported in ``memory_usage.host``, not budgeted). Plans whose FDMT tree
         history does not fit (UWL-like bands at high time resolution) run the
-        skewed-window path; their subband rows are then searched with a fixed
+        skewed-window path, as does packed input on the CPU with blocks over
+        2048 samples (faster there); their subband rows are then searched with a fixed
         per-row latency of up to the dispersion delay to the bottom of the
-        band, so the final such samples of a stream are searched only if it
-        continues. Raises ``ValueError`` when nothing fits. On a GPU the
-        staging block for host (NumPy) input is allocated by the first such
-        :meth:`execute`, outside that check; ``memory_usage.staging`` shows
-        it once allocated.
+        band, so the final such samples of a stream are searched by a later
+        call or by :meth:`drain`. Raises ``ValueError`` when nothing fits. On a GPU host
+        (NumPy) input is copied one chunk at a time into a buffer reserved
+        inside that budget, so :meth:`execute` allocates nothing.
 
         ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
@@ -244,7 +295,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         S/N stays calibrated on the remaining channels. On the CPU each
         block is copied once to zero them; on a GPU the transform reads them
         as zero, without a copy. :meth:`execute` also takes a mask per block
-        (float32 input), ANDed with this one.
+        (float or packed input), ANDed with this one.
 
         ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``AUTO``)
         chooses the Stage-1 tile screening / scoring mode on both CPU and GPU:
@@ -299,8 +350,33 @@ void bind_fdmt_boxcar(py::module_& mod) {
             every working buffer is sized, not allocated. Raises as the
             constructor would when nothing fits ``max_memory_bytes``. GPU
             backends read the device's limits (no device memory is allocated;
-            the CUDA context is not counted). Per-call kill masks add their
-            noise tables on first use (not included).
+            the CUDA context is not counted). Per-call kill masks are
+            included when declared (``BoxcarConfig.per_call_masks``);
+            otherwise they add their noise tables on first use.
+            )doc")
+        .def_static(
+            "estimate_minimum_memory",
+            [](const plans::FDMTPlan& plan, BoxcarConfig config, bool smear,
+               int nthreads, SizeType nbeams, std::optional<SizeType> fuse,
+               std::optional<SizeType> chunk, std::string_view backend,
+               int device, const py::object& kill) {
+                const auto mask = extract_kill_mask(kill);
+                return FDMTBoxcar::estimate_minimum_memory(
+                    plan, config, smear, make_exec(backend, nthreads, device),
+                    nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
+                    chunk.value_or(0), mask);
+            },
+            "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
+            "nthreads"_a = 1, "nbeams"_a = 1, "fuse_levels"_a = py::none(),
+            "chunk_nsamps"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
+            "device"_a = 0, "kill_mask"_a = py::none(),
+            R"doc(
+            The smallest configuration of these arguments: what
+            :meth:`estimate_memory` returns at the smallest
+            ``max_memory_bytes`` an ``FDMTBoxcar`` can be built with (the
+            result's ``max_memory_bytes``; one byte less raises). A few
+            estimates long. Raises as :meth:`estimate_memory` for anything
+            but the budget.
             )doc")
         .def(
             "execute",
@@ -336,15 +412,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
                 CandidateResultView view;
                 {
                     py::gil_scoped_release release;
-                    if (packed && !kill.is_none()) {
-                        throw std::invalid_argument(
-                            "FDMTBoxcar: per-call kill masks need float32 "
-                            "input");
-                    }
                     if (packed) {
                         view = search.execute(
                             std::span(static_cast<const uint8_t*>(input.data()),
-                                      static_cast<SizeType>(input.size())));
+                                      static_cast<SizeType>(input.size())),
+                            std::span<const uint8_t>(mask));
                     } else {
                         view = search.execute(
                             std::span(static_cast<const float*>(input.data()),
@@ -359,15 +431,19 @@ void bind_fdmt_boxcar(py::module_& mod) {
             Search one block and return its candidates.
 
             ``kill_mask``: ``None`` or one bool/integer per channel, low
-            frequency first (0 = killed), for this block only (float32
-            input). It is ANDed with the constructor's mask; ``None`` means
-            the constructor's mask alone. When the mask changes, the
-            endpoints whose input reaches back into the previous block are
-            scored with the variance of the OR of both masks (no extra false
-            alarms, S/N there slightly low). The first mask needs blocks of
-            at least the largest row support plus ``max_boxcar - 1`` samples
-            and its noise tables within ``max_memory_bytes``; otherwise
-            ``ValueError``, with the stream unchanged.
+            frequency first (0 = killed), for this block only. It is ANDed
+            with the constructor's mask; ``None`` means the constructor's
+            mask alone. On packed input, channels it kills (and the
+            constructor's mask keeps) read the code ``input_mean``, which
+            must then be a whole number (else ``ValueError``): the expected
+            sums stay the constructor's, and only the thresholds and S/N
+            scales follow the mask. When the mask changes, the
+            endpoints whose input reaches back before the block are scored
+            with the variance of every channel live in their reach (no
+            extra false alarms, S/N there slightly low); any block length
+            works. The first mask needs its noise tables within
+            ``max_memory_bytes``; otherwise ``ValueError``, with the stream
+            unchanged.
             )doc")
         .def("flush",
              [](FDMTBoxcar& search) {
@@ -467,8 +543,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         GPU):
         over it the overlap-save segments are shortened (:attr:`chunk_nsamps`)
         until it fits. Raises ``ValueError`` when even the shortest segment
-        does not fit. GPU host-input staging is allocated lazily, outside
-        that check, as on FDMTBoxcar. ``config.screen_mode``
+        does not fit. On a GPU the device copy of a host (NumPy) block is
+        reserved inside that budget at construction. ``config.screen_mode``
         (:class:`BoxcarScreenMode`) applies to every segment's DM-row search
         as on :class:`FDMTBoxcar`.
         )doc")

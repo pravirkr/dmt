@@ -320,7 +320,8 @@ DMT_D bool detect_tile_grouped_int(const uint64_t* ring,
 
 // kScreen: tiles are screened by width group (detect_tile_grouped*); a
 // separate instantiation, so the plain kernel keeps its register budget.
-// kBlockNoise: per-call mask tables are in use (float rows only). A
+// kBlockNoise: per-call mask tables are in use (packed rows: their integer
+// cutoffs, S/N per sample and S/N-ranked runs, peaks carry their S/N). A
 // separate instance, so the common unmasked launch carries none of their
 // state (it cost ~160 B of stack per thread and 15-50% of the run time).
 // kKeep: OverflowPolicy::kKeepBrightest (KeepWriter, per-row stores); a
@@ -376,6 +377,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                        SizeType group_offset,
                        BoxcarKeepEntry* keep_all,
                        SizeType keep_q,
+                       uint64_t* detected_all,
+                       uint64_t* plane_slots,
+                       SizeType plane_cap,
                        T* ring_global,
                        SizeType task_base,
                        bool bypass_screen) {
@@ -407,12 +411,17 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     BoxcarPeak* peaks        = peaks_all + index * peak_count;
     RawCandidate prototype   = row.candidate;
     prototype.beam_idx       = static_cast<uint32_t>(beam);
-    CandidateWriter writer{candidates, counts,    slots,    per_dm_all + index,
-                           widths,     prototype, capacity, dm_cap};
-    writer.means   = means ? means + row_index * nfilters : nullptr;
-    writer.scales  = inv_sigma + row_index * nfilters;
-    writer.unit    = unit;
-    writer.integer = std::is_integral_v<T> &&
+    const PlaneShare share =
+        plane_share(slots, capacity, plane_slots, plane_cap, row.plane);
+    CandidateWriter writer{candidates,         counts, share.slots,
+                           per_dm_all + index, widths, prototype,
+                           share.capacity,     dm_cap};
+    writer.base   = share.base;
+    writer.means  = means ? means + row_index * nfilters : nullptr;
+    writer.scales = inv_sigma + row_index * nfilters;
+    writer.unit   = unit;
+    // Packed rows under per-call masks carry their S/N in the peak.
+    writer.integer = std::is_integral_v<T> && !kBlockNoise &&
                      mode != PeakFindingMode::kContiguousPeakAcrossWidths;
     // kKeepBrightest: the row's store and this thread's pending candidates.
     struct NoKeep {};
@@ -422,6 +431,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         keeper = KeepWriter{counts,
                             keep_all + (index * keep_q),
                             per_dm_all + index,
+                            detected_all + index,
                             keep_q,
                             &pending,
                             writer.means,
@@ -446,11 +456,18 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     const float* plane_inv = inv_sigma + row_index * nfilters;
     const float* inv_row   = plane_inv;
     const float* thr_float = plane_thr;
+    // Packed rows: the integer cutoffs likewise.
+    const uint64_t* plane_ithr = nullptr;
+    if constexpr (std::is_integral_v<T>) {
+        plane_ithr = integer_thresholds + row_index * nfilters;
+    }
+    const uint64_t* thr_int = plane_ithr;
     const float* in_play[4][2];
+    const uint64_t* in_play_i[4];
     int n_play           = 0;
     bool mixed           = false;
     uint64_t row_support = 0;
-    if constexpr (kBlockNoise && !std::is_integral_v<T>) {
+    if constexpr (kBlockNoise) {
         if (block_tables.count > 0) {
             row_support       = block_tables.support[row_index];
             const uint64_t s0 = input.sample_begin;
@@ -458,10 +475,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             const int e0      = block_entry(block_tables, s0);
             const int e1      = block_entry(block_tables, s1);
             const auto add    = [&](int e, int k) {
-                const float* t = block_tables.thr[e][k];
-                const float* v = block_tables.inv[e][k];
-                t = t != nullptr ? t + row_index * nfilters : plane_thr;
-                v = v != nullptr ? v + row_index * nfilters : plane_inv;
+                const float* t     = block_tables.thr[e][k];
+                const float* v     = block_tables.inv[e][k];
+                const uint64_t* it = block_tables.ithr[e][k];
+                t  = t != nullptr ? t + row_index * nfilters : plane_thr;
+                v  = v != nullptr ? v + row_index * nfilters : plane_inv;
+                it = it != nullptr ? it + row_index * nfilters : plane_ithr;
                 for (int j = 0; j < n_play; ++j) {
                     if (in_play[j][0] == t) {
                         return;
@@ -469,6 +488,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 }
                 in_play[n_play][0] = t;
                 in_play[n_play][1] = v;
+                in_play_i[n_play]  = it;
                 ++n_play;
             };
             for (int e = e0; e <= e1; ++e) {
@@ -491,6 +511,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             if (n_play == 1) {
                 thr_float = in_play[0][0];
                 inv_row   = in_play[0][1];
+                thr_int   = in_play_i[0];
             } else {
                 mixed = true;
             }
@@ -498,23 +519,32 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     }
     const T* thr_row = [&] {
         if constexpr (std::is_integral_v<T>) {
-            return integer_thresholds + row_index * nfilters;
+            return thr_int;
         } else {
             return thr_float;
         }
     }();
-    const uint32_t* wtab = widths;
-    const T* ttab        = thr_row;
+    // Tables other than the constructor's (one, or several).
+    [[maybe_unused]] const bool custom = mixed || thr_float != plane_thr;
+    const uint32_t* wtab               = widths;
+    const T* ttab                      = thr_row;
     if (shared_tables) {
         T* s_thr       = ring + mask + 1;
         auto* s_widths = reinterpret_cast<uint32_t*>(s_thr + nfilters);
         for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
             T th = thr_row[f];
-            if constexpr (!std::is_integral_v<T>) {
+            if constexpr (kBlockNoise) {
                 if (mixed) {
-                    th = in_play[0][0][f];
-                    for (int j = 1; j < n_play; ++j) {
-                        th = th < in_play[j][0][f] ? th : in_play[j][0][f];
+                    if constexpr (std::is_integral_v<T>) {
+                        th = in_play_i[0][f];
+                        for (int j = 1; j < n_play; ++j) {
+                            th = th < in_play_i[j][f] ? th : in_play_i[j][f];
+                        }
+                    } else {
+                        th = in_play[0][0][f];
+                        for (int j = 1; j < n_play; ++j) {
+                            th = th < in_play[j][0][f] ? th : in_play[j][0][f];
+                        }
                     }
                 }
             }
@@ -532,19 +562,32 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     const float* group_thr =
         screen_ngroups > 0 ? screen_thresholds + row_index * screen_ngroups
                            : nullptr;
-    if constexpr (kScreen && !std::is_integral_v<T>) {
-        if ((thr_float != plane_thr || mixed) && group_offset == 0) {
+    if constexpr (kScreen && kBlockNoise) {
+        if (custom && group_offset == 0) {
             force_bookkeeping = true; // no room for the group bounds
-        } else if (thr_float != plane_thr || mixed) {
+        } else if (custom) {
             auto* s_grp = reinterpret_cast<float*>(storage + group_offset);
             __syncthreads();
             for (int g = tid; g < screen_ngroups; g += kBlockThreads) {
-                float th = 3.402823466e38F;
-                for (uint32_t f = screen_groups[g].f_lo;
-                     f < screen_groups[g].f_hi; ++f) {
-                    th = th < ttab[f] ? th : ttab[f];
+                if constexpr (std::is_integral_v<T>) {
+                    // Packed: cutoff - mean, rounded down to float (as
+                    // init_prefix_screen()); the mean is the constructor's.
+                    double th = 1.0e300;
+                    for (uint32_t f = screen_groups[g].f_lo;
+                         f < screen_groups[g].f_hi; ++f) {
+                        const double c = static_cast<double>(ttab[f]) -
+                                         means[row_index * nfilters + f];
+                        th             = th < c ? th : c;
+                    }
+                    s_grp[g] = __double2float_rd(th);
+                } else {
+                    float th = 3.402823466e38F;
+                    for (uint32_t f = screen_groups[g].f_lo;
+                         f < screen_groups[g].f_hi; ++f) {
+                        th = th < ttab[f] ? th : ttab[f];
+                    }
+                    s_grp[g] = th;
                 }
-                s_grp[g] = th;
             }
             group_thr = s_grp;
         }
@@ -620,8 +663,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 if constexpr (std::is_integral_v<T>) {
                     return detect_tile_grouped_int<kBlockThreads, kFull, kCold>(
                         ring, mask, position, lookback, n, wtab, ttab,
-                        screen_groups, screen_ngroups,
-                        screen_thresholds + row_index * screen_ngroups,
+                        screen_groups, screen_ngroups, group_thr,
                         screen_m1[row_index],
                         reinterpret_cast<float*>(storage + screen_offset),
                         start, row.warmup);
@@ -680,16 +722,23 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                 for (int j = 0; j < kItems; ++j) {
                     const uint32_t local  = tid * kItems + j;
                     const uint64_t sample = start + local;
-                    if constexpr (!std::is_integral_v<T>) {
+                    if constexpr (kBlockNoise) {
                         if (mixed) {
                             const int e = block_entry(block_tables, sample);
                             const int k = block_table(block_tables, e, sample,
                                                       width, row_support);
-                            const float* t = block_tables.thr[e][k];
                             const float* v = block_tables.inv[e][k];
-                            threshold      = t != nullptr
-                                                 ? t[row_index * nfilters + f]
-                                                 : plane_thr[f];
+                            if constexpr (std::is_integral_v<T>) {
+                                const uint64_t* it = block_tables.ithr[e][k];
+                                threshold = it != nullptr
+                                                ? it[row_index * nfilters + f]
+                                                : plane_ithr[f];
+                            } else {
+                                const float* t = block_tables.thr[e][k];
+                                threshold = t != nullptr
+                                                ? t[row_index * nfilters + f]
+                                                : plane_thr[f];
+                            }
                             scale = v != nullptr ? v[row_index * nfilters + f]
                                                  : plane_inv[f];
                         }
@@ -713,8 +762,9 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                         // sample.
                         raw_sums[j] = sum;
                         if (above[j] &&
-                            mode ==
-                                PeakFindingMode::kContiguousPeakAcrossWidths) {
+                            (kBlockNoise ||
+                             mode == PeakFindingMode::
+                                         kContiguousPeakAcrossWidths)) {
                             snr[j] = static_cast<float>(
                                 (static_cast<double>(sum) -
                                  means[row_index * nfilters + f]) *
@@ -743,7 +793,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     __syncthreads_or(f_hit || peaks[f].open) != 0) {
                     reduce_runs<T, kBlockThreads>(
                         shared, above, snr, filters, start, n, peaks + f, out,
-                        raw_sums, std::is_integral_v<T>);
+                        raw_sums,
+                        std::is_integral_v<T> ? (kBlockNoise ? 2 : 1) : 0);
                     // Only reduce_runs() emits in this mode: drain behind
                     // the same block vote, not once per width.
                     if constexpr (kKeep) {
@@ -864,11 +915,14 @@ template <typename T,
           typename C,
           bool kGlobalRing>
 void FDMTBoxcarCudaEngine::configure_variants() {
+    const SizeType smem = kBlockNoise ? m_smem_noise : m_smem;
     configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise,
-                                        C, false, kGlobalRing>);
+                                        C, false, kGlobalRing>,
+                     smem);
     if (m_bright_q != 0) {
         configure_kernel(kernel_fdmt_boxcar<T, kBlockThreads, kScreen,
-                                            kBlockNoise, C, true, kGlobalRing>);
+                                            kBlockNoise, C, true, kGlobalRing>,
+                         smem);
     }
 }
 
@@ -893,11 +947,17 @@ void FDMTBoxcarCudaEngine::configure_shared_block(SizeType limit) {
     }
     // Group screen bounds of per-call mask tables, when they fit (else
     // those rows take the exact bookkeeping on every tile).
+    // Packed rows reserve them only in their per-call mask instances, so
+    // the unmasked launch keeps its shared memory.
     m_group_offset = 0;
-    if (!m_screen_groups_d.empty() && std::is_floating_point_v<T> &&
+    m_smem_noise   = m_smem;
+    if (!m_screen_groups_d.empty() &&
         m_smem + (m_screen_groups_d.size() * sizeof(float)) <= limit) {
         m_group_offset = m_smem;
-        m_smem += m_screen_groups_d.size() * sizeof(float);
+        m_smem_noise   = m_smem + (m_screen_groups_d.size() * sizeof(float));
+        if constexpr (std::is_floating_point_v<T>) {
+            m_smem = m_smem_noise;
+        }
     }
     if (m_smem > limit) {
         throw std::invalid_argument(fmt::format(
@@ -910,17 +970,18 @@ void FDMTBoxcarCudaEngine::configure_shared_block(SizeType limit) {
     } else {
         configure_variants<T, kBlockThreads, true, false, T>();
     }
+    if (m_screen_groups_d.empty()) {
+        configure_variants<T, kBlockThreads, false, true, T>();
+    } else {
+        configure_variants<T, kBlockThreads, true, true, T>();
+    }
     if constexpr (std::is_integral_v<T>) {
         if (m_screen_groups_d.empty()) {
             configure_variants<T, kBlockThreads, false, false, uint32_t>();
+            configure_variants<T, kBlockThreads, false, true, uint32_t>();
         } else {
             configure_variants<T, kBlockThreads, true, false, uint32_t>();
-        }
-    } else {
-        if (m_screen_groups_d.empty()) {
-            configure_variants<T, kBlockThreads, false, true, T>();
-        } else {
-            configure_variants<T, kBlockThreads, true, true, T>();
+            configure_variants<T, kBlockThreads, true, true, uint32_t>();
         }
     }
 }
@@ -945,6 +1006,7 @@ void FDMTBoxcarCudaEngine::configure_global(SizeType limit) {
     m_screen_offset = 0;
     m_group_offset  = 0;
     m_smem          = sizeof(BoxcarShared<T, kGlobalBlock>);
+    m_smem_noise    = m_smem;
     if (m_smem > limit) {
         throw std::invalid_argument(fmt::format(
             "FDMTBoxcar: the search needs {} B of shared memory per "
@@ -963,10 +1025,10 @@ void FDMTBoxcarCudaEngine::configure_global(SizeType limit) {
                    "memory ({} blocks per batch, {} B)",
                    m_width, m_ring_batch, m_ring_d.size() * sizeof(uint64_t));
     configure_variants<T, kGlobalBlock, false, false, T, true>();
+    configure_variants<T, kGlobalBlock, false, true, T, true>();
     if constexpr (std::is_integral_v<T>) {
         configure_variants<T, kGlobalBlock, false, false, uint32_t, true>();
-    } else {
-        configure_variants<T, kGlobalBlock, false, true, T, true>();
+        configure_variants<T, kGlobalBlock, false, true, uint32_t, true>();
     }
 }
 
@@ -1060,21 +1122,23 @@ void FDMTBoxcarCudaEngine::launch_score_args(const FDMTSearchInput& stopped,
                                              cudaStream_t stream,
                                              SizeType task_base) {
     kernel_fdmt_boxcar<T, kBlockThreads, kScreen, kBlockNoise, C, kKeep,
-                       kGlobalRing><<<grid, block, m_smem, stream>>>(
-        stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
-        raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
-        raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d), m_peak_count,
-        raw(m_candidates_d), raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
-        m_config.max_candidates, m_config.max_cands_per_dm, m_config.peak_mode,
-        m_config.skip_cold_prefix, g.level == m_plan.get_niters(),
-        raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit, m_mask,
-        m_shared_tables, m_config.use_trapezoid, raw(m_screen_groups_d),
-        static_cast<int>(m_screen_groups_d.size()), raw(m_screen_thresholds_d),
-        raw(m_screen_m1_d), m_screen_offset,
-        kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
-        raw(m_bright_d), m_bright_q,
-        kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr, task_base,
-        m_config.screen_mode == BoxcarScreenMode::kNone);
+                       kGlobalRing>
+        <<<grid, block, kBlockNoise ? m_smem_noise : m_smem, stream>>>(
+            stopped, raw(m_rows_d), g.row_begin, g.row_count, m_rows.size(),
+            raw(m_widths_d), m_filters, m_width, raw(m_thresholds_d),
+            raw(m_scales_d), carry, raw(m_peaks_d), raw(m_open_d), m_peak_count,
+            candidate_out(), raw(m_counts_d), raw(m_slots_d), raw(m_per_dm_d),
+            m_config.max_candidates, dm_cap(), m_config.peak_mode,
+            m_config.skip_cold_prefix, g.level == m_plan.get_niters(),
+            raw(m_integer_thresholds), raw(m_integer_means), m_integer_unit,
+            m_mask, m_shared_tables, m_config.use_trapezoid,
+            raw(m_screen_groups_d), static_cast<int>(m_screen_groups_d.size()),
+            raw(m_screen_thresholds_d), raw(m_screen_m1_d), m_screen_offset,
+            kBlockNoise ? m_block_tables : BlockTables{}, m_group_offset,
+            raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
+            raw(m_plane_slots_d), m_plane_cap,
+            kGlobalRing ? reinterpret_cast<T*>(raw(m_ring_d)) : nullptr,
+            task_base, m_config.screen_mode == BoxcarScreenMode::kNone);
 }
 
 template <typename T,
@@ -1105,18 +1169,16 @@ void FDMTBoxcarCudaEngine::launch_score_block(const FDMTSearchInput& input,
                                               dim3 grid,
                                               dim3 block,
                                               C* carry) {
-    // Per-call mask tables take their own kernel instance (float rows only).
-    if constexpr (!std::is_integral_v<T>) {
-        if (m_block_tables.count > 0) {
-            if (m_screen_groups_d.empty()) {
-                launch_score_kernel<T, kBlockThreads, false, true, C>(
-                    input, g, grid, block, carry);
-            } else {
-                launch_score_kernel<T, kBlockThreads, true, true, C>(
-                    input, g, grid, block, carry);
-            }
-            return;
+    // Per-call mask tables take their own kernel instance.
+    if (m_block_tables.count > 0) {
+        if (m_screen_groups_d.empty()) {
+            launch_score_kernel<T, kBlockThreads, false, true, C>(
+                input, g, grid, block, carry);
+        } else {
+            launch_score_kernel<T, kBlockThreads, true, true, C>(input, g, grid,
+                                                                 block, carry);
         }
+        return;
     }
     if (m_screen_groups_d.empty()) {
         launch_score_kernel<T, kBlockThreads, false, false, C>(input, g, grid,
@@ -1159,11 +1221,9 @@ void FDMTBoxcarCudaEngine::launch_score(const FDMTSearchInput& input,
                                         dim3 block,
                                         C* carry) {
     if (m_global_ring) {
-        if constexpr (!std::is_integral_v<T>) {
-            if (m_block_tables.count > 0) {
-                launch_score_global<T, true, C>(input, g, grid, block, carry);
-                return;
-            }
+        if (m_block_tables.count > 0) {
+            launch_score_global<T, true, C>(input, g, grid, block, carry);
+            return;
         }
         launch_score_global<T, false, C>(input, g, grid, block, carry);
         return;

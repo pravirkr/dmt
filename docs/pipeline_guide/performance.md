@@ -243,7 +243,9 @@ not fit the memory budget (`max_memory_bytes`, 10 GiB by default;
 `FDMTBoxcar`, valid mode, `nbeams=1`, automatic fusion, any subband depth
 that leaves the fused levels below it, 8-bit through float32 input)
 automatically switches to the [skewed-window engine](skewed_window_fdmt.md).
-It replaces the tree history with per-channel raw input rings and compact
+An `FDMTBoxcar` on packed input takes it first even when the tree fits
+(blocks longer than 2048 samples): 2.7-4x faster on 8-bit UWL subband
+searches, as fast or faster on small plans. It replaces the tree history with per-channel raw input rings and compact
 per-row causal rings, evaluates level 4 from per-subband running-sum
 stripes, and fuses levels 4–8 inside each 256-channel group before merging
 the upper levels. It takes the longest chunk (4096 to 256) whose estimate
@@ -476,7 +478,9 @@ exact size.
 
 - `FDMT`, `FDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`: the constructor's
   arguments; everything is allocated at construction. On a GPU,
-  `host_staging` is what the first host-memory call adds.
+  `FDMT.estimate_memory(...).host_staging` and `FDMTFFT`'s are what the
+  first host-memory call adds; `FDMTBoxcar` and `FDMTFFTBoxcar` stage host
+  input inside their budget (`usage`), so host calls add nothing.
 - `CohFDMT`: the configuration and backend.
 - `DDMTFFT`, `DDMT`, `SDMT`: the plan plus the call length `nsamps` (and
   `gulp_size` for DDMT and SDMT), because some buffers are made by the
@@ -490,6 +494,15 @@ plan = dmtlib.DDMTPlan(1200.0, 1600.0, 4096, 64e-6, 1000.0, 0.5)
 est = dmtlib.DDMTFFT.estimate_memory(plan, 65536, backend="cuda")
 print(est.usage.total + est.host_staging)  # bytes on the device
 ```
+
+`FDMTBoxcar.estimate_minimum_memory(...)` (same arguments, no budget)
+returns the estimate at the smallest `max_memory_bytes` the search can be
+built with (`est.max_memory_bytes`; one byte less raises), in a few
+estimates' time. Every larger budget builds too: when the faster path a
+budget suggests is over it, the engine takes the smaller path instead.
+The minimum is the boxcar's buffers (mostly rows × `max_boxcar` of carry)
+plus the FDMT's smallest path at its shortest chunk; `max_boxcar` is the
+main lever.
 
 (chunked-execution)=
 ### Chunked execution (`chunk_nsamps`)

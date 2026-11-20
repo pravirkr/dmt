@@ -472,11 +472,22 @@ reference(const plans::FDMTPlan& plan,
  * Per-call kill masks (FDMTBoxcar::execute(waterfall, kill_mask)): block k
  * runs with effective mask ctor AND masks[k] (an empty masks[k]: ctor
  * alone). Killed input reads as zero per block. Endpoint t of block k uses
- * the tables of that mask, except, when the mask changed from block k - 1
- * (k > 0), the first S_r + W - 1 endpoints of each row (S_r its support
- * with every channel active), which use the tables of the OR of both masks.
- * Tables come from constructor-masked instances (independent of the
- * engines' noise model); the warm-up from the constructor mask. One beam.
+ * the tables of that mask, except the first S_r + W - 1 endpoints of each
+ * row (S_r its support with every channel active) when block k > 0 has a
+ * transition: they use the history mask, block k's channels OR every
+ * channel live in the R samples before it (R = max S_r + max W - 1; for
+ * blocks of at least R samples, the OR of blocks k - 1 and k). Block k has
+ * a transition when its mask changed from block k - 1 or its history mask
+ * differs from its own. Tables come from constructor-masked instances
+ * (independent of the engines' noise model); the warm-up from the
+ * constructor mask. One beam.
+ *
+ * Catch-all (`lags`: each row's search lag, `ring` > 0 entries kept of
+ * `needed`): endpoint t of a row with lag L is searched in call
+ * q = (t + L) / ns. Once call q has evicted an entry (q >= ring - 1), the
+ * blocks up to q - ring + 1 use the catch-all of call min(q, last block):
+ * that block's channels OR every channel live from
+ * max(0, (q - needed + 1) ns) - R on.
  */
 struct MaskedReference {
     std::vector<std::vector<uint8_t>> effective;
@@ -488,7 +499,10 @@ masked_reference(const plans::FDMTPlan& plan,
                  bool smear,
                  const std::vector<std::vector<float>>& input,
                  std::span<const uint8_t> ctor,
-                 const std::vector<std::vector<uint8_t>>& masks) {
+                 const std::vector<std::vector<uint8_t>>& masks,
+                 std::span<const uint64_t> lags = {},
+                 SizeType ring                  = 0,
+                 SizeType needed                = 0) {
     const SizeType nchans = plan.get_nchans();
     const SizeType ns     = plan.get_nsamps();
     const auto metadata   = [&](std::span<const uint8_t> kill) {
@@ -534,23 +548,51 @@ masked_reference(const plans::FDMTPlan& plan,
                            p.warmup_samples.end());
         }
     }
+    const auto ctor_meta = metadata(ctor);
+    const auto planes    = ctor_meta.get_search_plans();
+    const SizeType nf    = planes.front().widths.size();
+    const uint64_t reach = *std::max_element(support.begin(), support.end()) +
+                           planes.front().widths.back() - 1;
     std::vector<const Tables*> steady;
     std::vector<const Tables*> transition;
     for (SizeType k = 0; k < input.size(); ++k) {
         steady.push_back(&tables(out.effective[k]));
         const Tables* tr = nullptr;
-        if (k > 0 && out.effective[k] != out.effective[k - 1]) {
-            std::vector<uint8_t> u(nchans);
-            for (SizeType c = 0; c < nchans; ++c) {
-                u[c] = out.effective[k][c] | out.effective[k - 1][c];
+        if (k > 0) {
+            // Blocks j < k with a sample in [k ns - reach, k ns).
+            std::vector<uint8_t> h = out.effective[k];
+            for (SizeType j = 0; j < k; ++j) {
+                if ((j + 1) * ns + reach > k * ns) {
+                    for (SizeType c = 0; c < nchans; ++c) {
+                        h[c] = h[c] | out.effective[j][c];
+                    }
+                }
             }
-            tr = &tables(u);
+            if (out.effective[k] != out.effective[k - 1] ||
+                h != out.effective[k]) {
+                tr = &tables(h);
+            }
         }
         transition.push_back(tr);
     }
-    const auto ctor_meta = metadata(ctor);
-    const auto planes    = ctor_meta.get_search_plans();
-    const SizeType nf    = planes.front().widths.size();
+    // The catch-all of call q: block q OR every block live from its
+    // oldest searched block's reach on.
+    std::vector<const Tables*> catch_all;
+    const bool use_catch = !lags.empty() && needed > ring;
+    for (SizeType q = 0; use_catch && q < input.size(); ++q) {
+        const uint64_t oldest =
+            q + 1 >= needed ? (q + 1 - needed) * ns : uint64_t{0};
+        const uint64_t from    = oldest > reach ? oldest - reach : 0;
+        std::vector<uint8_t> h = out.effective[q];
+        for (SizeType j = 0; j < q; ++j) {
+            if ((j + 1) * ns > from) {
+                for (SizeType c = 0; c < nchans; ++c) {
+                    h[c] = h[c] | out.effective[j][c];
+                }
+            }
+        }
+        catch_all.push_back(&tables(h));
+    }
     const auto rows =
         reference_rows(plan, smear, 1, planes, input, out.effective);
     out.candidates = direct_windows(
@@ -560,6 +602,12 @@ masked_reference(const plans::FDMTPlan& plan,
             if (transition[k] != nullptr &&
                 t < (k * ns) + support[row] + planes.front().widths[f] - 1) {
                 tab = transition[k];
+            }
+            if (use_catch) {
+                const SizeType q = (t + lags[row]) / ns;
+                if (q + 1 >= ring && k + ring <= q + 1) {
+                    tab = catch_all[std::min(q, input.size() - 1)];
+                }
             }
             return std::pair{tab->thr[(row * nf) + f],
                              tab->inv[(row * nf) + f]};

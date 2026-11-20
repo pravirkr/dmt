@@ -192,7 +192,8 @@ TEST_CASE("FDMT performance parameters and memory usage", "[fdmt_cpu][cpu]") {
     CHECK(mem.workspace > orig.get_memory_usage().workspace);
     CHECK(orig.get_memory_usage().workspace > 0); // unpack + box rows
 
-    // Per-thread scratch: exactly one slice per thread.
+    // Per-thread scratch: exactly one slice per thread (construction
+    // only: no thread runs).
     FDMT one(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
              Exec::cpu(1), 1, 3);
     FDMT two(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
@@ -630,7 +631,7 @@ void check_estimate(const algorithms::FDMTMemoryEstimate& e, const FDMT& f) {
 
 TEST_CASE("FDMT estimate_memory equals the constructed instance (cpu)",
           "[fdmt_cpu][cpu][budget]") {
-    const auto cpu = Exec::cpu(3);
+    const auto cpu = Exec::cpu();
     SECTION("tree path, fused and unfused, beams, modes") {
         for (const char* mode : {"valid", "full"}) {
             for (const SizeType fuse : {kFDMTAutoFuse, kUnfused}) {

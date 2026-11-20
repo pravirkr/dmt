@@ -233,7 +233,7 @@ TEST_CASE("FDMTFFT fractional delays parity", "[fdmt_fft_gpu][gpu][parity]") {
                 v = dist(rng);
             }
             FDMTFFT cpu(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 48, 0, 1,
-                        true, mode, Exec::cpu(2), 1, frac);
+                        true, mode, Exec::cpu(), 1, frac);
             FDMTFFT gpu(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 48, 0, 1,
                         true, mode, test::gpu_exec(), 1, frac);
             const auto n = cpu.get_plan().get_dmt_size();
@@ -282,7 +282,8 @@ TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (gpu)",
         CHECK(e.usage.total() > (SizeType{100} << 30));
     }
     SECTION("a configuration the device cannot hold fails clearly") {
-        // Terabytes: the first large buffer fails, nothing large is held.
+        // Terabytes: the free-memory check fails before anything is
+        // allocated.
         // A std::bad_alloc (Python MemoryError), with the requirement.
         CHECK_THROWS_AS(FDMTFFT(1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1,
                                 true, "full", gpu, SizeType{1} << 16),
@@ -291,6 +292,8 @@ TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (gpu)",
             FDMTFFT(1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1, true,
                     "full", gpu, SizeType{1} << 16),
             Catch::Matchers::ContainsSubstring("this configuration needs") &&
+                Catch::Matchers::ContainsSubstring(
+                    "is free on the device (nothing allocated)") &&
                 Catch::Matchers::ContainsSubstring("estimate_memory()"));
     }
 }

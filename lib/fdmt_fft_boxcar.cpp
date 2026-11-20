@@ -35,6 +35,11 @@ public:
                 "FDMTFFTBoxcar: subband search and packed input are not "
                 "supported (plan subband_depth 0, input_nbits 32)");
         }
+        if (config.per_call_masks) {
+            throw std::invalid_argument(
+                "FDMTFFTBoxcar: per-call kill masks are not supported "
+                "(BoxcarConfig::per_call_masks must be false)");
+        }
         if (beams == 0 || beams > UINT32_MAX ||
             beams >
                 SIZE_MAX / this->plan.get_nchans() / this->plan.get_nsamps()) {
@@ -179,9 +184,11 @@ FDMTFFTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
     const Impl impl(plan, config, use_box_smearing, exec, nbeams,
                     fractional_delays, kill_mask, max_memory_bytes,
                     /*estimate_only=*/true);
-    return {.usage        = impl.engine->memory_usage(),
-            .chunk_nsamps = impl.engine->chunk_nsamps(),
-            .host_staging = impl.engine->host_staging_bytes()};
+    return {.usage            = impl.engine->memory_usage(),
+            .chunk_nsamps     = impl.engine->chunk_nsamps(),
+            .search_path      = impl.engine->search_path(),
+            .search_latency   = impl.latency,
+            .max_memory_bytes = max_memory_bytes};
 }
 FDMTFFTBoxcar::~FDMTFFTBoxcar()                                   = default;
 FDMTFFTBoxcar::FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept            = default;

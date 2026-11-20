@@ -14,7 +14,7 @@ TEST_CASE("FFTWManager C2C forward then backward recovers scaled input",
           "[fft][cpu]") {
     const SizeType length  = 16;
     const SizeType howmany = 5;
-    const int nthreads     = 3;
+    const int nthreads     = 1;
 
     FFTWManager forward(FFTKind::kC2CForward, length, howmany, nthreads);
     FFTWManager backward(FFTKind::kC2CBackward, length, howmany, nthreads);
@@ -42,7 +42,7 @@ TEST_CASE("FFTWManager R2C then C2R recovers scaled input", "[fft][cpu]") {
     const SizeType length    = 32;
     const SizeType howmany   = 7;
     const SizeType n_complex = (length / 2) + 1;
-    const int nthreads       = 4;
+    const int nthreads       = 1;
 
     FFTWManager forward(FFTKind::kR2C, length, howmany, nthreads);
     FFTWManager backward(FFTKind::kC2R, length, howmany, nthreads);

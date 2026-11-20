@@ -93,6 +93,12 @@ void FDMTCudaEngine::reset_search_history(Stream queue) {
                             m_top->ring.size() * sizeof(float), stream));
         m_top_filled = static_cast<SizeType>(m_top->max_ring);
     }
+    if (m_top && !m_top->win_top.empty()) {
+        // The windowed top's carried spreads start the next chunk's merges.
+        gpu_utils::check_gpu_call(
+            cudaMemsetAsync(thrust::raw_pointer_cast(m_top->win_top.data()), 0,
+                            m_top->win_top.size() * sizeof(float), stream));
+    }
     m_top_stale      = false;
     m_parity         = false;
     m_is_initialized = false;

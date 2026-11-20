@@ -717,6 +717,28 @@ public:
                    sink);
     }
 
+    /// One block of zero input (FDMTBoxcar::drain() padding), searched as
+    /// execute_search() would search an all-zero block of the engine's
+    /// input type, without reading or staging one.
+    void execute_search_zero(FDMTSearchSink& sink) {
+        // Never dereferenced: `zero` writes the ring directly. They only
+        // select the float or packed path, as a real block would.
+        static constexpr float kNoFloat    = 0.0F;
+        static constexpr uint8_t kNoPacked = 0;
+        if (m_nbits == 32) {
+            run_search(Input{.f32       = &kNoFloat,
+                             .ring_elem = sizeof(float),
+                             .zero      = true},
+                       sink);
+        } else {
+            run_search(Input{.packed    = &kNoPacked,
+                             .nbits     = m_nbits,
+                             .ring_elem = m_ring_elem,
+                             .zero      = true},
+                       sink);
+        }
+    }
+
     void reset_history() noexcept {
         std::fill(m_ring.begin(), m_ring.end(), std::byte{0});
         std::fill(m_ring_f.begin(), m_ring_f.end(), 0.0F);
@@ -975,6 +997,8 @@ private:
         SizeType row_bytes{0};
         SizeType nbits{32};
         SizeType ring_elem{sizeof(float)};
+        /// All-zero block: f32/packed only select the path, never read.
+        bool zero{false};
     };
 
     static constexpr uint32_t kOpNone = UINT32_MAX;
@@ -1823,7 +1847,8 @@ private:
     [[nodiscard]] BlockKind block_kind(const Input& in) const noexcept {
         BlockKind k;
         if (in.f32 != nullptr) {
-            k.int_block = integer_valued(in.f32);
+            // Zeros are exact integers, as integer_valued() finds them.
+            k.int_block = in.zero || integer_valued(in.f32);
             k.int_sums  = k.int_block && m_stream_pos >= m_nonint_until;
         }
         return k;
@@ -2010,6 +2035,19 @@ private:
                 throw std::logic_error("FDMT skew: unpack scratch too small");
             }
             auto* ring = reinterpret_cast<T*>(m_ring.data());
+            if (in.zero) {
+                // The bytes of a copied zero block (float +0.0, code 0).
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)
+                for (SizeType c = 0; c < m_nchans; ++c) {
+                    const SizeType W     = m_chan_ring_len[c];
+                    const SizeType pos   = m_stream_pos % W;
+                    T* dst               = ring + m_chan_ring_off[c];
+                    const SizeType first = std::min(n, W - pos);
+                    std::memset(dst + pos, 0, first * sizeof(T));
+                    std::memset(dst, 0, (n - first) * sizeof(T));
+                }
+                return;
+            }
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
             for (SizeType c = 0; c < m_nchans; ++c) {
                 const SizeType W   = m_chan_ring_len[c];

@@ -345,4 +345,47 @@ compute_bucket_cut_hd_f32(const KadaneGateBucket& bucket,
     return step_down_pos_monoid_f32(cut_f32);
 }
 
+/// Exact int32 bucket cut on `[bucket.f_lo, bucket.f_hi)` at the row's
+/// fixed `ibias` against integer cutoffs `thr_fn(f)`, as
+/// `KadaneGatePlan::recompute_row_icuts` (host and device): clamped to
+/// [0, INT32_MAX / 4]; INT32_MAX when no width can fire (cutoffs too large
+/// to shift never fire within int32 sums). Disabled rows are the caller's.
+template <typename ThrFn>
+[[nodiscard]] DMT_HD inline int32_t
+compute_bucket_icut_hd(const KadaneGateBucket& bucket,
+                       const uint32_t* widths,
+                       bool use_trapezoid,
+                       uint32_t int_shift,
+                       int32_t ibias,
+                       ThrFn&& thr_fn) noexcept {
+    constexpr int64_t kQuarter =
+        static_cast<int64_t>(std::numeric_limits<int32_t>::max()) / 4;
+    const auto b_int = static_cast<int64_t>(ibias);
+    int64_t min_cut  = std::numeric_limits<int64_t>::max();
+    for (uint32_t f = bucket.f_lo; f < bucket.f_hi; ++f) {
+        const uint64_t thr = thr_fn(SizeType{f});
+        if (thr > (std::numeric_limits<uint64_t>::max() >> (int_shift + 1U))) {
+            continue;
+        }
+        const uint32_t w_edge =
+            use_trapezoid ? trapezoid_edge_width(widths[f]) : 0U;
+        const uint32_t tilde_w = widths[f] - w_edge;
+        const uint64_t raw_t   = thr << int_shift;
+        const uint64_t eff_t   = w_edge == 0U ? raw_t : (raw_t + 1ULL) / 2ULL;
+        const int64_t c_val =
+            eff_t > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() /
+                                          2)
+                ? kQuarter
+                : static_cast<int64_t>(eff_t) -
+                      (b_int * static_cast<int64_t>(tilde_w));
+        min_cut = c_val < min_cut ? c_val : min_cut;
+    }
+    if (min_cut == std::numeric_limits<int64_t>::max()) {
+        return std::numeric_limits<int32_t>::max();
+    }
+    const int64_t clamped =
+        min_cut < 0 ? int64_t{0} : (min_cut > kQuarter ? kQuarter : min_cut);
+    return static_cast<int32_t>(clamped);
+}
+
 } // namespace dmt::kadane

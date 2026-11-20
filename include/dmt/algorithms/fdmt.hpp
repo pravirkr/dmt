@@ -59,10 +59,10 @@ inline constexpr SizeType kFDMTAutoFuse = static_cast<SizeType>(-1);
  * instance allocates (FDMTMemoryUsage::total(); for FDMTBoxcar
  * FDMTBoxcarMemoryUsage::budgeted(), device memory only on a GPU), not the
  * caller's input and output buffers. Within the budget
- * the fastest streaming path is taken; a plan whose tree history does not
- * fit (e.g. 6656 channels at 64 us to DM 2000) takes the skewed-window
- * path with the longest automatic chunk that fits. Construction throws
- * std::invalid_argument when no path fits.
+ * a fast streaming path is taken (a measured rule, close to the fastest); a
+ * plan whose tree history does not fit (e.g. 6656 channels at 64 us to DM 2000)
+ * takes the skewed-window path with the longest automatic chunk that fits.
+ * Construction throws std::invalid_argument when no path fits.
  */
 inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
 
@@ -242,11 +242,11 @@ public:
      * a multiple of 64. The stepper (reset()/advance()) needs chunk >= nsamps.
      * @param max_memory_bytes Budget for everything the instance allocates
      * (get_memory_usage().total(); default kFDMTDefaultMaxMemory, 10 GiB).
-     * The fastest streaming path that fits is taken. A valid-mode plan whose
-     * tree history does not fit (e.g. 6656 channels at 64 us to DM 2000)
-     * runs the skewed-window path instead, with the longest automatic chunk
-     * that fits (on parkes_uwl faster than the tree path on both backends).
-     * Throws std::invalid_argument when no path fits.
+     * A fast streaming path that fits is taken (close to the fastest). A
+     * valid-mode plan whose tree history does not fit (e.g. 6656 channels at 64
+     * us to DM 2000) runs the skewed-window path instead, with the longest
+     * automatic chunk that fits (on parkes_uwl faster than the tree path on
+     * both backends). Throws std::invalid_argument when no path fits.
      *
      * All working memory is allocated here (see get_memory_usage()). The
      * only later allocation is the GPU staging of host-memory calls (the
