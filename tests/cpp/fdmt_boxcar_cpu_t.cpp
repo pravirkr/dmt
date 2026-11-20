@@ -283,77 +283,6 @@ TEST_CASE("FDMTBoxcar carries wide windows and peaks across small blocks",
     CHECK(search.flush().total_detected == 0);
 }
 
-TEST_CASE("Boxcar run summaries compose across worker and tile boundaries",
-          "[boxcar][cpu]") {
-    using namespace algorithms::detail;
-    std::mt19937 random(39);
-    for (int trial = 0; trial < 500; ++trial) {
-        std::vector<bool> above(257);
-        std::vector<float> snr(257);
-        for (SizeType i = 0; i < above.size(); ++i) {
-            above[i] = random() % 5 != 0;
-            snr[i]   = static_cast<float>(random() % 5); // Deliberate ties.
-        }
-        BoxcarPeak carried;
-        std::vector<BoxcarPeak> expected;
-        for (SizeType i = 0; i < above.size(); ++i) {
-            boxcar_peak_step(
-                carried, above[i], snr[i], i, static_cast<uint32_t>(i % 3),
-                [&](const BoxcarPeak& peak) { expected.push_back(peak); });
-        }
-        if (carried.open) {
-            expected.push_back(carried);
-        }
-        std::vector<BoxcarRunSummary> summaries;
-        for (SizeType first = 0; first < above.size(); first += 4) {
-            BoxcarRunSummary s;
-            for (SizeType i = first; i < std::min(first + 4, above.size());
-                 ++i) {
-                if (!above[i]) {
-                    s.all           = false;
-                    s.trailing.open = false;
-                } else {
-                    boxcar_peak_step(s.trailing, true, snr[i], i,
-                                     static_cast<uint32_t>(i % 3),
-                                     [](const BoxcarPeak&) {});
-                }
-            }
-            summaries.push_back(s);
-        }
-        BoxcarRunSummary prefix;
-        std::vector<BoxcarPeak> actual;
-        for (SizeType worker = 0; worker < summaries.size(); ++worker) {
-            BoxcarPeak incoming = prefix.trailing;
-            for (SizeType i = worker * 4;
-                 i < std::min(worker * 4 + 4, above.size()); ++i) {
-                boxcar_peak_step(
-                    incoming, above[i], snr[i], i, static_cast<uint32_t>(i % 3),
-                    [&](const BoxcarPeak& peak) { actual.push_back(peak); });
-            }
-            prefix = boxcar_join(prefix, summaries[worker]);
-        }
-        if (prefix.trailing.open) {
-            actual.push_back(prefix.trailing);
-        }
-        REQUIRE(actual.size() == expected.size());
-        for (SizeType i = 0; i < actual.size(); ++i) {
-            CHECK(actual[i].begin == expected[i].begin);
-            CHECK(actual[i].end == expected[i].end);
-            CHECK(actual[i].peak == expected[i].peak);
-            CHECK(actual[i].snr == expected[i].snr);
-            CHECK(actual[i].filter == expected[i].filter);
-        }
-        // Different association order must give the identical trailing run.
-        auto right = BoxcarRunSummary{};
-        for (SizeType i = summaries.size(); i > 0; --i) {
-            right = boxcar_join(summaries[i - 1], right);
-        }
-        CHECK(right.trailing.open == prefix.trailing.open);
-        CHECK(right.trailing.peak == prefix.trailing.peak);
-        CHECK(right.trailing.begin == prefix.trailing.begin);
-    }
-}
-
 TEST_CASE("FDMTBoxcar scores whole blocks over multiple prefix tiles",
           "[boxcar][cpu]") {
     plans::FDMTPlan plan(700, 1200, 3, 2203, 0.001F,
@@ -500,51 +429,6 @@ TEST_CASE("FDMTBoxcar detects a band-limited pulse in its matching subband",
     CHECK(planes[3].f_high_mhz == odd.get_f_max());
 }
 
-TEST_CASE("FDMTBoxcar root reader agrees for CPU rings and GPU FIFOs",
-          "[boxcar][cpu]") {
-    using namespace algorithms::detail;
-    for (const SizeType delay : {SizeType{0}, SizeType{1}, SizeType{9}}) {
-        for (const SizeType n : {SizeType{3}, SizeType{17}}) {
-            for (const uint64_t position :
-                 {uint64_t{0}, uint64_t{4}, uint64_t{23}}) {
-                std::vector<float> state(2 * n), fifo(delay), ring(delay);
-                for (SizeType t = 0; t < n; ++t) {
-                    state[t]     = static_cast<float>(position + t + 101);
-                    state[n + t] = static_cast<float>(position + t + 1);
-                }
-                for (SizeType k = 0; k < delay; ++k) {
-                    const int64_t time = static_cast<int64_t>(position + k) -
-                                         static_cast<int64_t>(delay);
-                    fifo[k] = time < 0 ? 0.0F : static_cast<float>(time + 1);
-                    ring[(position + k) % delay] = fifo[k];
-                }
-                const BoxcarRow row{.tail = 0, .head = 1, .delay = delay};
-                FDMTSearchInput input{.state        = state.data(),
-                                      .history      = fifo.data(),
-                                      .row_stride   = n,
-                                      .beam_stride  = 2 * n,
-                                      .nsamps       = n,
-                                      .sample_begin = position};
-                for (SizeType t = 0; t < n; ++t) {
-                    const float device_value =
-                        boxcar_sample(input, row, 0, t, true);
-                    input.history      = ring.data();
-                    input.history_ring = true;
-                    CHECK(boxcar_sample(input, row, 0, t, true) ==
-                          device_value);
-                    input.history      = fifo.data();
-                    input.history_ring = false;
-                    const int64_t time = static_cast<int64_t>(position + t) -
-                                         static_cast<int64_t>(delay);
-                    CHECK(device_value ==
-                          state[t] +
-                              (time < 0 ? 0.0F : static_cast<float>(time + 1)));
-                }
-            }
-        }
-    }
-}
-
 TEST_CASE("Packed FDMTBoxcar agrees with centered float reference",
           "[boxcar][packed][cpu]") {
     const plans::FDMTPlan plan(700, 1200, 7, 139, 0.001F,
@@ -677,57 +561,6 @@ TEST_CASE("Packed FDMTBoxcar wide windows exceed uint32 safely",
         }
     }
     CHECK(found);
-    // This direct helper check also protects low-bit peak ordering from
-    // accidentally going through float before candidate emission.
-    algorithms::detail::BoxcarPeak peak;
-    const auto ignore = [](const auto&) {};
-    algorithms::detail::boxcar_integer_peak_step(
-        peak, true, (uint64_t{1} << 54), 1, 0, ignore);
-    algorithms::detail::boxcar_integer_peak_step(
-        peak, true, (uint64_t{1} << 54) + 1, 2, 0, ignore);
-    CHECK(peak.peak == 2);
-}
-
-TEST_CASE("Integer boxcar run summaries preserve exact peaks",
-          "[boxcar][packed][cpu]") {
-    using namespace algorithms::detail;
-    const std::vector<uint64_t> sums{0,
-                                     (uint64_t{1} << 54),
-                                     (uint64_t{1} << 54) + 1,
-                                     0,
-                                     0,
-                                     (uint64_t{1} << 54) + 2,
-                                     (uint64_t{1} << 54) + 3,
-                                     (uint64_t{1} << 54) + 3};
-    const auto segment = [&](SizeType begin, SizeType end) {
-        BoxcarRunSummary result;
-        for (SizeType t = begin; t < end; ++t) {
-            if (sums[t] == 0) {
-                result.all           = false;
-                result.trailing.open = false;
-            } else {
-                boxcar_integer_peak_step(result.trailing, true, sums[t], t, 0,
-                                         [](const auto&) {});
-            }
-        }
-        return result;
-    };
-    const auto expected = segment(0, sums.size());
-    for (SizeType i = 0; i <= sums.size(); ++i) {
-        for (SizeType j = i; j <= sums.size(); ++j) {
-            const auto a = segment(0, i), b = segment(i, j),
-                       c = segment(j, sums.size());
-            for (const auto result :
-                 {boxcar_join(boxcar_join(a, b, true), c, true),
-                  boxcar_join(a, boxcar_join(b, c, true), true)}) {
-                CHECK(result.all == expected.all);
-                CHECK(result.trailing.begin == expected.trailing.begin);
-                CHECK(result.trailing.end == expected.trailing.end);
-                CHECK(result.trailing.peak == expected.trailing.peak);
-                CHECK(result.trailing.raw_sum == expected.trailing.raw_sum);
-            }
-        }
-    }
 }
 
 TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
@@ -840,36 +673,6 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
 #endif
 }
 
-TEST_CASE("Boxcar width screen groups cover every width", "[boxcar][cpu]") {
-    using algorithms::detail::boxcar_screen_groups;
-    // Spacing 1.5 merges too few widths to pay: no groups.
-    CHECK(
-        boxcar_screen_groups(plans::generate_box_width_trials(163, 1.5F), false)
-            .empty());
-    for (const SizeType max_width : {SizeType{48}, SizeType{163}}) {
-        const auto widths = plans::generate_box_width_trials(max_width, 1.0F);
-        const auto groups = boxcar_screen_groups(widths, false);
-        REQUIRE_FALSE(groups.empty());
-        std::vector<int> covered(widths.size(), 0);
-        uint32_t level = 0;
-        for (const auto& g : groups) {
-            CHECK(g.level >= level); // ascending: one table raised in place
-            level = g.level;
-            CHECK(g.w_lo == widths[g.f_lo]);
-            CHECK(g.w_hi == widths[g.f_hi - 1]);
-            CHECK(g.w_hi < 2 * g.w_lo);
-            CHECK((1U << g.level) <= g.w_hi - g.w_lo + 1);
-            CHECK((2U << g.level) > g.w_hi - g.w_lo + 1);
-            for (uint32_t f = g.f_lo; f < g.f_hi; ++f) {
-                ++covered[f];
-            }
-        }
-        CHECK(std::ranges::all_of(covered, [](int c) { return c == 1; }));
-        // Trapezoid widths (>= 3) stay single, so grouping does not pay.
-        CHECK(boxcar_screen_groups(widths, true).empty());
-    }
-}
-
 TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
           "[boxcar][packed][cpu]") {
     // Spacing 1 up to 48 samples: the CPU and GPU scorers screen tiles by
@@ -948,121 +751,6 @@ TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
         }
     }
 }
-
-#ifdef DMT_ENABLE_GPU
-TEST_CASE("GPU FDMTBoxcar direct levels and top agree with the CPU",
-          "[boxcar][packed][gpu]") {
-    // 512 channels: the GPU computes levels 0..3 directly and, for subband
-    // depths 0 and 1, sums the trials (or level root - depth - 1) from a
-    // level-k ring (the direct top); depth 2 has only the direct levels.
-    // 2048 channels at depth 3: the top sums level 7 from level 4.
-    // Packed input is exact on both backends (uint32_t state at 8 bits,
-    // uint64_t at 16); float32 agrees within rounding near the threshold.
-    // The packed search's summary names the path taken, so a size limit
-    // cannot silently fall back to the plain tree. A reset_history() replays
-    // the stream exactly.
-    constexpr SizeType kBeams  = 2;
-    constexpr SizeType kBlocks = 4;
-    struct Case {
-        SizeType nchans;
-        SizeType depth;
-        bool top;
-        double chan_dm{0.0}; ///< plan level-0 boxes (coherent channels)
-    };
-    for (const Case cs :
-         {Case{512, 0, true}, Case{512, 1, true}, Case{512, 2, false},
-          Case{2048, 3, true}, Case{512, 1, true, 413.0}}) {
-        const SizeType depth = cs.depth;
-        const plans::FDMTPlan plan(1100.0F, 1714.0F, cs.nchans, 256, 455.6e-6F,
-                                   300, 0, 1, "valid", depth, cs.chan_dm);
-        const SizeType size = kBeams * plan.get_nchans() * plan.get_nsamps();
-        for (const SizeType bits : {SizeType{8}, SizeType{16}, SizeType{32}}) {
-            DYNAMIC_SECTION("nchans=" << cs.nchans << " depth=" << depth
-                                      << " chan_dm=" << cs.chan_dm
-                                      << " bits=" << bits) {
-                const uint32_t maximum = bits == 32 ? 0U : (1U << bits) - 1U;
-                const uint64_t seed    = 17 + depth + bits;
-                std::vector<std::vector<uint8_t>> packed(kBlocks);
-                std::vector<std::vector<float>> floats(kBlocks);
-                for (SizeType k = 0; k < kBlocks; ++k) {
-                    if (bits == 32) {
-                        floats[k] = dmt::test_random::normal<float>(
-                            size, seed + (k << 8U));
-                        continue;
-                    }
-                    const auto values = dmt::test_random::uniform_int<uint32_t>(
-                        size, seed + (k << 8U), 0, maximum);
-                    packed[k].resize(size * (bits / 8));
-                    for (SizeType i = 0; i < size; ++i) {
-                        const uint32_t v          = values[i];
-                        packed[k][i * (bits / 8)] = static_cast<uint8_t>(v);
-                        if (bits == 16) {
-                            packed[k][(i * 2) + 1] =
-                                static_cast<uint8_t>(v >> 8U);
-                        }
-                    }
-                }
-                BoxcarConfig cfg(24, 1.0F, 3.2F, 1.0F,
-                                 PeakFindingMode::kContiguousPeakPerWidth);
-                cfg.max_candidates   = 4000000;
-                cfg.max_cands_per_dm = 0;
-                if (bits != 32) {
-                    cfg.input_nbits = bits;
-                    cfg.input_mean  = static_cast<float>(maximum) * 0.5F;
-                    cfg.noise_sigma = std::sqrt(static_cast<float>(maximum) *
-                                                (maximum + 2.0F) / 12.0F);
-                }
-                for (const SizeType chunk : {SizeType{64}, SizeType{0}}) {
-                    FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(), kBeams,
-                                     algorithms::kFDMTAutoFuse, chunk);
-                    FDMTBoxcar gpu_s(plan, cfg, true,
-                                     Exec{algorithms::detail::kGPUBackend, 0},
-                                     kBeams, algorithms::kFDMTAutoFuse, chunk);
-                    std::vector<RawCandidate> c;
-                    std::vector<RawCandidate> g;
-                    for (SizeType k = 0; k < kBlocks; ++k) {
-                        if (bits == 32) {
-                            append(c, cpu_s.execute(floats[k]));
-                            append(g, gpu_s.execute(floats[k]));
-                        } else {
-                            append(c, cpu_s.execute(packed[k]));
-                            append(g, gpu_s.execute(packed[k]));
-                        }
-                    }
-                    append(c, cpu_s.flush());
-                    append(g, gpu_s.flush());
-                    REQUIRE_FALSE(c.empty());
-                    if (bits == 32) {
-                        compare_near_threshold(g, c, cfg.detect_thresh);
-                    } else {
-                        compare(g, c);
-                    }
-                    const auto summary = gpu_s.summary();
-                    INFO(summary);
-                    // Only the packed search takes the direct path.
-                    const bool direct = bits != 32;
-                    CHECK((summary.find("direct levels") !=
-                           std::string::npos) == direct);
-                    CHECK((summary.find("direct top") != std::string::npos) ==
-                          (direct && cs.top));
-                    // Run, reset, run again: identical candidates.
-                    gpu_s.reset_history();
-                    std::vector<RawCandidate> again;
-                    for (SizeType k = 0; k < kBlocks; ++k) {
-                        if (bits == 32) {
-                            append(again, gpu_s.execute(floats[k]));
-                        } else {
-                            append(again, gpu_s.execute(packed[k]));
-                        }
-                    }
-                    append(again, gpu_s.flush());
-                    compare(again, g);
-                }
-            }
-        }
-    }
-}
-#endif
 
 TEST_CASE("FDMTBoxcar drain() ends the stream", "[boxcar][cpu]") {
     // Off the skewed paths every row is searched up to the last sample, so

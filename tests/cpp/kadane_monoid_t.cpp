@@ -17,15 +17,15 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
-#include "dmt/fdmt_variance.hpp"
 #include "dmt/kadane_cuda.cuh"
 #include "dmt/kadane_plan.hpp"
 #include "dmt/kadane_simd.hpp"
 
+#include "kadane_test_tables.hpp"
+
 namespace dmt {
 namespace {
 
-using algorithms::detail::fdmt_trapezoid_variance;
 using kadane::clamp_kadane_i32;
 using kadane::compute_bucket_cut_hd_f32;
 using kadane::kadane_apply;
@@ -41,6 +41,7 @@ using kadane::make_kadane_seg_f32;
 using kadane::make_kadane_seg_i64;
 using kadane::ScalarBackend;
 using kadane::trapezoid_edge_width;
+using kadane_test::make_synthetic_tables;
 
 constexpr int kItems = 4;
 constexpr int kWarp  = 32;
@@ -161,81 +162,6 @@ KadaneSegI64 emulate_gpu_block_scan_i64(std::span<const uint32_t> tile,
     return w_acc[kBlockWarps - 1];
 }
 
-struct MonoidSyntheticTables {
-    std::vector<uint32_t> widths;
-    std::vector<float> raw_thresh;
-    std::vector<float> inv_sigma;
-    std::vector<double> int_mean;
-    std::vector<uint64_t> int_thresh;
-    SizeType n_rows     = 0;
-    double integer_unit = 1.0;
-};
-
-MonoidSyntheticTables
-make_tables(std::span<const uint32_t> widths,
-            bool use_trapezoid,
-            float detect_thresh,
-            float noise_sigma,
-            std::span<const std::pair<SizeType, SizeType>> row_specs,
-            bool packed       = false,
-            double input_mean = 0.0,
-            int scale_bits    = 0) {
-    MonoidSyntheticTables out;
-    out.widths.assign(widths.begin(), widths.end());
-    out.n_rows         = row_specs.size();
-    out.integer_unit   = std::ldexp(1.0, -scale_bits);
-    const double scale = std::ldexp(1.0, scale_bits);
-    const SizeType nf  = widths.size();
-
-    out.raw_thresh.resize(out.n_rows * nf);
-    out.inv_sigma.resize(out.n_rows * nf);
-    if (packed) {
-        out.int_mean.resize(out.n_rows * nf);
-        out.int_thresh.resize(out.n_rows * nf);
-    }
-
-    for (SizeType r = 0; r < out.n_rows; ++r) {
-        const auto [leaf_len, n_chans] = row_specs[r];
-        if (n_chans == 0) {
-            for (SizeType f = 0; f < nf; ++f) {
-                out.inv_sigma[(r * nf) + f] = 0.0F;
-                out.raw_thresh[(r * nf) + f] =
-                    std::numeric_limits<float>::max();
-                if (packed) {
-                    out.int_mean[(r * nf) + f]   = 0.0;
-                    out.int_thresh[(r * nf) + f] = UINT64_MAX;
-                }
-            }
-            continue;
-        }
-        for (SizeType f = 0; f < nf; ++f) {
-            const uint32_t w    = widths[f];
-            const uint32_t edge = use_trapezoid ? trapezoid_edge_width(w) : 0U;
-            const double var_1 =
-                fdmt_trapezoid_variance(leaf_len, w, edge, 1.0) *
-                static_cast<double>(n_chans) *
-                static_cast<double>(noise_sigma) *
-                static_cast<double>(noise_sigma);
-            const auto inv_s = static_cast<float>(1.0 / std::sqrt(var_1));
-            out.inv_sigma[(r * nf) + f]  = inv_s;
-            out.raw_thresh[(r * nf) + f] = detect_thresh / inv_s;
-            if (packed) {
-                const uint32_t tw = edge == 0U ? w : 2U * (w - edge);
-                const double mu   = input_mean * static_cast<double>(n_chans) *
-                                    static_cast<double>(leaf_len) *
-                                    static_cast<double>(tw) * scale;
-                const double thr_d =
-                    mu +
-                    (static_cast<double>(out.raw_thresh[(r * nf) + f]) * scale);
-                out.int_mean[(r * nf) + f] = mu;
-                out.int_thresh[(r * nf) + f] =
-                    static_cast<uint64_t>(std::max(1.0, std::ceil(thr_d)));
-            }
-        }
-    }
-    return out;
-}
-
 } // namespace
 
 TEST_CASE("KadaneSegF32 and KadaneSegI64 satisfy tropical monoid laws",
@@ -344,7 +270,8 @@ TEST_CASE("GPU block/warp KadaneSegF32 tree scan matches Stage-2 sequential "
     const std::vector<std::pair<SizeType, SizeType>> specs = {{1, 16}, {3, 32}};
 
     for (const bool use_trap : {false, true}) {
-        const auto tbl  = make_tables(widths, use_trap, 5.5F, 1.0F, specs);
+        const auto tbl =
+            make_synthetic_tables(widths, use_trap, 5.5F, 1.0F, specs);
         const auto plan = kadane::make_kadane_gate_plan(
             widths, use_trap, specs.size(), tbl.raw_thresh);
         REQUIRE(plan.num_buckets >= 1);
@@ -473,8 +400,8 @@ TEST_CASE("GPU block/warp KadaneSegI64 tree scan is bit-exact and "
     const std::vector<std::pair<SizeType, SizeType>> specs = {{1, 8}, {2, 16}};
 
     for (const bool use_trap : {false, true}) {
-        const auto tbl =
-            make_tables(widths, use_trap, 5.0F, 15.0F, specs, true, 128.0, 0);
+        const auto tbl = make_synthetic_tables(widths, use_trap, 5.0F, 15.0F,
+                                               specs, true, 128.0, 0);
         const uint64_t max_samp = 255ULL * 32ULL;
         const auto plan         = kadane::make_kadane_gate_plan(
             widths, use_trap, specs.size(), tbl.raw_thresh, tbl.int_mean,
@@ -664,7 +591,8 @@ TEST_CASE("DMT_HD BlockNoise cut recomputation matches host plans bit-for-bit",
         {1, 32}, {4, 64}, {2, 0}};
 
     for (const bool use_trap : {false, true}) {
-        const auto tbl = make_tables(widths, use_trap, 6.0F, 1.25F, specs);
+        const auto tbl =
+            make_synthetic_tables(widths, use_trap, 6.0F, 1.25F, specs);
         const KadaneGatePlan gplan = kadane::make_kadane_gate_plan(
             widths, use_trap, specs.size(), tbl.raw_thresh);
 
@@ -713,7 +641,7 @@ TEST_CASE("DMT_HD wide-boxcar BlockNoise cut bit-parity up to 2^20 and "
 
             for (const bool use_trap : {false, true}) {
                 const auto tbl =
-                    make_tables(widths, use_trap, 6.0F, 1.0F, specs);
+                    make_synthetic_tables(widths, use_trap, 6.0F, 1.0F, specs);
                 const KadaneGatePlan gplan = kadane::make_kadane_gate_plan(
                     widths, use_trap, specs.size(), tbl.raw_thresh);
                 REQUIRE(gplan.num_buckets == 3);

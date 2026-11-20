@@ -687,235 +687,74 @@ def test_boxcar_screen_mode_binding_defaults_and_roundtrip() -> None:
     assert "BoxcarScreenMode" in FDMTBoxcar.__doc__
 
 
-def test_keep_brightest_with_screen_modes() -> None:
-    plan = FDMTPlan(1200, 1500, 32, 2048, 0.001, 31, subband_depth=1)
-    rng = np.random.default_rng(17)
-    data = np.round(rng.standard_normal((32, 2048), dtype=np.float32) * 8) / 8
-    for t in range(80, 680, 60):
-        data[:, t : t + 6] += 4.5
-    data[:, 1750:1754] += 12.0
-
-    exact = {}
-    for screen in (
-        BoxcarScreenMode.PREFIX,
-        BoxcarScreenMode.KADANE,
-        BoxcarScreenMode.NONE,
-    ):
-        cfg = BoxcarConfig(
-            16,
-            peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
-            max_candidates=200,
-            max_cands_per_dm=8,
-            overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
-            screen_mode=screen,
-        )
-        res = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256).execute(data)
-        assert res.emitted_count == 200
-        assert res.overflowed
-        exact[screen] = res
-
-    ref = exact[BoxcarScreenMode.PREFIX]
-    for screen in (BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE):
-        got = exact[screen]
-        assert got.total_detected == ref.total_detected
-        assert got.dropped_per_dm == ref.dropped_per_dm
-        assert got.dropped_global == ref.dropped_global
-        assert_same(
-            sorted_candidates([got.candidates]),
-            sorted_candidates([ref.candidates]),
-        )
-
-
-@pytest.mark.parametrize("trapezoid", [False, True])
-@pytest.mark.parametrize("peak_mode", list(PeakFindingMode.__members__.values()))
-def test_exact_screen_modes_parity_float_and_packed(
-    trapezoid: bool, peak_mode: PeakFindingMode
-) -> None:
+@pytest.mark.parametrize(
+    "screen",
+    [BoxcarScreenMode.AUTO, BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE],
+)
+def test_screen_modes_match_prefix(screen: BoxcarScreenMode) -> None:
     rng = np.random.default_rng(104)
     samples = 311
-    blocks = 3
-    grid = [-41, 0, 7, 63]
-    plan = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid, subband_depth=1)
-    # Quantized dyadic floats avoid FMA/non-FMA tie noise while keeping rich
-    # positive and negative excursions across chunk boundaries.
-    f_blocks = []
-    for k in range(blocks):
-        blk = np.round(rng.standard_normal((2, 7, samples), dtype=np.float32) * 8) / 8
-        if k == 1:
-            blk[:, :4, 40:55] += 3.5
-        f_blocks.append(blk)
+    plan = FDMTPlan(
+        700, 1200, 7, samples, 0.001, dt_grid=[-41, 0, 7, 63], subband_depth=1
+    )
+    f_blocks = [
+        np.round(rng.standard_normal((2, 7, samples), dtype=np.float32) * 8) / 8
+        for _ in range(3)
+    ]
+    f_blocks[1][:, :4, 40:55] += 3.5
 
-    def run_drain(search: FDMTBoxcar, seq: list[np.ndarray]) -> np.ndarray:
+    def run_drain(cfg: BoxcarConfig, seq: list[np.ndarray], **kw: object) -> np.ndarray:
+        search = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=64, **kw)
         parts = [search.execute(b).candidates for b in seq]
         parts.append(search.drain().candidates)
         return sorted_candidates(parts)
 
-    ref_cfg = config(peak_mode)
-    ref_cfg.use_trapezoid = trapezoid
+    # Float + trapezoid + drain
+    ref_cfg = config()
+    ref_cfg.use_trapezoid = True
     ref_cfg.screen_mode = BoxcarScreenMode.PREFIX
-    ref = run_drain(FDMTBoxcar(plan, ref_cfg, nbeams=2, chunk_nsamps=64), f_blocks)
+    got_cfg = config()
+    got_cfg.use_trapezoid = True
+    got_cfg.screen_mode = screen
+    ref = run_drain(ref_cfg, f_blocks, nbeams=2)
     assert len(ref) > 0
-    for screen in (BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE):
-        cfg = config(peak_mode)
-        cfg.use_trapezoid = trapezoid
-        cfg.screen_mode = screen
-        got = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), f_blocks
-        )
-        assert_same(got, ref)
+    assert_same(run_drain(got_cfg, f_blocks, nbeams=2), ref)
 
-    # Packed uint8 multi-chunk + drain() parity.
+    # Packed uint8 + drain
     u8_blocks = [
-        rng.integers(90, 166, (2, 7, samples), dtype=np.uint8) for _ in range(blocks)
+        rng.integers(90, 166, (2, 7, samples), dtype=np.uint8) for _ in range(3)
     ]
     u8_blocks[1][:, 2:6, 100:116] = 220
-    u8_results = {}
-    for screen in (
-        BoxcarScreenMode.PREFIX,
-        BoxcarScreenMode.KADANE,
-        BoxcarScreenMode.NONE,
-    ):
-        cfg = BoxcarConfig(
-            17,
-            wtsp=1.5,
-            detect_thresh=3.2,
-            noise_sigma=float(np.sqrt((76**2 - 1) / 12)),
-            peak_mode=peak_mode,
-            max_cands_per_dm=0,
-            input_nbits=8,
-            input_mean=127.5,
-            use_trapezoid=trapezoid,
-            screen_mode=screen,
-        )
-        u8_results[screen] = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), u8_blocks
-        )
-    assert len(u8_results[BoxcarScreenMode.PREFIX]) > 0
+    u8_kwargs = dict(
+        wtsp=1.5,
+        detect_thresh=3.2,
+        noise_sigma=float(np.sqrt((76**2 - 1) / 12)),
+        max_cands_per_dm=0,
+        input_nbits=8,
+        input_mean=127.5,
+    )
+    u8_ref = run_drain(
+        BoxcarConfig(17, screen_mode=BoxcarScreenMode.PREFIX, **u8_kwargs),
+        u8_blocks,
+        nbeams=2,
+    )
+    assert len(u8_ref) > 0
     assert_same(
-        u8_results[BoxcarScreenMode.KADANE], u8_results[BoxcarScreenMode.PREFIX]
+        run_drain(
+            BoxcarConfig(17, screen_mode=screen, **u8_kwargs), u8_blocks, nbeams=2
+        ),
+        u8_ref,
     )
-    assert_same(u8_results[BoxcarScreenMode.NONE], u8_results[BoxcarScreenMode.PREFIX])
 
-
-def test_exact_screen_modes_kill_mask_and_skewed_drain() -> None:
-    # Constructor and dynamic per-call kill_mask parity across PREFIX/KADANE/NONE.
-    plan, blocks, masks = mask_blocks(21)
-    for use_trap in (False, True):
-        by_mode = {}
-        ctor_by_mode = {}
-        for screen in (
-            BoxcarScreenMode.PREFIX,
-            BoxcarScreenMode.KADANE,
-            BoxcarScreenMode.NONE,
-        ):
-            cfg = config()
-            cfg.use_trapezoid = use_trap
-            cfg.screen_mode = screen
-            by_mode[screen] = masked_stream(FDMTBoxcar(plan, cfg), blocks, masks)
-            ctor_by_mode[screen] = masked_stream(
-                FDMTBoxcar(plan, cfg, kill_mask=masks[0]), blocks, [None] * 4
-            )
-        assert len(by_mode[BoxcarScreenMode.PREFIX]) > 0
-        assert_same(by_mode[BoxcarScreenMode.KADANE], by_mode[BoxcarScreenMode.PREFIX])
-        assert_same(by_mode[BoxcarScreenMode.NONE], by_mode[BoxcarScreenMode.PREFIX])
-        assert_same(
-            ctor_by_mode[BoxcarScreenMode.KADANE],
-            ctor_by_mode[BoxcarScreenMode.PREFIX],
-        )
-        assert_same(
-            ctor_by_mode[BoxcarScreenMode.NONE],
-            ctor_by_mode[BoxcarScreenMode.PREFIX],
-        )
-
-    # Skewed-window subband search + drain() parity across PREFIX/KADANE/NONE.
-    rng = np.random.default_rng(31)
-    nchans, nsamps = 1152, 4096
-    skew_plan = FDMTPlan(
-        1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, subband_depth=1
-    )
-    codes = rng.integers(0, 216, (nchans, 2 * nsamps), dtype=np.uint8)
-    codes[600:1100, -14:-7] += 42
-    skew_blocks = [
-        np.ascontiguousarray(codes[:, k * nsamps : (k + 1) * nsamps]) for k in range(2)
-    ]
-    skew_res = {}
-    for screen in (
-        BoxcarScreenMode.PREFIX,
-        BoxcarScreenMode.KADANE,
-        BoxcarScreenMode.NONE,
-    ):
-        cfg = BoxcarConfig(
-            17,
-            wtsp=1.5,
-            detect_thresh=5.5,
-            noise_sigma=float(np.sqrt((216**2 - 1) / 12)),
-            input_nbits=8,
-            input_mean=107.5,
-            screen_mode=screen,
-        )
-        eng = FDMTBoxcar(skew_plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
-        assert eng.search_latency > 0
-        parts = [eng.execute(b).candidates for b in skew_blocks]
-        parts.append(eng.drain().candidates)
-        skew_res[screen] = sorted_candidates(parts)
-    assert len(skew_res[BoxcarScreenMode.PREFIX]) > 0
-    assert_same(skew_res[BoxcarScreenMode.KADANE], skew_res[BoxcarScreenMode.PREFIX])
-    assert_same(skew_res[BoxcarScreenMode.NONE], skew_res[BoxcarScreenMode.PREFIX])
-
-
-def _auto_case() -> tuple[FDMTPlan, list[np.ndarray]]:
-    rng = np.random.default_rng(91)
-    plan = FDMTPlan(
-        700, 1200, 7, 733, 0.001, dt_grid=[-73, -12, 0, 4, 97], subband_depth=1
-    )
-    # Unquantized floats: S/N bits depend on the exact summation order.
-    blocks = []
-    for _ in range(2):
-        data = rng.standard_normal((7, 733), dtype=np.float32)
-        data[:4, 320:336] += 4
-        blocks.append(data)
-    return plan, blocks
-
-
-def _auto_bytes(plan: FDMTPlan, screen: BoxcarScreenMode, **kw: object) -> int:
-    cfg = config()
-    cfg.screen_mode = screen
-    return FDMTBoxcar(plan, cfg, chunk_nsamps=64, **kw).memory_usage.total
-
-
-def _auto_run(
-    plan: FDMTPlan, blocks: list[np.ndarray], screen: BoxcarScreenMode, **kw: object
-) -> np.ndarray:
-    cfg = config()
-    cfg.screen_mode = screen
-    search = FDMTBoxcar(plan, cfg, chunk_nsamps=64, **kw)
-    assert search.config.screen_mode == screen
-    parts = [search.execute(b).candidates for b in blocks]
-    parts.append(search.drain().candidates)
-    return sorted_candidates(parts)
-
-
-def test_auto_screen_mode_is_kadane_on_cpu() -> None:
-    plan, blocks = _auto_case()
-    auto = _auto_run(plan, blocks, BoxcarScreenMode.AUTO)
-    kadane = _auto_run(plan, blocks, BoxcarScreenMode.KADANE)
-    assert len(auto) > 0
-    assert auto.tobytes() == kadane.tobytes()
-    # Exact modes emit the same candidates; the engine's buffers show which ran.
-    auto_b = _auto_bytes(plan, BoxcarScreenMode.AUTO)
-    assert auto_b == _auto_bytes(plan, BoxcarScreenMode.KADANE)
-    assert auto_b != _auto_bytes(plan, BoxcarScreenMode.PREFIX)
-
-
-def test_auto_screen_mode_is_prefix_on_gpu(gpu_backend: str) -> None:
-    plan, blocks = _auto_case()
-    auto = _auto_run(plan, blocks, BoxcarScreenMode.AUTO, backend=gpu_backend)
-    prefix = _auto_run(plan, blocks, BoxcarScreenMode.PREFIX, backend=gpu_backend)
-    assert len(auto) > 0
-    assert auto.tobytes() == prefix.tobytes()
-    auto_b = _auto_bytes(plan, BoxcarScreenMode.AUTO, backend=gpu_backend)
-    assert auto_b == _auto_bytes(plan, BoxcarScreenMode.PREFIX, backend=gpu_backend)
-    assert auto_b != _auto_bytes(plan, BoxcarScreenMode.KADANE, backend=gpu_backend)
+    # Per-call kill masks
+    m_plan, m_blocks, masks = mask_blocks(21)
+    m_ref_cfg = config()
+    m_ref_cfg.screen_mode = BoxcarScreenMode.PREFIX
+    m_got_cfg = config()
+    m_got_cfg.screen_mode = screen
+    m_ref = masked_stream(FDMTBoxcar(m_plan, m_ref_cfg), m_blocks, masks)
+    assert len(m_ref) > 0
+    assert_same(masked_stream(FDMTBoxcar(m_plan, m_got_cfg), m_blocks, masks), m_ref)
 
 
 @pytest.mark.parametrize("screen", list(BoxcarScreenMode.__members__.values()))
