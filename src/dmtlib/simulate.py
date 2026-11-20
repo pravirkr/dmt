@@ -12,6 +12,8 @@ from typing import Any, TypeVar
 
 import numpy as np
 
+from dmtlib.grid import DM_CONSTANT
+
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 try:
@@ -25,10 +27,6 @@ except ImportError:
         if len(args) == 1 and callable(args[0]):
             return args[0]
         return decorator
-
-
-# Dispersion constant (MHz^2 * s / (pc cm^-3)), the same as the C++ kDispConst.
-DM_CONSTANT = 1 / 2.41e-4  # TEMPO2, Manchester & Taylor (1972)
 
 
 def get_dmdelays(

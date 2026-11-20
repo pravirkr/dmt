@@ -486,7 +486,7 @@ private:
 
     std::vector<Chunk> m_chunks;
     std::vector<std::unique_ptr<utils::CUFFTManager>> m_fwd; // per chunk size
-    std::vector<bool> m_f_outer; // per group: subbands are contiguous bytes
+    bool m_f_outer{false}; // subbands are contiguous bytes in host baseband
 
     // Coherent stage.
     cfdmt_gpu::FusedArgs m_fused_args{};
@@ -564,12 +564,8 @@ private:
             }
             m_chunks.push_back({s0, s0 + n, m_fwd.back().get()});
         }
-        for (const auto g : m_plan.get_subband_groups()) {
-            static_cast<void>(g);
-            m_f_outer.push_back(
-                utils::parse_baseband_order(m_plan.get_format().order)[0] ==
-                utils::BasebandAxis::kFreq);
-        }
+        m_f_outer = utils::parse_baseband_order(m_plan.get_format().order)[0] ==
+                    utils::BasebandAxis::kFreq;
 
         m_spec.reserve(m_unpacker->output_size());
         m_power.reserve(nsub * nfft * n_p * 2);
@@ -744,7 +740,7 @@ private:
                 }
                 SizeType off   = 0;
                 SizeType bytes = h_groups[g].size();
-                if (m_f_outer[g]) {
+                if (m_f_outer) {
                     std::tie(off, bytes) = group_bytes(lo - g0, hi - g0);
                     uploaded[g]          = hi == g0 + sizes[g];
                 } else {

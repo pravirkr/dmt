@@ -171,10 +171,6 @@ public:
     [[nodiscard]] SizeType max_delay() const noexcept override {
         return m_model.max_delay;
     }
-    void set_gulp_size(SizeType gulp_size) override { m_gulp = gulp_size; }
-    [[nodiscard]] SizeType get_gulp_size() const noexcept override {
-        return m_gulp == 0 ? 65536 : m_gulp;
-    }
     [[nodiscard]] std::string_view method_used() const noexcept override {
         return detail::ddmt_fft_method_used(m_runs.size(), m_brute_dms.size());
     }
@@ -343,7 +339,6 @@ private:
     SizeType m_nact;
     SizeType m_ctx;     // guard + max_delay
     SizeType m_seg_n{}; // longest transform (memory cap)
-    SizeType m_gulp{0};
 
     std::vector<float> m_hist; // [beam][chan][ctx], first m_hist_len valid
     std::vector<float> m_hist_next;

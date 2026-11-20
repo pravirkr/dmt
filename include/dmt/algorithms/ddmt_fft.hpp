@@ -272,14 +272,6 @@ public:
     /// @brief Discards the retained history (cold start).
     void reset_history() noexcept;
 
-    /// @brief Host-path chunk length, stored for API parity with DDMT. The
-    /// Fourier engines transform every call whole on every backend:
-    /// chunking a call would move the transform boundaries, and with them
-    /// the (guard-level) result. 0: default.
-    void set_gulp_size(SizeType gulp_size);
-    /// @brief Current host-path chunk length in input samples.
-    [[nodiscard]] SizeType get_gulp_size() const noexcept;
-
     /// @brief Floats in a fully warmed-up history: nbeams * nchans *
     /// (get_max_delay() + guard).
     [[nodiscard]] SizeType history_state_size() const noexcept;

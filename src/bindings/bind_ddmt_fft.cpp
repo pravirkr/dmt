@@ -390,8 +390,6 @@ void bind_ddmt_fft(py::module_& mod) {
         .def("get_output_nsamps", &DDMTFFT::get_output_nsamps, "input_nsamps"_a)
         .def("reset_history", &DDMTFFT::reset_history)
         .def("history_state_size", &DDMTFFT::history_state_size)
-        .def("set_gulp_size", &DDMTFFT::set_gulp_size, "gulp_size"_a)
-        .def_property_readonly("gulp_size", &DDMTFFT::get_gulp_size)
         .def("save_history",
              [](const DDMTFFT& e) {
                  py::array_t<float, py::array::c_style> hist(

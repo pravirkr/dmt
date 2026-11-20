@@ -391,8 +391,6 @@ public:
     virtual void reset_history() noexcept                              = 0;
     [[nodiscard]] virtual SizeType history_state_size() const noexcept = 0;
     [[nodiscard]] virtual SizeType max_delay() const noexcept          = 0;
-    virtual void set_gulp_size(SizeType gulp_size)                     = 0;
-    [[nodiscard]] virtual SizeType get_gulp_size() const noexcept      = 0;
     /// "nufft", "piecewise_nufft" or "brute": how the grid's trials are
     /// summed, the same on every backend (a GPU engine transforms a run
     /// too long for shared memory as equal NUFFT sub-runs).

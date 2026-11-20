@@ -558,12 +558,6 @@ public:
     [[nodiscard]] SizeType max_delay() const noexcept override {
         return m_model.max_delay;
     }
-    // Stored only, as on the CPU: a gulp of a host call would change the
-    // transform boundaries, and with them the (guard-level) result bits.
-    void set_gulp_size(SizeType gulp_size) override { m_gulp = gulp_size; }
-    [[nodiscard]] SizeType get_gulp_size() const noexcept override {
-        return m_gulp == 0 ? 65536 : m_gulp;
-    }
     [[nodiscard]] std::string_view method_used() const noexcept override {
         return detail::ddmt_fft_method_used(m_nruns_model, m_brute_rows.size());
     }
@@ -775,7 +769,6 @@ private:
     SizeType m_nact;
     SizeType m_ctx;
     SizeType m_seg_n{};
-    SizeType m_gulp{0};
     SizeType m_hist_len{0};
     bool m_hist_zero{false}; // history must be zeroed before next use
     mutable gpu_utils::DeviceWorkFence m_device_work;
@@ -886,9 +879,6 @@ private:
 
     template <typename F> static void dispatch_width(int w, const F& f) {
         switch (w) {
-        case 2:
-            f(std::integral_constant<int, 2>{});
-            break;
         case 3:
             f(std::integral_constant<int, 3>{});
             break;
