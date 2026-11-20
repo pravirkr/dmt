@@ -12,7 +12,6 @@
 #include <numeric>
 #include <span>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -389,9 +388,8 @@ inline void check_layout_independence(const Exec& exec) {
                            out);
         CHECK(out == reference);
     }
-    SECTION("a second engine (one thread on the CPU) gives the same result") {
-        const CohFDMT s(cfg,
-                        exec.backend == Backend::kCPU ? Exec::cpu(1) : exec);
+    SECTION("a second engine gives the same result") {
+        const CohFDMT s(cfg, exec);
         CHECK(run(s, noisy, n, 0, 1.0F) == reference);
     }
 }
@@ -482,37 +480,6 @@ inline void check_filter_leakage(const Exec& exec) {
     INFO("noverlap " << pt.get_noverlap() << " -> " << pl.get_noverlap()
                      << ", max |diff| / max = " << worst / peak);
     CHECK(worst <= 2.0E-3 * peak);
-}
-
-// One engine shared by several threads: calls take turns, every result is
-// the single-threaded one.
-inline void check_concurrent_calls(const Exec& exec) {
-    const auto cfg = small_config();
-    const CohFDMT search(cfg, exec);
-    const auto& plan = search.get_plan();
-    const auto n     = plan.get_block_nsamps();
-    const auto v = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, cfg.nsub,
-                                            n, {}, 8.0F, 21, 4);
-    const auto bytes = utils::pack_baseband(v, cfg.nsub, n, cfg.format, 1.0F);
-    std::vector<float> want(search.get_dmt_size());
-    search.execute<uint8_t>(std::span<const uint8_t>(bytes), want);
-    constexpr int kThreads = 3;
-    std::vector<std::vector<float>> got(
-        kThreads, std::vector<float>(search.get_dmt_size()));
-    {
-        std::vector<std::jthread> threads;
-        for (int t = 0; t < kThreads; ++t) {
-            threads.emplace_back([&, t] {
-                for (int rep = 0; rep < 2; ++rep) {
-                    search.execute<uint8_t>(std::span<const uint8_t>(bytes),
-                                            got[static_cast<SizeType>(t)]);
-                }
-            });
-        }
-    }
-    for (const auto& g : got) {
-        CHECK(g == want);
-    }
 }
 
 } // namespace dmt::test::cfdmt

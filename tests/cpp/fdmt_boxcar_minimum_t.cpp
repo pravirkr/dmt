@@ -15,6 +15,8 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 #include "dmt/common/dm_grids.hpp"
 
+#include "test_sized.hpp"
+
 using namespace dmt;
 using algorithms::FDMTBoxcar;
 using algorithms::FDMTBoxcarMemoryEstimate;
@@ -72,12 +74,13 @@ FDMTBoxcarMemoryEstimate check_minimum(const plans::FDMTPlan& plan,
 /// path starts to be chosen).
 void check_monotone(const plans::FDMTPlan& plan,
                     const BoxcarConfig& cfg,
-                    Exec exec) {
+                    Exec exec,
+                    bool full) {
     const SizeType lo = check_minimum(plan, cfg, exec).max_memory_bytes;
     const SizeType hi =
         estimate(plan, cfg, exec, SizeType{1} << 40).usage.budgeted() * 5 / 4;
     REQUIRE(hi > lo);
-    constexpr SizeType kSteps = 128;
+    const SizeType kSteps = full ? 128 : 24;
     std::set<SizeType> usages;
     for (SizeType k = 0; k <= kSteps; ++k) {
         const SizeType b = lo + ((hi - lo) * k / kSteps);
@@ -105,18 +108,22 @@ BoxcarConfig small_config() {
     return cfg;
 }
 
-void check_backend(Exec exec) {
+void check_backend(Exec exec, bool full) {
     SECTION("tree-only plan (no smaller path)") {
-        check_monotone(grid_plan(16, 4096, 300, 0), small_config(), exec);
+        check_monotone(grid_plan(16, 4096, 300, 0), small_config(), exec, full);
     }
     SECTION("full band, 512 channels") {
-        check_monotone(grid_plan(512, 4096, 400, 0), small_config(), exec);
+        check_monotone(grid_plan(512, 4096, 400, 0), small_config(), exec,
+                       full);
     }
     SECTION("subband search, depth 1") {
-        check_monotone(grid_plan(256, 4096, 600, 1), small_config(), exec);
+        check_monotone(grid_plan(256, 4096, 600, 1), small_config(), exec,
+                       full);
     }
     SECTION("subband search, depth 2") {
-        check_monotone(grid_plan(1024, 8192, 1500, 2), small_config(), exec);
+        const auto plan = full ? grid_plan(1024, 8192, 1500, 2)
+                               : grid_plan(512, 4096, 800, 2);
+        check_monotone(plan, small_config(), exec, full);
     }
     SECTION("a plan whose budget search overshoots and narrows (GPU)") {
         check_minimum(grid_plan(2048, 4096, 600, 1), small_config(), exec);
@@ -142,13 +149,13 @@ void check_backend(Exec exec) {
 
 } // namespace
 
-TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (CPU)",
-          "[boxcar][memory][cpu]") {
-    check_backend(Exec::cpu(2));
+DMT_SIZED_TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (CPU)",
+                    "[boxcar][memory][cpu]") {
+    check_backend(Exec::cpu(), full);
     SECTION("an instance built at the minimum stays within it") {
         const auto plan = grid_plan(256, 4096, 600, 1);
-        const auto m    = check_minimum(plan, small_config(), Exec::cpu(2));
-        const FDMTBoxcar search(plan, small_config(), true, Exec::cpu(2), 1,
+        const auto m    = check_minimum(plan, small_config(), Exec::cpu());
+        const FDMTBoxcar search(plan, small_config(), true, Exec::cpu(), 1,
                                 algorithms::kFDMTAutoFuse, 0,
                                 m.max_memory_bytes);
         CHECK(search.get_memory_usage().budgeted() == m.usage.budgeted());
@@ -170,7 +177,7 @@ TEST_CASE("FDMTBoxcar minimum memory on short blocks (CPU)",
             DYNAMIC_SECTION(nchans << " channels, depth " << depth << ", "
                                    << nsamps << " samples") {
                 check_minimum(grid_plan(nchans, nsamps, 10, depth),
-                              small_config(), Exec::cpu(2));
+                              small_config(), Exec::cpu());
             }
         }
     }
@@ -179,6 +186,6 @@ TEST_CASE("FDMTBoxcar minimum memory on short blocks (CPU)",
 #ifdef DMT_ENABLE_GPU
 TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (GPU)",
           "[boxcar][memory][gpu]") {
-    check_backend(Exec::cuda(0));
+    check_backend(Exec::cuda(0), true);
 }
 #endif

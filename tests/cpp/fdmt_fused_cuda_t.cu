@@ -265,7 +265,7 @@ TEST_CASE("FDMT direct low levels stream exactly like the tree",
                                 1, true, "valid", exec, nbeams, fuse,
                                 kFloatTree, c);
                 };
-                FDMT cpu     = make(Exec::cpu(2), kUnfused, 0);
+                FDMT cpu     = make(Exec::cpu(), kUnfused, 0);
                 FDMT direct  = make(test::gpu_exec(), kFDMTAutoFuse, chunk);
                 FDMT tree    = make(test::gpu_exec(), kUnfused, chunk);
                 FDMT stepper = make(test::gpu_exec(), kFDMTAutoFuse, block);

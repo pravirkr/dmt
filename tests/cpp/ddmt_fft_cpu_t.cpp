@@ -198,7 +198,7 @@ TEST_CASE("DDMTFFT matches a double-precision reference",
     for (int i = 0; i < 40; ++i) {
         dms.push_back(0.37F * static_cast<float>(i)); // uniform, fractional
     }
-    DDMTFFT eng(kFlo, kFhi, kNc, kTs, dms, Exec::cpu(3), 32, {}, 1,
+    DDMTFFT eng(kFlo, kFhi, kNc, kTs, dms, Exec::cpu(), 32, {}, 1,
                 opts(method, 16));
     auto wf          = random_block(kNc, nsamps, 11);
     const auto n_out = eng.get_output_nsamps(nsamps);
@@ -212,14 +212,14 @@ TEST_CASE("DDMTFFT NUFFT tolerance and non-uniform brute force",
           "[ddmt_fft_cpu][cpu]") {
     const SizeType nsamps = 2000;
     auto wf               = random_block(kNc, nsamps, 3);
-    DDMTFFT brute(kFlo, kFhi, kNc, kTs, 60.0F, 0.25F, 1.0F, Exec::cpu(4), 32,
-                  {}, 1, opts(DDMTFFTMethod::kBrute));
+    DDMTFFT brute(kFlo, kFhi, kNc, kTs, 60.0F, 0.25F, 1.0F, Exec::cpu(), 32, {},
+                  1, opts(DDMTFFTMethod::kBrute));
     const auto n_out = brute.get_output_nsamps(nsamps);
     const auto ndm   = brute.get_plan().get_dm_arr().size();
     std::vector<float> ref(ndm * n_out);
     brute.execute(wf, ref);
     for (const double tol : {1e-3, 1e-6}) {
-        DDMTFFT nu(kFlo, kFhi, kNc, kTs, 60.0F, 0.25F, 1.0F, Exec::cpu(4), 32,
+        DDMTFFT nu(kFlo, kFhi, kNc, kTs, 60.0F, 0.25F, 1.0F, Exec::cpu(), 32,
                    {}, 1, opts(DDMTFFTMethod::kNUFFT, 16, tol));
         std::vector<float> got(ndm * n_out);
         nu.execute(wf, got);
@@ -229,7 +229,7 @@ TEST_CASE("DDMTFFT NUFFT tolerance and non-uniform brute force",
     // A non-uniform (Levin) grid runs brute force and matches the reference.
     const plans::LevinConfig lev{
         .dm_start = 0.0F, .dm_end = 30.0F, .pulse_width = 2e-3F, .tol = 1.2F};
-    DDMTFFT lv(kFlo, kFhi, kNc, kTs, lev, Exec::cpu(2), 32, {}, 1,
+    DDMTFFT lv(kFlo, kFhi, kNc, kTs, lev, Exec::cpu(), 32, {}, 1,
                opts(DDMTFFTMethod::kAuto, 16));
     CHECK(lv.get_options().method == DDMTFFTMethod::kBrute);
     const auto lv_dms = lv.get_plan().get_dm_arr();
@@ -270,7 +270,7 @@ TEST_CASE("Piecewise-uniform Levin grid", "[ddmt_fft_cpu][cpu]") {
                                  .pulse_width       = width,
                                  .tol               = 1.2F,
                                  .piecewise_uniform = true};
-    DDMTFFT eng(kFlo, kFhi, nc, ts, cfg, Exec::cpu(2));
+    DDMTFFT eng(kFlo, kFhi, nc, ts, cfg, Exec::cpu());
     CHECK(eng.get_plan().get_dm_arr().size() == pw.size());
     CHECK(eng.method_used() == "piecewise_nufft");
     const plans::LevinConfig plain{
@@ -295,9 +295,9 @@ TEST_CASE("DDMTFFT piecewise NUFFT matches brute force",
     }
     const SizeType nsamps = 1500;
     auto wf               = random_block(kNc, nsamps, 17);
-    DDMTFFT brute(kFlo, kFhi, kNc, kTs, dms, Exec::cpu(3), 32, {}, 1,
+    DDMTFFT brute(kFlo, kFhi, kNc, kTs, dms, Exec::cpu(), 32, {}, 1,
                   opts(DDMTFFTMethod::kBrute));
-    DDMTFFT mixed(kFlo, kFhi, kNc, kTs, dms, Exec::cpu(3), 32, {}, 1,
+    DDMTFFT mixed(kFlo, kFhi, kNc, kTs, dms, Exec::cpu(), 32, {}, 1,
                   opts(DDMTFFTMethod::kAuto));
     CHECK(brute.method_used() == "brute");
     CHECK(mixed.method_used() == "piecewise_nufft");
@@ -327,9 +327,9 @@ TEST_CASE("DDMTFFT streaming converges to one long call as the guard grows",
     auto wf             = random_block(kNc, nblk * blk, 21);
     double err_prev     = 1e9;
     for (const SizeType guard : {8, 64, 512}) {
-        DDMTFFT one(kFlo, kFhi, kNc, kTs, 30.0F, 1.0F, 0.0F, Exec::cpu(2), 32,
+        DDMTFFT one(kFlo, kFhi, kNc, kTs, 30.0F, 1.0F, 0.0F, Exec::cpu(), 32,
                     {}, 1, opts(DDMTFFTMethod::kBrute, guard));
-        DDMTFFT str(kFlo, kFhi, kNc, kTs, 30.0F, 1.0F, 0.0F, Exec::cpu(2), 32,
+        DDMTFFT str(kFlo, kFhi, kNc, kTs, 30.0F, 1.0F, 0.0F, Exec::cpu(), 32,
                     {}, 1, opts(DDMTFFTMethod::kBrute, guard));
         const auto ndm = one.get_plan().get_dm_arr().size();
         const auto n1  = one.get_output_nsamps(nblk * blk);
@@ -375,10 +375,10 @@ TEST_CASE("DDMTFFT packed, time-major, kill mask, beams and history",
     std::vector<float> asfloat(packed.begin(), packed.end());
 
     SECTION("packed == float") {
-        DDMTFFT p8(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 8, {},
+        DDMTFFT p8(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 8, {},
                    1, opts(method));
-        DDMTFFT pf(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 32,
-                   {}, 1, opts(method));
+        DDMTFFT pf(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32, {},
+                   1, opts(method));
         const auto n =
             p8.get_plan().get_dm_arr().size() * p8.get_output_nsamps(nsamps);
         std::vector<float> a(n);
@@ -394,7 +394,7 @@ TEST_CASE("DDMTFFT packed, time-major, kill mask, beams and history",
                 tm[(s * kNc) + c] = packed[(c * nsamps) + s];
             }
         }
-        DDMTFFT t8(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 8, {},
+        DDMTFFT t8(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 8, {},
                    1, opts(method));
         std::vector<float> c(n);
         t8.execute_time_major(tm, nsamps, c);
@@ -407,9 +407,9 @@ TEST_CASE("DDMTFFT packed, time-major, kill mask, beams and history",
         std::vector<uint8_t> mask(kNc, 1);
         mask[3]  = 0;
         mask[10] = 0;
-        DDMTFFT masked(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2),
-                       32, mask, 1, opts(method));
-        DDMTFFT plain(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 32,
+        DDMTFFT masked(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32,
+                       mask, 1, opts(method));
+        DDMTFFT plain(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32,
                       {}, 1, opts(method));
         auto zeroed = asfloat;
         for (const SizeType c : {3U, 10U}) {
@@ -428,7 +428,7 @@ TEST_CASE("DDMTFFT packed, time-major, kill mask, beams and history",
 
     SECTION("beams == independent engines") {
         const SizeType nbeams = 3;
-        DDMTFFT multi(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(3), 32,
+        DDMTFFT multi(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32,
                       {}, nbeams, opts(method));
         const auto ndm  = multi.get_plan().get_dm_arr().size();
         const auto nout = multi.get_output_nsamps(nsamps);
@@ -451,10 +451,10 @@ TEST_CASE("DDMTFFT packed, time-major, kill mask, beams and history",
         }
     }
 
-    SECTION("save/load history resumes the stream; threads do not matter") {
+    SECTION("save/load history resumes the stream") {
         DDMTFFT a(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(1), 32, {},
                   1, opts(method));
-        DDMTFFT b(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(5), 32, {},
+        DDMTFFT b(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32, {},
                   1, opts(method));
         const auto ndm = a.get_plan().get_dm_arr().size();
         for (unsigned blk = 0; blk < 2; ++blk) {
@@ -485,9 +485,9 @@ TEST_CASE("DDMTFFT packed low-bit streams match float", "[ddmt_fft_cpu][cpu]") {
     const SizeType nbits = GENERATE(1, 2, 4, 8, 16);
     CAPTURE(nbits);
     const std::vector<SizeType> blocks = {301, 157, 211};
-    DDMTFFT pk(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), nbits, {},
+    DDMTFFT pk(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), nbits, {},
                1, opts(DDMTFFTMethod::kAuto));
-    DDMTFFT fl(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(2), 32, {}, 1,
+    DDMTFFT fl(kFlo, kFhi, kNc, kTs, 20.0F, 0.5F, 0.0F, Exec::cpu(), 32, {}, 1,
                opts(DDMTFFTMethod::kAuto));
     const auto vmax = static_cast<int>(bit_pack_utils::max_sample_value(nbits));
     uint64_t seed   = 21;
@@ -549,9 +549,9 @@ TEST_CASE("DDMTFFT recovers fractional-delay pulses better than DDMT",
         }
     }
     const std::vector<float> dms = {static_cast<float>(dm_true)};
-    DDMTFFT fdd(kFlo, kFhi, nchans, kTs, dms, Exec::cpu(2), 32, {}, 1,
+    DDMTFFT fdd(kFlo, kFhi, nchans, kTs, dms, Exec::cpu(), 32, {}, 1,
                 opts(DDMTFFTMethod::kBrute, 32));
-    DDMT ddmt(kFlo, kFhi, nchans, kTs, dms, Exec::cpu(2));
+    DDMT ddmt(kFlo, kFhi, nchans, kTs, dms, Exec::cpu());
     std::vector<float> a(fdd.get_output_nsamps(nsamps));
     std::vector<float> b(ddmt.get_output_nsamps(nsamps));
     fdd.execute(wf, a);
@@ -597,7 +597,7 @@ TEST_CASE("DDMTFFT honours the plan's reference frequency",
             }
         }
         const std::vector<float> dms = {static_cast<float>(dm_true)};
-        DDMTFFT fdd(kFlo, kFhi, nchans, kTs, dms, Exec::cpu(2), 32, {}, 1,
+        DDMTFFT fdd(kFlo, kFhi, nchans, kTs, dms, Exec::cpu(), 32, {}, 1,
                     opts(DDMTFFTMethod::kBrute, 32), f_ref);
         CHECK(fdd.get_plan().get_f_ref() == f_ref);
         std::vector<float> a(fdd.get_output_nsamps(nsamps));
@@ -649,15 +649,15 @@ TEST_CASE("NUFFT type 1 matches the direct sum", "[ddmt_fft_cpu][cpu]") {
 TEST_CASE("DDMTFFT estimate_memory equals a warm stream (cpu)",
           "[ddmt_fft_cpu][cpu][budget]") {
     for (const auto& c : ddmt_fft_estimate::cases()) {
-        ddmt_fft_estimate::check_host(c, Exec::cpu(2));
+        ddmt_fft_estimate::check_host(c, Exec::cpu());
     }
-    ddmt_fft_estimate::check_call_lengths(Exec::cpu(2));
+    ddmt_fft_estimate::check_call_lengths(Exec::cpu());
     // The estimate allocates nothing: a history of over 2 TB (2^29 beams) is
     // sized, never allocated (an allocation would throw). Estimate only, as
     // ASan aborts on allocations that large instead of throwing.
     const auto big = ddmt_fft_estimate::many_beams(SizeType{1} << 29);
-    const auto e = DDMTFFT::estimate_memory(big.plan, big.nsamps, Exec::cpu(2),
-                                            big.nbeams, big.options);
+    const auto e   = DDMTFFT::estimate_memory(big.plan, big.nsamps, Exec::cpu(),
+                                              big.nbeams, big.options);
     CHECK(e.usage.history > (SizeType{1} << 41));
     CHECK(e.time_major_staging == 0);
     CHECK(e.host_staging == 0);

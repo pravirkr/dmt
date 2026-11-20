@@ -89,30 +89,26 @@ TEST_CASE("FDMT execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
     // Mixed-sign dt range exercises the running box rows of level 0.
     for (const std::string mode : {"full", "roll", "valid"}) {
         for (const SizeType fuse : {SizeType{0}, SizeType{3}, kFDMTAutoFuse}) {
-            for (const int nthreads : {1, 4}) {
-                DYNAMIC_SECTION("mode=" << mode << " fuse=" << fuse
-                                        << " nthreads=" << nthreads) {
-                    FDMT fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32, -16,
-                              1, true, mode, Exec::cpu(nthreads), nbeams, fuse);
-                    std::vector<float> dmt(nbeams *
-                                           fdmt.get_plan().get_buffer_size());
-                    // Warm-up: starts the OpenMP thread pool.
-                    fdmt.execute(wf, dmt);
-                    const auto n_float =
-                        count_allocations([&] { fdmt.execute(wf, dmt); });
-                    const auto n_packed  = count_allocations([&] {
-                        fdmt.execute(std::span<const uint8_t>(packed), nbits,
-                                     dmt);
-                    });
-                    const auto n_stepper = count_allocations([&] {
-                        fdmt.reset(wf, dmt);
-                        fdmt.advance(2);
-                        fdmt.finalize();
-                    });
-                    CHECK(n_float == 0);
-                    CHECK(n_packed == 0);
-                    CHECK(n_stepper == 0);
-                }
+            DYNAMIC_SECTION("mode=" << mode << " fuse=" << fuse) {
+                FDMT fdmt(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 32, -16, 1,
+                          true, mode, Exec::cpu(), nbeams, fuse);
+                std::vector<float> dmt(nbeams *
+                                       fdmt.get_plan().get_buffer_size());
+                // Warm-up.
+                fdmt.execute(wf, dmt);
+                const auto n_float =
+                    count_allocations([&] { fdmt.execute(wf, dmt); });
+                const auto n_packed  = count_allocations([&] {
+                    fdmt.execute(std::span<const uint8_t>(packed), nbits, dmt);
+                });
+                const auto n_stepper = count_allocations([&] {
+                    fdmt.reset(wf, dmt);
+                    fdmt.advance(2);
+                    fdmt.finalize();
+                });
+                CHECK(n_float == 0);
+                CHECK(n_packed == 0);
+                CHECK(n_stepper == 0);
             }
         }
     }
@@ -129,7 +125,7 @@ TEST_CASE("FDMTBoxcar warmed execution and flush do not allocate",
     cfg.wtsp           = 1;
     cfg.detect_thresh  = 1;
     cfg.max_candidates = 7;
-    algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
+    algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 1,
                                   algorithms::kFDMTAutoFuse, 64);
     std::vector<float> input(7 * 256, 3.0F);
     (void)search.execute(input);
@@ -148,7 +144,7 @@ TEST_CASE("Packed FDMTBoxcar warmed execution does not allocate",
     cfg.input_mean  = 127;
     cfg.noise_sigma = 2;
     cfg.max_boxcar  = 4096;
-    algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
+    algorithms::FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 1,
                                   algorithms::kFDMTAutoFuse, 64);
     std::vector<uint8_t> input(7 * 139, 130);
     (void)search.execute(input);

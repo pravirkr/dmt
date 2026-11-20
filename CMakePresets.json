@@ -130,17 +130,18 @@
       "execution": { "noTestsAction": "error" }
     },
     {
-      "name": "cpu-only",
+      "name": "cpu-quick",
       "hidden": true,
       "inherits": "base",
-      "filter": { "exclude": { "label": "^gpu$" } }
+      "filter": { "exclude": { "label": "^(gpu|slow)$" } },
+      "execution": { "noTestsAction": "error", "timeout": 180 }
     },
     { "name": "release", "inherits": "base", "configurePreset": "release" },
     { "name": "cuda", "inherits": "base", "configurePreset": "cuda" },
     { "name": "hip", "inherits": "base", "configurePreset": "hip" },
     { "name": "portable", "inherits": "base", "configurePreset": "portable" },
-    { "name": "asan", "inherits": "cpu-only", "configurePreset": "asan" },
-    { "name": "coverage", "inherits": "cpu-only", "configurePreset": "coverage" },
-    { "name": "ci", "inherits": "cpu-only", "configurePreset": "ci" }
+    { "name": "asan", "inherits": "cpu-quick", "configurePreset": "asan" },
+    { "name": "coverage", "inherits": "cpu-quick", "configurePreset": "coverage" },
+    { "name": "ci", "inherits": "cpu-quick", "configurePreset": "ci" }
   ]
 }

@@ -18,6 +18,8 @@
 
 #include "dmt/ddmt_fft_common.hpp"
 
+#include "test_sized.hpp"
+
 namespace dmt {
 
 namespace {
@@ -230,9 +232,12 @@ TEST_CASE("generate_dm_grid: kill_mask", "[grid][cpu]") {
                     std::invalid_argument);
 }
 
-TEST_CASE("generate_dm_grid: piecewise grids are DDMTFFT NUFFT runs",
-          "[grid][cpu]") {
+DMT_SIZED_TEST_CASE("generate_dm_grid: piecewise grids are DDMTFFT NUFFT runs",
+                    "[grid][cpu]") {
     for (const double chan_dm : {0.0, 413.0}) {
+        if (!full && chan_dm == 0.0) {
+            continue; // small: the chan_dm grid only
+        }
         auto c          = uwl();
         c.chan_dm       = chan_dm;
         c.max_snr_loss  = 0.1;

@@ -25,6 +25,9 @@ permissions:
 env:
   # Portable CI builds; cache CPM downloads across jobs.
   CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
+  # Every job must finish within 10 minutes. Tests run on one thread each;
+  # ctest runs them in parallel, one per core.
+  OMP_NUM_THREADS: "1"
 
 jobs:
   # =============================================================================
@@ -35,7 +38,7 @@ jobs:
     name: pre-commit
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -51,7 +54,7 @@ jobs:
   cpp-tests:
     name: "C++ tests (${{ matrix.compiler.cc }}, ${{ matrix.compiler.os }})"
     runs-on: ${{ matrix.compiler.os }}
-    timeout-minutes: 30
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -132,7 +135,7 @@ jobs:
   python-tests:
     name: "Python (ubuntu-24.04)"
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
@@ -185,7 +188,7 @@ jobs:
   sanitizers:
     name: Sanitizers (ASan+UBSan, gcc-13, Debug -O1)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -234,12 +237,18 @@ jobs:
   # Tier 2 — run on push to main (post-merge) and workflow_dispatch
   # =============================================================================
 
-  # clang-tidy: compile_commands.json (DMT_GPU=OFF) defines the TU set.
+  # clang-tidy: compile_commands.json (DMT_GPU=OFF) defines the TU set,
+  # split over three jobs (files dealt round-robin, largest first) to fit
+  # the 10-minute limit.
   clang-tidy:
-    name: clang-tidy
+    name: "clang-tidy (${{ matrix.shard }}/3)"
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@v7
 
@@ -282,16 +291,18 @@ jobs:
       # test files mostly produce macro noise (bugprone-chained-comparison
       # from CHECK(a < b)); together they pushed the job past its timeout.
       - name: Run clang-tidy
-        run: >
-          run-clang-tidy-18 -p build-ci-tidy -quiet -j "$(nproc)"
-          "^${GITHUB_WORKSPACE}/(lib|src)/"
+        run: |
+          mapfile -t files < <(jq -r '.[].file' build-ci-tidy/compile_commands.json \
+            | grep -E "^${GITHUB_WORKSPACE}/(lib|src)/" | sort -u | xargs ls -S \
+            | awk -v s=${{ matrix.shard }} '(NR - 1) % 3 == s { print "^" $0 "$" }')
+          run-clang-tidy-18 -p build-ci-tidy -quiet -j "$(nproc)" "${files[@]}"
 
   # C++ coverage (gcc-13, Debug). gcov upload to Codecov on main only.
   cpp-coverage:
     name: C++ coverage (gcc-13, Debug)
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -356,7 +367,7 @@ jobs:
     name: Python coverage (ubuntu-24.04)
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

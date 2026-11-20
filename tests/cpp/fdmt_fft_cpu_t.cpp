@@ -438,7 +438,7 @@ TEST_CASE("FDMTFFT segmented execute matches single transform",
     CAPTURE(mode, box);
 
     FDMTFFT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, box, mode,
-                 Exec::cpu(4), 1, /*fractional_delays=*/false);
+                 Exec::cpu(), 1, /*fractional_delays=*/false);
     const auto n = fdmt.get_plan().get_dmt_size();
     for (unsigned blk = 0; blk < 3; ++blk) {
         auto wf = random_waterfall(nchans, nsamps, 700 + blk);
@@ -447,7 +447,7 @@ TEST_CASE("FDMTFFT segmented execute matches single transform",
         // Same history for both paths: step first (it updates the overlap
         // in finalize()), then rewind by replaying on a twin.
         FDMTFFT twin(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, box,
-                     mode, Exec::cpu(4), 1, /*fractional_delays=*/false);
+                     mode, Exec::cpu(), 1, /*fractional_delays=*/false);
         for (unsigned prev = 0; prev < blk; ++prev) {
             auto wp = random_waterfall(nchans, nsamps, 700 + prev);
             std::vector<float> scratch(n, 0.0F);
@@ -472,7 +472,7 @@ TEST_CASE("FDMTFFT segmented execute vs FDMT valid streaming",
     FDMT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
                   "valid");
     FDMTFFT fdmt_fft(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
-                     "valid", Exec::cpu(2), 1, /*fractional_delays=*/false);
+                     "valid", Exec::cpu(), 1, /*fractional_delays=*/false);
     const auto nout = fdmt_cpu.get_plan().get_dmt_size();
     for (unsigned b = 0; b < 3; ++b) {
         auto wf = random_waterfall(nchans, nsamps, 300 + b);
@@ -482,23 +482,6 @@ TEST_CASE("FDMTFFT segmented execute vs FDMT valid streaming",
         fdmt_fft.execute(wf, dmt_fft);
         CHECK(rel_max_err(dmt_fft, dmt_cpu, nout) < 2e-5);
     }
-}
-
-TEST_CASE("FDMTFFT results do not depend on the thread count",
-          "[fdmt_fft_cpu][cpu]") {
-    const size_t nchans = 64;
-    const size_t nsamps = 4096;
-    auto waterfall      = random_waterfall(nchans, nsamps, 17);
-    FDMTFFT one(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 128, 0, 1, true,
-                "valid", Exec::cpu(1));
-    FDMTFFT many(1000.0F, 1500.0F, nchans, nsamps, 0.001F, 128, 0, 1, true,
-                 "valid", Exec::cpu(7));
-    const auto n = one.get_plan().get_dmt_size();
-    std::vector<float> a(n, 0.0F);
-    std::vector<float> b(n, 0.0F);
-    one.execute(waterfall, a);
-    many.execute(waterfall, b);
-    test::require_exact(a, b);
 }
 
 TEST_CASE("FFT planner effort and wisdom", "[fdmt_fft_cpu][cpu]") {
@@ -538,13 +521,13 @@ TEST_CASE("FDMTFFT fractional delays: stepper matches execute",
     const size_t nsamps = 512;
     auto waterfall      = random_waterfall(nchans, nsamps, 31);
     FDMTFFT fdmt(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 40, 0, 1, true, mode,
-                 Exec::cpu(3), 1, /*fractional_delays=*/true);
+                 Exec::cpu(), 1, /*fractional_delays=*/true);
     CHECK(fdmt.fractional_delays());
     const auto n = fdmt.get_plan().get_dmt_size();
     std::vector<float> one(n, 0.0F);
     std::vector<float> step(n, 0.0F);
     FDMTFFT twin(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 40, 0, 1, true, mode,
-                 Exec::cpu(3), 1, true);
+                 Exec::cpu(), 1, true);
     fdmt.execute(waterfall, one);
     twin.reset(waterfall, step);
     twin.advance(2);
@@ -554,7 +537,7 @@ TEST_CASE("FDMTFFT fractional delays: stepper matches execute",
 
     // Integer and fractional modes differ, but only slightly.
     FDMTFFT integer(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 40, 0, 1, true,
-                    mode, Exec::cpu(3), 1, /*fractional_delays=*/false);
+                    mode, Exec::cpu(), 1, /*fractional_delays=*/false);
     std::vector<float> ref(n, 0.0F);
     integer.execute(waterfall, ref);
     // Valid mode lags by the look-ahead: output t is integer output t - lag.
@@ -583,9 +566,9 @@ TEST_CASE("FDMTFFT fractional delays stream like one long block",
     const size_t nblocks = 4;
     auto all             = random_waterfall(nchans, blk * nblocks, 41);
     FDMTFFT longer(1100.0F, 1500.0F, nchans, blk * nblocks, 0.001F, 48, 0, 1,
-                   true, "valid", Exec::cpu(2), 1, true);
+                   true, "valid", Exec::cpu(), 1, true);
     FDMTFFT stream(1100.0F, 1500.0F, nchans, blk, 0.001F, 48, 0, 1, true,
-                   "valid", Exec::cpu(2), 1, true);
+                   "valid", Exec::cpu(), 1, true);
     const auto ndms = longer.get_plan().get_dmt_ndms();
     std::vector<float> ref(ndms * blk * nblocks, 0.0F);
     longer.execute(all, ref);
@@ -642,9 +625,9 @@ TEST_CASE("FDMTFFT fractional delays improve pulse recovery",
         return dt * (a - (1.0 / (f * f))) / (a - b);
     };
     FDMTFFT integer(f_min, f_max, nchans, nsamps, 0.001F, 160, 0, 1, false,
-                    "full", Exec::cpu(4), 1, /*fractional_delays=*/false);
+                    "full", Exec::cpu(), 1, /*fractional_delays=*/false);
     FDMTFFT frac(f_min, f_max, nchans, nsamps, 0.001F, 160, 0, 1, false, "full",
-                 Exec::cpu(4), 1, true);
+                 Exec::cpu(), 1, true);
     const auto& grid = integer.get_plan().get_dt_grid_final();
     const auto nout  = integer.get_plan().get_dmt_nsamps();
     std::mt19937 rng(8);
@@ -825,14 +808,14 @@ TEST_CASE("FDMTFFT effective variance and sigma respect kill_mask",
 
 TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (cpu)",
           "[fdmt_fft][cpu][budget]") {
-    fft_estimate::check_all(Exec::cpu(3));
+    fft_estimate::check_all(Exec::cpu());
     SECTION("nothing is allocated") {
         // 2^24 beams: a history of hundreds of GB, sized, never allocated
         // (an allocation would throw std::bad_alloc).
         const SizeType beams = SizeType{1} << 24;
         const auto e =
             FDMTFFT::estimate_memory(1000.0F, 1500.0F, 64, 1024, 0.001F, 80, 0,
-                                     1, true, "valid", Exec::cpu(3), beams);
+                                     1, true, "valid", Exec::cpu(), beams);
         CHECK(e.usage.history > (SizeType{700} << 30));
     }
     SECTION("no FFT storage, twiddles or phasor tables are built") {
@@ -842,7 +825,7 @@ TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (cpu)",
             const auto before = utils::fft_allocation_count();
             const auto e      = FDMTFFT::estimate_memory(
                 1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1, true, "valid",
-                Exec::cpu(3), 1, frac);
+                Exec::cpu(), 1, frac);
             CHECK(utils::fft_allocation_count() == before);
             CHECK(e.usage.plan > 0);
         }

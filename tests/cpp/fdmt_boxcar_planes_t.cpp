@@ -239,12 +239,12 @@ void check_share(Exec exec) {
 
 TEST_CASE("FDMTBoxcar per-plane counts add up and follow the drops",
           "[boxcar][planes][cpu]") {
-    check_counts(Exec::cpu(3));
+    check_counts(Exec::cpu());
 }
 
 TEST_CASE("FDMTBoxcar max_candidates_per_plane keeps each plane's share",
           "[boxcar][planes][cpu]") {
-    check_share(Exec::cpu(3));
+    check_share(Exec::cpu());
 }
 
 #ifdef DMT_ENABLE_GPU
@@ -266,7 +266,7 @@ TEST_CASE("FDMTBoxcar per-plane counts and shares: GPU equals CPU",
             auto cfg        = planes_config(OverflowPolicy::kKeepBrightest);
             cfg.max_candidates_per_plane = share;
             cfg.max_candidates           = share == 0 ? 50 : 11 * share;
-            const auto cpu               = run(plan, cfg, Exec::cpu(3));
+            const auto cpu               = run(plan, cfg, Exec::cpu());
             const auto gpu               = run(plan, cfg, Exec::cuda(0));
             for (SizeType k = 0; k < cpu.calls.size(); ++k) {
                 for (SizeType p = 0; p < cpu.plans.size(); ++p) {

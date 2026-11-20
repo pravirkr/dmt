@@ -233,7 +233,7 @@ TEST_CASE("FDMTFFT fractional delays parity", "[fdmt_fft_gpu][gpu][parity]") {
                 v = dist(rng);
             }
             FDMTFFT cpu(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 48, 0, 1,
-                        true, mode, Exec::cpu(2), 1, frac);
+                        true, mode, Exec::cpu(), 1, frac);
             FDMTFFT gpu(1100.0F, 1500.0F, nchans, nsamps, 0.001F, 48, 0, 1,
                         true, mode, test::gpu_exec(), 1, frac);
             const auto n = cpu.get_plan().get_dmt_size();

@@ -312,7 +312,7 @@ inline SearchRun run_subband_search(
     LiveHistory live;
     uint64_t reach = 0;
     if (masks != nullptr) {
-        model = std::make_unique<BoxcarNoiseModel>(plan, box, true, 4);
+        model = std::make_unique<BoxcarNoiseModel>(plan, box, true, 1);
         engine->enable_block_noise(model->support());
         live.reset(prev, 0);
         reach = model->max_support() + planes.front().widths.back() - 1;

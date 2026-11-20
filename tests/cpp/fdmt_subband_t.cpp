@@ -125,8 +125,8 @@ TEST_CASE("FDMT subband depth leaves the root transform unchanged",
                     DYNAMIC_SECTION("nchans=" << nchans << " depth=" << depth
                                               << " smear=" << smear
                                               << " fuse=" << fuse) {
-                        FDMT ref(base, smear, Exec::cpu(2), 1, fuse);
-                        FDMT sub(plan, smear, Exec::cpu(2), 1, fuse);
+                        FDMT ref(base, smear, Exec::cpu(), 1, fuse);
+                        FDMT sub(plan, smear, Exec::cpu(), 1, fuse);
                         CHECK(sub.get_fuse_levels() <=
                               plan.get_max_fuse_levels());
                         std::vector<float> a(base.get_dmt_size());
@@ -155,7 +155,7 @@ TEST_CASE("FDMT stepper computes every tree and staggered subband exactly",
         const auto input =
             dmt::test_random::uniform_int<float>(nchans * nsamps, 11, 0, 15);
         DYNAMIC_SECTION("nchans=" << nchans << " depth=" << depth) {
-            FDMT fdmt(plan, false, Exec::cpu(2), 1, 0, false, nsamps);
+            FDMT fdmt(plan, false, Exec::cpu(), 1, 0, false, nsamps);
             std::vector<float> output(plan.get_dmt_size());
             fdmt.reset(input, output);
             for (SizeType l = 0;; ++l) {
@@ -229,7 +229,7 @@ TEST_CASE("FDMT stepper subbands stay exact across streamed blocks",
             }
         }
         DYNAMIC_SECTION("nchans=" << nchans << " depth=" << depth) {
-            FDMT fdmt(plan, false, Exec::cpu(2), 1, 0, false, nsamps);
+            FDMT fdmt(plan, false, Exec::cpu(), 1, 0, false, nsamps);
             std::vector<float> output(plan.get_dmt_size());
             for (SizeType b = 0; b < 2; ++b) {
                 fdmt.reset(blocks[b], output);
@@ -283,8 +283,8 @@ TEST_CASE("FDMTFFT plan constructor exposes staggered subbands",
     const auto input =
         dmt::test_random::uniform_int<float>(nchans * nsamps, 9, 0, 15);
     // Rounded delays: every node equals FDMT's (up to FFT rounding).
-    FDMTFFT fft(plan, false, Exec::cpu(2), 1, false);
-    FDMT ref(plan, false, Exec::cpu(2), 1, 0, false, nsamps);
+    FDMTFFT fft(plan, false, Exec::cpu(), 1, false);
+    FDMT ref(plan, false, Exec::cpu(), 1, 0, false, nsamps);
     CHECK(fft.get_plan().get_subband_depth() == 3);
     std::vector<float> out_a(plan.get_dmt_size());
     std::vector<float> out_b(plan.get_dmt_size());
@@ -317,8 +317,8 @@ TEST_CASE("FDMTFFT plan constructor exposes staggered subbands",
     }
     CHECK(staggered == 1 + 3 + 7);
     // Fractional delays: the depth leaves the root transform unchanged.
-    FDMTFFT a(base, true, Exec::cpu(2));
-    FDMTFFT b(plan, true, Exec::cpu(2));
+    FDMTFFT a(base, true, Exec::cpu());
+    FDMTFFT b(plan, true, Exec::cpu());
     std::vector<float> ya(base.get_dmt_size());
     std::vector<float> yb(plan.get_dmt_size());
     a.execute(input, ya);

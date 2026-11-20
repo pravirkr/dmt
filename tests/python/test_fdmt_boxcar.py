@@ -54,7 +54,7 @@ def test_streamed_matches_monolithic(mode: PeakFindingMode) -> None:
     large = FDMTPlan(
         700, 1200, 7, samples * blocks, 0.001, dt_grid=grid, subband_depth=2
     )
-    streamed = FDMTBoxcar(small, config(mode), nthreads=2, nbeams=2, chunk_nsamps=64)
+    streamed = FDMTBoxcar(small, config(mode), nthreads=1, nbeams=2, chunk_nsamps=64)
     whole = FDMTBoxcar(large, config(mode), nbeams=2)
     parts = []
     for k in range(blocks):
@@ -177,7 +177,7 @@ def test_packed_streaming_and_centered_reference(
     cfg.detect_thresh = 2.713
     grid = [-73, -12, 0, 4, 97]
     plan = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid, subband_depth=2)
-    packed = FDMTBoxcar(plan, cfg, nbeams=2, nthreads=2, chunk_nsamps=64)
+    packed = FDMTBoxcar(plan, cfg, nbeams=2, nthreads=1, chunk_nsamps=64)
     cfg.input_nbits = 32
     cfg.input_mean = 0
     floating = FDMTBoxcar(plan, cfg, nbeams=2)
@@ -370,7 +370,7 @@ def test_drain_searches_the_skewed_tail() -> None:
     )
     found = {}
     for end in ("flush", "drain"):
-        search = FDMTBoxcar(plan, cfg, nthreads=4, max_memory_bytes=75 << 20)
+        search = FDMTBoxcar(plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
         latency = search.search_latency
         assert latency > 0
         parts = [search.execute(block).candidates for block in blocks]
@@ -386,7 +386,7 @@ def test_drain_searches_the_skewed_tail() -> None:
             assert search.searched_nsamps == 0
     # An explicit chunk keeps the tree path when it fits (packed input
     # otherwise takes the skewed path first).
-    tree = FDMTBoxcar(plan, cfg, nthreads=4, chunk_nsamps=nsamps)
+    tree = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=nsamps)
     assert tree.search_latency == 0
     expected = run(tree, blocks)
     assert_same(found["drain"], expected)
@@ -422,7 +422,7 @@ def test_drain_contract_on_the_gpu(gpu_backend: str) -> None:
         gpu.execute(blocks[0])
     gpu.reset_history()
     assert gpu.searched_nsamps == 0
-    tree = FDMTBoxcar(plan, cfg, nthreads=4, chunk_nsamps=nsamps)
+    tree = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=nsamps)
     assert tree.search_latency == 0
     expected = run(tree, blocks)
     assert len(expected) > 0
@@ -711,7 +711,7 @@ def test_keep_brightest_with_screen_modes() -> None:
             overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
             screen_mode=screen,
         )
-        res = FDMTBoxcar(plan, cfg, nthreads=2, chunk_nsamps=256).execute(data)
+        res = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256).execute(data)
         assert res.emitted_count == 200
         assert res.overflowed
         exact[screen] = res
@@ -736,7 +736,7 @@ def test_keep_brightest_with_screen_modes() -> None:
         overflow_policy=OverflowPolicy.DROP_NEW,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    sur_drop = FDMTBoxcar(plan, sur_drop_cfg, nthreads=2, chunk_nsamps=256).execute(
+    sur_drop = FDMTBoxcar(plan, sur_drop_cfg, nthreads=1, chunk_nsamps=256).execute(
         data
     )
     assert sur_drop.overflowed
@@ -751,7 +751,7 @@ def test_keep_brightest_with_screen_modes() -> None:
         overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    sur_keep = FDMTBoxcar(plan, sur_keep_cfg, nthreads=2, chunk_nsamps=256).execute(
+    sur_keep = FDMTBoxcar(plan, sur_keep_cfg, nthreads=1, chunk_nsamps=256).execute(
         data
     )
     assert sur_keep.overflowed
@@ -794,7 +794,7 @@ def test_exact_screen_modes_parity_float_and_packed(
         cfg.use_trapezoid = trapezoid
         cfg.screen_mode = screen
         got = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=2, nbeams=2, chunk_nsamps=64), f_blocks
+            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), f_blocks
         )
         assert_same(got, ref)
 
@@ -822,7 +822,7 @@ def test_exact_screen_modes_parity_float_and_packed(
             screen_mode=screen,
         )
         u8_results[screen] = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=2, nbeams=2, chunk_nsamps=64), u8_blocks
+            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), u8_blocks
         )
     assert len(u8_results[BoxcarScreenMode.PREFIX]) > 0
     assert_same(
@@ -887,7 +887,7 @@ def test_exact_screen_modes_kill_mask_and_skewed_drain() -> None:
             input_mean=107.5,
             screen_mode=screen,
         )
-        eng = FDMTBoxcar(skew_plan, cfg, nthreads=2, max_memory_bytes=75 << 20)
+        eng = FDMTBoxcar(skew_plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
         assert eng.search_latency > 0
         parts = [eng.execute(b).candidates for b in skew_blocks]
         parts.append(eng.drain().candidates)
@@ -916,7 +916,7 @@ def test_kadane_surrogate_end_to_end_pulse_and_quiet_noise() -> None:
             use_trapezoid=use_trap,
             screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
         )
-        quiet_eng = FDMTBoxcar(plan, quiet_cfg, nthreads=2, kill_mask=kill)
+        quiet_eng = FDMTBoxcar(plan, quiet_cfg, nthreads=1, kill_mask=kill)
         quiet_cands = []
         for _ in range(2):
             blk = rng.standard_normal((nchans, nsamps), dtype=np.float32)
@@ -941,7 +941,7 @@ def test_kadane_surrogate_end_to_end_pulse_and_quiet_noise() -> None:
                 use_trapezoid=use_trap,
                 screen_mode=screen,
             )
-            eng = FDMTBoxcar(plan, cfg, nthreads=2, chunk_nsamps=256, kill_mask=kill)
+            eng = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256, kill_mask=kill)
             frontier = eng.get_candidate_frontier()
             parts = []
             for blk in blocks:
@@ -1007,7 +1007,7 @@ def test_kadane_surrogate_packed_uint8() -> None:
         input_mean=128.0,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    sur_u8 = FDMTBoxcar(plan, sur_u8_cfg, nthreads=2, chunk_nsamps=256)
+    sur_u8 = FDMTBoxcar(plan, sur_u8_cfg, nthreads=1, chunk_nsamps=256)
     assert len(sur_u8.execute(u8_noise).candidates) == 0
     cands_u8 = np.concatenate(
         [sur_u8.execute(u8_sig).candidates, sur_u8.drain().candidates]

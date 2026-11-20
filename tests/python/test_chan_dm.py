@@ -160,6 +160,9 @@ def test_plan_rejects_bad_chan_dm() -> None:
         FDMTPlan(704.0, 4032.0, 64, 512, 64e-6, 100, chan_dm=float("nan"))
 
 
+_BOX_REFS: dict[tuple, np.ndarray] = {}
+
+
 @pytest.mark.parametrize("fuse", [None, 0, 1, 3])
 @pytest.mark.parametrize("smear", [True, False])
 @pytest.mark.parametrize("case", CASES)
@@ -177,11 +180,15 @@ def test_fdmt_reads_the_boxes(
         np.ascontiguousarray(x[:, k * nsamps : (k + 1) * nsamps]) for k in range(4)
     ]
     kw = {} if fuse is None else {"fuse_levels": fuse}
-    eng = FDMT(plan, use_box_smearing=smear, backend=backend, nthreads=2, **kw)
+    eng = FDMT(plan, use_box_smearing=smear, backend=backend, nthreads=1, **kw)
     out = stream(eng, blocks, nsamps)
     t0 = plan.startup_samples + 1
     n = 4 * nsamps - t0
-    ref = box_outputs(plan, x.astype(np.float64), t0, n, smear)
+    # The reference depends on neither the fusion depth nor the backend.
+    key = (f_min, f_max, nchans, tsamp, chan_dm, smear)
+    if key not in _BOX_REFS:
+        _BOX_REFS[key] = box_outputs(plan, x.astype(np.float64), t0, n, smear)
+    ref = _BOX_REFS[key]
     np.testing.assert_allclose(out[:, t0:], ref, rtol=0, atol=2e-5 * np.abs(ref).max())
 
 
@@ -197,7 +204,7 @@ def test_packed_gpu_matches_cpu(gpu_backend: str, case: Case, fuse: int | None) 
     outs = []
     for backend in ("cpu", gpu_backend):
         for int_tree in (True, False):
-            eng = FDMT(plan, backend=backend, int_tree=int_tree, nthreads=2, **kw)
+            eng = FDMT(plan, backend=backend, int_tree=int_tree, nthreads=1, **kw)
             outs.append(
                 np.concatenate(
                     [np.asarray(eng.execute(c, 8)).copy() for c in codes], axis=-1
@@ -303,8 +310,8 @@ def test_skewed_path_matches_the_tree(smear: bool) -> None:
     plan = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, chan_dm=413.0)
     rng = np.random.default_rng(17)
     codes = [rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8) for _ in range(3)]
-    tree = FDMT(plan, use_box_smearing=smear, nthreads=2)
-    skew = FDMT(plan, use_box_smearing=smear, nthreads=2, max_memory_bytes=40 << 20)
+    tree = FDMT(plan, use_box_smearing=smear, nthreads=1)
+    skew = FDMT(plan, use_box_smearing=smear, nthreads=1, max_memory_bytes=40 << 20)
     assert tree.history_state_size() != skew.history_state_size()  # skewed path
     a = np.concatenate([np.asarray(tree.execute(c, 8)).copy() for c in codes], axis=-1)
     b = np.concatenate([np.asarray(skew.execute(c, 8)).copy() for c in codes], axis=-1)
@@ -324,7 +331,7 @@ def test_white_noise_matches_the_plan_variance() -> None:
     )
     rng = np.random.default_rng(7)
     blocks = [rng.standard_normal((128, nsamps)).astype(np.float32) for _ in range(6)]
-    out = stream(FDMT(plan, nthreads=2), blocks, nsamps)[:, plan.startup_samples + 1 :]
+    out = stream(FDMT(plan, nthreads=1), blocks, nsamps)[:, plan.startup_samples + 1 :]
     model = np.array(
         [plan.get_effective_sigma(i, 1, True) for i in range(out.shape[0])]
     )
@@ -534,17 +541,17 @@ def _history_round_trip(kw: dict) -> None:
     plan = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, chan_dm=413.0)
     rng = np.random.default_rng(37)
     codes = [rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8) for _ in range(3)]
-    a = FDMT(plan, nthreads=2, **kw)
+    a = FDMT(plan, nthreads=1, **kw)
     for c in codes[:2]:
         a.execute(c, 8)
     saved = np.asarray(a.save_history())
     want = np.asarray(a.execute(codes[2], 8)).copy()
-    b = FDMT(plan, nthreads=2, **kw)
+    b = FDMT(plan, nthreads=1, **kw)
     b.load_history(saved)
     np.testing.assert_array_equal(np.asarray(b.execute(codes[2], 8)), want)
     # A history saved without chan_dm (other level-0 boxes) is refused.
     plain = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700)
-    c = FDMT(plain, nthreads=2, **kw)
+    c = FDMT(plain, nthreads=1, **kw)
     other = np.asarray(c.save_history())
     with pytest.raises(ValueError):
         b.load_history(other)

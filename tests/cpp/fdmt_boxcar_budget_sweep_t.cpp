@@ -12,6 +12,7 @@
 
 #include "budget_sweep.hpp"
 #include "cpu/fdmt_cpu_engine.hpp"
+#include "test_sized.hpp"
 
 using namespace dmt;
 using algorithms::FDMTBoxcarMemoryEstimate;
@@ -74,22 +75,27 @@ BoxcarConfig sweep_config(SizeType nbits) {
 }
 } // namespace
 
-TEST_CASE("FDMTBoxcar budget sweep: the list's rank never worsens (cpu)",
-          "[boxcar][budget][sweep]") {
-    // A 1152-channel subband search (cryopaf_lband-like) and its full band.
+DMT_SIZED_TEST_CASE(
+    "FDMTBoxcar budget sweep: the list's rank never worsens (cpu)",
+    "[boxcar][budget][sweep]") {
+    // A 1152-channel subband search (cryopaf_lband-like) and its full band
+    // (full size only).
     for (const SizeType depth : {SizeType{1}, SizeType{0}}) {
+        if (!full && depth == 0) {
+            continue;
+        }
         const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 16384, 455.6e-6F,
                                    2700, 0, 1, "valid", depth);
         for (const SizeType nbits : {SizeType{32}, SizeType{8}}) {
             INFO("depth " << depth << " nbits " << nbits);
-            test::check_budget_sweep(plan, sweep_config(nbits), Exec::cpu(2),
+            test::check_budget_sweep(plan, sweep_config(nbits), Exec::cpu(),
                                      cpu_rank(nbits));
         }
     }
     // Short blocks: no skewed chunk of at least kSkewFirstMinChunk.
     const plans::FDMTPlan small(1100.0F, 1714.0F, 1152, 2048, 455.6e-6F, 2700,
                                 0, 1, "valid", 1);
-    test::check_budget_sweep(small, sweep_config(8), Exec::cpu(2), cpu_rank(8));
+    test::check_budget_sweep(small, sweep_config(8), Exec::cpu(), cpu_rank(8));
 }
 
 TEST_CASE("FDMTBoxcar (cpu): packed input takes long skewed chunks first",
@@ -99,7 +105,7 @@ TEST_CASE("FDMTBoxcar (cpu): packed input takes long skewed chunks first",
         const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, nsamps, 455.6e-6F,
                                    2700, 0, 1, "valid", 1);
         return FDMTBoxcar::estimate_memory(plan, sweep_config(nbits), true,
-                                           Exec::cpu(2));
+                                           Exec::cpu());
     };
     // Default budget: everything fits, so the order alone decides.
     const auto packed = path(16384, 8);

@@ -90,7 +90,7 @@ Engine make(SizeType nchans,
             SizeType chunk,
             bool smear = true) {
     return {FDMT(kFMin, kFMax, nchans, nsamps, kTsamp, dt_max, dt_min, 1, smear,
-                 "valid", Exec::cpu(2), nbeams, fuse, int_tree, chunk)};
+                 "valid", Exec::cpu(), nbeams, fuse, int_tree, chunk)};
 }
 
 } // namespace

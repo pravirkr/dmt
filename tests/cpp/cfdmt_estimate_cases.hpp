@@ -64,7 +64,7 @@ inline void check_all(const Exec& exec) {
 inline void check_impossible_cpu() {
     auto cfg         = small_config();
     cfg.block_nsamps = SizeType{1} << 33;
-    const auto e     = CohFDMT::estimate_memory(cfg, Exec::cpu(2));
+    const auto e     = CohFDMT::estimate_memory(cfg, Exec::cpu());
     CHECK(e.spectrum > (SizeType{1} << 41));
 }
 

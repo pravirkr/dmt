@@ -300,7 +300,7 @@ TEST_CASE("GPU FDMTBoxcar per-call masks support kKadane, kNone, and "
             cfg.max_candidates   = 1U << 20;
             cfg.max_cands_per_dm = 0;
 
-            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 1, 0, 64,
+            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), 1, 0, 64,
                            algorithms::kFDMTDefaultMaxMemory, ctor);
             FDMTBoxcar gpu(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse,
                            64, algorithms::kFDMTDefaultMaxMemory, ctor);
@@ -800,7 +800,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
                             cfg.use_trapezoid = trap;
                             cfg.screen_mode   = screen;
                             auto cpu =
-                                make_packed(plan, cfg, Exec::cpu(3), ctor);
+                                make_packed(plan, cfg, Exec::cpu(), ctor);
                             const auto want = host_run(cpu, input, masks, true);
                             REQUIRE(want.size() > 50);
                             for (const SizeType chunk :
@@ -884,8 +884,8 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                         PeakFindingMode::kContiguousPeakPerWidth, d.nbits);
                     cfg.input_mean  = static_cast<float>(d.mean);
                     cfg.noise_sigma = d.scale;
-                    auto cpu = make_packed(plan, cfg, Exec::cpu(3), ctor);
-                    auto gpu = make_packed(plan, cfg, kGpu, ctor);
+                    auto cpu        = make_packed(plan, cfg, Exec::cpu(), ctor);
+                    auto gpu        = make_packed(plan, cfg, kGpu, ctor);
                     REQUIRE(gpu.get_search_latency() == 0);
                     const auto want = host_run(cpu, input, masks);
                     REQUIRE(want.size() > 20);
@@ -928,7 +928,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                     cfg.overflow_policy  = OverflowPolicy::kKeepBrightest;
                     cfg.max_cands_per_dm = 3;
                 }
-                auto cpu = make_packed(plan, cfg, Exec::cpu(3), ctor);
+                auto cpu = make_packed(plan, cfg, Exec::cpu(), ctor);
                 auto gpu = make_packed(plan, cfg, kGpu, ctor);
                 std::vector<bool> cpu_flags;
                 std::vector<bool> gpu_flags;
@@ -955,7 +955,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
         const auto input  = gpu_pack(stream, 32, 2048, 16, 30000, 3000.0F);
         const auto cfg =
             packed_cfg(PeakFindingMode::kContiguousPeakPerWidth, 16);
-        auto cpu        = make_packed(plan, cfg, Exec::cpu(3), ctor);
+        auto cpu        = make_packed(plan, cfg, Exec::cpu(), ctor);
         auto gpu        = make_packed(plan, cfg, kGpu, ctor);
         const auto want = host_run(cpu, input, masks, true);
         REQUIRE(want.size() > 20);
@@ -1062,7 +1062,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the screens skip tiles",
                     cfg.screen_mode      = screen;
                     cfg.max_candidates   = 1U << 20;
                     cfg.max_cands_per_dm = 0;
-                    auto cpu             = make_packed(plan, cfg, Exec::cpu(3));
+                    auto cpu             = make_packed(plan, cfg, Exec::cpu());
                     auto gpu             = make_packed(plan, cfg, kGpu);
                     const auto& widths = gpu.get_search_plans().front().widths;
                     REQUIRE_FALSE(
@@ -1246,7 +1246,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
     SECTION("calls queued without host sync") {
         // Every block in its own device buffer, queued back to back; the
         // first per-call mask arrives right after an unmasked queued call.
-        auto cpu        = make_packed(plan, cfg, Exec::cpu(3));
+        auto cpu        = make_packed(plan, cfg, Exec::cpu());
         const auto want = host_run(cpu, input, masks);
         auto gpu        = make_packed(plan, cfg, kGpu);
         cudaStream_t st;
@@ -1290,7 +1290,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
               std::pair{true, BoxcarScreenMode::kKadaneSurrogate},
               std::pair{false, BoxcarScreenMode::kKadaneSurrogate}}) {
             INFO("gpu " << on_gpu << " screen " << static_cast<int>(screen));
-            const Exec ex           = on_gpu ? kGpu : Exec::cpu(3);
+            const Exec ex           = on_gpu ? kGpu : Exec::cpu();
             auto base               = cfg;
             base.screen_mode        = screen;
             auto declared           = base;
@@ -1350,7 +1350,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: kKadaneSurrogate",
             DYNAMIC_SECTION("mode " << static_cast<int>(mode)) {
                 auto cfg        = packed_cfg(mode);
                 cfg.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-                auto cpu        = make_packed(plan, cfg, Exec::cpu(3), ctor);
+                auto cpu        = make_packed(plan, cfg, Exec::cpu(), ctor);
                 auto gpu        = make_packed(plan, cfg, kGpu, ctor);
                 const auto want = host_run(cpu, input, masks, true);
                 REQUIRE(want.size() > 20);

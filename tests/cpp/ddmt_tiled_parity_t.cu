@@ -313,7 +313,7 @@ TEST_CASE("parity: DDMT and SDMT (gpu) kernels match CPU, "
                     const auto in = Input::random(nbits, sc.nbeams * sc.nchans,
                                                   nsamps, 7 + nbits);
 
-                    DDMT cpu(plan, Exec::cpu(4), sc.nbeams);
+                    DDMT cpu(plan, Exec::cpu(), sc.nbeams);
                     const auto ref = run_host(cpu, in);
 
                     // Monolithic: host and device spans.
@@ -380,7 +380,7 @@ TEST_CASE("parity: DDMT and SDMT (gpu) time-major streaming matches CPU "
                     const auto nsamps = max_delay + 777;
                     const auto in     = Input::random(nbits, nbeams * nchans,
                                                       nsamps, 99 + nbits);
-                    DDMT cpu(plan, Exec::cpu(4), nbeams);
+                    DDMT cpu(plan, Exec::cpu(), nbeams);
                     const auto ref = run_host(cpu, in);
 
                     auto gpu_ptr = make_gpu(sdmt, plan, nbeams);

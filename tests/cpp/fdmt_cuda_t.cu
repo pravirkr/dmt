@@ -1002,7 +1002,7 @@ TEST_CASE("FDMT (gpu) chunked execution matches whole blocks",
                                          << " fuse=" << fuse) {
                     auto whole   = make(test::gpu_exec(), fuse, nsamps);
                     auto chunked = make(test::gpu_exec(), fuse, chunk);
-                    auto cpu     = make(Exec::cpu(2), fuse, nsamps);
+                    auto cpu     = make(Exec::cpu(), fuse, nsamps);
                     REQUIRE(whole.get_chunk_nsamps() == nsamps);
                     REQUIRE(chunked.get_chunk_nsamps() == chunk);
                     const uint32_t max_val = nbits == 0 ? 7U : 3U;

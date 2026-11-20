@@ -118,7 +118,7 @@ def test_streamed_blocks_match_one_long_block(frac: bool, rtol: float) -> None:
     large = FDMTPlan(1100, 1500, NCHANS, 3 * NSAMPS, 0.001, dt_grid=GRID)
     config = BoxcarConfig(32, wtsp=2.0, detect_thresh=8.0, max_cands_per_dm=0)
     streamed = FDMTFFTBoxcar(
-        small, config, nthreads=2, nbeams=2, fractional_delays=frac
+        small, config, nthreads=1, nbeams=2, fractional_delays=frac
     )
     whole = FDMTFFTBoxcar(large, config, nbeams=2, fractional_delays=frac)
     parts = []
@@ -309,7 +309,7 @@ def test_fft_boxcar_exact_screen_modes_parity(
         eng = FDMTFFTBoxcar(
             plan,
             cfg,
-            nthreads=2,
+            nthreads=1,
             nbeams=2,
             fractional_delays=frac,
             kill_mask=kill,
@@ -348,7 +348,7 @@ def test_fft_boxcar_kadane_surrogate_pulse_and_quiet_noise(
         use_trapezoid=trapezoid,
         screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
     )
-    quiet = FDMTFFTBoxcar(plan, quiet_cfg, nthreads=2, kill_mask=kill, backend=backend)
+    quiet = FDMTFFTBoxcar(plan, quiet_cfg, nthreads=1, kill_mask=kill, backend=backend)
     quiet_parts = [
         quiet.execute(
             rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32)
@@ -372,7 +372,7 @@ def test_fft_boxcar_kadane_surrogate_pulse_and_quiet_noise(
             use_trapezoid=trapezoid,
             screen_mode=screen,
         )
-        eng = FDMTFFTBoxcar(plan, cfg, nthreads=2, kill_mask=kill, backend=backend)
+        eng = FDMTFFTBoxcar(plan, cfg, nthreads=1, kill_mask=kill, backend=backend)
         frontier = eng.get_candidate_frontier()
         parts = []
         for blk in blocks:

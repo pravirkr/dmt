@@ -100,7 +100,7 @@ FrontierRun stream(Search& search,
 }
 
 std::vector<Exec> frontier_backends() {
-    std::vector<Exec> out{Exec::cpu(3)};
+    std::vector<Exec> out{Exec::cpu()};
 #ifdef DMT_ENABLE_GPU
     out.push_back({algorithms::detail::kGPUBackend, 1, 0});
 #endif
@@ -122,7 +122,7 @@ TEST_CASE("FDMTBoxcar candidate frontier bounds every later candidate",
                                         << masked << " drain " << drain) {
                     const auto cfg   = frontier_config(mode);
                     const auto masks = frontier_masks(input.size(), masked);
-                    FDMTBoxcar search(plan, cfg, true, Exec::cpu(3), 1,
+                    FDMTBoxcar search(plan, cfg, true, Exec::cpu(), 1,
                                       algorithms::kFDMTAutoFuse, 64);
                     const auto run = stream(search, input, masks, drain);
                     REQUIRE(run.candidates.size() > 100);
@@ -234,7 +234,7 @@ TEST_CASE("GPU FDMTBoxcar candidate frontier equals the CPU's",
                                     << masked) {
                 const auto cfg   = frontier_config(mode);
                 const auto masks = frontier_masks(input.size(), masked);
-                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(3));
+                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu());
                 FDMTBoxcar gpu(plan, cfg, true,
                                {algorithms::detail::kGPUBackend, 1, 0});
                 const auto a = stream(cpu, input, masks, true);

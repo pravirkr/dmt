@@ -57,7 +57,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest keeps the brightest of each call, "
                     const auto calls_of =
                         [&](const BoxcarConfig& c,
                             std::vector<CandidateCounts>* counts) {
-                            FDMTBoxcar search(plan, c, true, Exec::cpu(3),
+                            FDMTBoxcar search(plan, c, true, Exec::cpu(),
                                               kBeams);
                             return packed ? run_calls(search, bytes, counts)
                                           : run_calls(search, input, counts);
@@ -137,13 +137,13 @@ TEST_CASE("FDMTBoxcar kKeepBrightest finds a late pulse after an early storm",
             return c.peak_sample >= 3500 && c.peak_sample < 3520;
         });
     };
-    FDMTBoxcar first(plan, cfg, true, Exec::cpu(3));
+    FDMTBoxcar first(plan, cfg, true, Exec::cpu());
     const auto dropped = first.execute(std::span<const float>(block));
     REQUIRE(dropped.overflowed());
     CHECK_FALSE(pulse({dropped.candidates.begin(), dropped.candidates.end()}));
 
     cfg.overflow_policy = OverflowPolicy::kKeepBrightest;
-    FDMTBoxcar bright(plan, cfg, true, Exec::cpu(3));
+    FDMTBoxcar bright(plan, cfg, true, Exec::cpu());
     const auto kept = bright.execute(std::span<const float>(block));
     REQUIRE(kept.overflowed());
     const std::vector<RawCandidate> v(kept.candidates.begin(),
@@ -207,12 +207,12 @@ TEST_CASE("FDMTFFTBoxcar kKeepBrightest keeps the brightest of each call",
     auto open             = cfg;
     open.max_candidates   = SizeType{1} << 20;
     open.max_cands_per_dm = 0;
-    FDMTFFTBoxcar all_search(plan, open, true, Exec::cpu(3));
+    FDMTFFTBoxcar all_search(plan, open, true, Exec::cpu());
     const auto all       = run_calls(all_search, input);
     cfg.overflow_policy  = OverflowPolicy::kKeepBrightest;
     cfg.max_cands_per_dm = 4;
     cfg.max_candidates   = 60;
-    FDMTFFTBoxcar kept_search(plan, cfg, true, Exec::cpu(3));
+    FDMTFFTBoxcar kept_search(plan, cfg, true, Exec::cpu());
     const auto kept = run_calls(kept_search, input);
     REQUIRE(kept.size() == all.size());
     SizeType dropped = 0;

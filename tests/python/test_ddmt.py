@@ -417,8 +417,8 @@ class TestSDMT:
                     data[c, bit_off // 8] |= val << (bit_off % 8)
 
         args = (self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
-        ddmt = DDMT(*args, nthreads=4, nbits=nbits)
-        sdmt = SDMT(*args, nthreads=4, nbits=nbits)
+        ddmt = DDMT(*args, nthreads=1, nbits=nbits)
+        sdmt = SDMT(*args, nthreads=1, nbits=nbits)
         np.testing.assert_array_equal(
             sdmt.execute(data, nsamps), ddmt.execute(data, nsamps)
         )
@@ -430,7 +430,7 @@ class TestSDMT:
         args = (self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS)
         expected = DDMT(*args).execute(wf)
 
-        sdmt = SDMT(*args, nthreads=4)
+        sdmt = SDMT(*args, nthreads=1)
         out1 = sdmt.execute(wf[:, :900])
         out2 = sdmt.execute(wf[:, 900:])
         got = np.concatenate([out1, out2], axis=1)

@@ -17,6 +17,8 @@
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
 
+#include "test_sized.hpp"
+
 using namespace dmt;
 using namespace dmt::algorithms::detail;
 
@@ -167,8 +169,8 @@ std::vector<std::vector<uint8_t>> trace_masks(SizeType nchans) {
 
 } // namespace
 
-TEST_CASE("make_boxcar_plans equals a per-row trace of the FDMT tree",
-          "[boxcar][plans][cpu]") {
+DMT_SIZED_TEST_CASE("make_boxcar_plans equals a per-row trace of the FDMT tree",
+                    "[boxcar][plans][cpu]") {
     struct Case {
         SizeType nchans;
         SizeType depth;
@@ -176,10 +178,16 @@ TEST_CASE("make_boxcar_plans equals a per-row trace of the FDMT tree",
         float sub_loss;
     };
     const std::vector<IndexType> dts = {-73, -12, -5, 0, 4, 9, 30, 60, 97};
-    for (const auto& c :
-         {Case{7, 2, 0.0, 0.0F}, Case{7, 2, 20.0, 0.0F}, Case{7, 2, 0.0, 0.3F},
-          Case{32, 0, 0.0, 0.0F}, Case{45, 3, 0.0, 0.0F},
-          Case{45, 3, 20.0, 0.0F}, Case{45, 3, 0.0, 0.3F}}) {
+    const std::vector<Case> cases =
+        full
+            ? std::vector<Case>{Case{7, 2, 0.0, 0.0F},  Case{7, 2, 20.0, 0.0F},
+                                Case{7, 2, 0.0, 0.3F},  Case{32, 0, 0.0, 0.0F},
+                                Case{45, 3, 0.0, 0.0F}, Case{45, 3, 20.0, 0.0F},
+                                Case{45, 3, 0.0, 0.3F}}
+            : std::vector<Case>{Case{7, 2, 0.0, 0.0F}, Case{7, 2, 20.0, 0.0F},
+                                Case{7, 2, 0.0, 0.3F}, Case{32, 0, 0.0, 0.0F},
+                                Case{45, 3, 20.0, 0.0F}};
+    for (const auto& c : cases) {
         const plans::FDMTPlan plan(700, 1200, c.nchans, 311, 0.001F, dts,
                                    "valid", c.depth, c.chan_dm, c.sub_loss);
         const auto masks = trace_masks(c.nchans);

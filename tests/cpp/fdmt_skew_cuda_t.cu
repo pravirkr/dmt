@@ -69,7 +69,7 @@ struct SkewRig {
     [[nodiscard]] std::unique_ptr<algorithms::detail::FDMTEngine>
     cpu(bool skewed) const {
         algorithms::detail::FDMTEngineConfig cfg{};
-        cfg.exec               = Exec::cpu(2);
+        cfg.exec               = Exec::cpu();
         cfg.nbeams             = nbeams;
         cfg.chunk_nsamps       = chunk;
         cfg.skew_history_bytes = skewed ? 0 : SIZE_MAX;

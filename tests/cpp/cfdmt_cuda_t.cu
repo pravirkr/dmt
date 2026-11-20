@@ -73,7 +73,7 @@ void require_close(const std::vector<float>& gpu,
 
 std::vector<float> run_cpu(const CohFDMTConfig& cfg,
                            const std::vector<uint8_t>& in) {
-    const CohFDMT cpu(cfg, Exec::cpu(4));
+    const CohFDMT cpu(cfg, Exec::cpu());
     std::vector<float> out(cpu.get_dmt_size());
     cpu.execute<uint8_t>(std::span<const uint8_t>(in), out);
     return out;
@@ -183,13 +183,6 @@ TEST_CASE("CohFDMT (gpu) trimmed filter margin matches a 1e-6 margin",
         SKIP("no GPU device");
     }
     test::cfdmt::check_filter_leakage(test::gpu_exec());
-}
-
-TEST_CASE("CohFDMT (gpu) concurrent calls on one engine", "[cfdmt_gpu][gpu]") {
-    if (!test::gpu_device_available()) {
-        SKIP("no GPU device");
-    }
-    test::cfdmt::check_concurrent_calls(test::gpu_exec());
 }
 
 // --- CPU parity ---

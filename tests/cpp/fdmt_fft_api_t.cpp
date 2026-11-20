@@ -109,7 +109,7 @@ TEST_CASE("FDMTFFT packed and time-major input match float input",
             const auto tm_packed = pack_rows(tm, 2 * kNs, kNch, nbits);
             const auto make      = [&] {
                 return FDMTFFT(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true,
-                               mode, Exec::cpu(2), 2);
+                               mode, Exec::cpu(), 2);
             };
             auto f_float  = make();
             auto f_packed = make();
@@ -163,9 +163,9 @@ TEST_CASE("FDMTFFT kill mask equals zeroed channels", "[cpu][fdmt_fft_cpu]") {
     for (const auto* mode : {"valid", "full", "roll"}) {
         CAPTURE(mode);
         FDMTFFT killed(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true, mode,
-                       Exec::cpu(2), 1, true, mask);
+                       Exec::cpu(), 1, true, mask);
         FDMTFFT zeroed(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true, mode,
-                       Exec::cpu(2));
+                       Exec::cpu());
         const auto n = killed.get_plan().get_dmt_size();
         std::vector<float> a(n);
         std::vector<float> b(n);
@@ -186,9 +186,9 @@ TEST_CASE("FDMTFFT history save and load resume a stream",
     for (const bool frac : {true, false}) {
         CAPTURE(frac);
         FDMTFFT a(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true, "valid",
-                  Exec::cpu(2), 2, frac);
+                  Exec::cpu(), 2, frac);
         FDMTFFT b(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true, "valid",
-                  Exec::cpu(2), 2, frac);
+                  Exec::cpu(), 2, frac);
         REQUIRE(a.history_state_size() > 0);
         const auto n = 2 * a.get_plan().get_dmt_size();
         std::vector<float> ra(n);
@@ -225,10 +225,10 @@ TEST_CASE("FDMTFFT forced segments equal the single transform",
         for (const bool frac : {true, false}) {
             CAPTURE(mode, frac);
             FDMTFFT single(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true, mode,
-                           Exec::cpu(2), 1, frac);
+                           Exec::cpu(), 1, frac);
             const SegmentCap cap(1024);
             FDMTFFT segmented(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true,
-                              mode, Exec::cpu(2), 1, frac);
+                              mode, Exec::cpu(), 1, frac);
             const auto n = single.get_plan().get_dmt_size();
             std::vector<float> a(n);
             std::vector<float> b(n);
@@ -255,10 +255,10 @@ TEST_CASE("DDMTFFT forced segments equal the single transform",
         CAPTURE(algorithms::to_string(method));
         const DDMTFFTOptions opts{.method = method};
         DDMTFFT single(kFMin, kFMax, nch, kTsamp, 30.0F, 0.5F, 0.0F,
-                       Exec::cpu(2), 32, {}, 1, opts);
+                       Exec::cpu(), 32, {}, 1, opts);
         const SegmentCap cap(1024);
         DDMTFFT segmented(kFMin, kFMax, nch, kTsamp, 30.0F, 0.5F, 0.0F,
-                          Exec::cpu(2), 32, {}, 1, opts);
+                          Exec::cpu(), 32, {}, 1, opts);
         const auto ndm = single.get_plan().get_dm_arr().size();
         for (unsigned blk = 0; blk < 2; ++blk) {
             const auto wf = noise(nch * ns, 30 + blk);

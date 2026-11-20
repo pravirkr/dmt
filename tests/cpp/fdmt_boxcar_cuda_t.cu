@@ -315,7 +315,7 @@ TEST_CASE("Packed FDMTBoxcar GPU searches boxes far wider than 4096",
         append(out, search.flush());
         return out;
     };
-    const auto expected = run(Exec::cpu(2));
+    const auto expected = run(Exec::cpu());
     REQUIRE(expected.size() > 100);
     compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
 }
@@ -353,7 +353,7 @@ TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",
         append(out, search.flush());
         return out;
     };
-    const auto expected = run(Exec::cpu(2));
+    const auto expected = run(Exec::cpu());
     REQUIRE(expected.size() > 100);
     compare(run({algorithms::detail::kGPUBackend, 1, 0}), expected);
 
@@ -373,7 +373,7 @@ TEST_CASE("Packed FDMTBoxcar GPU fits max_boxcar 4096 with dense widths",
         append(out, search.flush());
         return out;
     };
-    const auto expected_f = run_float(Exec::cpu(2));
+    const auto expected_f = run_float(Exec::cpu());
     REQUIRE(expected_f.size() > 100);
     compare(run_float({algorithms::detail::kGPUBackend, 1, 0}), expected_f);
 }
@@ -412,8 +412,7 @@ TEST_CASE("Packed FDMTBoxcar GPU matches CPU on host and nondefault stream",
                     cfg.peak_mode      = mode;
                     cfg.max_candidates = 500000;
                     cfg.max_cands_per_dm = 0;
-                    FDMTBoxcar cpu(plan, cfg, smear, Exec::cpu(2), beams, 0,
-                                   64);
+                    FDMTBoxcar cpu(plan, cfg, smear, Exec::cpu(), beams, 0, 64);
                     std::vector<RawCandidate> expected;
                     for (const auto& block : input) {
                         append(expected, cpu.execute(block));
@@ -514,7 +513,7 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                 cfg.noise_sigma = std::sqrt(static_cast<float>(maximum) *
                                             (maximum + 2.0F) / 12.0F);
             }
-            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(4), kBeams,
+            FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(), kBeams,
                              algorithms::kFDMTAutoFuse, 64,
                              algorithms::kFDMTDefaultMaxMemory, kill);
             const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
@@ -902,7 +901,7 @@ TEST_CASE("Packed FDMTBoxcar GPU kKadane and kNone match CPU across bit depths",
                 cfg.max_candidates   = 500000;
                 cfg.max_cands_per_dm = 0;
 
-                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), kBeams, 0, 64);
+                FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), kBeams, 0, 64);
                 FDMTBoxcar gpu(plan, cfg, true, gpu_exec, kBeams,
                                algorithms::kFDMTAutoFuse, 128);
                 std::vector<RawCandidate> expected;
@@ -941,7 +940,7 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
             cfg.max_candidates   = 500000;
             cfg.max_cands_per_dm = 0;
 
-            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 2, 0, 64);
+            FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), 2, 0, 64);
             FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 2,
                            algorithms::kFDMTAutoFuse, 64);
             std::vector<RawCandidate> expected;
@@ -983,7 +982,7 @@ TEST_CASE("FDMTBoxcar GPU kKadaneSurrogate matches CPU kKadaneSurrogate",
         cfg.max_candidates   = 500000;
         cfg.max_cands_per_dm = 0;
 
-        FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(2), 2, 0, 64);
+        FDMTBoxcar cpu(plan, cfg, true, Exec::cpu(), 2, 0, 64);
         FDMTBoxcar gpu(plan, cfg, true, gpu_exec, 2, algorithms::kFDMTAutoFuse,
                        128);
         std::vector<RawCandidate> expected;
