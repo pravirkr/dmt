@@ -140,11 +140,4 @@ make_kadane_gate_plan(std::span<const uint32_t> widths,
                       bool enable_int32_gate                       = false,
                       uint64_t max_int_sample                      = 0);
 
-/// Recompute lossless float32 bucket cuts for explicit `row_biases` against
-/// `min_thr` (size == `plan.widths.size()`).
-void recompute_cuts_for_biases(const KadaneGatePlan& plan,
-                               std::span<const float> row_biases,
-                               std::span<const float> min_thr,
-                               std::span<float> out_cuts);
-
 } // namespace dmt::kadane

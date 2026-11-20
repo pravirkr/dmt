@@ -873,10 +873,7 @@ bool FDMTBoxcarCudaEngine::try_configure_shared_kadane() {
         cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin,
                                m_device),
         "FDMTBoxcar: shared memory limit");
-    const auto limit =
-        m_shared_limit != 0
-            ? std::min(m_shared_limit, static_cast<SizeType>(optin))
-            : static_cast<SizeType>(optin);
+    const auto limit = static_cast<SizeType>(optin);
     if constexpr (std::is_integral_v<T>) {
         if (kadane_shared_need<T, SegT>(kKadaneThreads) > limit) {
             return false;

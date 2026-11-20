@@ -496,7 +496,7 @@ public:
         // most 256 MiB (launched in batches of blocks).
         SizeType rings = 0;
         if (ex.backend != Backend::kCPU && width > 4096) {
-            rings = std::min<SizeType>(SizeType{256} << 20,
+            rings = std::min<SizeType>(detail::kGlobalRingBytes,
                                        rows * std::bit_ceil(width + 1024) *
                                            sizeof(uint64_t));
         }

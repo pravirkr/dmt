@@ -123,10 +123,6 @@ struct FDMTEngineConfig {
     /// which never writes a full-block root plane, so the root output is
     /// exempt from the 32-bit extent check; root-writing calls then throw.
     bool search_only{false};
-    /// Private (GPU, tests): shared memory per block the boxcar search may
-    /// use, in bytes; 0 takes the device's opt-in limit. Tests lower it to
-    /// reach the fallbacks of small-shared-memory GPUs.
-    SizeType boxcar_shared_limit{0};
     /// Private: build the engine's tables and size every working buffer
     /// (get_memory_usage()), but allocate the buffers only on allocate().
     /// Memory estimates and budget searches build engines this way.

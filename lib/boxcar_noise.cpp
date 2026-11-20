@@ -12,18 +12,11 @@
 #include <utility>
 #include <vector>
 
+#include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
-
-namespace {
-// As in boxcar_plans.cpp: an opaque integer test, safe under -ffast-math.
-bool finite(float x) {
-    const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-    return (bits & 0x7F800000U) != 0x7F800000U;
-}
-} // namespace
 
 BoxcarNoiseModel::BoxcarNoiseModel(const plans::FDMTPlan& plan,
                                    const BoxcarConfig& config,
@@ -324,8 +317,9 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
             const float inv_sigma = static_cast<float>(1.0 / sigma);
             const float threshold =
                 static_cast<float>(m_config.detect_thresh * sigma);
-            ok = ok && finite(inv_sigma) && finite(threshold) &&
-                 inv_sigma > 0 && threshold > 0;
+            ok = ok && utils::is_finite_bits(inv_sigma) &&
+                 utils::is_finite_bits(threshold) && inv_sigma > 0 &&
+                 threshold > 0;
             tables->inv_sigma[k] = inv_sigma;
             tables->thresh[k]    = threshold;
             if (m_packed) {

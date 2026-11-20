@@ -30,11 +30,6 @@ using kadane::LagWindow;
 inline constexpr SizeType kGateTile             = 256;
 inline constexpr SizeType kKadaneExactPrefixCap = 4096;
 
-[[nodiscard]] inline bool is_finite_f32(float x) noexcept {
-    const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-    return (bits & 0x7F800000U) != 0x7F800000U;
-}
-
 /// Scoring tile: each tile rebuilds its running sums and screen minima over
 /// the max_width - 1 lookback samples before it, so wide boxcars take longer
 /// tiles (about 4x the lookback, 1024 to 4096 samples) to amortize that.

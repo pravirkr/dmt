@@ -482,7 +482,6 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
       m_carry32(
           config.input_nbits != 32 &&
           int_search_fits_u32(plan, cfg.use_box_smearing, config.input_nbits)) {
-    m_shared_limit = cfg.boxcar_shared_limit;
     gpu_utils::set_device(m_device);
     // Deferred: the device buffers below are sized, not allocated, until
     // allocate().

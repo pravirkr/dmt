@@ -17,6 +17,7 @@
 #include "dmt/common/plans.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/fdmt_int_tree.hpp"
 
 namespace {
 
@@ -200,10 +201,17 @@ TEST_CASE("FDMTBoxcar CPU screen modes match bit-for-bit",
 
     SECTION("float streaming (rectangular, trapezoid, and wide boxcar)") {
         const auto blocks = make_float_blocks(plan, 2, 3, 101);
-        for (const auto& [max_w, wtsp, trap] :
-             std::array<std::tuple<SizeType, float, bool>, 3>{
-                 {{64, 1.0F, false}, {64, 1.25F, true}, {600, 1.25F, false}}}) {
-            const auto cfg = make_cfg(max_w, wtsp, 3.0F, trap);
+        for (const auto& [max_w, wtsp, trap, pm] :
+             std::array<std::tuple<SizeType, float, bool, PeakFindingMode>, 4>{
+                 {{64, 1.0F, false,
+                   PeakFindingMode::kContiguousPeakAcrossWidths},
+                  {64, 1.0F, false, PeakFindingMode::kContiguousPeakPerWidth},
+                  {64, 1.25F, true,
+                   PeakFindingMode::kContiguousPeakAcrossWidths},
+                  {600, 1.25F, false,
+                   PeakFindingMode::kContiguousPeakAcrossWidths}}}) {
+            auto cfg      = make_cfg(max_w, wtsp, 3.0F, trap);
+            cfg.peak_mode = pm;
             const auto ref =
                 run_float(plan, cfg, BoxcarScreenMode::kPrefix, blocks, 2);
             REQUIRE(ref.counts.total_detected > 0);
@@ -232,6 +240,46 @@ TEST_CASE("FDMTBoxcar CPU screen modes match bit-for-bit",
                 require_bit_exact(run_packed(plan, cfg, screen, blocks, 1),
                                   ref);
             }
+        }
+    }
+
+    SECTION("16-bit wide boxcar (!has_int32 centered-float gate fallback)") {
+        const plans::FDMTPlan wide_plan(700.0F, 1200.0F, 16, 256, 0.001F, 48);
+        const float maxf  = 65535.0F;
+        auto cfg          = make_cfg(600, 2.0F, 2.7F, true);
+        cfg.input_nbits   = 16;
+        cfg.input_mean    = maxf * 0.5F;
+        cfg.noise_sigma   = std::sqrt(maxf * (maxf + 2.0F) / 12.0F);
+        const auto blocks = make_packed_blocks(wide_plan, 1, 4, 16, 616U);
+        const auto ref =
+            run_packed(wide_plan, cfg, BoxcarScreenMode::kPrefix, blocks, 1);
+        REQUIRE(ref.counts.total_detected > 0);
+        for (const auto screen :
+             {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+            require_bit_exact(run_packed(wide_plan, cfg, screen, blocks, 1),
+                              ref);
+        }
+    }
+
+    SECTION("16-bit smearing plan exceeding uint32 (!m_carry32 uint64 carry)") {
+        const plans::FDMTPlan u64_plan(700.0F, 1200.0F, 8, 128, 0.001F,
+                                       std::vector<IndexType>{0, 32, 16384},
+                                       "valid", 1);
+        REQUIRE_FALSE(
+            algorithms::detail::int_search_fits_u32(u64_plan, true, 16));
+        const float maxf  = 65535.0F;
+        auto cfg          = make_cfg(32, 1.5F, 2.65F, true);
+        cfg.input_nbits   = 16;
+        cfg.input_mean    = maxf * 0.5F;
+        cfg.noise_sigma   = std::sqrt(maxf * (maxf + 2.0F) / 12.0F);
+        const auto blocks = make_packed_blocks(u64_plan, 1, 4, 16, 632U);
+        const auto ref =
+            run_packed(u64_plan, cfg, BoxcarScreenMode::kPrefix, blocks, 1);
+        REQUIRE(ref.counts.total_detected > 0);
+        for (const auto screen :
+             {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+            require_bit_exact(run_packed(u64_plan, cfg, screen, blocks, 1),
+                              ref);
         }
     }
 

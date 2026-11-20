@@ -1055,10 +1055,7 @@ template <typename T> void FDMTBoxcarCudaEngine::configure_shared() {
         cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin,
                                m_device),
         "FDMTBoxcar: shared memory limit");
-    const auto limit =
-        m_shared_limit != 0
-            ? std::min(m_shared_limit, static_cast<SizeType>(optin))
-            : static_cast<SizeType>(optin);
+    const auto limit = static_cast<SizeType>(optin);
     const SizeType eff_chunk =
         std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
     int threads = eff_chunk <= 64 * kItems    ? 64

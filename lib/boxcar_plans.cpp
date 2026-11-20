@@ -13,19 +13,11 @@
 #include <fmt/format.h>
 
 #include "dmt/boxcar.hpp"
+#include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 namespace dmt::plans {
-
-namespace {
-// Keep the integer load opaque: -ffast-math may otherwise fold even
-// bitwise NaN guards when it infers that floating arguments are finite.
-bool finite(float x) {
-    const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-    return (bits & 0x7F800000U) != 0x7F800000U;
-}
-} // namespace
 
 std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
                                                 float wtsp) {
@@ -33,8 +25,8 @@ std::vector<uint32_t> generate_box_width_trials(SizeType max_width,
     // wider boxes run correctly with no speed promise. The cap only guards
     // against a mistyped width (2^20 samples is over a minute at 64 us).
     constexpr SizeType kMaxWidth = SizeType{1} << 20;
-    if (max_width == 0 || max_width > kMaxWidth || !finite(wtsp) ||
-        wtsp < 1.0F) {
+    if (max_width == 0 || max_width > kMaxWidth ||
+        !utils::is_finite_bits(wtsp) || wtsp < 1.0F) {
         throw std::invalid_argument(
             "Boxcar: max_width must be 1..1048576 and wtsp finite >= 1");
     }
@@ -183,9 +175,11 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
         const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
         return (bits & 0x7F800000U) != 0x7F800000U;
     };
-    if (plan.get_mode() != "valid" || !finite(config.detect_thresh) ||
-        config.detect_thresh <= 0 || !finite(config.noise_sigma) ||
-        config.noise_sigma <= 0 || config.max_candidates == 0 ||
+    if (plan.get_mode() != "valid" ||
+        !utils::is_finite_bits(config.detect_thresh) ||
+        config.detect_thresh <= 0 ||
+        !utils::is_finite_bits(config.noise_sigma) || config.noise_sigma <= 0 ||
+        config.max_candidates == 0 ||
         static_cast<unsigned>(config.peak_mode) >
             static_cast<unsigned>(PeakFindingMode::kAllAboveThreshold) ||
         static_cast<unsigned>(config.overflow_policy) >
@@ -211,7 +205,8 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             kMaxKeepPerDM, config.max_cands_per_dm));
     }
     const bool packed = config.input_nbits != 32;
-    if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||
+    if ((!packed && config.input_mean != 0) ||
+        !utils::is_finite_bits(config.input_mean) ||
         (packed && config.input_nbits != 1 && config.input_nbits != 2 &&
          config.input_nbits != 4 && config.input_nbits != 8 &&
          config.input_nbits != 16) ||
@@ -361,8 +356,9 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     const float inv_sigma = static_cast<float>(1.0 / sigma);
                     const float threshold =
                         static_cast<float>(config.detect_thresh * sigma);
-                    if (!finite(inv_sigma) || !finite(threshold) ||
-                        inv_sigma <= 0 || threshold <= 0) {
+                    if (!utils::is_finite_bits(inv_sigma) ||
+                        !utils::is_finite_bits(threshold) || inv_sigma <= 0 ||
+                        threshold <= 0) {
                         throw std::invalid_argument(
                             "FDMTBoxcar: sigma/threshold is outside float32 "
                             "range");

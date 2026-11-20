@@ -33,10 +33,7 @@ inline constexpr SizeType kSharedFilters = 512;
 // Widest boxcar of the fast path (prefix ring in shared memory); wider
 // boxes take the device-memory ring (kGlobalRing), with no speed promise.
 inline constexpr SizeType kFastMaxWidth = 4096;
-// Device memory of the kGlobalRing rings: blocks are launched in batches
-// whose rings fit it (at least one block).
-inline constexpr SizeType kGlobalRingBytes = SizeType{256} << 20;
-inline constexpr int kGlobalBlock          = 256;
+inline constexpr int kGlobalBlock       = 256;
 
 // Radix-select key length for OverflowPolicy::kKeepBrightest:
 // 18 bytes (4B snr + 8B peak + 4B rank + 2B filter).
@@ -687,8 +684,6 @@ private:
     gpu_utils::PlannedVector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
     int m_block_threads   = 256;
-    // FDMTEngineConfig::boxcar_shared_limit (0: the device's opt-in limit).
-    SizeType m_shared_limit = 0;
     // Fallbacks taken to fit max_boxcar in shared memory (configure_shared).
     bool m_screen_dropped  = false;
     bool m_block_shrunk    = false;

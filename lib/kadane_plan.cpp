@@ -13,6 +13,7 @@
 
 #include <fmt/format.h>
 
+#include "dmt/dm_utils.hpp"
 #include "dmt/kadane_monoid.hpp"
 
 namespace dmt::kadane {
@@ -20,16 +21,6 @@ namespace dmt::kadane {
 namespace {
 
 constexpr float kDeadThreshFloor = 1.0e35F;
-
-bool is_finite_f32(float x) noexcept {
-    const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-    return (bits & 0x7F800000U) != 0x7F800000U;
-}
-
-bool is_finite_f64(double x) noexcept {
-    const volatile uint64_t bits = std::bit_cast<uint64_t>(x);
-    return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
-}
 
 /// Step a positive float down by 1 ULP using integer bit arithmetic so
 /// `-ffast-math` / `-ffinite-math-only` cannot fold or warn on infinities.
@@ -46,7 +37,7 @@ bool is_dead_row(std::span<const float> row_thr) noexcept {
         return true;
     }
     return std::ranges::any_of(row_thr, [](float v) {
-        return !is_finite_f32(v) || v <= 0.0F || v >= kDeadThreshFloor;
+        return !utils::is_finite_bits(v) || v <= 0.0F || v >= kDeadThreshFloor;
     });
 }
 
@@ -183,7 +174,7 @@ float compute_bucket_cut_f32(const KadaneGateBucket& bucket,
                              bool use_trapezoid,
                              float b_f32,
                              std::span<const float> row_thr) noexcept {
-    if (!is_finite_f32(b_f32) || b_f32 < 0.0F) {
+    if (!utils::is_finite_bits(b_f32) || b_f32 < 0.0F) {
         return 0.0F;
     }
     const double b_val    = static_cast<double>(b_f32);
@@ -205,7 +196,7 @@ float compute_bucket_cut_f32(const KadaneGateBucket& bucket,
         tau_raw = std::min(tau_raw, tilde_th - (b_val * tilde_wf));
         thr_max = std::max(thr_max, thr_f);
     }
-    if (!is_finite_f64(tau_raw) || tau_raw <= 0.0) {
+    if (!utils::is_finite_bits(tau_raw) || tau_raw <= 0.0) {
         return 0.0F;
     }
 
@@ -216,11 +207,11 @@ float compute_bucket_cut_f32(const KadaneGateBucket& bucket,
          (32.0 * (thr_max + (b_val * w_hi))));
     const double margin = std::max(0.008 * scale_1, 4.0 * fp_err);
     const double cut_d  = tau_raw - margin;
-    if (!is_finite_f64(cut_d) || cut_d <= 0.0) {
+    if (!utils::is_finite_bits(cut_d) || cut_d <= 0.0) {
         return 0.0F;
     }
     const auto cut_f32 = static_cast<float>(cut_d);
-    if (!is_finite_f32(cut_f32) || cut_f32 <= 0.0F) {
+    if (!utils::is_finite_bits(cut_f32) || cut_f32 <= 0.0F) {
         return 0.0F;
     }
     return step_down_pos_f32(cut_f32);
@@ -413,7 +404,7 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
             }
             const double b_opt = hull.solve().bias;
             float b_f32        = static_cast<float>(b_opt);
-            if (!is_finite_f32(b_f32) || b_f32 <= 0.0F) {
+            if (!utils::is_finite_bits(b_f32) || b_f32 <= 0.0F) {
                 b_f32 = std::numeric_limits<float>::min();
             }
             bias[(k * row_stride) + r] = b_f32;
@@ -448,13 +439,13 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                 integer_thresh_lut.data() + (r * num_filters);
 
             const double mu_1 = mean_r[0] / static_cast<double>(int_weight[0]);
-            if (!is_finite_f64(mu_1) || mu_1 < 0.0) {
+            if (!utils::is_finite_bits(mu_1) || mu_1 < 0.0) {
                 tables_valid = false;
                 break;
             }
             row_mu1[idx] = mu_1;
             for (SizeType f = 0; f < num_filters; ++f) {
-                if (!is_finite_f64(mean_r[f]) || mean_r[f] < 0.0) {
+                if (!utils::is_finite_bits(mean_r[f]) || mean_r[f] < 0.0) {
                     tables_valid = false;
                     break;
                 }
@@ -522,7 +513,7 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                     integer_thresh_lut.data() + (r * num_filters);
 
                 const double mu_s = row_mu1[idx] * scale_f64;
-                if (!is_finite_f64(mu_s) ||
+                if (!utils::is_finite_bits(mu_s) ||
                     mu_s >= static_cast<double>(b_cap)) {
                     shift_ok = false;
                     break;
@@ -535,7 +526,7 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                     const double b_exc =
                         b_exc_tbl[(idx * num_buckets) + k] * scale_f64;
                     const double target_b = std::floor(mu_s + b_exc);
-                    if (!is_finite_f64(target_b) ||
+                    if (!utils::is_finite_bits(target_b) ||
                         target_b > static_cast<double>(b_cap)) {
                         shift_ok = false;
                         break;
@@ -662,29 +653,6 @@ make_kadane_gate_plan(std::span<const uint32_t> widths,
     return KadaneGatePlan(widths, use_trapezoid, n_rows, raw_thresh_lut,
                           integer_mean_lut, integer_thresh_lut,
                           enable_int32_gate, max_int_sample);
-}
-
-void recompute_cuts_for_biases(const KadaneGatePlan& plan,
-                               std::span<const float> row_biases,
-                               std::span<const float> min_thr,
-                               std::span<float> out_cuts) {
-    if (row_biases.size() < plan.num_buckets ||
-        min_thr.size() != plan.widths.size() ||
-        out_cuts.size() < plan.num_buckets) {
-        throw std::invalid_argument(
-            "recompute_cuts_for_biases: invalid span sizes");
-    }
-    if (is_dead_row(min_thr)) {
-        for (SizeType k = 0; k < plan.num_buckets; ++k) {
-            out_cuts[k] = std::numeric_limits<float>::max();
-        }
-        return;
-    }
-    for (SizeType k = 0; k < plan.num_buckets; ++k) {
-        out_cuts[k] =
-            compute_bucket_cut_f32(plan.buckets[k], plan.widths,
-                                   plan.use_trapezoid, row_biases[k], min_thr);
-    }
 }
 
 } // namespace dmt::kadane

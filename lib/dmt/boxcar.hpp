@@ -18,6 +18,10 @@
 
 namespace dmt::algorithms::detail {
 
+/// Device memory cap for GPU wide-boxcar (> 4096) prefix rings: blocks are
+/// launched in batches whose rings fit within this budget (at least one block).
+inline constexpr SizeType kGlobalRingBytes = SizeType{256} << 20;
+
 /// Search planes of `plan`. Channels with kill_mask[c] == 0 are excluded
 /// from the noise model (empty: keep all); `extra_warmup` is added to every
 /// row's cold support (FDMT-FFT's interpolation guard).

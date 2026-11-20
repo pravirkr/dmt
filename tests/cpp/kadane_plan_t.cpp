@@ -877,30 +877,6 @@ TEST_CASE("KadaneGatePlan wide boxcars up to 2^20: soundness, int32 bounds, "
                         }
                     }
                 }
-
-                // Force margin > tau_raw on the 2^20 bucket via a steep fixed
-                // bias in recompute_cuts_for_biases and verify safe clamp to 0.
-                std::vector<float> steep_biases(plan.num_buckets);
-                for (SizeType k = 0; k < plan.num_buckets; ++k) {
-                    steep_biases[k] = plan.row_bias(k, 0);
-                }
-                const uint32_t f_last = static_cast<uint32_t>(nf - 1);
-                const uint32_t w_last = widths[f_last];
-                const uint32_t we_last =
-                    use_trap ? kadane::trapezoid_edge_width(w_last) : 0U;
-                const double tilde_last = static_cast<double>(w_last - we_last);
-                const double tilde_thr =
-                    static_cast<double>(tab.raw_thresh[f_last]) *
-                    (we_last == 0U ? 1.0 : 0.5);
-                // Bias leaving tiny positive tau_raw < rounding margin:
-                steep_biases[plan.num_buckets - 1] =
-                    static_cast<float>((tilde_thr - 1.0e-3) / tilde_last);
-                std::vector<float> clamped_cuts(plan.num_buckets, -1.0F);
-                kadane::recompute_cuts_for_biases(
-                    plan, steep_biases,
-                    std::span<const float>(tab.raw_thresh.data(), nf),
-                    clamped_cuts);
-                CHECK(clamped_cuts[plan.num_buckets - 1] == 0.0F);
             }
         }
     }

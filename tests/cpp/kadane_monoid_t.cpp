@@ -694,53 +694,6 @@ TEST_CASE("DMT_HD wide-boxcar BlockNoise cut bit-parity up to 2^20 and "
                         }
                     }
                 }
-
-                // (c) Marginal bias (0 < tau_raw < margin) and extreme near-
-                // kDeadFloor / huge-bias finiteness checks at w_hi = max_boxcar
-                const SizeType nf     = widths.size();
-                const uint32_t f_last = static_cast<uint32_t>(nf - 1);
-                const uint32_t w_last = widths[f_last];
-                const uint32_t we_last =
-                    use_trap ? trapezoid_edge_width(w_last) : 0U;
-                const auto tilde_last = static_cast<double>(w_last - we_last);
-                const double tilde_thr =
-                    static_cast<double>(tbl.raw_thresh[f_last]) *
-                    (we_last == 0U ? 1.0 : 0.5);
-
-                std::vector<float> test_biases = {
-                    gplan.row_bias(0, 0),
-                    gplan.row_bias(1, 0),
-                    static_cast<float>((tilde_thr - 1.0e-3) / tilde_last),
-                };
-                const std::span<const float> row0_thr(tbl.raw_thresh.data(),
-                                                      nf);
-                std::vector<float> host_custom(gplan.num_buckets, -1.0F);
-                kadane::recompute_cuts_for_biases(gplan, test_biases, row0_thr,
-                                                  host_custom);
-                for (SizeType k = 0; k < gplan.num_buckets; ++k) {
-                    const float hd_cut = compute_bucket_cut_hd_f32(
-                        gplan.buckets[k], widths.data(), nf, use_trap,
-                        test_biases[k],
-                        [&](SizeType f) { return row0_thr[f]; });
-                    CHECK(std::bit_cast<uint32_t>(hd_cut) ==
-                          std::bit_cast<uint32_t>(host_custom[k]));
-                }
-                CHECK(std::bit_cast<uint32_t>(host_custom[2]) == 0U);
-
-                // Near-kDeadFloor finite thresholds + huge bias overflow guard
-                std::vector<float> huge_thr(nf, 9.0e34F);
-                std::vector<float> huge_biases(gplan.num_buckets, 1.0e38F);
-                kadane::recompute_cuts_for_biases(gplan, huge_biases, huge_thr,
-                                                  host_custom);
-                for (SizeType k = 0; k < gplan.num_buckets; ++k) {
-                    const float hd_cut = compute_bucket_cut_hd_f32(
-                        gplan.buckets[k], widths.data(), nf, use_trap,
-                        huge_biases[k],
-                        [&](SizeType f) { return huge_thr[f]; });
-                    CHECK(std::bit_cast<uint32_t>(hd_cut) ==
-                          std::bit_cast<uint32_t>(host_custom[k]));
-                    CHECK(std::bit_cast<uint32_t>(hd_cut) == 0U);
-                }
             }
         }
     }

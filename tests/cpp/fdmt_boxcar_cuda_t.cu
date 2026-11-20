@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -521,12 +522,16 @@ TEST_CASE("FDMTBoxcar GPU screen modes match bit-for-bit",
 
     SECTION("float streaming (rectangular, trapezoid, and async DeviceSpan)") {
         const auto input = waterfalls(plan, 2, 3);
-        for (const bool trap : {false, true}) {
+        for (const auto& [trap, mode] :
+             std::array<std::pair<bool, PeakFindingMode>, 3>{
+                 {{false, PeakFindingMode::kContiguousPeakAcrossWidths},
+                  {false, PeakFindingMode::kContiguousPeakPerWidth},
+                  {true, PeakFindingMode::kContiguousPeakAcrossWidths}}}) {
             BoxcarConfig base_cfg;
-            base_cfg.max_boxcar    = 64;
-            base_cfg.wtsp          = 1.5F;
-            base_cfg.detect_thresh = 2.7F;
-            base_cfg.peak_mode = PeakFindingMode::kContiguousPeakAcrossWidths;
+            base_cfg.max_boxcar       = 64;
+            base_cfg.wtsp             = 1.5F;
+            base_cfg.detect_thresh    = 2.7F;
+            base_cfg.peak_mode        = mode;
             base_cfg.use_trapezoid    = trap;
             base_cfg.max_candidates   = 500000;
             base_cfg.max_cands_per_dm = 0;
@@ -658,6 +663,35 @@ TEST_CASE("FDMTBoxcar GPU screen modes match bit-for-bit",
         for (const auto screen :
              {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
             compare(run_screen(screen), expected);
+        }
+    }
+
+    SECTION("wide boxcars (> 4096, device-memory ring)") {
+        const plans::FDMTPlan wide_plan(700, 1200, 7, 2048, 0.001F,
+                                        std::vector<IndexType>{-5, 0, 7, 40},
+                                        "valid", 1);
+        const auto input = waterfalls(wide_plan, 1, 4);
+        for (const SizeType max_w : {SizeType{8192}, SizeType{16384}}) {
+            for (const auto screen :
+                 {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
+                BoxcarConfig cfg;
+                cfg.max_boxcar       = max_w;
+                cfg.wtsp             = 2.0F;
+                cfg.detect_thresh    = 3.0F;
+                cfg.screen_mode      = screen;
+                cfg.max_candidates   = 1U << 20;
+                cfg.max_cands_per_dm = 0;
+                const auto expected = reference(wide_plan, cfg, true, 1, input);
+                REQUIRE_FALSE(expected.empty());
+                FDMTBoxcar gpu(wide_plan, cfg, true, gpu_exec, 1,
+                               algorithms::kFDMTAutoFuse, 128);
+                std::vector<RawCandidate> actual;
+                for (const auto& block : input) {
+                    append(actual, gpu.execute(block));
+                }
+                append(actual, gpu.flush());
+                compare(actual, expected);
+            }
         }
     }
 }
@@ -941,6 +975,23 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
                 !Catch::Matchers::ContainsSubstring("nsamps") &&
                 !Catch::Matchers::ContainsSubstring("FDMT (cuda): this")));
     }
+}
+
+TEST_CASE("The free-memory check fails early and only when over",
+          "[gpu][budget]") {
+    constexpr SizeType kGiB = SizeType{1} << 30;
+    const gpu_utils::DeviceMemoryInfo dev{
+        .free = 3 * kGiB, .total = 8 * kGiB, .known = true};
+    CHECK_NOTHROW(gpu_utils::check_free_memory("X", 3 * kGiB, dev,
+                                               gpu_utils::kAdviceBudget));
+    CHECK_NOTHROW(
+        gpu_utils::check_free_memory("X", kGiB, dev, gpu_utils::kAdviceBudget));
+    CHECK_NOTHROW(gpu_utils::check_free_memory("X", 100 * kGiB,
+                                               gpu_utils::DeviceMemoryInfo{},
+                                               gpu_utils::kAdviceBudget));
+    CHECK_THROWS_AS(gpu_utils::check_free_memory("FDMT (cuda)", (3 * kGiB) + 1,
+                                                 dev, gpu_utils::kAdviceBudget),
+                    gpu_utils::DeviceAllocationError);
 }
 
 TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
