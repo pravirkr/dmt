@@ -78,7 +78,7 @@ public:
      *
      * @param f_min Bottom edge frequency in MHz.
      * @param f_max Top edge frequency in MHz.
-     * @param nchans Number of channels (power of 2).
+     * @param nchans Number of channels.
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
      * @param dt_max Maximum delay trial in samples.

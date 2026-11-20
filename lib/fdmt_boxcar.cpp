@@ -103,8 +103,8 @@ public:
         cfg.max_memory_bytes = max_memory - fixed;
         // The engine, with the declared masks' buffers sized (deferred), and
         // the budgeted bytes of both.
-        const auto build = [&] {
-            engine = make_engine(cfg, smear, exec);
+        const auto build = [&](SizeType* fdmt_bytes = nullptr) {
+            engine = make_engine(cfg, smear, exec, fdmt_bytes);
             if (model) {
                 engine->enable_block_noise(model->support());
             }
@@ -125,10 +125,29 @@ public:
                 needed, smaller_path);
         };
         const auto select = [&](const detail::FDMTEngineConfig& start) {
-            cfg           = start;
-            SizeType used = 0;
+            cfg                 = start;
+            SizeType used       = 0;
+            SizeType fdmt_bytes = 0;
+            SizeType boxcar_est = fixed;
             try {
-                used = build();
+                used = build(&fdmt_bytes);
+                if (used > max_memory && chunk == 0 &&
+                    cfg.mode == FDMTMode::kValid &&
+                    exec.backend == Backend::kCPU &&
+                    engine->search_path().find("skewed") != std::string::npos) {
+                    const SizeType boxcar_actual =
+                        used > fdmt_bytes ? used - fdmt_bytes : SizeType{0};
+                    boxcar_est = std::max(boxcar_est, boxcar_actual);
+                    if (boxcar_actual < max_memory) {
+                        const SizeType exact_budget =
+                            max_memory - boxcar_actual;
+                        if (exact_budget < cfg.max_memory_bytes) {
+                            cfg.max_memory_bytes = exact_budget;
+                            engine.reset();
+                            used = build(&fdmt_bytes);
+                        }
+                    }
+                }
                 while (used > max_memory && chunk == 0 &&
                        cfg.mode == FDMTMode::kValid &&
                        engine->chunk_nsamps() > 256) {
@@ -138,14 +157,15 @@ public:
                                                 ? cfg.max_memory_bytes - excess
                                                 : cfg.max_memory_bytes;
                     engine.reset();
-                    used = build();
+                    used = build(&fdmt_bytes);
                 }
             } catch (const detail::BudgetError& e) {
                 // SIZE_MAX: no configuration of that path fits at all.
                 const SizeType need =
-                    e.needed() > std::numeric_limits<SizeType>::max() - fixed
+                    e.needed() >
+                            std::numeric_limits<SizeType>::max() - boxcar_est
                         ? std::numeric_limits<SizeType>::max()
-                        : fixed + e.needed();
+                        : boxcar_est + e.needed();
                 throw over(std::max(max_memory + 1, need), false);
             }
             if (used > max_memory) {
@@ -406,20 +426,29 @@ public:
                (slots * (config.input_nbits != 32 ? 4 : 2) * rows * filters *
                 sizeof(float));
     }
-    std::unique_ptr<detail::FDMTBoxcarEngine> make_engine(
-        const detail::FDMTEngineConfig& cfg, bool /*smear*/, Exec ex) const {
+    std::unique_ptr<detail::FDMTBoxcarEngine>
+    make_engine(const detail::FDMTEngineConfig& cfg,
+                bool /*smear*/,
+                Exec ex,
+                SizeType* fdmt_bytes = nullptr) const {
         if (ex.backend == Backend::kCPU) {
+            auto fdmt = detail::make_fdmt_cpu(plan, cfg);
+            if (fdmt_bytes != nullptr) {
+                *fdmt_bytes = fdmt->get_memory_usage().total();
+            }
             return detail::make_fdmt_boxcar_cpu(
                 plan, config, planes, cfg,
-                detail::make_boxcar_driver(detail::make_fdmt_cpu(plan, cfg)),
-                kill_runs);
+                detail::make_boxcar_driver(std::move(fdmt)), kill_runs);
         }
 #ifdef DMT_ENABLE_GPU
         if (ex.backend == detail::kGPUBackend) {
+            auto fdmt = detail::make_fdmt_gpu(plan, cfg);
+            if (fdmt_bytes != nullptr) {
+                *fdmt_bytes = fdmt->get_memory_usage().total();
+            }
             return detail::make_fdmt_boxcar_gpu(
                 plan, config, planes, cfg,
-                detail::make_boxcar_driver(detail::make_fdmt_gpu(plan, cfg)),
-                kill_runs);
+                detail::make_boxcar_driver(std::move(fdmt)), kill_runs);
         }
 #endif
         detail::throw_unavailable("FDMTBoxcar", ex.backend);

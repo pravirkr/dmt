@@ -229,16 +229,16 @@ bool FDMTCpuEngine::choose_skew(const detail::FDMTEngineConfig& cfg) {
                                                       : 1;
     const SizeType req_fuse =
         skew_fuse_request(cfg.fuse_levels, cfg.max_fuse_levels);
-    // The budget a (chunk, leaf) engine needs: its estimate plus a tenth of
-    // headroom for the merge tables.
-    const auto need = [&](SizeType c, SizeType leaf) {
-        const auto e = detail::estimate_skew_memory(
-            m_plan, 4, c, ring_elem, m_nthreads, m_use_box_smearing, req_fuse,
-            depth, leaf);
-        const SizeType bytes =
-            e.ring + ((e.state + e.rings) * state_elem / sizeof(float)) +
-            e.stripes + plan_bytes;
-        return bytes + (bytes / 10);
+    // Exact budget of a (chunk, leaf) engine from a deferred FDMTSkewCpu.
+    const auto need = [&](SizeType c, SizeType leaf) -> SizeType {
+        try {
+            const auto e = detail::estimate_skew_memory(
+                m_plan, 4, c, ring_elem, m_nthreads, m_use_box_smearing,
+                req_fuse, depth, leaf, m_search_nbits != 32, m_search_u32);
+            return e.total() + plan_bytes;
+        } catch (const std::length_error&) {
+            return SIZE_MAX;
+        }
     };
     const auto fits = [&](SizeType c, SizeType leaf) {
         return need(c, leaf) <= cfg.max_memory_bytes;
