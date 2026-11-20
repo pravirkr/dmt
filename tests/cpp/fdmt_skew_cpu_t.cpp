@@ -931,42 +931,6 @@ DMT_SIZED_TEST_CASE(
 }
 
 DMT_SIZED_TEST_CASE(
-    "FDMTBoxcar skewed path: the surrogate screen with the catch-all",
-    "[fdmt_cpu][cpu][skew][boxcar][mask]") {
-    // kKadaneSurrogate is approximate, so no direct reference (with
-    // per-call masks its result also moves slightly with the block length,
-    // catch-all or not). With the catch-all active and changing masks,
-    // drain() through zero blocks equals drain() through host zero blocks.
-    using skew_search_test::require_same_before;
-    using skew_search_test::run_subband_search;
-    auto box          = skew_search_test::search_config(false);
-    box.detect_thresh = 3.5F;
-    box.screen_mode   = BoxcarScreenMode::kKadaneSurrogate;
-    const auto masks  = changing_masks(1152, 2);
-    SECTION("changing masks: zero-block drain equals host-block drain") {
-        const SizeType ns = 128;
-        const auto plan =
-            make_plan(kCryopafLband, ns, full ? 400.0F : 150.0F, 3);
-        const SizeType nb = (full ? 6144 : 2048) / ns;
-        std::vector<std::vector<uint8_t>> changing;
-        for (SizeType b = 0; b < nb; ++b) {
-            changing.push_back((b / 7) % 2 == 0 ? masks[0] : masks[1]);
-        }
-        const auto planes =
-            algorithms::detail::make_boxcar_plans(plan, box, true);
-        const auto zero =
-            run_subband_search(plan, Exec::cpu(), true, false, nb, 64, 1, true,
-                               &changing, 1.5F, &planes, SIZE_MAX, &box);
-        const auto host = run_subband_search(
-            plan, Exec::cpu(), true, false, nb, 64, 1, true, &changing, 1.5F,
-            &planes, SIZE_MAX, &box, nullptr, false);
-        REQUIRE(zero.latency > ns);
-        REQUIRE(zero.zero_blocks);
-        require_same_before(zero.candidates, host.candidates, UINT64_MAX);
-    }
-}
-
-DMT_SIZED_TEST_CASE(
     "FDMTBoxcar skewed path: a call failing after its mask commit "
     "leaves the stream unchanged",
     "[fdmt_cpu][cpu][skew][boxcar][mask]") {

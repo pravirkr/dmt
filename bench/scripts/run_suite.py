@@ -40,7 +40,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BINARY = "dmt_bench_suite"
-SCREEN_MODES = ("auto", "prefix", "kadane", "kadane_surrogate", "none")
+SCREEN_MODES = ("auto", "prefix", "kadane", "none")
 
 
 def validate_screen_mode(spec: str) -> str:
@@ -283,7 +283,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "--screen-mode",
         default="",
         help="Stage-1 screen mode(s) for --suite boxcar (sets DMT_BENCH_SCREEN): "
-        "comma-separated from auto, prefix, kadane, kadane_surrogate, none, or "
+        "comma-separated from auto, prefix, kadane, none, or "
         "'all' (unset runs auto without a /screen: name suffix)",
     )
     ap.add_argument(

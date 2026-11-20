@@ -35,8 +35,6 @@ using kadane::kadane_identity_i64;
 using kadane::KadaneGatePlan;
 using kadane::KadaneSegF32;
 using kadane::KadaneSegI64;
-using kadane::KadaneSurrogateDeviceView;
-using kadane::KadaneSurrogatePlan;
 using kadane::kKadaneInt32Cap;
 using kadane::LagWindow;
 using kadane::make_kadane_seg_f32;
@@ -658,8 +656,7 @@ TEST_CASE("Shared DMT_HD LagWindow is chunk-size-invariant across small and "
     }
 }
 
-TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
-          "host plans bit-for-bit",
+TEST_CASE("DMT_HD BlockNoise cut recomputation matches host plans bit-for-bit",
           "[kadane_monoid][kadane][monoid][boxcar][cpu]") {
     const std::vector<uint32_t> widths = {1,  2,  3,  5,   8,   13,  21,
                                           34, 55, 89, 144, 233, 377, 610};
@@ -693,54 +690,6 @@ TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
                               [&](SizeType f) { return min_thr[f]; });
                 CHECK(std::bit_cast<uint32_t>(hd_cut) ==
                       std::bit_cast<uint32_t>(host_cuts[k]));
-            }
-        }
-
-        // Surrogate device view S/N evaluator parity (float & integer)
-        for (const bool packed : {false, true}) {
-            const auto stbl = make_tables(widths, use_trap, 6.0F, 1.25F, specs,
-                                          packed, 64.0, 2);
-            const KadaneSurrogatePlan splan =
-                packed ? kadane::make_kadane_surrogate_plan(
-                             widths, use_trap, specs.size(), stbl.raw_thresh,
-                             stbl.inv_sigma, stbl.int_mean, stbl.integer_unit)
-                       : kadane::make_kadane_surrogate_plan(
-                             widths, use_trap, specs.size(), stbl.raw_thresh,
-                             stbl.inv_sigma);
-
-            KadaneSurrogateDeviceView view{};
-            view.num_passes    = splan.num_passes;
-            view.n_rows        = splan.n_rows;
-            view.row_stride    = splan.row_stride;
-            view.n_filters     = widths.size();
-            view.max_width     = splan.max_width;
-            view.is_integer    = splan.is_integer;
-            view.integer_unit  = splan.integer_unit;
-            view.bias          = splan.bias.data();
-            view.trigger       = splan.trigger.data();
-            view.box_inv_sigma = splan.box_inv_sigma_lut.data();
-            view.row_mean_1 =
-                splan.row_mean_1.empty() ? nullptr : splan.row_mean_1.data();
-            view.disabled_row = splan.disabled_row.data();
-            view.w_nearest    = splan.width_nearest_filter.data();
-            view.w_bracket_lo = splan.width_bracket_lo.data();
-            view.w_bracket_hi = splan.width_bracket_hi.data();
-            view.w_log_lerp   = splan.width_log_lerp.data();
-
-            for (SizeType r = 0; r < specs.size(); ++r) {
-                for (uint32_t w :
-                     {1U, 2U, 4U, 7U, 19U, 64U, 200U, 610U, 750U}) {
-                    const double raw_sum =
-                        packed ? (64.0 * 4.0 * 64.0 * w + 500.0) : 42.5;
-                    uint32_t host_f = 0U;
-                    uint32_t dev_f  = 0U;
-                    const float host_snr =
-                        splan.eval_surrogate_snr(r, raw_sum, w, &host_f);
-                    const float dev_snr = view.eval_surrogate_snr(
-                        r, raw_sum, w, widths[0], dev_f);
-                    CHECK(dev_f == host_f);
-                    CHECK(std::abs(dev_snr - host_snr) <= 1.0e-5F);
-                }
             }
         }
     }

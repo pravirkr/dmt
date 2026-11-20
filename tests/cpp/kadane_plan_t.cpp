@@ -28,7 +28,6 @@ namespace {
 using algorithms::FDMTBoxcar;
 using algorithms::detail::fdmt_trapezoid_variance;
 using kadane::KadaneGatePlan;
-using kadane::KadaneSurrogatePlan;
 
 struct SyntheticPlaneTables {
     std::vector<uint32_t> widths;
@@ -309,8 +308,8 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kAuto and coexists with "
                       BoxcarScreenMode::kNone, false) ==
                   BoxcarScreenMode::kNone);
     static_assert(algorithms::detail::resolve_screen_mode(
-                      BoxcarScreenMode::kKadaneSurrogate, true) ==
-                  BoxcarScreenMode::kKadaneSurrogate);
+                      BoxcarScreenMode::kKadane, true) ==
+                  BoxcarScreenMode::kKadane);
 
     // 11-argument construction stays 100% source-compatible with kDropNew +
     // the default screen mode (kAuto).
@@ -335,8 +334,7 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kAuto and coexists with "
          {OverflowPolicy::kDropNew, OverflowPolicy::kKeepBrightest}) {
         for (const auto mode :
              {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-              BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone,
-              BoxcarScreenMode::kAuto}) {
+              BoxcarScreenMode::kNone, BoxcarScreenMode::kAuto}) {
             const BoxcarConfig cfg(
                 256, 2.0F, 6.5F, 1.2F, PeakFindingMode::kContiguousPeakPerWidth,
                 4096, 16, false, 32, 0.0F, false, policy, mode);
@@ -349,34 +347,13 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kAuto and coexists with "
 
     // Plan / FDMTBoxcar validation:
     // - Rejects invalid screen_mode enumerator.
-    // - Rejects kKadaneSurrogate when max_boxcar > 4096, accepts <= 4096.
-    // - Accepts kPrefix, kKadane, and kNone up to 2^20 (1048576).
+    // - Accepts kAuto, kPrefix, kKadane, and kNone up to 2^20 (1048576).
     // - Preserves OverflowPolicy::kKeepBrightest coexistence and validation.
     const plans::FDMTPlan fdmt_plan(1200.0F, 1500.0F, 8, 256, 0.001F, 10.0F);
     BoxcarConfig bad_cfg{};
     bad_cfg.max_boxcar  = 32;
     bad_cfg.screen_mode = static_cast<BoxcarScreenMode>(99);
     CHECK_THROWS_AS(FDMTBoxcar(fdmt_plan, bad_cfg), std::invalid_argument);
-
-    for (const SizeType bad_surr_w :
-         {SizeType{4097}, SizeType{16384}, SizeType{1048576}}) {
-        BoxcarConfig surr_wide{};
-        surr_wide.max_boxcar  = bad_surr_w;
-        surr_wide.wtsp        = 2.0F;
-        surr_wide.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-        CHECK_THROWS_AS(FDMTBoxcar(fdmt_plan, surr_wide),
-                        std::invalid_argument);
-    }
-    {
-        BoxcarConfig surr_ok{};
-        surr_ok.max_boxcar       = 4096;
-        surr_ok.wtsp             = 2.0F;
-        surr_ok.max_cands_per_dm = 16;
-        surr_ok.overflow_policy  = OverflowPolicy::kKeepBrightest;
-        surr_ok.screen_mode      = BoxcarScreenMode::kKadaneSurrogate;
-        const FDMTBoxcar ok_boxcar(fdmt_plan, surr_ok);
-        CHECK(ok_boxcar.get_search_plans().back().widths.back() == 4096U);
-    }
 
     for (const auto wide_mode :
          {BoxcarScreenMode::kAuto, BoxcarScreenMode::kPrefix,
@@ -927,176 +904,6 @@ TEST_CASE("KadaneGatePlan 256-sample noise tile trigger suppression < 0.5%",
     }
 }
 
-TEST_CASE("KadaneSurrogatePlan strip coverage, O(1) S/N evaluation, and pulse "
-          "recovery across 1..4096",
-          "[kadane_plan][kadane][boxcar][cpu]") {
-    const auto widths = plans::generate_box_width_trials(4096, 1.5F);
-    const std::array<std::pair<SizeType, SizeType>, 2> specs{{
-        {1, 1},   // White noise
-        {16, 64}, // Colored FDMT box smearing
-    }};
-    const auto tab =
-        make_synthetic_tables(widths, false, 6.0F, 1.0F, specs, false);
-
-    const auto dec_plan = kadane::make_kadane_surrogate_plan(
-        widths, false, tab.n_rows, tab.raw_thresh, tab.inv_sigma, {}, 1.0,
-        true);
-    const auto full_plan = kadane::make_kadane_surrogate_plan(
-        widths, false, tab.n_rows, tab.raw_thresh, tab.inv_sigma, {}, 1.0,
-        false);
-
-    REQUIRE(dec_plan.num_passes == 3);
-    CHECK(dec_plan.has_decimated);
-    CHECK(dec_plan.passes[0].w_lo == 1U);
-    CHECK(dec_plan.passes[0].decimate_factor == 1U);
-    CHECK(dec_plan.passes[1].w_lo == dec_plan.passes[0].w_hi + 1U);
-    CHECK(dec_plan.passes[1].decimate_factor == 4U);
-    CHECK(dec_plan.passes[2].w_lo == dec_plan.passes[1].w_hi + 1U);
-    CHECK(dec_plan.passes[2].w_hi == 4096U);
-    CHECK(dec_plan.passes[2].decimate_factor == 4U);
-
-    REQUIRE(full_plan.num_passes == 3);
-    CHECK(!full_plan.has_decimated);
-    for (SizeType k = 0; k < full_plan.num_passes; ++k) {
-        CHECK(full_plan.passes[k].decimate_factor == 1U);
-    }
-
-    // Trapezoid disables decimation automatically.
-    const auto trap_tab =
-        make_synthetic_tables(widths, true, 6.0F, 1.0F, specs, false);
-    const auto trap_plan = kadane::make_kadane_surrogate_plan(
-        widths, true, trap_tab.n_rows, trap_tab.raw_thresh, trap_tab.inv_sigma,
-        {}, 1.0, true);
-    CHECK(!trap_plan.has_decimated);
-
-    // Check O(1) arbitrary-width S/N evaluation on both white & colored rows.
-    CHECK(dec_plan.memory_bytes() > 0);
-    for (uint32_t w = 1U; w <= 4096U; ++w) {
-        uint32_t f_idx     = UINT32_MAX;
-        const float snr_w0 = dec_plan.eval_surrogate_snr(
-            0, 10.0 * std::sqrt(static_cast<double>(w)), w, &f_idx);
-        CHECK(f_idx < widths.size());
-        CHECK_THAT(snr_w0, Catch::Matchers::WithinRel(10.0F, 1.0e-5F));
-
-        // Colored FDMT row (leaf_len=16, n_chans=64) exact variance comparison.
-        const double exact_var =
-            64.0 * fdmt_trapezoid_variance(16, w, 0, 1.0 / 16.0);
-        const double exact_sigma = std::sqrt(exact_var);
-        const float snr_colored =
-            dec_plan.eval_surrogate_snr(1, 10.0 * exact_sigma, w);
-        CHECK_THAT(snr_colored, Catch::Matchers::WithinRel(10.0F, 0.015F));
-    }
-
-    // Check packed integer (scale_bits = 5, integer_unit = 1/32) S/N evaluation
-    // and sub-minimum width (`width < widths[0]`) inv_sigma extrapolation.
-    {
-        const auto p_tab  = make_synthetic_tables(widths, true, 6.0F, 4.0F,
-                                                  specs, true, 128.0, 5);
-        const auto p_plan = kadane::make_kadane_surrogate_plan(
-            widths, true, p_tab.n_rows, p_tab.raw_thresh, p_tab.inv_sigma,
-            p_tab.int_mean, p_tab.integer_unit, true);
-        CHECK(p_plan.is_integer);
-        CHECK(p_plan.memory_bytes() > 0);
-        const double scale = 32.0;
-        for (const uint32_t w : {1U, 4U, 19U, 128U, 1024U, 4096U}) {
-            const double mean_sum = p_plan.row_mean_1[0] * w;
-            const double sig_w    = 4.0 * std::sqrt(static_cast<double>(w));
-            const double raw_sum  = mean_sum + (8.5 * sig_w * scale);
-            const float snr_p     = p_plan.eval_surrogate_snr(0, raw_sum, w);
-            CHECK_THAT(snr_p, Catch::Matchers::WithinRel(8.5F, 1.0e-4F));
-        }
-
-        // Sub-minimum bank width (widths starting at 4, evaluating width = 1).
-        const std::array<uint32_t, 3> hi_widths{4U, 8U, 16U};
-        const std::array<std::pair<SizeType, SizeType>, 1> wspec{{{1, 1}}};
-        const auto hi_tab =
-            make_synthetic_tables(hi_widths, true, 6.0F, 2.0F, wspec, false);
-        const auto hi_plan = kadane::make_kadane_surrogate_plan(
-            hi_widths, true, 1, hi_tab.raw_thresh, hi_tab.inv_sigma);
-        CHECK_THAT(hi_plan.eval_surrogate_snr(0, 20.0, 1U),
-                   Catch::Matchers::WithinRel(10.0F, 1.0e-4F));
-    }
-
-    // Simulate multi-pass decimated surrogate Kadane across widths 1..4096
-    // on noisy streams with injected S/N = 10 pulses.
-    auto rng = make_seeded_rng(13579U);
-    std::normal_distribution<float> gauss(0.0F, 1.0F);
-    const std::array<uint32_t, 10> test_widths{1,  2,   5,   12,   20,
-                                               48, 128, 400, 1200, 4096};
-
-    for (const uint32_t pw : test_widths) {
-        constexpr SizeType kStreamLen = 12288;
-        std::vector<float> stream(kStreamLen);
-        for (float& x : stream) {
-            x = gauss(rng);
-        }
-        const SizeType p_start = 4096 + 3; // Intentionally unaligned mod 4!
-        double cur             = 0.0;
-        for (SizeType t = p_start; t < p_start + pw; ++t) {
-            cur += static_cast<double>(stream[t]);
-        }
-        const double target = 10.0 * std::sqrt(static_cast<double>(pw));
-        const auto add      = static_cast<float>((target - cur) / pw);
-        for (SizeType t = p_start; t < p_start + pw; ++t) {
-            stream[t] += add;
-        }
-
-        // Prefix sum for O(1) exact boxcar re-score of winning excursions.
-        std::vector<double> pfx(kStreamLen + 1, 0.0);
-        for (SizeType t = 0; t < kStreamLen; ++t) {
-            pfx[t + 1] = pfx[t] + static_cast<double>(stream[t]);
-        }
-
-        float best_snr = 0.0F;
-        for (SizeType k = 0; k < dec_plan.num_passes; ++k) {
-            const uint32_t dec   = dec_plan.passes[k].decimate_factor;
-            const float b        = dec_plan.row_bias(k, 0);
-            const float trig     = dec_plan.row_trigger(k, 0);
-            const SizeType steps = kStreamLen / dec;
-
-            float c          = 0.0F;
-            float exc_peak   = 0.0F;
-            SizeType exc_beg = 0;
-            SizeType peak_st = 0;
-            SizeType peak_en = 0;
-
-            const auto finish_exc = [&] {
-                if (exc_peak >= trig) {
-                    const SizeType s0 = peak_st * dec;
-                    const SizeType s1 = ((peak_en + 1) * dec);
-                    const auto w_cand = static_cast<uint32_t>(s1 - s0);
-                    const double rsum = pfx[s1] - pfx[s0];
-                    best_snr          = std::max(
-                        best_snr, dec_plan.eval_surrogate_snr(0, rsum, w_cand));
-                }
-                exc_peak = 0.0F;
-            };
-
-            for (SizeType j = 0; j < steps; ++j) {
-                float y = 0.0F;
-                for (uint32_t q = 0; q < dec; ++q) {
-                    y += stream[(j * dec) + q];
-                }
-                if (c == 0.0F) {
-                    exc_beg = j;
-                }
-                c += (y - b);
-                if (c <= 0.0F) {
-                    finish_exc();
-                    c = 0.0F;
-                } else if (c > exc_peak) {
-                    exc_peak = c;
-                    peak_st  = exc_beg;
-                    peak_en  = j;
-                }
-            }
-            finish_exc();
-        }
-        INFO("Surrogate pulse width=" << pw << " recovered S/N=" << best_snr);
-        CHECK(best_snr >= 8.0F);
-    }
-}
-
 TEST_CASE("KadaneGatePlan wide boxcars up to 2^20: soundness, int32 bounds, "
           "and width validation",
           "[kadane_plan][kadane][boxcar][cpu]") {
@@ -1107,10 +914,9 @@ TEST_CASE("KadaneGatePlan wide boxcars up to 2^20: soundness, int32 bounds, "
         {64, 256}, // Heavy FDMT smearing
     }};
 
-    // 1. Validation boundaries on KadaneGatePlan vs KadaneSurrogatePlan.
+    // 1. Validation boundaries on KadaneGatePlan.
     {
         const std::vector<float> one_thr{6.0F};
-        const std::vector<float> one_inv{1.0F};
         CHECK_THROWS_AS(
             kadane::make_kadane_gate_plan(std::span<const uint32_t>{}, false, 1,
                                           std::span<const float>{}),
@@ -1158,20 +964,6 @@ TEST_CASE("KadaneGatePlan wide boxcars up to 2^20: soundness, int32 bounds, "
                                                              1, max_trials_thr);
         CHECK(ok_4096.widths.size() == 4096);
         CHECK(ok_4096.buckets[ok_4096.num_buckets - 1].w_hi == 1048576U);
-
-        // KadaneSurrogatePlan remains strictly capped at max_width <= 4096.
-        const std::array<uint32_t, 2> surr_4097{1U, 4097U};
-        const std::array<float, 2> surr_inv{1.0F, 1.0F / 64.0F};
-        CHECK_THROWS_AS(kadane::make_kadane_surrogate_plan(surr_4097, false, 1,
-                                                           two_thr, surr_inv),
-                        std::invalid_argument);
-        const auto wide_8192 = plans::generate_box_width_trials(8192, 2.0F);
-        const auto tab_8192 =
-            make_synthetic_tables(wide_8192, false, 6.0F, 1.0F, row_specs);
-        CHECK_THROWS_AS(kadane::make_kadane_surrogate_plan(
-                            wide_8192, false, tab_8192.n_rows,
-                            tab_8192.raw_thresh, tab_8192.inv_sigma),
-                        std::invalid_argument);
     }
 
     // 2. Algebraic soundness & cut clamping across wide boxcars (16384 & 2^20).

@@ -21,7 +21,6 @@
 #include "dmt/kadane_cuda.cuh"
 #include "dmt/kadane_monoid.hpp"
 #include "dmt/kadane_plan.hpp"
-#include "dmt/kadane_surrogate.hpp"
 
 namespace dmt::algorithms::detail::fdmt_boxcar_cuda {
 
@@ -39,19 +38,16 @@ inline constexpr SizeType kFastMaxWidth = 4096;
 inline constexpr SizeType kGlobalRingBytes = SizeType{256} << 20;
 inline constexpr int kGlobalBlock          = 256;
 
-// Radix-select key lengths for OverflowPolicy::kKeepBrightest:
-// 18 bytes on kPrefix/kKadane/kNone (4B snr + 8B peak + 4B rank + 2B filter);
-// 38 bytes on kKadaneSurrogate (+ 8B begin + 8B end + 2B width + 2B slot).
-inline constexpr int kKeepBaseKeyBytes      = 18;
-inline constexpr int kKeepSurrogateKeyBytes = 38;
-inline constexpr int kKeepMaxKeyBytes       = kKeepSurrogateKeyBytes;
+// Radix-select key length for OverflowPolicy::kKeepBrightest:
+// 18 bytes (4B snr + 8B peak + 4B rank + 2B filter).
+inline constexpr int kKeepKeyBytes = 18;
 
 struct KeepSelect {
     uint64_t n        = 0; ///< entries in the stores
     uint64_t k        = 0; ///< still to select within the prefix
     uint32_t resolved = 0; ///< selection fixed by prefix[0, depth)
     uint32_t depth    = 0;
-    uint8_t prefix[kKeepMaxKeyBytes]{};
+    uint8_t prefix[kKeepKeyBytes]{};
 };
 
 // Fixed part of the block's shared memory. The dynamic part follows it:
@@ -68,21 +64,6 @@ template <typename T> DMT_D inline T shfl_up(T value, int delta) {
 
 DMT_D inline uint64_t increment(uint64_t* count) {
     return atomicAdd(reinterpret_cast<unsigned long long*>(count), 1ULL);
-}
-
-[[nodiscard]] DMT_HD constexpr uint32_t
-pack_keep_filter(uint32_t filter_idx, uint32_t surrogate_width = 0U) noexcept {
-    return (filter_idx & 0xFFFFU) | (surrogate_width << 16U);
-}
-
-[[nodiscard]] DMT_HD constexpr uint32_t
-keep_filter_idx(const BoxcarKeepEntry& e) noexcept {
-    return e.filter & 0xFFFFU;
-}
-
-[[nodiscard]] DMT_HD constexpr uint32_t
-keep_surrogate_width(const BoxcarKeepEntry& e) noexcept {
-    return e.filter >> 16U;
 }
 
 /// Where a row's candidates go (kDropNew): the call's slots, or with
@@ -149,8 +130,7 @@ struct CandidateWriter {
 };
 
 // OverflowPolicy::kKeepBrightest. Within one row: brighter() restricted to
-// the fields that can differ (S/N, peak sample, filter_idx, begin_sample,
-// end_sample, surrogate width).
+// the fields that differ (S/N, peak sample, width).
 DMT_D inline bool keep_brighter(const BoxcarKeepEntry& a,
                                 const BoxcarKeepEntry& b) {
     if (a.snr != b.snr) {
@@ -159,18 +139,7 @@ DMT_D inline bool keep_brighter(const BoxcarKeepEntry& a,
     if (a.peak != b.peak) {
         return a.peak < b.peak;
     }
-    const uint32_t fa = keep_filter_idx(a);
-    const uint32_t fb = keep_filter_idx(b);
-    if (fa != fb) {
-        return fa < fb;
-    }
-    if (a.begin != b.begin) {
-        return a.begin < b.begin;
-    }
-    if (a.end != b.end) {
-        return a.end < b.end;
-    }
-    return keep_surrogate_width(a) < keep_surrogate_width(b);
+    return a.filter < b.filter;
 }
 
 // A row's store: a heap of at most q entries, dimmest at the top, with
@@ -256,7 +225,7 @@ struct KeepWriter {
             return;
         }
         pending->entry[pending->n++] = {peak.peak, peak.begin, peak.end, snr,
-                                        pack_keep_filter(peak.filter)};
+                                        peak.filter};
     }
 };
 
@@ -438,16 +407,6 @@ struct BlockTables {
     bool transition[2]{false, false};
     int count               = 0;
     const uint64_t* support = nullptr;
-    // Host table identities (null: the constructor tables) of the entry
-    // just evicted plus the ring, oldest first, as the CPU kKadaneSurrogate
-    // ring keeps them: whether an open excursion's earlier best sat under
-    // other tables is decided by identity, never dereferenced here.
-    static constexpr int kTagEntries = 3;
-    int tag_count                    = 0;
-    uint64_t tag_first[kTagEntries]{};
-    bool tag_transition[kTagEntries]{};
-    const void* tag_steady[kTagEntries]{};
-    const void* tag_tr[kTagEntries]{};
 };
 
 // The entry of stream sample `s` (the older one for samples before the
@@ -635,17 +594,6 @@ private:
                              dim3 block,
                              C* carry);
 
-    // Standalone Kadane surrogate path (fdmt_boxcar_cuda_surrogate.cu).
-    void init_surrogate(bool use_box_smearing, std::span<const double> means);
-    void reset_surrogate(cudaStream_t stream);
-    [[nodiscard]] kadane::KadaneSurrogateDeviceView
-    make_surrogate_view() noexcept;
-    void launch_score_surrogate(const FDMTSearchInput& input,
-                                const LevelGroup& g,
-                                SizeType beams);
-    void launch_flush_surrogate(cudaStream_t stream);
-    void launch_open_begin_surrogate(cudaStream_t stream);
-
     // Common helpers (fdmt_boxcar_cuda.cu).
     /// One block's search (`search()` runs the driver) between the block
     /// noise commit and the result bookkeeping, on `queue`.
@@ -688,7 +636,6 @@ private:
     [[nodiscard]] SizeType slot_floats() const noexcept;
     /// Open packed per-width peaks take their S/N (the first per-call mask).
     void sync_peak_snr();
-    void sync_surrogate_snr();
     void reset_block_noise();
     const float* slot_of(const NoiseTables* tables, cudaStream_t stream);
     void commit_block_noise(cudaStream_t stream);
@@ -832,22 +779,6 @@ private:
     gpu_utils::PlannedVector<int32_t> m_kadane_ic_d;
     gpu_utils::PlannedVector<kadane::LagWindow<float>> m_lag_f32_d;
     gpu_utils::PlannedVector<kadane::LagWindow<int32_t>> m_lag_i32_d;
-
-    // --- Standalone surrogate (`kKadaneSurrogate`) plan & device state ---
-    kadane::KadaneSurrogatePlan m_surrogate_plan;
-    bool m_surrogate_int_u32 = false;
-    gpu_utils::PlannedVector<float> m_surr_bias_d;
-    gpu_utils::PlannedVector<float> m_surr_trig_d;
-    gpu_utils::PlannedVector<float> m_surr_box_inv_d;
-    gpu_utils::PlannedVector<double> m_surr_mean1_d;
-    gpu_utils::PlannedVector<uint8_t> m_surr_disabled_d;
-    gpu_utils::PlannedVector<uint32_t> m_surr_nearest_d;
-    gpu_utils::PlannedVector<uint32_t> m_surr_blo_d;
-    gpu_utils::PlannedVector<uint32_t> m_surr_bhi_d;
-    gpu_utils::PlannedVector<float> m_surr_lerp_d;
-    gpu_utils::PlannedVector<kadane::KadaneSurrogateRowState>
-        m_surrogate_rows_d;
-    gpu_utils::PlannedVector<uint64_t> m_surrogate_pos_d;
     /// Buffers a deferred construction left for allocate() (declared last:
     /// destroyed first, after nothing else refers to it).
     gpu_utils::PendingList m_deferred;

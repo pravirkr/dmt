@@ -34,16 +34,13 @@ enum class OverflowPolicy : uint8_t {
     kKeepBrightest,
 };
 
-/// Stage-1 tile screening / scoring mode for boxcar search.
+/// Stage-1 tile screening mode for boxcar search.
 enum class BoxcarScreenMode : uint8_t {
     /// Prefix-sum / range-minimum tile screen (max_boxcar 1..2^20).
     kPrefix,
     /// Lossless multi-bucket Kadane gate + Stage-2 scoring (max_boxcar
     /// 1..2^20).
     kKadane,
-    /// Approximate multi-bias Kadane scorer, skipping Stage-2 prefix scan
-    /// (max_boxcar 1..4096).
-    kKadaneSurrogate,
     /// Disable Stage-1 screening; score every tile directly (max_boxcar
     /// 1..2^20).
     kNone,
@@ -86,10 +83,9 @@ struct BoxcarConfig {
           overflow_policy(overflow_policy),
           screen_mode(screen_mode) {}
 
-    /// Widest box searched, 1..2^20 samples (1..4096 for kKadaneSurrogate);
-    /// always the last width of the bank. Up to 4096 the search is tuned;
-    /// wider boxes are searched exactly but more slowly (on a GPU, prefix
-    /// rings in device memory).
+    /// Widest box searched, 1..2^20 samples; always the last width of the
+    /// bank. Up to 4096 the search is tuned; wider boxes are searched
+    /// exactly but more slowly (on a GPU, prefix rings in device memory).
     SizeType max_boxcar = 4096;
     /// Width spacing >= 1: from 1, next = max(w + 1, ceil(w * wtsp)) while
     /// it is <= max_boxcar, then max_boxcar when the steps stop below it
@@ -121,9 +117,7 @@ struct BoxcarConfig {
     /// detections cannot crowd out the others; the planes' shares must fit
     /// max_candidates (number of planes x this <= max_candidates).
     SizeType max_candidates_per_plane = 0;
-    /// Default kAuto; see BoxcarScreenMode (kKadaneSurrogate is approximate
-    /// and supports max_boxcar up to 4096; the other modes are exact and
-    /// support 1..2^20).
+    /// Default kAuto; see BoxcarScreenMode.
     BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto;
     /// FDMTBoxcar (float or packed input): the stream will pass per-call
     /// kill masks.

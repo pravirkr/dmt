@@ -13,7 +13,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
-#include <omp.h>
 
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_boxcar.hpp"
@@ -590,10 +589,6 @@ TEST_CASE("FDMTBoxcar kKadane matches kPrefix bit-for-bit on packed "
                             std::sqrt(maxf * (maxf + 2.0F) / 12.0F), true);
         const auto pblks = make_packed_blocks(u64_plan, 1, 4, 16, 632U);
         check_pk(u64_plan, pcfg, pblks, 1, 64, {}, true, true);
-        const auto surr = run_fdmt_boxcar_packed(
-            u64_plan, pcfg, BoxcarScreenMode::kKadaneSurrogate, pblks, true,
-            Exec::cpu(1), 1, 64, true, {}, true);
-        CHECK_FALSE(surr.candidates.empty());
     }
 }
 
@@ -739,323 +734,6 @@ TEST_CASE("FDMTFFTBoxcar kKadane and kNone match kPrefix bit-for-bit",
     }
 }
 
-TEST_CASE("kKadaneSurrogate end-to-end recovery, S/N calibration, streaming "
-          "frontier, and zero false alarms",
-          "[fdmt_boxcar_kadane][boxcar][kadane][surrogate][cpu]") {
-    SECTION("Zero false positives on pure unit-variance Gaussian noise") {
-        const plans::FDMTPlan plan(700.0F, 1200.0F, 16, 512, 0.001F, 32);
-        std::mt19937 rng(12345U); // NOLINT(bugprone-random-generator-seed)
-        const SizeType blk_len = plan.get_nchans() * plan.get_nsamps();
-        std::vector<std::vector<float>> fblocks(8, std::vector<float>(blk_len));
-        std::vector<std::vector<uint8_t>> u8blocks(
-            8, std::vector<uint8_t>(blk_len));
-        for (SizeType k = 0; k < 8; ++k) {
-            for (SizeType i = 0; i < blk_len; ++i) {
-                const float g  = next_gaussian(rng);
-                fblocks[k][i]  = g;
-                u8blocks[k][i] = static_cast<uint8_t>(
-                    std::clamp(std::round(128.0F + 16.0F * g), 0.0F, 255.0F));
-            }
-        }
-        const auto fcfg = make_cfg(64, 1.5F, 6.5F);
-        const auto frun = run_fdmt_boxcar_float(
-            plan, fcfg, BoxcarScreenMode::kKadaneSurrogate, fblocks, true,
-            Exec::cpu(1), 1, 128, true);
-        CHECK(frun.candidates.empty());
-        CHECK(frun.counts.total_detected == 0);
-        CHECK(run_fdmt_fft_boxcar_float(plan, fcfg,
-                                        BoxcarScreenMode::kKadaneSurrogate,
-                                        fblocks, true, 1, true)
-                  .candidates.empty());
-        CHECK(run_fdmt_boxcar_packed(
-                  plan, make_packed_cfg(64, 1.5F, 6.5F, 8, 128.0F, 16.0F),
-                  BoxcarScreenMode::kKadaneSurrogate, u8blocks, true,
-                  Exec::cpu(1), 1, 128, true)
-                  .candidates.empty());
-    }
-
-    SECTION("Narrow and wide dispersed pulse recovery on FDMTBoxcar and "
-            "FDMTFFTBoxcar (float32, uint8, uint16)") {
-        const plans::FDMTPlan plan(700.0F, 1200.0F, 16, 512, 0.001F, 40, 0, 1,
-                                   "valid", 1);
-        const SizeType target_dm = 22;
-        const SizeType nchans    = plan.get_nchans();
-        const SizeType nsamps    = plan.get_nsamps();
-        const SizeType blk_len   = nchans * nsamps;
-        const plans::FDMTPlan full_plan(700.0F, 1200.0F, nchans, 4 * nsamps,
-                                        0.001F, 40);
-        const plans::FDMTPlan root_plan(700.0F, 1200.0F, nchans, nsamps, 0.001F,
-                                        40);
-        auto best_root_snr = [](const StreamRun& run) {
-            float best = 0.0F;
-            for (const auto& c : run.candidates) {
-                if (c.subband_level == 0 && c.dm_idx == target_dm &&
-                    c.peak_sample >= 950 && c.peak_sample <= 1120) {
-                    best = std::max(best, c.snr);
-                }
-            }
-            return best;
-        };
-        for (const SizeType pulse_w :
-             {SizeType{1}, SizeType{4}, SizeType{24}, SizeType{64}}) {
-            std::mt19937 rng(4000U + static_cast<uint32_t>(pulse_w));
-            std::vector<float> full_wf(4 * blk_len);
-            for (float& x : full_wf) {
-                x = next_gaussian(rng);
-            }
-            algorithms::add_frb_track(
-                full_wf, full_plan, target_dm,
-                15.0F / std::sqrt(static_cast<float>(nchans * pulse_w)), 980,
-                pulse_w);
-            std::vector<std::vector<float>> fblocks(
-                4, std::vector<float>(blk_len));
-            std::vector<std::vector<uint8_t>> u8blocks(
-                4, std::vector<uint8_t>(blk_len));
-            std::vector<std::vector<uint8_t>> u16blocks(
-                4, std::vector<uint8_t>(blk_len * 2));
-            for (SizeType k = 0; k < 4; ++k) {
-                for (SizeType c = 0; c < nchans; ++c) {
-                    for (SizeType t = 0; t < nsamps; ++t) {
-                        const float x =
-                            full_wf[(c * 4 * nsamps) + (k * nsamps) + t];
-                        const SizeType dst = (c * nsamps) + t;
-                        fblocks[k][dst]    = x;
-                        u8blocks[k][dst]   = static_cast<uint8_t>(std::clamp(
-                            std::round(128.0F + 12.0F * x), 0.0F, 255.0F));
-                        const auto u16v    = static_cast<uint16_t>(
-                            std::clamp(std::round(32768.0F + 1000.0F * x), 0.0F,
-                                       65535.0F));
-                        u16blocks[k][2 * dst] = static_cast<uint8_t>(u16v);
-                        u16blocks[k][(2 * dst) + 1] =
-                            static_cast<uint8_t>(u16v >> 8U);
-                    }
-                }
-            }
-            for (const bool trap : {false, true}) {
-                DYNAMIC_SECTION("pulse_w=" << pulse_w << " trap=" << trap) {
-                    for (const auto peak_mode :
-                         {PeakFindingMode::kContiguousPeakPerWidth,
-                          PeakFindingMode::kContiguousPeakAcrossWidths,
-                          PeakFindingMode::kAllAboveThreshold}) {
-                        if (trap &&
-                            peak_mode == PeakFindingMode::kAllAboveThreshold) {
-                            continue;
-                        }
-                        const auto cfg =
-                            make_cfg(64, 1.5F, 6.0F, trap, peak_mode);
-                        const auto exact = run_fdmt_boxcar_float(
-                            plan, cfg, BoxcarScreenMode::kPrefix, fblocks,
-                            false, Exec::cpu(1), 1, 64, true);
-                        const auto surr_1t = run_fdmt_boxcar_float(
-                            plan, cfg, BoxcarScreenMode::kKadaneSurrogate,
-                            fblocks, false, Exec::cpu(1), 1, 64, true, {},
-                            nullptr,
-                            peak_mode ==
-                                PeakFindingMode::kContiguousPeakPerWidth);
-                        require_bit_exact(
-                            run_fdmt_boxcar_float(
-                                plan, cfg, BoxcarScreenMode::kKadaneSurrogate,
-                                fblocks, false, Exec::cpu(), 1, 64, true),
-                            surr_1t);
-                        const float exact_snr = best_root_snr(exact);
-                        const float surr_snr  = best_root_snr(surr_1t);
-                        REQUIRE(exact_snr > 11.0F);
-                        CHECK(surr_snr >= 0.90F * exact_snr);
-                        CHECK(surr_snr <= 1.15F * exact_snr);
-                    }
-                    auto check_packed_surr = [&](const BoxcarConfig& pcfg,
-                                                 const auto& pblks, bool rep) {
-                        const auto s = run_fdmt_boxcar_packed(
-                            plan, pcfg, BoxcarScreenMode::kKadaneSurrogate,
-                            pblks, false, Exec::cpu(1), 1, 64, true, {}, rep);
-                        const auto p = run_fdmt_boxcar_packed(
-                            plan, pcfg, BoxcarScreenMode::kPrefix, pblks, false,
-                            Exec::cpu(1), 1, 64, true);
-                        CHECK(best_root_snr(s) >= 0.90F * best_root_snr(p));
-                    };
-                    check_packed_surr(
-                        make_packed_cfg(64, 1.5F, 6.0F, 8, 128.0F, 12.0F, trap),
-                        u8blocks, true);
-                    check_packed_surr(make_packed_cfg(64, 1.5F, 6.0F, 16,
-                                                      32768.0F, 1000.0F, trap),
-                                      u16blocks, false);
-                    const auto fft_cfg = make_cfg(64, 1.5F, 6.0F, trap);
-                    for (const bool frac : {false, true}) {
-                        if (frac && pulse_w == 1) {
-                            continue;
-                        }
-                        const auto fft_exact = run_fdmt_fft_boxcar_float(
-                            root_plan, fft_cfg, BoxcarScreenMode::kPrefix,
-                            fblocks, false, 1, frac);
-                        const auto fft_surr = run_fdmt_fft_boxcar_float(
-                            root_plan, fft_cfg,
-                            BoxcarScreenMode::kKadaneSurrogate, fblocks, false,
-                            1, frac);
-                        CHECK(best_root_snr(fft_surr) >=
-                              0.90F * best_root_snr(fft_exact));
-                    }
-                }
-            }
-        }
-    }
-
-    SECTION("Dynamic per-call kill_mask, cross-block open excursions, and "
-            "outer OpenMP team safety in surrogate") {
-        const plans::FDMTPlan plan(700.0F, 1200.0F, 8, 256, 0.001F, 24, 0, 1,
-                                   "valid", 1);
-        auto blocks = make_float_blocks(plan, 1, 3, 999U);
-        for (SizeType c = 4; c < 8; ++c) {
-            for (SizeType t = 0; t < 256; ++t) {
-                blocks[1][(c * 256) + t] = 80.0F;
-            }
-        }
-        const std::vector<std::vector<uint8_t>> masks{
-            {}, {1, 1, 1, 1, 0, 0, 0, 0}, {}};
-        auto cfg        = make_cfg(32, 1.5F, 6.0F);
-        cfg.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-
-        const auto masked_run = run_fdmt_boxcar_float(
-            plan, cfg, BoxcarScreenMode::kKadaneSurrogate, blocks, true,
-            Exec::cpu(1), 1, 64, true, {}, &masks, true);
-        for (const auto& c : masked_run.candidates) {
-            if (c.chan_begin >= 4 && c.begin_sample >= 256 &&
-                c.end_sample < 512) {
-                FAIL("Killed upper subband emitted a surrogate candidate");
-            }
-        }
-
-        // Open surrogate excursion peaking at end of Block 0 and closing in
-        // Block 1 / Block 2 / flush() across 0%->100% and 75%->0% kill masks.
-        const plans::FDMTPlan xplan(700.0F, 1200.0F, 8, 256, 0.001F, 16);
-        const std::vector<uint8_t> m_none(8, 1U);
-        const std::vector<uint8_t> m_all(8, 0U);
-        const std::vector<uint8_t> m_75{1, 1, 0, 0, 0, 0, 0, 0};
-        const std::vector<float> zero_blk(8 * 256, 0.0F);
-        std::vector<float> b0_full(8 * 256, 0.0F);
-        std::vector<float> b0_75(8 * 256, 0.0F);
-        std::vector<float> b1_hold(8 * 256, 0.0F);
-        std::vector<float> b1_nudge(8 * 256, 0.0F);
-        for (SizeType c = 0; c < 8; ++c) {
-            for (SizeType t = 248; t < 256; ++t) {
-                b0_full[(c * 256) + t] = 14.0F / std::sqrt(8.0F * 8.0F);
-                if (c < 2) {
-                    b0_75[(c * 256) + t] = 9.5F / std::sqrt(2.0F * 8.0F);
-                }
-            }
-            for (SizeType t = 0; t < 75; ++t) {
-                b1_hold[(c * 256) + t] = 0.09F; // Decays past t=64 into steady!
-            }
-            for (SizeType t = 0; t < 3; ++t) {
-                b1_nudge[(c * 256) + t] = 0.35F; // Nudges next_c under m_none!
-            }
-        }
-        const std::vector<std::vector<uint8_t>> mk_ref0{m_none};
-        const std::vector<std::vector<uint8_t>> mk_0to100{m_none, m_all, m_all};
-        const std::vector<std::vector<uint8_t>> mk_ref75{m_75};
-        const std::vector<std::vector<uint8_t>> mk_75to0{m_75, m_none};
-        for (const auto pm : {PeakFindingMode::kContiguousPeakPerWidth,
-                              PeakFindingMode::kContiguousPeakAcrossWidths,
-                              PeakFindingMode::kAllAboveThreshold}) {
-            const auto xcfg = make_cfg(32, 1.5F, 6.0F, false, pm);
-            auto xsnr = [&](const std::vector<std::vector<float>>& blks,
-                            const std::vector<std::vector<uint8_t>>& mks) {
-                const auto r = run_fdmt_boxcar_float(
-                    xplan, xcfg, BoxcarScreenMode::kKadaneSurrogate, blks,
-                    false, Exec::cpu(1), 1, 64, false, {}, &mks);
-                float best = 0.0F;
-                for (const auto& c : r.candidates) {
-                    if (c.dm_idx == 0 && c.peak_sample >= 244 &&
-                        c.peak_sample < 256) {
-                        best = std::max(best, c.snr);
-                    }
-                }
-                return best;
-            };
-            const float ref_a = xsnr({b0_full}, mk_ref0);
-            REQUIRE(ref_a > 12.0F);
-            CHECK(std::bit_cast<uint32_t>(
-                      xsnr({b0_full, zero_blk, zero_blk}, mk_0to100)) ==
-                  std::bit_cast<uint32_t>(ref_a));
-            const float ref_b = xsnr({b0_75}, mk_ref75);
-            REQUIRE(ref_b > 8.0F);
-            for (const auto* b1 : std::array<const std::vector<float>*, 3>{
-                     &zero_blk, &b1_hold, &b1_nudge}) {
-                CHECK(std::bit_cast<uint32_t>(xsnr({b0_75, *b1}, mk_75to0)) ==
-                      std::bit_cast<uint32_t>(ref_b));
-            }
-        }
-
-        // Two independent Exec::cpu(1) instances where pos - 1 at flush()
-        // lands on a mixed transition+steady boundary.
-        const plans::FDMTPlan tplan(700.0F, 1200.0F, 8, 47, 0.001F, 16);
-        auto tblocks = make_float_blocks(tplan, 1, 2, 1212U);
-        for (SizeType c = 1; c < 8; ++c) {
-            for (SizeType t = 39; t < 47; ++t) {
-                tblocks[1][(c * 47) + t] += 2.8F; // Open at pos=94 in flush()!
-            }
-        }
-        const std::vector<std::vector<uint8_t>> tmasks{{0, 1, 1, 1, 1, 1, 1, 1},
-                                                       m_none};
-        const auto tcfg       = make_cfg(32, 1.5F, 5.0F);
-        const auto serial_ref = run_fdmt_boxcar_float(
-            tplan, tcfg, BoxcarScreenMode::kKadaneSurrogate, tblocks, false,
-            Exec::cpu(1), 1, 47, false, {}, &tmasks);
-        REQUIRE_FALSE(serial_ref.candidates.empty());
-        std::array<StreamRun, 2> par_runs{};
-        std::array<bool, 2> par_fr_ok{true, true};
-        for (int w = 0; w < 2; ++w) {
-            bool& ok = par_fr_ok[static_cast<SizeType>(w)];
-            try {
-                BoxcarConfig wcfg = tcfg;
-                wcfg.screen_mode  = BoxcarScreenMode::kKadaneSurrogate;
-                FDMTBoxcar s(tplan, wcfg, false, Exec::cpu(1), 1,
-                             algorithms::kFDMTAutoFuse, 47);
-                auto& dst   = par_runs[static_cast<SizeType>(w)];
-                uint64_t fr = 0;
-                auto acc = [&](const CandidateResultView& v, uint64_t next_fr) {
-                    for (const auto& c : v.candidates) {
-                        ok = ok && (c.begin_sample >= fr);
-                    }
-                    ok = ok && (next_fr >= fr) && !v.overflowed();
-                    fr = next_fr;
-                    dst.counts.emitted_count += v.emitted_count;
-                    dst.counts.total_detected += v.total_detected;
-                    dst.candidates.insert(dst.candidates.end(),
-                                          v.candidates.begin(),
-                                          v.candidates.end());
-                };
-                for (SizeType k = 0; k < tblocks.size(); ++k) {
-                    acc(s.execute(tblocks[k], tmasks[k]),
-                        s.get_candidate_frontier());
-                }
-                acc(s.flush(), s.get_candidate_frontier());
-            } catch (...) {
-                ok = false;
-            }
-        }
-        CHECK((par_fr_ok[0] && par_fr_ok[1]));
-        require_bit_exact(par_runs[0], serial_ref);
-        require_bit_exact(par_runs[1], serial_ref);
-
-        // Candidate overflow bounds check (max_candidates = 5 per call)
-        auto ov_cfg             = make_cfg(32, 1.5F, 2.2F, false,
-                                           PeakFindingMode::kAllAboveThreshold);
-        ov_cfg.max_candidates   = 5;
-        ov_cfg.max_cands_per_dm = 2;
-        const auto ov_run       = run_fdmt_boxcar_float(
-            plan, ov_cfg, BoxcarScreenMode::kKadaneSurrogate, blocks, true,
-            Exec::cpu(1), 1, 64, false, {}, nullptr, true, true);
-        CHECK(ov_run.counts.overflowed());
-        CHECK(ov_run.counts.emitted_count <=
-              (blocks.size() + 1) * ov_cfg.max_candidates);
-        CHECK(ov_run.counts.dropped_per_dm > 0);
-        CHECK(ov_run.counts.dropped_global > 0);
-        CHECK(ov_run.counts.total_detected == ov_run.counts.emitted_count +
-                                                  ov_run.counts.dropped_per_dm +
-                                                  ov_run.counts.dropped_global);
-    }
-}
-
 TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
           "BoxcarScreenModes",
           "[fdmt_boxcar_kadane][boxcar][kadane][overflow][cpu]") {
@@ -1065,7 +743,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
     using boxcar_test::run_calls;
 
     SECTION("Per-call top-q per DM and global top-K across kPrefix, kKadane, "
-            "kNone, and kKadaneSurrogate (float, packed, multi-beam, flush)") {
+            "and kNone (float, packed, multi-beam, flush)") {
         constexpr SizeType kBeams = 2;
         for (const SizeType depth : {SizeType{0}, SizeType{1}}) {
             const plans::FDMTPlan plan(700.0F, 1200.0F, 16, 256, 0.001F,
@@ -1147,7 +825,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
                                 return calls;
                             };
 
-                        // 1. Exact modes: kPrefix == kKadane == kNone ==
+                        // Exact modes: kPrefix == kKadane == kNone ==
                         // keep_brightest(uncapped).
                         auto open_cfg             = base_cfg;
                         open_cfg.max_candidates   = SizeType{1} << 20;
@@ -1207,53 +885,6 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
                             }
                             CHECK(dropped_sum > 0);
                         }
-
-                        // 2. kKadaneSurrogate: keeps exact top-q per DM and
-                        // global top-K of uncapped kKadaneSurrogate.
-                        const auto all_surr = run_mode_calls(
-                            open_cfg, BoxcarScreenMode::kKadaneSurrogate,
-                            nullptr);
-                        SizeType total_surr = 0;
-                        for (const auto& v : all_surr) {
-                            total_surr += v.size();
-                        }
-                        REQUIRE(total_surr > 100);
-                        if (peak_mode != PeakFindingMode::kAllAboveThreshold) {
-                            CHECK_FALSE(all_surr.back().empty());
-                        }
-
-                        for (const auto& [q, k_cap] :
-                             {std::pair<SizeType, SizeType>{3, 1U << 20},
-                              {2, 70},
-                              {1, 20}}) {
-                            auto scfg = base_cfg;
-                            scfg.overflow_policy =
-                                OverflowPolicy::kKeepBrightest;
-                            scfg.max_cands_per_dm = q;
-                            scfg.max_candidates   = k_cap;
-                            std::vector<CandidateCounts> s1_counts;
-                            const auto s1_kept = run_mode_calls(
-                                scfg, BoxcarScreenMode::kKadaneSurrogate,
-                                &s1_counts, q == 2);
-                            REQUIRE(s1_kept.size() == all_surr.size());
-                            SizeType dropped_sum = 0;
-                            for (SizeType i = 0; i < all_surr.size(); ++i) {
-                                CandidateCounts want;
-                                const auto expected =
-                                    keep_brightest(all_surr[i], q, k_cap, want);
-                                require_same(s1_kept[i], expected);
-                                require_bit_exact_candidates(s1_kept[i],
-                                                             expected);
-                                check_counts_eq(s1_counts[i], want);
-                                CHECK(s1_counts[i].total_detected ==
-                                      s1_counts[i].emitted_count +
-                                          s1_counts[i].dropped_per_dm +
-                                          s1_counts[i].dropped_global);
-                                dropped_sum +=
-                                    want.dropped_per_dm + want.dropped_global;
-                            }
-                            CHECK(dropped_sum > 0);
-                        }
                     }
                 }
             }
@@ -1289,7 +920,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
         CandidateCounts pfx_counts_ref{};
         for (const auto mode :
              {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-              BoxcarScreenMode::kNone, BoxcarScreenMode::kKadaneSurrogate}) {
+              BoxcarScreenMode::kNone, BoxcarScreenMode::kAuto}) {
             BoxcarConfig cfg;
             cfg.max_boxcar       = 16;
             cfg.detect_thresh    = 6.0F;
@@ -1333,7 +964,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
             if (mode == BoxcarScreenMode::kPrefix) {
                 pfx_kept_ref   = v;
                 pfx_counts_ref = static_cast<const CandidateCounts&>(kept);
-            } else if (mode != BoxcarScreenMode::kKadaneSurrogate) {
+            } else {
                 require_bit_exact_candidates(v, pfx_kept_ref);
                 check_counts_eq(static_cast<const CandidateCounts&>(kept),
                                 pfx_counts_ref);
@@ -1347,7 +978,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
         const auto fblocks = make_float_blocks(plan, 1, 3, 2200U);
         for (const auto mode :
              {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-              BoxcarScreenMode::kNone, BoxcarScreenMode::kKadaneSurrogate}) {
+              BoxcarScreenMode::kNone, BoxcarScreenMode::kAuto}) {
             BoxcarConfig open_cfg;
             open_cfg.max_boxcar       = 16;
             open_cfg.wtsp             = 1.5F;
@@ -1383,7 +1014,7 @@ TEST_CASE("FDMTBoxcar kKeepBrightest works identically across all 4 "
 }
 
 TEST_CASE("FDMTBoxcar drop_block_noise rollback on throw preserves skewed "
-          "subband stream across kKadane, kNone, and kKadaneSurrogate",
+          "subband stream across kKadane and kNone",
           "[fdmt_boxcar_kadane][boxcar][kadane][skew][mask][cpu]") {
     using skew_search_test::run_subband_search;
     using skew_search_test::search_config;
@@ -1418,8 +1049,7 @@ TEST_CASE("FDMTBoxcar drop_block_noise rollback on throw preserves skewed "
                         pfx_clean.candidates.size());
 
                 for (const auto mode :
-                     {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone,
-                      BoxcarScreenMode::kKadaneSurrogate}) {
+                     {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
                     if (mode == BoxcarScreenMode::kNone && !use_drain) {
                         continue;
                     }
@@ -1430,10 +1060,8 @@ TEST_CASE("FDMTBoxcar drop_block_noise rollback on throw preserves skewed "
                         use_drain, &masks, 1.5F, &planes, SIZE_MAX, &cfg);
                     REQUIRE(clean.latency > 0);
                     REQUIRE(clean.candidates.size() > 100);
-                    if (mode != BoxcarScreenMode::kKadaneSurrogate) {
-                        require_bit_exact_candidates(clean.candidates,
-                                                     pfx_clean.candidates);
-                    }
+                    require_bit_exact_candidates(clean.candidates,
+                                                 pfx_clean.candidates);
 
                     for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
                         const auto failed = run_subband_search(

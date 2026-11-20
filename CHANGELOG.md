@@ -116,10 +116,8 @@ All notable changes to `dmt` are listed here. The format follows
 - **`BoxcarConfig::screen_mode` / `dmtlib.BoxcarScreenMode`** for `FDMTBoxcar`
   and `FDMTFFTBoxcar` (CPU and GPU): `kAuto` (`AUTO`, default), `kKadane`
   (`KADANE`, lossless multi-bucket Kadane tile gate + exact Stage-2 scoring),
-  `kPrefix` (`PREFIX`, prefix-sum / sparse range-minimum screen), `kNone`
-  (`NONE`, unscreened exact scoring), and `kKadaneSurrogate`
-  (`KADANE_SURROGATE`, approximate multi-bias Kadane excursion detector with
-  local replay, `max_boxcar` up to 4096).
+  `kPrefix` (`PREFIX`, prefix-sum / sparse range-minimum screen), and `kNone`
+  (`NONE`, unscreened exact scoring).
 
 ### Changed
 
@@ -262,8 +260,7 @@ All notable changes to `dmt` are listed here. The format follows
   across all `wtsp` spacings and `{1, 2, 1}` trapezoids. GPU `kAuto` keeps
   `kPrefix`.
 - `max_boxcar` may exceed 4096 (up to 2^20 samples, still at most 4096
-  widths, except `kKadaneSurrogate` which is capped at 4096). Boxes wider than
-  4096 are exact but not tuned for speed.
+  widths). Boxes wider than 4096 are exact but not tuned for speed.
 - On a GPU, `max_memory_bytes` of `FDMTBoxcar` and `FDMTFFTBoxcar` bounds
   device memory only. Host allocations are reported in the new
   `memory_usage.host`, and `memory_usage.budgeted` is the part checked.

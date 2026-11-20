@@ -2,12 +2,10 @@
 
 // Private: the CPU FDMTBoxcar engine (detail::make_fdmt_boxcar_cpu). The class
 // is declared here and defined across:
-// - fdmt_boxcar_cpu.cpp           (lifecycle, memory, block noise, dispatch)
-// - fdmt_boxcar_cpu_prefix.cpp    (kPrefix & kNone prefix-sum screen + scorer)
-// - fdmt_boxcar_cpu_kadane.cpp    (kKadane SIMD bound gate + lazy tile scorer)
-// - fdmt_boxcar_cpu_surrogate.cpp (kKadaneSurrogate multi-strip scorer)
+// - fdmt_boxcar_cpu.cpp        (lifecycle, memory, block noise, dispatch)
+// - fdmt_boxcar_cpu_prefix.cpp (kPrefix & kNone prefix-sum screen + scorer)
+// - fdmt_boxcar_cpu_kadane.cpp (kKadane SIMD bound gate + lazy tile scorer)
 
-#include <array>
 #include <atomic>
 #include <bit>
 #include <cstddef>
@@ -23,7 +21,6 @@
 #include "dmt/kadane_monoid.hpp"
 #include "dmt/kadane_plan.hpp"
 #include "dmt/kadane_simd.hpp"
-#include "dmt/kadane_surrogate.hpp"
 #include "dmt/planned_vector.hpp"
 
 namespace dmt::algorithms::detail::fdmt_boxcar_cpu {
@@ -252,80 +249,6 @@ private:
                         SizeType beams,
                         const FDMTSearchInput& input);
 
-    // Standalone multi-strip Kadane surrogate (fdmt_boxcar_cpu_surrogate.cpp)
-    void init_surrogate(bool use_box_smearing);
-    void emit_surrogate_raw(SizeType row,
-                            SizeType beam,
-                            uint64_t begin_sample,
-                            uint64_t end_sample,
-                            uint64_t peak_sample,
-                            float snr,
-                            uint32_t filter_idx,
-                            uint32_t width);
-    void
-    emit_surrogate_peak(SizeType row, SizeType beam, const BoxcarPeak& peak);
-    [[nodiscard]] const NoiseTables* active_surrogate_table(
-        SizeType row_idx, uint64_t sample, uint32_t filter_idx) const noexcept;
-    [[nodiscard]] float
-    eval_surrogate_excursion_snr(SizeType row_idx,
-                                 const kadane::SurrogateExcursion& ex,
-                                 const TileTables* tables,
-                                 uint64_t tile_start,
-                                 uint64_t tile_end,
-                                 uint32_t& out_filter_idx) const noexcept;
-    void cache_surrogate_pass_snr(
-        SizeType row_idx,
-        kadane::KadaneSurrogatePassState& st,
-        uint32_t pass_idx,
-        const TileTables* tables,
-        uint64_t tile_start,
-        uint64_t tile_end,
-        const kadane::KadaneSurrogatePassState* prev_st) const noexcept;
-    void handle_surrogate_excursion(SizeType row_idx,
-                                    SizeType beam,
-                                    const kadane::SurrogateExcursion& ex,
-                                    const kadane::KadaneSurrogateRowState& st,
-                                    const TileTables* tables,
-                                    uint64_t tile_start,
-                                    uint64_t tile_end);
-    void
-    maybe_finalize_surrogate_pending(SizeType row_idx,
-                                     SizeType beam,
-                                     uint64_t tile_end,
-                                     const kadane::KadaneSurrogateRowState& st);
-    const float* stage_surrogate_row(const FDMTSearchInput& in,
-                                     SizeType row_idx,
-                                     SizeType beam,
-                                     SizeType t0,
-                                     SizeType n,
-                                     float* dst_f32,
-                                     uint32_t* tmp_u32) const noexcept;
-    std::span<const float> build_surrogate_lookback(SizeType tid,
-                                                    SizeType row_idx,
-                                                    SizeType beam,
-                                                    const FDMTSearchInput& in,
-                                                    SizeType t0) noexcept;
-    void save_surrogate_carry(SizeType tid,
-                              SizeType row_idx,
-                              SizeType beam,
-                              const FDMTSearchInput& in) noexcept;
-    void compute_surrogate_row_triggers(
-        SizeType row_idx,
-        const float* screen_thr,
-        std::array<float, kadane::kMaxSurrogatePasses>& out_triggers)
-        const noexcept;
-    void consume_surrogate(SizeType row_lo,
-                           SizeType row_hi,
-                           SizeType first_beam,
-                           SizeType beams,
-                           const FDMTSearchInput& input);
-    void sync_surrogate_row_at_pos(SizeType tid,
-                                   SizeType row_idx,
-                                   SizeType beam,
-                                   uint64_t pos);
-    void update_open_begin_surrogate();
-    void flush_surrogate();
-
     const plans::FDMTPlan& m_plan;
     BoxcarConfig m_config;
     const std::vector<plans::BoxcarPlanePlan>& m_planes;
@@ -403,9 +326,9 @@ private:
     std::optional<BlockNoise> m_evicted;
     bool m_commit_open   = false;
     SizeType m_ring_size = 1;
-    /// Entries the search latency needs (1 + ceil(latency / nsamps), plus
-    /// the surrogate's); above m_ring_size the oldest kept entry takes the
-    /// latest catch-all tables (BlockNoise::catch_all).
+    /// Entries the search latency needs (1 + ceil(latency / nsamps)); above
+    /// m_ring_size the oldest kept entry takes the latest catch-all tables
+    /// (BlockNoise::catch_all).
     SizeType m_ring_needed = 1;
     bool m_has_catch_all   = false; ///< m_catch_all set (null: constructor)
     std::shared_ptr<const NoiseTables> m_catch_all;
@@ -422,7 +345,6 @@ private:
     std::vector<uint64_t> m_screen_ithr; ///< packed: min integer cutoffs
     SizeType m_kadane_exact_prefix_cap = kKadaneExactPrefixCap;
     SizeType m_prefix_stride           = 0;
-    SizeType m_surrogate_carry_ring    = 0;
     kadane::KadaneGatePlan m_kadane_plan;
     bool m_kadane_int32 = false;
     bool m_any_edge_lag = false;
@@ -431,16 +353,6 @@ private:
     std::vector<LagWindow<float>> m_lag_f32;
     std::vector<LagWindow<int32_t>> m_lag_i32;
     std::vector<uint8_t> m_open;
-    kadane::KadaneSurrogatePlan m_surrogate_plan;
-    bool m_surrogate_int_u32 = false;
-    std::vector<float> m_surrogate_c;
-    std::vector<float> m_surrogate_dec;
-    std::vector<kadane::KadaneSurrogateRowState> m_surrogate_rows;
-    std::vector<uint8_t> m_surrogate_open;
-    std::vector<uint64_t> m_surrogate_pos;
-    std::vector<float> m_surrogate_chk_c;
-    std::vector<float> m_surrogate_chk_dec;
-    std::vector<float> m_surrogate_lb;
     std::vector<double> m_row_int_m1;
     std::vector<float> m_tile_f32;
     std::vector<uint32_t> m_tile_u32;

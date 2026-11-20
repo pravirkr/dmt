@@ -1444,8 +1444,7 @@ TEST_CASE("FDMTBoxcar packed per-call mask: a constant mask with box smearing",
     const auto quiet = pack_stream(stream, 32, 400, kDepth8);
     const auto noisy = pack_stream(loud, 32, 400, kDepth8);
     for (const auto screen :
-         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-          BoxcarScreenMode::kKadaneSurrogate}) {
+         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane}) {
         for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
                                 PeakFindingMode::kContiguousPeakAcrossWidths,
                                 PeakFindingMode::kAllAboveThreshold}) {

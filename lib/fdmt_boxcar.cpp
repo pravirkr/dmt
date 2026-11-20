@@ -20,7 +20,7 @@
 #include "dmt/gpu_search_list.hpp"
 #include "dmt/kadane_monoid.hpp"
 #include "dmt/kadane_plan.hpp"
-#include "dmt/kadane_surrogate.hpp"
+#include "dmt/kadane_simd.hpp"
 
 namespace dmt::algorithms {
 
@@ -440,12 +440,9 @@ public:
             : detail::int_search_fits_u32(plan, smear, config.input_nbits)
                 ? sizeof(uint32_t)
                 : sizeof(uint64_t);
-        const SizeType carry = mode == BoxcarScreenMode::kKadaneSurrogate
-                                   ? SizeType{0}
-                                   : rows * width * carry_elem;
+        const SizeType carry = rows * width * carry_elem;
         const SizeType peaks =
-            mode == BoxcarScreenMode::kKadaneSurrogate ? SizeType{1}
-            : config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
+            config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth
                 ? filters
                 : SizeType{1};
         // Budgeted bytes only: on a GPU the device copies (the host result
@@ -513,14 +510,6 @@ public:
                                        : 0))) +
                 (base_rows *
                  ((2 * kadane::kMaxGateBuckets * sizeof(float)) + 1));
-        } else if (mode == BoxcarScreenMode::kKadaneSurrogate) {
-            kadane_extra =
-                (rows *
-                 (sizeof(kadane::KadaneSurrogateRowState) + sizeof(uint64_t))) +
-                (base_rows *
-                 ((2 * kadane::kMaxSurrogatePasses * sizeof(float)) +
-                  (filters * sizeof(float)) + 1)) +
-                ((width + 1) * ((3 * sizeof(uint32_t)) + sizeof(float)));
         }
         return carry + (rows * peaks * sizeof(detail::BoxcarPeak)) + cands +
                luts + row_table + staging + rings + kadane_extra;

@@ -16,8 +16,8 @@ reports each differing key and exits non-zero on any mismatch beyond `--tol`
 (absolute), or when the key sets differ. Across backends, exclude the keys
 that differ by design: the skewed-window state (`--exclude skew/`, the GPU
 runs its direct path and the saved state is backend-specific), the
-float-input FDMTBoxcar `snr` fields and the `kKadaneSurrogate` `snr`, which
-differ by rounding, and `boxcar_x/fft_boxcar/` (float FFT sums).
+float-input FDMTBoxcar `snr` fields, which differ by rounding, and
+`boxcar_x/fft_boxcar/` (float FFT sums).
 """
 
 from __future__ import annotations
@@ -274,7 +274,7 @@ def _fdmt_boxcar(out: dict, backend: str) -> None:
     out["fdmt_boxcar/overflow/counts"] = np.asarray(counts, dtype=np.uint64)
 
 
-def _boxcar_features(out: dict, backend: str) -> None:
+def _boxcar_features(out: dict, backend: str) -> None:  # noqa: PLR0915
     """FDMTBoxcar options added after 0.8.0, on integer input (exact sums).
 
     Every screen mode on a screened configuration (wtsp 1, blocks of several
@@ -304,7 +304,6 @@ def _boxcar_features(out: dict, backend: str) -> None:
         "prefix": dmtlib.BoxcarScreenMode.PREFIX,
         "kadane": dmtlib.BoxcarScreenMode.KADANE,
         "none": dmtlib.BoxcarScreenMode.NONE,
-        "surrogate": dmtlib.BoxcarScreenMode.KADANE_SURROGATE,
     }
     plan = dmtlib.FDMTPlan(F_MIN, F_MAX, nchans, nsamps, TSAMP, 96, subband_depth=1)
     for name, screen in screens.items():

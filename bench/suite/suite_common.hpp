@@ -562,8 +562,6 @@ inline std::string_view screen_mode_name(BoxcarScreenMode mode) {
         return "prefix";
     case BoxcarScreenMode::kKadane:
         return "kadane";
-    case BoxcarScreenMode::kKadaneSurrogate:
-        return "kadane_surrogate";
     case BoxcarScreenMode::kNone:
         return "none";
     case BoxcarScreenMode::kAuto:
@@ -579,9 +577,6 @@ inline BoxcarScreenMode parse_screen_mode(std::string_view token) {
     if (token == "kadane") {
         return BoxcarScreenMode::kKadane;
     }
-    if (token == "kadane_surrogate") {
-        return BoxcarScreenMode::kKadaneSurrogate;
-    }
     if (token == "none") {
         return BoxcarScreenMode::kNone;
     }
@@ -590,7 +585,7 @@ inline BoxcarScreenMode parse_screen_mode(std::string_view token) {
     }
     throw std::invalid_argument(
         fmt::format("DMT_BENCH_SCREEN token '{}': expected prefix, kadane, "
-                    "kadane_surrogate, none, auto or all",
+                    "none, auto or all",
                     token));
 }
 
@@ -601,7 +596,7 @@ inline bool boxcar_screen_explicit() {
 }
 
 /// Boxcar Stage-1 screen modes: DMT_BENCH_SCREEN (comma-separated, or "all"
-/// for the four explicit modes {prefix, kadane, kadane_surrogate, none}).
+/// for the three explicit modes {prefix, kadane, none}).
 /// Unset defaults to {kAuto} (kKadane on CPU, kPrefix on GPU) with no name
 /// suffix so published suite names stay unchanged; "auto" runs kAuto with an
 /// explicit "/screen:auto" suffix.
@@ -613,7 +608,7 @@ inline std::vector<BoxcarScreenMode> boxcar_screen_modes() {
     const std::string_view spec(env);
     if (spec == "all") {
         return {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-                BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone};
+                BoxcarScreenMode::kNone};
     }
     std::vector<BoxcarScreenMode> modes;
     std::size_t start = 0;

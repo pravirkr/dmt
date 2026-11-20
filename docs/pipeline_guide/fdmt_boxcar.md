@@ -341,10 +341,6 @@ tiles are rejected before per-width scoring:
   Used when groups plus range-minimum levels are fewer than half the widths
   (dense `wtsp=1` grids); `wtsp >= 1.5` and `use_trapezoid` widths stay
   ungrouped.
-- `KADANE_SURROGATE` (approximate, `max_boxcar` up to 4096): standalone
-  multi-bias Kadane excursion detector with local lookback replay, skipping
-  the full-stream Stage-2 prefix scan. Candidate counts and S/N are
-  approximate rather than exact.
 - `NONE` (lossless, `max_boxcar` up to $2^{20}$): disables Stage-1 screening
   and scores every width on every tile directly (`AUTO`, `KADANE`, `PREFIX`
   and `NONE` emit identical candidates).
@@ -675,9 +671,7 @@ tile stops after Stage 1.
   with sparse range-minimum screening on dense banks. Width and threshold
   tables are staged in shared memory, and tiles with a crossing or an open
   excursion run the exact ordered run summaries. Explicit `KADANE` runs a
-  warp/block tropical-monoid Kadane gate before Stage-2 prefix scoring, and
-  `KADANE_SURROGATE` runs multi-strip Kadane excursion detection with local
-  replay.
+  warp/block tropical-monoid Kadane gate before Stage-2 prefix scoring.
 :::
 
 ```{note}

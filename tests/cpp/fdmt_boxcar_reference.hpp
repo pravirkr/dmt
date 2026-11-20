@@ -93,8 +93,7 @@ inline void compare_near_threshold(std::vector<RawCandidate> actual,
         return std::tuple(c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
                           c.filter_idx);
     };
-    // Total order: kKadaneSurrogate can emit two runs of one row with the
-    // same begin (passes closing at different ends).
+    // Total order on (row, begin_sample, end_sample, peak_sample).
     const auto order = [&](const auto& a, const auto& b) {
         return std::tuple(row(a), a.begin_sample, a.end_sample, a.peak_sample) <
                std::tuple(row(b), b.begin_sample, b.end_sample, b.peak_sample);
@@ -697,7 +696,7 @@ inline std::vector<EstimateCase> estimate_cases() {
     cases.push_back({"auto screen", plan, cfg, 1});
     for (const auto mode :
          {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-          BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone}) {
+          BoxcarScreenMode::kNone}) {
         BoxcarConfig c = cfg;
         c.screen_mode  = mode;
         cases.push_back({"screen mode", plan, c, 2});
@@ -712,8 +711,6 @@ inline std::vector<EstimateCase> estimate_cases() {
     packed.input_mean   = 127;
     packed.noise_sigma  = 3;
     cases.push_back({"packed 8-bit", plan, packed, 2});
-    packed.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-    cases.push_back({"packed surrogate", plan, packed, 1});
     BoxcarConfig keep     = cfg;
     keep.overflow_policy  = OverflowPolicy::kKeepBrightest;
     keep.max_cands_per_dm = 4;

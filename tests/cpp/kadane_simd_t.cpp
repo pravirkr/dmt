@@ -13,24 +13,19 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 #include "dmt/common/types.hpp"
 
 #include "dmt/fdmt_variance.hpp"
 #include "dmt/kadane_plan.hpp"
-#include "dmt/kadane_surrogate.hpp"
 
 namespace dmt {
 namespace {
 
 using algorithms::detail::fdmt_trapezoid_variance;
-using kadane::KadaneSurrogatePlan;
-using kadane::KadaneSurrogateRowState;
 using kadane::NativeBackend;
 using kadane::ScalarBackend;
-using kadane::SurrogateExcursion;
 
 std::mt19937 make_seeded_rng(uint32_t seed) { return std::mt19937(seed); }
 
@@ -365,116 +360,6 @@ uint32_t reference_gate_tile_i32(SizeType num_buckets,
         }
     }
     return mask;
-}
-
-std::vector<SurrogateExcursion>
-run_continuous_surrogate_reference(const KadaneSurrogatePlan& plan,
-                                   SizeType row,
-                                   std::span<const float> stream,
-                                   uint64_t row_warmup = 0) {
-    std::vector<SurrogateExcursion> out;
-    KadaneSurrogateRowState st{};
-    const auto emit = [&](const SurrogateExcursion& ex) { out.push_back(ex); };
-    static_cast<void>(kadane::replay_surrogate_row(
-        plan, row, 0ULL, stream.size(), stream.data(), st, emit, 0, nullptr,
-        0.0F, {}, row_warmup));
-    kadane::flush_surrogate_row(plan, row, st, emit);
-    return out;
-}
-
-std::vector<SurrogateExcursion>
-run_tiled_surrogate_pipeline(const KadaneSurrogatePlan& plan,
-                             SizeType row,
-                             std::span<const float> stream,
-                             std::span<const SizeType> tile_lengths,
-                             uint64_t row_warmup = 0) {
-    const SizeType n_rows = plan.n_rows;
-    const SizeType stride = plan.row_stride;
-    const SizeType np     = plan.num_passes;
-
-    std::vector<float> dummy_zero(stream.size(), 0.0F);
-    std::vector<const float*> base_ptrs(n_rows, dummy_zero.data());
-    base_ptrs[row] = stream.data();
-
-    std::vector<float> state_c(np * stride, 0.0F);
-    std::vector<float> state_c_scalar(np * stride, 0.0F);
-    std::vector<float> chk_c(np * stride, 0.0F);
-    std::vector<float> chk_c_scalar(np * stride, 0.0F);
-    std::vector<float> dec_part(n_rows, 0.0F);
-    std::vector<float> dec_part_scalar(n_rows, 0.0F);
-    std::vector<float> chk_dec(n_rows, 0.0F);
-    std::vector<float> chk_dec_scalar(n_rows, 0.0F);
-
-    KadaneSurrogateRowState row_st{};
-    bool open_triggered = false;
-    std::vector<SurrogateExcursion> out;
-    const auto emit = [&](const SurrogateExcursion& ex) { out.push_back(ex); };
-
-    SizeType t0      = 0;
-    SizeType len_idx = 0;
-    while (t0 < stream.size()) {
-        const SizeType step_len = std::min(
-            tile_lengths[len_idx % tile_lengths.size()], stream.size() - t0);
-        ++len_idx;
-
-        std::vector<const float*> tile_ptrs(n_rows);
-        for (SizeType r = 0; r < n_rows; ++r) {
-            tile_ptrs[r] = base_ptrs[r] + t0;
-        }
-        std::vector<SizeType> fv_vec(n_rows, 0);
-        if (row_warmup > t0) {
-            fv_vec[row] = static_cast<SizeType>(row_warmup - t0);
-        }
-
-        const auto phase = static_cast<uint32_t>(t0 & 3ULL);
-        const uint32_t hit_native =
-            kadane::scan_surrogate_tile_f32<NativeBackend>(
-                plan, 0, n_rows, step_len, tile_ptrs.data(), state_c.data(),
-                stride, phase, dec_part.data(), fv_vec.data(), chk_c.data(),
-                stride, chk_dec.data());
-        const uint32_t hit_scalar =
-            kadane::scan_surrogate_tile_f32<ScalarBackend>(
-                plan, 0, n_rows, step_len, tile_ptrs.data(),
-                state_c_scalar.data(), stride, phase, dec_part_scalar.data(),
-                fv_vec.data(), chk_c_scalar.data(), stride,
-                chk_dec_scalar.data());
-        REQUIRE(hit_native == hit_scalar);
-        for (SizeType k = 0; k < np; ++k) {
-            REQUIRE(
-                std::bit_cast<uint32_t>(state_c[(k * stride) + row]) ==
-                std::bit_cast<uint32_t>(state_c_scalar[(k * stride) + row]));
-            REQUIRE(std::bit_cast<uint32_t>(chk_c[(k * stride) + row]) ==
-                    std::bit_cast<uint32_t>(chk_c_scalar[(k * stride) + row]));
-        }
-        REQUIRE(std::bit_cast<uint32_t>(dec_part[row]) ==
-                std::bit_cast<uint32_t>(dec_part_scalar[row]));
-
-        const bool row_hit =
-            ((hit_native >> static_cast<uint32_t>(row)) & 1U) != 0U;
-        if (row_hit || open_triggered) {
-            std::array<float, kadane::kMaxSurrogatePasses> row_chk{};
-            for (SizeType k = 0; k < np; ++k) {
-                row_chk[k] = chk_c[(k * stride) + row];
-            }
-            const std::span<const float> lookback(stream.data(), t0);
-            open_triggered = kadane::replay_surrogate_row(
-                plan, row, static_cast<uint64_t>(t0), step_len,
-                stream.data() + t0, row_st, emit, fv_vec[row], row_chk.data(),
-                chk_dec[row], lookback, row_warmup);
-
-            // Verify that after replay, every pass's `cur_c` matches the SIMD
-            // tile scanner's updated `state_c` bit-for-bit!
-            for (SizeType k = 0; k < np; ++k) {
-                REQUIRE(std::bit_cast<uint32_t>(row_st.passes[k].cur_c) ==
-                        std::bit_cast<uint32_t>(state_c[(k * stride) + row]));
-            }
-        }
-
-        t0 += step_len;
-    }
-
-    kadane::flush_surrogate_row(plan, row, row_st, emit);
-    return out;
 }
 
 } // namespace
@@ -1059,249 +944,9 @@ TEST_CASE("kadane_simd - KadaneGatePlan lossless f32 & i32 pulse detection",
     }
 }
 
-// ============================================================================
-// 6. Kernel 3 (`scan_surrogate_tile_f32` & `replay_surrogate_row`) Parity
-// ============================================================================
-
-TEST_CASE(
-    "kadane_simd - scan_surrogate_tile_f32 bit-for-bit parity (dec 1 & 4)",
-    "[kadane_simd][kadane][boxcar][cpu]") {
-    auto rng = make_seeded_rng(424242U);
-    std::normal_distribution<float> dist(10.0F, 1.5F);
-    const std::array<SizeType, 9> tile_lens = {0,  1,  3,   7,  15,
-                                               16, 17, 255, 256};
-    const std::array<std::array<uint32_t, 3>, 3> dec_configs = {{
-        {1U, 1U, 1U},
-        {1U, 4U, 1U},
-        {1U, 1U, 4U},
-    }};
-
-    for (SizeType num_passes = 1; num_passes <= 3; ++num_passes) {
-        const auto& dec = dec_configs[num_passes - 1];
-        for (uint32_t phase : {0U, 1U, 2U, 3U}) {
-            for (SizeType n_rows : {SizeType{1}, SizeType{3}, SizeType{4},
-                                    SizeType{8}, SizeType{15}, SizeType{16},
-                                    SizeType{17}, SizeType{31}, SizeType{32}}) {
-                for (SizeType tile_len : tile_lens) {
-                    if (phase != 1U && tile_len > 17 && n_rows != 17) {
-                        continue;
-                    }
-
-                    std::vector<std::vector<float>> rows(
-                        n_rows,
-                        std::vector<float>(std::max<SizeType>(1, tile_len)));
-                    std::vector<const float*> ptrs(n_rows);
-                    for (SizeType r = 0; r < n_rows; ++r) {
-                        for (SizeType t = 0; t < tile_len; ++t) {
-                            rows[r][t] = dist(rng);
-                        }
-                        ptrs[r] = rows[r].data();
-                    }
-
-                    const SizeType stride = n_rows;
-                    std::vector<float> bias(num_passes * stride);
-                    std::vector<float> cut(num_passes * stride);
-                    std::vector<float> c_init(num_passes * stride);
-                    std::vector<float> dec_init(n_rows);
-                    std::vector<SizeType> fv(n_rows);
-
-                    for (SizeType r = 0; r < n_rows; ++r) {
-                        fv[r]       = (r % 3 == 0) ? 0 : ((r * 3) % 14);
-                        dec_init[r] = 20.0F + static_cast<float>(r);
-                        for (SizeType k = 0; k < num_passes; ++k) {
-                            bias[(k * stride) + r] =
-                                dec[k] == 4U ? 42.0F : 10.5F;
-                            cut[(k * stride) + r] =
-                                5.0F + (2.0F * static_cast<float>(k));
-                            c_init[(k * stride) + r] =
-                                (r % 2 == 0) ? 0.0F : 1.5F;
-                        }
-                    }
-
-                    auto c_nat  = c_init;
-                    auto c_sca  = c_init;
-                    auto c_ns   = c_init;
-                    auto dp_nat = dec_init;
-                    auto dp_sca = dec_init;
-                    auto dp_ns  = dec_init;
-                    std::vector<float> chkc_nat(num_passes * stride, -1.0F);
-                    std::vector<float> chkc_sca(num_passes * stride, -2.0F);
-                    std::vector<float> chkd_nat(n_rows, -1.0F);
-                    std::vector<float> chkd_sca(n_rows, -2.0F);
-
-                    const SizeType* fv_ptr =
-                        (phase % 2 == 1U) ? fv.data() : nullptr;
-
-                    const uint32_t hm_nat =
-                        kadane::scan_surrogate_tile_f32<NativeBackend>(
-                            num_passes, n_rows, tile_len, ptrs.data(),
-                            dec.data(), bias.data(), stride, cut.data(), stride,
-                            c_nat.data(), stride, phase, dp_nat.data(), fv_ptr,
-                            chkc_nat.data(), stride, chkd_nat.data());
-                    const uint32_t hm_sca =
-                        kadane::scan_surrogate_tile_f32<ScalarBackend>(
-                            num_passes, n_rows, tile_len, ptrs.data(),
-                            dec.data(), bias.data(), stride, cut.data(), stride,
-                            c_sca.data(), stride, phase, dp_sca.data(), fv_ptr,
-                            chkc_sca.data(), stride, chkd_sca.data());
-                    const uint32_t hm_ns =
-                        kadane::scalar::scan_surrogate_tile_f32(
-                            num_passes, n_rows, tile_len, ptrs.data(),
-                            dec.data(), bias.data(), stride, cut.data(), stride,
-                            c_ns.data(), stride, phase, dp_ns.data(), fv_ptr,
-                            nullptr, 0, nullptr);
-
-                    REQUIRE(hm_nat == hm_sca);
-                    REQUIRE(hm_ns == hm_sca);
-                    for (SizeType i = 0; i < num_passes * stride; ++i) {
-                        REQUIRE(std::bit_cast<uint32_t>(c_nat[i]) ==
-                                std::bit_cast<uint32_t>(c_sca[i]));
-                        REQUIRE(std::bit_cast<uint32_t>(c_ns[i]) ==
-                                std::bit_cast<uint32_t>(c_sca[i]));
-                        REQUIRE(std::bit_cast<uint32_t>(chkc_nat[i]) ==
-                                std::bit_cast<uint32_t>(chkc_sca[i]));
-                    }
-                    for (SizeType r = 0; r < n_rows; ++r) {
-                        REQUIRE(std::bit_cast<uint32_t>(dp_nat[r]) ==
-                                std::bit_cast<uint32_t>(dp_sca[r]));
-                        REQUIRE(std::bit_cast<uint32_t>(dp_ns[r]) ==
-                                std::bit_cast<uint32_t>(dp_sca[r]));
-                        REQUIRE(std::bit_cast<uint32_t>(chkd_nat[r]) ==
-                                std::bit_cast<uint32_t>(chkd_sca[r]));
-                    }
-                }
-            }
-        }
-    }
-}
-
-TEST_CASE("kadane_simd - KadaneSurrogatePlan tiled SIMD + replay exact parity",
+TEST_CASE("kadane_simd - multi-tile streaming state_c carry",
           "[kadane_simd][kadane][boxcar][cpu]") {
-    const std::array<uint32_t, 16> widths = {1,  2,  3,  4,  6,  8,   12,  16,
-                                             24, 32, 48, 64, 96, 128, 192, 256};
-    const std::array<std::pair<SizeType, SizeType>, 9> row_specs = {{
-        {1, 64},
-        {2, 64},
-        {3, 64},
-        {4, 64},
-        {1, 0},
-        {2, 128},
-        {5, 96},
-        {1, 32},
-        {3, 48},
-    }};
-    const auto tables =
-        make_synthetic_tables(widths, false, 6.0F, 1.0F, row_specs, false);
-
-    for (bool allow_decimation : {false, true}) {
-        const auto plan = kadane::make_kadane_surrogate_plan(
-            widths, false, tables.n_rows, tables.raw_thresh, tables.inv_sigma,
-            {}, 1.0, allow_decimation);
-        if (allow_decimation) {
-            REQUIRE(plan.has_decimated);
-        }
-
-        const SizeType row      = 2;
-        constexpr SizeType kLen = 1400;
-        std::mt19937 rng(allow_decimation ? 777111U : 333999U);
-        std::normal_distribution<float> bg(0.0F, 0.35F);
-        std::vector<float> stream(kLen);
-        for (float& v : stream) {
-            v = bg(rng);
-        }
-
-        // 1) Adversarial fledgling ramp starting 110 samples before `t = 256`
-        // with ULP-absorption jump at `t = 250`, crossing trigger after `t =
-        // 256`!
-        const float b0   = plan.row_bias(0, row);
-        const float trig = plan.row_trigger(0, row);
-        for (SizeType t = 130; t < 146; ++t) {
-            stream[t] = -50.0F; // Guaranteed zero reset before `t = 146`.
-        }
-        stream[146] = b0 + 1.0e-6F;
-        for (SizeType t = 147; t < 250; ++t) {
-            stream[t] = b0;
-        }
-        stream[250] = b0 + (0.55F * trig);
-        for (SizeType t = 251; t < 256; ++t) {
-            stream[t] = b0;
-        }
-        for (SizeType t = 256; t < 264; ++t) {
-            stream[t] = b0 + (0.35F * trig);
-        }
-        for (SizeType t = 264; t < 280; ++t) {
-            stream[t] = -40.0F;
-        }
-
-        // 2) Wide pulse (`w = 96`) spanning multiple tiles `[610, 706)` to
-        // exercise the `decimate_factor == 4` pass across arbitrary phases.
-        const SizeType f_wide = 12; // width 96
-        const float wide_thr =
-            tables.raw_thresh[(row * widths.size()) + f_wide];
-        const float wide_amp = (1.35F * wide_thr) / 96.0F;
-        for (SizeType t = 610; t < 706; ++t) {
-            stream[t] += wide_amp;
-        }
-
-        // 3) Open excursion extending right to end-of-stream
-        // (`flush_surrogate_row`).
-        for (SizeType t = 1340; t < kLen; ++t) {
-            stream[t] = b0 + (0.25F * trig);
-        }
-
-        for (uint64_t warmup : {uint64_t{0}, uint64_t{19}}) {
-            const auto expected =
-                run_continuous_surrogate_reference(plan, row, stream, warmup);
-            REQUIRE(expected.size() >= 2);
-
-            // Verify evaluated S/N exceeds threshold on injected pulses!
-            bool saw_wide_snr = false;
-            for (const auto& ex : expected) {
-                uint32_t f_nearest = 0U;
-                const float snr    = plan.eval_surrogate_snr(
-                    row, ex.best_raw_sum, ex.best_len, &f_nearest);
-                if (ex.seg_begin >= 580ULL && ex.best_end <= 740ULL &&
-                    snr >= 6.0F) {
-                    saw_wide_snr = true;
-                }
-            }
-            CHECK(saw_wide_snr);
-
-            const std::array<std::vector<SizeType>, 5> schedules = {{
-                {1},
-                {7},
-                {16},
-                {64},
-                {3, 17, 64, 15, 255, 16, 1},
-            }};
-
-            for (const auto& sched : schedules) {
-                const auto actual = run_tiled_surrogate_pipeline(
-                    plan, row, stream, sched, warmup);
-                REQUIRE(actual.size() == expected.size());
-                for (SizeType i = 0; i < expected.size(); ++i) {
-                    CHECK(actual[i].seg_begin == expected[i].seg_begin);
-                    CHECK(actual[i].best_end == expected[i].best_end);
-                    CHECK(actual[i].close_end == expected[i].close_end);
-                    CHECK(actual[i].best_len == expected[i].best_len);
-                    CHECK(actual[i].pass_idx == expected[i].pass_idx);
-                    CHECK(std::bit_cast<uint32_t>(actual[i].best_c) ==
-                          std::bit_cast<uint32_t>(expected[i].best_c));
-                    CHECK_THAT(actual[i].best_raw_sum,
-                               Catch::Matchers::WithinRel(
-                                   expected[i].best_raw_sum, 1e-12) ||
-                                   Catch::Matchers::WithinAbs(
-                                       expected[i].best_raw_sum, 1e-12));
-                }
-            }
-        }
-    }
-}
-
-TEST_CASE(
-    "kadane_simd - multi-tile streaming state_c carry & integer surrogate",
-    "[kadane_simd][kadane][boxcar][cpu]") {
-    // 1) Multi-tile streaming `state_c` carry: splitting 513 samples into
+    // Multi-tile streaming `state_c` carry: splitting 513 samples into
     // unaligned tiles `[1, 3, 7, 15, 16, 17, 64, ...]` must yield bit-for-bit
     // identical final `state_c` and overall max to a single 513-sample tile!
     constexpr SizeType kRows = 23;
@@ -1398,40 +1043,6 @@ TEST_CASE(
         REQUIRE(std::bit_cast<uint32_t>(fm_tiled[i]) ==
                 std::bit_cast<uint32_t>(fm_single[i]));
     }
-
-    // 2) Integer surrogate row integration via `convert_u32_to_f32` +
-    // `KadaneSurrogatePlan::eval_surrogate_snr`.
-    const std::array<uint32_t, 8> widths = {1, 2, 4, 8, 16, 32, 64, 128};
-    const std::array<std::pair<SizeType, SizeType>, 4> row_specs = {{
-        {1, 32},
-        {2, 32},
-        {3, 32},
-        {4, 32},
-    }};
-    const auto tables = make_synthetic_tables(widths, false, 6.0F, 2.0F,
-                                              row_specs, true, 50.0, 0);
-    const auto plan   = kadane::make_kadane_surrogate_plan(
-        widths, false, tables.n_rows, tables.raw_thresh, tables.inv_sigma,
-        tables.int_mean, tables.integer_unit, true);
-    REQUIRE(plan.is_integer);
-
-    std::vector<uint32_t> u_row(512, 50U * 32U);
-    for (SizeType t = 200; t < 224; ++t) {
-        u_row[t] += 45U;
-    }
-    std::vector<float> f_row(512);
-    kadane::convert_u32_to_f32<NativeBackend>(u_row.data(), f_row.data(),
-                                              u_row.size());
-    const std::array<SizeType, 2> sched = {64, 17};
-    const auto exs = run_tiled_surrogate_pipeline(plan, 0, f_row, sched, 0);
-    REQUIRE(!exs.empty());
-    bool detected = false;
-    for (const auto& ex : exs) {
-        if (plan.eval_surrogate_snr(0, ex.best_raw_sum, ex.best_len) >= 6.0F) {
-            detected = true;
-        }
-    }
-    CHECK(detected);
 }
 
 } // namespace dmt

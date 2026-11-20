@@ -73,16 +73,12 @@ void bind_fdmt_boxcar(py::module_& mod) {
         .value("KEEP_BRIGHTEST", OverflowPolicy::kKeepBrightest);
     py::enum_<BoxcarScreenMode>(
         mod, "BoxcarScreenMode",
-        "Stage-1 tile screening / scoring mode for analytical boxcar search.")
+        "Stage-1 tile screening mode for analytical boxcar search.")
         .value("PREFIX", BoxcarScreenMode::kPrefix,
                "Prefix-sum / range-minimum tile screen (exact).")
         .value("KADANE", BoxcarScreenMode::kKadane,
                "Lossless multi-bucket Kadane tile gate + exact Stage-2 "
                "prefix-sum scoring.")
-        .value("KADANE_SURROGATE", BoxcarScreenMode::kKadaneSurrogate,
-               "Approximate multi-bias Kadane excursion detector with local "
-               "lookback replay (skips full-stream Stage-2 prefix scan; "
-               "max_boxcar 1..4096).")
         .value("NONE", BoxcarScreenMode::kNone,
                "Disable Stage-1 screening and score every tile directly "
                "(exact).")
@@ -92,29 +88,26 @@ void bind_fdmt_boxcar(py::module_& mod) {
     py::class_<BoxcarConfig>(mod, "BoxcarConfig", R"doc(
         Analytical boxcar and trapezoid matched-filter search settings.
 
-        ``max_boxcar`` (1..2^20, at most 4096 widths; 1..4096 for
-        ``KADANE_SURROGATE``) bounds the geometrically spaced width bank
-        generated with ``wtsp`` (:func:`generate_box_width_trials`). Set
-        ``use_trapezoid=True`` to replace widths >= 3 with ``{1, 2, 1}``
-        half-weight edge-tapered trapezoids. ``input_nbits`` selects float32
-        (32) or packed unsigned codes (1/2/4/8/16) calibrated by
-        ``input_mean`` and ``noise_sigma``. ``overflow_policy``
-        (:class:`OverflowPolicy`, default ``DROP_NEW``) chooses between
-        first-come overflow and exact ``KEEP_BRIGHTEST`` top-S/N selection.
-        ``screen_mode`` selects the Stage-1 tile screening / scoring algorithm
-        (:class:`BoxcarScreenMode`, default ``BoxcarScreenMode.AUTO``):
-        ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU), ``KADANE``,
-        ``PREFIX`` and ``NONE`` are lossless and produce identical exact
-        candidates; ``KADANE_SURROGATE`` is an approximate multi-bias Kadane
-        scorer (``max_boxcar`` up to 4096) that skips the full-stream prefix
-        scan. ``per_call_masks=True`` declares that :class:`FDMTBoxcar` will
-        get per-call kill masks: their requirements and memory are checked
-        and reserved at construction (and in ``estimate_memory``) instead of
-        at the first masked call. ``max_candidates_per_plane`` (0: off)
-        gives each searched plane its own share of a call's candidates (its
-        first ones under ``DROP_NEW``, its brightest under
-        ``KEEP_BRIGHTEST``), so a flooded plane cannot crowd out the others;
-        planes x share must not exceed ``max_candidates``.
+        ``max_boxcar`` (1..2^20, at most 4096 widths) bounds the geometrically
+        spaced width bank generated with ``wtsp``
+        (:func:`generate_box_width_trials`). Set ``use_trapezoid=True`` to
+        replace widths >= 3 with ``{1, 2, 1}`` half-weight edge-tapered
+        trapezoids. ``input_nbits`` selects float32 (32) or packed unsigned
+        codes (1/2/4/8/16) calibrated by ``input_mean`` and ``noise_sigma``.
+        ``overflow_policy`` (:class:`OverflowPolicy`, default ``DROP_NEW``)
+        chooses between first-come overflow and exact ``KEEP_BRIGHTEST``
+        top-S/N selection. ``screen_mode`` selects the Stage-1 tile screening
+        algorithm (:class:`BoxcarScreenMode`, default
+        ``BoxcarScreenMode.AUTO``): ``AUTO`` (``KADANE`` on the CPU,
+        ``PREFIX`` on a GPU), ``KADANE``, ``PREFIX`` and ``NONE`` are lossless
+        and produce identical exact candidates. ``per_call_masks=True``
+        declares that :class:`FDMTBoxcar` will get per-call kill masks: their
+        requirements and memory are checked and reserved at construction (and
+        in ``estimate_memory``) instead of at the first masked call.
+        ``max_candidates_per_plane`` (0: off) gives each searched plane its own
+        share of a call's candidates (its first ones under ``DROP_NEW``, its
+        brightest under ``KEEP_BRIGHTEST``), so a flooded plane cannot crowd
+        out the others; planes x share must not exceed ``max_candidates``.
         )doc")
         .def(py::init([](SizeType max_boxcar, float wtsp, float detect_thresh,
                          float noise_sigma, PeakFindingMode peak_mode,
@@ -298,12 +291,10 @@ void bind_fdmt_boxcar(py::module_& mod) {
         (float or packed input), ANDed with this one.
 
         ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``AUTO``)
-        chooses the Stage-1 tile screening / scoring mode on both CPU and GPU:
+        chooses the Stage-1 tile screening mode on both CPU and GPU:
         ``PREFIX``, ``KADANE`` (lossless multi-bucket Kadane gate), ``NONE``
-        and ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU) emit
-        identical exact candidates; ``KADANE_SURROGATE`` uses approximate
-        multi-bias Kadane excursion detection with local replay
-        (``max_boxcar`` up to 4096).
+        and ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU) all emit
+        identical exact candidates.
         )doc")
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,

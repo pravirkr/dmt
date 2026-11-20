@@ -11,7 +11,6 @@ from dmtlib import (
     FDMTPlan,
     OverflowPolicy,
     PeakFindingMode,
-    add_frb_track,
 )
 
 
@@ -662,7 +661,6 @@ def test_boxcar_screen_mode_binding_defaults_and_roundtrip() -> None:
     assert set(BoxcarScreenMode.__members__) == {
         "PREFIX",
         "KADANE",
-        "KADANE_SURROGATE",
         "NONE",
         "AUTO",
     }
@@ -726,38 +724,6 @@ def test_keep_brightest_with_screen_modes() -> None:
             sorted_candidates([got.candidates]),
             sorted_candidates([ref.candidates]),
         )
-
-    sur_drop_cfg = BoxcarConfig(
-        16,
-        detect_thresh=4.5,
-        peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
-        max_candidates=32,
-        max_cands_per_dm=4,
-        overflow_policy=OverflowPolicy.DROP_NEW,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-    )
-    sur_drop = FDMTBoxcar(plan, sur_drop_cfg, nthreads=1, chunk_nsamps=256).execute(
-        data
-    )
-    assert sur_drop.overflowed
-    assert not np.any(sur_drop.candidates["peak_sample"] >= 1740)
-
-    sur_keep_cfg = BoxcarConfig(
-        16,
-        detect_thresh=4.5,
-        peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
-        max_candidates=32,
-        max_cands_per_dm=4,
-        overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-    )
-    sur_keep = FDMTBoxcar(plan, sur_keep_cfg, nthreads=1, chunk_nsamps=256).execute(
-        data
-    )
-    assert sur_keep.overflowed
-    assert sur_keep.emitted_count == 32
-    best = sur_keep.candidates[np.argmax(sur_keep.candidates["snr"])]
-    assert 1745 <= int(best["peak_sample"]) <= 1765
 
 
 @pytest.mark.parametrize("trapezoid", [False, True])
@@ -895,128 +861,6 @@ def test_exact_screen_modes_kill_mask_and_skewed_drain() -> None:
     assert len(skew_res[BoxcarScreenMode.PREFIX]) > 0
     assert_same(skew_res[BoxcarScreenMode.KADANE], skew_res[BoxcarScreenMode.PREFIX])
     assert_same(skew_res[BoxcarScreenMode.NONE], skew_res[BoxcarScreenMode.PREFIX])
-
-
-def test_kadane_surrogate_end_to_end_pulse_and_quiet_noise() -> None:
-    rng = np.random.default_rng(77)
-    nchans, nsamps = 64, 1024
-    grid = list(range(0, 96, 3))
-    plan = FDMTPlan(
-        1100.0, 1500.0, nchans, nsamps, 0.001, dt_grid=grid, subband_depth=1
-    )
-    kill = np.ones(nchans, dtype=np.uint8)
-    kill[10:14] = 0
-
-    # Quiet noise produces zero false alarms at high threshold.
-    for use_trap in (False, True):
-        quiet_cfg = BoxcarConfig(
-            64,
-            wtsp=1.5,
-            detect_thresh=6.5,
-            use_trapezoid=use_trap,
-            screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-        )
-        quiet_eng = FDMTBoxcar(plan, quiet_cfg, nthreads=1, kill_mask=kill)
-        quiet_cands = []
-        for _ in range(2):
-            blk = rng.standard_normal((nchans, nsamps), dtype=np.float32)
-            quiet_cands.append(quiet_eng.execute(blk).candidates)
-        quiet_cands.append(quiet_eng.drain().candidates)
-        assert len(np.concatenate(quiet_cands)) == 0
-
-    # Injected dispersed pulse across multi-chunk streaming + drain().
-    data = rng.standard_normal((nchans, 2 * nsamps), dtype=np.float32)
-    pulse = np.zeros((nchans, nsamps), dtype=np.float32)
-    add_frb_track(pulse, plan, 18, 2.5, 620, 8)
-    data[:, nsamps:] += pulse
-    blocks = [data[:, k * nsamps : (k + 1) * nsamps].copy() for k in range(2)]
-
-    for use_trap in (False, True):
-        found = {}
-        for screen in (BoxcarScreenMode.PREFIX, BoxcarScreenMode.KADANE_SURROGATE):
-            cfg = BoxcarConfig(
-                64,
-                wtsp=1.5,
-                detect_thresh=6.5,
-                use_trapezoid=use_trap,
-                screen_mode=screen,
-            )
-            eng = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256, kill_mask=kill)
-            frontier = eng.get_candidate_frontier()
-            parts = []
-            for blk in blocks:
-                res = eng.execute(blk)
-                assert np.all(res.candidates["begin_sample"] >= frontier)
-                frontier = eng.get_candidate_frontier()
-                parts.append(res.candidates)
-            last = eng.drain()
-            assert np.all(last.candidates["begin_sample"] >= frontier)
-            assert eng.get_candidate_frontier() == eng.searched_nsamps
-            found[screen] = np.concatenate([*parts, last.candidates])
-        ref_full = found[BoxcarScreenMode.PREFIX]
-        sur_full = found[BoxcarScreenMode.KADANE_SURROGATE]
-        ref_root = ref_full[ref_full["subband_level"] == 0]
-        sur_root = sur_full[sur_full["subband_level"] == 0]
-        assert len(sur_root) > 0
-        best_ref = ref_root[np.argmax(ref_root["snr"])]
-        best_sur = sur_root[np.argmax(sur_root["snr"])]
-        assert int(best_sur["dm_idx"]) == int(best_ref["dm_idx"])
-        assert abs(int(best_sur["peak_sample"]) - int(best_ref["peak_sample"])) <= 6
-        assert (
-            0.90 * float(best_ref["snr"])
-            <= float(best_sur["snr"])
-            <= (1.15 * float(best_ref["snr"]))
-        )
-        # Surrogate search is deterministic across thread counts.
-        sur_1t_cfg = BoxcarConfig(
-            64,
-            wtsp=1.5,
-            detect_thresh=6.5,
-            use_trapezoid=use_trap,
-            screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-        )
-        sur_1t = FDMTBoxcar(
-            plan, sur_1t_cfg, nthreads=1, chunk_nsamps=256, kill_mask=kill
-        )
-        c1 = sorted_candidates(
-            [*[sur_1t.execute(b).candidates for b in blocks], sur_1t.drain().candidates]
-        )
-        assert_same(sorted_candidates([sur_full]), c1)
-
-
-def test_kadane_surrogate_packed_uint8() -> None:
-    rng = np.random.default_rng(78)
-    nchans, nsamps = 64, 1024
-    plan = FDMTPlan(
-        1100.0, 1500.0, nchans, nsamps, 0.001, dt_grid=list(range(0, 96, 3))
-    )
-    u8_noise = np.clip(
-        np.round(128.0 + 10.0 * rng.standard_normal((nchans, nsamps))), 0, 255
-    ).astype(np.uint8)
-    u8_pulse = np.zeros((nchans, nsamps), dtype=np.float32)
-    add_frb_track(u8_pulse, plan, 12, 30.0, 500, 4)
-    u8_sig = np.clip(np.round(u8_noise.astype(np.float32) + u8_pulse), 0, 255).astype(
-        np.uint8
-    )
-    sur_u8_cfg = BoxcarConfig(
-        32,
-        wtsp=1.5,
-        detect_thresh=6.5,
-        noise_sigma=10.0,
-        input_nbits=8,
-        input_mean=128.0,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-    )
-    sur_u8 = FDMTBoxcar(plan, sur_u8_cfg, nthreads=1, chunk_nsamps=256)
-    assert len(sur_u8.execute(u8_noise).candidates) == 0
-    cands_u8 = np.concatenate(
-        [sur_u8.execute(u8_sig).candidates, sur_u8.drain().candidates]
-    )
-    root_u8 = cands_u8[cands_u8["subband_level"] == 0]
-    assert len(root_u8) > 0
-    best_u8 = root_u8[np.argmax(root_u8["snr"])]
-    assert abs(int(best_u8["dm_idx"]) - 12) <= 1
-    assert abs(int(best_u8["peak_sample"]) - (nsamps + 500)) <= 6
 
 
 def _auto_case() -> tuple[FDMTPlan, list[np.ndarray]]:

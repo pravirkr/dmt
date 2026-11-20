@@ -36,8 +36,7 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
       m_beams(cfg.nbeams),
       m_threads(std::max(1, cfg.exec.nthreads)),
       m_width(planes.front().widths.back()),
-      m_tile((config.screen_mode == BoxcarScreenMode::kKadane ||
-              config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)
+      m_tile(config.screen_mode == BoxcarScreenMode::kKadane
                  ? kGateTile
                  : scoring_tile(m_width)),
       m_filters(planes.front().widths.size()),
@@ -65,12 +64,7 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
                                       plan.get_nsamps(), config.input_nbits));
         }
     }
-    const SizeType carry_ring =
-        config.screen_mode == BoxcarScreenMode::kKadaneSurrogate
-            ? (std::max<SizeType>(m_width, kGateTile + 4) + 1)
-            : m_width;
-    m_surrogate_carry_ring = carry_ring;
-    if (m_rows.size() > SIZE_MAX / m_beams / carry_ring ||
+    if (m_rows.size() > SIZE_MAX / m_beams / m_width ||
         m_rows.size() > SIZE_MAX / m_beams / m_peak_count) {
         throw std::invalid_argument("FDMTBoxcar: history size overflow");
     }
@@ -84,9 +78,8 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
     m_carry32 =
         config.input_nbits != 32 &&
         int_search_fits_u32(plan, cfg.use_box_smearing, config.input_nbits);
-    if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate ||
-        config.input_nbits == 32) {
-        m_deferred.resize(m_carry, rows * carry_ring);
+    if (config.input_nbits == 32) {
+        m_deferred.resize(m_carry, rows * m_width);
     } else if (m_carry32) {
         m_deferred.resize(m_integer_carry32, rows * m_width);
     } else {
@@ -116,28 +109,24 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
         m_deferred.resize(m_keep, rows * m_keep_q);
         m_deferred.resize(m_row_detected, rows);
     }
-    if (config.screen_mode != BoxcarScreenMode::kKadaneSurrogate) {
-        m_kadane_exact_prefix_cap = std::min<SizeType>(
-            SizeType{1} << 18,
-            std::max(kKadaneExactPrefixCap, m_driver->chunk_nsamps()));
-        const SizeType pref_tile =
-            (config.screen_mode == BoxcarScreenMode::kKadane &&
-             config.input_nbits == 32)
-                ? m_kadane_exact_prefix_cap
-                : m_tile;
-        m_prefix_stride = m_width + pref_tile + 1;
-        if (config.input_nbits == 32) {
-            m_deferred.resize(m_prefix, static_cast<SizeType>(m_threads) *
-                                            m_prefix_stride);
-        } else {
-            m_deferred.resize(m_integer_prefix,
-                              static_cast<SizeType>(m_threads) *
-                                  m_prefix_stride);
-        }
-        m_deferred.resize(m_best, static_cast<SizeType>(m_threads) * m_tile);
-        m_deferred.resize(m_best_filter,
-                          static_cast<SizeType>(m_threads) * m_tile);
+    m_kadane_exact_prefix_cap = std::min<SizeType>(
+        SizeType{1} << 18,
+        std::max(kKadaneExactPrefixCap, m_driver->chunk_nsamps()));
+    const SizeType pref_tile =
+        (config.screen_mode == BoxcarScreenMode::kKadane &&
+         config.input_nbits == 32)
+            ? m_kadane_exact_prefix_cap
+            : m_tile;
+    m_prefix_stride = m_width + pref_tile + 1;
+    if (config.input_nbits == 32) {
+        m_deferred.resize(m_prefix,
+                          static_cast<SizeType>(m_threads) * m_prefix_stride);
+    } else {
+        m_deferred.resize(m_integer_prefix,
+                          static_cast<SizeType>(m_threads) * m_prefix_stride);
     }
+    m_deferred.resize(m_best, static_cast<SizeType>(m_threads) * m_tile);
+    m_deferred.resize(m_best_filter, static_cast<SizeType>(m_threads) * m_tile);
     if (config.screen_mode == BoxcarScreenMode::kPrefix) {
         make_screen_groups(planes.front().widths);
     }
@@ -170,8 +159,6 @@ FDMTBoxcarCpuEngine::FDMTBoxcarCpuEngine(
     }
     if (config.screen_mode == BoxcarScreenMode::kKadane) {
         init_kadane(cfg.use_box_smearing);
-    } else if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        init_surrogate(cfg.use_box_smearing);
     }
     m_allocated = !cfg.defer_allocation;
 }
@@ -283,21 +270,13 @@ CandidateResultView FDMTBoxcarCpuEngine::copy_result(Stream /*unused*/) {
 
 CandidateResultView FDMTBoxcarCpuEngine::flush() {
     begin_result(0);
-    if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        flush_surrogate();
-    }
     for (SizeType b = 0; b < m_beams; ++b) {
         for (SizeType row = 0; row < m_rows.size(); ++row) {
             const SizeType index = (b * m_rows.size()) + row;
             for (SizeType f = 0; f < m_peak_count; ++f) {
                 auto& peak = m_peaks[(index * m_peak_count) + f];
                 if (peak.open) {
-                    if (m_config.screen_mode ==
-                        BoxcarScreenMode::kKadaneSurrogate) {
-                        emit_surrogate_peak(row, b, peak);
-                    } else {
-                        emit(row, b, peak);
-                    }
+                    emit(row, b, peak);
                     peak.open = false;
                 }
             }
@@ -350,8 +329,7 @@ SizeType FDMTBoxcarCpuEngine::block_noise_bytes() const noexcept {
                 : static_cast<SizeType>(m_threads) * m_filters * sizeof(float);
     }
     const SizeType cuts =
-        (m_config.screen_mode == BoxcarScreenMode::kKadane ||
-         m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate)
+        m_config.screen_mode == BoxcarScreenMode::kKadane
             ? (static_cast<SizeType>(m_threads) * kadane::kMaxGateBuckets *
                kadane::kMaxBatchRows * sizeof(float))
             : 0;
@@ -421,16 +399,13 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
     m_killed.resize(m_plan.get_nchans());
     m_deferred.resize(m_screen_thr,
                       static_cast<SizeType>(m_threads) * m_filters);
-    if (m_config.screen_mode == BoxcarScreenMode::kKadane ||
-        m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
+    if (m_config.screen_mode == BoxcarScreenMode::kKadane) {
         m_deferred.resize(m_thread_cuts, static_cast<SizeType>(m_threads) *
                                              kadane::kMaxGateBuckets *
                                              kadane::kMaxBatchRows);
     }
     m_support         = std::move(support);
     const uint64_t ns = m_plan.get_nsamps();
-    const SizeType extra_ring =
-        m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate ? 1 : 0;
     // Blocks shorter than the largest reach: at most the entries blocks of
     // that reach would need; older blocks share the catch-all.
     uint64_t reach = 0;
@@ -439,8 +414,7 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
     }
     reach += m_width - 1;
     const auto blocks = [&](uint64_t n) {
-        return 1 + extra_ring +
-               static_cast<SizeType>((search_latency() + n - 1) / n);
+        return 1 + static_cast<SizeType>((search_latency() + n - 1) / n);
     };
     m_ring_needed = blocks(ns);
     m_ring_size = std::min(m_ring_needed, blocks(std::max<uint64_t>(reach, 1)));
@@ -460,22 +434,6 @@ void FDMTBoxcarCpuEngine::enable_block_noise(
                 peak.snr = static_cast<float>(
                     (static_cast<double>(peak.raw_sum) - m_integer_means[i]) *
                     m_integer_scales[i]);
-            }
-        }
-    }
-    if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        const SizeType np = m_surrogate_plan.num_passes;
-        for (SizeType idx = 0; idx < m_surrogate_rows.size(); ++idx) {
-            const SizeType b   = idx / m_rows.size();
-            const SizeType r   = idx % m_rows.size();
-            const uint64_t pos = m_surrogate_pos[idx];
-            if (pos > 0 && m_surrogate_plan.disabled_row[r] == 0U) {
-                sync_surrogate_row_at_pos(0, r, b, pos);
-                for (SizeType k = 0; k < np; ++k) {
-                    cache_surrogate_pass_snr(r, m_surrogate_rows[idx].passes[k],
-                                             static_cast<uint32_t>(k), nullptr,
-                                             0, 0, nullptr);
-                }
             }
         }
     }
@@ -538,13 +496,6 @@ void FDMTBoxcarCpuEngine::reset_history(Stream /*unused*/) {
         w.reset();
     }
     std::ranges::fill(m_open, uint8_t{0});
-    std::ranges::fill(m_surrogate_c, 0.0F);
-    std::ranges::fill(m_surrogate_dec, 0.0F);
-    for (auto& st : m_surrogate_rows) {
-        st.reset();
-    }
-    std::ranges::fill(m_surrogate_open, uint8_t{0});
-    std::ranges::fill(m_surrogate_pos, uint64_t{0});
     m_position   = 0;
     m_open_begin = UINT64_MAX;
     begin_result(0);
@@ -572,10 +523,6 @@ void FDMTBoxcarCpuEngine::consume(SizeType level,
     }
     if (m_config.screen_mode == BoxcarScreenMode::kKadane) {
         consume_kadane(row_lo, row_hi, first, beams, input);
-        return;
-    }
-    if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        consume_surrogate(row_lo, row_hi, first, beams, input);
         return;
     }
     const SizeType nrows = row_hi - row_lo;
@@ -631,7 +578,6 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
                           (m_offsets.size() * sizeof(SizeType)) +
                           (m_row_plane.size() * sizeof(uint32_t)) +
                           m_kadane_plan.memory_bytes() +
-                          m_surrogate_plan.memory_bytes() +
                           (m_row_int_m1.size() * sizeof(double));
     for (const auto& p : m_planes) {
         plan_bytes += sizeof(p) + (p.widths.size() * sizeof(uint32_t)) +
@@ -643,22 +589,13 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCpuEngine::memory_usage() const noexcept {
                        sizeof(float));
     }
     const SizeType kadane_hist =
-        ((m_deferred.size(m_kadane_fc) + m_deferred.size(m_surrogate_c) +
-          m_deferred.size(m_surrogate_dec)) *
-         sizeof(float)) +
+        (m_deferred.size(m_kadane_fc) * sizeof(float)) +
         (m_deferred.size(m_kadane_ic) * sizeof(int32_t)) +
         (m_deferred.size(m_lag_f32) * sizeof(LagWindow<float>)) +
         (m_deferred.size(m_lag_i32) * sizeof(LagWindow<int32_t>)) +
-        ((m_deferred.size(m_open) + m_deferred.size(m_surrogate_open)) *
-         sizeof(uint8_t)) +
-        (m_deferred.size(m_surrogate_rows) *
-         sizeof(kadane::KadaneSurrogateRowState)) +
-        (m_deferred.size(m_surrogate_pos) * sizeof(uint64_t));
+        (m_deferred.size(m_open) * sizeof(uint8_t));
     const SizeType kadane_work =
-        ((m_deferred.size(m_tile_f32) + m_deferred.size(m_thread_cuts) +
-          m_deferred.size(m_surrogate_chk_c) +
-          m_deferred.size(m_surrogate_chk_dec) +
-          m_deferred.size(m_surrogate_lb)) *
+        ((m_deferred.size(m_tile_f32) + m_deferred.size(m_thread_cuts)) *
          sizeof(float)) +
         (m_deferred.size(m_tile_u32) * sizeof(uint32_t));
     return {
@@ -1084,10 +1021,6 @@ std::span<const T> FDMTBoxcarCpuEngine::masked(std::span<const T> block,
 }
 
 void FDMTBoxcarCpuEngine::update_open_begin() {
-    if (m_config.screen_mode == BoxcarScreenMode::kKadaneSurrogate) {
-        update_open_begin_surrogate();
-        return;
-    }
     uint64_t oldest = UINT64_MAX;
     if (m_config.peak_mode != PeakFindingMode::kAllAboveThreshold) {
         const auto n = static_cast<std::ptrdiff_t>(m_peaks.size());

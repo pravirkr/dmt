@@ -210,12 +210,6 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
             "per-row store; e.g. 16), got {}",
             kMaxKeepPerDM, config.max_cands_per_dm));
     }
-    constexpr SizeType kMaxSurrogateBoxcar = 4096;
-    if (config.screen_mode == BoxcarScreenMode::kKadaneSurrogate &&
-        config.max_boxcar > kMaxSurrogateBoxcar) {
-        throw std::invalid_argument(
-            "FDMTBoxcar: kKadaneSurrogate supports max_boxcar up to 4096");
-    }
     const bool packed = config.input_nbits != 32;
     if ((!packed && config.input_mean != 0) || !finite(config.input_mean) ||
         (packed && config.input_nbits != 1 && config.input_nbits != 2 &&

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -11,12 +10,10 @@
 
 namespace dmt::kadane {
 
-inline constexpr SizeType kMaxGateBuckets          = 3;
-inline constexpr SizeType kMaxSurrogatePasses      = 3;
-inline constexpr SizeType kKadaneRowAlign          = 16;
-inline constexpr uint32_t kMaxKadaneGateWidth      = 1U << 20;
-inline constexpr SizeType kMaxKadaneGateFilters    = 4096;
-inline constexpr uint32_t kMaxKadaneSurrogateWidth = 4096U;
+inline constexpr SizeType kMaxGateBuckets       = 3;
+inline constexpr SizeType kKadaneRowAlign       = 16;
+inline constexpr uint32_t kMaxKadaneGateWidth   = 1U << 20;
+inline constexpr SizeType kMaxKadaneGateFilters = 4096;
 inline constexpr int32_t kKadaneInt32Cap =
     std::numeric_limits<int32_t>::max() / 2;
 
@@ -25,33 +22,6 @@ inline constexpr int32_t kKadaneInt32Cap =
 /// use edge width floor((width + 1) / 4) and core width `width - 2 * w_edge`.
 DMT_HD constexpr uint32_t trapezoid_edge_width(uint32_t width) noexcept {
     return width >= 3U ? (width + 1U) / 4U : 0U;
-}
-
-/// `sqrt(num / den)` with IEEE rounding on host and device alike (nvcc
-/// `-use_fast_math` and hip-clang `-ffast-math` would otherwise approximate
-/// float division and square root), so surrogate S/N matches across backends.
-DMT_HD inline float surrogate_width_scale(float num, float den) noexcept {
-#if defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
-    return __fsqrt_rn(__fdiv_rn(num, den));
-#else
-    return static_cast<float>(
-        ::sqrt(static_cast<double>(num) / static_cast<double>(den)));
-#endif
-}
-
-/// Log-linear inverse-sigma interpolation `lo * (hi / lo)^t`, evaluated in
-/// double (untouched by fast-math on either backend) and rounded once.
-DMT_HD inline float
-surrogate_log_lerp(float inv_lo, float inv_hi, float t) noexcept {
-    const double lo = static_cast<double>(inv_lo);
-    const double l2 = static_cast<double>(t) *
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-                      ::log2(static_cast<double>(inv_hi) / lo);
-    return static_cast<float>(lo * ::exp2(l2));
-#else
-                      std::log2(static_cast<double>(inv_hi) / lo);
-    return static_cast<float>(lo * std::exp2(l2));
-#endif
 }
 
 /// Contiguous filter-index bucket [f_lo, f_hi) in `widths`.
@@ -176,111 +146,5 @@ void recompute_cuts_for_biases(const KadaneGatePlan& plan,
                                std::span<const float> row_biases,
                                std::span<const float> min_thr,
                                std::span<float> out_cuts);
-
-/// One width-strip pass of `KadaneSurrogatePlan`.
-struct KadaneSurrogatePass {
-    uint32_t w_lo            = 1; ///< Target strip minimum width (inclusive).
-    uint32_t w_hi            = 1; ///< Target strip maximum width (inclusive).
-    uint32_t decimate_factor = 1; ///< 1: full stream; 4: 4-sample block sum.
-};
-
-/**
- * @brief Transform-agnostic multi-bias / decimated Kadane surrogate plan for
- * `BoxcarScreenMode::kKadaneSurrogate`.
- *
- * Supports calibrated `widths` in `1..kMaxKadaneSurrogateWidth` (1..4096).
- * Plans up to `kMaxSurrogatePasses` (<= 3) passes (full-resolution passes plus
- * an optional fused f=4 decimated pass when `max_width >= 16` and
- * `!use_trapezoid`), strip-center tangent biases, excursion pre-filter trigger
- * thresholds, and O(1) arbitrary-width S/N evaluation.
- */
-struct KadaneSurrogatePlan {
-    SizeType num_passes = 0;
-    SizeType n_rows     = 0;
-    SizeType row_stride = 0;
-    uint32_t max_width  = 0;
-    bool use_trapezoid  = false;
-    bool has_decimated  = false;
-    bool is_integer     = false;
-    double integer_unit = 1.0;
-
-    std::vector<uint32_t> widths;
-    std::array<KadaneSurrogatePass, kMaxSurrogatePasses> passes{};
-
-    /// Per-pass step bias and excursion trigger threshold in SoA layout
-    /// `[k * row_stride + r]`. When `decimate_factor == 4`, `bias` applies to
-    /// unscaled 4-sample block sums `y_j = x_{4j} + x_{4j+1} + x_{4j+2} +
-    /// x_{4j+3}`.
-    std::vector<float> bias;
-    std::vector<float> trigger;
-
-    /// Effective rectangular boxcar inverse sigma [n_rows * widths.size()].
-    std::vector<float> box_inv_sigma_lut;
-    /// Per-row 1-sample baseline mean in integer units (empty when float).
-    std::vector<double> row_mean_1;
-    /// 1 when row r is dead / fully masked, 0 when active.
-    std::vector<uint8_t> disabled_row;
-
-    /// O(1) lookup tables indexed by width w in [0, max_width].
-    std::vector<uint32_t> width_nearest_filter;
-    std::vector<uint32_t> width_bracket_lo;
-    std::vector<uint32_t> width_bracket_hi;
-    std::vector<float> width_log_lerp;
-
-    KadaneSurrogatePlan() = default;
-    KadaneSurrogatePlan(std::span<const uint32_t> widths,
-                        bool use_trapezoid,
-                        SizeType n_rows,
-                        std::span<const float> raw_thresh_lut,
-                        std::span<const float> inv_sigma_lut,
-                        std::span<const double> integer_mean_lut = {},
-                        double integer_unit                      = 1.0,
-                        bool allow_decimation                    = true);
-
-    [[nodiscard]] float row_bias(SizeType k, SizeType r) const noexcept {
-        return bias[k * row_stride + r];
-    }
-    [[nodiscard]] float row_trigger(SizeType k, SizeType r) const noexcept {
-        return trigger[k * row_stride + r];
-    }
-
-    /// O(1) nearest filter index in `widths` for arbitrary width >= 1.
-    [[nodiscard]] uint32_t nearest_filter_idx(uint32_t width) const noexcept;
-
-    /// O(1) exact/interpolated rectangular boxcar inverse sigma for `row` and
-    /// arbitrary width >= 1.
-    [[nodiscard]] float interpolate_inv_sigma(SizeType row,
-                                              uint32_t width) const noexcept;
-
-    /// O(1) matched-filter S/N evaluation for a contiguous subarray sum
-    /// `raw_sum` of length `width` on `row`. Writes nearest `filter_idx` in
-    /// `widths` to `*out_filter_idx` when non-null.
-    [[nodiscard]] float
-    eval_surrogate_snr(SizeType row,
-                       double raw_sum,
-                       uint32_t width,
-                       uint32_t* out_filter_idx = nullptr) const noexcept;
-
-    [[nodiscard]] SizeType memory_bytes() const noexcept {
-        return ((widths.size() + width_nearest_filter.size() +
-                 width_bracket_lo.size() + width_bracket_hi.size()) *
-                sizeof(uint32_t)) +
-               ((bias.size() + trigger.size() + box_inv_sigma_lut.size() +
-                 width_log_lerp.size()) *
-                sizeof(float)) +
-               (row_mean_1.size() * sizeof(double)) +
-               (disabled_row.size() * sizeof(uint8_t));
-    }
-};
-
-[[nodiscard]] KadaneSurrogatePlan
-make_kadane_surrogate_plan(std::span<const uint32_t> widths,
-                           bool use_trapezoid,
-                           SizeType n_rows,
-                           std::span<const float> raw_thresh_lut,
-                           std::span<const float> inv_sigma_lut,
-                           std::span<const double> integer_mean_lut = {},
-                           double integer_unit                      = 1.0,
-                           bool allow_decimation                    = true);
 
 } // namespace dmt::kadane
