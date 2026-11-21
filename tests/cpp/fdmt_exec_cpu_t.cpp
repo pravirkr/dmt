@@ -192,14 +192,12 @@ TEST_CASE("FDMT performance parameters and memory usage", "[fdmt_cpu][cpu]") {
     CHECK(mem.workspace > orig.get_memory_usage().workspace);
     CHECK(orig.get_memory_usage().workspace > 0); // unpack + box rows
 
-    // Per-thread scratch: exactly one slice per thread (construction
-    // only: no thread runs).
-    FDMT one(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
-             Exec::cpu(1), 1, 3);
-    FDMT two(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
-             Exec::cpu(2), 1, 3);
-    CHECK(two.get_memory_usage().workspace ==
-          2 * one.get_memory_usage().workspace);
+    // Per-thread scratch: exactly one slice per thread (estimate only: nothing
+    // is allocated and no thread runs).
+    const plans::FDMTPlan p(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, "valid");
+    const auto one = FDMT::estimate_memory(p, true, Exec::cpu(1), 1, 3);
+    const auto two = FDMT::estimate_memory(p, true, Exec::cpu(2), 1, 3);
+    CHECK(two.usage.workspace == 2 * one.usage.workspace);
 }
 
 TEST_CASE("FDMT automatic fusion depth", "[fdmt_cpu][cpu]") {
@@ -227,9 +225,11 @@ TEST_CASE("FDMT automatic fusion depth", "[fdmt_cpu][cpu]") {
             prev_depth = depth;
             CHECK(fused_bytes(fdmt, n) <= budget);
             if (depth < fdmt.get_plan().get_niters()) {
-                FDMT deeper(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1,
-                            true, "full", Exec::cpu(nthreads), 1, depth + 1);
-                CHECK(fused_bytes(deeper, n) > budget);
+                const auto deeper = FDMT::estimate_memory(
+                    fdmt.get_plan(), true, Exec::cpu(nthreads), 1, depth + 1);
+                const auto rows =
+                    3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
+                CHECK((deeper.usage.workspace / n) - rows > budget);
             }
         }
     }

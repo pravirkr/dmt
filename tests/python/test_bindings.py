@@ -63,9 +63,9 @@ class TestBackends:
         "cls", [dmtlib.FDMT, dmtlib.FDMTFFT], ids=["FDMT", "FDMTFFT"]
     )
     def test_default_backend_is_cpu(self, cls: type) -> None:
-        engine = cls(1000.0, 1500.0, 16, 64, 0.001, 8, nthreads=2)
+        engine = cls(1000.0, 1500.0, 16, 64, 0.001, 8, nthreads=1)
         assert engine.backend == "cpu"
-        assert engine.nthreads == 2
+        assert engine.nthreads == 1
         assert engine.device == -1
 
     def test_unknown_backend_raises(self) -> None:

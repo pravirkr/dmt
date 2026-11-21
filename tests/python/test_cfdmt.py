@@ -113,7 +113,7 @@ class TestPlan:
 class TestExecute:
     @pytest.mark.parametrize("where", ["centre", "edge"])
     def test_recovers_dispersed_impulse(self, where: str) -> None:
-        coh = CohFDMT(small_config(normalize=False), 4)
+        coh = CohFDMT(small_config(normalize=False), 1)
         plan = coh.plan
         c = plan.dm_grid_coh
         dm = c[2] if where == "centre" else c[1] + 0.49 * plan.dm_step_coh
@@ -127,10 +127,10 @@ class TestExecute:
         assert abs(t - j0) <= 1
 
     def test_normalised_noise_matches_variance_grid(self) -> None:
-        coh = CohFDMT(small_config(block_nsamps=1 << 18), 4)
+        coh = CohFDMT(small_config(block_nsamps=1 << 18), 1)
         plan = coh.plan
         v = dmtlib.simulate_baseband(
-            plan.f_center, plan.bw_sub, plan.nsub, plan.block_nsamps, [], 16.0, 3, 4
+            plan.f_center, plan.bw_sub, plan.nsub, plan.block_nsamps, [], 16.0, 3, 1
         )
         out = coh.execute(dmtlib.pack_baseband(v, plan.format, 1.0))
         ratio = out.var(axis=1) / plan.get_effective_variance_grid()
@@ -141,13 +141,13 @@ class TestExecute:
 
     def test_skipback_blocks_tile_one_long_block(self) -> None:
         cfg = small_config(normalize=False)
-        small = CohFDMT(cfg, 4)
+        small = CohFDMT(cfg, 1)
         p = small.plan
         nb = 3
         total = p.block_nsamps + (nb - 1) * p.stride_nsamps
-        big = CohFDMT(small_config(normalize=False, block_nsamps=total), 4)
+        big = CohFDMT(small_config(normalize=False, block_nsamps=total), 1)
         assert big.plan.output_nsamps == nb * p.output_nsamps
-        v = dmtlib.simulate_baseband(p.f_center, p.bw_sub, p.nsub, total, [], 8.0, 5, 4)
+        v = dmtlib.simulate_baseband(p.f_center, p.bw_sub, p.nsub, total, [], 8.0, 5, 1)
         whole = big.execute(dmtlib.pack_baseband(v, p.format, 1.0))
         parts = [
             small.execute(
@@ -170,15 +170,15 @@ class TestExecute:
         plan = CohFDMTPlan(base)
         v = pulse_voltages(plan, plan.dm_grid_coh[1], 150.0, noise=0.5)
         scale = 50.0 / np.abs(v).max()
-        ref = CohFDMT(base, 4).execute(dmtlib.pack_baseband(v, base.format, scale))
+        ref = CohFDMT(base, 1).execute(dmtlib.pack_baseband(v, base.format, scale))
         for order in ("PRITF", "TFPRI"):
             for signed in (True, False):
                 fmt = BasebandFormat(order, is_signed=signed)
-                got = CohFDMT(small_config(format=fmt), 4).execute(
+                got = CohFDMT(small_config(format=fmt), 1).execute(
                     dmtlib.pack_baseband(v, fmt, scale)
                 )
                 np.testing.assert_array_equal(got, ref)
-        grouped = CohFDMT(small_config(subband_groups=[6, 10]), 4)
+        grouped = CohFDMT(small_config(subband_groups=[6, 10]), 1)
         groups = [
             dmtlib.pack_baseband(v, base.format, scale, sub_begin=0, sub_count=6),
             dmtlib.pack_baseband(v, base.format, scale, sub_begin=6, sub_count=10),
@@ -186,7 +186,7 @@ class TestExecute:
         np.testing.assert_array_equal(grouped.execute(groups), ref)
 
     def test_out_buffer_reuse_and_int8_input(self) -> None:
-        coh = CohFDMT(small_config(), 2)
+        coh = CohFDMT(small_config(), 1)
         raw = np.random.default_rng(1).normal(0, 10, coh.input_size()).astype(np.int8)
         buf = np.empty(coh.dmt_size, dtype=np.float32)
         out = coh.execute(raw, out=buf)

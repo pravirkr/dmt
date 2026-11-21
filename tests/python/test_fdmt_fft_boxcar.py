@@ -20,15 +20,11 @@ GRID = list(range(0, 120, 3))
 
 
 def backends() -> list[str]:
-    # The GPU backend only with a device for it (conftest's probe), so these
-    # cases skip, rather than fail, on a GPU build without a GPU.
     try:
-        from .conftest import _usable  # noqa: PLC0415
+        from .conftest import gpu_backends  # noqa: PLC0415
     except ImportError:
-        from conftest import _usable  # noqa: PLC0415
-    names = ["cpu"]
-    names += [b for b in ("cuda", "hip") if _usable(b)]
-    return names
+        from conftest import gpu_backends  # noqa: PLC0415
+    return ["cpu", *gpu_backends()]
 
 
 def best(candidates: np.ndarray) -> np.void:

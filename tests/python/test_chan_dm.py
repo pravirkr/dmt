@@ -17,25 +17,14 @@ K_DM = 1.0 / 2.41e-4
 AMP = 48.0 / np.sqrt(128 * 4)  # burst amplitude: matched S/N 48
 
 
-def _gpu_backends() -> list[str]:
-    import dmtlib  # noqa: PLC0415
-
-    usable = []
-    for b in ("cuda", "hip"):
-        if b not in dmtlib.available_backends():
-            continue
-        try:
-            dmtlib.FDMT(1000.0, 1500.0, 4, 8, 0.001, 2, backend=b)
-        except Exception:  # noqa: BLE001, S112 - no device: CPU only
-            continue
-        usable.append(b)
-    return usable
-
-
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     # `backend`: the CPU and every usable GPU backend of this build.
     if "backend" in metafunc.fixturenames:
-        metafunc.parametrize("backend", ["cpu", *_gpu_backends()])
+        try:
+            from .conftest import gpu_backends  # noqa: PLC0415
+        except ImportError:
+            from conftest import gpu_backends  # noqa: PLC0415
+        metafunc.parametrize("backend", ["cpu", *gpu_backends()])
 
 
 Case = tuple[float, float, int, float, np.ndarray, float]

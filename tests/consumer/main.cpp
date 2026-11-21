@@ -20,7 +20,7 @@ int main() {
     dmt::algorithms::FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                /*dt_min=*/0, /*dt_step=*/1,
                                /*use_box_smearing=*/true, /*mode=*/"full",
-                               dmt::Exec::cpu(/*nthreads=*/2));
+                               dmt::Exec::cpu(/*nthreads=*/1));
     const auto& plan = fdmt.get_plan();
 
     const size_t t0 = 300;

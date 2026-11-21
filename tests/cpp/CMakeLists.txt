@@ -36,6 +36,10 @@ set(TARGET_TESTS ${PROJECT_NAME}_tests)
 # ones loop over the backends available at run time) and the GPU tests,
 # CUDA source compiled for this build's GPU backend (CUDA or HIP).
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+# fdmt_alloc_cpu_t.cpp replaces global operator new; keep it in its own binary
+# so it does not intercept allocations in the rest of the suite.
+set(ALLOC_TEST_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/fdmt_alloc_cpu_t.cpp)
+list(REMOVE_ITEM TEST_SOURCES ${ALLOC_TEST_SOURCE})
 if(DMT_GPU_BACKEND)
   file(GLOB TEST_SOURCES_GPU CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
   set_source_files_properties(${TEST_SOURCES_GPU} PROPERTIES LANGUAGE ${DMT_GPU_BACKEND})
@@ -73,6 +77,22 @@ if(DMT_GPU_BACKEND)
 endif()
 
 dmt_enable_coverage(${TARGET_TESTS})
+
+set(TARGET_ALLOC_TESTS ${PROJECT_NAME}_alloc_tests)
+add_executable(${TARGET_ALLOC_TESTS} ${ALLOC_TEST_SOURCE})
+target_include_directories(
+  ${TARGET_ALLOC_TESTS} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
+                                ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(${TARGET_ALLOC_TESTS} PRIVATE ${DMT_BACKEND_DEFINITIONS})
+target_link_libraries(
+  ${TARGET_ALLOC_TESTS}
+  PRIVATE ${PROJECT_NAME}::${DMT_LIBRARY_NAME}
+          ${DMT_COMPILE_OPTIONS}
+          Catch2::Catch2WithMain
+          OpenMP::OpenMP_CXX
+)
+dmt_enable_coverage(${TARGET_ALLOC_TESTS})
 
 # Device tests are tagged [gpu] (or [parity]); they run on this build's GPU
 # backend (test names prefixed with it) and are labelled `gpu`, so
@@ -121,6 +141,16 @@ if(DMT_GPU_BACKEND)
     ENVIRONMENT
     "OMP_NUM_THREADS=1"
   )
+  catch_discover_tests(
+    ${TARGET_ALLOC_TESTS}
+    TEST_PREFIX
+    "cpu:"
+    PROPERTIES
+    LABELS
+    "cpu"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
+  )
 else()
   catch_discover_tests(
     ${TARGET_TESTS}
@@ -139,6 +169,14 @@ else()
     PROPERTIES
     LABELS
     "slow"
+    ENVIRONMENT
+    "OMP_NUM_THREADS=1"
+  )
+  catch_discover_tests(
+    ${TARGET_ALLOC_TESTS}
+    PROPERTIES
+    LABELS
+    "cpu"
     ENVIRONMENT
     "OMP_NUM_THREADS=1"
   )

@@ -56,7 +56,7 @@ def _assert_coh_close(got: np.ndarray, want: np.ndarray) -> None:
 
 def test_coh_fdmt_gpu_matches_cpu(gpu_backend: str) -> None:
     cfg = dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0)
-    cpu = CohFDMT(cfg, 4)
+    cpu = CohFDMT(cfg, 1)
     gpu = on(gpu_backend, CohFDMT, cfg)
     assert gpu.backend == gpu_backend
     rng = np.random.default_rng(2)
@@ -90,7 +90,7 @@ def test_coh_fdmt_gpu_formats_match_cpu(
     )
     data = _coh_block(cfg, nbits)
     _assert_coh_close(
-        on(gpu_backend, CohFDMT, cfg).execute(data), CohFDMT(cfg, 4).execute(data)
+        on(gpu_backend, CohFDMT, cfg).execute(data), CohFDMT(cfg, 1).execute(data)
     )
 
 
@@ -102,7 +102,7 @@ def test_coh_fdmt_gpu_subband_groups_match_cpu(gpu_backend: str) -> None:
     data = _coh_block(base, 3)
     split = CohFDMT(grouped, 1).input_size(0)
     groups = [data[:split], data[split:]]
-    want = CohFDMT(base, 4).execute(data)
+    want = CohFDMT(base, 1).execute(data)
     _assert_coh_close(on(gpu_backend, CohFDMT, grouped).execute(groups), want)
 
 

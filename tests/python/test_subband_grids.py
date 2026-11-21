@@ -16,22 +16,13 @@ F_MIN, F_MAX, NCHANS, TSAMP, NSAMPS = 704.0, 1216.0, 128, 256e-6, 2048
 DMS = dmtlib.generate_dm_grid(F_MIN, F_MAX, NCHANS, TSAMP, 0.0, 300.0, max_snr_loss=0.1)
 
 
-def _gpu_backends() -> list[str]:
-    usable = []
-    for b in ("cuda", "hip"):
-        if b not in dmtlib.available_backends():
-            continue
-        try:
-            dmtlib.FDMT(1000.0, 1500.0, 4, 8, 0.001, 2, backend=b)
-        except Exception:  # noqa: BLE001, S112 - no device: CPU only
-            continue
-        usable.append(b)
-    return usable
-
-
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if "backend" in metafunc.fixturenames:
-        metafunc.parametrize("backend", ["cpu", *_gpu_backends()])
+        try:
+            from .conftest import gpu_backends  # noqa: PLC0415
+        except ImportError:
+            from conftest import gpu_backends  # noqa: PLC0415
+        metafunc.parametrize("backend", ["cpu", *gpu_backends()])
 
 
 def make_plan(loss: float, depth: int = 3, nsamps: int = NSAMPS) -> FDMTPlan:

@@ -1,17 +1,26 @@
 """Noise-only validation; deliberately no FDMT/DDMT signal-sensitivity claims."""
 
-import runpy
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 from dmtlib import DDMT, FDMT, FDMTFFT
 
-ANALYSIS = runpy.run_path(
-    str(Path(__file__).resolve().parents[2] / "bench/scripts/fdmt_noise.py")
-)
-WHITE = ANALYSIS["WHITE_ENGINES"]
+try:
+    from ._fdmt_noise import (
+        WHITE_ENGINES,
+        analyze,
+        cold_start_noise,
+        collect_noise,
+        white_noise_metrics,
+    )
+except ImportError:
+    from _fdmt_noise import (
+        WHITE_ENGINES,
+        analyze,
+        cold_start_noise,
+        collect_noise,
+        white_noise_metrics,
+    )
 
 
 @pytest.mark.parametrize(
@@ -24,7 +33,7 @@ def test_fdmt_and_ddmt_preserve_white_noise(
     delays: list[int],
     blocks: int,
 ) -> None:
-    streams, plan, _ = ANALYSIS["collect_noise"](
+    streams, plan = collect_noise(
         nchans=nchans,
         nsamps=nsamps,
         realizations=256,
@@ -32,8 +41,8 @@ def test_fdmt_and_ddmt_preserve_white_noise(
         blocks=blocks,
         seed=45872,
     )
-    report = ANALYSIS["analyze"](streams, plan)
-    for name in WHITE:
+    report = analyze(streams, plan)
+    for name in WHITE_ENGINES:
         for trial, row in enumerate(report[name]):
             assert row["passed"], (name, delays[trial], row)
     # Positive control: these geometries have multi-sample channel windows.
@@ -45,7 +54,7 @@ def test_fdmt_and_ddmt_preserve_white_noise(
 
 def test_gpu_fdmt_and_ddmt_preserve_white_noise(gpu_backend: str) -> None:
     # Device construction/execution errors propagate after backend discovery.
-    streams, plan, _ = ANALYSIS["collect_noise"](
+    streams, plan = collect_noise(
         nchans=17,
         nsamps=512,
         realizations=256,
@@ -53,8 +62,8 @@ def test_gpu_fdmt_and_ddmt_preserve_white_noise(gpu_backend: str) -> None:
         backend=gpu_backend,
         seed=45872,
     )
-    report = ANALYSIS["analyze"](streams, plan)
-    for name in WHITE:
+    report = analyze(streams, plan)
+    for name in WHITE_ENGINES:
         assert all(row["passed"] for row in report[name]), (name, report[name])
 
 
@@ -109,7 +118,7 @@ def test_signed_unfiltered_noise_across_block_boundaries() -> None:
     )
     np.testing.assert_array_equal(actual, expected)
     for trial in range(delays.size):
-        row = ANALYSIS["white_noise_metrics"](
+        row = white_noise_metrics(
             actual[:, trial, block * 2 :], chans, comparisons=delays.size
         )
         assert row["passed"], (delays[trial], row)
@@ -166,7 +175,7 @@ def test_fdmt_fft_startup_samples_bounds_the_ramp(box: bool) -> None:
 
 def test_cold_start_mean_ramp_and_its_removal() -> None:
     # Low-frequency excess from nonzero-mean input and a cold start. Dropping startup_samples restores white statistics.
-    result = ANALYSIS["cold_start_noise"](
+    result = cold_start_noise(
         mean=1.0, nchans=16, nsamps=4096, realizations=128, delay=1024, seed=7
     )
     assert result["startup_samples"] == 1024
