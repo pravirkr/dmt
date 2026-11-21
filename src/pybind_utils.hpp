@@ -289,14 +289,21 @@ inline Exec make_exec(std::string_view backend, int nthreads, int device) {
     return {.backend = b, .nthreads = nthreads, .device = device};
 }
 
-// The stepper's dmt buffer: the caller's, or a new nbeams * dmt_size one.
-// Kept alive as the engine's `_dmt_buffer` attribute by the caller.
+// The stepper's dmt buffer: the caller's (validated in place), or a new
+// nbeams * dmt_size one. Kept alive as the engine's `_dmt_buffer` attribute.
 template <typename Engine>
-py::array_t<float, py::array::c_style> stepper_dmt_buffer(
-    const Engine& engine,
-    const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
+py::array_t<float, py::array::c_style>
+stepper_dmt_buffer(const Engine& engine,
+                   std::string_view context,
+                   const std::optional<py::array>& dmt_opt) {
     if (dmt_opt.has_value()) {
-        return *dmt_opt;
+        auto arr =
+            require_contiguous_array<float>(*dmt_opt, context, "float32");
+        if (!arr.writeable()) {
+            throw py::value_error(
+                fmt::format("{}: dmt buffer must be writeable", context));
+        }
+        return arr;
     }
     return py::array_t<float, py::array::c_style>(static_cast<py::ssize_t>(
         engine.get_nbeams() * engine.get_plan().get_dmt_size()));

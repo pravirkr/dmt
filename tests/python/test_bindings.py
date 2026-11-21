@@ -125,10 +125,57 @@ class TestStrictWaterfallInput:
         fdmt_packed = dmtlib.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
         packed_u16 = np.zeros((nchans, nsamps), dtype=np.uint16)
         packed_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.uint8)[:, :nsamps]
-        with pytest.raises(TypeError, match="uint8"):
+        with pytest.raises(ValueError, match="dtype uint8"):
             fdmt_packed.execute(packed_u16, 8)
         with pytest.raises(ValueError, match="C-contiguous"):
             fdmt_packed.execute(packed_noncontig, 8)
+
+    def test_stepper_dmt_buffer_rejects_bad_dtype_layout_and_readonly(self) -> None:
+        nchans, nsamps = 16, 64
+        wf = np.zeros((nchans, nsamps), dtype=np.float32)
+        packed = np.zeros((nchans, nsamps), dtype=np.uint8)
+
+        for cls in (dmtlib.FDMT, dmtlib.FDMTFFT):
+            engine = cls(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+            needed = engine.plan.buffer_size
+            bad_dtype = np.zeros(needed, dtype=np.float64)
+            bad_stride = np.zeros(needed * 2, dtype=np.float32)[::2]
+            readonly = np.zeros(needed, dtype=np.float32)
+            readonly.setflags(write=False)
+
+            for call in (
+                lambda buf, e=engine: e.reset(wf, buf),
+                lambda buf, e=engine: e.reset(packed, 8, buf),
+            ):
+                with pytest.raises(ValueError, match="dtype float32"):
+                    call(bad_dtype)
+                with pytest.raises(ValueError, match="C-contiguous"):
+                    call(bad_stride)
+                with pytest.raises(ValueError, match="writeable"):
+                    call(readonly)
+
+    def test_compute_fdmt_one_shots_reject_wrong_dtype_and_non_contiguous(self) -> None:
+        nchans, nsamps = 16, 64
+        wf_f64 = np.zeros((nchans, nsamps), dtype=np.float64)
+        wf_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.float32)[:, :nsamps]
+
+        for fn in (libdmt.compute_fdmt, libdmt.compute_fdmt_fft):
+            with pytest.raises(ValueError, match="dtype float32"):
+                fn(wf_f64, 1000.0, 1500.0, nchans, nsamps, 0.001, 8)
+            with pytest.raises(ValueError, match="C-contiguous"):
+                fn(wf_noncontig, 1000.0, 1500.0, nchans, nsamps, 0.001, 8)
+            with pytest.raises(ValueError, match="dtype float32"):
+                fn(wf_f64, 1000.0, 1500.0, nchans, nsamps, 0.001, dt_grid=[0, 4, 8])
+            with pytest.raises(ValueError, match="C-contiguous"):
+                fn(
+                    wf_noncontig,
+                    1000.0,
+                    1500.0,
+                    nchans,
+                    nsamps,
+                    0.001,
+                    dt_grid=[0, 4, 8],
+                )
 
     def test_ddmt_and_ddmt_fft_reject_wrong_dtype_and_non_contiguous(self) -> None:
         nchans, nsamps = 16, 64

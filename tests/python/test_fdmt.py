@@ -1223,7 +1223,7 @@ class TestFDMTPerformanceParams:
         packed = np.zeros((self.nchans, self.nsamps), dtype=np.uint8)
         with pytest.raises(TypeError):
             fdmt.execute(packed)
-        with pytest.raises(TypeError):
+        with pytest.raises(ValueError):
             fdmt.execute(packed.astype(np.float32), 8)
         with pytest.raises(ValueError):
             fdmt.execute(packed, 3)

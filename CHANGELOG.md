@@ -121,6 +121,12 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Changed
 
+- **Strict host waterfall and buffer inputs in Python bindings.** `FDMT`,
+  `FDMTFFT`, `DDMT`, `DDMTFFT`, `compute_fdmt`, `compute_fdmt_fft`,
+  `pack_baseband`, and `add_frb_track` now require exact dtype (`float32`,
+  `uint8` for packed input, `complex64` for baseband voltages) and
+  C-contiguous layout (plus writeability for in-place `dmt` / `waterfall`
+  buffers), raising `ValueError` instead of silently copying or casting.
 - **GPU `FDMTBoxcar` and `FDMTFFTBoxcar` stage host-memory input inside
   `max_memory_bytes`.** A host (NumPy) block was copied whole to the
   device on the first host `execute()`, outside the budget (UWL 6656
