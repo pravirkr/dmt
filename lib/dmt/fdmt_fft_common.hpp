@@ -31,7 +31,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "dmt/common/plans.hpp"
@@ -44,6 +47,13 @@ namespace dmt::algorithms::fdmt_fft {
 
 /// Guard samples of fractional-delay FDMTFFT (see file comment).
 inline constexpr SizeType kFractionalGuard = 64;
+
+[[nodiscard]] inline std::uint32_t to_u32(SizeType v) {
+    if (v >= std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("FDMTFFT: tree index exceeds 32 bits");
+    }
+    return static_cast<std::uint32_t>(v);
+}
 
 /// @brief Real-valued merge shifts of the fractional tree, indexed like
 /// FDMTPlanContainer::coordinates_sum, and the resulting support.

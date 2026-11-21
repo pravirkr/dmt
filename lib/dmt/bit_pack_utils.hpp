@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 
@@ -215,12 +216,13 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
             out[i] = static_cast<T>(row[i]);
         }
     } else if constexpr (NBITS == 16) {
-        const auto* words = reinterpret_cast<const uint16_t*>(row);
 #if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd
 #endif
         for (SizeType i = 0; i < nsamps; ++i) {
-            out[i] = static_cast<T>(words[i]);
+            uint16_t word = 0;
+            std::memcpy(&word, row + (i * 2), sizeof(word));
+            out[i] = static_cast<T>(word);
         }
     } else {
         detail::unpack_row_subbyte<NBITS, T>(row, nsamps, out);
@@ -251,7 +253,7 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
         unpack_row<16>(row, nsamps, out);
         break;
     default:
-        break;
+        std::abort();
     }
 }
 

@@ -51,37 +51,6 @@ dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
     return kDispConstD * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
 }
 
-/**
- * @brief POSIX aligned memory allocator for SIMD vectorization and cache
- * alignment.
- * @tparam T Value type to allocate.
- */
-template <typename T> struct AlignedAllocator {
-    static constexpr std::size_t kAlignment = alignof(std::max_align_t);
-
-    /**
-     * @brief Allocates aligned memory.
-     * @param n Number of elements to allocate.
-     * @return Pointer to aligned memory buffer.
-     * @throws std::bad_alloc if allocation fails.
-     */
-    T* allocate(std::size_t n) {
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, kAlignment, n * sizeof(T)) != 0) {
-            throw std::bad_alloc();
-        }
-        return reinterpret_cast<T*>(ptr);
-    }
-
-    /**
-     * @brief Deallocates aligned memory.
-     * @param ptr Pointer previously allocated with allocate().
-     */
-    void deallocate(T* ptr, std::size_t /*unused*/) noexcept { free(ptr); }
-};
-
-template <typename T> using AlignedVector = std::vector<T, AlignedAllocator<T>>;
-
 template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
 

@@ -127,12 +127,7 @@ struct LevelOps {
     std::vector<CopyOp> copy;
 };
 
-std::uint32_t to_u32(SizeType v) {
-    if (v > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::overflow_error("FDMTFFT: tree index exceeds 32 bits");
-    }
-    return static_cast<std::uint32_t>(v);
-}
+using fdmt_fft::to_u32;
 
 // One transform length: sizes, exact twiddles and FFTW row plans.
 struct Geometry {

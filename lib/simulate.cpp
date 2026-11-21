@@ -181,13 +181,16 @@ std::vector<uint8_t> pack_baseband(std::span<const ComplexType> voltages,
             fmt::format("pack_baseband: expected {} voltages, got {}",
                         2 * nsub * nsamps, voltages.size()));
     }
+    if (sub_begin > nsub || t_begin > nsamps) {
+        throw std::invalid_argument("pack_baseband: range out of bounds");
+    }
     if (sub_count == 0) {
         sub_count = nsub - sub_begin;
     }
     if (t_count == 0) {
         t_count = nsamps - t_begin;
     }
-    if (sub_begin + sub_count > nsub || t_begin + t_count > nsamps) {
+    if (sub_count > nsub - sub_begin || t_count > nsamps - t_begin) {
         throw std::invalid_argument("pack_baseband: range out of bounds");
     }
     const auto st    = baseband_strides(format, t_count, sub_count);

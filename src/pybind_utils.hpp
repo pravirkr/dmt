@@ -60,6 +60,12 @@ as_listof_pyarray(const std::vector<std::vector<T>>& vec_of_vecs) {
 inline std::vector<IndexType> extract_dt_grid(const py::object& obj) {
     std::vector<IndexType> result;
     if (py::isinstance<py::array>(obj)) {
+        const auto raw  = py::reinterpret_borrow<py::array>(obj);
+        const char kind = raw.dtype().kind();
+        if (kind != 'i' && kind != 'u') {
+            throw py::value_error(
+                "dt_grid must have an integer dtype (got non-integer array)");
+        }
         auto arr =
             py::array_t<IndexType,
                         py::array::c_style | py::array::forcecast>::ensure(obj);

@@ -1409,3 +1409,19 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_estimate(gpu_backend)
+
+
+def test_add_frb_track_and_dt_grid_input_validation() -> None:
+    plan = libdmt.FDMTPlan(700.0, 1200.0, 8, 64, 0.001, 16)
+    with pytest.raises(ValueError, match="float32"):
+        libdmt.add_frb_track(np.zeros((8, 64), dtype=np.float64), plan, 0)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        libdmt.add_frb_track(np.zeros((8, 64), dtype=np.float32, order="F"), plan, 0)
+    ro = np.zeros((8, 64), dtype=np.float32)
+    ro.setflags(write=False)
+    with pytest.raises(ValueError, match="writeable"):
+        libdmt.add_frb_track(ro, plan, 0)
+    with pytest.raises(ValueError, match="integer"):
+        libdmt.FDMTPlan(
+            700.0, 1200.0, 8, 64, 0.001, dt_grid=np.array([0.5, 1.5], dtype=np.float32)
+        )

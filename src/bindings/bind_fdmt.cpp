@@ -1565,8 +1565,15 @@ void bind_fdmt(py::module_& mod) {
                 const auto& plan   = fdmt.get_plan();
                 const auto ncoords = plan.get_dmt_ndms();
                 const auto nsamps  = plan.get_dmt_nsamps();
+                const auto fsize   = sizeof(float);
+                if (fdmt.get_nbeams() == 1) {
+                    return py::array_t<float>({ncoords, nsamps},
+                                              {nsamps * fsize, fsize},
+                                              dmt.data(), self);
+                }
                 return py::array_t<float>(
-                    {ncoords, nsamps}, {nsamps * sizeof(float), sizeof(float)},
+                    {fdmt.get_nbeams(), ncoords, nsamps},
+                    {plan.get_dmt_size() * fsize, nsamps * fsize, fsize},
                     dmt.data(), self);
             },
             py::kw_only(), py::arg("stream") = py::none())
@@ -1746,14 +1753,26 @@ void bind_fdmt(py::module_& mod) {
 
     mod.def(
         "add_frb_track",
-        [](py::array_t<float, py::array::c_style>& waterfall,
-           const FDMTPlan& plan, SizeType dm_idx, float amplitude,
-           IndexType toffset, SizeType width) {
+        [](py::array& waterfall, const FDMTPlan& plan, SizeType dm_idx,
+           float amplitude, IndexType toffset, SizeType width) {
+            if (!waterfall.dtype().is(py::dtype::of<float>())) {
+                throw py::value_error(
+                    "add_frb_track: waterfall must have dtype float32");
+            }
+            if ((waterfall.flags() & py::array::c_style) == 0) {
+                throw py::value_error(
+                    "add_frb_track: waterfall must be C-contiguous");
+            }
+            if (!waterfall.writeable()) {
+                throw py::value_error(
+                    "add_frb_track: waterfall must be writeable");
+            }
             algorithms::add_frb_track(
-                std::span<float>(waterfall.mutable_data(), waterfall.size()),
+                std::span<float>(static_cast<float*>(waterfall.mutable_data()),
+                                 static_cast<SizeType>(waterfall.size())),
                 plan, dm_idx, amplitude, toffset, width);
         },
-        py::arg("waterfall"), py::arg("plan"), py::arg("dm_idx"),
+        py::arg("waterfall").noconvert(), py::arg("plan"), py::arg("dm_idx"),
         py::arg("amplitude") = 1.0F, py::arg("toffset") = 0,
         py::arg("width") = 1,
         R"doc(

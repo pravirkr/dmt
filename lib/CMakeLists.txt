@@ -1,6 +1,5 @@
 # System dependencies
 message(STATUS "Searching for required system dependencies...")
-find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
 # fmt — keep version in sync with spdlog's expected fmt release.

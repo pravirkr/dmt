@@ -864,8 +864,8 @@ struct LevinConfig {
     float dm_start{};    ///< Lowest DM trial in pc/cm^3 (must be >= 0)
     float dm_end{};      ///< Upper DM search bound in pc/cm^3
     float pulse_width{}; ///< Intrinsic pulse width in seconds
-    float tol{}; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must
-                 ///< be > 1.0)
+    float tol{1.25F}; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25,
+                      ///< must be > 1.0)
     /// Use the DDplan-style piecewise-uniform grid
     /// (DDMTPlan::generate_levin_dm_grid_piecewise()) instead of the
     /// continuously varying Levin grid: typically 1.2-1.4x the trials, and

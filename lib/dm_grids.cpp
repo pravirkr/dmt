@@ -29,8 +29,6 @@ constexpr SizeType kNumWidths = kWidths.size();
 constexpr SizeType kMaxGroups = 64;
 // Pulse arrival times tried across the band's delay span.
 constexpr SizeType kNumTaus = 21;
-// Scale of the modelled per-channel pulse width (1: second-moment match).
-constexpr double kWidthScale = 1.0;
 // Log-spaced nodes of the half step over |DM - chan_dm| (plus 0).
 constexpr SizeType kNumNodes = 36;
 constexpr int kBisections    = 22;
@@ -166,8 +164,7 @@ public:
         for (SizeType g = 0; g < m; ++g) {
             const double s = u * m_s[g];
             const double l = 1.0 + s;
-            a.width[g] = kWidthScale *
-                         std::sqrt(((m_w0 * m_w0) + 1.0 + (2.0 * s * s)) / 6.0);
+            a.width[g] = std::sqrt(((m_w0 * m_w0) + 1.0 + (2.0 * s * s)) / 6.0);
             for (SizeType w = 0; w < kNumWidths; ++w) {
                 const double mn = std::min(l, kWidths[w]);
                 const double mx = std::max(l, kWidths[w]);

@@ -468,3 +468,17 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_fft_estimate(gpu_backend)
+
+
+def test_fdmt_fft_finalize_preserves_nbeams() -> None:
+    rng = np.random.default_rng(19)
+    nbeams, nchans, nsamps = 2, 8, 256
+    wf = rng.standard_normal((nbeams, nchans, nsamps), dtype=np.float32)
+    eng = FDMTFFT(700.0, 1200.0, nchans, nsamps, 0.001, 16, nbeams=nbeams)
+    expected = eng.execute(wf)
+    eng.reset_history()
+    dmt_buf = np.empty_like(expected)
+    eng.reset(wf, dmt_buf)
+    got = eng.finalize()
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)

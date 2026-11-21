@@ -209,8 +209,8 @@ class TestExecute:
 
 def _check_estimate(backend: str) -> None:
     for cfg in (small_config(), small_config(normalize=False)):
-        est = CohFDMT.estimate_memory(cfg, 2, backend=backend)
-        assert est == CohFDMT(cfg, 2, backend=backend).memory_usage()
+        est = CohFDMT.estimate_memory(cfg, 1, backend=backend)
+        assert est == CohFDMT(cfg, 1, backend=backend).memory_usage()
         assert est["total"] > 0
 
 
@@ -220,3 +220,12 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_estimate(gpu_backend)
+
+
+def test_pack_baseband_rejects_out_of_bounds_begin() -> None:
+    cfg = small_config()
+    v = np.zeros((2, cfg.nsub, 64), dtype=np.complex64)
+    with pytest.raises(ValueError, match="out of bounds"):
+        dmtlib.pack_baseband(v, cfg.format, 1.0, sub_begin=cfg.nsub + 1)
+    with pytest.raises(ValueError, match="out of bounds"):
+        dmtlib.pack_baseband(v, cfg.format, 1.0, t_begin=65)

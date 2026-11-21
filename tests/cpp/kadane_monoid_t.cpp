@@ -631,8 +631,8 @@ TEST_CASE("DMT_HD wide-boxcar BlockNoise cut bit-parity up to 2^20 and "
 
     // 1. Wide-boxcar (max_boxcar = 16384 and 1048576) bit-identical parity
     // between compute_bucket_cut_hd_f32 and KadaneGatePlan::recompute_row_cuts
-    // / recompute_cuts_for_biases across normal, clamped-zero, near-overflow,
-    // and dead-row threshold profiles.
+    // across normal, clamped-zero, near-overflow, and dead-row threshold
+    // profiles.
     for (const SizeType max_boxcar : {SizeType{16384}, SizeType{1048576}}) {
         for (const float wtsp : {2.0F, 1.5F}) {
             const auto widths =

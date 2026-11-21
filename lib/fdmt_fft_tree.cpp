@@ -24,13 +24,6 @@ namespace dmt::algorithms::fdmt_fft {
 
 namespace {
 
-std::uint32_t to_u32(SizeType v) {
-    if (v >= std::numeric_limits<std::uint32_t>::max()) {
-        throw std::overflow_error("FDMTFFT: tree index exceeds 32 bits");
-    }
-    return static_cast<std::uint32_t>(v);
-}
-
 SizeType index_of(SizeType buf_offset, SizeType nsamps) {
     if (nsamps == 0) {
         throw std::logic_error("FDMTFFT: coordinate with zero samples");

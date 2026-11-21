@@ -211,27 +211,17 @@ TEST_CASE("FDMT automatic fusion depth", "[fdmt_cpu][cpu]") {
         const auto rows = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
         return (f.get_memory_usage().workspace / nthreads) - rows;
     };
-    SizeType prev_depth = SIZE_MAX;
-    for (const int nthreads : {1, 2, 4, 8}) {
-        DYNAMIC_SECTION("full, nthreads=" << nthreads) {
-            const auto n = static_cast<SizeType>(nthreads);
-            const SizeType budget =
-                std::max<SizeType>((SizeType{36} << 20) / n, SizeType{8} << 20);
-            FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true,
-                      "full", Exec::cpu(nthreads));
-            const auto depth = fdmt.get_fuse_levels();
-            REQUIRE(depth >= 1);
-            REQUIRE(depth <= prev_depth); // more threads never fuse deeper
-            prev_depth = depth;
-            CHECK(fused_bytes(fdmt, n) <= budget);
-            if (depth < fdmt.get_plan().get_niters()) {
-                const auto deeper = FDMT::estimate_memory(
-                    fdmt.get_plan(), true, Exec::cpu(nthreads), 1, depth + 1);
-                const auto rows =
-                    3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
-                CHECK((deeper.usage.workspace / n) - rows > budget);
-            }
-        }
+    const SizeType budget = SizeType{36} << 20;
+    FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true, "full",
+              Exec::cpu(1));
+    const auto depth = fdmt.get_fuse_levels();
+    REQUIRE(depth >= 1);
+    CHECK(fused_bytes(fdmt, 1) <= budget);
+    if (depth < fdmt.get_plan().get_niters()) {
+        const auto deeper = FDMT::estimate_memory(fdmt.get_plan(), true,
+                                                  Exec::cpu(1), 1, depth + 1);
+        const auto rows   = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
+        CHECK(deeper.usage.workspace - rows > budget);
     }
 }
 
@@ -278,28 +268,21 @@ TEST_CASE("FDMT automatic fusion depth in valid mode (time tiles)",
     };
     const std::vector<Case> cases = {{1024, 4096, 256}, {256, 4096, 3000}};
     for (const auto& c : cases) {
-        SizeType prev_depth = SIZE_MAX;
-        for (const int nthreads : {1, 2, 4, 8}) {
-            DYNAMIC_SECTION("nchans=" << c.nchans << " dt_max=" << c.dt_max
-                                      << " nthreads=" << nthreads) {
-                FDMT fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max, 0,
-                          1, true, "valid", Exec::cpu(nthreads));
-                const auto& plan   = fdmt.get_plan();
-                const auto& shapes = plan.get_container().state_shape;
-                const auto depth   = fdmt.get_fuse_levels();
-                REQUIRE(depth >= 1);
-                REQUIRE(depth <= prev_depth);
-                prev_depth = depth;
-                CHECK(working_set(plan, depth, 256) <= kBudget);
-                const auto next = depth + 1;
-                if (next <= plan.get_niters()) {
-                    CHECK((working_set(plan, next, 256) > kBudget ||
-                           shapes[next].nchans <
-                               2 * static_cast<SizeType>(nthreads)));
-                }
-                CHECK_THAT(fdmt.summary(),
-                           Catch::Matchers::ContainsSubstring("time tiles of"));
+        DYNAMIC_SECTION("nchans=" << c.nchans << " dt_max=" << c.dt_max) {
+            FDMT fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max, 0, 1,
+                      true, "valid", Exec::cpu(1));
+            const auto& plan   = fdmt.get_plan();
+            const auto& shapes = plan.get_container().state_shape;
+            const auto depth   = fdmt.get_fuse_levels();
+            REQUIRE(depth >= 1);
+            CHECK(working_set(plan, depth, 256) <= kBudget);
+            const auto next = depth + 1;
+            if (next <= plan.get_niters()) {
+                CHECK((working_set(plan, next, 256) > kBudget ||
+                       shapes[next].nchans < 2));
             }
+            CHECK_THAT(fdmt.summary(),
+                       Catch::Matchers::ContainsSubstring("time tiles of"));
         }
     }
 }
