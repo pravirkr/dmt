@@ -642,10 +642,9 @@ void bind_fdmt(py::module_& mod) {
                         "FDMT.execute: nbits given, so waterfall must be a "
                         "packed uint8 array");
                 }
-                const auto packed =
-                    py::array_t<uint8_t, py::array::c_style>::ensure(
-                        waterfall_obj);
-                if (!packed || (packed.ndim() != 2 && packed.ndim() != 3)) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    waterfall_obj, "FDMT.execute", "uint8");
+                if (packed.ndim() != 2 && packed.ndim() != 3) {
                     throw std::runtime_error(
                         "Packed waterfall must be a 2D (nchans, row_bytes) or "
                         "3D (nbeams, nchans, row_bytes) uint8 NumPy array.");
@@ -661,8 +660,8 @@ void bind_fdmt(py::module_& mod) {
                                      nbits, dmt);
                     });
             },
-            py::arg("waterfall_packed"), py::arg("nbits"), py::kw_only(),
-            py::arg("out") = py::none(),
+            py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
+            py::kw_only(), py::arg("out") = py::none(),
             // No numpydoc sections here: pybind11 joins the overload
             // docstrings, and the float overload below documents both.
             "Run the FDMT transform on packed low-bit integer input "
@@ -678,11 +677,9 @@ void bind_fdmt(py::module_& mod) {
                         "for packed input (execute(waterfall_packed, nbits)) "
                         "or convert to float32 explicitly");
                 }
-                const auto waterfall = py::array_t<
-                    float, py::array::c_style |
-                               py::array::forcecast>::ensure(waterfall_obj);
-                if (!waterfall ||
-                    (waterfall.ndim() != 2 && waterfall.ndim() != 3)) {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "FDMT.execute", "float32");
+                if (waterfall.ndim() != 2 && waterfall.ndim() != 3) {
                     throw std::runtime_error("Input waterfall must be a 2D "
                                              "(nchans, nsamps) or 3D (nbeams, "
                                              "nchans, nsamps) NumPy array.");
@@ -698,7 +695,8 @@ void bind_fdmt(py::module_& mod) {
                                      dmt);
                     });
             },
-            py::arg("waterfall"), py::kw_only(), py::arg("out") = py::none(),
+            py::arg("waterfall").noconvert(), py::kw_only(),
+            py::arg("out") = py::none(),
             R"doc(
             Run the FDMT transform on float or packed low-bit input, in host
             or device memory.
@@ -706,8 +704,8 @@ void bind_fdmt(py::module_& mod) {
             Parameters
             ----------
             waterfall : numpy.ndarray or device array
-                ``(nchans, nsamps)`` for ``nbeams=1``, or ``(nbeams, nchans,
-                nsamps)``. Other float dtypes are cast to float32 (a copy);
+                C-contiguous float32 ``(nchans, nsamps)`` for ``nbeams=1``, or
+                ``(nbeams, nchans, nsamps)``;
                 uint8 input needs ``nbits`` (packed overload). Device memory
                 (GPU backends, no copies): a PyTorch, CuPy, Numba or any
                 other ``__dlpack__`` / ``__cuda_array_interface__`` array on
@@ -824,11 +822,9 @@ void bind_fdmt(py::module_& mod) {
                         "packed input (reset(waterfall_packed, nbits)) or "
                         "convert to float32 explicitly");
                 }
-                const auto waterfall = py::array_t<
-                    float, py::array::c_style |
-                               py::array::forcecast>::ensure(waterfall_obj);
-                if (!waterfall ||
-                    (waterfall.ndim() != 2 && waterfall.ndim() != 3)) {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "FDMT.reset", "float32");
+                if (waterfall.ndim() != 2 && waterfall.ndim() != 3) {
                     throw std::runtime_error("Input waterfall must be a 2D "
                                              "(nchans, nsamps) or 3D (nbeams, "
                                              "nchans, nsamps) NumPy array.");
@@ -840,7 +836,7 @@ void bind_fdmt(py::module_& mod) {
                     std::span<const float>(waterfall.data(), waterfall.size()),
                     std::span<float>(dmt.mutable_data(), dmt.size()));
             },
-            py::arg("waterfall"), py::arg("dmt") = py::none(),
+            py::arg("waterfall").noconvert(), py::arg("dmt") = py::none(),
             R"doc(
             Reset and initialize the stepper with waterfall and optional dmt
             buffer (at least ``nbeams * plan.dmt_size`` floats).
@@ -1381,9 +1377,9 @@ void bind_fdmt(py::module_& mod) {
             "packed execute()).")
         .def(
             "execute",
-            [](FDMTFFT& fdmt,
-               const py::array_t<float, py::array::c_style>& waterfall)
-                -> py::object {
+            [](FDMTFFT& fdmt, const py::array& waterfall_obj) -> py::object {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "FDMTFFT.execute", "float32");
                 const auto nbeams     = fdmt.get_nbeams();
                 const auto& plan      = fdmt.get_plan();
                 const auto ndms       = plan.get_dmt_ndms();
@@ -1427,7 +1423,7 @@ void bind_fdmt(py::module_& mod) {
                                          "(nchans, nsamps) or 3D (nbeams, "
                                          "nchans, nsamps) NumPy array.");
             },
-            py::arg("waterfall"),
+            py::arg("waterfall").noconvert(),
             R"doc(
             Run the FFT-domain FDMT transform.
 
@@ -1491,10 +1487,11 @@ void bind_fdmt(py::module_& mod) {
             ":meth:`FDMT.reset`.")
         .def(
             "reset",
-            [](const py::object& self,
-               const py::array_t<float, py::array::c_style>& waterfall,
+            [](const py::object& self, const py::array& waterfall_obj,
                std::optional<py::array_t<float, py::array::c_style>> dmt_opt) {
-                auto& fdmt = self.cast<FDMTFFT&>();
+                auto& fdmt           = self.cast<FDMTFFT&>();
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "FDMTFFT.reset", "float32");
                 py::array_t<float, py::array::c_style> dmt;
                 if (dmt_opt.has_value()) {
                     dmt = *dmt_opt;
@@ -1510,7 +1507,7 @@ void bind_fdmt(py::module_& mod) {
                     std::span<const float>(waterfall.data(), waterfall.size()),
                     std::span<float>(dmt.mutable_data(), dmt.size()));
             },
-            py::arg("waterfall"), py::arg("dmt") = py::none())
+            py::arg("waterfall").noconvert(), py::arg("dmt") = py::none())
         .def(
             "advance",
             [](FDMTFFT& fdmt, SizeType levels, const py::object& stream) {

@@ -267,8 +267,9 @@ void bind_ddmt(py::module_& mod) {
             "DDMTMemoryUsage: bytes held now (see estimate_memory).")
         .def(
             "execute",
-            [](DDMT& ddmt,
-               const py::array_t<float, py::array::c_style>& waterfall) {
+            [](DDMT& ddmt, const py::array& waterfall_obj) {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "DDMT.execute", "float32");
                 const auto& plan = ddmt.get_plan();
                 const auto ndim  = waterfall.ndim();
                 if (ndim != 2 && ndim != 3) {
@@ -335,7 +336,7 @@ void bind_ddmt(py::module_& mod) {
                 }
                 return dmt;
             },
-            "waterfall"_a,
+            "waterfall"_a.noconvert(),
             R"doc(
             Dedisperse a float32 waterfall of shape ``(nchans, nsamps)``, or
             ``(nbeams, nchans, nsamps)`` if this instance's nbeams > 1.
@@ -343,9 +344,10 @@ void bind_ddmt(py::module_& mod) {
             )doc")
         .def(
             "execute",
-            [](DDMT& ddmt,
-               const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
+            [](DDMT& ddmt, const py::array& waterfall_packed_obj,
                SizeType nsamps) {
+                const auto waterfall_packed = require_contiguous_array<uint8_t>(
+                    waterfall_packed_obj, "DDMT.execute", "uint8");
                 const auto& plan      = ddmt.get_plan();
                 const auto& plan_c    = plan.get_container();
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
@@ -377,7 +379,7 @@ void bind_ddmt(py::module_& mod) {
                 }
                 return dmt;
             },
-            "waterfall_packed"_a, "nsamps"_a,
+            "waterfall_packed"_a.noconvert(), "nsamps"_a,
             R"doc(
             Dedisperse a channel-major packed integer waterfall of shape
             ``(nchans, row_bytes)``, or ``(nbeams, nchans, row_bytes)`` if
@@ -387,10 +389,12 @@ void bind_ddmt(py::module_& mod) {
             )doc")
         .def(
             "execute_time_major",
-            [](DDMT& ddmt,
-               const py::array_t<uint8_t, py::array::c_style>&
-                   filterbank_packed,
+            [](DDMT& ddmt, const py::array& filterbank_packed_obj,
                SizeType nsamps) {
+                const auto filterbank_packed =
+                    require_contiguous_array<uint8_t>(filterbank_packed_obj,
+                                                      "DDMT.execute_time_major",
+                                                      "uint8");
                 const auto& plan_c    = ddmt.get_plan().get_container();
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
                 const auto dm_count   = plan_c.dm_arr.size();
@@ -415,7 +419,7 @@ void bind_ddmt(py::module_& mod) {
                     nsamps, std::span<int32_t>(dmt.mutable_data(), dmt.size()));
                 return dmt;
             },
-            "filterbank_packed"_a, "nsamps"_a,
+            "filterbank_packed"_a.noconvert(), "nsamps"_a,
             R"doc(
             Dedisperse a time-major packed filterbank of shape
             ``(nsamps, samp_bytes)``, or ``(nbeams, nsamps, samp_bytes)`` if

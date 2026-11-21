@@ -502,11 +502,11 @@ void bind_cfdmt(py::module_& mod) {
 
     mod.def(
         "pack_baseband",
-        [](const py::array_t<std::complex<float>,
-                             py::array::c_style | py::array::forcecast>&
-               voltages,
-           const BasebandFormat& format, float scale, SizeType sub_begin,
-           SizeType sub_count, SizeType t_begin, SizeType t_count) {
+        [](const py::array& voltages_obj, const BasebandFormat& format,
+           float scale, SizeType sub_begin, SizeType sub_count,
+           SizeType t_begin, SizeType t_count) {
+            const auto voltages = require_contiguous_array<std::complex<float>>(
+                voltages_obj, "pack_baseband", "complex64");
             if (voltages.ndim() != 3 || voltages.shape(0) != 2) {
                 throw std::invalid_argument(
                     "pack_baseband: voltages must have shape (2, nsub, "
@@ -520,8 +520,9 @@ void bind_cfdmt(py::module_& mod) {
                 t_count);
             return as_pyarray(std::move(bytes));
         },
-        "voltages"_a, "format"_a = BasebandFormat{}, "scale"_a = 1.0F,
-        "sub_begin"_a = 0, "sub_count"_a = 0, "t_begin"_a = 0, "t_count"_a = 0,
+        "voltages"_a.noconvert(), "format"_a = BasebandFormat{},
+        "scale"_a = 1.0F, "sub_begin"_a = 0, "sub_count"_a = 0, "t_begin"_a = 0,
+        "t_count"_a = 0,
         R"doc(
         Quantise ``(2, nsub, nsamps)`` voltages into a baseband block.
 

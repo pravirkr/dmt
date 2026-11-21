@@ -57,6 +57,25 @@ as_listof_pyarray(const std::vector<std::vector<T>>& vec_of_vecs) {
     return result;
 }
 
+/// Strict zero-copy host array check: requires exact dtype T and C-contiguous
+/// layout, raising ValueError otherwise (never silently casts or copies).
+template <typename T>
+inline py::array_t<T, py::array::c_style>
+require_contiguous_array(const py::array& arr,
+                         std::string_view context,
+                         std::string_view dtype_name) {
+    if (!arr.dtype().is(py::dtype::of<T>())) {
+        throw py::value_error(fmt::format("{}: expected dtype {}, got {}",
+                                          context, dtype_name,
+                                          std::string(py::str(arr.dtype()))));
+    }
+    if ((arr.flags() & py::array::c_style) == 0) {
+        throw py::value_error(
+            fmt::format("{}: input array must be C-contiguous", context));
+    }
+    return py::array_t<T, py::array::c_style>::ensure(arr);
+}
+
 inline std::vector<IndexType> extract_dt_grid(const py::object& obj) {
     std::vector<IndexType> result;
     if (py::isinstance<py::array>(obj)) {

@@ -140,8 +140,8 @@ class TestDDMT:
 
         # 2. Streamed execution across two chunks
         chunk1_samps = 100
-        chunk1 = full_waterfall[:, :chunk1_samps]
-        chunk2 = full_waterfall[:, chunk1_samps:]
+        chunk1 = np.ascontiguousarray(full_waterfall[:, :chunk1_samps])
+        chunk2 = np.ascontiguousarray(full_waterfall[:, chunk1_samps:])
 
         ddmt.reset_history()
         out1 = ddmt.execute(chunk1)
@@ -229,8 +229,8 @@ class TestDDMT:
 
         streamed = DDMT(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
         split = 50
-        out1 = streamed.execute(waterfall[:, :, :split])
-        out2 = streamed.execute(waterfall[:, :, split:])
+        out1 = streamed.execute(np.ascontiguousarray(waterfall[:, :, :split]))
+        out2 = streamed.execute(np.ascontiguousarray(waterfall[:, :, split:]))
 
         out_cat = np.concatenate([out1, out2], axis=2)
         np.testing.assert_allclose(out_cat, out_expected, rtol=1e-5, atol=1e-5)
@@ -240,7 +240,7 @@ class TestDDMT:
         assert len(hist) == streamed.history_state_size()
         streamed.reset_history()
         streamed.load_history(hist)
-        out3 = streamed.execute(waterfall[:, :, :30])
+        out3 = streamed.execute(np.ascontiguousarray(waterfall[:, :, :30]))
         assert out3.shape[2] == 30
 
     @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
@@ -431,8 +431,8 @@ class TestSDMT:
         expected = DDMT(*args).execute(wf)
 
         sdmt = SDMT(*args, nthreads=1)
-        out1 = sdmt.execute(wf[:, :900])
-        out2 = sdmt.execute(wf[:, 900:])
+        out1 = sdmt.execute(np.ascontiguousarray(wf[:, :900]))
+        out2 = sdmt.execute(np.ascontiguousarray(wf[:, 900:]))
         got = np.concatenate([out1, out2], axis=1)
         np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-4)
 
@@ -440,7 +440,7 @@ class TestSDMT:
         assert len(hist) == sdmt.history_state_size()
         sdmt.reset_history()
         sdmt.load_history(hist)
-        assert sdmt.execute(wf[:, :64]).shape[1] == 64
+        assert sdmt.execute(np.ascontiguousarray(wf[:, :64])).shape[1] == 64
 
     def test_time_major_matches_channel_major(self) -> None:
         nsamps = 1500

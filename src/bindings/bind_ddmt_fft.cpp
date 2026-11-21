@@ -294,8 +294,9 @@ void bind_ddmt_fft(py::module_& mod) {
             "transform as output.")
         .def(
             "execute",
-            [](DDMTFFT& e,
-               const py::array_t<float, py::array::c_style>& waterfall) {
+            [](DDMTFFT& e, const py::array& waterfall_obj) {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "DDMTFFT.execute", "float32");
                 const auto ndim = waterfall.ndim();
                 if (ndim != 2 && ndim != 3) {
                     throw std::invalid_argument(
@@ -318,7 +319,7 @@ void bind_ddmt_fft(py::module_& mod) {
                     std::span<float>(out.mutable_data(), out.size()));
                 return out;
             },
-            "waterfall"_a,
+            "waterfall"_a.noconvert(),
             R"doc(
             Dedisperse a float32 waterfall ``(nchans, nsamps)`` or
             ``(nbeams, nchans, nsamps)``; returns ``(n_dm, output_nsamps)`` or
@@ -326,29 +327,29 @@ void bind_ddmt_fft(py::module_& mod) {
             )doc")
         .def(
             "execute",
-            [](DDMTFFT& e,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
-               SizeType nsamps) {
+            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "DDMTFFT.execute", "uint8");
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
                 e.execute(
                     std::span<const uint8_t>(packed.data(), packed.size()),
                     nsamps, std::span<float>(out.mutable_data(), out.size()));
                 return out;
             },
-            "waterfall_packed"_a, "nsamps"_a,
+            "waterfall_packed"_a.noconvert(), "nsamps"_a,
             "Dedisperse a channel-major packed waterfall (float32 output).")
         .def(
             "execute_time_major",
-            [](DDMTFFT& e,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
-               SizeType nsamps) {
+            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "DDMTFFT.execute_time_major", "uint8");
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
                 e.execute_time_major(
                     std::span<const uint8_t>(packed.data(), packed.size()),
                     nsamps, std::span<float>(out.mutable_data(), out.size()));
                 return out;
             },
-            "filterbank_packed"_a, "nsamps"_a,
+            "filterbank_packed"_a.noconvert(), "nsamps"_a,
             "Dedisperse a time-major packed filterbank (float32 output).")
         .def(
             "execute",

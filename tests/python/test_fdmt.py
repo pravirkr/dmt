@@ -714,7 +714,9 @@ class TestFDMT:
         ndms = fdmt_valid.plan.dmt_ndms
         streamed = np.zeros((ndms, total), dtype=np.float32)
         for b in range(n_blocks):
-            block = waterfall[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                waterfall[:, b * block_size : (b + 1) * block_size]
+            )
             streamed[:, b * block_size : (b + 1) * block_size] = fdmt_valid.execute(
                 block
             )
@@ -736,7 +738,9 @@ class TestFDMT:
         total = block_size * n_blocks
         streamed = np.zeros((ndms, total), dtype=np.float32)
         for b in range(n_blocks):
-            block = waterfall[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                waterfall[:, b * block_size : (b + 1) * block_size]
+            )
             streamed[:, b * block_size : (b + 1) * block_size] = fdmt.execute(block)
         return streamed
 
@@ -822,7 +826,7 @@ class TestFDMT:
         )
         res_valid = np.zeros_like(res_mono)
         for b in range(n_blocks):
-            block = wf[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(wf[:, b * block_size : (b + 1) * block_size])
             res_valid[:, b * block_size : (b + 1) * block_size] = valid_engine.execute(
                 block
             )
@@ -863,7 +867,9 @@ class TestFDMT:
         )
         res_valid = np.zeros_like(res_mono)
         for b in range(n_blocks):
-            block = wf[:, :, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                wf[:, :, b * block_size : (b + 1) * block_size]
+            )
             res_valid[:, :, b * block_size : (b + 1) * block_size] = (
                 valid_engine.execute(block)
             )
@@ -993,7 +999,9 @@ class TestFDMT:
         ndms = fdmt_valid.plan.dmt_ndms
         streamed = np.zeros((ndms, total), dtype=np.float32)
         for b in range(n_blocks):
-            block = waterfall[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                waterfall[:, b * block_size : (b + 1) * block_size]
+            )
             dmt_buf = np.zeros(fdmt_valid.plan.buffer_size, dtype=np.float32)
             fdmt_valid.reset(block, dmt_buf)
             fdmt_valid.advance_until_remaining(2)

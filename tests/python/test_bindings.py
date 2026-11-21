@@ -99,3 +99,68 @@ class TestBackends:
                 True,
                 "cpu",
             )
+
+
+class TestStrictWaterfallInput:
+    """Every waterfall binding requires exact dtype and C-contiguous layout."""
+
+    def test_fdmt_and_fdmt_fft_reject_wrong_dtype_and_non_contiguous(self) -> None:
+        nchans, nsamps = 16, 64
+        wf_f64 = np.zeros((nchans, nsamps), dtype=np.float64)
+        wf_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.float32)[:, :nsamps]
+
+        for cls in (dmtlib.FDMT, dmtlib.FDMTFFT):
+            engine = cls(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+            with pytest.raises(ValueError, match="dtype float32"):
+                engine.execute(wf_f64)
+            with pytest.raises(ValueError, match="C-contiguous"):
+                engine.execute(wf_noncontig)
+
+            out = np.zeros(engine.plan.buffer_size, dtype=np.float32)
+            with pytest.raises(ValueError, match="dtype float32"):
+                engine.reset(wf_f64, out)
+            with pytest.raises(ValueError, match="C-contiguous"):
+                engine.reset(wf_noncontig, out)
+
+        fdmt_packed = dmtlib.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+        packed_u16 = np.zeros((nchans, nsamps), dtype=np.uint16)
+        packed_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.uint8)[:, :nsamps]
+        with pytest.raises(TypeError, match="uint8"):
+            fdmt_packed.execute(packed_u16, 8)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            fdmt_packed.execute(packed_noncontig, 8)
+
+    def test_ddmt_and_ddmt_fft_reject_wrong_dtype_and_non_contiguous(self) -> None:
+        nchans, nsamps = 16, 64
+        dms = np.array([0.0, 5.0], dtype=np.float32)
+        wf_f64 = np.zeros((nchans, nsamps), dtype=np.float64)
+        wf_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.float32)[:, :nsamps]
+        packed_u16 = np.zeros((nchans, nsamps), dtype=np.uint16)
+        packed_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.uint8)[:, :nsamps]
+        tm_u16 = np.zeros((nsamps, nchans), dtype=np.uint16)
+        tm_noncontig = np.zeros((nsamps, nchans * 2), dtype=np.uint8)[:, :nchans]
+
+        for cls in (dmtlib.DDMT, dmtlib.DDMTFFT):
+            eng_f32 = cls(1000.0, 1500.0, nchans, 0.001, dms, nthreads=1)
+            with pytest.raises(ValueError, match="dtype float32"):
+                eng_f32.execute(wf_f64)
+            with pytest.raises(ValueError, match="C-contiguous"):
+                eng_f32.execute(wf_noncontig)
+
+            eng_u8 = cls(1000.0, 1500.0, nchans, 0.001, dms, nbits=8, nthreads=1)
+            with pytest.raises(ValueError, match="dtype uint8"):
+                eng_u8.execute(packed_u16, nsamps)
+            with pytest.raises(ValueError, match="C-contiguous"):
+                eng_u8.execute(packed_noncontig, nsamps)
+            with pytest.raises(ValueError, match="dtype uint8"):
+                eng_u8.execute_time_major(tm_u16, nsamps)
+            with pytest.raises(ValueError, match="C-contiguous"):
+                eng_u8.execute_time_major(tm_noncontig, nsamps)
+
+    def test_pack_baseband_rejects_wrong_dtype_and_non_contiguous(self) -> None:
+        v_c128 = np.zeros((2, 4, 16), dtype=np.complex128)
+        v_noncontig = np.zeros((2, 4, 32), dtype=np.complex64)[:, :, :16]
+        with pytest.raises(ValueError, match="dtype complex64"):
+            libdmt.pack_baseband(v_c128)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            libdmt.pack_baseband(v_noncontig)
