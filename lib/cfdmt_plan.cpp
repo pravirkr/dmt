@@ -593,8 +593,10 @@ private:
             // Cost per valid channel sample of the per-trial work (chirp,
             // inverse FFT, detection) ~ (log2(mbin) + 3) / useful fraction;
             // very long transforms leave the caches.
-            double best = std::numeric_limits<double>::max();
-            for (SizeType m = 16; m <= (SizeType{1} << 20); m *= 2) {
+            constexpr SizeType kMaxAutoMbin = SizeType{1} << 20;
+            m_mbin                          = 0;
+            double best                     = std::numeric_limits<double>::max();
+            for (SizeType m = 16; m <= kMaxAutoMbin; m *= 2) {
                 if (m <= (2 * novc) + 1) {
                     continue;
                 }
@@ -609,6 +611,13 @@ private:
                     best   = cost;
                     m_mbin = m;
                 }
+            }
+            if (m_mbin == 0) {
+                throw std::invalid_argument(fmt::format(
+                    "CohFDMT: coherent filter overlap ({} channel samples, "
+                    "noverlap={}) exceeds automatic mbin limit ({}); pass "
+                    "nbin explicitly or reduce DM / channel bandwidth",
+                    novc, m_noverlap, kMaxAutoMbin));
             }
         }
         m_nbin = m_n_p * m_mbin;

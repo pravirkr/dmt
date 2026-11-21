@@ -550,29 +550,33 @@ private:
     void forward(Geometry& g, const Source& data, SizeType b, SizeType p0) {
         const auto nblocks =
             static_cast<std::int64_t>((m_nact + kFwdBatch - 1) / kFwdBatch);
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
-        for (std::int64_t bi = 0; bi < nblocks; ++bi) {
-            auto& w       = ws();
-            const auto a0 = static_cast<SizeType>(bi) * kFwdBatch;
-            const auto na = std::min(kFwdBatch, m_nact - a0);
-            for (SizeType i = 0; i < na; ++i) {
-                fill_row(w.time.data(), g.n_fft, data, b,
-                         m_model.active[a0 + i], p0);
-                g.r2c->r2c(w.time.data(), w.batch.data() + (i * g.bins_stride));
-            }
-            constexpr auto kTB = static_cast<SizeType>(TB);
-            const auto ntb     = (g.n_bins + kTB - 1) / kTB;
-            float* dst         = m_spectra.data() + (a0 * 2 * kTB);
-            for (SizeType t = 0; t < ntb; ++t) {
-                float* d = dst + (t * m_nact * 2 * kTB);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+#pragma omp for schedule(static) nowait
+            for (std::int64_t bi = 0; bi < nblocks; ++bi) {
+                auto& w       = ws();
+                const auto a0 = static_cast<SizeType>(bi) * kFwdBatch;
+                const auto na = std::min(kFwdBatch, m_nact - a0);
                 for (SizeType i = 0; i < na; ++i) {
-                    fft_cpu::stream_split<TB>(
-                        d + (i * 2 * kTB),
-                        w.batch.data() + (i * g.bins_stride) + (t * kTB));
+                    fill_row(w.time.data(), g.n_fft, data, b,
+                             m_model.active[a0 + i], p0);
+                    g.r2c->r2c(w.time.data(),
+                               w.batch.data() + (i * g.bins_stride));
+                }
+                constexpr auto kTB = static_cast<SizeType>(TB);
+                const auto ntb     = (g.n_bins + kTB - 1) / kTB;
+                float* dst         = m_spectra.data() + (a0 * 2 * kTB);
+                for (SizeType t = 0; t < ntb; ++t) {
+                    float* d = dst + (t * m_nact * 2 * kTB);
+                    for (SizeType i = 0; i < na; ++i) {
+                        fft_cpu::stream_split<TB>(
+                            d + (i * 2 * kTB),
+                            w.batch.data() + (i * g.bins_stride) + (t * kTB));
+                    }
                 }
             }
+            fft_cpu::stream_fence();
         }
-        fft_cpu::stream_fence();
     }
 
     // ---- brute force ----
@@ -587,13 +591,16 @@ private:
         const double inv_n = 1.0 / static_cast<double>(g.n_fft);
         // Items tile-major: threads running concurrently share a tile's
         // spectra in the last-level cache.
-#pragma omp parallel for schedule(dynamic, 1) num_threads(m_nthreads)
-        for (std::int64_t it = 0; it < items; ++it) {
-            const auto t = static_cast<SizeType>(it) / nblk;
-            const auto k = static_cast<SizeType>(it) % nblk;
-            brute_item<TB>(ws(), g, t, k * kDmBlock, inv_n);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+#pragma omp for schedule(dynamic, 1) nowait
+            for (std::int64_t it = 0; it < items; ++it) {
+                const auto t = static_cast<SizeType>(it) / nblk;
+                const auto k = static_cast<SizeType>(it) % nblk;
+                brute_item<TB>(ws(), g, t, k * kDmBlock, inv_n);
+            }
+            fft_cpu::stream_fence();
         }
-        fft_cpu::stream_fence();
     }
 
     template <int TB>

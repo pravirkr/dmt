@@ -830,6 +830,30 @@ TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (cpu)",
             CHECK(e.usage.plan > 0);
         }
     }
+    SECTION("lazy time-major, stepper and view buffers are reported") {
+        const plans::FDMTPlan plan(1000.0F, 1500.0F, 32, 256, 0.001F, 32);
+        FDMTFFT f(plan, true, Exec::cpu());
+        const auto base = f.get_memory_usage();
+
+        // Time-major packed input allocates m_unpacked.
+        std::vector<uint8_t> packed(32 * 256, 0);
+        std::vector<float> dmt(plan.get_dmt_size(), 0.0F);
+        f.execute_time_major(packed, 8, dmt);
+        const auto after_tm = f.get_memory_usage();
+        CHECK(after_tm.workspace >= base.workspace + (32 * 256 * sizeof(float)));
+
+        // Stepper allocates m_step_geo, m_step_spectra, m_state_a/b.
+        std::vector<float> wf(32 * 256, 0.0F);
+        f.reset(wf, dmt);
+        const auto after_step = f.get_memory_usage();
+        CHECK(after_step.plan > after_tm.plan);
+        CHECK(after_step.state > after_tm.state);
+
+        // View materializes m_view_time.
+        (void)f.view_level_data();
+        const auto after_view = f.get_memory_usage();
+        CHECK(after_view.workspace > after_step.workspace);
+    }
 }
 
 } // namespace dmt

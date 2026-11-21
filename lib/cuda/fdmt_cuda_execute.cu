@@ -30,7 +30,7 @@ template <FDMTMode Mode,
           typename Input,
           typename TOut,
           bool HasChanDM = false>
-__global__ void
+__global__ __launch_bounds__(1024) void
 kernel_init_fdmt(const Input waterfall,
                  TOut* __restrict__ state,
                  const int* __restrict__ grids0_dt_grid_ptr,

@@ -524,19 +524,16 @@ public:
                 history_state_size(), out.size()));
         }
         std::fill_n(out.begin(), kHistHeader, 0.0F);
-        const auto put16 = [&](SizeType at, uint64_t v, SizeType words) {
-            for (SizeType i = 0; i < words; ++i) {
-                out[at + i] = static_cast<float>((v >> (16 * i)) & 0xFFFFU);
-            }
-        };
-        put16(0, kHistMagic, 1);
-        put16(1, kHistVersion, 1);
-        put16(2, layout_hash(), 4);
-        put16(6, m_stream_pos, 4);
-        put16(10,
-              m_nonint_until > m_stream_pos ? m_nonint_until - m_stream_pos : 0,
-              4);
-        put16(14, m_ring_elem, 1);
+        detail::put16(out, 0, kHistMagic, 1);
+        detail::put16(out, 1, kHistVersion, 1);
+        detail::put16(out, 2, layout_hash(), 4);
+        detail::put16(out, 6, m_stream_pos, 4);
+        detail::put16(out, 10,
+                      m_nonint_until > m_stream_pos
+                          ? m_nonint_until - m_stream_pos
+                          : 0,
+                      4);
+        detail::put16(out, 14, m_ring_elem, 1);
         float* ring          = out.data() + kHistHeader;
         const SizeType tot   = m_chan_ring_off[m_nchans];
         const SizeType words = hist_ring_words(m_ring_elem);
@@ -558,25 +555,16 @@ public:
     }
 
     void load_history(std::span<const float> in) {
-        const auto get16 = [&](SizeType at, SizeType words) {
-            uint64_t v = 0;
-            for (SizeType i = 0; i < words; ++i) {
-                const float x = in[at + i];
-                if (!(x >= 0.0F && x <= 65535.0F) || x != std::floor(x)) {
-                    throw std::invalid_argument(
-                        "FDMT::load_history: not a skewed-window history");
-                }
-                v |= static_cast<uint64_t>(x) << (16 * i);
-            }
-            return v;
-        };
-        if (in.size() < kHistHeader || get16(0, 1) != kHistMagic ||
-            get16(1, 1) != kHistVersion) {
+        constexpr const char* kBadSkewHeader =
+            "FDMT::load_history: not a skewed-window history";
+        if (in.size() < kHistHeader ||
+            detail::get16(in, 0, 1, kBadSkewHeader) != kHistMagic ||
+            detail::get16(in, 1, 1, kBadSkewHeader) != kHistVersion) {
             throw std::invalid_argument(
                 "FDMT::load_history: not a skewed-window history (it was "
                 "saved by a different engine path)");
         }
-        uint64_t elem = get16(14, 1);
+        uint64_t elem = detail::get16(in, 14, 1, kBadSkewHeader);
         if (elem == 0) { // written before the format word: a float ring
             elem = sizeof(float);
         }
@@ -589,14 +577,14 @@ public:
                 "FDMT::load_history: Invalid input size. Expected {}, got {}",
                 history_size_for(elem), in.size()));
         }
-        if (get16(2, 4) != layout_hash()) {
+        if (detail::get16(in, 2, 4, kBadSkewHeader) != layout_hash()) {
             throw std::invalid_argument(
                 "FDMT::load_history: the history was saved by an engine with "
                 "a different skewed-window layout (plan, chunk_nsamps or "
                 "fusion depth)");
         }
-        const uint64_t pos   = get16(6, 4);
-        const uint64_t rem   = get16(10, 4);
+        const uint64_t pos   = detail::get16(in, 6, 4, kBadSkewHeader);
+        const uint64_t rem   = detail::get16(in, 10, 4, kBadSkewHeader);
         const float* ring    = in.data() + kHistHeader;
         const SizeType tot   = m_chan_ring_off[m_nchans];
         const SizeType words = hist_ring_words(elem);

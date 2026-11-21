@@ -318,7 +318,9 @@ public:
         return m_seg_hop;
     }
     [[nodiscard]] FDMTMemoryUsage memory_usage() const noexcept override {
-        SizeType work = m_deferred.size(m_search_rows) * sizeof(float);
+        SizeType work = (m_deferred.size(m_search_rows) + m_unpacked.size() +
+                         m_view_time.size()) *
+                        sizeof(float);
         for (const auto& w : m_ws) {
             work += (m_deferred.size(w.time) + m_deferred.size(w.q) +
                      m_deferred.size(w.w0) + m_deferred.size(w.buf_a) +
@@ -333,9 +335,13 @@ public:
                     (m_deferred.size(m_r_table) + m_deferred.size(m_frac_r)) *
                         sizeof(float) +
                     m_frac_s.size() * sizeof(double) +
-                    (m_geo ? m_geo->twiddle_bytes() : 0),
+                    (m_geo ? m_geo->twiddle_bytes() : 0) +
+                    (m_step_geo ? m_step_geo->twiddle_bytes() : 0),
                 .state     = m_deferred.size(m_spectra) * sizeof(float) +
-                             m_deferred.size(m_out_spec) * sizeof(ComplexType),
+                             (m_deferred.size(m_out_spec) +
+                              m_step_spectra.size() + m_state_a.size() +
+                              m_state_b.size()) *
+                                 sizeof(ComplexType),
                 .history   = m_deferred.size(m_overlap) * sizeof(float),
                 .workspace = work,
                 .output    = 0};
@@ -1005,29 +1011,34 @@ private:
         const auto& g = *m_geo;
         const auto nblocks =
             static_cast<std::int64_t>((m_nchans + kFwdBatch - 1) / kFwdBatch);
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
-        for (std::int64_t bi = 0; bi < nblocks; ++bi) {
-            auto& w       = ws();
-            const auto c0 = static_cast<SizeType>(bi) * kFwdBatch;
-            const auto nc = std::min(kFwdBatch, m_nchans - c0);
-            for (SizeType i = 0; i < nc; ++i) {
-                const auto c = c0 + i;
-                fill_segment(w.time.data(), src, (beam * m_nchans) + c,
-                             m_overlap_len > 0 ? overlap_row(beam, c) : nullptr,
-                             seg);
-                g.r2c->r2c(w.time.data(), w.batch.data() + (i * g.bins_stride));
-            }
-            float* dst = m_spectra.data() + (c0 * kTileFl);
-            for (SizeType t = 0; t < g.n_tiles; ++t) {
-                float* d = dst + (t * m_nchans * kTileFl);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+#pragma omp for schedule(static) nowait
+            for (std::int64_t bi = 0; bi < nblocks; ++bi) {
+                auto& w       = ws();
+                const auto c0 = static_cast<SizeType>(bi) * kFwdBatch;
+                const auto nc = std::min(kFwdBatch, m_nchans - c0);
                 for (SizeType i = 0; i < nc; ++i) {
-                    fft_cpu::stream_split<kTile>(
-                        d + (i * kTileFl),
-                        w.batch.data() + (i * g.bins_stride) + (t * kTile));
+                    const auto c = c0 + i;
+                    fill_segment(
+                        w.time.data(), src, (beam * m_nchans) + c,
+                        m_overlap_len > 0 ? overlap_row(beam, c) : nullptr,
+                        seg);
+                    g.r2c->r2c(w.time.data(),
+                               w.batch.data() + (i * g.bins_stride));
+                }
+                float* dst = m_spectra.data() + (c0 * kTileFl);
+                for (SizeType t = 0; t < g.n_tiles; ++t) {
+                    float* d = dst + (t * m_nchans * kTileFl);
+                    for (SizeType i = 0; i < nc; ++i) {
+                        fft_cpu::stream_split<kTile>(
+                            d + (i * kTileFl),
+                            w.batch.data() + (i * g.bins_stride) + (t * kTile));
+                    }
                 }
             }
+            fft_cpu::stream_fence();
         }
-        fft_cpu::stream_fence();
     }
 
     void update_overlap(const Source& src, SizeType beam) {
@@ -1098,11 +1109,14 @@ private:
 
     void run_tiles() {
         const auto n_tiles = static_cast<std::int64_t>(m_geo->n_tiles);
-#pragma omp parallel for schedule(dynamic, 4) num_threads(m_nthreads)
-        for (std::int64_t t = 0; t < n_tiles; ++t) {
-            run_tile(ws(), static_cast<SizeType>(t) * kTile);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+#pragma omp for schedule(dynamic, 4) nowait
+            for (std::int64_t t = 0; t < n_tiles; ++t) {
+                run_tile(ws(), static_cast<SizeType>(t) * kTile);
+            }
+            fft_cpu::stream_fence();
         }
-        fft_cpu::stream_fence();
     }
 
     void run_tile(Workspace& w, SizeType k0) {

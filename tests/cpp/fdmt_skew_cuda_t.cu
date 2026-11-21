@@ -194,6 +194,12 @@ TEST_CASE("FDMT (gpu) skewed path: packed input, history and input types",
         }
         std::vector<float> junk(hsize, 0.5F);
         REQUIRE_THROWS_AS(a->load_history(junk), std::invalid_argument);
+        auto nan_hdr = hist;
+        nan_hdr[6]   = std::numeric_limits<float>::quiet_NaN();
+        REQUIRE_THROWS_AS(a->load_history(nan_hdr), std::invalid_argument);
+        auto inf_hdr = hist;
+        inf_hdr[6]   = std::numeric_limits<float>::infinity();
+        REQUIRE_THROWS_AS(a->load_history(inf_hdr), std::invalid_argument);
     }
 
     SECTION("switching input type keeps the stream (matches CPU skew)") {

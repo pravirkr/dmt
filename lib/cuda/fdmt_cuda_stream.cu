@@ -488,15 +488,10 @@ uint64_t FDMTCudaEngine::skew_layout_hash() const {
 void FDMTCudaEngine::save_skew_history_d(float* dst,
                                          cudaStream_t stream) const {
     std::array<float, kSkewHistHeader> hdr{};
-    const auto put16 = [&](SizeType at, uint64_t x, SizeType words) {
-        for (SizeType i = 0; i < words; ++i) {
-            hdr[at + i] = static_cast<float>((x >> (16 * i)) & 0xFFFFU);
-        }
-    };
-    put16(0, kSkewHistMagic, 1);
-    put16(1, kSkewHistVersion, 1);
-    put16(2, skew_layout_hash(), 4);
-    put16(6, m_next_pos, 4);
+    detail::put16(hdr, 0, kSkewHistMagic, 1);
+    detail::put16(hdr, 1, kSkewHistVersion, 1);
+    detail::put16(hdr, 2, skew_layout_hash(), 4);
+    detail::put16(hdr, 6, m_next_pos, 4);
     // Pageable source: returns once the header has been staged.
     gpu_utils::check_gpu_call(cudaMemcpyAsync(dst, hdr.data(), sizeof(hdr),
                                               cudaMemcpyHostToDevice, stream),
@@ -519,30 +514,21 @@ void FDMTCudaEngine::load_skew_history_d(const float* src,
                               "FDMT::load_history");
     gpu_utils::check_gpu_call(cudaStreamSynchronize(stream),
                               "FDMT::load_history");
-    const auto get16 = [&](SizeType at, SizeType words) {
-        uint64_t x = 0;
-        for (SizeType i = 0; i < words; ++i) {
-            const float f = hdr[at + i];
-            if (!(f >= 0.0F && f <= 65535.0F) || f != std::floor(f)) {
-                throw std::invalid_argument(
-                    "FDMT::load_history: not a skewed-window history");
-            }
-            x |= static_cast<uint64_t>(f) << (16 * i);
-        }
-        return x;
-    };
-    if (get16(0, 1) != kSkewHistMagic || get16(1, 1) != kSkewHistVersion) {
+    constexpr const char* kBadSkewHeader =
+        "FDMT::load_history: not a skewed-window history";
+    if (detail::get16(hdr, 0, 1, kBadSkewHeader) != kSkewHistMagic ||
+        detail::get16(hdr, 1, 1, kBadSkewHeader) != kSkewHistVersion) {
         throw std::invalid_argument(
             "FDMT::load_history: not a skewed-window history (it was "
             "saved by a different engine path)");
     }
-    if (get16(2, 4) != skew_layout_hash()) {
+    if (detail::get16(hdr, 2, 4, kBadSkewHeader) != skew_layout_hash()) {
         throw std::invalid_argument(
             "FDMT::load_history: the history was saved by an engine with "
             "a different skewed-window layout (plan, chunk_nsamps, beams "
             "or direct levels)");
     }
-    const uint64_t pos = get16(6, 4);
+    const uint64_t pos = detail::get16(hdr, 6, 4, kBadSkewHeader);
     SizeType off       = kSkewHistHeader;
     for (const auto& b : skew_hist_buffers()) {
         gpu_utils::check_gpu_call(

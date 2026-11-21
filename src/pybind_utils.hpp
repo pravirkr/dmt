@@ -272,7 +272,11 @@ py::object fdmt_execute_to_array(const Engine& fdmt,
                         name, expected_size, input_size));
     }
     auto buf = fdmt_output_buffer(fdmt, name, out);
-    run(std::span<float>(buf.mutable_data(), buf.size()));
+    const std::span<float> dmt_span(buf.mutable_data(), buf.size());
+    {
+        const py::gil_scoped_release release;
+        run(dmt_span);
+    }
     if (!batched) {
         return py::array_t<float>({ncoords, nsamps}, {nsamps * fsize, fsize},
                                   buf.data(), buf);

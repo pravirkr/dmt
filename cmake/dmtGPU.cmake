@@ -137,6 +137,10 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
   # device, so nvcc flags fmt's host-only long double formatting in each .cu
   # file (#20208-D "'long double' is treated as 'double' in device code").
   # dmt's device code has no long double; silence that one diagnostic.
+  set(DMT_GPU_CONFIG_FLAGS_DEBUG -G -g -O0)
+  set(DMT_GPU_CONFIG_FLAGS_RELEASE -O3 -use_fast_math -DNDEBUG)
+  set(DMT_GPU_CONFIG_FLAGS_RELWITHDEBINFO -O2 -g -lineinfo -use_fast_math -DNDEBUG)
+  set(DMT_GPU_CONFIG_FLAGS_MINSIZEREL -O2 -use_fast_math -DNDEBUG)
   target_compile_options(
     ${DMT_GPU_OPTIONS}
     INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:
@@ -145,10 +149,10 @@ if(DMT_GPU_BACKEND STREQUAL "CUDA")
               --expt-relaxed-constexpr
               --diag-suppress=20208
               -Xcompiler=-Wall,-Wextra
-              $<$<CONFIG:Debug>:-G;-g;-O0>
-              $<$<CONFIG:Release>:-O3;-use_fast_math;-DNDEBUG>
-              $<$<CONFIG:RelWithDebInfo>:-O2;-g;-lineinfo;-use_fast_math;-DNDEBUG>
-              $<$<CONFIG:MinSizeRel>:-O2;-use_fast_math;-DNDEBUG>
+              $<$<CONFIG:Debug>:${DMT_GPU_CONFIG_FLAGS_DEBUG}>
+              $<$<CONFIG:Release>:${DMT_GPU_CONFIG_FLAGS_RELEASE}>
+              $<$<CONFIG:RelWithDebInfo>:${DMT_GPU_CONFIG_FLAGS_RELWITHDEBINFO}>
+              $<$<CONFIG:MinSizeRel>:${DMT_GPU_CONFIG_FLAGS_MINSIZEREL}>
               >
   )
   set(CMAKE_CUDA_ARCHITECTURES ${DMT_CUDA_ARCHITECTURES})
@@ -266,15 +270,19 @@ if(DMT_GPU_BACKEND STREQUAL "HIP")
 
   set(DMT_GPU_OPTIONS ${PROJECT_NAME}_gpu_options)
   add_library(${DMT_GPU_OPTIONS} INTERFACE)
+  set(DMT_GPU_CONFIG_FLAGS_DEBUG -O0 -g)
+  set(DMT_GPU_CONFIG_FLAGS_RELEASE -O3 -ffast-math -DNDEBUG)
+  set(DMT_GPU_CONFIG_FLAGS_RELWITHDEBINFO -O2 -g -ffast-math -DNDEBUG)
+  set(DMT_GPU_CONFIG_FLAGS_MINSIZEREL -O2 -ffast-math -DNDEBUG)
   target_compile_options(
     ${DMT_GPU_OPTIONS}
     INTERFACE $<$<COMPILE_LANGUAGE:HIP>:
               -Wall
               -Wextra
-              $<$<CONFIG:Debug>:-O0;-g>
-              $<$<CONFIG:Release>:-O3;-ffast-math;-DNDEBUG>
-              $<$<CONFIG:RelWithDebInfo>:-O2;-g;-ffast-math;-DNDEBUG>
-              $<$<CONFIG:MinSizeRel>:-O2;-ffast-math;-DNDEBUG>
+              $<$<CONFIG:Debug>:${DMT_GPU_CONFIG_FLAGS_DEBUG}>
+              $<$<CONFIG:Release>:${DMT_GPU_CONFIG_FLAGS_RELEASE}>
+              $<$<CONFIG:RelWithDebInfo>:${DMT_GPU_CONFIG_FLAGS_RELWITHDEBINFO}>
+              $<$<CONFIG:MinSizeRel>:${DMT_GPU_CONFIG_FLAGS_MINSIZEREL}>
               >
   )
   message(STATUS "HIP Architectures: ${CMAKE_HIP_ARCHITECTURES}")

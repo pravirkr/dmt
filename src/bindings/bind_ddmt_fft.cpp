@@ -170,6 +170,10 @@ void bind_ddmt_fft(py::module_& mod) {
         On a GPU backend :meth:`execute` and the history methods also take
         device arrays without a copy, asynchronously on ``stream``, as for
         :class:`DDMT`.
+
+        Transform methods release the GIL during C++/GPU execution; a single
+        instance holds mutable streaming history and workspace buffers and is
+        not safe for concurrent calls from multiple threads.
         )doc");
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                         float dm_max, float dm_step, float dm_min, int nthreads,
@@ -314,9 +318,13 @@ void bind_ddmt_fft(py::module_& mod) {
                 const auto nsamps =
                     static_cast<SizeType>(waterfall.shape(ndim - 1));
                 auto out = output_array(e, nsamps, ndim == 3);
-                e.execute(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    e.execute(in_span, out_span);
+                }
                 return out;
             },
             "waterfall"_a.noconvert(),
@@ -331,9 +339,13 @@ void bind_ddmt_fft(py::module_& mod) {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "DDMTFFT.execute", "uint8");
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
-                e.execute(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nsamps, std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    e.execute(in_span, nsamps, out_span);
+                }
                 return out;
             },
             "waterfall_packed"_a.noconvert(), "nsamps"_a,
@@ -344,9 +356,13 @@ void bind_ddmt_fft(py::module_& mod) {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "DDMTFFT.execute_time_major", "uint8");
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
-                e.execute_time_major(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nsamps, std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    e.execute_time_major(in_span, nsamps, out_span);
+                }
                 return out;
             },
             "filterbank_packed"_a.noconvert(), "nsamps"_a,

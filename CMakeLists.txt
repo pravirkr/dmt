@@ -134,14 +134,24 @@ target_compile_options(
   ${DMT_COMPILE_OPTIONS} INTERFACE $<${_dmt_not_hip}:-Wall;-Wextra>
                                    $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wpedantic>
 )
+if(DMT_ENABLE_COVERAGE)
+  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O0 -g)
+else()
+  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O1 -g)
+endif()
+set(DMT_CXX_CONFIG_FLAGS_RELEASE -O3 -DNDEBUG -ffast-math)
+if(DMT_MARCH_FLAG)
+  list(APPEND DMT_CXX_CONFIG_FLAGS_RELEASE "${DMT_MARCH_FLAG}")
+endif()
+set(DMT_CXX_CONFIG_FLAGS_RELWITHDEBINFO -O2 -DNDEBUG -g)
+set(DMT_CXX_CONFIG_FLAGS_MINSIZEREL -Os -DNDEBUG)
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
   INTERFACE
-    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:$<IF:$<BOOL:${DMT_ENABLE_COVERAGE}>,-O0,-O1>;-g>>
-    $<${_dmt_not_hip}:$<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>>
-    $<${_dmt_not_hip}:$<$<CONFIG:Release>:${DMT_MARCH_FLAG}>>
-    $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>>
-    $<${_dmt_not_hip}:$<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:${DMT_CXX_CONFIG_FLAGS_DEBUG}>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Release>:${DMT_CXX_CONFIG_FLAGS_RELEASE}>>
+    $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:${DMT_CXX_CONFIG_FLAGS_RELWITHDEBINFO}>>
+    $<${_dmt_not_hip}:$<$<CONFIG:MinSizeRel>:${DMT_CXX_CONFIG_FLAGS_MINSIZEREL}>>
 )
 
 # OpenMP detection

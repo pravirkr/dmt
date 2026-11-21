@@ -249,6 +249,10 @@ void bind_ddmt(py::module_& mod) {
         ``__cuda_array_interface__`` array on this instance's device)
         without a copy, asynchronously on ``stream``, as for
         :meth:`FDMT.execute`.
+
+        Transform methods release the GIL during C++/GPU execution; a single
+        instance holds mutable streaming history and staging buffers and is
+        not safe for concurrent calls from multiple threads.
         )doc");
     def_ddmt_inits<DDMT>(ddmt_cls);
     ddmt_cls
@@ -324,15 +328,15 @@ void bind_ddmt(py::module_& mod) {
                         : std::vector<py::ssize_t>{
                               static_cast<py::ssize_t>(dm_count),
                               static_cast<py::ssize_t>(nsamps_out)});
-                if (nsamps_out > 0) {
-                    ddmt.execute(
-                        std::span<const float>(waterfall.data(),
-                                               waterfall.size()),
-                        std::span<float>(dmt.mutable_data(), dmt.size()));
-                } else {
-                    ddmt.execute(std::span<const float>(waterfall.data(),
-                                                        waterfall.size()),
-                                 std::span<float>{});
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                const std::span<float> out_span =
+                    nsamps_out > 0
+                        ? std::span<float>(dmt.mutable_data(), dmt.size())
+                        : std::span<float>{};
+                {
+                    const py::gil_scoped_release release;
+                    ddmt.execute(in_span, out_span);
                 }
                 return dmt;
             },
@@ -365,17 +369,15 @@ void bind_ddmt(py::module_& mod) {
                         : std::vector<py::ssize_t>{
                               static_cast<py::ssize_t>(dm_count),
                               static_cast<py::ssize_t>(nsamps_out)});
-                if (nsamps_out > 0) {
-                    ddmt.execute(
-                        std::span<const uint8_t>(waterfall_packed.data(),
-                                                 waterfall_packed.size()),
-                        nsamps,
-                        std::span<int32_t>(dmt.mutable_data(), dmt.size()));
-                } else {
-                    ddmt.execute(
-                        std::span<const uint8_t>(waterfall_packed.data(),
-                                                 waterfall_packed.size()),
-                        nsamps, std::span<int32_t>{});
+                const std::span<const uint8_t> in_span(waterfall_packed.data(),
+                                                       waterfall_packed.size());
+                const std::span<int32_t> out_span =
+                    nsamps_out > 0
+                        ? std::span<int32_t>(dmt.mutable_data(), dmt.size())
+                        : std::span<int32_t>{};
+                {
+                    const py::gil_scoped_release release;
+                    ddmt.execute(in_span, nsamps, out_span);
                 }
                 return dmt;
             },
@@ -413,10 +415,14 @@ void bind_ddmt(py::module_& mod) {
                               static_cast<py::ssize_t>(nsamps_out)});
                 // Always called, even with no output yet: the block still
                 // feeds the stream history.
-                ddmt.execute_time_major(
-                    std::span<const uint8_t>(filterbank_packed.data(),
-                                             filterbank_packed.size()),
-                    nsamps, std::span<int32_t>(dmt.mutable_data(), dmt.size()));
+                const std::span<const uint8_t> in_span(
+                    filterbank_packed.data(), filterbank_packed.size());
+                const std::span<int32_t> out_span(dmt.mutable_data(),
+                                                  dmt.size());
+                {
+                    const py::gil_scoped_release release;
+                    ddmt.execute_time_major(in_span, nsamps, out_span);
+                }
                 return dmt;
             },
             "filterbank_packed"_a.noconvert(), "nsamps"_a,

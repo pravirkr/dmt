@@ -129,6 +129,35 @@ class TestStrictWaterfallInput:
             fdmt_packed.execute(packed_u16, 8)
         with pytest.raises(ValueError, match="C-contiguous"):
             fdmt_packed.execute(packed_noncontig, 8)
+        with pytest.raises(ValueError, match="dtype uint8"):
+            fdmt_packed.reset(packed_u16, 8)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            fdmt_packed.reset(packed_noncontig, 8)
+
+        fft_eng = dmtlib.FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+        tm_u16 = np.zeros((nsamps, nchans), dtype=np.uint16)
+        tm_noncontig = np.zeros((nsamps, nchans * 2), dtype=np.uint8)[:, :nchans]
+        with pytest.raises(ValueError, match="dtype uint8"):
+            fft_eng.execute(packed_u16, 8)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            fft_eng.execute(packed_noncontig, 8)
+        with pytest.raises(ValueError, match="dtype uint8"):
+            fft_eng.execute_time_major(tm_u16, 8)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            fft_eng.execute_time_major(tm_noncontig, 8)
+        with pytest.raises(ValueError, match="dtype uint8"):
+            fft_eng.reset(packed_u16, 8)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            fft_eng.reset(packed_noncontig, 8)
+
+        hist_f64 = np.zeros(fft_eng.history_state_size(), dtype=np.float64)
+        hist_noncontig = np.zeros(fft_eng.history_state_size() * 2, dtype=np.float32)[
+            ::2
+        ]
+        with pytest.raises(ValueError, match="dtype float32"):
+            fft_eng.load_history(hist_f64)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            fft_eng.load_history(hist_noncontig)
 
     def test_stepper_dmt_buffer_rejects_bad_dtype_layout_and_readonly(self) -> None:
         nchans, nsamps = 16, 64

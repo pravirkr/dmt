@@ -839,7 +839,7 @@ void fdmt_init_box_extend_block(const TS* __restrict__ wf_sub,
         o[k]  = outs[k];
         sk[k] = scales[k];
     }
-    const TS* __restrict__ x = wf_sub - s0;
+    const TS* __restrict__ x = wf_sub;
     const auto body          = [&](auto keep) {
 #pragma omp simd
         for (SizeType i = head; i < nsamps; ++i) {
@@ -849,7 +849,7 @@ void fdmt_init_box_extend_block(const TS* __restrict__ wf_sub,
             static_assert(kK == 4, "update the unroll count below");
 #pragma GCC unroll 4
             for (SizeType k = 0; k < kK; ++k) {
-                a       = fdmt_init_add<TAcc>(a, x[i - k]);
+                a       = fdmt_init_add<TAcc>(a, x[i - s0 - k]);
                 o[k][i] = sk[k](a);
             }
             if constexpr (decltype(keep)::value) {

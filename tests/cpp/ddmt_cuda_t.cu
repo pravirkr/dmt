@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -441,6 +442,85 @@ TEST_CASE("DDMT and SDMT (gpu) estimate_memory equal the instance",
     for (const bool sdmt : {false, true}) {
         const auto e = ddmt_estimate::estimate(sdmt, big, exec);
         CHECK(e.usage.history / 2 > props.totalGlobalMem);
+    }
+}
+
+TEST_CASE("DDMT (gpu) device-memory calls reject 32-bit sample overflow",
+          "[ddmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    constexpr auto kMaxInt =
+        static_cast<SizeType>(std::numeric_limits<int>::max());
+    const auto exec = test::gpu_exec();
+    const Device dev{exec.backend, exec.device};
+    constexpr SizeType nchans = 8;
+
+    SECTION("float device execute: nsamps > INT_MAX and history + nsamps > INT_MAX") {
+        DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 100.0F,
+                  50.0F, 0.0F, exec);
+        thrust::device_vector<float> dummy(nchans * 16, 0.0F);
+        auto* ptr = thrust::raw_pointer_cast(dummy.data());
+
+        // Cold stream: nsamps alone exceeds INT_MAX.
+        const SizeType over = kMaxInt + 1;
+        CHECK_THROWS_AS(
+            ddmt.execute(DeviceSpan<const float>(ptr, nchans * over, dev),
+                         DeviceSpan<float>(ptr, ddmt.get_output_nsamps(over) *
+                                                    ddmt.get_plan().get_dm_arr().size(),
+                                           dev)),
+            std::invalid_argument);
+
+        // Warm the stream with a real small block so m_history_len > 0; then
+        // nsamps == INT_MAX fits in int32 alone, but history + nsamps overflows.
+        const SizeType warm_n = 16;
+        const thrust::device_vector<float> wf_warm(nchans * warm_n, 0.0F);
+        thrust::device_vector<float> out_warm(
+            std::max<SizeType>(1, ddmt.get_output_nsamps(warm_n) *
+                                      ddmt.get_plan().get_dm_arr().size()),
+            0.0F);
+        ddmt.execute(
+            DeviceSpan<const float>(thrust::raw_pointer_cast(wf_warm.data()),
+                                    wf_warm.size(), dev),
+            DeviceSpan<float>(thrust::raw_pointer_cast(out_warm.data()),
+                              ddmt.get_output_nsamps(warm_n) *
+                                  ddmt.get_plan().get_dm_arr().size(),
+                              dev));
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+
+        const SizeType at_max = kMaxInt;
+        CHECK_THROWS_AS(
+            ddmt.execute(
+                DeviceSpan<const float>(ptr, nchans * at_max, dev),
+                DeviceSpan<float>(ptr,
+                                  ddmt.get_output_nsamps(at_max) *
+                                      ddmt.get_plan().get_dm_arr().size(),
+                                  dev)),
+            std::invalid_argument);
+    }
+
+    SECTION("packed channel-major and time-major device execute") {
+        DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 100.0F,
+                  50.0F, 0.0F, exec, /*nbits=*/8);
+        thrust::device_vector<uint8_t> d_in(1, 0);
+        thrust::device_vector<int32_t> d_out(1, 0);
+        auto* in_ptr  = thrust::raw_pointer_cast(d_in.data());
+        auto* out_ptr = thrust::raw_pointer_cast(d_out.data());
+        const SizeType over = kMaxInt + 1;
+        const SizeType out_elems =
+            ddmt.get_output_nsamps(over) * ddmt.get_plan().get_dm_arr().size();
+        const auto row_bytes = bit_pack_utils::packed_row_bytes(over, 8);
+        const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, 8);
+
+        CHECK_THROWS_AS(
+            ddmt.execute(DeviceSpan<const uint8_t>(in_ptr, nchans * row_bytes, dev),
+                         over, DeviceSpan<int32_t>(out_ptr, out_elems, dev)),
+            std::invalid_argument);
+        CHECK_THROWS_AS(
+            ddmt.execute_time_major(
+                DeviceSpan<const uint8_t>(in_ptr, over * samp_bytes, dev), over,
+                DeviceSpan<int32_t>(out_ptr, out_elems, dev)),
+            std::invalid_argument);
     }
 }
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -314,6 +315,7 @@ public:
         }
         const auto nsamps = d_waterfall.size() / rows;
         check_size(d_dmt.size(), out_size(nsamps), "execute (output)");
+        check_int32_extents(nsamps, "execute(device float)");
         const auto s = to_cuda(stream);
         core<32>(reinterpret_cast<const uint8_t*>(d_waterfall.data()),
                  nsamps * sizeof(float), nsamps, d_dmt.data(), s);
@@ -331,6 +333,7 @@ public:
         check_size(d_waterfall_packed.size(), rows * row_bytes,
                    "execute (packed input bytes)");
         check_size(d_dmt.size(), out_size(nsamps), "execute (output)");
+        check_int32_extents(nsamps, "execute(device packed)");
         const auto s = to_cuda(stream);
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
             if constexpr (NBITS != 32) {
@@ -353,6 +356,7 @@ public:
                    "execute_time_major (input bytes)");
         check_size(d_dmt.size(), out_size(nsamps),
                    "execute_time_major (output)");
+        check_int32_extents(nsamps, "execute_time_major(device)");
         const auto s         = to_cuda(stream);
         const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         // The transpose scratch is reused by the next call: order this
@@ -639,6 +643,18 @@ private:
                 fmt::format("DDMT (gpu): {} buffer size mismatch: expected "
                             "{}, got {}",
                             what, expected, got));
+        }
+    }
+    void check_int32_extents(SizeType nsamps, std::string_view what) const {
+        constexpr auto kMax =
+            static_cast<SizeType>(std::numeric_limits<int>::max());
+        if (nsamps > kMax || m_history_len > kMax - nsamps) {
+            throw std::invalid_argument(fmt::format(
+                "{} (gpu): {} history ({}) + samples ({}) exceeds the 32-bit "
+                "sample index range ({}); split the device call into smaller "
+                "chunks",
+                m_shared_sums ? "SDMT" : "DDMT", what, m_history_len, nsamps,
+                kMax));
         }
     }
 
@@ -1109,6 +1125,7 @@ private:
                   SizeType n_new,
                   DDMTAcc<NBITS>* d_out,
                   cudaStream_t stream) {
+        check_int32_extents(n_new, "execute");
         gpu_utils::check_gpu_call(cudaStreamWaitEvent(stream, m_hist_ready, 0));
         const auto hist_len = m_history_len;
         const auto total    = hist_len + n_new;

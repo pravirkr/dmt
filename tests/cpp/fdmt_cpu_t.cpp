@@ -1118,6 +1118,12 @@ TEST_CASE("FDMT plain-tree history header identifies the configuration",
         bad[0] = 0.5F;
         throws(bad, "not an FDMT history");
         bad    = hist;
+        bad[6] = std::numeric_limits<float>::quiet_NaN();
+        throws(bad, "not an FDMT history");
+        bad    = hist;
+        bad[6] = std::numeric_limits<float>::infinity();
+        throws(bad, "not an FDMT history");
+        bad    = hist;
         bad[0] = static_cast<float>(algorithms::detail::kFDMTSkewHistMagic);
         throws(bad, "skewed-window path");
         bad    = hist;

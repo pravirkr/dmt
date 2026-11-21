@@ -33,24 +33,10 @@ struct LayoutHasher {
     }
 };
 
-/// The 16-bit piece at header[at .. at + words), or throws: every header
-/// word is an exact integer in [0, 65535].
-uint64_t get16(std::span<const float> header, SizeType at, SizeType words) {
-    uint64_t v = 0;
-    for (SizeType i = 0; i < words; ++i) {
-        const float x = header[at + i];
-        // Negated so that NaN fails too.
-        if (!(x >= 0.0F && x <= 65535.0F) || // NOLINT(*-simplify-boolean-expr)
-            x != std::floor(x)) {
-            throw std::invalid_argument(
-                "FDMT::load_history: not an FDMT history (no valid header; "
-                "buffers saved before dmt 0.8 have none and cannot be "
-                "loaded)");
-        }
-        v |= static_cast<uint64_t>(x) << (16 * i);
-    }
-    return v;
-}
+constexpr const char* kBadTreeHeader =
+    "FDMT::load_history: not an FDMT history (no valid header; "
+    "buffers saved before dmt 0.8 have none and cannot be "
+    "loaded)";
 
 } // namespace
 
@@ -90,23 +76,18 @@ uint64_t fdmt_tree_history_hash(const plans::FDMTPlan& plan,
 void write_fdmt_tree_history_header(std::span<float> header,
                                     uint64_t layout_hash,
                                     uint64_t stream_pos) noexcept {
-    const auto put16 = [&](SizeType at, uint64_t v, SizeType words) {
-        for (SizeType i = 0; i < words; ++i) {
-            header[at + i] = static_cast<float>((v >> (16 * i)) & 0xFFFFU);
-        }
-    };
     for (SizeType i = 0; i < kFDMTHistHeader; ++i) {
         header[i] = 0.0F;
     }
-    put16(0, kFDMTTreeHistMagic, 1);
-    put16(1, kFDMTTreeHistVersion, 1);
-    put16(2, layout_hash, 4);
-    put16(6, stream_pos, 4);
+    put16(header, 0, kFDMTTreeHistMagic, 1);
+    put16(header, 1, kFDMTTreeHistVersion, 1);
+    put16(header, 2, layout_hash, 4);
+    put16(header, 6, stream_pos, 4);
 }
 
 uint64_t check_fdmt_tree_history_header(std::span<const float> header,
                                         uint64_t layout_hash) {
-    const uint64_t magic = get16(header, 0, 1);
+    const uint64_t magic = get16(header, 0, 1, kBadTreeHeader);
     if (magic == 0) {
         throw std::invalid_argument(
             "FDMT::load_history: the buffer has no history header (a zeroed "
@@ -120,24 +101,22 @@ uint64_t check_fdmt_tree_history_header(std::span<const float> header,
             "max_memory_bytes)");
     }
     if (magic != kFDMTTreeHistMagic) {
-        throw std::invalid_argument(
-            "FDMT::load_history: not an FDMT history (no valid header; "
-            "buffers saved before dmt 0.8 have none and cannot be loaded)");
+        throw std::invalid_argument(kBadTreeHeader);
     }
-    const uint64_t version = get16(header, 1, 1);
+    const uint64_t version = get16(header, 1, 1, kBadTreeHeader);
     if (version != kFDMTTreeHistVersion) {
         throw std::invalid_argument(fmt::format(
             "FDMT::load_history: history version {} is not supported (this "
             "build reads version {})",
             version, kFDMTTreeHistVersion));
     }
-    if (get16(header, 2, 4) != layout_hash) {
+    if (get16(header, 2, 4, kBadTreeHeader) != layout_hash) {
         throw std::invalid_argument(
             "FDMT::load_history: the history was saved by an FDMT with a "
             "different configuration (plan: DM grid or tree; nbeams; "
             "use_box_smearing)");
     }
-    return get16(header, 6, 4);
+    return get16(header, 6, 4, kBadTreeHeader);
 }
 
 void throw_fdmt_history_size(SizeType expected, SizeType got) {

@@ -41,6 +41,14 @@ TEST_CASE("build_info identifies the build", "[backend][cpu]") {
     CHECK(!b.fftw.empty());
     const bool gpu_build = available_backends().size() > 1;
     CHECK((b.gpu == "none") == !gpu_build);
+    if (b.build_type == "Release") {
+        CHECK(b.cxx_flags.find("-ffast-math") != std::string_view::npos);
+#ifdef DMT_ENABLE_CUDA
+        CHECK(b.gpu.find("-use_fast_math") != std::string_view::npos);
+#elif defined(DMT_ENABLE_HIP)
+        CHECK(b.gpu.find("-ffast-math") != std::string_view::npos);
+#endif
+    }
     const auto line = build_info_string();
     CHECK(line.find(std::string(b.git_sha)) != std::string::npos);
 }

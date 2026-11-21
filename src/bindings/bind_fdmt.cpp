@@ -325,6 +325,11 @@ void bind_fdmt(py::module_& mod) {
         the first call with host arrays also allocates device copies of the
         input block and output plane, kept for later calls.
 
+        Transform and stepper methods release the GIL during C++/GPU
+        execution; a single instance holds mutable streaming state and
+        workspace buffers and is not safe for concurrent calls from multiple
+        threads.
+
         See also
         --------
         FDMTPlan, FDMTFFT, compute_fdmt, available_backends
@@ -643,15 +648,15 @@ void bind_fdmt(py::module_& mod) {
                         "Packed waterfall must be a 2D (nchans, row_bytes) or "
                         "3D (nbeams, nchans, row_bytes) uint8 NumPy array.");
                 }
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
                 return fdmt_execute_to_array(
                     fdmt, "FDMT", packed.ndim() == 3,
                     static_cast<SizeType>(packed.size()),
                     fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
                         (((fdmt.get_plan().get_nsamps() * nbits) + 7) / 8),
                     out, [&](std::span<float> dmt) {
-                        fdmt.execute(std::span<const uint8_t>(packed.data(),
-                                                              packed.size()),
-                                     nbits, dmt);
+                        fdmt.execute(in_span, nbits, dmt);
                     });
             },
             py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
@@ -678,16 +683,15 @@ void bind_fdmt(py::module_& mod) {
                                              "(nchans, nsamps) or 3D (nbeams, "
                                              "nchans, nsamps) NumPy array.");
                 }
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
                 return fdmt_execute_to_array(
                     fdmt, "FDMT", waterfall.ndim() == 3,
                     static_cast<SizeType>(waterfall.size()),
                     fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
                         fdmt.get_plan().get_nsamps(),
-                    out, [&](std::span<float> dmt) {
-                        fdmt.execute(std::span<const float>(waterfall.data(),
-                                                            waterfall.size()),
-                                     dmt);
-                    });
+                    out,
+                    [&](std::span<float> dmt) { fdmt.execute(in_span, dmt); });
             },
             py::arg("waterfall").noconvert(), py::kw_only(),
             py::arg("out") = py::none(),
@@ -780,10 +784,11 @@ void bind_fdmt(py::module_& mod) {
             "copies; see above.")
         .def(
             "reset",
-            [](const py::object& self,
-               const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
+            [](const py::object& self, const py::array& waterfall_obj,
                SizeType nbits, const std::optional<py::array>& dmt_opt) {
-                auto& fdmt = self.cast<FDMT&>();
+                auto& fdmt                  = self.cast<FDMT&>();
+                const auto waterfall_packed = require_contiguous_array<uint8_t>(
+                    waterfall_obj, "FDMT.reset", "uint8");
                 if (waterfall_packed.ndim() != 2 &&
                     waterfall_packed.ndim() != 3) {
                     throw std::runtime_error(
@@ -793,10 +798,11 @@ void bind_fdmt(py::module_& mod) {
                 auto dmt = stepper_dmt_buffer(fdmt, "FDMT.reset", dmt_opt);
                 self.attr("_waterfall_buffer") = waterfall_packed;
                 self.attr("_dmt_buffer")       = dmt;
-                fdmt.reset(std::span<const uint8_t>(waterfall_packed.data(),
-                                                    waterfall_packed.size()),
-                           nbits,
-                           std::span<float>(dmt.mutable_data(), dmt.size()));
+                const std::span<const uint8_t> in_span(waterfall_packed.data(),
+                                                       waterfall_packed.size());
+                const std::span<float> dmt_span(dmt.mutable_data(), dmt.size());
+                const py::gil_scoped_release release;
+                fdmt.reset(in_span, nbits, dmt_span);
             },
             py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
             py::arg("dmt").noconvert() = py::none(),
@@ -825,9 +831,11 @@ void bind_fdmt(py::module_& mod) {
                 auto dmt = stepper_dmt_buffer(fdmt, "FDMT.reset", dmt_opt);
                 self.attr("_waterfall_buffer") = waterfall;
                 self.attr("_dmt_buffer")       = dmt;
-                fdmt.reset(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(dmt.mutable_data(), dmt.size()));
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                const std::span<float> dmt_span(dmt.mutable_data(), dmt.size());
+                const py::gil_scoped_release release;
+                fdmt.reset(in_span, dmt_span);
             },
             py::arg("waterfall").noconvert(),
             py::arg("dmt").noconvert() = py::none(),
@@ -870,7 +878,9 @@ void bind_fdmt(py::module_& mod) {
         .def(
             "advance",
             [](FDMT& fdmt, SizeType levels, const py::object& stream) {
-                fdmt.advance(levels, stepper_stream(stream));
+                const auto s = stepper_stream(stream);
+                const py::gil_scoped_release release;
+                fdmt.advance(levels, s);
             },
             py::arg("levels") = 1, py::kw_only(),
             py::arg("stream") = py::none(),
@@ -879,7 +889,9 @@ void bind_fdmt(py::module_& mod) {
         .def(
             "advance_until_remaining",
             [](FDMT& fdmt, SizeType remaining, const py::object& stream) {
-                fdmt.advance_until_remaining(remaining, stepper_stream(stream));
+                const auto s = stepper_stream(stream);
+                const py::gil_scoped_release release;
+                fdmt.advance_until_remaining(remaining, s);
             },
             py::arg("remaining_levels"), py::kw_only(),
             py::arg("stream") = py::none(),
@@ -912,8 +924,12 @@ void bind_fdmt(py::module_& mod) {
         .def(
             "finalize",
             [](const py::object& self, const py::object& stream) -> py::object {
-                auto& fdmt = self.cast<FDMT&>();
-                fdmt.finalize(stepper_stream(stream));
+                auto& fdmt   = self.cast<FDMT&>();
+                const auto s = stepper_stream(stream);
+                {
+                    const py::gil_scoped_release release;
+                    fdmt.finalize(s);
+                }
                 const py::object buffer = self.attr("_dmt_buffer");
                 if (!py::isinstance<py::array>(buffer)) {
                     return fdmt_device_result(fdmt, buffer);
@@ -1077,6 +1093,11 @@ void bind_fdmt(py::module_& mod) {
 
         On a GPU backend :meth:`execute`, :meth:`reset` and the history
         methods also take device arrays without a copy, as for :class:`FDMT`.
+
+        Transform and stepper methods release the GIL during C++/GPU
+        execution; a single instance holds mutable streaming state and
+        workspace buffers and is not safe for concurrent calls from multiple
+        threads.
 
         See also
         --------
@@ -1317,13 +1338,17 @@ void bind_fdmt(py::module_& mod) {
             "subband view's rows by it for S/N.")
         .def(
             "execute",
-            [](FDMTFFT& fdmt,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
-               SizeType nbits) {
+            [](FDMTFFT& fdmt, const py::array& packed_obj, SizeType nbits) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "FDMTFFT.execute", "uint8");
                 auto out = fft_output(fdmt, packed.ndim());
-                fdmt.execute(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nbits, std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    fdmt.execute(in_span, nbits, out_span);
+                }
                 return out;
             },
             py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
@@ -1333,13 +1358,17 @@ void bind_fdmt(py::module_& mod) {
             "output.")
         .def(
             "execute_time_major",
-            [](FDMTFFT& fdmt,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
-               SizeType nbits) {
+            [](FDMTFFT& fdmt, const py::array& packed_obj, SizeType nbits) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "FDMTFFT.execute_time_major", "uint8");
                 auto out = fft_output(fdmt, packed.ndim());
-                fdmt.execute_time_major(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nbits, std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    fdmt.execute_time_major(in_span, nbits, out_span);
+                }
                 return out;
             },
             py::arg("filterbank_packed").noconvert(), py::arg("nbits"),
@@ -1348,16 +1377,19 @@ void bind_fdmt(py::module_& mod) {
             "uint8 at ``nbits``; shares the streaming history.")
         .def(
             "reset",
-            [](const py::object& self,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
+            [](const py::object& self, const py::array& packed_obj,
                SizeType nbits, const std::optional<py::array>& dmt_opt) {
-                auto& fdmt = self.cast<FDMTFFT&>();
-                auto dmt   = stepper_dmt_buffer(fdmt, "FDMTFFT.reset", dmt_opt);
+                auto& fdmt        = self.cast<FDMTFFT&>();
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "FDMTFFT.reset", "uint8");
+                auto dmt = stepper_dmt_buffer(fdmt, "FDMTFFT.reset", dmt_opt);
                 self.attr("_waterfall_buffer") = packed;
                 self.attr("_dmt_buffer")       = dmt;
-                fdmt.reset(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nbits, std::span<float>(dmt.mutable_data(), dmt.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> dmt_span(dmt.mutable_data(), dmt.size());
+                const py::gil_scoped_release release;
+                fdmt.reset(in_span, nbits, dmt_span);
             },
             py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
             py::arg("dmt").noconvert() = py::none(),
@@ -1372,6 +1404,8 @@ void bind_fdmt(py::module_& mod) {
                 const auto& plan      = fdmt.get_plan();
                 const auto ndms       = plan.get_dmt_ndms();
                 const auto nsamps_out = plan.get_dmt_nsamps();
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
 
                 if (waterfall.ndim() == 2) {
                     if (nbeams != 1) {
@@ -1384,10 +1418,12 @@ void bind_fdmt(py::module_& mod) {
                     }
                     py::array_t<float, py::array::c_style> result(
                         {ndms, nsamps_out});
-                    fdmt.execute(
-                        std::span<const float>(waterfall.data(),
-                                               waterfall.size()),
-                        std::span<float>(result.mutable_data(), result.size()));
+                    const std::span<float> out_span(result.mutable_data(),
+                                                    result.size());
+                    {
+                        const py::gil_scoped_release release;
+                        fdmt.execute(in_span, out_span);
+                    }
                     return result;
                 }
                 if (waterfall.ndim() == 3) {
@@ -1401,10 +1437,12 @@ void bind_fdmt(py::module_& mod) {
                     }
                     py::array_t<float, py::array::c_style> result(
                         {nbeams, ndms, nsamps_out});
-                    fdmt.execute(
-                        std::span<const float>(waterfall.data(),
-                                               waterfall.size()),
-                        std::span<float>(result.mutable_data(), result.size()));
+                    const std::span<float> out_span(result.mutable_data(),
+                                                    result.size());
+                    {
+                        const py::gil_scoped_release release;
+                        fdmt.execute(in_span, out_span);
+                    }
                     return result;
                 }
                 throw std::runtime_error("Input waterfall must be a 2D "
@@ -1483,23 +1521,29 @@ void bind_fdmt(py::module_& mod) {
                 auto dmt = stepper_dmt_buffer(fdmt, "FDMTFFT.reset", dmt_opt);
                 self.attr("_waterfall_buffer") = waterfall;
                 self.attr("_dmt_buffer")       = dmt;
-                fdmt.reset(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(dmt.mutable_data(), dmt.size()));
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                const std::span<float> dmt_span(dmt.mutable_data(), dmt.size());
+                const py::gil_scoped_release release;
+                fdmt.reset(in_span, dmt_span);
             },
             py::arg("waterfall").noconvert(),
             py::arg("dmt").noconvert() = py::none())
         .def(
             "advance",
             [](FDMTFFT& fdmt, SizeType levels, const py::object& stream) {
-                fdmt.advance(levels, stepper_stream(stream));
+                const auto s = stepper_stream(stream);
+                const py::gil_scoped_release release;
+                fdmt.advance(levels, s);
             },
             py::arg("levels") = 1, py::kw_only(),
             py::arg("stream") = py::none())
         .def(
             "advance_until_remaining",
             [](FDMTFFT& fdmt, SizeType remaining, const py::object& stream) {
-                fdmt.advance_until_remaining(remaining, stepper_stream(stream));
+                const auto s = stepper_stream(stream);
+                const py::gil_scoped_release release;
+                fdmt.advance_until_remaining(remaining, s);
             },
             py::arg("remaining_levels"), py::kw_only(),
             py::arg("stream") = py::none())
@@ -1531,8 +1575,12 @@ void bind_fdmt(py::module_& mod) {
         .def(
             "finalize",
             [](const py::object& self, const py::object& stream) -> py::object {
-                auto& fdmt = self.cast<FDMTFFT&>();
-                fdmt.finalize(stepper_stream(stream));
+                auto& fdmt   = self.cast<FDMTFFT&>();
+                const auto s = stepper_stream(stream);
+                {
+                    const py::gil_scoped_release release;
+                    fdmt.finalize(s);
+                }
                 const py::object buffer = self.attr("_dmt_buffer");
                 if (!py::isinstance<py::array>(buffer)) {
                     return fdmt_device_result(fdmt, buffer);
@@ -1577,10 +1625,13 @@ void bind_fdmt(py::module_& mod) {
             "Save the streaming history into a 1D float32 array.")
         .def(
             "load_history",
-            [](FDMTFFT& fdmt,
-               const py::array_t<float, py::array::c_style>& hist) {
-                fdmt.load_history(
-                    std::span<const float>(hist.data(), hist.size()));
+            [](FDMTFFT& fdmt, const py::array& hist_obj) {
+                const auto hist = require_contiguous_array<float>(
+                    hist_obj, "FDMTFFT.load_history", "float32");
+                const std::span<const float> hist_span(hist.data(),
+                                                       hist.size());
+                const py::gil_scoped_release release;
+                fdmt.load_history(hist_span);
             },
             py::arg("history").noconvert(),
             "Restore a streaming history saved by save_history().")
@@ -1614,12 +1665,18 @@ void bind_fdmt(py::module_& mod) {
            std::string_view backend, int device, bool fractional_delays) {
             const auto waterfall = require_contiguous_array<float>(
                 waterfall_obj, "compute_fdmt_fft", "float32");
-            const auto exec       = make_exec(backend, nthreads, device);
-            auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
-                std::span<const float>(waterfall.data(), waterfall.size()),
-                f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                use_box_smearing, mode, exec, nbeams, fractional_delays);
-            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+            const auto exec = make_exec(backend, nthreads, device);
+            const std::span<const float> in_span(waterfall.data(),
+                                                 waterfall.size());
+            auto [dmt, fdmt_plan] = [&] {
+                const py::gil_scoped_release release;
+                return algorithms::compute_fdmt_fft(
+                    in_span, f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                    dt_min, dt_step, use_box_smearing, mode, exec, nbeams,
+                    fractional_delays);
+            }();
+            return std::make_tuple(as_pyarray(std::move(dmt)),
+                                   std::move(fdmt_plan));
         },
         py::arg("waterfall").noconvert(), py::arg("f_min"), py::arg("f_max"),
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"),
@@ -1648,20 +1705,31 @@ void bind_fdmt(py::module_& mod) {
             const auto waterfall = require_contiguous_array<float>(
                 waterfall_obj, "compute_fdmt_fft", "float32");
             const auto exec = make_exec(backend, nthreads, device);
+            const std::span<const float> in_span(waterfall.data(),
+                                                 waterfall.size());
             const auto [type, obj] =
                 resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
             if (type == CustomGridType::kDt) {
-                auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    f_min, f_max, nchans, nsamps, tsamp, extract_dt_grid(obj),
-                    use_box_smearing, mode, exec, nbeams, fractional_delays);
-                return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+                const auto grid       = extract_dt_grid(obj);
+                auto [dmt, fdmt_plan] = [&] {
+                    const py::gil_scoped_release release;
+                    return algorithms::compute_fdmt_fft(
+                        in_span, f_min, f_max, nchans, nsamps, tsamp, grid,
+                        use_box_smearing, mode, exec, nbeams,
+                        fractional_delays);
+                }();
+                return std::make_tuple(as_pyarray(std::move(dmt)),
+                                       std::move(fdmt_plan));
             }
-            auto [dmt, fdmt_plan] = algorithms::compute_fdmt_fft(
-                std::span<const float>(waterfall.data(), waterfall.size()),
-                f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
-                use_box_smearing, mode, exec, nbeams, fractional_delays);
-            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+            const auto grid       = extract_dm_grid(obj);
+            auto [dmt, fdmt_plan] = [&] {
+                const py::gil_scoped_release release;
+                return algorithms::compute_fdmt_fft(
+                    in_span, f_min, f_max, nchans, nsamps, tsamp, grid,
+                    use_box_smearing, mode, exec, nbeams, fractional_delays);
+            }();
+            return std::make_tuple(as_pyarray(std::move(dmt)),
+                                   std::move(fdmt_plan));
         },
         py::arg("waterfall").noconvert(), py::arg("f_min"), py::arg("f_max"),
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
@@ -1682,12 +1750,17 @@ void bind_fdmt(py::module_& mod) {
            std::string_view backend, int device) {
             const auto waterfall = require_contiguous_array<float>(
                 waterfall_obj, "compute_fdmt", "float32");
-            const auto exec       = make_exec(backend, nthreads, device);
-            auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
-                std::span<const float>(waterfall.data(), waterfall.size()),
-                f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min, dt_step,
-                use_box_smearing, mode, exec, nbeams);
-            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+            const auto exec = make_exec(backend, nthreads, device);
+            const std::span<const float> in_span(waterfall.data(),
+                                                 waterfall.size());
+            auto [dmt, fdmt_plan] = [&] {
+                const py::gil_scoped_release release;
+                return algorithms::compute_fdmt(
+                    in_span, f_min, f_max, nchans, nsamps, tsamp, dt_max,
+                    dt_min, dt_step, use_box_smearing, mode, exec, nbeams);
+            }();
+            return std::make_tuple(as_pyarray(std::move(dmt)),
+                                   std::move(fdmt_plan));
         },
         py::arg("waterfall").noconvert(), py::arg("f_min"), py::arg("f_max"),
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"),
@@ -1713,20 +1786,31 @@ void bind_fdmt(py::module_& mod) {
             const auto waterfall = require_contiguous_array<float>(
                 waterfall_obj, "compute_fdmt", "float32");
             const auto exec = make_exec(backend, nthreads, device);
+            const std::span<const float> in_span(waterfall.data(),
+                                                 waterfall.size());
             const auto [type, obj] =
                 resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
             if (type == CustomGridType::kDt) {
-                auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    f_min, f_max, nchans, nsamps, tsamp, extract_dt_grid(obj),
-                    use_box_smearing, mode, exec, nbeams);
-                return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+                const auto grid       = extract_dt_grid(obj);
+                auto [dmt, fdmt_plan] = [&] {
+                    const py::gil_scoped_release release;
+                    return algorithms::compute_fdmt(
+                        in_span, f_min, f_max, nchans, nsamps, tsamp, grid,
+                        use_box_smearing, mode, exec, nbeams);
+                }();
+                return std::make_tuple(as_pyarray(std::move(dmt)),
+                                       std::move(fdmt_plan));
             }
-            auto [dmt, fdmt_plan] = algorithms::compute_fdmt(
-                std::span<const float>(waterfall.data(), waterfall.size()),
-                f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
-                use_box_smearing, mode, exec, nbeams);
-            return std::make_tuple(as_pyarray(std::move(dmt)), fdmt_plan);
+            const auto grid       = extract_dm_grid(obj);
+            auto [dmt, fdmt_plan] = [&] {
+                const py::gil_scoped_release release;
+                return algorithms::compute_fdmt(in_span, f_min, f_max, nchans,
+                                                nsamps, tsamp, grid,
+                                                use_box_smearing, mode, exec,
+                                                nbeams);
+            }();
+            return std::make_tuple(as_pyarray(std::move(dmt)),
+                                   std::move(fdmt_plan));
         },
         py::arg("waterfall").noconvert(), py::arg("f_min"), py::arg("f_max"),
         py::arg("nchans"), py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
