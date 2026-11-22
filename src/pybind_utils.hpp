@@ -219,14 +219,13 @@ resolve_custom_grid(const py::object& dt_grid,
     return {CustomGridType::kDm, dm_obj};
 }
 
-// The engine's output buffer: the caller's `out` (validated, reused as is)
-// or a fresh array of nbeams * get_dmt_size() floats.
-template <typename Engine>
-py::array_t<float, py::array::c_style>
-fdmt_output_buffer(const Engine& fdmt,
-                   std::string_view name,
-                   const std::optional<py::array>& out) {
-    const auto needed = fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size();
+// An engine's float32 output buffer: the caller's `out` (validated, reused as
+// is) or a fresh array of `needed` floats.
+inline py::array_t<float, py::array::c_style>
+float_output_buffer(SizeType needed,
+                    std::string_view name,
+                    std::string_view size_expr,
+                    const std::optional<py::array>& out) {
     if (!out.has_value()) {
         return py::array_t<float, py::array::c_style>(
             static_cast<py::ssize_t>(needed));
@@ -240,11 +239,22 @@ fdmt_output_buffer(const Engine& fdmt,
     }
     if (static_cast<SizeType>(arr.size()) < needed) {
         throw std::invalid_argument(fmt::format(
-            "{}.execute: out has {} elements, needs at least nbeams * "
-            "plan.dmt_size = {}",
-            name, arr.size(), needed));
+            "{}.execute: out has {} elements, needs at least {} = {}", name,
+            arr.size(), size_expr, needed));
     }
     return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
+}
+
+// The engine's output buffer: the caller's `out` (validated, reused as is)
+// or a fresh array of nbeams * get_dmt_size() floats.
+template <typename Engine>
+py::array_t<float, py::array::c_style>
+fdmt_output_buffer(const Engine& fdmt,
+                   std::string_view name,
+                   const std::optional<py::array>& out) {
+    return float_output_buffer(
+        fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(), name,
+        "nbeams * plan.dmt_size", out);
 }
 
 // FDMT execute(): runs `run(dmt_span)` into the output buffer

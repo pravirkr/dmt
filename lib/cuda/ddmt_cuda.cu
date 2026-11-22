@@ -125,41 +125,11 @@ cudaStream_t to_cuda(Stream stream) {
     return static_cast<cudaStream_t>(stream.native);
 }
 
-bool is_packed_width(SizeType nbits) {
-    return nbits == 1 || nbits == 2 || nbits == 4 || nbits == 8 || nbits == 16;
-}
+using bit_pack_utils::is_packed_width;
+using bit_pack_utils::row_bytes_for;
 
-/// Calls f.template operator()<NBITS>() for the runtime width (1..16, 32).
 template <typename F> void dispatch_nbits(SizeType nbits, F&& f) {
-    switch (nbits) {
-    case 1:
-        f.template operator()<1>();
-        break;
-    case 2:
-        f.template operator()<2>();
-        break;
-    case 4:
-        f.template operator()<4>();
-        break;
-    case 8:
-        f.template operator()<8>();
-        break;
-    case 16:
-        f.template operator()<16>();
-        break;
-    case 32:
-        f.template operator()<32>();
-        break;
-    default:
-        throw std::invalid_argument(
-            fmt::format("DDMT (gpu): unsupported nbits={}", nbits));
-    }
-}
-
-/// Bytes of one channel row holding @p nsamps samples (float when 32).
-SizeType row_bytes_for(SizeType nsamps, SizeType nbits) {
-    return nbits == 32 ? nsamps * sizeof(float)
-                       : bit_pack_utils::packed_row_bytes(nsamps, nbits);
+    bit_pack_utils::dispatch_nbits(nbits, std::forward<F>(f), "DDMT (gpu)");
 }
 
 class DDMTCudaEngine final : public detail::DDMTEngine {

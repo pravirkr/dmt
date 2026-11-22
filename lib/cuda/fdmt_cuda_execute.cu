@@ -601,23 +601,15 @@ void FDMTCudaEngine::execute_search_int_typed(const Source& chunk_at,
             if (l > 0 && l < root) {
                 const auto reg_sum =
                     detail::fdmt_regular_sum_coords(m_plan.get_container(), l);
-                const int count =
-                    static_cast<int>(std::max(reg_sum, shape.ncoords_copy));
-                const dim3 block(kIterThreads);
-                const dim3 grid(
-                    (m_active + kIterThreads * kIterSampsPerTh - 1) /
-                        (kIterThreads * kIterSampsPerTh),
-                    std::min(count, kMaxGridY), m_nbeams);
-                gpu_utils::check_kernel_launch_params(grid, block);
-                const bool fuse_ring = grid.x == 1;
-                kernel_execute_iter<FDMTMode::kValid, TInt, TInt, TInt>
-                    <<<grid, block, 0, stream>>>(
+                const bool fuse_ring =
+                    launch_execute_iter<FDMTMode::kValid, TInt, TInt, TInt>(
                         level_ptr(l - 1), level_ptr(l), sums, copies, ring,
                         static_cast<int>(m_active), static_cast<int>(reg_sum),
                         static_cast<int>(shape.ncoords_copy),
                         static_cast<int>(m_half_elems),
                         static_cast<int>(m_half_elems), tree, 0, m_chunk_pos,
-                        1.0F, static_cast<int>(m_active), fuse_ring);
+                        1.0F, static_cast<int>(m_active), m_nbeams, true, 0,
+                        stream);
                 if (fuse_ring) {
                     adv_begin = static_cast<int>(reg_sum);
                 }
@@ -704,27 +696,20 @@ void FDMTCudaEngine::execute_search_int_direct(const Source& chunk_at,
         copies.update_offsets(m_coords_copy_offsets[l]);
         const auto reg_sum =
             detail::fdmt_regular_sum_coords(m_plan.get_container(), l);
-        const int count =
-            static_cast<int>(std::max(reg_sum, shape.ncoords_copy));
         const int nsamps_l = static_cast<int>(
             m_active +
             (l < m_level_max_extra.size() ? m_level_max_extra[l] : 0));
-        const dim3 block(kIterThreads);
-        const dim3 grid((nsamps_l + kIterThreads * kIterSampsPerTh - 1) /
-                            (kIterThreads * kIterSampsPerTh),
-                        std::min(count, kMaxGridY), m_nbeams);
-        gpu_utils::check_kernel_launch_params(grid, block);
         const bool skewed_mid = m_direct->skewed && m_top && l <= m_top->level;
-        const bool fuse_ring  = !skewed_mid && grid.x == 1;
         const auto h_base     = static_cast<int64_t>(ring_base_for_level(l));
-        kernel_execute_iter<FDMTMode::kValid, TInt, TInt, TInt>
-            <<<grid, block, 0, stream>>>(
+        const bool fuse_ring =
+            launch_execute_iter<FDMTMode::kValid, TInt, TInt, TInt>(
                 level_ptr(l - 1), level_ptr(l), sums, copies,
                 skewed_mid ? nullptr : ring, nsamps_l,
                 static_cast<int>(reg_sum), static_cast<int>(shape.ncoords_copy),
                 static_cast<int>(m_half_elems), static_cast<int>(m_half_elems),
                 h_stride, h_base, m_chunk_pos, 1.0F, static_cast<int>(m_active),
-                fuse_ring, skewed_mid ? static_cast<int>(m_chunk) : 0);
+                m_nbeams, !skewed_mid,
+                skewed_mid ? static_cast<int>(m_chunk) : 0, stream);
         return (skewed_mid || fuse_ring) ? static_cast<int>(reg_sum) : 0;
     };
     const auto advance = [&](SizeType l, int adv_begin) {
@@ -1270,20 +1255,15 @@ void FDMTCudaEngine::run_windowed_top(cudaStream_t stream, Consume&& consume) {
         copies.update_offsets(m_coords_copy_offsets[l]);
         const int nsum  = static_cast<int>(shape.ncoords_sum);
         const int ncopy = static_cast<int>(shape.ncoords_copy);
-        const int count = std::max(nsum, ncopy);
         T* out = l == root ? reinterpret_cast<T*>(
                                  thrust::raw_pointer_cast(t.trials.data()))
                            : state_level_ptr<T>(l);
         const int nsamps_l = static_cast<int>(m_active + m_level_max_extra[l]);
-        constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
-        const dim3 grid((nsamps_l + kBlockSamps - 1) / kBlockSamps,
-                        std::min(count, kMaxGridY), 1);
-        gpu_utils::check_kernel_launch_params(grid, dim3(kIterThreads));
-        kernel_execute_iter<FDMTMode::kValid, T, T, T>
-            <<<grid, kIterThreads, 0, stream>>>(
-                state_level_ptr<T>(l - 1), out, sums, copies, nullptr, nsamps_l,
-                nsum, ncopy, 0, 0, 0, 0, m_chunk_pos, 1.0F,
-                static_cast<int>(m_active), false, static_cast<int>(m_chunk));
+        (void)launch_execute_iter<FDMTMode::kValid, T, T, T>(
+            state_level_ptr<T>(l - 1), out, sums, copies, nullptr, nsamps_l,
+            nsum, ncopy, 0, 0, 0, 0, m_chunk_pos, 1.0F,
+            static_cast<int>(m_active), 1, false, static_cast<int>(m_chunk),
+            stream);
         if (l == t.level + 1 && !t.carry_len.empty()) {
             // Level top_k has been read: carry each row's last spread
             // samples to the front for the next chunk.
@@ -1402,46 +1382,35 @@ int FDMTCudaEngine::execute_iter_typed(const TIn* __restrict__ in_ptr,
     coords_sum_cur.update_offsets(m_coords_sum_offsets[next_level]);
     coords_copy_cur.update_offsets(m_coords_copy_offsets[next_level]);
 
-    const auto coords_max     = std::max(ncoords_sum_cur, ncoords_copy_cur);
-    constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
-    const dim3 block_size     = dim3(kIterThreads, 1);
-    // Coordinates beyond grid.y's limit are strided in the kernel.
-    const dim3 grid_size = dim3((nsamps + kBlockSamps - 1) / kBlockSamps,
-                                std::min(coords_max, kMaxGridY), m_nbeams);
-    gpu_utils::check_kernel_launch_params(grid_size, block_size);
-
     // Beams are level_beam_stride() elements apart in each level.
     const auto in_state_nelements  = level_beam_stride(next_level - 1);
     const auto out_state_nelements = level_beam_stride(next_level);
     const auto hist                = tree_history(next_level);
 
     if (m_mode == FDMTMode::kFull) {
-        kernel_execute_iter<FDMTMode::kFull, TIn, TOut>
-            <<<grid_size, block_size, 0, stream>>>(
-                in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, hist.in,
-                nsamps, ncoords_sum_cur, ncoords_copy_cur, in_state_nelements,
-                out_state_nelements, hist.stride, hist.base, hist.ring,
-                m_int_unit, active);
+        (void)launch_execute_iter<FDMTMode::kFull, TIn, TOut>(
+            in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, hist.in, nsamps,
+            ncoords_sum_cur, ncoords_copy_cur, in_state_nelements,
+            out_state_nelements, hist.stride, hist.base, hist.ring, m_int_unit,
+            active, m_nbeams, false, 0, stream);
     } else if (m_mode == FDMTMode::kRoll) {
-        kernel_execute_iter<FDMTMode::kRoll, TIn, TOut>
-            <<<grid_size, block_size, 0, stream>>>(
-                in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, hist.in,
-                nsamps, ncoords_sum_cur, ncoords_copy_cur, in_state_nelements,
-                out_state_nelements, hist.stride, hist.base, hist.ring,
-                m_int_unit, active);
+        (void)launch_execute_iter<FDMTMode::kRoll, TIn, TOut>(
+            in_ptr, out_ptr, coords_sum_cur, coords_copy_cur, hist.in, nsamps,
+            ncoords_sum_cur, ncoords_copy_cur, in_state_nelements,
+            out_state_nelements, hist.stride, hist.base, hist.ring, m_int_unit,
+            active, m_nbeams, false, 0, stream);
     } else {
         const bool skewed_mid =
             m_direct && m_direct->skewed && m_top && next_level <= m_top->level;
-        const bool fuse_ring = valid && !skewed_mid &&
-                               hist.ring != kFifoHistory &&
-                               hist.out != nullptr && grid_size.x == 1;
-        kernel_execute_iter<FDMTMode::kValid, TIn, TOut>
-            <<<grid_size, block_size, 0, stream>>>(
-                in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
-                skewed_mid ? nullptr : hist.in, nsamps, ncoords_sum_cur,
-                ncoords_copy_cur, in_state_nelements, out_state_nelements,
-                hist.stride, hist.base, hist.ring, m_int_unit, active,
-                fuse_ring, skewed_mid ? static_cast<int>(m_chunk) : 0);
+        const bool allow_fuse = valid && !skewed_mid &&
+                                hist.ring != kFifoHistory &&
+                                hist.out != nullptr;
+        const bool fuse_ring = launch_execute_iter<FDMTMode::kValid, TIn, TOut>(
+            in_ptr, out_ptr, coords_sum_cur, coords_copy_cur,
+            skewed_mid ? nullptr : hist.in, nsamps, ncoords_sum_cur,
+            ncoords_copy_cur, in_state_nelements, out_state_nelements,
+            hist.stride, hist.base, hist.ring, m_int_unit, active, m_nbeams,
+            allow_fuse, skewed_mid ? static_cast<int>(m_chunk) : 0, stream);
 
         fused_coords = (skewed_mid || fuse_ring) ? ncoords_sum_cur : 0;
         if (advance_hist && !skewed_mid) {

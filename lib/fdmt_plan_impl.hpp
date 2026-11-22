@@ -122,6 +122,9 @@ public:
         return m_container.grids[m_niters][0].dt_grid;
     }
     std::vector<float> get_dm_grid_final() const noexcept;
+    void smearing_row(SizeType level,
+                      SizeType coord_idx,
+                      std::span<float> out) const noexcept;
     std::vector<float> get_smearing_grid_final() const noexcept;
     /**
      * @brief Per-channel input-sample shift needed to *place* a synthetic
@@ -170,7 +173,15 @@ public:
     float variance_from_smearing_row(
         const float* smearing_row,
         float w,
-        std::span<const uint8_t> kill_mask) const noexcept;
+        std::span<const uint8_t> kill_mask) const noexcept {
+        return variance_from_smearing_row(smearing_row, w, kill_mask, 0,
+                                          m_nchans);
+    }
+    float variance_from_smearing_row(const float* smearing_row,
+                                     float w,
+                                     std::span<const uint8_t> kill_mask,
+                                     SizeType chan_begin,
+                                     SizeType chan_end) const noexcept;
     SizeType max_box_s() const noexcept {
         return m_container.level0_boxes.empty()
                    ? m_container.state_shape[0].dt_max

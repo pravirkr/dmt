@@ -997,8 +997,72 @@ private:
                  int out_row_stride,
                  cudaStream_t stream);
 
+    template <typename T>
+    void launch_top_ring_update(const T* level_state,
+                                int64_t level_stride,
+                                cudaStream_t stream);
+
+    template <typename T>
+    void run_top_impl(const T* level_state,
+                      int64_t level_stride,
+                      T* out,
+                      int64_t out_beam_stride,
+                      int out_row_stride,
+                      cudaStream_t stream,
+                      bool update_meta);
+
     /// Level k's newest samples of this chunk into its rings.
     void update_top_rings(cudaStream_t stream);
+
+    /// Zeroes all persistent streaming history buffers and resets stream
+    /// counters (shared by `reset_history()` and `reset_search_history()`).
+    void zero_history(cudaStream_t stream, bool throw_on_error);
+
+    /// Single launch helper for `kernel_execute_iter` across all FDMT paths.
+    /// Returns true when the ring advance was fused into the merge kernel.
+    template <FDMTMode Mode, typename TIn, typename TOut, typename THist = float>
+    static bool launch_execute_iter(const TIn* in_ptr,
+                                    TOut* out_ptr,
+                                    const plans::FDMTCoordDPtrs& sums,
+                                    const plans::FDMTCoordCopyDPtrs& copies,
+                                    THist* hist_ptr,
+                                    int nsamps,
+                                    int nsum,
+                                    int ncopy,
+                                    int in_beam_stride,
+                                    int out_beam_stride,
+                                    int64_t hist_stride,
+                                    int64_t hist_base,
+                                    uint64_t hist_ring,
+                                    float int_unit,
+                                    int active,
+                                    SizeType nbeams,
+                                    bool allow_fuse_ring,
+                                    int skew_stride,
+                                    cudaStream_t stream) {
+        constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
+        const int count           = std::max(nsum, ncopy);
+        const dim3 block(kIterThreads, 1);
+        const dim3 grid((nsamps + kBlockSamps - 1) / kBlockSamps,
+                        std::min(count, kMaxGridY), nbeams);
+        gpu_utils::check_kernel_launch_params(grid, block);
+        const bool fuse_ring = allow_fuse_ring && grid.x == 1;
+        if constexpr (Mode == FDMTMode::kValid) {
+            kernel_execute_iter<Mode, TIn, TOut, THist>
+                <<<grid, block, 0, stream>>>(
+                    in_ptr, out_ptr, sums, copies, hist_ptr, nsamps, nsum,
+                    ncopy, in_beam_stride, out_beam_stride, hist_stride,
+                    hist_base, hist_ring, int_unit, active, fuse_ring,
+                    skew_stride);
+        } else {
+            kernel_execute_iter<Mode, TIn, TOut, THist>
+                <<<grid, block, 0, stream>>>(
+                    in_ptr, out_ptr, sums, copies, hist_ptr, nsamps, nsum,
+                    ncopy, in_beam_stride, out_beam_stride, hist_stride,
+                    hist_base, hist_ring, int_unit, active);
+        }
+        return fuse_ring;
+    }
 
     /// Rewrites the tree histories of levels k+1..root from the rings at the
     /// current stream position, after top chunks left them behind.

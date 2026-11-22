@@ -35,10 +35,6 @@ using namespace pybind11::literals; // NOLINT
 
 namespace {
 
-std::vector<uint8_t> fft_kill_mask(const py::object& m) {
-    return extract_kill_mask(m);
-}
-
 // Consumes a device waterfall: float32 (`nbits` unset) or packed uint8, 2D
 // for nbeams == 1 or 3D (beams first).
 template <typename Engine>
@@ -150,27 +146,6 @@ py::object fdmt_device_result(const Engine& eng, const py::object& dmt) {
     const py::tuple shape = nb == 1 ? py::tuple(py::make_tuple(ndms, nout))
                                     : py::tuple(py::make_tuple(nb, ndms, nout));
     return device_helper("view")(dmt, nb * plan.get_dmt_size(), shape);
-}
-
-// FDMTFFT output for an input of `ndim` dimensions.
-py::array_t<float, py::array::c_style> fft_output(const FDMTFFT& fdmt,
-                                                  py::ssize_t ndim) {
-    const auto& plan = fdmt.get_plan();
-    const auto ndms  = plan.get_dmt_ndms();
-    const auto nout  = plan.get_dmt_nsamps();
-    if (ndim == 2) {
-        if (fdmt.get_nbeams() != 1) {
-            throw std::invalid_argument(
-                "FDMTFFT: a 2D waterfall needs nbeams == 1");
-        }
-        return py::array_t<float, py::array::c_style>({ndms, nout});
-    }
-    if (ndim == 3) {
-        return py::array_t<float, py::array::c_style>(
-            {fdmt.get_nbeams(), ndms, nout});
-    }
-    throw std::runtime_error("Packed waterfall must be a 2D or 3D (beams "
-                             "first) uint8 NumPy array.");
 }
 
 } // namespace
@@ -1118,7 +1093,7 @@ void bind_fdmt(py::module_& mod) {
                          int nthreads, SizeType nbeams,
                          std::string_view backend, int device,
                          bool fractional_delays, const py::object& kill_mask) {
-                 const auto mask = fft_kill_mask(kill_mask);
+                 const auto mask = extract_kill_mask(kill_mask);
                  return FDMTFFT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                 dt_min, dt_step, use_box_smearing, mode,
                                 make_exec(backend, nthreads, device), nbeams,
@@ -1140,7 +1115,7 @@ void bind_fdmt(py::module_& mod) {
                 const auto [type, obj] =
                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                 const auto exec = make_exec(backend, nthreads, device);
-                const auto mask = fft_kill_mask(kill_mask);
+                const auto mask = extract_kill_mask(kill_mask);
                 if (type == CustomGridType::kDt) {
                     return std::make_unique<FDMTFFT>(
                         f_min, f_max, nchans, nsamps, tsamp,
@@ -1165,7 +1140,7 @@ void bind_fdmt(py::module_& mod) {
                          int nthreads, SizeType nbeams,
                          std::string_view backend, int device,
                          bool fractional_delays, const py::object& kill_mask) {
-                 const auto mask = fft_kill_mask(kill_mask);
+                 const auto mask = extract_kill_mask(kill_mask);
                  return std::make_unique<FDMTFFT>(
                      plan, use_box_smearing,
                      make_exec(backend, nthreads, device), nbeams,
@@ -1186,7 +1161,7 @@ void bind_fdmt(py::module_& mod) {
                int nthreads, SizeType nbeams, std::string_view backend,
                int device, bool fractional_delays,
                const py::object& kill_mask) {
-                const auto mask = fft_kill_mask(kill_mask);
+                const auto mask = extract_kill_mask(kill_mask);
                 return FDMTFFT::estimate_memory(
                     f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
                     dt_step, use_box_smearing, mode,
@@ -1220,7 +1195,7 @@ void bind_fdmt(py::module_& mod) {
                 const auto [type, obj] =
                     resolve_custom_grid(dt_grid, dt_arr, dm_grid, dm_arr);
                 const auto exec = make_exec(backend, nthreads, device);
-                const auto mask = fft_kill_mask(kill_mask);
+                const auto mask = extract_kill_mask(kill_mask);
                 if (type == CustomGridType::kDt) {
                     return FDMTFFT::estimate_memory(
                         f_min, f_max, nchans, nsamps, tsamp,
@@ -1246,7 +1221,7 @@ void bind_fdmt(py::module_& mod) {
             [](const FDMTPlan& plan, bool use_box_smearing, int nthreads,
                SizeType nbeams, std::string_view backend, int device,
                bool fractional_delays, const py::object& kill_mask) {
-                const auto mask = fft_kill_mask(kill_mask);
+                const auto mask = extract_kill_mask(kill_mask);
                 return FDMTFFT::estimate_memory(
                     plan, use_box_smearing,
                     make_exec(backend, nthreads, device), nbeams,
@@ -1346,40 +1321,56 @@ void bind_fdmt(py::module_& mod) {
             "subband view's rows by it for S/N.")
         .def(
             "execute",
-            [](FDMTFFT& fdmt, const py::array& packed_obj, SizeType nbits) {
+            [](FDMTFFT& fdmt, const py::array& packed_obj, SizeType nbits,
+               const std::optional<py::array>& out) -> py::object {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "FDMTFFT.execute", "uint8");
-                auto out = fft_output(fdmt, packed.ndim());
+                if (packed.ndim() != 2 && packed.ndim() != 3) {
+                    throw std::runtime_error(
+                        "Packed waterfall must be a 2D (nchans, row_bytes) or "
+                        "3D (nbeams, nchans, row_bytes) uint8 NumPy array.");
+                }
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
-                const std::span<float> out_span(out.mutable_data(), out.size());
-                {
-                    const py::gil_scoped_release release;
-                    fdmt.execute(in_span, nbits, out_span);
-                }
-                return out;
+                return fdmt_execute_to_array(
+                    fdmt, "FDMTFFT", packed.ndim() == 3,
+                    static_cast<SizeType>(packed.size()),
+                    fdmt.get_nbeams() * fdmt.get_plan().get_nchans() *
+                        (((fdmt.get_plan().get_nsamps() * nbits) + 7) / 8),
+                    out, [&](std::span<float> dmt) {
+                        fdmt.execute(in_span, nbits, dmt);
+                    });
             },
             py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
+            py::kw_only(), py::arg("out") = py::none(),
             "Run the transform on packed low-bit unsigned input: "
             "``(nchans, row_bytes)`` or ``(nbeams, nchans, row_bytes)`` uint8 "
             "rows at ``nbits`` (1, 2, 4, 8, 16) per sample, LSB first; float32 "
             "output.")
         .def(
             "execute_time_major",
-            [](FDMTFFT& fdmt, const py::array& packed_obj, SizeType nbits) {
+            [](FDMTFFT& fdmt, const py::array& packed_obj, SizeType nbits,
+               const std::optional<py::array>& out) -> py::object {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "FDMTFFT.execute_time_major", "uint8");
-                auto out = fft_output(fdmt, packed.ndim());
+                if (packed.ndim() != 2 && packed.ndim() != 3) {
+                    throw std::runtime_error(
+                        "Packed waterfall must be a 2D or 3D (beams first) "
+                        "uint8 NumPy array.");
+                }
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
-                const std::span<float> out_span(out.mutable_data(), out.size());
-                {
-                    const py::gil_scoped_release release;
-                    fdmt.execute_time_major(in_span, nbits, out_span);
-                }
-                return out;
+                return fdmt_execute_to_array(
+                    fdmt, "FDMTFFT", packed.ndim() == 3,
+                    static_cast<SizeType>(packed.size()),
+                    fdmt.get_nbeams() * fdmt.get_plan().get_nsamps() *
+                        (((fdmt.get_plan().get_nchans() * nbits) + 7) / 8),
+                    out, [&](std::span<float> dmt) {
+                        fdmt.execute_time_major(in_span, nbits, dmt);
+                    });
             },
             py::arg("filterbank_packed").noconvert(), py::arg("nbits"),
+            py::kw_only(), py::arg("out") = py::none(),
             "Run the transform on a time-major packed filterbank: "
             "``(nsamps, sample_bytes)`` or ``(nbeams, nsamps, sample_bytes)`` "
             "uint8 at ``nbits``; shares the streaming history.")
@@ -1405,59 +1396,35 @@ void bind_fdmt(py::module_& mod) {
             "packed execute()).")
         .def(
             "execute",
-            [](FDMTFFT& fdmt, const py::array& waterfall_obj) -> py::object {
+            [](FDMTFFT& fdmt, const py::array& waterfall_obj,
+               const std::optional<py::array>& out) -> py::object {
                 const auto waterfall = require_contiguous_array<float>(
                     waterfall_obj, "FDMTFFT.execute", "float32");
-                const auto nbeams     = fdmt.get_nbeams();
-                const auto& plan      = fdmt.get_plan();
-                const auto ndms       = plan.get_dmt_ndms();
-                const auto nsamps_out = plan.get_dmt_nsamps();
+                if (waterfall.ndim() != 2 && waterfall.ndim() != 3) {
+                    throw std::runtime_error("Input waterfall must be a 2D "
+                                             "(nchans, nsamps) or 3D (nbeams, "
+                                             "nchans, nsamps) NumPy array.");
+                }
+                const auto nbeams = fdmt.get_nbeams();
+                const auto& plan  = fdmt.get_plan();
+                const auto expected =
+                    nbeams * plan.get_nchans() * plan.get_nsamps();
+                if (waterfall.ndim() == 3 &&
+                    static_cast<SizeType>(waterfall.shape(0)) != nbeams) {
+                    throw std::invalid_argument(fmt::format(
+                        "FDMTFFT: Invalid size of waterfall. Expected {}, "
+                        "got {}",
+                        expected, waterfall.size()));
+                }
                 const std::span<const float> in_span(waterfall.data(),
                                                      waterfall.size());
-
-                if (waterfall.ndim() == 2) {
-                    if (nbeams != 1) {
-                        throw std::invalid_argument(fmt::format(
-                            "FDMTFFT: Invalid size of waterfall. Expected "
-                            "{}, "
-                            "got {}",
-                            nbeams * plan.get_nchans() * plan.get_nsamps(),
-                            waterfall.size()));
-                    }
-                    py::array_t<float, py::array::c_style> result(
-                        {ndms, nsamps_out});
-                    const std::span<float> out_span(result.mutable_data(),
-                                                    result.size());
-                    {
-                        const py::gil_scoped_release release;
-                        fdmt.execute(in_span, out_span);
-                    }
-                    return result;
-                }
-                if (waterfall.ndim() == 3) {
-                    if (static_cast<SizeType>(waterfall.shape(0)) != nbeams) {
-                        throw std::invalid_argument(fmt::format(
-                            "FDMTFFT: Invalid size of waterfall. Expected "
-                            "{}, "
-                            "got {}",
-                            nbeams * plan.get_nchans() * plan.get_nsamps(),
-                            waterfall.size()));
-                    }
-                    py::array_t<float, py::array::c_style> result(
-                        {nbeams, ndms, nsamps_out});
-                    const std::span<float> out_span(result.mutable_data(),
-                                                    result.size());
-                    {
-                        const py::gil_scoped_release release;
-                        fdmt.execute(in_span, out_span);
-                    }
-                    return result;
-                }
-                throw std::runtime_error("Input waterfall must be a 2D "
-                                         "(nchans, nsamps) or 3D (nbeams, "
-                                         "nchans, nsamps) NumPy array.");
+                return fdmt_execute_to_array(
+                    fdmt, "FDMTFFT", waterfall.ndim() == 3,
+                    static_cast<SizeType>(waterfall.size()), expected, out,
+                    [&](std::span<float> dmt) { fdmt.execute(in_span, dmt); });
             },
-            py::arg("waterfall").noconvert(),
+            py::arg("waterfall").noconvert(), py::kw_only(),
+            py::arg("out") = py::none(),
             R"doc(
             Run the FFT-domain FDMT transform.
 
@@ -1466,6 +1433,10 @@ void bind_fdmt(py::module_& mod) {
             waterfall : numpy.ndarray, dtype float32
                 C-contiguous ``(nchans, nsamps)`` or
                 ``(nbeams, nchans, nsamps)``.
+            out : numpy.ndarray, optional
+                Writeable C-contiguous float32 buffer of at least
+                ``nbeams * plan.dmt_size`` elements, reused instead of
+                allocating a new one per call.
 
             Returns
             -------

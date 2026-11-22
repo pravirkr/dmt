@@ -146,9 +146,6 @@ private:
     template <typename T>
     std::span<const T> masked(std::span<const T> block, std::vector<T>& buffer);
     void update_open_begin();
-    void reset_block_noise();
-    void commit_block_noise();
-    [[nodiscard]] SizeType ring_index(uint64_t sample) const noexcept;
 
     // Prefix-sum screen & exact tile scorer (fdmt_boxcar_cpu_prefix.cpp)
     void make_screen_groups(const std::vector<uint32_t>& widths);
@@ -314,29 +311,8 @@ private:
     // Per-call kill masks: off until the first one (then the per-block
     // tables below replace the planes' tables).
     uint64_t m_open_begin = UINT64_MAX; ///< see open_begin_min()
-    bool m_noise_on       = false;
     std::shared_ptr<const std::vector<uint64_t>> m_support;
-    std::vector<BlockNoise> m_ring; ///< oldest first, at most m_ring_size
-    std::optional<BlockNoise> m_pending;
-    /// The entry the last commit evicted, kept until its call completes.
-    std::optional<BlockNoise> m_evicted;
-    bool m_commit_open   = false;
-    SizeType m_ring_size = 1;
-    /// Entries the search latency needs (1 + ceil(latency / nsamps)); above
-    /// m_ring_size the oldest kept entry takes the latest catch-all tables
-    /// (BlockNoise::catch_all).
-    SizeType m_ring_needed = 1;
-    bool m_has_catch_all   = false; ///< m_catch_all set (null: constructor)
-    std::shared_ptr<const NoiseTables> m_catch_all;
-    /// What the open commit replaced (restored if its call throws).
-    struct CatchUndo {
-        bool has_catch_all = false;
-        std::shared_ptr<const NoiseTables> catch_all;
-        bool front_set = false;
-        std::shared_ptr<const NoiseTables> steady, transition_tables;
-        bool transition = false;
-    };
-    CatchUndo m_catch_undo;
+    BlockNoiseRing m_noise_ring;
     std::vector<float> m_screen_thr; ///< per thread: min thresholds of a tile
     std::vector<uint64_t> m_screen_ithr; ///< packed: min integer cutoffs
     SizeType m_kadane_exact_prefix_cap = kKadaneExactPrefixCap;

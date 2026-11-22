@@ -172,48 +172,89 @@ std::vector<float> FDMTPlan::Impl::get_dm_grid_final() const noexcept {
     return dm_grid_final;
 }
 
+namespace {
+
+template <bool kTrackDelay, typename LeafFn>
+void trace_tree_leaves(const FDMTPlanContainer& container,
+                       SizeType nchans,
+                       SizeType level,
+                       SizeType coord_idx,
+                       IndexType init_target,
+                       LeafFn&& on_leaf) noexcept {
+    auto walk = [&](auto& self, SizeType l, SizeType idx,
+                    IndexType target) -> void {
+        if (l >= container.coordinates.size() ||
+            idx >= container.coordinates[l].size()) {
+            return;
+        }
+        const auto& coord = container.coordinates[l][idx];
+        if (l == 0) {
+            const auto chan = coord.i_sub;
+            if (chan < nchans &&
+                coord.i_dt < container.grids[0][chan].dt_grid.size()) {
+                on_leaf(idx, chan, container.grids[0][chan].dt_grid[coord.i_dt],
+                        target);
+            }
+            return;
+        }
+        if constexpr (kTrackDelay) {
+            if (coord.i_coord_head == SIZE_MAX) {
+                // Pure copy/passthrough of an unpaired odd sub-band: target
+                // is forwarded unchanged.
+                if (coord.i_coord_tail != SIZE_MAX) {
+                    self(self, l - 1, coord.i_coord_tail, target);
+                }
+                return;
+            }
+            const auto dt_val =
+                container.grids[l][coord.i_sub].dt_grid[coord.i_dt];
+            const auto delay = static_cast<IndexType>(coord.delay);
+            if (coord.i_coord_tail != SIZE_MAX) {
+                self(self, l - 1, coord.i_coord_tail,
+                     target - ((dt_val >= 0) ? IndexType{0} : delay));
+            }
+            self(self, l - 1, coord.i_coord_head,
+                 target - ((dt_val >= 0) ? delay : IndexType{0}));
+        } else {
+            if (coord.i_coord_tail != SIZE_MAX) {
+                self(self, l - 1, coord.i_coord_tail, target);
+            }
+            if (coord.i_coord_head != SIZE_MAX) {
+                self(self, l - 1, coord.i_coord_head, target);
+            }
+        }
+    };
+    walk(walk, level, coord_idx, init_target);
+}
+
+} // namespace
+
+void FDMTPlan::Impl::smearing_row(SizeType level,
+                                  SizeType coord_idx,
+                                  std::span<float> out) const noexcept {
+    if (m_nchans == 0 || out.empty()) {
+        return;
+    }
+    const auto& boxes = m_container.level0_boxes;
+    trace_tree_leaves<false>(
+        m_container, std::min(m_nchans, out.size()), level, coord_idx,
+        IndexType{0},
+        [&](SizeType idx0, SizeType chan, IndexType dt0, IndexType) noexcept {
+            out[chan] = boxes.empty() ? std::abs(static_cast<float>(dt0))
+                                      : static_cast<float>(boxes[idx0].s);
+        });
+}
+
 std::vector<float> FDMTPlan::Impl::get_smearing_grid_final() const noexcept {
     const auto ndms = get_dmt_ndms();
     std::vector<float> smearing_grid(ndms * m_nchans, 0.0F);
     if (m_niters == 0 || m_nchans == 0) {
         return smearing_grid;
     }
-
-    // Helper lambda to recursively trace coordinates down to level 0
-    auto trace_coord = [&](auto& self, SizeType level, SizeType coord_idx,
-                           SizeType dm_idx) -> void {
-        if (level == 0) {
-            if (coord_idx < m_container.coordinates[0].size()) {
-                const auto& coord0 = m_container.coordinates[0][coord_idx];
-                const auto chan    = coord0.i_sub;
-                if (chan < m_nchans &&
-                    coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
-                    const auto dt =
-                        m_container.grids[0][chan].dt_grid[coord0.i_dt];
-                    smearing_grid[(dm_idx * m_nchans) + chan] =
-                        m_container.level0_boxes.empty()
-                            ? std::abs(static_cast<float>(dt))
-                            : static_cast<float>(
-                                  m_container.level0_boxes[coord_idx].s);
-                }
-            }
-            return;
-        }
-
-        if (level < m_container.coordinates.size() &&
-            coord_idx < m_container.coordinates[level].size()) {
-            const auto& coord = m_container.coordinates[level][coord_idx];
-            if (coord.i_coord_tail != SIZE_MAX) {
-                self(self, level - 1, coord.i_coord_tail, dm_idx);
-            }
-            if (coord.i_coord_head != SIZE_MAX) {
-                self(self, level - 1, coord.i_coord_head, dm_idx);
-            }
-        }
-    };
-
     for (SizeType i_dm = 0; i_dm < ndms; ++i_dm) {
-        trace_coord(trace_coord, m_niters, i_dm, i_dm);
+        smearing_row(m_niters, i_dm,
+                     std::span<float>(&smearing_grid[i_dm * m_nchans],
+                                      m_nchans));
     }
     return smearing_grid;
 }
@@ -239,53 +280,19 @@ std::vector<IndexType> FDMTPlan::Impl::trace_dm(SizeType dm_idx) const {
                                 " out of range [0, " + std::to_string(ndms) +
                                 ")");
     }
-
-    auto trace = [&](auto& self, SizeType level, SizeType coord_idx,
-                     IndexType target) -> void {
-        if (level == 0) {
-            if (coord_idx < m_container.coordinates[0].size()) {
-                const auto& coord0 = m_container.coordinates[0][coord_idx];
-                const auto chan    = coord0.i_sub;
-                if (chan < m_nchans &&
-                    coord0.i_dt < m_container.grids[0][chan].dt_grid.size()) {
-                    const auto dt0 =
-                        m_container.grids[0][chan].dt_grid[coord0.i_dt];
-                    if (m_container.level0_boxes.empty()) {
-                        shifts[chan] =
-                            target - std::abs(static_cast<IndexType>(dt0));
-                    } else {
-                        // The box's farthest read of a chan_dm plan.
-                        const auto& box = m_container.level0_boxes[coord_idx];
-                        shifts[chan]    = target - box.lag - box.s;
-                    }
-                }
+    const auto& boxes = m_container.level0_boxes;
+    trace_tree_leaves<true>(
+        m_container, m_nchans, m_niters, dm_idx, IndexType{0},
+        [&](SizeType idx0, SizeType chan, IndexType dt0,
+            IndexType target) noexcept {
+            if (boxes.empty()) {
+                shifts[chan] = target - std::abs(static_cast<IndexType>(dt0));
+            } else {
+                // The box's farthest read of a chan_dm plan.
+                const auto& box = boxes[idx0];
+                shifts[chan]    = target - box.lag - box.s;
             }
-            return;
-        }
-        if (level >= m_container.coordinates.size() ||
-            coord_idx >= m_container.coordinates[level].size()) {
-            return;
-        }
-        const auto& coord = m_container.coordinates[level][coord_idx];
-        if (coord.i_coord_head == SIZE_MAX) {
-            // Pure copy/passthrough of an unpaired odd sub-band: target
-            // is forwarded unchanged.
-            if (coord.i_coord_tail != SIZE_MAX) {
-                self(self, level - 1, coord.i_coord_tail, target);
-            }
-            return;
-        }
-        const auto dt_val =
-            m_container.grids[level][coord.i_sub].dt_grid[coord.i_dt];
-        const auto delay = static_cast<IndexType>(coord.delay);
-        if (coord.i_coord_tail != SIZE_MAX) {
-            self(self, level - 1, coord.i_coord_tail,
-                 target - ((dt_val >= 0) ? IndexType{0} : delay));
-        }
-        self(self, level - 1, coord.i_coord_head,
-             target - ((dt_val >= 0) ? delay : IndexType{0}));
-    };
-    trace(trace, m_niters, dm_idx, IndexType{0});
+        });
     return shifts;
 }
 

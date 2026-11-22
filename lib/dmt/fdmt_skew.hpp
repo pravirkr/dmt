@@ -31,6 +31,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_cpu_mem.hpp"
 #include "dmt/fdmt_direct.hpp"
 #include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_search.hpp"
@@ -146,131 +147,6 @@ inline SizeType skew_leaf_level(const plans::FDMTPlan& plan,
 }
 
 /// 2 MiB-aligned hugepage-backed array zero-filled in parallel across threads.
-template <typename T> class SkewLargeArray {
-public:
-    SkewLargeArray() = default;
-    ~SkewLargeArray() { std::free(m_data); } // NOLINT
-    SkewLargeArray(const SkewLargeArray&)            = delete;
-    SkewLargeArray& operator=(const SkewLargeArray&) = delete;
-    SkewLargeArray(SkewLargeArray&&)                 = delete;
-    SkewLargeArray& operator=(SkewLargeArray&&)      = delete;
-
-    void assign(SizeType n, int nthreads) {
-        std::free(m_data); // NOLINT
-        m_data = nullptr;
-        m_size = n;
-        if (n == 0) {
-            return;
-        }
-        constexpr SizeType kAlign = SizeType{2} << 20;
-        const SizeType bytes =
-            (((n * sizeof(T)) + kAlign - 1) / kAlign) * kAlign;
-        m_data = static_cast<T*>(std::aligned_alloc(kAlign, bytes)); // NOLINT
-        if (m_data == nullptr) {
-            throw std::bad_alloc();
-        }
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
-        ::madvise(m_data, bytes, MADV_HUGEPAGE);
-#endif
-        auto* raw            = reinterpret_cast<std::byte*>(m_data);
-        const SizeType pages = bytes / kAlign;
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (SizeType i = 0; i < pages; ++i) {
-            std::memset(raw + (i * kAlign), 0, kAlign);
-        }
-    }
-    void swap(SkewLargeArray& other) noexcept {
-        std::swap(m_data, other.m_data);
-        std::swap(m_size, other.m_size);
-    }
-    [[nodiscard]] T* data() noexcept { return m_data; }
-    [[nodiscard]] const T* data() const noexcept { return m_data; }
-    [[nodiscard]] SizeType size() const noexcept { return m_size; }
-    [[nodiscard]] T* begin() noexcept { return m_data; }
-    [[nodiscard]] T* end() noexcept { return m_data + m_size; }
-
-private:
-    T* m_data{nullptr};
-    SizeType m_size{0};
-};
-
-template <typename StateT>
-inline void skew_stream_add(const StateT* __restrict__ a,
-                            const StateT* __restrict__ b,
-                            StateT* __restrict__ out,
-                            SizeType m) noexcept {
-    // NOLINTNEXTLINE(bugprone-branch-clone): SIMD path when AVX is on
-    if constexpr (std::is_same_v<StateT, float>) {
-#if defined(__AVX512F__) || defined(__AVX__)
-#if defined(__AVX512F__)
-        constexpr SizeType kLanes = 16;
-#else
-        constexpr SizeType kLanes = 8;
-#endif
-        constexpr std::uintptr_t kAlign = kLanes * sizeof(float);
-        SizeType i                      = 0;
-        for (;
-             i < m && (reinterpret_cast<std::uintptr_t>(out + i) % kAlign) != 0;
-             ++i) {
-            out[i] = a[i] + b[i];
-        }
-        for (; i + kLanes <= m; i += kLanes) {
-#if defined(__AVX512F__)
-            _mm512_stream_ps(out + i, _mm512_add_ps(_mm512_loadu_ps(a + i),
-                                                    _mm512_loadu_ps(b + i)));
-#else
-            _mm256_stream_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(a + i),
-                                                    _mm256_loadu_ps(b + i)));
-#endif
-        }
-        for (; i < m; ++i) {
-            out[i] = a[i] + b[i];
-        }
-#else
-#pragma omp simd
-        for (SizeType i = 0; i < m; ++i) {
-            out[i] = a[i] + b[i];
-        }
-#endif
-    } else {
-#if defined(__AVX512F__)
-        if constexpr (std::is_same_v<StateT, uint32_t>) {
-            constexpr SizeType kLanes       = 16;
-            constexpr std::uintptr_t kAlign = kLanes * sizeof(uint32_t);
-            SizeType i                      = 0;
-            for (; i < m &&
-                   (reinterpret_cast<std::uintptr_t>(out + i) % kAlign) != 0;
-                 ++i) {
-                out[i] = a[i] + b[i];
-            }
-            for (; i + kLanes <= m; i += kLanes) {
-                _mm512_stream_si512(
-                    reinterpret_cast<__m512i*>(out + i),
-                    _mm512_add_epi32(
-                        _mm512_loadu_si512(
-                            reinterpret_cast<const __m512i*>(a + i)),
-                        _mm512_loadu_si512(
-                            reinterpret_cast<const __m512i*>(b + i))));
-            }
-            for (; i < m; ++i) {
-                out[i] = a[i] + b[i];
-            }
-            return;
-        }
-#endif
-#pragma omp simd
-        for (SizeType i = 0; i < m; ++i) {
-            out[i] = a[i] + b[i];
-        }
-    }
-}
-
-inline void skew_stream_fence() noexcept {
-#if defined(__AVX__)
-    _mm_sfence();
-#endif
-}
-
 /**
  * @brief Streaming FDMT on skewed windows (see the file comment). Valid
  * mode only; float or packed (1, 2, 4, 8, 16 bit) input, one beam.
@@ -772,23 +648,12 @@ private:
         const auto& pc = m_plan.get_container();
         // Box-mean weights (float) and recipes (packed).
         if (m_smear) {
-            const auto weights = m_plan.get_box_weights();
-            const auto scale_f = m_plan.get_box_mean_bits();
-            const float w_unit = std::ldexp(
-                1.0F, -static_cast<int>(m_plan.get_box_fraction_bits()));
-            m_int_unit = m_search_int
-                             ? 1.0F
-                             : std::ldexp(1.0F, -static_cast<int>(scale_f));
-            m_box_w.resize(weights.size());
-            m_box_round.resize(weights.size());
-            for (SizeType s = 0; s < weights.size(); ++s) {
-                m_box_w[s]     = static_cast<float>(weights[s]) * w_unit;
-                m_box_round[s] = m_search_int ? FDMTBoxRound{.mul = weights[s],
-                                                             .add = 0U,
-                                                             .rshift = 0U,
-                                                             .lshift = 0U}
-                                              : box_round(s + 1, scale_f);
-            }
+            auto tables = make_fdmt_box_tables(
+                m_plan.get_box_weights(), m_plan.get_box_fraction_bits(),
+                m_plan.get_box_mean_bits(), m_search_int);
+            m_int_unit  = tables.int_unit;
+            m_box_w     = std::move(tables.w_f32);
+            m_box_round = std::move(tables.round);
             const SizeType box_max =
                 (pc.level0_boxes.empty() ? pc.state_shape[0].dt_max
                                          : pc.level0_max_box_s) +
@@ -1399,7 +1264,7 @@ private:
     /// so the stream history) in place.
     void widen_ring(SizeType elem) {
         const SizeType tot = m_chan_ring_off[m_nchans];
-        SkewLargeArray<std::byte> wide;
+        FDMTLargeArray<std::byte> wide;
         wide.assign(tot * elem, m_nthreads);
         ring_dispatch(m_ring_elem, [&](auto from_tag) {
             using From      = decltype(from_tag);
@@ -1934,7 +1799,7 @@ private:
                             if (op.head == kOpNone) {
                                 std::copy_n(tail, m, out);
                             } else if (stream) {
-                                skew_stream_add(tail, in + op.head, out, m);
+                                fdmt_stream_add(tail, in + op.head, out, m);
                             } else {
                                 eval_op_tile(op, in, out, m);
                             }
@@ -1946,7 +1811,7 @@ private:
                         // Each thread fences its own non-temporal stores
                         // before the barrier that publishes them.
                         if (stream) {
-                            skew_stream_fence();
+                            fdmt_stream_fence();
                         }
 #pragma omp barrier
                     }
@@ -2323,11 +2188,11 @@ private:
                     }
                 } else {
                     const StateT* __restrict__ head = in + op.head;
-                    skew_stream_add(tail, head, out, m);
+                    fdmt_stream_add(tail, head, out, m);
                 }
             }
             if (!search_out) {
-                skew_stream_fence();
+                fdmt_stream_fence();
             }
         }
     }
@@ -2385,9 +2250,9 @@ private:
     SizeType m_group_b_elems{0};
     bool m_shared_group{false};
     bool m_group_in_idle{false};
-    SkewLargeArray<float> m_state;
-    SkewLargeArray<std::byte> m_ring;
-    SkewLargeArray<std::byte> m_scratch;
+    FDMTLargeArray<float> m_state;
+    FDMTLargeArray<std::byte> m_ring;
+    FDMTLargeArray<std::byte> m_scratch;
     SizeType m_stripe_bytes{0};
     SizeType m_group_a_bytes{0};
     SizeType m_group_b_bytes{0};

@@ -72,27 +72,15 @@ SizeType taper_ringing_length(double leakage) {
     return kRef / 2;
 }
 
-bool is_smooth7(SizeType n) {
-    if (n == 0) {
-        return false;
-    }
-    for (const SizeType p : {2U, 3U, 5U, 7U}) {
-        while (n % p == 0) {
-            n /= p;
-        }
-    }
-    return n == 1;
-}
-
 // 7-smooth integer nearest to x (>= 1); ties go down.
 SizeType nearest_smooth7(double x) {
     const auto lo0 = static_cast<SizeType>(std::max(1.0, std::floor(x)));
     SizeType lo    = lo0;
-    while (lo > 1 && !is_smooth7(lo)) {
+    while (lo > 1 && !utils::is_smooth7(lo)) {
         --lo;
     }
     SizeType hi = std::max<SizeType>(1, static_cast<SizeType>(std::ceil(x)));
-    while (!is_smooth7(hi)) {
+    while (!utils::is_smooth7(hi)) {
         ++hi;
     }
     return (x - static_cast<double>(lo) <= static_cast<double>(hi) - x) ? lo

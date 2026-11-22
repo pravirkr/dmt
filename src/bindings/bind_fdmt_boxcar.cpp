@@ -2,6 +2,7 @@
 #include <cstring>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -43,6 +44,78 @@ BoxcarResult own_result(CandidateResultView view) {
     }
     return {std::move(array), view, view.input_sample_begin, view.input_nsamps,
             std::move(planes)};
+}
+
+template <typename Search>
+void bind_boxcar_common(py::class_<Search>& cls, const char* drain_doc) {
+    cls.def("flush",
+            [](Search& search) {
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.flush();
+                }
+                return own_result(view);
+            })
+        .def(
+            "drain",
+            [](Search& search) {
+                CandidateResultView view;
+                {
+                    py::gil_scoped_release release;
+                    view = search.drain();
+                }
+                return own_result(view);
+            },
+            drain_doc)
+        .def("get_candidate_frontier", &Search::get_candidate_frontier,
+             R"doc(
+            The oldest sample a later candidate can still have: every
+            candidate emitted by a later :meth:`execute`, :meth:`flush` or
+            :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
+            ``end_sample``) at or after it. It is the smallest
+            ``begin_sample`` of the excursions still open, or
+            :attr:`searched_nsamps` when none is open — for a ``chan_dm``
+            plan minus :attr:`FDMTPlan.level0_causal_delay` clamped at 0,
+            matching candidate times. It never decreases until
+            :meth:`reset_history` (then 0). Use it as the watermark
+            for releasing candidate groups, whatever the length of an
+            excursion.
+            )doc")
+        .def_property_readonly(
+            "searched_nsamps", &Search::get_searched_nsamps,
+            "FDMT output samples [0, n) searched by every row so far (after "
+            ":meth:`drain`, the whole stream; for ``chan_dm != 0`` this is the "
+            "raw count without subtracting "
+            ":attr:`FDMTPlan.level0_causal_delay`).")
+        .def("reset_history",
+             [](Search& search) {
+                 py::gil_scoped_release release;
+                 search.reset_history();
+             })
+        .def_property_readonly("plan", &Search::get_plan,
+                               py::return_value_policy::reference_internal)
+        .def_property_readonly(
+            "config", [](const Search& search) { return search.get_config(); })
+        .def_property_readonly(
+            "search_plans",
+            [](const Search& search) {
+                const auto planes = search.get_search_plans();
+                return std::vector<plans::BoxcarPlanePlan>(planes.begin(),
+                                                           planes.end());
+            })
+        .def_property_readonly("nbeams", &Search::get_nbeams)
+        .def_property_readonly("chunk_nsamps", &Search::get_chunk_nsamps)
+        .def_property_readonly("nthreads", &Search::nthreads)
+        .def_property_readonly("device", &Search::device)
+        .def_property_readonly("backend",
+                               [](const Search& search) {
+                                   return std::string(
+                                       to_string(search.backend()));
+                               })
+        .def_property_readonly("memory_usage", &Search::get_memory_usage)
+        .def("summary", &Search::summary)
+        .def("__repr__", &Search::summary);
 }
 } // namespace
 
@@ -247,7 +320,7 @@ void bind_fdmt_boxcar(py::module_& mod) {
         not exceed max_width; max_width ends the bank when the steps stop
         below it (9 at wtsp 2: 1, 2, 4, 8, 9).
         )doc");
-    py::class_<FDMTBoxcar>(mod, "FDMTBoxcar", R"doc(
+    py::class_<FDMTBoxcar> fdmt_boxcar_cls(mod, "FDMTBoxcar", R"doc(
         Streaming valid-mode FDMT and analytical boxcar detection.
 
         Input is contiguous float32, (channels, samples) for one beam or
@@ -295,7 +368,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``PREFIX``, ``KADANE`` (lossless multi-bucket Kadane gate), ``NONE``
         and ``AUTO`` (``KADANE`` on the CPU, ``PREFIX`` on a GPU) all emit
         identical exact candidates.
-        )doc")
+        )doc");
+    fdmt_boxcar_cls
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams,
                          std::optional<SizeType> fuse,
@@ -436,87 +510,21 @@ void bind_fdmt_boxcar(py::module_& mod) {
             ``max_memory_bytes``; otherwise ``ValueError``, with the stream
             unchanged.
             )doc")
-        .def("flush",
-             [](FDMTBoxcar& search) {
-                 CandidateResultView view;
-                 {
-                     py::gil_scoped_release release;
-                     view = search.flush();
-                 }
-                 return own_result(view);
-             })
-        .def(
-            "drain",
-            [](FDMTBoxcar& search) {
-                CandidateResultView view;
-                {
-                    py::gil_scoped_release release;
-                    view = search.drain();
-                }
-                return own_result(view);
-            },
-            R"doc(
-            End of stream: search the stream up to its last sample and emit
-            the open excursions (as :meth:`flush`). Without it the last
-            :attr:`search_latency` samples are never searched. The stream ends:
-            ``execute`` raises until :meth:`reset_history`.
-            )doc")
-        .def("get_candidate_frontier", &FDMTBoxcar::get_candidate_frontier,
-             R"doc(
-            The oldest sample a later candidate can still have: every
-            candidate emitted by a later :meth:`execute`, :meth:`flush` or
-            :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
-            ``end_sample``) at or after it. It is the smallest
-            ``begin_sample`` of the excursions still open, or
-            :attr:`searched_nsamps` when none is open — for a ``chan_dm``
-            plan minus :attr:`FDMTPlan.level0_causal_delay` clamped at 0,
-            matching candidate times. It never decreases until
-            :meth:`reset_history` (then 0). Use it as the watermark
-            for releasing candidate groups, whatever the length of an
-            excursion.
-            )doc")
-        .def_property_readonly(
-            "searched_nsamps", &FDMTBoxcar::get_searched_nsamps,
-            "FDMT output samples [0, n) searched by every row so far (after "
-            ":meth:`drain`, the whole stream; for ``chan_dm != 0`` this is the "
-            "raw count without subtracting "
-            ":attr:`FDMTPlan.level0_causal_delay`).")
         .def_property_readonly(
             "search_latency", &FDMTBoxcar::get_search_latency,
             "Input samples a stream sample waits for before every searched "
             "row has searched it (the largest subband row lag on the skewed "
             "paths; 0 otherwise).")
-        .def("reset_history",
-             [](FDMTBoxcar& search) {
-                 py::gil_scoped_release release;
-                 search.reset_history();
-             })
-        .def_property_readonly("plan", &FDMTBoxcar::get_plan,
-                               py::return_value_policy::reference_internal)
-        .def_property_readonly(
-            "config",
-            [](const FDMTBoxcar& search) { return search.get_config(); })
-        .def_property_readonly("search_plans",
-                               [](const FDMTBoxcar& search) {
-                                   const auto planes =
-                                       search.get_search_plans();
-                                   return std::vector<plans::BoxcarPlanePlan>(
-                                       planes.begin(), planes.end());
-                               })
-        .def_property_readonly("nbeams", &FDMTBoxcar::get_nbeams)
-        .def_property_readonly("chunk_nsamps", &FDMTBoxcar::get_chunk_nsamps)
-        .def_property_readonly("fuse_levels", &FDMTBoxcar::get_fuse_levels)
-        .def_property_readonly("nthreads", &FDMTBoxcar::nthreads)
-        .def_property_readonly("device", &FDMTBoxcar::device)
-        .def_property_readonly("backend",
-                               [](const FDMTBoxcar& search) {
-                                   return std::string(
-                                       to_string(search.backend()));
-                               })
-        .def_property_readonly("memory_usage", &FDMTBoxcar::get_memory_usage)
-        .def("summary", &FDMTBoxcar::summary)
-        .def("__repr__", &FDMTBoxcar::summary);
-    py::class_<FDMTFFTBoxcar>(mod, "FDMTFFTBoxcar", R"doc(
+        .def_property_readonly("fuse_levels", &FDMTBoxcar::get_fuse_levels);
+    bind_boxcar_common(
+        fdmt_boxcar_cls,
+        R"doc(
+            End of stream: search the stream up to its last sample and emit
+            the open excursions (as :meth:`flush`). Without it the last
+            :attr:`search_latency` samples are never searched. The stream ends:
+            ``execute`` raises until :meth:`reset_history`.
+            )doc");
+    py::class_<FDMTFFTBoxcar> fdmt_fft_boxcar_cls(mod, "FDMTFFTBoxcar", R"doc(
         Streaming valid-mode FDMT-FFT and analytical boxcar detection.
 
         The Fourier-domain counterpart of FDMTBoxcar, with the same config,
@@ -538,7 +546,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
         reserved inside that budget at construction. ``config.screen_mode``
         (:class:`BoxcarScreenMode`) applies to every segment's DM-row search
         as on :class:`FDMTBoxcar`.
-        )doc")
+        )doc");
+    fdmt_fft_boxcar_cls
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
                          const py::object& kill, std::string_view backend,
@@ -603,81 +612,15 @@ void bind_fdmt_boxcar(py::module_& mod) {
                 return own_result(view);
             },
             "waterfall"_a)
-        .def("flush",
-             [](FDMTFFTBoxcar& search) {
-                 CandidateResultView view;
-                 {
-                     py::gil_scoped_release release;
-                     view = search.flush();
-                 }
-                 return own_result(view);
-             })
-        .def(
-            "drain",
-            [](FDMTFFTBoxcar& search) {
-                CandidateResultView view;
-                {
-                    py::gil_scoped_release release;
-                    view = search.drain();
-                }
-                return own_result(view);
-            },
-            R"doc(
+        .def_property_readonly("output_latency",
+                               &FDMTFFTBoxcar::get_output_latency);
+    bind_boxcar_common(
+        fdmt_fft_boxcar_cls,
+        R"doc(
             End of stream: search the stream up to its last sample and emit
             the open excursions (as :meth:`flush`). Without it the last
             :attr:`output_latency` samples are never searched. The stream ends:
             ``execute`` raises until :meth:`reset_history`.
-            )doc")
-        .def("get_candidate_frontier", &FDMTFFTBoxcar::get_candidate_frontier,
-             R"doc(
-            The oldest sample a later candidate can still have: every
-            candidate emitted by a later :meth:`execute`, :meth:`flush` or
-            :meth:`drain` has ``begin_sample`` (hence ``peak_sample`` and
-            ``end_sample``) at or after it. It is the smallest
-            ``begin_sample`` of the excursions still open, or
-            :attr:`searched_nsamps` when none is open — for a ``chan_dm``
-            plan minus :attr:`FDMTPlan.level0_causal_delay` clamped at 0,
-            matching candidate times. It never decreases until
-            :meth:`reset_history` (then 0). Use it as the watermark
-            for releasing candidate groups, whatever the length of an
-            excursion.
-            )doc")
-        .def_property_readonly(
-            "searched_nsamps", &FDMTFFTBoxcar::get_searched_nsamps,
-            "FDMT output samples [0, n) searched by every row so far (after "
-            ":meth:`drain`, the whole stream; for ``chan_dm != 0`` this is the "
-            "raw count without subtracting "
-            ":attr:`FDMTPlan.level0_causal_delay`).")
-        .def("reset_history",
-             [](FDMTFFTBoxcar& search) {
-                 py::gil_scoped_release release;
-                 search.reset_history();
-             })
-        .def_property_readonly("plan", &FDMTFFTBoxcar::get_plan,
-                               py::return_value_policy::reference_internal)
-        .def_property_readonly(
-            "config",
-            [](const FDMTFFTBoxcar& search) { return search.get_config(); })
-        .def_property_readonly("search_plans",
-                               [](const FDMTFFTBoxcar& search) {
-                                   const auto planes =
-                                       search.get_search_plans();
-                                   return std::vector<plans::BoxcarPlanePlan>(
-                                       planes.begin(), planes.end());
-                               })
-        .def_property_readonly("nbeams", &FDMTFFTBoxcar::get_nbeams)
-        .def_property_readonly("chunk_nsamps", &FDMTFFTBoxcar::get_chunk_nsamps)
-        .def_property_readonly("output_latency",
-                               &FDMTFFTBoxcar::get_output_latency)
-        .def_property_readonly("nthreads", &FDMTFFTBoxcar::nthreads)
-        .def_property_readonly("device", &FDMTFFTBoxcar::device)
-        .def_property_readonly("backend",
-                               [](const FDMTFFTBoxcar& search) {
-                                   return std::string(
-                                       to_string(search.backend()));
-                               })
-        .def_property_readonly("memory_usage", &FDMTFFTBoxcar::get_memory_usage)
-        .def("summary", &FDMTFFTBoxcar::summary)
-        .def("__repr__", &FDMTFFTBoxcar::summary);
+            )doc");
 }
 } // namespace dmt

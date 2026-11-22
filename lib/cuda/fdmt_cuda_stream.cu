@@ -40,70 +40,59 @@ __global__ void kernel_tree_ring_to_fifo(const float* __restrict__ ring,
 
 } // namespace
 
-void FDMTCudaEngine::reset_search_history(Stream queue) {
-    gpu_utils::set_device(m_device_id);
-    const auto stream = to_cuda(queue);
-    for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_fifo_d[0],
-                    &m_tree_fifo_d[1], &m_tree_ring_d}) {
-        if (!v->empty()) {
-            gpu_utils::check_gpu_call(
-                cudaMemsetAsync(thrust::raw_pointer_cast(v->data()), 0,
-                                v->size() * sizeof(float), stream));
-        }
+void FDMTCudaEngine::zero_history(cudaStream_t stream, bool throw_on_error) {
+    if (throw_on_error) {
+        gpu_utils::set_device(m_device_id);
+    } else {
+        (void)cudaSetDevice(m_device_id);
     }
-    if (m_integer_ring.size() > 0) {
-        gpu_utils::check_gpu_call(
-            cudaMemsetAsync(thrust::raw_pointer_cast(m_integer_ring.data()), 0,
-                            m_integer_ring.size() * sizeof(uint64_t), stream));
-    }
-    if (m_integer32_ring.size() > 0) {
-        gpu_utils::check_gpu_call(cudaMemsetAsync(
-            thrust::raw_pointer_cast(m_integer32_ring.data()), 0,
-            m_integer32_ring.size() * sizeof(uint32_t), stream));
-    }
-    if (m_direct) {
-        for (auto& w : m_direct->win) {
-            if (!w.empty()) {
-                gpu_utils::check_gpu_call(
-                    cudaMemsetAsync(thrust::raw_pointer_cast(w.data()), 0,
-                                    w.size() * sizeof(float), stream));
+    const auto zero_vec = [&](auto& v) {
+        using ElemT =
+            typename std::remove_reference_t<decltype(v)>::value_type;
+        if (!v.empty()) {
+            const cudaError_t err = cudaMemsetAsync(
+                thrust::raw_pointer_cast(v.data()), 0,
+                v.size() * sizeof(ElemT), stream);
+            if (throw_on_error) {
+                gpu_utils::check_gpu_call(err);
             }
         }
-        if (!m_direct->win_ring.empty()) {
-            gpu_utils::check_gpu_call(cudaMemsetAsync(
-                thrust::raw_pointer_cast(m_direct->win_ring.data()), 0,
-                m_direct->win_ring.size() * sizeof(float), stream));
+    };
+    for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_fifo_d[0],
+                    &m_tree_fifo_d[1], &m_tree_ring_d}) {
+        zero_vec(*v);
+    }
+    zero_vec(m_integer_ring);
+    zero_vec(m_integer32_ring);
+    if (m_direct) {
+        for (auto& w : m_direct->win) {
+            zero_vec(w);
         }
-        if (!m_direct->win_ring_u8.empty()) {
-            gpu_utils::check_gpu_call(cudaMemsetAsync(
-                thrust::raw_pointer_cast(m_direct->win_ring_u8.data()), 0,
-                m_direct->win_ring_u8.size() * sizeof(uint8_t), stream));
-        }
-        if (!m_direct->win_ring_u16.empty()) {
-            gpu_utils::check_gpu_call(cudaMemsetAsync(
-                thrust::raw_pointer_cast(m_direct->win_ring_u16.data()), 0,
-                m_direct->win_ring_u16.size() * sizeof(uint16_t), stream));
-        }
+        zero_vec(m_direct->win_ring);
+        zero_vec(m_direct->win_ring_u8);
+        zero_vec(m_direct->win_ring_u16);
+        // An all-zero window is consistent with all-zero tree histories.
         m_direct_filled = static_cast<SizeType>(m_direct->window);
     }
     m_direct_stale = false;
-    if (m_top && !m_top->ring.empty()) {
-        gpu_utils::check_gpu_call(
-            cudaMemsetAsync(thrust::raw_pointer_cast(m_top->ring.data()), 0,
-                            m_top->ring.size() * sizeof(float), stream));
+    if (m_top) {
+        zero_vec(m_top->ring);
+        // The windowed top's carried spreads start the next chunk's merges.
+        zero_vec(m_top->win_top);
         m_top_filled = static_cast<SizeType>(m_top->max_ring);
     }
-    if (m_top && !m_top->win_top.empty()) {
-        // The windowed top's carried spreads start the next chunk's merges.
-        gpu_utils::check_gpu_call(
-            cudaMemsetAsync(thrust::raw_pointer_cast(m_top->win_top.data()), 0,
-                            m_top->win_top.size() * sizeof(float), stream));
-    }
-    m_top_stale      = false;
-    m_parity         = false;
+    m_top_stale = false;
+    m_parity    = false;
+    // Abandons any unfinished stepper block along with its stream.
     m_is_initialized = false;
     m_chunk_pos      = 0;
     m_next_pos       = 0;
+    m_hist_pos_base  = 0;
+}
+
+void FDMTCudaEngine::reset_search_history(Stream queue) {
+    const auto stream = to_cuda(queue);
+    zero_history(stream, true);
     m_device_work.mark(stream);
 }
 
@@ -250,50 +239,8 @@ void FDMTCudaEngine::finalize(Stream stream_in) {
     m_is_initialized   = false;
 }
 
-void FDMTCudaEngine::reset_history() noexcept {
-    m_chunk_pos     = 0;
-    m_next_pos      = 0;
-    m_hist_pos_base = 0;
-    gpu_utils::set_device(m_device_id);
-    for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_fifo_d[0],
-                    &m_tree_fifo_d[1], &m_tree_ring_d}) {
-        if (!v->empty()) {
-            v->assign(v->size(), 0.0F);
-        }
-    }
-    if (!m_integer_ring.empty()) {
-        m_integer_ring.assign(m_integer_ring.size(), 0);
-    }
-    if (!m_integer32_ring.empty()) {
-        m_integer32_ring.assign(m_integer32_ring.size(), 0);
-    }
-    if (m_direct) {
-        for (auto& w : m_direct->win) {
-            w.assign(w.size(), 0.0F);
-        }
-        if (!m_direct->win_ring.empty()) {
-            m_direct->win_ring.assign(m_direct->win_ring.size(), 0.0F);
-        }
-        if (!m_direct->win_ring_u8.empty()) {
-            m_direct->win_ring_u8.assign(m_direct->win_ring_u8.size(), 0);
-        }
-        if (!m_direct->win_ring_u16.empty()) {
-            m_direct->win_ring_u16.assign(m_direct->win_ring_u16.size(), 0);
-        }
-        // An all-zero window is consistent with all-zero tree histories.
-        m_direct_filled = static_cast<SizeType>(m_direct->window);
-    }
-    m_direct_stale = false;
-    if (m_top) {
-        m_top->ring.assign(m_top->ring.size(), 0.0F);
-        m_top->win_top.assign(m_top->win_top.size(), 0.0F);
-        m_top_filled = static_cast<SizeType>(m_top->max_ring);
-    }
-    m_top_stale = false;
-    m_parity    = false;
-    // Abandons any unfinished stepper block along with its stream.
-    m_is_initialized = false;
-}
+// NOLINTNEXTLINE(bugprone-exception-escape)
+void FDMTCudaEngine::reset_history() noexcept { zero_history(nullptr, false); }
 
 SizeType FDMTCudaEngine::history_state_size() const noexcept {
     if (skew_history()) {

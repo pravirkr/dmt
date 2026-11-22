@@ -35,6 +35,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_cpu_mem.hpp"
 #include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_int_tree.hpp"
 #include "dmt/fdmt_search.hpp"
@@ -43,62 +44,9 @@
 
 namespace dmt::algorithms::detail::fdmt_cpu {
 
-/**
- * @brief A large zero-initialised array for the engine's tree state and
- * tree history: 2 MiB-aligned, with transparent huge pages requested on
- * Linux, and zero-filled by `nthreads` threads with a static schedule.
- *
- * Huge pages: a fused time tile writes short runs of thousands of rows that
- * lie a chunk apart, one 4 KiB page each, so with small pages nearly every
- * run misses the TLB. The parallel fill first-touches the pages across the
- * threads (and so across NUMA nodes) instead of on the constructing thread.
- */
-template <typename T> class FDMTLargeArray {
-public:
-    FDMTLargeArray() = default;
-    ~FDMTLargeArray() { std::free(m_data); } // NOLINT
-    FDMTLargeArray(const FDMTLargeArray&)            = delete;
-    FDMTLargeArray& operator=(const FDMTLargeArray&) = delete;
-    FDMTLargeArray(FDMTLargeArray&&)                 = delete;
-    FDMTLargeArray& operator=(FDMTLargeArray&&)      = delete;
-
-    void assign(SizeType n, int nthreads) {
-        std::free(m_data); // NOLINT
-        m_data = nullptr;
-        m_size = n;
-        if (n == 0) {
-            return;
-        }
-        constexpr SizeType kAlign = SizeType{2} << 20;
-        const SizeType bytes =
-            (((n * sizeof(T)) + kAlign - 1) / kAlign) * kAlign;
-        m_data = static_cast<T*>(std::aligned_alloc(kAlign, bytes)); // NOLINT
-        if (m_data == nullptr) {
-            throw std::bad_alloc();
-        }
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
-        ::madvise(m_data, bytes, MADV_HUGEPAGE); // a hint; failure is harmless
-#endif
-        auto* raw            = reinterpret_cast<std::byte*>(m_data);
-        const SizeType pages = bytes / kAlign;
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (SizeType i = 0; i < pages; ++i) {
-            std::memset(raw + (i * kAlign), 0, kAlign);
-        }
-    }
-    [[nodiscard]] T* data() noexcept { return m_data; }
-    [[nodiscard]] const T* data() const noexcept { return m_data; }
-    [[nodiscard]] SizeType size() const noexcept { return m_size; }
-    [[nodiscard]] bool empty() const noexcept { return m_size == 0; }
-    [[nodiscard]] T* begin() noexcept { return m_data; }
-    [[nodiscard]] T* end() noexcept { return m_data + m_size; }
-    [[nodiscard]] const T* begin() const noexcept { return m_data; }
-    [[nodiscard]] const T* end() const noexcept { return m_data + m_size; }
-
-private:
-    T* m_data{nullptr};
-    SizeType m_size{0};
-};
+using detail::FDMTLargeArray;
+using detail::fdmt_stream_add;
+using detail::fdmt_stream_fence;
 
 /**
  * @brief One merge (or copy) of the engine's tree, from the plan's

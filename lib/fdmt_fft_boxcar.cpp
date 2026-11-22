@@ -10,8 +10,8 @@
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_drain.hpp"
-#include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_fft_common.hpp"
+#include "dmt/fdmt_fft_tree.hpp"
 
 namespace dmt::algorithms {
 
@@ -71,8 +71,7 @@ public:
         // length) while the instance is over it. The boxcar buffers do not
         // depend on the segment, so fail at once when they alone are over.
         const SizeType discard = std::max(geom.skip, geom.support);
-        const SizeType n_min =
-            utils::next_fft_size((2 * (discard + geom.guard)) + 2);
+        const SizeType n_min   = fdmt_fft::min_segment_length(geom);
         auto used = engine->memory_usage();
         // Budgeted bytes only: on a GPU the host result storage
         // (max_candidates) is reported, not budgeted.

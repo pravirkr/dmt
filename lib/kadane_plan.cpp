@@ -22,16 +22,6 @@ namespace {
 
 constexpr float kDeadThreshFloor = 1.0e35F;
 
-/// Step a positive float down by 1 ULP using integer bit arithmetic so
-/// `-ffast-math` / `-ffinite-math-only` cannot fold or warn on infinities.
-float step_down_pos_f32(float x) noexcept {
-    if (x <= 0.0F) {
-        return 0.0F;
-    }
-    const uint32_t bits = std::bit_cast<uint32_t>(x);
-    return bits > 0U ? std::bit_cast<float>(bits - 1U) : 0.0F;
-}
-
 bool is_dead_row(std::span<const float> row_thr) noexcept {
     if (row_thr.empty()) {
         return true;
@@ -164,58 +154,6 @@ private:
     std::vector<HullPoint> m_pts;
     SizeType m_head = 0;
 };
-
-/// Compute exact lossless float32 bucket cut on `[bucket.f_lo, bucket.f_hi)`
-/// for a fixed float32 `b_f32`, absorbing worst-case `bucket.w_hi`-step
-/// float32 drift (for `bucket.w_hi` up to `2^20`) and clamping non-positive or
-/// non-finite cuts safely to `0.0F`.
-float compute_bucket_cut_f32(const KadaneGateBucket& bucket,
-                             std::span<const uint32_t> widths,
-                             bool use_trapezoid,
-                             float b_f32,
-                             std::span<const float> row_thr) noexcept {
-    if (!utils::is_finite_bits(b_f32) || b_f32 < 0.0F) {
-        return 0.0F;
-    }
-    const double b_val    = static_cast<double>(b_f32);
-    const uint32_t w0     = widths[0];
-    const uint32_t we0    = use_trapezoid ? trapezoid_edge_width(w0) : 0U;
-    const double tilde_w0 = static_cast<double>(w0 - we0);
-    const double tilde_thr0 =
-        static_cast<double>(row_thr[0]) * (we0 == 0U ? 1.0 : 0.5);
-    const double scale_1 = tilde_thr0 / std::sqrt(tilde_w0);
-
-    double tau_raw = std::numeric_limits<double>::max();
-    double thr_max = 0.0;
-    for (uint32_t f = bucket.f_lo; f < bucket.f_hi; ++f) {
-        const uint32_t wf     = widths[f];
-        const uint32_t we     = use_trapezoid ? trapezoid_edge_width(wf) : 0U;
-        const double tilde_wf = static_cast<double>(wf - we);
-        const auto thr_f      = static_cast<double>(row_thr[f]);
-        const double tilde_th = thr_f * (we == 0U ? 1.0 : 0.5);
-        tau_raw = std::min(tau_raw, tilde_th - (b_val * tilde_wf));
-        thr_max = std::max(thr_max, thr_f);
-    }
-    if (!utils::is_finite_bits(tau_raw) || tau_raw <= 0.0) {
-        return 0.0F;
-    }
-
-    const auto w_hi = static_cast<double>(bucket.w_hi);
-    const double fp_err =
-        static_cast<double>(FLT_EPSILON) *
-        ((w_hi * (tau_raw + (2.0 * b_val) + (2.0 * scale_1))) +
-         (32.0 * (thr_max + (b_val * w_hi))));
-    const double margin = std::max(0.008 * scale_1, 4.0 * fp_err);
-    const double cut_d  = tau_raw - margin;
-    if (!utils::is_finite_bits(cut_d) || cut_d <= 0.0) {
-        return 0.0F;
-    }
-    const auto cut_f32 = static_cast<float>(cut_d);
-    if (!utils::is_finite_bits(cut_f32) || cut_f32 <= 0.0F) {
-        return 0.0F;
-    }
-    return step_down_pos_f32(cut_f32);
-}
 
 SizeType aligned_row_stride(SizeType n_rows) {
     if (n_rows == 0) {
@@ -408,8 +346,9 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                 b_f32 = std::numeric_limits<float>::min();
             }
             bias[(k * row_stride) + r] = b_f32;
-            cut[(k * row_stride) + r]  = compute_bucket_cut_f32(
-                bkt, widths, use_trapezoid, b_f32, row_thr);
+            cut[(k * row_stride) + r]  = compute_bucket_cut_hd_f32(
+                bkt, widths.data(), num_filters, use_trapezoid, b_f32,
+                [&](SizeType f) { return row_thr[f]; });
         }
     }
 
@@ -618,8 +557,9 @@ void KadaneGatePlan::recompute_row_cuts(SizeType row,
         return;
     }
     for (SizeType k = 0; k < num_buckets; ++k) {
-        out_cuts[k] = compute_bucket_cut_f32(buckets[k], widths, use_trapezoid,
-                                             row_bias(k, row), min_thr);
+        out_cuts[k] = compute_bucket_cut_hd_f32(
+            buckets[k], widths.data(), widths.size(), use_trapezoid,
+            row_bias(k, row), [&](SizeType f) { return min_thr[f]; });
     }
 }
 

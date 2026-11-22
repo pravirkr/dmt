@@ -482,3 +482,30 @@ def test_fdmt_fft_finalize_preserves_nbeams() -> None:
     got = eng.finalize()
     assert got.shape == expected.shape
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_fdmt_fft_execute_out_buffer() -> None:
+    rng = np.random.default_rng(23)
+    nchans, nsamps = 16, 128
+    eng = FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 16, mode="roll")
+    wf = rng.standard_normal((nchans, nsamps), dtype=np.float32)
+    out = np.empty(eng.plan.dmt_size, dtype=np.float32)
+    ref = eng.execute(wf)
+    got = eng.execute(wf, out=out)
+    assert np.shares_memory(got, out)
+    np.testing.assert_array_equal(got, ref)
+
+    vals = rng.integers(0, 256, size=(nchans, nsamps))
+    packed = _pack(vals, 8)
+    tm = _pack(vals.T.copy(), 8)
+    ref_p = eng.execute(packed, 8)
+    got_p = eng.execute(packed, 8, out=out)
+    assert np.shares_memory(got_p, out)
+    np.testing.assert_array_equal(got_p, ref_p)
+
+    got_tm = eng.execute_time_major(tm, 8, out=out)
+    assert np.shares_memory(got_tm, out)
+    np.testing.assert_array_equal(got_tm, ref_p)
+
+    with pytest.raises(ValueError, match="elements"):
+        eng.execute(wf, out=np.empty(eng.plan.dmt_size - 1, dtype=np.float32))

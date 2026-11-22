@@ -193,21 +193,12 @@ void FDMTCpuEngine::plan_working_memory(SizeType fuse_levels,
     if (m_use_box_smearing) {
         const auto weights = m_plan.get_box_weights();
         const auto box_max = weights.size(); // L_max
-        const auto scale_f = m_plan.get_box_mean_bits();
-        const float w_unit =
-            std::ldexp(1.0F, -static_cast<int>(m_plan.get_box_fraction_bits()));
-        m_int_unit = std::ldexp(1.0F, -static_cast<int>(scale_f));
-        m_box_w_f32.resize(box_max);
-        m_box_round.resize(box_max);
-        for (SizeType s = 0; s < box_max; ++s) {
-            m_box_w_f32[s] = static_cast<float>(weights[s]) * w_unit;
-            m_box_round[s] = m_search_nbits == 32
-                                 ? detail::box_round(s + 1, scale_f)
-                                 : detail::FDMTBoxRound{.mul    = weights[s],
-                                                        .add    = 0,
-                                                        .rshift = 0,
-                                                        .lshift = 0};
-        }
+        auto tables        = detail::make_fdmt_box_tables(
+            weights, m_plan.get_box_fraction_bits(), m_plan.get_box_mean_bits(),
+            m_search_nbits != 32);
+        m_int_unit  = tables.int_unit;
+        m_box_w_f32 = std::move(tables.w_f32);
+        m_box_round = std::move(tables.round);
         for (const SizeType nbits : {1, 2, 4, 8, 16}) {
             const auto largest = detail::box_round_max(
                 bit_pack_utils::max_sample_value(nbits), box_max);
@@ -407,18 +398,12 @@ detail::try_make_fdmt_cpu(const plans::FDMTPlan& plan,
     }
     const bool search_u32 = detail::int_search_fits_u32(
         plan, cfg.use_box_smearing, cfg.search_nbits);
-    SizeType auto_chunk =
-        detail::fdmt_chunk_nsamps(plan, cfg.mode, cfg.nbeams, cfg.chunk_nsamps,
-                                  cfg.search_upper_levels);
-    if (cfg.mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
-        (plan.get_history_size() + plan.get_tree_history_size()) *
-                sizeof(float) >
-            detail::kFDMTChunkStateBudget) {
-        auto_chunk = std::min<SizeType>(1024, plan.get_nsamps());
-    } else if (cfg.search_nbits != 32 && !search_u32 && cfg.chunk_nsamps == 0) {
-        auto_chunk =
-            std::min(plan.get_nsamps(), std::max<SizeType>(64, auto_chunk / 2));
-    }
+    const SizeType state_elem = (cfg.search_nbits == 32 || search_u32)
+                                    ? sizeof(uint32_t)
+                                    : sizeof(uint64_t);
+    const SizeType auto_chunk = detail::fdmt_chunk_nsamps(
+        plan, cfg.mode, cfg.nbeams, cfg.chunk_nsamps, cfg.search_upper_levels,
+        state_elem);
 
     const SizeType niters = plan.get_niters();
     const SizeType nsamps = plan.get_nsamps();

@@ -27,26 +27,17 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
     m_max_memory   = cfg.max_memory_bytes;
     m_path         = cfg.path;
     m_search_only  = cfg.search_only;
-    m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                        cfg.chunk_nsamps, m_search_upper);
-    // Automatic chunk: L2-resident state when it fits, else the budget
-    // rule (halved only when the packed search needs uint64 state).
+    // Automatic chunk: L2-resident state when it fits, else the budget rule.
     const SizeType elem = (m_search_nbits == 32 || m_search_u32)
                               ? sizeof(uint32_t)
                               : sizeof(uint64_t);
     const SizeType cached =
         cfg.chunk_nsamps == 0 ? detail::fdmt_gpu_cache_chunk(m_plan, cfg) : 0;
-    if (cached != 0) {
-        m_chunk = cached;
-    } else if (m_mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
-               (m_plan.get_history_size() + m_plan.get_tree_history_size()) *
-                       sizeof(float) >
-                   detail::kFDMTChunkStateBudget) {
-        m_chunk = std::min<SizeType>(1024, m_plan.get_nsamps());
-    } else if (elem == sizeof(uint64_t) && cfg.chunk_nsamps == 0) {
-        m_chunk =
-            std::min(m_plan.get_nsamps(), std::max<SizeType>(64, m_chunk / 2));
-    }
+    m_chunk = cached != 0
+                  ? cached
+                  : detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
+                                              cfg.chunk_nsamps, m_search_upper,
+                                              elem);
     m_requested_fuse = cfg.fuse_levels;
     {
         // Deferred: every device buffer is sized here, allocated by
@@ -126,24 +117,13 @@ void FDMTCudaEngine::init_device_structures(SizeType fuse_levels) {
         // weights, and the packed-input rounding recipes on 2^-F.
         const auto weights = m_plan.get_box_weights();
         const auto box_max = weights.size();
-        const auto scale_f = m_plan.get_box_mean_bits();
-        const float w_unit =
-            std::ldexp(1.0F, -static_cast<int>(m_plan.get_box_fraction_bits()));
-        m_int_unit = std::ldexp(1.0F, -static_cast<int>(scale_f));
-        std::vector<float> box_w(box_max);
-        std::vector<detail::FDMTBoxRound> box_round(box_max);
-        for (SizeType s = 0; s < box_max; ++s) {
-            box_w[s]     = static_cast<float>(weights[s]) * w_unit;
-            box_round[s] = m_search_nbits == 32
-                               ? detail::box_round(s + 1, scale_f)
-                               : detail::FDMTBoxRound{.mul    = weights[s],
-                                                      .add    = 0,
-                                                      .rshift = 0,
-                                                      .lshift = 0};
-        }
-        m_box_w_h     = box_w;
-        m_box_w_d     = box_w;
-        m_box_round_d = box_round;
+        auto tables        = detail::make_fdmt_box_tables(
+            weights, m_plan.get_box_fraction_bits(), m_plan.get_box_mean_bits(),
+            m_search_nbits != 32);
+        m_int_unit    = tables.int_unit;
+        m_box_w_h     = std::move(tables.w_f32);
+        m_box_w_d     = m_box_w_h;
+        m_box_round_d = tables.round;
         for (const SizeType nbits : {1, 2, 4, 8, 16}) {
             // The rounding product's width is independent of the u32/u64
             // search state: it must hold S * mul + add (box_round_max()).

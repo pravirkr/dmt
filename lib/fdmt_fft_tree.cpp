@@ -374,6 +374,11 @@ std::vector<TreeStage> level_tree_stages(const TreeDag& dag, SizeType max_out) {
     return stages;
 }
 
+SizeType min_segment_length(const Geometry& geom) {
+    const auto discard = std::max(geom.skip, geom.support);
+    return utils::next_fft_size((2 * (discard + geom.guard)) + 2);
+}
+
 Segments choose_segments(const Geometry& geom,
                          FDMTMode mode,
                          SizeType nsamps_out,
@@ -413,9 +418,10 @@ Segments choose_segments(const Geometry& geom,
         double rough;
     };
     std::vector<Cand> cands;
-    const auto n_min = (2 * (discard + ahead)) + 2;
-    for (SizeType n = utils::next_fft_size(
-             capped ? n_min : std::max(kMinSegment, n_min));
+    const auto n_min = min_segment_length(geom);
+    for (SizeType n =
+             capped ? n_min
+                    : std::max(utils::next_fft_size(kMinSegment), n_min);
          n < n_single && (!capped || n <= max_len);
          n = utils::next_fft_size(n + 1)) {
         const auto hop  = n - discard - ahead;
@@ -429,7 +435,7 @@ Segments choose_segments(const Geometry& geom,
         throw std::invalid_argument(fmt::format(
             "FDMTFFT: segment cap {} is shorter than the minimum overlap-save "
             "segment {}",
-            max_len, utils::next_fft_size(n_min)));
+            max_len, n_min));
     }
     std::ranges::sort(cands, {}, &Cand::rough);
     if (cands.size() > 8) {

@@ -23,66 +23,43 @@ void FDMTCudaEngine::launch_direct_int(const FDMTInputPacked& input,
         const auto lvl_ptr = [&](SizeType l) -> TInt* {
             return state_level_ptr<TInt>(l);
         };
+        const auto run_skewed_ring = [&](auto& ring_vec) {
+            using RingT = typename std::remove_reference_t<
+                decltype(ring_vec)>::value_type;
+            auto* wring = thrust::raw_pointer_cast(ring_vec.data());
+            detail::kernel_direct_write_ring<FDMTInputPacked, RingT>
+                <<<wgrid, 256, 0, stream>>>(
+                    wring, d.win_ring_size,
+                    thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                    thrust::raw_pointer_cast(d.chan_ring_len.data()), input,
+                    nchans, active, m_chunk_pos);
+            for (SizeType b = 0; b < m_skew_nbatches; ++b) {
+                const int32_t sub0    = d.batch_sub_off[b];
+                const int32_t nsubs_b = d.batch_sub_off[b + 1] - sub0;
+                if (nsubs_b > 0) {
+                    const dim3 lgrid(nsubs_b, ntiles, m_nbeams);
+                    gpu_utils::check_kernel_launch_params(
+                        lgrid, dim3(detail::kDirectWarps * 32));
+                    detail::kernel_direct_level_skewed<RingT, uint32_t, TInt>
+                        <<<lgrid, detail::kDirectWarps * 32, d.smem, stream>>>(
+                            wring, d.win_ring_size,
+                            thrust::raw_pointer_cast(d.chan_ring_off.data()),
+                            thrust::raw_pointer_cast(d.chan_ring_len.data()),
+                            thrust::raw_pointer_cast(d.subs.data()) + sub0,
+                            thrust::raw_pointer_cast(d.leaf_off.data()),
+                            thrust::raw_pointer_cast(d.leaves.data()), out,
+                            row_stride, b_stride_k, d.cpass, m_chunk_pos,
+                            active);
+                }
+                if (m_skew_nbatches > 1 && m_top) {
+                    launch_skewed_batch_mid<TInt>(b, lvl_ptr, stream);
+                }
+            }
+        };
         if (m_search_nbits <= 8) {
-            auto* wring = thrust::raw_pointer_cast(d.win_ring_u8.data());
-            detail::kernel_direct_write_ring<FDMTInputPacked, uint8_t>
-                <<<wgrid, 256, 0, stream>>>(
-                    wring, d.win_ring_size,
-                    thrust::raw_pointer_cast(d.chan_ring_off.data()),
-                    thrust::raw_pointer_cast(d.chan_ring_len.data()), input,
-                    nchans, active, m_chunk_pos);
-            for (SizeType b = 0; b < m_skew_nbatches; ++b) {
-                const int32_t sub0    = d.batch_sub_off[b];
-                const int32_t nsubs_b = d.batch_sub_off[b + 1] - sub0;
-                if (nsubs_b > 0) {
-                    const dim3 lgrid(nsubs_b, ntiles, m_nbeams);
-                    gpu_utils::check_kernel_launch_params(
-                        lgrid, dim3(detail::kDirectWarps * 32));
-                    detail::kernel_direct_level_skewed<uint8_t, uint32_t, TInt>
-                        <<<lgrid, detail::kDirectWarps * 32, d.smem, stream>>>(
-                            wring, d.win_ring_size,
-                            thrust::raw_pointer_cast(d.chan_ring_off.data()),
-                            thrust::raw_pointer_cast(d.chan_ring_len.data()),
-                            thrust::raw_pointer_cast(d.subs.data()) + sub0,
-                            thrust::raw_pointer_cast(d.leaf_off.data()),
-                            thrust::raw_pointer_cast(d.leaves.data()), out,
-                            row_stride, b_stride_k, d.cpass, m_chunk_pos,
-                            active);
-                }
-                if (m_skew_nbatches > 1 && m_top) {
-                    launch_skewed_batch_mid<TInt>(b, lvl_ptr, stream);
-                }
-            }
+            run_skewed_ring(d.win_ring_u8);
         } else {
-            auto* wring = thrust::raw_pointer_cast(d.win_ring_u16.data());
-            detail::kernel_direct_write_ring<FDMTInputPacked, uint16_t>
-                <<<wgrid, 256, 0, stream>>>(
-                    wring, d.win_ring_size,
-                    thrust::raw_pointer_cast(d.chan_ring_off.data()),
-                    thrust::raw_pointer_cast(d.chan_ring_len.data()), input,
-                    nchans, active, m_chunk_pos);
-            for (SizeType b = 0; b < m_skew_nbatches; ++b) {
-                const int32_t sub0    = d.batch_sub_off[b];
-                const int32_t nsubs_b = d.batch_sub_off[b + 1] - sub0;
-                if (nsubs_b > 0) {
-                    const dim3 lgrid(nsubs_b, ntiles, m_nbeams);
-                    gpu_utils::check_kernel_launch_params(
-                        lgrid, dim3(detail::kDirectWarps * 32));
-                    detail::kernel_direct_level_skewed<uint16_t, uint32_t, TInt>
-                        <<<lgrid, detail::kDirectWarps * 32, d.smem, stream>>>(
-                            wring, d.win_ring_size,
-                            thrust::raw_pointer_cast(d.chan_ring_off.data()),
-                            thrust::raw_pointer_cast(d.chan_ring_len.data()),
-                            thrust::raw_pointer_cast(d.subs.data()) + sub0,
-                            thrust::raw_pointer_cast(d.leaf_off.data()),
-                            thrust::raw_pointer_cast(d.leaves.data()), out,
-                            row_stride, b_stride_k, d.cpass, m_chunk_pos,
-                            active);
-                }
-                if (m_skew_nbatches > 1 && m_top) {
-                    launch_skewed_batch_mid<TInt>(b, lvl_ptr, stream);
-                }
-            }
+            run_skewed_ring(d.win_ring_u16);
         }
         gpu_utils::check_last_gpu_error(
             "FDMT (cuda): integer skewed direct levels failed");
@@ -111,60 +88,91 @@ void FDMTCudaEngine::launch_direct_int(const FDMTInputPacked& input,
         "FDMT (cuda): integer direct levels failed");
 }
 
-template <typename TInt>
-void FDMTCudaEngine::run_top_int(const TInt* level_state,
-                                 TInt* out,
-                                 int64_t out_beam_stride,
-                                 cudaStream_t stream) {
+template <typename T>
+void FDMTCudaEngine::launch_top_ring_update(const T* level_state,
+                                            int64_t level_stride,
+                                            cudaStream_t stream) {
+    auto& t                = *m_top;
+    constexpr int kWarps   = 8;
+    constexpr int kSegment = 256;
+    const int active       = static_cast<int>(m_active);
+    const int newest       = std::min(t.max_ring, active);
+    if (newest > 0) {
+        auto* rings =
+            reinterpret_cast<T*>(thrust::raw_pointer_cast(t.ring.data()));
+        const dim3 rgrid((t.nrows + kWarps - 1) / kWarps,
+                         (newest + kSegment - 1) / kSegment, m_nbeams);
+        detail::kernel_direct_top_ring<T><<<rgrid, kWarps * 32, 0, stream>>>(
+            level_state, level_stride, static_cast<int>(m_chunk), rings,
+            t.ring_size, thrust::raw_pointer_cast(t.ring_off.data()),
+            thrust::raw_pointer_cast(t.ring_len.data()), t.nrows, m_chunk_pos,
+            active);
+    }
+}
+
+template <typename T>
+void FDMTCudaEngine::run_top_impl(const T* level_state,
+                                  int64_t level_stride,
+                                  T* out,
+                                  int64_t out_beam_stride,
+                                  int out_row_stride,
+                                  cudaStream_t stream,
+                                  bool update_meta) {
     auto& t              = *m_top;
     constexpr int kWarps = 8;
     constexpr int kSamps = 32 * detail::kTopSampsPerLane;
     const int active     = static_cast<int>(m_active);
     auto* rings =
-        reinterpret_cast<TInt*>(thrust::raw_pointer_cast(t.ring.data()));
+        reinterpret_cast<T*>(thrust::raw_pointer_cast(t.ring.data()));
     if (t.target_ring) {
         const dim3 grid(t.ntrials, 1, m_nbeams);
         gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
-        detail::kernel_direct_top_target<TInt>
-            <<<grid, kWarps * 32, 0, stream>>>(
-                level_state, static_cast<int64_t>(m_half_elems),
-                static_cast<int>(m_chunk), rings, t.ring_size,
-                thrust::raw_pointer_cast(t.ring_off.data()),
-                thrust::raw_pointer_cast(t.ring_len.data()),
-                thrust::raw_pointer_cast(t.leaf_off.data()),
-                thrust::raw_pointer_cast(t.leaves.data()),
-                thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
-                out_beam_stride, static_cast<int>(m_chunk), m_chunk_pos, active,
-                0, m_skew_nbatches > 1 ? 0 : -1, true);
-        gpu_utils::check_last_gpu_error(
-            "FDMT (cuda): integer direct top target failed");
+        detail::kernel_direct_top_target<T><<<grid, kWarps * 32, 0, stream>>>(
+            level_state, level_stride, static_cast<int>(m_chunk), rings,
+            t.ring_size, thrust::raw_pointer_cast(t.ring_off.data()),
+            thrust::raw_pointer_cast(t.ring_len.data()),
+            thrust::raw_pointer_cast(t.leaf_off.data()),
+            thrust::raw_pointer_cast(t.leaves.data()),
+            thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
+            out_beam_stride, out_row_stride, m_chunk_pos, active, 0,
+            m_skew_nbatches > 1 ? 0 : -1, true);
+        gpu_utils::check_last_gpu_error("FDMT (cuda): direct top target failed");
+        if (update_meta) {
+            m_top_stale     = false;
+            m_current_level = t.target;
+        }
         return;
     }
     const dim3 grid((t.ntrials + kWarps - 1) / kWarps,
                     (active + kSamps - 1) / kSamps, m_nbeams);
     gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
-    detail::kernel_direct_top<TInt><<<grid, kWarps * 32, 0, stream>>>(
-        level_state, static_cast<int64_t>(m_half_elems),
-        static_cast<int>(m_chunk), rings, t.ring_size,
-        thrust::raw_pointer_cast(t.ring_off.data()),
+    detail::kernel_direct_top<T><<<grid, kWarps * 32, 0, stream>>>(
+        level_state, level_stride, static_cast<int>(m_chunk), rings,
+        t.ring_size, thrust::raw_pointer_cast(t.ring_off.data()),
         thrust::raw_pointer_cast(t.ring_len.data()),
         thrust::raw_pointer_cast(t.leaf_off.data()),
         thrust::raw_pointer_cast(t.leaves.data()),
         thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
-        out_beam_stride, static_cast<int>(m_chunk), m_chunk_pos, active);
-    constexpr int kSegment = 256;
-    const int newest       = std::min(t.max_ring, active);
-    if (newest > 0) {
-        const dim3 rgrid((t.nrows + kWarps - 1) / kWarps,
-                         (newest + kSegment - 1) / kSegment, m_nbeams);
-        detail::kernel_direct_top_ring<TInt><<<rgrid, kWarps * 32, 0, stream>>>(
-            level_state, static_cast<int64_t>(m_half_elems),
-            static_cast<int>(m_chunk), rings, t.ring_size,
-            thrust::raw_pointer_cast(t.ring_off.data()),
-            thrust::raw_pointer_cast(t.ring_len.data()), t.nrows, m_chunk_pos,
-            active);
+        out_beam_stride, out_row_stride, m_chunk_pos, active);
+    gpu_utils::check_last_gpu_error("FDMT (cuda): direct top failed");
+    launch_top_ring_update<T>(level_state, level_stride, stream);
+    gpu_utils::check_last_gpu_error("FDMT (cuda): direct top rings failed");
+    if (update_meta) {
+        m_top_filled = std::min<SizeType>(static_cast<SizeType>(t.max_ring),
+                                          m_top_filled + m_active);
+        m_top_stale     = !t.skewed;
+        m_current_level = t.target;
     }
-    gpu_utils::check_last_gpu_error("FDMT (cuda): integer direct top failed");
+}
+
+template <typename TInt>
+void FDMTCudaEngine::run_top_int(const TInt* level_state,
+                                 TInt* out,
+                                 int64_t out_beam_stride,
+                                 cudaStream_t stream) {
+    run_top_impl<TInt>(level_state, static_cast<int64_t>(m_half_elems), out,
+                       out_beam_stride, static_cast<int>(m_chunk), stream,
+                       false);
 }
 
 void FDMTCudaEngine::configure_direct(SizeType requested) {
@@ -185,17 +193,8 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
         return;
     }
     m_direct_eligible = true;
-    std::vector<float> box_w(m_box_w_d.size());
-    if (packed) {
-        // Integer weights (exact in float), so the leaves give the
-        // integer search's level-0 values.
-        const auto weights = m_plan.get_box_weights();
-        for (SizeType i = 0; i < box_w.size(); ++i) {
-            box_w[i] = static_cast<float>(weights[i]);
-        }
-    } else {
-        std::copy(m_box_w_h.begin(), m_box_w_h.end(), box_w.begin());
-    }
+    const auto box_w  = detail::make_fdmt_direct_box_weights(
+        m_plan.get_box_weights(), m_box_w_h, packed);
     auto plan = detail::build_fdmt_direct_plan(m_plan, levels,
                                                m_use_box_smearing, box_w);
     int span  = 0;
@@ -289,17 +288,12 @@ void FDMTCudaEngine::launch_skewed_batch_mid(SizeType b,
         const int nsamps_l = static_cast<int>(
             m_active +
             (l < m_level_max_extra.size() ? m_level_max_extra[l] : 0));
-        constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
-        const dim3 block(kIterThreads, 1);
-        const dim3 grid((nsamps_l + kBlockSamps - 1) / kBlockSamps,
-                        std::min(coords_max, kMaxGridY), m_nbeams);
-        gpu_utils::check_kernel_launch_params(grid, block);
-        kernel_execute_iter<FDMTMode::kValid, T, T, T>
-            <<<grid, block, 0, stream>>>(
-                lvl_ptr(l - 1), lvl_ptr(l), sums, copies, nullptr, nsamps_l,
-                ncoords_sum_b, ncoords_copy_b, level_beam_stride(l - 1),
-                level_beam_stride(l), 0, 0, m_chunk_pos, 1.0F,
-                static_cast<int>(m_active), false, static_cast<int>(m_chunk));
+        (void)launch_execute_iter<FDMTMode::kValid, T, T, T>(
+            lvl_ptr(l - 1), lvl_ptr(l), sums, copies, nullptr, nsamps_l,
+            ncoords_sum_b, ncoords_copy_b, level_beam_stride(l - 1),
+            level_beam_stride(l), 0, 0, m_chunk_pos, 1.0F,
+            static_cast<int>(m_active), m_nbeams, false,
+            static_cast<int>(m_chunk), stream);
     }
     if (m_top && m_top->target_ring) {
         auto& t              = *m_top;
@@ -466,15 +460,8 @@ void FDMTCudaEngine::build_skewed_direct_from_windows(
     const std::vector<SizeType>& batch_grid_off) {
     const SizeType k  = kDirectLevels;
     const bool packed = m_search_nbits != 32;
-    std::vector<float> box_w(m_box_w_d.size());
-    if (packed) {
-        const auto weights = m_plan.get_box_weights();
-        for (SizeType i = 0; i < box_w.size(); ++i) {
-            box_w[i] = static_cast<float>(weights[i]);
-        }
-    } else {
-        std::copy(m_box_w_h.begin(), m_box_w_h.end(), box_w.begin());
-    }
+    const auto box_w  = detail::make_fdmt_direct_box_weights(
+        m_plan.get_box_weights(), m_box_w_h, packed);
     auto dplan = detail::build_fdmt_direct_skewed_plan(
         m_plan, k, m_use_box_smearing, box_w, m_chunk, s_hi_k, sp_k,
         batch_grid_off);
@@ -548,69 +535,22 @@ void FDMTCudaEngine::run_top(float* out,
                              int64_t out_beam_stride,
                              int out_row_stride,
                              cudaStream_t stream) {
-    auto& t              = *m_top;
-    constexpr int kWarps = 8;
-    constexpr int kSamps = 32 * detail::kTopSampsPerLane;
-    const int active     = static_cast<int>(m_active);
-    if (t.target_ring) {
-        const dim3 grid(t.ntrials, 1, m_nbeams);
-        gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
-        detail::kernel_direct_top_target<><<<grid, kWarps * 32, 0, stream>>>(
-            reinterpret_cast<const float*>(m_levels_d[t.level].base),
-            level_beam_stride(t.level), static_cast<int>(m_chunk),
-            thrust::raw_pointer_cast(t.ring.data()), t.ring_size,
-            thrust::raw_pointer_cast(t.ring_off.data()),
-            thrust::raw_pointer_cast(t.ring_len.data()),
-            thrust::raw_pointer_cast(t.leaf_off.data()),
-            thrust::raw_pointer_cast(t.leaves.data()),
-            thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
-            out_beam_stride, out_row_stride, m_chunk_pos, active, 0,
-            m_skew_nbatches > 1 ? 0 : -1, true);
-        gpu_utils::check_last_gpu_error(
-            "FDMT (cuda): direct top target failed");
-        m_top_stale     = false;
-        m_current_level = t.target;
-        return;
-    }
-    const dim3 grid((t.ntrials + kWarps - 1) / kWarps,
-                    (active + kSamps - 1) / kSamps, m_nbeams);
-    gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
-    detail::kernel_direct_top<><<<grid, kWarps * 32, 0, stream>>>(
+    const auto& t = *m_top;
+    run_top_impl<float>(
         reinterpret_cast<const float*>(m_levels_d[t.level].base),
-        level_beam_stride(t.level), static_cast<int>(m_chunk),
-        thrust::raw_pointer_cast(t.ring.data()), t.ring_size,
-        thrust::raw_pointer_cast(t.ring_off.data()),
-        thrust::raw_pointer_cast(t.ring_len.data()),
-        thrust::raw_pointer_cast(t.leaf_off.data()),
-        thrust::raw_pointer_cast(t.leaves.data()),
-        thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
-        out_beam_stride, out_row_stride, m_chunk_pos, active);
-    gpu_utils::check_last_gpu_error("FDMT (cuda): direct top failed");
-    update_top_rings(stream);
-    m_top_stale     = !t.skewed;
-    m_current_level = t.target;
+        level_beam_stride(t.level), out, out_beam_stride, out_row_stride,
+        stream, true);
 }
 
 void FDMTCudaEngine::update_top_rings(cudaStream_t stream) {
     if (m_top->target_ring) {
         return;
     }
-    auto& t                = *m_top;
-    constexpr int kWarps   = 8;
-    constexpr int kSegment = 256;
-    const int newest       = std::min(t.max_ring, static_cast<int>(m_active));
-    if (newest > 0) {
-        const dim3 grid((t.nrows + kWarps - 1) / kWarps,
-                        (newest + kSegment - 1) / kSegment, m_nbeams);
-        detail::kernel_direct_top_ring<><<<grid, kWarps * 32, 0, stream>>>(
-            reinterpret_cast<const float*>(m_levels_d[t.level].base),
-            level_beam_stride(t.level), static_cast<int>(m_chunk),
-            thrust::raw_pointer_cast(t.ring.data()), t.ring_size,
-            thrust::raw_pointer_cast(t.ring_off.data()),
-            thrust::raw_pointer_cast(t.ring_len.data()), t.nrows, m_chunk_pos,
-            static_cast<int>(m_active));
-        gpu_utils::check_last_gpu_error("FDMT (cuda): direct top rings failed");
-    }
+    const auto& t = *m_top;
+    launch_top_ring_update<float>(
+        reinterpret_cast<const float*>(m_levels_d[t.level].base),
+        level_beam_stride(t.level), stream);
+    gpu_utils::check_last_gpu_error("FDMT (cuda): direct top rings failed");
     m_top_filled = std::min<SizeType>(static_cast<SizeType>(t.max_ring),
                                       m_top_filled + m_active);
 }

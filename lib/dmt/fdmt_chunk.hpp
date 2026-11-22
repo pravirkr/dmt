@@ -101,7 +101,8 @@ inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
                                   FDMTMode mode,
                                   SizeType nbeams,
                                   SizeType requested,
-                                  bool regular_only = false) {
+                                  bool regular_only   = false,
+                                  SizeType elem_bytes = sizeof(float)) {
     const SizeType nsamps = plan.get_nsamps();
     if (mode != FDMTMode::kValid) {
         if (requested != 0 && requested < nsamps) {
@@ -134,7 +135,16 @@ inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
         }
         chunk = next;
     }
-    return std::min(chunk, nsamps);
+    chunk = std::min(chunk, nsamps);
+    if ((plan.get_history_size() + plan.get_tree_history_size()) *
+            sizeof(float) >
+        kFDMTChunkStateBudget) {
+        return std::min<SizeType>(1024, nsamps);
+    }
+    if (elem_bytes == sizeof(uint64_t)) {
+        return std::min(nsamps, std::max<SizeType>(64, chunk / 2));
+    }
+    return chunk;
 }
 
 /// Shortest chunk fdmt_cache_chunk() considers: below it the per-chunk

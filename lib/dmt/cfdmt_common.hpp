@@ -26,7 +26,7 @@ inline uint64_t fixed_turns(double x) noexcept {
 }
 
 /// Signed turn in [-1/2, 1/2) of a 0.64 fixed-point phase.
-inline float turn_of(uint64_t s) noexcept {
+DMT_HD inline float turn_of(uint64_t s) noexcept {
     return static_cast<float>(static_cast<int64_t>(s)) *
            5.42101086242752217e-20F;
 }

@@ -327,28 +327,6 @@ __global__ void kernel_level0_state(const float2* __restrict__ spec,
     }
 }
 
-// dst row r, samples [o0, o0 + cnt) = time row r from sample skip; with
-// zero_tail, samples past the transform are zero (stepper views).
-__global__ void kernel_trim(const float* __restrict__ time,
-                            float* __restrict__ dst,
-                            int64_t nrows,
-                            int64_t n_fft,
-                            int64_t dst_len,
-                            int64_t o0,
-                            int64_t cnt,
-                            int64_t skip) {
-    const auto t =
-        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
-    if (t >= cnt) {
-        return;
-    }
-    for (int64_t row = blockIdx.y; row < nrows; row += gridDim.y) {
-        const auto s = skip + t;
-        dst[(row * dst_len) + o0 + t] =
-            s < n_fft ? time[(row * n_fft) + s] : 0.0F;
-    }
-}
-
 // Copies `nrows` spectrum rows (stride nb).
 __global__ void kernel_copy_rows(const float2* __restrict__ src,
                                  float2* __restrict__ dst,
@@ -1308,30 +1286,6 @@ private:
 
     // ---- pipeline ----
 
-    template <typename F>
-    void dispatch_nbits(SizeType nbits, const F& f) const {
-        switch (nbits) {
-        case 1:
-            f(std::integral_constant<int, 1>{});
-            break;
-        case 2:
-            f(std::integral_constant<int, 2>{});
-            break;
-        case 4:
-            f(std::integral_constant<int, 4>{});
-            break;
-        case 8:
-            f(std::integral_constant<int, 8>{});
-            break;
-        case 16:
-            f(std::integral_constant<int, 16>{});
-            break;
-        default:
-            f(std::integral_constant<int, 32>{});
-            break;
-        }
-    }
-
     // Window rows of one segment (p0: its first virtual-input sample).
     void fill(const Input& in,
               const Geo& g,
@@ -1344,14 +1298,18 @@ private:
                         grid_y(nrows));
         const float* hist =
             m_hist_len > 0 ? m_hist[m_hist_cur].data() : nullptr;
-        dispatch_nbits(in.nbits, [&](auto nb) {
-            kernel_fill<decltype(nb)::value><<<grid, kBlock, 0, s>>>(
-                in.data, static_cast<int64_t>(in.row_len), hist,
-                m_has_kill ? m_keep.data() : nullptr, win, nrows,
-                static_cast<int>(m_nchans), static_cast<int64_t>(m_nsamps),
-                static_cast<int64_t>(g.n_fft), static_cast<int64_t>(p0),
-                static_cast<int64_t>(zeros), static_cast<int64_t>(m_hist_len));
-        });
+        bit_pack_utils::dispatch_nbits(
+            in.nbits,
+            [&]<unsigned NB>() {
+                kernel_fill<static_cast<int>(NB)><<<grid, kBlock, 0, s>>>(
+                    in.data, static_cast<int64_t>(in.row_len), hist,
+                    m_has_kill ? m_keep.data() : nullptr, win, nrows,
+                    static_cast<int>(m_nchans), static_cast<int64_t>(m_nsamps),
+                    static_cast<int64_t>(g.n_fft), static_cast<int64_t>(p0),
+                    static_cast<int64_t>(zeros),
+                    static_cast<int64_t>(m_hist_len));
+            },
+            "FDMTFFT (gpu)");
     }
 
     void update_history(const Input& in, cudaStream_t s) {
@@ -1361,13 +1319,18 @@ private:
         const auto nrows = static_cast<int64_t>(m_nbeams * m_nchans);
         const dim3 grid(blocks_for(static_cast<int64_t>(m_hist_len)),
                         grid_y(nrows));
-        dispatch_nbits(in.nbits, [&](auto nb) {
-            kernel_update_history<decltype(nb)::value><<<grid, kBlock, 0, s>>>(
-                in.data, static_cast<int64_t>(in.row_len),
-                m_hist[m_hist_cur].data(), m_hist[m_hist_cur ^ 1].data(), nrows,
-                static_cast<int64_t>(m_nsamps),
-                static_cast<int64_t>(m_hist_len));
-        });
+        bit_pack_utils::dispatch_nbits(
+            in.nbits,
+            [&]<unsigned NB>() {
+                kernel_update_history<static_cast<int>(NB)>
+                    <<<grid, kBlock, 0, s>>>(
+                        in.data, static_cast<int64_t>(in.row_len),
+                        m_hist[m_hist_cur].data(),
+                        m_hist[m_hist_cur ^ 1].data(), nrows,
+                        static_cast<int64_t>(m_nsamps),
+                        static_cast<int64_t>(m_hist_len));
+            },
+            "FDMTFFT (gpu)");
         m_hist_cur ^= 1;
     }
 
@@ -1415,7 +1378,7 @@ private:
         inverse_rows(g, out_spec, time, s);
         const auto rows = static_cast<int64_t>(m_nbeams * m_ndms);
         const dim3 grid(blocks_for(static_cast<int64_t>(cnt)), grid_y(rows));
-        kernel_trim<<<grid, kBlock, 0, s>>>(
+        fourier_gpu::kernel_trim<<<grid, kBlock, 0, s>>>(
             time, dst, rows, static_cast<int64_t>(g.n_fft),
             static_cast<int64_t>(m_nsamps_out), static_cast<int64_t>(o0),
             static_cast<int64_t>(cnt), static_cast<int64_t>(skip));
@@ -1631,7 +1594,7 @@ private:
                 s);
             const dim3 tgrid(blocks_for(static_cast<int64_t>(cnt)),
                              grid_y(static_cast<int64_t>(n)));
-            kernel_trim<<<tgrid, kBlock, 0, s>>>(
+            fourier_gpu::kernel_trim<<<tgrid, kBlock, 0, s>>>(
                 m_view_time.data(), m_view_d.data() + (r0 * nsv),
                 static_cast<int64_t>(n), static_cast<int64_t>(g.n_fft),
                 static_cast<int64_t>(nsv), 0, static_cast<int64_t>(cnt),

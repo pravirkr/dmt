@@ -8,6 +8,8 @@
 
 #include "dmt/common/types.hpp"
 
+#include "dmt/fdmt_variance.hpp"
+
 namespace dmt::kadane {
 
 inline constexpr SizeType kMaxGateBuckets       = 3;
@@ -17,12 +19,7 @@ inline constexpr SizeType kMaxKadaneGateFilters = 4096;
 inline constexpr int32_t kKadaneInt32Cap =
     std::numeric_limits<int32_t>::max() / 2;
 
-/// Edge taper width of the symmetric {1, 2, 1} trapezoidal filter of total
-/// support `width`. Widths 1 and 2 are pure boxcars (edge width 0); widths >= 3
-/// use edge width floor((width + 1) / 4) and core width `width - 2 * w_edge`.
-DMT_HD constexpr uint32_t trapezoid_edge_width(uint32_t width) noexcept {
-    return width >= 3U ? (width + 1U) / 4U : 0U;
-}
+using algorithms::detail::trapezoid_edge_width;
 
 /// Contiguous filter-index bucket [f_lo, f_hi) in `widths`.
 struct KadaneGateBucket {

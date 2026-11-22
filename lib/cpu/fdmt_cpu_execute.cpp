@@ -46,61 +46,6 @@ void ring_store(
 }
 
 /**
- * @brief out[i] = a[i] + b[i] for i < m with non-temporal (streaming) stores
- * where the target supports them, for rows that go to main memory anyway (a
- * level far larger than the caches): it skips the read-for-ownership of
- * every output line. Same float additions as the plain loop, so the result
- * is bit-identical. Callers must fdmt_stream_fence() before another thread
- * reads `out`.
- */
-inline void fdmt_stream_add(const float* __restrict__ a,
-                            const float* __restrict__ b,
-                            float* __restrict__ out,
-                            SizeType m) noexcept {
-#if defined(__AVX512F__) || defined(__AVX__)
-#if defined(__AVX512F__)
-    constexpr SizeType kLanes = 16;
-#else
-    constexpr SizeType kLanes = 8;
-#endif
-    constexpr std::uintptr_t kAlign = kLanes * sizeof(float);
-    SizeType i                      = 0;
-    for (; i < m && (reinterpret_cast<std::uintptr_t>(out + i) % kAlign) != 0;
-         ++i) {
-        out[i] = a[i] + b[i];
-    }
-    for (; i + kLanes <= m; i += kLanes) {
-#if defined(__AVX512F__)
-        _mm512_stream_ps(out + i, _mm512_add_ps(_mm512_loadu_ps(a + i),
-                                                _mm512_loadu_ps(b + i)));
-#else
-        _mm256_stream_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(a + i),
-                                                _mm256_loadu_ps(b + i)));
-#endif
-    }
-    for (; i < m; ++i) {
-        out[i] = a[i] + b[i];
-    }
-#elif defined(__clang__) && __has_builtin(__builtin_nontemporal_store)
-    for (SizeType i = 0; i < m; ++i) {
-        __builtin_nontemporal_store(a[i] + b[i], out + i);
-    }
-#else
-#pragma omp simd
-    for (SizeType i = 0; i < m; ++i) {
-        out[i] = a[i] + b[i];
-    }
-#endif
-}
-
-/// Orders this thread's streaming stores before a following barrier.
-inline void fdmt_stream_fence() noexcept {
-#if defined(__AVX__)
-    _mm_sfence();
-#endif
-}
-
-/**
  * @brief Element-wise converting copy (`std::copy_n` when the types match).
  */
 template <typename TIn, typename TOut>

@@ -45,28 +45,6 @@ std::span<const uint8_t> byte_view(const py::array& arr) {
             static_cast<SizeType>(arr.size())};
 }
 
-py::array_t<float, py::array::c_style>
-output_buffer(const CohFDMT& coh, const std::optional<py::array>& out) {
-    const auto needed = coh.get_dmt_size();
-    if (!out.has_value()) {
-        return py::array_t<float, py::array::c_style>(
-            static_cast<py::ssize_t>(needed));
-    }
-    const auto& arr = *out;
-    if (arr.dtype().kind() != 'f' || arr.itemsize() != 4 ||
-        (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
-        throw py::type_error("CohFDMT.execute: out must be a writeable, "
-                             "C-contiguous float32 array");
-    }
-    if (static_cast<SizeType>(arr.size()) < needed) {
-        throw std::invalid_argument(
-            fmt::format("CohFDMT.execute: out has {} elements, needs at least "
-                        "dmt_size = {}",
-                        arr.size(), needed));
-    }
-    return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
-}
-
 // Device-memory execute(): every group a C-contiguous 1-byte device array on
 // the instance's device; the result is a device array of the first group's
 // library (or a view of `out`).
@@ -152,9 +130,10 @@ py::object coh_execute(const CohFDMT& coh,
         throw py::type_error("CohFDMT.execute: out must be a NumPy array for "
                              "host data");
     }
-    auto buf = output_buffer(
-        coh, out.is_none() ? std::nullopt
-                           : std::optional<py::array>(out.cast<py::array>()));
+    auto buf = float_output_buffer(
+        coh.get_dmt_size(), "CohFDMT", "dmt_size",
+        out.is_none() ? std::nullopt
+                      : std::optional<py::array>(out.cast<py::array>()));
     {
         const py::gil_scoped_release release;
         coh.execute<uint8_t>(std::span<const std::span<const uint8_t>>(groups),

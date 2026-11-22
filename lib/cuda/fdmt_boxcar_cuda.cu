@@ -750,9 +750,7 @@ FDMTBoxcarCudaEngine::run_search(Stream queue, const Search& search) {
         undo_commit();
         throw;
     }
-    m_commit_open = false;
-    m_catch_undo  = {};
-    m_prev_evicted.reset();
+    m_noise_ring.finish_commit();
     m_position += m_plan.get_nsamps();
     finish_keep(stream);
     plane_counts(stream);
@@ -852,7 +850,7 @@ CandidateDeviceResultView FDMTBoxcarCudaEngine::flush_device(Stream queue) {
         raw(m_slots_d), raw(m_per_dm_d), m_config.max_candidates, dm_cap(),
         tasks, raw(m_integer_means), raw(m_scales_d), m_filters, m_integer_unit,
         // Packed peaks under per-call masks carry their own S/N.
-        m_config.input_nbits != 32 && !m_noise_on &&
+        m_config.input_nbits != 32 && !m_noise_ring.enabled() &&
             m_config.peak_mode != PeakFindingMode::kContiguousPeakAcrossWidths,
         raw(m_bright_d), m_bright_q, raw(m_row_detected_d),
         raw(m_plane_slots_d), m_plane_cap);
@@ -954,9 +952,9 @@ void FDMTBoxcarCudaEngine::enable_block_noise(
             allocate_slot(*m_slots.back());
         }
     }
-    m_ring.reserve(3);
-    m_noise_on = true;
-    reset_block_noise();
+    m_noise_ring.enable(ring_needed(), ring_size(), m_kill_runs);
+    m_block_tables      = {};
+    m_prev_block_tables = {};
     // Packed rows: S/N of what is open when the masks start.
     if (m_allocated && m_config.input_nbits != 32 &&
         m_config.peak_mode == PeakFindingMode::kContiguousPeakPerWidth) {
@@ -976,18 +974,19 @@ void FDMTBoxcarCudaEngine::allocate_slot(TableSlot& slot) {
 }
 
 void FDMTBoxcarCudaEngine::push_block_noise(BlockNoise entry) {
-    m_pending = std::move(entry);
+    m_noise_ring.push(std::move(entry));
 }
 
 void FDMTBoxcarCudaEngine::drop_block_noise() noexcept {
-    m_pending.reset();
-    undo_commit();
+    if (m_noise_ring.drop()) {
+        m_block_tables = m_prev_block_tables;
+    }
 }
 
 void FDMTBoxcarCudaEngine::reset_history(Stream queue) {
     gpu_utils::set_device(m_device);
     const auto stream = static_cast<cudaStream_t>(queue.native);
-    if (m_noise_on) {
+    if (m_noise_ring.enabled()) {
         reset_block_noise();
     }
     m_search_stop = UINT64_MAX;
@@ -1150,8 +1149,9 @@ bool FDMTBoxcarCudaEngine::keep_rows(Stream queue) {
         return true;
     }
     if (m_keep_in_transform) {
-        const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
-        set_keep(runs, queue, m_noise_on && m_config.input_nbits != 32);
+        const auto& runs = m_noise_ring.active_kill_runs(m_kill_runs);
+        set_keep(runs, queue,
+                 m_noise_ring.enabled() && m_config.input_nbits != 32);
         return true;
     }
     return false;
@@ -1163,7 +1163,7 @@ DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
     if (keep_rows(queue)) {
         return block;
     }
-    const auto& runs = m_noise_on ? m_ring.back().kill_runs : m_kill_runs;
+    const auto& runs = m_noise_ring.active_kill_runs(m_kill_runs);
     if (runs.empty()) {
         return block;
     }
@@ -1344,12 +1344,7 @@ SizeType FDMTBoxcarCudaEngine::ring_size() const noexcept {
 }
 
 uint64_t FDMTBoxcarCudaEngine::noise_catch_all_begin() const noexcept {
-    if (!m_noise_on || ring_needed() <= ring_size()) {
-        return UINT64_MAX;
-    }
-    // The first sample of the oldest block the next call still searches.
-    const uint64_t back = (ring_needed() - 1) * m_plan.get_nsamps();
-    return m_position > back ? m_position - back : 0;
+    return m_noise_ring.catch_all_begin(m_position, m_plan.get_nsamps());
 }
 
 SizeType FDMTBoxcarCudaEngine::slot_count() const noexcept {
@@ -1383,19 +1378,9 @@ SizeType FDMTBoxcarCudaEngine::slot_floats() const noexcept {
 }
 
 void FDMTBoxcarCudaEngine::reset_block_noise() {
-    m_pending.reset();
-    m_evicted.reset();
-    m_prev_evicted.reset();
-    m_commit_open = false;
-    m_ring.clear();
-    BlockNoise first; // the constructor tables from stream sample 0
-    first.kill_runs = m_kill_runs;
-    m_ring.push_back(std::move(first));
+    m_noise_ring.reset(m_kill_runs);
     m_block_tables      = {};
     m_prev_block_tables = {};
-    m_has_catch_all     = false;
-    m_catch_all.reset();
-    m_catch_undo = {};
 }
 
 const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
@@ -1408,27 +1393,8 @@ const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
             return raw(slot->device);
         }
     }
-    const auto in_ring = [&](uint64_t id) {
-        if (m_evicted && ((m_evicted->steady && m_evicted->steady->id == id) ||
-                          (m_evicted->transition_tables &&
-                           m_evicted->transition_tables->id == id))) {
-            return true;
-        }
-        for (const auto& e : m_ring) {
-            if ((e.steady && e.steady->id == id) ||
-                (e.transition_tables && e.transition_tables->id == id)) {
-                return true;
-            }
-        }
-        // The tables the catch-all replaced: an undo restores them (and
-        // m_prev_block_tables points at their slots).
-        const auto& u = m_catch_undo;
-        return u.front_set &&
-               ((u.steady && u.steady->id == id) ||
-                (u.transition_tables && u.transition_tables->id == id));
-    };
     for (auto& slot : m_slots) {
-        if (slot->id != 0 && in_ring(slot->id)) {
+        if (slot->id != 0 && m_noise_ring.references_table(slot->id)) {
             continue;
         }
         // The previous copy out of the pinned buffer has finished
@@ -1466,53 +1432,20 @@ const float* FDMTBoxcarCudaEngine::slot_of(const NoiseTables* tables,
 }
 
 void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
-    if (!m_noise_on) {
+    if (!m_noise_ring.enabled()) {
         return;
     }
-    BlockNoise entry;
-    if (m_pending) {
-        entry = std::move(*m_pending);
-        m_pending.reset();
-    } else {
-        entry.steady    = m_ring.back().steady;
-        entry.kill_runs = m_kill_runs;
-    }
-    entry.first_sample  = m_position;
-    m_prev_evicted      = std::move(m_evicted);
     m_prev_block_tables = m_block_tables;
-    m_catch_undo = {.has_catch_all = m_has_catch_all, .catch_all = m_catch_all};
-    if (entry.has_catch_all) {
-        m_catch_all         = std::move(entry.catch_all);
-        m_has_catch_all     = true;
-        entry.has_catch_all = false;
-    }
-    m_evicted.reset();
-    if (m_ring.size() == ring_size()) {
-        m_evicted = std::move(m_ring.front());
-        m_ring.erase(m_ring.begin());
-    }
-    m_ring.push_back(std::move(entry));
-    // A short block evicted an entry still searched: the oldest kept one
-    // stands for it with the catch-all.
-    if (m_evicted && ring_needed() > ring_size() && m_has_catch_all) {
-        auto& front                    = m_ring.front();
-        m_catch_undo.front_set         = true;
-        m_catch_undo.steady            = front.steady;
-        m_catch_undo.transition_tables = front.transition_tables;
-        m_catch_undo.transition        = front.transition;
-        front.steady                   = m_catch_all;
-        front.transition_tables        = m_catch_all;
-        front.transition               = true;
-    }
-    m_commit_open = true;
+    m_noise_ring.commit(m_position, m_kill_runs);
     try {
         BlockTables bt;
         const SizeType n   = table_floats();
-        const SizeType off = m_ring.size() > 2 ? m_ring.size() - 2 : 0;
-        bt.count           = static_cast<int>(m_ring.size() - off);
+        const auto entries = m_noise_ring.entries();
+        const SizeType off = entries.size() > 2 ? entries.size() - 2 : 0;
+        bt.count           = static_cast<int>(entries.size() - off);
         bt.support         = raw(m_support_d);
         for (int e = 0; e < bt.count; ++e) {
-            const auto& r     = m_ring[off + e];
+            const auto& r     = entries[off + e];
             bt.first[e]       = r.first_sample;
             bt.transition[e]  = r.transition;
             const bool packed = m_config.input_nbits != 32;
@@ -1539,33 +1472,15 @@ void FDMTBoxcarCudaEngine::commit_block_noise(cudaStream_t stream) {
     }
 }
 
-// m_ring is pre-reserved to 3 in enable_block_noise().
-// NOLINTNEXTLINE(bugprone-exception-escape)
 void FDMTBoxcarCudaEngine::undo_commit() noexcept {
-    if (!m_commit_open) {
+    if (!m_noise_ring.undo_commit()) {
         return;
     }
-    auto& u = m_catch_undo;
-    if (u.front_set) {
-        auto& front             = m_ring.front();
-        front.steady            = std::move(u.steady);
-        front.transition_tables = std::move(u.transition_tables);
-        front.transition        = u.transition;
-    }
-    m_has_catch_all = u.has_catch_all;
-    m_catch_all     = std::move(u.catch_all);
-    u               = {};
-    m_ring.pop_back();
-    if (m_evicted) {
-        m_ring.insert(m_ring.begin(), std::move(*m_evicted));
-    }
-    m_evicted      = std::move(m_prev_evicted);
     m_block_tables = m_prev_block_tables;
-    m_commit_open  = false;
 }
 
 void FDMTBoxcarCudaEngine::release_slots(cudaStream_t stream) {
-    if (!m_noise_on) {
+    if (!m_noise_ring.enabled()) {
         return;
     }
     for (auto& slot : m_slots) {

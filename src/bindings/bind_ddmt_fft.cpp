@@ -31,10 +31,6 @@ using namespace pybind11::literals; // NOLINT
 
 namespace {
 
-std::vector<uint8_t> mask_vec(const py::object& m) {
-    return extract_kill_mask(m);
-}
-
 DDMTFFTOptions
 make_options(std::string_view method, double tolerance, SizeType guard) {
     return DDMTFFTOptions{
@@ -186,7 +182,7 @@ void bind_ddmt_fft(py::module_& mod) {
                         std::optional<float> f_ref) {
                 return DDMTFFT(f_min, f_max, nchans, tsamp, dm_max, dm_step,
                                dm_min, make_exec(backend, nthreads, device),
-                               nbits, mask_vec(kill_mask), nbeams,
+                               nbits, extract_kill_mask(kill_mask), nbeams,
                                make_options(method, tolerance, guard), f_ref);
             }),
             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
@@ -205,7 +201,7 @@ void bind_ddmt_fft(py::module_& mod) {
                  return DDMTFFT(f_min, f_max, nchans, tsamp,
                                 std::span<const float>(dms.data(), dms.size()),
                                 make_exec(backend, nthreads, device), nbits,
-                                mask_vec(kill_mask), nbeams,
+                                extract_kill_mask(kill_mask), nbeams,
                                 make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
@@ -221,7 +217,7 @@ void bind_ddmt_fft(py::module_& mod) {
                          std::optional<float> f_ref) {
                  return DDMTFFT(f_min, f_max, nchans, tsamp, levin,
                                 make_exec(backend, nthreads, device), nbits,
-                                mask_vec(kill_mask), nbeams,
+                                extract_kill_mask(kill_mask), nbeams,
                                 make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,

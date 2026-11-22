@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
 
 #include "dmt/common/types.hpp"
@@ -157,6 +159,47 @@ constexpr SizeType packed_row_bytes(SizeType nsamps, SizeType nbits) noexcept {
  */
 constexpr uint32_t max_sample_value(SizeType nbits) noexcept {
     return (1U << nbits) - 1U;
+}
+
+/** @brief True when @p nbits is one of the packed integer widths (1, 2, 4, 8, 16). */
+constexpr bool is_packed_width(SizeType nbits) noexcept {
+    return nbits == 1 || nbits == 2 || nbits == 4 || nbits == 8 || nbits == 16;
+}
+
+/** @brief Byte length of one channel row holding @p nsamps samples (float when 32). */
+constexpr SizeType row_bytes_for(SizeType nsamps, SizeType nbits) noexcept {
+    return nbits == 32 ? nsamps * sizeof(float)
+                       : packed_row_bytes(nsamps, nbits);
+}
+
+/** @brief Calls `f.template operator()<NBITS>()` for runtime width 1, 2, 4, 8, 16, or 32. */
+template <typename F>
+inline void
+dispatch_nbits(SizeType nbits, F&& f, const char* caller = "dmt") {
+    switch (nbits) {
+    case 1:
+        f.template operator()<1>();
+        break;
+    case 2:
+        f.template operator()<2>();
+        break;
+    case 4:
+        f.template operator()<4>();
+        break;
+    case 8:
+        f.template operator()<8>();
+        break;
+    case 16:
+        f.template operator()<16>();
+        break;
+    case 32:
+        f.template operator()<32>();
+        break;
+    default:
+        throw std::invalid_argument(std::string(caller) +
+                                    ": unsupported nbits=" +
+                                    std::to_string(nbits));
+    }
 }
 
 #if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)

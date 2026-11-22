@@ -320,13 +320,7 @@ SizeType next_fft_size(SizeType n) {
     // symmetry FFTW exploits. Search m = 2 * (7-smooth) >= n.
     const SizeType half = std::max<SizeType>(1, (n + 1) / 2);
     for (SizeType m = half;; ++m) {
-        SizeType r = m;
-        for (const SizeType p : {2U, 3U, 5U, 7U}) {
-            while (r % p == 0) {
-                r /= p;
-            }
-        }
-        if (r == 1) {
+        if (is_smooth7(m)) {
             return 2 * m;
         }
     }

@@ -1,19 +1,23 @@
 #pragma once
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
+#include "dmt/fdmt_variance.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_planned_vector.cuh"
 #include "dmt/gpu_utils.cuh"
@@ -421,6 +425,526 @@ DMT_D inline int block_table(const BlockTables& bt,
     return bt.transition[e] && s < bt.first[e] + support + width - 1 ? 1 : 0;
 }
 
+// Lagged row slice (skewed-window subband search) and drain() stop guard.
+DMT_D __forceinline__ bool setup_row_input(FDMTSearchInput& input,
+                                           const BoxcarRow* rows,
+                                           SizeType row_base,
+                                           SizeType ndm,
+                                           SizeType task) {
+    if (input.row_lag != nullptr) {
+        FDMTSearchInput lagged;
+        if (!lagged_row_input(input, rows[row_base + (task % ndm)].row,
+                              lagged)) {
+            return false;
+        }
+        input = lagged;
+    }
+    return stop_row_input(input);
+}
+
+struct NoKeep {};
+
+template <typename T, bool kBlockNoise, bool kKeep, typename Pending>
+DMT_D __forceinline__ std::conditional_t<kKeep, KeepWriter, CandidateWriter>
+make_row_writer(const BoxcarRow& row,
+                SizeType beam,
+                SizeType row_index,
+                SizeType index,
+                SizeType nfilters,
+                const uint32_t* widths,
+                const float* inv_sigma,
+                const double* means,
+                double unit,
+                PeakFindingMode mode,
+                RawCandidate* candidates,
+                CandidateCounts* counts,
+                uint64_t* slots,
+                uint64_t* per_dm_all,
+                SizeType capacity,
+                SizeType dm_cap,
+                BoxcarKeepEntry* keep_all,
+                SizeType keep_q,
+                uint64_t* detected_all,
+                uint64_t* plane_slots,
+                SizeType plane_cap,
+                Pending& pending) {
+    const double* row_means =
+        means != nullptr ? means + (row_index * nfilters) : nullptr;
+    const float* row_scales = inv_sigma + (row_index * nfilters);
+    // Packed rows under per-call masks carry their S/N in the peak.
+    const bool integer = std::is_integral_v<T> && !kBlockNoise &&
+                         mode != PeakFindingMode::kContiguousPeakAcrossWidths;
+    if constexpr (kKeep) {
+        return KeepWriter{counts,
+                          keep_all + (index * keep_q),
+                          per_dm_all + index,
+                          detected_all + index,
+                          keep_q,
+                          &pending,
+                          row_means,
+                          row_scales,
+                          unit,
+                          integer};
+    } else {
+        (void)keep_all;
+        (void)keep_q;
+        (void)detected_all;
+        (void)pending;
+        RawCandidate prototype = row.candidate;
+        prototype.beam_idx     = static_cast<uint32_t>(beam);
+        const PlaneShare share =
+            plane_share(slots, capacity, plane_slots, plane_cap, row.plane);
+        CandidateWriter writer{candidates,         counts, share.slots,
+                               per_dm_all + index, widths, prototype,
+                               share.capacity,     dm_cap};
+        writer.base    = share.base;
+        writer.means   = row_means;
+        writer.scales  = row_scales;
+        writer.unit    = unit;
+        writer.integer = integer;
+        return writer;
+    }
+}
+
+struct BlockNoiseArrays {
+    const float* in_play[4][2];
+    const uint64_t* in_play_i[4];
+    int n_play           = 0;
+    bool mixed           = false;
+    uint64_t row_support = 0;
+};
+
+template <typename T, bool kBlockNoise> struct RowNoise {
+    const float* plane_thr     = nullptr;
+    const float* plane_inv     = nullptr;
+    const uint64_t* plane_ithr = nullptr;
+    const float* inv_row       = nullptr;
+    const float* thr_float     = nullptr;
+    const uint64_t* thr_int    = nullptr;
+    std::conditional_t<kBlockNoise, BlockNoiseArrays, NoKeep> bn{};
+    bool custom = false;
+
+    DMT_D __forceinline__ bool is_mixed() const {
+        if constexpr (kBlockNoise) {
+            return bn.mixed;
+        } else {
+            return false;
+        }
+    }
+
+    DMT_D __forceinline__ uint64_t support() const {
+        if constexpr (kBlockNoise) {
+            return bn.row_support;
+        } else {
+            return 0;
+        }
+    }
+
+    DMT_D __forceinline__ const T* thr_row() const {
+        if constexpr (std::is_integral_v<T>) {
+            return thr_int;
+        } else {
+            return thr_float;
+        }
+    }
+
+    DMT_D __forceinline__ uint64_t min_ithr_at(SizeType f) const {
+        if constexpr (kBlockNoise) {
+            if (bn.mixed) {
+                uint64_t th = bn.in_play_i[0][f];
+                for (int j = 1; j < bn.n_play; ++j) {
+                    th = th < bn.in_play_i[j][f] ? th : bn.in_play_i[j][f];
+                }
+                return th;
+            }
+        }
+        return thr_int[f];
+    }
+
+    DMT_D __forceinline__ float min_fthr_at(SizeType f) const {
+        if constexpr (kBlockNoise) {
+            if (bn.mixed) {
+                float th = bn.in_play[0][0][f];
+                for (int j = 1; j < bn.n_play; ++j) {
+                    th = th < bn.in_play[j][0][f] ? th : bn.in_play[j][0][f];
+                }
+                return th;
+            }
+        }
+        return thr_float[f];
+    }
+
+    DMT_D __forceinline__ T min_thr_at(SizeType f) const {
+        if constexpr (std::is_integral_v<T>) {
+            return min_ithr_at(f);
+        } else {
+            return min_fthr_at(f);
+        }
+    }
+};
+
+// Resolve the per-call kill-mask tables active for this row's sample range.
+// One table: the row reads it as the constructor's. Several ("mixed"): the
+// screen takes their per-width minimum (a lower bound for every endpoint)
+// and the bookkeeping picks the table per sample.
+template <typename T, bool kBlockNoise>
+DMT_D __forceinline__ RowNoise<T, kBlockNoise>
+resolve_row_noise(const FDMTSearchInput& input,
+                  SizeType row_index,
+                  SizeType nfilters,
+                  SizeType max_width,
+                  const uint32_t* widths,
+                  const float* thresholds,
+                  const float* inv_sigma,
+                  const uint64_t* integer_thresholds,
+                  const BlockTables& block_tables) {
+    RowNoise<T, kBlockNoise> noise;
+    noise.plane_thr = thresholds + (row_index * nfilters);
+    noise.plane_inv = inv_sigma + (row_index * nfilters);
+    noise.inv_row   = noise.plane_inv;
+    noise.thr_float = noise.plane_thr;
+    if constexpr (std::is_integral_v<T>) {
+        noise.plane_ithr = integer_thresholds + (row_index * nfilters);
+    }
+    noise.thr_int = noise.plane_ithr;
+    if constexpr (kBlockNoise) {
+        if (block_tables.count > 0) {
+            noise.bn.row_support = block_tables.support[row_index];
+            const uint64_t s0    = input.sample_begin;
+            const uint64_t s1    = s0 + input.nsamps - 1;
+            const int e0         = block_entry(block_tables, s0);
+            const int e1         = block_entry(block_tables, s1);
+            const auto add       = [&](int e, int k) {
+                const float* t     = block_tables.thr[e][k];
+                const float* v     = block_tables.inv[e][k];
+                const uint64_t* it = block_tables.ithr[e][k];
+                t  = t != nullptr ? t + (row_index * nfilters)
+                                  : noise.plane_thr;
+                v  = v != nullptr ? v + (row_index * nfilters)
+                                  : noise.plane_inv;
+                it = it != nullptr ? it + (row_index * nfilters)
+                                   : noise.plane_ithr;
+                for (int j = 0; j < noise.bn.n_play; ++j) {
+                    if (noise.bn.in_play[j][0] == t) {
+                        return;
+                    }
+                }
+                noise.bn.in_play[noise.bn.n_play][0] = t;
+                noise.bn.in_play[noise.bn.n_play][1] = v;
+                noise.bn.in_play_i[noise.bn.n_play]  = it;
+                ++noise.bn.n_play;
+            };
+            for (int e = e0; e <= e1; ++e) {
+                const uint64_t first = block_tables.first[e];
+                const uint64_t lo    = e == e0 ? s0 : first;
+                const uint64_t hi = e < e1 ? block_tables.first[e + 1] - 1 : s1;
+                if (!block_tables.transition[e]) {
+                    add(e, 0);
+                    continue;
+                }
+                // Transition [1] before first + support + w - 1 (as high as
+                // max_width - 1), steady [0] from widths[0] - 1 onward.
+                if (lo < first + noise.bn.row_support + max_width - 1) {
+                    add(e, 1);
+                }
+                if (hi + 1 >= first + noise.bn.row_support + widths[0]) {
+                    add(e, 0);
+                }
+            }
+            if (noise.bn.n_play == 1) {
+                noise.thr_float = noise.bn.in_play[0][0];
+                noise.inv_row   = noise.bn.in_play[0][1];
+                noise.thr_int   = noise.bn.in_play_i[0];
+            } else {
+                noise.bn.mixed = true;
+            }
+        }
+        noise.custom = noise.bn.mixed || noise.thr_float != noise.plane_thr;
+    }
+    return noise;
+}
+
+template <typename T, int kBlockThreads, bool kBlockNoise>
+DMT_D __forceinline__ void stage_row_tables(T* s_thr,
+                                            uint32_t* s_widths,
+                                            const uint32_t* widths,
+                                            SizeType nfilters,
+                                            const RowNoise<T, kBlockNoise>& noise) {
+    const int tid = static_cast<int>(threadIdx.x);
+    for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
+        s_thr[f]    = noise.min_thr_at(f);
+        s_widths[f] = widths[f];
+    }
+}
+
+template <int kBlockThreads>
+DMT_D __forceinline__ bool any_open_peaks(const BoxcarPeak* peaks,
+                                          SizeType peak_count,
+                                          PeakFindingMode mode) {
+    const int tid = static_cast<int>(threadIdx.x);
+    bool open     = false;
+    if (mode != PeakFindingMode::kAllAboveThreshold) {
+        for (SizeType f = tid; f < peak_count; f += kBlockThreads) {
+            open = open || peaks[f].open;
+        }
+    }
+    return __syncthreads_or(open) != 0;
+}
+
+template <typename T, typename C, int kBlockThreads>
+DMT_D __forceinline__ void bootstrap_carry_ring(
+    BoxcarShared<T, kBlockThreads>& shared,
+    T* ring,
+    uint32_t mask,
+    const C* carry,
+    SizeType max_width,
+    uint32_t lookback,
+    uint64_t sample_begin) {
+    constexpr int kBlockTile = kBlockThreads * kItems;
+    const int tid            = static_cast<int>(threadIdx.x);
+    if (sample_begin == 0) {
+        for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
+            ring[j & mask] = T{0};
+        }
+        __syncthreads();
+        return;
+    }
+    if (tid == 0) {
+        ring[0] = 0;
+    }
+    __syncthreads();
+    // Bootstrap only the short raw carry, never an entire DM-time row.
+    const auto carry0  = static_cast<uint32_t>(sample_begin % max_width);
+    const auto width32 = static_cast<uint32_t>(max_width);
+    for (uint32_t p = 0; p < lookback; p += kBlockTile) {
+        const T base = ring[p & mask];
+        T x[kItems];
+        for (int j = 0; j < kItems; ++j) {
+            const uint32_t t    = p + (tid * kItems) + j;
+            const uint32_t back = t < lookback ? lookback - t : 0U;
+            x[j]                = t < lookback && sample_begin >= back
+                                      ? carry[carry0 >= back
+                                                  ? carry0 - back
+                                                  : carry0 + width32 - back]
+                                      : T{0};
+        }
+        prefix_tile<T, kBlockThreads>(shared, ring, mask, x, p, base);
+    }
+}
+
+template <typename T, int kBlockThreads, bool kFull = false>
+DMT_D __forceinline__ void load_tile_samples(const FDMTSearchInput& input,
+                                             const BoxcarRow& row,
+                                             SizeType beam,
+                                             SizeType t0,
+                                             int n,
+                                             bool root,
+                                             T (&x)[kItems]) {
+    const int tid = static_cast<int>(threadIdx.x);
+#pragma unroll
+    for (int j = 0; j < kItems; ++j) {
+        const SizeType local = static_cast<SizeType>((tid * kItems) + j);
+        if constexpr (!kFull) {
+            x[j] = 0;
+            if (local >= static_cast<SizeType>(n)) {
+                continue;
+            }
+        }
+        if constexpr (std::is_integral_v<T>) {
+            x[j] = boxcar_integer_sample(input, row, beam, t0 + local, root);
+        } else {
+            x[j] = boxcar_sample(input, row, beam, t0 + local, root);
+        }
+    }
+}
+
+// Exact per-width / across-width / all-above-threshold scoring and peak
+// bookkeeping for one tile whose prefix sums already sit in `ring`.
+template <typename T,
+          int kBlockThreads,
+          bool kBlockNoise,
+          bool kKeep,
+          typename Writer,
+          typename Pending>
+DMT_D __forceinline__ void score_tile_bookkeeping(
+    BoxcarShared<T, kBlockThreads>& shared,
+    const T* ring,
+    uint32_t mask,
+    uint32_t position,
+    int n,
+    uint64_t start,
+    const BoxcarRow& row,
+    SizeType row_index,
+    const uint32_t* wtab,
+    const T* ttab,
+    SizeType nfilters,
+    const RowNoise<T, kBlockNoise>& noise,
+    const BlockTables& block_tables,
+    const double* means,
+    double unit,
+    PeakFindingMode mode,
+    bool skip_cold,
+    bool use_trapezoid,
+    BoxcarPeak* peaks,
+    const Writer& out,
+    Pending& pending) {
+    const int tid = static_cast<int>(threadIdx.x);
+    float best[kItems];
+    uint32_t best_filter[kItems];
+    T current[kItems];
+    uint64_t raw_sums[kItems]{};
+    for (int j = 0; j < kItems; ++j) {
+        current[j]     = ring[(position + (tid * kItems) + j + 1) & mask];
+        best[j]        = -1.0F;
+        best_filter[j] = 0;
+    }
+    for (SizeType f = 0; f < nfilters; ++f) {
+        bool above[kItems];
+        float snr[kItems];
+        uint32_t filters[kItems];
+        const uint32_t width  = wtab[f];
+        const uint32_t w_edge = use_trapezoid ? trapezoid_edge_width(width) : 0U;
+        T threshold           = ttab[f];
+        float scale           = noise.inv_row[f];
+        bool f_hit            = false;
+        for (int j = 0; j < kItems; ++j) {
+            const uint32_t local  = (tid * kItems) + j;
+            const uint64_t sample = start + local;
+            if constexpr (kBlockNoise) {
+                if (noise.is_mixed()) {
+                    const int e = block_entry(block_tables, sample);
+                    const int k = block_table(block_tables, e, sample, width,
+                                              noise.support());
+                    const float* v = block_tables.inv[e][k];
+                    if constexpr (std::is_integral_v<T>) {
+                        const uint64_t* it = block_tables.ithr[e][k];
+                        threshold          = it != nullptr
+                                                 ? it[(row_index * nfilters) + f]
+                                                 : noise.plane_ithr[f];
+                    } else {
+                        const float* t = block_tables.thr[e][k];
+                        threshold      = t != nullptr
+                                             ? t[(row_index * nfilters) + f]
+                                             : noise.plane_thr[f];
+                    }
+                    scale = v != nullptr ? v[(row_index * nfilters) + f]
+                                         : noise.plane_inv[f];
+                }
+            }
+            const uint32_t idx = position + local + 1;
+            T sum              = current[j] - ring[(idx - width) & mask];
+            if (w_edge > 0) {
+                sum += ring[(idx - w_edge) & mask] -
+                       ring[(idx - width + w_edge) & mask];
+            }
+            above[j] = local < static_cast<uint32_t>(n) &&
+                       (!skip_cold || sample >= row.warmup + width - 1) &&
+                       sum >= threshold;
+            f_hit  = f_hit || above[j];
+            snr[j] = 0;
+            if constexpr (std::is_integral_v<T>) {
+                // In per-width and all modes, integer threshold crossings stay
+                // integer until a candidate is emitted. Across-width comparison
+                // needs real S/N at each sample.
+                raw_sums[j] = sum;
+                if (above[j] &&
+                    (kBlockNoise ||
+                     mode == PeakFindingMode::kContiguousPeakAcrossWidths)) {
+                    snr[j] = static_cast<float>(
+                        (static_cast<double>(sum) -
+                         means[(row_index * nfilters) + f]) *
+                        (scale * unit));
+                }
+            } else {
+                snr[j] = above[j] ? sum * scale : 0.0F;
+            }
+            filters[j] = static_cast<uint32_t>(f);
+            if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
+                if (above[j] && snr[j] > best[j]) {
+                    best[j]        = snr[j];
+                    best_filter[j] = filters[j];
+                }
+            } else if (mode == PeakFindingMode::kAllAboveThreshold &&
+                       above[j]) {
+                BoxcarPeak peak{sample, sample,     sample,
+                                snr[j], filters[j], true};
+                if constexpr (std::is_integral_v<T>) {
+                    peak.raw_sum = sum;
+                }
+                out(peak);
+            }
+        }
+        if (mode == PeakFindingMode::kContiguousPeakPerWidth &&
+            __syncthreads_or(f_hit || peaks[f].open) != 0) {
+            reduce_runs<T, kBlockThreads>(
+                shared, above, snr, filters, start, n, peaks + f, out, raw_sums,
+                std::is_integral_v<T> ? (kBlockNoise ? 2 : 1) : 0);
+            // Only reduce_runs() emits in this mode: drain behind the same
+            // block vote, not once per width.
+            if constexpr (kKeep) {
+                keep_drain(shared, pending, out);
+            }
+        }
+        if constexpr (kKeep) {
+            // Direct emission above: drain each width (mode is block-uniform).
+            if (mode == PeakFindingMode::kAllAboveThreshold) {
+                keep_drain(shared, pending, out);
+            }
+        }
+    }
+    if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
+        bool above[kItems];
+        for (int j = 0; j < kItems; ++j) {
+            above[j] = best[j] >= 0;
+        }
+        reduce_runs<T, kBlockThreads>(shared, above, best, best_filter, start,
+                                      n, peaks, out, raw_sums, false);
+        if constexpr (kKeep) {
+            keep_drain(shared, pending, out);
+        }
+    }
+}
+
+template <typename T, int kBlockThreads>
+DMT_D __forceinline__ void recenter_prefix_ring(T* ring,
+                                                uint32_t mask,
+                                                uint32_t end,
+                                                uint32_t lookback) {
+    const int tid  = static_cast<int>(threadIdx.x);
+    const T origin = ring[(end - lookback) & mask];
+    __syncthreads();
+    for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
+        ring[(end - lookback + j) & mask] -= origin;
+    }
+    __syncthreads();
+}
+
+template <typename T, typename C, int kBlockThreads>
+DMT_D __forceinline__ void save_row_carry(const FDMTSearchInput& input,
+                                          const BoxcarRow& row,
+                                          SizeType beam,
+                                          bool root,
+                                          SizeType max_width,
+                                          C* carry) {
+    const int tid       = static_cast<int>(threadIdx.x);
+    const SizeType keep = input.nsamps < max_width ? input.nsamps : max_width;
+    // Carry slot of the first kept sample; the kept samples follow it.
+    const auto keep0 = static_cast<uint32_t>(
+        (input.sample_begin + input.nsamps - keep) % max_width);
+    const auto width32 = static_cast<uint32_t>(max_width);
+    for (SizeType t = tid; t < keep; t += kBlockThreads) {
+        const SizeType sample = input.nsamps - keep + t;
+        uint32_t slot         = keep0 + static_cast<uint32_t>(t);
+        slot -= slot >= width32 ? width32 : 0U;
+        if constexpr (std::is_integral_v<T>) {
+            carry[slot] = static_cast<C>(
+                boxcar_integer_sample(input, row, beam, sample, root));
+        } else {
+            carry[slot] = boxcar_sample(input, row, beam, sample, root);
+        }
+    }
+}
+
 template <typename T> inline T* raw(thrust::device_vector<T>& v) {
     return thrust::raw_pointer_cast(v.data());
 }
@@ -507,6 +1031,100 @@ private:
 #endif
     }
 
+    [[nodiscard]] SizeType shared_mem_limit() const {
+        int optin = 0;
+        gpu_utils::check_gpu_call(
+            cudaDeviceGetAttribute(
+                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
+            "FDMTBoxcar: shared memory limit");
+        return static_cast<SizeType>(optin);
+    }
+
+    template <typename T, typename HeaderBytes>
+    [[nodiscard]] SizeType block_shared_need(int threads,
+                                             bool screen,
+                                             HeaderBytes header_bytes) const {
+        const auto need = [&]<int kBlockThreads>() {
+            const SizeType ring =
+                std::bit_ceil(m_width + SizeType{kBlockThreads * kItems});
+            SizeType bytes =
+                header_bytes(std::integral_constant<int, kBlockThreads>{}) +
+                (ring * sizeof(T));
+            if (screen) {
+                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(T));
+            }
+            return bytes;
+        };
+        return threads == 64    ? need.template operator()<64>()
+               : threads == 128 ? need.template operator()<128>()
+                                : need.template operator()<256>();
+    }
+
+    template <typename T>
+    [[nodiscard]] SizeType shared_need(int threads, bool screen) const {
+        return block_shared_need<T>(threads, screen, []<int K>(
+                                                         std::integral_constant<
+                                                             int, K>) {
+            return sizeof(BoxcarShared<T, K>);
+        });
+    }
+
+    // Shared block-size policy for prefix and float Kadane: float Kadane's
+    // Stage 2 prefix sum is associated per block tile (threads * kItems), so
+    // only the same block size as prefix gives bit-identical float S/N.
+    template <typename T>
+    [[nodiscard]] int select_prefix_block_threads(SizeType limit,
+                                                  bool& shrunk) const {
+        const SizeType eff_chunk =
+            std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
+        int threads = eff_chunk <= 64 * kItems    ? 64
+                      : eff_chunk <= 128 * kItems ? 128
+                                                  : 256;
+        while (threads > 64 && shared_need<T>(threads, false) > limit) {
+            threads /= 2;
+            shrunk = true;
+        }
+        return threads;
+    }
+
+    template <typename T, int kBlockThreads>
+    void configure_shared_layout(SizeType header_bytes,
+                                 SizeType limit,
+                                 bool with_screen,
+                                 const char* label) {
+        constexpr SizeType kBlockTile = kBlockThreads * kItems;
+        const SizeType ring           = std::bit_ceil(m_width + kBlockTile);
+        const SizeType fixed          = header_bytes + (ring * sizeof(T));
+        const SizeType tables = m_filters * (sizeof(T) + sizeof(uint32_t));
+        m_block_threads       = kBlockThreads;
+        m_mask                = static_cast<uint32_t>(ring - 1);
+        m_shared_tables =
+            m_filters <= kSharedFilters && fixed + tables <= limit;
+        m_smem          = fixed + (m_shared_tables ? tables : 0);
+        m_screen_offset = 0;
+        if (with_screen) {
+            m_smem          = (m_smem + 15) / 16 * 16;
+            m_screen_offset = m_smem;
+            m_smem += ring * sizeof(T);
+        }
+        m_group_offset = 0;
+        m_smem_noise   = m_smem;
+        if (with_screen &&
+            m_smem + (m_screen_groups_d.size() * sizeof(float)) <= limit) {
+            m_group_offset = m_smem;
+            m_smem_noise = m_smem + (m_screen_groups_d.size() * sizeof(float));
+            if constexpr (std::is_floating_point_v<T>) {
+                m_smem = m_smem_noise;
+            }
+        }
+        if (m_smem > limit) {
+            throw std::invalid_argument(fmt::format(
+                "{}: max_boxcar {} needs {} B of shared memory per block; "
+                "the device allows {} B",
+                label, m_width, m_smem, limit));
+        }
+    }
+
     // Prefix / kNone / wide-ring path (fdmt_boxcar_cuda_prefix.cu).
     void init_prefix_screen();
     template <typename T> void configure_shared();
@@ -520,8 +1138,6 @@ private:
               typename C,
               bool kGlobalRing = false>
     void configure_variants();
-    template <typename T>
-    [[nodiscard]] SizeType shared_need(int threads, bool screen) const;
     template <typename T, typename C = T>
     void launch_score(const FDMTSearchInput& input,
                       const LevelGroup& g,
@@ -571,8 +1187,6 @@ private:
                      std::span<const double> means,
                      std::span<const uint64_t> cutoffs);
     void reset_kadane(cudaStream_t stream);
-    template <typename T, typename SegT>
-    [[nodiscard]] SizeType kadane_shared_need(int threads) const;
     template <typename T, typename SegT>
     [[nodiscard]] bool try_configure_shared_kadane();
     template <typename T, typename SegT, int kBlockThreads>
@@ -737,28 +1351,11 @@ private:
     gpu_utils::PlannedVector<uint64_t> m_oldest_d; ///< candidate frontier
     gpu_host::PinnedBuffer<uint64_t> m_oldest_h;
     // Per-call kill masks: off until the first one.
-    bool m_noise_on = false;
-    std::vector<BlockNoise> m_ring; ///< oldest first, at most ring_size()
-    std::optional<BlockNoise> m_pending;
-    /// The entry the last commit evicted, kept until its call completes.
-    std::optional<BlockNoise> m_evicted;
-    std::optional<BlockNoise> m_prev_evicted;
-    bool m_commit_open = false;
+    BlockNoiseRing m_noise_ring;
     std::vector<std::unique_ptr<TableSlot>> m_slots;
     gpu_utils::PlannedVector<uint64_t> m_support_d;
     BlockTables m_block_tables{};
     BlockTables m_prev_block_tables{};
-    bool m_has_catch_all = false; ///< m_catch_all set (null: constructor)
-    std::shared_ptr<const NoiseTables> m_catch_all;
-    /// What the open commit replaced (restored by undo_commit()).
-    struct CatchUndo {
-        bool has_catch_all = false;
-        std::shared_ptr<const NoiseTables> catch_all;
-        bool front_set = false;
-        std::shared_ptr<const NoiseTables> steady, transition_tables;
-        bool transition = false;
-    };
-    CatchUndo m_catch_undo;
 
     // --- Kadane gate (`kKadane`) plan & device state ---
     kadane::KadaneGatePlan m_kadane_plan;

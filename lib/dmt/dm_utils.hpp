@@ -186,6 +186,22 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
 }
 
 /**
+ * @brief True if @p n > 0 has only prime factors 2, 3, 5 and 7 (7-smooth).
+ */
+[[nodiscard]] constexpr bool is_smooth7(SizeType n) noexcept {
+    if (n == 0) {
+        return false;
+    }
+    for (const SizeType p : {SizeType{2}, SizeType{3}, SizeType{5},
+                             SizeType{7}}) {
+        while (n % p == 0) {
+            n /= p;
+        }
+    }
+    return n == 1;
+}
+
+/**
  * @brief Smallest FFT-friendly length >= n: even, and a product of the
  * primes 2, 3, 5 and 7 only (FFTW and cuFFT have fast codelets for these).
  */

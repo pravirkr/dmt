@@ -75,7 +75,7 @@ namespace {
 /// has none). A row's noise terms and support depend on its node's only.
 struct LeafLevel {
     std::vector<SizeType> first{0}; ///< node i: entries [first[i], first[i+1])
-    std::vector<std::pair<uint32_t, uint32_t>> entries;
+    std::vector<BoxcarLengthBin> entries;
     std::vector<uint64_t> reach;
 
     void clear() {
@@ -83,8 +83,7 @@ struct LeafLevel {
         entries.clear();
         reach.clear();
     }
-    [[nodiscard]] std::span<const std::pair<uint32_t, uint32_t>>
-    hist(SizeType i) const {
+    [[nodiscard]] std::span<const BoxcarLengthBin> hist(SizeType i) const {
         return {entries.data() + first[i], entries.data() + first[i + 1]};
     }
 };
@@ -117,7 +116,7 @@ void leaf_level(const plans::FDMTPlanContainer& pc,
                 throw std::invalid_argument(
                     "FDMTBoxcar: level-0 box is too long");
             }
-            out.entries.emplace_back(static_cast<uint32_t>(len), 1U);
+            out.entries.push_back({static_cast<uint32_t>(len), 1U});
             out.reach[idx] = reach;
         }
         out.first.push_back(out.entries.size());
@@ -138,7 +137,7 @@ void sum_level(const plans::FDMTPlanContainer& pc,
         const auto& c  = coords[idx];
         const auto a   = prev.hist(c.tail_buf_offset / nsamps);
         uint64_t reach = a.empty() ? 0 : prev.reach[c.tail_buf_offset / nsamps];
-        std::span<const std::pair<uint32_t, uint32_t>> b;
+        std::span<const BoxcarLengthBin> b;
         if (c.i_coord_head != SIZE_MAX) {
             const SizeType h = c.head_buf_offset / nsamps;
             b                = prev.hist(h);
@@ -146,19 +145,10 @@ void sum_level(const plans::FDMTPlanContainer& pc,
                 reach = std::max<uint64_t>(reach, c.delay + prev.reach[h]);
             }
         }
-        SizeType i = 0;
-        SizeType j = 0;
-        while (i < a.size() || j < b.size()) {
-            if (j == b.size() || (i < a.size() && a[i].first < b[j].first)) {
-                out.entries.push_back(a[i++]);
-            } else if (i == a.size() || b[j].first < a[i].first) {
-                out.entries.push_back(b[j++]);
-            } else {
-                out.entries.emplace_back(a[i].first, a[i].second + b[j].second);
-                ++i;
-                ++j;
-            }
-        }
+        const SizeType base = out.entries.size();
+        const SizeType merged = merge_length_bins(a, b, nullptr);
+        out.entries.resize(base + merged);
+        (void)merge_length_bins(a, b, out.entries.data() + base);
         out.reach[idx] = reach;
         out.first.push_back(out.entries.size());
     }
@@ -317,67 +307,30 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                     // Preserve the exact DM values of custom physical grids.
                     out.dm_grid[k] = root_dm[d];
                 }
+                const double mw =
+                    packed ? row_mean_weight(length_counts, smear,
+                                             plan.get_box_fraction_bits(), unit)
+                           : 0.0;
                 for (SizeType f = 0; f < widths.size(); ++f) {
-                    const SizeType width = widths[f];
-                    const SizeType w_edge =
-                        config.use_trapezoid ? trapezoid_edge_width(widths[f])
-                                             : 0;
-                    double variance    = 0;
-                    double mean_weight = 0;
-                    for (const auto& [len, count] : length_counts) {
-                        const double weight =
-                            smear ? box_weight(len,
-                                               plan.get_box_fraction_bits()) *
-                                        unit
-                                  : 1.0;
-                        const auto n = static_cast<double>(count);
-                        variance += n * fdmt_trapezoid_variance(len, width,
-                                                                w_edge, weight);
-                        mean_weight += n * static_cast<double>(len) * weight;
-                    }
-                    if (variance == 0) {
-                        // Every channel of the row is killed: never detect.
-                        out.inv_sigma_lut[k * widths.size() + f] = 0;
-                        out.raw_thresh_lut[k * widths.size() + f] =
-                            std::numeric_limits<float>::max();
-                        if (packed) {
-                            out.integer_mean_lut[k * widths.size() + f] = 0;
-                            out.integer_thresh_lut[k * widths.size() + f] =
-                                UINT64_MAX;
-                        }
-                        continue;
-                    }
-                    const double sigma =
-                        config.noise_sigma * std::sqrt(variance);
-                    const float inv_sigma = static_cast<float>(1.0 / sigma);
-                    const float threshold =
-                        static_cast<float>(config.detect_thresh * sigma);
-                    if (!utils::is_finite_bits(inv_sigma) ||
-                        !utils::is_finite_bits(threshold) || inv_sigma <= 0 ||
-                        threshold <= 0) {
+                    const auto r = row_width_noise(
+                        length_counts, widths[f], config, smear,
+                        plan.get_box_fraction_bits(), unit, packed, mw);
+                    if (!r.ok_float) {
                         throw std::invalid_argument(
                             "FDMTBoxcar: sigma/threshold is outside float32 "
                             "range");
                     }
-                    out.inv_sigma_lut[k * widths.size() + f]  = inv_sigma;
-                    out.raw_thresh_lut[k * widths.size() + f] = threshold;
+                    if (!r.ok_int) {
+                        throw std::invalid_argument(
+                            "FDMTBoxcar: integer threshold exceeds uint64");
+                    }
+                    out.inv_sigma_lut[(k * widths.size()) + f]  = r.inv_sigma;
+                    out.raw_thresh_lut[(k * widths.size()) + f] = r.thresh;
                     if (packed) {
-                        const double scale = smear ? 1.0 / unit : 1.0;
-                        const double filter_weight =
-                            w_edge == 0
-                                ? static_cast<double>(width)
-                                : static_cast<double>(2 * (width - w_edge));
-                        const double mean   = config.input_mean * mean_weight *
-                                              filter_weight * scale;
-                        const double cutoff = std::ceil(
-                            mean + config.detect_thresh * sigma * scale);
-                        if (cutoff >= std::ldexp(1.0, 64)) {
-                            throw std::invalid_argument(
-                                "FDMTBoxcar: integer threshold exceeds uint64");
-                        }
-                        out.integer_mean_lut[k * widths.size() + f] = mean;
-                        out.integer_thresh_lut[k * widths.size() + f] =
-                            static_cast<uint64_t>(cutoff);
+                        out.integer_mean_lut[(k * widths.size()) + f] =
+                            r.integer_mean;
+                        out.integer_thresh_lut[(k * widths.size()) + f] =
+                            r.integer_thresh;
                     }
                 }
             }

@@ -423,39 +423,6 @@ std::vector<float> DDMTPlan::get_effective_variance_grid() const noexcept {
 std::vector<float> DDMTPlan::get_effective_sigma_grid() const noexcept {
     return m_impl->get_effective_sigma_grid();
 }
-namespace {
-
-// DDMTPlan's Levin grids: generate_levin_dm_grid() in float. tol is passed
-// through as given (0 is invalid here, not the free function's default).
-std::vector<float> levin_grid(float dm_start,
-                              float dm_end,
-                              float tsamp,
-                              float pulse_width,
-                              float f_min,
-                              float f_max,
-                              SizeType nchans,
-                              float tol,
-                              bool piecewise,
-                              SizeType min_run) {
-    if (!utils::is_finite_bits(tol) || !(tol > 1.0F)) {
-        throw std::invalid_argument(
-            fmt::format("Levin DM grid: tol must be > 1, got {}", tol));
-    }
-    DMGridConfig c;
-    c.f_min       = f_min;
-    c.f_max       = f_max;
-    c.nchans      = nchans;
-    c.tsamp       = tsamp;
-    c.pulse_width = pulse_width;
-    c.tol         = tol;
-    c.piecewise   = piecewise;
-    c.min_run     = min_run;
-    const auto g  = plans::generate_levin_dm_grid(c, dm_start, dm_end);
-    return {g.begin(), g.end()}; // float values, exact
-}
-
-} // namespace
-
 std::vector<float> DDMTPlan::generate_levin_dm_grid(float dm_start,
                                                     float dm_end,
                                                     float tsamp,
@@ -464,8 +431,8 @@ std::vector<float> DDMTPlan::generate_levin_dm_grid(float dm_start,
                                                     float f_max,
                                                     SizeType nchans,
                                                     float tol) {
-    return levin_grid(dm_start, dm_end, tsamp, pulse_width, f_min, f_max,
-                      nchans, tol, false, 32);
+    return utils::generate_levin_dm_grid(dm_start, dm_end, tsamp, pulse_width,
+                                         f_min, f_max, nchans, tol);
 }
 std::vector<float>
 DDMTPlan::generate_levin_dm_grid_piecewise(float dm_start,
@@ -477,8 +444,9 @@ DDMTPlan::generate_levin_dm_grid_piecewise(float dm_start,
                                            SizeType nchans,
                                            float tol,
                                            SizeType min_run) {
-    return levin_grid(dm_start, dm_end, tsamp, pulse_width, f_min, f_max,
-                      nchans, tol, true, min_run);
+    return utils::generate_levin_dm_grid_piecewise(dm_start, dm_end, tsamp,
+                                                   pulse_width, f_min, f_max,
+                                                   nchans, tol, min_run);
 }
 
 } // namespace dmt::plans

@@ -24,14 +24,16 @@ namespace dmt::plans {
 float FDMTPlan::Impl::variance_from_smearing_row(
     const float* smearing_row,
     float w,
-    std::span<const uint8_t> kill_mask) const noexcept {
+    std::span<const uint8_t> kill_mask,
+    SizeType chan_begin,
+    SizeType chan_end) const noexcept {
     // Each channel's level-0 box of L samples carries the box-mean
     // weight round(2^b / L) * 2^-b (see get_box_fraction_bits()).
     // Killed channels read as zero and add nothing.
     const auto bits  = get_box_fraction_bits();
     const double inv = std::ldexp(1.0, -static_cast<int>(bits));
     double total_var = 0.0;
-    for (SizeType c = 0; c < m_nchans; ++c) {
+    for (SizeType c = chan_begin; c < chan_end; ++c) {
         if (!is_active(kill_mask, c)) {
             continue;
         }
@@ -92,9 +94,11 @@ float FDMTPlan::Impl::get_effective_variance(
     if (!use_box_smearing) {
         return static_cast<float>(count_active(kill_mask, 0, m_nchans)) * w;
     }
-    const auto smearing_grid = get_smearing_grid_final();
-    return variance_from_smearing_row(&smearing_grid[dm_idx * m_nchans], w,
-                                      kill_mask);
+    std::vector<float> row(m_nchans, 0.0F);
+    if (m_niters > 0) {
+        smearing_row(m_niters, dm_idx, row);
+    }
+    return variance_from_smearing_row(row.data(), w, kill_mask);
 }
 
 float FDMTPlan::Impl::get_effective_sigma(
@@ -122,15 +126,12 @@ std::vector<float> FDMTPlan::Impl::get_effective_variance_grid(
             grid, static_cast<float>(count_active(kill_mask, 0, m_nchans)) * w);
         return grid;
     }
-    // Compute the O(ndms * nchans) smearing-grid tree trace exactly
-    // once and reuse it for every DM index below. Calling
-    // get_effective_variance() in this loop instead would recompute
-    // get_smearing_grid_final() from scratch on every iteration, making
-    // this O(ndms^2 * nchans) for no reason.
-    const auto smearing_grid = get_smearing_grid_final();
+    std::vector<float> row(m_nchans, 0.0F);
     for (SizeType i = 0; i < ndms; ++i) {
-        grid[i] = variance_from_smearing_row(&smearing_grid[i * m_nchans], w,
-                                             kill_mask);
+        if (m_niters > 0) {
+            smearing_row(m_niters, i, row);
+        }
+        grid[i] = variance_from_smearing_row(row.data(), w, kill_mask);
     }
     return grid;
 }
@@ -180,45 +181,10 @@ std::vector<float> FDMTPlan::Impl::get_subband_variance_grid(
     // The level-0 box of every channel a row reaches (all of the
     // subband's channels, once each), as in get_smearing_grid_final().
     std::vector<float> smear(m_nchans, 0.0F);
-    const auto& boxes = m_container.level0_boxes;
-    const auto trace  = [&](auto& self, SizeType l, SizeType idx) -> void {
-        const auto& c = m_container.coordinates[l][idx];
-        if (l == 0) {
-            smear[c.i_sub] =
-                boxes.empty()
-                    ? std::abs(static_cast<float>(
-                          m_container.grids[0][c.i_sub].dt_grid[c.i_dt]))
-                    : static_cast<float>(boxes[idx].s);
-            return;
-        }
-        self(self, l - 1, c.i_coord_tail);
-        if (c.i_coord_head != SIZE_MAX) {
-            self(self, l - 1, c.i_coord_head);
-        }
-    };
-    const auto bits  = get_box_fraction_bits();
-    const double inv = std::ldexp(1.0, -static_cast<int>(bits));
     for (SizeType d = 0; d < g.ndt; ++d) {
-        if (level == 0) {
-            smear[subband] =
-                boxes.empty() ? std::abs(static_cast<float>(g.dt_grid[d]))
-                              : static_cast<float>(boxes[g.coord_offset + d].s);
-        } else {
-            trace(trace, level, g.coord_offset + d);
-        }
-        double total = 0.0;
-        for (SizeType ch = g.chan_begin; ch < g.chan_end; ++ch) {
-            if (!is_active(kill_mask, ch)) {
-                continue;
-            }
-            const auto box_len = static_cast<SizeType>(smear[ch]) + 1;
-            const double weight =
-                static_cast<double>(
-                    algorithms::detail::box_weight(box_len, bits)) *
-                inv;
-            total += algorithms::detail::fdmt_box_variance(box_len, w, weight);
-        }
-        out[d] = static_cast<float>(total);
+        smearing_row(level, g.coord_offset + d, smear);
+        out[d] = variance_from_smearing_row(smear.data(), w, kill_mask,
+                                            g.chan_begin, g.chan_end);
     }
     return out;
 }

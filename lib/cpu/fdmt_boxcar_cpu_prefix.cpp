@@ -17,6 +17,73 @@
 
 namespace dmt::algorithms::detail::fdmt_boxcar_cpu {
 
+namespace {
+
+inline void build_range_min(const double* level0,
+                            double* dst_levels,
+                            SizeType len,
+                            SizeType stride,
+                            SizeType levels) noexcept {
+    for (SizeType k = 1; k <= levels; ++k) {
+        const SizeType half = SizeType{1} << (k - 1);
+        if (half >= len) {
+            break;
+        }
+        const double* src = k == 1 ? level0 : dst_levels + ((k - 2) * stride);
+        double* dst       = dst_levels + ((k - 1) * stride);
+        const SizeType m  = len - (2 * half) + 1;
+#pragma omp simd
+        for (SizeType j = 0; j < m; ++j) {
+            dst[j] = std::min(src[j], src[j + half]);
+        }
+    }
+}
+
+template <typename Prefix, typename Thr>
+inline bool check_width_range(const plans::BoxcarPlanePlan& plane,
+                              const Thr* thr_row,
+                              const BoxcarRow& row,
+                              const Prefix* prefix,
+                              SizeType lookback,
+                              uint64_t start,
+                              SizeType n,
+                              bool cold,
+                              bool use_trapezoid,
+                              SizeType f_lo,
+                              SizeType f_hi) noexcept {
+    const Prefix* hi = prefix + lookback + 1;
+    for (SizeType f = f_lo; f < f_hi; ++f) {
+        const SizeType width  = plane.widths[f];
+        const SizeType w_edge = use_trapezoid ? trapezoid_edge_width(width) : 0;
+        const Prefix* lo      = prefix + lookback + 1 - width;
+        const auto th         = static_cast<Prefix>(thr_row[f]);
+        const uint64_t first_valid = row.warmup + width - 1;
+        bool hit                   = false;
+        if (w_edge == 0) {
+#pragma omp simd reduction(|| : hit)
+            for (SizeType t = 0; t < n; ++t) {
+                hit = hit || (hi[t] - lo[t] >= th &&
+                              (!cold || start + t >= first_valid));
+            }
+        } else {
+            const Prefix* lo_in = prefix + lookback + 1 - width + w_edge;
+            const Prefix* hi_in = prefix + lookback + 1 - w_edge;
+#pragma omp simd reduction(|| : hit)
+            for (SizeType t = 0; t < n; ++t) {
+                const Prefix sum = (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
+                hit = hit ||
+                      (sum >= th && (!cold || start + t >= first_valid));
+            }
+        }
+        if (hit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 void FDMTBoxcarCpuEngine::make_screen_groups(
     const std::vector<uint32_t>& widths) {
     m_screen_levels = 0;
@@ -223,20 +290,8 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
         group_thresh = m_group_thresh.data() + (tid * m_groups.size());
         range_min    = m_range_min.data() +
                        (tid * screen_slots() * (m_width + m_tile + 1));
-        for (SizeType g = 0; g < m_groups.size(); ++g) {
-            if constexpr (std::is_integral_v<T>) {
-                // Mean-centred cutoffs: integer cutoff minus the
-                // width's mean (screen_tile_int()). Set above any centered
-                // cutoff without relying on Inf under -ffast-math.
-                double th = std::numeric_limits<double>::max();
-                for (SizeType f = m_groups[g].f_lo; f < m_groups[g].f_hi; ++f) {
-                    const SizeType i = (dm * m_filters) + f;
-                    th               = std::min(
-                        th, static_cast<double>(plane.integer_thresh_lut[i]) -
-                                plane.integer_mean_lut[i]);
-                }
-                group_thresh[g] = th;
-            }
+        if constexpr (std::is_integral_v<T>) {
+            set_igroups(tables.screen_ithr);
         }
     }
     for (SizeType t0 = 0; t0 < input.nsamps; t0 += m_tile) {
@@ -248,7 +303,7 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
         const bool cold =
             m_config.skip_cold_prefix && start + 1 < row.warmup + m_width;
         if constexpr (!std::is_integral_v<T>) {
-            if (m_noise_on) {
+            if (m_noise_ring.enabled()) {
                 screen_thr =
                     tile_tables(plane, dm, row_idx, start, n, tid, tables);
                 if (tables.mixed) {
@@ -277,36 +332,15 @@ void FDMTBoxcarCpuEngine::score(const plans::BoxcarPlanePlan& plane,
             }
             screened = true;
         }
-        for (SizeType f = 0; f < m_filters && !hit && !screened; ++f) {
-            const SizeType width  = plane.widths[f];
-            const SizeType w_edge = m_config.use_trapezoid
-                                        ? trapezoid_edge_width(plane.widths[f])
-                                        : 0;
-            const Prefix* lo      = prefix + lookback + 1 - width;
-            const Prefix* hi      = prefix + lookback + 1;
-            const auto threshold  = [&] {
-                if constexpr (std::is_integral_v<T>) {
-                    return tables.screen_ithr[f];
-                } else {
-                    return static_cast<Prefix>(screen_thr[f]);
-                }
-            }();
-            const uint64_t first_valid = row.warmup + width - 1;
-            if (w_edge == 0) {
-#pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    hit = hit || (hi[t] - lo[t] >= threshold &&
-                                  (!cold || start + t >= first_valid));
-                }
+        if (!hit && !screened) {
+            if constexpr (std::is_integral_v<T>) {
+                hit = check_width_range(plane, tables.screen_ithr, row, prefix,
+                                        lookback, start, n, cold,
+                                        m_config.use_trapezoid, 0, m_filters);
             } else {
-                const Prefix* lo_in = prefix + lookback + 1 - width + w_edge;
-                const Prefix* hi_in = prefix + lookback + 1 - w_edge;
-#pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    const Prefix sum = (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
-                    hit = hit || (sum >= threshold &&
-                                  (!cold || start + t >= first_valid));
-                }
+                hit = check_width_range(plane, screen_thr, row, prefix,
+                                        lookback, start, n, cold,
+                                        m_config.use_trapezoid, 0, m_filters);
             }
         }
         if (hit || open) {
@@ -343,19 +377,7 @@ bool FDMTBoxcarCpuEngine::screen_tile(const plans::BoxcarPlanePlan& plane,
                                       double* range_min) const {
     const SizeType len    = lookback + n + 1; // prefix entries
     const SizeType stride = m_width + m_tile + 1;
-    for (SizeType k = 1; k <= m_screen_levels; ++k) {
-        const SizeType half = SizeType{1} << (k - 1);
-        if (half >= len) {
-            break;
-        }
-        const double* src = k == 1 ? prefix : range_min + ((k - 2) * stride);
-        double* dst       = range_min + ((k - 1) * stride);
-        const SizeType m  = len - (2 * half) + 1;
-#pragma omp simd
-        for (SizeType j = 0; j < m; ++j) {
-            dst[j] = std::min(src[j], src[j + half]);
-        }
-    }
+    build_range_min(prefix, range_min, len, stride, m_screen_levels);
     const double* hi = prefix + lookback + 1;
     for (SizeType g = 0; g < m_groups.size(); ++g) {
         const auto& grp     = m_groups[g];
@@ -378,33 +400,10 @@ bool FDMTBoxcarCpuEngine::screen_tile(const plans::BoxcarPlanePlan& plane,
         if (!any) {
             continue;
         }
-        for (SizeType f = grp.f_lo; f < grp.f_hi; ++f) {
-            const SizeType width = plane.widths[f];
-            const SizeType w_edge =
-                m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
-            const double* lo           = prefix + lookback + 1 - width;
-            const auto th              = static_cast<double>(thr_row[f]);
-            const uint64_t first_valid = row.warmup + width - 1;
-            bool hit                   = false;
-            if (w_edge == 0) {
-#pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    hit = hit || (hi[t] - lo[t] >= th &&
-                                  (!cold || start + t >= first_valid));
-                }
-            } else {
-                const double* lo_in = prefix + lookback + 1 - width + w_edge;
-                const double* hi_in = prefix + lookback + 1 - w_edge;
-#pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    const double sum = (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
-                    hit = hit ||
-                          (sum >= th && (!cold || start + t >= first_valid));
-                }
-            }
-            if (hit) {
-                return true;
-            }
+        if (check_width_range(plane, thr_row, row, prefix, lookback, start, n,
+                              cold, m_config.use_trapezoid, grp.f_lo,
+                              grp.f_hi)) {
+            return true;
         }
     }
     return false;
@@ -435,19 +434,7 @@ bool FDMTBoxcarCpuEngine::screen_tile_int(const plans::BoxcarPlanePlan& plane,
     }
     const double scale = static_cast<double>(prefix[len - 1]) +
                          (std::abs(m1) * static_cast<double>(len)) + 1.0;
-    for (SizeType k = 1; k <= m_screen_levels; ++k) {
-        const SizeType half = SizeType{1} << (k - 1);
-        if (half >= len) {
-            break;
-        }
-        const double* src = range_min + ((k - 1) * stride);
-        double* dst       = range_min + (k * stride);
-        const SizeType m  = len - (2 * half) + 1;
-#pragma omp simd
-        for (SizeType j = 0; j < m; ++j) {
-            dst[j] = std::min(src[j], src[j + half]);
-        }
-    }
+    build_range_min(centred, range_min + stride, len, stride, m_screen_levels);
     const double* hi = centred + lookback + 1;
     for (SizeType g = 0; g < m_groups.size(); ++g) {
         const auto& grp = m_groups[g];
@@ -468,35 +455,10 @@ bool FDMTBoxcarCpuEngine::screen_tile_int(const plans::BoxcarPlanePlan& plane,
         if (!any) {
             continue;
         }
-        const uint64_t* phi = prefix + lookback + 1;
-        for (SizeType f = grp.f_lo; f < grp.f_hi; ++f) {
-            const SizeType width = plane.widths[f];
-            const SizeType w_edge =
-                m_config.use_trapezoid ? trapezoid_edge_width(width) : 0;
-            const uint64_t* lo         = prefix + lookback + 1 - width;
-            const uint64_t th          = ithr_row[f];
-            const uint64_t first_valid = row.warmup + width - 1;
-            bool hit                   = false;
-            if (w_edge == 0) {
-#pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    hit = hit || (phi[t] - lo[t] >= th &&
-                                  (!cold || start + t >= first_valid));
-                }
-            } else {
-                const uint64_t* lo_in = prefix + lookback + 1 - width + w_edge;
-                const uint64_t* hi_in = prefix + lookback + 1 - w_edge;
-#pragma omp simd reduction(|| : hit)
-                for (SizeType t = 0; t < n; ++t) {
-                    const uint64_t sum =
-                        (phi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
-                    hit = hit ||
-                          (sum >= th && (!cold || start + t >= first_valid));
-                }
-            }
-            if (hit) {
-                return true;
-            }
+        if (check_width_range(plane, ithr_row, row, prefix, lookback, start, n,
+                              cold, m_config.use_trapezoid, grp.f_lo,
+                              grp.f_hi)) {
+            return true;
         }
     }
     return false;

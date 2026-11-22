@@ -334,6 +334,28 @@ void launch_unpack_time_major(const uint8_t* packed,
                                 static_cast<int64_t>(nsamps), samp_bytes);
 }
 
+/// dst row r, samples [o0, o0 + cnt) = time row r from sample skip (zero
+/// past n_fft for stepper views).
+__global__ inline void kernel_trim(const float* __restrict__ time,
+                                   float* __restrict__ dst,
+                                   int64_t nrows,
+                                   int64_t n_fft,
+                                   int64_t dst_len,
+                                   int64_t o0,
+                                   int64_t cnt,
+                                   int64_t skip) {
+    const auto t =
+        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (t >= cnt) {
+        return;
+    }
+    for (int64_t row = blockIdx.y; row < nrows; row += gridDim.y) {
+        const auto s = skip + t;
+        dst[(row * dst_len) + o0 + t] =
+            s < n_fft ? time[(row * n_fft) + s] : 0.0F;
+    }
+}
+
 /// Time-major packed input at `nbits` -> channel-major float rows.
 inline void unpack_time_major(const uint8_t* packed,
                               float* out,

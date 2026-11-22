@@ -17,6 +17,7 @@
 
 #include <cstdint>
 
+#include "dmt/cfdmt_common.hpp"
 #include "dmt/fourier_gpu.cuh"
 #include "dmt/gpu_compat.cuh"
 
@@ -264,9 +265,7 @@ __global__ void chirp_kernel(const unsigned long long* __restrict__ base,
         const unsigned long long ph = base[idx] + (k * inc[idx]);
         float sn                    = 0.0F;
         float cs                    = 0.0F;
-        sincospif(2.0F * static_cast<float>(static_cast<long long>(ph)) *
-                      5.42101086242752217e-20F,
-                  &sn, &cs);
+        sincospif(2.0F * cfdmt::turn_of(static_cast<uint64_t>(ph)), &sn, &cs);
         const float w = taper[idx % mbin];
         chirp[idx]    = {w * cs, w * sn};
     }
