@@ -1134,6 +1134,10 @@ SizeType FDMTBoxcarCudaEngine::chunk_nsamps() const noexcept {
     return m_driver->chunk_nsamps();
 }
 
+FDMTPath FDMTBoxcarCudaEngine::path() const noexcept {
+    return m_driver->path();
+}
+
 std::string FDMTBoxcarCudaEngine::search_path() const {
     std::string path = m_driver->search_path();
     if (m_global_ring) {

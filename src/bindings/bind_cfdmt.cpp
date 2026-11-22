@@ -171,7 +171,8 @@ py::object coh_execute(const CohFDMT& coh,
 py::dict coh_memory_dict(const plans::CohFDMTMemoryUsage& m) {
     return py::dict("spectrum"_a = m.spectrum, "waterfall"_a = m.waterfall,
                     "fdmt"_a = m.fdmt, "workspace"_a = m.workspace,
-                    "output"_a = m.output, "total"_a = m.total());
+                    "output"_a = m.output, "pinned"_a = m.pinned,
+                    "host_pinned"_a = m.host_pinned, "total"_a = m.total());
 }
 
 } // namespace

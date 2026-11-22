@@ -278,6 +278,18 @@ public:
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_top && m_top->windowed ? m_top->max_lag : 0;
     }
+    [[nodiscard]] detail::FDMTPath path() const noexcept override {
+        if (m_top && m_top->windowed) {
+            return detail::FDMTPath::kWindowed;
+        }
+        if (m_direct && m_direct->skewed) {
+            return detail::FDMTPath::kSkewed;
+        }
+        if (m_direct || m_top) {
+            return detail::FDMTPath::kDirect;
+        }
+        return detail::FDMTPath::kTree;
+    }
     [[nodiscard]] std::string search_path() const override;
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override;
@@ -429,15 +441,15 @@ private:
     //   only its newest samples, and no history is shifted or doubled.
     // The level-0 input history and the FIFOs flip on m_parity per chunk.
     std::array<gpu_utils::PlannedVector<float>, 2> m_tree_fifo_d;
-    mutable gpu_utils::PlannedVector<float> m_tree_ring_d;
+    gpu_utils::PlannedVector<float> m_tree_ring_d;
     SizeType m_fifo_levels{0};
     SizeType m_fifo_size{0};
-    mutable SizeType m_ring_size{0};
+    SizeType m_ring_size{0};
     SizeType m_ring_low_base{0};
     SizeType m_ring_low_size{0};
     SizeType m_ring_high_orig_base{0};
     SizeType m_ring_high_size{0};
-    mutable bool m_full_tree_ring{false};
+    bool m_full_tree_ring{false};
     std::vector<SizeType> m_level_max_extra;
     bool m_parity{false};
     float* m_fifo_in_ptr{nullptr};
@@ -574,9 +586,8 @@ private:
     std::unique_ptr<DirectTopD> m_top;
     bool m_search_upper{false};
     SizeType m_max_memory{kFDMTDefaultMaxMemory}; // FDMTEngineConfig
-    // FDMTEngineConfig::gpu_path
-    detail::FDMTEngineConfig::GPUPath m_path{
-        detail::FDMTEngineConfig::GPUPath::kAuto};
+    // FDMTEngineConfig::path
+    detail::FDMTPath m_path{detail::FDMTPath::kAuto};
     bool m_search_only{false}; // FDMTEngineConfig::search_only
     // set_search_keep(): level-0 rows the search reads as zero.
     const uint8_t* m_search_keep{nullptr};
@@ -647,12 +658,11 @@ private:
     void check_root_output() const;
 
     /// Tree history offsets are unsigned 32-bit (plans_cuda.cuh), taken from
-    /// the full tree layout. Checked against the highest offset an active
-    /// FIFO or ring level reads (`ring_elems` per beam): levels covered by
-    /// the direct levels or the direct top are never indexed, so a plan
-    /// whose full tree exceeds the range still runs when they cover it.
-    /// Checked again when ensure_full_tree_history() expands to the full
-    /// tree.
+    /// the full tree layout. Checked at construction against the highest
+    /// offset any active FIFO or ring level can read (`ring_elems` per beam):
+    /// levels covered by the direct levels or the direct top are never
+    /// indexed on search-only or skewed engines, while ordinary non-skewed
+    /// FDMT allocates the full tree ring upfront for stepper / history use.
     static void check_tree_ring_extent(SizeType ring_elems);
 
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const;
@@ -662,8 +672,6 @@ private:
                              SizeType dmt_size) const;
 
     void check_subband_idx(SizeType subband_idx) const;
-
-    void ensure_full_tree_history(cudaStream_t stream) const;
 
     // ---- skewed-window streaming history (m_direct->skewed) -------------
     //
@@ -691,6 +699,9 @@ private:
     [[nodiscard]] std::vector<SkewHistBuffer> skew_hist_buffers() const;
 
     [[nodiscard]] uint64_t skew_layout_hash() const;
+
+    [[nodiscard]] uint64_t
+    check_skew_history_header(std::span<const float> hdr) const;
 
     void save_skew_history_d(float* dst, cudaStream_t stream) const;
 

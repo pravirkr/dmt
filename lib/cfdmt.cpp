@@ -86,8 +86,7 @@ const plans::CohFDMTPlan& CohFDMT::get_plan() const noexcept {
 }
 Backend CohFDMT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int CohFDMT::nthreads() const noexcept {
-    return backend() == Backend::kCPU ? std::max(1, m_impl->m_cfg.exec.nthreads)
-                                      : 1;
+    return std::max(1, m_impl->m_cfg.exec.nthreads);
 }
 int CohFDMT::device() const noexcept {
     return backend() == Backend::kCPU ? -1 : m_impl->m_cfg.exec.device;

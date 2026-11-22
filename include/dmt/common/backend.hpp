@@ -37,8 +37,9 @@ enum class Backend : std::uint8_t { kCPU, kCUDA, kHIP };
 /**
  * @brief Where and how an algorithm instance runs.
  *
- * `nthreads` is honored by Backend::kCPU (OpenMP workers) and `device` by the
- * GPU backends (device ordinal). The field that does not apply is ignored.
+ * `nthreads` is honored by Backend::kCPU (OpenMP workers) and by GPU backends
+ * (host-memory staging worker threads, capped by the staging pipeline;
+ * default 1). `device` selects the GPU device ordinal (ignored on CPU).
  * Constructing an algorithm with a backend this build does not contain
  * throws std::invalid_argument naming available_backends().
  */
@@ -50,11 +51,13 @@ struct Exec {
     [[nodiscard]] static constexpr Exec cpu(int nthreads = 1) noexcept {
         return {.backend = Backend::kCPU, .nthreads = nthreads, .device = 0};
     }
-    [[nodiscard]] static constexpr Exec cuda(int device = 0) noexcept {
-        return {.backend = Backend::kCUDA, .nthreads = 1, .device = device};
+    [[nodiscard]] static constexpr Exec cuda(int device   = 0,
+                                             int nthreads = 1) noexcept {
+        return {.backend = Backend::kCUDA, .nthreads = nthreads, .device = device};
     }
-    [[nodiscard]] static constexpr Exec hip(int device = 0) noexcept {
-        return {.backend = Backend::kHIP, .nthreads = 1, .device = device};
+    [[nodiscard]] static constexpr Exec hip(int device   = 0,
+                                            int nthreads = 1) noexcept {
+        return {.backend = Backend::kHIP, .nthreads = nthreads, .device = device};
     }
 };
 

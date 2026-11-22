@@ -112,8 +112,8 @@ public:
           m_ctx(m_model.context()) {
         m_deferred.defer(cfg.defer_allocation);
         m_seg_n = ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
-        if (const auto cap = detail::fft_segment_cap(); cap > 0) {
-            m_seg_n = std::min(m_seg_n, cap); // testing hook
+        if (cfg.max_segment > 0) {
+            m_seg_n = std::min(m_seg_n, cfg.max_segment);
         }
         m_deferred.assign(m_hist, history_state_size(), 0.0F);
         m_deferred.assign(m_hist_next, history_state_size(), 0.0F);

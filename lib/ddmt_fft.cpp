@@ -220,8 +220,7 @@ const plans::DDMTPlan& DDMTFFT::get_plan() const noexcept {
 SizeType DDMTFFT::get_nbeams() const noexcept { return m_impl->m_cfg.nbeams; }
 Backend DDMTFFT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int DDMTFFT::nthreads() const noexcept {
-    return backend() == Backend::kCPU ? std::max(1, m_impl->m_cfg.exec.nthreads)
-                                      : 1;
+    return std::max(1, m_impl->m_cfg.exec.nthreads);
 }
 int DDMTFFT::device() const noexcept {
     return backend() == Backend::kCPU ? -1 : m_impl->m_cfg.exec.device;

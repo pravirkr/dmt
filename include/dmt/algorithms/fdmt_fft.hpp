@@ -68,8 +68,12 @@ namespace dmt::algorithms {
  *
  * Runs on the backend chosen by the `Exec` constructor argument. The output
  * is compact: nbeams * plan.get_dmt_size() floats. Host memory works on every
- * backend (a GPU backend stages it and blocks); device memory (`DeviceSpan`)
- * on GPU backends only, asynchronous on the given Stream.
+ * backend (a GPU backend stages input/output device buffers and, when the
+ * output plane reaches 2 * min(max(1, nthreads), 4) * 8 MiB, pipelines
+ * device-to-host copies through that many pinned host bytes across up to
+ * min(nthreads, 4) host worker threads, reported in get_memory_usage().pinned
+ * and estimate_memory().host_pinned, and blocks); device memory (`DeviceSpan`)
+ * works on GPU backends only, asynchronous on the given Stream.
  */
 class FDMTFFT {
 public:
@@ -235,7 +239,7 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept;
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;

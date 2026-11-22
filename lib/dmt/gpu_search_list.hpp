@@ -16,7 +16,7 @@ namespace dmt::algorithms::detail {
 /// One configuration of a GPU subband search: the FDMT path and chunk.
 struct GPUSearchEntry {
     SizeType chunk;
-    FDMTEngineConfig::GPUPath path;
+    FDMTPath path;
     friend bool operator==(const GPUSearchEntry&,
                            const GPUSearchEntry&) = default;
 };
@@ -53,7 +53,7 @@ inline SizeType gpu_direct_min_chunk(SizeType max_boxcar) {
  */
 inline std::vector<GPUSearchEntry> gpu_search_list(SizeType cache_chunk,
                                                    SizeType max_boxcar) {
-    using P             = FDMTEngineConfig::GPUPath;
+    using P             = FDMTPath;
     const SizeType tmin = gpu_direct_min_chunk(max_boxcar);
     std::vector<GPUSearchEntry> list;
     if (cache_chunk != 0) {
@@ -104,7 +104,7 @@ GPUSearchChoice choose_gpu_search(const std::vector<GPUSearchEntry>& list,
                                   SizeType nsamps,
                                   Measure&& measure,
                                   bool search = true) {
-    using P = FDMTEngineConfig::GPUPath;
+    using P = FDMTPath;
     GPUSearchChoice out;
     std::map<std::pair<SizeType, P>, std::optional<SizeType>> built;
     const auto capped = [&](SizeType i) {

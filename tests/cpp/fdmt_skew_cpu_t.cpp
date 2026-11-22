@@ -327,15 +327,16 @@ DMT_SIZED_TEST_CASE(
 
 namespace {
 
-// make_fdmt_cpu engine on the skewed-window path (threshold 0) or the tree.
+// make_fdmt_cpu engine on the skewed-window path or the tree.
 std::unique_ptr<algorithms::detail::FDMTEngine>
 make_cpu_engine(const plans::FDMTPlan& plan, bool skew, SizeType chunk) {
     algorithms::detail::FDMTEngineConfig cfg{};
-    cfg.exec               = Exec::cpu();
-    cfg.chunk_nsamps       = chunk;
-    cfg.skew_history_bytes = skew ? 0 : SIZE_MAX;
-    auto e                 = algorithms::detail::make_fdmt_cpu(plan, cfg);
-    REQUIRE(e->search_path().empty() == !skew);
+    cfg.exec         = Exec::cpu();
+    cfg.chunk_nsamps = chunk;
+    cfg.path         = skew ? algorithms::detail::FDMTPath::kSkewed
+                            : algorithms::detail::FDMTPath::kTree;
+    auto e           = algorithms::detail::make_fdmt_cpu(plan, cfg);
+    REQUIRE(e->path() == cfg.path);
     return e;
 }
 
@@ -655,8 +656,8 @@ DMT_SIZED_TEST_CASE("FDMTBoxcar skewed path: subband search matches the tree",
                 const auto tree = run_subband_search(
                     plan, Exec::cpu(), false, packed, kBlocks, 1024, 0, false,
                     nullptr, 1.5F, &planes);
-                REQUIRE_FALSE(skew.path.empty());
-                REQUIRE(tree.path.empty());
+                REQUIRE(skew.fdmt_path == algorithms::detail::FDMTPath::kSkewed);
+                REQUIRE(tree.fdmt_path == algorithms::detail::FDMTPath::kTree);
                 // Lags are at most the root's largest delay.
                 const uint64_t cutoff =
                     (kBlocks * plan.get_nsamps()) -
@@ -1011,7 +1012,7 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: subband search matches CPU tree",
                 const auto cpu = run_subband_search(plan, Exec::cpu(), false,
                                                     packed, kBlocks);
                 INFO("gpu path: " << gpu.path);
-                REQUIRE(gpu.path.find("windowed") != std::string::npos);
+                REQUIRE(gpu.fdmt_path == algorithms::detail::FDMTPath::kWindowed);
                 const uint64_t cutoff =
                     (kBlocks * plan.get_nsamps()) -
                     static_cast<uint64_t>(plan.get_dt_max()) - 64;
@@ -1037,7 +1038,7 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: per-call masks match the CPU tree",
             const auto cpu = run_subband_search(plan, Exec::cpu(), false, false,
                                                 kBlocks, 1024, 0, true, &masks);
             INFO("gpu path: " << gpu.path);
-            REQUIRE(gpu.path.find("windowed") != std::string::npos);
+            REQUIRE(gpu.fdmt_path == algorithms::detail::FDMTPath::kWindowed);
             REQUIRE(gpu.latency > 0);
             require_same_before(gpu.candidates, cpu.candidates, UINT64_MAX,
                                 2e-5F);
@@ -1055,7 +1056,7 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: a call failing after its mask "
     const auto masks           = changing_masks(plan.get_nchans(), kBlocks);
     const auto clean = run_subband_search(plan, Exec::cuda(0), true, false,
                                           kBlocks, 1024, 0, true, &masks);
-    REQUIRE(clean.path.find("windowed") != std::string::npos);
+    REQUIRE(clean.fdmt_path == algorithms::detail::FDMTPath::kWindowed);
     REQUIRE(clean.latency > 0);
     for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
         DYNAMIC_SECTION("fail before block " << fail_at) {
@@ -1082,7 +1083,7 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: kKeepBrightest keeps the "
     const auto clean = run_subband_search(plan, Exec::cuda(0), true, false,
                                           kBlocks, 1024, 0, false, nullptr,
                                           1.5F, nullptr, SIZE_MAX, &open, &all);
-    REQUIRE(clean.path.find("windowed") != std::string::npos);
+    REQUIRE(clean.fdmt_path == algorithms::detail::FDMTPath::kWindowed);
     REQUIRE(clean.latency > 0);
     for (const auto& [q, k] :
          {std::pair<SizeType, SizeType>{2, 500}, {1, 100}}) {
@@ -1126,7 +1127,7 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: per-call masks with the width "
                 run_subband_search(plan, Exec::cpu(), false, false, kBlocks,
                                    4096, 0, true, &masks, kWtsp);
             INFO("gpu path: " << gpu.path);
-            REQUIRE(gpu.path.find("windowed") != std::string::npos);
+            REQUIRE(gpu.fdmt_path == algorithms::detail::FDMTPath::kWindowed);
             REQUIRE(gpu.latency > 0);
             require_same_before(gpu.candidates, cpu.candidates, UINT64_MAX,
                                 2e-5F);
@@ -1148,7 +1149,7 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: drain() searches the lagged tail",
             const auto cpu = run_subband_search(plan, Exec::cpu(), false,
                                                 packed, kBlocks, 1024, 0, true);
             INFO("gpu path: " << gpu.path);
-            REQUIRE(gpu.path.find("windowed") != std::string::npos);
+            REQUIRE(gpu.fdmt_path == algorithms::detail::FDMTPath::kWindowed);
             REQUIRE(gpu.latency > 0);
             REQUIRE(gpu.searched == n);
             for (const auto& c : gpu.candidates) {

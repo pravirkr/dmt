@@ -219,7 +219,10 @@ struct FDMTInput {
 class FDMTCpuEngine final : public detail::FDMTEngine {
 public:
     FDMTCpuEngine(const plans::FDMTPlan& plan,
-                  const detail::FDMTEngineConfig& cfg);
+                  const detail::FDMTEngineConfig& cfg,
+                  bool skew,
+                  SizeType chunk,
+                  SizeType skew_leaf = 0);
 
     ~FDMTCpuEngine() override = default;
 
@@ -300,6 +303,9 @@ public:
                 "FDMT: zero-block search needs the skewed path");
         }
         m_skew->execute_search_zero(sink);
+    }
+    [[nodiscard]] detail::FDMTPath path() const noexcept override {
+        return m_skew ? detail::FDMTPath::kSkewed : detail::FDMTPath::kTree;
     }
     [[nodiscard]] std::string search_path() const override {
         if (m_skew) {
@@ -603,28 +609,9 @@ private:
         return ((n + 63) / 64) * 64;
     }
 
-    /**
-     * Resolves fuse_levels and allocates every buffer execute() and the
-     * stepper use: the merge ops, the state halves and histories, per-level
-     * type tables, the box means and the per-thread workspace (see
-     * FDMTWorkspace). Nothing is allocated after this.
-     */
     /// Fuse level requested of the skewed-window engine (0: automatic).
     [[nodiscard]] SizeType skew_fuse_request(SizeType fuse_levels,
                                              SizeType max_fuse_levels) const;
-
-    /**
-     * Tree path or skewed-window engine (fdmt_skew.hpp), under the memory
-     * budget. Float input: the tree path when its history and state fit
-     * max_memory_bytes, else the skewed engine at the fastest (chunk, leaf
-     * level) of skew_candidates() whose estimate fits. Packed input with an
-     * automatic chunk: the skewed chunks of at least kSkewFirstMinChunk,
-     * then the tree, then the shorter chunks. An explicit chunk_nsamps
-     * takes the tree when it fits, else the skewed engine at that chunk
-     * with the fastest leaf level that fits it. Sets m_chunk and
-     * m_skew_leaf. Throws when nothing fits.
-     */
-    bool choose_skew(const detail::FDMTEngineConfig& cfg);
 
     /// Builds the tables and sizes the working buffers (m_planned, or the
     /// skewed engine's), without allocating them.

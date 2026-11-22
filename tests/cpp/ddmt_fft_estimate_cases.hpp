@@ -4,6 +4,8 @@
 // stream of equal calls, run until warm, holds what the estimate says.
 
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,18 +26,6 @@ using algorithms::DDMTFFTMemoryUsage;
 using algorithms::DDMTFFTMethod;
 using algorithms::DDMTFFTOptions;
 
-// Restores the segment-cap hook at scope exit.
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
-
 struct Case {
     std::string name;
     plans::DDMTPlan plan;
@@ -44,6 +34,34 @@ struct Case {
     SizeType nsamps{};
     SizeType cap{0}; // segment cap (0: none)
 };
+
+// Engine factory for capped cases (c.cap > 0), where tests force a short
+// segment directly through DDMTFFTEngineConfig::max_segment.
+inline std::unique_ptr<algorithms::detail::DDMTFFTEngine>
+make_capped_engine(const Case& c, const Exec& exec, bool defer) {
+    const algorithms::detail::DDMTFFTEngineConfig cfg{
+        .nbeams           = c.nbeams,
+        .exec             = exec,
+        .options          = c.options,
+        .max_segment      = c.cap,
+        .defer_allocation = defer};
+    if (exec.backend == Backend::kCPU) {
+        return algorithms::detail::make_ddmt_fft_cpu(c.plan, cfg);
+    }
+#ifdef DMT_ENABLE_GPU
+    if (exec.backend == algorithms::detail::kGPUBackend) {
+        return algorithms::detail::make_ddmt_fft_gpu(c.plan, cfg);
+    }
+#endif
+    throw std::invalid_argument("DDMTFFT estimate test: unavailable backend");
+}
+
+inline DDMTFFTMemoryUsage usage_of(const DDMTFFT& eng) {
+    return eng.get_memory_usage();
+}
+inline DDMTFFTMemoryUsage usage_of(const algorithms::detail::DDMTFFTEngine& eng) {
+    return eng.memory_usage();
+}
 
 inline plans::DDMTPlan
 plan_of(float dm_max, SizeType nbits, std::vector<uint8_t> mask = {}) {
@@ -76,22 +94,26 @@ inline std::vector<Case> cases() {
 
 inline void check_usage(const DDMTFFTMemoryUsage& want,
                         SizeType staging,
+                        SizeType pinned,
                         const DDMTFFTMemoryUsage& got) {
     CHECK(want.plan == got.plan);
     CHECK(want.history == got.history);
     CHECK(want.transform == got.transform);
     CHECK(want.workspace == got.workspace);
     CHECK(staging == got.staging);
+    CHECK(pinned == got.pinned);
+    CHECK(want.pinned == 0);
     CHECK(want.total() > 0);
 }
 
 /// Calls `call(n_out)` from a cold start until its first warm call (the
 /// estimate's stream), checks the usage, then once more: nothing changes.
-template <typename F>
-void check_stream(DDMTFFT& eng,
+template <typename Engine, typename F>
+void check_stream(Engine& eng,
                   SizeType nsamps,
                   const DDMTFFTMemoryEstimate& e,
                   SizeType staging,
+                  SizeType pinned,
                   const F& call) {
     for (int i = 0; i < 4000; ++i) {
         const auto out = eng.get_output_nsamps(nsamps);
@@ -101,22 +123,26 @@ void check_stream(DDMTFFT& eng,
         }
     }
     REQUIRE(eng.get_output_nsamps(nsamps) == nsamps);
-    check_usage(e.usage, staging, eng.get_memory_usage());
+    check_usage(e.usage, staging, pinned, usage_of(eng));
     call(nsamps);
-    check_usage(e.usage, staging, eng.get_memory_usage());
+    check_usage(e.usage, staging, pinned, usage_of(eng));
 }
 
 enum class HostCall : std::uint8_t { kChannelMajor, kTimeMajor };
 
 /// A host-memory call of `nsamps` zero samples (float or packed, as the
 /// plan; time-major packed when asked).
-inline void
-host_call(DDMTFFT& eng, SizeType nsamps, SizeType out, HostCall kind) {
-    const auto& plan  = eng.get_plan();
+template <typename Engine>
+void host_call(Engine& eng,
+               const plans::DDMTPlan& plan,
+               SizeType nbeams,
+               SizeType nsamps,
+               SizeType out,
+               HostCall kind) {
     const auto nbits  = plan.get_nbits();
     const auto nchans = plan.get_nchans();
-    const auto rows   = eng.get_nbeams() * nchans;
-    std::vector<float> dmt(eng.get_nbeams() * plan.get_dm_arr().size() * out);
+    const auto rows   = nbeams * nchans;
+    std::vector<float> dmt(nbeams * plan.get_dm_arr().size() * out);
     if (nbits == 32) {
         const std::vector<float> wf(rows * nsamps, 0.0F);
         eng.execute(wf, dmt);
@@ -126,7 +152,7 @@ host_call(DDMTFFT& eng, SizeType nsamps, SizeType out, HostCall kind) {
         eng.execute(wf, nsamps, dmt);
     } else {
         const std::vector<uint8_t> wf(
-            eng.get_nbeams() * nsamps *
+            nbeams * nsamps *
                 bit_pack_utils::packed_row_bytes(nchans, nbits),
             0);
         eng.execute_time_major(wf, nsamps, dmt);
@@ -137,20 +163,36 @@ host_call(DDMTFFT& eng, SizeType nsamps, SizeType out, HostCall kind) {
 /// `host_staging`) and, for packed plans, time-major.
 inline void check_host(const Case& c, const Exec& exec) {
     INFO(c.name);
-    const SegmentCap cap(c.cap);
-    const auto e =
-        DDMTFFT::estimate_memory(c.plan, c.nsamps, exec, c.nbeams, c.options);
+    const auto run = [&](auto& eng, const DDMTFFTMemoryEstimate& e,
+                         HostCall kind, SizeType staging) {
+        check_stream(eng, c.nsamps, e, staging, e.host_pinned,
+                     [&](SizeType out) {
+                         host_call(eng, c.plan, c.nbeams, c.nsamps, out, kind);
+                     });
+    };
+    if (c.cap == 0) {
+        const auto e = DDMTFFT::estimate_memory(c.plan, c.nsamps, exec,
+                                                c.nbeams, c.options);
+        {
+            DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
+            run(eng, e, HostCall::kChannelMajor, e.host_staging);
+        }
+        if (c.plan.get_nbits() != 32) {
+            DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
+            run(eng, e, HostCall::kTimeMajor, e.time_major_staging);
+        } else {
+            CHECK(e.time_major_staging == 0);
+        }
+        return;
+    }
+    const auto e = make_capped_engine(c, exec, true)->estimate(c.nsamps);
     {
-        DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
-        check_stream(eng, c.nsamps, e, e.host_staging, [&](SizeType out) {
-            host_call(eng, c.nsamps, out, HostCall::kChannelMajor);
-        });
+        auto eng = make_capped_engine(c, exec, false);
+        run(*eng, e, HostCall::kChannelMajor, e.host_staging);
     }
     if (c.plan.get_nbits() != 32) {
-        DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
-        check_stream(eng, c.nsamps, e, e.time_major_staging, [&](SizeType out) {
-            host_call(eng, c.nsamps, out, HostCall::kTimeMajor);
-        });
+        auto eng = make_capped_engine(c, exec, false);
+        run(*eng, e, HostCall::kTimeMajor, e.time_major_staging);
     } else {
         CHECK(e.time_major_staging == 0);
     }
@@ -203,7 +245,7 @@ inline void check_call_lengths(const Exec& exec) {
     CHECK(found);
     const auto e = DDMTFFT::estimate_memory(plan, 0, exec, 1, options);
     const DDMTFFT unused(plan, exec, 1, options);
-    check_usage(e.usage, 0, unused.get_memory_usage());
+    check_usage(e.usage, 0, 0, unused.get_memory_usage());
 }
 
 /// A configuration whose history alone (two copies of nbeams x 16 channels

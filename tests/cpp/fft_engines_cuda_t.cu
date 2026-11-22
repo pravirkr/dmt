@@ -95,17 +95,6 @@ DeviceSpan<const T> dcspan(const thrust::device_vector<T>& d) {
     return {thrust::raw_pointer_cast(d.data()), d.size()};
 }
 
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
-
 // A non-blocking stream (no implicit ordering with the legacy stream).
 struct NonBlockingStream {
     cudaStream_t s{nullptr};
@@ -413,18 +402,30 @@ TEST_CASE("FDMTFFT GPU forced segments match the CPU",
     for (const auto* mode : {"valid", "full"}) {
         for (const bool frac : {true, false}) {
             CAPTURE(mode, frac);
-            const SegmentCap cap(1024);
-            FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, mode,
-                        Exec::cpu(), 1, frac);
-            FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, mode,
-                        test::gpu_exec(), 1, frac);
-            const auto n = cpu.get_plan().get_dmt_size();
+            const plans::FDMTPlan plan(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1,
+                                       mode);
+            const auto fdmt_mode = std::string_view(mode) == "valid"
+                                       ? FDMTMode::kValid
+                                       : FDMTMode::kFull;
+            const algorithms::detail::FDMTFFTEngineConfig base{
+                .use_box_smearing  = true,
+                .mode              = fdmt_mode,
+                .nbeams            = 1,
+                .exec              = Exec::cpu(),
+                .fractional_delays = frac,
+                .max_segment       = 1024};
+            auto gpu_cfg = base;
+            gpu_cfg.exec = test::gpu_exec();
+            const auto cpu = algorithms::detail::make_fdmt_fft_cpu(plan, base);
+            const auto gpu =
+                algorithms::detail::make_fdmt_fft_gpu(plan, gpu_cfg);
+            const auto n = plan.get_dmt_size();
             std::vector<float> a(n);
             std::vector<float> b(n);
             for (unsigned blk = 0; blk < 2; ++blk) {
                 const auto wf = noise(nch * ns, 130 + blk);
-                cpu.execute(wf, a);
-                gpu.execute(wf, b);
+                cpu->execute(wf, a);
+                gpu->execute(wf, b);
                 CHECK(max_rel(b, a) < 2e-5);
             }
         }
@@ -541,18 +542,23 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
     gpu.execute(wf, b);
     CHECK(max_rel(b, a) < 2e-5);
 
-    const SegmentCap cap(1024);
-    DDMTFFT cpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu());
-    DDMTFFT gpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F,
-                  test::gpu_exec());
-    const auto ns2 = SizeType{6000};
-    const auto n2 =
-        cpu_s.get_plan().get_dm_arr().size() * cpu_s.get_output_nsamps(ns2);
+    const plans::DDMTPlan plan_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F);
+    const algorithms::detail::DDMTFFTEngineConfig seg_cpu{
+        .nbeams      = 1,
+        .exec        = Exec::cpu(),
+        .options     = {.method = DDMTFFTMethod::kNUFFT},
+        .max_segment = 1024};
+    auto seg_gpu = seg_cpu;
+    seg_gpu.exec = test::gpu_exec();
+    const auto cpu_s = algorithms::detail::make_ddmt_fft_cpu(plan_s, seg_cpu);
+    const auto gpu_s = algorithms::detail::make_ddmt_fft_gpu(plan_s, seg_gpu);
+    const auto ns2   = SizeType{6000};
+    const auto n2    = plan_s.get_dm_arr().size() * cpu_s->get_output_nsamps(ns2);
     std::vector<float> c(n2);
     std::vector<float> d(n2);
     const auto wf2 = noise(32 * ns2, 401);
-    cpu_s.execute(wf2, c);
-    gpu_s.execute(wf2, d);
+    cpu_s->execute(wf2, c);
+    gpu_s->execute(wf2, d);
     CHECK(max_rel(d, c) < 2e-5);
 }
 

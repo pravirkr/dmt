@@ -78,7 +78,7 @@ public:
     [[nodiscard]] const plans::CohFDMTPlan& get_plan() const noexcept;
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;
@@ -101,10 +101,9 @@ public:
     /**
      * @brief Memory an instance built with these arguments would allocate,
      * computed without allocating it: equal to that instance's
-     * get_memory_usage() after construction. A GPU backend reads the
-     * device's limits (L2 size, shared memory) but allocates no device
-     * buffers. Not included, as for FDMT: the 64 MiB of pinned host memory
-     * a GPU host-memory execute() takes when the result is 64 MiB or more.
+     * get_memory_usage() after construction. A GPU backend allocates no device
+     * buffers. Pinned host memory a GPU host-memory execute() allocates on
+     * first use is reported separately in `host_pinned` (not in `total()`).
      * @throws std::invalid_argument as the constructor would.
      */
     [[nodiscard]] static plans::CohFDMTMemoryUsage

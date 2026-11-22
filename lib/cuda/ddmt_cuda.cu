@@ -169,8 +169,10 @@ public:
                    bool shared_sums)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
           m_nbeams(cfg.nbeams),
           m_shared_sums(shared_sums),
+          m_force_shared_sums(cfg.force_shared_sums),
           m_estimate_only(cfg.defer_allocation) {
         init();
     }
@@ -395,7 +397,7 @@ public:
                 const auto cnt = n1 - n0;
                 bytes          = rows * cnt * sizeof(float);
                 auto* dst      = reinterpret_cast<float*>(h_dst);
-                parallel_rows(rows, bytes, [&](SizeType r) {
+                parallel_rows(rows, bytes, m_nthreads, [&](SizeType r) {
                     std::memcpy(dst + (r * cnt), &waterfall[(r * nsamps) + n0],
                                 cnt * sizeof(float));
                 });
@@ -427,7 +429,7 @@ public:
                             bit_pack_utils::packed_row_bytes(n1, NBITS);
                         const auto cnt = b1 - b0;
                         bytes          = rows * cnt;
-                        parallel_rows(rows, bytes, [&](SizeType r) {
+                        parallel_rows(rows, bytes, m_nthreads, [&](SizeType r) {
                             std::memcpy(h_dst + (r * cnt),
                                         &waterfall_packed[(r * row_bytes) + b0],
                                         cnt);
@@ -457,13 +459,15 @@ public:
                         SizeType& bytes) {
                         const auto cnt = (n1 - n0) * samp_bytes;
                         bytes          = m_nbeams * cnt;
-                        parallel_rows(m_nbeams, bytes, [&](SizeType b) {
-                            std::memcpy(
-                                h_dst + (b * cnt),
-                                &filterbank_packed[(b * nsamps * samp_bytes) +
-                                                   (n0 * samp_bytes)],
-                                cnt);
-                        });
+                        parallel_rows(
+                            m_nbeams, bytes, m_nthreads, [&](SizeType b) {
+                                std::memcpy(
+                                    h_dst + (b * cnt),
+                                    &filterbank_packed[(b * nsamps *
+                                                        samp_bytes) +
+                                                       (n0 * samp_bytes)],
+                                    cnt);
+                            });
                         // Time-major chunk: transposed on the device.
                         return SizeType{0};
                     },
@@ -480,8 +484,10 @@ protected:
 private:
     const plans::DDMTPlan& m_plan; // owned by the DDMT facade
     int m_device_id;
+    int m_nthreads;
     SizeType m_nbeams;
-    bool m_shared_sums; // SDMT: use the shared-sum kernel when it pays
+    bool m_shared_sums;       // SDMT: use the shared-sum kernel when it pays
+    bool m_force_shared_sums; // SDMT: use shared-sum kernel whenever it fits
     // Estimate-only: plan tables and history are sized into m_planned,
     // never uploaded.
     bool m_estimate_only;
@@ -937,7 +943,7 @@ private:
                                                      : 9.6e12;
         const double speedup =
             (best->ddmt / kDdmtRate) / (best->ops / kSharedRate);
-        if (speedup < 1.1 && !detail::sdmt_gpu_always_shared()) {
+        if (speedup < 1.1 && !m_force_shared_sums) {
             logging::debug("SDMT ({}): shared sums do not pay (estimated "
                            "{:.2f}x); running the DDMT kernel",
                            DMT_GPU_NAME, speedup);
@@ -1197,11 +1203,12 @@ private:
             const auto* src =
                 reinterpret_cast<const Acc*>(m_h_out[p.buf].data());
             const auto out_rows = m_nbeams * m_ndm;
-            parallel_rows(
-                out_rows, out_rows * p.n_out * sizeof(Acc), [&](SizeType r) {
-                    std::memcpy(h_out + (r * n_total) + p.pos,
-                                src + (r * p.n_out), p.n_out * sizeof(Acc));
-                });
+            parallel_rows(out_rows, out_rows * p.n_out * sizeof(Acc),
+                          m_nthreads, [&](SizeType r) {
+                              std::memcpy(h_out + (r * n_total) + p.pos,
+                                          src + (r * p.n_out),
+                                          p.n_out * sizeof(Acc));
+                          });
         };
 
         for (SizeType k = 0; k < nchunk; ++k) {

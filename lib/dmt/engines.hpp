@@ -28,28 +28,6 @@
 
 namespace dmt::algorithms::detail {
 
-/// A configuration over its memory budget (max_memory_bytes). `needed` is
-/// the smallest budget the configuration tried would need: a lower bound of
-/// what fits, so a caller can raise the budget to it and try again
-/// (FDMTBoxcar::estimate_minimum_memory()). Public type: invalid_argument.
-class BudgetError : public std::invalid_argument {
-public:
-    BudgetError(const std::string& what,
-                SizeType needed,
-                bool smaller_path = false)
-        : std::invalid_argument(what),
-          m_needed(needed),
-          m_smaller_path(smaller_path) {}
-    [[nodiscard]] SizeType needed() const noexcept { return m_needed; }
-    /// The failing engine took its larger path (CPU tree, GPU unskewed
-    /// direct levels): a smaller path may fit the budget.
-    [[nodiscard]] bool smaller_path() const noexcept { return m_smaller_path; }
-
-private:
-    SizeType m_needed;
-    bool m_smaller_path;
-};
-
 // The backend lib/cuda/ is compiled for: DMT_ENABLE_CUDA (nvcc) or
 // DMT_ENABLE_HIP (hip-clang, through dmt/gpu_compat.cuh); DMT_ENABLE_GPU is
 // set with either.
@@ -76,9 +54,41 @@ void check_device(const Device& view,
                   int device,
                   std::string_view what);
 
+// GPU host-memory D2H staging parameters (shared by ChunkedStager and the
+// memory estimators so the threshold and pinned footprint cannot drift).
+inline constexpr SizeType kHostStagingChunkBytes = SizeType{8} << 20;
+inline constexpr int kHostStagingMaxWorkers      = 4;
+
+[[nodiscard]] constexpr int host_staging_workers(int nthreads) noexcept {
+    return std::clamp(nthreads, 1, kHostStagingMaxWorkers);
+}
+
+[[nodiscard]] constexpr SizeType
+host_staging_pinned_bytes(SizeType output_bytes, int nthreads) noexcept {
+    const SizeType need =
+        SizeType{2} *
+        static_cast<SizeType>(host_staging_workers(nthreads)) *
+        kHostStagingChunkBytes;
+    return output_bytes >= need ? need : 0;
+}
+
 // ---------------------------------------------------------------------------
 // FDMT
 // ---------------------------------------------------------------------------
+
+/// Transform path of an FDMT engine (private: chosen automatically by
+/// default, or pinned by the FDMTBoxcar search list and internal tests).
+enum class FDMTPath : uint8_t {
+    kAuto,     ///< choose the fastest path that fits max_memory_bytes
+    kTree,     ///< plain tree (CPU: no skewed window; GPU: no direct/skewed)
+    kDirect,   ///< GPU unskewed direct levels / top (CPU: alias of kTree)
+    kSkewed,   ///< skewed-window path (CPU: FDMTSkewCpu; GPU: skewed direct / windowed top)
+    kWindowed, ///< reported by GPU subband search with windowed top
+};
+
+[[nodiscard]] constexpr bool is_skewed_path(FDMTPath path) noexcept {
+    return path == FDMTPath::kSkewed || path == FDMTPath::kWindowed;
+}
 
 struct FDMTEngineConfig {
     bool use_box_smearing{true};
@@ -97,28 +107,11 @@ struct FDMTEngineConfig {
     /// Memory budget of everything the engine allocates
     /// (FDMTMemoryUsage::total(); see algorithms::kFDMTDefaultMaxMemory).
     SizeType max_memory_bytes{algorithms::kFDMTDefaultMaxMemory};
-    /// Private (CPU): kSkewHistoryAuto (default) takes the skewed-window
-    /// engine (fdmt_skew.hpp) when the tree path does not fit
-    /// max_memory_bytes, or first for packed input (see
-    /// FDMTCpuEngine::choose_skew()); any other value is a level-0 + tree
-    /// history threshold in bytes above which it is taken (tests: 0 forces it,
-    /// SIZE_MAX forbids it).
-    static constexpr SizeType kSkewHistoryAuto = SIZE_MAX - 1;
-    /// As kSkewHistoryAuto but never the tree path: the fallback when the
-    /// tree path was chosen and its engine is over the budget.
-    static constexpr SizeType kSkewHistoryNoTree = SIZE_MAX - 2;
-    SizeType skew_history_bytes{kSkewHistoryAuto};
-    /// Private (CPU, tests): leaf level of a skewed engine forced by
-    /// skew_history_bytes (0: automatic). Budget-chosen engines take the
-    /// fastest leaf level that fits (FDMTCpuEngine::skew_candidates).
+    /// Private: requested transform path (kAuto selects by budget).
+    FDMTPath path{FDMTPath::kAuto};
+    /// Private (CPU, tests): leaf level of a skewed engine when path ==
+    /// kSkewed with an explicit chunk (0: automatic / fastest fitting leaf).
     SizeType skew_leaf{0};
-    /// Private (GPU): path of a direct-eligible engine. kAuto takes the
-    /// skewed path (windowed top of a subband search, skewed direct top)
-    /// when the tree history is over max_memory_bytes; kSkewed takes it
-    /// even when the unskewed direct top fits its ring budget; kDirect
-    /// never takes it by choice (FDMTBoxcar's ordered list, tests).
-    enum class GPUPath : uint8_t { kAuto, kDirect, kSkewed };
-    GPUPath gpu_path{GPUPath::kAuto};
     /// Private (GPU): the engine only runs execute_search() (FDMTBoxcar),
     /// which never writes a full-block root plane, so the root output is
     /// exempt from the 32-bit extent check; root-writing calls then throw.
@@ -242,6 +235,8 @@ public:
     /// allocation equals get_memory_usage(), checked here.
     virtual void allocate()                           = 0;
     [[nodiscard]] virtual std::string summary() const = 0;
+    /// The transform path this engine built.
+    [[nodiscard]] virtual FDMTPath path() const noexcept = 0;
     /// The search's transform path when it differs from the plain tree
     /// (GPU direct levels and direct top), e.g. "direct levels 0-3, direct
     /// top 5 -> 9"; empty otherwise.
@@ -255,7 +250,22 @@ protected:
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
 };
 
+/// Outcome of building an FDMT engine within cfg.max_memory_bytes.
+/// On success, `engine` is non-null. On budget overflow, `engine` is null,
+/// `needed` is the smallest total bytes among the tried configurations
+/// (SIZE_MAX if none could be built), and `error` describes the failure.
+/// Non-budget errors (invalid parameters, 32-bit extent limits) still throw.
+struct FDMTEngineAttempt {
+    std::unique_ptr<FDMTEngine> engine;
+    SizeType needed{0};
+    std::string error;
+};
+
 // The plan outlives the engine (both are owned by the FDMT facade).
+FDMTEngineAttempt try_make_fdmt_cpu(const plans::FDMTPlan& plan,
+                                    const FDMTEngineConfig& cfg);
+FDMTEngineAttempt try_make_fdmt_gpu(const plans::FDMTPlan& plan,
+                                    const FDMTEngineConfig& cfg);
 std::unique_ptr<FDMTEngine> make_fdmt_cpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
 std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
@@ -274,6 +284,9 @@ struct DDMTEngineConfig {
     Exec exec{};
     // Estimate-only engine: buffers are sized, never allocated (estimate()).
     bool defer_allocation{false};
+    // SDMT GPU: run the shared-sum kernel whenever its programs fit, even
+    // where the DDMT kernel is estimated faster (for small-plan tests).
+    bool force_shared_sums{false};
 };
 
 class DDMTEngine {
@@ -350,6 +363,8 @@ struct DDMTFFTEngineConfig {
     SizeType nbeams{1};
     Exec exec{};
     DDMTFFTOptions options{}; // method resolved by the facade (never kAuto)
+    // Longest overlap-save transform length (0: default budget).
+    SizeType max_segment{0};
     // Estimate-only engine: buffers are sized, never allocated (estimate()).
     bool defer_allocation{false};
 };
@@ -419,18 +434,6 @@ make_ddmt_fft_cpu(const plans::DDMTPlan& plan, const DDMTFFTEngineConfig& cfg);
 std::unique_ptr<DDMTFFTEngine>
 make_ddmt_fft_gpu(const plans::DDMTPlan& plan, const DDMTFFTEngineConfig& cfg);
 
-// Testing hook: while set, SDMT GPU engines constructed afterwards run the
-// shared-sum kernel whenever its programs fit, even where the DDMT kernel is
-// estimated to be faster (so tests cover it on small plans).
-void set_sdmt_gpu_always_shared(bool on) noexcept;
-[[nodiscard]] bool sdmt_gpu_always_shared() noexcept;
-
-// Testing hook: while non-zero, FDMTFFT and DDMTFFT engines constructed
-// afterwards cap their overlap-save transform length at this many samples
-// (so tests cover several segments on small inputs). 0: no cap.
-void set_fft_segment_cap(SizeType nsamps) noexcept;
-[[nodiscard]] SizeType fft_segment_cap() noexcept;
-
 // ---------------------------------------------------------------------------
 // FDMT-FFT
 // ---------------------------------------------------------------------------
@@ -445,8 +448,7 @@ struct FDMTFFTEngineConfig {
     bool fractional_delays{true};
     // Per channel, 1 = keep (empty: keep all); killed channels read as zero.
     std::vector<uint8_t> kill_mask;
-    // Longest overlap-save transform execute() may use (0: no cap); with
-    // the fft_segment_cap() testing hook the smaller one applies. The
+    // Longest overlap-save transform execute() may use (0: no cap). The
     // FDMTFFTBoxcar memory budget sets it.
     SizeType max_segment{0};
     // The engine drives a boxcar search (execute_search()): allocate the
@@ -457,15 +459,6 @@ struct FDMTFFTEngineConfig {
     // only on allocate(): the memory estimate and the budget search.
     bool defer_allocation{false};
 };
-
-/// The smaller of two segment caps, 0 meaning none.
-[[nodiscard]] constexpr SizeType combine_segment_caps(SizeType a,
-                                                      SizeType b) noexcept {
-    if (a == 0 || b == 0) {
-        return a + b;
-    }
-    return std::min(a, b);
-}
 
 class FDMTFFTEngine {
 public:

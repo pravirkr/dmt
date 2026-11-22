@@ -208,25 +208,28 @@ TEST_CASE("DDMTFFT GPU host packed, time-major and history reset",
 namespace {
 
 // A device-memory call of `nsamps` zero samples (float or packed).
-void device_call(DDMTFFT& eng, SizeType nsamps, SizeType out) {
-    const auto& plan = eng.get_plan();
+template <typename Engine>
+void device_call(Engine& eng,
+                 const plans::DDMTPlan& plan,
+                 SizeType nbeams,
+                 SizeType nsamps,
+                 SizeType out) {
     const auto nbits = plan.get_nbits();
-    const auto rows  = eng.get_nbeams() * plan.get_nchans();
-    thrust::device_vector<float> dmt(eng.get_nbeams() *
-                                     plan.get_dm_arr().size() * out);
+    const auto rows  = nbeams * plan.get_nchans();
+    thrust::device_vector<float> dmt(nbeams * plan.get_dm_arr().size() * out);
     const DeviceSpan<float> out_d(thrust::raw_pointer_cast(dmt.data()),
                                   dmt.size());
     if (nbits == 32) {
         const thrust::device_vector<float> wf(rows * nsamps, 0.0F);
         eng.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()),
                                             wf.size()),
-                    out_d);
+                    out_d, Stream{});
     } else {
         const thrust::device_vector<uint8_t> wf(
             rows * bit_pack_utils::packed_row_bytes(nsamps, nbits), 0);
         eng.execute(DeviceSpan<const uint8_t>(
                         thrust::raw_pointer_cast(wf.data()), wf.size()),
-                    nsamps, out_d);
+                    nsamps, out_d, Stream{});
     }
     cudaDeviceSynchronize();
 }
@@ -242,15 +245,28 @@ TEST_CASE("DDMTFFT (gpu) estimate_memory equals a warm stream",
     for (const auto& c : ddmt_fft_estimate::cases()) {
         ddmt_fft_estimate::check_host(c, exec);
         INFO(c.name << " (device memory)");
-        const ddmt_fft_estimate::SegmentCap cap(c.cap);
-        const auto e = DDMTFFT::estimate_memory(c.plan, c.nsamps, exec,
-                                                c.nbeams, c.options);
-        DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
-        ddmt_fft_estimate::check_stream(
-            eng, c.nsamps, e, e.device_staging,
-            [&](SizeType out) { device_call(eng, c.nsamps, out); });
-        if (c.plan.get_nbits() == 32) {
-            CHECK(e.device_staging == 0);
+        if (c.cap == 0) {
+            const auto e = DDMTFFT::estimate_memory(c.plan, c.nsamps, exec,
+                                                    c.nbeams, c.options);
+            DDMTFFT eng(c.plan, exec, c.nbeams, c.options);
+            ddmt_fft_estimate::check_stream(
+                eng, c.nsamps, e, e.device_staging, 0, [&](SizeType out) {
+                    device_call(eng, c.plan, c.nbeams, c.nsamps, out);
+                });
+            if (c.plan.get_nbits() == 32) {
+                CHECK(e.device_staging == 0);
+            }
+        } else {
+            const auto e = ddmt_fft_estimate::make_capped_engine(c, exec, true)
+                               ->estimate(c.nsamps);
+            auto eng = ddmt_fft_estimate::make_capped_engine(c, exec, false);
+            ddmt_fft_estimate::check_stream(
+                *eng, c.nsamps, e, e.device_staging, 0, [&](SizeType out) {
+                    device_call(*eng, c.plan, c.nbeams, c.nsamps, out);
+                });
+            if (c.plan.get_nbits() == 32) {
+                CHECK(e.device_staging == 0);
+            }
         }
     }
     ddmt_fft_estimate::check_call_lengths(exec);

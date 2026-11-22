@@ -636,19 +636,28 @@ private:
 
 /**
  * @brief Memory a CohFDMT engine allocates at construction, in bytes (host
- * memory on the CPU backend, device memory on a GPU backend).
+ * memory on the CPU backend, device memory on a GPU backend, `pinned` and
+ * `host_pinned` apart).
  */
 struct CohFDMTMemoryUsage {
-    SizeType spectrum{0};  ///< Unpacked, forward-transformed input block
-    SizeType waterfall{0}; ///< One coarse trial's aligned waterfall
-    SizeType fdmt{0};      ///< Fine FDMT engine and its output buffer
-    SizeType workspace{0}; ///< Tables and scratch (CPU: per thread); on a GPU
-                           ///< also the cuFFT work areas and the device copies
-                           ///< of a host-memory call's input and result
-    SizeType output{0};    ///< Caller-provided result per execute() (not
-                           ///< owned by the engine)
+    SizeType spectrum{0};    ///< Unpacked, forward-transformed input block
+    SizeType waterfall{0};   ///< One coarse trial's aligned waterfall
+    SizeType fdmt{0};        ///< Fine FDMT engine and its output buffer
+    SizeType workspace{0};   ///< Tables and scratch (CPU: per thread); on a GPU
+                             ///< also the cuFFT work areas and the device
+                             ///< copies of a host-memory call's input and
+                             ///< result
+    SizeType output{0};      ///< Caller-provided result per execute() (not
+                             ///< owned by the engine)
+    SizeType pinned{0};      ///< GPU: pinned host buffers currently held for
+                             ///< host-memory calls (host memory, not in
+                             ///< total())
+    SizeType host_pinned{0}; ///< GPU: pinned host bytes a host-memory execute()
+                             ///< allocates when output reaches the staging
+                             ///< threshold (not in total(); 0 on CPU)
 
-    /// Total allocated by the engine (excludes `output`).
+    /// Total allocated where the instance runs (excludes `output`, `pinned`
+    /// and `host_pinned`).
     [[nodiscard]] constexpr SizeType total() const noexcept {
         return spectrum + waterfall + fdmt + workspace;
     }

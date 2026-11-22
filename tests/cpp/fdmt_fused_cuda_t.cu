@@ -428,14 +428,23 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
         CHECK(e.usage.history == got.history);
         CHECK(e.usage.workspace == got.workspace);
         CHECK(e.usage.output == got.output);
+        CHECK(e.usage.pinned == 0);
+        CHECK(got.pinned == 0);
         CHECK(e.chunk_nsamps == f.get_chunk_nsamps());
         if (c.plan.get_mode() == std::string_view("valid")) {
-            // The first host call stages what host_staging says.
+            // The first host call stages what host_staging / host_pinned say.
             std::vector<float> in(2 * c.plan.get_nchans() *
                                   c.plan.get_nsamps());
             std::vector<float> out(2 * c.plan.get_dmt_size());
             f.execute(std::span<const float>(in), std::span<float>(out));
             CHECK(f.get_memory_usage().total() == got.total() + e.host_staging);
+            CHECK(f.get_memory_usage().pinned == e.host_pinned);
+            // save_history() and load_history() must not allocate extra
+            // history buffers mid-stream.
+            std::vector<float> hist(f.history_state_size());
+            f.save_history(hist);
+            f.load_history(hist);
+            CHECK(f.get_memory_usage().history == got.history);
         }
     }
     SECTION("nothing is allocated") {

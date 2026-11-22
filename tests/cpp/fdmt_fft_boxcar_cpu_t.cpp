@@ -17,36 +17,19 @@ using namespace boxcar_test;
 using algorithms::FDMTFFT;
 using algorithms::FDMTFFTBoxcar;
 
-namespace {
-
-// Forces several overlap-save segments per block; restored at scope exit.
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
-
-} // namespace
-
 TEST_CASE("FDMTFFTBoxcar matches materialized FDMTFFT and direct windows",
           "[boxcar][cpu]") {
-    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+    const plans::FDMTPlan plan(700, 1200, 7, 751, 0.001F,
                                std::vector<IndexType>{0, 4, 17, 40, 97});
     const auto input = waterfalls(plan, 1, 4);
-    for (const SizeType cap : {SizeType{0}, SizeType{512}}) {
-        const SegmentCap segments(cap);
+    for (const bool segmented : {false, true}) {
         for (const bool smear : {true, false}) {
             for (const bool frac : {true, false}) {
                 for (const auto mode :
                      {PeakFindingMode::kContiguousPeakPerWidth,
                       PeakFindingMode::kContiguousPeakAcrossWidths,
                       PeakFindingMode::kAllAboveThreshold}) {
-                    CAPTURE(cap, smear, frac, mode);
+                    CAPTURE(segmented, smear, frac, mode);
                     BoxcarConfig cfg;
                     cfg.max_boxcar       = 37;
                     cfg.wtsp             = 1;
@@ -54,16 +37,31 @@ TEST_CASE("FDMTFFTBoxcar matches materialized FDMTFFT and direct windows",
                     cfg.peak_mode        = mode;
                     cfg.max_candidates   = 500000;
                     cfg.max_cands_per_dm = 0;
-                    FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1,
-                                         frac);
+                    SizeType budget      = algorithms::kFDMTDefaultMaxMemory;
+                    if (segmented) {
+                        const auto open = FDMTFFTBoxcar::estimate_memory(
+                            plan, cfg, smear, Exec::cpu(), 1, frac);
+                        budget = open.usage.budgeted() - 1;
+                    }
+                    FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, frac,
+                                         {}, budget);
                     CHECK(search.get_output_latency() == (frac ? 64U : 0U));
+                    SizeType ref_cap = 0;
+                    if (segmented) {
+                        CHECK(search.get_chunk_nsamps() < plan.get_nsamps());
+                        const auto geom = algorithms::fdmt_fft::make_geometry(
+                            plan, FDMTMode::kValid, frac, smear);
+                        ref_cap = search.get_chunk_nsamps() +
+                                  std::max(geom.skip, geom.support) +
+                                  geom.guard;
+                    }
                     std::vector<RawCandidate> actual;
                     for (const auto& block : input) {
                         append(actual, search.execute(block));
                     }
                     append(actual, search.flush());
                     compare(actual, fft_reference(plan, cfg, smear, frac, {},
-                                                  Exec::cpu(), input));
+                                                  Exec::cpu(), input, ref_cap));
                     // A reset stream reproduces the same candidates.
                     search.reset_history();
                     std::vector<RawCandidate> again;

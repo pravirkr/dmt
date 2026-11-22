@@ -76,6 +76,7 @@ public:
     void allocate() override;
     [[nodiscard]] FDMTBoxcarMemoryUsage memory_usage() const noexcept override;
     [[nodiscard]] SizeType chunk_nsamps() const noexcept override;
+    [[nodiscard]] FDMTPath path() const noexcept override;
     [[nodiscard]] std::string search_path() const override;
     [[nodiscard]] SizeType fuse_levels() const noexcept override;
 

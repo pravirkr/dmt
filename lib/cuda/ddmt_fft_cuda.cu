@@ -504,19 +504,21 @@ public:
                       const detail::DDMTFFTEngineConfig& cfg)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
           m_nbeams(cfg.nbeams),
           m_opts(cfg.options),
           m_model(plan, cfg.options.guard),
           m_nchans(plan.get_nchans()),
           m_ndm(m_model.dm.size()),
           m_nact(m_model.active.size()),
-          m_ctx(m_model.context()) {
+          m_ctx(m_model.context()),
+          m_host(cfg.exec.device, cfg.exec.nthreads) {
         gpu_utils::set_device(m_device_id);
         // Estimate-only: every buffer is sized, none allocated.
         const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_deferred
                                                                : nullptr);
         setup_methods();
-        m_seg_n = segment_cap();
+        m_seg_n = segment_cap(cfg.max_segment);
         for (auto& h : m_hist) {
             h.reserve_zeroed(history_state_size());
         }
@@ -584,7 +586,8 @@ public:
                 .transform = transform,
                 .workspace = 0,
                 .staging   = m_in_d.bytes() + m_packed_d.bytes() +
-                             m_unpacked_d.bytes() + m_out_d.bytes()};
+                             m_unpacked_d.bytes() + m_out_d.bytes(),
+                .pinned    = m_host.pinned_bytes()};
     }
 
     [[nodiscard]] DDMTFFTMemoryEstimate estimate(SizeType nsamps) override {
@@ -612,6 +615,7 @@ public:
         const auto rows = m_nbeams * m_nchans;
         const auto out  = m_nbeams * m_ndm * nsamps * sizeof(float);
         DDMTFFTMemoryEstimate e{.usage = memory_usage()};
+        e.host_pinned = detail::host_staging_pinned_bytes(out, m_nthreads);
         if (m_plan.get_nbits() == 32) {
             e.host_staging = (rows * nsamps * sizeof(float)) + out;
         } else {
@@ -761,6 +765,7 @@ protected:
 private:
     const plans::DDMTPlan& m_plan; // owned by the DDMTFFT facade
     int m_device_id;
+    int m_nthreads;
     SizeType m_nbeams;
     DDMTFFTOptions m_opts;
     ddmt_fft::DelayModel m_model;
@@ -904,12 +909,12 @@ private:
     }
 
     // Longest transform: the CPU engine's (same segments, same result
-    // bits), capped only by the testing hook.
-    [[nodiscard]] SizeType segment_cap() const {
+    // bits), capped by max_segment when set.
+    [[nodiscard]] SizeType segment_cap(SizeType max_segment) const {
         auto cap =
             ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
-        if (const auto hook = detail::fft_segment_cap(); hook > 0) {
-            cap = std::min(cap, hook);
+        if (max_segment > 0) {
+            cap = std::min(cap, max_segment);
         }
         return cap;
     }

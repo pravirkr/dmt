@@ -22,6 +22,8 @@ inline void check_usage(const plans::CohFDMTMemoryUsage& e,
     CHECK(e.fdmt == got.fdmt);
     CHECK(e.workspace == got.workspace);
     CHECK(e.output == got.output);
+    CHECK(e.pinned == got.pinned);
+    CHECK(e.host_pinned == got.host_pinned);
     CHECK(e.total() > 0);
 }
 

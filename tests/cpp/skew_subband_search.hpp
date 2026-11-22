@@ -34,6 +34,7 @@ namespace dmt::skew_search_test {
 
 struct SearchRun {
     std::vector<RawCandidate> candidates;
+    algorithms::detail::FDMTPath fdmt_path{algorithms::detail::FDMTPath::kTree};
     std::string path;
     uint64_t latency{0};     ///< search_latency() of the engine
     uint64_t searched{0};    ///< searched samples at the end (drain: all)
@@ -202,6 +203,9 @@ public:
     [[nodiscard]] SizeType fuse_levels() const noexcept override {
         return m_inner->fuse_levels();
     }
+    [[nodiscard]] algorithms::detail::FDMTPath path() const noexcept override {
+        return m_inner->path();
+    }
     [[nodiscard]] std::string search_path() const override {
         return m_inner->search_path();
     }
@@ -278,9 +282,9 @@ inline SearchRun run_subband_search(
     cfg.max_fuse_levels  = std::min(root - 1, root - plan.get_subband_depth());
     cfg.search_upper_levels = plan.get_subband_depth() > 0;
     cfg.search_nbits        = packed ? 8 : 32;
-    cfg.skew_history_bytes  = skew ? 0 : SIZE_MAX;
-    cfg.gpu_path            = skew ? FDMTEngineConfig::GPUPath::kSkewed
-                                   : FDMTEngineConfig::GPUPath::kAuto;
+    cfg.path = skew ? FDMTPath::kSkewed
+                    : (exec.backend == Backend::kCPU ? FDMTPath::kTree
+                                                     : FDMTPath::kAuto);
     cfg.skew_leaf           = leaf;
     const bool cpu          = exec.backend == Backend::kCPU;
     bool armed              = false;
@@ -305,6 +309,7 @@ inline SearchRun run_subband_search(
                       : nullptr;
 #endif
     SearchRun run;
+    run.fdmt_path    = engine->path();
     run.path         = engine->search_path();
     const SizeType n = plan.get_nchans() * plan.get_nsamps();
     std::unique_ptr<BoxcarNoiseModel> model;

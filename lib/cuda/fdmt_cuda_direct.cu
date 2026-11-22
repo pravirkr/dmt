@@ -179,9 +179,9 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
     if (packed) {
         requested = m_requested_fuse;
     }
-    if (m_mode != FDMTMode::kValid || requested != kFDMTAutoFuse ||
-        m_plan.get_niters() <= levels || m_search_max_fuse < levels ||
-        get_fuse_levels() >= levels) {
+    if (m_path == detail::FDMTPath::kTree || m_mode != FDMTMode::kValid ||
+        requested != kFDMTAutoFuse || m_plan.get_niters() <= levels ||
+        m_search_max_fuse < levels || get_fuse_levels() >= levels) {
         return;
     }
     m_direct_eligible = true;

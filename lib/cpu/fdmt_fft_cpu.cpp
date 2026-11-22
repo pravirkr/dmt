@@ -694,8 +694,7 @@ private:
         }
         const auto seg = fdmt_fft::choose_segments(
             m_geom, m_mode, m_nsamps_out, nodes, m_nchans, m_ndms,
-            detail::combine_segment_caps(detail::fft_segment_cap(),
-                                         m_max_segment));
+            m_max_segment);
         m_seg_len   = seg.n_fft;
         m_nseg      = seg.nseg;
         m_seg_hop   = seg.hop;

@@ -635,6 +635,8 @@ SizeType FDMTBoxcarCpuEngine::chunk_nsamps() const noexcept {
     return m_driver->chunk_nsamps();
 }
 
+FDMTPath FDMTBoxcarCpuEngine::path() const noexcept { return m_driver->path(); }
+
 std::string FDMTBoxcarCpuEngine::search_path() const {
     return m_driver->search_path();
 }

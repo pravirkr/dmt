@@ -429,7 +429,9 @@ def _skewed(out: dict, backend: str) -> None:
     codes = rng.integers(0, 216, size=(nchans, nsamps * nblocks), dtype=np.int32)
     codes[200:900, 5000:5006] += 40
     plan = dmtlib.FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700)
-    budget = 30 << 20
+    # CPU needs <30 MiB on the skewed path; CUDA's direct path holds 38.4 MiB
+    # with its full tree history allocated upfront (chunk=256).
+    budget = (30 if backend == "cpu" else 40) << 20
     f = dmtlib.FDMT(plan, max_memory_bytes=budget, backend=backend)
     for k in range(2):
         block = codes[:, k * nsamps : (k + 1) * nsamps].astype(np.float32)

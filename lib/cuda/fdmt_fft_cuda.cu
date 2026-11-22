@@ -471,7 +471,8 @@ public:
           m_mode(cfg.mode),
           m_frac(cfg.fractional_delays),
           m_max_segment(cfg.max_segment),
-          m_plan(&plan) {
+          m_plan(&plan),
+          m_host(cfg.exec.device, cfg.exec.nthreads) {
         if (m_nbeams == 0) {
             throw std::invalid_argument("FDMTFFT: nbeams must be positive");
         }
@@ -642,6 +643,7 @@ public:
                          m_step_in_d.bytes() + m_view_spec.bytes() +
                          m_view_time.bytes() + m_view_d.bytes() + fft_work,
             .output    = 0,
+            .pinned    = m_host.pinned_bytes(),
         };
     }
 
@@ -1126,12 +1128,11 @@ private:
                        m_seg.n_fft, m_seg.nseg, m_geom.n_fft, m_frac, split);
     }
 
-    // Segment length cap: the testing hook and the configured cap (the
-    // FDMTFFTBoxcar memory budget). Memory follows the arguments alone: a
-    // configuration the device cannot hold fails in allocate().
-    [[nodiscard]] SizeType segment_cap() const {
-        return detail::combine_segment_caps(detail::fft_segment_cap(),
-                                            m_max_segment);
+    // Segment length cap: the configured cap (set by FDMTFFTBoxcar's memory
+    // budget). Memory follows the arguments alone: a configuration the device
+    // cannot hold fails in allocate().
+    [[nodiscard]] SizeType segment_cap() const noexcept {
+        return m_max_segment;
     }
 
     [[nodiscard]] std::unique_ptr<utils::CUFFTManager>

@@ -265,10 +265,12 @@ TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (gpu)",
                                     out.size()));
         REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
         CHECK(f.get_memory_usage().total() == total);
+        CHECK(f.get_memory_usage().pinned == 0);
         std::vector<float> in_h(in.size(), 1.0F);
         std::vector<float> out_h(out.size());
         f.execute(std::span<const float>(in_h), std::span<float>(out_h));
         CHECK(f.get_memory_usage().total() == total + e.host_staging);
+        CHECK(f.get_memory_usage().pinned == e.host_pinned);
     }
     SECTION("nothing is allocated") {
         // 2^16 beams: hundreds of GB of buffers and cuFFT work areas, sized

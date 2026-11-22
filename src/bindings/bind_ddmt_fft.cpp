@@ -84,24 +84,25 @@ void bind_ddmt_fft(py::module_& mod) {
 
     py::class_<DDMTFFTMemoryUsage>(mod, "DDMTFFTMemoryUsage", R"doc(
         Memory a DDMTFFT instance holds, in bytes (host memory on the CPU
-        backend, device memory on a GPU backend). Buffers are made by the
-        calls that need them and kept (see ``DDMTFFT.estimate_memory``). Not
-        counted: input and output arrays, the FFT libraries' plan objects
-        (cuFFT work areas are counted), per-call temporaries and the GPU's
-        64 MiB pinned host staging.
+        backend, device memory on a GPU backend, ``pinned`` apart). Buffers
+        are made by the calls that need them and kept (see
+        ``DDMTFFT.estimate_memory``). Not counted: input and output arrays,
+        the FFT libraries' plan objects (cuFFT work areas are counted), and
+        per-call temporaries. ``pinned`` is not included in ``total``.
         )doc")
         .def_readonly("plan", &DDMTFFTMemoryUsage::plan)
         .def_readonly("history", &DDMTFFTMemoryUsage::history)
         .def_readonly("transform", &DDMTFFTMemoryUsage::transform)
         .def_readonly("workspace", &DDMTFFTMemoryUsage::workspace)
         .def_readonly("staging", &DDMTFFTMemoryUsage::staging)
+        .def_readonly("pinned", &DDMTFFTMemoryUsage::pinned)
         .def_property_readonly("total", &DDMTFFTMemoryUsage::total)
         .def("__repr__", [](const DDMTFFTMemoryUsage& m) {
             return fmt::format("DDMTFFTMemoryUsage(plan={}, history={}, "
                                "transform={}, workspace={}, staging={}, "
-                               "total={})",
+                               "pinned={}, total={})",
                                m.plan, m.history, m.transform, m.workspace,
-                               m.staging, m.total());
+                               m.staging, m.pinned, m.total());
         });
 
     py::class_<DDMTFFTMemoryEstimate>(mod, "DDMTFFTMemoryEstimate", R"doc(
@@ -109,22 +110,23 @@ void bind_ddmt_fft(py::module_& mod) {
         ``DDMTFFT.estimate_memory`` (computed without allocating it).
 
         ``usage`` equals that instance's ``memory_usage`` once a cold stream
-        of such calls is warm (``staging`` 0: CPU calls, GPU calls on float
-        device arrays). The staging calls of another kind add:
-        ``host_staging`` for host arrays (GPU; 0 on the CPU),
-        ``time_major_staging`` for ``execute_time_major`` (packed plans) and
-        ``device_staging`` for packed device arrays (GPU).
+        of such calls is warm (``staging`` and ``pinned`` 0: CPU calls, GPU
+        calls on float device arrays). The staging calls of another kind add:
+        ``host_staging`` and ``host_pinned`` for host arrays (GPU; 0 on the
+        CPU), ``time_major_staging`` for ``execute_time_major`` (packed plans)
+        and ``device_staging`` for packed device arrays (GPU).
         )doc")
         .def_readonly("usage", &DDMTFFTMemoryEstimate::usage)
         .def_readonly("host_staging", &DDMTFFTMemoryEstimate::host_staging)
+        .def_readonly("host_pinned", &DDMTFFTMemoryEstimate::host_pinned)
         .def_readonly("time_major_staging",
                       &DDMTFFTMemoryEstimate::time_major_staging)
         .def_readonly("device_staging", &DDMTFFTMemoryEstimate::device_staging)
         .def("__repr__", [](const DDMTFFTMemoryEstimate& e) {
             return fmt::format("DDMTFFTMemoryEstimate(total={}, "
-                               "host_staging={}, time_major_staging={}, "
-                               "device_staging={})",
-                               e.usage.total(), e.host_staging,
+                               "host_staging={}, host_pinned={}, "
+                               "time_major_staging={}, device_staging={})",
+                               e.usage.total(), e.host_staging, e.host_pinned,
                                e.time_major_staging, e.device_staging);
         });
 

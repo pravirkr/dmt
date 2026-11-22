@@ -1,7 +1,6 @@
 #include "dmt/common/backend.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -99,34 +98,6 @@ void check_device(const Device& view,
             "{}: memory is on {}:{} but this instance runs on {}:{}", what,
             to_string(view.backend), view.id, to_string(backend), device));
     }
-}
-
-namespace {
-// Process-wide knob.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<bool> g_sdmt_gpu_always_shared{false};
-} // namespace
-
-void set_sdmt_gpu_always_shared(bool on) noexcept {
-    g_sdmt_gpu_always_shared.store(on, std::memory_order_relaxed);
-}
-
-bool sdmt_gpu_always_shared() noexcept {
-    return g_sdmt_gpu_always_shared.load(std::memory_order_relaxed);
-}
-
-namespace {
-// Process-wide knob.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<SizeType> g_fft_segment_cap{0};
-} // namespace
-
-void set_fft_segment_cap(SizeType nsamps) noexcept {
-    g_fft_segment_cap.store(nsamps, std::memory_order_relaxed);
-}
-
-SizeType fft_segment_cap() noexcept {
-    return g_fft_segment_cap.load(std::memory_order_relaxed);
 }
 
 // Device-memory defaults: host-only engines inherit these.

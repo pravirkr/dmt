@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -31,48 +32,30 @@
 namespace dmt::algorithms::detail::fdmt_cpu {
 
 FDMTCpuEngine::FDMTCpuEngine(const plans::FDMTPlan& plan,
-                             const detail::FDMTEngineConfig& cfg)
+                             const detail::FDMTEngineConfig& cfg,
+                             bool skew,
+                             SizeType chunk,
+                             SizeType skew_leaf)
     : m_use_box_smearing(cfg.use_box_smearing),
       m_int_tree(cfg.int_tree),
       m_mode(cfg.mode),
       m_nbeams(cfg.nbeams),
       m_nthreads(std::max(1, cfg.exec.nthreads)),
-      m_plan(plan) {
+      m_plan(plan),
+      m_chunk(chunk),
+      m_search_nbits(cfg.search_nbits),
+      m_search_upper(cfg.search_upper_levels),
+      m_search_u32(detail::int_search_fits_u32(m_plan,
+                                               m_use_box_smearing,
+                                               m_search_nbits)),
+      m_skew_leaf(skew_leaf) {
     if (m_nbeams == 0) {
         throw std::invalid_argument("FDMT: nbeams must be at least 1");
     }
-    m_search_nbits = cfg.search_nbits;
-    m_search_upper = cfg.search_upper_levels;
-    // Packed search state in uint32_t when the plan bounds every tree
-    // value below 2^32 (as the GPU engine): half the bytes per merge.
-    m_search_u32 =
-        detail::int_search_fits_u32(m_plan, m_use_box_smearing, m_search_nbits);
-    m_chunk = detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                        cfg.chunk_nsamps, m_search_upper);
-    if (m_mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
-        (m_plan.get_history_size() + m_plan.get_tree_history_size()) *
-                sizeof(float) >
-            detail::kFDMTChunkStateBudget) {
-        m_chunk = std::min<SizeType>(1024, m_plan.get_nsamps());
-    } else if (m_search_nbits != 32 && !m_search_u32 && cfg.chunk_nsamps == 0) {
-        m_chunk =
-            std::min(m_plan.get_nsamps(), std::max<SizeType>(64, m_chunk / 2));
-    }
-    const bool skew = choose_skew(cfg);
     plan_working_memory(cfg.fuse_levels, cfg.max_fuse_levels, skew);
     if (m_mode == FDMTMode::kValid && !m_skew) {
         m_hist_hash = detail::fdmt_tree_history_hash(m_plan, m_nbeams,
                                                      m_use_box_smearing);
-    }
-    const SizeType used = get_memory_usage().total();
-    if (used > cfg.max_memory_bytes) {
-        throw detail::BudgetError(
-            fmt::format("FDMT (cpu): this configuration needs {:.2f} GiB, over "
-                        "max_memory_bytes ({:.2f} GiB){}",
-                        static_cast<double>(used) / (1 << 30),
-                        static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
-                        skew ? "; use a shorter chunk_nsamps" : ""),
-            used, /*smaller_path=*/!skew);
     }
     if (!cfg.defer_allocation) {
         allocate();
@@ -180,109 +163,6 @@ FDMTCpuEngine::skew_candidates(SizeType ring_elem) {
     }
     return {{4096, 2}, {4096, 3}, {4096, 4}, {4096, 1}, {2048, 4}, {2048, 2},
             {2048, 3}, {2048, 1}, {1024, 0}, {512, 0},  {256, 0}};
-}
-
-bool FDMTCpuEngine::choose_skew(const detail::FDMTEngineConfig& cfg) {
-    const SizeType niters = m_plan.get_niters();
-    const SizeType nsamps = m_plan.get_nsamps();
-    const SizeType depth =
-        m_search_upper ? m_plan.get_subband_depth() : SizeType{0};
-    const bool eligible =
-        m_mode == FDMTMode::kValid && m_nbeams == 1 && niters >= 5 &&
-        cfg.fuse_levels != 0 && cfg.max_fuse_levels >= 4 &&
-        // Searched subband levels sit above the leaf and fused levels.
-        (!m_search_upper || niters >= depth + 5);
-    if (!eligible) {
-        return false;
-    }
-    const SizeType hist_floats =
-        m_plan.get_history_size() + m_plan.get_tree_history_size();
-    using Cfg             = detail::FDMTEngineConfig;
-    const bool allow_tree = cfg.skew_history_bytes != Cfg::kSkewHistoryNoTree;
-    if (cfg.skew_history_bytes != Cfg::kSkewHistoryAuto && allow_tree) {
-        m_skew_leaf = cfg.skew_leaf;
-        return m_chunk < nsamps &&
-               hist_floats * sizeof(float) > cfg.skew_history_bytes;
-    }
-    const auto& pc            = m_plan.get_container();
-    const bool wide           = m_search_nbits != 32 && !m_search_u32;
-    const SizeType state_elem = wide ? sizeof(uint64_t) : sizeof(float);
-    const SizeType plan_bytes = pc.get_memory_usage();
-    SizeType max_rows         = 0;
-    for (SizeType l = 0; l < niters; ++l) {
-        max_rows = std::max(max_rows, m_search_upper
-                                          ? detail::fdmt_regular_coords(pc, l)
-                                          : pc.state_shape[l].ncoords);
-    }
-    const SizeType tree_bytes = (hist_floats * state_elem) +
-                                (2 * max_rows * m_chunk * state_elem) +
-                                plan_bytes;
-    const bool tree_fits = allow_tree && tree_bytes <= cfg.max_memory_bytes;
-    // Packed input with an automatic chunk takes the long skewed chunks
-    // before the tree (see skew_candidates()); float takes the tree first.
-    const bool skew_first = m_search_nbits != 32 && cfg.chunk_nsamps == 0;
-    if (tree_fits && !skew_first) {
-        return false;
-    }
-    const SizeType ring_elem = m_search_nbits == 32   ? sizeof(float)
-                               : m_search_nbits == 16 ? 2
-                                                      : 1;
-    const SizeType req_fuse =
-        skew_fuse_request(cfg.fuse_levels, cfg.max_fuse_levels);
-    // Exact budget of a (chunk, leaf) engine from a deferred FDMTSkewCpu.
-    const auto need = [&](SizeType c, SizeType leaf) -> SizeType {
-        try {
-            const auto e = detail::estimate_skew_memory(
-                m_plan, 4, c, ring_elem, m_nthreads, m_use_box_smearing,
-                req_fuse, depth, leaf, m_search_nbits != 32, m_search_u32);
-            return e.total() + plan_bytes;
-        } catch (const std::length_error&) {
-            return SIZE_MAX;
-        }
-    };
-    const auto fits = [&](SizeType c, SizeType leaf) {
-        return need(c, leaf) <= cfg.max_memory_bytes;
-    };
-    if (cfg.chunk_nsamps != 0) {
-        // Explicit chunk: the fastest leaf level that fits it (else the
-        // automatic one); checked against the budget once allocated.
-        if (m_chunk >= nsamps) {
-            return false;
-        }
-        m_skew_leaf = 0;
-        for (const auto& [c, leaf] : skew_candidates(ring_elem)) {
-            if (c == m_chunk && leaf != 0 && fits(c, leaf)) {
-                m_skew_leaf = leaf;
-                break;
-            }
-        }
-        return true;
-    }
-    SizeType smallest = allow_tree ? tree_bytes : SIZE_MAX;
-    for (const auto& [c, leaf] : skew_candidates(ring_elem)) {
-        if (tree_fits && c < kSkewFirstMinChunk) {
-            return false; // the tree before the short skewed chunks
-        }
-        if (c < nsamps && fits(c, leaf)) {
-            m_chunk     = c;
-            m_skew_leaf = leaf;
-            return true;
-        }
-        if (c < nsamps) {
-            smallest = std::min(smallest, need(c, leaf));
-        }
-    }
-    if (tree_fits) {
-        return false;
-    }
-    throw detail::BudgetError(
-        fmt::format(
-            "FDMT (cpu): no streaming path fits max_memory_bytes ({:.2f} GiB): "
-            "the tree path needs {:.2f} GiB and the skewed-window path more "
-            "than the budget at every chunk length",
-            static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
-            static_cast<double>(tree_bytes) / (1 << 30)),
-        smallest);
 }
 
 void FDMTCpuEngine::plan_working_memory(SizeType fuse_levels,
@@ -518,32 +398,167 @@ SizeType FDMTCpuEngine::auto_fuse_levels() const noexcept {
 } // namespace dmt::algorithms::detail::fdmt_cpu
 
 namespace dmt::algorithms {
+
+detail::FDMTEngineAttempt
+detail::try_make_fdmt_cpu(const plans::FDMTPlan& plan,
+                          const detail::FDMTEngineConfig& cfg) {
+    if (cfg.nbeams == 0) {
+        throw std::invalid_argument("FDMT: nbeams must be at least 1");
+    }
+    const bool search_u32 = detail::int_search_fits_u32(
+        plan, cfg.use_box_smearing, cfg.search_nbits);
+    SizeType auto_chunk =
+        detail::fdmt_chunk_nsamps(plan, cfg.mode, cfg.nbeams, cfg.chunk_nsamps,
+                                  cfg.search_upper_levels);
+    if (cfg.mode == FDMTMode::kValid && cfg.chunk_nsamps == 0 &&
+        (plan.get_history_size() + plan.get_tree_history_size()) *
+                sizeof(float) >
+            detail::kFDMTChunkStateBudget) {
+        auto_chunk = std::min<SizeType>(1024, plan.get_nsamps());
+    } else if (cfg.search_nbits != 32 && !search_u32 && cfg.chunk_nsamps == 0) {
+        auto_chunk =
+            std::min(plan.get_nsamps(), std::max<SizeType>(64, auto_chunk / 2));
+    }
+
+    const SizeType niters = plan.get_niters();
+    const SizeType nsamps = plan.get_nsamps();
+    const SizeType depth =
+        cfg.search_upper_levels ? plan.get_subband_depth() : SizeType{0};
+    const bool skew_eligible =
+        cfg.mode == FDMTMode::kValid && cfg.nbeams == 1 && niters >= 5 &&
+        cfg.fuse_levels != 0 && cfg.max_fuse_levels >= 4 &&
+        // Searched subband levels sit above the leaf and fused levels.
+        (!cfg.search_upper_levels || niters >= depth + 5);
+    const SizeType ring_elem = cfg.search_nbits == 32   ? sizeof(float)
+                               : cfg.search_nbits == 16 ? 2
+                                                        : 1;
+    const auto skew_list =
+        detail::fdmt_cpu::FDMTCpuEngine::skew_candidates(ring_elem);
+
+    struct Candidate {
+        bool skew{false};
+        SizeType chunk{0};
+        SizeType leaf{0};
+    };
+    std::vector<Candidate> candidates;
+    const auto add_skew_explicit = [&](SizeType c) {
+        if (!skew_eligible || c >= nsamps) {
+            return;
+        }
+        if (cfg.skew_leaf != 0) {
+            candidates.push_back({true, c, cfg.skew_leaf});
+            return;
+        }
+        for (const auto& [sc, leaf] : skew_list) {
+            if (sc == c && leaf != 0) {
+                candidates.push_back({true, c, leaf});
+            }
+        }
+        candidates.push_back({true, c, 0});
+    };
+
+    if (cfg.path == FDMTPath::kTree || cfg.path == FDMTPath::kDirect) {
+        candidates.push_back({false, auto_chunk, 0});
+    } else if (detail::is_skewed_path(cfg.path)) {
+        if (cfg.chunk_nsamps != 0) {
+            add_skew_explicit(auto_chunk);
+        } else if (skew_eligible) {
+            for (const auto& [c, leaf] : skew_list) {
+                if (c < nsamps) {
+                    candidates.push_back({true, c, leaf});
+                }
+            }
+        }
+    } else if (cfg.chunk_nsamps != 0) {
+        // Explicit chunk under kAuto: tree first, then skewed at that chunk.
+        candidates.push_back({false, auto_chunk, 0});
+        add_skew_explicit(auto_chunk);
+    } else {
+        // Automatic chunk under kAuto: packed input takes the long skewed
+        // chunks before the tree; float takes the tree first.
+        const bool skew_first = cfg.search_nbits != 32;
+        constexpr SizeType kMinFirst =
+            detail::fdmt_cpu::FDMTCpuEngine::kSkewFirstMinChunk;
+        if (skew_first && skew_eligible) {
+            for (const auto& [c, leaf] : skew_list) {
+                if (c >= kMinFirst && c < nsamps) {
+                    candidates.push_back({true, c, leaf});
+                }
+            }
+        }
+        candidates.push_back({false, auto_chunk, 0});
+        if (skew_eligible) {
+            for (const auto& [c, leaf] : skew_list) {
+                if ((!skew_first || c < kMinFirst) && c < nsamps) {
+                    candidates.push_back({true, c, leaf});
+                }
+            }
+        } else if (cfg.mode == FDMTMode::kValid) {
+            // Tree-only plans (too few levels, multi-beam, or unfused):
+            // halve the automatic chunk down to 256, matching the GPU path.
+            for (SizeType c = auto_chunk / 2; c >= 256; c /= 2) {
+                candidates.push_back({false, c, 0});
+            }
+        }
+    }
+
+    auto deferred_cfg             = cfg;
+    deferred_cfg.defer_allocation = true;
+    SizeType smallest             = std::numeric_limits<SizeType>::max();
+    SizeType tree_bytes           = 0;
+    bool tried_skew               = false;
+    for (const auto& cand : candidates) {
+        std::unique_ptr<detail::fdmt_cpu::FDMTCpuEngine> eng;
+        try {
+            eng = std::make_unique<detail::fdmt_cpu::FDMTCpuEngine>(
+                plan, deferred_cfg, cand.skew, cand.chunk, cand.leaf);
+        } catch (const std::length_error&) {
+            continue;
+        }
+        const SizeType used = eng->get_memory_usage().total();
+        if (!cand.skew) {
+            tree_bytes = used;
+        } else {
+            tried_skew = true;
+        }
+        if (used <= cfg.max_memory_bytes) {
+            if (!cfg.defer_allocation) {
+                eng->allocate();
+            }
+            return {.engine = std::move(eng), .needed = used, .error = {}};
+        }
+        smallest = std::min(smallest, used);
+    }
+
+    std::string msg;
+    if (smallest == std::numeric_limits<SizeType>::max()) {
+        msg = "FDMT (cpu): no streaming path is available for this "
+              "configuration";
+    } else if (tree_bytes > 0 && tried_skew && cfg.chunk_nsamps == 0) {
+        msg = fmt::format(
+            "FDMT (cpu): no streaming path fits max_memory_bytes ({:.2f} GiB): "
+            "the tree path needs {:.2f} GiB and the skewed-window path more "
+            "than the budget at every chunk length",
+            static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
+            static_cast<double>(tree_bytes) / (1 << 30));
+    } else {
+        msg = fmt::format("FDMT (cpu): this configuration needs {:.2f} GiB, "
+                          "over max_memory_bytes ({:.2f} GiB){}",
+                          static_cast<double>(smallest) / (1 << 30),
+                          static_cast<double>(cfg.max_memory_bytes) / (1 << 30),
+                          tried_skew ? "; use a shorter chunk_nsamps" : "");
+    }
+    return {.engine = nullptr, .needed = smallest, .error = std::move(msg)};
+}
+
 std::unique_ptr<detail::FDMTEngine>
 detail::make_fdmt_cpu(const plans::FDMTPlan& plan,
                       const detail::FDMTEngineConfig& cfg) {
-    using Cfg = detail::FDMTEngineConfig;
-    try {
-        return std::make_unique<detail::fdmt_cpu::FDMTCpuEngine>(plan, cfg);
-    } catch (const detail::BudgetError& tree) {
-        // The tree path is chosen from an estimate of its bytes; when the
-        // built engine is over the budget after all, take the skewed path
-        // (if eligible) rather than fail a budget a smaller path fits.
-        if (cfg.skew_history_bytes != Cfg::kSkewHistoryAuto ||
-            !tree.smaller_path()) {
-            throw;
-        }
-        auto skew               = cfg;
-        skew.skew_history_bytes = Cfg::kSkewHistoryNoTree;
-        try {
-            return std::make_unique<detail::fdmt_cpu::FDMTCpuEngine>(plan,
-                                                                     skew);
-        } catch (const detail::BudgetError& e) {
-            if (e.needed() < tree.needed()) {
-                throw;
-            }
-            throw tree;
-        }
+    auto res = try_make_fdmt_cpu(plan, cfg);
+    if (!res.engine) {
+        throw std::invalid_argument(res.error);
     }
+    return std::move(res.engine);
 }
 
 } // namespace dmt::algorithms

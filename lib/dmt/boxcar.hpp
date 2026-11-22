@@ -484,6 +484,9 @@ public:
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
+    [[nodiscard]] virtual FDMTPath path() const noexcept {
+        return FDMTPath::kTree;
+    }
     [[nodiscard]] virtual std::string search_path() const { return {}; }
     /// Input samples a searched sample waits for (FDMTEngine::search_latency).
     [[nodiscard]] virtual uint64_t search_latency() const noexcept { return 0; }
@@ -552,6 +555,7 @@ public:
     }
     virtual SizeType chunk_nsamps() const noexcept = 0;
     virtual SizeType fuse_levels() const noexcept  = 0;
+    [[nodiscard]] virtual FDMTPath path() const noexcept = 0;
     virtual std::string search_path() const        = 0;
     /// drain(): endpoints at or after `stop` are not searched (UINT64_MAX:
     /// none); reset_history() clears it.

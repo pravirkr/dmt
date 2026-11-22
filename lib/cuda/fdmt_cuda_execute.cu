@@ -969,6 +969,11 @@ void FDMTCudaEngine::reset(std::span<const uint8_t> waterfall_h,
 }
 
 void FDMTCudaEngine::check_stepper_block() const {
+    if (m_direct && m_direct->skewed) {
+        throw std::logic_error(
+            "FDMT (cuda): the stepper is not supported on the skewed-window "
+            "path; raise max_memory_bytes or use execute()");
+    }
     if (m_chunk < m_plan.get_nsamps()) {
         throw std::logic_error(fmt::format(
             "FDMT (cuda): the stepper runs whole blocks, but this engine "
@@ -1205,9 +1210,6 @@ void FDMTCudaEngine::start(const Input& input,
     const bool direct = fuse && use_direct<Input>(types);
     m_top_chunk       = fuse && use_top(types);
     if (m_mode == FDMTMode::kValid) {
-        if ((!direct && m_direct) || (!m_top_chunk && m_top)) {
-            ensure_full_tree_history(stream);
-        }
         // Tree levels after direct chunks lag behind: rebuild their
         // histories (at the current position) before the tree runs.
         if (!direct) {

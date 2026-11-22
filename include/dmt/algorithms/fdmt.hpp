@@ -68,8 +68,9 @@ inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
 
 /**
  * @brief Memory an FDMT engine allocates, in bytes (host memory on the CPU
- * backend, device memory on a GPU backend). Apart from the GPU staging of
- * host-memory calls (in `workspace` once the first one allocates it),
+ * backend, device memory on a GPU backend, `pinned` apart). Apart from the GPU
+ * staging of host-memory calls (device buffers in `workspace` and page-locked
+ * host buffers in `pinned` once the first host call allocates them),
  * everything is allocated at construction; the caller provides the input
  * and the `output` bytes of output buffer per call.
  */
@@ -79,11 +80,14 @@ struct FDMTMemoryUsage {
     SizeType history{0};   ///< "valid"-mode streaming history
     SizeType workspace{0}; ///< CPU: per-thread fusion/unpack scratch;
                            ///< GPU: fused-kernel index tables, plus the
-                           ///< host-memory call staging once allocated
+                           ///< host-memory call device staging once allocated
     SizeType output{0};    ///< Caller-provided dmt buffer per execute() (not
                            ///< owned by the engine)
+    SizeType pinned{0};    ///< GPU: pinned host buffers held for host-memory
+                           ///< calls (host memory, not in total())
 
-    /// Total allocated by the engine (excludes `output`).
+    /// Total allocated where the instance runs (excludes `output` and
+    /// `pinned`).
     [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + state + history + workspace;
     }
@@ -104,6 +108,11 @@ struct FDMTMemoryEstimate {
     /// device-memory calls never allocate them (packed host input stages
     /// its packed bytes instead of the float block). 0 on the CPU.
     SizeType host_staging{0};
+    /// GPU backends: pinned host bytes the first host-memory execute() or
+    /// finalize() adds when the output plane reaches the staging threshold
+    /// (2 * min(max(1, nthreads), 4) * 8 MiB); 0 for smaller outputs,
+    /// device-memory calls, and the CPU.
+    SizeType host_pinned{0};
 };
 
 /**
@@ -131,7 +140,11 @@ struct FDMTMemoryEstimate {
  *   it through device buffers for the whole input block and output plane,
  *   allocated on the first host call outside max_memory_bytes (reported in
  *   get_memory_usage().workspace once allocated), and blocks until the
- *   result is on the host. Device memory (`DeviceSpan`) works on
+ *   result is on the host. When the output plane reaches the pinned-staging
+ *   threshold (2 * min(max(1, nthreads), 4) * 8 MiB), device-to-host copies
+ *   pipeline through that many pinned host bytes across up to min(nthreads, 4)
+ *   host worker threads (reported in get_memory_usage().pinned and
+ *   estimate_memory().host_pinned). Device memory (`DeviceSpan`) works on
  *   GPU backends only (the CPU backend throws std::invalid_argument) and is
  *   asynchronous on the given Stream.
  */
@@ -426,7 +439,7 @@ public:
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
 
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
 
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.

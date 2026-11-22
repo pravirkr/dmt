@@ -12,17 +12,6 @@ using algorithms::FDMTFFTBoxcar;
 
 namespace {
 
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
-
 // Per-beam references from the CPU FDMTFFT.
 std::vector<RawCandidate>
 cpu_reference(const plans::FDMTPlan& plan,
@@ -31,7 +20,8 @@ cpu_reference(const plans::FDMTPlan& plan,
               bool frac,
               std::span<const uint8_t> kill,
               SizeType beams,
-              const std::vector<std::vector<float>>& input) {
+              const std::vector<std::vector<float>>& input,
+              SizeType max_segment = 0) {
     const Exec exec = Exec::cpu();
     std::vector<RawCandidate> expected;
     const SizeType size = plan.get_nchans() * plan.get_nsamps();
@@ -41,7 +31,8 @@ cpu_reference(const plans::FDMTPlan& plan,
             beam[k].assign(input[k].begin() + b * size,
                            input[k].begin() + (b + 1) * size);
         }
-        auto c = fft_reference(plan, cfg, smear, frac, kill, exec, beam);
+        auto c =
+            fft_reference(plan, cfg, smear, frac, kill, exec, beam, max_segment);
         for (auto& x : c) {
             x.beam_idx = static_cast<uint32_t>(b);
         }
@@ -54,18 +45,17 @@ cpu_reference(const plans::FDMTPlan& plan,
 
 TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
           "[gpu][parity][boxcar]") {
-    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+    const plans::FDMTPlan plan(700, 1200, 7, 751, 0.001F,
                                std::vector<IndexType>{0, 4, 17, 40, 97});
     const auto input = waterfalls(plan, 2, 4);
     const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
-    for (const SizeType cap : {SizeType{0}, SizeType{512}}) {
-        const SegmentCap segments(cap);
+    for (const bool segmented : {false, true}) {
         for (const bool frac : {true, false}) {
             for (const auto mode :
                  {PeakFindingMode::kContiguousPeakPerWidth,
                   PeakFindingMode::kContiguousPeakAcrossWidths,
                   PeakFindingMode::kAllAboveThreshold}) {
-                CAPTURE(cap, frac, mode);
+                CAPTURE(segmented, frac, mode);
                 BoxcarConfig cfg;
                 cfg.max_boxcar       = 37;
                 cfg.wtsp             = 1;
@@ -73,9 +63,24 @@ TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
                 cfg.peak_mode        = mode;
                 cfg.max_candidates   = 500000;
                 cfg.max_cands_per_dm = 0;
+                SizeType budget      = algorithms::kFDMTDefaultMaxMemory;
+                if (segmented) {
+                    const auto open = FDMTFFTBoxcar::estimate_memory(
+                        plan, cfg, true, exec, 2, frac);
+                    budget = open.usage.budgeted() - 1;
+                }
+                FDMTFFTBoxcar search(plan, cfg, true, exec, 2, frac, {},
+                                     budget);
+                SizeType ref_cap = 0;
+                if (segmented) {
+                    CHECK(search.get_chunk_nsamps() < plan.get_nsamps());
+                    const auto geom = algorithms::fdmt_fft::make_geometry(
+                        plan, FDMTMode::kValid, frac, true);
+                    ref_cap = search.get_chunk_nsamps() +
+                              std::max(geom.skip, geom.support) + geom.guard;
+                }
                 const auto expected =
-                    cpu_reference(plan, cfg, true, frac, {}, 2, input);
-                FDMTFFTBoxcar search(plan, cfg, true, exec, 2, frac);
+                    cpu_reference(plan, cfg, true, frac, {}, 2, input, ref_cap);
                 std::vector<RawCandidate> actual;
                 for (const auto& block : input) {
                     append(actual, search.execute(block));

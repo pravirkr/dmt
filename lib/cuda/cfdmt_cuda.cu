@@ -65,10 +65,10 @@ unsigned grid_for(uint64_t n) {
         std::clamp<uint64_t>((n + kBlock - 1) / kBlock, 1, uint64_t{1} << 20));
 }
 
-// Front-end chunk size as a share of the device L2: unpack, the forward
-// FFT's passes and the channel powers of a chunk then run out of L2, and the
-// host path's upload overlaps with the front end chunk by chunk.
-constexpr double kChunkL2Share = 0.25;
+// Fixed front-end chunk target: memory and chunking depend only on the
+// arguments, never on device properties, while keeping chunk uploads
+// overlapped with the front end.
+constexpr SizeType kFrontEndChunkBytes = SizeType{16} << 20;
 // Default cuFFT-path work buffer (a fixed size: memory depends on the
 // arguments only, never on the device's free memory).
 constexpr SizeType kWorkBytes = SizeType{1} << 30;
@@ -305,6 +305,7 @@ public:
                       const detail::CohFDMTEngineConfig& cfg)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
           m_fdmt_plan(plan.get_f_min(),
                       plan.get_f_max(),
                       plan.get_nchans(),
@@ -313,7 +314,8 @@ public:
                       static_cast<IndexType>(plan.get_fine_dt_max()),
                       -static_cast<IndexType>(plan.get_fine_dt_max()),
                       plan.get_config().dt_step,
-                      "valid") {
+                      "valid"),
+          m_host(cfg.exec.device, cfg.exec.nthreads) {
         gpu_utils::set_device(m_device_id);
         {
             // Deferred: every device buffer, table upload and cuFFT work
@@ -448,12 +450,16 @@ public:
             input += r.bytes();
         }
 
+        const SizeType output_bytes = m_plan.get_dmt_size() * sizeof(float);
         return {.spectrum  = m_spec.capacity() * sizeof(ComplexTypeGPU),
                 .waterfall = m_waterfall.capacity() * sizeof(float),
                 .fdmt =
                     fdmt_mem.total() + (m_fdmt_out.capacity() * sizeof(float)),
-                .workspace = workspace + input,
-                .output    = m_plan.get_dmt_size() * sizeof(float)};
+                .workspace   = workspace + input,
+                .output      = output_bytes,
+                .pinned      = m_host.pinned_bytes(),
+                .host_pinned = detail::host_staging_pinned_bytes(output_bytes,
+                                                                 m_nthreads)};
     }
 
 protected:
@@ -470,6 +476,7 @@ private:
 
     const plans::CohFDMTPlan& m_plan; // owned by the CohFDMT facade
     int m_device_id;
+    int m_nthreads;
     // Pending device buffers of a deferred construction (declared before
     // them: a pending buffer leaves the list when it is destroyed).
     gpu_utils::PendingList m_deferred;
@@ -544,16 +551,10 @@ private:
         m_nwin            = ((m_plan.get_fdmt_nsamps() + lc() - 1) / lc()) + 1;
 
         // Front-end chunks of equal size (plus a remainder).
-        int l2 = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, m_device_id),
-            "CohFDMT: device attribute query failed");
         const SizeType sub_bytes =
             SizeType{2} * nfft * nbin * sizeof(ComplexTypeGPU);
-        const SizeType per = std::clamp<SizeType>(
-            static_cast<SizeType>(kChunkL2Share * static_cast<double>(l2)) /
-                sub_bytes,
-            1, nsub);
+        const SizeType per =
+            std::clamp<SizeType>(kFrontEndChunkBytes / sub_bytes, 1, nsub);
         for (SizeType s0 = 0; s0 < nsub; s0 += per) {
             const SizeType n = std::min(per, nsub - s0);
             if (m_fwd.empty() ||
@@ -633,22 +634,14 @@ private:
         const int log2n  = exact_log2(mbin);
         const bool shape = log2n >= cfdmt_gpu::kFusedMinLog2 &&
                            log2n <= cfdmt_gpu::kFusedMaxLog2;
-        int optin        = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(
-                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
-            "CohFDMT: device attribute query failed");
-        const bool fits = shape && cfdmt_gpu::fused_smem_bytes(log2n) <=
-                                       static_cast<uint64_t>(optin);
         if (path == CohFDMTCoherentPath::kCuFFT ||
-            (path == CohFDMTCoherentPath::kAuto && !fits)) {
+            (path == CohFDMTCoherentPath::kAuto && !shape)) {
             return false;
         }
-        if (!fits) {
+        if (!shape) {
             throw std::invalid_argument(fmt::format(
                 "CohFDMT (gpu): the fused coherent kernel needs a "
-                "power-of-two channel FFT of 16-4096 bins fitting in shared "
-                "memory; mbin={}",
+                "power-of-two channel FFT of 16-4096 bins; mbin={}",
                 mbin));
         }
         m_fused      = fused_kernel_for<cfdmt_gpu::kFusedMinLog2>(log2n);

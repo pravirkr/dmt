@@ -178,11 +178,13 @@ py::array_t<float, py::array::c_style> fft_output(const FDMTFFT& fdmt,
 void bind_fdmt(py::module_& mod) {
     py::class_<FDMTMemoryUsage>(mod, "FDMTMemoryUsage", R"doc(
         Memory an FDMT engine holds, in bytes (host memory on the CPU
-        backend, device memory on a GPU backend). The constructor allocates
-        it; on a GPU the first host-memory ``execute`` adds device copies of
-        the input block and output plane (``FDMT.estimate_memory`` reports
-        them as ``host_staging``). ``output`` is the caller-side output buffer
-        per call (managed automatically in Python) and is not part of
+        backend, device memory on a GPU backend, ``pinned`` apart). The
+        constructor allocates it; on a GPU the first host-memory ``execute``
+        adds device copies of the input block and output plane
+        (``FDMT.estimate_memory`` reports them as ``host_staging``) and, for
+        outputs at or above the pinned-staging threshold, page-locked host
+        buffers in ``pinned`` (reported as ``host_pinned``). ``output`` (the
+        caller-side output buffer per call) and ``pinned`` are not part of
         ``total``.
         )doc")
         .def_readonly("plan", &FDMTMemoryUsage::plan)
@@ -190,12 +192,14 @@ void bind_fdmt(py::module_& mod) {
         .def_readonly("history", &FDMTMemoryUsage::history)
         .def_readonly("workspace", &FDMTMemoryUsage::workspace)
         .def_readonly("output", &FDMTMemoryUsage::output)
+        .def_readonly("pinned", &FDMTMemoryUsage::pinned)
         .def_property_readonly("total", &FDMTMemoryUsage::total)
         .def("__repr__", [](const FDMTMemoryUsage& m) {
             return fmt::format(
                 "FDMTMemoryUsage(plan={}, state={}, history={}, workspace={}, "
-                "total={}, output={})",
-                m.plan, m.state, m.history, m.workspace, m.total(), m.output);
+                "pinned={}, total={}, output={})",
+                m.plan, m.state, m.history, m.workspace, m.pinned, m.total(),
+                m.output);
         });
 
     py::class_<FDMTMemoryEstimate>(mod, "FDMTMemoryEstimate", R"doc(
@@ -206,15 +210,19 @@ void bind_fdmt(py::module_& mod) {
         its ``chunk_nsamps`` (``FDMTFFT``: the output samples per overlap-save
         segment); ``host_staging`` (GPU backends) the device bytes
         the first host-memory call adds outside ``max_memory_bytes`` (float32
-        input block and output plane; 0 on the CPU).
+        input block and output plane; 0 on the CPU); ``host_pinned`` (GPU
+        backends) the pinned host bytes a host-memory call adds when the
+        output reaches the staging threshold (0 otherwise and on the CPU).
         )doc")
         .def_readonly("usage", &FDMTMemoryEstimate::usage)
         .def_readonly("chunk_nsamps", &FDMTMemoryEstimate::chunk_nsamps)
         .def_readonly("host_staging", &FDMTMemoryEstimate::host_staging)
+        .def_readonly("host_pinned", &FDMTMemoryEstimate::host_pinned)
         .def("__repr__", [](const FDMTMemoryEstimate& e) {
             return fmt::format("FDMTMemoryEstimate(total={}, chunk_nsamps={}, "
-                               "host_staging={})",
-                               e.usage.total(), e.chunk_nsamps, e.host_staging);
+                               "host_staging={}, host_pinned={})",
+                               e.usage.total(), e.chunk_nsamps, e.host_staging,
+                               e.host_pinned);
         });
 
     py::class_<FDMT>(mod, "FDMT", py::dynamic_attr(),
