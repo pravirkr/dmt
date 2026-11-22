@@ -33,9 +33,7 @@ class Type1Plan {
 public:
     /// @param modes Number of output modes M (>= 1).
     /// @param tol Target relative accuracy (1e-7 .. 1e-2).
-    /// @param nthreads Unused (execute() is single-threaded and thread-safe;
-    /// callers run independent transforms in parallel).
-    Type1Plan(SizeType modes, double tol, int nthreads = 1);
+    Type1Plan(SizeType modes, double tol);
     ~Type1Plan();
     Type1Plan(Type1Plan&&) noexcept;
     Type1Plan& operator=(Type1Plan&&) noexcept;

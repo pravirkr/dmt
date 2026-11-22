@@ -17,12 +17,6 @@ float cff(float f_start, float f_end, float f_min, float f_max) {
            (std::pow(f_min, kDispCoeff) - std::pow(f_max, kDispCoeff));
 }
 
-SizeType calculate_dt_sub(
-    float f_start, float f_end, float f_min, float f_max, SizeType dt) {
-    const float ratio = cff(f_start, f_end, f_min, f_max);
-    return static_cast<SizeType>(std::ceil(static_cast<float>(dt) * ratio));
-}
-
 float get_dmconv(float f_min, float f_max, float tsamp) {
     const float dm_conv = kDispConst * (std::pow(f_min, kDispCoeff) -
                                         std::pow(f_max, kDispCoeff));

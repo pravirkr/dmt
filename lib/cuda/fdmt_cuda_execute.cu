@@ -19,8 +19,9 @@ namespace {
  * this level. A row here only ever represents "this single channel's own
  * delay/smearing width of |dt| samples": rows +s and -s are always identical,
  * since a single leaf channel has no other channel to be earlier/later than.
- * This mirrors the CPU implementation's `fdmt_init_subband` in fdmt.cpp exactly
- * (see its doc comment for the full rationale) -- every row lookup below is
+ * This mirrors the CPU implementation's `fdmt_init_channel` in
+ * lib/cpu/fdmt_cpu_execute.cpp exactly (see its doc comment for the full
+ * rationale) -- every row lookup below is
  * indexed by magnitude `s`, and `write_matches` fans a computed row out to
  * whichever of the +s / -s dt indices are actually present in this
  * sub-band's grid.
@@ -666,8 +667,6 @@ void FDMTCudaEngine::execute_search_int_direct(const Source& chunk_at,
                                                cudaStream_t stream) {
     const SizeType root = m_plan.get_niters();
     const auto h_stride = static_cast<int64_t>(m_ring_size);
-    auto* state         = reinterpret_cast<TInt*>(
-        thrust::raw_pointer_cast(m_state_internal_d.data()));
     const auto level_ptr = [&](SizeType l) { return state_level_ptr<TInt>(l); };
     const auto beam_stride = static_cast<int64_t>(m_half_elems);
     const auto consume     = [&](SizeType l, const TInt* src, const TInt* prev,
@@ -928,16 +927,14 @@ void FDMTCudaEngine::reset(DeviceSpan<const uint8_t> d_waterfall,
                            SizeType nbits,
                            DeviceSpan<float> d_dmt,
                            Stream stream) {
-    reset_impl(to_cuda(d_waterfall), nbits, to_cuda(d_dmt), to_cuda(stream),
-               /*fuse=*/false);
+    reset_impl(to_cuda(d_waterfall), nbits, to_cuda(d_dmt), to_cuda(stream));
     m_device_work.mark(to_cuda(stream));
 }
 
 void FDMTCudaEngine::reset(DeviceSpan<const float> d_waterfall,
                            DeviceSpan<float> d_dmt,
                            Stream stream) {
-    reset_impl(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream),
-               /*fuse=*/false);
+    reset_impl(to_cuda(d_waterfall), to_cuda(d_dmt), to_cuda(stream));
     m_device_work.mark(to_cuda(stream));
 }
 
@@ -950,7 +947,7 @@ void FDMTCudaEngine::reset(std::span<const float> waterfall_h,
     reset_impl(cuda::std::span<const float>(
                    thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
                    waterfall_h.size()),
-               stage_dmt_span(), m_host.stream(), /*fuse=*/false);
+               stage_dmt_span(), m_host.stream());
     m_host_dmt = dmt_h;
 }
 
@@ -964,7 +961,7 @@ void FDMTCudaEngine::reset(std::span<const uint8_t> waterfall_h,
     reset_impl(cuda::std::span<const uint8_t>(
                    thrust::raw_pointer_cast(m_stage_wf_packed_d.data()),
                    waterfall_h.size()),
-               nbits, stage_dmt_span(), m_host.stream(), /*fuse=*/false);
+               nbits, stage_dmt_span(), m_host.stream());
     m_host_dmt = dmt_h;
 }
 
@@ -987,8 +984,7 @@ void FDMTCudaEngine::check_stepper_block() const {
 void FDMTCudaEngine::reset_impl(cuda::std::span<const uint8_t> d_waterfall,
                                 SizeType nbits,
                                 cuda::std::span<float> d_dmt,
-                                cudaStream_t stream,
-                                bool fuse) {
+                                cudaStream_t stream) {
     check_root_output();
     check_stepper_block();
     check_packed_inputs(d_waterfall.size(), nbits, d_dmt.size());
@@ -998,13 +994,12 @@ void FDMTCudaEngine::reset_impl(cuda::std::span<const uint8_t> d_waterfall,
                                 .row_bytes = static_cast<int>(row_bytes),
                                 .nbits     = static_cast<int>(nbits)};
     start(input, m_int_tree ? m_int_levels[nbits] : m_float_levels,
-          d_dmt.data(), m_plan.get_nsamps(), stream, fuse);
+          d_dmt.data(), m_plan.get_nsamps(), stream, /*fuse=*/false);
 }
 
 void FDMTCudaEngine::reset_impl(cuda::std::span<const float> d_waterfall,
                                 cuda::std::span<float> d_dmt,
-                                cudaStream_t stream,
-                                bool fuse) {
+                                cudaStream_t stream) {
     check_root_output();
     check_stepper_block();
     check_inputs(d_waterfall.size(), d_dmt.size());
@@ -1013,7 +1008,7 @@ void FDMTCudaEngine::reset_impl(cuda::std::span<const float> d_waterfall,
         .nsamps = static_cast<int>(m_plan.get_nsamps()),
     };
     start(input, m_float_levels, d_dmt.data(), m_plan.get_nsamps(), stream,
-          fuse);
+          /*fuse=*/false);
 }
 
 void FDMTCudaEngine::check_inputs(SizeType waterfall_size,
@@ -1086,7 +1081,6 @@ template <FDMTMode Mode, bool Smear, typename Input, typename TOut>
 void FDMTCudaEngine::launch_fused_typed(const Input& input,
                                         TOut* out,
                                         cudaStream_t stream) {
-    const auto& f = *m_fused;
     if constexpr (Mode == FDMTMode::kValid) {
         if (m_chan_dm) {
             launch_fused_kernel<Mode, Smear, Input, TOut, true>(input, out,
@@ -1095,7 +1089,6 @@ void FDMTCudaEngine::launch_fused_typed(const Input& input,
         }
     }
     launch_fused_kernel<Mode, Smear, Input, TOut, false>(input, out, stream);
-    (void)f;
 }
 
 template <FDMTMode Mode,
@@ -1201,7 +1194,6 @@ void FDMTCudaEngine::start(const Input& input,
             m_current_level, total_levels() - 1));
     }
     m_stream           = stream;
-    m_dmt_target_ptr   = dmt;
     m_active           = active;
     m_current_level    = 0;
     m_host_dmt         = {};

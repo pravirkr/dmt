@@ -171,10 +171,6 @@ make_boxcar_plans(const plans::FDMTPlan& plan,
                   bool smear,
                   std::span<const uint8_t> kill_mask,
                   uint64_t extra_warmup) {
-    const auto finite = [](float x) {
-        const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-        return (bits & 0x7F800000U) != 0x7F800000U;
-    };
     if (plan.get_mode() != "valid" ||
         !utils::is_finite_bits(config.detect_thresh) ||
         config.detect_thresh <= 0 ||

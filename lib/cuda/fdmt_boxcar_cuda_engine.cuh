@@ -656,7 +656,7 @@ private:
     bool m_carry32 = false;
     std::unique_ptr<BoxcarDriver> m_driver;
     /// Killed channel runs: read as zero by the transform (m_keep_d) or
-    /// zeroed in m_input_d / m_packed_input.
+    /// zeroed in m_input_d.
     std::vector<std::pair<SizeType, SizeType>> m_kill_runs;
     bool m_keep_in_transform = false;
     /// kKeepBrightest: max_cands_per_dm entries per (beam, row), the rows'
@@ -682,7 +682,6 @@ private:
     gpu_utils::PlannedVector<uint64_t> m_integer_carry, m_integer_thresholds;
     gpu_utils::PlannedVector<uint32_t> m_integer_carry32;
     gpu_utils::PlannedVector<double> m_integer_means;
-    gpu_utils::PlannedVector<uint8_t> m_packed_input;
     double m_integer_unit = 1;
     int m_block_threads   = 256;
     // Fallbacks taken to fit max_boxcar in shared memory (configure_shared).

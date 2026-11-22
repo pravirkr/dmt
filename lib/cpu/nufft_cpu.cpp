@@ -434,7 +434,7 @@ public:
     std::unique_ptr<utils::FFTWRowPlan> m_fft;
 };
 
-Type1Plan::Type1Plan(SizeType modes, double tol, int /*nthreads*/)
+Type1Plan::Type1Plan(SizeType modes, double tol)
     : m_impl(std::make_unique<Impl>(modes, tol)) {}
 Type1Plan::~Type1Plan()                                     = default;
 Type1Plan::Type1Plan(Type1Plan&& other) noexcept            = default;

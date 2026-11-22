@@ -133,8 +133,8 @@ public:
             }
             auto& plan_r = m_plans[r.count];
             if (!plan_r) {
-                plan_r = std::make_unique<nufft::Type1Plan>(
-                    r.count, m_opts.tolerance, m_nthreads);
+                plan_r = std::make_unique<nufft::Type1Plan>(r.count,
+                                                            m_opts.tolerance);
             }
             m_runs.push_back({r, plan_r.get()});
             std::fill_n(by_nufft.begin() + static_cast<std::ptrdiff_t>(r.begin),

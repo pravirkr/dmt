@@ -333,11 +333,16 @@ FDMTMemoryUsage FDMTCudaEngine::get_memory_usage() const noexcept {
                 c.hist_offset.size()) *
                sizeof(int);
     };
+    const auto copy_coord_bytes = [](const plans::FDMTCoordCopyD& c) {
+        return (c.nsamps.size() + c.buf_offset.size() +
+                c.tail_buf_offset.size() + c.tail_nsamps.size()) *
+               sizeof(int);
+    };
     const auto& sh = m_plan_d.state_shape;
     const auto& g0 = m_plan_d.grids0;
     const SizeType plan_bytes =
         coord_bytes(m_plan_d.coordinates_sum) +
-        coord_bytes(m_plan_d.coordinates_copy) +
+        copy_coord_bytes(m_plan_d.coordinates_copy) +
         ((sh.nchans.size() + sh.ncoords_sum.size() + sh.ncoords_copy.size() +
           sh.nsamps.size() + sh.dt_max.size() + g0.dt_grid.size() +
           g0.ndt.size() + g0.coord_offset.size() + m_level0_box_d.size() +

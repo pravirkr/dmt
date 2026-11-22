@@ -73,7 +73,7 @@ __global__ __launch_bounds__(kIterThreads) void kernel_execute_iter(
     const TIn* __restrict__ state_in,
     TOut* __restrict__ state_out,
     const plans::FDMTCoordDPtrs coords_sum,
-    const plans::FDMTCoordDPtrs coords_copy,
+    const plans::FDMTCoordCopyDPtrs coords_copy,
     THist* __restrict__ hist_in,
     int nsamps,
     int ncoords_sum_cur,

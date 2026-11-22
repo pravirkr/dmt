@@ -716,7 +716,6 @@ private:
         std::vector<int> delays(pc.delay_table.size());
         std::ranges::transform(pc.delay_table, delays.begin(),
                                [](SizeType v) { return static_cast<int>(v); });
-        upload(m_delay_d, delays.begin(), delays.end());
         std::vector<int> active;
         for (SizeType c = 0; c < nchans; ++c) {
             if (pc.kill_mask[c] != 0) {
@@ -724,14 +723,19 @@ private:
             }
         }
         m_nact = static_cast<int>(active.size());
-        upload(m_active_d, active.begin(), active.end());
 
+        // Decide the kernel first so only its plan tables are uploaded.
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
-            select_kernel<NBITS>(delays, active);
-            if (m_shared_sums) {
-                select_shared<NBITS>(delays, active);
+            if (!m_shared_sums || !select_shared<NBITS>(delays, active)) {
+                select_kernel<NBITS>(delays, active);
             }
         });
+        if (m_kind != KernelKind::kShared) {
+            upload(m_active_d, active.begin(), active.end());
+            if (m_kind == KernelKind::kDirect) {
+                upload(m_delay_d, delays.begin(), delays.end());
+            }
+        }
 
         if (m_estimate_only) {
             return; // estimates create no streams or events
@@ -886,10 +890,10 @@ private:
      * Either way the sums are the same.
      */
     template <unsigned NBITS>
-    void select_shared(const std::vector<int>& delays,
+    bool select_shared(const std::vector<int>& delays,
                        const std::vector<int>& active) {
         if (m_ndm == 0 || active.empty()) {
-            return;
+            return false;
         }
         using E   = sdmt_gpu::Elem<NBITS>;
         int optin = 0;
@@ -929,7 +933,7 @@ private:
             logging::debug("SDMT ({}): no shared-sum program fits; running "
                            "the DDMT kernel",
                            DMT_GPU_NAME);
-            return;
+            return false;
         }
         // Estimated times from sustained rates measured on an L40S at the
         // reference point (4096 channels, 2049 trials): ~3.4e12 arena
@@ -947,7 +951,7 @@ private:
             logging::debug("SDMT ({}): shared sums do not pay (estimated "
                            "{:.2f}x); running the DDMT kernel",
                            DMT_GPU_NAME, speedup);
-            return;
+            return false;
         }
         logging::debug("SDMT ({}): shared-sum kernel, DM tiles of {}, {} "
                        "programs, arena {} elements, estimated {:.2f}x "
@@ -964,6 +968,7 @@ private:
         upload(m_sdmt_wins_d, best->wins.begin(), best->wins.end());
         upload(m_sdmt_nodes_d, best->nodes.begin(), best->nodes.end());
         upload(m_sdmt_trials_d, best->trials.begin(), best->trials.end());
+        return true;
         with_sdmt_cfg(best_cfg, [&]<class Cfg>() {
             gpu_utils::check_gpu_call(
                 cudaFuncSetAttribute(

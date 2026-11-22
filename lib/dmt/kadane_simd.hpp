@@ -82,10 +82,6 @@ struct ScalarBackend {
     static constexpr SizeType kRowGroups = 4;
     static constexpr SizeType kBatchRows = kSimdLanes * kRowGroups;
 
-    [[nodiscard]] static constexpr std::string_view isa_name() noexcept {
-        return "scalar";
-    }
-
     using VecF = float;
     using VecI = int32_t;
 
@@ -380,10 +376,6 @@ struct Avx512fBackend {
     static constexpr SizeType kRowGroups = 2;
     static constexpr SizeType kBatchRows = kSimdLanes * kRowGroups;
 
-    [[nodiscard]] static constexpr std::string_view isa_name() noexcept {
-        return "avx512f";
-    }
-
     using VecF = __m512;
     using VecI = __m512i;
 
@@ -632,10 +624,6 @@ struct Avx2Backend {
     static constexpr SizeType kSimdLanes = 8;
     static constexpr SizeType kRowGroups = 2;
     static constexpr SizeType kBatchRows = kSimdLanes * kRowGroups;
-
-    [[nodiscard]] static constexpr std::string_view isa_name() noexcept {
-        return "avx2";
-    }
 
     using VecF = __m256;
     using VecI = __m256i;
@@ -918,10 +906,6 @@ struct NeonBackend {
     static constexpr SizeType kRowGroups = 4;
     static constexpr SizeType kBatchRows = kSimdLanes * kRowGroups;
 
-    [[nodiscard]] static constexpr std::string_view isa_name() noexcept {
-        return "neon";
-    }
-
     using VecF = float32x4_t;
     using VecI = int32x4_t;
 
@@ -1100,10 +1084,6 @@ using NativeBackend = ScalarBackend;
 inline constexpr SizeType kSimdLanes = NativeBackend::kSimdLanes;
 inline constexpr SizeType kRowGroups = NativeBackend::kRowGroups;
 inline constexpr SizeType kBatchRows = NativeBackend::kBatchRows;
-
-[[nodiscard]] constexpr std::string_view active_isa_name() noexcept {
-    return NativeBackend::isa_name();
-}
 
 /// Load an `L x valid_cols` (`0 <= valid_cols <= L`, `L = Backend::kSimdLanes`)
 /// row-major block from `row_ptrs[0..L-1]` at `t_offset`, transpose in

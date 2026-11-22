@@ -184,6 +184,9 @@ public:
     }
     void reset(Stream stream) override { m_inner->reset(stream); }
     void allocate() override { m_inner->allocate(); }
+    [[nodiscard]] bool stages_host_input() const noexcept override {
+        return m_inner->stages_host_input();
+    }
     bool set_search_keep(const uint8_t* keep, float fill) override {
         return m_inner->set_search_keep(keep, fill);
     }
@@ -282,6 +285,7 @@ inline SearchRun run_subband_search(
     cfg.max_fuse_levels  = std::min(root - 1, root - plan.get_subband_depth());
     cfg.search_upper_levels = plan.get_subband_depth() > 0;
     cfg.search_nbits        = packed ? 8 : 32;
+    cfg.search_only         = true;
     cfg.path = skew ? FDMTPath::kSkewed
                     : (exec.backend == Backend::kCPU ? FDMTPath::kTree
                                                      : FDMTPath::kAuto);

@@ -2,8 +2,7 @@
 
 /**
  * @file types.hpp
- * @brief Common type definitions, astrophysical dispersion constants, and
- * memory utilities.
+ * @brief Common type definitions and astrophysical dispersion constants.
  */
 
 #include <bit>

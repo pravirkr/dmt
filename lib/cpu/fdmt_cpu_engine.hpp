@@ -138,26 +138,21 @@ struct FDMTRowLengths {
  * @brief Per-thread scratch carved out of one engine-owned buffer allocated
  * at construction (see FDMTCpuEngine::m_workspace), so execute() never
  * allocates. Thread t's slice starts at base + t * stride and holds, at
- * fixed offsets: one unpacked packed-input row (`unpack`, nsamps samples of
- * <= 4 bytes), two running level-0 box rows for mixed-sign dt grids
- * (`rows`), and the level-fusion ping-pong buffers (`fused_a`/`fused_b`).
+ * fixed offsets: one unpacked packed-input row (`slice(tid)`, nsamps samples
+ * of <= 8 bytes), two running level-0 box rows for mixed-sign dt grids
+ * (`slice(tid) + row_bytes`), and the level-fusion ping-pong buffers
+ * (`fused_a`/`fused_b`).
  * Every parallel region that uses it runs with exactly `nthreads` threads.
  */
 struct FDMTWorkspace {
     std::byte* base{nullptr};
     SizeType stride{0};
-    SizeType row_bytes{0};   ///< one row of nsamps samples, <= 4 bytes each
+    SizeType row_bytes{0};   ///< one row of nsamps samples, <= 8 bytes each
     SizeType fused_bytes{0}; ///< one fusion ping-pong buffer
     int nthreads{1};
 
     [[nodiscard]] std::byte* slice(SizeType tid) const noexcept {
         return base + (tid * stride);
-    }
-    template <typename T> [[nodiscard]] T* unpack(SizeType tid) const noexcept {
-        return reinterpret_cast<T*>(slice(tid));
-    }
-    template <typename T> [[nodiscard]] T* rows(SizeType tid) const noexcept {
-        return reinterpret_cast<T*>(slice(tid) + row_bytes);
     }
     [[nodiscard]] std::byte* fused_a(SizeType tid) const noexcept {
         return slice(tid) + (3 * row_bytes);

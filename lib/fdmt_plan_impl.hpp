@@ -148,8 +148,8 @@ public:
      * (unpaired odd sub-band, `i_coord_head == SIZE_MAX`) forwards its
      * target unchanged. Level 0 applies one more magnitude-only shift of
      * `|dt|` in the same "look backward" direction as a head shift (see
-     * `fdmt_init_subband`'s doc comment in fdmt.cpp), so the running target
-     * is reduced by `|dt|` once more at the leaf itself.
+     * `fdmt_init_channel` in lib/cpu/fdmt_cpu_execute.cpp), so the running
+     * target is reduced by `|dt|` once more at the leaf itself.
      */
     SizeType get_startup_samples() const;
 

@@ -125,8 +125,8 @@ message(STATUS "CPU target (Release): ${DMT_MARCH_FLAG}")
 # Compiler flags (Interface target to hold global compile options)
 set(DMT_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
-# Host-compiler flags; HIP sources get their own (dmt_gpu_options): no
-# -ffast-math or -march=native reaches device code there.
+# Host-compiler flags; HIP sources get their own (dmt_gpu_options in
+# cmake/dmtGPU.cmake), so host -march=native does not reach device code.
 set(_dmt_not_hip "$<NOT:$<COMPILE_LANGUAGE:HIP>>")
 # No -Wpedantic on CUDA: nvcc forwards it to the host compiler, which then
 # flags the line directives in nvcc's own generated code.

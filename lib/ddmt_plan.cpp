@@ -40,11 +40,10 @@ public:
           m_f_ref(f_ref.value_or(f_min)),
           m_nchans(nchans),
           m_tsamp(tsamp),
-          m_dm_arr(generate_dm_arr(dm_max, dm_step, dm_min)),
-          m_nbits(nbits),
-          m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        validate_inputs();
-        configure_plan();
+          m_nbits(nbits) {
+        auto dm_arr = generate_dm_arr(dm_max, dm_step, dm_min);
+        validate_inputs(dm_arr, kill_mask);
+        configure_plan(std::move(dm_arr), kill_mask);
         logging::debug("DDMT: dm_max={}, dm_min={}, dm_step={}", dm_max, dm_min,
                        dm_step);
     }
@@ -62,12 +61,11 @@ public:
           m_f_ref(f_ref.value_or(f_min)),
           m_nchans(nchans),
           m_tsamp(tsamp),
-          m_dm_arr(dm_arr.begin(), dm_arr.end()),
-          m_nbits(nbits),
-          m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        validate_inputs();
-        configure_plan();
-        logging::debug("DDMT: dm_count={}", m_dm_arr.size());
+          m_nbits(nbits) {
+        validate_inputs(dm_arr, kill_mask);
+        configure_plan(std::vector<float>(dm_arr.begin(), dm_arr.end()),
+                       kill_mask);
+        logging::debug("DDMT: dm_count={}", m_container.dm_arr.size());
     }
 
     Impl(float f_min,
@@ -83,30 +81,20 @@ public:
           m_f_ref(f_ref.value_or(f_min)),
           m_nchans(nchans),
           m_tsamp(tsamp),
-          m_dm_arr(
-              levin.piecewise_uniform
-                  ? utils::generate_levin_dm_grid_piecewise(levin.dm_start,
-                                                            levin.dm_end,
-                                                            tsamp,
-                                                            levin.pulse_width,
-                                                            f_min,
-                                                            f_max,
-                                                            nchans,
-                                                            levin.tol)
-                  : utils::generate_levin_dm_grid(levin.dm_start,
-                                                  levin.dm_end,
-                                                  tsamp,
-                                                  levin.pulse_width,
-                                                  f_min,
-                                                  f_max,
-                                                  nchans,
-                                                  levin.tol)),
-          m_nbits(nbits),
-          m_kill_mask(kill_mask.begin(), kill_mask.end()) {
-        validate_inputs();
-        configure_plan();
+          m_nbits(nbits) {
+        auto dm_arr = levin.piecewise_uniform
+                          ? utils::generate_levin_dm_grid_piecewise(
+                                levin.dm_start, levin.dm_end, tsamp,
+                                levin.pulse_width, f_min, f_max, nchans,
+                                levin.tol)
+                          : utils::generate_levin_dm_grid(
+                                levin.dm_start, levin.dm_end, tsamp,
+                                levin.pulse_width, f_min, f_max, nchans,
+                                levin.tol);
+        validate_inputs(dm_arr, kill_mask);
+        configure_plan(std::move(dm_arr), kill_mask);
         logging::debug("DDMT Levin: dm_start={}, dm_end={}, count={}",
-                       levin.dm_start, levin.dm_end, m_dm_arr.size());
+                       levin.dm_start, levin.dm_end, m_container.dm_arr.size());
     }
 
     ~Impl()                                = default;
@@ -123,7 +111,9 @@ public:
     }
     SizeType get_nchans() const noexcept { return m_nchans; }
     float get_tsamp() const noexcept { return m_tsamp; }
-    std::vector<float> get_dm_arr() const noexcept { return m_dm_arr; }
+    std::vector<float> get_dm_arr() const noexcept {
+        return m_container.dm_arr;
+    }
     const DDMTPlanContainer& get_container() const noexcept {
         return m_container;
     }
@@ -163,10 +153,12 @@ public:
     }
     [[nodiscard]] std::vector<float>
     get_effective_variance_grid() const noexcept {
-        return std::vector<float>(m_dm_arr.size(), get_effective_variance());
+        return std::vector<float>(m_container.dm_arr.size(),
+                                  get_effective_variance());
     }
     [[nodiscard]] std::vector<float> get_effective_sigma_grid() const noexcept {
-        return std::vector<float>(m_dm_arr.size(), get_effective_sigma());
+        return std::vector<float>(m_container.dm_arr.size(),
+                                  get_effective_sigma());
     }
 
 private:
@@ -175,9 +167,7 @@ private:
     float m_f_ref;
     SizeType m_nchans;
     float m_tsamp;
-    std::vector<float> m_dm_arr;
     SizeType m_nbits;
-    std::vector<uint8_t> m_kill_mask;
 
     DDMTPlanContainer m_container;
     bool m_sealed{false};
@@ -193,7 +183,8 @@ private:
             std::ranges::count(m_container.kill_mask, static_cast<uint8_t>(1)));
     }
 
-    void validate_inputs() const {
+    void validate_inputs(std::span<const float> dm_arr,
+                         std::span<const uint8_t> kill_mask) const {
         if (!utils::is_finite_bits(m_f_min) ||
             !utils::is_finite_bits(m_f_max) ||
             !utils::is_finite_bits(m_tsamp)) {
@@ -219,10 +210,10 @@ private:
         if (m_nchans <= 0) {
             throw std::invalid_argument("nchans must be greater than 0");
         }
-        if (m_dm_arr.empty()) {
+        if (dm_arr.empty()) {
             throw std::invalid_argument("dm_arr must not be empty");
         }
-        for (const float dm : m_dm_arr) {
+        for (const float dm : dm_arr) {
             if (!utils::is_finite_bits(dm) || !(dm >= 0.0F)) {
                 throw std::invalid_argument(
                     "DDMT: DM trials must be finite and >= 0");
@@ -233,10 +224,10 @@ private:
             throw std::invalid_argument(fmt::format(
                 "DDMT: nbits={} must be one of 1, 2, 4, 8, 16, 32", m_nbits));
         }
-        if (!m_kill_mask.empty() && m_kill_mask.size() != m_nchans) {
+        if (!kill_mask.empty() && kill_mask.size() != m_nchans) {
             throw std::invalid_argument(
                 fmt::format("DDMT: kill_mask size={} must equal nchans={}",
-                            m_kill_mask.size(), m_nchans));
+                            kill_mask.size(), m_nchans));
         }
         if (m_nbits < 32) {
             // Worst case (no kill_mask applied yet): every channel at the
@@ -254,22 +245,24 @@ private:
             }
         }
     }
-    void configure_plan() {
+    void configure_plan(std::vector<float> dm_arr,
+                        std::span<const uint8_t> kill_mask) {
         m_container.nchans    = m_nchans;
-        m_container.dm_arr    = m_dm_arr;
+        m_container.dm_arr    = std::move(dm_arr);
         m_container.nbits     = m_nbits;
-        m_container.kill_mask = m_kill_mask.empty()
+        m_container.kill_mask = kill_mask.empty()
                                     ? std::vector<uint8_t>(m_nchans, 1)
-                                    : m_kill_mask;
+                                    : std::vector<uint8_t>(kill_mask.begin(),
+                                                           kill_mask.end());
         canonicalize_mask(m_container.kill_mask);
         // Channel c is centred at f_min + (c + 1/2) df; output times refer
         // to f_ref (get_f_ref(), get_time_offset()).
         const auto df    = (m_f_max - m_f_min) / static_cast<float>(m_nchans);
         const auto f_ref = static_cast<double>(m_f_ref);
         m_container.time_offset = utils::generate_delay_offset(
-            m_dm_arr, m_nchans, m_f_min, df, m_tsamp, f_ref);
+            m_container.dm_arr, m_nchans, m_f_min, df, m_tsamp, f_ref);
         m_container.delay_table = utils::generate_delay_table(
-            m_dm_arr, m_nchans, m_f_min, df, m_tsamp, f_ref);
+            m_container.dm_arr, m_nchans, m_f_min, df, m_tsamp, f_ref);
         m_container.fractional_delay_table =
             utils::generate_fractional_delay_table(m_nchans, m_f_min, df,
                                                    m_tsamp, f_ref);
@@ -310,7 +303,7 @@ private:
     }
 };
 
-// --- Definitions for FDMTPlan ---
+// --- Definitions for DDMTPlan ---
 
 DDMTPlan::DDMTPlan(float f_min,
                    float f_max,

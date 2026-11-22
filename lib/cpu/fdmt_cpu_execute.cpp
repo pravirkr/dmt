@@ -1132,7 +1132,7 @@ struct FDMTLevel0Channel {
     SizeType hist_len;
     SizeType nsamps;    ///< samples of this chunk
     SizeType stride;    ///< row stride of the level-0 rows
-    std::byte* unpack;  ///< scratch row of nsamps samples (<= 4 bytes)
+    std::byte* unpack;  ///< scratch row of nsamps samples (<= 8 bytes)
     std::byte* acc_row; ///< scratch row of nsamps samples (<= 8 bytes)
     /// chan_dm plans only (else nullptr): the channel's level-0 boxes and
     /// their sweep order (FDMTPlanContainer::level0_boxes / level0_order).

@@ -506,17 +506,10 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
         // by the first call that needs them.
         m_keep_d.resize(m_beams * plan.get_nchans());
     }
-    if (!m_keep_in_transform &&
-        (config.input_nbits == 32 || !m_kill_runs.empty())) {
-        // The block the driver reads (FDMT-FFT segments): host input is
+    if (!m_keep_in_transform && config.input_nbits == 32) {
+        // The float block the driver reads (FDMT-FFT segments): host input is
         // copied here and killed rows are zeroed here, inside the budget.
-        if (config.input_nbits == 32) {
-            m_input_d.resize(m_beams * plan.get_nchans() * plan.get_nsamps());
-        } else {
-            m_packed_input.resize(m_beams * plan.get_nchans() *
-                                  bit_pack_utils::packed_row_bytes(
-                                      plan.get_nsamps(), config.input_nbits));
-        }
+        m_input_d.resize(m_beams * plan.get_nchans() * plan.get_nsamps());
     }
     std::vector<float> thresholds;
     std::vector<float> scales;
@@ -720,7 +713,8 @@ FDMTBoxcarCudaEngine::execute(std::span<const float> waterfall) {
         return copy_result({});
     }
     if (m_input_d.size() != waterfall.size()) {
-        m_input_d.resize(waterfall.size());
+        throw std::logic_error(
+            "FDMTBoxcar (gpu): host float staging buffer not reserved");
     }
     gpu_utils::check_gpu_call(cudaMemcpyAsync(raw(m_input_d), waterfall.data(),
                                               waterfall.size_bytes(),
@@ -772,28 +766,19 @@ FDMTBoxcarCudaEngine::run_search(Stream queue, const Search& search) {
 CandidateResultView
 FDMTBoxcarCudaEngine::execute(std::span<const uint8_t> waterfall) {
     validate_packed(waterfall.size());
+    if (!m_driver->stages_host_input()) {
+        throw std::logic_error(
+            "FDMTBoxcar (gpu): packed host input requires a staging driver");
+    }
     gpu_utils::set_device(m_device);
     m_work.wait();
-    if (m_driver->stages_host_input()) {
-        (void)run_search({}, [&] {
-            if (!keep_rows({})) {
-                throw std::logic_error("FDMTBoxcar (gpu): host staging "
-                                       "without kept rows");
-            }
-            m_driver->search(waterfall, m_config.input_nbits, *this);
-        });
-        return copy_result({});
-    }
-    if (m_packed_input.size() != waterfall.size()) {
-        m_packed_input.resize(waterfall.size());
-    }
-    gpu_utils::check_gpu_call(cudaMemcpyAsync(
-        raw(m_packed_input), waterfall.data(), waterfall.size_bytes(),
-        cudaMemcpyHostToDevice, nullptr));
-    (void)execute(DeviceSpan<const uint8_t>(raw(m_packed_input),
-                                            waterfall.size(),
-                                            {kGPUBackend, m_device}),
-                  {});
+    (void)run_search({}, [&] {
+        if (!keep_rows({})) {
+            throw std::logic_error("FDMTBoxcar (gpu): host staging "
+                                   "without kept rows");
+        }
+        m_driver->search(waterfall, m_config.input_nbits, *this);
+    });
     return copy_result({});
 }
 
@@ -802,8 +787,12 @@ FDMTBoxcarCudaEngine::execute(DeviceSpan<const uint8_t> waterfall,
                               Stream queue) {
     validate_packed(waterfall.size());
     return run_search(queue, [&] {
-        m_driver->search(masked(waterfall, m_packed_input, queue),
-                         m_config.input_nbits, *this, queue);
+        if (!keep_rows(queue)) {
+            throw std::logic_error(
+                "FDMTBoxcar (gpu): packed input requires a driver with kept "
+                "rows");
+        }
+        m_driver->search(waterfall, m_config.input_nbits, *this, queue);
     });
 }
 
@@ -1123,8 +1112,7 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCudaEngine::memory_usage() const noexcept {
                       (m_bright_rank_d.size() * sizeof(uint32_t)) +
                       (sizeof(KeepSelect) * m_bright_sel_d.size()) +
                       (m_bright_hist_d.size() * sizeof(uint64_t)),
-        .staging = (m_input_d.size() * sizeof(float)) + m_packed_input.size() +
-                   m_keep_d.size(),
+        .staging = (m_input_d.size() * sizeof(float)) + m_keep_d.size(),
         .host = host_plan + (m_slots.size() * slot_floats() * sizeof(float)) +
                 (m_candidates_h.size() * sizeof(RawCandidate)) +
                 (m_plane_counts_h.size() * sizeof(CandidateCounts))};

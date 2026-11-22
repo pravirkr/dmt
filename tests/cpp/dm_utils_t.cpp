@@ -20,13 +20,6 @@ TEST_CASE("cff", "[fdmt_utils][cpu][internal]") {
     REQUIRE(utils::cff(1000.0F, 1000.0F, 1000.0F, 1500.0F) == 0.0F);
 }
 
-TEST_CASE("calculate_dt_sub", "[fdmt_utils][cpu][internal]") {
-    REQUIRE(utils::calculate_dt_sub(1000.0F, 1500.0F, 1000.0F, 1500.0F, 100) ==
-            100);
-    REQUIRE(utils::calculate_dt_sub(1000.0F, 1500.0F, 1000.0F, 1500.0F, 0) ==
-            0);
-}
-
 TEST_CASE("find_nearest_sorted_idx", "[fdmt_utils][cpu][internal]") {
     SECTION("Test case 1: Empty array") {
         std::vector<size_t> arr_sorted;

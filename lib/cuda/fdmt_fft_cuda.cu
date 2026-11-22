@@ -349,7 +349,7 @@ __global__ void kernel_trim(const float* __restrict__ time,
     }
 }
 
-// Copies `rows` spectrum rows (dist nb) and fixes their Hermitian edges.
+// Copies `nrows` spectrum rows (stride nb).
 __global__ void kernel_copy_rows(const float2* __restrict__ src,
                                  float2* __restrict__ dst,
                                  int64_t nrows,
@@ -1029,6 +1029,7 @@ private:
     mutable DevBuf<float> m_view_time;
     mutable DevBuf<float> m_view_d;
     mutable std::unique_ptr<utils::CUFFTManager> m_view_c2r;
+    mutable SizeType m_view_batch{0};
     mutable std::vector<float> m_view_h;
     mutable bool m_view_h_valid{false};
 
@@ -1590,20 +1591,24 @@ private:
         gpu_utils::set_device(m_device_id);
         const auto& g   = *m_step_geo;
         const auto s    = m_step_stream;
-        const auto rows = m_plan->get_container().state_shape[m_level].ncoords;
-        const auto nsv  = view_nsamps();
-        if (!m_view_c2r) {
+        const auto rows  = m_plan->get_container().state_shape[m_level].ncoords;
+        const auto nsv   = view_nsamps();
+        const auto batch = std::min(kViewBatch, rows);
+        if (!m_view_c2r || m_view_batch != batch) {
             m_view_c2r = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kC2R, g.n_fft, kViewBatch, m_device_id, g.n_fft,
+                utils::FFTKind::kC2R, g.n_fft, batch, m_device_id, g.n_fft,
                 g.nb);
-            m_view_spec.reserve(kViewBatch * g.nb);
-            m_view_time.reserve(kViewBatch * g.n_fft);
+            m_view_batch = batch;
+            m_view_spec.reserve(batch * g.nb);
+            m_view_time.reserve(batch * g.n_fft);
         }
         m_view_d.reserve(m_max_coords * std::max(nsv, m_nsamps_out));
         const auto skip = m_geom.skip;
         const auto cnt  = nsv;
-        for (SizeType r0 = 0; r0 < rows; r0 += kViewBatch) {
-            const auto n = std::min(kViewBatch, rows - r0);
+        // Declared outside the loop so a partial-tail plan outlives stream work.
+        std::unique_ptr<utils::CUFFTManager> tail_c2r;
+        for (SizeType r0 = 0; r0 < rows; r0 += batch) {
+            const auto n = std::min(batch, rows - r0);
             const dim3 grid(blocks_for(static_cast<int64_t>(g.nb)),
                             grid_y(static_cast<int64_t>(n)));
             kernel_copy_rows<<<grid, kBlock, 0, s>>>(
@@ -1611,12 +1616,18 @@ private:
                 static_cast<int64_t>(n), static_cast<int64_t>(g.nb));
             fourier_gpu::hermitian_edges(m_view_spec.data(), n, g.nb, g.n_bins,
                                          g.n_fft, s);
-            m_view_c2r->execute(
-                cuda::std::span<float>(m_view_time.data(),
-                                       kViewBatch * g.n_fft),
+            utils::CUFFTManager* c2r = m_view_c2r.get();
+            if (n < batch) {
+                tail_c2r = std::make_unique<utils::CUFFTManager>(
+                    utils::FFTKind::kC2R, g.n_fft, n, m_device_id, g.n_fft,
+                    g.nb);
+                c2r = tail_c2r.get();
+            }
+            c2r->execute(
+                cuda::std::span<float>(m_view_time.data(), n * g.n_fft),
                 cuda::std::span<ComplexTypeGPU>(
                     reinterpret_cast<ComplexTypeGPU*>(m_view_spec.data()),
-                    kViewBatch * g.nb),
+                    n * g.nb),
                 s);
             const dim3 tgrid(blocks_for(static_cast<int64_t>(cnt)),
                              grid_y(static_cast<int64_t>(n)));

@@ -145,31 +145,6 @@ inline SizeType skew_leaf_level(const plans::FDMTPlan& plan,
     return auto_skew_leaf_level(plan, w, level, fuse_ring, chunk);
 }
 
-/// Memory of the skewed-window engine for `plan` at level K and chunk
-/// length `chunk`, from the plan alone (bytes): the raw ring (`ring_elem`
-/// bytes per sample), the two state halves, the per-row rings and the
-/// per-thread running-sum stripes. Also the tree engine's streaming state
-/// for comparison: its two chunk halves and its level-0 + tree history.
-struct FDMTSkewEstimate {
-    SizeType ring_nsamps{0};
-    SizeType ring{0};
-    SizeType state{0};
-    SizeType rings{0};
-    SizeType stripes{0};
-    SizeType tables{0};
-    SizeType tree_state{0};
-    SizeType tree_history{0};
-    /// Samples recomputed per chunk per row at levels >= K if the overlap
-    /// were recomputed instead of kept: sum of spreads / (rows * chunk).
-    double recompute_fraction{0.0};
-    [[nodiscard]] SizeType total() const noexcept {
-        return ring + state + rings + stripes + tables;
-    }
-    [[nodiscard]] SizeType tree_total() const noexcept {
-        return tree_state + tree_history;
-    }
-};
-
 /// 2 MiB-aligned hugepage-backed array zero-filled in parallel across threads.
 template <typename T> class SkewLargeArray {
 public:
@@ -358,11 +333,8 @@ public:
         m_search_from = m_win.search_from;
         m_fuse =
             auto_skew_fuse_level(plan, m_win, level, m_chunk, m_nthreads, fuse);
-        m_fuse_ring = m_fuse;
-        m_level =
-            skew_leaf_level(plan, m_win, level, m_fuse_ring, m_chunk, leaf);
-        m_loc_win =
-            compute_local_skew_windows(plan, m_win, m_level, m_fuse_ring);
+        m_level = skew_leaf_level(plan, m_win, level, m_fuse, m_chunk, leaf);
+        m_loc_win = compute_local_skew_windows(plan, m_win, m_level, m_fuse);
         build_tables();
         plan_buffers();
         if (!defer_allocation) {
@@ -752,7 +724,6 @@ private:
     struct KSub {
         int32_t c0;
         int32_t nc;
-        int64_t need_back;
         std::vector<KRow> rows;
         std::vector<StripeSpan> spans;
     };
@@ -841,7 +812,7 @@ private:
 
         const SizeType k      = m_level;
         const SizeType f      = m_fuse;
-        const SizeType f_ring = m_fuse_ring;
+        const SizeType f_ring = m_fuse;
         m_row_off.assign(m_root + 1, {});
         m_level_len.assign(m_root + 1, 0);
         for (SizeType l = k; l < m_root; ++l) {
@@ -949,10 +920,9 @@ private:
             SizeType r_begin      = 0;
             const auto flush_ksub = [&](SizeType r_end) {
                 KSub ks{
-                    .c0        = sub.c0,
-                    .nc        = sub.nc,
-                    .need_back = sub_need_back,
-                    .rows      = std::vector<KRow>(
+                    .c0   = sub.c0,
+                    .nc   = sub.nc,
+                    .rows = std::vector<KRow>(
                         all_rows.begin() + static_cast<std::ptrdiff_t>(r_begin),
                         all_rows.begin() + static_cast<std::ptrdiff_t>(r_end)),
                     .spans =
@@ -1534,7 +1504,7 @@ private:
         mix(m_nchans);
         mix(m_level);
         mix(m_fuse);
-        mix(m_fuse_ring);
+        mix(m_fuse); // historical ring-level slot (keeps saved hashes stable)
         mix(m_chunk);
         mix(m_search_from);
         mix(m_smear ? 1 : 0);
@@ -1947,8 +1917,7 @@ private:
                                            : ((l - m_level) % 2 == 0) ? grp_a
                                                                       : grp_b;
                         const bool at_f  = (l == m_fuse);
-                        const bool stream =
-                            !at_f && !batch.in_l3 && (l != m_fuse_ring);
+                        const bool stream = !at_f && !batch.in_l3;
                         const auto* ops   = m_ops[l].data();
                         const SizeType lo = m_groups[batch.g_lo].op_lo[l];
                         const SizeType hi = m_groups[batch.g_hi - 1].op_hi[l];
@@ -1984,7 +1953,6 @@ private:
                 }
             }
         } else {
-            const bool ring_at_f = (m_fuse_ring == m_fuse);
 #pragma omp parallel for num_threads(m_nthreads) schedule(dynamic, 1)
             for (SizeType g = 0; g < m_groups.size(); ++g) {
                 const auto& fg = m_groups[g];
@@ -2003,7 +1971,7 @@ private:
                     reinterpret_cast<StateT*>(grp_base + m_group_a_bytes);
 
                 // Pre-copy level-F carry-in before the tile loop.
-                if (fused && ring_at_f) {
+                if (fused) {
                     const auto* ops_f = m_ops[m_fuse].data();
                     for (SizeType k = fg.op_lo[m_fuse]; k < fg.op_hi[m_fuse];
                          ++k) {
@@ -2013,7 +1981,7 @@ private:
                                         out_f + op.out - op.spread);
                         }
                     }
-                } else if (!fused) {
+                } else {
                     for (SizeType s = fg.sub_lo; s < fg.sub_hi; ++s) {
                         for (const auto& kr : m_subs[s].rows) {
                             if (kr.spread > 0) {
@@ -2056,22 +2024,14 @@ private:
                                 const Op& op = ops[k];
                                 StateT* out  = at_f ? (dst_half + op.out + ts)
                                                     : (dst_half + op.out);
-                                if (!ring_at_f && op.spread > 0) {
-                                    std::copy_n(rings_f + op.ring_off,
-                                                op.spread, out - op.spread);
-                                }
                                 eval_op_tile(op, in, out, tn + op.local_spread);
-                                if (!ring_at_f && op.spread > 0) {
-                                    std::copy_n(out - op.spread + tn, op.spread,
-                                                rings_f + op.ring_off);
-                                }
                             }
                         }
                     }
                 }
 
                 // Post-copy level-F carry-out after the tile loop.
-                if (fused && ring_at_f) {
+                if (fused) {
                     const auto* ops_f = m_ops[m_fuse].data();
                     for (SizeType k = fg.op_lo[m_fuse]; k < fg.op_hi[m_fuse];
                          ++k) {
@@ -2081,7 +2041,7 @@ private:
                                         op.spread, rings_f + op.ring_off);
                         }
                     }
-                } else if (!fused) {
+                } else {
                     for (SizeType s = fg.sub_lo; s < fg.sub_hi; ++s) {
                         for (const auto& kr : m_subs[s].rows) {
                             if (kr.spread > 0) {
@@ -2376,7 +2336,6 @@ private:
     bool m_smear;
     int m_nthreads;
     SizeType m_fuse;
-    SizeType m_fuse_ring{0};
     SizeType m_level;
     SizeType m_root;
     SizeType m_nchans;
@@ -2437,58 +2396,5 @@ private:
     Memory m_mem;
     bool m_allocated{false};
 };
-
-inline FDMTSkewEstimate estimate_skew_memory(const plans::FDMTPlan& plan,
-                                             SizeType level,
-                                             SizeType chunk,
-                                             SizeType ring_elem,
-                                             int nthreads,
-                                             bool smear            = true,
-                                             SizeType fuse         = 0,
-                                             SizeType search_depth = 0,
-                                             SizeType leaf         = 0,
-                                             bool search_int       = false,
-                                             bool search_u32       = true) {
-    const SizeType nbits =
-        ring_elem == sizeof(float) ? 32 : (ring_elem == 2 ? 16 : 8);
-    const FDMTSkewCpu eng(plan, smear, nthreads, chunk, level, nbits, fuse,
-                          search_int, search_u32, search_depth, leaf,
-                          /*defer_allocation=*/true);
-    const auto m        = eng.memory_usage();
-    const auto& pc      = plan.get_container();
-    const auto root     = plan.get_niters();
-    const auto& w       = eng.windows();
-    const auto k_leaf   = eng.get_leaf_level();
-    const auto f_ring   = eng.get_fuse_level();
-    const auto lw       = compute_local_skew_windows(plan, w, k_leaf, f_ring);
-    SizeType rows       = 0;
-    SizeType spread_sum = 0;
-    for (SizeType l = k_leaf; l < root; ++l) {
-        const auto st = w.stats(l);
-        rows += st.used;
-        spread_sum += (l < f_ring) ? lw.stats(l).sum_spread
-                                   : (l == f_ring ? 0 : st.sum_spread);
-    }
-    SizeType tree_rows = 0;
-    for (SizeType l = 0; l < root; ++l) {
-        tree_rows = std::max(tree_rows, pc.state_shape[l].ncoords);
-    }
-    FDMTSkewEstimate e;
-    e.ring_nsamps = eng.ring_nsamps();
-    e.ring        = m.ring;
-    e.state       = m.state;
-    e.rings       = m.rings;
-    e.stripes     = m.stripes;
-    e.tables      = eng.plan_bytes();
-    e.recompute_fraction =
-        rows == 0 ? 0.0
-                  : static_cast<double>(spread_sum) /
-                        (static_cast<double>(rows) *
-                         static_cast<double>(eng.get_chunk_nsamps()));
-    e.tree_state   = 2 * tree_rows * eng.get_chunk_nsamps() * sizeof(float);
-    e.tree_history = (plan.get_history_size() + plan.get_tree_history_size()) *
-                     sizeof(float);
-    return e;
-}
 
 } // namespace dmt::algorithms::detail

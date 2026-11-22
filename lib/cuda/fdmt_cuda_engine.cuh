@@ -247,18 +247,15 @@ public:
     // The stepper (always unfused) runs whole blocks only.
     void check_stepper_block() const;
 
-    // `fuse`: execute() only -- replace level 0 and the first merges by the
-    // fused kernel (see configure_fusion()); the stepper stays unfused.
+    // Unfused stepper entry points.
     void reset_impl(cuda::std::span<const uint8_t> d_waterfall,
                     SizeType nbits,
                     cuda::std::span<float> d_dmt,
-                    cudaStream_t stream,
-                    bool fuse);
+                    cudaStream_t stream);
 
     void reset_impl(cuda::std::span<const float> d_waterfall,
                     cuda::std::span<float> d_dmt,
-                    cudaStream_t stream,
-                    bool fuse);
+                    cudaStream_t stream);
 
     /// Levels below which execute() does not materialise the tree: the
     /// tile fusion's depth, or the direct levels' (fdmt_direct.hpp).
@@ -620,7 +617,6 @@ private:
     bool m_is_initialized{false};
     SizeType m_current_level{0};
     std::vector<LevelBufD> m_levels_d;
-    float* m_dmt_target_ptr{nullptr};
     cudaStream_t m_stream{nullptr};
     // End of the latest device-memory call; host-memory calls wait for it.
     mutable gpu_utils::DeviceWorkFence m_device_work;

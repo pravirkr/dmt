@@ -85,7 +85,7 @@ constexpr int kSpreadChunk = 1024; // channels staged per spread pass
 // Largest NUFFT sub-run: its fine grid (~2.2 x trials complex floats) must
 // fit the shared memory of one block.
 constexpr SizeType kMaxSubRun = 4096;
-constexpr SizeType kMaxWidth  = 16; // NUFFT kernel width bound (nufft_cpu)
+constexpr SizeType kMaxWidth  = 8;  // NUFFT kernel width bound (nufft_cpu)
 constexpr int kTile           = 32; // deconvolution transpose tile
 constexpr int kTileRows       = 8;
 // The CPU engine's channel-spectra cap (ddmt_fft_cpu.cpp): same segments.
