@@ -346,6 +346,7 @@ private:
     std::vector<float> m_unpacked;
 
     std::map<SizeType, std::unique_ptr<Geometry>> m_geos;
+    std::vector<SizeType> m_geo_lru;
     FFTVector<float> m_spectra;        // [tile][nact][kBinsFl]
     FFTVector<ComplexType> m_out_spec; // [ndm][bins_stride]
     std::vector<Workspace> m_ws;
@@ -434,15 +435,26 @@ private:
     Geometry& geometry(SizeType n) {
         // One entry per transform length seen (warm-up, steady state, odd
         // final blocks); a stream of ever-changing block sizes must not grow
-        // the plan cache without bound.
+        // the plan cache without bound. Evict only the least recently used
+        // entry so an occasional odd block does not thrash hot lengths.
         constexpr SizeType kMaxGeometries = 4;
-        if (!m_geos.contains(n) && m_geos.size() >= kMaxGeometries) {
-            m_geos.clear();
+        auto it                           = m_geos.find(n);
+        if (it != m_geos.end()) {
+            if (const auto lru = std::find(m_geo_lru.begin(), m_geo_lru.end(), n);
+                lru != m_geo_lru.end()) {
+                std::rotate(lru, lru + 1, m_geo_lru.end());
+            }
+        } else {
+            if (m_geos.size() >= kMaxGeometries && !m_geo_lru.empty()) {
+                m_geos.erase(m_geo_lru.front());
+                m_geo_lru.erase(m_geo_lru.begin());
+            }
+            auto built =
+                std::make_unique<Geometry>(n, !m_deferred.deferring());
+            it = m_geos.emplace(n, std::move(built)).first;
+            m_geo_lru.push_back(n);
         }
-        auto& g = m_geos[n];
-        if (!g) {
-            g = std::make_unique<Geometry>(n, !m_deferred.deferring());
-        }
+        auto& g = it->second;
         const auto spec_floats = g->n_tiles * m_nact * kBinsFl;
         if (m_deferred.size(m_spectra) < spec_floats) {
             m_deferred.assign(m_spectra, spec_floats, 0.0F);

@@ -1,9 +1,8 @@
 #pragma once
 
 // Published benchmark suite (dmt_bench_suite): one data configuration shared
-// by every algorithm and backend, so FDMT, FDMT-FFT (integer and fractional
-// merge delays), DDMT, SDMT and DDMT-FFT (NUFFT and brute force) land on the
-// same plots. DMT_BENCH_CONFIG selects cryopaf_low (512 channels),
+// by every algorithm and backend, so FDMT, FDMT-FFT (fractional merge
+// delays), DDMT, SDMT and DDMT-FFT (NUFFT) land on the same plots. DMT_BENCH_CONFIG selects cryopaf_low (512 channels),
 // cryopaf_lband (1152 channels), parkes_uwl (6656 channels) or
 // meerkat_lband (4096 channels). Only block
 // length, DM range and input bit width are swept. See bench/README.md.
@@ -13,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -23,6 +23,11 @@
 #include <benchmark/benchmark.h>
 #include <fmt/format.h>
 
+#include "dmt/algorithms/ddmt.hpp"
+#include "dmt/algorithms/ddmt_fft.hpp"
+#include "dmt/algorithms/fdmt.hpp"
+#include "dmt/algorithms/fdmt_fft.hpp"
+#include "dmt/algorithms/sdmt.hpp"
 #include "dmt/common/build_info.hpp"
 #include "dmt/common/candidate.hpp"
 #include "dmt/common/plans.hpp"
@@ -190,12 +195,10 @@ inline const std::vector<SizeType> kNbitsSweep   = {1, 2, 4, 8, 16, 32};
 enum class Sweep { kNsamps, kNdms, kNbits };
 enum class Algo {
     kFDMT,
-    kFDMTFFT,
     kFDMTFFTFrac,
     kDDMT,
     kSDMT,
     kDDMTFFT,
-    kDDMTFFTBrute,
 };
 
 struct Point {
@@ -221,8 +224,6 @@ inline std::string_view algo_name(Algo a) {
     switch (a) {
     case Algo::kFDMT:
         return "FDMT";
-    case Algo::kFDMTFFT:
-        return "FDMT-FFT";
     case Algo::kDDMT:
         return "DDMT";
     case Algo::kSDMT:
@@ -231,8 +232,6 @@ inline std::string_view algo_name(Algo a) {
         return "FDMT-FFT-frac";
     case Algo::kDDMTFFT:
         return "DDMT-FFT";
-    case Algo::kDDMTFFTBrute:
-        return "DDMT-FFT-brute";
     }
     return "?";
 }
@@ -258,14 +257,6 @@ inline std::vector<Point> sweep_points(Sweep sweep) {
         break;
     }
     return points;
-}
-
-/// The reference point (both sweeps through it, float32 input): where the
-/// verification-only engines (FDMT-FFT with integer delays, brute-force
-/// DDMT-FFT) are timed.
-inline bool is_reference(const Point& p) {
-    return p.sweep == Sweep::kNdms && p.nsamps == kNsampsRef &&
-           p.dm_max == kDmMaxRef && p.nbits == 32;
 }
 
 /// CPU thread counts: DMT_BENCH_THREADS, e.g. "8" (the default: the
@@ -331,50 +322,65 @@ inline double memory_budget_bytes() {
     return gb * 1024.0 * 1024.0 * 1024.0;
 }
 
+inline SizeType packed_bytes(SizeType nsamps, SizeType nbits) {
+    return kNchans * (((nsamps * nbits) + 7) / 8);
+}
+
 /// Estimated working-set bytes of one engine at point `p` (input, output and
-/// the engine's own buffers), used only for the skip decision.
+/// the engine's own estimate_memory()), used only for the skip decision.
 inline double estimate_bytes(Algo algo,
                              const plans::FDMTPlan& plan,
                              const Point& p,
-                             bool device = false) {
+                             Exec exec) {
     const double input =
-        static_cast<double>(kNchans * p.nsamps) *
-        ((p.nbits == 32) ? 4.0 : static_cast<double>(p.nbits) / 8.0);
-    const double b = static_cast<double>(plan.get_buffer_size()) * 4.0;
-    const double d = static_cast<double>(plan.get_dmt_size()) * 4.0;
-    // The FDMT runs blocks in chunks whose two state halves fit 2 GiB.
-    constexpr double kChunkStateBudget = 2.0 * 1024.0 * 1024.0 * 1024.0;
+        (p.nbits == 32)
+            ? static_cast<double>(kNchans * p.nsamps) * sizeof(float)
+            : static_cast<double>(packed_bytes(p.nsamps, p.nbits));
     switch (algo) {
-    case Algo::kFDMT: { // output + the engine's two state halves
-        const double raw_hist =
-            static_cast<double>(plan.get_history_size()) *
-            ((p.nbits == 32) ? 4.0 : (p.nbits == 16 ? 2.0 : 1.0));
-        const double tree_hist =
-            static_cast<double>(plan.get_history_size() +
-                                plan.get_tree_history_size()) *
-            sizeof(float);
-        // Wide plans whose unskewed tree history exceeds 2 GiB use the
-        // skewed-window / direct-top streaming ring (~0.85 * raw_hist +
-        // level-F / top ring <= 0.5 GiB).
-        const double hist =
-            (tree_hist > kChunkStateBudget)
-                ? (0.86 * raw_hist + 0.5 * 1024.0 * 1024.0 * 1024.0)
-                : tree_hist * (device ? 2.0 : 1.0);
-        return input + d + std::min(2.0 * b, kChunkStateBudget) + hist +
-               static_cast<double>(plan.get_container().get_memory_usage());
+    case Algo::kFDMT: {
+        const double out =
+            static_cast<double>(plan.get_dmt_size()) * sizeof(float);
+        try {
+            const auto est = algorithms::FDMT::estimate_memory(
+                plan, true, exec, 1, algorithms::kFDMTAutoFuse, true);
+            return input + out + static_cast<double>(est.usage.total());
+        } catch (const std::invalid_argument&) {
+            return std::numeric_limits<double>::infinity();
+        }
     }
-    case Algo::kFDMTFFT: // channel + DM rows, spectra, tree stage, FFT work
-    case Algo::kFDMTFFTFrac:
-    case Algo::kDDMTFFT:
-    case Algo::kDDMTFFTBrute:
-        return input + d +
-               (10.0 * static_cast<double>(plan.get_fft_size()) *
-                static_cast<double>(kNchans + plan.get_dmt_ndms()));
-    case Algo::kDDMT: // output + one block of history per channel
-    case Algo::kSDMT:
-        return input + d +
-               (static_cast<double>(kNchans) * 4.0 *
-                static_cast<double>(plan.get_dt_max()));
+    case Algo::kFDMTFFTFrac: {
+        const double out =
+            static_cast<double>(plan.get_dmt_size()) * sizeof(float);
+        const auto est =
+            algorithms::FDMTFFT::estimate_memory(plan, true, exec, 1, true);
+        return input + out + static_cast<double>(est.usage.total());
+    }
+    case Algo::kDDMT:
+    case Algo::kSDMT: {
+        const auto dms = dm_grid(p);
+        const plans::DDMTPlan dplan(kFMin, kFMax, kNchans, kTsamp, dms,
+                                    p.nbits);
+        const double out =
+            static_cast<double>(dms.size() * p.nsamps) * sizeof(float);
+        const auto est = (algo == Algo::kDDMT)
+                             ? algorithms::DDMT::estimate_memory(dplan,
+                                                                 p.nsamps, exec)
+                             : algorithms::SDMT::estimate_memory(
+                                   dplan, p.nsamps, exec);
+        return input + out + static_cast<double>(est.usage.total());
+    }
+    case Algo::kDDMTFFT: {
+        const auto dms = dm_grid(p);
+        const plans::DDMTPlan dplan(kFMin, kFMax, kNchans, kTsamp, dms,
+                                    p.nbits);
+        const double out =
+            static_cast<double>(dms.size() * p.nsamps) * sizeof(float);
+        const auto est = algorithms::DDMTFFT::estimate_memory(
+            dplan, p.nsamps, exec, 1,
+            algorithms::DDMTFFTOptions{
+                .method = algorithms::DDMTFFTMethod::kNUFFT});
+        return input + out + static_cast<double>(est.usage.total());
+    }
     }
     return 0.0;
 }
@@ -472,10 +478,6 @@ inline std::vector<uint8_t> make_packed_input(SizeType nbytes) {
         e = static_cast<uint8_t>(x >> 24);
     }
     return v;
-}
-
-inline SizeType packed_bytes(SizeType nsamps, SizeType nbits) {
-    return kNchans * (((nsamps * nbits) + 7) / 8);
 }
 
 /// Candidate-search benchmarks: boxcars up to 100 ms (floor(0.1 s / tsamp)

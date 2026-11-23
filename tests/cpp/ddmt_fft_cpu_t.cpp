@@ -663,4 +663,43 @@ TEST_CASE("DDMTFFT estimate_memory equals a warm stream (cpu)",
     CHECK(e.host_staging == 0);
 }
 
+TEST_CASE("DDMTFFT geometry cache evicts one LRU entry (cpu)",
+          "[ddmt_fft_cpu][cpu]") {
+    const SizeType nchans = 32;
+    const auto dms        = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 40.0F, 0.001F, 0.001F, 1100.0F, 1500.0F, nchans, 1.1F);
+    const plans::DDMTPlan plan(1100.0F, 1500.0F, nchans, 0.001F, dms);
+    DDMTFFT eng(plan, Exec::cpu());
+    const SizeType ndm = dms.size();
+    // Five distinct block lengths producing five distinct FFT lengths.
+    const std::array<SizeType, 5> lens{256, 320, 384, 512, 640};
+    for (int k = 0; k < 2; ++k) {
+        const SizeType n = lens[0];
+        const std::vector<float> wf(nchans * n, 1.0F);
+        std::vector<float> out(ndm * eng.get_output_nsamps(n));
+        eng.execute(wf, out);
+    }
+    for (const SizeType n : lens) {
+        const std::vector<float> wf(nchans * n, 1.0F);
+        std::vector<float> out(ndm * eng.get_output_nsamps(n));
+        eng.execute(wf, out);
+    }
+    const auto after_five = eng.get_memory_usage();
+    // Re-running the three recently used lengths keeps them cached (no growth)
+    // and produces accurate outputs.
+    for (const SizeType n : {lens[1], lens[2], lens[3]}) {
+        const std::vector<float> wf(nchans * n, 1.0F);
+        std::vector<float> out(ndm * eng.get_output_nsamps(n));
+        eng.execute(wf, out);
+        CHECK(eng.get_memory_usage().transform == after_five.transform);
+        CHECK(eng.get_memory_usage().total() == after_five.total());
+        float max_err = 0.0F;
+        for (const float v : out) {
+            max_err = std::max(max_err,
+                               std::abs(v - static_cast<float>(nchans)));
+        }
+        CHECK(max_err < 5e-3F);
+    }
+}
+
 } // namespace dmt

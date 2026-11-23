@@ -173,11 +173,10 @@ public:
      * (chunk, leaf level) candidates of the skewed-window engine, fastest
      * first. Measured on parkes_uwl (6656 channels, 8 threads one per CCD
      * on an EPYC 9654, s per 2.1 s block): float ring K=1 4.96 at chunk
-     * 4096 and 7.4 at 2048, K=2 6.6 / 9.4, K=3 8.8 / 11.1, K=4 13.3 /
-     * 15.3, K=1 13.6 at 1024 (levels 1..K-1 of a direct leaf cost double
-     * running-sum gathers, the binary merges above them are cheap); 8-bit
-     * ring K=2 4.08, K=3 4.38, K=4 4.69, K=1 4.77 at 4096, K=4 5.99 and
-     * K=2 6.28 at 2048. Leaf 0: the automatic level (<= 4).
+     * 4096, 7.4 at 2048, 13.6 at 1024 (levels 1..K-1 of a direct leaf cost
+     * double running-sum gathers, the binary merges above them are cheap);
+     * 8-bit ring K=2 4.08 and K=4 4.69 at 4096, K=4 5.99 at 2048. Leaf 0:
+     * the automatic level (<= 4).
      */
     static std::vector<std::pair<SizeType, SizeType>>
     skew_candidates(SizeType ring_elem);

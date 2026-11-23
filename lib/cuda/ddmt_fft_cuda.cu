@@ -786,6 +786,7 @@ private:
     DevBuf<float> m_in_d;
     DevBuf<float> m_out_d;
     std::map<SizeType, GpuGeometry> m_geos;
+    std::vector<SizeType> m_geo_lru;
 
     [[nodiscard]] float* hist() const noexcept {
         return m_hist[m_hist_cur].data();
@@ -961,52 +962,71 @@ private:
     GpuGeometry& geometry(SizeType n) {
         // A few transform lengths (warm-up, steady state, odd blocks); a
         // stream of ever-changing block sizes must not grow the plan cache.
+        // Evict only the least recently used entry so an occasional odd block
+        // does not destroy every cached cuFFT plan.
         constexpr SizeType kMaxGeometries = 4;
-        if (!m_geos.contains(n) && m_geos.size() >= kMaxGeometries) {
-            m_geos.clear();
+        if (const auto it = m_geos.find(n); it != m_geos.end()) {
+            if (const auto lru =
+                    std::find(m_geo_lru.begin(), m_geo_lru.end(), n);
+                lru != m_geo_lru.end()) {
+                std::rotate(lru, lru + 1, m_geo_lru.end());
+            }
+        } else {
+            if (m_geos.size() >= kMaxGeometries && !m_geo_lru.empty()) {
+                m_geos.erase(m_geo_lru.front());
+                m_geo_lru.erase(m_geo_lru.begin());
+            }
+            m_geo_lru.push_back(n);
         }
         auto& g = m_geos[n];
         if (!g.r2c) {
-            g.n_fft  = n;
-            g.n_bins = (n / 2) + 1;
-            g.r2c    = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kR2C, n, m_nact, m_device_id);
-            g.c2r = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kC2R, n, m_ndm, m_device_id);
-            std::vector<unsigned long long> xr(m_nact);
-            std::vector<unsigned long long> sr(m_nact);
-            for (const auto& run : m_runs) {
-                const auto nf = run->plan->fine_grid();
-                if (!g.nu.contains(nf)) {
-                    g.nu[nf] = std::make_unique<utils::CUFFTManager>(
-                        utils::FFTKind::kC2CBackward, nf, g.n_bins,
-                        m_device_id);
-                }
-                // x = k ddm r / N and the centring + dm0 phase k shift r / N
-                // (turns per bin), as the CPU's prepare_points().
-                const double shift =
-                    run->run.dm0 +
-                    (static_cast<double>(run->plan->half()) * run->run.ddm);
-                for (SizeType a = 0; a < m_nact; ++a) {
-                    const double r = m_model.rate[m_model.active[a]];
-                    xr[a]          = phase_fixed(-(run->run.ddm * r), n);
-                    sr[a]          = phase_fixed(-(shift * r), n);
-                }
-                g.xr.emplace_back().upload(xr);
-                g.sr.emplace_back().upload(sr);
-            }
-            if (!m_brute_rows.empty()) {
-                // +tau / N per (brute trial, active channel), exact.
-                const auto nb = m_brute_rows.size();
-                std::vector<unsigned long long> s(nb * m_nact);
-                for (SizeType i = 0; i < nb; ++i) {
-                    for (SizeType a = 0; a < m_nact; ++a) {
-                        s[(i * m_nact) + a] = phase_fixed(
-                            -m_model.tau(m_brute_rows[i], m_model.active[a]),
-                            n);
+            try {
+                g.n_fft  = n;
+                g.n_bins = (n / 2) + 1;
+                g.r2c    = std::make_unique<utils::CUFFTManager>(
+                    utils::FFTKind::kR2C, n, m_nact, m_device_id);
+                g.c2r = std::make_unique<utils::CUFFTManager>(
+                    utils::FFTKind::kC2R, n, m_ndm, m_device_id);
+                std::vector<unsigned long long> xr(m_nact);
+                std::vector<unsigned long long> sr(m_nact);
+                for (const auto& run : m_runs) {
+                    const auto nf = run->plan->fine_grid();
+                    if (!g.nu.contains(nf)) {
+                        g.nu[nf] = std::make_unique<utils::CUFFTManager>(
+                            utils::FFTKind::kC2CBackward, nf, g.n_bins,
+                            m_device_id);
                     }
+                    // x = k ddm r / N and the centring + dm0 phase k shift r / N
+                    // (turns per bin), as the CPU's prepare_points().
+                    const double shift =
+                        run->run.dm0 +
+                        (static_cast<double>(run->plan->half()) * run->run.ddm);
+                    for (SizeType a = 0; a < m_nact; ++a) {
+                        const double r = m_model.rate[m_model.active[a]];
+                        xr[a]          = phase_fixed(-(run->run.ddm * r), n);
+                        sr[a]          = phase_fixed(-(shift * r), n);
+                    }
+                    g.xr.emplace_back().upload(xr);
+                    g.sr.emplace_back().upload(sr);
                 }
-                g.brute.upload(s);
+                if (!m_brute_rows.empty()) {
+                    // +tau / N per (brute trial, active channel), exact.
+                    const auto nb = m_brute_rows.size();
+                    std::vector<unsigned long long> s(nb * m_nact);
+                    for (SizeType i = 0; i < nb; ++i) {
+                        for (SizeType a = 0; a < m_nact; ++a) {
+                            s[(i * m_nact) + a] = phase_fixed(
+                                -m_model.tau(m_brute_rows[i],
+                                             m_model.active[a]),
+                                n);
+                        }
+                    }
+                    g.brute.upload(s);
+                }
+            } catch (...) {
+                m_geos.erase(n);
+                std::erase(m_geo_lru, n);
+                throw;
             }
         }
         m_rows_d.reserve(std::max(m_nact, m_ndm) * n);

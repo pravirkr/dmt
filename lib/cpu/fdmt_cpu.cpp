@@ -157,12 +157,10 @@ SizeType FDMTCpuEngine::skew_fuse_request(SizeType fuse_levels,
 std::vector<std::pair<SizeType, SizeType>>
 FDMTCpuEngine::skew_candidates(SizeType ring_elem) {
     if (ring_elem == sizeof(float)) {
-        return {{4096, 1}, {4096, 2}, {2048, 1}, {4096, 3}, {2048, 2},
-                {2048, 3}, {4096, 4}, {1024, 1}, {2048, 4}, {1024, 0},
+        return {{4096, 1}, {2048, 1}, {1024, 1}, {1024, 0},
                 {512, 1},  {512, 0},  {256, 1},  {256, 0}};
     }
-    return {{4096, 2}, {4096, 3}, {4096, 4}, {4096, 1}, {2048, 4}, {2048, 2},
-            {2048, 3}, {2048, 1}, {1024, 0}, {512, 0},  {256, 0}};
+    return {{4096, 2}, {4096, 4}, {2048, 4}, {1024, 0}, {512, 0}, {256, 0}};
 }
 
 void FDMTCpuEngine::plan_working_memory(SizeType fuse_levels,
