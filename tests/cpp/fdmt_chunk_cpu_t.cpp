@@ -11,9 +11,9 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 
-#include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_chunk.hpp"
 
+#include "test_helpers.hpp"
 #include "test_random.hpp"
 
 // Chunked execution (chunk_nsamps, mode "valid"): a block of nsamps runs as
@@ -35,32 +35,6 @@ constexpr float kTsamp = 0.001F;
 
 std::vector<float> random_block(SizeType n, unsigned seed) {
     return dmt::test_random::uniform_real<float>(n, seed, -1.0F, 1.0F);
-}
-
-std::vector<uint8_t>
-random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
-    const auto vals = dmt::test_random::uniform_int<uint32_t>(
-        nrows * nsamps, seed, 0, bit_pack_utils::max_sample_value(nbits));
-    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
-    std::vector<uint8_t> packed(nrows * row_bytes, 0);
-    for (SizeType r = 0; r < nrows; ++r) {
-        uint8_t* row = packed.data() + (r * row_bytes);
-        for (SizeType s = 0; s < nsamps; ++s) {
-            const uint32_t v = vals[(r * nsamps) + s];
-            switch (nbits) {
-            case 1:
-                bit_pack_utils::write_packed_sample<1>(row, s, v);
-                break;
-            case 2:
-                bit_pack_utils::write_packed_sample<2>(row, s, v);
-                break;
-            default:
-                bit_pack_utils::write_packed_sample<8>(row, s, v);
-                break;
-            }
-        }
-    }
-    return packed;
 }
 
 struct Engine {
@@ -160,7 +134,8 @@ TEST_CASE("FDMT chunked execution with packed input and int tree",
                                     int_tree, 128);
                 for (unsigned blk = 0; blk < 3; ++blk) {
                     const auto wf =
-                        random_packed(nchans, nsamps, nbits, 40 + blk);
+                        test::random_packed(nchans, nsamps, nbits, 40 + blk)
+                            .packed;
                     REQUIRE_THAT(chunked.run(wf, nbits),
                                  Catch::Matchers::Equals(whole.run(wf, nbits)));
                 }

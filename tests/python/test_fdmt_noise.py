@@ -1,26 +1,29 @@
 """Noise-only validation; deliberately no FDMT/DDMT signal-sensitivity claims."""
 
+import importlib.util
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from dmtlib import DDMT, FDMT, FDMTFFT
 
-try:
-    from ._fdmt_noise import (
-        WHITE_ENGINES,
-        analyze,
-        cold_start_noise,
-        collect_noise,
-        white_noise_metrics,
-    )
-except ImportError:
-    from _fdmt_noise import (
-        WHITE_ENGINES,
-        analyze,
-        cold_start_noise,
-        collect_noise,
-        white_noise_metrics,
-    )
+
+def _load_fdmt_noise():
+    path = Path(__file__).resolve().parents[2] / "bench" / "scripts" / "fdmt_noise.py"
+    spec = importlib.util.spec_from_file_location("_bench_fdmt_noise", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_noise = _load_fdmt_noise()
+WHITE_ENGINES = _noise.WHITE_ENGINES
+analyze = _noise.analyze
+cold_start_noise = _noise.cold_start_noise
+collect_noise = _noise.collect_noise
+white_noise_metrics = _noise.white_noise_metrics
 
 
 @pytest.mark.parametrize(
@@ -33,7 +36,7 @@ def test_fdmt_and_ddmt_preserve_white_noise(
     delays: list[int],
     blocks: int,
 ) -> None:
-    streams, plan = collect_noise(
+    streams, plan, _ = collect_noise(
         nchans=nchans,
         nsamps=nsamps,
         realizations=256,
@@ -54,7 +57,7 @@ def test_fdmt_and_ddmt_preserve_white_noise(
 
 def test_gpu_fdmt_and_ddmt_preserve_white_noise(gpu_backend: str) -> None:
     # Device construction/execution errors propagate after backend discovery.
-    streams, plan = collect_noise(
+    streams, plan, _ = collect_noise(
         nchans=17,
         nsamps=512,
         realizations=256,

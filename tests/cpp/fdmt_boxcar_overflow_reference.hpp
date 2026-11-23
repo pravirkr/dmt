@@ -11,13 +11,9 @@
 #include <tuple>
 #include <vector>
 
-#include "dmt/boxcar.hpp"
-
 #include "fdmt_boxcar_reference.hpp"
 
 namespace boxcar_test {
-
-using algorithms::detail::brighter;
 
 using Calls = std::vector<std::vector<RawCandidate>>;
 
@@ -96,17 +92,7 @@ inline Calls run_calls_masked(algorithms::FDMTBoxcar& search,
 
 inline void require_same(std::vector<RawCandidate> a,
                          std::vector<RawCandidate> b) {
-    std::ranges::sort(a, brighter);
-    std::ranges::sort(b, brighter);
-    REQUIRE(a.size() == b.size());
-    for (SizeType i = 0; i < a.size(); ++i) {
-        CHECK(row_key(a[i]) == row_key(b[i]));
-        CHECK(a[i].peak_sample == b[i].peak_sample);
-        CHECK(a[i].begin_sample == b[i].begin_sample);
-        CHECK(a[i].end_sample == b[i].end_sample);
-        CHECK(a[i].filter_idx == b[i].filter_idx);
-        CHECK(a[i].snr == b[i].snr);
-    }
+    compare_exact(std::move(a), std::move(b));
 }
 
 } // namespace boxcar_test

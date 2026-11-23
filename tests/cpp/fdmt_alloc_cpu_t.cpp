@@ -12,8 +12,6 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
-#include "dmt/bit_pack_utils.hpp"
-
 // FDMT allocates all working memory in its constructor: execute() and the
 // stepper must not allocate. Checked by replacing the global operator new of
 // this test binary with a counting one that is only armed around the calls
@@ -84,7 +82,7 @@ TEST_CASE("FDMT execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
     const SizeType nbits  = 2;
     std::vector<float> wf(nbeams * nchans * nsamps, 1.0F);
     std::vector<uint8_t> packed(
-        nbeams * nchans * bit_pack_utils::packed_row_bytes(nsamps, nbits),
+        nbeams * nchans * (((nsamps * nbits) + 7) / 8),
         0x5A);
     // Mixed-sign dt range exercises the running box rows of level 0.
     for (const std::string mode : {"full", "roll", "valid"}) {

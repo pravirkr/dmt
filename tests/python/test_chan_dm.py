@@ -300,7 +300,8 @@ def test_skewed_path_matches_the_tree(smear: bool) -> None:
     rng = np.random.default_rng(17)
     codes = [rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8) for _ in range(3)]
     tree = FDMT(plan, use_box_smearing=smear, nthreads=1)
-    skew = FDMT(plan, use_box_smearing=smear, nthreads=1, max_memory_bytes=40 << 20)
+    budget = FDMT.estimate_memory(plan, use_box_smearing=smear, nthreads=1).usage.total // 2
+    skew = FDMT(plan, use_box_smearing=smear, nthreads=1, max_memory_bytes=budget)
     assert tree.history_state_size() != skew.history_state_size()  # skewed path
     a = np.concatenate([np.asarray(tree.execute(c, 8)).copy() for c in codes], axis=-1)
     b = np.concatenate([np.asarray(skew.execute(c, 8)).copy() for c in codes], axis=-1)
@@ -525,9 +526,12 @@ def test_chunked_gpu_matches_cpu(gpu_backend: str, fuse: int) -> None:
     np.testing.assert_array_equal(outs[1], outs[0])
 
 
-def _history_round_trip(kw: dict) -> None:
+def _history_round_trip(kw: dict, *, skewed: bool = False) -> None:
     nsamps, nchans = 2048, 1152
     plan = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, chan_dm=413.0)
+    if skewed:
+        budget = FDMT.estimate_memory(plan, nthreads=1, **kw).usage.total // 2
+        kw = {**kw, "max_memory_bytes": budget}
     rng = np.random.default_rng(37)
     codes = [rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8) for _ in range(3)]
     a = FDMT(plan, nthreads=1, **kw)
@@ -548,7 +552,7 @@ def _history_round_trip(kw: dict) -> None:
 
 @pytest.mark.parametrize("path", ["tree", "skewed"])
 def test_history_round_trip(path: str) -> None:
-    _history_round_trip({"tree": {}, "skewed": {"max_memory_bytes": 40 << 20}}[path])
+    _history_round_trip({}, skewed=(path == "skewed"))
 
 
 def test_history_round_trip_gpu(gpu_backend: str) -> None:

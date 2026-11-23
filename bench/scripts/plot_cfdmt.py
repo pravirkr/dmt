@@ -20,7 +20,6 @@ import argparse
 import json
 import statistics
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 

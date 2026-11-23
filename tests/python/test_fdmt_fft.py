@@ -3,6 +3,11 @@ import pytest
 
 from dmtlib import FDMT, FDMTFFT, compute_fdmt_fft, libdmt
 
+try:
+    from ._helpers import pack_lsb_first
+except ImportError:
+    from _helpers import pack_lsb_first
+
 
 class TestFDMTFFT:
     def test_fdmt_fft_initialise_shape(self) -> None:
@@ -321,22 +326,6 @@ class TestFDMTFFT:
         )
 
 
-def _pack(vals: np.ndarray, nbits: int) -> np.ndarray:
-    """Rows of unsigned values -> LSB-first packed uint8 rows."""
-    if nbits == 16:
-        return np.ascontiguousarray(vals.astype("<u2")).view(np.uint8)
-    if nbits == 8:
-        return vals.astype(np.uint8)
-    per = 8 // nbits
-    rows, n = vals.shape
-    out = np.zeros((rows, (n * nbits + 7) // 8), dtype=np.uint8)
-    for i in range(n):
-        out[:, i // per] |= (vals[:, i].astype(np.uint8) << ((i % per) * nbits)).astype(
-            np.uint8
-        )
-    return out
-
-
 class TestFDMTFFTInputs:
     args = (1100.0, 1500.0, 64, 512, 0.001, 48)
 
@@ -345,8 +334,10 @@ class TestFDMTFFTInputs:
         rng = np.random.default_rng(nbits)
         vals = rng.integers(0, 2**nbits, size=(64, 512))
         ref = FDMTFFT(*self.args).execute(vals.astype(np.float32))
-        packed = FDMTFFT(*self.args).execute(_pack(vals, nbits), nbits)
-        tm = FDMTFFT(*self.args).execute_time_major(_pack(vals.T.copy(), nbits), nbits)
+        packed = FDMTFFT(*self.args).execute(pack_lsb_first(vals, nbits), nbits)
+        tm = FDMTFFT(*self.args).execute_time_major(
+            pack_lsb_first(vals.T.copy(), nbits), nbits
+        )
         np.testing.assert_allclose(packed, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
         np.testing.assert_allclose(tm, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
 
@@ -496,8 +487,8 @@ def test_fdmt_fft_execute_out_buffer() -> None:
     np.testing.assert_array_equal(got, ref)
 
     vals = rng.integers(0, 256, size=(nchans, nsamps))
-    packed = _pack(vals, 8)
-    tm = _pack(vals.T.copy(), 8)
+    packed = pack_lsb_first(vals, 8)
+    tm = pack_lsb_first(vals.T.copy(), 8)
     ref_p = eng.execute(packed, 8)
     got_p = eng.execute(packed, 8, out=out)
     assert np.shares_memory(got_p, out)

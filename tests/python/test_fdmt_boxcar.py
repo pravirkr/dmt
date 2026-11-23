@@ -13,6 +13,11 @@ from dmtlib import (
     PeakFindingMode,
 )
 
+try:
+    from ._helpers import pack_lsb_first, sorted_candidates
+except ImportError:
+    from _helpers import pack_lsb_first, sorted_candidates
+
 
 def config(
     mode: PeakFindingMode = PeakFindingMode.CONTIGUOUS_PEAK_PER_WIDTH,
@@ -24,21 +29,6 @@ def config(
         max_cands_per_dm=0,
         peak_mode=mode,
     )
-
-
-def sorted_candidates(parts: list[np.ndarray]) -> np.ndarray:
-    data = np.concatenate(parts)
-    fields = [
-        "beam_idx",
-        "subband_level",
-        "subband_idx",
-        "dm_idx",
-        "filter_idx",
-        "begin_sample",
-        "end_sample",
-        "peak_sample",
-    ]
-    return np.sort(data, order=fields)
 
 
 @pytest.mark.parametrize("mode", list(PeakFindingMode.__members__.values()))
@@ -152,12 +142,6 @@ def test_gpu_matches_cpu(gpu_backend: str, mode: PeakFindingMode) -> None:
             np.testing.assert_array_equal(result[name], expected[name])
 
 
-def pack_codes(codes: np.ndarray, bits: int) -> np.ndarray:
-    """Independently padded rows, with least significant sample bits first."""
-    lanes = ((codes[..., None] >> np.arange(bits)) & 1).astype(np.uint8)
-    return np.packbits(lanes.reshape(*codes.shape[:-1], -1), axis=-1, bitorder="little")
-
-
 @pytest.mark.parametrize("bits", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("mode", list(PeakFindingMode.__members__.values()))
 def test_packed_streaming_and_centered_reference(
@@ -183,7 +167,7 @@ def test_packed_streaming_and_centered_reference(
     actual, expected = [], []
     for k in range(blocks):
         block = codes[:, :, k * samples : (k + 1) * samples]
-        actual.append(packed.execute(pack_codes(block, bits)).candidates)
+        actual.append(packed.execute(pack_lsb_first(block, bits)).candidates)
         expected.append(
             floating.execute((block.astype(np.float32) - mean).copy()).candidates
         )
@@ -199,7 +183,7 @@ def test_packed_streaming_and_centered_reference(
     with pytest.raises(ValueError):
         packed.execute(np.zeros((2, 7, samples), np.float32))
     with pytest.raises(ValueError):
-        packed.execute(pack_codes(codes[:, :, :samples], bits)[:, :, :-1].copy())
+        packed.execute(pack_lsb_first(codes[:, :, :samples], bits)[:, :, :-1].copy())
     assert len(packed.search_plans[-1].integer_thresh_lut) > 0
 
 
@@ -368,8 +352,11 @@ def test_drain_searches_the_skewed_tail() -> None:
         input_mean=107.5,
     )
     found = {}
+    min_budget = FDMTBoxcar.estimate_minimum_memory(
+        plan, cfg, nthreads=1
+    ).max_memory_bytes
     for end in ("flush", "drain"):
-        search = FDMTBoxcar(plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
+        search = FDMTBoxcar(plan, cfg, nthreads=1, max_memory_bytes=min_budget)
         latency = search.search_latency
         assert latency > 0
         parts = [search.execute(block).candidates for block in blocks]
@@ -816,7 +803,9 @@ def _check_boxcar_estimate(backend: str) -> None:
         assert "FDMTBoxcarMemoryEstimate(" in repr(est)
 
     big = FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
-    budget = 70 << 20
+    budget = FDMTBoxcar.estimate_minimum_memory(
+        big, config(), backend=backend
+    ).max_memory_bytes
     est = FDMTBoxcar.estimate_memory(
         big, config(), backend=backend, max_memory_bytes=budget
     )

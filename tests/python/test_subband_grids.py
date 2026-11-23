@@ -161,8 +161,6 @@ def test_rows_match_the_unpruned_plan(nbits: int, backend: str) -> None:
     b = keyed(pruned, s1, run(s1, data))
     assert len(b) > 100
     root = plain.niters
-    staggered = {(p.level, p.subband_idx) for p in s1.search_plans if p.staggered}
-    del staggered
     # Nodes of the unpruned plan (the pruned plan's subband grids may hold
     # other trials: its staggered grids push their own down the tree).
     nodes = {

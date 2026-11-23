@@ -13,9 +13,7 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 
-#include "dmt/bit_pack_utils.hpp"
-#include "dmt/gpu_compat.cuh"
-
+#include "test_gpu_compat.cuh"
 #include "test_helpers.hpp"
 
 // FDMT packed low-bit input and narrow-integer tree (the int_tree
@@ -37,46 +35,6 @@ namespace {
 constexpr float kFMin  = 1000.0F;
 constexpr float kFMax  = 1500.0F;
 constexpr float kTsamp = 0.001F;
-
-struct PackedWaterfall {
-    std::vector<float> values;
-    std::vector<uint8_t> packed;
-};
-
-PackedWaterfall
-random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(
-        0, bit_pack_utils::max_sample_value(nbits));
-    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
-    PackedWaterfall out{.values = std::vector<float>(nrows * nsamps),
-                        .packed = std::vector<uint8_t>(nrows * row_bytes, 0)};
-    for (SizeType r = 0; r < nrows; ++r) {
-        uint8_t* row = out.packed.data() + (r * row_bytes);
-        for (SizeType s = 0; s < nsamps; ++s) {
-            const uint32_t v             = dis(gen);
-            out.values[(r * nsamps) + s] = static_cast<float>(v);
-            switch (nbits) {
-            case 1:
-                bit_pack_utils::write_packed_sample<1>(row, s, v);
-                break;
-            case 2:
-                bit_pack_utils::write_packed_sample<2>(row, s, v);
-                break;
-            case 4:
-                bit_pack_utils::write_packed_sample<4>(row, s, v);
-                break;
-            case 8:
-                bit_pack_utils::write_packed_sample<8>(row, s, v);
-                break;
-            default:
-                bit_pack_utils::write_packed_sample<16>(row, s, v);
-                break;
-            }
-        }
-    }
-    return out;
-}
 
 template <typename Fdmt>
 std::vector<float> run_float(Fdmt& fdmt, const std::vector<float>& wf) {
@@ -125,7 +83,7 @@ TEST_CASE("FDMT packed input matches float input and FDMT", "[fdmt_gpu][gpu]") {
                     DYNAMIC_SECTION("nchans=" << c.nchans << " nbits=" << nbits
                                               << " mode=" << mode
                                               << " smearing=" << smearing) {
-                        const auto wf = random_packed(c.nchans, c.nsamps, nbits,
+                        const auto wf = test::random_packed(c.nchans, c.nsamps, nbits,
                                                       17 + nbits);
                         FDMT gpu_float(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                        c.dt_max, c.dt_min, 1, smearing, mode,
@@ -176,7 +134,7 @@ TEST_CASE("FDMT packed valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                          "valid");
                 const auto n = cpu.get_plan().get_dmt_size();
                 for (SizeType b = 0; b < 8; ++b) {
-                    const auto wf = random_packed(
+                    const auto wf = test::random_packed(
                         nchans, block, nbits, static_cast<unsigned>(90 + b));
                     const auto g = run_packed(gpu, wf.packed, nbits);
                     const auto h = run_packed(cpu, wf.packed, nbits);
@@ -195,14 +153,14 @@ TEST_CASE("FDMT packed multi-beam matches per-beam execution",
     const SizeType nsamps = 128;
     const SizeType nbeams = 3;
     const SizeType nbits  = 2;
-    const auto wf         = random_packed(nbeams * nchans, nsamps, nbits, 5);
+    const auto wf         = test::random_packed(nbeams * nchans, nsamps, nbits, 5);
     FDMT multi(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true, "full",
                test::gpu_exec(), nbeams);
     const auto got        = run_packed(multi, wf.packed, nbits);
     const auto& plan      = multi.get_plan();
     const auto n          = plan.get_dmt_size();
     const auto gpu_stride = plan.get_dmt_size(); // compact output layout
-    const auto row_bytes  = bit_pack_utils::packed_row_bytes(nsamps, nbits);
+    const auto row_bytes  = test::packed_row_bytes(nsamps, nbits);
     for (SizeType b = 0; b < nbeams; ++b) {
         std::vector<uint8_t> one(
             wf.packed.begin() +
@@ -221,7 +179,7 @@ TEST_CASE("FDMT packed device-memory execute and stepper", "[fdmt_gpu][gpu]") {
     const SizeType nchans = 64;
     const SizeType nsamps = 128;
     const SizeType nbits  = 1;
-    const auto wf         = random_packed(nchans, nsamps, nbits, 3);
+    const auto wf         = test::random_packed(nchans, nsamps, nbits, 3);
     FDMT ref(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full",
              test::gpu_exec());
     const auto expected = run_float(ref, wf.values);

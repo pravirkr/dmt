@@ -59,35 +59,6 @@ std::vector<uint8_t> random_mask(SizeType n, unsigned seed, double killed) {
     return m;
 }
 
-// Exact equality of two candidate sets (every field, S/N bit for bit).
-void compare_exact(std::vector<RawCandidate> a, std::vector<RawCandidate> b) {
-    sort(a);
-    sort(b);
-    REQUIRE(a.size() == b.size());
-    // Plain comparison first; assertions only for the first mismatches
-    // (per-candidate assertions dominated the Debug CI jobs).
-    const auto same = [](const RawCandidate& x, const RawCandidate& y) {
-        return key(x) == key(y) &&
-               std::bit_cast<uint32_t>(x.snr) ==
-                   std::bit_cast<uint32_t>(y.snr) &&
-               x.width == y.width && x.dm == y.dm && x.staggered == y.staggered;
-    };
-    SizeType reported = 0;
-    for (SizeType i = 0; i < a.size() && reported < 10; ++i) {
-        if (same(a[i], b[i])) {
-            continue;
-        }
-        ++reported;
-        INFO("candidate " << i);
-        REQUIRE(key(a[i]) == key(b[i]));
-        REQUIRE(std::bit_cast<uint32_t>(a[i].snr) ==
-                std::bit_cast<uint32_t>(b[i].snr));
-        REQUIRE(a[i].width == b[i].width);
-        REQUIRE(a[i].dm == b[i].dm);
-        REQUIRE(a[i].staggered == b[i].staggered);
-    }
-}
-
 // Streams `input` through `search` with per-block masks (an empty entry:
 // the old overload when `old_for_empty`, else an empty span), then ends
 // with flush() or drain().
@@ -801,6 +772,18 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
                     }
                 }
             }
+            // Steady state under previous block's mask `ma` matches `ta`.
+            const SizeType i = (r * widths.size()) + f;
+            double exact_a   = 0.0;
+            for (SizeType c = 0; c < nchans; ++c) {
+                if (ma[c] != 0) {
+                    for (SizeType k = 0; k < lags + w; ++k) {
+                        exact_a += g[c][k] * g[c][k];
+                    }
+                }
+            }
+            REQUIRE_THAT(exact_a,
+                         Catch::Matchers::WithinRel(var(ta, i), 1e-5));
             // Endpoint at offset u from the start of block b (mask mb),
             // previous block mask ma.
             const SizeType window = support[r] + w - 1;
@@ -813,7 +796,6 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
                         exact += m[c] != 0 ? g[c][k] * g[c][k] : 0.0;
                     }
                 }
-                const SizeType i = (r * widths.size()) + f;
                 INFO("row " << r << " width " << w << " offset " << u
                             << " exact " << exact);
                 if (u >= window) {
@@ -828,7 +810,6 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
         }
     }
     REQUIRE(checked > 100);
-    (void)ta;
 }
 
 TEST_CASE("FDMTBoxcar per-call mask: scores stay calibrated on white noise",

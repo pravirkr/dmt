@@ -19,6 +19,11 @@ import pytest
 
 from dmtlib import DDMT, DDMTFFT, FDMT, FDMTFFT, SDMT, CohFDMT
 
+try:
+    from ._helpers import pack_lsb_first
+except ImportError:
+    from _helpers import pack_lsb_first
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -251,14 +256,6 @@ class StreamProtocol:
 FDMT_ARGS = (1000.0, 1500.0, 64, 256, 0.001, 40)
 
 
-def pack2(values: np.ndarray) -> np.ndarray:
-    """2-bit LSB-first packing (4 samples per byte) along the last axis."""
-    out = np.zeros((*values.shape[:-1], values.shape[-1] // 4), dtype=np.uint8)
-    for k in range(4):
-        out |= values[..., k::4].astype(np.uint8) << (2 * k)
-    return out
-
-
 class TestFDMT:
     @pytest.mark.parametrize("cls", [FDMT, FDMTFFT])
     def test_execute_matches_host(self, cls: type, cuda: str, xp: Lib) -> None:
@@ -294,7 +291,7 @@ class TestFDMT:
     @pytest.mark.parametrize("cls", [FDMT, FDMTFFT])
     def test_beams_and_packed(self, cls: type, cuda: str, xp: Lib) -> None:
         values = np.random.default_rng(3).integers(0, 4, (2, 64, 256))
-        packed = pack2(values)
+        packed = pack_lsb_first(values, 2)
         host = cls(*FDMT_ARGS, nbeams=2, backend=cuda)
         dev = cls(*FDMT_ARGS, nbeams=2, backend=cuda)
         got = dev.execute(xp.asarray(packed), 2)
@@ -364,7 +361,9 @@ class TestFDMT:
 
     @pytest.mark.parametrize("cls", [FDMT, FDMTFFT])
     def test_stepper_packed(self, cls: type, cuda: str, xp: Lib) -> None:
-        packed = pack2(np.random.default_rng(18).integers(0, 4, (64, 256)))
+        packed = pack_lsb_first(
+            np.random.default_rng(18).integers(0, 4, (64, 256)), 2
+        )
         want = cls(*FDMT_ARGS, backend=cuda).execute(packed, 2)
         eng = cls(*FDMT_ARGS, backend=cuda)
         eng.reset(xp.asarray(packed), 2)
@@ -563,11 +562,61 @@ class TestCohFDMT:
             CohFDMT(cfg).execute(xp.asarray(data))
 
 
-# Stream semantics checked against PyTorch. Each "slow producer" holds a
-# stream with torch.cuda._sleep before the work that writes the input, so a
-# transform that is not ordered after that work reads the wrong data.
+# Stream semantics checked against PyTorch and CuPy. Each producer holds its
+# stream on a host-mapped flag via cuStreamWaitValue32 until the host opens the
+# gate after queuing the consumer, so stream ordering is tested deterministically
+# with no cycle-count sleeps.
 
-SLEEP_CYCLES = 200_000_000  # ~0.1 s on an L40
+
+class _StreamGate:
+    """Host-controlled GPU stream barrier backed by mapped pinned memory."""
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self._ctypes = ctypes
+        self._cuda = ctypes.CDLL("libcuda.so.1")
+        self._cudart = ctypes.CDLL("libcudart.so")
+        self._wait_fn = getattr(
+            self._cuda, "cuStreamWaitValue32_v2", self._cuda.cuStreamWaitValue32
+        )
+        host_ptr = ctypes.c_void_p()
+        dev_ptr = ctypes.c_void_p()
+        # cudaHostAllocMapped = 2
+        if self._cudart.cudaHostAlloc(ctypes.byref(host_ptr), ctypes.c_size_t(4), 2) != 0:
+            pytest.skip("cudaHostAllocMapped unavailable")
+        if self._cudart.cudaHostGetDevicePointer(ctypes.byref(dev_ptr), host_ptr, 0) != 0:
+            self._cudart.cudaFreeHost(host_ptr)
+            pytest.skip("cudaHostGetDevicePointer unavailable")
+        self._host_ptr = host_ptr
+        self._dev_ptr = dev_ptr
+        self._flag = ctypes.c_uint32.from_address(host_ptr.value)
+        self._flag.value = 0
+        self._released = False
+
+    def wait(self, stream_ptr: int) -> None:
+        rc = self._wait_fn(
+            self._ctypes.c_void_p(stream_ptr),
+            self._ctypes.c_uint64(self._dev_ptr.value),
+            self._ctypes.c_uint32(1),
+            self._ctypes.c_uint(0),
+        )
+        if rc != 0:
+            self.release()
+            pytest.skip(f"cuStreamWaitValue32 unavailable (rc={rc})")
+
+    def release(self) -> None:
+        if not self._released:
+            self._flag.value = 1
+            self._released = True
+
+    def __enter__(self) -> "_StreamGate":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+        self._cudart.cudaDeviceSynchronize()
+        self._cudart.cudaFreeHost(self._host_ptr)
 
 
 @pytest.fixture
@@ -579,13 +628,13 @@ def torch(cuda: str) -> Any:  # noqa: ANN401, ARG001
 
 
 @contextlib.contextmanager
-def slow_producer(torch: Any, stream: Any, src: Any) -> Iterator[Any]:  # noqa: ANN401
-    """On ``stream``: sleep, then copy ``src`` into a new tensor (yielded)."""
-    with torch.cuda.stream(stream):
+def slow_producer(torch: Any, stream: Any, src: Any) -> Iterator[tuple[Any, _StreamGate]]:  # noqa: ANN401
+    """On ``stream``: wait on a host gate, then copy ``src`` into a new tensor."""
+    with _StreamGate() as gate, torch.cuda.stream(stream):
         x = torch.zeros_like(src)
-        torch.cuda._sleep(SLEEP_CYCLES)  # noqa: SLF001
+        gate.wait(stream.cuda_stream)
         x.copy_(src)
-        yield x
+        yield x, gate
 
 
 def roll_fdmt(torch: Any) -> tuple[FDMT, np.ndarray, np.ndarray]:  # noqa: ANN401
@@ -619,10 +668,12 @@ class TestTorchStreams:
         src = torch.from_numpy(wf).cuda()
         s = torch.cuda.Stream()
         torch.cuda.synchronize()
-        with slow_producer(torch, s, src) as x:
+        with slow_producer(torch, s, src) as (x, gate):
             got = fdmt.execute(x)
+            assert not s.query()
+            gate.release()
+            s.synchronize()
         assert stream_of_block(torch, got.data_ptr()) == s.cuda_stream
-        s.synchronize()
         np.testing.assert_array_equal(got.cpu().numpy(), want)
 
     def test_producer_ordering(self, torch: Any) -> None:  # noqa: ANN401
@@ -632,10 +683,13 @@ class TestTorchStreams:
         src = torch.from_numpy(wf).cuda()
         a, b = torch.cuda.Stream(), torch.cuda.Stream()
         torch.cuda.synchronize()
-        with slow_producer(torch, a, src) as x:
+        with slow_producer(torch, a, src) as (x, gate):
             got = fdmt.execute(x, stream=b)
+            assert not a.query()
+            assert not b.query()
+            gate.release()
+            b.synchronize()
         assert stream_of_block(torch, got.data_ptr()) == b.cuda_stream
-        b.synchronize()
         np.testing.assert_array_equal(got.cpu().numpy(), want)
 
     @pytest.mark.parametrize("default", ["zero", "object"])
@@ -648,9 +702,11 @@ class TestTorchStreams:
         stream = 0 if default == "zero" else torch.cuda.default_stream()
         side = torch.cuda.Stream()
         torch.cuda.synchronize()
-        with slow_producer(torch, side, src) as x:
+        with slow_producer(torch, side, src) as (x, gate):
             got = fdmt.execute(x, stream=stream)
-        torch.cuda.default_stream().synchronize()
+            assert not side.query()
+            gate.release()
+            torch.cuda.default_stream().synchronize()
         np.testing.assert_array_equal(got.cpu().numpy(), want)
 
     def test_per_thread_default_stream(self, torch: Any) -> None:  # noqa: ANN401
@@ -667,14 +723,16 @@ class TestTorchStreams:
         # read it.
         fdmt, wf, want = roll_fdmt(torch)
         a, b = torch.cuda.Stream(), torch.cuda.Stream()
-        with torch.cuda.stream(b):
-            torch.cuda._sleep(SLEEP_CYCLES)  # noqa: SLF001
-        with torch.cuda.stream(a):
-            x = torch.from_numpy(wf).cuda()
-            got = fdmt.execute(x, stream=b)
-            del x
-            junk = torch.full((64, 256), np.nan, device="cuda")
-        b.synchronize()
+        with _StreamGate() as gate:
+            gate.wait(b.cuda_stream)
+            with torch.cuda.stream(a):
+                x = torch.from_numpy(wf).cuda()
+                got = fdmt.execute(x, stream=b)
+                del x
+                junk = torch.full((64, 256), np.nan, device="cuda")
+            assert not b.query()
+            gate.release()
+            b.synchronize()
         assert junk.isnan().all()
         np.testing.assert_array_equal(got.cpu().numpy(), want)
 
@@ -722,30 +780,25 @@ class CAIOnly:
         return desc
 
 
-SPIN_SOURCE = r"""
-extern "C" __global__ void spin(long long cycles) {
-    const long long start = clock64();
-    while (clock64() - start < cycles) {}
-}
-"""
-
-
 @pytest.fixture
 def cp(cuda: str) -> Any:  # noqa: ANN401, ARG001
     return pytest.importorskip("cupy")
 
 
-def busy_producer(cp: Any, wf: np.ndarray) -> tuple[Any, Any]:  # noqa: ANN401
-    """A waterfall written on a new stream after ~0.1 s of spinning on it."""
-    spin = cp.RawKernel(SPIN_SOURCE, "spin")
+@contextlib.contextmanager
+def busy_producer(
+    cp: Any, wf: np.ndarray  # noqa: ANN401
+) -> Iterator[tuple[Any, Any, _StreamGate]]:
+    """A waterfall written on a new stream after the host opens the gate."""
     src = cp.asarray(wf)
     cp.cuda.Device().synchronize()
     stream = cp.cuda.Stream(non_blocking=True)
-    with stream:
-        x = cp.zeros_like(src)
-        spin((1,), (1,), (np.int64(SLEEP_CYCLES),))
-        x[...] = src
-    return x, stream
+    with _StreamGate() as gate:
+        with stream:
+            x = cp.zeros_like(src)
+            gate.wait(stream.ptr)
+            x[...] = src
+        yield x, stream, gate
 
 
 def warm_fdmt(cp: Any) -> tuple[FDMT, np.ndarray, np.ndarray]:  # noqa: ANN401
@@ -789,30 +842,38 @@ class TestCudaArrayInterface:
         else:
             monkeypatch.delenv("NUMBA_CUDA_ARRAY_INTERFACE_SYNC", raising=False)
         fdmt, wf, want = warm_fdmt(cp)
-        x, producer = busy_producer(cp, wf)
-        call = cp.cuda.Stream(non_blocking=True)
-        out = cp.empty(fdmt.plan.dmt_size, dtype=cp.float32)
-        fdmt.execute(CAIOnly(x, stream=producer.ptr), out=out, stream=call)
-        assert not producer.done  # the host did not wait
-        call.synchronize()
-        got = out.get().reshape(want.shape)
-        if sync == "0":
-            assert not np.array_equal(got, want)  # read before it was written
-        else:
-            np.testing.assert_array_equal(got, want)
+        with busy_producer(cp, wf) as (x, producer, gate):
+            call = cp.cuda.Stream(non_blocking=True)
+            out = cp.empty(fdmt.plan.dmt_size, dtype=cp.float32)
+            fdmt.execute(CAIOnly(x, stream=producer.ptr), out=out, stream=call)
+            assert not producer.done  # the host did not wait
+            if sync == "0":
+                call.synchronize()  # finishes while producer is still gated
+                gate.release()
+                producer.synchronize()
+                got = out.get().reshape(want.shape)
+                assert not np.array_equal(got, want)  # read before it was written
+            else:
+                assert not call.done  # consumer is waiting on producer
+                gate.release()
+                call.synchronize()
+                got = out.get().reshape(want.shape)
+                np.testing.assert_array_equal(got, want)
 
     def test_numba_producer_stream(self, cp: Any) -> None:  # noqa: ANN401
         numba = Numba()
         fdmt, wf, want = warm_fdmt(cp)
-        x, producer = busy_producer(cp, wf)
-        # A Numba array bound to the busy stream reports it in its CAI.
-        nb = numba.cuda.as_cuda_array(x, sync=False).bind(
-            numba.cuda.external_stream(producer.ptr)
-        )
-        assert nb.__cuda_array_interface__["stream"] == producer.ptr
-        got = fdmt.execute(nb, stream=0)
-        numba.cuda.default_stream().synchronize()
-        np.testing.assert_array_equal(got.copy_to_host(), want)
+        with busy_producer(cp, wf) as (x, producer, gate):
+            # A Numba array bound to the busy stream reports it in its CAI.
+            nb = numba.cuda.as_cuda_array(x, sync=False).bind(
+                numba.cuda.external_stream(producer.ptr)
+            )
+            assert nb.__cuda_array_interface__["stream"] == producer.ptr
+            got = fdmt.execute(nb, stream=0)
+            assert not producer.done
+            gate.release()
+            numba.cuda.default_stream().synchronize()
+            np.testing.assert_array_equal(got.copy_to_host(), want)
 
     def test_errors(self, cp: Any) -> None:  # noqa: ANN401
         fdmt = FDMT(*FDMT_ARGS, backend="cuda")

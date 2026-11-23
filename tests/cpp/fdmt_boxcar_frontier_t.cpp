@@ -9,9 +9,8 @@
 #include <span>
 #include <vector>
 
-#include "dmt/engines.hpp"
-
 #include "fdmt_boxcar_reference.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 
@@ -99,12 +98,76 @@ FrontierRun stream(Search& search,
     return run;
 }
 
-std::vector<Exec> frontier_backends() {
-    std::vector<Exec> out{Exec::cpu()};
-#ifdef DMT_ENABLE_GPU
-    out.push_back({algorithms::detail::kGPUBackend, 1, 0});
-#endif
-    return out;
+void check_long_excursion_frontier(Exec exec) {
+    // A constant offset keeps the rows above threshold from sample 1000 to
+    // 2600 (blocks 2 to 6): the frontier stays at the excursion's begin,
+    // and the candidate that finally closes it begins exactly there.
+    const auto plan   = frontier_plan();
+    const SizeType ns = plan.get_nsamps();
+    auto input        = waterfalls(plan, 1, 9);
+    for (SizeType k = 0; k < input.size(); ++k) {
+        for (SizeType c = 0; c < 32; ++c) {
+            for (SizeType t = 0; t < ns; ++t) {
+                const SizeType s = (k * ns) + t;
+                if (s >= 1000 && s < 2600) {
+                    input[k][(c * ns) + t] += 3.0F;
+                }
+            }
+        }
+    }
+    for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                            PeakFindingMode::kContiguousPeakAcrossWidths}) {
+        DYNAMIC_SECTION("mode " << static_cast<int>(mode)) {
+            FDMTBoxcar search(plan, frontier_config(mode), true, exec);
+            std::vector<uint64_t> held;
+            std::vector<RawCandidate> all;
+            for (SizeType k = 0; k < input.size(); ++k) {
+                append(all, search.execute(input[k]));
+                if (k >= 3 && k <= 5) {
+                    held.push_back(search.get_candidate_frontier());
+                }
+            }
+            append(all, search.flush());
+            REQUIRE(held.size() == 3);
+            CHECK(held[0] == held[1]);
+            CHECK(held[1] == held[2]);
+            CHECK(held[0] <= 1000 + 40);
+            CHECK(held[0] < 3 * ns);
+            // The closing candidate begins at the held frontier, and no
+            // later candidate begins before it.
+            const auto oldest = std::ranges::min_element(
+                all, {}, [&](const RawCandidate& c) {
+                    return c.end_sample >= 2500 ? c.begin_sample : UINT64_MAX;
+                });
+            REQUIRE(oldest != all.end());
+            CHECK(oldest->begin_sample == held[0]);
+            CHECK(oldest->end_sample >= 2500);
+        }
+    }
+}
+
+void check_fft_frontier(Exec exec) {
+    // FDMTFFTBoxcar searches with an output latency: the frontier follows
+    // its searched position.
+    const plans::FDMTPlan plan(700, 1200, 32, 512, 0.001F,
+                               std::vector<IndexType>{0, 3, 9, 20, 41, 77},
+                               "valid");
+    const auto input = waterfalls(plan, 1, 5);
+    for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                            PeakFindingMode::kAllAboveThreshold}) {
+        for (const bool drain : {false, true}) {
+            DYNAMIC_SECTION("mode " << static_cast<int>(mode) << " drain "
+                                    << drain) {
+                algorithms::FDMTFFTBoxcar search(plan, frontier_config(mode),
+                                                 true, exec);
+                const auto run =
+                    stream(search, input, Masks(input.size()), drain);
+                REQUIRE_FALSE(run.candidates.empty());
+                search.reset_history();
+                CHECK(search.get_candidate_frontier() == 0);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -142,86 +205,25 @@ TEST_CASE("FDMTBoxcar candidate frontier bounds every later candidate",
 
 TEST_CASE("FDMTBoxcar candidate frontier holds a long excursion's begin",
           "[boxcar][frontier][cpu]") {
-    // A constant offset keeps the rows above threshold from sample 1000 to
-    // 2600 (blocks 2 to 6): the frontier stays at the excursion's begin,
-    // and the candidate that finally closes it begins exactly there.
-    const auto plan   = frontier_plan();
-    const SizeType ns = plan.get_nsamps();
-    auto input        = waterfalls(plan, 1, 9);
-    for (SizeType k = 0; k < input.size(); ++k) {
-        for (SizeType c = 0; c < 32; ++c) {
-            for (SizeType t = 0; t < ns; ++t) {
-                const SizeType s = (k * ns) + t;
-                if (s >= 1000 && s < 2600) {
-                    input[k][(c * ns) + t] += 3.0F;
-                }
-            }
-        }
-    }
-    for (const auto& exec : frontier_backends()) {
-        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
-                                PeakFindingMode::kContiguousPeakAcrossWidths}) {
-            DYNAMIC_SECTION("backend " << static_cast<int>(exec.backend)
-                                       << " mode " << static_cast<int>(mode)) {
-                FDMTBoxcar search(plan, frontier_config(mode), true, exec);
-                std::vector<uint64_t> held;
-                std::vector<RawCandidate> all;
-                for (SizeType k = 0; k < input.size(); ++k) {
-                    append(all, search.execute(input[k]));
-                    if (k >= 3 && k <= 5) {
-                        held.push_back(search.get_candidate_frontier());
-                    }
-                }
-                append(all, search.flush());
-                REQUIRE(held.size() == 3);
-                CHECK(held[0] == held[1]);
-                CHECK(held[1] == held[2]);
-                CHECK(held[0] <= 1000 + 40);
-                CHECK(held[0] < 3 * ns);
-                // The closing candidate begins at the held frontier, and no
-                // later candidate begins before it.
-                const auto oldest = std::ranges::min_element(
-                    all, {}, [&](const RawCandidate& c) {
-                        return c.end_sample >= 2500 ? c.begin_sample
-                                                    : UINT64_MAX;
-                    });
-                REQUIRE(oldest != all.end());
-                CHECK(oldest->begin_sample == held[0]);
-                CHECK(oldest->end_sample >= 2500);
-            }
-        }
-    }
+    check_long_excursion_frontier(Exec::cpu());
 }
 
 TEST_CASE("FDMTFFTBoxcar candidate frontier bounds every later candidate",
           "[boxcar][frontier][cpu]") {
-    // FDMTFFTBoxcar searches with an output latency: the frontier follows
-    // its searched position.
-    const plans::FDMTPlan plan(700, 1200, 32, 512, 0.001F,
-                               std::vector<IndexType>{0, 3, 9, 20, 41, 77},
-                               "valid");
-    const auto input = waterfalls(plan, 1, 5);
-    for (const auto& exec : frontier_backends()) {
-        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
-                                PeakFindingMode::kAllAboveThreshold}) {
-            for (const bool drain : {false, true}) {
-                DYNAMIC_SECTION("backend " << static_cast<int>(exec.backend)
-                                           << " mode " << static_cast<int>(mode)
-                                           << " drain " << drain) {
-                    algorithms::FDMTFFTBoxcar search(
-                        plan, frontier_config(mode), true, exec);
-                    const auto run =
-                        stream(search, input, Masks(input.size()), drain);
-                    REQUIRE_FALSE(run.candidates.empty());
-                    search.reset_history();
-                    CHECK(search.get_candidate_frontier() == 0);
-                }
-            }
-        }
-    }
+    check_fft_frontier(Exec::cpu());
 }
 
 #ifdef DMT_ENABLE_GPU
+TEST_CASE("GPU FDMTBoxcar candidate frontier holds a long excursion's begin",
+          "[gpu][boxcar][frontier]") {
+    check_long_excursion_frontier(test::gpu_exec());
+}
+
+TEST_CASE("GPU FDMTFFTBoxcar candidate frontier bounds every later candidate",
+          "[gpu][boxcar][frontier]") {
+    check_fft_frontier(test::gpu_exec());
+}
+
 TEST_CASE("GPU FDMTBoxcar candidate frontier equals the CPU's",
           "[gpu][boxcar][frontier]") {
     const auto plan  = frontier_plan();
@@ -235,8 +237,7 @@ TEST_CASE("GPU FDMTBoxcar candidate frontier equals the CPU's",
                 const auto cfg   = frontier_config(mode);
                 const auto masks = frontier_masks(input.size(), masked);
                 FDMTBoxcar cpu(plan, cfg, true, Exec::cpu());
-                FDMTBoxcar gpu(plan, cfg, true,
-                               {algorithms::detail::kGPUBackend, 1, 0});
+                FDMTBoxcar gpu(plan, cfg, true, test::gpu_exec());
                 const auto a = stream(cpu, input, masks, true);
                 const auto b = stream(gpu, input, masks, true);
                 CHECK(a.frontier == b.frontier);

@@ -19,6 +19,8 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_int_tree.hpp"
 
+#include "fdmt_boxcar_reference.hpp"
+
 namespace {
 
 using namespace dmt; // NOLINT(google-build-using-namespace)
@@ -29,12 +31,6 @@ struct StreamRun {
     std::vector<RawCandidate> candidates;
     CandidateCounts counts{};
 };
-
-auto canonical_key(const RawCandidate& c) {
-    return std::tuple(c.beam_idx, c.subband_level, c.staggered, c.subband_idx,
-                      c.dm_idx, c.filter_idx, c.begin_sample, c.end_sample,
-                      c.peak_sample);
-}
 
 void append_view(StreamRun& run, const CandidateResultView& view) {
     REQUIRE(view.candidates.size() == view.emitted_count);
@@ -51,19 +47,8 @@ void require_bit_exact(StreamRun actual, StreamRun expected) {
     CHECK(actual.counts.emitted_count == expected.counts.emitted_count);
     CHECK(actual.counts.dropped_global == expected.counts.dropped_global);
     CHECK(actual.counts.dropped_per_dm == expected.counts.dropped_per_dm);
-    std::ranges::sort(actual.candidates, {}, canonical_key);
-    std::ranges::sort(expected.candidates, {}, canonical_key);
-    REQUIRE(actual.candidates.size() == expected.candidates.size());
-    for (SizeType i = 0; i < actual.candidates.size(); ++i) {
-        const auto& a = actual.candidates[i];
-        const auto& e = expected.candidates[i];
-        REQUIRE(canonical_key(a) == canonical_key(e));
-        CHECK(a.width == e.width);
-        CHECK(a.chan_begin == e.chan_begin);
-        CHECK(a.chan_end == e.chan_end);
-        CHECK(std::bit_cast<uint32_t>(a.dm) == std::bit_cast<uint32_t>(e.dm));
-        CHECK(std::bit_cast<uint32_t>(a.snr) == std::bit_cast<uint32_t>(e.snr));
-    }
+    boxcar_test::compare_exact(std::move(actual.candidates),
+                               std::move(expected.candidates));
 }
 
 float next_gaussian(std::mt19937& rng) noexcept {

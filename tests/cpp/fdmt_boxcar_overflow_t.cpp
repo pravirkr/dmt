@@ -12,9 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/engines.hpp"
-
 #include "fdmt_boxcar_overflow_reference.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 
@@ -241,13 +240,13 @@ TEST_CASE("FDMTFFTBoxcar kKeepBrightest keeps the brightest of each call (CPU)",
 #ifdef DMT_ENABLE_GPU
 TEST_CASE("FDMTBoxcar kKeepBrightest keeps the brightest of each call (GPU)",
           "[gpu][boxcar][overflow]") {
-    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec gpu = test::gpu_exec();
     check_overflow_core(gpu, true);
 }
 
 TEST_CASE("GPU FDMTBoxcar kKeepBrightest: screen, masks, wide and 16-bit",
           "[gpu][boxcar][overflow]") {
-    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec gpu = test::gpu_exec();
     SECTION("width screen") {
         const plans::FDMTPlan plan(700, 1200, 16, 4096, 0.001F,
                                    std::vector<IndexType>{0, 3, 9, 20, 41});
@@ -321,7 +320,7 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest: screen, masks, wide and 16-bit",
 
 TEST_CASE("GPU FDMTBoxcar kKeepBrightest cuts ties across beams and rows",
           "[gpu][boxcar][overflow]") {
-    const Exec gpu{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec gpu = test::gpu_exec();
     const plans::FDMTPlan plan(700, 1200, 16, 1024, 0.001F,
                                std::vector<IndexType>{0, 3, 9}, "valid", 1);
     std::vector<uint8_t> block(2 * plan.get_nchans() * plan.get_nsamps(), 60);
@@ -365,6 +364,6 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest cuts ties across beams and rows",
 
 TEST_CASE("FDMTFFTBoxcar kKeepBrightest keeps the brightest of each call (GPU)",
           "[gpu][boxcar][overflow]") {
-    check_fft_overflow(Exec{algorithms::detail::kGPUBackend, 1, 0});
+    check_fft_overflow(test::gpu_exec());
 }
 #endif

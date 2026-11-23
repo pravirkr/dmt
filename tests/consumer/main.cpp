@@ -42,8 +42,8 @@ int main() {
     }
     std::cout << "; " << plan.get_dmt_ndms() << " DM trials; peak at DM index "
               << i_dm << ", sample " << t << '\n';
-    if (i_dm != 0) {
-        std::cerr << "expected the peak at DM index 0\n";
+    if (i_dm != 0 || t != t0) {
+        std::cerr << "expected the peak at DM index 0, sample " << t0 << '\n';
         return 1;
     }
     return 0;

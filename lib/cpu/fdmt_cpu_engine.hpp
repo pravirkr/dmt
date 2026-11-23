@@ -264,6 +264,16 @@ public:
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override;
     void allocate() override;
 
+    // Automatic fusion budgets (kFDMTAutoFuse): exposed for white-box tests.
+    // "full"/"roll" modes: per-thread scratch fits max(kFuseBudgetTotal /
+    // nthreads, kFuseBudgetPerThread). "valid" mode: time tiles of kFuseTiles
+    // within kFuseTileBudget and >= kFuseGroupsPerThread groups per thread.
+    static constexpr SizeType kFuseBudgetTotal          = SizeType{36} << 20;
+    static constexpr SizeType kFuseBudgetPerThread      = SizeType{8} << 20;
+    static constexpr std::array<SizeType, 2> kFuseTiles = {512, 256};
+    static constexpr SizeType kFuseTileBudget           = SizeType{1792} << 10;
+    static constexpr SizeType kFuseGroupsPerThread      = 2;
+
     void advance(SizeType levels, Stream /*stream*/) override;
 
     void advance_until_remaining(SizeType remaining_levels,
@@ -531,9 +541,7 @@ private:
     // high-DM plan (1024 channels at 512 us, DM 2000: ~22 rows per channel,
     // 2-8K-sample chunks) fuse at 8 threads, within 1% of its best depth
     // on the ARM64 laptop, where 5 MB fell back to no fusion (+18%).
-    static constexpr SizeType kFuseBudgetTotal     = SizeType{36} << 20;
-    static constexpr SizeType kFuseBudgetPerThread = SizeType{8} << 20;
-
+    //
     // Valid mode fuses in time tiles instead (initialise_fused_tiled): the
     // deepest depth, then the longest tile of kFuseTiles, whose mean
     // per-group working set (fused_tile_working_set) is at most
@@ -544,9 +552,7 @@ private:
     // per core): float input, 512 us, 1024 channels to DM 2000 (F=4, T=512,
     // -31% against the untiled F=1) and 4096 channels to DM 1000 (F=7,
     // T=256, -27%), each within 1% of the best (F, T) measured.
-    static constexpr std::array<SizeType, 2> kFuseTiles = {512, 256};
-    static constexpr SizeType kFuseTileBudget           = SizeType{1792} << 10;
-    static constexpr SizeType kFuseGroupsPerThread      = 2;
+    // (Constants defined in the public section above.)
 
     static constexpr SizeType round_up_64(SizeType n) noexcept {
         return ((n + 63) / 64) * 64;

@@ -9,11 +9,8 @@
 #include <utility>
 #include <vector>
 
-#include "dmt/boxcar.hpp"
-#include "dmt/boxcar_runs.hpp"
-#include "dmt/fdmt_variance.hpp"
-
 #include "fdmt_boxcar_reference.hpp"
+#include "test_helpers.hpp"
 #include "test_random.hpp"
 #include "test_sized.hpp"
 
@@ -563,37 +560,11 @@ TEST_CASE("Packed FDMTBoxcar wide windows exceed uint32 safely",
     CHECK(found);
 }
 
-TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
+TEST_CASE("Trapezoidal FDMTBoxcar sensitivity",
           "[boxcar][trapezoid][cpu]") {
-    using namespace algorithms::detail;
-    // 1. Verify exact analytical variance against explicit discrete
-    // convolution.
-    for (SizeType len :
-         {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{5}, SizeType{8}}) {
-        for (uint32_t width : {1U, 2U, 3U, 4U, 5U, 8U, 12U, 16U, 32U}) {
-            const uint32_t w_edge = trapezoid_edge_width(width);
-            std::vector<double> filt(width, 1.0);
-            for (uint32_t k = w_edge; k < width - w_edge; ++k) {
-                filt[k] = w_edge > 0 ? 2.0 : 1.0;
-            }
-            const SizeType conv_len = len + width - 1;
-            double exact_var        = 0.0;
-            for (SizeType n = 0; n < conv_len; ++n) {
-                double c = 0.0;
-                for (SizeType i = 0; i < len; ++i) {
-                    const SizeType j = n - i;
-                    if (n >= i && j < width) {
-                        c += 1.25 * filt[j];
-                    }
-                }
-                exact_var += c * c;
-            }
-            CHECK_THAT(fdmt_trapezoid_variance(len, width, w_edge, 1.25),
-                       Catch::Matchers::WithinRel(exact_var, 1e-12));
-        }
-    }
-    // 2. Verify off-phase pulse sensitivity gain for [0.5, 1.0, 0.5] and
-    // [0.5, 1.0, 1.0, 0.5] profiles at DM=0.
+    // Verify off-phase pulse sensitivity gain for [0.5, 1.0, 0.5] profile at
+    // DM=0. (Analytical trapezoid variance formula is verified in
+    // boxcar_plans_trace_t.cpp.)
     const plans::FDMTPlan plan(700, 1200, 16, 128, 0.001F,
                                std::vector<IndexType>{0, 4});
     std::vector<float> pulse_w3(16 * 128, 0.0F);
@@ -626,9 +597,14 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
     CHECK_THAT(max_snr_trap,
                Catch::Matchers::WithinRel(4.0F * std::sqrt(1.5F), 1e-5F));
     CHECK(max_snr_trap > max_snr_rect * 1.05F);
+}
+
 #ifdef DMT_ENABLE_GPU
-    // 3. Verify CPU and GPU agree on multi-chunk float32 and packed 8-bit
+TEST_CASE("GPU FDMTBoxcar trapezoid matches CPU", "[gpu][parity][boxcar]") {
+    // Verify CPU and GPU agree on multi-chunk float32 and packed 8-bit
     // (integer thresholds use the filter weight 2 (W - w_edge); exact).
+    const plans::FDMTPlan plan(700, 1200, 16, 128, 0.001F,
+                               std::vector<IndexType>{0, 4});
     const auto wf = waterfalls(plan, 1, 3);
     std::vector<std::vector<uint8_t>> wf8;
     for (const auto& block : wf) {
@@ -650,9 +626,7 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
                 cfg.noise_sigma = 16.0F;
             }
             FDMTBoxcar cpu_s(plan, cfg, true, Exec::cpu(), 1, 0, 64);
-            FDMTBoxcar gpu_s(plan, cfg, true,
-                             Exec{algorithms::detail::kGPUBackend, 0}, 1, 0,
-                             64);
+            FDMTBoxcar gpu_s(plan, cfg, true, test::gpu_exec(), 1, 0, 64);
             std::vector<RawCandidate> c;
             std::vector<RawCandidate> g;
             for (SizeType k = 0; k < wf.size(); ++k) {
@@ -670,21 +644,19 @@ TEST_CASE("Trapezoidal FDMTBoxcar variance, sensitivity, and CPU/GPU parity",
             compare(g, c);
         }
     }
-#endif
 }
+#endif
 
-TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
-          "[boxcar][packed][cpu]") {
+namespace {
+
+void check_width_screen(Exec exec) {
     // Spacing 1 up to 48 samples: the CPU and GPU scorers screen tiles by
     // width group (boxcar_screen_groups), which must not change any result.
     const plans::FDMTPlan plan(700, 1200, 7, 311, 0.001F,
                                std::vector<IndexType>{-73, -12, 0, 4, 97},
                                "valid", 2);
     constexpr SizeType blocks = 4;
-    REQUIRE_FALSE(algorithms::detail::boxcar_screen_groups(
-                      plans::generate_box_width_trials(48, 1.0F), false)
-                      .empty());
-    const auto input = waterfalls(plan, 1, blocks);
+    const auto input          = waterfalls(plan, 1, blocks);
     // 8-bit copies of a uniform integer stream, and the centred floats.
     const SizeType size = plan.get_nchans() * plan.get_nsamps();
     std::vector<std::vector<uint8_t>> packed(blocks,
@@ -721,36 +693,43 @@ TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
                 REQUIRE_FALSE(expected_packed.empty());
                 pcfg.input_nbits = 8;
                 pcfg.input_mean  = 127.5F;
-                std::vector<Exec> execs{Exec::cpu()};
-#ifdef DMT_ENABLE_GPU
-                execs.push_back(Exec{algorithms::detail::kGPUBackend, 0});
-#endif
-                for (const auto& exec : execs) {
-                    for (const SizeType chunk :
-                         {SizeType{64}, plan.get_nsamps()}) {
-                        FDMTBoxcar search(plan, cfg, true, exec, 1,
-                                          algorithms::kFDMTAutoFuse, chunk);
-                        std::vector<RawCandidate> actual;
-                        for (const auto& block : input) {
-                            append(actual, search.execute(block));
-                        }
-                        append(actual, search.flush());
-                        compare(actual, expected);
-                        FDMTBoxcar packed_search(plan, pcfg, true, exec, 1,
-                                                 algorithms::kFDMTAutoFuse,
-                                                 chunk);
-                        std::vector<RawCandidate> actual_packed;
-                        for (const auto& block : packed) {
-                            append(actual_packed, packed_search.execute(block));
-                        }
-                        append(actual_packed, packed_search.flush());
-                        compare(actual_packed, expected_packed);
+                for (const SizeType chunk :
+                     {SizeType{64}, plan.get_nsamps()}) {
+                    FDMTBoxcar search(plan, cfg, true, exec, 1,
+                                      algorithms::kFDMTAutoFuse, chunk);
+                    std::vector<RawCandidate> actual;
+                    for (const auto& block : input) {
+                        append(actual, search.execute(block));
                     }
+                    append(actual, search.flush());
+                    compare(actual, expected);
+                    FDMTBoxcar packed_search(plan, pcfg, true, exec, 1,
+                                             algorithms::kFDMTAutoFuse, chunk);
+                    std::vector<RawCandidate> actual_packed;
+                    for (const auto& block : packed) {
+                        append(actual_packed, packed_search.execute(block));
+                    }
+                    append(actual_packed, packed_search.flush());
+                    compare(actual_packed, expected_packed);
                 }
             }
         }
     }
 }
+
+} // namespace
+
+TEST_CASE("FDMTBoxcar width screen matches the reference at many widths",
+          "[boxcar][packed][cpu]") {
+    check_width_screen(Exec::cpu());
+}
+
+#ifdef DMT_ENABLE_GPU
+TEST_CASE("GPU FDMTBoxcar width screen matches the reference at many widths",
+          "[gpu][boxcar][packed]") {
+    check_width_screen(test::gpu_exec());
+}
+#endif
 
 TEST_CASE("FDMTBoxcar drain() ends the stream", "[boxcar][cpu]") {
     // Off the skewed paths every row is searched up to the last sample, so
@@ -1062,7 +1041,7 @@ TEST_CASE("FDMTBoxcar kill mask keeps scores calibrated",
 TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (cpu)",
           "[boxcar][cpu][budget]") {
     const auto cpu = Exec::cpu();
-    for (const auto& c : estimate_cases()) {
+    for (const auto& c : estimate_cases(cpu)) {
         INFO(c.name << " beams " << c.beams);
         const auto e = FDMTBoxcar::estimate_memory(
             c.plan, c.config, true, cpu, c.beams, algorithms::kFDMTAutoFuse,
@@ -1099,3 +1078,114 @@ TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (cpu)",
             std::invalid_argument);
     }
 }
+
+namespace {
+
+void check_white_noise_far(Exec exec) {
+    constexpr SizeType kNchans = 32;
+    constexpr SizeType kNsamps = 4096;
+    constexpr SizeType kBlocks = 8;
+    constexpr float kThresh    = 3.0F;
+    const plans::FDMTPlan plan(700.0F, 1200.0F, kNchans, kNsamps, 0.001F,
+                               std::vector<IndexType>{0, 7, 23, 55}, "valid",
+                               1);
+    std::vector<uint8_t> kill(kNchans, 1);
+    for (SizeType c = 0; c < kNchans; c += 4) {
+        kill[c] = 0;
+    }
+    const double expected_far = 0.5 * std::erfc(kThresh / std::sqrt(2.0));
+    std::vector<std::vector<float>> float_blocks;
+    std::vector<std::vector<uint8_t>> packed_blocks;
+    for (SizeType b = 0; b < kBlocks; ++b) {
+        auto wf = test_random::normal<float>(kNchans * kNsamps,
+                                             7100 + static_cast<unsigned>(b));
+        std::vector<uint8_t> pk(wf.size());
+        for (SizeType i = 0; i < wf.size(); ++i) {
+            pk[i] = static_cast<uint8_t>(
+                std::clamp(std::lround(128.0F + (20.0F * wf[i])), 0L, 255L));
+        }
+        float_blocks.push_back(std::move(wf));
+        packed_blocks.push_back(std::move(pk));
+    }
+    for (const bool packed : {false, true}) {
+        for (const bool masked : {false, true}) {
+            DYNAMIC_SECTION((packed ? "packed8" : "float")
+                            << (masked ? " masked" : " unmasked")) {
+                BoxcarConfig cfg;
+                cfg.max_boxcar       = 16;
+                cfg.wtsp             = 1.5F;
+                cfg.detect_thresh    = kThresh;
+                cfg.peak_mode        = PeakFindingMode::kAllAboveThreshold;
+                cfg.max_candidates   = 1U << 20;
+                cfg.max_cands_per_dm = 0;
+                cfg.skip_cold_prefix = true;
+                if (packed) {
+                    cfg.input_nbits = 8;
+                    cfg.input_mean  = 128.0F;
+                    cfg.noise_sigma = 20.0F;
+                }
+                const std::span<const uint8_t> mask_span =
+                    masked ? std::span<const uint8_t>(kill)
+                           : std::span<const uint8_t>{};
+                FDMTBoxcar search(plan, cfg, true, exec, 1,
+                                  algorithms::kFDMTAutoFuse, 0,
+                                  algorithms::kFDMTDefaultMaxMemory, mask_span);
+                const uint64_t total_nsamps = kBlocks * kNsamps;
+                uint64_t valid_endpoints    = 0;
+                for (const auto& p : search.get_search_plans()) {
+                    const SizeType nw = p.widths.size();
+                    for (SizeType d = 0; d < p.dm_grid.size(); ++d) {
+                        for (SizeType f = 0; f < nw; ++f) {
+                            if (p.inv_sigma_lut[(d * nw) + f] <= 0.0F) {
+                                continue;
+                            }
+                            const uint64_t skip =
+                                p.warmup_samples[d] + p.widths[f] - 1;
+                            if (total_nsamps > skip) {
+                                valid_endpoints += total_nsamps - skip;
+                            }
+                        }
+                    }
+                }
+                REQUIRE(valid_endpoints > 100000);
+                uint64_t detected = 0;
+                for (SizeType b = 0; b < kBlocks; ++b) {
+                    const auto res =
+                        packed
+                            ? search.execute(
+                                  std::span<const uint8_t>(packed_blocks[b]))
+                            : search.execute(
+                                  std::span<const float>(float_blocks[b]));
+                    REQUIRE_FALSE(res.overflowed());
+                    detected += res.total_detected;
+                }
+                const auto fin = search.flush();
+                REQUIRE_FALSE(fin.overflowed());
+                detected += fin.total_detected;
+                const double observed_far =
+                    static_cast<double>(detected) /
+                    static_cast<double>(valid_endpoints);
+                INFO("detected " << detected << " / " << valid_endpoints
+                                 << " = " << observed_far << " vs expected "
+                                 << expected_far);
+                CHECK(observed_far > 0.65 * expected_far);
+                CHECK(observed_far < 1.45 * expected_far);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("FDMTBoxcar false-alarm rate on white noise matches Gaussian tail",
+          "[boxcar][cpu]") {
+    check_white_noise_far(Exec::cpu());
+}
+
+#ifdef DMT_ENABLE_GPU
+TEST_CASE("GPU FDMTBoxcar false-alarm rate on white noise matches Gaussian "
+          "tail",
+          "[boxcar][gpu]") {
+    check_white_noise_far(test::gpu_exec());
+}
+#endif

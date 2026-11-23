@@ -3,6 +3,11 @@ import pytest
 
 from dmtlib import libdmt
 
+try:
+    from ._helpers import pack_lsb_first
+except ImportError:
+    from _helpers import pack_lsb_first
+
 
 def frb_track_gain(plan: libdmt.FDMTPlan, dm_idx: int, use_box_smearing: bool) -> float:
     """FDMT output of add_frb_track's unit impulses: each channel adds its
@@ -729,8 +734,12 @@ class TestFDMT:
             atol=1e-5,
         )
 
-        # Test reset_history()
+        # Test reset_history(): re-running block 0 reproduces the cold first block.
         fdmt_valid.reset_history()
+        first_block = np.ascontiguousarray(waterfall[:, :block_size])
+        np.testing.assert_array_equal(
+            fdmt_valid.execute(first_block), streamed[:, :block_size]
+        )
 
     @staticmethod
     def _stream_blocks(fdmt, waterfall, block_size, n_blocks):
@@ -804,38 +813,6 @@ class TestFDMT:
             rtol=1e-5,
             atol=1e-3,
         )
-
-    def test_valid_mode_streaming_small_block_regime(self) -> None:
-        # Exact target regime where block_size < dt_max
-        nchans = 32
-        dt_max = 32
-        block_size = 8
-        n_blocks = 10
-        total = block_size * n_blocks
-
-        rng = np.random.default_rng(42)
-        wf = rng.standard_normal((nchans, total)).astype(np.float32)
-
-        full_engine = libdmt.FDMT(
-            1200.0, 1600.0, nchans, total, 1e-3, dt_max, 0, mode="full"
-        )
-        res_mono = full_engine.execute(wf)
-
-        valid_engine = libdmt.FDMT(
-            1200.0, 1600.0, nchans, block_size, 1e-3, dt_max, 0, mode="valid"
-        )
-        res_valid = np.zeros_like(res_mono)
-        for b in range(n_blocks):
-            block = np.ascontiguousarray(wf[:, b * block_size : (b + 1) * block_size])
-            res_valid[:, b * block_size : (b + 1) * block_size] = valid_engine.execute(
-                block
-            )
-
-        # After warm-up of dt_max samples, streaming valid mode must match monolithic full
-        valid_slice = slice(dt_max, (n_blocks - 1) * block_size)
-        diff = np.abs(res_mono[:, valid_slice] - res_valid[:, valid_slice])
-        assert np.max(diff) < 1e-4
-        assert np.sum(diff > 1e-4) == 0
 
     def test_valid_mode_streaming_multi_beam_small_block(self) -> None:
         # Multi-beam 3D streaming in small block regime (block_size < dt_max)
@@ -1106,22 +1083,6 @@ class TestFDMT:
         )
 
 
-def _pack_lsb_first(values: np.ndarray, nbits: int) -> np.ndarray:
-    """Pack unsigned ``nbits``-wide samples row-wise, LSB-first (DDMT convention)."""
-    nrows, nsamps = values.shape
-    if nbits == 8:
-        return values.astype(np.uint8)
-    if nbits == 16:
-        return values.astype("<u2").view(np.uint8).reshape(nrows, 2 * nsamps)
-    per_byte = 8 // nbits
-    row_bytes = (nsamps * nbits + 7) // 8
-    padded = np.zeros((nrows, row_bytes * per_byte), dtype=np.uint32)
-    padded[:, :nsamps] = values
-    shifts = (np.arange(per_byte, dtype=np.uint32) * nbits)[None, None, :]
-    lanes = padded.reshape(nrows, row_bytes, per_byte) << shifts
-    return lanes.sum(axis=2).astype(np.uint8)
-
-
 class TestFDMTPerformanceParams:
     nchans = 64
     nsamps = 203
@@ -1193,7 +1154,7 @@ class TestFDMTPerformanceParams:
         values = rng.integers(
             0, 2**nbits, size=(self.nchans, self.nsamps), dtype=np.uint32
         )
-        packed = _pack_lsb_first(values, nbits)
+        packed = pack_lsb_first(values, nbits)
         assert packed.shape == (self.nchans, (self.nsamps * nbits + 7) // 8)
 
         def make(**perf: object) -> libdmt.FDMT:
@@ -1393,7 +1354,8 @@ def _check_estimate(backend: str) -> None:
     assert (est.host_staging == 0) == (backend == "cpu")
 
     plan = libdmt.FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
-    budget = 60 << 20
+    full_est = libdmt.FDMT.estimate_memory(plan, backend=backend)
+    budget = full_est.usage.total // 2
     est = libdmt.FDMT.estimate_memory(plan, backend=backend, max_memory_bytes=budget)
     fdmt = libdmt.FDMT(plan, backend=backend, max_memory_bytes=budget)
     assert _usage(est.usage) == _usage(fdmt.memory_usage)

@@ -14,6 +14,7 @@
 
 #include "dmt/engines.hpp"
 
+#include "test_helpers.hpp"
 #include "test_random.hpp"
 
 // FDMTFFT packed and time-major input, kill mask and streaming history, and
@@ -37,28 +38,6 @@ constexpr SizeType kNs  = 1024;
 
 std::vector<float> noise(SizeType n, unsigned seed) {
     return dmt::test_random::normal<float>(n, seed);
-}
-
-// rows x n unsigned values -> rows of LSB-first packed bytes.
-std::vector<uint8_t> pack_rows(const std::vector<uint32_t>& vals,
-                               SizeType rows,
-                               SizeType n,
-                               SizeType nbits) {
-    const auto rb = ((n * nbits) + 7) / 8;
-    std::vector<uint8_t> out(rows * rb, 0);
-    for (SizeType r = 0; r < rows; ++r) {
-        for (SizeType i = 0; i < n; ++i) {
-            const auto v   = vals[(r * n) + i];
-            const auto bit = i * nbits;
-            for (SizeType q = 0; q < nbits; ++q) {
-                if (((v >> q) & 1U) != 0U) {
-                    out[(r * rb) + ((bit + q) / 8)] |=
-                        static_cast<uint8_t>(1U << ((bit + q) % 8));
-                }
-            }
-        }
-    }
-    return out;
 }
 
 double max_rel(const std::vector<float>& a, const std::vector<float>& b) {
@@ -93,8 +72,8 @@ TEST_CASE("FDMTFFT packed and time-major input match float input",
                     }
                 }
             }
-            const auto packed    = pack_rows(vals, 2 * kNch, kNs, nbits);
-            const auto tm_packed = pack_rows(tm, 2 * kNs, kNch, nbits);
+            const auto packed    = test::pack_rows(vals, 2 * kNch, kNs, nbits);
+            const auto tm_packed = test::pack_rows(tm, 2 * kNs, kNch, nbits);
             const auto make      = [&] {
                 return FDMTFFT(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true,
                                mode, Exec::cpu(), 2);
@@ -121,7 +100,7 @@ TEST_CASE("FDMTFFT packed stepper matches packed execute",
           "[cpu][fdmt_fft_cpu]") {
     const auto vals =
         dmt::test_random::uniform_int<uint32_t>(kNch * kNs, 9, 0, 15);
-    const auto packed = pack_rows(vals, kNch, kNs, 4);
+    const auto packed = test::pack_rows(vals, kNch, kNs, 4);
     FDMTFFT a(kFMin, kFMax, kNch, kNs, kTsamp, 48);
     FDMTFFT b(kFMin, kFMax, kNch, kNs, kTsamp, 48);
     const auto n = a.get_plan().get_dmt_size();

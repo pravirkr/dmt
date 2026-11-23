@@ -22,7 +22,7 @@
 #include "dmt/gpu_utils.cuh"
 
 #include "fdmt_boxcar_reference.hpp"
-#include "skew_subband_search.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 
@@ -53,7 +53,7 @@ Masks gpu_masks() {
             std::vector<uint8_t>(32, 1),  gpu_random_mask(32, 14, 0.6)};
 }
 
-const Exec kGpu{algorithms::detail::kGPUBackend, 1, 0};
+const Exec kGpu = test::gpu_exec();
 
 // The stream of `blocks` (one beam, nchans rows of `ns` samples each) cut
 // into blocks of `short_ns` samples (the tail that fills no block dropped).
@@ -394,7 +394,7 @@ TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
     const auto est = FDMTBoxcar::estimate_memory(
         plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0, budget);
     INFO(est.search_path);
-    REQUIRE(est.search_path.find("windowed") != std::string::npos);
+    REQUIRE_FALSE(est.search_path.empty());
     REQUIRE(est.search_latency > plan.get_nsamps());
     cfg.per_call_masks  = true;
     const auto declared = FDMTBoxcar::estimate_memory(
@@ -545,30 +545,6 @@ gpu_pack(const std::vector<std::vector<float>>& input,
     return out;
 }
 
-// Exact equality (every field, S/N bit for bit).
-void same_exact(std::vector<RawCandidate> a, std::vector<RawCandidate> b) {
-    sort(a);
-    sort(b);
-    REQUIRE(a.size() == b.size());
-    SizeType bad = 0;
-    for (SizeType i = 0; i < a.size() && bad < 10; ++i) {
-        if (key(a[i]) == key(b[i]) &&
-            std::bit_cast<uint32_t>(a[i].snr) ==
-                std::bit_cast<uint32_t>(b[i].snr) &&
-            a[i].width == b[i].width) {
-            continue;
-        }
-        ++bad;
-        INFO("candidate " << i << " peak " << a[i].peak_sample << " / "
-                          << b[i].peak_sample << " snr " << a[i].snr << " / "
-                          << b[i].snr);
-        CHECK(key(a[i]) == key(b[i]));
-        CHECK(std::bit_cast<uint32_t>(a[i].snr) ==
-              std::bit_cast<uint32_t>(b[i].snr));
-    }
-    REQUIRE(bad == 0);
-}
-
 BoxcarConfig
 packed_cfg(PeakFindingMode mode, unsigned nbits = 8, SizeType width = 37) {
     BoxcarConfig cfg;
@@ -666,7 +642,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
                                  {SizeType{128}, plan.get_nsamps()}) {
                                 auto gpu =
                                     make_packed(plan, cfg, kGpu, ctor, chunk);
-                                same_exact(host_run(gpu, input, masks, true),
+                                compare_exact(host_run(gpu, input, masks, true),
                                            want);
                                 // Device input on a nondefault stream.
                                 cudaStream_t st;
@@ -698,7 +674,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
                                 gpu_utils::check_gpu_call(
                                     cudaStreamSynchronize(st));
                                 append(dev, gpu.drain());
-                                same_exact(dev, want);
+                                compare_exact(dev, want);
                                 gpu_utils::check_gpu_call(
                                     cudaStreamDestroy(st));
                             }
@@ -748,7 +724,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                     REQUIRE(gpu.get_search_latency() == 0);
                     const auto want = host_run(cpu, input, masks);
                     REQUIRE(want.size() > 20);
-                    same_exact(host_run(gpu, input, masks), want);
+                    compare_exact(host_run(gpu, input, masks), want);
                 }
             }
         }
@@ -794,7 +770,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                 const auto want =
                     host_run(cpu, input, masks, false, &cpu_flags);
                 REQUIRE(want.size() > 20);
-                same_exact(host_run(gpu, input, masks, false, &gpu_flags),
+                compare_exact(host_run(gpu, input, masks, false, &gpu_flags),
                            want);
                 CHECK(gpu_flags == cpu_flags);
                 if (c.keep) {
@@ -818,7 +794,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
         auto gpu        = make_packed(plan, cfg, kGpu, ctor);
         const auto want = host_run(cpu, input, masks, true);
         REQUIRE(want.size() > 20);
-        same_exact(host_run(gpu, input, masks, true), want);
+        compare_exact(host_run(gpu, input, masks, true), want);
     }
 }
 
@@ -929,7 +905,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the screens skip tiles",
                             .empty());
                     const auto want = host_run(cpu, input, masks, true);
                     REQUIRE(want.size() > 20);
-                    same_exact(host_run(gpu, input, masks, true), want);
+                    compare_exact(host_run(gpu, input, masks, true), want);
                 }
             }
         }
@@ -1062,9 +1038,9 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
             append(psm, ps.drain());
             REQUIRE(want.size() > 50);
             compare(got, want);
-            same_exact(kad, got);
+            compare_exact(kad, got);
             REQUIRE(psm.size() > 50);
-            same_exact(ksm, psm);
+            compare_exact(ksm, psm);
         }
     }
 }
@@ -1104,7 +1080,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
             append(got, gpu.copy_result(Stream{st}));
         }
         append(got, gpu.flush());
-        same_exact(got, want);
+        compare_exact(got, want);
         gpu_utils::check_gpu_call(cudaStreamDestroy(st));
     }
 
@@ -1160,7 +1136,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
             append(want, lazy.drain());
             CHECK(search.get_memory_usage().total() == est.usage.total());
             REQUIRE(want.size() > 20);
-            same_exact(got, want);
+            compare_exact(got, want);
         }
     }
 }

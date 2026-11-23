@@ -13,9 +13,7 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 
-#include "dmt/bit_pack_utils.hpp"
-#include "dmt/gpu_compat.cuh"
-
+#include "test_gpu_compat.cuh"
 #include "test_helpers.hpp"
 
 // FDMT level fusion (the fuse_levels constructor parameter). The fused
@@ -47,28 +45,6 @@ std::vector<float> random_floats(SizeType n, unsigned seed) {
         x = dis(gen);
     }
     return v;
-}
-
-struct Packed2 {
-    std::vector<float> values;
-    std::vector<uint8_t> packed;
-};
-
-Packed2 random_2bit(SizeType nrows, SizeType nsamps, unsigned seed) {
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<uint32_t> dis(0, 3);
-    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, 2);
-    Packed2 out{.values = std::vector<float>(nrows * nsamps),
-                .packed = std::vector<uint8_t>(nrows * row_bytes, 0)};
-    for (SizeType r = 0; r < nrows; ++r) {
-        for (SizeType s = 0; s < nsamps; ++s) {
-            const auto v                 = dis(gen);
-            out.values[(r * nsamps) + s] = static_cast<float>(v);
-            bit_pack_utils::write_packed_sample<2>(
-                out.packed.data() + (r * row_bytes), s, v);
-        }
-    }
-    return out;
 }
 
 template <typename Fdmt>
@@ -171,7 +147,7 @@ TEST_CASE("FDMT fused packed int tree matches FDMT", "[fdmt_gpu][gpu]") {
             DYNAMIC_SECTION("mode=" << mode << " smearing=" << smearing) {
                 const SizeType nchans = 256;
                 const SizeType nsamps = 300;
-                const auto wf         = random_2bit(nchans, nsamps, 5);
+                const auto wf = test::random_packed(nchans, nsamps, 2, 5);
                 // Packed reference: the CPU float tree on the same packed
                 // input (bit-exact); float input within the rounding bound
                 // with box smearing, exactly without (separate engines: a
@@ -231,8 +207,9 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                 fused.save_history(hist_out);
                 for (SizeType b = 0; b < 8; ++b) {
                     FDMT& gpu     = (b % 3 == 2) ? unfused : fused;
-                    const auto wf = random_2bit(nbeams * nchans, block,
-                                                static_cast<unsigned>(80 + b));
+                    const auto wf = test::random_packed(
+                        nbeams * nchans, block, 2,
+                        static_cast<unsigned>(80 + b));
                     gpu.load_history(hist_in);
                     const auto got = beams(gpu, run_2bit(gpu, wf.packed));
                     gpu.save_history(hist_out);
@@ -400,6 +377,10 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
         SizeType budget;
     };
     const SizeType big = algorithms::kFDMTDefaultMaxMemory;
+    const plans::FDMTPlan budget_plan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F,
+                                      2700);
+    const SizeType half_budget =
+        FDMT::estimate_memory(budget_plan, true, gpu, 2).usage.total() / 2;
     const std::vector<Case> cases{
         {plans::FDMTPlan(1000.0F, 1500.0F, 256, 2048, 0.001F, 400),
          kFDMTAutoFuse, 0, big},
@@ -409,8 +390,7 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (gpu)",
                          "full"),
          kFDMTAutoFuse, 0, big},
         // Direct levels and a budget-chosen chunk.
-        {plans::FDMTPlan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, 2700),
-         kFDMTAutoFuse, 0, SizeType{70} << 20},
+        {budget_plan, kFDMTAutoFuse, 0, half_budget},
         // A subband plan (skewed direct levels and windowed top).
         {plans::FDMTPlan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, 2700, 0, 1,
                          "valid", 2),

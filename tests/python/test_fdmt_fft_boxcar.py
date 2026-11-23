@@ -14,6 +14,11 @@ from dmtlib import (
     add_frb_track,
 )
 
+try:
+    from ._helpers import sorted_candidates
+except ImportError:
+    from _helpers import sorted_candidates
+
 NCHANS = 64
 NSAMPS = 2048
 GRID = list(range(0, 120, 3))
@@ -257,21 +262,6 @@ def test_candidate_frontier(backend: str) -> None:
     assert search.get_candidate_frontier() == search.searched_nsamps
 
 
-def _sorted_fft_cands(parts: list[np.ndarray]) -> np.ndarray:
-    data = np.concatenate(parts)
-    fields = [
-        "beam_idx",
-        "subband_level",
-        "subband_idx",
-        "dm_idx",
-        "filter_idx",
-        "begin_sample",
-        "end_sample",
-        "peak_sample",
-    ]
-    return np.sort(data, order=fields)
-
-
 @pytest.mark.parametrize("backend", backends())
 @pytest.mark.parametrize("frac", [False, True])
 @pytest.mark.parametrize("trapezoid", [False, True])
@@ -314,7 +304,7 @@ def test_fft_boxcar_exact_screen_modes_parity(
         assert eng.config.screen_mode == screen
         parts = [eng.execute(b).candidates for b in blocks]
         parts.append(eng.drain().candidates)
-        results[screen] = _sorted_fft_cands(parts)
+        results[screen] = sorted_candidates(parts)
 
     ref = results[BoxcarScreenMode.PREFIX]
     assert len(ref) > 0

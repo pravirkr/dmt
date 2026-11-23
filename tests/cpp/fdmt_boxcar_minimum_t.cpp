@@ -15,6 +15,9 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 #include "dmt/common/dm_grids.hpp"
 
+#include "fdmt_boxcar_reference.hpp"
+#include "test_helpers.hpp"
+#include "test_random.hpp"
 #include "test_sized.hpp"
 
 using namespace dmt;
@@ -147,6 +150,68 @@ void check_backend(Exec exec, bool full) {
     }
 }
 
+void check_minimum_equals_default(Exec exec) {
+    const auto grid = plans::DDMTPlan::generate_levin_dm_grid_piecewise(
+        0.0F, 1000.0F, 455.6e-6F, 455.6e-6F, 1100.0F, 1714.0F, 1152, 1.1F);
+    const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, grid,
+                               "valid", 1);
+    constexpr SizeType kBlocks = 3;
+    const SizeType block_elems = plan.get_nchans() * plan.get_nsamps();
+    std::vector<std::vector<uint8_t>> packed_blocks;
+    std::vector<std::vector<float>> float_blocks;
+    for (SizeType b = 0; b < kBlocks; ++b) {
+        auto bytes = test_random::uniform_int<uint8_t>(
+            block_elems, 310 + static_cast<unsigned>(b), 0, 255);
+        std::vector<float> vals(block_elems);
+        for (SizeType i = 0; i < block_elems; ++i) {
+            vals[i] = static_cast<float>(bytes[i]) - 128.0F;
+        }
+        packed_blocks.push_back(std::move(bytes));
+        float_blocks.push_back(std::move(vals));
+    }
+    for (const bool packed : {false, true}) {
+        DYNAMIC_SECTION((packed ? "packed 8-bit" : "float")) {
+            const BoxcarConfig cfg(24, 1.5F, 4.2F, 73.9F,
+                                   PeakFindingMode::kContiguousPeakPerWidth,
+                                   1U << 20, 0, true, packed ? 8 : 32,
+                                   packed ? 127.5F : 0.0F);
+            const auto min = FDMTBoxcar::estimate_minimum_memory(
+                plan, cfg, true, exec);
+            FDMTBoxcar at_min(plan, cfg, true, exec, 1,
+                              algorithms::kFDMTAutoFuse, 0,
+                              min.max_memory_bytes);
+            FDMTBoxcar at_def(plan, cfg, true, exec, 1,
+                              algorithms::kFDMTAutoFuse, 0,
+                              algorithms::kFDMTDefaultMaxMemory);
+            REQUIRE(at_min.get_search_latency() > 0);
+            const auto run_all = [&](FDMTBoxcar& s) {
+                std::vector<RawCandidate> out;
+                for (SizeType b = 0; b < kBlocks; ++b) {
+                    if (packed) {
+                        boxcar_test::append(
+                            out, s.execute(std::span<const uint8_t>(
+                                     packed_blocks[b])));
+                    } else {
+                        boxcar_test::append(
+                            out,
+                            s.execute(std::span<const float>(float_blocks[b])));
+                    }
+                }
+                boxcar_test::append(out, s.drain());
+                return out;
+            };
+            const auto got  = run_all(at_min);
+            const auto want = run_all(at_def);
+            REQUIRE_FALSE(got.empty());
+            if (exec.backend == Backend::kCPU || packed) {
+                boxcar_test::compare_exact(got, want);
+            } else {
+                boxcar_test::compare(got, want);
+            }
+        }
+    }
+}
+
 } // namespace
 
 DMT_SIZED_TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (CPU)",
@@ -161,6 +226,12 @@ DMT_SIZED_TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (CPU)",
         CHECK(search.get_memory_usage().budgeted() == m.usage.budgeted());
         CHECK(search.get_chunk_nsamps() == m.chunk_nsamps);
     }
+}
+
+TEST_CASE("FDMTBoxcar candidates at estimate_minimum_memory match default "
+          "budget (CPU)",
+          "[boxcar][memory][cpu]") {
+    check_minimum_equals_default(Exec::cpu());
 }
 
 TEST_CASE("FDMTBoxcar minimum memory on short blocks (CPU)",
@@ -186,6 +257,12 @@ TEST_CASE("FDMTBoxcar minimum memory on short blocks (CPU)",
 #ifdef DMT_ENABLE_GPU
 TEST_CASE("FDMTBoxcar minimum memory and monotone budgets (GPU)",
           "[boxcar][memory][gpu]") {
-    check_backend(Exec::cuda(0), true);
+    check_backend(test::gpu_exec(), true);
+}
+
+TEST_CASE("FDMTBoxcar candidates at estimate_minimum_memory match default "
+          "budget (GPU)",
+          "[boxcar][memory][gpu]") {
+    check_minimum_equals_default(test::gpu_exec());
 }
 #endif

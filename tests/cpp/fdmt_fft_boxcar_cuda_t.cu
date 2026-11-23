@@ -6,6 +6,8 @@
 
 #include "fdmt_boxcar_reference.hpp"
 #include "fdmt_fft_boxcar_estimates.hpp"
+#include "fdmt_fft_boxcar_reference.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 using algorithms::FDMTFFTBoxcar;
@@ -48,7 +50,7 @@ TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
     const plans::FDMTPlan plan(700, 1200, 7, 751, 0.001F,
                                std::vector<IndexType>{0, 4, 17, 40, 97});
     const auto input = waterfalls(plan, 2, 4);
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec = test::gpu_exec();
     for (const bool segmented : {false, true}) {
         for (const bool frac : {true, false}) {
             for (const auto mode :
@@ -119,7 +121,7 @@ TEST_CASE("FDMTFFTBoxcar GPU kill mask and wide windows match the reference",
                                std::vector<IndexType>{0, 9, 33, 71});
     const auto input = waterfalls(plan, 1, 3);
     const std::vector<uint8_t> kill{1, 0, 1, 1, 0, 1, 1, 1};
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec = test::gpu_exec();
     BoxcarConfig cfg;
     cfg.max_boxcar       = 1500;
     cfg.wtsp             = 1.5F;
@@ -152,7 +154,7 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     cfg.detect_thresh    = 6.0F;
     cfg.max_candidates   = 200000;
     cfg.max_cands_per_dm = 0;
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec = test::gpu_exec();
     FDMTFFTBoxcar open(plan, cfg, true, exec);
     // Half of what the segments take: the input block reserved for host
     // calls (staging) does not shrink with them.
@@ -188,7 +190,7 @@ TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
     BoxcarConfig cfg;
     cfg.max_boxcar     = 32;
     cfg.max_candidates = SizeType{1} << 22;
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec = test::gpu_exec();
     const FDMTFFTBoxcar open(plan, cfg, true, exec);
     const auto usage          = open.get_memory_usage();
     const SizeType host_cands = cfg.max_candidates * sizeof(RawCandidate);
@@ -201,5 +203,5 @@ TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
 
 TEST_CASE("FDMTFFTBoxcar estimate_memory equals the constructed instance (gpu)",
           "[boxcar][gpu][budget]") {
-    check_fft_boxcar_estimates(Exec{algorithms::detail::kGPUBackend, 1, 0});
+    check_fft_boxcar_estimates(test::gpu_exec());
 }

@@ -11,6 +11,7 @@
 
 #include "fdmt_boxcar_reference.hpp"
 #include "fdmt_fft_boxcar_estimates.hpp"
+#include "fdmt_fft_boxcar_reference.hpp"
 #include "test_random.hpp"
 
 using namespace boxcar_test;
@@ -45,7 +46,8 @@ TEST_CASE("FDMTFFTBoxcar matches materialized FDMTFFT and direct windows",
                     }
                     FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, frac,
                                          {}, budget);
-                    CHECK(search.get_output_latency() == (frac ? 64U : 0U));
+                    CHECK(search.get_output_latency() ==
+                          (frac ? algorithms::fdmt_fft::kFractionalGuard : 0U));
                     SizeType ref_cap = 0;
                     if (segmented) {
                         CHECK(search.get_chunk_nsamps() < plan.get_nsamps());
@@ -320,7 +322,7 @@ TEST_CASE("FDMTFFTBoxcar drain() searches the last latency samples",
         CAPTURE(frac);
         FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(), 1, frac);
         const uint64_t latency = search.get_output_latency();
-        CHECK(latency == (frac ? 64U : 0U));
+        CHECK(latency == (frac ? algorithms::fdmt_fft::kFractionalGuard : 0U));
         std::vector<RawCandidate> drained;
         for (const auto& block : input) {
             append(drained, search.execute(block));

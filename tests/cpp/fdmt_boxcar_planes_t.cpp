@@ -11,9 +11,8 @@
 
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include "dmt/boxcar.hpp"
-
 #include "fdmt_boxcar_reference.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 
@@ -85,11 +84,6 @@ by_plane(const Run& r, const std::vector<RawCandidate>& call) {
         out[plane_of(r, c)].push_back(c);
     }
     return out;
-}
-
-bool same_candidate(const RawCandidate& a, const RawCandidate& b) {
-    return key(a) == key(b) &&
-           std::bit_cast<uint32_t>(a.snr) == std::bit_cast<uint32_t>(b.snr);
 }
 
 /// The per-plane counters add up to the call's, and each plane's emitted
@@ -193,21 +187,19 @@ void check_share(Exec exec) {
                                   want[p].size() - n);
                             if (policy == OverflowPolicy::kKeepBrightest) {
                                 // Exactly the plane's brightest.
-                                std::ranges::sort(want[p],
-                                                  algorithms::detail::brighter);
+                                std::ranges::sort(want[p], brighter);
                                 want[p].resize(n);
                                 auto h = have[p];
-                                std::ranges::sort(h,
-                                                  algorithms::detail::brighter);
+                                std::ranges::sort(h, brighter);
                                 for (SizeType i = 0; i < n; ++i) {
-                                    REQUIRE(same_candidate(h[i], want[p][i]));
+                                    REQUIRE(same_candidate_exact(h[i], want[p][i]));
                                 }
                             } else {
                                 // Some of the plane's own.
                                 for (const auto& c : have[p]) {
                                     REQUIRE(std::ranges::any_of(
                                         want[p], [&](const RawCandidate& w) {
-                                            return same_candidate(c, w);
+                                            return same_candidate_exact(c, w);
                                         }));
                                 }
                             }
@@ -250,12 +242,12 @@ TEST_CASE("FDMTBoxcar max_candidates_per_plane keeps each plane's share",
 #ifdef DMT_ENABLE_GPU
 TEST_CASE("GPU FDMTBoxcar per-plane counts add up and follow the drops",
           "[boxcar][planes][gpu]") {
-    check_counts(Exec::cuda(0));
+    check_counts(test::gpu_exec());
 }
 
 TEST_CASE("GPU FDMTBoxcar max_candidates_per_plane keeps each plane's share",
           "[boxcar][planes][gpu]") {
-    check_share(Exec::cuda(0));
+    check_share(test::gpu_exec());
 }
 
 TEST_CASE("FDMTBoxcar per-plane counts and shares: GPU equals CPU",
@@ -267,7 +259,7 @@ TEST_CASE("FDMTBoxcar per-plane counts and shares: GPU equals CPU",
             cfg.max_candidates_per_plane = share;
             cfg.max_candidates           = share == 0 ? 50 : 11 * share;
             const auto cpu               = run(plan, cfg, Exec::cpu());
-            const auto gpu               = run(plan, cfg, Exec::cuda(0));
+            const auto gpu               = run(plan, cfg, test::gpu_exec());
             for (SizeType k = 0; k < cpu.calls.size(); ++k) {
                 for (SizeType p = 0; p < cpu.plans.size(); ++p) {
                     INFO("call " << k << " plane " << p);
