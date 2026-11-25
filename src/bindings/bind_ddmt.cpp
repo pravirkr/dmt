@@ -381,7 +381,7 @@ void bind_ddmt(py::module_& mod) {
                 }
                 return dmt;
             },
-            "waterfall_packed"_a.noconvert(), "nsamps"_a,
+            "waterfall_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             R"doc(
             Dedisperse a channel-major packed integer waterfall of shape
             ``(nchans, row_bytes)``, or ``(nbeams, nchans, row_bytes)`` if
@@ -425,7 +425,7 @@ void bind_ddmt(py::module_& mod) {
                 }
                 return dmt;
             },
-            "filterbank_packed"_a.noconvert(), "nsamps"_a,
+            "filterbank_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             R"doc(
             Dedisperse a time-major packed filterbank of shape
             ``(nsamps, samp_bytes)``, or ``(nbeams, nsamps, samp_bytes)`` if
@@ -485,7 +485,7 @@ void bind_ddmt(py::module_& mod) {
             -----
             Asynchronous on ``stream``, with the stream history kept on the
             device. The packed :meth:`execute` and
-            :meth:`execute_time_major` take ``(waterfall_packed, nsamps)``
+            :meth:`execute_time_major` take ``(waterfall_packed, nsamps=...)``
             uint8 device arrays the same way.
             )doc")
         .def(
@@ -498,7 +498,7 @@ void bind_ddmt(py::module_& mod) {
                         DeviceSpan<int32_t> dmt,
                         Stream s) { ddmt.execute(in, n, dmt, s); });
             },
-            "waterfall_packed"_a, "nsamps"_a, py::kw_only(),
+            "waterfall_packed"_a, py::kw_only(), "nsamps"_a,
             "out"_a = py::none(), "stream"_a = py::none(),
             "Packed analogue of the device-memory execute() (int32 output).")
         .def(
@@ -513,7 +513,7 @@ void bind_ddmt(py::module_& mod) {
                         DeviceSpan<int32_t> dmt,
                         Stream s) { ddmt.execute_time_major(in, n, dmt, s); });
             },
-            "filterbank_packed"_a, "nsamps"_a, py::kw_only(),
+            "filterbank_packed"_a, py::kw_only(), "nsamps"_a,
             "out"_a = py::none(), "stream"_a = py::none(),
             "Device-memory execute_time_major() (GPU backends, int32 output).")
         .def("set_gulp_size", &DDMT::set_gulp_size, "gulp_size"_a,

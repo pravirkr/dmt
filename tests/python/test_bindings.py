@@ -39,10 +39,16 @@ def test_simulate_python_helpers() -> None:
     np.testing.assert_array_equal(delays, np.round(expected).astype(np.int32))
     assert delays[0] > 0  # the half-channel delay of channel 0
 
-    arr, n_disp = simulate.generate_pure_frb(8, 32, 1000.0, 1500.0, 0, 10.0, 1.0)
-    assert arr.shape == (8, 32)
-    assert n_disp > 0
-    assert float(np.sum(arr)) > 0.0
+    for dt in (0, 12.375):
+        arr, n_disp = simulate.generate_pure_frb(8, 32, 1000.0, 1500.0, dt, 20.0, 1.0)
+        assert arr.shape == (8, 32)
+        assert n_disp > 0
+        assert float(np.sum(arr)) > 0.0
+        cpp_flat, cpp_disp = libdmt.generate_pure_frb(
+            8, 32, 1000.0, 1500.0, dt, 20.0, 1.0
+        )
+        np.testing.assert_array_equal(arr, np.asarray(cpp_flat).reshape((8, 32)))
+        assert n_disp == float(cpp_disp)
 
 
 class TestBackends:
@@ -126,29 +132,29 @@ class TestStrictWaterfallInput:
         packed_u16 = np.zeros((nchans, nsamps), dtype=np.uint16)
         packed_noncontig = np.zeros((nchans, nsamps * 2), dtype=np.uint8)[:, :nsamps]
         with pytest.raises(ValueError, match="dtype uint8"):
-            fdmt_packed.execute(packed_u16, 8)
+            fdmt_packed.execute(packed_u16, nbits=8)
         with pytest.raises(ValueError, match="C-contiguous"):
-            fdmt_packed.execute(packed_noncontig, 8)
+            fdmt_packed.execute(packed_noncontig, nbits=8)
         with pytest.raises(ValueError, match="dtype uint8"):
-            fdmt_packed.reset(packed_u16, 8)
+            fdmt_packed.reset(packed_u16, nbits=8)
         with pytest.raises(ValueError, match="C-contiguous"):
-            fdmt_packed.reset(packed_noncontig, 8)
+            fdmt_packed.reset(packed_noncontig, nbits=8)
 
         fft_eng = dmtlib.FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
         tm_u16 = np.zeros((nsamps, nchans), dtype=np.uint16)
         tm_noncontig = np.zeros((nsamps, nchans * 2), dtype=np.uint8)[:, :nchans]
         with pytest.raises(ValueError, match="dtype uint8"):
-            fft_eng.execute(packed_u16, 8)
+            fft_eng.execute(packed_u16, nbits=8)
         with pytest.raises(ValueError, match="C-contiguous"):
-            fft_eng.execute(packed_noncontig, 8)
+            fft_eng.execute(packed_noncontig, nbits=8)
         with pytest.raises(ValueError, match="dtype uint8"):
-            fft_eng.execute_time_major(tm_u16, 8)
+            fft_eng.execute_time_major(tm_u16, nbits=8)
         with pytest.raises(ValueError, match="C-contiguous"):
-            fft_eng.execute_time_major(tm_noncontig, 8)
+            fft_eng.execute_time_major(tm_noncontig, nbits=8)
         with pytest.raises(ValueError, match="dtype uint8"):
-            fft_eng.reset(packed_u16, 8)
+            fft_eng.reset(packed_u16, nbits=8)
         with pytest.raises(ValueError, match="C-contiguous"):
-            fft_eng.reset(packed_noncontig, 8)
+            fft_eng.reset(packed_noncontig, nbits=8)
 
         hist_f64 = np.zeros(fft_eng.history_state_size(), dtype=np.float64)
         hist_noncontig = np.zeros(fft_eng.history_state_size() * 2, dtype=np.float32)[
@@ -174,7 +180,7 @@ class TestStrictWaterfallInput:
 
             for call in (
                 lambda buf, e=engine: e.reset(wf, buf),
-                lambda buf, e=engine: e.reset(packed, 8, buf),
+                lambda buf, e=engine: e.reset(packed, nbits=8, dmt=buf),
             ):
                 with pytest.raises(ValueError, match="dtype float32"):
                     call(bad_dtype)
@@ -225,13 +231,40 @@ class TestStrictWaterfallInput:
 
             eng_u8 = cls(1000.0, 1500.0, nchans, 0.001, dms, nbits=8, nthreads=1)
             with pytest.raises(ValueError, match="dtype uint8"):
-                eng_u8.execute(packed_u16, nsamps)
+                eng_u8.execute(packed_u16, nsamps=nsamps)
             with pytest.raises(ValueError, match="C-contiguous"):
-                eng_u8.execute(packed_noncontig, nsamps)
+                eng_u8.execute(packed_noncontig, nsamps=nsamps)
             with pytest.raises(ValueError, match="dtype uint8"):
-                eng_u8.execute_time_major(tm_u16, nsamps)
+                eng_u8.execute_time_major(tm_u16, nsamps=nsamps)
             with pytest.raises(ValueError, match="C-contiguous"):
-                eng_u8.execute_time_major(tm_noncontig, nsamps)
+                eng_u8.execute_time_major(tm_noncontig, nsamps=nsamps)
+
+    def test_packed_second_argument_is_keyword_only(self) -> None:
+        nchans, nsamps = 16, 64
+        packed = np.zeros((nchans, nsamps), dtype=np.uint8)
+        tm = np.zeros((nsamps, nchans), dtype=np.uint8)
+        dms = np.array([0.0, 5.0], dtype=np.float32)
+
+        fdmt = dmtlib.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+        with pytest.raises(TypeError):
+            fdmt.execute(packed, 8)
+        with pytest.raises(TypeError):
+            fdmt.reset(packed, 8)
+
+        fdmt_fft = dmtlib.FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+        with pytest.raises(TypeError):
+            fdmt_fft.execute(packed, 8)
+        with pytest.raises(TypeError):
+            fdmt_fft.execute_time_major(tm, 8)
+        with pytest.raises(TypeError):
+            fdmt_fft.reset(packed, 8)
+
+        for cls in (dmtlib.DDMT, dmtlib.SDMT, dmtlib.DDMTFFT):
+            eng = cls(1000.0, 1500.0, nchans, 0.001, dms, nbits=8, nthreads=1)
+            with pytest.raises(TypeError):
+                eng.execute(packed, nsamps)
+            with pytest.raises(TypeError):
+                eng.execute_time_major(tm, nsamps)
 
     def test_pack_baseband_rejects_wrong_dtype_and_non_contiguous(self) -> None:
         v_c128 = np.zeros((2, 4, 16), dtype=np.complex128)

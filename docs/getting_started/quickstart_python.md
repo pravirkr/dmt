@@ -54,7 +54,7 @@ for block in stream:                        # contiguous (256, 1024) float32 blo
 | input | call |
 | :--- | :--- |
 | float32 `(nchans, nsamps)` or `(nbeams, nchans, nsamps)` | `execute(waterfall)` |
-| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits)` |
+| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits=...)` |
 
 - **Output.** float32, `(n_dm, n_times)` or `(nbeams, n_dm, n_times)`, with
   `n_dm = plan.dmt_ndms` and `n_times = plan.dmt_nsamps`.
@@ -75,7 +75,7 @@ for block in stream:                        # contiguous (256, 1024) float32 blo
 ```python
 nbits = 2
 packed = np.random.randint(0, 256, size=(256, 1024 * nbits // 8), dtype=np.uint8)
-dmt_plane = fdmt.execute(packed, nbits)
+dmt_plane = fdmt.execute(packed, nbits=nbits)
 ```
 
 (channel-order)=

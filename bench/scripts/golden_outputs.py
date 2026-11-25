@@ -89,7 +89,9 @@ def _fdmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
                 int_tree=int_tree,
                 backend=backend,
             )
-            out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(packed, nbits)
+            out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(
+                packed, nbits=nbits
+            )
 
 
 def _fdmt_stepper(out: dict, backend: str, data: np.ndarray) -> None:
@@ -118,7 +120,7 @@ def _ddmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
         d = dmtlib.DDMT(
             F_MIN, F_MAX, nchans, TSAMP, 100.0, 1.0, nbits=nbits, backend=backend
         )
-        out[f"ddmt/packed{nbits}"] = d.execute(_pack(values, nbits), nsamps)
+        out[f"ddmt/packed{nbits}"] = d.execute(_pack(values, nbits), nsamps=nsamps)
 
 
 def _fft(out: dict, backend: str, data: np.ndarray) -> None:
@@ -440,7 +442,7 @@ def _skewed(out: dict, backend: str) -> None:
     f = dmtlib.FDMT(plan, max_memory_bytes=budget, backend=backend)
     for k in range(2):
         block = codes[:, k * nsamps : (k + 1) * nsamps].astype(np.uint8)
-        out[f"skew/fdmt/u8/block{k}"] = f.execute(block, 8)
+        out[f"skew/fdmt/u8/block{k}"] = f.execute(block, nbits=8)
     out["skew/fdmt/u8/history"] = f.save_history()
 
     sub = dmtlib.FDMTPlan(

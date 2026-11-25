@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dmt/boxcar.hpp"
+#include "dmt/device_macros.hpp"
 
 namespace dmt::algorithms::detail {
 

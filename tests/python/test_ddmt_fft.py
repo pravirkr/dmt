@@ -55,7 +55,7 @@ def test_packed_history_and_beams():
     p8 = dmtlib.DDMTFFT(F_MIN, F_MAX, NCHANS, TSAMP, 20.0, 0.5, nbits=8)
     pf = dmtlib.DDMTFFT(F_MIN, F_MAX, NCHANS, TSAMP, 20.0, 0.5)
     np.testing.assert_array_equal(
-        p8.execute(packed, 900), pf.execute(packed.astype(np.float32))
+        p8.execute(packed, nsamps=900), pf.execute(packed.astype(np.float32))
     )
 
     a = dmtlib.DDMTFFT(F_MIN, F_MAX, NCHANS, TSAMP, 20.0, 0.5)
@@ -166,10 +166,10 @@ def _check_estimate(backend: str) -> None:
         eng = dmtlib.DDMTFFT(plan, **kw)
         dtype = np.float32 if nbits == 32 else np.uint8
         block = np.zeros((NCHANS, nsamps), dtype)
-        args = (block,) if nbits == 32 else (block, nsamps)
+        exec_kw = {} if nbits == 32 else {"nsamps": nsamps}
         while True:
             warm = eng.get_output_nsamps(nsamps) == nsamps
-            eng.execute(*args)
+            eng.execute(block, **exec_kw)
             if warm:
                 break
         got, want = eng.memory_usage, est.usage

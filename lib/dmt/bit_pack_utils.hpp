@@ -11,6 +11,8 @@
 
 #include "dmt/common/types.hpp"
 
+#include "dmt/device_macros.hpp"
+
 namespace dmt::bit_pack_utils {
 
 namespace detail {

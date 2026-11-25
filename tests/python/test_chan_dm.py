@@ -196,7 +196,7 @@ def test_packed_gpu_matches_cpu(gpu_backend: str, case: Case, fuse: int | None) 
             eng = FDMT(plan, backend=backend, int_tree=int_tree, nthreads=1, **kw)
             outs.append(
                 np.concatenate(
-                    [np.asarray(eng.execute(c, 8)).copy() for c in codes], axis=-1
+                    [np.asarray(eng.execute(c, nbits=8)).copy() for c in codes], axis=-1
                 )
             )
     for o in outs[1:]:
@@ -277,12 +277,16 @@ def test_two_beams_match_single_beams(engine: str, backend: str) -> None:
         for b in codes:
             eng = FDMT(plan, backend=backend)
             single.append(
-                np.concatenate([np.asarray(eng.execute(c, 8)).copy() for c in b], -1)
+                np.concatenate(
+                    [np.asarray(eng.execute(c, nbits=8)).copy() for c in b], -1
+                )
             )
         two = FDMT(plan, backend=backend, nbeams=2)
         both = np.concatenate(
             [
-                np.asarray(two.execute(np.stack([codes[0][k], codes[1][k]]), 8)).copy()
+                np.asarray(
+                    two.execute(np.stack([codes[0][k], codes[1][k]]), nbits=8)
+                ).copy()
                 for k in range(3)
             ],
             axis=-1,
@@ -303,8 +307,12 @@ def test_skewed_path_matches_the_tree(smear: bool) -> None:
     budget = FDMT.estimate_memory(plan, use_box_smearing=smear, nthreads=1).usage.total // 2
     skew = FDMT(plan, use_box_smearing=smear, nthreads=1, max_memory_bytes=budget)
     assert tree.history_state_size() != skew.history_state_size()  # skewed path
-    a = np.concatenate([np.asarray(tree.execute(c, 8)).copy() for c in codes], axis=-1)
-    b = np.concatenate([np.asarray(skew.execute(c, 8)).copy() for c in codes], axis=-1)
+    a = np.concatenate(
+        [np.asarray(tree.execute(c, nbits=8)).copy() for c in codes], axis=-1
+    )
+    b = np.concatenate(
+        [np.asarray(skew.execute(c, nbits=8)).copy() for c in codes], axis=-1
+    )
     np.testing.assert_array_equal(b, a)
 
 
@@ -520,7 +528,7 @@ def test_chunked_gpu_matches_cpu(gpu_backend: str, fuse: int) -> None:
         eng = FDMT(plan, backend=backend, fuse_levels=fuse, **kw)
         outs.append(
             np.concatenate(
-                [np.asarray(eng.execute(c, 8)).copy() for c in codes], axis=-1
+                [np.asarray(eng.execute(c, nbits=8)).copy() for c in codes], axis=-1
             )
         )
     np.testing.assert_array_equal(outs[1], outs[0])
@@ -536,12 +544,12 @@ def _history_round_trip(kw: dict, *, skewed: bool = False) -> None:
     codes = [rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8) for _ in range(3)]
     a = FDMT(plan, nthreads=1, **kw)
     for c in codes[:2]:
-        a.execute(c, 8)
+        a.execute(c, nbits=8)
     saved = np.asarray(a.save_history())
-    want = np.asarray(a.execute(codes[2], 8)).copy()
+    want = np.asarray(a.execute(codes[2], nbits=8)).copy()
     b = FDMT(plan, nthreads=1, **kw)
     b.load_history(saved)
-    np.testing.assert_array_equal(np.asarray(b.execute(codes[2], 8)), want)
+    np.testing.assert_array_equal(np.asarray(b.execute(codes[2], nbits=8)), want)
     # A history saved without chan_dm (other level-0 boxes) is refused.
     plain = FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700)
     c = FDMT(plain, nthreads=1, **kw)

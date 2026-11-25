@@ -1165,8 +1165,8 @@ class TestFDMTPerformanceParams:
         ref = make(fuse_levels=0, int_tree=False)
         expected = np.array(ref.execute(values.astype(np.float32)))
         ref.reset_history()
-        expected_pk = np.array(ref.execute(packed, nbits))
-        got = np.array(make(int_tree=int_tree).execute(packed, nbits))
+        expected_pk = np.array(ref.execute(packed, nbits=nbits))
+        got = np.array(make(int_tree=int_tree).execute(packed, nbits=nbits))
         np.testing.assert_array_equal(got, expected_pk)
 
         plan = ref.plan
@@ -1184,10 +1184,12 @@ class TestFDMTPerformanceParams:
         packed = np.zeros((self.nchans, self.nsamps), dtype=np.uint8)
         with pytest.raises(TypeError):
             fdmt.execute(packed)
+        with pytest.raises(TypeError):
+            fdmt.execute(packed, 8)
         with pytest.raises(ValueError):
-            fdmt.execute(packed.astype(np.float32), 8)
+            fdmt.execute(packed.astype(np.float32), nbits=8)
         with pytest.raises(ValueError):
-            fdmt.execute(packed, 3)
+            fdmt.execute(packed, nbits=3)
 
     @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
     @pytest.mark.parametrize("fuse_levels", [1, 3, None])

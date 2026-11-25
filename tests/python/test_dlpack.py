@@ -294,9 +294,11 @@ class TestFDMT:
         packed = pack_lsb_first(values, 2)
         host = cls(*FDMT_ARGS, nbeams=2, backend=cuda)
         dev = cls(*FDMT_ARGS, nbeams=2, backend=cuda)
-        got = dev.execute(xp.asarray(packed), 2)
+        got = dev.execute(xp.asarray(packed), nbits=2)
         assert tuple(got.shape) == (2, dev.plan.dmt_ndms, dev.plan.dmt_nsamps)
-        np.testing.assert_array_equal(xp.get(got), host.execute(packed, 2))
+        np.testing.assert_array_equal(xp.get(got), host.execute(packed, nbits=2))
+        with pytest.raises(TypeError):
+            dev.execute(xp.asarray(packed), 2)
 
     def test_streams(self, cuda: str, xp: Lib) -> None:
         # "roll" mode keeps no history, so every call gives the same result.
@@ -364,9 +366,11 @@ class TestFDMT:
         packed = pack_lsb_first(
             np.random.default_rng(18).integers(0, 4, (64, 256)), 2
         )
-        want = cls(*FDMT_ARGS, backend=cuda).execute(packed, 2)
+        want = cls(*FDMT_ARGS, backend=cuda).execute(packed, nbits=2)
         eng = cls(*FDMT_ARGS, backend=cuda)
-        eng.reset(xp.asarray(packed), 2)
+        with pytest.raises(TypeError):
+            eng.reset(xp.asarray(packed), 2)
+        eng.reset(xp.asarray(packed), nbits=2)
         eng.advance_until_remaining(0)
         got = eng.finalize()
         xp.synchronize()
@@ -429,14 +433,20 @@ class TestDDMT:
         packed = rng.integers(0, 256, (64, 1024), dtype=np.uint8)
         host = DDMT(*DDMT_ARGS, nbits=8, backend=cuda)
         dev = DDMT(*DDMT_ARGS, nbits=8, backend=cuda)
-        got = dev.execute(xp.asarray(packed), 1024)
+        got = dev.execute(xp.asarray(packed), nsamps=1024)
         assert xp.get(got).dtype == np.int32
-        np.testing.assert_array_equal(xp.get(got), host.execute(packed, 1024))
+        np.testing.assert_array_equal(xp.get(got), host.execute(packed, nsamps=1024))
+        with pytest.raises(TypeError):
+            dev.execute(xp.asarray(packed), 1024)
         tm = np.ascontiguousarray(packed.T)
         out = xp.empty(got.shape[0] * dev.get_output_nsamps(1024), np.int32)
-        got = dev.execute_time_major(xp.asarray(tm), 1024, out=out)
+        got = dev.execute_time_major(xp.asarray(tm), nsamps=1024, out=out)
         assert xp.ptr(got) == xp.ptr(out)
-        np.testing.assert_array_equal(xp.get(got), host.execute_time_major(tm, 1024))
+        np.testing.assert_array_equal(
+            xp.get(got), host.execute_time_major(tm, nsamps=1024)
+        )
+        with pytest.raises(TypeError):
+            dev.execute_time_major(xp.asarray(tm), 1024)
 
     @pytest.mark.parametrize(("nbits", "dtype"), [(32, np.float32), (8, np.uint8)])
     def test_history_round_trip(
@@ -448,7 +458,7 @@ class TestDDMT:
             run = lambda e, b: e.execute(b)  # noqa: E731
         else:
             blocks = [rng.integers(0, 256, (64, 512), dtype=np.uint8) for _ in "ab"]
-            run = lambda e, b: e.execute(b, 512)  # noqa: E731
+            run = lambda e, b: e.execute(b, nsamps=512)  # noqa: E731
         host = DDMT(*DDMT_ARGS, nbits=nbits, backend=cuda)
         run(host, blocks[0])
         want = run(host, blocks[1])
@@ -506,8 +516,11 @@ class TestDDMT:
         rng = np.random.default_rng(11)
         args = (1100.0, 1500.0, 64, 0.001, 30.0, 0.25)
         packed = rng.integers(0, 256, (64, 2000), dtype=np.uint8)
-        want = DDMTFFT(*args, nbits=8, backend=cuda).execute(packed, 2000)
-        got = DDMTFFT(*args, nbits=8, backend=cuda).execute(xp.asarray(packed), 2000)
+        want = DDMTFFT(*args, nbits=8, backend=cuda).execute(packed, nsamps=2000)
+        ddmt_fft = DDMTFFT(*args, nbits=8, backend=cuda)
+        with pytest.raises(TypeError):
+            ddmt_fft.execute(xp.asarray(packed), 2000)
+        got = ddmt_fft.execute(xp.asarray(packed), nsamps=2000)
         assert xp.get(got).dtype == np.float32
         np.testing.assert_allclose(
             xp.get(got), want, rtol=0, atol=1e-5 * np.abs(want).max()
@@ -740,7 +753,7 @@ class TestTorchStreams:
         ddmt = DDMT(*DDMT_ARGS, nbits=8, backend="cuda")
         packed = torch.randint(0, 256, (64, 512), dtype=torch.uint8, device="cuda")
         shape = (len(ddmt.plan.dm_arr), ddmt.get_output_nsamps(512))
-        got = ddmt.execute(packed, 512)
+        got = ddmt.execute(packed, nsamps=512)
         assert type(got) is torch.Tensor
         assert got.dtype == torch.int32
         assert got.device == packed.device

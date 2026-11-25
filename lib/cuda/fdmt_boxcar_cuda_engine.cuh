@@ -17,6 +17,7 @@
 
 #include "dmt/boxcar.hpp"
 #include "dmt/boxcar_runs.hpp"
+#include "dmt/device_macros.hpp"
 #include "dmt/fdmt_variance.hpp"
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_planned_vector.cuh"

@@ -159,8 +159,8 @@ py::dict coh_memory_dict(const plans::CohFDMTMemoryUsage& m) {
 void bind_cfdmt(py::module_& mod) {
     mod.def(
         "generate_pure_frb",
-        [](SizeType nchans, SizeType nsamps, float f_min, float f_max,
-           SizeType dt, float pulse_toa, float amplitude = 1.0F) {
+        [](SizeType nchans, SizeType nsamps, float f_min, float f_max, float dt,
+           float pulse_toa, float amplitude = 1.0F) {
             auto [arr, nsamps_dispersed] = utils::generate_pure_frb(
                 nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude);
             return std::make_tuple(as_pyarray(std::move(arr)),
@@ -177,7 +177,7 @@ void bind_cfdmt(py::module_& mod) {
             Waterfall shape.
         f_min, f_max : float
             Band edges in MHz.
-        dt : int
+        dt : float
             Total delay across the band, in samples.
         pulse_toa : float
             Pulse time of arrival at the lowest channel, in samples.

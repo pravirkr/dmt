@@ -8,6 +8,7 @@
 
 #include "dmt/common/types.hpp"
 
+#include "dmt/device_macros.hpp"
 #include "dmt/kadane_plan.hpp"
 
 namespace dmt::kadane {

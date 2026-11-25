@@ -15,6 +15,8 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
+#include "dmt/device_macros.hpp"
+
 namespace dmt::cfdmt {
 
 /// frac(x) as a 0.64 fixed-point number of turns.

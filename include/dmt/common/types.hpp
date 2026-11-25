@@ -58,15 +58,4 @@ concept IntegralDataType = std::is_integral_v<T>;
  */
 enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
 
-// Callable from both host and device when compiled with nvcc or hip-clang
-#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
-#define DMT_HD __host__ __device__
-#define DMT_D __device__
-#define DMT_H __host__
-#else
-#define DMT_HD
-#define DMT_D
-#define DMT_H
-#endif
-
 } // namespace dmt

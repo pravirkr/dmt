@@ -5,6 +5,7 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/device_macros.hpp"
 
 /**
  * @file ddmt_kernel.cuh

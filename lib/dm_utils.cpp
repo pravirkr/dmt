@@ -304,6 +304,9 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
             count = min_run;
         }
         count = std::max<SizeType>(count, 1);
+        while (a + (step * static_cast<double>(count)) < b) {
+            ++count;
+        }
         for (SizeType q = 0; q < count; ++q) {
             out.push_back(
                 static_cast<float>(a + (step * static_cast<double>(q))));

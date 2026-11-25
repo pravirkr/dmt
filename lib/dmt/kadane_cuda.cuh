@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "dmt/device_macros.hpp"
 #include "dmt/kadane_monoid.hpp"
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
 #include "dmt/gpu_compat.cuh"

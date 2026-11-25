@@ -334,9 +334,9 @@ class TestFDMTFFTInputs:
         rng = np.random.default_rng(nbits)
         vals = rng.integers(0, 2**nbits, size=(64, 512))
         ref = FDMTFFT(*self.args).execute(vals.astype(np.float32))
-        packed = FDMTFFT(*self.args).execute(pack_lsb_first(vals, nbits), nbits)
+        packed = FDMTFFT(*self.args).execute(pack_lsb_first(vals, nbits), nbits=nbits)
         tm = FDMTFFT(*self.args).execute_time_major(
-            pack_lsb_first(vals.T.copy(), nbits), nbits
+            pack_lsb_first(vals.T.copy(), nbits), nbits=nbits
         )
         np.testing.assert_allclose(packed, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
         np.testing.assert_allclose(tm, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
@@ -489,12 +489,12 @@ def test_fdmt_fft_execute_out_buffer() -> None:
     vals = rng.integers(0, 256, size=(nchans, nsamps))
     packed = pack_lsb_first(vals, 8)
     tm = pack_lsb_first(vals.T.copy(), 8)
-    ref_p = eng.execute(packed, 8)
-    got_p = eng.execute(packed, 8, out=out)
+    ref_p = eng.execute(packed, nbits=8)
+    got_p = eng.execute(packed, nbits=8, out=out)
     assert np.shares_memory(got_p, out)
     np.testing.assert_array_equal(got_p, ref_p)
 
-    got_tm = eng.execute_time_major(tm, 8, out=out)
+    got_tm = eng.execute_time_major(tm, nbits=8, out=out)
     assert np.shares_memory(got_tm, out)
     np.testing.assert_array_equal(got_tm, ref_p)
 

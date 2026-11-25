@@ -346,7 +346,7 @@ void bind_ddmt_fft(py::module_& mod) {
                 }
                 return out;
             },
-            "waterfall_packed"_a.noconvert(), "nsamps"_a,
+            "waterfall_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             "Dedisperse a channel-major packed waterfall (float32 output).")
         .def(
             "execute_time_major",
@@ -363,7 +363,7 @@ void bind_ddmt_fft(py::module_& mod) {
                 }
                 return out;
             },
-            "filterbank_packed"_a.noconvert(), "nsamps"_a,
+            "filterbank_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             "Dedisperse a time-major packed filterbank (float32 output).")
         .def(
             "execute",
@@ -398,7 +398,7 @@ void bind_ddmt_fft(py::module_& mod) {
                     [&](DeviceSpan<const uint8_t> in, DeviceSpan<float> dmt,
                         Stream s) { e.execute(in, nsamps, dmt, s); });
             },
-            "waterfall_packed"_a, "nsamps"_a, py::kw_only(),
+            "waterfall_packed"_a, py::kw_only(), "nsamps"_a,
             "out"_a = py::none(), "stream"_a = py::none(),
             "Dedisperse a channel-major packed uint8 device array (float32 "
             "output).")

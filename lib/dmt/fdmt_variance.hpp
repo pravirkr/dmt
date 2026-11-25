@@ -4,6 +4,8 @@
 
 #include "dmt/common/types.hpp"
 
+#include "dmt/device_macros.hpp"
+
 namespace dmt::algorithms::detail {
 
 /// Energy of a width-W boxcar convolved with a weighted length-L leaf box.

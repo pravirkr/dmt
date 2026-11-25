@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 
 import numpy as np
 
+from dmtlib import libdmt
 from dmtlib.grid import DM_CONSTANT
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -139,13 +140,12 @@ def cff(f1_start: float, f1_end: float, f2_start: float, f2_end: float) -> float
     return (f1_start**-2 - f1_end**-2) / (f2_start**-2 - f2_end**-2)
 
 
-@njit(cache=True, fastmath=True)
 def generate_pure_frb(
     nchans: int,
     nsamps: int,
     f_min: float,
     f_max: float,
-    dt: int,
+    dt: float,
     pulse_toa: float,
     amplitude: float = 1.0,
 ) -> tuple[np.ndarray, float]:
@@ -159,7 +159,7 @@ def generate_pure_frb(
         Number of time samples.
     f_min, f_max : float
         Band edges in MHz.
-    dt : int
+    dt : float
         Dispersive delay across the full band in samples.
     pulse_toa : float
         Arrival time at lowest frequency in samples.
@@ -172,47 +172,12 @@ def generate_pure_frb(
         Waterfall array with shape ``(nchans, nsamps)`` and the number of dispersed
         samples.
     """
-    arr = np.zeros((nchans, nsamps), dtype=np.float32)
-    foff = (f_max - f_min) / nchans
-    chan_freqs = np.arange(nchans, dtype=np.float32) * foff + f_min + foff / 2
-    # Use channel edges for physical accuracy
-    freqs_bot = chan_freqs - foff / 2
-    freqs_top = chan_freqs + foff / 2
-
-    dt_start = dt * cff(f_min, freqs_bot, f_min, f_max)
-    tstart = pulse_toa - dt_start
-    tstart_int = tstart.astype(np.int32)
-    tstart_frac = tstart - tstart_int
-
-    dt_sub = dt * cff(freqs_bot, freqs_top, f_min, f_max)
-    tend = tstart - dt_sub
-    tend_int = tend.astype(np.int32)
-    tend_frac = 1 - (tend - tend_int)
-
-    nsamps_dispersed = 0
-    for ichan in range(nchans):
-        tstart_i = tstart_int[ichan]
-        tend_i = tend_int[ichan]
-
-        if 0 <= tend_i <= tstart_i < nsamps:
-            if tend_i == tstart_i:
-                arr[ichan, tend_i] = amplitude
-                nsamps_dispersed += 1
-            else:
-                arr[ichan, tend_i : tstart_i + 1] = amplitude / dt_sub[ichan]
-                arr[ichan, tend_i] *= tend_frac[ichan]
-                arr[ichan, tstart_i] *= tstart_frac[ichan]
-                nsamps_dispersed += tstart_i - tend_i + 1
-        elif tend_i < 0 <= tstart_i < nsamps:
-            arr[ichan, : tstart_i + 1] = amplitude / dt_sub[ichan]
-            arr[ichan, tstart_i] *= tstart_frac[ichan]
-            nsamps_dispersed += tstart_i + 1
-        elif 0 <= tend_i < nsamps <= tstart_i:
-            arr[ichan, tend_i:] = amplitude / dt_sub[ichan]
-            arr[ichan, tend_i] *= tend_frac[ichan]
-            nsamps_dispersed += nsamps - tend_i
-
-    return arr, float(nsamps_dispersed)
+    arr, nsamps_dispersed = libdmt.generate_pure_frb(
+        nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude
+    )
+    return np.asarray(arr, dtype=np.float32).reshape((nchans, nsamps)), float(
+        nsamps_dispersed
+    )
 
 
 @njit(cache=True, fastmath=True)

@@ -13,6 +13,7 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include "dmt/boxcar_noise.hpp"
+#include "dmt/device_macros.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_variance.hpp"
 

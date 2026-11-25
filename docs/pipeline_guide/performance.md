@@ -359,7 +359,7 @@ fdmt = FDMT(704.0, 1216.0, nchans, nsamps, 8.192e-5, 2048, nthreads=8)
 # (nchans, nsamps * nbits / 8) uint8, sample 0 in the low bits of byte 0
 packed = np.random.randint(0, 256, size=(nchans, nsamps * nbits // 8),
                            dtype=np.uint8)
-dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
+dmt = fdmt.execute(packed, nbits=nbits) # float32 (n_dm, n_times)
 ```
 :::
 :::{tab-item} C++
@@ -377,7 +377,7 @@ fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
 :::
 ::::
 
-On the CUDA backend, `execute(packed, nbits)` behaves the same way, and the
+On the CUDA backend, `execute(packed, nbits=...)` behaves the same way, and the
 host overload copies only the packed bytes over PCIe.
 
 Speedup over float input, both at the default configuration (automatic

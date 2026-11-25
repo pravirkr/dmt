@@ -8,6 +8,8 @@
 
 #include "dmt/common/types.hpp"
 
+#include "dmt/device_macros.hpp"
+
 // Level-0 box means of the FDMT (use_box_smearing = true), shared by the
 // plan (noise variance, int_tree bounds), the CPU and GPU engines and
 // FDMT-FFT so all of them use the same integers.

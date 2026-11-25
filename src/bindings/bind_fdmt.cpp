@@ -642,12 +642,12 @@ void bind_fdmt(py::module_& mod) {
                         fdmt.execute(in_span, nbits, dmt);
                     });
             },
-            py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
-            py::kw_only(), py::arg("out") = py::none(),
+            py::arg("waterfall_packed").noconvert(), py::kw_only(),
+            py::arg("nbits"), py::arg("out") = py::none(),
             // No numpydoc sections here: pybind11 joins the overload
             // docstrings, and the float overload below documents both.
             "Run the FDMT transform on packed low-bit integer input "
-            "(``waterfall_packed``, ``nbits``); see below.")
+            "(``waterfall_packed``, ``nbits=...``); see below.")
         .def(
             "execute",
             [](FDMT& fdmt, const py::array& waterfall_obj,
@@ -656,7 +656,7 @@ void bind_fdmt(py::module_& mod) {
                     waterfall_obj.itemsize() == 1) {
                     throw py::type_error(
                         "FDMT.execute: got a uint8 waterfall; pass nbits "
-                        "for packed input (execute(waterfall_packed, nbits)) "
+                        "for packed input (execute(waterfall_packed, nbits=...)) "
                         "or convert to float32 explicitly");
                 }
                 const auto waterfall = require_contiguous_array<float>(
@@ -694,7 +694,7 @@ void bind_fdmt(py::module_& mod) {
                 C-contiguous float32 or packed uint8 with ``nbits``; never
                 converted: another dtype or layout raises ``TypeError``.
             waterfall_packed : numpy.ndarray or device array, dtype uint8
-                Packed overload, called as ``execute(waterfall_packed, nbits)``:
+                Packed overload, called as ``execute(waterfall_packed, nbits=...)``:
                 C-contiguous ``(nchans, row_bytes)`` or ``(nbeams, nchans,
                 row_bytes)``; each row holds ``nsamps`` unsigned samples of
                 ``nbits`` bits, LSB-first for ``nbits < 8`` (same convention
@@ -749,7 +749,7 @@ void bind_fdmt(py::module_& mod) {
                                            waterfall_packed, nbits, out,
                                            stream);
             },
-            py::arg("waterfall_packed"), py::arg("nbits"), py::kw_only(),
+            py::arg("waterfall_packed"), py::kw_only(), py::arg("nbits"),
             py::arg("out") = py::none(), py::arg("stream") = py::none(),
             "Packed overload of the device-memory execute() below.")
         .def(
@@ -787,10 +787,10 @@ void bind_fdmt(py::module_& mod) {
                 const py::gil_scoped_release release;
                 fdmt.reset(in_span, nbits, dmt_span);
             },
-            py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
-            py::arg("dmt").noconvert() = py::none(),
+            py::arg("waterfall_packed").noconvert(), py::kw_only(),
+            py::arg("nbits"), py::arg("dmt").noconvert() = py::none(),
             "Reset and initialize the stepper with a packed low-bit waterfall "
-            "(see execute(waterfall_packed, nbits)) and optional dmt buffer "
+            "(see execute(waterfall_packed, nbits=...)) and optional dmt buffer "
             "of at least nbeams * plan.dmt_size floats.")
         .def(
             "reset",
@@ -801,7 +801,7 @@ void bind_fdmt(py::module_& mod) {
                     waterfall_obj.itemsize() == 1) {
                     throw py::type_error(
                         "FDMT.reset: got a uint8 waterfall; pass nbits for "
-                        "packed input (reset(waterfall_packed, nbits)) or "
+                        "packed input (reset(waterfall_packed, nbits=...)) or "
                         "convert to float32 explicitly");
                 }
                 const auto waterfall = require_contiguous_array<float>(
@@ -846,9 +846,8 @@ void bind_fdmt(py::module_& mod) {
                 fdmt_reset_device<FDMT>(self, "FDMT.reset", waterfall_packed,
                                         nbits, dmt, stream);
             },
-            py::arg("waterfall_packed"), py::arg("nbits"),
-            py::arg("dmt") = py::none(), py::kw_only(),
-            py::arg("stream") = py::none())
+            py::arg("waterfall_packed"), py::kw_only(), py::arg("nbits"),
+            py::arg("dmt") = py::none(), py::arg("stream") = py::none())
         .def(
             "reset",
             [](const py::object& self, const DeviceArray& waterfall,
@@ -1341,8 +1340,8 @@ void bind_fdmt(py::module_& mod) {
                         fdmt.execute(in_span, nbits, dmt);
                     });
             },
-            py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
-            py::kw_only(), py::arg("out") = py::none(),
+            py::arg("waterfall_packed").noconvert(), py::kw_only(),
+            py::arg("nbits"), py::arg("out") = py::none(),
             "Run the transform on packed low-bit unsigned input: "
             "``(nchans, row_bytes)`` or ``(nbeams, nchans, row_bytes)`` uint8 "
             "rows at ``nbits`` (1, 2, 4, 8, 16) per sample, LSB first; float32 "
@@ -1369,8 +1368,8 @@ void bind_fdmt(py::module_& mod) {
                         fdmt.execute_time_major(in_span, nbits, dmt);
                     });
             },
-            py::arg("filterbank_packed").noconvert(), py::arg("nbits"),
-            py::kw_only(), py::arg("out") = py::none(),
+            py::arg("filterbank_packed").noconvert(), py::kw_only(),
+            py::arg("nbits"), py::arg("out") = py::none(),
             "Run the transform on a time-major packed filterbank: "
             "``(nsamps, sample_bytes)`` or ``(nbeams, nsamps, sample_bytes)`` "
             "uint8 at ``nbits``; shares the streaming history.")
@@ -1390,8 +1389,8 @@ void bind_fdmt(py::module_& mod) {
                 const py::gil_scoped_release release;
                 fdmt.reset(in_span, nbits, dmt_span);
             },
-            py::arg("waterfall_packed").noconvert(), py::arg("nbits"),
-            py::arg("dmt").noconvert() = py::none(),
+            py::arg("waterfall_packed").noconvert(), py::kw_only(),
+            py::arg("nbits"), py::arg("dmt").noconvert() = py::none(),
             "Initialize the stepper with a packed low-bit waterfall (see the "
             "packed execute()).")
         .def(
@@ -1452,7 +1451,7 @@ void bind_fdmt(py::module_& mod) {
                                            waterfall_packed, nbits, out,
                                            stream);
             },
-            py::arg("waterfall_packed"), py::arg("nbits"), py::kw_only(),
+            py::arg("waterfall_packed"), py::kw_only(), py::arg("nbits"),
             py::arg("out") = py::none(), py::arg("stream") = py::none(),
             "Packed overload of the device-memory execute() below.")
         .def(
@@ -1476,8 +1475,8 @@ void bind_fdmt(py::module_& mod) {
                                            waterfall_packed, nbits, dmt,
                                            stream);
             },
-            py::arg("waterfall_packed"), py::arg("nbits"),
-            py::arg("dmt")    = py::none(), py::kw_only(),
+            py::arg("waterfall_packed"), py::kw_only(), py::arg("nbits"),
+            py::arg("dmt")    = py::none(),
             py::arg("stream") = py::none())
         .def(
             "reset",
