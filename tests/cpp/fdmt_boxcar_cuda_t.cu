@@ -23,6 +23,7 @@
 
 #include "fdmt_boxcar_nan_cases.hpp"
 #include "fdmt_boxcar_reference.hpp"
+#include "fdmt_tail_cases.hpp"
 #include "test_helpers.hpp"
 
 using namespace boxcar_test;
@@ -30,6 +31,17 @@ using namespace boxcar_test;
 TEST_CASE("FDMTBoxcar GPU Kadane screen recovers after a NaN block",
           "[boxcar][gpu]") {
     test::check_nan_block_does_not_blind(test::gpu_exec());
+}
+
+TEST_CASE("FDMT GPU execute_tail: blocks plus a short tail equal one pass",
+          "[fdmt][gpu]") {
+    boxcar_test::check_fdmt_tail(test::gpu_exec());
+}
+
+TEST_CASE("FDMTBoxcar GPU drain(tail): blocks plus a short tail equal one "
+          "pass",
+          "[boxcar][gpu]") {
+    boxcar_test::check_boxcar_tail(test::gpu_exec());
 }
 
 TEST_CASE("FDMTBoxcar GPU host and device APIs match direct reference",

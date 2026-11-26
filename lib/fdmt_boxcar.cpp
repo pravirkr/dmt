@@ -875,6 +875,71 @@ CandidateResultView FDMTBoxcar::drain() {
         *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
         m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state);
 }
+
+namespace {
+
+void check_tail(const plans::FDMTPlan& plan, SizeType n_tail) {
+    if (n_tail == 0 || n_tail > plan.get_nsamps()) {
+        throw std::invalid_argument(fmt::format(
+            "FDMTBoxcar::drain: n_tail must be 1..nsamps ({}), got {}",
+            plan.get_nsamps(), n_tail));
+    }
+}
+
+} // namespace
+
+CandidateResultView FDMTBoxcar::drain(std::span<const float> tail,
+                                      SizeType n_tail) {
+    check_tail(m_impl->plan, n_tail);
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            return m_impl->run_masked(
+                {}, tail.size(), [&] { return m_impl->engine->execute(tail); });
+        });
+}
+CandidateResultView FDMTBoxcar::drain(std::span<const uint8_t> tail,
+                                      SizeType n_tail) {
+    check_tail(m_impl->plan, n_tail);
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            return m_impl->run_masked(
+                {}, tail.size(), [&] { return m_impl->engine->execute(tail); });
+        });
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const float> tail,
+                                      SizeType n_tail,
+                                      Stream stream) {
+    check_tail(m_impl->plan, n_tail);
+    detail::check_device(tail.device, backend(), device(), "FDMTBoxcar::drain");
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            static_cast<void>(m_impl->run_masked({}, tail.size(), [&] {
+                return m_impl->engine->execute(tail, stream);
+            }));
+            return m_impl->engine->copy_result(stream);
+        });
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const uint8_t> tail,
+                                      SizeType n_tail,
+                                      Stream stream) {
+    check_tail(m_impl->plan, n_tail);
+    detail::check_device(tail.device, backend(), device(), "FDMTBoxcar::drain");
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            static_cast<void>(m_impl->run_masked({}, tail.size(), [&] {
+                return m_impl->engine->execute(tail, stream);
+            }));
+            return m_impl->engine->copy_result(stream);
+        });
+}
 uint64_t FDMTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,
                                    m_impl->engine->search_latency());

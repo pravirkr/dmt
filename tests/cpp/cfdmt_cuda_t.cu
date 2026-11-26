@@ -147,6 +147,14 @@ TEST_CASE("CohFDMT (gpu) output is independent of layout, encoding and "
     test::cfdmt::check_layout_independence(test::gpu_exec());
 }
 
+TEST_CASE("CohFDMT (gpu) reads descending and lower-sideband subbands",
+          "[cfdmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    test::cfdmt::check_sideband_and_order(test::gpu_exec());
+}
+
 TEST_CASE("CohFDMT (gpu) 4-bit input and dt_step recover the pulse",
           "[cfdmt_gpu][gpu]") {
     if (!test::gpu_device_available()) {

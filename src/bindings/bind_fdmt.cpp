@@ -103,7 +103,8 @@ py::object fdmt_execute_device(Engine& eng,
                                const DeviceArray& waterfall,
                                std::optional<SizeType> nbits,
                                const py::object& out,
-                               const py::object& stream) {
+                               const py::object& stream,
+                               std::optional<SizeType> n_tail = std::nullopt) {
     const DeviceCall call =
         device_call(what, eng.backend(), eng.device(), waterfall, stream);
     const auto input = consume_device_waterfall(eng, call, waterfall, nbits);
@@ -115,6 +116,25 @@ py::object fdmt_execute_device(Engine& eng,
     auto result = device_output<float>(call, waterfall.obj, out, shape);
     {
         const py::gil_scoped_release release;
+        if constexpr (requires {
+                          eng.execute_tail(call.span<const float>(input),
+                                           SizeType{1},
+                                           call.span<float>(result.tensor),
+                                           call.native_stream());
+                      }) {
+            if (n_tail.has_value()) {
+                if (nbits.has_value()) {
+                    eng.execute_tail(call.span<const uint8_t>(input), *nbits,
+                                     *n_tail, call.span<float>(result.tensor),
+                                     call.native_stream());
+                } else {
+                    eng.execute_tail(call.span<const float>(input), *n_tail,
+                                     call.span<float>(result.tensor),
+                                     call.native_stream());
+                }
+                return result.array;
+            }
+        }
         if (nbits.has_value()) {
             eng.execute(call.span<const uint8_t>(input), *nbits,
                         call.span<float>(result.tensor), call.native_stream());
@@ -781,6 +801,69 @@ void bind_fdmt(py::module_& mod) {
             // docstrings, and the host overload above documents both.
             "Run the FDMT transform on device memory (GPU backends), without "
             "copies; see above.")
+        .def(
+            "execute_tail",
+            [](FDMT& fdmt, const py::array& waterfall_obj, SizeType n_tail,
+               const std::optional<SizeType> nbits,
+               const std::optional<py::array>& out) -> py::object {
+                const auto& plan = fdmt.get_plan();
+                if (nbits.has_value()) {
+                    const auto packed = require_contiguous_array<uint8_t>(
+                        waterfall_obj, "FDMT.execute_tail", "uint8");
+                    check_packed_waterfall(fdmt, "FDMT.execute_tail", packed,
+                                           *nbits);
+                    const std::span<const uint8_t> in_span(packed.data(),
+                                                           packed.size());
+                    return fdmt_execute_to_array(
+                        fdmt, "FDMT", packed.ndim() == 3,
+                        static_cast<SizeType>(packed.size()),
+                        fdmt.get_nbeams() * plan.get_nchans() *
+                            packed_bytes(plan.get_nsamps(), *nbits),
+                        out, [&](std::span<float> dmt) {
+                            fdmt.execute_tail(in_span, *nbits, n_tail, dmt);
+                        });
+                }
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "FDMT.execute_tail", "float32");
+                check_float_waterfall(fdmt, "FDMT.execute_tail", waterfall);
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                return fdmt_execute_to_array(
+                    fdmt, "FDMT", waterfall.ndim() == 3,
+                    static_cast<SizeType>(waterfall.size()),
+                    fdmt.get_nbeams() * plan.get_nchans() * plan.get_nsamps(),
+                    out, [&](std::span<float> dmt) {
+                        fdmt.execute_tail(in_span, n_tail, dmt);
+                    });
+            },
+            py::arg("waterfall").noconvert(), py::arg("n_tail"),
+            py::kw_only(), py::arg("nbits") = py::none(),
+            py::arg("out") = py::none(),
+            R"doc(
+            The stream's last, short block (mode ``"valid"``): a whole block
+            (as :meth:`execute`; packed with ``nbits=``) whose first
+            ``n_tail`` samples per channel are data and the rest padding
+            (e.g. zeros). The first ``n_tail`` output samples of every row do
+            not depend on the padding (the transform is causal in its
+            ``f_min`` reference); later ones do. The stream then ends:
+            :meth:`execute`, :meth:`execute_tail` and :meth:`reset` raise
+            ``RuntimeError`` until :meth:`reset_history` or
+            :meth:`load_history`. NumPy or device arrays (GPU backends; then
+            asynchronous on keyword-only ``stream``).
+            )doc")
+        .def(
+            "execute_tail",
+            [](FDMT& fdmt, const DeviceArray& waterfall, SizeType n_tail,
+               const std::optional<SizeType> nbits, const py::object& out,
+               const py::object& stream) {
+                return fdmt_execute_device(fdmt, "FDMT.execute_tail",
+                                           waterfall, nbits, out, stream,
+                                           n_tail);
+            },
+            py::arg("waterfall"), py::arg("n_tail"), py::kw_only(),
+            py::arg("nbits") = py::none(), py::arg("out") = py::none(),
+            py::arg("stream") = py::none(),
+            "Device-memory overload of :meth:`execute_tail` (GPU backends).")
         .def(
             "reset",
             [](const py::object& self, const py::array& waterfall_obj,

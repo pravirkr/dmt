@@ -40,11 +40,13 @@ __device__ __forceinline__ float decode(const uint8_t* data,
 }
 
 // One thread per (subband, FFT block, sample) of subbands [sub_begin,
-// sub_begin + nsub): both polarisations.
+// sub_begin + nsub): both polarisations. im_sign -1 conjugates (lower
+// sideband).
 __global__ void unpack_kernel(const SubbandDesc* __restrict__ desc,
                               const float* __restrict__ lut,
                               unsigned nbits,
                               bool is_signed,
+                              float im_sign,
                               uint64_t sub_begin,
                               uint64_t nsub,
                               uint64_t nfft,
@@ -63,10 +65,11 @@ __global__ void unpack_kernel(const SubbandDesc* __restrict__ desc,
         const uint64_t e0   = d.base + (((j * step) + i) * d.time);
         const uint64_t e1   = e0 + d.pol;
         float2* dst         = out + (row * 2 * nbin) + i;
-        dst[0]    = {decode(d.data, e0, nbits, is_signed, lut),
-                     decode(d.data, e0 + d.ri, nbits, is_signed, lut)};
+        dst[0] = {decode(d.data, e0, nbits, is_signed, lut),
+                  im_sign * decode(d.data, e0 + d.ri, nbits, is_signed, lut)};
         dst[nbin] = {decode(d.data, e1, nbits, is_signed, lut),
-                     decode(d.data, e1 + d.ri, nbits, is_signed, lut)};
+                     im_sign *
+                         decode(d.data, e1 + d.ri, nbits, is_signed, lut)};
     }
 }
 
@@ -146,12 +149,16 @@ public:
                     groups[g].size(), input_size(g)));
             }
             const auto st = baseband_strides(m_format, m_nsamps, m_groups[g]);
-            for (SizeType s = 0; s < m_groups[g]; ++s) {
-                m_desc_h[isub++] = {.data = groups[g].data(),
-                                    .base = s * st.freq,
-                                    .pol  = st.pol,
-                                    .ri   = st.ri,
-                                    .time = st.time};
+            for (SizeType s = 0; s < m_groups[g]; ++s, ++isub) {
+                // Descriptors in ascending frequency; isub is the input's
+                // order.
+                const SizeType k =
+                    m_format.descending ? m_nsub - 1 - isub : isub;
+                m_desc_h[k] = {.data = groups[g].data(),
+                               .base = s * st.freq,
+                               .pol  = st.pol,
+                               .ri   = st.ri,
+                               .time = st.time};
             }
         }
         gpu_utils::set_device(m_device_id);
@@ -189,7 +196,8 @@ public:
             int64_t{1} << 20));
         unpack_kernel<<<blocks, fourier_gpu::kBlock, 0, stream>>>(
             m_desc.data(), m_lut.data(), static_cast<unsigned>(m_format.nbits),
-            m_format.is_signed, sub_begin, nsub, m_nfft, m_nbin, m_step,
+            m_format.is_signed, m_format.lower_sideband ? -1.0F : 1.0F,
+            sub_begin, nsub, m_nfft, m_nbin, m_step,
             reinterpret_cast<float2*>(out.data()));
         gpu_utils::check_last_gpu_error("BasebandUnpackerCUDA: unpack kernel");
     }

@@ -272,6 +272,26 @@ public:
      * ends the stream: execute() throws until reset_history().
      */
     [[nodiscard]] CandidateResultView drain();
+    /**
+     * End of stream with a short last block: searches the first @p n_tail
+     * samples of each channel of @p tail, then drains as drain() does.
+     * @p tail is a whole block, laid out as for execute() (float or packed
+     * by config.input_nbits; host or device memory); its samples from
+     * @p n_tail on are padding, never searched, and (the FDMT being causal)
+     * they change no row before the stream's end. get_searched_nsamps()
+     * then ends at the tail's n_tail-th sample, and no candidate reaches
+     * past it. Uses the constructor's kill mask. Device input is read on
+     * @p stream; the call returns host results, as drain().
+     * @throws std::invalid_argument unless 1 <= n_tail <= nsamps.
+     */
+    [[nodiscard]] CandidateResultView drain(std::span<const float> tail,
+                                            SizeType n_tail);
+    [[nodiscard]] CandidateResultView drain(std::span<const uint8_t> tail,
+                                            SizeType n_tail);
+    [[nodiscard]] CandidateResultView
+    drain(DeviceSpan<const float> tail, SizeType n_tail, Stream stream = {});
+    [[nodiscard]] CandidateResultView
+    drain(DeviceSpan<const uint8_t> tail, SizeType n_tail, Stream stream = {});
     /// FDMT output samples [0, n) whose trailing endpoints every row has
     /// searched (after drain(), the whole stream; for a chan_dm plan this is
     /// the raw FDMT count without subtracting

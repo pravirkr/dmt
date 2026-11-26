@@ -104,7 +104,12 @@ simulate_baseband(float f_center,
  * sub_count) and samples [@p t_begin, @p t_begin + @p t_count).
  *
  * Each component v becomes round(v * scale) clipped to the format's range
- * (2-bit: the nearest of format.levels_2bit to v * scale).
+ * (2-bit: the nearest of format.levels_2bit to v * scale). The voltages are
+ * upper sideband in ascending frequency (as simulate_baseband() makes
+ * them); format.lower_sideband packs their conjugates, and with
+ * format.descending the subband range counts in the format's order, from
+ * the highest subband down (one call per CohFDMTConfig::subband_groups
+ * entry, in its order).
  */
 std::vector<uint8_t> pack_baseband(std::span<const ComplexType> voltages,
                                    SizeType nsub,

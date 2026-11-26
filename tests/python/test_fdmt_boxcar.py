@@ -1012,3 +1012,44 @@ def test_minimum_memory() -> None:
 
 def test_minimum_memory_gpu(gpu_backend: str) -> None:
     _check_minimum_memory(gpu_backend)
+
+
+def test_drain_with_short_tail_matches_one_pass() -> None:
+    """Whole blocks then drain(tail, n_tail=...) find the single pass's
+    candidates, none from the tail's padding."""
+    nchans, nsamps, tail, nblocks = 16, 128, 45, 3
+    total = nblocks * nsamps + tail
+    rng = np.random.default_rng(6)
+    values = rng.integers(76, 180, (nchans, total)).astype(np.uint8)
+    cfg = BoxcarConfig(
+        16,
+        wtsp=1.5,
+        detect_thresh=2.5,
+        max_candidates=1 << 20,
+        max_cands_per_dm=0,
+        input_nbits=8,
+        input_mean=128.0,
+        noise_sigma=30.0,
+    )
+
+    def plan(n: int) -> FDMTPlan:
+        return FDMTPlan(1200.0, 1600.0, nchans, n, 0.001, 40)
+
+    whole = FDMTBoxcar(plan(total), cfg)
+    want = np.concatenate([whole.execute(values).candidates, whole.drain().candidates])
+    stream = FDMTBoxcar(plan(nsamps), cfg)
+    parts = [
+        stream.execute(
+            np.ascontiguousarray(values[:, k * nsamps : (k + 1) * nsamps])
+        ).candidates
+        for k in range(nblocks)
+    ]
+    block = np.full((nchans, nsamps), 255, dtype=np.uint8)
+    block[:, :tail] = values[:, nblocks * nsamps :]
+    parts.append(stream.drain(block, n_tail=tail).candidates)
+    got = np.concatenate(parts)
+    assert stream.searched_nsamps == total
+    assert len(want) > 20
+    assert np.all(got["end_sample"] < total)
+    order = ("peak_sample", "dm_idx", "width", "begin_sample")
+    np.testing.assert_array_equal(np.sort(got, order=order), np.sort(want, order=order))
