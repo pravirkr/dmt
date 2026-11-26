@@ -290,8 +290,8 @@ boxcar suite (`bench/results/parkes_uwl/plots/summary.md`):
 | :--- | ---: | ---: |
 | full band, uint8 | 0.36 s per block (5.8× real time) | 4.17 s (0.50×) |
 | full band, float32 | 0.36 s (5.8×) | 5.25 s (0.40×) |
-| depth 4, uint8 | 1.16 s (1.81×) | 14.3 s (0.15×) |
-| depth 4, float32 | 1.59 s (1.32×) | 20.1 s (0.10×) |
+| depth 4, uint8 | 1.17 s (1.80×) | 6.21 s (0.34×) |
+| depth 4, float32 | 2.34 s (0.90×) | 9.89 s (0.21×) |
 
 (The CPU full-band rows are not in the suite; they come from a standalone
 FDMTBoxcar loop over 5 blocks on the same machine and threads. The float32 row

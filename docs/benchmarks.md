@@ -225,7 +225,7 @@ differently.
 ::::
 
 - **CPU.** Packed 1–4-bit input runs the FDMT tree in narrow integer lanes,
-  1.1–1.4× faster than float32.
+  1.0–1.4× faster than float32 (least on `meerkat_lband`).
 - **GPU.** Only `cryopaf_lband` gains from 1–2-bit input; on the other
   presets float32 uses the faster direct bottom and top kernels.
 - **16-bit** input is no faster than float32 (slower on the GPU).
@@ -302,10 +302,10 @@ engines are not run here (FDMT-FFT needs ~50 GB; CPU DDMT takes hours).
 
 - **The GPU keeps up at the native 64 µs on 8-bit input.** Float32 fits the
   budget only with short chunks and runs just below real time.
-- **Each halving of the resolution is 4–5× cheaper.** From 256 µs, 8 CPU
-  threads keep up. At high DM the bottom channels are smeared far beyond
-  256 µs anyway, so a real-time system can search at 256–512 µs and keep the
-  64 µs data around triggers.
+- **Each halving of the resolution is 3–6× cheaper on the GPU and 2–5× on
+  the CPU.** From 256 µs, 8 CPU threads keep up. At high DM the bottom
+  channels are smeared far beyond 256 µs anyway, so a real-time system can
+  search at 256–512 µs and keep the 64 µs data around triggers.
 - **On the CPU, 64 µs** is for offline processing.
 
 :::{dropdown} Exact numbers

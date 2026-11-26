@@ -150,7 +150,7 @@ runs:
 | :--- | ---: | ---: | ---: |
 | `cryopaf_low` | 37.9 ms | 24.4 ms | 21.8 ms |
 | `cryopaf_lband` | 17.2 ms | 13.8 ms | 11.6 ms |
-| `meerkat_lband` | 46.5 ms | 39.8 ms | 25.9 ms |
+| `meerkat_lband` | 46.5 ms | 39.8 ms | 25.7 ms |
 | `parkes_uwl` | – | – | 353 ms (1.84 GiB) |
 
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)

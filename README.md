@@ -143,7 +143,7 @@ Requirements, CMake options and development installs are in the
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.7.0 on one node: an AMD EPYC 9654 (up to 8 threads, one per
+Measured with dmt 0.8.0 on one node: an AMD EPYC 9654 (up to 8 threads, one per
 CCD) and an NVIDIA L40S (device-resident data). The `meerkat_lband`
 preset is a typical L-band survey setup: 4096 channels at 856–1712 MHz and
 612.48 µs, processed as a stream of 20.1 s blocks, with up to 4057 DM trials
@@ -155,7 +155,7 @@ from 0 to 2000 pc cm⁻³.
 </picture>
 
 Every engine runs faster than real time on both backends. FDMT is the
-fastest, at 55× real time on 8 CPU threads and 776× on the L40S: 19× faster
+fastest, at 57× real time on 8 CPU threads and 780× on the L40S: 19× faster
 than brute-force DDMT on the CPU and 6× on the GPU. Sweeps over DM range,
 block length and input width, the other presets (including the 6656-channel
 Parkes UWL search within a 10 GiB memory budget), and CohFDMT are on the

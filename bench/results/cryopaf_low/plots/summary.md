@@ -4,7 +4,7 @@
 
 | results | CPU | GPU | RAM | CPU threads | placement | load (1/5/15 min) | dmt |
 | :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- |
-| `l40s-epyc9654` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | 8 | close | 17.0 169.5 282.7 of 384 CPUs → 6.4 102.9 240.0 of 384 CPUs | 0.8.0 |
+| `l40s-epyc9654` | AMD EPYC 9654 96-Core Processor | NVIDIA L40S | 755 GB | 8 | close | 2.0 2.9 3.5 of 384 CPUs → 7.2 4.7 4.1 of 384 CPUs | 0.8.0 |
 
 <!-- results -->
 
@@ -12,45 +12,45 @@
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT | DDMT / FDMT | SDMT / FDMT | FDMT-FFT / FDMT | FDMT real-time factor |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| AMD EPYC 9654 96-Core Processor · 8 thr | 252 ms | 318 ms | 337 ms | 331 ms | 185 ms | 1.3× | 1.3× | 1.3× | 67× |
-| NVIDIA L40S | 21.8 ms | 25 ms | 31.8 ms | 31.6 ms | 14.8 ms | 1.5× | 1.4× | 1.1× | 769× |
+| AMD EPYC 9654 96-Core Processor · 8 thr | 255 ms | 317 ms | 341 ms | 336 ms | 184 ms | 1.3× | 1.3× | 1.2× | 66× |
+| NVIDIA L40S | 21.8 ms | 25 ms | 31.5 ms | 31.7 ms | 14.9 ms | 1.4× | 1.5× | 1.1× | 769× |
 
 **Peak memory at the reference point** (float32 input): process peak resident set size on the CPU (input, output, engine and the benchmark process itself), device memory in use on the GPU (input, output and engine; sampled every millisecond). Measured in the same runs as the times above.
 
 | platform | FDMT | FDMT-FFT | DDMT | SDMT | DDMT-FFT |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| AMD EPYC 9654 96-Core Processor · 8 thr | 1.84 GiB | 0.87 GiB | 0.39 GiB | 0.40 GiB | 0.82 GiB |
-| NVIDIA L40S | 0.74 GiB | 4.14 GiB | 0.34 GiB | 0.34 GiB | 1.97 GiB |
+| AMD EPYC 9654 96-Core Processor · 8 thr | 1.85 GiB | 0.89 GiB | 0.41 GiB | 0.41 GiB | 0.83 GiB |
+| NVIDIA L40S | 0.84 GiB | 4.14 GiB | 0.34 GiB | 0.34 GiB | 1.97 GiB |
 
 **Real-time factor by input width** (data seconds per compute second, 32768 samples × 1545 DM trials):
 
 | platform | engine | 1-bit | 2-bit | 4-bit | 8-bit | 16-bit | float32 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| AMD EPYC 9654 96-Core Processor | FDMT, 8 threads | 89.0× | 87.1× | 81.0× | 65.4× | 64.5× | 66.4× |
-| AMD EPYC 9654 96-Core Processor | DDMT, 8 threads | 95.7× | 87.4× | 95.9× | 95.9× | 54.4× | 50.0× |
-| AMD EPYC 9654 96-Core Processor | SDMT, 8 threads | 103.8× | 90.7× | 101.3× | 106.1× | 55.8× | 51.0× |
-| AMD EPYC 9654 96-Core Processor | DDMT-FFT, 8 threads | 90.6× | 90.5× | 89.7× | 90.7× | 90.7× | 89.8× |
-| NVIDIA L40S | FDMT, device-resident | 659.5× | 642.3× | 638.6× | 538.8× | 470.2× | 769.4× |
-| NVIDIA L40S | DDMT, device-resident | 578.4× | 562.9× | 546.4× | 612.5× | 574.2× | 529.0× |
-| NVIDIA L40S | SDMT, device-resident | 578.1× | 563.8× | 545.8× | 616.8× | 571.5× | 529.3× |
-| NVIDIA L40S | FDMT-FFT, device-resident | 676.7× | 674.8× | 675.1× | 674.5× | 670.7× | 670.6× |
-| NVIDIA L40S | DDMT-FFT, device-resident | 1122.8× | 1121.7× | 1121.1× | 1120.0× | 1118.2× | 1129.8× |
+| AMD EPYC 9654 96-Core Processor | FDMT, 8 threads | 88.8× | 87.5× | 81.9× | 64.8× | 63.0× | 66.1× |
+| AMD EPYC 9654 96-Core Processor | DDMT, 8 threads | 98.4× | 87.5× | 98.2× | 97.7× | 54.0× | 49.5× |
+| AMD EPYC 9654 96-Core Processor | SDMT, 8 threads | 103.0× | 90.3× | 103.6× | 106.9× | 55.7× | 50.6× |
+| AMD EPYC 9654 96-Core Processor | DDMT-FFT, 8 threads | 91.4× | 90.8× | 90.4× | 90.3× | 91.5× | 91.1× |
+| NVIDIA L40S | FDMT, device-resident | 658.4× | 646.5× | 637.9× | 536.2× | 471.8× | 768.5× |
+| NVIDIA L40S | DDMT, device-resident | 581.4× | 568.1× | 547.1× | 617.5× | 574.1× | 530.2× |
+| NVIDIA L40S | SDMT, device-resident | 581.9× | 568.1× | 549.8× | 617.9× | 572.6× | 530.6× |
+| NVIDIA L40S | FDMT-FFT, device-resident | 677.0× | 676.0× | 675.8× | 675.1× | 674.4× | 672.5× |
+| NVIDIA L40S | DDMT-FFT, device-resident | 1122.6× | 1123.0× | 1121.9× | 1121.3× | 1117.4× | 1129.4× |
 
 **FDMTBoxcar** (`run_suite.py --suite boxcar`): 32768 samples × 1545 DM trials, boxcars to 100 ms, threshold 6, median time per block. *allocated*: the library's own accounting plus the input block; *peak*: process peak RSS (CPU) or device memory in use (GPU), measured in the same run.
 
 | benchmark | time per block | real-time factor | allocated | peak |
 | :--- | ---: | ---: | ---: | ---: |
-| `cuda: fft_fused/wtsp:1` | 25.3 ms | 662× | 3.99 GiB | 3.98 GiB |
-| `cuda: fft_fused/wtsp:1.5` | 24.8 ms | 678× | 3.97 GiB | 3.97 GiB |
-| `cuda: fft_transform` | 24.8 ms | 676× | 4.14 GiB | 4.14 GiB |
-| `cuda: fused/wtsp:1.5/sb:0` | 22.5 ms | 744× | 0.56 GiB | 0.56 GiB |
-| `cuda: fused/wtsp:1/sb:0` | 23.2 ms | 722× | 0.58 GiB | 0.58 GiB |
-| `cuda: fused_uint8/wtsp:1.5/sb:0` | 22.7 ms | 740× | 0.52 GiB | 0.51 GiB |
-| `cuda: fused_uint8/wtsp:1/sb:0` | 24 ms | 700× | 0.54 GiB | 0.54 GiB |
-| `cuda: separate/wtsp:1` | 22.8 ms | 737× | 0.77 GiB | 0.77 GiB |
-| `cuda: separate/wtsp:1.5` | 22.2 ms | 757× | 0.75 GiB | 0.75 GiB |
-| `cuda: transform` | 21.8 ms | 769× | 0.73 GiB | 0.74 GiB |
-| `cpu: uint8/wtsp:1.5/cpu8` | 445 ms | 38× | 1.54 GiB | 1.60 GiB |
-| `cpu: uint8/wtsp:1/cpu8` | 483 ms | 35× | 1.57 GiB | 1.62 GiB |
-| `cpu: wtsp:1.5/cpu8` | 315 ms | 53× | 1.61 GiB | 1.67 GiB |
-| `cpu: wtsp:1/cpu8` | 339 ms | 49× | 1.63 GiB | 1.68 GiB |
+| `cuda: fft_fused/wtsp:1` | 25.3 ms | 663× | 4.05 GiB | 4.05 GiB |
+| `cuda: fft_fused/wtsp:1.5` | 24.8 ms | 677× | 4.03 GiB | 4.03 GiB |
+| `cuda: fft_transform` | 24.9 ms | 675× | 4.14 GiB | 4.14 GiB |
+| `cuda: fused/wtsp:1.5/sb:0` | 22.5 ms | 746× | 0.56 GiB | 0.56 GiB |
+| `cuda: fused/wtsp:1/sb:0` | 23.4 ms | 718× | 0.58 GiB | 0.58 GiB |
+| `cuda: fused_uint8/wtsp:1.5/sb:0` | 22.7 ms | 739× | 0.52 GiB | 0.52 GiB |
+| `cuda: fused_uint8/wtsp:1/sb:0` | 23.9 ms | 702× | 0.54 GiB | 0.54 GiB |
+| `cuda: separate/wtsp:1` | 22.8 ms | 737× | 0.93 GiB | 0.93 GiB |
+| `cuda: separate/wtsp:1.5` | 22.1 ms | 758× | 0.92 GiB | 0.91 GiB |
+| `cuda: transform` | 21.8 ms | 769× | 0.83 GiB | 0.84 GiB |
+| `cpu: uint8/wtsp:1.5/cpu8` | 291 ms | 58× | 0.91 GiB | 0.98 GiB |
+| `cpu: uint8/wtsp:1/cpu8` | 324 ms | 52× | 0.93 GiB | 1.00 GiB |
+| `cpu: wtsp:1.5/cpu8` | 259 ms | 65× | 1.61 GiB | 1.67 GiB |
+| `cpu: wtsp:1/cpu8` | 298 ms | 56× | 1.63 GiB | 1.68 GiB |
