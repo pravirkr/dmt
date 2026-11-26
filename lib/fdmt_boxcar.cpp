@@ -28,10 +28,12 @@ public:
         : m_chunk(chunk),
           m_latency(latency) {}
 
-    void search(std::span<const float>, detail::FDMTSearchSink&) override {}
-    void
-    search(DeviceSpan<const float>, detail::FDMTSearchSink&, Stream) override {}
-    void reset(Stream) override {}
+    void search(std::span<const float> /*wf*/,
+                detail::FDMTSearchSink& /*sink*/) override {}
+    void search(DeviceSpan<const float> /*wf*/,
+                detail::FDMTSearchSink& /*sink*/,
+                Stream /*stream*/) override {}
+    void reset(Stream /*stream*/) override {}
     void allocate() override {}
     [[nodiscard]] bool stages_host_input() const noexcept override {
         return true;

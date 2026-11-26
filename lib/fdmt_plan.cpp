@@ -174,7 +174,7 @@ std::vector<float> FDMTPlan::Impl::get_dm_grid_final() const noexcept {
 
 namespace {
 
-template <bool kTrackDelay, typename LeafFn>
+template <bool TrackDelay, typename LeafFn>
 void trace_tree_leaves(const FDMTPlanContainer& container,
                        SizeType nchans,
                        SizeType level,
@@ -197,7 +197,7 @@ void trace_tree_leaves(const FDMTPlanContainer& container,
             }
             return;
         }
-        if constexpr (kTrackDelay) {
+        if constexpr (TrackDelay) {
             if (coord.i_coord_head == SIZE_MAX) {
                 // Pure copy/passthrough of an unpaired odd sub-band: target
                 // is forwarded unchanged.
@@ -281,18 +281,19 @@ std::vector<IndexType> FDMTPlan::Impl::trace_dm(SizeType dm_idx) const {
                                 ")");
     }
     const auto& boxes = m_container.level0_boxes;
-    trace_tree_leaves<true>(
-        m_container, m_nchans, m_niters, dm_idx, IndexType{0},
-        [&](SizeType idx0, SizeType chan, IndexType dt0,
-            IndexType target) noexcept {
-            if (boxes.empty()) {
-                shifts[chan] = target - std::abs(static_cast<IndexType>(dt0));
-            } else {
-                // The box's farthest read of a chan_dm plan.
-                const auto& box = boxes[idx0];
-                shifts[chan]    = target - box.lag - box.s;
-            }
-        });
+    trace_tree_leaves<true>(m_container, m_nchans, m_niters, dm_idx,
+                            IndexType{0},
+                            [&](SizeType idx0, SizeType chan, IndexType dt0,
+                                IndexType target) noexcept {
+                                if (boxes.empty()) {
+                                    shifts[chan] = target - std::abs(dt0);
+                                } else {
+                                    // The box's farthest read of a chan_dm
+                                    // plan.
+                                    const auto& box = boxes[idx0];
+                                    shifts[chan]    = target - box.lag - box.s;
+                                }
+                            });
     return shifts;
 }
 

@@ -8,388 +8,73 @@ All notable changes to `dmt` are listed here. The format follows
 
 ### Added
 
-- **`FDMTBoxcar::estimate_minimum_memory(...)`** (C++ and Python): the
-  estimate at the smallest `max_memory_bytes` the search can be built with
-  (same arguments as `estimate_memory()`, no budget), and
-  `FDMTBoxcarMemoryEstimate::max_memory_bytes`, the budget an estimate was
-  made with (for the minimum: the smallest that builds; one byte less
-  raises).
-- **`dmt::dispersion_delay(dm, f_lo_mhz, f_hi_mhz)`** (C++,
-  `dmt/common/types.hpp`): the dispersion delay in seconds, as Python's
-  `dmtlib.dispersion_delay` (TEMPO2 constant 1 / 2.41e-4; `f_hi_mhz` =
-  infinity for the delay from infinite frequency).
-- Documented time conventions of `RawCandidate`: `peak_sample` is the
-  trailing end of the window at the arrival at the lower edge of the
-  candidate's own plane (`f_low_mhz`; plan frequencies are channel edges);
-  a `chan_dm` plan's level-0 causal delay is subtracted on every plane. And
-  `FDMTBoxcar`'s input contract: no preprocessing; each channel zero mean,
-  common sigma, white in time over at least `max_boxcar` samples.
-- **`FDMTBoxcar` per-call kill masks on packed input** (Python
-  `execute(codes, kill_mask=...)`; C++ `execute(waterfall, kill_mask)`, host
-  or device input; CPU and GPU, every screen): channels a per-call mask
-  kills read the code `input_mean`, which must then be an integer. The
-  constructor plan's integer means stay exact, so only the per-mask cutoffs
-  and S/N scales change, as on float input (without box smearing the
-  candidates equal the float search on `code - input_mean`). Per-width
-  peaks across a change of tables are ranked by S/N.
-- **`BoxcarConfig::per_call_masks`** (Python `per_call_masks=`, default
-  false): declares that an `FDMTBoxcar` stream will pass per-call kill
-  masks. Their requirements are checked and their memory
-  reserved at construction and in `estimate_memory()`, before the
-  transform's path is chosen, so a per-call mask no longer fails mid-run
-  for those reasons, and `get_memory_usage()` stays at the estimate.
-  Candidates are unchanged. `FDMTFFTBoxcar` rejects it.
-- **Per-plane candidate counts:** `CandidateResultView::plane_counts`
-  (Python `plane_counts`, a structured array) and
-  `CandidateDeviceResultView::plane_counts` give each searched plane's
-  `emitted_count`, `total_detected`, `dropped_global` and `dropped_per_dm`
-  for the call, in `get_search_plans()` order (`FDMTBoxcar`,
-  `FDMTFFTBoxcar`); they sum to the call's counters, so a pipeline can tell
-  which subband lost candidates.
-- **`BoxcarConfig::max_candidates_per_plane`** (Python
-  `max_candidates_per_plane=`, default 0: off): each searched plane keeps at
-  most this many candidates per call, its first ones under `kDropNew` and
-  exactly its brightest under `kKeepBrightest`, so a plane flooded with
-  detections (RFI in one subband) cannot crowd the others out of
-  `max_candidates`. The planes' shares must fit `max_candidates`.
-- **`FDMTBoxcarMemoryEstimate::search_path` and `search_latency`** (C++ and
-  Python): the transform's path and the search latency of the instance the
-  estimate describes.
-
-- **`FDMT::estimate_memory(...)`** (C++ and Python `FDMT.estimate_memory`),
-  one overload per constructor with the same arguments: the memory the
-  instance would allocate (`usage`, equal to its `get_memory_usage()`), its
-  `chunk_nsamps`, and on a GPU the `host_staging` bytes the first host-memory
-  call adds, all computed without allocating. A GPU backend reads the
-  device's limits but allocates no device memory.
-- **`FDMTFFT::estimate_memory(...)`** (one overload per constructor) and
-  **`FDMTFFTBoxcar::estimate_memory(...)`**, C++ and Python: the same
-  estimate for the Fourier-domain engines (`chunk_nsamps` is the
-  overlap-save segment). Python `FDMTFFT` gains `memory_usage`.
-- **`CohFDMT::estimate_memory(config, exec)`** (C++ and Python
-  `CohFDMT.estimate_memory`): the memory a `CohFDMT` built with these
-  arguments would allocate, equal to its `get_memory_usage()`, computed
-  without allocating.
-- **`DDMTFFT::estimate_memory(plan, nsamps, exec, nbeams, options)`** (C++
-  and Python `DDMTFFT.estimate_memory`): the memory a `DDMTFFT` holds once a
-  stream of calls of `nsamps` samples is warm (`usage`), plus the staging
-  that host-memory, time-major and packed device-memory calls add, computed
-  without allocating. **`DDMTFFT::get_memory_usage()`** (Python
-  `memory_usage`) reports what an instance holds now.
-- **`DDMT::estimate_memory(plan, nsamps, exec, nbeams, gulp_size)`** and
-  **`SDMT::estimate_memory(...)`** (C++ and Python): the memory an instance
-  making calls of `nsamps` samples holds (`usage`), plus on a GPU the device
-  and pinned staging that host-memory and time-major calls add, computed
-  without allocating. **`DDMT::get_memory_usage()`** (Python
-  `memory_usage`) reports what an instance holds now.
-- **`FDMTBoxcar::estimate_memory(...)`** (C++ and Python
-  `FDMTBoxcar.estimate_memory`), with the constructor's arguments: the same
-  `usage` and `chunk_nsamps`, computed without allocating.
-- **`FDMTPlan` `chan_dm`** (C++ and Python, default 0) for coherently
-  dedispersed channels: level-0 boxes cover the residual intra-channel sweep
-  at the trial DM, centred on each channel's arrival, in `FDMT`,
-  `FDMTBoxcar`, `FDMTFFT` and `FDMTFFTBoxcar` (CPU and GPU, float and packed
-  input), with the noise model to match. FDMT output rows lag by the new
-  `get_level0_causal_delay()`, which `FDMTBoxcar` and `FDMTFFTBoxcar`
-  subtract from candidate times and `get_candidate_frontier()` (clamped at 0,
-  while `get_searched_nsamps()` stays in FDMT output samples);
-  `get_level0_boxes()` lists the boxes. Valid mode only. With `chan_dm` 0
-  every output is unchanged.
-- **Subband DM grids**: `FDMTPlan(..., subband_max_snr_loss=...)` (off at 0)
-  gives staggered subbands their own `generate_dm_grid` trials and has
-  `FDMTBoxcar` score only the tree-subband rows nearest such a grid, so deep
-  subband searches score 2-4x fewer rows (the full band is unchanged).
-  `BoxcarPlanePlan.coord_indices`, `FDMTCoordGrid::search_rows`, and
-  `FDMTSubDTGrid.search_rows` list the scored rows. The worst pulses can lose
-  up to about 1.5x the requested loss.
-- **DM-grid generators** (C++ `dmt/common/dm_grids.hpp`, Python `dmtlib`):
-  `generate_dm_grid` spaces trials so a pulse halfway between two keeps
-  `1 - max_snr_loss` (default 0.05) of its S/N after the boxcar search,
-  modelled over every channel, and takes `chan_dm`, `kill_mask`, `tol` and
-  `piecewise` (uniform segments for `DDMTFFT`). `generate_levin_dm_grid`
-  returns the Levin grids of `DDMTPlan` unchanged.
-- **`OverflowPolicy::kKeepBrightest`** for `FDMTBoxcar` and `FDMTFFTBoxcar`
-  (CPU and GPU): on overflow each DM row keeps its `max_cands_per_dm`
-  brightest candidates, and the call keeps the `max_candidates` brightest of
-  those, deterministically. Set a small positive `max_cands_per_dm`; the
-  stores count in the memory budget. `kDropNew` stays the default.
-- **`BoxcarConfig::screen_mode` / `dmtlib.BoxcarScreenMode`** for `FDMTBoxcar`
-  and `FDMTFFTBoxcar` (CPU and GPU): `kAuto` (`AUTO`, default), `kKadane`
-  (`KADANE`, lossless multi-bucket Kadane tile gate + exact Stage-2 scoring),
-  `kPrefix` (`PREFIX`, prefix-sum / sparse range-minimum screen), and `kNone`
-  (`NONE`, unscreened exact scoring).
-- **Pinned host memory in the memory reports**: `FDMTMemoryUsage::pinned`
-  and `DDMTFFTMemoryUsage::pinned` (Python `memory_usage["pinned"]`) give the
-  pinned host buffers a GPU instance holds for host-memory calls, and
-  `FDMTMemoryEstimate::host_pinned` and `DDMTFFTMemoryEstimate::host_pinned`
-  what the first such call adds (`FDMT`, `FDMTFFT`, `DDMTFFT`; `CohFDMT`
-  reports it in `host_pinned` of its estimate). Not part of `total()`; 0 on
-  the CPU. `DDMT` and `SDMT` already had both.
-- **`Exec::cuda(device, nthreads)` and `Exec::hip(device, nthreads)`**
-  (`nthreads` default 1): on a GPU backend `nthreads` is the number of host
-  worker threads that stage host-memory results through pinned buffers
-  (`FDMT`, `FDMTFFT`, `DDMTFFT`, `CohFDMT`: up to 4, once the output plane
-  reaches 2 x min(nthreads, 4) x 8 MiB). Python: the engines' `nthreads=`
-  argument now means the same on a GPU backend. 0.8.0 always staged with
-  up to 4 threads (`DDMT` up to 16), so at the default host-output GPU calls
-  on large planes are slower than 0.8.0 (up to 42% for `meerkat_lband` on an
-  L40S); pass `nthreads=4` for the 0.8.0 speed.
-- **`out=` on host `FDMTFFT.execute` and `FDMTFFT.execute_time_major`**
-  (Python, keyword-only): writes the result into a caller-owned C-contiguous
-  `float32` array of the output shape, as `FDMT.execute` does.
-- `dmt::build_info()` (Python `dmtlib.build_info()`) reports the
-  configuration's own compiler flags: `-ffast-math` in `cxx_flags` and the
-  GPU flags (`-use_fast_math` for CUDA) in `gpu`.
+- **Memory estimation:** static `estimate_memory(...)` across all engines (C++
+  and Python, no allocation), `FDMTBoxcar::estimate_minimum_memory()`,
+  `DDMT` / `DDMTFFT` `get_memory_usage()`, and `pinned` / `host_pinned` fields
+  for GPU pinned host staging.
+- **DM grids and `chan_dm`:** `generate_dm_grid` and `generate_levin_dm_grid`
+  (C++ `dmt/common/dm_grids.hpp`, Python `dmtlib`),
+  `FDMTPlan(..., subband_max_snr_loss=...)` for pruned subband grids, and
+  `FDMTPlan(..., chan_dm=...)` for coherently dedispersed channels.
+- **Boxcar search (`FDMTBoxcar`, `FDMTFFTBoxcar`):** `BoxcarScreenMode`
+  (`kAuto`, `kKadane`, `kPrefix`, `kNone`; lossless `kKadane` is now the CPU
+  default), `OverflowPolicy::kKeepBrightest`, `max_candidates_per_plane` and
+  `plane_counts`, per-call kill masks on packed input, and
+  `BoxcarConfig::per_call_masks`.
+- **GPU staging threads:** `Exec::cuda(device, nthreads)` /
+  `Exec::hip(device, nthreads)` (Python `nthreads=`, default 1, up to 4) caps
+  host-output staging workers; pass `nthreads=4` for 0.8.0 host-output speed on
+  large planes.
+- Keyword-only `out=` on host `FDMTFFT.execute` / `execute_time_major`
+  (Python) and `dmt::dispersion_delay()` in `dmt/common/types.hpp`.
 
 ### Changed
 
-- **Strict host waterfall and buffer inputs in Python bindings.** `FDMT`,
-  `FDMTFFT`, `DDMT`, `DDMTFFT`, `compute_fdmt`, `compute_fdmt_fft`,
-  `pack_baseband`, and `add_frb_track` now require exact dtype (`float32`,
-  `uint8` for packed input, `complex64` for baseband voltages) and
-  C-contiguous layout (plus writeability for in-place `dmt` / `waterfall`
-  buffers), raising `ValueError` instead of silently copying or casting.
-- **GPU `FDMTBoxcar` and `FDMTFFTBoxcar` stage host-memory input inside
-  `max_memory_bytes`.** A host (NumPy) block was copied whole to the
-  device on the first host `execute()`, outside the budget (UWL 6656
-  channels: +0.44 GiB per 65536-sample 8-bit block, +1.7 GiB float).
-  `FDMTBoxcar` now copies each chunk into a `beams x nchans x chunk`
-  buffer reserved at construction and counted in the budget (UWL 8-bit at
-  chunk 4096: 27 MiB; float 109 MiB); `FDMTFFTBoxcar` reserves the whole
-  float block at construction (its overlap-save segment usually spans the
-  block). Host calls allocate nothing, and
-  `FDMTBoxcarMemoryEstimate.host_staging` is gone (it was new in this
-  release). Device-input callers hold the buffer too. Every GPU
-  estimate grows by it, so a configuration exactly at a budget
-  breakpoint may take the next shorter chunk. Candidates are unchanged
-  (bitwise, host vs device input, on every path). Host-input speed on an
-  L40: Parkes UWL within 2% (8-bit and float), packed input unchanged;
-  fast float plans are slower (MeerKAT L-band float 291x -> 224x real
-  time: per-chunk copies get about half the bandwidth of one block copy).
-  Device input is unchanged.
-- **GPU engines check the device's free memory before allocating.** GPU
-  `FDMT`, `FDMTBoxcar`, `FDMTFFTBoxcar`, `FDMTFFT` and `CohFDMT` compare
-  the configuration they chose (from `max_memory_bytes` and the other
-  arguments only; free memory never changes the choice) with the device's
-  free memory at construction, and raise `std::bad_alloc` (Python
-  `MemoryError`) with what they need and what is free before allocating
-  anything. Estimates do not read free memory. The advice in these errors
-  now names `max_memory_bytes` for the engines that have one (`FDMT`,
-  `FDMTBoxcar`, `FDMTFFTBoxcar`; with `estimate_minimum_memory()` for
-  the boxcar searches) instead of shorter blocks.
-- **GPU `FDMTBoxcar` subband searches choose path and chunk by a simple
-  rule** (`subband_depth > 0`, automatic chunk). They took the unskewed
-  direct path whenever it fit at any chunk and halved the chunk until it
-  did, so a larger budget could be slower: Parkes UWL depth 4 with
-  `max_boxcar` 4096 at the default 10 GiB ran direct at chunk 256 (0.92x
-  real time on an L40, 8-bit) where the skewed path at chunk 4096 fits in
-  7.8 GiB (2.79x). Now: the chunk whose state fits the L2 cache when the
-  plan has one (as before), else the direct path at the longest chunk from
-  4096 down to `max_boxcar / 8` (at least 256) that fits, else the skewed
-  path at the longest chunk that fits, else shorter direct chunks. Longer
-  chunks are faster on either path; short direct chunks lose to long skewed
-  ones only when `max_boxcar` is wide. A simple rule, not an optimum: on
-  the UWL plans measured the choice is the fastest that fits at the default
-  budget and within about 30% of it at any budget; in narrow windows a
-  larger budget can still be slower (UWL above at 10.2 GiB: direct chunk
-  512, 1.94x, against 2.79x at 10 GiB). Visible: that UWL configuration moves to the skewed path, so
-  `search_latency` goes from 0 to about 139k samples (8.9 s) and its
-  candidates agree with the direct path's to float precision, not bitwise;
-  UWL depths 1-3 move from chunk 1024 to longer chunks (11-25% faster at
-  10 GiB); the `parkes_uwl` preset (DM 0-2000, `max_boxcar` 100 ms, float)
-  at a 9 GiB budget moves from skewed chunk 1024 to direct chunk 256 (about
-  2x faster, `search_latency` 0). Full-band searches, plain
-  `FDMT` and an explicit `chunk_nsamps` are unchanged.
-- **CPU `FDMTBoxcar` on packed input takes the skewed-window path first**
-  (automatic chunk, where the skewed path applies). It took the tree path
-  whenever it fit, which on 8-bit input is 2.7-4x slower on the UWL subband
-  plans (EPYC 9334, x real time, tree vs skewed: 0.18-0.65 vs 0.73-1.73
-  with a 2.7-6.6 GiB tree) and ties or is up to 1.35x slower on small
-  plans (cryopaf, meerkat).
-  Now: skewed chunks 4096 and 2048, then the tree, then shorter skewed
-  chunks; blocks of 2048 samples or fewer keep the tree. Float input
-  (tree first) and an explicit `chunk_nsamps` are unchanged. Visible:
-  `cryopaf_lband`, `cryopaf_low` and `meerkat_lband` packed searches move
-  to the skewed path at chunk 4096 with 34-76% less memory; a packed
-  subband search now has `search_latency` > 0 (`cryopaf_lband`: 5861
-  samples), so a stream must end with `drain()`, not `flush()`, to search
-  its last samples; candidates are the tree path's, bit for bit. Only
-  8-bit input was timed (16-bit follows the same rule).
-- **`FDMTBoxcar` per-call kill masks work with any block length** (they
-  needed blocks of at least the largest row support plus `max_boxcar - 1`
-  samples, and on a GPU a search latency of at most one block). Windows
-  that reach back before their block use the variance of the history mask:
-  the block's channels and every channel live within that reach (one
-  timestamp per channel). When blocks are shorter than the search latency
-  needs, the oldest kept block stands for the older ones with one
-  conservative catch-all table, so the masks' memory stays fixed whatever
-  the block length. Results with blocks at least that long are unchanged.
-- `FDMT`, `FDMTBoxcar`: a budget no longer fails where a smaller path
-  fits. The tree path (CPU) or unskewed direct levels (GPU) were chosen
-  when the budget looked large enough and then turned out over it, so some
-  budgets above a working one failed (Parkes UWL subband depth 4: 6.5-7.2
-  GiB on the GPU while 3.6 GiB worked). The smaller path is now taken
-  instead; budgets that worked choose as before.
-- An `FDMTBoxcar` over its budget now reports what the whole search needs
-  (it reported the FDMT's share). Python: still `ValueError`.
-- `FDMTBoxcar::drain()` (Python `drain`) no longer builds a zero block of
-  the whole input in host memory (and, on a GPU, a device staging block)
-  to search the samples behind the search latency: it searches them without
-  any input block, so memory stays at `get_memory_usage()` and its estimate
-  through the end of the stream. Candidates are unchanged. On a GPU, a
-  subband search (plan `subband_depth` > 0) now reserves one byte per beam
-  and channel for this in `get_memory_usage().staging` (and in
-  `estimate_memory()`). `FDMTFFTBoxcar::drain()` is unchanged.
-- `FDMTBoxcar` and `FDMTFFTBoxcar` construction and `estimate_memory()` are
-  much faster on wide bands: the per-row noise tables and warm-up are built
-  once per FDMT tree node instead of tracing every row's subtree. Parkes
-  UWL (6656 channels, 4039 trials, GPU): 1.6 s to 0.55 s at subband depth
-  0, 3.9 s to 0.35 s at depth 2. The tables are bitwise unchanged.
-- `FDMT` construction no longer allocates while it chooses its path and
-  chunk: on a GPU the budget search sizes candidate engines without
-  allocating them (it could briefly hold more than `max_memory_bytes`), and
-  on the CPU the budget is checked before allocating.
-- `FDMTBoxcar` construction likewise sizes the engines it tries for a chunk
-  and allocates only the one it keeps; on the CPU the budget is checked
-  before allocating.
-- GPU `FDMTFFT` no longer shortens its overlap-save segments to fit the
-  device's free memory: memory follows the arguments alone, so the same
-  configuration behaves the same on any device. One that does not fit fails
-  at construction with a `std::bad_alloc` (Python `MemoryError`) saying
-  what it needs and what was free before it allocated (use shorter blocks
-  or fewer beams; `estimate_memory` gives the requirement); GPU `FDMT`,
-  `FDMTBoxcar`, `FDMTFFTBoxcar` and `CohFDMT` allocation failures carry the
-  same message (still `std::bad_alloc`).
-- A GPU device or pinned-host allocation that runs out of memory now
-  raises `std::bad_alloc` (Python `MemoryError`, was `RuntimeError`) with
-  the size that failed, for every engine (`DDMTFFT` included).
-- `CohFDMT::get_memory_usage()` now counts every buffer the engine owns:
-  the CPU per-channel power partials, and on a GPU the remaining tables and
-  the device copy of a host-memory call's result (in `workspace`, which
-  was reported as `output`; `output` is now the caller's result size on
-  both backends).
-- GPU `DDMTFFT` and `CohFDMT` likewise no longer size themselves from the
-  device's free memory: `DDMTFFT` keeps the CPU engine's segment length
-  (same segments on both backends), and the `CohFDMT` cuFFT path (channel
-  FFT lengths the fused kernel can't take) uses a fixed 1 GiB work buffer.
-  The GPU `CohFDMT` front end (unpack, channel FFT, channel powers) runs in
-  fixed 24 MiB chunks instead of a quarter of the device's L2 cache (the
-  same 24 MiB on an L40S).
-  Likewise the GPU `FDMT` automatic chunk (and so `FDMTBoxcar`'s path list
-  and every GPU `estimate_memory()`) uses a fixed 96 MiB cache target, the
-  L40S's L2, instead of the device's L2 size.
-  `FDMTFFT` and `FDMTFFTBoxcar` construction sizes the engines it tries and
-  allocates only the one it keeps.
-- The memory usage and estimate structs (`FDMTMemoryUsage`,
-  `DDMTMemoryUsage`, `DDMTFFTMemoryUsage`, `CohFDMTMemoryUsage` and their
-  estimates) start at zero when default-constructed.
-- CPU `FDMTFFT` and `FDMTFFTBoxcar` count the twiddle table they hold (8
-  bytes per transform sample) in `get_memory_usage().plan`.
-- GPU `FDMTBoxcar` with a kill mask allocates the transform's per-row flags
-  (one byte per beam and channel) at construction instead of on the first
-  call, so `get_memory_usage()` includes them from the start.
-- **CPU boxcar default Stage-1 screen (`BoxcarScreenMode::kAuto`)**: CPU
-  `FDMTBoxcar` and `FDMTFFTBoxcar` now default to `kKadane`, a lossless
-  multi-bucket SIMD Kadane tile gate with exact `kPrefix` candidate parity
-  across all `wtsp` spacings and `{1, 2, 1}` trapezoids. GPU `kAuto` keeps
-  `kPrefix`.
-- `max_boxcar` may exceed 4096 (up to 2^20 samples, still at most 4096
-  widths). Boxes wider than 4096 are exact but not tuned for speed.
-- On a GPU, `max_memory_bytes` of `FDMTBoxcar` and `FDMTFFTBoxcar` bounds
-  device memory only. Host allocations are reported in the new
-  `memory_usage.host`, and `memory_usage.budgeted` is the part checked.
-- Tutorials 1-7 are MyST notebooks, executed by the docs build. The `docs`
-  extra adds `ipykernel` and `jupyter-cache`.
-- `dmtlib.calculate_snr_loss` uses the model of `generate_dm_grid` (now in
-  C++ as `plans::calculate_snr_loss`). `pulse_width` is in seconds (default
-  0), and it, `chan_dm` and the new `kill_mask` are keyword-only.
-- **Python: `nbits=` and `nsamps=` are keyword-only on the packed
-  overloads.** Packed `FDMT` and `FDMTFFT` `execute`, `execute_time_major`
-  and `reset` take `nbits=` by keyword only, and packed `DDMT`, `SDMT` and
-  `DDMTFFT` `execute` and `execute_time_major` take `nsamps=` by keyword
-  only, on host and device input. `FDMT.reset` and `FDMTFFT.reset` take `dmt=` by keyword only on
-  every overload (float and packed, host and device). A positional call
-  raises `TypeError`.
-- **Plain float GPU `FDMT` allocates its full tree-history ring at
-  construction**, inside `max_memory_bytes` and in `get_memory_usage()` and
-  `estimate_memory()`. It held a smaller ring and grew it, outside the
-  budget, on the first `save_history()` / `load_history()` or the first call
-  its direct levels could not take. Device memory at construction grows by
-  the difference (L40S, 32768-sample blocks to DM 2000: `cryopaf_lband` +61
-  MiB to 237 MiB, `cryopaf_low` +105 MiB to 594 MiB, `meerkat_lband` +236
-  MiB to 530 MiB; `parkes_uwl` unchanged); a budget just above the old
-  usage can now raise `ValueError` (C++ `std::invalid_argument`). Paths,
-  chunks and results are unchanged.
-- The Python bindings release the GIL around host transforms (`execute`,
-  `execute_time_major`, the steppers, `compute_fdmt*`, host
-  `save_history` / `load_history`), so other Python threads run meanwhile.
-  One instance is still not safe for concurrent calls from several threads.
-- `dmtlib.simulate.generate_pure_frb` wraps `libdmt.generate_pure_frb` (the
-  Numba version is gone) and takes `dt` as a float on both, so a fractional
-  sweep works the same in either. The C++ function works in single
-  precision: values differ from the former Numba version by float rounding,
-  most at the sweep's first and last samples (up to about a quarter of the
-  amplitude for thousands of channels at sample offsets above 1000).
-- The DDMT-FFT engines (CPU and GPU) keep a cache of the geometries of
-  recent call lengths and evict the least recently used one instead of
-  clearing the whole cache, so streams cycling through a few block lengths
-  stop rebuilding them.
-- `DMT_HD`, `DMT_D` and `DMT_H` are no longer defined by
-  `dmt/common/types.hpp` (they were internal; define your own in code that
-  used them).
-- Host `FDMT`, `DDMT` and `DDMTFFT` `load_history` (Python) follow the
-  strict-input rule: a history of the wrong dtype or a non-contiguous one
-  raises `ValueError` instead of being copied, as `FDMTFFT.load_history`
-  already did.
+- **Breaking — strict Python host inputs:** waterfalls, packed arrays,
+  in-place buffers and host `load_history` require exact dtype (`float32`,
+  `uint8`, `complex64`) and C-contiguous layout, raising `ValueError` instead
+  of copying or casting.
+- **Breaking — keyword-only Python arguments:** `nbits=` on packed `FDMT` /
+  `FDMTFFT` calls, `nsamps=` on packed `DDMT` / `SDMT` / `DDMTFFT` calls, and
+  `dmt=` on all `FDMT.reset` / `FDMTFFT.reset` overloads.
+- **Breaking — `dmtlib.calculate_snr_loss`:** uses `generate_dm_grid`'s model
+  with keyword-only `pulse_width` (seconds), `chan_dm` and `kill_mask`.
+- **Deterministic GPU sizing and memory budgets:** engines size from arguments
+  alone (fixed 96 MiB GPU `FDMT` cache target and 24 MiB `CohFDMT` chunks),
+  check free device memory before allocating, and raise `std::bad_alloc`
+  (`MemoryError`) on OOM. Plain float GPU `FDMT` allocates its full
+  tree-history ring upfront inside `max_memory_bytes`; GPU `FDMTBoxcar` /
+  `FDMTFFTBoxcar` budget device memory only (including host-input staging).
+- **Boxcar path selection and masks:** `max_boxcar` supports up to 2^20
+  samples; per-call kill masks work on any block length; GPU subband and CPU
+  packed searches favour faster skewed chunks where applicable; `drain()` no
+  longer allocates a zero input block.
+- **Python bindings:** GIL released around host transforms and history calls;
+  `dmtlib.simulate.generate_pure_frb` wraps C++ `libdmt.generate_pure_frb`
+  (float `dt`, single precision; Numba version removed).
 
 ### Removed
 
-- `dmtlib.generate_optimal_dm_grid` and `generate_optimal_dt_grid`. Use
-  `generate_dm_grid` or `generate_levin_dm_grid`, and pass the DMs to
-  `FDMTPlan(..., dm_grid=...)` for delay grids.
+- `BoxcarScreenMode::kKadaneSurrogate` (`KADANE_SURROGATE`); use `kKadane`.
+- `dmt::AlignedAllocator` and `dmt::AlignedVector` from `dmt/common/types.hpp`.
+- No-op `DDMTFFT::set_gulp_size()` / `get_gulp_size()` (C++ and Python).
+- `dmtlib.generate_optimal_dm_grid` and `generate_optimal_dt_grid`.
+- Internal `DMT_HD`, `DMT_D` and `DMT_H` macros from `dmt/common/types.hpp`.
 
 ### Fixed
 
-- **GPU `FDMTBoxcar.reset_history()` on the windowed (skewed) path** left
-  the abandoned stream's carried top-level samples in place, so the next
-  stream's first windows could include them. They are now cleared.
-- **GPU engines with different settings in one process** (`FDMTBoxcar`,
-  and the FDMT direct levels and `DDMTFFT` NUFFT kernels under it): a
-  kernel's shared-memory limit is shared by the whole process, and each
-  engine set it to its own need, so one built later with a smaller need
-  (box smearing off, a narrower `max_boxcar`) made the earlier one fail
-  with "invalid argument". The limit is now only ever raised.
-- `FDMTFFTBoxcar` on a GPU no longer counts its host result storage
-  against `max_memory_bytes` when checking whether the boxcar buffers alone
-  fit, so budgets that fit the device memory build as documented.
-- `FDMTBoxcar` on the GPU:
-  - Wide boxes that don't fit shared memory no longer throw. The search
-    falls back to smaller blocks or a device-memory ring, with the same
-    candidates.
-  - Kill masks are applied inside the FDMT, without a block-sized staging
-    copy. Candidates are bit-identical.
-  - Plans whose root plane exceeds 2^31 elements now construct (e.g. Parkes
-    UWL with fine DM grids).
-- A per-call kill mask whose call throws no longer leaves its noise tables
-  in the stream history.
-- The `FDMT` docs no longer say that `execute()` never allocates: on a GPU
-  the first host-memory call allocates device copies of the input block and
-  output plane outside `max_memory_bytes`.
-- `CohFDMTPlan` with an automatic `nbin` whose overlap needs more than 2^20
-  bins now raises `std::invalid_argument` (Python `ValueError`) instead of
-  building a plan with too few bins.
-- `DDMTPlan.generate_levin_dm_grid_piecewise` applies the floating-point
-  rounding fix-up of each segment's step that `piecewise_wrap` uses, so the
-  two agree where a step rounds across an integer.
-- CPU `FDMTFFT::memory_usage()` counts the buffers allocated on first use
-  (time-major input, stepper and view buffers).
-- Saved histories with a NaN or infinite header field are rejected on every
-  path (plain tree, CPU and GPU skewed window) under `-ffast-math`.
-- The GPU `FDMT` stepper (`execute_levels` / `continue_levels`) on the
-  skewed-window path raises `std::invalid_argument` (Python `ValueError`)
-  instead of failing with a CUDA error (illegal address, which ended the
-  process's CUDA context). The skewed path has no stepper on either
-  backend.
+- GPU `FDMTBoxcar::reset_history()` on the skewed path now clears carried
+  top-level samples; failed per-call mask calls leave stream state unchanged.
+- GPU kernel shared-memory opt-in limits are only ever raised across engines
+  in the same process.
+- GPU `FDMTBoxcar` falls back cleanly for wide boxes, applies kill masks
+  in-transform without a block staging copy, and handles plans with > 2^31
+  root elements; GPU `FDMTFFTBoxcar` excludes host results from
+  `max_memory_bytes`.
+- GPU `FDMT` stepper on the skewed path raises `std::invalid_argument`
+  (`ValueError`) instead of failing with a CUDA error; `CohFDMTPlan`
+  rejects automatic `nbin` > 2^20; NaN/inf saved history headers are rejected
+  under `-ffast-math`.
 
 ## [0.8.0] - 2026-11-11
 

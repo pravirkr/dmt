@@ -212,7 +212,7 @@ void bind_ddmt(py::module_& mod) {
         plan : DDMTPlan, optional
             Pre-configured DDMT plan.
         nthreads : int, optional
-            Number of OpenMP worker threads (default 1).
+            OpenMP threads (CPU) or host-staging worker cap (GPU; default 1).
         nbits : int, optional
             Bit precision per sample (32 for float, or 1, 2, 4, 8, 16 for packed integer).
         kill_mask : array_like, optional

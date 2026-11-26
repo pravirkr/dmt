@@ -111,9 +111,8 @@ rounding (measured: within $1.5 \times 10^{-7}$ of the output scale on the
 
 ## Window spreads
 
-`dmt_tests "[.skew_report]"` prints these for the four benchmark presets
-(DM 0–2000 on the piecewise Levin grid). Largest and mean spread per level,
-in samples:
+Largest and mean spread per level, in samples, for the benchmark presets
+(DM 0–2000 on the piecewise Levin grid):
 
 | level | `cryopaf_lband` (Δt 8877) | `meerkat_lband` (Δt 13 876) | `parkes_uwl` (Δt 253 891) |
 | ---: | ---: | ---: | ---: |
@@ -230,9 +229,10 @@ float and packed, CPU and GPU.
 - **GPU:** by building engines (deferred: sized, not allocated) and
   measuring them. A subband search (`FDMTBoxcar`, `subband_depth > 0`)
   takes the first that fits of (`detail::gpu_search_list`,
-  `lib/dmt/gpu_search_list.hpp`): direct at the plan's L2-cache chunk when
-  it has one; direct from chunk 4096 down to `max_boxcar / 8` (at least
-  256); skewed from 4096 down to 256; shorter direct chunks. A simple rule,
+  `lib/dmt/gpu_search_list.hpp`): direct at the plan's 96 MiB cache-target
+  chunk when it has one; direct from chunk 4096 down to `max_boxcar / 8` (at
+  least 256); skewed from 4096 down to 256; shorter direct chunks. A simple
+  rule,
   not an optimum: on the UWL plans measured it takes the fastest
   configuration that fits at 10 GiB and stays within about 30% of it at any
   budget (narrow windows where a larger budget first fits a short direct
@@ -248,7 +248,7 @@ float and packed, CPU and GPU.
   one engine rejects a run whose shortest chunk does not fit, else a
   bisection finds its longest fitting chunk (one to about five engines in
   all). Full-band searches and plain `FDMT` keep the automatic chunk
-  (L2-resident state, else 1024: fastest there) and halve it while over
+  (96 MiB cache target, else 1024: fastest there) and halve it while over
   budget.
 - **FDMTBoxcar** gives the FDMT the budget minus its own carry, peak,
   candidate and threshold buffers, and halves an automatic chunk again if

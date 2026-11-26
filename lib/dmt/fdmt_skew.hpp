@@ -393,7 +393,7 @@ public:
         float* ring          = out.data() + kHistHeader;
         const SizeType tot   = m_chan_ring_off[m_nchans];
         const SizeType words = hist_ring_words(m_ring_elem);
-        if (m_ring.size() == 0) {
+        if (m_ring.empty()) {
             std::fill_n(ring, words, 0.0F);
         } else if (m_ring_elem != sizeof(float)) {
             ring_dispatch(m_ring_elem, [&](auto tag) {
@@ -481,7 +481,7 @@ public:
                 need = 2;
             }
         }
-        if (m_ring.size() == 0) { // float-built, before any input
+        if (m_ring.empty()) { // float-built, before any input
             alloc_ring(need);
         } else if (need > m_ring_elem) {
             if (m_nbits != 32) {
@@ -1296,7 +1296,7 @@ private:
     /// input type arrives; narrower input is converted on write. The stream
     /// history survives any change of input type.
     void ensure_ring(SizeType ring_elem) {
-        if (m_ring.size() == 0) {
+        if (m_ring.empty()) {
             alloc_ring(ring_elem);
         } else if (ring_elem > m_ring_elem) {
             widen_ring(ring_elem);

@@ -426,9 +426,8 @@ public:
         return m_ring;
     }
     [[nodiscard]] const std::vector<std::pair<SizeType, SizeType>>&
-    active_kill_runs(const std::vector<std::pair<SizeType, SizeType>>&
-                         default_runs) const noexcept {
-        return m_enabled ? m_ring.back().kill_runs : default_runs;
+    current_kill_runs() const noexcept {
+        return m_ring.back().kill_runs;
     }
 
     void push(BlockNoise entry) { m_pending = std::move(entry); }

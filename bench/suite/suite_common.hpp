@@ -381,7 +381,7 @@ inline double estimate_bytes(Algo algo,
         }
         }
     } catch (const std::invalid_argument&) {
-        return std::numeric_limits<double>::infinity();
+        return std::numeric_limits<double>::max();
     }
     return 0.0;
 }

@@ -134,6 +134,16 @@ target_compile_options(
   ${DMT_COMPILE_OPTIONS} INTERFACE $<${_dmt_not_hip}:-Wall;-Wextra>
                                    $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wpedantic>
 )
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(
+  "-Wno-missing-designated-field-initializers" DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS
+)
+if(DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
+  target_compile_options(
+    ${DMT_COMPILE_OPTIONS}
+    INTERFACE $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wno-missing-designated-field-initializers>
+  )
+endif()
 if(DMT_ENABLE_COVERAGE)
   set(DMT_CXX_CONFIG_FLAGS_DEBUG -O0 -g)
 else()

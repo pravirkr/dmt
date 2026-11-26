@@ -237,7 +237,7 @@ float_output_buffer(SizeType needed,
                                          "C-contiguous float32 array",
                                          name));
     }
-    if (static_cast<SizeType>(arr.size()) < needed) {
+    if (std::cmp_less(arr.size(), needed)) {
         throw std::invalid_argument(fmt::format(
             "{}.execute: out has {} elements, needs at least {} = {}", name,
             arr.size(), size_expr, needed));

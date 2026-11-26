@@ -615,9 +615,9 @@ a fast path that fits in the rest (rule 3 above):
   windows ([](skewed_window_fdmt.md)), at the longest automatic chunk
   (4096 down to 256 samples) that fits; a longer chunk is faster.
 - **GPU subband searches** (`subband_depth > 0`) take the first that fits
-  of a short list: the plan's L2-cache chunk on the direct path, the direct
-  path at chunks 4096 down to `max_boxcar / 8`, the skewed path at 4096
-  down to 256, then shorter direct chunks
+  of a short list: the plan's 96 MiB cache-target chunk on the direct path,
+  the direct path at chunks 4096 down to `max_boxcar / 8`, the skewed path
+  at 4096 down to 256, then shorter direct chunks
   ([details](skewed_window_fdmt.md#memory-budget-and-chunk-length)).
 - Construction raises `ValueError` (`std::invalid_argument`) when nothing
   fits.
@@ -696,9 +696,11 @@ cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DDMT_GPU=CUDA -DDMT_BUILD_TESTING=ON -DDMT_BUILD_PYTHON=OFF
 cmake --build build-cuda -j
 ctest --test-dir build-cuda --output-on-failure
-compute-sanitizer --tool memcheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
-compute-sanitizer --tool racecheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
-compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
+for bin in dmt_tests dmt_internal_tests; do
+  compute-sanitizer --tool memcheck "build-cuda/tests/cpp/$bin" '[gpu][boxcar]'
+  compute-sanitizer --tool racecheck "build-cuda/tests/cpp/$bin" '[gpu][boxcar]'
+  compute-sanitizer --tool synccheck "build-cuda/tests/cpp/$bin" '[gpu][boxcar]'
+done
 ```
 :::
 

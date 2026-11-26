@@ -141,7 +141,7 @@ void bind_ddmt_fft(py::module_& mod) {
         f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min, dm_arr, levin, plan
             As for :class:`DDMT`.
         nthreads : int, optional
-            OpenMP threads (CPU).
+            OpenMP threads (CPU) or host-staging worker cap (GPU; default 1).
         nbits : int, optional
             Input precision: 32 (float) or 1, 2, 4, 8, 16 (packed).
         kill_mask : array_like, optional

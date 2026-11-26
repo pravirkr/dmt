@@ -951,7 +951,8 @@ template <typename T>
 std::span<const T> FDMTBoxcarCpuEngine::masked(std::span<const T> block,
                                                std::vector<T>& buffer) {
     // The block's own kill runs under per-call masks.
-    const auto& runs = m_noise_ring.active_kill_runs(m_kill_runs);
+    const auto& runs =
+        m_noise_ring.enabled() ? m_noise_ring.current_kill_runs() : m_kill_runs;
     if (runs.empty()) {
         return block;
     }

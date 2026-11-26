@@ -339,7 +339,7 @@ void bind_cfdmt(py::module_& mod) {
         config : CohFDMTConfig
             The search.
         nthreads : int, optional
-            OpenMP threads on the CPU backend.
+            OpenMP threads (CPU) or host-staging worker cap (GPU; default 1).
         backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``).
         device : int, optional

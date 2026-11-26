@@ -81,10 +81,12 @@ fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt_buf);
 ## GPUs
 
 The same class runs on a GPU with `dmt::Exec::cuda(device)` (or
-`dmt::Exec::hip(device)`); `dmt::available_backends()` lists what the build
-has. Host spans work on every backend. Device memory goes through
-`dmt::DeviceSpan` and an optional `dmt::Stream` (a `cudaStream_t` converts),
-asynchronously:
+`dmt::Exec::hip(device)`); an optional second argument `nthreads` (default 1)
+caps the host worker threads that pipeline host-memory results through pinned
+buffers (pass `4` for multi-threaded host-output staging on large planes).
+`dmt::available_backends()` lists what the build has. Host spans work on every
+backend. Device memory goes through `dmt::DeviceSpan` and an optional
+`dmt::Stream` (a `cudaStream_t` converts), asynchronously:
 
 ```cpp
 dmt::algorithms::FDMT gpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1,

@@ -255,6 +255,7 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
                              T* __restrict__ out) noexcept {
     static_assert(detail::is_packed_nbits(NBITS),
                   "unpack_row: NBITS must be 1, 2, 4, 8, or 16");
+    // NOLINTNEXTLINE(bugprone-branch-clone): if-constexpr discards two branches
     if constexpr (NBITS == 8) {
 #if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd

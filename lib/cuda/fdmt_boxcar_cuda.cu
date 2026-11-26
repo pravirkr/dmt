@@ -1149,7 +1149,9 @@ bool FDMTBoxcarCudaEngine::keep_rows(Stream queue) {
         return true;
     }
     if (m_keep_in_transform) {
-        const auto& runs = m_noise_ring.active_kill_runs(m_kill_runs);
+        const auto& runs = m_noise_ring.enabled()
+                               ? m_noise_ring.current_kill_runs()
+                               : m_kill_runs;
         set_keep(runs, queue,
                  m_noise_ring.enabled() && m_config.input_nbits != 32);
         return true;
@@ -1163,7 +1165,8 @@ DeviceSpan<const T> FDMTBoxcarCudaEngine::masked(
     if (keep_rows(queue)) {
         return block;
     }
-    const auto& runs = m_noise_ring.active_kill_runs(m_kill_runs);
+    const auto& runs =
+        m_noise_ring.enabled() ? m_noise_ring.current_kill_runs() : m_kill_runs;
     if (runs.empty()) {
         return block;
     }

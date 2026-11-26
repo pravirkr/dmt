@@ -500,8 +500,9 @@ void bind_fdmt(py::module_& mod) {
                 return std::string(to_string(fdmt.backend()));
             },
             "Backend this instance runs on ('cpu', 'cuda', ...).")
-        .def_property_readonly("nthreads", &FDMT::nthreads,
-                               "OpenMP threads (CPU backend); 1 on a GPU.")
+        .def_property_readonly(
+            "nthreads", &FDMT::nthreads,
+            "OpenMP threads (CPU) or host-staging worker cap (GPU).")
         .def_property_readonly("device", &FDMT::device,
                                "Device ordinal (GPU backend); -1 on the CPU.")
         .def_property_readonly(
@@ -1409,7 +1410,7 @@ void bind_fdmt(py::module_& mod) {
                 const auto expected =
                     nbeams * plan.get_nchans() * plan.get_nsamps();
                 if (waterfall.ndim() == 3 &&
-                    static_cast<SizeType>(waterfall.shape(0)) != nbeams) {
+                    std::cmp_not_equal(waterfall.shape(0), nbeams)) {
                     throw std::invalid_argument(fmt::format(
                         "FDMTFFT: Invalid size of waterfall. Expected {}, "
                         "got {}",

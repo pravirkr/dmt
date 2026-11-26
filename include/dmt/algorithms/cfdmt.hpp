@@ -101,9 +101,10 @@ public:
     /**
      * @brief Memory an instance built with these arguments would allocate,
      * computed without allocating it: equal to that instance's
-     * get_memory_usage() after construction. A GPU backend allocates no device
-     * buffers. Pinned host memory a GPU host-memory execute() allocates on
-     * first use is reported separately in `host_pinned` (not in `total()`).
+     * get_memory_usage() after construction. A GPU backend needs the device
+     * (it reads its shared-memory limit) but allocates no device buffers.
+     * Pinned host memory a GPU host-memory execute() allocates on first use
+     * is reported separately in `host_pinned` (not in `total()`).
      * @throws std::invalid_argument as the constructor would.
      */
     [[nodiscard]] static plans::CohFDMTMemoryUsage
