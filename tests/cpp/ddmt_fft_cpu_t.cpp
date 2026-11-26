@@ -64,7 +64,7 @@ double lag_of(double dm, SizeType c, SizeType nchans) {
     const double df = (static_cast<double>(kFhi) - kFlo) / nchans;
     const double f  = kFlo + (df * (static_cast<double>(c) + 0.5));
     const double fr = kFlo;
-    const double k  = static_cast<double>(kDispConst) / kTs;
+    const double k  = kDispConst / kTs;
     return dm * k * ((1.0 / (fr * fr)) - (1.0 / (f * f)));
 }
 
@@ -580,7 +580,7 @@ TEST_CASE("DDMTFFT honours the plan's reference frequency",
     const double dm_true  = 17.3;
     const double s_ref    = 900.4; // f_ref arrival, samples
     const double df       = (static_cast<double>(kFhi) - kFlo) / nchans;
-    const double k        = static_cast<double>(kDispConst) / kTs;
+    const double k        = kDispConst / kTs;
     for (const float f_ref : {kFlo, kFhi}) {
         CAPTURE(f_ref);
         const double fr      = f_ref;

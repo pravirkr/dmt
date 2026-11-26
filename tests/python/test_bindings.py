@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 
@@ -27,8 +29,7 @@ def test_trace_dm_and_add_frb_track() -> None:
 
 
 def test_simulate_python_helpers() -> None:
-    pytest.importorskip("numba")
-    simulate = pytest.importorskip("dmtlib.simulate")
+    from dmtlib import simulate  # noqa: PLC0415 - numba is optional
 
     delays = simulate.get_dmdelays(10.0, 1000.0, 1500.0, 0.001, 8)
     assert delays.shape == (8,)
@@ -45,6 +46,9 @@ def test_simulate_python_helpers() -> None:
         (64, 128, 40.5, 90.25, 2.0),
         (16, 64, 30.0, 10.5, 1.0),  # the top channels start before sample 0
         (16, 64, 50.3, 70.1, 1.0),  # the bottom channels end after the block
+        (16, 64, 30.0, 0.5, 1.0),  # most channels sweep wholly before sample 0
+        (16, 64, 30.0, -0.25, 1.0),  # every sweep ends in (-1, 0) or earlier
+        (4, 16, 400.0, 40.0, 1.0),  # the bottom sweep covers the whole block
     ]
     for nchans, nsamps, dt, toa, amp in cases:
         arr, n_disp = simulate.generate_pure_frb(
@@ -55,9 +59,10 @@ def test_simulate_python_helpers() -> None:
         expected, expected_disp = _pure_frb_reference(
             nchans, nsamps, 1000.0, 1500.0, dt, toa, amp
         )
+        assert isinstance(n_disp, int)
         assert n_disp == expected_disp
-        # float32 sweep times: the edge fractions agree to ~1e-5 of a sample.
-        np.testing.assert_allclose(arr, expected, rtol=0, atol=1e-4 * amp)
+        assert np.all(arr >= 0.0)
+        np.testing.assert_allclose(arr, expected, rtol=1e-6, atol=1e-7 * amp)
 
 
 def _pure_frb_reference(
@@ -68,15 +73,19 @@ def _pure_frb_reference(
     dt: float,
     toa: float,
     amp: float,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, int]:
     """Channel-edge integration of a dispersed pulse in float64.
 
     Channel c spans [f_lo, f_hi]; its sweep starts at toa - dt * k(f_min, f_lo)
     and lasts dt * k(f_lo, f_hi) samples (k: the ratio of dispersion delays to
     the full band's), spread evenly over the samples it covers, with the first
-    and last sample weighted by the fraction covered. Sample indices truncate
-    toward zero.
+    and last sample weighted by the fraction covered. Sample indices floor the
+    sweep times, and samples outside the block are dropped.
     """
+    # The C++ simulator takes float32 arguments and computes in double.
+    f_min, f_max, dt, toa, amp = (
+        float(np.float32(v)) for v in (f_min, f_max, dt, toa, amp)
+    )
 
     def k(a: float, b: float) -> float:
         return (a**-2 - b**-2) / (f_min**-2 - f_max**-2)
@@ -89,26 +98,21 @@ def _pure_frb_reference(
         tstart = toa - dt * k(f_min, lo)
         sweep = dt * k(lo, hi)
         tend = tstart - sweep
-        s, e = int(tstart), int(tend)
-        s_frac, e_frac = tstart - s, 1.0 - (tend - e)
-        if 0 <= e <= s < nsamps:
-            if e == s:
-                arr[c, s] = amp
-                ndisp += 1
-                continue
-            arr[c, e : s + 1] = amp / sweep
-            arr[c, e] *= e_frac
-            arr[c, s] *= s_frac
-            ndisp += s - e + 1
-        elif e < 0 <= s < nsamps:
-            arr[c, : s + 1] = amp / sweep
-            arr[c, s] *= s_frac
-            ndisp += s + 1
-        elif 0 <= e < nsamps <= s:
-            arr[c, e:] = amp / sweep
-            arr[c, e] *= e_frac
-            ndisp += nsamps - e
-    return arr, float(ndisp)
+        s, e = math.floor(tstart), math.floor(tend)
+        if s < 0 or e >= nsamps:
+            continue
+        if e == s:
+            arr[c, s] = amp
+            ndisp += 1
+            continue
+        row = np.zeros(s - e + 1)
+        row[:] = amp / sweep
+        row[0] *= 1.0 - (tend - e)
+        row[-1] *= tstart - s
+        first, last = max(e, 0), min(s, nsamps - 1)
+        arr[c, first : last + 1] = row[first - e : last - e + 1]
+        ndisp += last - first + 1
+    return arr, ndisp
 
 
 class TestBackends:

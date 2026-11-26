@@ -33,7 +33,13 @@ namespace dmt::utils {
  * @param f_max Top edge frequency in MHz.
  * @param dt Total dispersive delay across the band in time samples.
  * @param pulse_toa Pulse time of arrival at the lowest channel in samples.
- * @param amplitude Peak pulse amplitude (default: 1.0).
+ * @param amplitude Fluence of the pulse in every channel, in amplitude x
+ * samples (default: 1.0): each channel's samples sum to @p amplitude. A
+ * channel whose sweep lasts dt_sub > 1 samples holds amplitude / dt_sub per
+ * fully covered sample, so the smeared peak is below @p amplitude; a sweep
+ * within one sample puts all of @p amplitude there. Sample indices floor the
+ * sweep times (computed in double), so channels that sweep wholly before
+ * sample 0 or after the block stay zero.
  * @return Tuple of:
  * - Flattened float32 waterfall array of length nchans * nsamps.
  * - Number of samples that received non-zero dispersed energy.

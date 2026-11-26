@@ -19,15 +19,15 @@ using SizeType    = std::size_t;    // Common size type
 using IndexType   = std::ptrdiff_t; // Common index type (for signed indexing)
 using ComplexType = std::complex<float>;
 
-// Constants for dispersion calculations
+// Constants for dispersion calculations, in s MHz^2 cm^3 / pc. All are double:
+// convert explicitly where a float is needed.
 inline constexpr float kDispCoeff = -2.0F;
-inline constexpr float kDispConstLK =
+inline constexpr double kDispConstLK =
     4.1488080e3; // L&K Handbook of Pulsar Astronomy
-inline constexpr float kDispConstMT =
-    1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
-inline constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
-inline constexpr float kDispConst   = kDispConstMT;
-inline constexpr double kDispConstD = 1.0 / 2.41e-4;
+inline constexpr double kDispConstMT =
+    1.0 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
+inline constexpr double kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
+inline constexpr double kDispConst   = kDispConstMT;
 
 /**
  * @brief Dispersion delay in seconds of `f_lo_mhz` behind `f_hi_mhz`.
@@ -47,7 +47,7 @@ dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
     const double inv_hi     = (std::bit_cast<uint64_t>(f_hi_mhz) & kAbs) == kInf
                                   ? 0.0
                                   : 1.0 / (f_hi_mhz * f_hi_mhz);
-    return kDispConstD * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
+    return kDispConst * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
 }
 
 template <typename T>

@@ -18,7 +18,7 @@ namespace dmt::plans {
 namespace {
 
 // The dispersion constant of dmtlib (Manchester & Taylor), in double.
-constexpr double kDMConstant = kDispConstD;
+constexpr double kDMConstant = kDispConst;
 
 // Boxcar widths (samples) the S/N model searches over.
 constexpr std::array<double, 19> kWidths{

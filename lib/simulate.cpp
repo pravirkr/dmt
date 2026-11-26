@@ -13,7 +13,6 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/baseband_layout.hpp"
-#include "dmt/dm_utils.hpp"
 #include "dmt/fft.hpp"
 
 namespace dmt::utils {
@@ -30,59 +29,57 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
     std::vector<float> arr(nchans * nsamps, 0.0F);
     SizeType nsamps_dispersed = 0;
 
-    const float foff      = (f_max - f_min) / static_cast<float>(nchans);
-    const float foff_half = foff / 2.0F;
+    // Sweep times in double: float32 loses ~1e-4 of a sample on long blocks,
+    // which moves the edge fractions of every channel.
+    const double fmin  = f_min;
+    const double fmax  = f_max;
+    const double toa   = pulse_toa;
+    const double total = dt;
+    const double amp   = amplitude;
+    const double foff  = (fmax - fmin) / static_cast<double>(nchans);
+    const double norm  = (1.0 / (fmin * fmin)) - (1.0 / (fmax * fmax));
+    // Fraction of the full-band delay between frequencies a < b.
+    const auto frac = [&](double a, double b) {
+        return ((1.0 / (a * a)) - (1.0 / (b * b))) / norm;
+    };
+    const auto n = static_cast<IndexType>(nsamps);
 
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-        const auto freq =
-            f_min + (static_cast<float>(ichan) * foff) + foff_half;
-        const auto freq_min    = freq - foff_half;
-        const auto freq_max    = freq + foff_half;
-        const auto dt_start    = dt * utils::cff(f_min, freq_min, f_min, f_max);
-        const auto tstart      = pulse_toa - dt_start;
-        const auto tstart_int  = static_cast<IndexType>(tstart);
-        const auto tstart_frac = tstart - static_cast<float>(tstart_int);
-
-        const auto dt_sub   = dt * utils::cff(freq_min, freq_max, f_min, f_max);
-        const auto tend     = tstart - dt_sub;
-        const auto tend_int = static_cast<IndexType>(tend);
-        const auto tend_frac = 1.0F - (tend - static_cast<float>(tend_int));
-
-        float* arr_chan_start = &arr[ichan * nsamps];
-
-        if (tstart_int < 0 || std::cmp_greater_equal(tend_int, nsamps)) {
+        const double f_lo = fmin + (static_cast<double>(ichan) * foff);
+        const double f_hi = f_lo + foff;
+        // The channel's sweep covers [tend, tstart]: tstart at its bottom
+        // edge, tend at its top edge (earlier).
+        const double tstart = toa - (total * frac(fmin, f_lo));
+        const double dt_sub = total * frac(f_lo, f_hi);
+        const double tend   = tstart - dt_sub;
+        // floor, not truncation toward zero: a sweep ending in (-1, 0) lies
+        // before sample 0 and must not spill into it.
+        const auto s = static_cast<IndexType>(std::floor(tstart));
+        const auto e = static_cast<IndexType>(std::floor(tend));
+        if (s < 0 || e >= n) {
             continue;
         }
-
-        if (tend_int >= 0 && tend_int <= tstart_int &&
-            std::cmp_less(tstart_int, nsamps)) {
-            if (tend_int == tstart_int) {
-                arr_chan_start[tend_int] = amplitude;
-                nsamps_dispersed += 1;
-            } else {
-                const float amp_per_sample = amplitude / dt_sub;
-                std::fill(arr_chan_start + tend_int,
-                          arr_chan_start + tstart_int + 1, amp_per_sample);
-                arr_chan_start[tend_int] *= tend_frac;
-                arr_chan_start[tstart_int] *= tstart_frac;
-                nsamps_dispersed +=
-                    static_cast<SizeType>(tstart_int - tend_int + 1);
-            }
-        } else if (tend_int < 0 && 0 <= tstart_int &&
-                   std::cmp_less(tstart_int, nsamps)) {
-            const float amp_per_sample = amplitude / dt_sub;
-            std::fill(arr_chan_start, arr_chan_start + tstart_int + 1,
-                      amp_per_sample);
-            arr_chan_start[tstart_int] *= tstart_frac;
-            nsamps_dispersed += static_cast<SizeType>(tstart_int + 1);
-        } else if (tend_int >= 0 && std::cmp_less(tend_int, nsamps) &&
-                   std::cmp_less_equal(nsamps, tstart_int)) {
-            const float amp_per_sample = amplitude / dt_sub;
-            std::fill(arr_chan_start + tend_int, arr_chan_start + nsamps,
-                      amp_per_sample);
-            arr_chan_start[tend_int] *= tend_frac;
-            nsamps_dispersed += (nsamps - tend_int);
+        float* row = arr.data() + (ichan * nsamps);
+        if (e == s) {
+            // Within one sample: all of the channel's fluence lands there.
+            row[s] = amplitude;
+            nsamps_dispersed += 1;
+            continue;
         }
+        const double per_sample = amp / dt_sub;
+        const IndexType first   = std::max<IndexType>(e, 0);
+        const IndexType last    = std::min<IndexType>(s, n - 1);
+        for (IndexType i = first; i <= last; ++i) {
+            double v = per_sample;
+            if (i == e) {
+                v *= 1.0 - (tend - static_cast<double>(e));
+            }
+            if (i == s) {
+                v *= tstart - static_cast<double>(s);
+            }
+            row[i] = static_cast<float>(v);
+        }
+        nsamps_dispersed += static_cast<SizeType>(last - first + 1);
     }
     return {arr, nsamps_dispersed};
 }
@@ -109,7 +106,7 @@ simulate_baseband(float f_center,
     std::vector<ComplexType> v(nrows * nsamps, ComplexType{0.0F, 0.0F});
     if (!pulses.empty()) {
         const auto n        = static_cast<double>(nsamps);
-        const double k_disp = static_cast<double>(kDispConst);
+        const double k_disp = kDispConst;
 #pragma omp parallel for num_threads(std::max(1, nthreads)) schedule(static)
         for (SizeType row = 0; row < nrows; ++row) {
             const SizeType isub = row % nsub;
